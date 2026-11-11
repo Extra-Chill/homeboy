@@ -7945,18 +7945,27 @@ pub(super) fn publish_incomplete_draft<
         ));
         candidate.to_string()
     } else {
-        backend.commit_all(path, &title)?;
-        git::run_git(root, &["rev-parse", "HEAD"], "resolve draft candidate")?
-            .trim()
-            .to_string()
+        let (candidate, _) = backend.prepare_manual_candidate(
+            path,
+            &promotion
+                .verified_base
+                .as_ref()
+                .ok_or_else(|| Error::git_command_failed("verified base SHA is missing"))?
+                .sha,
+        )?;
+        let dates = backend.candidate_dates(path, &candidate.candidate_sha)?;
+        backend.validate_publication_identity(path)?;
+        backend.publish_tree(
+            path,
+            &candidate.tree_sha,
+            &candidate.base_sha,
+            &title,
+            &dates,
+        )?
     };
     backend.push_branch(path, sha.trim(), &head)?;
     let pr = match backend.find_open_pr(None, path, &options.finalization.base, &head)? {
         Some(pr) => {
-            if !pr.is_draft {
-                let capability = backend.quarantine_capability(false, false)?;
-                backend.quarantine_pr(path, &pr, capability)?;
-            }
             if review_form_unavailable {
                 backend.update_pr(None, path, pr.number, &title, &body)?
             } else {

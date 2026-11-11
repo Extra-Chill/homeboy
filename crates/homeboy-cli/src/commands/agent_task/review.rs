@@ -848,12 +848,12 @@ pub(crate) fn finalize_pull_request(mut args: FinalizePrArgs) -> CmdResult<Value
     validate_finalize_inputs(&args)?;
     let path = args.path;
     let mut run_id = args.run_id;
-    let mut verified_candidate_sha = None;
+    let mut verified_candidate_tree = None;
     let mut dependency_hydration = Vec::new();
     if !args.verify.is_empty() {
         report_manual_verification_progress(&run_id, args.preflight, &args.verify)?;
         let verification = execute_manual_verification(&path, &args.verify)?;
-        verified_candidate_sha = Some(verification.candidate_sha);
+        verified_candidate_tree = Some(verification.candidate_tree);
         dependency_hydration = verification.dependency_hydration;
         args.gate_results = verification
             .commands
@@ -986,8 +986,9 @@ pub(crate) fn finalize_pull_request(mut args: FinalizePrArgs) -> CmdResult<Value
         composed_ai_model_disclosure: false,
         review_profile,
         manual_finalization: args.manual_finalization,
-        expected_candidate_sha: None,
-        verified_candidate_sha,
+        candidate: None,
+        expected_candidate_tree: None,
+        verified_candidate_tree,
         inherited_gate_evidence: None,
         repository_integrity_evidence: None,
         protected_branches: args.protected_branches,
@@ -1256,7 +1257,7 @@ fn validate_finalize_inputs(args: &FinalizePrArgs) -> homeboy::core::Result<()> 
 /// working-tree edits or mutate the candidate finalization publishes.
 struct ManualVerification {
     commands: Vec<String>,
-    candidate_sha: String,
+    candidate_tree: String,
     dependency_hydration:
         Vec<homeboy::agents::agent_tasks::finalization::AgentTaskGateSetupEvidence>,
 }
@@ -1400,7 +1401,7 @@ fn execute_manual_verification(
             .iter()
             .map(|command| command.trim().to_string())
             .collect(),
-        candidate_sha,
+        candidate_tree: git_output(path, &["rev-parse", &format!("{candidate_sha}^{{tree}}")])?,
         dependency_hydration: setup,
     })
 }
@@ -3873,7 +3874,7 @@ mod tests {
     }
 
     #[test]
-    fn manual_preflight_rejects_dirty_and_unpushed_candidates_then_recovers_idempotently() {
+    fn manual_preflight_accepts_unpushed_tree_and_recovers_idempotently() {
         homeboy::test_support::with_isolated_home(|home| {
             let root = tempfile::tempdir().expect("fixture root");
             let remote = root.path().join("origin.git");
@@ -3979,7 +3980,16 @@ mod tests {
             );
             run_git(&checkout, &["add", "."]);
             run_git(&checkout, &["commit", "-m", "feature"]);
-            let error = dispatch_agent_task_error(&[
+            run_git(
+                &checkout,
+                &[
+                    "remote",
+                    "set-url",
+                    "origin",
+                    "git@github.com:example/manual-finalization.git",
+                ],
+            );
+            let _validated = dispatch_agent_task(&[
                 "homeboy",
                 "agent-task",
                 "finalize-pr",
@@ -4008,20 +4018,9 @@ mod tests {
                 "--model",
                 "fixture-model",
             ]);
-            assert!(
-                error
-                    .message
-                    .contains("recoverable manual preflight requires an already-pushed candidate"),
-                "unexpected error: {error:?}"
-            );
-            assert!(error
-                .message
-                .contains("push the candidate branch and rerun preflight"));
-            assert!(
-                agent_task_lifecycle::reconcile_status("manual-cli-unpushed-13053")
-                    .expect("manual identity was reserved")
-                    .metadata["cook_delivery"]["artifacts"]["manual"]["intent"]
-                    .is_null()
+            run_git(
+                &checkout,
+                &["remote", "set-url", "origin", remote.to_str().unwrap()],
             );
             run_git(&checkout, &["push", "-u", "origin", "feature"]);
             let failed_gate = dispatch_agent_task_error(&[
@@ -4142,9 +4141,10 @@ mod tests {
             ]);
             assert!(mutation
                 .message
-                .contains("manual verification candidate changed after its gate completed"));
+                .contains("candidate tree changed after verification"));
             std::fs::write(checkout.join("feature.txt"), "feature\n")
                 .expect("restore fixture candidate");
+            run_git(&checkout, &["add", "-A"]);
             run_git(
                 &checkout,
                 &[
@@ -4305,7 +4305,7 @@ esac
         };
         let (value, exit_code) =
             crate::commands::agent_task::run(args).expect("dispatch CLI command");
-        assert_eq!(exit_code, 0, "CLI command succeeds");
+        assert_eq!(exit_code, 0, "CLI command succeeds: {value}");
         value
     }
 

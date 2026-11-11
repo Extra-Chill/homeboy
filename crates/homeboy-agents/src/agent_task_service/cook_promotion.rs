@@ -2512,8 +2512,9 @@ pub(crate) fn cook_finalization_options_with_stores(
         composed_ai_model_disclosure,
         review_profile,
         manual_finalization: false,
-        expected_candidate_sha: None,
-        verified_candidate_sha: None,
+        candidate: promotion.candidate.clone(),
+        expected_candidate_tree: None,
+        verified_candidate_tree: None,
         inherited_gate_evidence: None,
         protected_branches: options.finalization.protected_branches.clone(),
         draft_pr: options.finalization.draft_pr,
@@ -3023,7 +3024,7 @@ pub(crate) fn recover_cook_pr_with_backend_and_review_form<B: AgentTaskPrFinaliz
         let mut finalization =
             manual_finalization_options(report, retryable, recovery_component_id.as_deref())?;
         if retryable {
-            finalization.expected_candidate_sha = None;
+            finalization.expected_candidate_tree = None;
         }
         let failure_run_id = finalization.run_id.clone();
         let result =
@@ -3552,7 +3553,7 @@ fn recover_manual_finalization_pr<B: AgentTaskPrFinalizationBackend>(
     if retryable {
         // Direct publication first persisted this dossier before it attempted a
         // mutation. It is safe to retry that original mutation after failure.
-        finalization.expected_candidate_sha = None;
+        finalization.expected_candidate_tree = None;
     }
     let result =
         agent_task_lifecycle::AgentTaskLifecycleStore::from_environment().and_then(|store| {
@@ -3876,10 +3877,6 @@ fn valid_manual_finalization_receipt(
         && report.finalization_outcome.publication_action == report.pr_action
         && report.finalization_outcome.publication_status == "review_ready"
         && report.finalization_outcome.published
-        && (recorded_manual_finalization_retry_candidate(&record.metadata)
-            .or_else(|| recorded_manual_finalization_retry_origin(&record.metadata))
-            .is_some()
-            || (!report.finalization_outcome.committed && !report.finalization_outcome.pushed))
         && binding.candidate_sha == binding.remote_sha
         && binding.candidate_sha == binding.pr_head_sha
         && git_identity.commit_sha.as_deref() == Some(binding.candidate_sha.as_str())
@@ -3898,8 +3895,8 @@ fn receipt_matches_manual_preflight(
     receipt: &AgentTaskPrFinalizationReport,
     intent: &AgentTaskPrFinalizationReport,
     binding: &crate::agent_task_finalization::AgentTaskPublicationBinding,
-    git_identity: &homeboy_core::git::GitIdentityProof,
-    intent_git_identity: &homeboy_core::git::GitIdentityProof,
+    _git_identity: &homeboy_core::git::GitIdentityProof,
+    _intent_git_identity: &homeboy_core::git::GitIdentityProof,
     record: &crate::agent_task_lifecycle::AgentTaskRunRecord,
 ) -> bool {
     // Publication adds only the live-base observation to the preflight dossier.
@@ -3940,13 +3937,11 @@ fn receipt_matches_manual_preflight(
                             && intent.changed_files == binding.changed_files))
             })
         } else {
-            intent_git_identity.commit_sha.is_some()
-                && git_identity.commit_sha == intent_git_identity.commit_sha
-                && binding.candidate_sha
-                    == intent_git_identity
-                        .commit_sha
-                        .as_deref()
-                        .unwrap_or_default()
+            intent
+                .publication_proof
+                .binding
+                .as_ref()
+                .is_some_and(|expected| expected.candidate_tree == binding.candidate_tree)
         })
 }
 
@@ -4039,11 +4034,11 @@ fn manual_finalization_options(
     let base = target.base.clone().filter(|base| base == &report.base);
     let head = target.head.clone().filter(|head| head == &report.head);
     let verified_base_sha = target.verified_base_sha.clone();
-    let expected_candidate_sha = report
+    let expected_candidate_tree = report
         .publication_proof
-        .git_identity
+        .binding
         .as_ref()
-        .and_then(|identity| identity.commit_sha.clone());
+        .map(|binding| binding.candidate_tree.clone());
     if path.is_none()
         || base.is_none()
         || head.is_none()
@@ -4083,8 +4078,9 @@ fn manual_finalization_options(
         // durable records, or a manual finalization with no Cook lineage).
         review_profile: resolve_review_profile(component_id, &path)?,
         manual_finalization: true,
-        expected_candidate_sha,
-        verified_candidate_sha: None,
+        candidate: None,
+        expected_candidate_tree,
+        verified_candidate_tree: None,
         inherited_gate_evidence: report.inherited_gate_evidence,
         protected_branches: vec![
             "main".to_string(),

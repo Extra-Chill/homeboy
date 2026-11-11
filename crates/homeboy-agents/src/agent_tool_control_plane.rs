@@ -456,6 +456,7 @@ mod tools {
                 tags: bool_input(input, "tags"),
                 atomic: bool_input(input, "atomic"),
                 force_with_lease: bool_input(input, "force_with_lease"),
+                lease: None,
                 remote_url: optional_string(input, &["remote_url"]).map(str::to_string),
                 token: None,
                 refspec: optional_string(input, &["refspec"]).map(str::to_string),
