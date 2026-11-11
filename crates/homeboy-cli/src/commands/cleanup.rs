@@ -3389,6 +3389,19 @@ fn run_cleanup_category_process(
         )));
     }
 
+    let stdout_capture = &supervised.output.capture.stdout;
+    if stdout_capture.truncated {
+        return Err(Box::new(cleanup_category_process_failure(
+            metadata,
+            args.apply,
+            timeout,
+            last_progress,
+            format!(
+                "cleanup category evidence exceeded the {} byte limit ({} bytes)",
+                stdout_capture.byte_limit, stdout_capture.bytes_seen
+            ),
+        )));
+    }
     let stdout = String::from_utf8_lossy(&supervised.output.stdout);
     let envelope: Value = match serde_json::from_str(&stdout) {
         Ok(value) => value,
@@ -4509,9 +4522,18 @@ fn persisted_artifacts_category(
         .as_ref()
         .map(|cleanup| cleanup.candidate_count)
         .unwrap_or(0);
+    // The full index grows with every run (thousands of records); the sweep
+    // carries counts and the command that lists them, keeping category
+    // evidence bounded.
     let output = serde_json::json!({
         "persisted_artifacts": persisted,
-        "resource_lifecycle": resources,
+        "resource_lifecycle": {
+            "resource_count": resources.resource_count,
+            "actionable_count": resources.actionable_count,
+            "cleanup_eligible_count": resources.cleanup_eligible_count,
+            "cleanup_candidate_count": resource_cleanup_candidates,
+            "detail_command": "homeboy runs resources --cleanup-plan --cleanup-eligible",
+        },
     });
     Ok(CleanupInventoryCategory {
         category: PERSISTED_RUN_ARTIFACTS_METADATA.category.to_string(),
@@ -5212,6 +5234,61 @@ mod tests {
     use tempfile::TempDir;
 
     use super::*;
+
+    /// The Lab's resource index (5,692 records) made this category's evidence
+    /// 6 MB, past the 4 MiB category output cap, so every retention pass
+    /// failed to parse it. Evidence stays the same size as the index grows.
+    #[test]
+    fn persisted_artifacts_category_evidence_is_independent_of_index_size() {
+        let record: homeboy::core::resource_lifecycle_index::ResourceLifecycleRecord =
+            serde_json::from_value(json!({
+                "owner": "agent-task.executor-evidence", "run_id": "run-1",
+                "kind": "executor_evidence_directory", "path": "/tmp/run-1",
+                "root_bound": "/tmp", "status": "cleanup_pending",
+                "cleanup_policy": "delete_after_ttl", "evidence_retention": "metadata",
+                "ttl": "P30D", "cleanup_intent": "dry_run",
+            }))
+            .expect("resource record");
+        let evidence = |count: usize| {
+            let category = persisted_artifacts_category(
+                runs_service::PersistedArtifactCleanupOutcome {
+                    dry_run: false,
+                    artifact_root: "/tmp".into(),
+                    older_than_days: 30,
+                    totals: homeboy::core::engine::temp::CleanupSizeTotals {
+                        inspected_count: 0,
+                        planned_size_bytes: 0,
+                        removed_size_bytes: 0,
+                    },
+                    planned_record_count: 0,
+                    planned_file_count: 0,
+                    planned_directory_count: 0,
+                    removed_record_count: 0,
+                    removed_file_count: 0,
+                    removed_directory_count: 0,
+                    skipped_count: 0,
+                    rows: Vec::new(),
+                },
+                RunsResourcesOutput {
+                    command: "runs.resources",
+                    schema: "homeboy/resource-lifecycle-index/v1",
+                    mode: super::super::runs::ResourceCleanupMode::DryRun,
+                    source_count: 1,
+                    resource_count: count,
+                    actionable_count: count,
+                    cleanup_eligible_count: count,
+                    sources: Vec::new(),
+                    resources: vec![record.clone(); count],
+                    diagnostics: Vec::new(),
+                    cleanup: None,
+                },
+                true,
+            )
+            .expect("category");
+            serde_json::to_vec(&category.output).unwrap().len()
+        };
+        assert!(evidence(10_000) < 1024, "{} bytes", evidence(10_000));
+    }
 
     /// A runtime-tmp pass that stopped with inventory left must say so. The
     /// live dry run reported `has_more: true` with a `next_cursor`, yet the
