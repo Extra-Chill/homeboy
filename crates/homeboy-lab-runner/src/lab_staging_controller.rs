@@ -3241,8 +3241,13 @@ impl LabStagingStageOperations for ProductionLabStagingOperations {
                 )))
             }
             LabStagingPhase::DispatchRunner => {
-                let dispatch = Self::recover_dispatch_receipt(request, checkpoint)?
-                    .ok_or_else(|| Self::ambiguous_intent("dispatch"))?;
+                // Without a receipt or an accepted runner identity, no job
+                // was bound to this run (#17830). Submission is keyed on the
+                // immutable run id, so re-dispatch either submits the job or
+                // the daemon replays the one it already accepted.
+                let Some(dispatch) = Self::recover_dispatch_receipt(request, checkpoint)? else {
+                    return Ok(None);
+                };
                 let mut completed = checkpoint.clone();
                 completed.phase = LabStagingPhase::ObserveRunner;
                 completed.stage_intent = None;
@@ -8500,6 +8505,14 @@ mod tests {
                 &hydration,
             )
             .expect("persist hydration receipt");
+
+            // Before any runner job is bound, the unreceipted intent
+            // re-stages the dispatch instead of failing closed (#17830).
+            let intent = checkpoint.intent_for_current_action();
+            assert!(ProductionLabStagingOperations
+                .recover_stage(&request, &checkpoint, &intent)
+                .expect("an unbound dispatch intent re-stages")
+                .is_none());
 
             homeboy_agents::agent_task_lifecycle::bind_accepted_lab_runner_job(
                 &homeboy_core::lab_contract::RunnerJobIdentity::new(
