@@ -4796,6 +4796,17 @@ fn cook_existing_destination_head_never_becomes_origin_base() {
 
 #[test]
 fn supersede_previous_candidate_exact_and_fail_closed() {
+    // A cancelled Cook leaves its promoted candidate staged exactly like a
+    // recoverable one; a re-cook must set both aside (#17910).
+    for stopped in [
+        agent_task_lifecycle::AgentTaskRunState::CandidateRecoverable,
+        agent_task_lifecycle::AgentTaskRunState::Cancelled,
+    ] {
+        supersede_previous_candidate_from(stopped);
+    }
+}
+
+fn supersede_previous_candidate_from(stopped: agent_task_lifecycle::AgentTaskRunState) {
     homeboy_core::test_support::with_isolated_home(|_| {
         let repo = tempfile::tempdir().unwrap();
         let git = |args: &[&str]| {
@@ -4839,8 +4850,7 @@ fn supersede_previous_candidate_exact_and_fail_closed() {
         });
         agent_task_lifecycle::record_promotion("supersede-old", promotion).unwrap();
         agent_task_lifecycle::rewrite_record_for_test("supersede-old", |record| {
-            record
-                .set_state_for_test(agent_task_lifecycle::AgentTaskRunState::CandidateRecoverable);
+            record.set_state_for_test(stopped);
             record.lifecycle.execution.state = record.state().into();
         })
         .unwrap();

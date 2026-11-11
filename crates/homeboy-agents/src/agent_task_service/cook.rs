@@ -8295,14 +8295,23 @@ fn supersede_previous_cook_candidate(
             continue;
         }
         // Destination identity is included in the fingerprint. Only stopped
-        // cooks may surrender it; never steal a live provider's workspace.
+        // cooks may surrender it; never steal a live provider's workspace. A
+        // Cook cancelled mid-gate leaves its promoted candidate staged just
+        // like a failed one (#17910), so it surrenders it too once its driver
+        // has exited.
         if !matches!(
             old.state(),
             agent_task_lifecycle::AgentTaskRunState::CandidateRecoverable
                 | agent_task_lifecycle::AgentTaskRunState::PartialFailure
                 | agent_task_lifecycle::AgentTaskRunState::Failed
+                | agent_task_lifecycle::AgentTaskRunState::Cancelled
         ) {
             continue;
+        }
+        if let Some(recipe) = super::load_recipe_for_attempt(&old.run_id)? {
+            if super::cook_prior_candidate::cook_driver_is_live(&recipe.cook_id)? {
+                continue;
+            }
         }
         let message = format!("homeboy: superseded candidate of {}", old.run_id);
         homeboy_core::git::run_git(
