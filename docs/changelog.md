@@ -4,6 +4,12 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.458.23] - 2026-11-11
+
+### Fixed
+- preserve Pi agent directory for detached admission
+- diagnose missing materialized cwd at daemon admission
+
 ## [0.458.22] - 2026-11-11
 
 ### Changed
