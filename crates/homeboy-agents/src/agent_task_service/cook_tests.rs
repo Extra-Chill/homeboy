@@ -24538,7 +24538,21 @@ fn cook_finalization_without_a_passed_gate_publishes_only_inherited_failures() {
 
     // A proven inherited baseline failure is also eligible with no passed
     // gate: it publishes as an unverified draft instead of stranding.
-    let mut inherited = promotion(run_id);
+    let repo = tempfile::tempdir().unwrap();
+    let git = |args: &[&str]| {
+        let status = Command::new("git")
+            .args(["-c", "user.email=a@example.test", "-c", "user.name=A"])
+            .args(args)
+            .current_dir(repo.path())
+            .status()
+            .unwrap();
+        assert!(status.success(), "git {args:?}");
+    };
+    git(&["init", "-q", "-b", "verified-base"]);
+    git(&["commit", "-q", "--allow-empty", "-m", "base"]);
+    git(&["checkout", "-q", "-b", "candidate"]);
+    git(&["commit", "-q", "--allow-empty", "-m", "candidate"]);
+    let mut inherited = promotion_with_existing_path(run_id, repo.path());
     let gate = &mut inherited.deterministic_gates[0];
     gate.status = crate::agent_task_gate::AgentTaskGateStatus::AcceptedInheritedFailure;
     gate.exit_code = 1;
