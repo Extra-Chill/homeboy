@@ -4,6 +4,12 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.458.30] - 2026-11-11
+
+### Fixed
+- an unbound dispatch intent re-stages instead of failing closed
+- a re-cook sets aside a cancelled Cook's staged candidate
+
 ## [0.458.29] - 2026-11-11
 
 ### Changed
