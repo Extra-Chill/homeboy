@@ -4944,6 +4944,25 @@ fn blocker(
             }
         }
     }
+    if record.state().is_terminal()
+        && record.metadata["detached_cook_handoff"]["admission_state"] == "failed"
+    {
+        if let Some(reason) = record.metadata["detached_cook_handoff"]["reason"]
+            .as_str()
+            .filter(|reason| !reason.trim().is_empty())
+        {
+            return Some(ControlPlaneBlocker {
+                details: None,
+                code: Some("detached_handoff_failed".to_string()),
+                message: redacted_bounded(reason, MESSAGE_BOUND),
+                state: None,
+                reason: Some(redacted_bounded(reason, MESSAGE_BOUND)),
+                retry: None,
+                daemon: None,
+                output: None,
+            });
+        }
+    }
     if let Some(admission) = record.metadata.get("unmaterialized_cook_admission") {
         if let Some((state, reason, retry, daemon)) =
             unmaterialized_admission_blocker(record, admission)

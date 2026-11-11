@@ -59,6 +59,8 @@ struct DetachedCookAdmission {
     cook_id: String,
     launcher_id: String,
     pending: bool,
+    /// The error that stopped this launcher, recorded as the parent's diagnostic.
+    failure: Option<String>,
 }
 
 impl DetachedCookAdmission {
@@ -76,11 +78,20 @@ impl DetachedCookAdmission {
             cook_id: cook_id.to_string(),
             launcher_id,
             pending: true,
+            failure: None,
         })
     }
 
     fn release(&mut self) {
         self.pending = false;
+    }
+
+    /// Keep the error that stops this launcher so the failed parent names it.
+    fn record<T>(&mut self, result: homeboy::core::Result<T>) -> homeboy::core::Result<T> {
+        if let Err(error) = &result {
+            self.failure = Some(error.message.clone());
+        }
+        result
     }
 }
 
@@ -91,7 +102,9 @@ impl Drop for DetachedCookAdmission {
                 &self.store,
                 &self.cook_id,
                 &self.launcher_id,
-                "detached Cook launcher stopped before its step bound the handoff",
+                self.failure
+                    .as_deref()
+                    .unwrap_or("detached Cook launcher stopped before its step bound the handoff"),
             );
         }
     }
@@ -248,7 +261,10 @@ pub(super) fn intercept_local_detached_cook(
     // restart, recover under the exact lease and continue this same request
     // instead of making the operator reconstruct it (#13513).
     let controller_client = if cli.detach_after_handoff {
-        homeboy::core::daemon::LocalControllerJobClient::connect_current_build_recovering_idle()?
+        admission.record(
+            homeboy::core::daemon::LocalControllerJobClient::connect_current_build_recovering_idle(
+            ),
+        )?
     } else {
         match homeboy::core::daemon::LocalControllerJobClient::connect_current_build() {
             Ok(client) => client,
@@ -258,7 +274,7 @@ pub(super) fn intercept_local_detached_cook(
                 }
                 return Ok(None);
             }
-            Err(error) => return Err(error),
+            Err(error) => return admission.record(Err(error)),
         }
     };
     let mut overrides = vec![(
@@ -280,7 +296,11 @@ pub(super) fn intercept_local_detached_cook(
         &cwd,
         environment,
     );
-    let submission = controller_client.submit_with_disposition(request.submission()?)?;
+    let submission = admission.record(
+        request
+            .submission()
+            .and_then(|submission| controller_client.submit_with_disposition(submission)),
+    )?;
     let job_id = submission.job.id.to_string();
     // A draining daemon persists the step in `pending_resource_admission`; the
     // replacement daemon starts it, and its child binds this handoff (#17707).
