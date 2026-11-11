@@ -266,15 +266,17 @@ impl LabGateRequest {
         }))
     }
 
-    /// Controller/runner build skew is checked first: a skewed runner cannot
-    /// bind a receipt, and the cause is the skew, not the binding (#17761).
+    /// The binding is the compatibility check: a runner on another Homeboy
+    /// release that binds the receipt to this request ran this gate, so its
+    /// evidence counts (#17856). Only when the binding fails is build skew
+    /// named as its cause (#17761).
     pub fn verify_receipt(&self, receipt: &LabGateReceipt) -> Result<()> {
-        verify_runner_build(&self.runner_id)?;
         if receipt.schema != LAB_GATE_RECEIPT_SCHEMA
             || receipt.request_sha256 != self.identity()?
             || receipt.candidate != self.candidate
             || receipt.report.id != format!("gate-{}", self.index)
         {
+            verify_runner_build(&self.runner_id)?;
             return Err(Error::invalid_argument(
                 "gate.receipt",
                 "Lab gate receipt is not bound to the admitted candidate and invocation",
@@ -326,9 +328,10 @@ impl RunnerBuildSkew {
     }
 }
 
-/// Refuse with `runner.version_skew` when the transport observes that the
-/// runner runs another Homeboy version than this controller. An unavailable
-/// observation is not skew; later stages report their own cause.
+/// Explain a receipt the runner could not bind with `runner.version_skew`
+/// when the transport observes that the runner runs another Homeboy version
+/// than this controller. An unavailable observation is not skew; the binding
+/// error stands.
 fn verify_runner_build(runner_id: &str) -> Result<()> {
     match active_transport().build_skew(runner_id) {
         Ok(Some(skew)) => Err(skew.error(runner_id)),
@@ -939,9 +942,8 @@ pub(super) fn preflight(
     packages: &[AgentTaskGatePackageArtifactRequirement],
     timeout: Duration,
 ) -> Result<()> {
-    // Cook preview and admission name the skew up front instead of failing
-    // later in receipt verification (#17761).
-    verify_runner_build(runner_id)?;
+    // A skewed runner is admitted when it binds the readiness receipt; a
+    // binding failure names the skew (#17761, #17856).
     let request = LabGateRequest {
         schema: LabGateRequestSchema::V2,
         preflight_only: true,
@@ -2582,8 +2584,7 @@ mod tests {
         .unwrap()
     }
 
-    /// A transport whose `skew-runner` runs another Homeboy version and that
-    /// must never be asked to execute a gate.
+    /// A transport whose `skew-runner` runs another Homeboy release.
     struct SkewedRunnerTransport {
         previous: Arc<dyn LabGateTransport>,
     }
@@ -2603,7 +2604,6 @@ mod tests {
             request: &LabGateRequest,
             supervision: Option<&GateSupervision>,
         ) -> Result<LabGateReceipt> {
-            assert_ne!(request.runner_id, "skew-runner", "skew refuses up front");
             self.previous.execute(cwd, request, supervision)
         }
     }
@@ -2621,10 +2621,12 @@ mod tests {
         }
     }
 
-    /// #17761: receipt verification names controller/runner skew before the
-    /// binding check, instead of `gate.receipt ... not bound`.
+    /// #17856: a runner on another Homeboy release whose receipt binds the
+    /// request ran this gate, and its evidence counts. #17761: when the
+    /// binding fails, the skew is named as the cause instead of
+    /// `gate.receipt ... not bound`.
     #[test]
-    fn skewed_runner_receipt_verification_fails_with_version_skew() {
+    fn skewed_runner_receipt_counts_when_bound_and_names_the_skew_when_not() {
         homeboy_core::test_support::with_isolated_home(|_| {
             let temp = tempfile::tempdir().unwrap();
             repository(temp.path());
@@ -2637,31 +2639,12 @@ mod tests {
             let previous = active_transport();
             register_lab_gate_transport(Arc::new(SkewedRunnerTransport { previous }));
 
-            assert_version_skew(&request.verify_receipt(&receipt).unwrap_err());
-        });
-    }
-
-    /// #17761: Cook preview/admission readiness refuses a skewed runner up
-    /// front with the same typed error, without running the runner probe.
-    #[test]
-    fn skewed_runner_preview_fails_with_version_skew() {
-        homeboy_core::test_support::with_isolated_home(|_| {
-            let temp = tempfile::tempdir().unwrap();
-            repository(temp.path());
-            let previous = active_transport();
-            register_lab_gate_transport(Arc::new(SkewedRunnerTransport { previous }));
-
-            let error = preflight(
-                temp.path(),
-                "skew-runner",
-                &AgentTaskGateEnvironmentPolicy::default(),
-                &[],
-                &[],
-                Duration::from_secs(5),
-            )
-            .unwrap_err();
-
-            assert_version_skew(&error);
+            request
+                .verify_receipt(&receipt)
+                .expect("a bound receipt counts");
+            let mut unbound = receipt.clone();
+            unbound.request_sha256 = "another-release-request".to_string();
+            assert_version_skew(&request.verify_receipt(&unbound).unwrap_err());
         });
     }
 
