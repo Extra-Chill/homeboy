@@ -4,6 +4,13 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.458.31] - 2026-11-11
+
+### Fixed
+- rebase non-terminal lifecycle conflicts with bounded retries
+- the provider environment carries evidence locations, not directory manifests
+- Lab gates wait through a transient execute refusal
+
 ## [0.458.30] - 2026-11-11
 
 ### Fixed
