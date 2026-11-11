@@ -415,7 +415,7 @@ pub(crate) fn restart_daemon_in_place(
     // Pollers reattach through the runner's restart recovery lock. Holding it
     // across the restart makes them wait for the restarted session instead of
     // reattaching the stopped lease and reporting the job lost.
-    restart_recovery::with_restart_recovery_lock(runner_id, || {
+    restart_recovery::with_restart(runner_id, &previous_lease, || {
         let (report, exit_code) = if runner.settings.service_managed {
             service::repoint_and_restart(runner_id, service_binary)?;
             terminate_tunnel_if_owned(previous);
@@ -423,6 +423,9 @@ pub(crate) fn restart_daemon_in_place(
         } else {
             restart_direct_daemon_in_place(&runner, previous, &previous_lease)?
         };
+        if exit_code != 0 {
+            return Err(Error::internal_unexpected("runner restart failed"));
+        }
         if exit_code == 0 {
             let session = read_session(runner_id)?.ok_or_else(|| {
                 Error::internal_unexpected(

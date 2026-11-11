@@ -60,6 +60,7 @@ pub fn is_transient_refusal(code: &str, details: &serde_json::Value) -> bool {
         || details["admission_wait"] == crate::parsed_command_preflight::READINESS_UNOBSERVED
         || details["daemon_transport_error"]["kind"] == "timeout"
         || details["substrate_wait"] == "runner_connect"
+        || details["substrate_wait"] == "runner_restarting"
         || reasons_transient(&details["runner_availability"]["reasons"])
         || reasons_transient(&details["readiness_reasons"])
 }
