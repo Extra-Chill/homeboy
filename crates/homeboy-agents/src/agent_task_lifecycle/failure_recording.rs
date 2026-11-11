@@ -934,7 +934,9 @@ fn candidate_adoption_recovery(phase: &str, error: &Error) -> Option<serde_json:
     }))
 }
 
-fn pre_execution_failure_classification(error: &Error) -> AgentTaskFailureClassification {
+pub(super) fn pre_execution_failure_classification(
+    error: &Error,
+) -> AgentTaskFailureClassification {
     if error.details["pre_execution_phase"] == "gate_toolchain_preflight" {
         return AgentTaskFailureClassification::CapabilityMissing;
     }
@@ -955,17 +957,18 @@ fn pre_execution_failure_classification(error: &Error) -> AgentTaskFailureClassi
 /// not invalid caller input. They may be retried manually after the operator
 /// repairs the backing store, while the existing retry reservation still
 /// prevents duplicate active attempts.
-fn pre_execution_failure_is_retryable(error: &Error) -> bool {
+pub(super) fn pre_execution_failure_is_retryable(error: &Error) -> bool {
     error.retryable == Some(true) || is_controller_infrastructure_failure(error)
 }
 
 fn is_controller_infrastructure_failure(error: &Error) -> bool {
-    matches!(
-        error.code,
-        homeboy_core::ErrorCode::InternalIoError
-            | homeboy_core::ErrorCode::InternalJsonError
-            | homeboy_core::ErrorCode::StorageExhausted
-    )
+    super::terminal_transition::is_transition_conflict(error)
+        || matches!(
+            error.code,
+            homeboy_core::ErrorCode::InternalIoError
+                | homeboy_core::ErrorCode::InternalJsonError
+                | homeboy_core::ErrorCode::StorageExhausted
+        )
 }
 
 /// Shared `(run_id, runner_id)` identity borrowed by the Lab offload dispatch

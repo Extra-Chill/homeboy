@@ -213,6 +213,70 @@ fn a_stale_annotation_rebases_unless_it_overlaps_the_concurrent_write() {
     );
 }
 
+#[test]
+fn exhausted_transition_conflicts_are_retryable_controller_failures() {
+    use crate::agent_task_lifecycle::{AgentTaskTransitionConflict, AgentTaskTransitionError};
+
+    let error: Error = AgentTaskTransitionError::Conflict(AgentTaskTransitionConflict {
+        run_id: RUN_ID.to_string(),
+        expected_revision: 25,
+        actual_revision: 26,
+        actual_state: Some(AgentTaskRunState::Running),
+        transition: "annotate",
+    })
+    .into();
+    assert!(super::super::failure_recording::pre_execution_failure_is_retryable(&error));
+    assert_eq!(
+        super::super::failure_recording::pre_execution_failure_classification(&error),
+        crate::agent_task::AgentTaskFailureClassification::ExecutionFailed,
+    );
+}
+
+/// Both caller-held commit paths preserve a progress write that wins the CAS.
+#[test]
+fn non_terminal_snapshot_transitions_preserve_concurrent_progress() {
+    use crate::agent_task_lifecycle::{set_run_state, AgentTaskAdvance};
+
+    for kind in [None, Some(AgentTaskAdvance::BindLabHandoff)] {
+        let context = homeboy_core::test_support::HermeticTestContext::new();
+        let store = AgentTaskLifecycleStore::new(context.path_roots());
+        planned_proxy(&store);
+        let mut snapshot = store.read_record(RUN_ID).expect("snapshot");
+        snapshot.metadata["controller_annotation"] = serde_json::json!("kept");
+        if kind.is_some() {
+            snapshot.lab_handoff = Some(
+                crate::agent_task_lifecycle::AgentTaskLabHandoff::pending(
+                    RUNNER_ID,
+                    "2026-11-11T00:00:00Z".to_string(),
+                    "2999-01-01T00:00:00Z".to_string(),
+                )
+                .accepted(RUNNER_JOB_ID, "2026-11-11T00:05:00Z".to_string()),
+            );
+            set_run_state(&mut snapshot, AgentTaskRunState::Running);
+        }
+        store
+            .mutate_record(RUN_ID, |record| {
+                record.metadata["heartbeat"] = serde_json::json!("concurrent");
+                true
+            })
+            .expect("concurrent annotate");
+        assert!(store.read_record(RUN_ID).unwrap().revision > snapshot.revision);
+        match kind {
+            None => store.commit_record(&mut snapshot),
+            Some(kind) => store.advance_record(&mut snapshot, kind),
+        }
+        .expect("stale transition rebases");
+        let stored = store.read_record(RUN_ID).expect("committed");
+        assert_eq!(stored.metadata["heartbeat"], "concurrent");
+        assert_eq!(stored.metadata["controller_annotation"], "kept");
+        assert_eq!(snapshot, stored);
+        if kind.is_some() {
+            assert_eq!(stored.state(), AgentTaskRunState::Running);
+            assert_eq!(stored.runner_job_id(), Some(RUNNER_JOB_ID));
+        }
+    }
+}
+
 /// State and ownership move only through typed transitions: an annotation
 /// that changes the state or the Lab handoff is refused, and the typed
 /// transition validates the state it leaves.

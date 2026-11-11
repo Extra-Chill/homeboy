@@ -7186,7 +7186,9 @@ fn run_cook_spine(
                 == agent_task_lifecycle::AgentTaskRunState::Failed)
                 .then(|| incomplete_no_candidate_reason(&aggregate))
                 .flatten();
-            let status = if no_candidate_reason.is_some() {
+            let status = if record.metadata["pre_execution_failure"].is_object() {
+                CookStatus::PreExecutionFailure
+            } else if no_candidate_reason.is_some() {
                 CookStatus::NoCandidate
             } else {
                 terminal_fallback_status(record.state())
