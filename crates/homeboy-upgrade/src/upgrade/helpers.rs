@@ -3827,7 +3827,7 @@ mod runner_source_upgrade_tests {
             .expect("dangling extension link");
 
             assert!(preflight_extensions_for_upgrade("1.0.0").is_empty());
-            let warnings = target_missing_extension_warnings();
+            let warnings = orphan_extension_warnings();
             assert_eq!(warnings.len(), 1);
             assert_eq!(warnings[0].extension_id, "discord");
             assert!(warnings[0].reason.contains("WARNING"));
