@@ -114,7 +114,7 @@ pub fn ensure_scheduling_daemon() -> Option<serde_json::Value> {
     let error = result.err()?;
     Some(serde_json::json!({
         "daemon": scheduling_daemon_evidence(),
-        "error": error.message_with_cause(),
+        "error": error.attributed_message(),
         "next_action": "homeboy daemon recover",
     }))
 }
