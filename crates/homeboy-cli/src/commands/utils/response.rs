@@ -367,7 +367,7 @@ impl<T: Serialize> CommandResultEnvelope<T> {
 impl CommandResultEnvelope<()> {
     fn from_error(identity: &CommandIdentity, err: &Error, exit_code: i32) -> Self {
         let next_actions = actions_for_error(err);
-        let summary = err.message.clone();
+        let summary = err.attributed_message();
         Self {
             schema: COMMAND_RESULT_SCHEMA,
             command: identity.command.clone(),
@@ -1565,7 +1565,7 @@ fn failure_digest_for_error(err: &Error) -> Option<CommandFailureDigest> {
             retryable: err.retryable,
         }),
         _ => Some(CommandFailureDigest {
-            summary: err.message.clone(),
+            summary: err.attributed_message(),
             stdout_tail: None,
             stderr_tail: None,
             artifact_refs: Vec::new(),
@@ -3961,6 +3961,29 @@ mod tests {
             payload.expect_err("error payload").code,
             ErrorCode::ValidationMissingArgument
         );
+    }
+
+    /// An `internal_io` error keeps its fixed "IO error" message in
+    /// `diagnostics`; the summary a launcher, status or notification forwards
+    /// names the operation and the OS error behind it.
+    #[test]
+    fn an_io_error_summary_names_its_operation_and_os_error() {
+        let error = Error::internal_io(
+            "Directory not empty (os error 39)",
+            Some("publish gate input snapshot capture".to_string()),
+        );
+        let value = serde_json::to_value(CommandResultEnvelope::<()>::from_error(
+            &CommandIdentity::top_level("agent-task"),
+            &error,
+            1,
+        ))
+        .expect("response json");
+
+        let expected =
+            "IO error: publish gate input snapshot capture: Directory not empty (os error 39)";
+        assert_eq!(value["summary"], expected);
+        assert_eq!(value["diagnostics"]["failure_digest"]["summary"], expected);
+        assert_eq!(value["diagnostics"]["message"], "IO error");
     }
 
     #[test]

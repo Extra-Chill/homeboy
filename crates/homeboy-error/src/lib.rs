@@ -397,9 +397,11 @@ pub struct Error {
 
 pub type Result<T> = std::result::Result<T, Error>;
 
+/// Renders [`Error::attributed_message`], so `{error}` in any diagnostic names
+/// the cause a generic message such as "IO error" keeps in `details`.
 impl std::fmt::Display for Error {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{}", self.message)
+        f.write_str(&self.attributed_message())
     }
 }
 
@@ -794,7 +796,8 @@ impl Error {
             self.details
                 .get(key)
                 .and_then(Value::as_str)
-                .filter(|value| !value.trim().is_empty())
+                .map(str::trim)
+                .filter(|value| !value.is_empty() && *value != self.message)
         };
         match (field("context"), field("error")) {
             (Some(context), Some(error)) => format!("{}: {context}: {error}", self.message),
@@ -812,29 +815,6 @@ impl Error {
             hints: Vec::new(),
             retryable: None,
             source: None,
-        }
-    }
-
-    /// The message plus the cause carried in `details`, for a surface that
-    /// keeps only one string.
-    ///
-    /// Several constructors use a fixed `message` and put the real cause in
-    /// `details`: `internal_io` is always "IO error", with the OS error in
-    /// `details.error` and the failing operation in `details.context`. A
-    /// boundary that forwards `message` alone reports "IO error" with no way
-    /// to tell which file or operation failed.
-    pub fn message_with_cause(&self) -> String {
-        let text = |key: &str| {
-            self.details
-                .get(key)
-                .and_then(Value::as_str)
-                .map(str::trim)
-                .filter(|value| !value.is_empty() && *value != self.message)
-        };
-        match (text("context"), text("error")) {
-            (Some(context), Some(error)) => format!("{}: {context}: {error}", self.message),
-            (None, Some(error)) => format!("{}: {error}", self.message),
-            _ => self.message.clone(),
         }
     }
 
@@ -1732,7 +1712,7 @@ mod storage_exhaustion_tests {
     use super::*;
 
     #[test]
-    fn message_with_cause_names_the_failed_operation_behind_a_generic_message() {
+    fn attributed_message_names_the_failed_operation_behind_a_generic_message() {
         let cases = [
             (
                 Error::internal_io(
@@ -1751,7 +1731,8 @@ mod storage_exhaustion_tests {
             ),
         ];
         for (error, expected) in cases {
-            assert_eq!(error.message_with_cause(), expected);
+            assert_eq!(error.attributed_message(), expected);
+            assert_eq!(error.to_string(), expected);
         }
     }
 
