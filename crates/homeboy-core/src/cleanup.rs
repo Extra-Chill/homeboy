@@ -3747,6 +3747,8 @@ mod tests {
         crate::test_support::with_isolated_home(|_| {
             let small = git_repo();
             let large = git_repo();
+            crate::worktree::record_removed_for_test("fixture-small", small.path());
+            crate::worktree::record_removed_for_test("fixture-large", large.path());
             write_file(&small.path().join("target/debug/app"), "small");
             write_file(&large.path().join("target/debug/app"), &"L".repeat(128));
             let retention = crate::defaults::RetentionConfig {
@@ -3774,6 +3776,7 @@ mod tests {
     fn automatic_artifact_retention_reclaims_idle_cargo_target() {
         crate::test_support::with_isolated_home(|_| {
             let repo = repo_with_ignored_artifacts();
+            crate::worktree::record_removed_for_test("fixture-idle", repo.path());
             write_file(
                 &repo.path().join(".cargo-target/debug/app"),
                 "Cargo artifact",
@@ -3837,6 +3840,7 @@ mod tests {
     fn automatic_retention_deletes_pressure_candidate_without_precomputed_size() {
         crate::test_support::with_isolated_home(|_| {
             let repo = git_repo();
+            crate::worktree::record_removed_for_test("fixture-idle", repo.path());
             write_file(&repo.path().join("target/debug/app"), "artifact");
             let retention = crate::defaults::RetentionConfig {
                 reconstructable_artifact_reserve_bytes: u64::MAX,
