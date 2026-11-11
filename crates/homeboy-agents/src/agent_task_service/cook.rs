@@ -7443,6 +7443,7 @@ fn run_cook_spine(
             metadata: serde_json::json!({
                 "previous_failure_set": previous_failure_set,
                 "intentional_no_change": intentional_no_change,
+                "pending_operator_feedback": crate::agent_task_feedback::has_pending(lifecycle_store, &cook_id),
             }),
         });
         let feedback_status = feedback.status;

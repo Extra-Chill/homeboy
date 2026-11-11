@@ -3229,13 +3229,19 @@ fn consume_claimed_with_dispatcher_policy(
     };
     let mut options = options;
     if matches!(mode, CookMode::ContinueTerminal | CookMode::Adopt) {
-        // A terminal continuation finishes an accepted candidate; it never
-        // spends the retry budget on new provider work.
+        // A terminal continuation finishes an accepted candidate; it spends no
+        // retry budget on new provider work, except one attempt that applies
+        // operator feedback still pending against the candidate (#17611).
+        let feedback_attempt = u32::from(crate::agent_task_feedback::has_pending(
+            &lifecycle_store,
+            &claim.continuation().cook_id,
+        ));
         options.retry_policy.max_attempts = recipe
             .attempts
             .last()
             .map(|attempt| attempt.attempt)
-            .unwrap_or(0);
+            .unwrap_or(0)
+            + feedback_attempt;
     }
     if agent_task_lifecycle::run_record_exists_in_store(
         &lifecycle_store,

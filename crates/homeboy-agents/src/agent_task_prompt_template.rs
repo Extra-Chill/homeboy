@@ -27,6 +27,9 @@ pub(crate) enum PromptPurpose {
     Attempt,
     /// A gate-fix attempt after deterministic gates failed.
     FollowUp,
+    /// A provider dispatch that carries pending operator feedback, appended
+    /// to the attempt's instructions at dispatch.
+    Feedback,
     /// A retry after an attempt that changed no files.
     NoChange,
 }
@@ -36,6 +39,7 @@ impl PromptPurpose {
         match self {
             Self::Attempt => "attempt",
             Self::FollowUp => "follow_up",
+            Self::Feedback => "feedback",
             Self::NoChange => "no_change",
         }
     }
@@ -83,6 +87,29 @@ fn configured_template(purpose: PromptPurpose) -> Option<String> {
             );
             None
         }
+    }
+}
+
+/// Append the operator template for `purpose`, rendered against the request
+/// as it is now, to the request's current instructions.
+pub(crate) fn append_prompt_template(request: &mut AgentTaskRequest, purpose: PromptPurpose) {
+    let template = configured_template(purpose);
+    append_prompt_template_with(request, purpose, template.as_deref());
+}
+
+pub(crate) fn append_prompt_template_with(
+    request: &mut AgentTaskRequest,
+    purpose: PromptPurpose,
+    template: Option<&str>,
+) {
+    let Some(template) = template else {
+        return;
+    };
+    let context = template_context(request, &request.instructions, purpose);
+    let rendered = render(template, &context);
+    let rendered = rendered.trim();
+    if !rendered.is_empty() {
+        request.instructions = format!("{}\n\n{rendered}", request.instructions.trim_end());
     }
 }
 
@@ -263,6 +290,27 @@ mod tests {
         assert_eq!(request.instructions, "Fix the bug.\n\nNext: follow_up");
         apply_prompt_template_with(&mut request, PromptPurpose::FollowUp, None);
         assert_eq!(request.instructions, "Fix the bug.");
+    }
+
+    #[test]
+    fn feedback_template_appends_dispatch_facts_to_the_current_instructions() {
+        let mut request = request("Fix the bug.\n\nGate output");
+        merge_homeboy_facts(
+            &mut request,
+            json!({ "cook_feedback": [{ "text": "Also cover Windows paths." }] }),
+        );
+        append_prompt_template_with(
+            &mut request,
+            PromptPurpose::Feedback,
+            Some("Reviewer: {{ inputs.homeboy.cook_feedback.0.text }}"),
+        );
+        assert_eq!(
+            request.instructions,
+            "Fix the bug.\n\nGate output\n\nReviewer: Also cover Windows paths."
+        );
+        let before = request.clone();
+        append_prompt_template_with(&mut request, PromptPurpose::Feedback, None);
+        assert_eq!(request, before);
     }
 
     #[test]
