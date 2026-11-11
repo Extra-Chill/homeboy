@@ -500,11 +500,8 @@ fn refused_publication_ends_the_terminal_continuation_without_regating() {
 /// no-op.
 #[derive(Clone, Copy, Debug)]
 enum WedgedCook {
-    /// The candidate is applied but a Lab gate deferred, and an earlier
-    /// manual publication intent is recorded.
+    /// The candidate is applied but a Lab gate deferred.
     DeferredGateBeforePublish,
-    /// Green gates, applied candidate, no AI-authored review form.
-    MissingReviewForm,
     /// A provider liveness timeout left the attempt candidate-recoverable
     /// before any terminal continuation was scheduled.
     ContinuationNotScheduled,
@@ -573,18 +570,6 @@ fn wedge(case: WedgedCook, options: &CookRequest) {
             promotion.normalize_gate_outcome();
             store
                 .record_promotion(run, serde_json::to_value(&promotion).unwrap())
-                .unwrap();
-            agent_task_lifecycle::record_manual_finalization_intent(
-                run,
-                serde_json::json!({ "run_id": run }),
-            )
-            .unwrap();
-        }
-        WedgedCook::MissingReviewForm => {
-            let mut aggregate = store.read_aggregate(run).unwrap();
-            aggregate.outcomes[0].outputs = Value::Null;
-            store
-                .record_run_aggregate(run, &options.identity.initial_plan, &aggregate)
                 .unwrap();
         }
         WedgedCook::ContinuationNotScheduled => {
@@ -661,7 +646,7 @@ fn every_wedged_cook_state_has_one_progressing_recovery_step() {
                     let stored = persisted_promotion_for_attempt(run).unwrap().unwrap();
                     assert!(stored.finalization_eligible(), "{case:?}");
                 }
-                WedgedCook::MissingReviewForm | WedgedCook::ContinuationNotScheduled => {
+                WedgedCook::ContinuationNotScheduled => {
                     assert_eq!(plan.step, CookRecoveryStep::Continue, "{case:?}: {plan:?}");
                     let (report, exit) = crate::agent_task_service::recover_cook(
                         cook,
@@ -937,53 +922,6 @@ impl crate::agent_task_service::CookRecoveryPerformer for RecordingPublish {
         self.0.lock().unwrap().push(preflight);
         Ok((serde_json::json!({ "status": "validated" }), 0))
     }
-}
-
-/// #17641: the operator's recorded publication intent is a planner input, not
-/// a `recover`-only override. Status, diagnose, `recover --preflight` and
-/// `recover` therefore all name `publish` for it, and `recover` performs the
-/// exact step its preflight validated rather than a continuation.
-#[test]
-fn cook_recovery_preflight_status_and_recover_name_one_step() {
-    use crate::agent_task_service::{CookRecoveryRequest, CookRecoveryStep};
-    with_corrected_gate_candidate(|options, _, _| {
-        wedge(WedgedCook::MissingReviewForm, &options);
-        let cook = &options.identity.cook_id;
-        let run = &options.identity.initial_run_id;
-        agent_task_lifecycle::record_manual_finalization_intent(
-            run,
-            serde_json::json!({ "run_id": run }),
-        )
-        .unwrap();
-
-        let plan = crate::agent_task_service::plan_cook_recovery(cook).unwrap();
-        assert_eq!(plan.step, CookRecoveryStep::Publish, "{plan:?}");
-        let context =
-            crate::agent_task_service::cook_failure_context(cook, Some(&plan.run_id), &plan.status)
-                .unwrap();
-        assert_eq!(context.recovery_step, Some(CookRecoveryStep::Publish));
-        assert!(context
-            .next_actions
-            .iter()
-            .any(|action| action.action == "publish"));
-
-        let performer = RecordingPublish(Default::default());
-        let (preflight, _) = crate::agent_task_service::recover_cook(
-            cook,
-            CookRecoveryRequest {
-                preflight: true,
-                ..Default::default()
-            },
-            &performer,
-        )
-        .unwrap();
-        let (performed, exit) =
-            crate::agent_task_service::recover_cook(cook, Default::default(), &performer).unwrap();
-        assert_eq!(exit, 0, "{performed:#?}");
-        assert_eq!(preflight.step, CookRecoveryStep::Publish);
-        assert_eq!(performed.step, CookRecoveryStep::Publish);
-        assert_eq!(*performer.0.lock().unwrap(), vec![true, false]);
-    });
 }
 
 /// A second gate Homeboy added to the declared verify gate, whose failure

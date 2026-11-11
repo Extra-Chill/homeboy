@@ -5,7 +5,6 @@ use super::*;
 
 const DETACHED_COOK_ADMISSION_LEASE_SECONDS: i64 = 30;
 use chrono::DateTime;
-use homeboy_engine_primitives::content_hash;
 use std::collections::BTreeSet;
 use std::fs::{self, File, OpenOptions};
 
@@ -7893,100 +7892,6 @@ pub fn record_cook_force_with_lease_receipt_in_store(
     record_cook_delivery(lifecycle_store, run_id, |_, draft| {
         draft.artifacts.force_with_lease = Some(receipt.clone());
         Some(CookDeliveryCommit::FollowDelivery)
-    })
-}
-
-/// Persist a validated manual publication intent without claiming Cook completion.
-pub(crate) fn record_manual_finalization_intent(
-    run_id: &str,
-    intent: Value,
-) -> Result<AgentTaskRunRecord> {
-    let digest = manual_finalization_intent_digest(&intent);
-    let lifecycle_store = AgentTaskLifecycleStore::from_environment()?;
-    record_cook_delivery(&lifecycle_store, run_id, |_, draft| {
-        let manual = &mut draft.artifacts.manual;
-        manual.intent = Some(intent.clone());
-        manual.intent_digest = Some(json!(digest));
-        Some(CookDeliveryCommit::FollowDelivery)
-    })
-}
-
-/// Mark a preflight dossier as a retryable direct publication. Unlike an
-/// explicit `--preflight` recovery, this path may still need to commit.
-pub fn record_manual_finalization_retry(run_id: &str) -> Result<AgentTaskRunRecord> {
-    let lifecycle_store = AgentTaskLifecycleStore::from_environment()?;
-    record_cook_delivery(&lifecycle_store, run_id, |_, draft| {
-        draft.artifacts.manual.retry = true;
-        Some(CookDeliveryCommit::FollowDelivery)
-    })
-}
-
-pub fn record_manual_finalization_retry_candidate(
-    run_id: &str,
-    candidate: Value,
-) -> Result<AgentTaskRunRecord> {
-    let lifecycle_store = AgentTaskLifecycleStore::from_environment()?;
-    record_cook_delivery(&lifecycle_store, run_id, |_, draft| {
-        draft.artifacts.manual.retry_candidate = Some(candidate.clone());
-        Some(CookDeliveryCommit::FollowDelivery)
-    })
-}
-
-/// Stable digest of the exact validated manual dossier persisted for recovery.
-pub(crate) fn manual_finalization_intent_digest(intent: &Value) -> String {
-    content_hash::sha256_hex(
-        &serde_json::to_vec(intent).expect("JSON values always serialize into a manual intent"),
-    )
-}
-
-/// Persist a completed manual receipt and bind it to the validated intent digest.
-pub(crate) fn record_manual_finalization_receipt(
-    run_id: &str,
-    receipt: Value,
-) -> Result<AgentTaskRunRecord> {
-    let lifecycle_store = AgentTaskLifecycleStore::from_environment()?;
-    record_cook_delivery(&lifecycle_store, run_id, |_, draft| {
-        let artifacts = &mut draft.artifacts;
-        artifacts.finalization = Some(receipt.clone());
-        let manual = &mut artifacts.manual;
-        manual.failure = None;
-        manual.retry = false;
-        if let Some(candidate) = manual.retry_candidate.take() {
-            manual.retry_origin = Some(candidate);
-        }
-        manual.receipt_digest = Some(json!(manual_finalization_intent_digest(&receipt)));
-        manual.receipt_intent_digest = manual.intent_digest.clone();
-        Some(CookDeliveryCommit::Terminal(
-            AgentTaskTerminalOutcome::Succeeded,
-        ))
-    })
-}
-
-/// Record a failed manual publication as a terminal, recoverable lifecycle
-/// state. Manual identities have no provider tasks, so leaving them queued
-/// would falsely suggest that `agent-task run` can make progress.
-pub fn record_manual_finalization_failure(
-    run_id: &str,
-    error: &homeboy_core::Error,
-) -> Result<AgentTaskRunRecord> {
-    let run_id = sanitize_run_id(run_id);
-    let policy = homeboy_core::redaction::RedactionPolicy::default();
-    let failure = json!({
-        "schema": "homeboy/agent-task-manual-finalization-failure/v1",
-        "status": "failed",
-        "phase": "publication",
-        "error": {
-            "code": error.code.as_str(),
-            "message": policy.redact_string(&error.message),
-            "details": policy.redact_json(&error.details),
-        },
-    });
-    let lifecycle_store = AgentTaskLifecycleStore::from_environment()?;
-    record_cook_delivery(&lifecycle_store, &run_id, |_, draft| {
-        draft.artifacts.manual.failure = Some(failure.clone());
-        Some(CookDeliveryCommit::Terminal(
-            AgentTaskTerminalOutcome::Failed,
-        ))
     })
 }
 

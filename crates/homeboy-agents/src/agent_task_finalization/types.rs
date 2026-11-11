@@ -6,8 +6,6 @@ use crate::agent_task_review_dossier::{AgentTaskPublicContract, AgentTaskPublicC
 use homeboy_core::git::GitIdentityProof;
 use homeboy_core::repository_integrity::RepositoryIntegrityEvidence;
 
-pub const AGENT_TASK_MANUAL_CANDIDATE_BINDING_SCHEMA: &str =
-    "homeboy/agent-task-manual-candidate-binding/v1";
 pub const AGENT_TASK_INHERITED_GATE_EVIDENCE_SCHEMA: &str =
     "homeboy/agent-task-inherited-gate-evidence/v1";
 
@@ -24,17 +22,6 @@ pub struct AgentTaskInheritedGateEvidence {
     pub gate_ids: Vec<String>,
     /// Exact command identity for every visible or private gate, keyed by gate id.
     pub gate_command_sha256: std::collections::BTreeMap<String, String>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-pub struct AgentTaskManualCandidateBinding {
-    pub schema: String,
-    pub selection: crate::agent_task_lifecycle::AgentTaskCookCandidateSelection,
-    pub candidate: crate::agent_task_promotion::AgentTaskCandidateFingerprint,
-    pub source: crate::agent_task_promotion::AgentTaskPromotionSource,
-    pub model: String,
-    pub replacement_gate_proof: serde_json::Value,
-    pub gates: Vec<HomeboyGateResult>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -78,8 +65,6 @@ pub struct AgentTaskPrFinalizationReport {
     /// A green promotion receipt inherited after exact candidate binding.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub inherited_gate_evidence: Option<AgentTaskInheritedGateEvidence>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub manual_candidate_binding: Option<AgentTaskManualCandidateBinding>,
     #[serde(flatten)]
     pub evidence: AgentTaskPrEvidence,
 }

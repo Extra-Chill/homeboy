@@ -8,8 +8,7 @@
 //!
 //! A few callers need the full artifact a delivery step recorded, because
 //! they execute it again: replaying the exact `AgentTaskPromotionReport` to
-//! finalize or resume, authenticating a manual publication dossier against its
-//! digest, or handing a finalization receipt back verbatim. They read it here,
+//! finalize or resume, or handing a finalization receipt back verbatim. They read it here,
 //! through exactly one accessor per artifact of the record, so every remaining
 //! raw reader is explicit and greppable (`recorded_`).
 
@@ -125,46 +124,4 @@ fn holds_payload_reference(value: &Value) -> bool {
 /// The publication receipt exactly as the publisher recorded it.
 pub fn recorded_finalization_receipt(metadata: &Value) -> Option<&Value> {
     recorded_artifact(metadata, "/finalization")
-}
-
-/// `manual_finalization_identity`: marks a run reserved for manual
-/// publication. It is the run reservation's identity, written before any
-/// delivery step runs, so it stays a run-metadata key of its own.
-pub fn persisted_manual_finalization_identity(metadata: &Value) -> Option<&Value> {
-    metadata.get("manual_finalization_identity")
-}
-
-/// The validated manual publication dossier.
-pub fn recorded_manual_finalization_intent(metadata: &Value) -> Option<&Value> {
-    recorded_artifact(metadata, "/manual/intent")
-}
-
-/// Integrity digest of the manual publication dossier.
-pub fn recorded_manual_finalization_intent_digest(metadata: &Value) -> Option<&Value> {
-    recorded_artifact(metadata, "/manual/intent_digest")
-}
-
-/// The preflight dossier was marked a retryable direct publication.
-pub fn recorded_manual_finalization_retry(metadata: &Value) -> bool {
-    recorded_artifact(metadata, "/manual/retry") == Some(&Value::Bool(true))
-}
-
-/// The manual publication retry's candidate fingerprint.
-pub fn recorded_manual_finalization_retry_candidate(metadata: &Value) -> Option<&Value> {
-    recorded_artifact(metadata, "/manual/retry_candidate")
-}
-
-/// The retry candidate a completed manual receipt consumed.
-pub fn recorded_manual_finalization_retry_origin(metadata: &Value) -> Option<&Value> {
-    recorded_artifact(metadata, "/manual/retry_origin")
-}
-
-/// Digest of the completed manual receipt.
-pub fn recorded_manual_finalization_receipt_digest(metadata: &Value) -> Option<&Value> {
-    recorded_artifact(metadata, "/manual/receipt_digest")
-}
-
-/// The intent digest the completed manual receipt was bound to.
-pub fn recorded_manual_finalization_receipt_intent_digest(metadata: &Value) -> Option<&Value> {
-    recorded_artifact(metadata, "/manual/receipt_intent_digest")
 }

@@ -527,10 +527,11 @@ homeboy agent-task finalize-pr --manual-finalization \
 ```
 
 Each `--verify` runs against the same clean committed candidate in an isolated
-detached checkout, before Homeboy reserves a manual-finalization lifecycle
-record. Homeboy hydrates declared dependencies there, retains structured setup
-provenance, and derives one durable gate result and reviewer test step per
-command. Gate setup, here and before promotion gates, hydrates the checkout
+detached checkout. Homeboy hydrates declared dependencies there, retains structured
+setup provenance, and derives one gate result and reviewer test step per command.
+Manual finalization writes no lifecycle intent or receipt. To retry, rerun the
+same command: the same tree and dates produce the same head SHA, and publication
+finds or creates one PR. `recover` handles Cook runs only. Gate setup, here and before promotion gates, hydrates the checkout
 root plus only the descendant dependency roots whose checkout-relative path a
 gate command names (for example `cd php-transformer && composer run lint`).
 Existing `--gate-result`, `--targeted-check-run`, and `--test-step` remain

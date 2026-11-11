@@ -50,7 +50,7 @@ fn ambient_store() -> Result<crate::agent_task_lifecycle::AgentTaskLifecycleStor
 
 #[derive(Default)]
 pub(super) struct MockBackend {
-    branch: String,
+    pub(super) branch: String,
     changed_files: Vec<String>,
     resolved_base: Option<AgentTaskPrResolvedBase>,
     publication_base_sha: Option<String>,
@@ -76,7 +76,7 @@ pub(super) struct MockBackend {
     pushed: bool,
     pub(super) created: bool,
     created_draft: bool,
-    create_calls: u8,
+    pub(super) create_calls: u8,
     commit_calls: u8,
     push_calls: u8,
     pushed_commit_sha: Option<String>,
@@ -98,6 +98,9 @@ impl AgentTaskPrFinalizationBackend for MockBackend {
         _path: &str,
         base: &str,
     ) -> Result<(crate::agent_task::AgentTaskCandidate, Vec<String>)> {
+        if self.real_git {
+            return RealAgentTaskPrFinalizationBackend.prepare_manual_candidate(_path, base);
+        }
         Ok((
             crate::agent_task::AgentTaskCandidate {
                 base_sha: base.into(),

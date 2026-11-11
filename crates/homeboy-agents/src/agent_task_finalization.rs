@@ -1161,7 +1161,6 @@ fn report(
         review_dossier: options.review_dossier.clone(),
         manual_finalization: options.manual_finalization,
         inherited_gate_evidence: options.inherited_gate_evidence.clone(),
-        manual_candidate_binding: None,
         evidence: options.evidence.clone(),
     }
 }

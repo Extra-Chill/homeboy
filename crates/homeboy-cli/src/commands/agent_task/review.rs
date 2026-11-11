@@ -844,10 +844,12 @@ fn adoption_envelope(
     })
 }
 
-pub(crate) fn finalize_pull_request(mut args: FinalizePrArgs) -> CmdResult<Value> {
+fn manual_finalization_options(
+    mut args: FinalizePrArgs,
+) -> homeboy::core::Result<AgentTaskPrFinalizationOptions> {
     validate_finalize_inputs(&args)?;
     let path = args.path;
-    let mut run_id = args.run_id;
+    let run_id = args.run_id;
     let mut verified_candidate_tree = None;
     let mut dependency_hydration = Vec::new();
     if !args.verify.is_empty() {
@@ -875,12 +877,6 @@ pub(crate) fn finalize_pull_request(mut args: FinalizePrArgs) -> CmdResult<Value
             .map(|command| format!("{command}=>passes as recorded by Homeboy's deterministic gate"))
             .collect();
     }
-    if args.manual_finalization {
-        run_id = agent_task_service::prepare_manual_finalization_identity(&run_id)?;
-    }
-    // Retained for the finalization handoff, which names the exact apply command
-    // after a validated preflight (#9867). `run_id` itself moves into the options.
-    let handoff_run_id = run_id.clone();
     let title = args.title;
     let commit_message = args.commit_message;
     let gate_results = parse_gate_results(&args.gate_results)?;
@@ -994,24 +990,17 @@ pub(crate) fn finalize_pull_request(mut args: FinalizePrArgs) -> CmdResult<Value
         protected_branches: args.protected_branches,
         draft_pr: false,
     };
-    let result = if args.preflight {
+    Ok(options)
+}
+
+pub(crate) fn finalize_pull_request(args: FinalizePrArgs) -> CmdResult<Value> {
+    let preflight = args.preflight;
+    let options = manual_finalization_options(args)?;
+    let report = if preflight {
         homeboy::agents::agent_tasks::finalization::preflight_pr(options)
-    } else if args.manual_finalization {
-        let intent = homeboy::agents::agent_tasks::finalization::preflight_pr(options.clone())?;
-        agent_task_service::persist_manual_finalization_retry_intent(&handoff_run_id, &intent)?;
-        finalize_pr(options)
     } else {
         finalize_pr(options)
-    };
-    let report = match result {
-        Ok(report) => report,
-        Err(error) => {
-            if args.manual_finalization && !args.preflight {
-                agent_task_lifecycle::record_manual_finalization_failure(&handoff_run_id, &error)?;
-            }
-            return Err(error);
-        }
-    };
+    }?;
     let exit_code = if matches!(
         report.status.as_str(),
         "review_ready" | "draft_published" | "validated"
@@ -1022,26 +1011,7 @@ pub(crate) fn finalize_pull_request(mut args: FinalizePrArgs) -> CmdResult<Value
     };
 
     let mut value = serde_json::to_value(&report).unwrap_or(Value::Null);
-    if should_persist_manual_preflight_intent(
-        args.preflight,
-        &report.status,
-        report.manual_finalization,
-    ) {
-        agent_task_service::persist_manual_finalization_intent(&handoff_run_id, &report)?;
-    }
-    if !args.preflight && report.manual_finalization {
-        if let Err(error) =
-            agent_task_service::persist_manual_finalization_receipt(&handoff_run_id, &report)
-        {
-            agent_task_lifecycle::record_manual_finalization_failure(&handoff_run_id, &error)?;
-            return Err(error);
-        }
-    }
-    value["handoff"] = finalization_handoff(
-        &report.status,
-        report.pr_url.as_deref(),
-        Some(handoff_run_id.as_str()),
-    );
+    value["handoff"] = finalization_handoff(&report.status, report.pr_url.as_deref());
 
     Ok((value, exit_code))
 }
@@ -1152,14 +1122,6 @@ pub(crate) fn replacement_gate_proof(
             None,
         )
     })
-}
-
-fn should_persist_manual_preflight_intent(
-    preflight: bool,
-    status: &str,
-    manual_finalization: bool,
-) -> bool {
-    preflight && status == "validated" && manual_finalization
 }
 
 fn validate_finalize_inputs(args: &FinalizePrArgs) -> homeboy::core::Result<()> {
@@ -2919,7 +2881,7 @@ fn promotion_handoff(report: &AgentTaskPromotionReport, _to_worktree: &str) -> V
 /// as a failed publication attempt. Reporting a validated safety check as an
 /// apparent failure sent an agent toward error inspection instead of the apply
 /// command it had just earned (#9867).
-fn finalization_handoff(status: &str, pr_url: Option<&str>, run_id: Option<&str>) -> Value {
+fn finalization_handoff(status: &str, pr_url: Option<&str>) -> Value {
     let pr_opened = status == "review_ready" && pr_url.is_some();
     // `validated` is the terminal success status for a non-mutating preflight;
     // `finalize_pr` never returns it.
@@ -2933,23 +2895,15 @@ fn finalization_handoff(status: &str, pr_url: Option<&str>, run_id: Option<&str>
         "pr_not_opened"
     };
 
-    let finalize_command = run_id.map(|run_id| format!("homeboy agent-task recover {run_id}"));
-
     let next_actions = if pr_opened {
         vec!["PR opened or updated; continue review in GitHub".to_string()]
     } else if publication_validated {
-        let mut actions = vec![
+        vec![
             "Publication validated; no commit, push, or PR mutation occurred by design."
                 .to_string(),
-        ];
-        match finalize_command.as_deref() {
-            Some(command) => actions.push(format!("Run `{command}` to execute the validated publication.")),
-            None => actions.push(
-                "Rerun the same finalize-pr invocation without --preflight to execute the validated publication."
-                    .to_string(),
-            ),
-        }
-        actions
+            "Rerun the same finalize-pr invocation without --preflight to execute the validated publication."
+                .to_string(),
+        ]
     } else {
         vec!["PR was not opened; inspect finalization status and git/PR errors".to_string()]
     };
@@ -2968,7 +2922,6 @@ fn finalization_handoff(status: &str, pr_url: Option<&str>, run_id: Option<&str>
         },
         "boundary": boundary,
         "pr_url": pr_url,
-        "finalize_command": if publication_validated { finalize_command.clone() } else { None },
         "next_actions": next_actions
     })
 }
@@ -3808,7 +3761,6 @@ mod tests {
         let handoff = finalization_handoff(
             "review_ready",
             Some("https://github.com/Extra-Chill/homeboy/pull/9999"),
-            Some("agent-task-1234"),
         );
 
         assert_eq!(handoff["states"]["patch_artifact_produced"], true);
@@ -3819,26 +3771,17 @@ mod tests {
             handoff["pr_url"],
             "https://github.com/Extra-Chill/homeboy/pull/9999"
         );
-        assert!(
-            handoff["finalize_command"].is_null(),
-            "an executed publication has nothing left to apply"
-        );
     }
 
     /// A validated preflight suppressed publication on purpose, so it must not
     /// be rendered with failed-publication wording (#9867).
     #[test]
     fn finalization_handoff_distinguishes_validated_preflight_from_failed_publication() {
-        let handoff = finalization_handoff("validated", None, Some("agent-task-9867"));
+        let handoff = finalization_handoff("validated", None);
 
         assert_eq!(handoff["boundary"], "publication_validated_not_executed");
         assert_eq!(handoff["states"]["pr_opened"], false);
         assert_eq!(handoff["states"]["publication_mutated"], false);
-        assert_eq!(
-            handoff["finalize_command"],
-            "homeboy agent-task recover agent-task-9867"
-        );
-
         let actions = handoff["next_actions"]
             .as_array()
             .expect("next actions")
@@ -3851,8 +3794,8 @@ mod tests {
             "must state the suppression was intentional: {actions}"
         );
         assert!(
-            actions.contains("homeboy agent-task recover agent-task-9867"),
-            "must name the exact apply command: {actions}"
+            actions.contains("without --preflight"),
+            "must name the exact apply step: {actions}"
         );
         assert!(
             !actions.contains("inspect finalization status"),
@@ -3863,10 +3806,9 @@ mod tests {
     /// A genuinely failed publication keeps the error-inspection guidance.
     #[test]
     fn finalization_handoff_keeps_error_guidance_for_failed_publication() {
-        let handoff = finalization_handoff("failed", None, Some("agent-task-9867"));
+        let handoff = finalization_handoff("failed", None);
 
         assert_eq!(handoff["boundary"], "pr_not_opened");
-        assert!(handoff["finalize_command"].is_null());
         assert_eq!(
             handoff["next_actions"][0],
             "PR was not opened; inspect finalization status and git/PR errors"
@@ -4177,9 +4119,14 @@ exit 2
 printf '%s\n' "$*" >> "$HOMEBOY_FAKE_GH_LOG"
 case "$1 $2" in
   "auth status"|"repo view") printf '%s\n' '{"nameWithOwner":"example/manual-finalization"}' ;;
-  "pr list") printf '%s\n' '[]' ;;
+  "pr list")
+    case "$*" in
+      *"--state open"*) grep -q '^pr create ' "$HOMEBOY_FAKE_GH_LOG" && printf '%s\n' '[{"number":1,"title":"Manual continuation","url":"https://github.com/example/manual-finalization/pull/1","state":"OPEN","isDraft":false,"baseRefName":"main","headRefName":"feature","headRepositoryOwner":{"login":"example"}}]' || printf '%s\n' '[]' ;;
+      *) printf '%s\n' '[]' ;;
+    esac ;;
   "pr create") printf '%s\n' 'https://github.com/example/manual-finalization/pull/1' ;;
   "pr view") sha=$(git rev-parse HEAD); printf '{"baseRefName":"main","headRefName":"feature","headRefOid":"%s","headRepository":{"name":"manual-finalization"},"headRepositoryOwner":{"login":"example"}}\n' "$sha" ;;
+  "api -X") printf '%s\n' '{"number":1,"html_url":"https://github.com/example/manual-finalization/pull/1"}' ;;
   *) [ "$1" = "--version" ] || exit 2 ;;
 esac
 "#, 0o755)
@@ -4213,7 +4160,7 @@ esac
                 .expect("write component registration");
             }
 
-            let preflight = dispatch_agent_task(&[
+            let manual_argv = [
                 "homeboy",
                 "agent-task",
                 "finalize-pr",
@@ -4241,7 +4188,8 @@ esac
                 "test \"$(cat feature.txt)\" = feature",
                 "--model",
                 "fixture-model",
-            ]);
+            ];
+            let preflight = dispatch_agent_task(&manual_argv);
             assert_eq!(preflight["status"], "validated");
             assert_eq!(preflight["normalized_gate_results"][0]["status"], "passed");
             assert_eq!(
@@ -4256,16 +4204,20 @@ esac
                 preflight["review_dossier"]["ai_assistance"]["model"],
                 "fixture-model"
             );
-            let continuation = preflight["handoff"]["finalize_command"]
-                .as_str()
-                .expect("emitted continuation")
-                .to_string();
-            let argv = continuation.split_whitespace().collect::<Vec<_>>();
+            // The apply step is the same invocation without --preflight; rerunning it is the retry.
+            let argv = manual_argv
+                .into_iter()
+                .filter(|arg| *arg != "--preflight")
+                .collect::<Vec<_>>();
             let published = dispatch_agent_task(&argv);
-            assert_eq!(published["step"], serde_json::json!({ "kind": "publish" }));
-            assert_eq!(published["result"]["status"], "review_ready");
+            assert_eq!(published["status"], "review_ready");
             let repeated = dispatch_agent_task(&argv);
-            assert_eq!(repeated["result"], published["result"]);
+            assert_eq!(repeated["status"], "review_ready");
+            assert_eq!(repeated["pr_url"], published["pr_url"]);
+            assert_eq!(
+                repeated["publication_proof"]["git_identity"]["commit_sha"],
+                published["publication_proof"]["git_identity"]["commit_sha"]
+            );
             let error = dispatch_agent_task_error(&[
                 "homeboy",
                 "agent-task",
@@ -4330,20 +4282,6 @@ esac
             .expect("Git output is UTF-8")
             .trim()
             .to_string()
-    }
-
-    #[test]
-    fn durable_run_manual_preflight_does_not_persist_manual_intent() {
-        assert!(!should_persist_manual_preflight_intent(
-            true,
-            "validated",
-            false,
-        ));
-        assert!(should_persist_manual_preflight_intent(
-            true,
-            "validated",
-            true,
-        ));
     }
 
     #[test]

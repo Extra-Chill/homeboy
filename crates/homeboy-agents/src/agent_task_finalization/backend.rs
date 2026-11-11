@@ -1297,6 +1297,56 @@ mod remote_base_tests {
     }
 
     #[test]
+    fn manual_finalization_republishes_same_head_without_lifecycle_writes() {
+        let (repo, _origin) = publication_repo();
+        let path = repo.path().to_str().unwrap();
+        let context = homeboy_core::test_support::HermeticTestContext::new();
+        let store = crate::agent_task_lifecycle::AgentTaskLifecycleStore::new(context.path_roots());
+        let mut options = super::super::tests::options();
+        options.path = path.into();
+        options.manual_finalization = true;
+        options.head = Some("feature".into());
+        options.verified_base_sha = Some(git_output(path, &["rev-parse", "HEAD^"]).unwrap());
+        options.verified_candidate_tree =
+            Some(git_output(path, &["rev-parse", "HEAD^{tree}"]).unwrap());
+        options.changed_files = vec!["feature.txt".into()];
+        let run_id = options.run_id.clone();
+        let mut backend = super::super::tests::MockBackend::default();
+        backend.real_git = true;
+        backend.branch = "feature".into();
+        let first =
+            super::super::finalize_pr_with_backend(options.clone(), &mut backend, &store).unwrap();
+        backend.existing_pr = Some(AgentTaskPrRef {
+            number: first.pr_number.unwrap(),
+            url: first.pr_url.clone().unwrap(),
+            is_draft: false,
+        });
+        let second = super::super::finalize_pr_with_backend(options, &mut backend, &store).unwrap();
+        assert_eq!(first.status, "review_ready");
+        assert_eq!(second.status, "review_ready");
+        assert_eq!(first.pr_number, second.pr_number);
+        assert_eq!(first.pr_url, second.pr_url);
+        let first_sha = first
+            .publication_proof
+            .git_identity
+            .unwrap()
+            .commit_sha
+            .unwrap();
+        let second_sha = second
+            .publication_proof
+            .git_identity
+            .unwrap()
+            .commit_sha
+            .unwrap();
+        assert_eq!(first_sha, second_sha);
+        assert_eq!(backend.create_calls, 1);
+        assert!(
+            store.read_record(&run_id).is_err(),
+            "manual publication must not create lifecycle records"
+        );
+    }
+
+    #[test]
     fn publishes_gated_tree_reproducibly_and_leaves_pr_open_on_read_failure() {
         let (repo, _origin) = publication_repo();
         let path = repo.path().to_str().unwrap();
