@@ -148,6 +148,33 @@ fn lab_gate_public_error(error: &Error, artifact_ref: String) -> Error {
     public
 }
 
+/// A terminal job without receipt evidence did not judge the candidate. Keep
+/// this out of the validation/configuration class so Cook's existing transport
+/// retry budget can regate it (#17841).
+fn missing_terminal_receipt(job_id: &str, problem: &str) -> Error {
+    Error::new(
+        homeboy_core::ErrorCode::RunnerLabTransportFailure,
+        problem,
+        serde_json::json!({
+            "field": "gate.receipt",
+            "problem": problem,
+            "job_id": job_id,
+            "stage": "terminal_projection",
+            "gate_disposition": "unavailable",
+        }),
+    )
+    .with_retryable(true)
+}
+
+fn terminal_receipt_stream<'a>(result: &'a serde_json::Value, job_id: &str) -> Result<&'a str> {
+    result
+        .get("stdout")
+        .and_then(serde_json::Value::as_str)
+        .ok_or_else(|| {
+            missing_terminal_receipt(job_id, "terminal runner gate has no receipt stream")
+        })
+}
+
 /// Summarize a non-receipt envelope without copying arbitrary gate output.
 fn terminal_envelope_diagnostic(value: &serde_json::Value, stdout_bytes: usize) -> String {
     let diagnostic = homeboy_core::redaction::redact_json(&serde_json::json!({
@@ -678,15 +705,10 @@ fn execute_owned(
         if storage.is_storage_exhausted() {
             storage.with_retryable(true)
         } else {
-            Error::invalid_argument("gate.receipt", "terminal runner gate has no result event")
+            missing_terminal_receipt(job_id, "terminal runner gate has no result event")
         }
     })?;
-    let stdout = result
-        .get("stdout")
-        .and_then(serde_json::Value::as_str)
-        .ok_or_else(|| {
-            Error::invalid_argument("gate.receipt", "terminal runner gate has no receipt stream")
-        })?;
+    let stdout = terminal_receipt_stream(&result, job_id)?;
     let private =
         request.visibility == homeboy_agents::agent_tasks::gate::AgentTaskGateVisibility::Private;
     let stderr = result
@@ -1136,6 +1158,40 @@ mod public_error_tests {
         let public = lab_gate_public_error(&error, "homeboy://run/x/artifact/y".into());
         assert!(public.message.contains("tracked/cycle"));
         assert_eq!(public.details["entry_path"], "tracked/cycle");
+    }
+
+    #[test]
+    fn terminal_gate_without_receipt_is_retryable_transport_not_configuration() {
+        for result in [
+            serde_json::json!({"exit_code": 1}),
+            serde_json::json!({"stdout": null}),
+        ] {
+            let error = terminal_receipt_stream(&result, "job-no-receipt").unwrap_err();
+            let public = lab_gate_public_error(&error, "homeboy://diagnostic".into());
+            assert_eq!(
+                public.code,
+                homeboy_core::ErrorCode::RunnerLabTransportFailure
+            );
+            assert_eq!(public.retryable, Some(true));
+            assert_eq!(public.details["job_id"], "job-no-receipt");
+            assert_eq!(public.details["stage"], "terminal_projection");
+            assert_eq!(public.details["gate_disposition"], "unavailable");
+            assert!(!is_pre_handoff_configuration_error(&public));
+            assert!(public
+                .message
+                .contains("terminal runner gate has no receipt stream"));
+        }
+        // A present stream is left to receipt verification, not reclassified
+        // based on the runner's failing exit status.
+        let result = serde_json::json!({"exit_code": 3, "stdout": "failing receipt"});
+        assert_eq!(
+            terminal_receipt_stream(&result, "job-failed").unwrap(),
+            "failing receipt"
+        );
+        let absent_result =
+            missing_terminal_receipt("job-no-result", "terminal runner gate has no result event");
+        assert_eq!(absent_result.retryable, Some(true));
+        assert!(!is_pre_handoff_configuration_error(&absent_result));
     }
 
     #[test]

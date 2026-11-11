@@ -18682,6 +18682,58 @@ fn gate_setup_failures_are_retried_and_other_promotion_errors_are_not() {
     assert_eq!(calls.get(), 1);
 }
 
+/// #17841: receipt-less Lab preflight is retryable through the existing
+/// promotion budget, not a terminal validation/configuration rejection.
+#[test]
+fn missing_gate_receipt_retries_promotion_within_existing_budget() {
+    let context = homeboy_core::test_support::HermeticTestContext::new();
+    let lifecycle_store = AgentTaskLifecycleStore::new(context.path_roots());
+    let options = compile_options("gate-receipt-retry");
+    let calls = std::cell::Cell::new(0);
+    let mut side_effects = CookSideEffects::for_test(
+        |_, _, run_id| {
+            calls.set(calls.get() + 1);
+            if calls.get() == 1 {
+                // Promotion wraps a transport-class preflight failure as
+                // promotion.gate_setup, retaining the retryable cause.
+                Err(homeboy_core::Error::dependency_step_failed(
+                    "promotion.gate_setup",
+                    "lab",
+                    None,
+                    Vec::new(),
+                    Vec::new(),
+                    None,
+                    Some(serde_json::json!({
+                        "code": "runner.lab_transport_failure",
+                        "message": "terminal runner gate has no receipt stream",
+                        "retry_action": "retry_dependency_hydration",
+                    })),
+                ))
+            } else {
+                Ok(promotion(run_id))
+            }
+        },
+        |_, _, _, _| Ok(Value::Null),
+    );
+    let mut retries = 0;
+    super::promote_with_gate_setup_retries(
+        &mut side_effects,
+        &lifecycle_store,
+        &options,
+        "receipt-retry-run",
+        |_, _, error| {
+            retries += 1;
+            assert_eq!(
+                error.details["cause"]["code"],
+                "runner.lab_transport_failure"
+            );
+        },
+    )
+    .expect("regate completes promotion");
+    assert_eq!(calls.get(), 2);
+    assert_eq!(retries, 1);
+}
+
 /// #16121: a gate setup failure caused by deterministic configuration (a Lab
 /// gate rejected in preflight for a missing runner `secret_env` ref) cannot
 /// change between attempts, so promotion is not retried.
