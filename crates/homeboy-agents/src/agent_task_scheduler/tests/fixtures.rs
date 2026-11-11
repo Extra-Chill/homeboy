@@ -446,8 +446,16 @@ impl AgentTaskExecutorAdapter for RecordingExecutor {
     fn execute(
         &self,
         request: AgentTaskRequest,
-        _context: AgentTaskExecutionContext,
+        context: AgentTaskExecutionContext,
     ) -> AgentTaskOutcome {
+        let cancel_calls = Arc::clone(&self.cancel_calls);
+        let task_id = request.task_id.clone();
+        context.cancellation.on_cancel(Arc::new(move || {
+            cancel_calls
+                .lock()
+                .expect("cancel calls")
+                .push(task_id.clone());
+        }));
         let running = self.running.fetch_add(1, Ordering::SeqCst) + 1;
         self.max_seen.fetch_max(running, Ordering::SeqCst);
 
@@ -464,13 +472,6 @@ impl AgentTaskExecutorAdapter for RecordingExecutor {
                 .get(&request.task_id)
                 .unwrap_or(&AgentTaskOutcomeStatus::Succeeded),
         )
-    }
-
-    fn cancel(&self, task_id: &str) {
-        self.cancel_calls
-            .lock()
-            .expect("cancel calls")
-            .push(task_id.to_string());
     }
 }
 

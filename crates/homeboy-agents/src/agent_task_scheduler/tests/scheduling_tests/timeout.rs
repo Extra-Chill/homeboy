@@ -440,20 +440,13 @@ mod timeout_tests {
     fn timeout_after_editing_workspace_reconciles_required_artifacts_and_records_candidate_commit()
     {
         #[derive(Default)]
-        struct EditThenTimeout {
-            cancelled: std::sync::atomic::AtomicBool,
-        }
+        struct EditThenTimeout;
 
         impl AgentTaskExecutorAdapter for EditThenTimeout {
-            fn cancel(&self, _task_id: &str) {
-                self.cancelled
-                    .store(true, std::sync::atomic::Ordering::SeqCst);
-            }
-
             fn execute(
                 &self,
                 request: AgentTaskRequest,
-                _context: AgentTaskExecutionContext,
+                context: AgentTaskExecutionContext,
             ) -> AgentTaskOutcome {
                 let root = request
                     .workspace
@@ -474,9 +467,7 @@ mod timeout_tests {
                 // requested so the bounded grace (not deferred cleanup)
                 // harvests the workspace on a loaded machine too.
                 let deadline = std::time::Instant::now() + Duration::from_secs(30);
-                while !self.cancelled.load(std::sync::atomic::Ordering::SeqCst)
-                    && std::time::Instant::now() < deadline
-                {
+                while !context.cancellation.is_cancelled() && std::time::Instant::now() < deadline {
                     thread::sleep(Duration::from_millis(1));
                 }
                 AgentTaskOutcome {

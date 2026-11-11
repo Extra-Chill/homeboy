@@ -45,8 +45,6 @@ pub trait AgentTaskExecutorAdapter: Send + Sync + 'static {
         request: AgentTaskRequest,
         context: AgentTaskExecutionContext,
     ) -> AgentTaskOutcome;
-
-    fn cancel(&self, _task_id: &str) {}
 }
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
@@ -476,7 +474,6 @@ impl AgentTaskScheduler {
             .map(|outcome| (outcome.task_id.clone(), outcome.clone()))
             .collect();
         let mut events = Vec::new();
-        let mut cancellation_notified = false;
         let execution_budget = plan.options.execution_budget.clone();
         // Legacy retry policy remains an operator-facing cap; the execution
         // budget adds a shared hard ceiling across retries and rotations.
@@ -524,13 +521,8 @@ impl AgentTaskScheduler {
 
         while !queued.is_empty() || !running.is_empty() {
             if cancellation.is_cancelled() {
+                // Running tasks hold child tokens, so they observed this cancel.
                 AgentTaskScheduleSupport::cancel_queued(&mut queued, &mut outcomes, &mut events);
-                if !cancellation_notified {
-                    for task in &running {
-                        self.executor.cancel(&task.task_id);
-                    }
-                    cancellation_notified = true;
-                }
             }
 
             let adaptive_decision = adaptive_concurrency_decision(
@@ -999,11 +991,14 @@ impl AgentTaskScheduler {
                 request.limits.timeout_ms = Some(task_timeout_ms);
                 let tx = tx.clone();
                 let attempt = scheduled.attempt;
+                // A per-task token lets this task's deadline stop its provider
+                // without cancelling the run.
+                let task_cancellation = cancellation.child();
                 let context = AgentTaskExecutionContext {
                     plan_id,
                     run_id: self.run_id.clone(),
                     attempt,
-                    cancellation: cancellation.clone(),
+                    cancellation: task_cancellation.clone(),
                     lifecycle_store: self.durable_lifecycle_store().ok().cloned(),
                     provider_capacity_key: scheduled.capacity_key.clone(),
                 };
@@ -1097,6 +1092,7 @@ impl AgentTaskScheduler {
                     timeout_ms: Some(task_cap_timeout_ms),
                     execution_deadline_unix_ms,
                     timeout_cancel_requested: false,
+                    cancellation: task_cancellation,
                     rotation_index: scheduled.rotation_index,
                     rotation_transitions_used: scheduled.rotation_transitions_used,
                     rotation_attempts: scheduled.rotation_attempts,
@@ -1168,7 +1164,6 @@ impl AgentTaskScheduler {
                 &mut quarantined,
                 &mut outcomes,
                 &mut events,
-                self.executor.as_ref(),
                 self.durable_lifecycle_store().ok(),
             );
 
@@ -1756,7 +1751,7 @@ impl AgentTaskScheduler {
                         // It keeps the join handle until the provider terminates,
                         // preserves late artifacts, and never reopens this result.
                         for task in &mut running {
-                            self.executor.cancel(&task.task_id);
+                            task.cancellation.cancel();
                             task.timeout_cancel_requested = true;
                             task.timeout_ms = Some(0);
                             task.started_at = Instant::now() - timeout_with_grace(0);
@@ -1766,7 +1761,6 @@ impl AgentTaskScheduler {
                             &mut quarantined,
                             &mut outcomes,
                             &mut events,
-                            self.executor.as_ref(),
                             self.durable_lifecycle_store().ok(),
                         );
                         break;
@@ -1997,6 +1991,8 @@ pub(super) struct RunningTask {
     pub(super) execution_deadline_unix_ms: Option<u64>,
     /// Deadline cancellation has been sent; harvesting waits for TaskResult.
     pub(super) timeout_cancel_requested: bool,
+    /// This task's provider cancellation, linked to the run's token.
+    pub(super) cancellation: AgentTaskCancellationToken,
     /// Rotation entries already consumed for this task (0 = original executor).
     pub(super) rotation_index: usize,
     pub(super) rotation_transitions_used: usize,
@@ -2761,48 +2757,6 @@ fn first_non_empty_json_string<'a>(
 #[cfg(test)]
 mod executor_erasure_tests {
     use super::*;
-    use std::sync::atomic::{AtomicUsize, Ordering};
-
-    struct CountingExecutor(Arc<AtomicUsize>);
-
-    impl AgentTaskExecutorAdapter for CountingExecutor {
-        fn execute(
-            &self,
-            _request: AgentTaskRequest,
-            _context: AgentTaskExecutionContext,
-        ) -> AgentTaskOutcome {
-            unreachable!("this fixture exercises the bound and cancel(), never execution");
-        }
-
-        fn cancel(&self, _task_id: &str) {
-            self.0.fetch_add(1, Ordering::SeqCst);
-        }
-    }
-
-    /// What the real call sites do: take the executor by value and hand a clone
-    /// onward, once per retry attempt and once per parallel branch.
-    fn dispatch_then_hand_on(executor: SharedAgentTaskExecutor) -> SharedAgentTaskExecutor {
-        executor.cancel("task");
-        executor.clone()
-    }
-
-    #[test]
-    fn cloning_a_shared_executor_shares_one_underlying_executor() {
-        let calls = Arc::new(AtomicUsize::new(0));
-        let executor: SharedAgentTaskExecutor = Arc::new(CountingExecutor(Arc::clone(&calls)));
-
-        let cloned = dispatch_then_hand_on(executor);
-        cloned.cancel("task");
-
-        // Cloning must share one executor rather than duplicate it. Retry
-        // attempts hand out clones and a provider adapter holds real state --
-        // per-clone copies would silently give each attempt its own.
-        assert_eq!(
-            calls.load(Ordering::SeqCst),
-            2,
-            "both the original and its clone must dispatch to the same executor"
-        );
-    }
 
     #[test]
     fn deferred_cleanup_descriptor_replaces_only_complete_content() {

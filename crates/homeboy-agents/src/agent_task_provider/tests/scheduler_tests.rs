@@ -774,6 +774,47 @@ fn provider_timeout_returns_structured_outcome() {
 }
 
 #[test]
+fn scheduler_deadline_stops_an_editing_provider_and_harvests_its_candidate() {
+    let _home = super::common::artifact_home();
+    let temp = tempfile::tempdir().expect("tempdir");
+    let source = linked_cook_source(&temp);
+    // Pi writes into its attempt workspace, then outlives the deadline.
+    let fake = FakePi::new("printf 'partial\\n' > provider-change.txt\nexec sleep 20");
+    let mut request = fake.request("cook-timeout");
+    request.workspace.root = Some(source.display().to_string());
+    request.limits.timeout_ms = Some(3_000);
+    request.limits.max_timeout_ms = Some(3_000);
+
+    let aggregate = AgentTaskScheduler::new(Arc::new(
+        ExtensionProviderAgentTaskExecutor::with_providers(vec![fake.provider()]),
+    ))
+    .run(AgentTaskPlan::new("timeout-harvest", vec![request]));
+
+    let outcome = &aggregate.outcomes[0];
+    assert_eq!(
+        outcome.status,
+        AgentTaskOutcomeStatus::CandidateRecoverable,
+        "{outcome:#?}"
+    );
+    // The scheduler's deadline itself stopped the provider; neither the
+    // provider's own timer nor deferred cleanup produced this outcome.
+    assert!(outcome
+        .diagnostics
+        .iter()
+        .any(|diagnostic| diagnostic.class == "agent_task.provider_cancelled"));
+    let candidate = outcome.candidate.as_ref().expect("harvested candidate");
+    let change = std::process::Command::new("git")
+        .args([
+            "show",
+            &format!("{}:provider-change.txt", candidate.candidate_sha),
+        ])
+        .current_dir(&source)
+        .output()
+        .expect("git show");
+    assert_eq!(String::from_utf8_lossy(&change.stdout), "partial\n");
+}
+
+#[test]
 fn provider_timeout_persists_bounded_redacted_last_activity() {
     const SECRET_ENV: &str = "HOMEBOY_TIMEOUT_TEST_SECRET";
     const SECRET: &str = "timeout-secret-value";

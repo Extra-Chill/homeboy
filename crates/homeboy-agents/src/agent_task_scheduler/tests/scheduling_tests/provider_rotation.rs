@@ -1798,9 +1798,7 @@ mod provider_rotation_tests {
     fn timed_out_attempt_rotates_after_recovering_a_malformed_scratch_index() {
         struct TimeoutThenSuccessExecutor {
             calls: AtomicUsize,
-            cancellation: std::sync::mpsc::Sender<()>,
             cancel_calls: Arc<AtomicUsize>,
-            cancellation_receiver: Mutex<std::sync::mpsc::Receiver<()>>,
             scratch_index: std::path::PathBuf,
             scratch_roots: Arc<Mutex<Vec<String>>>,
         }
@@ -1809,7 +1807,7 @@ mod provider_rotation_tests {
             fn execute(
                 &self,
                 request: AgentTaskRequest,
-                _context: AgentTaskExecutionContext,
+                context: AgentTaskExecutionContext,
             ) -> AgentTaskOutcome {
                 self.scratch_roots.lock().expect("scratch roots").push(
                     request.executor.config["runtime_env"]["TMPDIR"]
@@ -1819,11 +1817,15 @@ mod provider_rotation_tests {
                 );
                 if self.calls.fetch_add(1, Ordering::SeqCst) == 0 {
                     fs::write(&self.scratch_index, "{ stale").expect("corrupt stale index");
-                    self.cancellation_receiver
-                        .lock()
-                        .expect("cancellation receiver")
-                        .recv_timeout(Duration::from_secs(60))
-                        .expect("scheduler cancelled the timed-out first attempt");
+                    let cancelled = std::time::Instant::now() + Duration::from_secs(60);
+                    while !context.cancellation.is_cancelled() {
+                        assert!(
+                            std::time::Instant::now() < cancelled,
+                            "scheduler cancelled the timed-out first attempt"
+                        );
+                        thread::sleep(Duration::from_millis(1));
+                    }
+                    self.cancel_calls.fetch_add(1, Ordering::SeqCst);
                     let mut outcome = outcome(request.task_id, AgentTaskOutcomeStatus::Succeeded);
                     outcome.outputs = serde_json::json!({
                         "provider_run_result": {
@@ -1834,11 +1836,6 @@ mod provider_rotation_tests {
                 }
                 outcome(request.task_id, AgentTaskOutcomeStatus::Succeeded)
             }
-
-            fn cancel(&self, _task_id: &str) {
-                self.cancel_calls.fetch_add(1, Ordering::SeqCst);
-                let _ = self.cancellation.send(());
-            }
         }
 
         let _home = homeboy_core::test_support::HomeGuard::new();
@@ -1847,13 +1844,10 @@ mod provider_rotation_tests {
             .expect("homeboy data")
             .join("controller-scratch/resources.json");
         let scratch_roots = Arc::new(Mutex::new(Vec::new()));
-        let (cancellation, cancellation_receiver) = std::sync::mpsc::channel();
         let cancel_calls = Arc::new(AtomicUsize::new(0));
         let scheduler = AgentTaskScheduler::new(Arc::new(TimeoutThenSuccessExecutor {
             calls: AtomicUsize::new(0),
-            cancellation,
             cancel_calls: Arc::clone(&cancel_calls),
-            cancellation_receiver: Mutex::new(cancellation_receiver),
             scratch_index: scratch_index.clone(),
             scratch_roots: Arc::clone(&scratch_roots),
         }))

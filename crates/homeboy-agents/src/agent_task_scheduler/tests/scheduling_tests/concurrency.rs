@@ -166,17 +166,17 @@ pub(super) mod concurrency_tests {
         fn execute(
             &self,
             request: AgentTaskRequest,
-            _context: AgentTaskExecutionContext,
+            context: AgentTaskExecutionContext,
         ) -> AgentTaskOutcome {
+            let cancelled = Arc::clone(&self.cancelled);
+            context
+                .cancellation
+                .on_cancel(Arc::new(move || cancelled.store(true, Ordering::SeqCst)));
             self.entered.wait();
             if request.task_id == "task-2" {
                 std::thread::sleep(Duration::from_millis(300));
             }
             outcome(request.task_id, AgentTaskOutcomeStatus::Succeeded)
-        }
-
-        fn cancel(&self, _task_id: &str) {
-            self.cancelled.store(true, Ordering::SeqCst);
         }
     }
 
