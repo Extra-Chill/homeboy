@@ -4,6 +4,12 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.458.24] - 2026-11-11
+
+### Changed
+- Retry a transient issue-timeline lookup instead of rejecting the task URL
+- Publish an invalid-form draft in the agent's own words, without passing-gate logs
+
 ## [0.458.23] - 2026-11-11
 
 ### Fixed
