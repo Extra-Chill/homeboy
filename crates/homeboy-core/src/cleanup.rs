@@ -623,6 +623,23 @@ fn run_automatic_artifact_retention_at(
         }
         let mut seen_worktrees = HashSet::new();
         worktrees.retain(|worktree| seen_worktrees.insert(canonical_or_owned(&worktree.path)));
+        // Unattended retention reclaims only checkouts Homeboy created. Other
+        // worktrees of the same repository are caller-owned: an operator's
+        // checkout used as a workflow `cwd` lost its `node_modules` mid-run
+        // because it merely shared a repository with a Cook (#17871).
+        // `homeboy cleanup artifacts --path` still targets them explicitly.
+        let listing = crate::worktree::list_unlocked_in_root(data_root);
+        let recorded: HashSet<PathBuf> = listing
+            .as_ref()
+            .map(|listing| {
+                listing
+                    .worktrees
+                    .iter()
+                    .map(|record| canonical_or_owned(Path::new(&record.worktree_path)))
+                    .collect()
+            })
+            .unwrap_or_default();
+        worktrees.retain(|worktree| homeboy_owns_worktree(&worktree.path, data_root, &recorded));
         let root = root.ok_or_else(|| {
             Error::validation_invalid_argument(
                 "roots",
@@ -643,10 +660,24 @@ fn run_automatic_artifact_retention_at(
                 measurement_step_limit: None,
                 automatic_policy: Some(automatic_policy),
             },
-            ActiveWorktrees::from_listing(crate::worktree::list_unlocked_in_root(data_root)),
+            ActiveWorktrees::from_listing(listing),
             Some(data_root),
         )
     })
+}
+
+/// A checkout Homeboy created: one its task-worktree registry records, or one
+/// materialized under the Homeboy data root (Cook attempt scratch, baselines)
+/// or a Lab runner's `_lab_workspaces`.
+fn homeboy_owns_worktree(path: &Path, data_root: &Path, recorded: &HashSet<PathBuf>) -> bool {
+    let path = canonical_or_owned(path);
+    recorded.contains(&path)
+        || path.starts_with(canonical_or_owned(data_root))
+        || path.ancestors().any(|ancestor| {
+            ancestor
+                .file_name()
+                .is_some_and(|name| name == "_lab_workspaces")
+        })
 }
 
 #[cfg(unix)]
@@ -3716,6 +3747,8 @@ mod tests {
         crate::test_support::with_isolated_home(|_| {
             let small = git_repo();
             let large = git_repo();
+            crate::worktree::record_removed_for_test("fixture-small", small.path());
+            crate::worktree::record_removed_for_test("fixture-large", large.path());
             write_file(&small.path().join("target/debug/app"), "small");
             write_file(&large.path().join("target/debug/app"), &"L".repeat(128));
             let retention = crate::defaults::RetentionConfig {
@@ -3743,6 +3776,7 @@ mod tests {
     fn automatic_artifact_retention_reclaims_idle_cargo_target() {
         crate::test_support::with_isolated_home(|_| {
             let repo = repo_with_ignored_artifacts();
+            crate::worktree::record_removed_for_test("fixture-idle", repo.path());
             write_file(
                 &repo.path().join(".cargo-target/debug/app"),
                 "Cargo artifact",
@@ -3806,6 +3840,7 @@ mod tests {
     fn automatic_retention_deletes_pressure_candidate_without_precomputed_size() {
         crate::test_support::with_isolated_home(|_| {
             let repo = git_repo();
+            crate::worktree::record_removed_for_test("fixture-idle", repo.path());
             write_file(&repo.path().join("target/debug/app"), "artifact");
             let retention = crate::defaults::RetentionConfig {
                 reconstructable_artifact_reserve_bytes: u64::MAX,
@@ -3839,6 +3874,42 @@ mod tests {
             assert_eq!(
                 output.reclaimed_allocated_bytes,
                 accounting.available_delta_bytes
+            );
+        });
+    }
+
+    #[test]
+    fn automatic_retention_reclaims_only_homeboy_created_worktrees() {
+        crate::test_support::with_isolated_home(|_| {
+            // A caller-owned checkout and a Homeboy task worktree of the same
+            // repository, both holding idle dependencies under reserve pressure.
+            let caller = git_repo();
+            let task_parent = TempDir::new().expect("task parent");
+            let task = task_parent.path().join("task-worktree");
+            git(caller.path(), &["worktree", "add", task.to_str().unwrap()]);
+            crate::worktree::record_removed_for_test("fixture-task", &task);
+            for checkout in [caller.path(), task.as_path()] {
+                write_file(&checkout.join("node_modules/pkg/index.js"), "dependency");
+            }
+            let retention = crate::defaults::RetentionConfig {
+                reconstructable_artifact_days: 0,
+                reconstructable_artifact_reserve_bytes: u64::MAX,
+                ..Default::default()
+            };
+
+            let output = run_automatic_artifact_retention_in(
+                &[caller.path().to_path_buf()],
+                &retention,
+                automatic_retention_deadline(&retention),
+            )
+            .expect("automatic retention");
+
+            assert!(caller.path().join("node_modules/pkg/index.js").exists());
+            assert!(!task.join("node_modules").exists());
+            assert_eq!(output.applied_count, 1);
+            assert!(
+                output.cleanup_run_ref.is_some(),
+                "a deleting pass is traceable"
             );
         });
     }
