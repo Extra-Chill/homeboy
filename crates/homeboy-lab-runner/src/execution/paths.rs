@@ -94,6 +94,34 @@ pub(super) fn validate_runner_process_cwd(runner: &Runner, cwd: &str) -> Result<
     Ok(())
 }
 
+/// Validate the execution directory at daemon admission, while the submitted
+/// source mapping is still available. Never repair a missing checkout with
+/// mkdir: an empty directory would turn an infrastructure failure into a false
+/// workload result.
+pub(super) fn validate_daemon_process_cwd(
+    runner: &Runner,
+    cwd: &str,
+    source: Option<&homeboy_core::source_snapshot::SourceSnapshot>,
+) -> Result<()> {
+    validate_runner_process_cwd(runner, cwd).map_err(|mut error| {
+        if Path::new(cwd).is_absolute() && !Path::new(cwd).is_dir() {
+            let controller_path = source.and_then(|source| source.local_path.as_deref());
+            error.message = format!(
+                "Lab workspace admission failed at workspace_materialization.verify_cwd: controller path `{}`; expected Lab cwd `{cwd}` must exist and be a directory",
+                controller_path.unwrap_or("unknown (no source mapping submitted)")
+            );
+            error.details["stage"] = serde_json::json!("workspace_materialization.verify_cwd");
+            error.details["controller_path"] = serde_json::json!(controller_path);
+            error.details["expected_lab_path"] = serde_json::json!(cwd);
+            error.details["runner_id"] = serde_json::json!(runner.id);
+            error = error.with_hint(
+                "Re-materialize the submitted workspace before dispatch; do not create an empty cwd or retry the workload against a missing checkout.".to_string(),
+            );
+        }
+        error
+    })
+}
+
 pub(super) fn resolve_cwd(runner: &Runner, cwd: Option<&str>) -> Result<String> {
     match runner.kind {
         RunnerKind::Local => {
@@ -185,6 +213,42 @@ mod validate_remote_cwd_tests {
             .filter_map(|hint| hint.as_str())
             .collect::<Vec<_>>()
             .join("\n")
+    }
+
+    #[test]
+    fn daemon_admission_reports_both_paths_for_missing_monorepo_component() {
+        let root = tempfile::tempdir().unwrap();
+        let cwd = root.path().join("lab/plugins/analytics");
+        let mut runner = super::super::tests::local_runner(root.path().display().to_string());
+        runner.id = "lab".to_string();
+        let source =
+            homeboy_core::source_snapshot::existing_remote("lab", &cwd.display().to_string(), None);
+        let mut source = source;
+        source.local_path = Some("/controller/worktree/plugins/analytics".to_string());
+        let error = validate_daemon_process_cwd(&runner, &cwd.display().to_string(), Some(&source))
+            .expect_err("missing materialization must fail at admission");
+        assert!(error
+            .message
+            .contains("/controller/worktree/plugins/analytics"));
+        assert!(error.message.contains(&cwd.display().to_string()));
+        assert_eq!(
+            error.details["stage"],
+            "workspace_materialization.verify_cwd"
+        );
+        assert_eq!(
+            error.details["expected_lab_path"],
+            cwd.display().to_string()
+        );
+        assert!(!cwd.exists(), "admission must not invent an empty checkout");
+        std::fs::create_dir_all(&cwd).unwrap();
+        validate_daemon_process_cwd(&runner, &cwd.display().to_string(), Some(&source))
+            .expect("materialized nested cwd");
+        std::fs::remove_dir(&cwd).unwrap();
+        std::fs::write(&cwd, "not a directory").unwrap();
+        assert!(
+            validate_daemon_process_cwd(&runner, &cwd.display().to_string(), Some(&source))
+                .is_err()
+        );
     }
 
     #[test]

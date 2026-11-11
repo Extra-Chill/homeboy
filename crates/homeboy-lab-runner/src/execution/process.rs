@@ -363,7 +363,7 @@ pub(crate) fn prepare_daemon_local_process(
             resources: HashMap::new(),
             policy: server::RunnerPolicy::default(),
         });
-    validate_runner_process_cwd(&runner, &cwd)?;
+    super::paths::validate_daemon_process_cwd(&runner, &cwd, request.source_snapshot.as_ref())?;
     validate_required_paths(
         &runner,
         &request.require_paths,
