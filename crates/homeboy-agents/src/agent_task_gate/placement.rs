@@ -2898,6 +2898,69 @@ mod tests {
         (request, report)
     }
 
+    /// A receipt-less terminal job is transport non-execution. A subsequent
+    /// regate can pass, while a receipt-backed command failure remains failed.
+    #[test]
+    fn missing_terminal_gate_receipt_can_be_regated() {
+        struct ReceiptRetryTransport {
+            previous: Arc<dyn LabGateTransport>,
+            calls: std::sync::atomic::AtomicUsize,
+        }
+        impl LabGateTransport for ReceiptRetryTransport {
+            fn declared_runner(&self, command: &str) -> Result<Option<String>> {
+                self.previous.declared_runner(command)
+            }
+            fn execute(
+                &self,
+                cwd: &Path,
+                request: &LabGateRequest,
+                supervision: Option<&GateSupervision>,
+            ) -> Result<LabGateReceipt> {
+                if request.runner_id != "receipt-retry" {
+                    return self.previous.execute(cwd, request, supervision);
+                }
+                if self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst) == 0 {
+                    return Err(Error::new(
+                        homeboy_core::ErrorCode::RunnerLabTransportFailure,
+                        "terminal runner gate has no receipt stream",
+                        serde_json::json!({"stage":"terminal_projection", "job_id":"job-no-receipt", "gate_disposition":"unavailable"}),
+                    ).with_retryable(true));
+                }
+                execute_with_context(request.clone(), cwd, &runner_context("receipt-retry"))
+            }
+        }
+        homeboy_core::test_support::with_isolated_home(|_| {
+            register_lab_gate_transport(Arc::new(ReceiptRetryTransport {
+                previous: active_transport(),
+                calls: std::sync::atomic::AtomicUsize::new(0),
+            }));
+            let temp = tempfile::tempdir().unwrap();
+            repository(temp.path());
+            let request = mutating_gate(temp.path(), "receipt-retry", "printf passed");
+            let first = dispatch(temp.path(), &request, None).unwrap();
+            assert_eq!(first.status, AgentTaskGateStatus::Unavailable);
+            let disposition = first.lab_receipt.unwrap();
+            assert_eq!(disposition["error_code"], "runner.lab_transport_failure");
+            assert_eq!(disposition["retryable"], true);
+            assert_eq!(disposition["executed"], false);
+            let rerun = dispatch(temp.path(), &request, None).unwrap();
+            assert_eq!(rerun.status, AgentTaskGateStatus::Succeeded);
+            let failing = mutating_gate(temp.path(), "receipt-retry", "exit 3");
+            let failed = dispatch(temp.path(), &failing, None).unwrap();
+            assert_eq!(failed.status, AgentTaskGateStatus::Failed);
+            assert_eq!(failed.exit_code, 3);
+            assert_eq!(
+                gate_execute_failure(&LabGateReceipt {
+                    report: failed.clone(),
+                    ..execute_with_context(request, temp.path(), &runner_context("receipt-retry"))
+                        .unwrap()
+                })
+                .unwrap()["retryable"],
+                false
+            );
+        });
+    }
+
     /// #17649: a gate is `failed` only when its declared command ran and
     /// returned non-zero, and that verdict carries command, exit and tail.
     #[test]
