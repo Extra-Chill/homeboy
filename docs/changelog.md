@@ -4,6 +4,20 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.458.29] - 2026-11-11
+
+### Changed
+- publishing a staged candidate leaves the destination clean
+- Stop a timed-out provider at the scheduler deadline so its candidate is harvested
+
+### Fixed
+- retry terminal gates missing receipt streams
+- apply project components in dependency order
+- a changed controller or runner environment lifts the no-progress block
+- reclaim artifacts automatically only from Homeboy-created worktrees
+- name the cause behind a generic error message in Display and command results
+- count bound Lab receipts across release skew; name skew only when binding fails
+
 ## [0.458.28] - 2026-11-11
 
 ### Changed
