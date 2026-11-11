@@ -5,10 +5,7 @@ use serde_json::Value;
 
 use super::*;
 
-pub(super) fn workspace_is_busy(
-    task: &ScheduledTask,
-    running: &[RunningTask],
-) -> bool {
+pub(super) fn workspace_is_busy(task: &ScheduledTask, running: &[RunningTask]) -> bool {
     let Some(workspace) = task.workspace_key.as_deref() else {
         return false;
     };
