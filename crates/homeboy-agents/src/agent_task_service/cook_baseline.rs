@@ -431,6 +431,44 @@ pub(crate) fn compare_gate_failures_to_verified_base(
         base_sha,
         component_id,
         |baseline_gate_workspace| {
+            let unresolved_gates = || {
+                promotion.deterministic_gates.iter().filter(|gate| {
+                    gate.status == AgentTaskGateStatus::Failed && gate.baseline_comparison.is_none()
+                })
+            };
+            let gate_commands: Vec<String> = unresolved_gates()
+                .map(|gate| gate.command.join(" "))
+                .collect();
+            let environment = unresolved_gates()
+                .next()
+                .map(|gate| replay_gate_policy(&gate.environment, component_id))
+                .unwrap_or_default();
+            if let Err(error) = hydrate_base_gate_workspace(
+                baseline_gate_workspace,
+                &environment,
+                component_id,
+                &gate_commands,
+                timeout,
+            ) {
+                // A base without its dependencies cannot say whether the
+                // failure predates the candidate.
+                for gate in &mut promotion.deterministic_gates {
+                    if gate.status == AgentTaskGateStatus::Failed
+                        && gate.baseline_comparison.is_none()
+                    {
+                        gate.baseline_comparison = Some(AgentTaskGateBaselineComparison {
+                            base_ref: base_sha.to_string(),
+                            exit_code: 124,
+                            failure_fingerprint: String::new(),
+                            matches_candidate_failure: false,
+                            result: AgentTaskGateDifferentialResult::Inconclusive,
+                            diagnostic: Some(format!("baseline dependency setup failed: {error}")),
+                        });
+                    }
+                }
+                promotion.normalize_gate_outcome();
+                return Ok(());
+            }
             for (index, gate) in promotion.deterministic_gates.iter_mut().enumerate() {
                 if gate.status != AgentTaskGateStatus::Failed || gate.baseline_comparison.is_some()
                 {
@@ -595,9 +633,58 @@ pub(crate) fn compare_gate_failures_to_verified_base(
     )
 }
 
+/// Hydrate the base copy of a gate workspace exactly as candidate gate setup
+/// does: the checkout root plus every descendant root a gate names, such as
+/// `cd php-transformer && composer test` (#16109), under the gates' own
+/// environment. A failed install is an error, never a base to compare against.
+pub(crate) fn hydrate_base_gate_workspace(
+    workspace: &std::path::Path,
+    environment: &crate::agent_task_gate::AgentTaskGateEnvironmentPolicy,
+    component_id: Option<&str>,
+    gate_commands: &[String],
+    timeout: std::time::Duration,
+) -> Result<()> {
+    let hydration = crate::agent_task_gate::GateHydrationEnvironment::prepare(environment)?;
+    let policy = homeboy_core::deps::DependencyHydrationPolicy {
+        timeout,
+        environment: hydration.environment(),
+        ..Default::default()
+    };
+    let setup = crate::agent_task_gate::hydrate_gate_dependency_roots_for_component(
+        workspace,
+        environment.hydrate_dependencies,
+        "baseline_gate_workspace",
+        &policy,
+        component_id,
+        Some(gate_commands),
+    );
+    let failed = setup.as_ref().ok().and_then(|setup| {
+        setup
+            .iter()
+            .find(|outcome| outcome.status == homeboy_core::deps::DependencyHydrationStatus::Failed)
+            .cloned()
+    });
+    hydration.finish(setup.is_ok() && failed.is_none());
+    setup?;
+    match failed {
+        Some(failed) => Err(Error::internal_io(
+            format!(
+                "provider {} on package root {} ({}): {}",
+                failed.provider_id,
+                failed.package_root,
+                failed.reason,
+                failed.stderr.trim()
+            ),
+            Some("hydrate Cook gate baseline dependencies".to_string()),
+        )),
+        None => Ok(()),
+    }
+}
+
 /// Materialize the immutable `base_sha` as a detached checkout next to the
-/// repository, hydrate its dependencies, and run `run` in the base copy of
-/// `gate_workspace`. The checkout is removed before this returns.
+/// repository and run `run` in the base copy of `gate_workspace`. `run`
+/// hydrates the dependencies its gates need ([`hydrate_base_gate_workspace`]).
+/// The checkout is removed before this returns.
 pub(crate) fn with_detached_base_checkout<T>(
     repository_root: &std::path::Path,
     gate_workspace: &std::path::Path,
@@ -693,10 +780,6 @@ pub(crate) fn with_detached_base_checkout<T>(
                 None,
             ));
         }
-        homeboy_core::hygiene::materialize_worktree_dependencies_for_component(
-            &baseline_gate_workspace,
-            component_id,
-        )?;
         run(&baseline_gate_workspace)
     })();
     let cleanup = std::process::Command::new("git")
@@ -1453,6 +1536,106 @@ mod tests {
                     .result,
                 AgentTaskGateDifferentialResult::BaselineRed
             );
+        });
+    }
+
+    /// The base copy of the gate workspace gets the same dependency setup as
+    /// the candidate: a gate that runs inside a nested dependency root
+    /// (`cd tool && ...`) replays on the base with that root hydrated, so an
+    /// inherited failure compares as inherited rather than as a missing
+    /// install.
+    #[test]
+    fn differential_gate_comparison_hydrates_the_dependency_roots_its_gates_name() {
+        homeboy_core::test_support::with_isolated_home(|home| {
+            let adapters = home
+                .path()
+                .join(".config/homeboy/extensions/dependency-adapters");
+            std::fs::create_dir_all(&adapters).expect("adapter directory");
+            std::fs::write(
+                adapters.join("index.json"),
+                r#"{"schema":"homeboy-extension/dependency-adapter-index/v1","manifests":[{"id":"fixture","ecosystem":"fixture","path":"fixture.json"}]}"#,
+            )
+            .expect("adapter index");
+            std::fs::write(
+                adapters.join("fixture.json"),
+                r#"{"schema":"homeboy-extension/dependency-adapter-manifest/v1","id":"fixture","version":1,"ecosystem":"fixture","project_signals":{"root_files":["project.json"]},"package_managers":[{"id":"fixture","selection":{"priority":1,"files":["workspace.lock"],"search":"upward"},"commands":{"install":{"command":"mkdir -p deps && printf installed > deps/installed"}},"outputs":[{"path":"deps","kind":"directory"}]}]}"#,
+            )
+            .expect("adapter manifest");
+            let temp = tempfile::tempdir().expect("repository");
+            git_output(temp.path(), &["init", "-b", "main"]).expect("init");
+            git_output(temp.path(), &["config", "user.name", "Homeboy Test"]).expect("name");
+            git_output(temp.path(), &["config", "user.email", "test@example.test"]).expect("email");
+            let tool = temp.path().join("tool");
+            std::fs::create_dir(&tool).expect("tool");
+            std::fs::write(tool.join("project.json"), "{}").expect("project signal");
+            std::fs::write(tool.join("workspace.lock"), "").expect("lockfile");
+            std::fs::write(temp.path().join(".gitignore"), "deps/\n").expect("ignore");
+            git_output(temp.path(), &["add", "."]).expect("add");
+            git_output(temp.path(), &["commit", "-m", "base"]).expect("commit");
+            let base = git_output(temp.path(), &["rev-parse", "HEAD"]).expect("base sha");
+            // The candidate workspace was hydrated before its gate ran.
+            std::fs::create_dir(tool.join("deps")).expect("deps");
+            std::fs::write(tool.join("deps/installed"), "installed").expect("installed");
+
+            let command = "cd tool && cat deps/installed && false";
+            let candidate = std::process::Command::new("sh")
+                .args(&crate::agent_task_gate::legacy_gate_argv(command)[1..])
+                .current_dir(temp.path())
+                .output()
+                .expect("run candidate gate");
+            assert!(!candidate.status.success());
+            let mut promotion: AgentTaskPromotionReport =
+                serde_json::from_value(serde_json::json!({
+                    "schema": "homeboy/agent-task-promotion-report/v1",
+                    "status": "gate_failed",
+                    "source": {"kind": "aggregate", "task_id": "task"},
+                    "to_worktree": "fixture",
+                    "target": {"worktree": "fixture", "path": temp.path()},
+                    "candidate": {"base_sha": "base", "candidate_sha": "patch", "tree_sha": "tree"},
+                    "deterministic_gates": [],
+                    "operator_notification": {"status": "blocked", "message": "red"}
+                }))
+                .expect("promotion");
+            let stdout = String::from_utf8_lossy(&candidate.stdout).to_string();
+            let stderr = String::from_utf8_lossy(&candidate.stderr).to_string();
+            let exit_code = candidate.status.code().unwrap_or(1);
+            promotion
+                .deterministic_gates
+                .push(crate::agent_task_gate::AgentTaskGateReport::new(
+                    "nested-root-gate",
+                    crate::agent_task_gate::legacy_gate_argv(command),
+                    exit_code,
+                    &stdout,
+                    &stderr,
+                    None,
+                    HomeboyGateVisibility::Visible,
+                    AgentTaskGateRevealPolicy::FullEvidence,
+                    AgentTaskGateEnvironment::default(),
+                ));
+
+            compare_gate_failures_to_verified_base(
+                &ObservationStore::open_initialized_at(temp.path().join("observations.sqlite"))
+                    .expect("store"),
+                &mut promotion,
+                temp.path(),
+                temp.path(),
+                &base,
+                std::time::Duration::from_secs(30),
+                None,
+                |_compared, _total| Ok(()),
+            )
+            .expect("baseline comparison");
+
+            let comparison = promotion.deterministic_gates[0]
+                .baseline_comparison
+                .as_ref()
+                .expect("comparison");
+            assert_eq!(
+                comparison.result,
+                AgentTaskGateDifferentialResult::BaselineRed,
+                "{comparison:#?}"
+            );
+            assert!(comparison.matches_candidate_failure, "{comparison:#?}");
         });
     }
 
