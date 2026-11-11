@@ -3200,7 +3200,7 @@ fn cook_finalization_publishes_gated_sha_when_review_budget_is_exhausted() {
 }
 
 /// #17880: a form that fails only the title contract publishes a held draft
-/// in the agent's own words, without passing-gate logs or terminal escapes.
+/// in the agent's own words (as a conventional subject), without passing-gate logs or terminal escapes.
 #[test]
 fn cook_invalid_review_form_draft_carries_the_agent_form_not_placeholders() {
     homeboy_core::test_support::with_isolated_home(|_| {
@@ -3248,9 +3248,10 @@ fn cook_invalid_review_form_draft_carries_the_agent_form_not_placeholders() {
         .expect("an invalid form still publishes the green candidate as a draft");
         assert_eq!(receipt["status"], "draft_published");
         assert!(fixture.backend.draft);
+        // Normalized to a conventional subject, which drives versioning (#17919).
         assert_eq!(
             fixture.backend.title,
-            "Preview sites: keep categories when pulling without backup"
+            "fix: Preview sites: keep categories when pulling without backup"
         );
         let body = &fixture.backend.body;
         assert!(
@@ -3346,10 +3347,8 @@ fn cook_review_unavailable_draft_uses_default_title_without_source_lookup() {
             .expect("draft publication needs no title lookup");
         assert_eq!(result.exit_code, 0, "{:?}", result.value);
         assert_eq!(result.value.status, "draft_published");
-        assert_eq!(
-            fixture.backend.title,
-            "fix(cook): verified candidate cook-review-default-title"
-        );
+        // The title names the change, never the Cook id (#17919).
+        assert_eq!(fixture.backend.title, "fix: update lib.rs");
         assert!(homeboy_core::git::is_conventional_subject(
             &fixture.backend.title
         ));

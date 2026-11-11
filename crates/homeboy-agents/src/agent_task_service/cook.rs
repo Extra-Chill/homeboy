@@ -7794,6 +7794,27 @@ fn publish_latest_incomplete_draft(
     Ok(())
 }
 
+/// A held draft's title names the change: the agent's own title, made a
+/// conventional subject when it is not one, or else the candidate's changed
+/// files. A Cook id is not a title a reviewer can act on (#17919).
+fn draft_title(agent_title: Option<&str>, promotion: &AgentTaskPromotionReport) -> String {
+    if let Some(title) = agent_title {
+        if homeboy_core::git::is_conventional_subject(title) {
+            return title.to_string();
+        }
+        return format!("fix: {title}");
+    }
+    match promotion.changed_files.as_slice() {
+        [] => "fix: candidate with no changed files".to_string(),
+        [file] => format!("fix: update {file}"),
+        [file, rest @ ..] => format!(
+            "fix: update {file} and {} more file{}",
+            rest.len(),
+            if rest.len() == 1 { "" } else { "s" }
+        ),
+    }
+}
+
 pub(super) fn publish_incomplete_draft<
     B: crate::agent_task_finalization::AgentTaskPrFinalizationBackend,
 >(
@@ -7828,24 +7849,8 @@ pub(super) fn publish_incomplete_draft<
     // A gated draft whose gates are all inherited failures has nothing verified.
     let unverified = review_form_unavailable
         && crate::agent_task_review_dossier::verified_commands_from_promotion(promotion).is_empty();
-    let title = if let Some(title) = options
-        .finalization
-        .title
-        .is_empty()
-        .then(|| form.and_then(|form| form.specific_title()))
-        .flatten()
-    {
-        title.to_string()
-    } else if options.finalization.title.is_empty() {
-        format!(
-            "fix(cook): {} {}",
-            match (review_form_unavailable, unverified) {
-                (true, true) => "unverified candidate",
-                (true, false) => "verified candidate",
-                (false, _) => "incomplete",
-            },
-            options.identity.cook_id
-        )
+    let title = if options.finalization.title.is_empty() {
+        draft_title(form.and_then(|form| form.specific_title()), promotion)
     } else {
         options.finalization.title.clone()
     };
