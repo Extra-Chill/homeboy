@@ -6487,7 +6487,8 @@ mod cook_pull_request_ref_tests {
             )
             .unwrap();
             let mut input = issue.clone();
-            resolve_cook_issue(&mut input).expect("transient lookup failure is retried");
+            crate::commands::agent_task::run::resolve_cook_issue(&mut input)
+                .expect("transient lookup failure is retried");
             assert_eq!(
                 input.dispatch.task_url.as_deref(),
                 Some("https://github.com/example/repo/pull/1895")
