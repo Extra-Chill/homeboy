@@ -1316,9 +1316,9 @@ impl AgentTaskLifecycleStore {
     }
 
     /// Commit a snapshot the caller read and annotated, at the revision it was
-    /// read at (#15718). A writer that committed in between makes this fail
-    /// with an `agent_task_transition_conflict` and write nothing, instead of
-    /// being silently overwritten.
+    /// read at (#15718). Concurrent non-overlapping progress is rebased with
+    /// bounded retries. Incompatible changes or exhausted retries return an
+    /// `agent_task_transition_conflict` without overwriting the other writer.
     ///
     /// The annotation may not change the run state, the Lab handoff or
     /// workspace ownership; those move only through
@@ -1439,49 +1439,38 @@ impl AgentTaskLifecycleStore {
                 RecordWriteGuard::annotation(prepared),
             );
         }
-        let transition = match kind {
-            Some(kind) => AgentTaskTransition::Advance {
-                kind,
-                prepared: Box::new(prepared.clone()),
-            },
-            None => AgentTaskTransition::Annotate {
-                prepared: Box::new(prepared.clone()),
-            },
-        };
-        let conflict = match self.transition_locked_with_events(
-            &prepared.run_id,
-            prepared.revision,
-            transition.clone(),
-            emit_events,
-        )? {
-            Ok(committed) => return Ok(committed),
-            Err(conflict) => conflict,
-        };
-        // A writer committed since `prepared` was read. Under this lock the
-        // stored record is current: when that writer only recorded progress,
-        // the caller's changes are rebased onto it and the typed transition is
-        // validated against it as usual (#17777).
-        let stored = self.read_record(&prepared.run_id)?;
-        let rebased = super::record_rebase::rebase_onto(prepared, &stored);
-        let Some(rebased) = rebased else {
-            return Err(AgentTaskTransitionError::Conflict(conflict).into());
-        };
-        let transition = match kind {
-            Some(kind) => AgentTaskTransition::Advance {
-                kind,
-                prepared: Box::new(rebased.clone()),
-            },
-            None => AgentTaskTransition::Annotate {
-                prepared: Box::new(rebased.clone()),
-            },
-        };
-        self.transition_locked_with_events(
-            &rebased.run_id,
-            stored.revision,
-            transition,
-            emit_events,
-        )?
-        .map_err(|conflict| AgentTaskTransitionError::Conflict(conflict).into())
+        let mut candidate = prepared.clone();
+        let mut attempts = 0;
+        loop {
+            let transition = match kind {
+                Some(kind) => AgentTaskTransition::Advance {
+                    kind,
+                    prepared: Box::new(candidate.clone()),
+                },
+                None => AgentTaskTransition::Annotate {
+                    prepared: Box::new(candidate.clone()),
+                },
+            };
+            let conflict = match self.transition_locked_with_events(
+                &candidate.run_id,
+                candidate.revision,
+                transition,
+                emit_events,
+            )? {
+                Ok(committed) => return Ok(committed),
+                Err(conflict) => conflict,
+            };
+            attempts += 1;
+            if attempts >= TRANSITION_RETRY_ATTEMPTS {
+                return Err(AgentTaskTransitionError::Conflict(conflict).into());
+            }
+            // Reapply only this caller's delta, always from its original read
+            // base. Each commit re-validates the typed edge against the fresh
+            // record; terminal/ownership changes and overlapping edits refuse.
+            let stored = self.read_record(&prepared.run_id)?;
+            candidate = super::record_rebase::rebase_onto(prepared, &stored)
+                .ok_or_else(|| Error::from(AgentTaskTransitionError::Conflict(conflict)))?;
+        }
     }
 
     /// Rearm a retryable zero-provider record as queued. The caller's copy

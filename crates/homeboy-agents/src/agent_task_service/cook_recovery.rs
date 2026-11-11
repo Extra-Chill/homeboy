@@ -969,8 +969,7 @@ fn recover_cook_once(
             || replace_gates.is_some()
             || !publish.is_empty()
             || !record.state().is_terminal()
-            || !record.metadata["pre_execution_failure"].is_object()
-            || record.metadata["provider_executions_consumed"].as_u64() != Some(0)
+            || cook_recovery_status(&record) != "pre_execution_failure"
             || plan.step != CookRecoveryStep::Retry
         {
             return Err(Error::validation_invalid_argument(
