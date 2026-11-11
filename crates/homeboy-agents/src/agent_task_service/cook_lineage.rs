@@ -24,6 +24,10 @@ pub enum CookLineageKind {
     /// A remediation built from the source's promoted candidate to make
     /// failed gates pass.
     GateFix,
+    /// A review-form-only follow-up of the source's candidate. Nothing writes
+    /// this kind since #17814; it stays so recipes recorded before then still
+    /// decode.
+    ReviewForm,
     /// A replacement execution or pre-provider correction of the source.
     Replacement,
 }
