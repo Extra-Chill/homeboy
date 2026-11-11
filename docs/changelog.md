@@ -4,6 +4,11 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.458.25] - 2026-11-11
+
+### Fixed
+- resume the Pi session to correct an invalid review form
+
 ## [0.458.24] - 2026-11-11
 
 ### Changed
