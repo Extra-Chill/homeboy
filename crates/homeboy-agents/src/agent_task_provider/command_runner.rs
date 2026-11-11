@@ -1605,12 +1605,22 @@ pub(super) fn run_materialized_provider_command_once(
             }
             resume
         });
-    super::pi::resume_for_missing_outputs(
+    let declarations = &request.request.output_declarations;
+    super::pi::resume_for_unusable_outputs(
         &mut pi_outcome,
         &pi_request,
         &args,
         &request.artifacts_path,
         resume,
+        &|outputs| {
+            declarations
+                .iter()
+                .filter_map(|declaration| {
+                    let error = declaration.semantic_error(outputs.get(&declaration.name)?)?;
+                    Some((declaration.name.clone(), error))
+                })
+                .collect()
+        },
     );
     let parsed: Result<AgentTaskOutcome, serde_json::Error> = Ok(pi_outcome);
     match parsed {

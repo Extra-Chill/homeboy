@@ -183,42 +183,63 @@ fn output_instructions(request: &Value) -> String {
 }
 
 /// Resume a finished session once, with tools off, when its final answer
-/// omitted required declared outputs. The session that did the work can
-/// describe it in one turn; a fresh form-only attempt has to re-read the
-/// repository and often fails (#16821). `args` are the first run's arguments,
-/// ending with its prompt. Any failure leaves `result` unchanged.
-pub(super) fn resume_for_missing_outputs(
+/// omitted required declared outputs or emitted one that fails its contract.
+/// The session that did the work can restate or correct it in one turn; a
+/// fresh attempt has to re-read the repository and often fails (#16821).
+/// `invalid` lists `(output, error)` pairs for present-but-invalid outputs and
+/// re-checks the resumed reply. `args` are the first run's arguments, ending
+/// with its prompt. Any failure leaves `result` unchanged.
+pub(super) fn resume_for_unusable_outputs(
     result: &mut AgentTaskOutcome,
     request: &Value,
     args: &[String],
     artifacts: &Path,
     command: Option<Command>,
+    invalid: &dyn Fn(&Value) -> Vec<(String, String)>,
 ) {
-    let Some(index) = result
+    let missing_index = result
         .diagnostics
         .iter()
-        .position(|d| d.class == "pi.required_outputs_missing")
-    else {
-        return;
+        .position(|d| d.class == "pi.required_outputs_missing");
+    let missing: Vec<String> = missing_index
+        .map(|index| {
+            result.diagnostics[index].data["missing_outputs"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .filter_map(Value::as_str)
+                .map(str::to_string)
+                .collect()
+        })
+        .unwrap_or_default();
+    let rejected = if result.status == AgentTaskOutcomeStatus::Succeeded {
+        invalid(&result.outputs)
+    } else {
+        Vec::new()
     };
+    if missing.is_empty() && rejected.is_empty() {
+        return;
+    }
     let (Some(mut command), true) = (command, args.iter().any(|a| a == "--session")) else {
         return;
     };
-    let missing = result.diagnostics[index].data["missing_outputs"].clone();
-    let names = missing
-        .as_array()
-        .map(|names| {
-            names
-                .iter()
-                .filter_map(Value::as_str)
-                .collect::<Vec<_>>()
-                .join(", ")
-        })
-        .unwrap_or_default();
+    let mut feedback = Vec::new();
+    if !missing.is_empty() {
+        feedback.push(format!(
+            "Your final answer did not include the required output(s): {}. Describe the work you just finished.",
+            missing.join(", ")
+        ));
+    }
+    for (name, error) in &rejected {
+        feedback.push(format!(
+            "Your output `{name}` was rejected: {error} Re-emit it corrected; keep everything else."
+        ));
+    }
     let mut resume_args = args[..args.len() - 1].to_vec();
     resume_args.push("--no-tools".into());
     resume_args.push(format!(
-        "Your final answer did not include the required output(s): {names}. Describe the work you just finished.\n\n{}",
+        "{}\n\n{}",
+        feedback.join("\n"),
         output_instructions(request)
     ));
     let task = safe_segment(request["task_id"].as_str().unwrap_or_default());
@@ -249,26 +270,68 @@ pub(super) fn resume_for_missing_outputs(
     };
     let stream = std::fs::read_to_string(&stdout_path).unwrap_or_default();
     let resumed = outcome(request, &stream, "", status.code(), "", None);
-    if resumed.status != AgentTaskOutcomeStatus::Succeeded {
+    let Value::Object(supplied) = resumed.outputs.clone() else {
+        return;
+    };
+    let mut merged = result.outputs.clone();
+    if !merged.is_object() {
+        merged = json!({});
+    }
+    let mut corrected = Vec::new();
+    for (name, _) in &rejected {
+        if let Some(value) = supplied.get(name) {
+            let candidate = json!({ (name.as_str()): value });
+            if invalid(&candidate).is_empty() {
+                merged[name.as_str()] = value.clone();
+                corrected.push(name.clone());
+            }
+        }
+    }
+    let restated: Vec<String> = missing
+        .iter()
+        .filter(|name| supplied.contains_key(name.as_str()))
+        .cloned()
+        .collect();
+    let all_missing_restated = !missing.is_empty() && restated.len() == missing.len();
+    if all_missing_restated {
+        for name in &missing {
+            merged[name.as_str()] = supplied[name.as_str()].clone();
+        }
+    }
+    if corrected.is_empty() && !all_missing_restated {
         return;
     }
-    if let (Some(outputs), Value::Object(resumed)) =
-        (result.outputs.as_object_mut(), resumed.outputs.clone())
-    {
-        outputs.extend(resumed);
-    } else {
-        result.outputs = resumed.outputs;
+    result.outputs = merged;
+    if all_missing_restated {
+        let names = missing.join(", ");
+        result.status = AgentTaskOutcomeStatus::Succeeded;
+        result.failure_classification = None;
+        result.summary = Some(format!(
+            "Pi completed the task; resuming its session supplied the omitted output(s): {names}."
+        ));
+        result.diagnostics[missing_index.expect("missing outputs have a diagnostic")] =
+            AgentTaskDiagnostic {
+                class: "pi.required_outputs_resumed".into(),
+                message: format!(
+                    "Pi's final answer omitted {names}; resuming its session supplied them."
+                ),
+                data: json!({"class": "pi.required_outputs_resumed", "resumed_outputs": missing}),
+            };
     }
-    result.status = AgentTaskOutcomeStatus::Succeeded;
-    result.failure_classification = None;
-    result.summary = Some(format!(
-        "Pi completed the task; resuming its session supplied the omitted output(s): {names}."
-    ));
-    result.diagnostics[index] = AgentTaskDiagnostic {
-        class: "pi.required_outputs_resumed".into(),
-        message: format!("Pi's final answer omitted {names}; resuming its session supplied them."),
-        data: json!({"class": "pi.required_outputs_resumed", "resumed_outputs": missing}),
-    };
+    if !corrected.is_empty() {
+        result.diagnostics.push(AgentTaskDiagnostic {
+            class: "pi.declared_outputs_corrected".into(),
+            message: format!(
+                "Pi's output(s) {} failed their contract; resuming its session corrected them.",
+                corrected.join(", ")
+            ),
+            data: json!({
+                "class": "pi.declared_outputs_corrected",
+                "corrected_outputs": corrected,
+                "rejections": rejected.iter().map(|(name, error)| json!({"output": name, "error": error})).collect::<Vec<_>>(),
+            }),
+        });
+    }
 }
 
 fn structured_answer(text: &str) -> Option<Value> {
