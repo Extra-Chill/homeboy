@@ -216,4 +216,17 @@ mod tests {
     fn an_initial_attempt_has_no_lineage() {
         assert_eq!(plan_lineage(&plan_with(json!({}))), None);
     }
+
+    /// Recipes recorded before #17814 carry review-form lineage edges; they
+    /// must still decode, or every reader of that Cook fails.
+    #[test]
+    fn a_recorded_review_form_lineage_still_decodes() {
+        let lineage: CookAttemptLineage = serde_json::from_value(json!({
+            "source_run_id": "run-1",
+            "kind": "review_form",
+            "source_patch_sha256": "abc",
+        }))
+        .unwrap();
+        assert_eq!(lineage.kind, CookLineageKind::ReviewForm);
+    }
 }
