@@ -371,7 +371,7 @@ fn finalize_pr_with_backend_mode<B: AgentTaskPrFinalizationBackend>(
     let dates = backend.candidate_dates(&options.path, &candidate.candidate_sha)?;
     let published_sha = backend.publish_tree(
         &options.path,
-        &candidate.tree_sha,
+        &candidate,
         &base.sha,
         &options.commit_message,
         &dates,

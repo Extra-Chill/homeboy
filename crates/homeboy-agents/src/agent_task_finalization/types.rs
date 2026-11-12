@@ -378,10 +378,12 @@ pub trait AgentTaskPrFinalizationBackend {
         base: &str,
     ) -> Result<(crate::agent_task::AgentTaskCandidate, Vec<String>)>;
     fn candidate_dates(&mut self, path: &str, candidate_sha: &str) -> Result<(String, String)>;
+    /// Commit `candidate`'s tree on `parent`, keeping what the candidate
+    /// merged since `parent` as later parents (#17346).
     fn publish_tree(
         &mut self,
         path: &str,
-        tree: &str,
+        candidate: &crate::agent_task::AgentTaskCandidate,
         parent: &str,
         message: &str,
         dates: &(String, String),

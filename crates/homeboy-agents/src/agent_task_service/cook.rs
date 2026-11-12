@@ -7955,13 +7955,7 @@ pub(super) fn publish_incomplete_draft<
         )?;
         let dates = backend.candidate_dates(path, &candidate.candidate_sha)?;
         backend.validate_publication_identity(path)?;
-        backend.publish_tree(
-            path,
-            &candidate.tree_sha,
-            &candidate.base_sha,
-            &title,
-            &dates,
-        )?
+        backend.publish_tree(path, &candidate, &candidate.base_sha, &title, &dates)?
     };
     backend.push_branch(path, sha.trim(), &head)?;
     let pr = match backend.find_open_pr(None, path, &options.finalization.base, &head)? {
