@@ -3896,19 +3896,22 @@ fn diagnose_probes_a_runner_owned_terminal_record_when_the_job_is_known() {
 }
 
 #[test]
-fn queued_lab_diagnosis_and_recovery_agree_on_driver_ownership() {
+fn queued_diagnosis_and_recovery_agree_on_driver_ownership() {
     with_temp_home(|| {
-        for live in [true, false] {
-            let run_id = if live {
-                "run-lab-live"
-            } else {
-                "run-lab-abandoned"
+        // (live driver, runner selected, abandoned root cause): an abandoned
+        // admission resumes before and after runner selection (#17793).
+        for (live, lab, orphan_class) in [
+            (true, true, ""),
+            (false, true, "agent_task.runner_missing_pid"),
+            (false, false, "agent_task.queued_driver_missing"),
+        ] {
+            let suffix = match (live, lab) {
+                (true, _) => "lab-live",
+                (false, true) => "lab-abandoned",
+                (false, false) => "pre-runner-abandoned",
             };
-            let cook_id = if live {
-                "cook-lab-live"
-            } else {
-                "cook-lab-abandoned"
-            };
+            let run_id = &format!("run-{suffix}");
+            let cook_id = &format!("cook-{suffix}");
             persist_recipe_only_cook(cook_id, run_id);
             agent_task_lifecycle::submit_plan(&test_plan(), Some(run_id)).unwrap();
             use fs4::fs_std::FileExt;
@@ -3933,12 +3936,15 @@ fn queued_lab_diagnosis_and_recovery_agree_on_driver_ownership() {
                 record.updated_at = Some("2020-01-01T00:00:00Z".into());
                 record.submitted_at = "2020-01-01T00:00:00Z".into();
                 record.metadata["cook_id"] = json!(cook_id);
-                record.metadata["runner_id"] = json!("homeboy-lab");
-                record.metadata["runner_execution_record"] =
-                    json!({"status": "planned", "runner_id": "homeboy-lab"});
-                record.metadata["lab_admission_wait"] =
-                    json!({"started_at": "2026-11-10T00:00:00Z", "blocker": "runner at capacity"});
-                record.metadata["cook_progress"] = json!({"phase": "provider_start"});
+                if lab {
+                    record.metadata["runner_id"] = json!("homeboy-lab");
+                    record.metadata["runner_execution_record"] =
+                        json!({"status": "planned", "runner_id": "homeboy-lab"});
+                    record.metadata["lab_admission_wait"] = json!({"started_at": "2026-11-10T00:00:00Z", "blocker": "runner at capacity"});
+                    record.metadata["cook_progress"] = json!({"phase": "provider_start"});
+                } else {
+                    record.metadata["cook_progress"] = json!({"phase": "durable_identity"});
+                }
             })
             .unwrap();
             let (diagnosis, _) = diagnose(DiagnoseArgs {
@@ -3979,7 +3985,7 @@ fn queued_lab_diagnosis_and_recovery_agree_on_driver_ownership() {
                 assert_eq!(report["waiting_for"], "lab_admission", "{report:#}");
             } else {
                 assert_eq!(
-                    diagnosis["root_cause"]["class"], "agent_task.runner_missing_pid",
+                    diagnosis["root_cause"]["class"], orphan_class,
                     "{diagnosis:#}"
                 );
                 assert_eq!(recovery["step"]["kind"], "continue", "{recovery:#}");
@@ -3990,9 +3996,10 @@ fn queued_lab_diagnosis_and_recovery_agree_on_driver_ownership() {
                 })
                 .unwrap();
                 assert_eq!(
-                    report["runner_ownership_diagnostic"]["class"], "agent_task.runner_missing_pid",
+                    report["runner_ownership_diagnostic"]["class"], orphan_class,
                     "{report:#}"
                 );
+                assert_ne!(report["waiting_for"], "lab_admission", "{report:#}");
             }
         }
     });

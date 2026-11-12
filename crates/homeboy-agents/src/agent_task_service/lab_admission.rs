@@ -1,32 +1,31 @@
-//! Shared ownership observation for queued Lab attempts and the recovery planner.
+//! Shared ownership observation for queued attempts and the recovery planner.
 use super::*;
 use crate::agent_task_lifecycle;
 use serde_json::{json, Value};
 
 #[derive(Debug, Clone)]
-pub struct QueuedLabAdmission {
+pub struct QueuedAdmission {
     pub live_driver: bool,
     pub liveness: AgentTaskLiveness,
-    pub wait: Value,
+    pub wait: Option<Value>,
 }
 
 /// Observe the driver lock once. A recent heartbeat alone never proves driver
 /// ownership, but it gives an abandoned admission its normal liveness grace.
-pub fn queued_lab_admission(
+pub fn queued_admission(
     record: &agent_task_lifecycle::AgentTaskRunRecord,
-) -> Option<QueuedLabAdmission> {
-    queued_lab_admission_in_store(
+) -> Option<QueuedAdmission> {
+    queued_admission_in_store(
         record,
         &agent_task_lifecycle::AgentTaskLifecycleStore::from_environment().ok()?,
     )
 }
 
-pub(crate) fn queued_lab_admission_in_store(
+pub(crate) fn queued_admission_in_store(
     record: &agent_task_lifecycle::AgentTaskRunRecord,
     store: &agent_task_lifecycle::AgentTaskLifecycleStore,
-) -> Option<QueuedLabAdmission> {
+) -> Option<QueuedAdmission> {
     if record.state() != agent_task_lifecycle::AgentTaskRunState::Queued
-        || record.runner_id().is_none()
         || record.runner_job_id().is_some()
     {
         return None;
@@ -55,14 +54,16 @@ pub(crate) fn queued_lab_admission_in_store(
                     .expect("substrate deadline fits chrono"))
             .to_rfc3339()
         });
-    Some(QueuedLabAdmission {
+    Some(QueuedAdmission {
         live_driver,
         liveness,
-        wait: json!({
-            "runner_id": record.runner_id(), "started_at": start, "deadline": deadline,
-            "blocker": record.metadata.pointer("/lab_admission_wait/blocker")
-                .or_else(|| record.metadata.get("pre_execution_failure"))
-                .or_else(|| record.metadata.get("runner_availability")),
+        wait: record.runner_id().map(|runner_id| {
+            json!({
+                "runner_id": runner_id, "started_at": start, "deadline": deadline,
+                "blocker": record.metadata.pointer("/lab_admission_wait/blocker")
+                    .or_else(|| record.metadata.get("pre_execution_failure"))
+                    .or_else(|| record.metadata.get("runner_availability")),
+            })
         }),
     })
 }
