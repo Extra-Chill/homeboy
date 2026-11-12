@@ -4,6 +4,12 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.458.43] - 2026-11-12
+
+### Fixed
+- recognize Homeboy's own staged promotion in the destination
+- cancelling an attempt no longer fences the whole mission
+
 ## [0.458.42] - 2026-11-12
 
 ### Fixed
