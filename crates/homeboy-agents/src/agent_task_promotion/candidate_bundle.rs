@@ -150,7 +150,9 @@ pub(crate) fn validate_destination(
     {
         return Ok(());
     }
-    if head != candidate.base_sha {
+    // A destination can already hold the complete immutable candidate. It
+    // still needs gates, but is not a concurrent move to unrelated work.
+    if head != candidate.base_sha && head != candidate.candidate_sha {
         return Err(super::promote::CandidateDestinationMoved {
             expected: candidate.base_sha.clone(),
             actual: head,
