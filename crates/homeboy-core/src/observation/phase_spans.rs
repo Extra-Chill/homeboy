@@ -192,6 +192,29 @@ impl ObservationStore {
         )
     }
 
+    /// Persist an already-measured phase without including store write latency.
+    pub fn record_measured_run_phase(
+        &self,
+        run_id: &str,
+        phase: &str,
+        started_at: chrono::DateTime<chrono::Utc>,
+        duration: std::time::Duration,
+        failed: bool,
+    ) -> Result<()> {
+        let mut timer = homeboy_engine_primitives::phase_timing::PhaseTimer::with_version(
+            crate::build_identity::current().version,
+        );
+        if failed {
+            timer.record_failed(phase, duration);
+        } else {
+            timer.record_ok(phase, duration);
+        }
+        let mut report = timer.into_report();
+        report.spans[0].started_at =
+            started_at.to_rfc3339_opts(chrono::SecondsFormat::Millis, true);
+        self.record_phase_spans(run_id, &format!("{phase}:{started_at}"), &report)
+    }
+
     /// Append one completed timing report. The caller supplies a stable identity
     /// for this operation/attempt, so delivery retries cannot double-count it.
     /// Reports are capped per run as well as per event; progress heartbeats do

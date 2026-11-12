@@ -2413,20 +2413,42 @@ fn spawn_orchestration_reconciler(
         .expect("spawn orchestration reconciler")
 }
 
+const SLOW_DAEMON_PASS: Duration = Duration::from_secs(1);
+
+#[cfg(test)]
+thread_local! {
+    static SLOW_DAEMON_PASS_OVERRIDE: std::cell::Cell<Duration> = const {
+        std::cell::Cell::new(SLOW_DAEMON_PASS)
+    };
+}
+
 /// One pass per remaining global mechanism, per interval.
 ///
 /// The mechanisms are isolated from each other and from the loop: a
 /// reconcile that panics costs one pass, not the tick and not the daemon.
 /// Overlap is impossible by construction: the sleep happens after all
 /// passes return.
-/// Each periodic pass owns a small run ledger, rather than appending forever
-/// to the daemon lifetime run. Existing run retention owns their cleanup.
+/// Only failed, panicking, or slow (at least `SLOW_DAEMON_PASS`) passes open
+/// the observation store and write a durable run with the measured phase.
+/// Fast successful passes do not touch the store. Existing terminal-run
+/// retention owns cleanup of the recorded passes.
 fn observed_daemon_pass(name: &str, body: impl FnOnce() -> Result<()>) {
     if !maintenance_allowed() {
         return;
     }
+    let started_at = chrono::Utc::now();
+    let started = Instant::now();
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(body));
+    let duration = started.elapsed();
+    let failed = !matches!(&result, Ok(Ok(())));
+    #[cfg(test)]
+    let threshold = SLOW_DAEMON_PASS_OVERRIDE.with(|value| value.get());
+    #[cfg(not(test))]
+    let threshold = SLOW_DAEMON_PASS;
+    if !failed && duration < threshold {
+        return;
+    }
     let Ok(store) = crate::observation::ObservationStore::open_initialized() else {
-        let _ = body();
         return;
     };
     let Ok(run) = store.start_run(
@@ -2435,19 +2457,20 @@ fn observed_daemon_pass(name: &str, body: impl FnOnce() -> Result<()>) {
             .current_homeboy_version()
             .build(),
     ) else {
-        let _ = body();
         return;
     };
-    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        store.time_run_phase(&run.id, &format!("resolve.{name}"), body)
-    }));
-    let status = match &result {
-        Ok(Ok(())) => crate::observation::RunStatus::Pass,
-        _ => crate::observation::RunStatus::Error,
+    let _ = store.record_measured_run_phase(
+        &run.id,
+        &format!("resolve.{name}"),
+        started_at,
+        duration,
+        failed,
+    );
+    let status = if failed {
+        crate::observation::RunStatus::Error
+    } else {
+        crate::observation::RunStatus::Pass
     };
-    if result.is_err() {
-        let _ = store.record_run_phase(&run.id, &format!("resolve.{name}"), true);
-    }
     let _ = store.finish_run(&run.id, status, None);
 }
 
@@ -2590,6 +2613,58 @@ fn spawn_completion_notifier(shutdown: mpsc::Receiver<()>) -> std::thread::JoinH
 /// can replace the executable while the worker sleeps between ticks.
 fn maintenance_allowed() -> bool {
     !intake_draining()
+}
+
+#[cfg(test)]
+#[test]
+fn only_slow_or_failed_daemon_passes_are_recorded() {
+    use crate::observation::{ObservationStore, RunListFilter};
+    use homeboy_engine_primitives::phase_timing::PhaseStatus;
+
+    for (name, threshold, expected_status) in [
+        ("fast", Duration::MAX, None),
+        ("error", Duration::MAX, Some("error")),
+        ("slow", Duration::ZERO, Some("pass")),
+        ("panic", Duration::MAX, Some("error")),
+    ] {
+        crate::test_support::with_isolated_home(|_| {
+            struct ResetThreshold;
+            impl Drop for ResetThreshold {
+                fn drop(&mut self) {
+                    SLOW_DAEMON_PASS_OVERRIDE.with(|value| value.set(SLOW_DAEMON_PASS));
+                }
+            }
+            let _reset = ResetThreshold;
+            SLOW_DAEMON_PASS_OVERRIDE.with(|value| value.set(threshold));
+            observed_daemon_pass(name, || match name {
+                "error" => Err(Error::internal_unexpected("test pass failure")),
+                "panic" => panic!("test pass panic"),
+                _ => Ok(()),
+            });
+            let store = ObservationStore::open_initialized().unwrap();
+            let runs: Vec<_> = store
+                .list_runs(RunListFilter::default())
+                .unwrap()
+                .into_iter()
+                .filter(|run| run.kind == "daemon-pass")
+                .collect();
+            assert_eq!(runs.len(), usize::from(expected_status.is_some()), "{name}");
+            if let Some(status) = expected_status {
+                let run = &runs[0];
+                assert_eq!(run.status, status);
+                assert_eq!(
+                    run.command.as_deref(),
+                    Some(format!("daemon.{name}").as_str())
+                );
+                let report = store.phase_spans(&run.id).unwrap();
+                assert_eq!(report.spans.len(), 1);
+                let phase = &report.spans[0];
+                assert_eq!(phase.id, format!("resolve.{name}"));
+                assert_eq!(phase.status == PhaseStatus::Failed, status == "error");
+                assert!(phase.duration_ms.is_some_and(|duration| duration >= 0.0));
+            }
+        });
+    }
 }
 
 #[cfg(test)]
