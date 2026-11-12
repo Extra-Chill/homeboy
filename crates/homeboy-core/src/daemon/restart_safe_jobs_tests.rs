@@ -1,5 +1,6 @@
 //! A stale daemon is replaceable when every active job survives the handoff
-//! (#17666): driver-recovery jobs resume in the successor, live children do not.
+//! (#17666, #17870): driver-recovery jobs, including a live process the driver
+//! supervises, resume in the successor; an unprovable owner keeps protection.
 
 use super::*;
 use crate::api_jobs::{ControllerJobState, ControllerJobSubmissionOutcome};
@@ -124,18 +125,21 @@ fn stale_daemon_status(requests: &[serde_json::Value]) -> DaemonStatus {
     read_status().expect("status")
 }
 
+/// An upgrade replaces the daemon while a step it supervises is still running
+/// (#17870): the step's process is detached and the successor's driver
+/// re-adopts it, so new work is admitted at once instead of after the drain.
 #[test]
-fn a_stale_daemon_with_only_driver_recovery_jobs_is_restartable() {
+fn a_stale_daemon_whose_jobs_its_successor_resumes_is_restartable() {
     with_isolated_home(|_| {
-        let status = stale_daemon_status(&[json!({}), json!({})]);
+        let status = stale_daemon_status(&[json!({}), json!({ "live_pid": std::process::id() })]);
 
         assert!(!status.fresh);
+        assert_eq!(status.active_job_recovery_evidence.len(), 2);
         assert!(status
             .active_job_recovery_evidence
             .iter()
             .all(|evidence| evidence.disposition
                 == crate::api_jobs::DaemonActiveJobRecoveryDisposition::DriverRecovery));
-        assert_eq!(status.active_job_recovery_evidence.len(), 2);
         assert_eq!(status.freshness.active_jobs, 0);
         assert!(status.freshness.restartable);
         assert_eq!(
@@ -153,14 +157,14 @@ fn a_stale_daemon_with_only_driver_recovery_jobs_is_restartable() {
 }
 
 #[test]
-fn a_stale_daemon_with_a_protected_live_job_stays_blocked() {
+fn a_stale_daemon_with_an_unprovable_execution_owner_stays_blocked() {
     with_isolated_home(|_| {
-        let status = stale_daemon_status(&[json!({}), json!({ "live_pid": std::process::id() })]);
+        let status = stale_daemon_status(&[json!({}), json!({ "live_pid": 0x7fff_fff0_u32 })]);
 
-        assert!(status.active_job_recovery_evidence.iter().any(|evidence| {
-            evidence.disposition
-                == crate::api_jobs::DaemonActiveJobRecoveryDisposition::ProtectedLive
-        }));
+        assert!(status
+            .active_job_recovery_evidence
+            .iter()
+            .any(|evidence| evidence.disposition.blocks_daemon_replacement()));
         assert_eq!(status.freshness.active_jobs, 1);
         assert!(!status.freshness.restartable);
         assert!(status.freshness.repair_plan.is_empty());

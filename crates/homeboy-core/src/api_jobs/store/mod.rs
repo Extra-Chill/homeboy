@@ -2372,11 +2372,12 @@ impl JobStore {
             let repeat_recovery_is_safe = recovery
                 && inner.jobs.get(&job_id).is_some_and(|stored| {
                     let ownership = stored_job_execution_liveness(stored, &local_child_liveness);
-                    ownership.driver_owned
+                    (ownership.driver_owned
                         && matches!(
                             ownership.state,
                             Some(LocalChildLiveness::Dead | LocalChildLiveness::IdentityMismatch)
-                        )
+                        ))
+                        || ownership.driver_supervises_live(stored)
                 });
             let stored = inner
                 .jobs
@@ -3364,6 +3365,17 @@ struct JobExecutionLiveness {
     pid: Option<u32>,
     state: Option<LocalChildLiveness>,
     driver_owned: bool,
+}
+
+impl JobExecutionLiveness {
+    /// A live process the job's driver supervises from its checkpoint. The
+    /// process is detached from the daemon, so it outlives a replacement, and
+    /// the successor's driver re-adopts it instead of spawning another.
+    fn driver_supervises_live(&self, stored: &StoredJob) -> bool {
+        self.driver_owned
+            && stored.local_child.is_none()
+            && matches!(self.state, Some(LocalChildLiveness::Live))
+    }
 }
 
 /// Whether a controller job is checkpointed work whose only executor was the

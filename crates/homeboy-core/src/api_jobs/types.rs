@@ -353,8 +353,9 @@ pub enum DaemonActiveJobRecoveryDisposition {
     TerminalEvidence,
     DeadChild,
     ReusedChildPid,
-    /// No external execution remains; the controller driver must still resume
-    /// its durable state to publish the domain outcome.
+    /// The controller driver resumes this job from its durable checkpoint:
+    /// either no external execution remains, or the driver re-adopts the live
+    /// detached process it supervises.
     DriverRecovery,
     MissingChildIdentityRecoverable,
     /// A dead generation's job with no recorded child identity. Nothing in
@@ -373,8 +374,8 @@ impl DaemonActiveJobRecoveryDisposition {
     /// Whether a job with this disposition protects its daemon from being
     /// replaced. Durable terminal evidence proves no workload remains; a job
     /// awaiting attestation is left untouched by a replacement exactly as by
-    /// this daemon; and a driver-recovery job has no external execution, so
-    /// the successor's startup recovery resumes it from durable state.
+    /// this daemon; and a driver-recovery job resumes in the successor's
+    /// startup recovery, which re-adopts any live process it supervises.
     pub fn blocks_daemon_replacement(self) -> bool {
         !matches!(
             self,
