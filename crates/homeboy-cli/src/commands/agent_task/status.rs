@@ -303,6 +303,7 @@ fn status_once(args: StatusArgs) -> CmdResult<Value> {
         .unwrap_or(args.run_id);
     let store = homeboy::agents::agent_task_feedback::CookFeedbackStore::from_current_data_root()?;
     value["cook_feedback"] = store.status_value(&cook_id)?;
+    value["placement"] = crate::commands::run_placement::placement(&value);
     Ok((value, code))
 }
 
@@ -500,6 +501,7 @@ fn compact_control_plane_status(value: Value) -> Value {
         "phase": bounded_control_plane_value(value.get("phase").unwrap_or(&Value::Null)),
         "blocker": blocker,
         "owner": bounded_control_plane_value(value.get("owner").unwrap_or(&Value::Null)),
+        "placement": crate::commands::run_placement::placement(&value),
         "candidate": bounded_control_plane_value(value.get("candidate").unwrap_or(&Value::Null)),
         "gates": value.get("gates").and_then(Value::as_array)
             .map(|gates| gates.iter().take(COMPACT_REF_LIMIT).map(bounded_control_plane_value).collect::<Vec<_>>())
@@ -2805,6 +2807,10 @@ pub(super) fn diagnose(args: DiagnoseArgs) -> CmdResult<Value> {
     let recovery_prefix =
         agent_task_service_direct::cook_recovery_command_prefix_for_record(&record);
     preserve_controller_owner_placement_with_prefix(&mut value, run_id, &recovery_prefix);
+    value["placement"] = crate::commands::run_placement::placement(
+        &serde_json::to_value(agent_task_service::control_plane_run(&record.run_id)?)
+            .unwrap_or(Value::Null),
+    );
     Ok((value, 0))
 }
 
