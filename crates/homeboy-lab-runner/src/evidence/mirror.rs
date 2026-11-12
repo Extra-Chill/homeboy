@@ -1107,13 +1107,12 @@ fn validate_terminal_result(job: &Job, result: &Value, transport: &str) -> Resul
     if !job.status.is_terminal() {
         return Ok(());
     }
-    serde_json::from_value::<homeboy_core::api_jobs::RemoteRunnerJobResult>(result.clone())
-        .map(|_| ())
+    serde_json::from_value::<homeboy_core::api_jobs::RemoteRunnerTerminalResult>(result.clone())
         .map_err(|error| {
             Error::validation_invalid_argument(
                 "result",
                 format!(
-                    "runner job `{}` has a malformed terminal result on {transport}; schema=RemoteRunnerJobResult; payload={}: {error}",
+                    "runner job `{}` has a malformed terminal result on {transport}; schema=RemoteRunnerTerminalResult; payload={}: {error}",
                     job.id,
                     bounded_result_payload(result),
                 ),
@@ -1121,6 +1120,68 @@ fn validate_terminal_result(job: &Job, result: &Value, transport: &str) -> Resul
                 None,
             )
         })
+        .and_then(|terminal| match terminal {
+            homeboy_core::api_jobs::RemoteRunnerTerminalResult::Completed(_) => Ok(()),
+            homeboy_core::api_jobs::RemoteRunnerTerminalResult::PreSpawnFailure(failure) => {
+                Err(Error::validation_invalid_argument(
+                    "runner",
+                    format!(
+                        "runner job `{}` failed before spawn on {transport}: {}",
+                        job.id,
+                        failure.reason(),
+                    ),
+                    None,
+                    None,
+                )
+                .with_retryable(failure.retryable()))
+            }
+        })
+}
+
+#[cfg(test)]
+mod terminal_result_tests {
+    use super::*;
+
+    #[test]
+    fn controller_classifies_reservation_expiry_as_retryable_pre_spawn_failure() {
+        let mut job: Job = serde_json::from_value(json!({
+            "id": "3a0228de-6dac-4c38-854c-9b97ed838223",
+            "operation": "runner-exec",
+            "event_count": 0,
+            "status": "failed",
+            "created_at_ms": 0,
+            "updated_at_ms": 0
+        }))
+        .expect("job fixture");
+        let mut payload = json!({
+            "reason": "local_child_reservation_expired",
+            "reservation_expires_at_ms": 1794449078922_u64,
+            "reservation_id": "bc9a7c9e-0000-0000-0000-000000000000",
+            "retryable": true,
+            "status": "failed"
+        });
+        let error = validate_terminal_result(&job, &payload, "direct-daemon").unwrap_err();
+        assert_eq!(error.retryable, Some(true));
+        assert!(error.message.contains("failed before spawn"));
+        assert!(error.message.contains("local_child_reservation_expired"));
+        assert!(!error.message.contains("malformed"));
+
+        payload["retryable"] = json!(false);
+        assert_eq!(
+            validate_terminal_result(&job, &payload, "direct-daemon")
+                .unwrap_err()
+                .retryable,
+            Some(false)
+        );
+        let malformed =
+            validate_terminal_result(&job, &json!({"status": "failed"}), "direct-daemon")
+                .unwrap_err();
+        assert!(malformed.message.contains("malformed terminal result"));
+        assert_ne!(malformed.retryable, Some(true));
+        assert!(validate_terminal_result(&job, &json!({"exit_code": 1}), "direct-daemon").is_ok());
+        job.status = JobStatus::Queued;
+        assert!(validate_terminal_result(&job, &json!({}), "direct-daemon").is_ok());
+    }
 }
 
 fn result_availability_metadata(job: &Job) -> Value {

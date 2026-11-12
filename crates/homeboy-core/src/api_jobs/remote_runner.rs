@@ -393,6 +393,41 @@ fn merge_metadata_value(mut metadata: Value, key: &str, value: Value) -> Value {
     metadata
 }
 
+/// Terminal wire result. Pre-spawn failures have no process exit code.
+/// Keep the completed-process shape unchanged for existing workers.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(untagged)]
+pub enum RemoteRunnerTerminalResult {
+    PreSpawnFailure(RemoteRunnerPreSpawnFailure),
+    Completed(RemoteRunnerJobResult),
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(tag = "reason", deny_unknown_fields)]
+pub enum RemoteRunnerPreSpawnFailure {
+    #[serde(rename = "local_child_reservation_expired")]
+    ReservationExpired {
+        status: JobStatus,
+        retryable: bool,
+        reservation_id: String,
+        reservation_expires_at_ms: u64,
+    },
+}
+
+impl RemoteRunnerPreSpawnFailure {
+    pub fn retryable(&self) -> bool {
+        match self {
+            Self::ReservationExpired { retryable, .. } => *retryable,
+        }
+    }
+
+    pub fn reason(&self) -> &'static str {
+        match self {
+            Self::ReservationExpired { .. } => "local_child_reservation_expired",
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct RemoteRunnerJobResult {
     pub exit_code: i32,

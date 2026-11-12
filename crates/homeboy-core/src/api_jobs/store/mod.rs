@@ -3090,13 +3090,14 @@ impl JobStore {
                 stored.job.updated_at_ms = now;
                 stored.job.finished_at_ms = Some(now);
                 stored.job.stale_reason = Some(reason.to_string());
-                let terminal_result = serde_json::json!({
-                    "status": JobStatus::Failed,
-                    "reason": "local_child_reservation_expired",
-                    "retryable": true,
-                    "reservation_id": child.reservation_id,
-                    "reservation_expires_at_ms": child.reservation_expires_at_ms,
-                });
+                let terminal_result = serde_json::to_value(
+                    super::remote_runner::RemoteRunnerPreSpawnFailure::ReservationExpired {
+                        status: JobStatus::Failed,
+                        retryable: true,
+                        reservation_id: child.reservation_id.clone(),
+                        reservation_expires_at_ms: child.reservation_expires_at_ms,
+                    },
+                )?;
                 for (kind, message, data) in [
                     (
                         JobEventKind::Error,
