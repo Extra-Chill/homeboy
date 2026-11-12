@@ -528,6 +528,30 @@ impl AgentTaskLatestExecutorEvidence {
     }
 }
 
+/// Cook progress phases the controller owns before a runner job is bound.
+/// A fresh heartbeat in one of these keeps the stale-run watchdog off the run.
+/// `run_cook_startup_phase` asserts every startup phase it runs is listed, so
+/// a new phase cannot silently leave its runs exposed to cancellation.
+pub(crate) const CONTROLLER_PRE_PROVIDER_PHASES: &[&str] = &[
+    "durable_identity",
+    "destination_resolution",
+    "destination_provisioning",
+    "workspace_provider_canonicalization",
+    "prior_attempt_candidate_preservation",
+    "workspace_base_preflight",
+    "workspace_base_capture",
+    "workspace_base_convergence",
+    "workspace_disk_pressure",
+    "workspace_capacity_reservation",
+    "worktree_provider_lookup",
+    "worktree_provider_ensure",
+    "repro_base_check",
+    "provider_ready",
+    "provider_start",
+    "retry",
+    "in_flight",
+];
+
 impl AgentTaskRunRecord {
     /// A freshly submitted run: `Queued`, never committed (revision `0`), with
     /// an empty task list and no evidence. Every run starts here; its state
@@ -1084,28 +1108,11 @@ impl AgentTaskRunRecord {
         self.runner_job_id().is_none()
             && self.provider_handles.is_empty()
             && (self.metadata["phase"] == "source_materialization"
-                || matches!(
-                    self.metadata
-                        .pointer("/cook_progress/phase")
-                        .and_then(Value::as_str),
-                    Some(
-                        "durable_identity"
-                            | "destination_resolution"
-                            | "destination_provisioning"
-                            | "workspace_provider_canonicalization"
-                            | "workspace_base_preflight"
-                            | "workspace_base_capture"
-                            | "workspace_base_convergence"
-                            | "workspace_disk_pressure"
-                            | "workspace_capacity_reservation"
-                            | "worktree_provider_lookup"
-                            | "worktree_provider_ensure"
-                            | "provider_ready"
-                            | "provider_start"
-                            | "retry"
-                            | "in_flight"
-                    )
-                ))
+                || self
+                    .metadata
+                    .pointer("/cook_progress/phase")
+                    .and_then(Value::as_str)
+                    .is_some_and(|phase| CONTROLLER_PRE_PROVIDER_PHASES.contains(&phase)))
     }
 
     /// A controller-owned pre-provider phase is live only while its heartbeat
