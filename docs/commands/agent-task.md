@@ -1278,6 +1278,11 @@ Queued runs that should not execute can be cancelled without chat/session state:
 homeboy agent-task cancel "$run_id" --reason "not selected by controller"
 ```
 
+For a Cook, `cancel <attempt-run-id>` cancels only that attempt and reports
+`attempt cancelled; mission continues`. Earlier candidates remain available to
+`status`, `recover`, and `adopt`. Use `cancel <cook-id>` to fence the whole
+mission and retire all retained candidates; its output reports `mission fenced`.
+
 `cancel` marks queued runs and stale-running records as `cancelled` in the
 durable lifecycle store. It refuses to claim live provider cancellation for an
 active runner process until a provider-owned cancellation channel is available.
