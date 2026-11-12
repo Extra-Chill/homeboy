@@ -42,31 +42,36 @@ pub fn merged_parents(repo: &Path, base: &str, head: &str) -> Result<Vec<String>
 }
 
 /// Express `parents` as the checkout's pending merge, in Git's own terms:
-/// `MERGE_HEAD` lists them, so committing the staged tree there produces the
-/// merge commit Cook will publish. No parents clears it.
+/// `MERGE_HEAD` lists them and `MERGE_MODE` keeps every parent (`no-ff`), so
+/// committing the staged tree there produces the merge Cook publishes. No
+/// parents clears it.
 pub fn record_pending_merge(repo: &Path, parents: &[String]) -> Result<()> {
-    let path = git(
-        repo,
-        &[
-            "rev-parse",
-            "--path-format=absolute",
-            "--git-path",
-            "MERGE_HEAD",
-        ],
-    )?;
-    let path = Path::new(&path);
-    if parents.is_empty() {
-        return match std::fs::remove_file(path) {
-            Err(error) if error.kind() != std::io::ErrorKind::NotFound => Err(Error::internal_io(
-                error.to_string(),
-                Some(format!("remove {}", path.display())),
-            )),
-            _ => Ok(()),
+    for (name, contents) in [
+        ("MERGE_HEAD", format!("{}\n", parents.join("\n"))),
+        ("MERGE_MODE", "no-ff".to_string()),
+    ] {
+        let path = git(
+            repo,
+            &["rev-parse", "--path-format=absolute", "--git-path", name],
+        )?;
+        let path = Path::new(&path);
+        let result = if parents.is_empty() {
+            std::fs::remove_file(path).or_else(|error| {
+                (error.kind() == std::io::ErrorKind::NotFound)
+                    .then_some(())
+                    .ok_or(error)
+            })
+        } else {
+            std::fs::write(path, &contents)
         };
+        result.map_err(|error| {
+            Error::internal_io(
+                error.to_string(),
+                Some(format!("record {}", path.display())),
+            )
+        })?;
     }
-    std::fs::write(path, format!("{}\n", parents.join("\n"))).map_err(|error| {
-        Error::internal_io(error.to_string(), Some(format!("write {}", path.display())))
-    })
+    Ok(())
 }
 
 fn is_ancestor(repo: &Path, ancestor: &str, descendant: &str) -> Result<bool> {
@@ -145,6 +150,14 @@ mod tests {
 
         record_pending_merge(repo, &[trunk2.clone()]).unwrap();
         assert_eq!(run(repo, &["rev-parse", "MERGE_HEAD"]), trunk2);
+        // Committing there keeps both parents even where Git could fast-forward.
+        run(repo, &["reset", "-q", "--soft", &base]);
+        record_pending_merge(repo, &[trunk2.clone()]).unwrap();
+        run(repo, &["commit", "-qm", "staged merge"]);
+        assert_eq!(
+            run(repo, &["rev-parse", "HEAD^1", "HEAD^2"]),
+            format!("{base}\n{trunk2}")
+        );
         record_pending_merge(repo, &[]).unwrap();
         assert!(git(repo, &["rev-parse", "-q", "--verify", "MERGE_HEAD"]).is_err());
     }
