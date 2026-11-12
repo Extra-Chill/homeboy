@@ -45,6 +45,19 @@ impl RestartState {
         }
         Ok(true)
     }
+
+    /// Whether a poller still waits on this restart: only while its holder is alive.
+    fn in_progress(&self) -> bool {
+        self.phase == "restarting" && homeboy_core::process::pid_is_running(self.holder_pid)
+    }
+
+    /// An unpublished restart stopped `previous_lease`; only that lease is refused.
+    /// A session republished since (for example by `runner connect`) names a
+    /// different lease and proceeds, so a failed or abandoned restart never
+    /// wedges the runner.
+    fn stopped(&self, current_lease: Option<&str>) -> bool {
+        self.phase != "published" && current_lease.is_none_or(|lease| lease == self.previous_lease)
+    }
 }
 
 /// Publish the restart lifecycle under the recovery lock, never runner-state.lock.
@@ -128,7 +141,7 @@ pub(crate) fn with_restart_recovery_lock<T>(
         crate::runner_state_lock::LOCK_TIMEOUT,
         || {
             let state = crate::runner_state_lock::read_durable_json::<RestartState>(&state_path)?;
-            if let Some(state) = state.filter(|state| state.phase == "restarting") {
+            if let Some(state) = state.filter(RestartState::in_progress) {
                 let active = state.check(runner_id)?;
                 return Ok(active);
             }
@@ -139,7 +152,12 @@ pub(crate) fn with_restart_recovery_lock<T>(
                 crate::runner_state_lock::read_durable_json::<RestartState>(&state_path)?
             {
                 // A failed restart must never let a poller reattach the stopped lease.
-                if state.phase != "published" {
+                let current = read_session(runner_id)?;
+                if state.stopped(
+                    current
+                        .as_ref()
+                        .and_then(|s| s.remote_daemon_lease_id.as_deref()),
+                ) {
                     return Err(state.refusal(runner_id));
                 }
             }
@@ -247,8 +265,8 @@ mod tests {
     #[test]
     fn pollers_follow_the_restart_budget_and_outcome() {
         crate::test_support::with_isolated_home(|_| {
-            write_session(&session("lease-old", None)).expect("connected session");
             for outcome in ["published", "failed", "timeout"] {
+                write_session(&session("lease-old", None)).expect("connected session");
                 let failure = outcome != "published";
                 let barrier = std::sync::Arc::new(std::sync::Barrier::new(2));
                 let ready = barrier.clone();
@@ -308,6 +326,17 @@ mod tests {
                 }
                 assert_eq!(restart.join().expect("restart thread").is_err(), failure);
             }
+
+            // After the failed restart, a session republished under a new lease
+            // (for example by `runner connect`) is not wedged by the stale state.
+            write_session(&session("lease-connected", None)).expect("republished session");
+            let observed = with_restart_recovery_lock("runner-a", || read_session("runner-a"))
+                .expect("republished session proceeds")
+                .expect("session");
+            assert_eq!(
+                observed.remote_daemon_lease_id.as_deref(),
+                Some("lease-connected")
+            );
         });
     }
 
