@@ -3364,6 +3364,54 @@ fn dirty_destination_recovery_actions_commit_review_and_adopt_through_publicatio
 }
 
 #[test]
+fn cleared_reserve_pressure_cook_context_offers_retry() {
+    homeboy_core::test_support::with_isolated_home(|_| {
+        let fixture = CandidateAdoptionFixture::new_without_recovery(
+            "cook-reserve-cleared",
+            2,
+            1,
+            false,
+            None,
+        );
+        let error =
+            homeboy_core::Error::capacity_reserve(homeboy_core::error::CapacityReserveDetails {
+                filesystem: fixture
+                    .source
+                    .join("not-yet-materialized")
+                    .display()
+                    .to_string(),
+                available_bytes: 0,
+                reserve_bytes: 1,
+                shortfall_bytes: 1,
+            });
+        super::super::materialize_initial_cook_attempt(&fixture.options).unwrap();
+        agent_task_lifecycle::record_pre_execution_failure(
+            &fixture.run_id,
+            &fixture.options.identity.initial_plan,
+            "worktree_capacity_admission",
+            &error,
+        )
+        .unwrap();
+        let report = ambient_cook_report(CookReportInput {
+            cook_id: fixture.cook_id.clone(),
+            status: "pre_execution_failure",
+            disposition: CookDisposition::Terminal,
+            attempts: Vec::new(),
+            finalization: None,
+            stop_reason: Some(error.message),
+            exit_code: 1,
+            invocation_latest_run_id: Some(&fixture.run_id),
+        })
+        .value;
+        let context = report.failure_context.unwrap();
+        assert_eq!(
+            context.recovery_step,
+            Some(super::super::CookRecoveryStep::Retry)
+        );
+    });
+}
+
+#[test]
 fn reserve_pressure_cook_context_forwards_only_the_scoped_inventory_action() {
     homeboy_core::test_support::with_isolated_home(|_| {
         let fixture = CandidateAdoptionFixture::new_without_recovery(
@@ -3377,8 +3425,8 @@ fn reserve_pressure_cook_context_forwards_only_the_scoped_inventory_action() {
             homeboy_core::Error::capacity_reserve(homeboy_core::error::CapacityReserveDetails {
                 filesystem: "/worktrees/new-task".to_string(),
                 available_bytes: 90,
-                reserve_bytes: 100,
-                shortfall_bytes: 10,
+                reserve_bytes: u64::MAX,
+                shortfall_bytes: u64::MAX - 90,
             })
             .with_action(homeboy_core::error::ExecutableAction::new(
                 "capacity.reserve.inspect_repository_artifacts",
@@ -3453,8 +3501,8 @@ fn reserve_pressure_cook_context_forwards_the_shared_cargo_target_inventory() {
             homeboy_core::Error::capacity_reserve(homeboy_core::error::CapacityReserveDetails {
                 filesystem: "/worktrees/new-task".to_string(),
                 available_bytes: 90,
-                reserve_bytes: 100,
-                shortfall_bytes: 10,
+                reserve_bytes: u64::MAX,
+                shortfall_bytes: u64::MAX - 90,
             })
             .with_action(homeboy_core::error::ExecutableAction::new(
                 "capacity.reserve.inspect_repository_artifacts",

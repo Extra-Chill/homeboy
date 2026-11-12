@@ -4367,15 +4367,21 @@ pub(crate) fn cook_failure_context_with_stores(
         .as_ref()
         .and_then(|record| record.metadata.get("cook_controller_failure"))
         .cloned();
+    let live_reserve_failure = record
+        .as_ref()
+        .and_then(|record| record.metadata.get("pre_execution_failure"))
+        .and_then(reprobe_capacity_reserve_failure);
     let pre_execution_diagnostic = record.as_ref().and_then(|record| {
         let failure = record.metadata.get("pre_execution_failure")?;
         let details = failure.get("details")?;
         if failure.get("error_code").and_then(Value::as_str) == Some("resource.capacity_reserve") {
-            return Some(serde_json::json!({
-                "code": "resource.capacity_reserve",
-                "message": failure.get("message"),
-                "details": details,
-            }));
+            return live_reserve_failure.as_ref().map(|failure| {
+                serde_json::json!({
+                    "code": "resource.capacity_reserve",
+                    "message": failure.get("message"),
+                    "details": failure.get("details"),
+                })
+            });
         }
         details
             .get("worktree_provider_failure")
@@ -4511,7 +4517,7 @@ pub(crate) fn cook_failure_context_with_stores(
             None,
         )
     };
-    let recovery_actions = capacity_reserve_recovery_actions(record.as_ref())
+    let recovery_actions = capacity_reserve_recovery_actions(live_reserve_failure.as_ref())
         .or_else(|| {
             dirty_candidate_adoption_recovery_actions(
                 &recipe,
@@ -4840,17 +4846,69 @@ fn continuation_action_admitted(admission: Option<&Value>, fallback: bool) -> bo
 /// the shared Cargo targets that inventory cannot see
 /// (Extra-Chill/homeboy#15474). The confirmation-gated apply action stays in
 /// durable diagnostic evidence.
-fn capacity_reserve_recovery_actions(
-    record: Option<&agent_task_lifecycle::AgentTaskRunRecord>,
-) -> Option<CookRecoveryActions> {
-    let failure = record?.metadata.get("pre_execution_failure")?;
+///
+/// Re-measure the same filesystem and reserve that refused admission. Missing
+/// destinations are normal before materialization; probe their nearest ancestor.
+/// Keep unknown measurements blocked rather than treating them as cleared.
+fn reprobe_capacity_reserve_failure(failure: &Value) -> Option<Value> {
+    reprobe_capacity_reserve_failure_with(failure, |path| {
+        let mut root = Path::new(path);
+        while !root.exists() {
+            root = root.parent()?;
+        }
+        homeboy_core::observation::disk_budget::disk_budget(
+            root,
+            "Cook recovery reserve admission",
+            "filesystem capacity is not measurable",
+        )
+        .available_bytes
+    })
+}
+
+fn reprobe_capacity_reserve_failure_with(
+    failure: &Value,
+    probe: impl FnOnce(&str) -> Option<u64>,
+) -> Option<Value> {
     if failure.get("error_code").and_then(Value::as_str) != Some("resource.capacity_reserve") {
         return None;
     }
+    let mut live = failure.clone();
+    let filesystem = failure
+        .pointer("/details/filesystem")
+        .and_then(Value::as_str);
+    let reserve = failure
+        .pointer("/details/reserve_bytes")
+        .and_then(Value::as_u64);
+    let available = filesystem.and_then(probe);
+    if let (Some(filesystem), Some(reserve), Some(available)) = (filesystem, reserve, available) {
+        if available >= reserve {
+            return None;
+        }
+        let error =
+            homeboy_core::Error::capacity_reserve(homeboy_core::error::CapacityReserveDetails {
+                filesystem: filesystem.to_string(),
+                available_bytes: available,
+                reserve_bytes: reserve,
+                shortfall_bytes: reserve.saturating_sub(available),
+            });
+        live["message"] = json!(error.message);
+        live["details"]["available_bytes"] = json!(available);
+        live["details"]["shortfall_bytes"] = json!(reserve.saturating_sub(available));
+    } else {
+        live["message"] = json!("Filesystem reserve capacity could not be measured; inspect the filesystem before recovering.");
+        live["details"]["available_bytes"] = Value::Null;
+        live["details"]["shortfall_bytes"] = Value::Null;
+    }
+    Some(live)
+}
+
+fn capacity_reserve_recovery_actions(failure: Option<&Value>) -> Option<CookRecoveryActions> {
+    let failure = failure?;
     let actions = failure
         .pointer("/details/_homeboy_actions")
-        .and_then(Value::as_array)?
-        .iter()
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
         .filter(|action| {
             action
                 .get("id")
@@ -4876,11 +4934,16 @@ fn capacity_reserve_recovery_actions(
             })
         })
         .collect::<Vec<_>>();
-    (!actions.is_empty()).then(|| CookRecoveryActions {
+    Some(CookRecoveryActions {
         step: super::CookRecoveryStep::none(
-            "Filesystem reserve pressure blocked admission; free capacity before recovering.",
+            failure["message"]
+                .as_str()
+                .unwrap_or("Filesystem reserve capacity is not measurable."),
         ),
-        reason: "Filesystem reserve pressure blocked admission. Inspect the protected scoped inventory before approving any removal.".to_string(),
+        reason: failure["message"]
+            .as_str()
+            .unwrap_or("Filesystem reserve capacity is not measurable.")
+            .to_string(),
         legal_actions: actions.clone(),
         next_actions: actions,
     })
@@ -5344,6 +5407,37 @@ fn exact_checkpoint_candidate_mismatch(diagnostic: &Option<Value>) -> bool {
 #[cfg(test)]
 mod recovery_action_tests {
     use super::*;
+
+    #[test]
+    fn reserve_recovery_uses_live_capacity() {
+        let recorded = json!({
+            "error_code": "resource.capacity_reserve",
+            "message": "recorded shortfall",
+            "details": {
+                "filesystem": "/recorded/filesystem",
+                "available_bytes": 90,
+                "reserve_bytes": 100,
+                "shortfall_bytes": 10
+            }
+        });
+        for available in [100, 150] {
+            let live = reprobe_capacity_reserve_failure_with(&recorded, |path| {
+                assert_eq!(path, "/recorded/filesystem");
+                Some(available)
+            });
+            assert!(capacity_reserve_recovery_actions(live.as_ref()).is_none());
+        }
+        let live = reprobe_capacity_reserve_failure_with(&recorded, |_| Some(95)).unwrap();
+        assert_eq!(live["details"]["available_bytes"], 95);
+        assert_eq!(live["details"]["shortfall_bytes"], 5);
+        let actions = capacity_reserve_recovery_actions(Some(&live)).unwrap();
+        assert!(actions.reason.contains("95 bytes available"));
+        assert!(actions.reason.contains("5 bytes short"));
+        let unknown = reprobe_capacity_reserve_failure_with(&recorded, |_| None).unwrap();
+        assert!(unknown["details"]["available_bytes"].is_null());
+        assert!(capacity_reserve_recovery_actions(Some(&unknown)).is_some());
+        assert_eq!(recorded["details"]["available_bytes"], 90);
+    }
 
     #[test]
     fn recovery_actions_follow_the_cook_state_matrix() {
