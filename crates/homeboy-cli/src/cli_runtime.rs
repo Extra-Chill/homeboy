@@ -1505,10 +1505,7 @@ impl CliRuntime {
             output_file = None;
         }
 
-        if cli.command.consumes_output_file_as_command_arg() {
-            // This command owns `--output/-o`; it is not the global JSON envelope.
-            output_file = None;
-        } else if let Some(path) = output_file.as_deref() {
+        if let Some(path) = output_file.as_deref() {
             if let Some(exit) = output_file_path_exit_code(path, &command_identity) {
                 return exit;
             }

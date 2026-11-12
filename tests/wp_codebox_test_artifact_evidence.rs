@@ -403,7 +403,7 @@ fn artifact_get(home: &Path, run_id: &str, artifact: &Value, output: &Path) -> V
             "get",
             run_id,
             artifact_id,
-            "--output",
+            "--to",
             output.to_str().expect("output path"),
         ],
     );
