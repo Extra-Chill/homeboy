@@ -4614,6 +4614,51 @@ fn active_cooks_on_the_same_canonical_worktree_record_a_nonblocking_warning() {
     });
 }
 
+/// #17793: pre-runner admissions use the same ownership observation as Lab waits.
+#[test]
+fn cook_recovery_queued_admission_without_runner_respects_heartbeat_grace() {
+    use crate::agent_task_service::{plan_cook_recovery, CookRecoveryStep};
+    for fresh in [false, true] {
+        homeboy_core::test_support::with_isolated_home(|_| {
+            let cook_id = "cook-pre-runner-admission";
+            let options = batch_cook_options(cook_id, Arc::new(AcceptedDetachedAttemptDispatcher));
+            super::super::persist_initial_recipe(&options).unwrap();
+            super::super::materialize_initial_cook_attempt(&options).unwrap();
+            let run_id = &options.identity.initial_run_id;
+            let timestamp = if fresh {
+                chrono::Utc::now().to_rfc3339()
+            } else {
+                "2020-01-01T00:00:00Z".to_string()
+            };
+            agent_task_lifecycle::rewrite_record_for_test(run_id, |record| {
+                record.updated_at = Some(timestamp.clone());
+                record.metadata["cook_progress"] = serde_json::json!({
+                    "phase": "durable_identity", "updated_at": timestamp,
+                });
+            })
+            .unwrap();
+            let record = test_lifecycle_store().read_record(run_id).unwrap();
+            assert_eq!(
+                record.state(),
+                agent_task_lifecycle::AgentTaskRunState::Queued
+            );
+            assert!(record.runner_id().is_none());
+            assert!(record.runner_job_id().is_none());
+            assert!(CookRecipeStore::from_current_data_root()
+                .unwrap()
+                .foreign_cook_driver(cook_id)
+                .unwrap()
+                .is_none());
+            let plan = plan_cook_recovery(cook_id).unwrap();
+            if fresh {
+                assert!(matches!(plan.step, CookRecoveryStep::None { .. }));
+            } else {
+                assert_eq!(plan.step, CookRecoveryStep::Continue);
+            }
+        });
+    }
+}
+
 #[test]
 fn admission_refused_lifecycle_retry_dispatches_through_its_cook() {
     homeboy_core::test_support::with_isolated_home(|_| {

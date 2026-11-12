@@ -4574,7 +4574,7 @@ pub(crate) fn cook_failure_context_with_stores(
             // owns every transition, so recovery has no step to take, which
             // is what diagnose reports for the same Cook (#17494).
             let admission = record.as_ref().and_then(|record| {
-                super::lab_admission::queued_lab_admission_in_store(record, lifecycle_store)
+                super::lab_admission::queued_admission_in_store(record, lifecycle_store)
             });
             let live_driver = admission
                 .as_ref()

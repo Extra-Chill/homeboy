@@ -387,7 +387,7 @@ fn status_without_feedback(args: StatusArgs) -> CmdResult<Value> {
         // Provider response identity, distinct from the requested routing tier.
         value["served_models"] = json!(record.served_models);
         attach_lab_snapshot_failure_projection(&mut value, &record);
-        let admission = agent_task_service_direct::queued_lab_admission(&record);
+        let admission = agent_task_service_direct::queued_admission(&record);
         attach_lab_admission_wait(&mut value, admission.as_ref());
         if let Some(wait) = admission
             .as_ref()
@@ -2585,7 +2585,7 @@ pub(super) fn diagnose(args: DiagnoseArgs) -> CmdResult<Value> {
     let record = durable_read.record;
     let aggregate = durable_read.aggregate;
     let runner_diagnostic_probe = agent_task_lifecycle::runner_diagnostic_probe(&record);
-    let admission = agent_task_service_direct::queued_lab_admission(&record);
+    let admission = agent_task_service_direct::queued_admission(&record);
     let queued_runner_ownership = admission
         .as_ref()
         .filter(|wait| !wait.live_driver && wait.liveness.is_reconcilable())
@@ -5824,14 +5824,17 @@ fn runner_cancellation_diagnostic(record: &AgentTaskRunRecord) -> Option<Collect
 /// driver-lock observation used by the recovery planner.
 fn attach_lab_admission_wait(
     value: &mut Value,
-    admission: Option<&agent_task_service_direct::QueuedLabAdmission>,
+    admission: Option<&agent_task_service_direct::QueuedAdmission>,
 ) {
-    if let Some(admission) = admission.filter(|wait| wait.live_driver) {
+    if let Some(wait) = admission
+        .filter(|admission| admission.live_driver)
+        .and_then(|admission| admission.wait.as_ref())
+    {
         value["waiting_for"] = json!("lab_admission");
-        value["lab_admission_wait"] = admission.wait.clone();
+        value["lab_admission_wait"] = wait.clone();
         let message = format!(
             "Waiting for Lab admission on {}.",
-            admission.wait["runner_id"].as_str().unwrap_or("Lab")
+            wait["runner_id"].as_str().unwrap_or("Lab")
         );
         value["reason"] = json!(message);
         value["summary"] = json!(message);
