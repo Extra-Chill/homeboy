@@ -1640,7 +1640,7 @@ fn promotion_runs_gates_in_the_destination_workspace() {
     .expect("destination gate accepts the promoted candidate");
 
     assert_eq!(report.status, AgentTaskPromotionStatus::Applied);
-    assert_eq!(provider.verify_worktrees_clean, vec![false]);
+    assert_eq!(provider.verify_worktrees_clean, vec![true]);
     assert_eq!(provider.verify_calls[0].0, workspace);
     assert!(Command::new("git")
         .args(["status", "--porcelain"])
@@ -1648,7 +1648,7 @@ fn promotion_runs_gates_in_the_destination_workspace() {
         .output()
         .expect("inspect promotion destination")
         .stdout
-        .starts_with(b"M  src/lib.rs"));
+        .is_empty());
     let checkout = report.deterministic_gates[0]
         .candidate_checkout
         .as_ref()
@@ -2139,7 +2139,7 @@ fn gate_failure_preserves_the_pre_gate_candidate_baseline_for_feedback_retry() {
     );
     assert!(baseline["current_diff"]
         .as_str()
-        .is_some_and(|diff| !diff.is_empty()));
+        .is_some_and(|diff| diff.is_empty()));
 
     let evidence_path = temp.path().join("feedback-evidence.patch");
     let diff = baseline["current_diff"].as_str().unwrap();

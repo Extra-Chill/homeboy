@@ -96,7 +96,6 @@ fn fresh_candidate_without_patch_promotes_provider_commits_and_dirty_state_as_on
             workspace_path: Some(repo.into()),
             ..Default::default()
         };
-        let branch = git_head(repo, "HEAD");
         let mut checkpoint = None;
         let report = promote_with_provider_and_checkpoint_in_observation_store(
             request(repo, Some(candidate.clone())),
@@ -138,8 +137,7 @@ fn fresh_candidate_without_patch_promotes_provider_commits_and_dirty_state_as_on
             report.changed_files.join("\n"),
             String::from_utf8(diff.stdout).unwrap().trim()
         );
-        assert_eq!(git_head(repo, "HEAD"), branch);
-        assert_eq!(git_head(repo, "HEAD"), candidate.base_sha);
+        assert_eq!(git_head(repo, "HEAD"), candidate.candidate_sha);
         let branch = Command::new("git")
             .args(["symbolic-ref", "--short", "HEAD"])
             .current_dir(repo)
@@ -151,7 +149,7 @@ fn fresh_candidate_without_patch_promotes_provider_commits_and_dirty_state_as_on
         );
         assert_eq!(
             report.provenance["safety_baseline"]["tree"],
-            git_head(repo, "HEAD^{tree}")
+            git_head(repo, &format!("{}^{{tree}}", candidate.base_sha))
         );
         assert_eq!(
             std::fs::read_to_string(repo.join("dirty")).unwrap(),
@@ -229,7 +227,7 @@ fn ignored_local_pr_head_is_preserved_and_aligned_but_unrelated_movement_is_refu
             super::super::AgentTaskPromotionStatus::Applied
         );
         assert_eq!(report.provenance["destination_head_alignment"], expected);
-        assert_eq!(git_head(repo, "HEAD"), remote);
+        assert_eq!(git_head(repo, "HEAD"), candidate.candidate_sha);
         assert_eq!(
             git_head(repo, "refs/homeboy/superseded/pr-head-test"),
             local

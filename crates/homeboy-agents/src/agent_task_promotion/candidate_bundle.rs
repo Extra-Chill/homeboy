@@ -131,8 +131,8 @@ pub fn verify_candidate_ref(
 }
 
 /// Single admission contract for both promotion preflight and materialization:
-/// HEAD stays on the original base; feedback may replace only the recorded
-/// candidate tree in both the live index and the working tree.
+/// The destination is on the original base or the exact candidate. Feedback
+/// may replace only the recorded candidate tree.
 pub(crate) fn validate_destination(
     repo: &Path,
     candidate: &AgentTaskCandidate,
@@ -140,6 +140,16 @@ pub(crate) fn validate_destination(
 ) -> Result<()> {
     super::validate_candidate_commit(repo, candidate)?;
     let head = git(repo, &["rev-parse", "HEAD"])?;
+    if feedback.is_none()
+        && super::committed_changes::recover_candidate_destination(
+            repo,
+            &candidate.candidate_sha,
+            Some(&candidate.base_sha),
+            true,
+        )?
+    {
+        return Ok(());
+    }
     if head != candidate.base_sha {
         return Err(super::promote::CandidateDestinationMoved {
             expected: candidate.base_sha.clone(),
@@ -184,6 +194,16 @@ pub(crate) fn materialize_candidate_tree_with_feedback(
     feedback: Option<&serde_json::Value>,
 ) -> Result<()> {
     validate_destination(repo, candidate, feedback)?;
+    if feedback.is_none()
+        && super::committed_changes::recover_candidate_destination(
+            repo,
+            &candidate.candidate_sha,
+            Some(&candidate.base_sha),
+            false,
+        )?
+    {
+        return Ok(());
+    }
     let previous = feedback
         .and_then(|baseline| baseline.pointer("/candidate_commit/candidate_sha"))
         .and_then(serde_json::Value::as_str)
@@ -192,12 +212,10 @@ pub(crate) fn materialize_candidate_tree_with_feedback(
         repo,
         &["read-tree", "-u", "-m", previous, &candidate.candidate_sha],
     )?;
-    // HEAD stays on the base, so a merge the candidate carries is staged the
-    // way Git stages any merge: gates committing this checkout ship it too.
-    homeboy_core::git::record_pending_merge(
-        repo,
-        &homeboy_core::git::merged_parents(repo, &candidate.base_sha, &candidate.candidate_sha)?,
-    )
+    // Preserve the immutable commit (including merge parents) on the branch,
+    // rather than leaving a staged-only candidate after a gate failure.
+    git(repo, &["reset", "--soft", &candidate.candidate_sha])?;
+    Ok(())
 }
 
 pub(crate) fn fetch_run_candidates(
