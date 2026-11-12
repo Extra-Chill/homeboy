@@ -1260,6 +1260,7 @@ fn instance_view(
     job: &crate::api_jobs::Job,
     controller: &crate::api_jobs::ControllerJobState,
     store: &JobStore,
+    children: impl FnOnce(&str) -> Vec<String>,
 ) -> Value {
     let request = WorkflowJobRequest::parse(&controller.request).ok();
     let state = controller
@@ -1302,7 +1303,7 @@ fn instance_view(
         view["definition_digest"] = json!(request.definition_digest);
         view["inputs"] = json!(request.inputs);
         view["parent"] = json!(request.parent);
-        view["children"] = json!(child_instances(store, &request.instance));
+        view["children"] = json!(children(&request.instance));
     }
     view
 }
@@ -1310,26 +1311,25 @@ fn instance_view(
 /// The instances `instance` admitted, oldest first: the child links of a
 /// self-admitting chain.
 fn child_instances(store: &JobStore, instance: &str) -> Vec<String> {
-    let mut children = store
-        .controller_jobs_of_type(WORKFLOW_JOB_TYPE)
+    store
+        .controller_jobs_with_request(WORKFLOW_JOB_TYPE, "parent", instance)
         .iter()
-        .filter_map(|(job, controller)| {
-            let request = WorkflowJobRequest::parse(&controller.request).ok()?;
-            (request.parent.as_deref() == Some(instance))
-                .then(|| (job.created_at_ms, job.id, request.instance))
+        .filter_map(|(_, controller)| {
+            Some(
+                WorkflowJobRequest::parse(&controller.request)
+                    .ok()?
+                    .instance,
+            )
         })
-        .collect::<Vec<_>>();
-    children.sort();
-    children
-        .into_iter()
-        .map(|(_, _, instance)| instance)
         .collect()
 }
 
 /// `GET /workflows/<instance>`.
 pub(crate) fn workflow_status(store: &JobStore, instance: &str) -> Result<Value> {
     let (job, controller) = instance_job(store, instance)?;
-    Ok(instance_view(&job, &controller, store))
+    Ok(instance_view(&job, &controller, store, |instance| {
+        child_instances(store, instance)
+    }))
 }
 
 /// The instance a watcher moves to next: the last child of a terminal
@@ -1352,11 +1352,23 @@ pub fn chain_successor(view: &Value) -> Option<String> {
 
 /// `GET /workflows`.
 pub(crate) fn workflow_list(store: &JobStore) -> Value {
-    let instances = store
-        .controller_jobs_of_type(WORKFLOW_JOB_TYPE)
+    let jobs = store.controller_jobs_of_type(WORKFLOW_JOB_TYPE);
+    // One read builds every chain link, rather than one store read per instance.
+    let mut children: std::collections::HashMap<String, Vec<String>> =
+        std::collections::HashMap::new();
+    for (_, controller) in &jobs {
+        if let Ok(request) = WorkflowJobRequest::parse(&controller.request) {
+            if let Some(parent) = request.parent {
+                children.entry(parent).or_default().push(request.instance);
+            }
+        }
+    }
+    let instances = jobs
         .iter()
         .map(|(job, controller)| {
-            let view = instance_view(job, controller, store);
+            let view = instance_view(job, controller, store, |instance| {
+                children.get(instance).cloned().unwrap_or_default()
+            });
             json!({
                 "instance": view["instance"],
                 "workflow": view["workflow"],

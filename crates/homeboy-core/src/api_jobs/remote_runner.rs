@@ -578,7 +578,7 @@ impl JobStore {
         runner_id: &str,
     ) -> Result<Option<RunnerExecutionEnvelope>> {
         let inner = self.inner.lock().expect("job store mutex poisoned");
-        let stored = self.read_stored_job(&inner, job_id)?;
+        let stored = self.read_stored_job(&inner, job_id, false)?;
         if stored.job.target_runner_id.as_deref() != Some(runner_id) {
             return Err(Error::validation_invalid_argument(
                 "runner_id",
@@ -608,7 +608,7 @@ impl JobStore {
         runner_id: &str,
     ) -> Result<Option<RunnerExecutionEnvelope>> {
         let inner = self.inner.lock().expect("job store mutex poisoned");
-        let stored = self.read_stored_job(&inner, job_id)?;
+        let stored = self.read_stored_job(&inner, job_id, false)?;
         if stored.job.target_runner_id.as_deref() != Some(runner_id) {
             return Err(Error::validation_invalid_argument(
                 "runner_id",
@@ -1028,7 +1028,7 @@ impl JobStore {
                         }),
                     ));
                 }
-                let job = self.read_stored_job(inner, existing.job_id)?.job;
+                let job = self.read_stored_job(inner, existing.job_id, false)?.job.clone();
                 if job.status.is_terminal() {
                     // The original terminal snapshot is authoritative. A replay
                     // is an observation, not new work or a legal state mutation.

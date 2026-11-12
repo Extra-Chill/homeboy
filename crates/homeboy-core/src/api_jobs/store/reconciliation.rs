@@ -340,7 +340,7 @@ impl JobStore {
                         None,
                     ))
                 };
-                let stored = match self.read_stored_job(inner, *job_id) {
+                let stored = match self.read_stored_job(inner, *job_id, false) {
                     Ok(stored) => stored,
                     Err(_) => return refuse("does not exist".to_string()),
                 };
@@ -857,7 +857,7 @@ impl JobStore {
         let now = timestamp_ms();
         let inner = self.inner.lock().expect("job store mutex poisoned");
         let entries = self
-            .read_all_stored_jobs(&inner)
+            .jobs_with_history(&inner, super::sql_store::TerminalJobs::Stale)
             .unwrap_or_else(|_| inner.jobs.clone());
         let mut jobs: Vec<super::super::types::ActiveRunnerJobSummary> = entries
             .values()

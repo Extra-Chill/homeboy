@@ -81,8 +81,11 @@ impl JobStore {
     /// pruning rather than silently excluding work that could resume later.
     pub fn terminal_controller_job_ids(&self, job_type: &str, version: u32) -> Result<Vec<Uuid>> {
         let inner = self.inner.lock().expect("job store mutex poisoned");
-        let mut snapshot = inner.clone();
-        snapshot.jobs = self.read_all_stored_jobs(&inner)?;
+        let snapshot = JobStoreInner {
+            jobs: self
+                .jobs_with_history(&inner, sql_store::TerminalJobs::ControllerType(job_type))?,
+            ..JobStoreInner::default()
+        };
         terminal_controller_job_ids_in(&snapshot, job_type, version)
     }
 
@@ -641,7 +644,7 @@ impl JobStore {
     ) -> Result<T> {
         self.durable_transaction(|inner| {
             if !inner.jobs.contains_key(&job_id) {
-                let mut stored = self.read_stored_job(inner, job_id)?;
+                let mut stored = self.read_stored_job(inner, job_id, true)?.into_owned();
                 if let Some(persistence) = &self.persistence {
                     persistence
                         .synced
@@ -1735,44 +1738,55 @@ impl JobStore {
             .len()
     }
 
-    pub(super) fn read_stored_job(&self, inner: &JobStoreInner, job_id: Uuid) -> Result<StoredJob> {
+    /// One job from the live mirror, or its terminal row from SQL. Events are
+    /// read from SQL only when `with_events` asks for them; mirror entries are
+    /// borrowed, never cloned.
+    pub(super) fn read_stored_job<'a>(
+        &self,
+        inner: &'a JobStoreInner,
+        job_id: Uuid,
+        with_events: bool,
+    ) -> Result<std::borrow::Cow<'a, StoredJob>> {
         if let Some(stored) = inner.jobs.get(&job_id) {
-            return Ok(stored.clone());
+            return Ok(std::borrow::Cow::Borrowed(stored));
         }
         if let Some(persistence) = &self.persistence {
-            if let Some((Some(stored), _)) =
-                sql_store::read_job_and_controller_submissions(&persistence.path, job_id)?
+            if let Some(stored) =
+                sql_store::read_job_readonly(&persistence.path, job_id, with_events)?
             {
-                return Ok(stored);
+                return Ok(std::borrow::Cow::Owned(stored));
             }
         }
         Err(job_not_found(job_id))
     }
 
-    fn read_all_stored_jobs(&self, inner: &JobStoreInner) -> Result<HashMap<Uuid, StoredJob>> {
+    /// The live mirror plus the terminal history `filter` selects, read as job
+    /// rows without events. Live entries win over their SQL rows.
+    fn jobs_with_history(
+        &self,
+        inner: &JobStoreInner,
+        filter: sql_store::TerminalJobs<'_>,
+    ) -> Result<HashMap<Uuid, StoredJob>> {
         let mut jobs = HashMap::new();
         if let Some(persistence) = &self.persistence {
-            if let Some(durable) = sql_store::read_durable_store_readonly(&persistence.path)? {
-                jobs.extend(
-                    durable
-                        .jobs
-                        .into_iter()
-                        .map(|stored| (stored.job.id, stored)),
-                );
-            }
+            jobs.extend(
+                sql_store::read_terminal_jobs_readonly(&persistence.path, filter)?
+                    .into_iter()
+                    .map(|stored| (stored.job.id, stored)),
+            );
         }
-        jobs.extend(inner.jobs.clone());
+        jobs.extend(inner.jobs.iter().map(|(id, stored)| (*id, stored.clone())));
         Ok(jobs)
     }
 
     pub fn get(&self, job_id: Uuid) -> Result<Job> {
         let inner = self.inner.lock().expect("job store mutex poisoned");
-        Ok(self.read_stored_job(&inner, job_id)?.job)
+        Ok(self.read_stored_job(&inner, job_id, false)?.job.clone())
     }
 
     pub fn terminal_controller_job(&self, job_id: Uuid) -> Result<Option<Job>> {
         let inner = self.inner.lock().expect("job store mutex poisoned");
-        if let Ok(stored) = self.read_stored_job(&inner, job_id) {
+        if let Ok(stored) = self.read_stored_job(&inner, job_id, false) {
             if stored.controller_job.is_some() && stored.job.status.is_terminal() {
                 super::persistence::validate_terminal_controller_identity(&stored.job, job_id)?;
                 return Ok(Some(stored.job.clone()));
@@ -1810,7 +1824,7 @@ impl JobStore {
     pub fn list(&self) -> Vec<Job> {
         let inner = self.inner.lock().expect("job store mutex poisoned");
         let mut jobs: Vec<Job> = self
-            .read_all_stored_jobs(&inner)
+            .jobs_with_history(&inner, sql_store::TerminalJobs::All)
             .unwrap_or_else(|_| inner.jobs.clone())
             .into_values()
             .map(|stored| stored.job)
@@ -1822,7 +1836,7 @@ impl JobStore {
     /// Return a safe, non-reconciling projection for daemon-job inspection.
     pub fn inspection(&self, job_id: Uuid) -> Result<super::DaemonJobInspection> {
         let inner = self.inner.lock().expect("job store mutex poisoned");
-        let stored = self.read_stored_job(&inner, job_id)?;
+        let stored = self.read_stored_job(&inner, job_id, false)?;
         let linked_durable_run_id = stored
             .controller_job
             .as_ref()
@@ -1866,7 +1880,7 @@ impl JobStore {
 
     pub fn events(&self, job_id: Uuid) -> Result<Vec<JobEvent>> {
         let inner = self.inner.lock().expect("job store mutex poisoned");
-        Ok(self.read_stored_job(&inner, job_id)?.events)
+        Ok(self.read_stored_job(&inner, job_id, true)?.events.clone())
     }
 
     pub fn start(&self, job_id: Uuid) -> Result<Job> {
@@ -1926,8 +1940,9 @@ impl JobStore {
 
     pub(crate) fn controller_job_state(&self, job_id: Uuid) -> Result<ControllerJobState> {
         let inner = self.inner.lock().expect("job store mutex poisoned");
-        self.read_stored_job(&inner, job_id)?
+        self.read_stored_job(&inner, job_id, false)?
             .controller_job
+            .clone()
             .ok_or_else(|| {
                 Error::validation_invalid_argument(
                     "job_id",
@@ -2100,8 +2115,8 @@ impl JobStore {
     pub(crate) fn controller_job_for_key(&self, idempotency_key: &str) -> Option<Job> {
         let inner = self.inner.lock().expect("job store mutex poisoned");
         if let Some(submission) = inner.controller_submissions.get(idempotency_key) {
-            if let Ok(stored) = self.read_stored_job(&inner, submission.job_id) {
-                return Some(stored.job);
+            if let Ok(stored) = self.read_stored_job(&inner, submission.job_id, false) {
+                return Some(stored.job.clone());
             }
             return submission.terminal_job.clone();
         }
@@ -2144,7 +2159,7 @@ impl JobStore {
     pub(crate) fn controller_jobs_of_type(&self, job_type: &str) -> Vec<(Job, ControllerJobState)> {
         let inner = self.inner.lock().expect("job store mutex poisoned");
         let entries = self
-            .read_all_stored_jobs(&inner)
+            .jobs_with_history(&inner, sql_store::TerminalJobs::ControllerType(job_type))
             .unwrap_or_else(|_| inner.jobs.clone());
         let mut jobs = entries
             .values()
@@ -2157,12 +2172,49 @@ impl JobStore {
         jobs
     }
 
+    /// Controller jobs of one type whose request has `field == value`, oldest
+    /// first. Terminal history is filtered in SQL, so a lookup such as a
+    /// workflow's children never parses unrelated history.
+    pub(crate) fn controller_jobs_with_request(
+        &self,
+        job_type: &str,
+        field: &str,
+        value: &str,
+    ) -> Vec<(Job, ControllerJobState)> {
+        let inner = self.inner.lock().expect("job store mutex poisoned");
+        let entries = self
+            .jobs_with_history(
+                &inner,
+                sql_store::TerminalJobs::ControllerRequest {
+                    job_type,
+                    field,
+                    value,
+                },
+            )
+            .unwrap_or_else(|_| inner.jobs.clone());
+        let mut jobs = entries
+            .values()
+            .filter_map(|stored| {
+                let controller = stored.controller_job.as_ref()?;
+                (controller.job_type == job_type
+                    && controller.request.get(field).and_then(Value::as_str) == Some(value))
+                .then(|| (stored.job.clone(), controller.clone()))
+            })
+            .collect::<Vec<_>>();
+        jobs.sort_by_key(|(job, _)| job.created_at_ms);
+        jobs
+    }
+
     pub(crate) fn controller_cancellation_requested(&self, job_id: Uuid) -> bool {
         let inner = self.inner.lock().expect("job store mutex poisoned");
-        self.read_stored_job(&inner, job_id)
+        self.read_stored_job(&inner, job_id, false)
             .ok()
-            .and_then(|stored| stored.controller_job)
-            .is_some_and(|controller| controller.cancellation_requested)
+            .is_some_and(|stored| {
+                stored
+                    .controller_job
+                    .as_ref()
+                    .is_some_and(|controller| controller.cancellation_requested)
+            })
     }
 
     pub(crate) fn record_controller_prepared(&self, job_id: Uuid, prepared: Value) -> Result<()> {
@@ -2292,7 +2344,7 @@ impl JobStore {
                 if existing.fingerprint != fingerprint {
                     return Err(controller_idempotency_conflict(&idempotency_key));
                 }
-                let job = self.read_stored_job(inner, existing.job_id)?;
+                let job = self.read_stored_job(inner, existing.job_id, false)?;
                 return Ok(ControllerJobSubmissionOutcome::Existing(Box::new(
                     job.job.clone(),
                 )));
@@ -2936,7 +2988,7 @@ impl JobStore {
     ) -> Vec<(Uuid, crate::workspace_claim::WorkspaceOwnerLease)> {
         let inner = self.inner.lock().expect("job store mutex poisoned");
         let entries = self
-            .read_all_stored_jobs(&inner)
+            .jobs_with_history(&inner, sql_store::TerminalJobs::WorkspaceOwnerLease)
             .unwrap_or_else(|_| inner.jobs.clone());
         entries
             .values()
@@ -3268,7 +3320,7 @@ impl JobStore {
 
     pub(super) fn ensure_transition(&self, job_id: Uuid, next_status: JobStatus) -> Result<()> {
         let inner = self.inner.lock().expect("job store mutex poisoned");
-        let stored = self.read_stored_job(&inner, job_id)?;
+        let stored = self.read_stored_job(&inner, job_id, false)?;
         validate_transition(stored.job.status, next_status)
     }
 
@@ -3281,7 +3333,7 @@ impl JobStore {
 
     fn local_child_process(&self, job_id: Uuid) -> Result<Option<LocalChildProcessIdentity>> {
         let inner = self.inner.lock().expect("job store mutex poisoned");
-        let stored = self.read_stored_job(&inner, job_id)?;
+        let stored = self.read_stored_job(&inner, job_id, false)?;
         Ok(stored
             .local_child
             .as_ref()

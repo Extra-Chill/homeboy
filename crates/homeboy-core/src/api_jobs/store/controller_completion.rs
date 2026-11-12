@@ -414,7 +414,7 @@ impl JobStore {
         inner: &JobStoreInner,
         job_id: Uuid,
     ) -> Result<Option<Job>> {
-        let stored = self.read_stored_job(inner, job_id)?;
+        let stored = self.read_stored_job(inner, job_id, false)?;
         if stored.controller_job.is_none() {
             return Err(Error::validation_invalid_argument(
                 "job_id",
