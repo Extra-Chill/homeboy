@@ -5,6 +5,8 @@
 //! re-exports their public surface so existing call sites keep resolving
 //! `crate::agent_task_service::*` unchanged.
 
+pub use crate::agent_task_gate::failure_excerpt::gate_failure_excerpt_from_value;
+
 mod cook;
 mod cook_ci;
 pub use cook_ci::{cook_ci_status, repoll_cook_ci};

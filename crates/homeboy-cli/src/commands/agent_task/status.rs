@@ -2485,6 +2485,16 @@ pub(crate) fn evidence(args: EvidenceArgs) -> CmdResult<Value> {
     let failed_tasks = failed_task_statuses(aggregate.as_ref());
     let plan = agent_task_lifecycle::load_plan(run_id).ok();
 
+    let gate_outputs =
+        agent_task_service_direct::recorded_promotion_report(&durable_read.record.metadata)
+            .ok()
+            .flatten()
+            .and_then(|report| report.get("deterministic_gates").cloned())
+            .and_then(|gates| gates.as_array().cloned())
+            .unwrap_or_default()
+            .iter()
+            .filter_map(homeboy::agents::agent_task_service::gate_failure_excerpt_from_value)
+            .collect::<Vec<_>>();
     let mut hydrated = Vec::new();
     let mut total = 0;
     for (evidence_ref, task_id) in
@@ -2540,6 +2550,9 @@ pub(crate) fn evidence(args: EvidenceArgs) -> CmdResult<Value> {
         evidence: hydrated,
     })
     .unwrap_or(Value::Null);
+    if !gate_outputs.is_empty() {
+        value["gate_failure_outputs"] = json!(gate_outputs);
+    }
     if let Some(selection) = target.selection {
         value["candidate_selection"] = json!(selection);
     }
@@ -2736,6 +2749,20 @@ pub(super) fn diagnose(args: DiagnoseArgs) -> CmdResult<Value> {
     });
     if let Some(output) = gate_failure_output(&record) {
         value["gate_failure_output"] = Value::String(output);
+    }
+    if let Ok(Some(promotion)) =
+        agent_task_service_direct::recorded_promotion_report(&record.metadata)
+    {
+        let outputs: Vec<_> = promotion
+            .get("deterministic_gates")
+            .and_then(Value::as_array)
+            .into_iter()
+            .flatten()
+            .filter_map(homeboy::agents::agent_task_service::gate_failure_excerpt_from_value)
+            .collect();
+        if !outputs.is_empty() {
+            value["gate_failure_outputs"] = json!(outputs);
+        }
     }
     if let Some(projection) = lab_transport_failure_projection(&record, run_id) {
         value["lab_transport_failure"] = projection;

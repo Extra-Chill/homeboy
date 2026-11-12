@@ -15,6 +15,18 @@ pub(crate) struct RunsLogsArgs {
 }
 
 pub(crate) fn logs(args: RunsLogsArgs) -> CmdResult<Value> {
+    let store = homeboy::core::observation::ObservationStore::open_initialized()?;
+    if let Some(report) = super::gate_output::report(&store, &args.run_id) {
+        return Ok((
+            serde_json::json!({
+                "run_id": args.run_id,
+                "stdout": report.get("stdout"),
+                "stderr": report.get("stderr"),
+                "artifact": report.pointer("/lab_receipt/artifact_ref"),
+            }),
+            0,
+        ));
+    }
     let cursor = args
         .cursor
         .as_deref()
