@@ -869,7 +869,8 @@ fn promote_candidate(
     })?;
     super::destination::check_run(&path, options.source_run_id.as_deref())?;
     let feedback = outcome.metadata.get("gate_feedback_baseline");
-    let destination_head_alignment = align_superseded_head(&path, options, outcome, commit)?;
+    let destination_head_alignment =
+        align_superseded_head(&path, options, outcome, commit, feedback)?;
     if !options.dry_run || destination_head_alignment.is_none() {
         super::candidate_bundle::validate_destination(&path, commit, feedback)?;
     }
@@ -1010,11 +1011,16 @@ fn promote_candidate(
 /// candidate on the same base. A retry builds its candidate from the base, so
 /// the earlier candidate a prior promotion left at HEAD is not unrelated work.
 /// Any other movement stays refused by `validate_destination`.
+///
+/// When gate feedback names the superseded head as its baseline, the head
+/// moves back to the base with that candidate's tree kept staged: the shape
+/// feedback layers the new candidate onto.
 fn align_superseded_head(
     path: &Path,
     options: &AgentTaskPromotionRequest,
     outcome: &AgentTaskOutcome,
     candidate: &crate::agent_task::AgentTaskCandidate,
+    feedback: Option<&Value>,
 ) -> Result<Option<Value>> {
     let head = git_output(path, &["rev-parse", "HEAD"])?;
     if head == candidate.base_sha || head == candidate.candidate_sha {
@@ -1049,7 +1055,16 @@ fn align_superseded_head(
     }
     // Create-only: never overwrite an earlier saved head.
     git_output(path, &["update-ref", &reference, &head, ""])?;
-    git_output(path, &["reset", "--keep", &candidate.base_sha])?;
+    let feedback_baseline = feedback
+        .and_then(|baseline| baseline.pointer("/candidate_commit/candidate_sha"))
+        .and_then(Value::as_str)
+        == Some(head.as_str());
+    let mode = if feedback_baseline {
+        "--soft"
+    } else {
+        "--keep"
+    };
+    git_output(path, &["reset", mode, &candidate.base_sha])?;
     Ok(Some(
         json!({"from": head, "to": candidate.base_sha, "ref": reference}),
     ))
