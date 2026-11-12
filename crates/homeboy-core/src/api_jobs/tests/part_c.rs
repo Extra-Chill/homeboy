@@ -300,6 +300,32 @@ fn daemon_exec_projection_survives_event_retention_and_separates_run_identity() 
 }
 
 #[test]
+fn reservation_expiry_is_a_typed_pre_spawn_terminal_result() {
+    let payload = json!({
+        "reason": "local_child_reservation_expired",
+        "reservation_expires_at_ms": 1794449078922_u64,
+        "reservation_id": "bc9a7c9e-0000-0000-0000-000000000000",
+        "retryable": true,
+        "status": "failed"
+    });
+    let terminal: RemoteRunnerTerminalResult = serde_json::from_value(payload.clone())
+        .expect("reservation expiry decodes without exit_code");
+    let RemoteRunnerTerminalResult::PreSpawnFailure(failure) = terminal else {
+        panic!("reservation expiry must not be treated as a completed process");
+    };
+    assert!(failure.retryable());
+    assert_eq!(failure.reason(), "local_child_reservation_expired");
+    assert_eq!(serde_json::to_value(failure).unwrap(), payload);
+    assert!(matches!(
+        serde_json::from_value::<RemoteRunnerTerminalResult>(json!({"exit_code": 0})).unwrap(),
+        RemoteRunnerTerminalResult::Completed(_)
+    ));
+    assert!(
+        serde_json::from_value::<RemoteRunnerTerminalResult>(json!({"status": "failed"})).is_err()
+    );
+}
+
+#[test]
 fn remote_runner_result_observation_details_are_additive() {
     let legacy: RemoteRunnerJobResult = serde_json::from_value(json!({ "exit_code": 0 }))
         .expect("old result payload remains readable");
