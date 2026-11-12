@@ -352,7 +352,7 @@ impl AgentTaskPrFinalizationBackend for RealAgentTaskPrFinalizationBackend {
         path: &str,
         base: &str,
     ) -> Result<(crate::agent_task::AgentTaskCandidate, Vec<String>)> {
-        let candidate_sha = git_output(path, &["rev-parse", "HEAD"])?;
+        let head = git_output(path, &["rev-parse", "HEAD"])?;
         let changes = get_uncommitted_changes(path)?;
         let tree_sha = if changes.staged.is_empty()
             && changes.unstaged.is_empty()
@@ -362,6 +362,29 @@ impl AgentTaskPrFinalizationBackend for RealAgentTaskPrFinalizationBackend {
         } else {
             git_output(path, &["add", "-A"])?;
             git_output(path, &["write-tree"])?
+        };
+        // A staged merge is a merge commit, not a flat tree on HEAD: its
+        // parents are what keep the published branch from re-carrying what
+        // it merged (#17346).
+        let merged = homeboy_core::git::pending_merge(Path::new(path))?;
+        let candidate_sha = if merged.is_empty() {
+            head
+        } else {
+            let mut args = vec![
+                "-c",
+                "user.name=Homeboy",
+                "-c",
+                "user.email=homeboy@localhost",
+                "commit-tree",
+                tree_sha.as_str(),
+                "-p",
+                head.as_str(),
+            ];
+            for parent in &merged {
+                args.extend(["-p", parent.as_str()]);
+            }
+            args.extend(["-m", "Staged Cook candidate"]);
+            git_output(path, &args)?
         };
         let files = git_output(path, &["diff", "--name-only", base, &tree_sha])?
             .lines()
@@ -1489,22 +1512,8 @@ mod remote_base_tests {
         git(repo.path(), &["add", "-A"]);
         let mut backend = RealAgentTaskPrFinalizationBackend;
 
-        let (mut candidate, _) = backend.prepare_manual_candidate(path, &base).unwrap();
-        candidate.candidate_sha = git_output(
-            path,
-            &[
-                "commit-tree",
-                &candidate.tree_sha,
-                "-p",
-                &base,
-                "-p",
-                &trunk,
-                "-m",
-                "candidate",
-            ],
-        )
-        .unwrap();
         homeboy_core::git::record_pending_merge(repo.path(), &[trunk.clone()]).unwrap();
+        let (candidate, _) = backend.prepare_manual_candidate(path, &base).unwrap();
         let dates = backend.candidate_dates(path, &base).unwrap();
         let published = backend
             .publish_tree(path, &candidate, &base, "publish", &dates)

@@ -74,6 +74,28 @@ pub fn record_pending_merge(repo: &Path, parents: &[String]) -> Result<()> {
     Ok(())
 }
 
+/// The parents of the checkout's pending merge, as [`record_pending_merge`]
+/// (or `git merge`) left them in `MERGE_HEAD`; empty when none is pending.
+pub fn pending_merge(repo: &Path) -> Result<Vec<String>> {
+    let path = git(
+        repo,
+        &[
+            "rev-parse",
+            "--path-format=absolute",
+            "--git-path",
+            "MERGE_HEAD",
+        ],
+    )?;
+    match std::fs::read_to_string(&path) {
+        Ok(contents) => Ok(contents.split_whitespace().map(str::to_string).collect()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(Vec::new()),
+        Err(error) => Err(Error::internal_io(
+            error.to_string(),
+            Some(format!("read {path}")),
+        )),
+    }
+}
+
 fn is_ancestor(repo: &Path, ancestor: &str, descendant: &str) -> Result<bool> {
     let output = Command::new("git")
         .args(["merge-base", "--is-ancestor", ancestor, descendant])

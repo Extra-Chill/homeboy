@@ -4,7 +4,7 @@ pub use shallow::{deepen_shallow_source, is_shallow_repository, shallow_source_r
 mod commits;
 mod merge_parents;
 mod private_index;
-pub use merge_parents::{merged_parents, record_pending_merge};
+pub use merge_parents::{merged_parents, pending_merge, record_pending_merge};
 pub use private_index::private_index;
 mod gh_client;
 mod github;
