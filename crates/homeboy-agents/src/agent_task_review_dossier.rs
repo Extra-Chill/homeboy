@@ -66,6 +66,10 @@ pub struct AiReviewVerificationClaim {
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct AgentTaskReviewVerifiedCommand {
+    #[serde(default)]
+    pub label: String,
+    #[serde(default)]
+    pub elapsed_ms: Option<u128>,
     pub command: String,
     pub status: String,
     pub candidate_commit: String,
@@ -196,6 +200,9 @@ pub struct AgentTaskReviewAiAssistance {
     pub used: bool,
     pub tool: String,
     pub model: String,
+    /// The agent's own account of how it contributed (review form `used_for`).
+    #[serde(default)]
+    pub contribution: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -242,6 +249,13 @@ pub fn review_form_output_declaration() -> crate::agent_task::AgentTaskOutputDec
                 "pr_title": { "type": "string", "minLength": 1, "maxLength": 256 },
                 "completion": { "type": "string", "enum": ["complete", "incomplete"] },
                 "incomplete_reason": { "type": "string" },
+                "used_for": { "type": "string" },
+                "evidence": { "type": "array", "items": {
+                    "type": "object", "required": ["summary"], "properties": {
+                        "summary": { "type": "string" }, "url": { "type": "string" }
+                    }
+                } },
+                "evidence_required": { "type": "boolean" },
                 "summary": { "type": "string" },
                 "what_changed": {
                     "type": "array",
@@ -256,13 +270,21 @@ pub fn review_form_output_declaration() -> crate::agent_task::AgentTaskOutputDec
 }
 
 /// The single AI-authored "form" — every non-deterministic slot of the review
-/// dossier. The orchestrator owns everything else (AI-assistance tool/model,
-/// evidence, gate labels, how-to-test, source relationships, the section
+/// dossier, including task-specific measurements. The orchestrator owns
+/// AI-assistance tool/model, gate labels, how-to-test, source relationships, the section
 /// skeleton). The agent fills this once and returns it via
 /// `AgentTaskOutcome.outputs["review_form"]`; it is the only reviewer-facing
 /// prose the model authors.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
 pub struct AiFilledReviewForm {
+    /// Concrete AI contribution, retained alongside controller-owned attribution.
+    #[serde(default, deserialize_with = "prose_field")]
+    pub used_for: String,
+    /// Measurements, before/after observations and repro results requested by the task.
+    #[serde(default)]
+    pub evidence: Vec<AgentTaskReviewEvidence>,
+    #[serde(default)]
+    pub evidence_required: bool,
     /// Specific title of the verified change, rather than a task or repository label.
     #[serde(default)]
     pub pr_title: String,
@@ -549,6 +571,13 @@ pub(crate) fn verified_commands_from_promotion(
                 },
             );
             Some(AgentTaskReviewVerifiedCommand {
+                label: promotion
+                    .gate_results
+                    .iter()
+                    .find(|result| result.id == gate.id && result.name != result.id)
+                    .map(|result| result.name.clone())
+                    .unwrap_or_default(),
+                elapsed_ms: gate.verdict.as_ref().map(|verdict| verdict.elapsed_ms),
                 command,
                 status: format!("{:?}", gate.status).to_ascii_lowercase(),
                 candidate_commit: candidate.commit.clone(),
@@ -959,6 +988,20 @@ pub fn enrich_dossier(
             });
         }
     }
+    for command in &mut dossier.verified_commands {
+        if let Some(gate) = gates.iter().find(|gate| gate.id == command.evidence_ref) {
+            if gate.name != gate.id && !gate.name.trim().is_empty() {
+                command.label = gate.name.clone();
+            }
+        }
+        // Publication may supply a retained run artifact URL even when the
+        // original gate record only carries its internal id.
+        if !is_reviewer_url(&command.evidence_ref) {
+            if let Some(reference) = artifact_refs.iter().find(|url| is_reviewer_url(url)) {
+                command.evidence_ref = reference.clone();
+            }
+        }
+    }
     for reference in artifact_refs {
         if is_reviewer_url(reference) {
             dossier.evidence.push(AgentTaskReviewEvidence {
@@ -976,7 +1019,7 @@ pub fn enrich_dossier(
 /// Render the PR body:
 ///
 /// Summary, changes, verification, optional additional test steps, AI assistance,
-/// then closing references. Run provenance is collapsed and commands occur once.
+/// evidence, then closing references. Gate programs stay in retained evidence.
 pub fn render_review_dossier(
     dossier: &AgentTaskReviewDossier,
     profile: &AgentTaskReviewProfile,
@@ -1050,6 +1093,10 @@ pub fn render_review_dossier(
             bullets(&files)
         ));
     }
+    let evidence = render_evidence(&dossier.evidence);
+    blocks.push(format!("## Evidence\n{}", if evidence.is_empty() {
+        "Evidence is missing: no measurements, before/after observations or repro results were supplied.".to_string()
+    } else { evidence }));
     if dossier.ai_assistance.used {
         blocks.push(render_ai_disclosure(&dossier.ai_assistance));
     }
@@ -1092,10 +1139,19 @@ fn strip_model_tiers(model: &str) -> String {
 
 /// The one AI disclosure in the body.
 fn render_ai_disclosure(ai: &AgentTaskReviewAiAssistance) -> String {
-    prose(&strip_model_tiers(&ai.model))
+    let contribution = if ai.contribution.trim().is_empty() {
+        "Implementation and reviewer documentation were written by the AI".to_string()
+    } else {
+        prose(ai.contribution.trim().trim_end_matches('.'))
+    };
+    format!(
+        "## AI disclosure\nTool: Homeboy Cook. Agent: {}. Model: {}.\n\n{contribution}, under the direction of the Cook requester. Gates were run by Homeboy. A human reviews before merge.",
+        prose(&homeboy_tool_disclosure(&ai.tool)),
+        prose(&strip_model_tiers(&ai.model))
+    )
 }
 
-/// One visible entry per gate with its runnable command and result, followed
+/// One visible entry per gate with its short label and result, followed
 /// by CI and one collapsed block for provenance identifiers.
 fn render_verification(dossier: &AgentTaskReviewDossier) -> Option<String> {
     let mut visible = Vec::new();
@@ -1136,11 +1192,29 @@ fn render_verification(dossier: &AgentTaskReviewDossier) -> Option<String> {
                 "{status}{counts} on `{}`{base}.",
                 short_sha(&command.candidate_commit)
             );
-            if command.command.contains('\n') {
-                format!("- {result}\n\n{}", fenced_command(&command.command))
+            let label = if command.label.trim().is_empty() {
+                command
+                    .command
+                    .lines()
+                    .map(str::trim)
+                    .find(|line| !line.is_empty() && !line.starts_with("set "))
+                    .unwrap_or("Gate")
+                    .chars()
+                    .take(80)
+                    .collect::<String>()
             } else {
-                format!("- {} {result}", render_command(&command.command))
-            }
+                command.label.clone()
+            };
+            let duration = command
+                .elapsed_ms
+                .map(|ms| format!("{ms} ms"))
+                .unwrap_or_else(|| "duration not recorded".to_string());
+            let evidence = if is_reviewer_url(&command.evidence_ref) {
+                format!("[retained gate evidence]({})", command.evidence_ref)
+            } else {
+                "[retained gate metadata](#cook-run); output evidence link unavailable".to_string()
+            };
+            format!("- {}: {result} {duration}; {evidence}.", prose(&label))
         })
         .collect::<Vec<_>>();
     let repro = dossier
@@ -1157,16 +1231,11 @@ fn render_verification(dossier: &AgentTaskReviewDossier) -> Option<String> {
         }
         visible.push(format!("{repro}- CI: pending"));
     }
-    let evidence = render_evidence(&dossier.evidence);
-    if dossier.verified_commands.is_empty() {
-        if !evidence.is_empty() {
-            visible.push(evidence);
-        }
-    } else {
+    if !dossier.verified_commands.is_empty() {
         // Reviewer-resolvable labels only: `gate.id` is an internal positional
         // id (`gate-1`) a reviewer cannot use, so each entry is labeled by its
         // 1-based position among the visible gate lines above. (#16316)
-        let mut provenance = dossier
+        let provenance = dossier
             .verified_commands
             .iter()
             .enumerate()
@@ -1185,11 +1254,8 @@ fn render_verification(dossier: &AgentTaskReviewDossier) -> Option<String> {
             })
             .collect::<Vec<_>>()
             .join("\n");
-        if !evidence.is_empty() {
-            provenance = format!("{provenance}\n{evidence}");
-        }
         visible.push(format!(
-            "<details><summary>Cook run</summary>\n\n{provenance}\n\n</details>"
+            "<a id=\"cook-run\"></a>\n<details><summary>Cook run</summary>\n\n{provenance}\n\n</details>"
         ));
     }
     (!visible.is_empty()).then(|| visible.join("\n\n"))
@@ -2228,6 +2294,7 @@ mod tests {
                 used: true,
                 tool: "Pi".into(),
                 model: "openai/gpt-5.6-terra".into(),
+                contribution: String::new(),
             },
             source_relationships: vec![AgentTaskReviewIssueRelationship {
                 kind: AgentTaskReviewIssueRelationshipKind::Closes,
@@ -2262,6 +2329,9 @@ mod tests {
 
     fn valid_form() -> AiFilledReviewForm {
         AiFilledReviewForm {
+            used_for: String::new(),
+            evidence: Vec::new(),
+            evidence_required: false,
             pr_title: "fix(agent-task): guard the reload render path".into(),
             summary: "Fix the widget so it renders on reload.".into(),
             what_changed: vec!["Guard the null path in render().".into()],
@@ -2424,7 +2494,7 @@ mod tests {
             .expect("fixture gate evidence");
         let body = render_review_dossier(&value, &default_profile());
         for expected in [
-            "`cargo test connection` passed (175/177) on `candidate-commit`.",
+            "cargo test connection: passed (175/177) on `candidate-commit`.",
             "<details><summary>Cook run</summary>",
             "- Gate 1: tree `candidate-tree`; 2 failed, 0 ignored",
         ] {
@@ -2608,9 +2678,7 @@ mod tests {
             .expect("gate evidence passes the dossier scalar contract");
     }
 
-    /// #16270: the Cook PR body shape. One relationship line, the agent's
-    /// prose as markdown, one Verification line per gate with the runnable
-    /// command and provenance collapsed, and a single AI disclosure.
+    /// Cook PR bodies retain evidence and disclosure without dumping shell programs.
     #[test]
     fn cook_pr_body_pins_the_compact_verification_shape() {
         let gate_command = "set -e\ncargo fmt --all -- --check\nout=$(cargo test --workspace --lib task_issue_relationship 2>&1); echo \"$out\" | grep -E \"^test |test result\" | tail -30\necho \"$out\" | grep -qE \"test result: ok\\. [1-9]\" || { echo \"no task_issue_relationship tests ran\"; exit 1; }\n! echo \"$out\" | grep -q \"FAILED\"\ncargo test -p homeboy-agents --lib agent_task_review_dossier\n";
@@ -2630,13 +2698,20 @@ mod tests {
             used: true,
             tool: "Homeboy (pi)".into(),
             model: "anthropic-claude-opus-5-5".into(),
+            contribution: "Implemented the guard and its regression test.".into(),
         };
+        value.evidence.push(AgentTaskReviewEvidence {
+            summary: "After fix: 65 tests passed; before fix: repro failed.".into(),
+            url: None,
+        });
         value.verified_commands = vec![AgentTaskReviewVerifiedCommand {
+            label: "Rust regression suite".into(),
+            elapsed_ms: Some(1234),
             command: gate_command.into(),
             status: "succeeded".into(),
             candidate_commit: "cf5ddd58adabe779d1c9d26b16d90d83be16805b".into(),
             candidate_tree: "645eaae2998d0612cd2f08c977a31b49c06fec7d".into(),
-            evidence_ref: "gate-1".into(),
+            evidence_ref: "https://github.com/Extra-Chill/homeboy/actions/runs/123".into(),
             total: Some(65),
             passed: Some(65),
             failed: Some(0),
@@ -2663,7 +2738,11 @@ mod tests {
             }
             let rendered = render_review_dossier(&run, &default_profile());
             for fact in [
-                gate_command.trim_end(),
+                "Rust regression suite",
+                "Implemented the guard and its regression test, under the direction of the Cook requester.",
+                "1234 ms",
+                "[retained gate evidence](https://github.com/Extra-Chill/homeboy/actions/runs/123)",
+                "After fix: 65 tests passed; before fix: repro failed.",
                 "65/65",
                 "cf5ddd5",
                 "6229120",
@@ -2697,23 +2776,39 @@ mod tests {
                 "CI must continue the verification list without a blank line: {rendered}"
             );
         }
-        // The gate command appears once, runnable, and the disclosure once.
-        assert_eq!(body.matches("cargo fmt --all -- --check").count(), 1);
+        // Shell programs are retained in the run, not dumped into the body.
+        assert!(!body.contains(gate_command.trim_end()));
+        assert_eq!(body.matches("## AI disclosure").count(), 1);
         assert_eq!(body.matches("## AI assistance").count(), 0);
-        for retired in [
-            "## How to test",
-            "AI disclosure:",
-            "## Evidence",
-            "\\`",
-            "\\_",
-        ] {
+        for retired in ["## How to test", "\\`", "\\_"] {
             assert!(!body.contains(retired), "retired `{retired}` in {body}");
         }
         assert!(
-            body.chars().count() < 1_800,
+            body.chars().count() < 2_500,
             "{} chars: {body}",
             body.chars().count()
         );
+    }
+
+    #[test]
+    fn review_form_retains_measurements_and_missing_evidence_is_explicit() {
+        let form: AiFilledReviewForm = serde_json::from_value(serde_json::json!({
+            "pr_title": "fix(cook): retain evidence",
+            "summary": "Retain measurements.",
+            "what_changed": ["Render evidence."],
+            "completion": "complete",
+            "evidence_required": true,
+            "used_for": "Implemented the fix and regression tests.",
+            "evidence": [{"summary": "Before: 50 ms; after: 10 ms."}]
+        }))
+        .unwrap();
+        form.validate().unwrap();
+        let mut value = dossier();
+        value.evidence = form.evidence;
+        let body = render_review_dossier(&value, &default_profile());
+        assert!(body.contains("## Evidence\n- Before: 50 ms; after: 10 ms."));
+        value.evidence.clear();
+        assert!(render_review_dossier(&value, &default_profile()).contains("Evidence is missing"));
     }
 
     #[test]
@@ -2806,7 +2901,7 @@ mod tests {
     }
 
     #[test]
-    fn review_form_ignores_retired_used_for_and_compatibility_keys() {
+    fn review_form_accepts_used_for_and_legacy_compatibility_keys() {
         let outputs = serde_json::json!({ "review_form": {
             "pr_title": "fix(agent-task): guard reload path",
             "summary": "Guard reloads.",
@@ -2834,7 +2929,7 @@ mod tests {
         let declaration = review_form_output_declaration();
         assert!(declaration.structural_schema["properties"]
             .get("used_for")
-            .is_none());
+            .is_some());
         assert!(declaration.structural_schema["properties"]
             .get("compatibility")
             .is_none());
