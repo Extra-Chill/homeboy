@@ -78,7 +78,13 @@ fn compact_doctor_projection_bounds_evidence_and_renders_action() {
         })
         .collect();
 
-    let compact = output_projection(report, false);
+    let mut compact = output_projection(report, false);
+    // The observed environment is the test host's; pin it so the rendered
+    // summary is deterministic on every platform.
+    compact["environment"] = serde_json::json!({
+        "schema": homeboy_runner_contract::RUNNER_ENVIRONMENT_SCHEMA,
+        "platform": "linux", "arch": "x86_64", "execution_kind": "host",
+    });
     let rendered = serde_json::to_string(&compact).expect("compact JSON");
     assert_eq!(
         compact["checks"].as_array().expect("checks").len(),
@@ -88,7 +94,7 @@ fn compact_doctor_projection_bounds_evidence_and_renders_action() {
     assert!(rendered.len() < 16 * 1024, "{rendered}");
     assert_eq!(
         render_summary(&compact).as_deref(),
-        Some("Runner doctor\nStatus: degraded\nChecks shown: 12\nNext: homeboy runner doctor local --full")
+        Some("Runner doctor\nEnvironment: linux / x86_64 / host\nStatus: degraded\nChecks shown: 12\nNext: homeboy runner doctor local --full")
     );
     assert!(projection_envelope_bytes(&compact).unwrap() <= COMPACT_PROJECTION_BYTES);
 }

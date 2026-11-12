@@ -4134,8 +4134,6 @@ fn daemon_freshness_report(job_store: &JobStore) -> Result<DaemonFreshnessReport
     ))
 }
 
-/// One runner-owned observation. Capacity and freshness share the exact typed
-/// job snapshot, rather than straddling transitions through separate probes.
 /// Observe this process's build target, never the controller's target for a remote runner.
 pub fn observed_runner_environment() -> Result<homeboy_runner_contract::RunnerEnvironment> {
     serde_json::from_value(json!({
@@ -4149,6 +4147,8 @@ pub fn observed_runner_environment() -> Result<homeboy_runner_contract::RunnerEn
     })
 }
 
+/// One runner-owned observation. Capacity and freshness share the exact typed
+/// job snapshot, rather than straddling transitions through separate probes.
 fn describe_runner(job_store: &JobStore) -> Result<serde_json::Value> {
     let validation = validate_lease_file(&state_path()?)?;
     let lease = validation

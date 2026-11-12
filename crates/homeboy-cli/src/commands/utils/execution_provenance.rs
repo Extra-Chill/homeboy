@@ -76,17 +76,18 @@ pub fn captured() -> Option<Value> {
         .read()
         .ok()
         .and_then(|slot| slot.clone())?;
-    if let Some(environment) = ENVIRONMENT_EVIDENCE.get() {
-        value["environment"] = environment.clone();
-    } else {
+    // Observe the resolved runner once per process: a remote observation is a
+    // daemon round trip, and several evidence writers read provenance.
+    let environment = ENVIRONMENT_EVIDENCE.get_or_init(|| {
         let runner_id = value
             .pointer("/resolved_execution/runner_id")
             .and_then(Value::as_str)
             .unwrap_or("local");
         let resolved =
             homeboy::runner::runners::RunnerDiscoveryService::environment(runner_id).ok();
-        value["environment"] = json!({"requested": null, "resolved": {"runner_id": runner_id, "environment": resolved}});
-    }
+        json!({"requested": null, "resolved": {"runner_id": runner_id, "environment": resolved}})
+    });
+    value["environment"] = environment.clone();
     Some(value)
 }
 
