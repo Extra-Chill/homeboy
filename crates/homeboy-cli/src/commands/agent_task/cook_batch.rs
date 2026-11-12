@@ -622,6 +622,7 @@ fn batch_child(instance: &str, item: &Value, status: &str, batch_reason: &str) -
     let cook_id = item["run_id"].as_str();
     let mut child = json!({
         "index": index,
+        "placement": crate::commands::run_placement::placement(&Value::Null),
         "child_id": cook_id
             .map(str::to_string)
             .unwrap_or_else(|| format!("{instance}/cook/item-{index}")),
@@ -699,6 +700,10 @@ fn child_run(cook_id: &str) -> Option<Vec<(&'static str, Value)>> {
         .or_else(|| verdict.candidate.as_ref().map(|state| json!(state)))
         .unwrap_or(Value::Null);
     Some(vec![
+        (
+            "placement",
+            crate::commands::run_placement::placement(&json!(run)),
+        ),
         ("run_id", json!(record.run_id)),
         ("state", json!(verdict.state)),
         ("verdict", json!(verdict.state)),

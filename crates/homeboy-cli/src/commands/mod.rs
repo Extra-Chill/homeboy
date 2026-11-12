@@ -248,6 +248,7 @@ pub mod release;
 pub mod resources;
 pub mod review;
 pub mod rig;
+pub(crate) mod run_placement;
 pub mod runner;
 pub mod runs;
 pub(crate) mod runs_proof_summary;

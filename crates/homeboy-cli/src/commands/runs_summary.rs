@@ -126,6 +126,8 @@ pub(crate) fn project_runs_show_output(payload: &Value) -> Value {
         .collect::<Vec<_>>();
 
     let mut compact_run = json!({
+        "placement": (run.get("kind").and_then(Value::as_str) == Some("agent_task"))
+            .then(|| super::run_placement::placement(run)),
         "id": run.get("id").map(super::operator_projection::value),
         "kind": run.get("kind").map(super::operator_projection::value),
         "status": run.get("status").map(super::operator_projection::value),
@@ -451,6 +453,10 @@ fn render_run_detail(run: &Value) -> String {
 
     // Put terminal state and a supported next action ahead of run metadata.
     let mut lines = vec![format!("Status: {status}")];
+    // Execution location is an agent-task fact; other run kinds have none.
+    if string_value(run, &["kind"]) == Some("agent_task") {
+        lines.push(super::run_placement::line(run));
+    }
     lines.extend(cook_verdict_lines(run));
     lines.extend(failure_summary_lines(run));
     lines.extend(recovery_command_lines(run));

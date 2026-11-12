@@ -3168,7 +3168,14 @@ impl JobStore {
                 job_id,
                 kind: JobEventKind::Progress,
                 timestamp_ms: now,
-                message: Some("local runner child reserved before spawn".to_string()),
+                message: Some(format!(
+                    "runner {}: child reserved before spawn",
+                    stored
+                        .local_runner
+                        .as_ref()
+                        .map(|runner| runner.runner_id.as_str())
+                        .unwrap_or("unknown")
+                )),
                 data: Some(serde_json::json!({
                     "phase": "child_reserved",
                     "reservation_id": reservation_id,

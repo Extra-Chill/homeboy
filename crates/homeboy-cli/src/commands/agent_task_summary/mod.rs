@@ -31,7 +31,7 @@ pub(crate) fn render_agent_task_summary(
     kind: AgentTaskSummaryKind,
     payload: &Value,
 ) -> Option<String> {
-    match kind {
+    let summary = match kind {
         AgentTaskSummaryKind::Cook => render_cook_summary(payload),
         AgentTaskSummaryKind::Recover => Some(format!(
             "Recovery step: {}\nAttempt: {}\nStatus: {}",
@@ -48,7 +48,28 @@ pub(crate) fn render_agent_task_summary(
         AgentTaskSummaryKind::Review => render_review_summary(payload),
         AgentTaskSummaryKind::Providers => render_providers_summary(payload),
         AgentTaskSummaryKind::Capacity => render_capacity_summary(payload),
-    }
+    };
+    summary.map(|mut summary| {
+        if matches!(
+            kind,
+            AgentTaskSummaryKind::Cook
+                | AgentTaskSummaryKind::Status
+                | AgentTaskSummaryKind::Recover
+        ) && !summary.starts_with("Cook preview")
+            && !summary.contains("Placement:")
+        {
+            summary.push('\n');
+            summary.push_str(&super::run_placement::line(payload));
+            for child in payload["children"].as_array().into_iter().flatten() {
+                let id = child["child_id"]
+                    .as_str()
+                    .or(child["run_id"].as_str())
+                    .unwrap_or("child");
+                summary.push_str(&format!("\n  {id}: {}", super::run_placement::line(child)));
+            }
+        }
+        summary
+    })
 }
 
 #[cfg(test)]
