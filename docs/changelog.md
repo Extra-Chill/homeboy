@@ -4,6 +4,12 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.458.53] - 2026-11-12
+
+### Fixed
+- an agent's incomplete verdict is the root cause of an unfinished Cook
+- the stale-run watchdog protects every controller startup phase
+
 ## [0.458.52] - 2026-11-12
 
 ### Fixed
