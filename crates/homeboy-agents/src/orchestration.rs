@@ -4758,6 +4758,20 @@ fn placement(record: &AgentTaskRunRecord) -> Option<ControlPlaneRunPlacement> {
 }
 
 fn phase(record: &AgentTaskRunRecord) -> Option<String> {
+    // Terminal durable failures outrank stale staging/progress and owner hints.
+    if matches!(
+        record.state(),
+        AgentTaskRunState::Failed | AgentTaskRunState::PartialFailure
+    ) {
+        return Some(
+            if record.metadata["pre_execution_failure"].is_object() {
+                "pre_execution_failure"
+            } else {
+                "failed"
+            }
+            .to_string(),
+        );
+    }
     if record.is_controller_pre_provider_phase()
         && record.metadata["phase"] == "source_materialization"
     {
@@ -4984,6 +4998,26 @@ fn blocker(
     if let Some(blocker) = delivery.and_then(|delivery| delivery.blocker.as_ref()) {
         return Some(delivery_blocker(blocker));
     }
+    // Diagnose prefers the durable pre-execution cause over controller history.
+    if let Some(failure) = record.metadata.get("pre_execution_failure") {
+        if let Some(message) = failure["message"]
+            .as_str()
+            .filter(|message| !message.trim().is_empty())
+        {
+            return Some(ControlPlaneBlocker {
+                details: missing_argument_details(&failure["details"]),
+                code: failure["error_code"]
+                    .as_str()
+                    .map(|code| bounded(code, STATE_BOUND)),
+                message: homeboy_core::redaction::redact_string(message),
+                state: None,
+                reason: None,
+                retry: None,
+                daemon: None,
+                output: None,
+            });
+        }
+    }
     if let Some(message) = record
         .metadata
         .pointer("/cook_controller_failure/message")
@@ -5013,28 +5047,6 @@ fn blocker(
                 message: redacted_bounded(&stop.violation.observed_summary(), MESSAGE_BOUND),
                 state: None,
                 reason: Some(redacted_bounded(&stop.violation.remedy(), MESSAGE_BOUND)),
-                retry: None,
-                daemon: None,
-                output: None,
-            });
-        }
-    }
-    if let Some(failure) = record.metadata.get("pre_execution_failure") {
-        if let Some(message) = failure
-            .get("message")
-            .and_then(|value| value.as_str())
-            .filter(|value| !value.trim().is_empty())
-        {
-            return Some(ControlPlaneBlocker {
-                details: missing_argument_details(&failure["details"]),
-                code: failure
-                    .get("error_code")
-                    .and_then(|value| value.as_str())
-                    .filter(|value| !value.trim().is_empty())
-                    .map(|value| bounded(value, STATE_BOUND)),
-                message: homeboy_core::redaction::redact_string(message),
-                state: None,
-                reason: None,
                 retry: None,
                 daemon: None,
                 output: None,
@@ -7021,6 +7033,35 @@ mod tests {
             resource.updated_at.as_deref(),
             Some(observed_at.to_rfc3339().as_str())
         );
+    }
+
+    #[test]
+    fn terminal_staging_failure_overrides_in_flight_progress() {
+        let mut record = record(AGENT_TASK_RUN);
+        record.set_state_for_test(AgentTaskRunState::Failed);
+        record.metadata["phase"] = json!("in_flight");
+        record.metadata["cook_progress"] = json!({"phase": "in_flight"});
+        record.metadata["pre_execution_failure"] = json!({
+            "phase": "lab_staging_controller",
+            "error_code": "checkpoint.stage_intent",
+            "message": "checkpoint.stage_intent failed closed",
+            "details": {},
+            "provider_executions_consumed": 0
+        });
+        let resource = project_record(&record, None).expect("project failed attempt");
+        assert_eq!(resource.phase.as_deref(), Some("pre_execution_failure"));
+        let blocker = resource.blocker.expect("root cause");
+        assert_eq!(blocker.code.as_deref(), Some("checkpoint.stage_intent"));
+        assert_eq!(blocker.message, "checkpoint.stage_intent failed closed");
+    }
+
+    #[test]
+    fn active_staging_remains_in_flight() {
+        let mut record = record(AGENT_TASK_RUN);
+        record.set_state_for_test(AgentTaskRunState::Running);
+        record.metadata["cook_progress"] = json!({"phase": "in_flight"});
+        let resource = project_record(&record, None).expect("project staging attempt");
+        assert_eq!(resource.phase.as_deref(), Some("in_flight"));
     }
 
     #[test]
