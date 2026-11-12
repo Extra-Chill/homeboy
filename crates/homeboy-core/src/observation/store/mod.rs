@@ -37,8 +37,7 @@ pub use artifacts::{
     BoundedArtifactProjection,
 };
 pub use control_plane_actions::{
-    ControlPlaneActionClaim, ControlPlaneEffectAdmission, ControlPlaneEffectStatus,
-    ControlPlaneResourceProjection,
+    ControlPlaneEffectAdmission, ControlPlaneEffectStatus, ControlPlaneResourceProjection,
 };
 pub use control_plane_events::{
     PreparedControlPlaneEventAppend, CONTROL_PLANE_EVENT_RETENTION_LIMIT,
