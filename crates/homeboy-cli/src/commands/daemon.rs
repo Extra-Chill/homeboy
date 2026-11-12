@@ -749,7 +749,12 @@ fn recover_direct_with_drain(
             {
                 return Err(stale_recovery_plan_error());
             }
-            execute_recovery_plan(plan, lease_id.as_deref(), addr)
+            execute_recovery_plan(
+                plan,
+                lease_id.as_deref(),
+                addr,
+                current.service_manager().is_some(),
+            )
         },
         daemon::read_status,
     )
@@ -944,12 +949,58 @@ fn execute_recovery_plan(
     plan: &daemon::recovery_actions::DaemonRecoveryPlan,
     lease_id: Option<&str>,
     addr: &str,
+    service_managed: bool,
+) -> homeboy::core::Result<Vec<String>> {
+    execute_recovery_plan_with(
+        plan,
+        lease_id,
+        service_managed,
+        RecoveryOperations {
+            stop: &mut |lease_id| daemon::stop_for_lease(lease_id).map(|_| ()),
+            restart_service_managed: &mut |lease_id| {
+                daemon::restart_service_managed(lease_id, DaemonStatus::admits_work).map(|_| ())
+            },
+            drain_then_replace: &mut |lease_id| daemon::drain_then_replace(lease_id).map(|_| ()),
+            ensure_running: &mut || daemon::ensure_running(addr).map(|_| ()),
+        },
+    )
+}
+
+type RecoveryOperation<'a, Arg> = &'a mut dyn FnMut(Arg) -> homeboy::core::Result<()>;
+
+struct RecoveryOperations<'a> {
+    stop: RecoveryOperation<'a, &'a str>,
+    restart_service_managed: RecoveryOperation<'a, &'a str>,
+    drain_then_replace: RecoveryOperation<'a, &'a str>,
+    ensure_running: &'a mut dyn FnMut() -> homeboy::core::Result<()>,
+}
+
+fn execute_recovery_plan_with<'a>(
+    plan: &daemon::recovery_actions::DaemonRecoveryPlan,
+    lease_id: Option<&'a str>,
+    service_managed: bool,
+    operations: RecoveryOperations<'a>,
 ) -> homeboy::core::Result<Vec<String>> {
     use daemon::recovery_actions as actions;
 
     let mut applied_steps = Vec::new();
+    // Set once a service manager's replacement is proven live, so the plan's
+    // `ensure-running` step observes it instead of spawning beside it.
+    let mut manager_replaced = false;
     for step in &plan.steps {
         match step.code.as_str() {
+            // A service manager owns its daemon's replacement: signal the
+            // exact lease and wait for the manager's fresh daemon. A bare stop
+            // would let `ensure-running` race a Homeboy-owned spawn into the
+            // manager's restart window (#17891).
+            code if code == actions::DAEMON_STOP && service_managed => {
+                let lease_id = lease_id.ok_or_else(|| {
+                    Error::internal_unexpected("a service-managed stop requires a lease id")
+                })?;
+                (operations.restart_service_managed)(lease_id)?;
+                manager_replaced = true;
+            }
+            code if code == actions::DAEMON_ENSURE_RUNNING && manager_replaced => {}
             code if code == actions::DAEMON_STOP => {
                 let lease_id = lease_id.ok_or_else(|| {
                     Error::validation_invalid_argument(
@@ -959,16 +1010,16 @@ fn execute_recovery_plan(
                         None,
                     )
                 })?;
-                daemon::stop_for_lease(lease_id)?;
+                (operations.stop)(lease_id)?;
             }
             code if code == actions::DRAIN_THEN_REPLACE => {
-                daemon::drain_then_replace(
+                (operations.drain_then_replace)(
                     lease_id
                         .ok_or_else(|| Error::internal_unexpected("drain requires a lease id"))?,
                 )?;
             }
             code if code == actions::DAEMON_ENSURE_RUNNING => {
-                daemon::ensure_running(addr)?;
+                (operations.ensure_running)()?;
             }
             code => {
                 return Err(Error::validation_invalid_argument(
@@ -1069,12 +1120,15 @@ fn serve(addr: &str) -> CmdResult<DaemonOutput> {
 
 /// Every `daemon serve`, CLI-launched or run by a service manager, drains on
 /// SIGINT (Ctrl-C) and SIGTERM (`daemon stop` or a service-manager stop): it
-/// finishes owned responses and releases its lease (#15436, #17387).
+/// finishes owned responses and releases its lease (#15436, #17387). A drain
+/// that cannot finish is cut off at the shutdown deadline, so a caught SIGTERM
+/// always ends the process (#17891).
 fn install_drain_handlers() -> homeboy::core::Result<std::sync::Arc<std::sync::atomic::AtomicBool>>
 {
     let shutdown = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
     homeboy::core::process::install_shutdown_handler(shutdown.clone(), "daemon")?;
     homeboy::core::process::install_terminate_handler(shutdown.clone())?;
+    daemon::arm_shutdown_deadline(shutdown.clone())?;
     Ok(shutdown)
 }
 
@@ -1662,6 +1716,85 @@ mod tests {
         assert!(output.fresh);
         assert_eq!(output.lease_id.as_deref(), Some(new_lease));
         assert!(output.blocked_on.is_none());
+    }
+
+    fn stop_then_ensure_plan(lease_id: &str) -> daemon::recovery_actions::DaemonRecoveryPlan {
+        use daemon::recovery_actions as actions;
+        let status = recovery_status(
+            false,
+            Some(daemon::DaemonStaleReasonCode::VersionMismatch),
+            vec![
+                daemon::DaemonRepairStep::executable(
+                    actions::DAEMON_STOP,
+                    actions::stop_for_lease(lease_id),
+                ),
+                daemon::DaemonRepairStep::executable(
+                    actions::DAEMON_ENSURE_RUNNING,
+                    actions::ensure_running(),
+                ),
+            ],
+        );
+        let plan = daemon::recovery_actions::plan_recovery(&status);
+        assert_eq!(
+            plan.steps
+                .iter()
+                .map(|step| step.code.as_str())
+                .collect::<Vec<_>>(),
+            vec![actions::DAEMON_STOP, actions::DAEMON_ENSURE_RUNNING],
+            "a stale live daemon plans a stop then a start"
+        );
+        plan
+    }
+
+    /// #17891: recovering a stale service-managed daemon hands the replacement
+    /// to its manager and waits for it; it never stops the daemon and then
+    /// spawns a Homeboy-owned one into the manager's restart window.
+    #[test]
+    fn recover_routes_a_service_managed_stop_through_the_managers_restart() {
+        use daemon::recovery_actions as actions;
+        let plan = stop_then_ensure_plan("lease-managed");
+        let calls = std::cell::RefCell::new(Vec::new());
+        let applied = execute_recovery_plan_with(
+            &plan,
+            Some("lease-managed"),
+            true,
+            RecoveryOperations {
+                stop: &mut |_| panic!("a managed daemon is not stopped bare"),
+                restart_service_managed: &mut |lease| {
+                    calls.borrow_mut().push(format!("restart {lease}"));
+                    Ok(())
+                },
+                drain_then_replace: &mut |_| panic!("no drain was planned"),
+                ensure_running: &mut || panic!("ensure-running would spawn beside the manager"),
+            },
+        )
+        .expect("the manager's replacement completes the plan");
+        assert_eq!(calls.into_inner(), vec!["restart lease-managed"]);
+        assert_eq!(
+            applied,
+            vec![actions::DAEMON_STOP, actions::DAEMON_ENSURE_RUNNING]
+        );
+
+        let calls = std::cell::RefCell::new(Vec::new());
+        execute_recovery_plan_with(
+            &plan,
+            Some("lease-managed"),
+            false,
+            RecoveryOperations {
+                stop: &mut |lease| {
+                    calls.borrow_mut().push(format!("stop {lease}"));
+                    Ok(())
+                },
+                restart_service_managed: &mut |_| panic!("an unmanaged daemon has no manager"),
+                drain_then_replace: &mut |_| panic!("no drain was planned"),
+                ensure_running: &mut || {
+                    calls.borrow_mut().push("ensure".to_string());
+                    Ok(())
+                },
+            },
+        )
+        .expect("an unmanaged plan stops then starts");
+        assert_eq!(calls.into_inner(), vec!["stop lease-managed", "ensure"]);
     }
 
     #[test]
