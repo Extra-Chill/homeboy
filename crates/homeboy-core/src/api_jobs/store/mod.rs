@@ -1169,7 +1169,10 @@ impl JobStore {
     }
 
     /// Create or renew a caller-owned admission under one store lock. Replays
-    /// renew only the live reservation; terminal identities are never revived.
+    /// renew the live reservation. A key an execution already consumed is
+    /// refused; a reservation released or expired before any execution fenced
+    /// nothing, so the same caller reserves afresh instead of being refused
+    /// forever.
     pub(crate) fn create_or_renew_admission_at(
         &self,
         metadata: Value,
@@ -1178,22 +1181,27 @@ impl JobStore {
         workspace_owner_lease: Option<crate::workspace_claim::WorkspaceOwnerLease>,
     ) -> Result<AdmissionReservation> {
         self.durable_transaction(|inner| {
+            let keyed = |stored: &StoredJob| {
+                stored.admission_idempotency_key.as_deref() == Some(idempotency_key)
+            };
+            if inner
+                .jobs
+                .values()
+                .any(|stored| keyed(stored) && stored.job.operation != "runner.admission")
+            {
+                return Err(Error::validation_invalid_argument(
+                    "idempotency_key",
+                    "admission idempotency key was consumed by a runner execution",
+                    Some(idempotency_key.to_string()),
+                    None,
+                ));
+            }
             if let Some(stored) = inner
                 .jobs
                 .values_mut()
-                .filter(|stored| {
-                    stored.admission_idempotency_key.as_deref() == Some(idempotency_key)
-                })
+                .filter(|stored| keyed(stored) && !stored.job.status.is_terminal())
                 .min_by_key(|stored| (stored.job.created_at_ms, stored.job.id))
             {
-                if stored.job.status.is_terminal() {
-                    return Err(Error::validation_invalid_argument(
-                        "idempotency_key",
-                        "admission idempotency key belongs to a terminal reservation",
-                        Some(idempotency_key.to_string()),
-                        None,
-                    ));
-                }
                 if stored
                     .local_runner
                     .as_ref()
@@ -1555,7 +1563,7 @@ impl JobStore {
     /// idempotency check cannot close. Returns `(job, created)`; `created` is
     /// `false` when an existing active job was reused, letting the caller skip
     /// spawning a duplicate worker for it.
-    fn create_or_reuse_active_local_runner_job(
+    pub(super) fn create_or_reuse_active_local_runner_job(
         &self,
         request: LocalRunnerJobRequest,
     ) -> (Job, bool) {
