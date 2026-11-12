@@ -128,6 +128,9 @@ fn force_stop_for_lease_unlocked(expected_lease_id: &str) -> Result<DaemonStopRe
         ));
     }
     if state.startup_token.is_empty() {
+        if state.service_manager.is_some() {
+            return stop_service_managed_daemon(&state, state_path_display);
+        }
         return Err(Error::validation_invalid_argument(
             "daemon_lease",
             format!(
@@ -178,6 +181,118 @@ fn force_stop_for_lease_unlocked(expected_lease_id: &str) -> Result<DaemonStopRe
     }
 
     stop_token_owned_daemon(&path, &identity, &state, state_path_display)
+}
+
+/// How long `daemon stop` waits for a service-managed daemon to exit after
+/// SIGTERM: the daemon's own shutdown deadline plus margin.
+const SERVICE_MANAGED_STOP_GRACE: Duration =
+    Duration::from_secs(super::SHUTDOWN_GRACE.as_secs() + 5);
+
+/// Stop a service-managed `daemon serve`. It records no startup token, so the
+/// ownership proof is the unchanged lease plus the owner-lock holder record
+/// naming this pid (the proof `ensure-running` uses for a managed restart).
+/// SIGTERM drains it and its shutdown deadline bounds the exit (#17891). Its
+/// manager then applies its own restart policy: with `Restart=always` this is a
+/// restart; keeping it down is the manager's command, which the error names.
+fn stop_service_managed_daemon(
+    state: &DaemonState,
+    state_path_display: String,
+) -> Result<DaemonStopResult> {
+    stop_service_managed_daemon_with(
+        state,
+        state_path_display,
+        super::control::terminate_service_managed_daemon,
+        |pid| wait_for_pid_exit(pid, SERVICE_MANAGED_STOP_GRACE),
+    )
+}
+
+fn stop_service_managed_daemon_with(
+    state: &DaemonState,
+    state_path_display: String,
+    terminate: impl FnOnce(&DaemonState) -> Result<()>,
+    wait_for_exit: impl FnOnce(u32) -> bool,
+) -> Result<DaemonStopResult> {
+    let manager = state.service_manager.ok_or_else(|| {
+        Error::internal_unexpected(format!(
+            "daemon lease `{}` is not owned by a service manager",
+            state.lease_id
+        ))
+    })?;
+    let active_jobs = active_daemon_job_ids()?.len();
+    // Recorded before the signal, so the evidence names a requested stop even
+    // if this command dies first. The daemon's own clean stop replaces it.
+    write_termination_evidence(&DaemonTerminationEvidence {
+        classification: DaemonTerminationClassification::CleanStop,
+        observed_at: chrono::Utc::now().to_rfc3339(),
+        lease_id: Some(state.lease_id.clone()),
+        pid: Some(state.pid),
+        binary_identity: Some(state.build_identity.display.clone()),
+        active_jobs,
+        resource_evidence: "unavailable: ordinary stop does not collect OS resource snapshots"
+            .to_string(),
+        os_evidence: format!(
+            "stop requested; SIGTERM sent to {}-managed daemon pid {} after lease and owner-lock revalidation",
+            manager.as_str(),
+            state.pid
+        ),
+        stop_requested: true,
+    })?;
+    terminate(state)?;
+    if !wait_for_exit(state.pid) {
+        return Err(Error::internal_unexpected(format!(
+            "{}-managed daemon pid {} did not exit after SIGTERM",
+            manager.as_str(),
+            state.pid
+        ))
+        .with_hint(service_manager_stop_hint(manager, state.pid)));
+    }
+    Ok(DaemonStopResult {
+        stopped: true,
+        already_absent: false,
+        pid: Some(state.pid),
+        state_path: state_path_display,
+        termination_evidence: read_termination_evidence().ok().flatten(),
+    })
+}
+
+/// The exact command that stops or restarts the daemon through its manager.
+fn service_manager_stop_hint(manager: DaemonServiceManager, pid: u32) -> String {
+    match manager {
+        DaemonServiceManager::Systemd => match systemd_unit_of(pid) {
+            Some((unit, user)) => format!(
+                "Stop or restart it through systemd: `systemctl{} restart {unit}` (or `stop` to keep it down)",
+                if user { " --user" } else { "" }
+            ),
+            None => format!(
+                "Stop or restart it through systemd: `systemctl status {pid}` names its unit"
+            ),
+        },
+        DaemonServiceManager::Launchd => format!(
+            "Stop or restart it through launchd: `launchctl kickstart -k <service-target>` for the job running pid {pid}"
+        ),
+    }
+}
+
+/// The systemd unit owning `pid`, and whether it is a user unit, from its
+/// cgroup path (`0::/system.slice/homeboy-daemon.service`).
+fn systemd_unit_of(pid: u32) -> Option<(String, bool)> {
+    let cgroup = fs::read_to_string(format!("/proc/{pid}/cgroup")).ok()?;
+    systemd_unit_from_cgroup(&cgroup)
+}
+
+fn systemd_unit_from_cgroup(cgroup: &str) -> Option<(String, bool)> {
+    let path = cgroup
+        .lines()
+        .find_map(|line| line.strip_prefix("0::"))
+        .or_else(|| {
+            cgroup
+                .lines()
+                .find_map(|line| line.split_once(":name=systemd:").map(|(_, path)| path))
+        })?;
+    let user = path.contains("/user@");
+    path.rsplit('/')
+        .find(|segment| segment.ends_with(".service"))
+        .map(|unit| (unit.to_string(), user))
 }
 
 /// Stop an exact token-owned daemon. Active controller work is interrupted,
@@ -423,6 +538,9 @@ pub(super) fn stop_unlocked_with_force(force: bool) -> Result<DaemonStopResult> 
     }
 
     if state.startup_token.is_empty() {
+        if state.service_manager.is_some() {
+            return stop_service_managed_daemon(state, state_path_display);
+        }
         return Err(Error::validation_invalid_argument(
             "daemon_lease",
             format!(
@@ -583,5 +701,89 @@ mod tests {
                 error.message
             );
         });
+    }
+
+    fn managed_state(path: &std::path::Path) -> DaemonState {
+        let mut state = dead_state("lease-managed", path);
+        state.startup_token = String::new();
+        state.service_manager = Some(crate::daemon::DaemonServiceManager::Systemd);
+        state
+    }
+
+    /// #17891: a service-managed daemon records no startup token. `daemon
+    /// stop` signals it through the manager-ownership proof instead of
+    /// refusing, records the requested stop first, and reports the stop.
+    #[test]
+    fn a_tokenless_service_managed_daemon_is_stopped_not_refused() {
+        with_isolated_home(|_| {
+            let path = state_path().expect("state path");
+            let state = managed_state(&path);
+            let mut signaled = Vec::new();
+            let result = super::stop_service_managed_daemon_with(
+                &state,
+                path.display().to_string(),
+                |state| {
+                    signaled.push(state.pid);
+                    Ok(())
+                },
+                |_| true,
+            )
+            .expect("a managed daemon is stopped");
+            assert!(result.stopped);
+            assert_eq!(signaled, vec![state.pid]);
+            let evidence = super::read_termination_evidence()
+                .expect("read evidence")
+                .expect("the requested stop was recorded");
+            assert!(evidence.stop_requested);
+            assert_eq!(evidence.pid, Some(state.pid));
+        });
+    }
+
+    /// A managed daemon that does not exit is an error naming the manager's
+    /// own command, never a report of success.
+    #[test]
+    fn a_service_managed_daemon_that_survives_sigterm_names_the_manager_command() {
+        with_isolated_home(|_| {
+            let path = state_path().expect("state path");
+            let state = managed_state(&path);
+            let error = super::stop_service_managed_daemon_with(
+                &state,
+                path.display().to_string(),
+                |_| Ok(()),
+                |_| false,
+            )
+            .expect_err("a surviving daemon is not reported stopped");
+            assert!(
+                error.message.contains("did not exit after SIGTERM"),
+                "{}",
+                error.message
+            );
+            let hint = error
+                .hints
+                .iter()
+                .map(|hint| hint.message.clone())
+                .collect::<Vec<_>>()
+                .join("\n");
+            assert!(hint.contains("systemctl"), "{hint}");
+        });
+    }
+
+    #[test]
+    fn systemd_unit_is_read_from_the_cgroup_path() {
+        assert_eq!(
+            super::systemd_unit_from_cgroup("0::/system.slice/homeboy-daemon.service\n"),
+            Some(("homeboy-daemon.service".to_string(), false))
+        );
+        assert_eq!(
+            super::systemd_unit_from_cgroup(
+                "0::/user.slice/user-1000.slice/user@1000.service/app.slice/homeboy.service\n"
+            ),
+            Some(("homeboy.service".to_string(), true))
+        );
+        assert_eq!(
+            super::systemd_unit_from_cgroup("1:name=systemd:/system.slice/hb.service\n"),
+            Some(("hb.service".to_string(), false))
+        );
+        assert_eq!(super::systemd_unit_from_cgroup("0::/\n"), None);
     }
 }
