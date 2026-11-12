@@ -4,6 +4,11 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.458.44] - 2026-11-12
+
+### Fixed
+- an upgrade replaces a daemon whose live steps the successor re-adopts
+
 ## [0.458.43] - 2026-11-12
 
 ### Fixed
