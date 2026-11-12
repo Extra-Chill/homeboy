@@ -451,7 +451,7 @@ fn run_instance(
     if let Err(error) = project_timing(&state) {
         crate::log_status!("observe", "workflow timing persistence failed: {}", error);
     }
-    job.progress(projection(&state, Some(store)))?;
+    job.progress(progress_summary(&state))?;
     loop {
         if job.is_cancelled() {
             return Ok(cancelled(request, &state, job_id, store));
@@ -486,7 +486,7 @@ fn run_instance(
             }
             state = next;
             super::workflow_notify::awaiting_approvals(request, &state);
-            job.progress(projection(&state, Some(store)))?;
+            job.progress(progress_summary(&state))?;
             if state.status.is_terminal() {
                 break;
             }
@@ -1139,7 +1139,35 @@ pub fn step_request(
     Ok(step)
 }
 
-/// A pure projection of the instance for status and progress.
+/// The live progress event for one advance: where the instance is, not what
+/// it holds. Every advance appends one, so step outputs, items, and run
+/// projections stay in the checkpoint that `projection` serves to status
+/// reads; embedding them made each event a full snapshot (up to 318 KB).
+fn progress_summary(state: &InstanceState) -> Value {
+    json!({
+        "instance": state.instance,
+        "status": state.status.as_str(),
+        "iteration": state.iteration,
+        "step_runs": state.step_runs,
+        "reason": state.reason,
+        "steps": state.steps.iter().map(|(id, step)| {
+            let mut items = serde_json::Map::new();
+            for item in &step.items {
+                let phase = serde_json::to_value(item.phase).unwrap_or(Value::Null);
+                let key = phase.as_str().unwrap_or("unknown").to_string();
+                let count = items.get(&key).and_then(Value::as_u64).unwrap_or(0);
+                items.insert(key, json!(count + 1));
+            }
+            (id.clone(), json!({
+                "phase": step.phase,
+                "attempt": step.attempt,
+                "items": items,
+            }))
+        }).collect::<serde_json::Map<_, _>>(),
+    })
+}
+
+/// A pure projection of the instance for status.
 pub fn projection(state: &InstanceState, store: Option<&JobStore>) -> Value {
     let job_of = |key: &str| -> Value {
         store
