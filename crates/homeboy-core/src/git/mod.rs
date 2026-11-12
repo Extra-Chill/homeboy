@@ -70,7 +70,7 @@ pub use github::{
     IssueState, PrCreateOptions, PrEditOptions, PrFindOptions, PrMergeOptions, PrMergeReadiness,
     PrMergeabilityReconcileOptions, PrMergeabilityReconcileOutput, PrReadinessBlocker, PrState,
 };
-pub use github_pr_comments::{pr_comment, PrCommentMode, PrCommentOptions};
+pub use github_pr_comments::{pr_comment, repo_comment, PrCommentMode, PrCommentOptions};
 pub use github_types::{
     GithubPrCheckRollup, GithubPrFleetItem, GithubPrFleetOutput, GithubPrFleetSummary,
     PrFleetOptions,

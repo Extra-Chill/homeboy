@@ -59,6 +59,11 @@ pub struct CookOptionValues {
     /// Publish a non-empty candidate as a draft PR when every attempt fails a deterministic gate.
     #[arg(long)]
     pub publish_incomplete_draft: bool,
+    /// Keep an unpublished Cook's review form off its task issue. By default a
+    /// Cook that settles without a PR comments its findings on the GitHub
+    /// issue its --task-url names, updating that one comment on later attempts.
+    #[arg(long)]
+    pub no_tracker_note: bool,
     #[command(flatten)]
     pub gates: VerifyGateArgs,
     #[command(flatten)]

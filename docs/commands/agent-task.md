@@ -57,6 +57,17 @@ strings for repeated inputs), derived from the live command tree.
 `--gate-input-source` records provenance for already-snapshotted verification
 programs. Neither supplies a shared gate/provider file.
 
+## Tracker notes
+
+A Cook that settles without publishing a pull request comments its final review
+form on the GitHub issue its `--task-url` names: summary, what changed, why it
+stopped (the form's `incomplete_reason`, else the delivery blocker), and the last
+gate's verdict, with an AI-assistance line naming the provider and model. The
+comment is keyed by cook id, so a later attempt of the same Cook rewrites it in
+place, and the next Cook on that task reads it as issue context. A published
+attempt posts nothing: its pull request is the record. `--no-tracker-note`
+opts out.
+
 ## Incomplete Cook drafts
 
 Once deterministic gates pass, a missing or failed review form never blocks publication: Cook publishes the gated candidate SHA as a draft, with deterministic task, diff-stat and gate evidence plus the review failure reason. `--publish-incomplete-draft` remains opt-in preservation for candidates that failed their gates.
