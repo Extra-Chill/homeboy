@@ -409,11 +409,12 @@ impl JobStore {
     }
 
     /// Return only an immutable, durably committed controller terminal winner.
-    fn controller_terminal_winner(inner: &JobStoreInner, job_id: Uuid) -> Result<Option<Job>> {
-        let stored = inner
-            .jobs
-            .get(&job_id)
-            .ok_or_else(|| job_not_found(job_id))?;
+    fn controller_terminal_winner(
+        &self,
+        inner: &JobStoreInner,
+        job_id: Uuid,
+    ) -> Result<Option<Job>> {
+        let stored = self.read_stored_job(inner, job_id)?;
         if stored.controller_job.is_none() {
             return Err(Error::validation_invalid_argument(
                 "job_id",
@@ -435,7 +436,7 @@ impl JobStore {
     ) -> Result<Job> {
         // A cached terminal row was committed before publication and cannot
         // change again. Repeated losing writers do no reload, clone or rewrite.
-        if let Some(winner) = Self::controller_terminal_winner(
+        if let Some(winner) = self.controller_terminal_winner(
             &self.inner.lock().expect("job store mutex poisoned"),
             job_id,
         )? {
@@ -447,7 +448,7 @@ impl JobStore {
         if let Some(persistence) = &self.persistence {
             self.reload_durable_snapshot_already_locked(&persistence.path, &mut inner)?;
         }
-        if let Some(winner) = Self::controller_terminal_winner(&inner, job_id)? {
+        if let Some(winner) = self.controller_terminal_winner(&inner, job_id)? {
             let _ = self.clear_controller_completion(job_id);
             return Ok(winner);
         }

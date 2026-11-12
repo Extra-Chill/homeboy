@@ -44,6 +44,20 @@ pub(super) struct SqlSyncState {
     compaction_digest: u64,
 }
 
+impl SqlSyncState {
+    /// Baseline for an exact historical mutation; dropped again after commit.
+    pub(super) fn include_job(&mut self, stored: &mut StoredJob) -> Result<()> {
+        self.jobs.insert(
+            stored.job.id,
+            SyncedJob {
+                body_digest: digest(&job_row_body(stored)?),
+                event_sequences: stored.events.iter().map(|event| event.sequence).collect(),
+            },
+        );
+        Ok(())
+    }
+}
+
 #[derive(Debug)]
 struct SyncedJob {
     body_digest: u64,
@@ -145,11 +159,52 @@ pub(super) fn open_sql_store(path: &Path) -> Result<Connection> {
     Ok(connection)
 }
 
-/// Read the whole store plus the sync state that describes exactly what was
-/// read.
+/// Read live work and its sync baseline through the existing active index.
+/// Terminal history remains in SQL until an explicit read or retention pass.
 pub(super) fn load_sql_store(
     connection: &Connection,
     path: &Path,
+) -> Result<(DurableJobStore, SqlSyncState)> {
+    load_sql_store_view(connection, path, true)
+}
+
+pub(super) fn load_sql_store_for_compaction(
+    connection: &Connection,
+    path: &Path,
+) -> Result<(DurableJobStore, SqlSyncState)> {
+    load_sql_store_view(connection, path, false)
+}
+
+pub(super) fn retention_due(
+    path: &Path,
+    limit: usize,
+    bytes: usize,
+    inner: &super::store::JobStoreInner,
+) -> Result<bool> {
+    let Some(connection) = open_sql_store_readonly(path)? else {
+        return Ok(false);
+    };
+    let (mut count, mut size): (usize, usize) = connection.query_row(
+        "SELECT COUNT(*), COALESCE(SUM(length(body)), 0) + COALESCE((SELECT SUM(length(e.body)) FROM daemon_job_events e JOIN daemon_jobs j ON j.job_id = e.job_id WHERE j.active = 0), 0) FROM daemon_jobs WHERE active = 0",
+        [], |row| Ok((row.get(0)?, row.get(1)?)),
+    ).map_err(|error| store_error(path, "measure terminal retention", error))?;
+    for stored in inner
+        .jobs
+        .values()
+        .filter(|stored| stored.job.status.is_terminal())
+    {
+        count += 1;
+        size += serde_json::to_vec(stored)
+            .map_err(|error| serialize_error(error, "terminal retention"))?
+            .len();
+    }
+    Ok(count > limit || size > bytes)
+}
+
+fn load_sql_store_view(
+    connection: &Connection,
+    path: &Path,
+    active_only: bool,
 ) -> Result<(DurableJobStore, SqlSyncState)> {
     let mut state = SqlSyncState::default();
     let mut durable = DurableJobStore::default();
@@ -172,7 +227,11 @@ pub(super) fn load_sql_store(
     let mut events_by_job: HashMap<String, Vec<JobEvent>> = HashMap::new();
     {
         let mut statement = connection
-            .prepare("SELECT job_id, body FROM daemon_job_events ORDER BY sequence")
+            .prepare(if active_only {
+                "SELECT e.job_id, e.body FROM daemon_jobs j JOIN daemon_job_events e ON e.job_id = j.job_id WHERE j.active = 1 ORDER BY e.sequence"
+            } else {
+                "SELECT job_id, body FROM daemon_job_events ORDER BY sequence"
+            })
             .map_err(|error| store_error(path, "read daemon job events", error))?;
         let rows = statement
             .query_map([], |row| {
@@ -190,7 +249,11 @@ pub(super) fn load_sql_store(
 
     {
         let mut statement = connection
-            .prepare("SELECT job_id, body FROM daemon_jobs")
+            .prepare(if active_only {
+                "SELECT job_id, body FROM daemon_jobs WHERE active = 1"
+            } else {
+                "SELECT job_id, body FROM daemon_jobs"
+            })
             .map_err(|error| store_error(path, "read daemon jobs", error))?;
         let rows = statement
             .query_map([], |row| {
@@ -414,6 +477,7 @@ fn write_changes(
         if next.jobs.contains_key(id) {
             continue;
         }
+        changed = true;
         let id_text = id.to_string();
         transaction
             .execute(
@@ -526,7 +590,15 @@ pub(super) fn commit_sql_store(
     for delivery in terminal_deliveries {
         super::store::terminal_delivery::retain_on(&transaction, delivery, false)?;
     }
-    let next = write_changes(&transaction, path, durable, &baseline)?;
+    let mut next = write_changes(&transaction, path, durable, &baseline)?;
+    // Terminal rows remain durable, but are no longer part of the live baseline.
+    let live_ids: HashSet<_> = durable
+        .jobs
+        .iter()
+        .filter(|stored| !stored.job.status.is_terminal())
+        .map(|stored| stored.job.id)
+        .collect();
+    next.jobs.retain(|id, _| live_ids.contains(id));
     transaction
         .commit()
         .map_err(|error| store_error(path, "commit daemon job store", error))?;
@@ -542,7 +614,7 @@ pub(super) fn read_durable_store_readonly(path: &Path) -> Result<Option<DurableJ
     let Some(connection) = open_sql_store_readonly(path)? else {
         return Ok(None);
     };
-    Ok(Some(load_sql_store(&connection, path)?.0))
+    Ok(Some(load_sql_store_view(&connection, path, false)?.0))
 }
 
 /// Non-terminal job bodies through the `active` index. The daemon lifetime
@@ -575,7 +647,7 @@ pub(super) fn read_active_jobs_readonly(path: &Path) -> Result<Option<Vec<Stored
     Ok(Some(jobs))
 }
 
-/// One job (without events) and the controller submissions that name it, for
+/// One job with its events and the controller submissions that name it, for
 /// exact terminal-custody lookups.
 pub(super) fn read_job_and_controller_submissions(
     path: &Path,
@@ -585,7 +657,7 @@ pub(super) fn read_job_and_controller_submissions(
         return Ok(None);
     };
     let invalid = |error| Error::config_invalid_json(path.display().to_string(), error);
-    let stored = connection
+    let mut stored = connection
         .query_row(
             "SELECT body FROM daemon_jobs WHERE job_id = ?1",
             [job_id.to_string()],
@@ -595,6 +667,20 @@ pub(super) fn read_job_and_controller_submissions(
         .map_err(|error| store_error(path, "read daemon job", error))?
         .map(|body| serde_json::from_str::<StoredJob>(&body).map_err(invalid))
         .transpose()?;
+    if let Some(stored) = &mut stored {
+        let mut statement = connection
+            .prepare("SELECT body FROM daemon_job_events WHERE job_id = ?1 ORDER BY sequence")
+            .map_err(|error| store_error(path, "read daemon job events", error))?;
+        let rows = statement
+            .query_map([job_id.to_string()], |row| row.get::<_, String>(0))
+            .map_err(|error| store_error(path, "read daemon job events", error))?;
+        for row in rows {
+            let body = row.map_err(|error| store_error(path, "read daemon job event", error))?;
+            stored
+                .events
+                .push(serde_json::from_str(&body).map_err(invalid)?);
+        }
+    }
     let mut statement = connection
         .prepare(
             "SELECT body FROM daemon_job_submissions WHERE kind = 'controller' AND job_id = ?1",
