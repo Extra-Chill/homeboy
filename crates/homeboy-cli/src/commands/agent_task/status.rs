@@ -4918,6 +4918,20 @@ fn aggregate_failure_diagnostics(aggregate: &AgentTaskAggregate) -> Vec<Collecte
     });
     let scan: Vec<&homeboy::agents::agent_tasks::AgentTaskOutcome> = failed_first.collect();
 
+    // An agent that declared its task incomplete already said why; its words
+    // outrank whatever the provider stream happened to end with.
+    for outcome in &aggregate.outcomes {
+        if let Some(reason) = agent_task_service_direct::agent_incomplete_reason(&outcome.outputs) {
+            collected.push(CollectedDiagnostic {
+                task_id: outcome.task_id.clone(),
+                class: "agent.incomplete".to_string(),
+                message: reason,
+                source: "review_form".to_string(),
+                data: Value::Null,
+            });
+        }
+    }
+
     for outcome in scan {
         for diagnostic in &outcome.diagnostics {
             collected.push(CollectedDiagnostic {
@@ -5034,7 +5048,7 @@ struct CollectedDiagnostic {
 fn diagnostic_priority(item: &CollectedDiagnostic) -> (u8, u8) {
     let class = item.class.to_ascii_lowercase();
     let text = format!("{} {}", item.class, item.message).to_ascii_lowercase();
-    let priority = if item.source == "current_lifecycle" {
+    let priority = if item.source == "current_lifecycle" || item.source == "review_form" {
         0
     } else if class == "agent_task.provider_liveness_timeout" {
         // The typed lifecycle timeout is authoritative. An unparsed provider

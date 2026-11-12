@@ -1515,6 +1515,16 @@ pub(crate) fn review_form_from_aggregate(
     crate::agent_task_review_dossier::AiFilledReviewForm::from_outcome_outputs(&outcome.outputs)
 }
 
+/// The agent's own reason, from the review form in `outputs`, for leaving
+/// its task incomplete: the "why" of a Cook that settled unfinished.
+pub fn agent_incomplete_reason(outputs: &Value) -> Option<String> {
+    crate::agent_task_review_dossier::AiFilledReviewForm::from_outcome_outputs(outputs)
+        .ok()??
+        .incomplete_reason()
+        .filter(|reason| !reason.is_empty())
+        .map(str::to_string)
+}
+
 /// Project the PR-dossier contract before the first finalizing provider attempt
 /// is persisted or executed. Standalone and no-finalize requests retain their
 /// caller-defined contract.
