@@ -10861,7 +10861,7 @@ fn recover_selects_regate_only_for_unjudged_complete_candidates() {
 }
 
 #[test]
-fn recover_regate_explicitly_selects_an_earlier_candidate_after_attempt_cancellation() {
+fn operator_attempt_cancel_preserves_earlier_candidate_for_recovery() {
     with_corrected_gate_failure(false, |options, _| {
         let cook = &options.identity.cook_id;
         let run = &options.identity.initial_run_id;
@@ -10871,17 +10871,18 @@ fn recover_regate_explicitly_selects_an_earlier_candidate_after_attempt_cancella
         let mut later = recipe.attempts[0].clone();
         later.attempt = 2;
         later.run_id = "cancelled-later-attempt".into();
-        let mut record = store.read_record(run).unwrap();
-        record.run_id = later.run_id.clone();
-        record.set_state_for_test(agent_task_lifecycle::AgentTaskRunState::Running);
-        store.write_record(&record).unwrap();
-        agent_task_lifecycle::cancel_exact_run_in_store_with_provenance(
+        agent_task_lifecycle::submit_plan_in_store(
             &store,
-            &later.run_id,
-            Some("cancelled"),
-            Some(serde_json::json!({"actor": "runner", "cause": "runner_job_cancelled"})),
+            &crate::agent_task_schedule::AgentTaskPlan::new("queued-regate", Vec::new()),
+            Some(&later.run_id),
         )
         .unwrap();
+        store
+            .mutate_record(&later.run_id, |record| {
+                record.metadata["cook_id"] = serde_json::json!(cook);
+                true
+            })
+            .unwrap();
         recipe.attempts.push(later.clone());
         recipes.persist_recipe(&recipe).unwrap();
         let index = store
@@ -10896,6 +10897,51 @@ fn recover_regate_explicitly_selects_an_earlier_candidate_after_attempt_cancella
                 .remove("cook_delivery");
         })
         .unwrap();
+        use homeboy_control_plane_contract::{
+            ControlPlaneActionRequest, RunId, CONTROL_PLANE_ACTION_REQUEST_SCHEMA,
+            CONTROL_PLANE_CANCEL_PARAMETERS_SCHEMA,
+        };
+        let service = crate::orchestration::OrchestrationService::new(
+            crate::orchestration::LifecycleStoreLookup::new(store.clone()),
+        );
+        let request: ControlPlaneActionRequest = serde_json::from_value(serde_json::json!({
+            "schema": CONTROL_PLANE_ACTION_REQUEST_SCHEMA,
+            "effect_id": "test:cancel-second-attempt",
+            "action": "cancel",
+            "idempotency_key": "cancel-second-attempt",
+            "actor": "test",
+            "parameters": {
+                "schema": CONTROL_PLANE_CANCEL_PARAMETERS_SCHEMA,
+                "data": {"reason": "operator stop"}
+            },
+            "confirmed": true
+        }))
+        .unwrap();
+        let cancelled = service
+            .execute_action(&RunId::new(&later.run_id).unwrap(), &request)
+            .unwrap();
+        assert_eq!(
+            cancelled.message.as_deref(),
+            Some("attempt cancelled; mission continues")
+        );
+        assert!(store
+            .read_cook_index(cook)
+            .unwrap()
+            .cancellation_fence
+            .is_none());
+        let candidate = store.read_record(run).unwrap();
+        assert_eq!(
+            candidate.state(),
+            agent_task_lifecycle::AgentTaskRunState::CandidateRecoverable
+        );
+        assert!(candidate.metadata.get("candidate_retirement").is_none());
+        assert!(candidate.metadata.get("cancellation_fence").is_none());
+        assert_eq!(
+            crate::agent_task_service::plan_cook_recovery(cook)
+                .unwrap()
+                .run_id,
+            *run
+        );
         let (report, exit) = crate::agent_task_service::recover_cook(
             cook,
             crate::agent_task_service::CookRecoveryRequest {

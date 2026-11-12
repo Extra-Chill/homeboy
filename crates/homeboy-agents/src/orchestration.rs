@@ -2004,11 +2004,11 @@ impl OrchestrationService<LifecycleStoreLookup> {
         if request.action == ControlPlaneAction::Cancel
             && action_unavailability(&record, request.action).is_none()
         {
-            // The mission fence is what stops the Cook loop from admitting a
-            // further attempt or gate-fix. Write it before the terminal check:
+            // When the caller targets the Cook ID, the mission fence stops its
+            // loop from admitting another attempt. Write it before the terminal check:
             // a candidate-recoverable attempt is terminal, yet its Cook loop is
             // still deciding whether to continue (#15695).
-            fence_owning_cook_mission(
+            prepare_targeted_cancellation(
                 &self.lookup.store,
                 requested_id.as_str(),
                 &record,
@@ -2037,12 +2037,12 @@ impl OrchestrationService<LifecycleStoreLookup> {
                         .store
                         .read_record(&resolved)
                         .map_err(map_lifecycle_error)?;
-                    let fenced = record.metadata.get("cancellation_fence").is_some()
-                        || record.metadata.get("candidate_retirement").is_some();
+                    let fenced = record.metadata.get("cancellation_fence").is_some();
+                    let retired = record.metadata.get("candidate_retirement").is_some();
                     let resource = project_record(&record, None)?;
                     let verifying = resource.phase.as_deref() == Some(LIVE_GATE_VERIFYING_PHASE);
                     let mut result = cancel_result_for_record(&record, Duration::ZERO, 0, None);
-                    if fenced {
+                    if fenced || retired {
                         result.disposition = ControlPlaneCancelDisposition::Cancelled;
                         result.terminal = true;
                     } else if verifying {
@@ -2052,7 +2052,7 @@ impl OrchestrationService<LifecycleStoreLookup> {
                         result.terminal = false;
                     }
                     (
-                        if verifying || fenced {
+                        if verifying || fenced || retired {
                             ControlPlaneActionOutcome::Succeeded
                         } else {
                             ControlPlaneActionOutcome::AlreadySatisfied
@@ -2062,6 +2062,8 @@ impl OrchestrationService<LifecycleStoreLookup> {
                         Some(if fenced {
                             "mission fenced; recoverable candidates retired (evidence preserved)"
                                 .to_string()
+                        } else if retired {
+                            "attempt cancelled; mission continues".to_string()
                         } else if verifying {
                             "Cook promotion verification cancellation requested".to_string()
                         } else {
@@ -2093,13 +2095,29 @@ impl OrchestrationService<LifecycleStoreLookup> {
                             } else {
                                 ControlPlaneActionOutcome::Succeeded
                             };
-                            let message = pending.then(|| {
+                            let message = Some(if pending {
                                 result.observation_error.clone().unwrap_or_else(|| {
                                     format!(
                                         "cancellation is pending for run '{}'; retry with `homeboy agent-task cancel {}`",
                                         observed.run_id, observed.run_id
                                     )
                                 })
+                            } else if self
+                                .lookup
+                                .store
+                                .read_cook_index(requested_id.as_str())
+                                .is_ok()
+                            {
+                                "mission fenced".to_string()
+                            } else if observed
+                                .metadata
+                                .get("cook_id")
+                                .and_then(Value::as_str)
+                                .is_some()
+                            {
+                                "attempt cancelled; mission continues".to_string()
+                            } else {
+                                "run cancelled".to_string()
                             });
                             (
                                 outcome,
@@ -2642,22 +2660,15 @@ fn agent_task_admission_fence(
     })
 }
 
-/// Fence the Cook mission a cancel targets, whether it names the Cook alias or
-/// one of its attempts, so that cancelling any part of a Cook stops all of it.
-fn fence_owning_cook_mission(
+/// Only a Cook ID closes the mission. An exact attempt cancellation may retire
+/// that attempt's candidate, but must preserve candidates on other attempts.
+fn prepare_targeted_cancellation(
     store: &crate::agent_task_lifecycle::AgentTaskLifecycleStore,
     requested_id: &str,
     record: &AgentTaskRunRecord,
     reason: Option<&str>,
 ) -> homeboy_core::error::Result<()> {
-    let owner = record
-        .metadata
-        .get("cook_id")
-        .and_then(Value::as_str)
-        .filter(|cook_id| !cook_id.is_empty());
-    for cook_id in owner.into_iter().chain(std::iter::once(requested_id)) {
-        crate::agent_task_lifecycle::fence_cook_mission_in_store(store, cook_id, reason)?;
-    }
+    crate::agent_task_lifecycle::fence_cook_mission_in_store(store, requested_id, reason)?;
     if store.read_record(&record.run_id)?.state()
         == crate::agent_task_lifecycle::AgentTaskRunState::CandidateRecoverable
     {
@@ -8870,9 +8881,9 @@ mod tests {
 
     /// A gate-failed attempt is durably candidate-recoverable, which counts as
     /// terminal, while its Cook loop is still choosing a gate-fix attempt.
-    /// Cancelling the Cook or that attempt must close the mission (#15695).
+    /// Cancelling the Cook itself must close the mission (#15695).
     #[test]
-    fn cancel_of_a_candidate_recoverable_attempt_fences_its_cook_mission() {
+    fn cancel_scope_distinguishes_cook_from_candidate_attempt() {
         for (case, target_attempt, verifying) in [
             ("alias", false, false),
             ("attempt", true, false),
@@ -8957,6 +8968,22 @@ mod tests {
                 assert_eq!(cancelled.outcome, ControlPlaneActionOutcome::Succeeded);
                 assert_eq!(cancelled.result.data["disposition"], "cancelled");
                 assert_eq!(cancelled.result.data["terminal"], true);
+                if target_attempt {
+                    assert_eq!(
+                        cancelled.message.as_deref(),
+                        Some("attempt cancelled; mission continues")
+                    );
+                    assert!(store
+                        .read_cook_index(&cook_id)
+                        .unwrap()
+                        .cancellation_fence
+                        .is_none());
+                    assert!(crate::agent_task_service::ensure_cook_attempt_admitted(
+                        &store, &cook_id
+                    )
+                    .is_ok());
+                    return;
+                }
                 assert!(cancelled.message.as_deref().unwrap().contains("retired"));
                 let projected =
                     project_record(&store.read_record(&attempt_id).unwrap(), None).unwrap();
