@@ -1069,12 +1069,15 @@ fn serve(addr: &str) -> CmdResult<DaemonOutput> {
 
 /// Every `daemon serve`, CLI-launched or run by a service manager, drains on
 /// SIGINT (Ctrl-C) and SIGTERM (`daemon stop` or a service-manager stop): it
-/// finishes owned responses and releases its lease (#15436, #17387).
+/// finishes owned responses and releases its lease (#15436, #17387). A drain
+/// that cannot finish is cut off at the shutdown deadline, so a caught SIGTERM
+/// always ends the process (#17891).
 fn install_drain_handlers() -> homeboy::core::Result<std::sync::Arc<std::sync::atomic::AtomicBool>>
 {
     let shutdown = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
     homeboy::core::process::install_shutdown_handler(shutdown.clone(), "daemon")?;
     homeboy::core::process::install_terminate_handler(shutdown.clone())?;
+    daemon::arm_shutdown_deadline(shutdown.clone())?;
     Ok(shutdown)
 }
 

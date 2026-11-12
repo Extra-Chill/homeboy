@@ -54,6 +54,7 @@ pub mod runner_exec_job;
 pub mod runner_staging;
 pub(crate) mod runner_watch;
 mod service_manager;
+mod shutdown_deadline;
 pub mod step_job;
 mod stop;
 pub mod workflow_cadence;
@@ -79,6 +80,9 @@ pub use lifetime::ExecutableIdentity;
 pub use lifetime::IDLE_TIMEOUT_ENV as DAEMON_IDLE_TIMEOUT_ENV;
 use patch_capture::{capture_baseline, capture_patch_report};
 pub use service_manager::DaemonServiceManager;
+#[cfg(feature = "test-support")]
+pub use shutdown_deadline::SHUTDOWN_GRACE_MS_TEST_ENV;
+pub use shutdown_deadline::{arm_shutdown_deadline, SHUTDOWN_GRACE};
 #[cfg(test)]
 use stop::active_daemon_job_ids;
 pub(crate) use stop::stop_unlocked;
@@ -2058,15 +2062,19 @@ where
     }
     let mut accepted = 0;
     let mut serve_result = Ok(());
-    loop {
-        if intake_draining()
-            && daemon_freshness_report(&job_store).is_ok_and(|report| report.active_jobs == 0)
-        {
-            break;
-        }
-        if shutdown
+    let shutdown_set = || {
+        shutdown
             .as_ref()
             .is_some_and(|flag| flag.load(Ordering::Acquire))
+    };
+    'serve: loop {
+        // A requested stop is checked before anything that reads the store, so
+        // a slow freshness report never delays it (#17891).
+        if shutdown_set() {
+            break;
+        }
+        if intake_draining()
+            && daemon_freshness_report(&job_store).is_ok_and(|report| report.active_jobs == 0)
         {
             break;
         }
@@ -2089,18 +2097,31 @@ where
         };
         match stream {
             Ok(stream) => {
-                if shutdown
-                    .as_ref()
-                    .is_some_and(|flag| flag.load(Ordering::Acquire))
-                {
+                if shutdown_set() {
                     break;
                 }
-                if connection_tx.send(stream).is_err() {
-                    serve_result = Err(Error::internal_io(
-                        "daemon connection workers stopped".to_string(),
-                        Some("dispatch daemon connection".to_string()),
-                    ));
-                    break;
+                // Never block on a full queue: when every worker is busy a
+                // blocking send would wedge this loop, and with it every
+                // shutdown and drain check (#17891).
+                let mut pending = stream;
+                loop {
+                    match connection_tx.try_send(pending) {
+                        Ok(()) => break,
+                        Err(std::sync::mpsc::TrySendError::Full(stream)) => {
+                            if shutdown_set() {
+                                break 'serve;
+                            }
+                            pending = stream;
+                            std::thread::sleep(Duration::from_millis(10));
+                        }
+                        Err(std::sync::mpsc::TrySendError::Disconnected(_)) => {
+                            serve_result = Err(Error::internal_io(
+                                "daemon connection workers stopped".to_string(),
+                                Some("dispatch daemon connection".to_string()),
+                            ));
+                            break 'serve;
+                        }
+                    }
                 }
                 accepted += 1;
                 if request_limit.is_some_and(|limit| accepted >= limit) {
@@ -2117,6 +2138,12 @@ where
         }
     }
 
+    // Test-support fault boundary: wedge the drain after a requested stop, as a
+    // blocked serving thread does, so the shutdown deadline is observable.
+    #[cfg(feature = "test-support")]
+    if shutdown_set() {
+        let _ = crate::test_support::wait_at_file_gate("HOMEBOY_TEST_DAEMON_SHUTDOWN_DRAIN_GATE");
+    }
     let replacing = intake_draining();
     drop(connection_tx);
     let shutdown_requested = replacing
