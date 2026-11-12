@@ -1372,6 +1372,8 @@ jobs:
       # `write` so an incomplete release can be returned to draft. Detecting a
       # broken published release and leaving it published is not a guard (#8687).
       contents: write
+      # Dispatch the tag recovery below.
+      actions: write
     env:
       GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
     steps:
@@ -1450,6 +1452,18 @@ jobs:
             exit 1
           fi
           echo "::notice::Release ${RELEASE_TAG} contains every planned asset."
+
+      # A tag left without a release (for example, a build whose hosted runner
+      # was never acquired) is recovered by the documented tag dispatch. Only a
+      # push run dispatches it, once, so a recovery that fails again stays
+      # failed for a person to inspect. This run stays red either way.
+      - name: Dispatch tag recovery
+        if: ${{ failure() && inputs.release_tag == '' }}
+        env:
+          RELEASE_TAG: ${{ needs.prepare.outputs['release-tag'] }}
+        run: |
+          gh workflow run release.yml --repo "${GITHUB_REPOSITORY}" --ref "${RELEASE_BRANCH}" -f release_tag="${RELEASE_TAG}"
+          echo "::warning::Dispatched recovery for ${RELEASE_TAG}: gh run list --workflow release.yml --event workflow_dispatch"
 
   # A complete remote inventory proves that every archive was uploaded. It does
   # not prove that the consumer resolver selects this release rather than
