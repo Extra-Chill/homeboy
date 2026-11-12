@@ -178,9 +178,13 @@ all. A source build on an unreleased branch reports `ahead`, not `behind`.
 
 Both commands accept a positional component target, `--path`, and
 `--installed <version>`; `--component` remains available as an explicit selector.
-Without `--installed`, the query uses the resolved component checkout's declared
-version. `--installed` overrides it so you can ask about a version you are not
-currently running.
+Without `--installed`, Homeboy reports its running binary's embedded version,
+not the source checkout's version (`version_source: "running_binary"`). Other
+components report `checkout_version` with `version_source: "checkout"` and
+wording `checkout <version>`; installed containment and gap remain unknown.
+Deployment records are target-specific and cannot identify a unique installed
+build for these targetless queries. `--installed` takes precedence and reports
+`version_source: "override"`, so you can ask about a known installed version.
 
 ### `resolve` - discover a published release coordinate
 

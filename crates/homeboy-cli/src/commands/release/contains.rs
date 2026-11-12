@@ -46,7 +46,7 @@ pub struct ContainsArgs {
     #[arg(long, value_name = "PATH")]
     pub path: Option<String>,
 
-    /// Version to treat as installed instead of the component checkout's version.
+    /// Explicit installed version (otherwise binary identity or labeled checkout).
     #[arg(long, value_name = "VERSION")]
     pub installed: Option<String>,
 }
@@ -70,7 +70,7 @@ pub struct GapArgs {
     #[arg(long, value_name = "PATH")]
     pub path: Option<String>,
 
-    /// Version to treat as installed instead of the component checkout's version.
+    /// Explicit installed version (otherwise binary identity or labeled checkout).
     #[arg(long, value_name = "VERSION")]
     pub installed: Option<String>,
 }
