@@ -148,13 +148,26 @@ pub fn run(args: WorkflowArgs) -> CmdResult<Value> {
             let client = LocalControllerJobClient::connect()?;
             let view = match client.workflow(&instance) {
                 Ok(view) => view,
-                // Not an instance: a registered cadence's workflow id.
-                Err(error) => {
+                // The daemon answered that no such instance exists: the name
+                // may be a registered cadence's workflow id. Any other
+                // failure is the reason the cancel did not happen.
+                Err(error) if error.code == homeboy_core::ErrorCode::ValidationInvalidArgument => {
                     return client
                         .cancel_workflow_cadence(&instance)
                         .map(|cadence| (json!({ "cadence": cadence }), 0))
-                        .map_err(|_| error);
+                        .map_err(|cadence_error| {
+                            Error::validation_invalid_argument(
+                                "instance",
+                                format!(
+                                    "`{instance}` is neither a workflow instance ({}) nor a registered cadence ({})",
+                                    error.message, cadence_error.message
+                                ),
+                                Some(instance.clone()),
+                                None,
+                            )
+                        });
                 }
+                Err(error) => return Err(error),
             };
             let job_id = view["job"]["job_id"]
                 .as_str()
