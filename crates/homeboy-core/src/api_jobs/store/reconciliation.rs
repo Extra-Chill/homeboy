@@ -165,6 +165,8 @@ impl JobStore {
                     DaemonActiveJobRecoveryDisposition::QueuedForReplacement
                 } else if terminal_evidence.is_some() {
                     DaemonActiveJobRecoveryDisposition::TerminalEvidence
+                } else if ownership.driver_supervises_live(stored) {
+                    DaemonActiveJobRecoveryDisposition::DriverRecovery
                 } else if let Some(liveness) = ownership.state {
                     match liveness {
                         LocalChildLiveness::Dead

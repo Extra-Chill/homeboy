@@ -497,7 +497,7 @@ fn when_gates_launch_the_next_step_and_skip_the_rest() {
 /// together. The service-manager fixture owns replacement, just as systemd
 /// does in production; no alternate workflow adoption path is involved.
 #[test]
-fn stale_daemon_hands_live_workflow_to_replacement_at_step_boundary() {
+fn stale_daemon_hands_a_running_workflow_step_to_its_replacement() {
     use crate::daemon::*;
     use crate::paths;
     use std::net::TcpListener;
@@ -556,12 +556,40 @@ fn stale_daemon_hands_live_workflow_to_replacement_at_step_boundary() {
                 .with_daemon_lease(lease.lease_id.clone())
         };
         let store = snapshot();
-        // Installation made the serving lease stale. Upgrade schedules its
-        // existing exact-lease drain rather than killing the protected child.
+        // Installation made the serving lease stale. The running step's
+        // process is detached and its driver re-adopts it, so it does not hold
+        // the old daemon: the drain ends while the step is still running
+        // (#17870), and nothing waits for it before new work is admitted.
         let mut stale = lease.clone();
         stale.build_identity.version = "0.0.0".to_string();
         std::fs::write(state_path().unwrap(), serde_json::to_vec(&stale).unwrap()).unwrap();
+        let child = store
+            .controller_job_for_key(&format!("{}/a/1/1", request.instance))
+            .unwrap();
+        let evidence =
+            store.active_daemon_job_recovery_evidence(Some(&lease.lease_id), pid_is_running);
+        for id in [job_id, child.id] {
+            assert_eq!(
+                evidence
+                    .iter()
+                    .find(|e| e.job_id == id)
+                    .unwrap()
+                    .disposition,
+                crate::api_jobs::DaemonActiveJobRecoveryDisposition::DriverRecovery
+            );
+        }
         drain_then_replace(&lease.lease_id).unwrap();
+        wait(&|| server.is_finished());
+        server.join().unwrap().unwrap();
+        let store = snapshot();
+        assert!(!release.exists(), "the step is still running");
+        assert!(!store.get(child.id).unwrap().status.is_terminal());
+        assert!(!next.exists(), "old daemon must not schedule the next step");
+        assert!(!store.get(job_id).unwrap().status.is_terminal());
+        // This test's old daemon is a thread, so its workflow runtime outlives
+        // the serve loop that a real process exit would end. It yields at the
+        // step boundary without scheduling the next step.
+        std::fs::write(&release, "go").unwrap();
         let runtime = controller_job_runtime_key(&store, job_id);
         wait(&|| {
             !controller_job_runtimes()
@@ -569,47 +597,7 @@ fn stale_daemon_hands_live_workflow_to_replacement_at_step_boundary() {
                 .unwrap()
                 .contains_key(&runtime)
         });
-        let store = snapshot();
-        let child = store
-            .controller_job_for_key(&format!("{}/a/1/1", request.instance))
-            .unwrap();
-        let evidence =
-            store.active_daemon_job_recovery_evidence(Some(&lease.lease_id), pid_is_running);
-        assert_eq!(
-            evidence
-                .iter()
-                .find(|e| e.job_id == job_id)
-                .unwrap()
-                .disposition,
-            crate::api_jobs::DaemonActiveJobRecoveryDisposition::DriverRecovery
-        );
-        assert!(evidence
-            .iter()
-            .find(|e| e.job_id == child.id)
-            .unwrap()
-            .disposition
-            .blocks_daemon_replacement());
-        assert!(
-            !server.is_finished(),
-            "protected step still holds the old daemon"
-        );
-        assert!(!maintenance_allowed());
-        assert!(!next.exists());
-        assert!(store
-            .controller_job_for_key(&format!("{}/b/1/1", request.instance))
-            .is_none());
-        std::fs::write(&release, "go").unwrap();
-        wait(&|| server.is_finished());
-        server.join().unwrap().unwrap();
-        let store = snapshot();
-        assert_eq!(store.get(child.id).unwrap().status, JobStatus::Succeeded);
         assert!(!next.exists(), "old daemon must not schedule the next step");
-        assert!(!store.get(job_id).unwrap().status.is_terminal());
-        assert!(store
-            .controller_job_state(job_id)
-            .unwrap()
-            .checkpoint
-            .is_some());
 
         // A service manager starts the replacement. Its normal startup calls
         // recover_controller_jobs and adopts the checkpoint under its new lease.
@@ -628,6 +616,8 @@ fn stale_daemon_hands_live_workflow_to_replacement_at_step_boundary() {
         });
         wait(&|| next.exists());
         wait(&|| snapshot().get(job_id).unwrap().status.is_terminal());
+        let step = snapshot().get(child.id).unwrap();
+        assert_eq!(step.status, JobStatus::Succeeded);
         let adopted = snapshot().get(job_id).unwrap();
         assert_eq!(adopted.status, JobStatus::Succeeded);
         assert_ne!(

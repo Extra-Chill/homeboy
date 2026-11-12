@@ -1757,11 +1757,11 @@ mod tests {
     }
 
     #[test]
-    fn a_running_checkpoint_is_re_adopted_without_a_second_spawn() {
+    fn a_running_checkpoint_is_re_adopted_by_each_successor_without_a_second_spawn() {
         with_isolated_home(|home| {
             let path = home.path().join("step-jobs.sqlite");
             let counter = home.path().join("spawns");
-            let script = format!("echo spawn >> {}; sleep 1", counter.display());
+            let script = format!("echo spawn >> {}; sleep 2", counter.display());
             let request = request(&script, EnvMaterializationPlan::default());
             register_step_job_driver();
             let driver: Arc<dyn ControllerJobDriver> = Arc::new(StepJobDriver);
@@ -1787,6 +1787,14 @@ mod tests {
             harness
                 .handle()
                 .checkpoint(to_value(&checkpoint).unwrap())
+                .unwrap();
+            // A first successor claims the running step, then dies before it
+            // ends. Upgrades can replace the daemon again during one long step.
+            let job_id = uuid::Uuid::parse_str(&harness.handle().job_id()).unwrap();
+            crate::api_jobs::JobStore::open_without_reconciliation(&path)
+                .unwrap()
+                .with_daemon_lease("first-successor".to_string())
+                .claim_controller_execution(job_id, true)
                 .unwrap();
             let restarted = harness.reopen(&path, "replacement-lease").unwrap();
             let reaper = std::thread::spawn(move || process.wait());
