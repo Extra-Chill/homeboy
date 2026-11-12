@@ -70,7 +70,7 @@ paths directly:
 ```bash
 homeboy runs show <run-id>
 homeboy runs findings <run-id> --tool fuzz
-homeboy runs artifact get <run-id> <artifact-id> --output <path>
+homeboy runs artifact get <run-id> <artifact-id> --to <path>
 homeboy fuzz replay --run-id <run-id> --case-id <case-id> --dry-run
 ```
 

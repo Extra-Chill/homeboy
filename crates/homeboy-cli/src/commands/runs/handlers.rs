@@ -1602,6 +1602,83 @@ mod pull_tests {
     }
 
     #[test]
+    fn artifact_destination_is_separate_from_global_json_output() {
+        use crate::cli_surface::{Cli, Commands};
+        use crate::commands::runs::types::RunsCommand;
+        use clap::Parser;
+
+        with_isolated_home(|home| {
+            let store = ObservationStore::open_initialized().expect("store");
+            let run = store
+                .start_run(NewRunRecord::builder("bench").build())
+                .expect("run");
+            let source = home.path().join("source.bin");
+            let bytes = b"artifact bytes\0not a command-result envelope\xff";
+            fs::write(&source, bytes).expect("source");
+            let artifact = store
+                .record_artifact_with_metadata(
+                    &run.id,
+                    "failure.diagnostic",
+                    &source,
+                    serde_json::json!({"failure_diagnostic": true}),
+                )
+                .expect("artifact");
+            let handle = store
+                .bounded_artifact_projection_for_runs(std::slice::from_ref(&run.id), 1)
+                .expect("projection")
+                .diagnostic_handle
+                .expect("handle");
+
+            for command in ["get", "get-handle"] {
+                for flag in ["-o", "--to"] {
+                    for global_position in [None, Some(true), Some(false)] {
+                        let destination = home.path().join("download.bin");
+                        let json_path = home.path().join("result.json");
+                        let mut argv = vec!["homeboy".to_string()];
+                        if global_position == Some(true) {
+                            argv.extend(["--output".to_string(), json_path.display().to_string()]);
+                        }
+                        argv.extend([
+                            "runs".to_string(),
+                            "artifact".to_string(),
+                            command.to_string(),
+                        ]);
+                        if command == "get" {
+                            argv.extend([run.id.clone(), artifact.id.clone()]);
+                        } else {
+                            argv.push(handle.clone());
+                        }
+                        argv.extend([flag.to_string(), destination.display().to_string()]);
+                        if global_position == Some(false) {
+                            argv.extend(["--output".to_string(), json_path.display().to_string()]);
+                        }
+                        let cli = Cli::try_parse_from(argv).expect("parse retrieval flags");
+                        assert_eq!(cli.output, global_position.map(|_| json_path.clone()));
+                        let Commands::Runs(runs) = cli.command else {
+                            panic!("runs")
+                        };
+                        let RunsCommand::Artifact(args) = runs.command else {
+                            panic!("artifact")
+                        };
+                        let (output, code) = artifact_command(&store, args).expect("retrieve");
+                        assert_eq!(code, 0);
+                        let RunsOutput::ArtifactGet(result) = output else {
+                            panic!("retrieval result")
+                        };
+                        assert_eq!(PathBuf::from(result.output_path), destination);
+                        assert_eq!(fs::read(&destination).expect("download"), bytes);
+                        assert!(
+                            !json_path.exists(),
+                            "retrieval must not write the JSON envelope"
+                        );
+                        fs::remove_file(destination).expect("remove download");
+                    }
+                }
+            }
+        });
+    }
+
+    #[test]
     fn sanitize_artifact_filename_is_path_safe() {
         assert_eq!(
             sanitize_artifact_filename("finding-packets.json"),

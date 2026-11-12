@@ -446,7 +446,7 @@ fn fuzz_replay_artifact_access(artifact: &ArtifactRecord) -> FuzzReplayArtifactA
         public_access,
         public_url,
         fetch_command: Some(format!(
-            "homeboy runs artifact get {} {} --output <path>",
+            "homeboy runs artifact get {} {} --to <path>",
             artifact.run_id, artifact.id
         )),
         publish_command: None,
@@ -547,7 +547,7 @@ fn runner_artifact_replay_requires_local_bytes(reference: &str) -> homeboy::core
         Some(vec![
             format!("Runner artifact ref: {reference}"),
             "Use `homeboy fuzz replay --dry-run <runner-artifact://...>` to inspect replay intent without local bytes.".to_string(),
-            "Download the artifact first with `homeboy runs artifact get <run-id> <artifact-id> --output <path>`, then replay that local path.".to_string(),
+            "Download the artifact first with `homeboy runs artifact get <run-id> <artifact-id> --to <path>`, then replay that local path.".to_string(),
         ]),
     )
 }
