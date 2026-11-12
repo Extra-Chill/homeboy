@@ -994,6 +994,17 @@ pub(super) fn preflight(
             .and_then(serde_json::Value::as_str)
             .map(|message| format!(": {message}"))
             .unwrap_or_default();
+        if let Some(diagnostic) = diagnostic
+            .as_ref()
+            .filter(|d| d["code"] == "gate_runtime_unavailable")
+        {
+            let details = &diagnostic["details"];
+            return Err(super::gate_runtime::unavailable(
+                details["gate"].as_str().unwrap_or_default(),
+                details["executable"].as_str().unwrap_or_default(),
+                runner_id,
+            ));
+        }
         return Err(Error::new(
             homeboy_core::ErrorCode::RunnerLabTransportFailure,
             format!("runner did not return a ready non-execution readiness receipt{cause}"),
@@ -1695,6 +1706,41 @@ mod tests {
             timeout_seconds: 30,
             no_progress_timeout_seconds: 30,
         }
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn gate_runtime_lab_readiness_uses_declared_sandbox_path() {
+        use std::os::unix::fs::PermissionsExt;
+        homeboy_core::test_support::with_isolated_home(|_| {
+            let root = tempfile::tempdir().unwrap();
+            repository(root.path());
+            let bin = tempfile::tempdir().unwrap();
+            let mut request = request(root.path());
+            request.preflight_only = true;
+            request.toolchains = vec![AgentTaskGateToolchainRequirement {
+                command: "php".into(),
+                probe_arguments: vec![
+                    super::super::gate_runtime::RESOLVE_ONLY.into(),
+                    "php -v".into(),
+                ],
+            }];
+            request
+                .environment
+                .variables
+                .insert("PATH".into(), bin.path().display().to_string());
+            let context = homeboy_core::runner_job_execution_context::RunnerJobExecutionContext::direct_daemon(Some("controller-run"), "lab", "job", "homeboy", "reservation").unwrap();
+            let receipt = execute_with_context(request.clone(), root.path(), &context).unwrap();
+            let diagnostic = &receipt.report.lab_receipt.as_ref().unwrap()["diagnostic"];
+            assert_eq!(diagnostic["code"], "gate_runtime_unavailable");
+            assert_eq!(diagnostic["details"]["gate"], "php -v");
+            assert_eq!(diagnostic["details"]["executable"], "php");
+            let php = bin.path().join("php");
+            fs::write(&php, "#!/bin/sh\nexit 0\n").unwrap();
+            fs::set_permissions(&php, fs::Permissions::from_mode(0o755)).unwrap();
+            let receipt = execute_with_context(request, root.path(), &context).unwrap();
+            assert_eq!(receipt.readiness.unwrap()["status"], "ready");
+        });
     }
 
     #[test]
