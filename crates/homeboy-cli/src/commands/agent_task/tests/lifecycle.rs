@@ -549,7 +549,8 @@ fn status_projects_detached_staging_phase_and_failure_cause() {
 
         assert_eq!(exit_code, 0);
         assert_eq!(status_value["state"], "failed");
-        assert_eq!(status_value["phase"], "materializing");
+        // A terminal pre-execution failure outranks the stale staging phase (#17957).
+        assert_eq!(status_value["phase"], "pre_execution_failure");
         assert_eq!(
             status_value["blocker"]["code"],
             "validation.invalid_argument"
