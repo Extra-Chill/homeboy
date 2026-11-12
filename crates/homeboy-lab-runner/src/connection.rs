@@ -2793,6 +2793,14 @@ pub(crate) mod binary_convergence;
 pub(crate) mod remote_daemon;
 mod replacement_journal;
 mod restart_recovery;
+
+/// Wait out an in-flight in-place daemon restart, the same barrier transport
+/// pollers take, so an observation reads the restarted session instead of the
+/// stopped one. A failed restart that left the stopped lease current returns
+/// the transient `runner_restarting` refusal.
+pub(crate) fn await_daemon_restart(runner_id: &str) -> Result<()> {
+    restart_recovery::with_restart_recovery_lock(runner_id, || Ok(()))
+}
 mod service;
 mod session_store;
 mod transport;

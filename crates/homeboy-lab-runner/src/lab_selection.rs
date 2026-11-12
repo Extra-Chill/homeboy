@@ -723,9 +723,18 @@ pub(super) fn prepare_lab_runner_for_offload(
         ));
     }
 
-    prepare_lab_runner_for_offload_with(selection, status, |runner_id| {
+    prepare_lab_runner_for_offload_with(selection, status_after_daemon_restart, |runner_id| {
         connect_runner_for_offload(runner_id)
     })
+}
+
+/// Admission observes the runner only after an in-place daemon restart
+/// (`runner refresh-homeboy`) publishes its session. Observing mid-restart
+/// reads the stopped daemon's unreachable endpoint as a terminal ownership
+/// blocker and fails a Cook the restart was about to serve.
+pub(crate) fn status_after_daemon_restart(runner_id: &str) -> Result<RunnerStatusReport> {
+    crate::connection::await_daemon_restart(runner_id)?;
+    status(runner_id)
 }
 
 /// Prepare an explicitly selected runner before a controller-owned cook pins

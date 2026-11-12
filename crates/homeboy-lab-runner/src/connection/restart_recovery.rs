@@ -261,6 +261,39 @@ mod tests {
         session
     }
 
+    /// Lab admission during `runner refresh-homeboy` observes the restarted
+    /// session, never the stopped one mid-restart.
+    #[test]
+    fn lab_admission_observes_the_runner_after_its_restart_publishes() {
+        crate::test_support::with_isolated_home(|_| {
+            write_session(&session("lease-old", None)).expect("connected session");
+            let started = std::sync::Arc::new(std::sync::Barrier::new(2));
+            let restarting = started.clone();
+            let restart = std::thread::spawn(move || {
+                with_restart("runner-a", "lease-old", || {
+                    restarting.wait();
+                    std::thread::sleep(Duration::from_millis(300));
+                    rebind_restarted_lease("runner-a", "lease-old", &session("lease-new", None))
+                })
+            });
+            started.wait();
+
+            // The runner is not registered here, so the observation itself
+            // errors; what matters is which session it ran against.
+            let _ = crate::lab_selection::status_after_daemon_restart("runner-a");
+            let observed = read_session("runner-a").expect("read").expect("session");
+
+            assert_eq!(
+                observed.remote_daemon_lease_id.as_deref(),
+                Some("lease-new")
+            );
+            restart
+                .join()
+                .expect("restart thread")
+                .expect("restart publishes");
+        });
+    }
+
     /// Exercise the same recovery entry point used by transport pollers.
     #[test]
     fn pollers_follow_the_restart_budget_and_outcome() {
