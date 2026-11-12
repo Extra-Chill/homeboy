@@ -9734,6 +9734,7 @@ where
     // the response and the request handling stay unbounded.
     stream.set_read_timeout(Some(REQUEST_READ_TIMEOUT))?;
     let request_bytes = read_http_request(&mut stream)?;
+    lifetime::record_controller_request();
     let request = String::from_utf8_lossy(&request_bytes);
     let mut headers_and_body = request.splitn(2, "\r\n\r\n");
     let headers = headers_and_body.next().unwrap_or_default();
