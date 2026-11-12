@@ -4,6 +4,12 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.458.41] - 2026-11-12
+
+### Fixed
+- every local client request follows the serving lease across a restart
+- return freed heap and stop copying workflow state into every progress event
+
 ## [0.458.40] - 2026-11-12
 
 ### Changed
