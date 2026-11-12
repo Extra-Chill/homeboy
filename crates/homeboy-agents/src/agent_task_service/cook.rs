@@ -882,6 +882,10 @@ fn run_cook_startup_phase<T>(
     phase: &str,
     operation: impl FnOnce() -> Result<T>,
 ) -> Result<T> {
+    debug_assert!(
+        crate::agent_task_lifecycle::CONTROLLER_PRE_PROVIDER_PHASES.contains(&phase),
+        "startup phase `{phase}` must be listed in CONTROLLER_PRE_PROVIDER_PHASES"
+    );
     let started = Instant::now();
     report_cook_progress(
         lifecycle_store,
