@@ -176,7 +176,7 @@ pub fn ensure_running(addr: &str) -> Result<DaemonStartResult> {
     let status = read_status()?;
     // A drain fences roots, not access to the lease: owned continuations and
     // read/cancel clients must still reach its per-request admission gate.
-    if status.running && status.reachable && status.draining() {
+    if defers_to_drain(&status) {
         if let Some(state) = status.state {
             if !status.fresh {
                 super::drain_then_replace(&state.lease_id)?;
@@ -200,6 +200,19 @@ pub fn ensure_running(addr: &str) -> Result<DaemonStartResult> {
         None => {}
     }
     ensure_running_locked(addr)
+}
+
+/// Whether `ensure-running` keeps routing to a draining daemon and lets the
+/// drain finish the replacement. A stale drain with no active jobs holding it
+/// has nothing left to wait for: the daemon should already have exited, so
+/// returning it would report success while the daemon is still stale. That
+/// case falls through to the restart below, which proves the replacement
+/// before it reports success (#17891).
+fn defers_to_drain(status: &super::DaemonStatus) -> bool {
+    status.running
+        && status.reachable
+        && status.draining()
+        && (status.fresh || status.freshness.active_jobs > 0)
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -343,7 +356,7 @@ where
 /// no Homeboy launcher and possibly no startup token, so the proof that the PID is
 /// still that daemon is the unchanged lease plus the owner lock holder record
 /// naming it.
-fn terminate_service_managed_daemon(state: &super::DaemonState) -> Result<()> {
+pub(super) fn terminate_service_managed_daemon(state: &super::DaemonState) -> Result<()> {
     let path = crate::paths::daemon_state_file()?;
     let current = super::read_lease_if_identity_matches(
         &path,

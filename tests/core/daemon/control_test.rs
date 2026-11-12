@@ -1036,6 +1036,34 @@ fn ensure_running_defers_a_stale_service_managed_daemon_to_its_manager() {
     assert_eq!(super::stale_daemon_action(&fresh), None);
 }
 
+/// #17891: a stale drain that no active job holds has nothing left to wait
+/// for. `ensure-running` must restart it (and prove the replacement), not
+/// report the still-stale daemon as success.
+#[test]
+fn ensure_running_restarts_a_stale_drain_that_no_job_holds() {
+    with_isolated_home(|_| {
+        let mut idle = managed_status(Some(fake_daemon(4242, "lease-drain")), false);
+        std::fs::write(
+            super::super::drain_path().expect("drain path"),
+            "lease-drain",
+        )
+        .expect("record drain marker");
+        assert!(idle.draining(), "the drain marker names this lease");
+        assert!(!super::defers_to_drain(&idle));
+        assert_eq!(
+            super::stale_daemon_action(&idle),
+            Some(super::StaleDaemonAction::RestartServiceManaged(
+                "lease-drain"
+            ))
+        );
+
+        // While protected jobs hold the drain, it still finishes the
+        // replacement itself.
+        idle.freshness.active_jobs = 1;
+        assert!(super::defers_to_drain(&idle));
+    });
+}
+
 /// #17387: restarting a service-managed daemon signals the exact leased
 /// daemon once and then only observes; the replacement comes from its
 /// manager. The operation has no spawn step at all.
