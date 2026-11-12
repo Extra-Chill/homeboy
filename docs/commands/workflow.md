@@ -33,7 +33,7 @@ Statuses:
 
 ## Resume after fixing a definition
 
-`homeboy workflow run <file|id|-> --resume-from <instance>` admits the current definition and inputs as a new instance. The source must be terminal and belong to the same workflow on the selected daemon. A succeeded step is reused only when its complete templated step-definition digest matches and all its `needs` were reused. Changing a step therefore reruns its downstream steps. Failed, skipped, and unfinished steps run normally.
+`homeboy workflow run <file|id|-> --resume-from <instance>` admits the current definition as a new instance. Inputs the definition still declares keep the source's values unless passed again with `--input`; a `next_pass` instance also keeps its `iteration` and `previous`, so the chain continues from that pass. The source must be terminal and belong to the same workflow on the selected daemon. A succeeded step is reused only when its complete templated step-definition digest matches and all its `needs` were reused. Changing a step therefore reruns its downstream steps. Failed, skipped, and unfinished steps run normally.
 
 Reused steps retain their recorded outputs, run ids, item records, and original job keys (the references to their artifacts); artifacts are not copied or recreated. `runs show` includes `resumed_from` and each step's `reused` and `launched` flags. Pending steps have both flags false. Resume provenance participates in the deterministic instance id; omitting the flag preserves existing identity and pinning semantics. Cadences do not accept `--resume-from`.
 
@@ -177,7 +177,7 @@ A step runs with `env_clear()` plus its admitted environment:
 - `inputs.previous` is null on the first pass; thereafter it contains `outputs` (a map keyed by step id) and `unchanged_passes`. A step can read the whole object with `{{inputs.previous}}`.
 - `stop_unchanged` counts consecutive passes with equal JSON values at the chosen output pointer, including the first observation. A changed value resets the count to 1; a missing output is an error.
 - Each pass has its own status, step jobs and budget. Parent/children links and `--wait` follow the chain. Child admission is idempotent across recovery.
-- Definitions and admitted environments/programs are pinned. For file-based admission, a modified or missing definition is refused with a clear error before the next pass; restart to adopt edits. Registry files are checked too; stdin/inline/built-in definitions remain pinned snapshots. `next_pass` cannot be combined with `every`.
+- Definitions and admitted environments/programs are pinned. For file-based admission, a modified or missing definition ends the chain before the next pass with an error naming the `workflow run <file> --resume-from <instance>` command that continues it on the edited definition. Registry files are checked too; stdin/inline/built-in definitions remain pinned snapshots. `next_pass` cannot be combined with `every`.
 
 ### Cadence (`every`)
 

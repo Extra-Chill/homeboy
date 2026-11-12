@@ -41,7 +41,7 @@ enum WorkflowCommand {
         workflow: String,
     },
     /// Admit a workflow instance; next_pass forwards inputs with overrides, a typed iteration,
-    /// previous outputs, max_iterations and optional stop_unchanged. Changed file definitions are refused.
+    /// previous outputs, max_iterations and optional stop_unchanged. A changed file definition ends the chain; --resume-from continues it.
     /// The same definition and inputs return the existing instance
     Run(RunArgs),
     /// Cancel an instance and every step it is running, or stop a registered cadence
@@ -258,7 +258,7 @@ fn admit_with_resume(
     if let Some(source) = resumed_from {
         let view = client.workflow(source)?;
         if let Ok(source_inputs) = serde_json::from_value(view["inputs"].clone()) {
-            definition.carry_resumed_pass(&mut inputs, &source_inputs);
+            definition.carry_resumed_inputs(&mut inputs, &source_inputs, provided);
         }
     }
     let instance = definition.instance_id_with_resume(&inputs, instance_name, resumed_from);
