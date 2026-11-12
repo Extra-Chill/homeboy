@@ -18,7 +18,7 @@ pub const GATE_FAILURE_EXCERPT_MAX_LINES: usize = 60;
 pub const GATE_FAILURE_EXCERPT_MAX_BYTES: usize = 4 * 1024;
 
 /// Lines that identify where a failure is reported in typical runner output.
-const FAILURE_MARKERS: &[&str] = &["FAILED", "error", "Error", "ERROR", "panicked"];
+const FAILURE_MARKERS: &[&str] = &["FAIL", "✗", "ENOENT", "error", "Error", "ERROR", "panicked"];
 /// Context lines kept before and after each marker line.
 const CONTEXT_BEFORE: usize = 3;
 const CONTEXT_AFTER: usize = 6;
@@ -147,7 +147,19 @@ pub fn gate_failure_excerpt_from_value(gate: &Value) -> Option<String> {
         lines.push("output:".to_string());
         lines.push(output);
     }
-    Some(lines.join("\n"))
+    let tail = bound_bytes(&text_tail(&format!("{stdout}\n{stderr}"), 12), 1024);
+    if !tail.trim().is_empty() {
+        lines.push(format!("output tail:\n{tail}"));
+    }
+    if let Some(reference) = str_at(gate, "/lab_receipt/artifact_ref") {
+        lines.push(format!("artifact: {reference}"));
+        if let Some((_, handle)) = reference.rsplit_once("/artifact/") {
+            lines.push(format!(
+                "full output: homeboy runs artifact get-handle {handle}"
+            ));
+        }
+    }
+    Some(homeboy_core::redaction::redact_string(&lines.join("\n")))
 }
 
 /// The relevant lines of a failed command's combined stderr/stdout: the lines

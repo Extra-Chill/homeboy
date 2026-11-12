@@ -26,6 +26,7 @@ mod dossier;
 mod evidence;
 mod findings;
 mod friction;
+pub(crate) mod gate_output;
 mod gh_actions;
 mod gh_actions_cache;
 mod handlers;

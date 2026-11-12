@@ -7253,3 +7253,49 @@ fn cook_status_follows_recovery_attempt_instead_of_historical_candidate() {
         );
     });
 }
+
+#[test]
+fn real_failed_gate_is_visible_in_diagnose_and_failure_only_evidence() {
+    with_temp_home(|| {
+        let run_id = "run-real-gate-output";
+        agent_task_lifecycle::submit_plan(&test_plan(), Some(run_id)).unwrap();
+        let output = std::process::Command::new("sh")
+            .args([
+                "-c",
+                "printf 'FAIL broken fixture\\n'; printf 'Error: ENOENT fixture\\n' >&2; exit 7",
+            ])
+            .output()
+            .unwrap();
+        assert_eq!(output.status.code(), Some(7));
+        agent_task_lifecycle::record_promotion(run_id, json!({
+            "schema": "homeboy/agent-task-promotion-report/v1",
+            "status": "gate_failed",
+            "deterministic_gates": [{
+                "id": "fixture", "status": "failed", "exit_code": 7,
+                "stdout": String::from_utf8_lossy(&output.stdout),
+                "stderr": String::from_utf8_lossy(&output.stderr),
+                "lab_receipt": {"artifact_ref": "homeboy://run/lab-gate-fixture/artifact/output"}
+            }]
+        })).unwrap();
+        let (diagnosis, _) = diagnose(DiagnoseArgs {
+            run_id: run_id.into(),
+            full: false,
+        })
+        .unwrap();
+        let (proof, _) = evidence(EvidenceArgs {
+            run_id: run_id.into(),
+            kind: None,
+            task: None,
+            failure_only: true,
+            full: false,
+        })
+        .unwrap();
+        for value in [diagnosis, proof] {
+            let outputs = value["gate_failure_outputs"].to_string();
+            assert!(outputs.contains("FAIL broken fixture"), "{value}");
+            assert!(outputs.contains("Error: ENOENT fixture"));
+            assert!(outputs.contains("output tail:"));
+            assert!(outputs.contains("homeboy://run/lab-gate-fixture/artifact/output"));
+        }
+    });
+}

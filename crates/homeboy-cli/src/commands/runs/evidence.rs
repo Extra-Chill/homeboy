@@ -88,7 +88,7 @@ pub fn evidence(run_id: &str) -> CmdResult<RunsOutput> {
     // MCP, automation) can reuse it; this adapter only supplies the CLI-owned
     // `RunSummary`, disk budget, and command label.
     let run_summary = run_summary(run.clone());
-    let report = evidence_report::build_run_evidence_report_with_descendant_evidence(
+    let mut report = evidence_report::build_run_evidence_report_with_descendant_evidence(
         evidence_report::RunEvidenceReportInputs {
             command: "runs.evidence",
             run,
@@ -100,6 +100,11 @@ pub fn evidence(run_id: &str) -> CmdResult<RunsOutput> {
         descendant_evidence,
     );
 
+    if let Some(gate) = super::gate_output::report(&store, run_id) {
+        if let Some(excerpt) = super::gate_output::excerpt(&gate) {
+            report.failure.gate_failures.push(excerpt);
+        }
+    }
     Ok((RunsOutput::Evidence(Box::new(report)), 0))
 }
 
@@ -129,7 +134,12 @@ pub(crate) fn evidence_projection(
     run_ids.extend(runs_service::related_lab_run_ids(&store, &run)?);
     let projection =
         store.bounded_artifact_projection_for_runs(&run_ids, DEFAULT_ARTIFACT_LIMIT)?;
-    let summary = compact_projection(&run, projection);
+    let mut summary = compact_projection(&run, projection);
+    if let Some(report) = super::gate_output::report(store, run_id) {
+        if let Some(excerpt) = super::gate_output::excerpt(&report) {
+            summary.failure["gate_failures"] = json!([excerpt]);
+        }
+    }
     let summary = compact_to_output_limit(summary);
     Ok((RunsOutput::EvidenceSummary(summary), 0))
 }
