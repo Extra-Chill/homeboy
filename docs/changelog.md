@@ -4,6 +4,11 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.458.42] - 2026-11-12
+
+### Fixed
+- every gh call targets the checkout's origin, not a fork's parent
+
 ## [0.458.41] - 2026-11-12
 
 ### Fixed
