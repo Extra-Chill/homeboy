@@ -4,6 +4,11 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.458.37] - 2026-11-12
+
+### Changed
+- prune publication and promotion tests to distinct behaviors
+
 ## [0.458.36] - 2026-11-12
 
 ### Changed
