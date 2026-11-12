@@ -981,10 +981,6 @@ fn git_sync_of_detached_extension_source_preserves_source_revision() {
             ],
         );
         let detached_head = git_output(source.path(), &["rev-parse", "HEAD"]).unwrap();
-        let detached_short = git_output(source.path(), &["rev-parse", "--short", "HEAD"]).unwrap();
-        // The persisted source-revision record now stores the full commit SHA,
-        // while the install result still surfaces the abbreviated revision.
-        let detached_full = git_output(source.path(), &["rev-parse", "HEAD"]).unwrap();
 
         crate::create(
             &format!(
@@ -1032,11 +1028,11 @@ fn git_sync_of_detached_extension_source_preserves_source_revision() {
 
         assert_eq!(
             install.source_revision.as_deref(),
-            Some(detached_short.as_str())
+            Some(detached_head.as_str())
         );
         assert_eq!(
             homeboy_core::extension::lifecycle::read_source_revision("wordpress").as_deref(),
-            Some(detached_full.as_str())
+            Some(detached_head.as_str())
         );
     });
 }
