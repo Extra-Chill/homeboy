@@ -95,6 +95,38 @@ fn status_excludes_an_expired_admission_before_daemon_restart_reconciles_it() {
 }
 
 #[test]
+fn keyed_admission_reserves_again_after_release_but_not_after_consumption() {
+    let store = JobStore::default();
+    let reserve = |now| store.create_or_renew_admission_at(json!({}), "run-1", now, None);
+    let first = reserve(0).expect("first reservation");
+    assert!(first.created);
+    store
+        .release_admission_at(first.job.id, &first.token, 1)
+        .expect("caller releases before any execution");
+
+    let second = reserve(2).expect("a released reservation fenced nothing");
+    assert!(second.created && second.job.id != first.job.id);
+    assert_eq!(reserve(3).expect("replay").job.id, second.job.id);
+
+    store.create_or_reuse_active_local_runner_job(super::store::LocalRunnerJobRequest {
+        operation: "runner.exec".to_string(),
+        source_snapshot: None,
+        metadata: None,
+        path_materialization_plan: None,
+        local_runner: Some(super::store::LocalRunnerJob {
+            runner_id: "homeboy-lab".to_string(),
+            command: vec!["homeboy".to_string()],
+            cwd: None,
+            lifecycle: None,
+            workspace_owner_lease: None,
+        }),
+        admission_idempotency_key: Some("run-1".to_string()),
+    });
+    let refused = reserve(4).expect_err("an execution consumed the key");
+    assert_eq!(refused.details["field"], "idempotency_key");
+}
+
+#[test]
 fn runner_capacity_is_claimed_before_reserving_an_agent_task_child() {
     let store = JobStore::default();
     let local_runner = || super::store::LocalRunnerJob {
