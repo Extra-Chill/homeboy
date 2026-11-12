@@ -9,6 +9,8 @@ pub struct Invocation {
     pub exit_code: i32,
     pub error_code: Option<String>,
     pub error_field: Option<String>,
+    /// The command result's own `status`, such as a recovery report's outcome.
+    pub outcome: Option<String>,
     pub duration_ms: u64,
     pub caller_session: Option<String>,
     pub run_id: Option<String>,

@@ -52,6 +52,18 @@ pub(crate) fn error(error: &homeboy::core::Error) {
     });
 }
 
+/// Record the command result's own `status` when it is an opaque token.
+pub(crate) fn outcome(result: &serde_json::Value) {
+    CURRENT.with_borrow_mut(|current| {
+        if let Some(row) = current {
+            row.outcome = result
+                .get("status")
+                .and_then(|v| v.as_str())
+                .and_then(opaque);
+        }
+    });
+}
+
 pub(crate) fn finish(exit: std::process::ExitCode) {
     let row = CURRENT.with_borrow_mut(Option::take);
     let start = START.with_borrow_mut(Option::take);
