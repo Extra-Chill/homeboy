@@ -4,6 +4,15 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.458.50] - 2026-11-12
+
+### Changed
+- detached extension sync asserts the full source revision
+
+### Fixed
+- private Git indexes live in the repository's Git directory, not the shared tmpfs
+- --resume-from carries the source's inputs so an edited next_pass chain continues
+
 ## [0.458.49] - 2026-11-12
 
 ### Fixed
