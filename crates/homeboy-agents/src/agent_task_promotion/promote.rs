@@ -1573,10 +1573,7 @@ fn promote_committed_changes(
         outcome.candidate.as_ref().expect("adopted candidate"),
     )?;
     if !options.dry_run {
-        git_output(
-            &path,
-            &["read-tree", "--reset", "-u", &committed_patch.candidate],
-        )?;
+        git_output(&path, &["reset", "--hard", &committed_patch.candidate])?;
         if let Some(run_id) = options.source_run_id.as_deref() {
             git_output(
                 &path,

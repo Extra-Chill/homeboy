@@ -37,13 +37,29 @@ pub(crate) fn adopted_commit(
     if !worktree_path.is_dir() {
         return Ok(None);
     }
-    if options.candidate_ref.is_some() {
-        ensure_clean_source(worktree_path)?;
-    }
     let candidate = resolve_candidate(worktree_path, options.candidate_ref.as_deref())?;
     if options.candidate_ref.is_some() {
+        let recovered = recover_candidate_destination(
+            worktree_path,
+            &candidate,
+            options.task_base_sha.as_deref(),
+            options.dry_run,
+        )?;
+        if !recovered {
+            ensure_clean_source(worktree_path)?;
+        }
+    }
+    if options.candidate_ref.is_some() {
         let head = git_stdout(worktree_path, &["rev-parse", "--verify", "HEAD^{commit}"])?;
-        if candidate != head.trim() {
+        if candidate != head.trim()
+            && !(options.dry_run
+                && recover_candidate_destination(
+                    worktree_path,
+                    &candidate,
+                    options.task_base_sha.as_deref(),
+                    true,
+                )?)
+        {
             return Err(Error::validation_invalid_argument(
                 "candidate_ref",
                 "candidate revision must equal the recorded source worktree HEAD",
@@ -303,6 +319,39 @@ fn is_ancestor(cwd: &Path, ancestor: &str, descendant: &str) -> Result<bool> {
 
 fn adoption_graph_error(candidate: &str, message: &str) -> Error {
     Error::validation_invalid_argument("candidate_ref", message, Some(candidate.to_string()), None)
+}
+
+/// Recover only an exact candidate tree on its recorded base. Inspect the live
+/// index and worktree separately so unrelated staged or unstaged bytes survive.
+pub(crate) fn recover_candidate_destination(
+    cwd: &Path,
+    candidate: &str,
+    base: Option<&str>,
+    dry_run: bool,
+) -> Result<bool> {
+    let head = git_stdout(cwd, &["rev-parse", "HEAD"])?;
+    let tree = git_stdout(cwd, &["rev-parse", &format!("{candidate}^{{tree}}")])?;
+    if head.trim() != candidate {
+        let Some(base) = base else { return Ok(false) };
+        let base = git_stdout(cwd, &["rev-parse", &format!("{base}^{{commit}}")])?;
+        if head.trim() != base.trim() || !is_ancestor(cwd, head.trim(), candidate)? {
+            return Ok(false);
+        }
+    }
+    let index_tree = git_stdout(cwd, &["write-tree"])?;
+    let head_tree = git_stdout(cwd, &["rev-parse", "HEAD^{tree}"])?;
+    if index_tree.trim() != tree.trim() && index_tree.trim() != head_tree.trim() {
+        return Ok(false);
+    }
+    let observed = crate::agent_task_candidate_tree::workspace_tree(cwd)?;
+    if observed.trim() != tree.trim() {
+        return Ok(false);
+    }
+    if !dry_run {
+        // Mixed reset updates HEAD and index, never the authenticated worktree.
+        git_stdout(cwd, &["reset", "--mixed", candidate])?;
+    }
+    Ok(true)
 }
 
 fn ensure_clean_source(cwd: &Path) -> Result<()> {
