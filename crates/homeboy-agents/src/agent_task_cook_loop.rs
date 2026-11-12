@@ -98,6 +98,8 @@ pub enum AgentTaskCookLoopStatus {
     GateDeclarationInvalid,
     /// Verification was stopped by its supervisor budget, without a code verdict.
     GateBudgetExceeded,
+    /// Infrastructure failed; keep the candidate for verification-only recovery.
+    GateEnvironmentUnavailable,
     RetryRequested,
     RetriesExhausted,
 }
@@ -298,7 +300,17 @@ pub fn evaluate_cook_loop(options: AgentTaskCookLoopOptions) -> AgentTaskCookLoo
                     | crate::agent_task_gate::AgentTaskGateTermination::NoProgress
             )
         });
-    let should_retry = !gate_budget_exceeded
+    let environment_failure = failed_gates
+        .iter()
+        .find(|gate| gate.classification == AgentTaskGateFailureClassification::Environment);
+    if let Some(gate) = environment_failure {
+        quality.summary = format!(
+            "stop: environment; gate `{}`: {}. Candidate preserved. After fixing the environment run `homeboy agent-task recover {}` to re-gate, or `homeboy agent-task adopt {} --candidate-ref HEAD` from the local candidate worktree.",
+            gate.gate_id, gate.summary, options.source_request.task_id, options.source_request.task_id
+        );
+    }
+    let should_retry = environment_failure.is_none()
+        && !gate_budget_exceeded
         && options.promotion_report.status == AgentTaskPromotionStatus::GateFailed
         && !failed_gates.is_empty()
         // A candidate-code label describes the candidate-side observation; it is
@@ -363,6 +375,7 @@ pub fn evaluate_cook_loop(options: AgentTaskCookLoopOptions) -> AgentTaskCookLoo
             &failure_progression,
         ))
     } else if no_change_gap
+        && environment_failure.is_none()
         && !invalid_gate_declaration
         && !gate_budget_exceeded
         && retry_budget_remaining > 0
@@ -376,6 +389,8 @@ pub fn evaluate_cook_loop(options: AgentTaskCookLoopOptions) -> AgentTaskCookLoo
 
     let status = if follow_up_request.is_some() {
         AgentTaskCookLoopStatus::RetryRequested
+    } else if environment_failure.is_some() {
+        AgentTaskCookLoopStatus::GateEnvironmentUnavailable
     } else if agent_reported_incomplete {
         AgentTaskCookLoopStatus::AgentReportedIncomplete
     } else if gate_budget_exceeded {
@@ -842,6 +857,10 @@ fn gate_failure(
         .as_ref()
         .map(|evidence| evidence.stderr_tail.clone())
         .unwrap_or_else(|| text_tail(&gate.stderr, 20));
+    let environment_error =
+        crate::agent_task_gate::gate_environment_error(&gate.stdout, &gate.stderr)
+            .or_else(|| crate::agent_task_gate::gate_environment_error(&stdout_tail, &stderr_tail))
+            .map(str::to_owned);
     let summary = gate
         .failure_evidence
         .as_ref()
@@ -868,21 +887,31 @@ fn gate_failure(
         .map(|evidence| bounded_diagnostics(&evidence.diagnostics))
         .unwrap_or_default();
     let full_evidence_ref = source_run_id.map(|run_id| gate_evidence_ref(run_id, &gate.id));
+    let missing_executable = crate::agent_task_gate::gate_missing_executable(
+        &command,
+        gate.exit_code,
+        &gate.stdout,
+        &gate.stderr,
+    )
+    .is_some();
     AgentTaskCookLoopGateFailure {
         gate_id: gate.id.clone(),
         visibility: gate.visibility,
         reveal_policy: gate.reveal_policy,
         command,
         exit_code: gate.exit_code,
-        classification: gate
-            .failure_evidence
-            .as_ref()
-            .map(|evidence| evidence.classification)
-            .unwrap_or_default(),
+        classification: if environment_error.is_some() || missing_executable {
+            AgentTaskGateFailureClassification::Environment
+        } else {
+            gate.failure_evidence
+                .as_ref()
+                .map(|evidence| evidence.classification)
+                .unwrap_or_default()
+        },
         stdout_tail,
         stderr_tail,
         failure_excerpt: gate_failure_excerpt(gate).unwrap_or_default(),
-        summary,
+        summary: environment_error.unwrap_or(summary),
         agent_feedback,
         diagnostics,
         full_evidence_ref,
@@ -1262,6 +1291,81 @@ mod tests {
             AgentToolExecutionLocation::Runner
         );
         assert_eq!(request.policy.write, "patch");
+    }
+
+    #[test]
+    fn gate_output_decides_environment_stop_or_candidate_retry() {
+        for (output, environment) in [
+            (
+                "Error: spawn /gate-home/.studio/php-bin/8.4.27-studio-1/php ENOENT",
+                true,
+            ),
+            (
+                "failed to spawn php: No such file or directory (os error 2)",
+                true,
+            ),
+            ("error: toolchain 'nightly' is not installed", true),
+            ("No space left on device", true),
+            ("inode exhaustion on /tmp", true),
+            ("lab_workspace_dependency_hydration failed", true),
+            ("runner.lab_transport_failure: connection reset", true),
+            ("workspace staging failed: connection closed", true),
+            ("assertion failed: left == right", false),
+            (
+                "failed to open fixture.json: No such file or directory",
+                false,
+            ),
+        ] {
+            for unchanged in [false, true] {
+                let mut gate = failed_gate();
+                // Simulate older reports carrying a candidate-regression verdict.
+                gate.stderr = output.to_string();
+                let mut promotion = promotion_report(
+                    if unchanged {
+                        AgentTaskPromotionStatus::NoChangesGateFailed
+                    } else {
+                        AgentTaskPromotionStatus::GateFailed
+                    },
+                    vec![gate],
+                );
+                if unchanged {
+                    promotion.changed_files.clear();
+                }
+                let report = evaluate_cook_loop(AgentTaskCookLoopOptions {
+                    source_request: source_request(),
+                    promotion_report: promotion,
+                    attempt: 1,
+                    max_attempts: 3,
+                    source_run_id: Some("run-environment".to_string()),
+                    current_diff: "candidate patch".to_string(),
+                    review_form: None,
+                    metadata: Value::Null,
+                });
+                if environment {
+                    assert_eq!(
+                        report.status,
+                        AgentTaskCookLoopStatus::GateEnvironmentUnavailable,
+                        "{output}"
+                    );
+                    assert!(report.follow_up_request.is_none());
+                    assert_eq!(report.retry_budget_remaining, 2);
+                    assert!(report.quality.summary.contains(output));
+                    assert!(report.quality.summary.contains("Candidate preserved"));
+                    assert!(report
+                        .quality
+                        .summary
+                        .contains("homeboy agent-task recover"));
+                    assert!(report.quality.summary.contains("homeboy agent-task adopt"));
+                } else {
+                    assert_eq!(
+                        report.status,
+                        AgentTaskCookLoopStatus::RetryRequested,
+                        "{output}"
+                    );
+                    assert!(report.follow_up_request.is_some());
+                }
+            }
+        }
     }
 
     #[test]

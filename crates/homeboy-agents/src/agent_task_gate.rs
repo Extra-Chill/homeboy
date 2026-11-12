@@ -1379,6 +1379,8 @@ pub enum AgentTaskGateFailureClassification {
     ZeroTestsSelected,
     /// A supervisor deadline or silence limit stopped the gate before a verdict.
     ExecutionBudget,
+    /// Runner setup or infrastructure failed, not the candidate.
+    Environment,
 }
 
 pub const AGENT_TASK_GATE_DIAGNOSTIC_RECORD_SCHEMA: &str = "homeboy/gate-diagnostic-record/v1";
@@ -5675,7 +5677,11 @@ fn gate_failure_evidence(
     let shell_rejection = gate_shell_rejection(exit_code, stderr);
     let target_unresolved = homeboy_gate_target_unresolved(stdout, stderr);
     let setup_failure = homeboy_gate_setup_failure(exit_code, stdout, stderr);
+    let environment_error = gate_environment_error(stdout, stderr);
     let classification = match selection_problem {
+        _ if environment_error.is_some() || missing_executable.is_some() => {
+            AgentTaskGateFailureClassification::Environment
+        }
         Some((_, FocusedCargoSelectionProblem::NoTests)) => {
             AgentTaskGateFailureClassification::ZeroTestsSelected
         }
@@ -5689,9 +5695,9 @@ fn gate_failure_evidence(
         }
         None => AgentTaskGateFailureClassification::CandidateCode,
     };
-    let summary = if let Some((selection, FocusedCargoSelectionProblem::NoTests)) =
-        selection_problem
-    {
+    let summary = if let Some(line) = environment_error {
+        format!("gate environment failed: {line}")
+    } else if let Some((selection, FocusedCargoSelectionProblem::NoTests)) = selection_problem {
         let filter = selection.filter.as_deref().unwrap_or_default();
         format!("invalid_focused_cargo_selection: filter {filter:?} selected no tests")
     } else if let Some(bin) = missing_executable.as_deref() {
@@ -5715,7 +5721,9 @@ fn gate_failure_evidence(
             }
         }
     };
-    let agent_feedback = if selection_problem.is_some() {
+    let agent_feedback = if environment_error.is_some() {
+        "Environment failure, not candidate-code feedback. Preserve the candidate and re-gate after repairing the environment, or adopt locally.".to_string()
+    } else if selection_problem.is_some() {
         cargo_selection
             .and_then(|selection| selection.recovery.as_ref())
             .map(|recovery| match recovery.action.as_str() {
@@ -5732,7 +5740,7 @@ fn gate_failure_evidence(
                 "The Cargo test gate filter selected no tests. Choose a filter that selects at least one test before rerunning Cook.".to_string()
             })
     } else if let Some(bin) = missing_executable.as_deref() {
-        format!("The declared gate is invalid, not candidate-code feedback. The gate environment cannot run `{bin}`: executable not found. Declare an installed tool or add the setup step before rerunning Cook. Check dependency hydration at the gate's component path, including Composer dev dependencies in subdirectories. Do not change candidate code to satisfy this gate.")
+        format!("Environment failure, not candidate-code feedback. The gate environment cannot run `{bin}`: executable not found. Repair the environment and re-gate the preserved candidate, or adopt locally. Check dependency hydration at the gate's component path, including Composer dev dependencies in subdirectories. Do not change candidate code to satisfy this gate.")
     } else {
         match (missing_script, shell_rejection.as_deref()) {
             (Some(script), _) => format!(
@@ -5764,10 +5772,37 @@ fn gate_failure_evidence(
     }
 }
 
-/// Missing PATH executables are invalid gate declarations, not candidate
+/// Recognize infrastructure diagnostics conservatively: a plain missing file
+/// may be a candidate bug, but spawn failures and toolchain/setup errors are not.
+/// Shared with feedback evaluation so older persisted candidate-code labels
+/// cannot authorize another provider attempt for a broken environment.
+pub(crate) fn gate_environment_error<'a>(stdout: &'a str, stderr: &'a str) -> Option<&'a str> {
+    stderr.lines().chain(stdout.lines()).find(|line| {
+        let text = line.to_ascii_lowercase();
+        (text.contains("spawn")
+            && (text.contains("enoent") || text.contains("no such file or directory")))
+            || text.contains("no space left on device")
+            || text.contains("enospc")
+            || text.contains("inode exhaustion")
+            || text.contains("disk quota exceeded")
+            || (text.contains("toolchain")
+                && (text.contains("not installed")
+                    || text.contains("not found")
+                    || text.contains("no default toolchain")))
+            || text.contains("lab_workspace_dependency_hydration")
+            || text.contains("runner.lab_transport_failure")
+            || text.contains("gate_environment_unavailable")
+            || ((text.contains("dependency hydration")
+                || text.contains("workspace staging")
+                || text.contains("gate transport"))
+                && (text.contains("failed") || text.contains("error")))
+    })
+}
+
+/// Missing PATH executables are environment failures, not candidate
 /// failures. A missing path (`./bin/check`) stays candidate feedback: the
 /// candidate may be the change that creates it.
-fn gate_missing_executable(
+pub(crate) fn gate_missing_executable(
     command: &str,
     exit_code: i32,
     stdout: &str,
@@ -6800,7 +6835,34 @@ mod tests {
     }
 
     #[test]
-    fn missing_gate_executables_are_invalid_declarations() {
+    fn infrastructure_output_is_not_a_candidate_verdict() {
+        for output in [
+            "Error: spawn /gate-home/.studio/php-bin/8.4.27-studio-1/php ENOENT",
+            "error: toolchain 'nightly' is not installed",
+            "No space left on device",
+            "lab_workspace_dependency_hydration failed",
+            "runner.lab_transport_failure: connection reset",
+            "workspace staging failed: connection closed",
+        ] {
+            let evidence = gate_failure_evidence("verify", 1, "", output, None);
+            assert_eq!(
+                evidence.classification,
+                AgentTaskGateFailureClassification::Environment,
+                "{output}"
+            );
+            assert!(evidence.summary.contains(output));
+            assert!(evidence.agent_feedback.contains("Preserve the candidate"));
+        }
+        let evidence =
+            gate_failure_evidence("verify", 1, "", "assertion failed: left == right", None);
+        assert_eq!(
+            evidence.classification,
+            AgentTaskGateFailureClassification::CandidateCode
+        );
+    }
+
+    #[test]
+    fn missing_gate_executables_are_environment_failures() {
         for (command, code, stdout, stderr, bin) in [
             ("nginx -t", 127, "", "sh: 1: nginx: not found\n", "nginx"),
             (
@@ -6842,7 +6904,7 @@ mod tests {
             let evidence = gate_failure_evidence(command, code, stdout, stderr, None);
             assert_eq!(
                 evidence.classification,
-                AgentTaskGateFailureClassification::GateDeclaration
+                AgentTaskGateFailureClassification::Environment
             );
             assert_eq!(
                 evidence.summary,
@@ -6850,10 +6912,8 @@ mod tests {
             );
             assert!(evidence
                 .agent_feedback
-                .contains("invalid, not candidate-code feedback"));
-            assert!(evidence
-                .agent_feedback
-                .contains("Declare an installed tool or add the setup step"));
+                .contains("Environment failure, not candidate-code feedback"));
+            assert!(evidence.agent_feedback.contains("preserved candidate"));
             let mut report = AgentTaskGateReport::skipped(
                 "gate-1",
                 vec![command.to_string()],
@@ -6878,7 +6938,7 @@ mod tests {
         let evidence = report.failure_evidence.unwrap();
         assert_eq!(
             evidence.classification,
-            AgentTaskGateFailureClassification::GateDeclaration
+            AgentTaskGateFailureClassification::Environment
         );
         assert!(evidence.summary.contains("`phpcs`"));
         assert!(evidence
@@ -6895,7 +6955,7 @@ mod tests {
         assert_eq!(report.status, AgentTaskGateStatus::Failed);
         assert_eq!(
             report.failure_evidence.unwrap().classification,
-            AgentTaskGateFailureClassification::GateDeclaration
+            AgentTaskGateFailureClassification::Environment
         );
     }
 
