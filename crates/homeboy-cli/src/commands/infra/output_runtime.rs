@@ -542,12 +542,11 @@ impl<'a> OutputService<'a> {
 pub fn run_command(
     command: Commands,
     spec: &'static crate::command_contract::CommandSpec,
-    requested_output_file: Option<&str>,
+    output_file: Option<&str>,
     identity: &CommandIdentity,
     provenance: CommandArgumentProvenance,
     placement: crate::cli_surface::Placement,
 ) -> i32 {
-    let output_file = command_runtime_output_file(&command, requested_output_file);
     let plan = command.response_plan(spec, output_file.is_some());
     let output_service = OutputService::new(output_file);
 
@@ -608,17 +607,6 @@ pub(crate) fn validate_output_file_path(path: &str) -> Option<homeboy::core::Err
                 .to_string(),
         ]),
     ))
-}
-
-fn command_runtime_output_file<'a>(
-    command: &Commands,
-    requested_output_file: Option<&'a str>,
-) -> Option<&'a str> {
-    if command.consumes_output_file_as_command_arg() {
-        None
-    } else {
-        requested_output_file
-    }
 }
 
 pub(crate) fn run_json(

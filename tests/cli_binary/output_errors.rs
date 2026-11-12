@@ -74,7 +74,7 @@ fn validation_error_writes_json_output_file() {
 }
 
 #[test]
-fn command_owned_output_path_is_not_rejected_as_global_format() {
+fn artifact_destination_is_not_rejected_as_global_format() {
     let dir = tempfile::tempdir().expect("tempdir");
 
     let output = homeboy_command()
@@ -84,7 +84,7 @@ fn command_owned_output_path_is_not_rejected_as_global_format() {
             "get",
             "missing-run",
             "missing-artifact",
-            "--output",
+            "--to",
             "json",
         ])
         .current_dir(dir.path())
@@ -100,7 +100,7 @@ fn command_owned_output_path_is_not_rejected_as_global_format() {
         .unwrap_or_default();
     assert!(
         !message.contains("looks like an output format"),
-        "command-owned --output should not be validated as the global envelope path: {message}"
+        "the artifact destination should not be validated as the global envelope path: {message}"
     );
 }
 

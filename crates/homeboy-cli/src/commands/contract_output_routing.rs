@@ -117,10 +117,6 @@ impl Commands {
             output_file: descriptor.output_file_mode,
         }
     }
-
-    pub(crate) fn consumes_output_file_as_command_arg(&self) -> bool {
-        matches!(self, Commands::Runs(args) if args.is_artifact_get())
-    }
 }
 
 fn raw_ops_descriptor(
