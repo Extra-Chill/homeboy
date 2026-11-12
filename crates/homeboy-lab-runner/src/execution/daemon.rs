@@ -605,8 +605,6 @@ fn admission_recovery_key(runner_id: &str, lease_id: &str) -> String {
 struct AdmissionRenewalHealth {
     lease_expires_at_ms: Option<u64>,
     failure: Option<String>,
-    /// Last unanswered renewal while still inside the transport grace window.
-    transport_gap: Option<String>,
 }
 
 /// Token-free proof material a durable dispatcher may retain or serialize.
@@ -872,7 +870,6 @@ pub(crate) fn reserve_daemon_admission(
     let renewal_health = Arc::new(Mutex::new(AdmissionRenewalHealth {
         lease_expires_at_ms,
         failure: None,
-        transport_gap: None,
     }));
     let (renewer_stop, renewer) = spawn_admission_renewer(
         local_url.to_string(),
@@ -1205,9 +1202,10 @@ fn spawn_admission_renewer(
                         None => {}
                     }
                     drop(current_owner);
-                    let mut health = health.lock().expect("admission renewal health lock");
-                    health.lease_expires_at_ms = Some(expires_at_ms);
-                    health.transport_gap = None;
+                    health
+                        .lock()
+                        .expect("admission renewal health lock")
+                        .lease_expires_at_ms = Some(expires_at_ms);
                     last_confirmed = Instant::now();
                     wait = ADMISSION_RENEWAL_INTERVAL;
                 }
@@ -1225,10 +1223,6 @@ fn spawn_admission_renewer(
                         ));
                         return;
                     }
-                    health
-                        .lock()
-                        .expect("admission renewal health lock")
-                        .transport_gap = Some(detail);
                     wait = ADMISSION_RENEWAL_RETRY_INTERVAL;
                 }
             }
@@ -1375,7 +1369,6 @@ mod admission_tests {
             renewal_health: Arc::new(Mutex::new(AdmissionRenewalHealth {
                 lease_expires_at_ms: Some(42),
                 failure: Some("daemon rejected renewal".to_string()),
-                transport_gap: None,
             })),
         };
         let error = authority
@@ -1437,7 +1430,6 @@ mod admission_tests {
         let renewal_health = Arc::new(Mutex::new(AdmissionRenewalHealth {
             lease_expires_at_ms: Some(42),
             failure: None,
-            transport_gap: None,
         }));
         let authority = DaemonAdmissionReservationAuthority {
             daemon_lease_id: "lease-a".to_string(),
