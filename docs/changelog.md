@@ -4,6 +4,20 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.459.1] - 2026-11-12
+
+### Changed
+- a tag left without a release dispatches its recovery
+
+### Fixed
+- recover and diagnose agree on orphaned queued Cooks before runner selection
+- resend an unanswered /exec by its submission key instead of deferring the gate
+- decode reservation expiry as a typed retryable pre-spawn failure
+- Cook PR bodies carry evidence, labelled gates and a full AI disclosure
+- default diagnostics and connections to the sole remote runner
+- keep terminal history out of the live job mirror
+- retry of a Cook mission or superseded attempt targets the latest attempt
+
 ## [0.459.0] - 2026-11-12
 
 ### Added
