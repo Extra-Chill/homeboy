@@ -2140,10 +2140,26 @@ pub(crate) fn live_cook_continuation(
 ) -> Option<&Value> {
     let value = lifecycle_continuation(record)?;
     (lifecycle_continuation_state(Some(value)) == CookContinuationState::Claimed
-        && value["owner_pid"]
-            .as_u64()
-            .is_some_and(|pid| u32::try_from(pid).is_ok_and(homeboy_core::process::pid_is_running)))
+        && !continuation_owner_expired(value))
     .then_some(value)
+}
+
+pub(crate) fn abandoned_cook_continuation(
+    record: &agent_task_lifecycle::AgentTaskRunRecord,
+) -> bool {
+    lifecycle_continuation(record).is_some_and(|value| {
+        lifecycle_continuation_state(Some(value)) == CookContinuationState::Claimed
+            && continuation_owner_expired(value)
+    })
+}
+
+/// A claim is abandoned only when its owner process is gone. Age alone is not
+/// evidence: gates and recovery legitimately hold a claim for longer than any
+/// fixed window, and taking over a live claim would admit two drivers.
+fn continuation_owner_expired(value: &Value) -> bool {
+    value["owner_pid"].as_u64().is_some_and(|pid| {
+        u32::try_from(pid).map_or(true, |pid| !homeboy_core::process::pid_is_running(pid))
+    })
 }
 
 fn lifecycle_continuation(record: &agent_task_lifecycle::AgentTaskRunRecord) -> Option<&Value> {
@@ -2158,10 +2174,7 @@ fn lifecycle_continuation_claimable(value: Option<&Value>, foreign_driver: bool)
     !foreign_driver
         && match lifecycle_continuation_state(value) {
             CookContinuationState::Pending => true,
-            CookContinuationState::Claimed => value
-                .and_then(|value| value.get("owner_pid"))
-                .and_then(Value::as_u64)
-                .is_some_and(|pid| !homeboy_core::process::pid_is_running(pid as u32)),
+            CookContinuationState::Claimed => value.is_some_and(continuation_owner_expired),
             _ => false,
         }
 }
@@ -2414,10 +2427,7 @@ fn reconstruct_missing_attempt_record(
 fn lifecycle_continuation_is_claimable(value: Option<&Value>) -> bool {
     match lifecycle_continuation_state(value) {
         CookContinuationState::Pending => true,
-        CookContinuationState::Claimed => value
-            .and_then(|value| value.get("owner_pid"))
-            .and_then(Value::as_u64)
-            .is_some_and(|pid| !homeboy_core::process::pid_is_running(pid as u32)),
+        CookContinuationState::Claimed => value.is_some_and(continuation_owner_expired),
         _ => false,
     }
 }

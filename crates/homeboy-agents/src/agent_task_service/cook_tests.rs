@@ -8707,6 +8707,107 @@ fn recover_preflight_step(cook_id: &str) -> crate::agent_task_service::CookRecov
 }
 
 #[test]
+fn observation_lock_failures_are_retryable_transient_infrastructure() {
+    for message in ["database is locked", "writer contention budget exhausted"] {
+        homeboy_core::test_support::with_isolated_home(|_| {
+            let dispatcher = Arc::new(TransientThenAcceptedDispatcher {
+                failures: Mutex::new(vec![Error::internal_unexpected(message)]),
+                dispatched_run_ids: Mutex::default(),
+            });
+            let mut options = batch_cook_options("store-lock-classification", dispatcher);
+            options.provider_transport.provider_invocation =
+                Some(homeboy_core::command_invocation::CommandInvocation {
+                    argv: vec!["fixture-provider".to_string()],
+                    ..Default::default()
+                });
+            let run_id = options.identity.initial_run_id.clone();
+            let report = run_cook(CookContext::new(options, Arc::new(UnusedExecutor))).unwrap();
+            assert_eq!(report.value.status, "in_flight");
+            let record = agent_task_lifecycle::exact_record(&run_id).unwrap();
+            assert_eq!(record.metadata["pre_execution_failure"]["retryable"], true);
+            assert_eq!(
+                record.metadata["pre_execution_failure"]["failure_classification"],
+                "transient"
+            );
+        });
+    }
+}
+
+#[test]
+fn recover_takes_over_abandoned_continuation_claims() {
+    struct Preflight;
+    impl crate::agent_task_service::CookRecoveryPerformer for Preflight {
+        fn continue_cook(
+            &self,
+            _: &str,
+            _: bool,
+            _: &crate::agent_task_service::CookRecoveryOverrides,
+        ) -> Result<(Value, i32)> {
+            unreachable!()
+        }
+        fn preflight_continue_cook(&self, _: &str, _: bool) -> Result<(Value, i32)> {
+            Ok((serde_json::json!({}), 0))
+        }
+        fn retry(&self, _: &str) -> Result<(Value, i32)> {
+            unreachable!()
+        }
+        fn reconcile(&self, _: &str) -> Result<(Value, i32)> {
+            unreachable!()
+        }
+        fn adopt(&self, _: &str, _: &str) -> Result<(Value, i32)> {
+            unreachable!()
+        }
+    }
+    // The claim owner pid no longer exists.
+    let (owner, claimed_at) = (u32::MAX, agent_task_lifecycle::now_timestamp());
+    {
+        homeboy_core::test_support::with_isolated_home(|_| {
+            let options = retryable_pre_provider_cook("abandoned-continuation", 1);
+            let recipes = CookRecipeStore::from_current_data_root().unwrap();
+            recipes
+                .enqueue_terminal_continuation(
+                    &options.identity.cook_id,
+                    &options.identity.initial_run_id,
+                )
+                .unwrap();
+            agent_task_lifecycle::rewrite_record_for_test(
+                &options.identity.initial_run_id,
+                |record| {
+                    record.metadata["cook_continuation"]["state"] = serde_json::json!("claimed");
+                    record.metadata["cook_continuation"]["owner_pid"] = serde_json::json!(owner);
+                    record.metadata["cook_continuation"]["claimed_at"] =
+                        serde_json::json!(claimed_at);
+                },
+            )
+            .unwrap();
+            let (report, exit) = crate::agent_task_service::recover_cook(
+                &options.identity.cook_id,
+                crate::agent_task_service::CookRecoveryRequest {
+                    preflight: true,
+                    ..Default::default()
+                },
+                &Preflight,
+            )
+            .unwrap();
+            assert_eq!(exit, 0);
+            assert_eq!(
+                report.step,
+                crate::agent_task_service::CookRecoveryStep::Continue
+            );
+            assert!(
+                recipes
+                    .claim_continuation_for(
+                        &options.identity.cook_id,
+                        &options.identity.initial_run_id,
+                    )
+                    .unwrap()
+                    .is_some()
+            );
+        });
+    }
+}
+
+#[test]
 fn zero_execution_pre_execution_failure_recovers_by_retrying_its_recipe() {
     for (case, retryable, expected) in [
         (

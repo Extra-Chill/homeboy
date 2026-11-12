@@ -713,11 +713,15 @@ fn plan_cook_recovery_for_cook(id: &str) -> Result<CookRecoveryPlan> {
     }
     let record = agent_task_lifecycle::exact_record(&run_id)?;
     let status = cook_recovery_status(&record);
-    let step = super::cook_failure_context(&recipe.cook_id, Some(&run_id), &status)
-        .and_then(|context| context.recovery_step)
-        .unwrap_or_else(|| {
-            CookRecoveryStep::none("The Cook recipe or its recovery context could not be read.")
-        });
+    let step = if super::cook_recipe::abandoned_cook_continuation(&record) {
+        CookRecoveryStep::Continue
+    } else {
+        super::cook_failure_context(&recipe.cook_id, Some(&run_id), &status)
+            .and_then(|context| context.recovery_step)
+            .unwrap_or_else(|| {
+                CookRecoveryStep::none("The Cook recipe or its recovery context could not be read.")
+            })
+    };
     Ok(CookRecoveryPlan {
         cook_id: recipe.cook_id,
         run_id,
@@ -811,6 +815,15 @@ fn recover_cook_once(
         || !publish.is_empty();
     if unblock && !preflight {
         clear_no_progress_for(id);
+    }
+    if !preflight {
+        if let Ok(run_id) = super::resolve_cook_continuation_run_id(id) {
+            if let Ok(record) = agent_task_lifecycle::exact_record(&run_id) {
+                if agent_task_lifecycle::recorded_store_contention(&record) {
+                    agent_task_lifecycle::reconcile_status(&run_id)?;
+                }
+            }
+        }
     }
     if let Some(ci) = super::cook_ci::cook_ci_status(id)? {
         if corrected_gates.is_some() {
@@ -1475,10 +1488,13 @@ const STORE_CONTENTION_BASE_BACKOFF: std::time::Duration = std::time::Duration::
 /// Whether `error` is observation-store lock contention: the typed busy
 /// error, or a SQLite write whose contention budget ran out.
 pub fn is_store_contention(error: &Error) -> bool {
-    if error.code == homeboy_core::ErrorCode::ObservationStoreBusy {
-        return true;
-    }
-    let message = error.message.to_ascii_lowercase();
+    error.code == homeboy_core::ErrorCode::ObservationStoreBusy
+        || is_store_contention_message(&error.message)
+}
+
+/// Whether a recorded failure message reports observation-store lock contention.
+pub fn is_store_contention_message(message: &str) -> bool {
+    let message = message.to_ascii_lowercase();
     message.contains("database is locked")
         || message.contains("database is busy")
         || message.contains("writer contention budget exhausted")

@@ -50,7 +50,7 @@ pub(crate) fn project_terminal_runner_record(
     source: &homeboy_core::observation::RunRecord,
     persist: bool,
 ) -> Result<bool> {
-    if record.state().is_terminal() {
+    if record.state().is_terminal() && !lost_observation_write(record) {
         return Ok(false);
     }
     let Some(value) = source.metadata_json.get("agent_task_run") else {
@@ -123,6 +123,11 @@ pub(crate) fn project_terminal_runner_record(
         ));
     }
     let job_id = job_id.to_string();
+    if lost_observation_write(record) {
+        record
+            .ensure_metadata_object()
+            .remove("pre_execution_failure");
+    }
     let aggregate = projected_runner_aggregate(record, &aggregate);
     record_verified_lab_placement_outcome(record)?;
     record.ensure_metadata_object().insert(
@@ -151,6 +156,24 @@ pub(crate) fn project_terminal_runner_record(
         );
     }
     Ok(true)
+}
+
+/// Whether the controller recorded losing an observation-store write for this
+/// run, either as a pre-execution failure or as a post-handoff follow-up.
+pub(crate) fn recorded_store_contention(record: &AgentTaskRunRecord) -> bool {
+    record.metadata.get("transport_follow_up_failure").is_some()
+        || record.metadata["pre_execution_failure"]["message"]
+            .as_str()
+            .is_some_and(crate::agent_task_service::is_store_contention_message)
+}
+
+/// Only the synthetic controller failure may be superseded by retained runner evidence.
+pub(crate) fn lost_observation_write(record: &AgentTaskRunRecord) -> bool {
+    record.state() == AgentTaskRunState::Failed
+        && record.has_accepted_lab_handoff()
+        && record.metadata["pre_execution_failure"]["message"]
+            .as_str()
+            .is_some_and(crate::agent_task_service::is_store_contention_message)
 }
 
 /// Relay live daemon progress through the canonical snapshot projection.
