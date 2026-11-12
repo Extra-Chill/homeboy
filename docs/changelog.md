@@ -4,6 +4,16 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.460.0] - 2026-11-12
+
+### Added
+- record the command result's status as the invocation outcome
+- status, diagnose and run summaries name where a Cook executes
+
+### Fixed
+- an admission renewal gap never cancels an accepted runner job
+- repair the tunnel when describe loses a previously healthy connection
+
 ## [0.459.2] - 2026-11-12
 
 ### Changed
