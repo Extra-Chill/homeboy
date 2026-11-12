@@ -31,6 +31,39 @@ fn count(connection: &rusqlite::Connection, table: &str) -> i64 {
 }
 
 #[test]
+fn terminal_history_leaves_live_mirror_but_remains_replayable() {
+    let temp = tempfile::tempdir().expect("temp dir");
+    let path = temp.path().join(crate::paths::OBSERVATION_DB_FILENAME);
+    let store = JobStore::open_without_reconciliation(&path).expect("store");
+    let mut request = remote_runner_request("homeboy-lab", Some("extrachill"));
+    request.metadata = Some(json!({"submission_key": "terminal-mirror-test"}));
+    let job = store
+        .submit_runner_api_fixture(request.clone())
+        .expect("submit");
+    assert_eq!(store.mirrored_job_count(), 1);
+    store.cancel(job.id, "done").expect("terminalize");
+    assert_eq!(store.mirrored_job_count(), 0);
+    let peer = JobStore::open_without_reconciliation(&path).expect("peer");
+    for handle in [&store, &peer] {
+        assert_eq!(handle.mirrored_job_count(), 0);
+        assert_eq!(
+            handle.get(job.id).expect("retained job").status,
+            JobStatus::Cancelled
+        );
+        assert!(!handle.events(job.id).expect("retained events").is_empty());
+        assert!(handle.list().iter().any(|entry| entry.id == job.id));
+        assert_eq!(
+            handle
+                .submit_runner_api_fixture(request.clone())
+                .expect("dedupe")
+                .id,
+            job.id
+        );
+        assert_eq!(handle.mirrored_job_count(), 0);
+    }
+}
+
+#[test]
 fn appending_an_event_writes_only_that_jobs_rows() {
     let temp = tempfile::tempdir().expect("temp dir");
     let path = temp.path().join(crate::paths::OBSERVATION_DB_FILENAME);

@@ -1100,18 +1100,18 @@ fn terminal_job_retention_compacts_existing_store_without_losing_active_recovery
             job.id
         })
         .collect::<Vec<_>>();
-    store
-        .durable_transaction(|inner| {
-            for (index, job_id) in terminal.iter().enumerate() {
-                let stored = inner.jobs.get_mut(job_id).expect("terminal job exists");
+    for (index, job_id) in terminal.iter().enumerate() {
+        store
+            .durable_job_transaction(*job_id, |inner| {
+                let stored = inner.jobs.get_mut(job_id).expect("terminal job loaded");
                 let timestamp = (index as u64 + 1) * 100;
                 stored.job.created_at_ms = timestamp;
                 stored.job.updated_at_ms = timestamp;
                 stored.job.finished_at_ms = Some(timestamp);
-            }
-            Ok(())
-        })
-        .expect("seed store persists");
+                Ok(())
+            })
+            .expect("seed store persists");
+    }
 
     // Opening is read-only (#17381); retention applies on the next write.
     let compacted = JobStore::open_without_reconciliation_with_retention(&path, 3, 2)

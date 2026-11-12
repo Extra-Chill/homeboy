@@ -44,6 +44,20 @@ pub(super) struct SqlSyncState {
     compaction_digest: u64,
 }
 
+impl SqlSyncState {
+    /// Baseline for an exact historical mutation; dropped again after commit.
+    pub(super) fn include_job(&mut self, stored: &mut StoredJob) -> Result<()> {
+        self.jobs.insert(
+            stored.job.id,
+            SyncedJob {
+                body_digest: digest(&job_row_body(stored)?),
+                event_sequences: stored.events.iter().map(|event| event.sequence).collect(),
+            },
+        );
+        Ok(())
+    }
+}
+
 #[derive(Debug)]
 struct SyncedJob {
     body_digest: u64,
@@ -145,11 +159,87 @@ pub(super) fn open_sql_store(path: &Path) -> Result<Connection> {
     Ok(connection)
 }
 
-/// Read the whole store plus the sync state that describes exactly what was
-/// read.
+/// Read live work and its sync baseline through the existing active index.
+/// Terminal history remains in SQL until an explicit read or retention pass.
 pub(super) fn load_sql_store(
     connection: &Connection,
     path: &Path,
+) -> Result<(DurableJobStore, SqlSyncState)> {
+    load_sql_store_view(connection, path, true)
+}
+
+pub(super) fn load_sql_store_for_compaction(
+    connection: &Connection,
+    path: &Path,
+) -> Result<(DurableJobStore, SqlSyncState)> {
+    load_sql_store_view(connection, path, false)
+}
+
+/// Whether compaction needs the terminal history that the live mirror no
+/// longer holds. This applies the same rules as `compact_terminal_jobs`:
+/// - Non-workflow terminal jobs count against the count and byte budgets.
+/// - Workflow instances are exempt from both budgets and are due only when
+///   one has passed its retention deadline without an expiry marker.
+///
+/// The SQL byte estimate leaves out the JSON separators between events, so it
+/// never exceeds compaction's own measure. Once compaction is within budget,
+/// this stays false.
+pub(super) fn retention_due(
+    path: &Path,
+    limit: usize,
+    bytes: usize,
+    inner: &super::store::JobStoreInner,
+) -> Result<bool> {
+    let Some(connection) = open_sql_store_readonly(path)? else {
+        return Ok(false);
+    };
+    let workflow = crate::daemon::workflow_job::WORKFLOW_JOB_TYPE;
+    let (mut count, mut size): (usize, usize) = connection
+        .query_row(
+            "SELECT COUNT(*), COALESCE(SUM(length(j.body) + COALESCE((SELECT SUM(length(e.body)) FROM daemon_job_events e WHERE e.job_id = j.job_id), 0)), 0)
+             FROM daemon_jobs j
+             WHERE j.active = 0 AND COALESCE(json_extract(j.body, '$.controller_job.job_type'), '') != ?1",
+            [workflow],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .map_err(|error| store_error(path, "measure terminal retention", error))?;
+    for stored in inner.jobs.values().filter(|stored| {
+        stored.job.status.is_terminal()
+            && !stored
+                .controller_job
+                .as_ref()
+                .is_some_and(|controller| controller.job_type == workflow)
+    }) {
+        count += 1;
+        size += serde_json::to_vec(stored)
+            .map_err(|error| serialize_error(error, "terminal retention"))?
+            .len();
+    }
+    if count > limit || size > bytes {
+        return Ok(true);
+    }
+    let retention_ms = crate::defaults::load_config()
+        .retention
+        .workflow_instance_days
+        .saturating_mul(86_400_000);
+    let deadline = super::persistence::timestamp_ms().saturating_sub(retention_ms);
+    connection
+        .query_row(
+            "SELECT EXISTS (SELECT 1 FROM daemon_jobs
+                 WHERE active = 0
+                   AND json_extract(body, '$.controller_job.job_type') = ?1
+                   AND json_extract(body, '$.controller_job.request.expired_at_ms') IS NULL
+                   AND COALESCE(json_extract(body, '$.job.finished_at_ms'), json_extract(body, '$.job.updated_at_ms')) <= ?2)",
+            params![workflow, deadline as i64],
+            |row| row.get(0),
+        )
+        .map_err(|error| store_error(path, "measure workflow expiry", error))
+}
+
+fn load_sql_store_view(
+    connection: &Connection,
+    path: &Path,
+    active_only: bool,
 ) -> Result<(DurableJobStore, SqlSyncState)> {
     let mut state = SqlSyncState::default();
     let mut durable = DurableJobStore::default();
@@ -172,7 +262,11 @@ pub(super) fn load_sql_store(
     let mut events_by_job: HashMap<String, Vec<JobEvent>> = HashMap::new();
     {
         let mut statement = connection
-            .prepare("SELECT job_id, body FROM daemon_job_events ORDER BY sequence")
+            .prepare(if active_only {
+                "SELECT e.job_id, e.body FROM daemon_jobs j JOIN daemon_job_events e ON e.job_id = j.job_id WHERE j.active = 1 ORDER BY e.sequence"
+            } else {
+                "SELECT job_id, body FROM daemon_job_events ORDER BY sequence"
+            })
             .map_err(|error| store_error(path, "read daemon job events", error))?;
         let rows = statement
             .query_map([], |row| {
@@ -190,7 +284,11 @@ pub(super) fn load_sql_store(
 
     {
         let mut statement = connection
-            .prepare("SELECT job_id, body FROM daemon_jobs")
+            .prepare(if active_only {
+                "SELECT job_id, body FROM daemon_jobs WHERE active = 1"
+            } else {
+                "SELECT job_id, body FROM daemon_jobs"
+            })
             .map_err(|error| store_error(path, "read daemon jobs", error))?;
         let rows = statement
             .query_map([], |row| {
@@ -414,6 +512,7 @@ fn write_changes(
         if next.jobs.contains_key(id) {
             continue;
         }
+        changed = true;
         let id_text = id.to_string();
         transaction
             .execute(
@@ -526,7 +625,15 @@ pub(super) fn commit_sql_store(
     for delivery in terminal_deliveries {
         super::store::terminal_delivery::retain_on(&transaction, delivery, false)?;
     }
-    let next = write_changes(&transaction, path, durable, &baseline)?;
+    let mut next = write_changes(&transaction, path, durable, &baseline)?;
+    // Terminal rows remain durable, but are no longer part of the live baseline.
+    let live_ids: HashSet<_> = durable
+        .jobs
+        .iter()
+        .filter(|stored| !stored.job.status.is_terminal())
+        .map(|stored| stored.job.id)
+        .collect();
+    next.jobs.retain(|id, _| live_ids.contains(id));
     transaction
         .commit()
         .map_err(|error| store_error(path, "commit daemon job store", error))?;
@@ -542,7 +649,7 @@ pub(super) fn read_durable_store_readonly(path: &Path) -> Result<Option<DurableJ
     let Some(connection) = open_sql_store_readonly(path)? else {
         return Ok(None);
     };
-    Ok(Some(load_sql_store(&connection, path)?.0))
+    Ok(Some(load_sql_store_view(&connection, path, false)?.0))
 }
 
 /// Non-terminal job bodies through the `active` index. The daemon lifetime
@@ -558,21 +665,135 @@ pub(super) fn read_active_jobs_readonly(path: &Path) -> Result<Option<Vec<Stored
     let Some(connection) = open_sql_store_readonly(path)? else {
         return Ok(None);
     };
+    read_job_bodies(&connection, path, ACTIVE_JOBS_QUERY, []).map(Some)
+}
+
+/// Which terminal history a whole-store reader needs. Each filter runs in SQL
+/// over job rows only, so periodic readers never parse events or unrelated
+/// history.
+#[derive(Clone, Copy)]
+pub(super) enum TerminalJobs<'a> {
+    All,
+    ControllerType(&'a str),
+    /// Controller jobs of one type whose request has `field == value`.
+    ControllerRequest {
+        job_type: &'a str,
+        field: &'a str,
+        value: &'a str,
+    },
+    WorkspaceOwnerLease,
+    Stale,
+}
+
+/// Terminal job bodies (without events) that the live mirror no longer holds.
+pub(super) fn read_terminal_jobs_readonly(
+    path: &Path,
+    filter: TerminalJobs<'_>,
+) -> Result<Vec<StoredJob>> {
+    let Some(connection) = open_sql_store_readonly(path)? else {
+        return Ok(Vec::new());
+    };
+    const TERMINAL: &str = "SELECT body FROM daemon_jobs WHERE active = 0";
+    match filter {
+        TerminalJobs::All => read_job_bodies(&connection, path, TERMINAL, []),
+        TerminalJobs::ControllerType(job_type) => read_job_bodies(
+            &connection,
+            path,
+            "SELECT body FROM daemon_jobs WHERE active = 0 AND json_extract(body, '$.controller_job.job_type') = ?1",
+            [job_type],
+        ),
+        TerminalJobs::ControllerRequest {
+            job_type,
+            field,
+            value,
+        } => read_job_bodies(
+            &connection,
+            path,
+            "SELECT body FROM daemon_jobs WHERE active = 0 AND json_extract(body, '$.controller_job.job_type') = ?1 AND json_extract(body, ?2) = ?3",
+            [job_type, &format!("$.controller_job.request.{field}"), value],
+        ),
+        TerminalJobs::WorkspaceOwnerLease => read_job_bodies(
+            &connection,
+            path,
+            "SELECT body FROM daemon_jobs WHERE active = 0 AND json_extract(body, '$.local_runner.workspace_owner_lease') IS NOT NULL",
+            [],
+        ),
+        TerminalJobs::Stale => read_job_bodies(
+            &connection,
+            path,
+            "SELECT body FROM daemon_jobs WHERE active = 0 AND json_extract(body, '$.job.stale_reason') IS NOT NULL",
+            [],
+        ),
+    }
+}
+
+fn read_job_bodies<P: rusqlite::Params>(
+    connection: &Connection,
+    path: &Path,
+    query: &str,
+    params: P,
+) -> Result<Vec<StoredJob>> {
     let mut statement = connection
-        .prepare(ACTIVE_JOBS_QUERY)
-        .map_err(|error| store_error(path, "read active daemon jobs", error))?;
+        .prepare(query)
+        .map_err(|error| store_error(path, "read daemon job rows", error))?;
     let rows = statement
-        .query_map([], |row| row.get::<_, String>(0))
-        .map_err(|error| store_error(path, "read active daemon jobs", error))?;
+        .query_map(params, |row| row.get::<_, String>(0))
+        .map_err(|error| store_error(path, "read daemon job rows", error))?;
     let mut jobs = Vec::new();
     for row in rows {
-        let body = row.map_err(|error| store_error(path, "read active daemon job", error))?;
+        let body = row.map_err(|error| store_error(path, "read daemon job row", error))?;
         jobs.push(
             serde_json::from_str(&body)
                 .map_err(|error| Error::config_invalid_json(path.display().to_string(), error))?,
         );
     }
-    Ok(Some(jobs))
+    Ok(jobs)
+}
+
+/// One job row, with its events only when `with_events` asks for them.
+pub(super) fn read_job_readonly(
+    path: &Path,
+    job_id: Uuid,
+    with_events: bool,
+) -> Result<Option<StoredJob>> {
+    let Some(connection) = open_sql_store_readonly(path)? else {
+        return Ok(None);
+    };
+    let Some(mut stored) = read_job_row(&connection, path, job_id)? else {
+        return Ok(None);
+    };
+    if with_events {
+        let invalid = |error| Error::config_invalid_json(path.display().to_string(), error);
+        let mut statement = connection
+            .prepare("SELECT body FROM daemon_job_events WHERE job_id = ?1 ORDER BY sequence")
+            .map_err(|error| store_error(path, "read daemon job events", error))?;
+        let rows = statement
+            .query_map([job_id.to_string()], |row| row.get::<_, String>(0))
+            .map_err(|error| store_error(path, "read daemon job events", error))?;
+        for row in rows {
+            let body = row.map_err(|error| store_error(path, "read daemon job event", error))?;
+            stored
+                .events
+                .push(serde_json::from_str(&body).map_err(invalid)?);
+        }
+    }
+    Ok(Some(stored))
+}
+
+fn read_job_row(connection: &Connection, path: &Path, job_id: Uuid) -> Result<Option<StoredJob>> {
+    connection
+        .query_row(
+            "SELECT body FROM daemon_jobs WHERE job_id = ?1",
+            [job_id.to_string()],
+            |row| row.get::<_, String>(0),
+        )
+        .optional()
+        .map_err(|error| store_error(path, "read daemon job", error))?
+        .map(|body| {
+            serde_json::from_str::<StoredJob>(&body)
+                .map_err(|error| Error::config_invalid_json(path.display().to_string(), error))
+        })
+        .transpose()
 }
 
 /// One job (without events) and the controller submissions that name it, for
@@ -585,16 +806,7 @@ pub(super) fn read_job_and_controller_submissions(
         return Ok(None);
     };
     let invalid = |error| Error::config_invalid_json(path.display().to_string(), error);
-    let stored = connection
-        .query_row(
-            "SELECT body FROM daemon_jobs WHERE job_id = ?1",
-            [job_id.to_string()],
-            |row| row.get::<_, String>(0),
-        )
-        .optional()
-        .map_err(|error| store_error(path, "read daemon job", error))?
-        .map(|body| serde_json::from_str::<StoredJob>(&body).map_err(invalid))
-        .transpose()?;
+    let stored = read_job_row(&connection, path, job_id)?;
     let mut statement = connection
         .prepare(
             "SELECT body FROM daemon_job_submissions WHERE kind = 'controller' AND job_id = ?1",

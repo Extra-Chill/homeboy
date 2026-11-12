@@ -340,20 +340,21 @@ impl JobStore {
                         None,
                     ))
                 };
-                let Some(stored) = inner.jobs.get(job_id) else {
-                    return refuse("does not exist".to_string());
+                let stored = match self.read_stored_job(inner, *job_id, false) {
+                    Ok(stored) => stored,
+                    Err(_) => return refuse("does not exist".to_string()),
                 };
                 if !matches!(stored.job.status, JobStatus::Queued | JobStatus::Running) {
                     return refuse("is not active".to_string());
                 }
-                if !self.owns(stored) {
+                if !self.owns(&stored) {
                     return refuse("belongs to another daemon scope".to_string());
                 }
                 if live_lease_id.is_some() && stored.job.daemon_lease_id.as_deref() == live_lease_id
                 {
                     return refuse("belongs to the live daemon generation".to_string());
                 }
-                if stored_job_execution_liveness(stored, &local_child_liveness)
+                if stored_job_execution_liveness(&stored, &local_child_liveness)
                     .state
                     .is_some()
                 {
@@ -855,8 +856,10 @@ impl JobStore {
     pub(crate) fn stale_runner_jobs(&self) -> Vec<super::super::types::ActiveRunnerJobSummary> {
         let now = timestamp_ms();
         let inner = self.inner.lock().expect("job store mutex poisoned");
-        let mut jobs: Vec<super::super::types::ActiveRunnerJobSummary> = inner
-            .jobs
+        let entries = self
+            .jobs_with_history(&inner, super::sql_store::TerminalJobs::Stale)
+            .unwrap_or_else(|_| inner.jobs.clone());
+        let mut jobs: Vec<super::super::types::ActiveRunnerJobSummary> = entries
             .values()
             .filter(|stored| {
                 stored.job.status == JobStatus::Failed && stored.job.stale_reason.is_some()
