@@ -3906,51 +3906,105 @@ fn diagnose_probes_a_runner_owned_terminal_record_when_the_job_is_known() {
 }
 
 #[test]
-fn diagnose_surfaces_queued_runner_ownership_before_a_job_id_is_recorded() {
+fn queued_lab_diagnosis_and_recovery_agree_on_driver_ownership() {
     with_temp_home(|| {
-        let run_id = "run-cli-diagnose-queued-runner-ownership";
-        agent_task_lifecycle::submit_plan(&test_plan(), Some(run_id)).expect("persist attempt");
-        agent_task_lifecycle::rewrite_record_for_test(run_id, |record| {
-            record.updated_at = Some(chrono::Utc::now().to_rfc3339());
-            record.metadata["runner_id"] = json!("homeboy-lab");
-            record.metadata["runner_execution_record"] = json!({
-                "status": "planned",
-                "runner_id": "homeboy-lab"
-            });
-            record.metadata["cook_progress"] = json!({ "phase": "provider_start" });
-        })
-        .expect("persist queued runner ownership");
-
-        let (diagnosis, _) = diagnose(DiagnoseArgs {
-            run_id: run_id.to_string(),
-            full: false,
-        })
-        .expect("diagnose queued runner ownership");
-
-        assert_eq!(
-            diagnosis["root_cause"]["class"],
-            "agent_task.runner_missing_pid"
-        );
-        assert_eq!(diagnosis["root_cause"]["details"]["liveness"], "active");
-        assert_eq!(
-            diagnosis["root_cause"]["details"]["liveness_reconcilable"],
-            false
-        );
-        assert_eq!(diagnosis["root_cause"]["details"]["ownership"], "runner");
-        assert_eq!(diagnosis["causal_phase"], "provider_start");
-        assert_eq!(
-            diagnosis["runner_diagnostic_probe"]["skipped_reason"],
-            "missing_runner_job_id"
-        );
-        assert_eq!(
-            diagnosis["next_commands"][0],
-            format!("homeboy --runner homeboy-lab agent-task diagnose {run_id} --full")
-        );
-        assert_eq!(diagnosis["next_action_basis"], "diagnosis");
-        assert_eq!(
-            diagnosis["_homeboy_actionable"]["next_actions"][0]["command"],
-            format!("homeboy --runner homeboy-lab agent-task diagnose {run_id} --full")
-        );
+        for live in [true, false] {
+            let run_id = if live {
+                "run-lab-live"
+            } else {
+                "run-lab-abandoned"
+            };
+            let cook_id = if live {
+                "cook-lab-live"
+            } else {
+                "cook-lab-abandoned"
+            };
+            persist_recipe_only_cook(cook_id, run_id);
+            agent_task_lifecycle::submit_plan(&test_plan(), Some(run_id)).unwrap();
+            use fs4::fs_std::FileExt;
+            use std::io::Write;
+            let dir = homeboy::core::paths::homeboy_data()
+                .unwrap()
+                .join("agent-task-cooks")
+                .join(cook_id);
+            std::fs::create_dir_all(&dir).unwrap();
+            let mut lock = std::fs::OpenOptions::new()
+                .create(true)
+                .truncate(false)
+                .read(true)
+                .write(true)
+                .open(dir.join("driver.lock"))
+                .unwrap();
+            if live {
+                write!(lock, "{}", std::process::id()).unwrap();
+                lock.lock_exclusive().unwrap();
+            }
+            agent_task_lifecycle::rewrite_record_for_test(run_id, |record| {
+                record.updated_at = Some("2020-01-01T00:00:00Z".into());
+                record.submitted_at = "2020-01-01T00:00:00Z".into();
+                record.metadata["cook_id"] = json!(cook_id);
+                record.metadata["runner_id"] = json!("homeboy-lab");
+                record.metadata["runner_execution_record"] =
+                    json!({"status": "planned", "runner_id": "homeboy-lab"});
+                record.metadata["lab_admission_wait"] =
+                    json!({"started_at": "2026-11-10T00:00:00Z", "blocker": "runner at capacity"});
+                record.metadata["cook_progress"] = json!({"phase": "provider_start"});
+            })
+            .unwrap();
+            let (diagnosis, _) = diagnose(DiagnoseArgs {
+                run_id: run_id.into(),
+                full: false,
+            })
+            .unwrap();
+            let (recovery, _) = recover_preflight_probe(cook_id);
+            if live {
+                assert_eq!(recovery["step"]["kind"], "none", "{recovery:#}");
+                assert_eq!(diagnosis["waiting_for"], "lab_admission", "{diagnosis:#}");
+                assert_ne!(
+                    diagnosis["root_cause"]["class"],
+                    "agent_task.runner_missing_pid"
+                );
+                assert_eq!(
+                    diagnosis["lab_admission_wait"]["blocker"],
+                    "runner at capacity"
+                );
+                assert_eq!(diagnosis["lab_admission_wait"]["runner_id"], "homeboy-lab");
+                let wait = &diagnosis["lab_admission_wait"];
+                let start =
+                    chrono::DateTime::parse_from_rfc3339(wait["started_at"].as_str().unwrap())
+                        .unwrap();
+                let deadline =
+                    chrono::DateTime::parse_from_rfc3339(wait["deadline"].as_str().unwrap())
+                        .unwrap();
+                assert_eq!(
+                    (deadline - start).to_std().unwrap(),
+                    homeboy::core::substrate_wait::SUBSTRATE_WAIT_DEADLINE
+                );
+                let (report, _) = status(StatusArgs {
+                    run_id: run_id.into(),
+                    exact: true,
+                    ..Default::default()
+                })
+                .unwrap();
+                assert_eq!(report["waiting_for"], "lab_admission", "{report:#}");
+            } else {
+                assert_eq!(
+                    diagnosis["root_cause"]["class"], "agent_task.runner_missing_pid",
+                    "{diagnosis:#}"
+                );
+                assert_eq!(recovery["step"]["kind"], "continue", "{recovery:#}");
+                let (report, _) = status(StatusArgs {
+                    run_id: run_id.into(),
+                    exact: true,
+                    ..Default::default()
+                })
+                .unwrap();
+                assert_eq!(
+                    report["runner_ownership_diagnostic"]["class"], "agent_task.runner_missing_pid",
+                    "{report:#}"
+                );
+            }
+        }
     });
 }
 

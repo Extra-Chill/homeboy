@@ -34,6 +34,8 @@ mod cook_step;
 /// Resource supervision of a running Cook against its declared budgets.
 mod cook_supervision;
 mod discovery;
+mod lab_admission;
+pub use lab_admission::{queued_lab_admission, QueuedLabAdmission};
 mod execution;
 mod execution_step;
 /// Read-only process-tree activity sampling for a running Cook.
