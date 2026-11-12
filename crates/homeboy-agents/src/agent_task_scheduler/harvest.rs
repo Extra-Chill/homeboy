@@ -1666,10 +1666,16 @@ mod committed_harvest_tests {
             assert_eq!(
                 git(
                     &workspace,
-                    &["log", "--format=%s", &format!("{base}..HEAD")]
+                    &[
+                        "log",
+                        "--first-parent",
+                        "--format=%s",
+                        &format!("{base}..HEAD")
+                    ]
                 ),
                 "corrected"
             );
+            assert_eq!(git(&workspace, &["rev-parse", "HEAD^2"]), trunk);
             assert!(!git(
                 &workspace,
                 &["log", "--format=%ae", &format!("{base}..HEAD")]
