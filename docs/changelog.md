@@ -4,6 +4,17 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.458.40] - 2026-11-12
+
+### Changed
+- prune workspace, baseline, and adoption tests (slice C)
+
+### Fixed
+- a verified unchanged attempt owes no patch and retries with its incomplete reason
+- prioritize terminal staging failures in status
+- diagnose and recover agree on queued Lab retries waiting for admission
+- distinguish installed build versions from checkout versions
+
 ## [0.458.39] - 2026-11-12
 
 ### Fixed
