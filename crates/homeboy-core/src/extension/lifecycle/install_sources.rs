@@ -150,7 +150,7 @@ pub(super) fn install_from_url(
 
     // Capture source revision before resolve_cloned_extension may discard .git
     // (monorepo installs extract only the subdirectory, losing git history).
-    let source_revision = git::short_head_revision(&temp_dir);
+    let source_revision = git::head_sha(&temp_dir);
 
     // Determine what was cloned and install accordingly.
     let result = resolve_cloned_extension(&temp_dir, &extension_id, &extension_dir, url);
@@ -608,6 +608,22 @@ fn copy_dir_recursive(src: &Path, dst: &Path) -> Result<()> {
     )
 }
 
+// Durable refresh staging may have discarded .git after resolving the source.
+// Only a full commit ID can carry that provenance; requested branch names belong
+// in .source-requested-ref, not .source-revision.
+pub(super) fn resolved_local_source_revision(
+    source: &Path,
+    revision: Option<&str>,
+) -> Option<String> {
+    git::head_sha(source).or_else(|| {
+        revision
+            .filter(|value| {
+                matches!(value.len(), 40 | 64) && value.bytes().all(|byte| byte.is_ascii_hexdigit())
+            })
+            .map(str::to_string)
+    })
+}
+
 /// Install a extension by symlinking a local directory.
 pub(super) fn install_from_path(
     source_path: &str,
@@ -713,9 +729,7 @@ pub(super) fn install_from_path(
         .map_err(|e| Error::internal_io(e.to_string(), Some("create symlink".to_string())))?;
 
     // For linked (local) extensions, read revision from the source dir if it's a git repo
-    let source_revision = revision
-        .map(str::to_string)
-        .or_else(|| git::short_head_revision(&source));
+    let source_revision = resolved_local_source_revision(&source, revision);
     write_source_metadata(
         &extension_dir,
         &source.to_string_lossy(),

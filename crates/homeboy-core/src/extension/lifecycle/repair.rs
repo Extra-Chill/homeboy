@@ -81,7 +81,7 @@ fn replace_from_url(
             replace_clone_temp_glob(&extensions_dir, &extension_id)
         )));
     }
-    let source_revision = git::short_head_revision(&clone_dir);
+    let source_revision = git::head_sha(&clone_dir);
 
     let result = resolve_cloned_extension(&clone_dir, &extension_id, &staged_dir, url);
     if clone_dir.exists() {
@@ -149,11 +149,8 @@ fn replace_from_path(
     install_linked_shared_assets(&source, &extension_dir, source_root.as_deref())?;
 
     let old_path = installed_source_path(&extension_dir);
-    let source_revision = git::short_head_revision(&source).or_else(|| {
-        requested_revision
-            .filter(|revision| !revision.trim().is_empty())
-            .map(str::to_string)
-    });
+    let source_revision =
+        super::install_sources::resolved_local_source_revision(&source, requested_revision);
     let staged_link = extension_dir.with_file_name(format!(".replace-link-tmp-{}", extension_id));
     clean_replace_temp(&staged_link)?;
 
@@ -788,8 +785,6 @@ mod tests {
             assert!(commit_all(&worktree, "initial worktree"));
             let revision =
                 git_output(&worktree, &["rev-parse", "HEAD"]).expect("worktree revision");
-            let short_revision = git_output(&worktree, &["rev-parse", "--short", "HEAD"])
-                .expect("short worktree revision");
 
             install(&durable_source.join("pi").to_string_lossy(), Some("pi"))
                 .expect("install durable linked extension");
@@ -819,7 +814,7 @@ mod tests {
                 fs::read_to_string(metadata_dir.join(".pi.source-revision"))
                     .expect("worktree source revision")
                     .trim(),
-                short_revision
+                revision
             );
             assert!(
                 !metadata_dir.join(".pi.source-requested-ref").exists(),
@@ -895,7 +890,7 @@ mod tests {
     }
 
     #[test]
-    fn replace_from_local_path_uses_requested_revision_when_git_metadata_is_missing() {
+    fn replace_from_local_path_keeps_requested_ref_separate_when_git_metadata_is_missing() {
         with_isolated_home(|home| {
             let home = home.path();
             let old_source = home.join("old-source");
@@ -916,8 +911,13 @@ mod tests {
             )
             .expect("replace should preserve requested revision");
 
+            assert_eq!(result.source_revision, None);
+            assert_eq!(read_source_revision("wordpress"), None);
             assert_eq!(
-                result.source_revision.as_deref(),
+                super::super::update::read_source_requested_ref(
+                    &home.join(".config/homeboy/extensions/wordpress")
+                )
+                .as_deref(),
                 Some("fix/runtime-contract-preservation")
             );
         });
@@ -1025,7 +1025,7 @@ mod tests {
                 Some(remote) => remote,
                 None => return,
             };
-            let pinned_revision = match git_output(&source, &["rev-parse", "--short", "HEAD"]) {
+            let pinned_revision = match git_output(&source, &["rev-parse", "HEAD"]) {
                 Some(revision) => revision,
                 None => return,
             };

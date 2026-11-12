@@ -218,7 +218,7 @@ pub fn refresh(
     let local_source_revision = if is_git_url(source) {
         None
     } else {
-        git::short_head_revision(&absolute_source_path(source)?)
+        git::head_sha(&absolute_source_path(source)?)
     };
     let effective_revision = revision.or(local_source_revision.as_deref());
     let install_source = durable_refresh_source(source, &extension_id)?;
@@ -1003,7 +1003,7 @@ exec '{}' "$@"
                 None => return,
             };
             let source_revision =
-                git_output(&source, &["rev-parse", "--short", "HEAD"]).expect("source revision");
+                git_output(&source, &["rev-parse", "HEAD"]).expect("source revision");
             fs::write(source.join("nodejs/.source-revision"), "stale-marker\n")
                 .expect("stale copied marker");
 
@@ -1086,12 +1086,16 @@ exec '{}' "$@"
         with_isolated_home(|home| {
             let home_path = home.path();
             let source = home_path.join("staged-source");
-            write_extension_fixture(&source, "wordpress");
+            fs::create_dir_all(&source).expect("source repo");
+            let _remote =
+                prepare_git_extension_repo(&source, "wordpress").expect("prepare local git source");
+            let revision =
+                git_output(&source, &["rev-parse", "HEAD"]).expect("full source revision");
 
             let result = install_with_revision(
                 &source.join("wordpress").to_string_lossy(),
                 Some("wordpress"),
-                Some("abc1234"),
+                Some("HEAD"),
             )
             .expect("install linked staged extension");
 
@@ -1102,7 +1106,18 @@ exec '{}' "$@"
             );
             assert_eq!(
                 read_source_revision("wordpress").as_deref(),
-                Some("abc1234")
+                Some(revision.as_str())
+            );
+            assert_eq!(
+                fs::read_to_string(
+                    home_path.join(".config/homeboy/extensions/.wordpress.source-revision")
+                )
+                .expect("recorded sidecar revision"),
+                revision
+            );
+            assert_eq!(
+                super::update::read_source_requested_ref(&result.path).as_deref(),
+                Some("HEAD")
             );
             assert_eq!(
                 read_source_url(&result.path).as_deref(),
@@ -1674,7 +1689,7 @@ exec '{}' "$@"
                 Some(remote) => remote,
                 None => return,
             };
-            let pinned_revision = match git_output(&source, &["rev-parse", "--short", "HEAD"]) {
+            let pinned_revision = match git_output(&source, &["rev-parse", "HEAD"]) {
                 Some(revision) => revision,
                 None => return,
             };
@@ -1718,7 +1733,7 @@ exec '{}' "$@"
             write_extension_fixture_with_version(&source, "wordpress", "2.0.0");
             assert!(commit_all(&source, "branch extension update"));
             assert!(run_git(&source, &["push", "origin", "next-extension"]));
-            let branch_revision = match git_output(&source, &["rev-parse", "--short", "HEAD"]) {
+            let branch_revision = match git_output(&source, &["rev-parse", "HEAD"]) {
                 Some(revision) => revision,
                 None => return,
             };
@@ -1737,6 +1752,11 @@ exec '{}' "$@"
                 result.source_revision.as_deref(),
                 Some(branch_revision.as_str())
             );
+            assert_eq!(
+                fs::read_to_string(result.path.join(".source-revision"))
+                    .expect("recorded source revision"),
+                branch_revision
+            );
         });
     }
 
@@ -1749,7 +1769,7 @@ exec '{}' "$@"
                 Some(remote) => remote,
                 None => return,
             };
-            let pinned_revision = match git_output(&source, &["rev-parse", "--short", "HEAD"]) {
+            let pinned_revision = match git_output(&source, &["rev-parse", "HEAD"]) {
                 Some(revision) => revision,
                 None => return,
             };
