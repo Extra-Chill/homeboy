@@ -5,6 +5,10 @@ pub(super) struct RunnerExecArgs {
     /// Runner ID
     pub(super) id: String,
 
+    /// Measurement-window reservation id; passed as HOMEBOY_RUNNER_RESERVATION.
+    #[arg(long)]
+    pub(super) reservation: Option<String>,
+
     /// Remote/current working directory. SSH runners require this to be
     /// inside the runner workspace root unless the runner has a default
     /// workspace_root.
@@ -118,7 +122,10 @@ pub(super) struct RunnerExecArgs {
 }
 
 impl From<RunnerExecArgs> for super::exec::RunnerExecInput {
-    fn from(args: RunnerExecArgs) -> Self {
+    fn from(mut args: RunnerExecArgs) -> Self {
+        if let Some(id) = args.reservation.take() {
+            args.env.push(format!("HOMEBOY_RUNNER_RESERVATION={id}"));
+        }
         Self {
             runner_id: args.id,
             command: args.command,

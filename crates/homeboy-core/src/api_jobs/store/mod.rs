@@ -2377,8 +2377,16 @@ impl JobStore {
         inner: &mut JobStoreInner,
         operation: String,
         idempotency_key: String,
-        controller_job: ControllerJobState,
+        mut controller_job: ControllerJobState,
     ) -> Result<ControllerJobSubmissionOutcome> {
+        if let Some(id) = crate::daemon::reservation::holding(
+            controller_job
+                .request
+                .get("reservation")
+                .and_then(Value::as_str),
+        )? {
+            controller_job.pending_admission_reason = Some(format!("reservation:{id}"));
+        }
         let fingerprint = controller_submission_fingerprint(&controller_job);
         let now = timestamp_ms();
         {
@@ -2831,6 +2839,19 @@ impl JobStore {
             loop {
                 if job_handle.is_cancelled() {
                     return;
+                }
+                let holder = request
+                    .metadata
+                    .as_ref()
+                    .and_then(|m| m.get("reservation"))
+                    .and_then(Value::as_str);
+                match crate::daemon::reservation::holding(holder) {
+                    Ok(None) => {}
+                    held => {
+                        let _ = job_handle.progress(serde_json::json!({"status": "pending_resource_admission", "reservation_id": held.ok().flatten()}));
+                        thread::sleep(std::time::Duration::from_secs(1));
+                        continue;
+                    }
                 }
                 match worker_store.reserve_local_child_with_runner_capacity(
                     job_id,

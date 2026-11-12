@@ -2418,6 +2418,41 @@ fn parse_runner_jobs(
 
 /// Reconcile terminal runner jobs through the session's authoritative transport.
 /// The returned body is transport-neutral so callers retain one command contract.
+/// Create or release an operator measurement reservation on the serving daemon.
+pub fn reserve(runner_id: &str, payload: &Value) -> Result<Value> {
+    let report = status(runner_id)?;
+    let session = report
+        .session
+        .filter(|_| report.connected)
+        .ok_or_else(|| Error::internal_unexpected("runner is not connected"))?;
+    let response = crate::execution::daemon_api_post_json_for_session_with_broker_token(
+        &session,
+        "/reservation",
+        payload,
+        None,
+    )?;
+    let mut value =
+        crate::execution::canonical_daemon_body(&response, "reservation response")?.clone();
+    while value["state"] == "waiting_for_quiet" && payload.get("release").is_none_or(Value::is_null)
+    {
+        std::thread::sleep(Duration::from_secs(1));
+        let response = crate::execution::daemon_api_get(runner_id, "/reservation")?;
+        value = crate::execution::canonical_daemon_body(&response, "reservation status")?.clone();
+    }
+    if value["state"] == "reservation_wait_timeout" {
+        let mut error = Error::validation_invalid_argument(
+            "reservation",
+            "reservation_wait_timeout",
+            None,
+            None,
+        );
+        error.details["reason"] = serde_json::json!("reservation_wait_timeout");
+        error.details["reservation"] = value;
+        return Err(error);
+    }
+    Ok(value)
+}
+
 pub fn reconcile_terminal_jobs(runner_id: &str) -> Result<Value> {
     let report = status(runner_id)?;
     let Some(session) = report.session.filter(|_| report.connected) else {

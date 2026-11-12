@@ -126,6 +126,42 @@ fn admission_during_drain_queues_for_the_replacement_daemon_to_admit() {
 }
 
 #[test]
+fn reservation_holds_admission_without_failing_and_release_resumes() {
+    with_isolated_home(|_| {
+        register_driver();
+        write_test_lease("reservation-lease");
+        let store = lease_store("reservation-lease");
+        let reservation =
+            reservation::update(Some(json!({"quiet_below": 0, "window": 1}))).unwrap();
+        let request = ControllerJobRequest {
+            job_type: JOB_TYPE.into(),
+            version: 1,
+            idempotency_key: "reserved-job".into(),
+            active_idempotency_key: None,
+            request: json!({}),
+        };
+        let admitted = admit_controller_job(request, &store).unwrap();
+        let id = admitted.job.id;
+        assert!(admitted
+            .pending_admission(&store)
+            .unwrap()
+            .contains(reservation["id"].as_str().unwrap()));
+        assert_eq!(
+            start_controller_job(id, &store).unwrap().status,
+            JobStatus::Queued
+        );
+        reservation::update(Some(json!({"release": reservation["id"]}))).unwrap();
+        recover_controller_jobs(&store);
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while !store.get(id).unwrap().status.is_terminal() {
+            assert!(Instant::now() < deadline);
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        assert_eq!(store.get(id).unwrap().status, JobStatus::Succeeded);
+    });
+}
+
+#[test]
 fn daemon_plan_during_a_drain_lists_the_holder_jobs() {
     with_isolated_home(|_| {
         register_driver();

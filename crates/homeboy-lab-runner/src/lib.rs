@@ -422,6 +422,7 @@ pub use capabilities::{
 pub(crate) use command_path::normalize_runner_command_env_for_homeboy_path;
 pub use command_path::preflight_remote_argv_path_translation;
 pub(crate) use command_path::set_homeboy_command_selection;
+pub use connection::reserve;
 pub use connection::{
     close_transport, connect, connect_converging_binary, connect_with_live_lease_adoption,
     diagnostic_status, disconnect, disconnect_local_recovery, ensure_transport,

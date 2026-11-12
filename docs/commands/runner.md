@@ -16,6 +16,28 @@ Runner configuration separates printable environment from secrets:
 
 ## Subcommands
 
+### `reserve`
+
+```sh
+homeboy runner reserve <runner> --quiet-below 0.5 --window 10 --wait-timeout 30 --reason "timing measurements"
+homeboy runner exec --reservation <id> <runner> -- <command>
+homeboy runner reserve <runner> --release <id>
+```
+
+The serving daemon durably holds new admission immediately, without stopping running work.
+`--quiet-below` is the five-minute load average divided by logical CPU count
+(1.0 means one runnable task per CPU), sampled by the same pressure observer as
+normal admission. Unknown load never counts as quiet. Window and timeout are
+positive integer minutes; the wait timeout defaults to 30 minutes. Creation waits
+for `active`, returning the id and `active_until` (Unix milliseconds), or a typed
+`reservation_wait_timeout`. Only one waiting/active reservation is permitted.
+
+Queued Cook, gate, and workflow work stays pending; active-window commands tagged
+with the id may run. Release, wait timeout, or daemon-enforced expiry restores
+normal admission and queued work dispatches. Reservation state survives daemon
+restart; a crashed client cannot extend the window. Runner status/list pressure
+evidence includes the id, state, threshold, last observed load, deadline and reason.
+
 ### `lifecycle`
 
 Inspect runner workspace lifecycle and finalization readiness.
