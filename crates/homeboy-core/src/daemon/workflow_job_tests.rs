@@ -1437,6 +1437,67 @@ fn next_pass_validation_failure_records_terminal_reason() {
     });
 }
 
+/// Editing a file-admitted chain's definition takes effect on the next pass;
+/// an edit the chain's admission does not cover ends it with the command that
+/// admits it.
+#[test]
+fn next_pass_adopts_an_edited_definition_its_admission_covers() {
+    with_isolated_home(|home| {
+        let store = JobStore::open_without_reconciliation(
+            home.path().join(crate::paths::OBSERVATION_DB_FILENAME),
+        )
+        .unwrap()
+        .with_daemon_lease("workflow-next-pass-edit-test".into());
+        let chain = |program: &str| {
+            json!({
+                "schema": "homeboy/workflow/v1", "id": format!("edited-{program}"),
+                "inputs": {"note": {"default": "edited"}},
+                "next_pass": {"max_iterations": 2},
+                "steps": [{"id": "work", "exec": {"program": program, "args": ["-c", "true"]}}]
+            })
+        };
+        for (program, adopted) in [("sh", true), ("bash", false)] {
+            let source = home.path().join(format!("{program}.json"));
+            let edited = home.path().join(format!("{program}-edited.json"));
+            std::fs::write(&edited, serde_json::to_string(&chain(program)).unwrap()).unwrap();
+            let original = json!({
+                "schema": "homeboy/workflow/v1", "id": format!("edited-{program}"),
+                "next_pass": {"max_iterations": 2},
+                "steps": [{"id": "work", "exec": sh(&format!(
+                    "cp {} {}", edited.display(), source.display()
+                ))}]
+            });
+            std::fs::write(&source, serde_json::to_string(&original).unwrap()).unwrap();
+            let mut first = request(original, home.path());
+            first.definition_source = Some(source.display().to_string());
+            let job = admit(&store, &first);
+            crate::daemon::start_controller_job(job, &store).unwrap();
+            let status = wait_terminal(&store, job, 30).status;
+            let view = workflow_status(&store, &first.instance).unwrap();
+            let children = child_instances(&store, &first.instance);
+            if adopted {
+                assert_eq!(status, JobStatus::Succeeded, "{view:#}");
+                assert_eq!(children.len(), 1, "{view:#}");
+                let (_, child) = instance_job(&store, &children[0]).unwrap();
+                let child = WorkflowJobRequest::parse(&child.request).unwrap();
+                let expected = WorkflowDefinition::from_value(chain("sh")).unwrap();
+                assert_eq!(child.definition_digest, expected.digest());
+                assert_eq!(child.inputs["note"], "edited");
+                assert_eq!(child.inputs["iteration"], 2);
+            } else {
+                assert_eq!(status, JobStatus::Failed, "{view:#}");
+                let reason = view["reason"].as_str().unwrap();
+                assert!(reason.contains("program `bash`"), "{reason}");
+                assert!(
+                    reason.contains(&format!("--resume-from {}", first.instance)),
+                    "{reason}"
+                );
+                assert!(children.is_empty());
+            }
+        }
+    });
+}
+
 #[test]
 fn native_next_pass_forwards_inputs_and_stops_a_stable_chain() {
     with_isolated_home(|home| {

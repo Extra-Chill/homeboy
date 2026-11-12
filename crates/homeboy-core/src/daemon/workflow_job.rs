@@ -26,6 +26,7 @@ use crate::daemon::controller_job_driver::{
 use crate::daemon::step_job::{StepJobRequest, StepWait};
 use crate::env_materialization_plan::EnvMaterializationPlan;
 use crate::error::{Error, Result};
+use crate::workflow::definition::StepKind;
 use crate::workflow::{
     advance, Command, Event, FinishedStatus, InstanceState, InstanceStatus, StepPhase, StepResult,
     StepSubmission, SubmissionKind, WorkflowDefinition,
@@ -611,23 +612,57 @@ enum NextPass {
     Stop(String),
 }
 
-/// Build a replay-stable child from the admitted (pinned) definition.
+/// The definition the next pass runs. A file-admitted chain reads its source
+/// again, so an edit takes effect on the next pass; the pass stays pinned to
+/// what it read. An edit this pass's admission does not cover (a new
+/// environment or program) needs `workflow run` to admit it.
+fn next_definition(request: &WorkflowJobRequest) -> Result<WorkflowDefinition> {
+    let Some(path) = &request.definition_source else {
+        return Ok(request.definition.clone());
+    };
+    let text = std::fs::read_to_string(path)
+        .map_err(|e| invalid(format!("cannot read next-pass definition {path}: {e}")))?;
+    let definition = WorkflowDefinition::parse(&text)?;
+    definition.validate(&|_| true)?;
+    if definition.digest() == request.definition_digest {
+        return Ok(definition);
+    }
+    let runs_homeboy = |definition: &WorkflowDefinition| {
+        definition
+            .steps
+            .iter()
+            .any(|step| matches!(step.kind(), StepKind::Cook(_) | StepKind::Homeboy(_)))
+    };
+    let uncovered = if definition.env != request.definition.env {
+        Some("its environment".to_string())
+    } else if runs_homeboy(&definition) && !runs_homeboy(&request.definition) {
+        Some("Homeboy steps".to_string())
+    } else {
+        definition.steps.iter().find_map(|step| match step.kind() {
+            StepKind::Exec(exec)
+                if !Path::new(&exec.program).is_absolute()
+                    && !request.programs.contains_key(&exec.program) =>
+            {
+                Some(format!("program `{}`", exec.program))
+            }
+            _ => None,
+        })
+    };
+    match uncovered {
+        Some(what) => Err(invalid(format!(
+            "{path} now declares {what}, which this chain did not admit; continue it with `homeboy workflow run {path} --resume-from {}`",
+            request.instance
+        ))),
+        None => Ok(definition),
+    }
+}
+
+/// Build a replay-stable child from the definition the next pass runs.
 fn next_pass(request: &WorkflowJobRequest, state: &InstanceState) -> Result<Option<NextPass>> {
-    let Some(next) = &request.definition.next_pass else {
+    let definition = next_definition(request)?;
+    let Some(next) = &definition.next_pass else {
         return Ok(None);
     };
-    if let Some(path) = &request.definition_source {
-        let text = std::fs::read_to_string(path)
-            .map_err(|e| invalid(format!("cannot read next-pass definition {path}: {e}")))?;
-        let definition = WorkflowDefinition::parse(&text)?;
-        definition.validate(&|_| true)?;
-        if definition.digest() != request.definition_digest {
-            return Err(invalid(format!(
-                "definition changed between passes: {path}; continue the chain on the new definition with `homeboy workflow run {path} --resume-from {}`",
-                request.instance
-            )));
-        }
-    }
     let iteration = request
         .inputs
         .get("iteration")
@@ -692,10 +727,19 @@ fn next_pass(request: &WorkflowJobRequest, state: &InstanceState) -> Result<Opti
             other => other.clone(),
         })
     }
-    let mut child = request.clone();
+    let mut provided: BTreeMap<String, Value> = request
+        .inputs
+        .iter()
+        .filter(|(name, _)| definition.inputs.contains_key(*name))
+        .map(|(name, value)| (name.clone(), value.clone()))
+        .collect();
     for (name, value) in &next.inputs {
-        child.inputs.insert(name.clone(), render(value, state)?);
+        provided.insert(name.clone(), render(value, state)?);
     }
+    let mut child = request.clone();
+    child.inputs = definition.resolve_inputs(&provided)?;
+    child.definition_digest = definition.digest();
+    child.definition = definition.clone();
     child
         .inputs
         .insert("iteration".into(), json!(iteration + 1));
