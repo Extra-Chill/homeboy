@@ -13991,3 +13991,662 @@ fn workspace_base_capture_lock_times_out_while_another_controller_holds_it() {
         });
     });
 }
+
+/// A diverged destination is an operator workspace condition, not a transport
+/// failure: retrying can never converge it, so the pre-provider validation
+/// failure must be classified deterministic (`invalid_input`) and consume no
+/// transport retries (#14699).
+#[test]
+fn diverged_workspace_base_ancestry_preflight_is_deterministic_not_transport_retryable() {
+    homeboy_core::test_support::with_isolated_home(|_| {
+        let remote = tempfile::tempdir().expect("bare origin");
+        let workspace = tempfile::tempdir().expect("workspace");
+        let git = |cwd: &std::path::Path, args: &[&str]| {
+            let output = Command::new("git")
+                .args(args)
+                .current_dir(cwd)
+                .output()
+                .expect("run git");
+            assert!(
+                output.status.success(),
+                "git {:?} failed: {}",
+                args,
+                String::from_utf8_lossy(&output.stderr)
+            );
+            String::from_utf8_lossy(&output.stdout).trim().to_string()
+        };
+        git(remote.path(), &["init", "--bare"]);
+        let status = Command::new("git")
+            .args([
+                "clone",
+                remote.path().to_str().unwrap(),
+                workspace.path().to_str().unwrap(),
+            ])
+            .output()
+            .expect("clone workspace");
+        assert!(status.status.success());
+        git(
+            workspace.path(),
+            &["config", "user.email", "test@example.com"],
+        );
+        git(workspace.path(), &["config", "user.name", "Test"]);
+        git(workspace.path(), &["checkout", "-b", "main"]);
+        std::fs::write(workspace.path().join("base.txt"), "base\n").unwrap();
+        git(workspace.path(), &["add", "base.txt"]);
+        git(workspace.path(), &["commit", "-m", "base"]);
+        git(workspace.path(), &["push", "-u", "origin", "main"]);
+
+        let destination_root = tempfile::tempdir().expect("candidate worktree root");
+        let destination = destination_root.path().join("candidate");
+        let status = Command::new("git")
+            .args([
+                "clone",
+                "--branch",
+                "main",
+                remote.path().to_str().unwrap(),
+                destination.to_str().expect("candidate path"),
+            ])
+            .output()
+            .expect("clone candidate");
+        assert!(status.status.success());
+        git(&destination, &["config", "user.email", "test@example.com"]);
+        git(&destination, &["config", "user.name", "Test"]);
+        git(&destination, &["checkout", "-b", "candidate"]);
+
+        // Diverge: the base advances on origin while the destination commits
+        // candidate-only work without rebasing onto it.
+        std::fs::write(workspace.path().join("base-only.txt"), "base only\n").unwrap();
+        git(workspace.path(), &["add", "base-only.txt"]);
+        git(workspace.path(), &["commit", "-m", "advance base"]);
+        git(workspace.path(), &["push"]);
+        std::fs::write(destination.join("candidate-only.txt"), "candidate only\n").unwrap();
+        git(&destination, &["add", "candidate-only.txt"]);
+        git(&destination, &["commit", "-m", "candidate"]);
+
+        let diverged =
+            preflight_cook_workspace_base_ancestry(&destination, "main", "main", false, None)
+                .expect_err("diverged destination is rejected before provider execution");
+        assert_eq!(diverged.code.as_str(), "validation.invalid_argument");
+        assert_eq!(
+            diverged.details["workspace_base_ancestry"]["direction"],
+            "diverged"
+        );
+        assert_ne!(
+            diverged.retryable,
+            Some(true),
+            "a diverged workspace must not be classified as transport-retryable: {diverged}"
+        );
+
+        let outcome = crate::agent_task_lifecycle::build_pre_execution_failure_outcome(
+            "cook-diverged-run",
+            &AgentTaskRequest {
+                schema: crate::agent_task::AGENT_TASK_REQUEST_SCHEMA.to_string(),
+                task_id: "task-a".to_string(),
+                group_key: None,
+                parent_plan_id: None,
+                executor: AgentTaskExecutor {
+                    backend: "test".to_string(),
+                    selector: None,
+                    runtime_selection: None,
+                    required_capabilities: Vec::new(),
+                    secret_env: Vec::new(),
+                    model: None,
+                    config: Value::Null,
+                },
+                instructions: "run".to_string(),
+                inputs: Value::Null,
+                source_refs: Vec::new(),
+                workspace: AgentTaskWorkspace::default(),
+                component_contracts: Vec::new(),
+                policy: crate::agent_task::AgentTaskPolicy::default(),
+                limits: crate::agent_task::AgentTaskLimits::default(),
+                expected_artifacts: Vec::new(),
+                artifact_declarations: Vec::new(),
+                output_declarations: Vec::new(),
+                runtime_tools: Vec::new(),
+                metadata: Value::Null,
+            },
+            "workspace_base_ancestry_preflight",
+            &diverged,
+        );
+        assert_eq!(
+            outcome.failure_classification,
+            Some(crate::agent_task::AgentTaskFailureClassification::InvalidInput)
+        );
+        assert_eq!(outcome.diagnostics[0].data["retryable"], false);
+    });
+}
+
+#[test]
+fn workspace_snapshot_fence_invalidation_is_retryable_without_provider_execution() {
+    homeboy_core::test_support::with_isolated_home(|_| {
+        let remote = tempfile::tempdir().unwrap();
+        let source = tempfile::tempdir().unwrap();
+        let git = |path: &std::path::Path, args: &[&str]| {
+            let output = Command::new("git")
+                .args(args)
+                .current_dir(path)
+                .output()
+                .unwrap();
+            assert!(
+                output.status.success(),
+                "{}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+        };
+        git(remote.path(), &["init", "--bare"]);
+        let output = Command::new("git")
+            .args([
+                "clone",
+                remote.path().to_str().unwrap(),
+                source.path().to_str().unwrap(),
+            ])
+            .output()
+            .unwrap();
+        assert!(output.status.success());
+        git(source.path(), &["config", "user.email", "test@example.com"]);
+        git(source.path(), &["config", "user.name", "Test"]);
+        git(source.path(), &["checkout", "-b", "main"]);
+        std::fs::write(source.path().join("base"), "base\n").unwrap();
+        git(source.path(), &["add", "base"]);
+        git(source.path(), &["commit", "-m", "base"]);
+        git(source.path(), &["push", "-u", "origin", "main"]);
+        let root = tempfile::tempdir().unwrap();
+        let destination = root.path().join("candidate");
+        // Admission semantics under test, not the host volume's free space.
+        let _capacity =
+            homeboy_core::observation::disk_budget::test_seam::ample_disk_capacity_for_test(
+                root.path(),
+            );
+        git(
+            source.path(),
+            &[
+                "worktree",
+                "add",
+                "-b",
+                "candidate",
+                destination.to_str().unwrap(),
+                "main",
+            ],
+        );
+        std::fs::write(source.path().join("newer"), "newer\n").unwrap();
+        git(source.path(), &["add", "newer"]);
+        git(source.path(), &["commit", "-m", "advance"]);
+        git(source.path(), &["push"]);
+
+        let mut options = batch_cook_options(
+            "cook-snapshot-fence",
+            Arc::new(RecordingDetachedAttemptDispatcher {
+                dispatches: Arc::new(AtomicUsize::new(0)),
+            }),
+        );
+        options.workspace.to_worktree = destination.display().to_string();
+        options.workspace.source_worktree_path = Some(destination.clone());
+        options.identity.initial_plan.tasks[0].workspace.root =
+            Some(destination.display().to_string());
+        options.identity.initial_plan.tasks[0].metadata =
+            serde_json::json!({ "worktree_provision": { "kind": "explicit_cwd" } });
+        options.provider_transport.attempt_dispatcher = None;
+        let drift = destination.clone();
+        crate::agent_task_scheduler::set_snapshot_fence_test_hook(move || {
+            std::fs::write(drift.join("fence-drift"), "drift\n").unwrap();
+        });
+        let report = run_cook(CookContext::new(options.clone(), Arc::new(UnusedExecutor))).unwrap();
+        assert_eq!(report.value.status, "pre_execution_failure");
+        let record =
+            agent_task_lifecycle::reconcile_status(&options.identity.initial_run_id).unwrap();
+        assert_eq!(
+            record.metadata["pre_execution_failure"]["phase"],
+            "workspace_snapshot_fence"
+        );
+        assert_eq!(record.metadata["pre_execution_failure"]["retryable"], true);
+        assert_eq!(record.metadata["provider_executions_consumed"], 0);
+        assert!(record.metadata["provider_executions"].is_null());
+        let retry =
+            crate::agent_task_service::retry(&options.identity.initial_run_id, None, false, false)
+                .unwrap();
+        assert_eq!(retry.record.metadata["cook_id"], options.identity.cook_id);
+        assert_eq!(retry.record.metadata["cook_attempt"], 1);
+    });
+}
+
+#[test]
+fn retry_revalidates_a_generic_lab_workspace_inside_the_reservation_boundary() {
+    for (case, cook_owned, expected_calls) in
+        [("Cook retry", true, 2), ("standalone retry", false, 2)]
+    {
+        homeboy_core::test_support::with_isolated_home(|_| {
+            let options = retryable_pre_provider_cook("cook-generic-lab-replay-race", 2);
+            let workspace = tempfile::tempdir().expect("workspace");
+            let marker = workspace.path().join("workspace.txt");
+            std::fs::write(&marker, "recorded").expect("write recorded workspace");
+            let mut replay_plan = options.identity.initial_plan.clone();
+            replay_plan.metadata["generic_lab_command_replay"] = serde_json::json!({
+                "schema": "homeboy/generic-lab-command-replay/v1",
+                "normalized_args": ["homeboy", "bench"],
+                "materialization": {
+                    "canonical_root": workspace.path(),
+                    "content_identity": "recorded",
+                },
+            });
+            agent_task_lifecycle::persist_controller_plan_in_store(
+                &test_lifecycle_store(),
+                &options.identity.initial_run_id,
+                &replay_plan,
+            )
+            .expect("persist generic Lab replay plan");
+            if !cook_owned {
+                agent_task_lifecycle::submit_plan(&replay_plan, Some("standalone-replay")).unwrap();
+                agent_task_lifecycle::record_pre_execution_failure(
+                    "standalone-replay",
+                    &replay_plan,
+                    "lab_daemon_admission",
+                    &Error::internal_unexpected("daemon unavailable").with_retryable(true),
+                )
+                .unwrap();
+            }
+            let source = if cook_owned {
+                options.identity.initial_run_id.as_str()
+            } else {
+                "standalone-replay"
+            };
+            // Neither public entry point may reserve a generic replay without preflight.
+            assert!(
+                crate::agent_task_service::retry(source, Some("unvalidated"), false, false)
+                    .is_err(),
+                "{case}"
+            );
+            assert!(
+                agent_task_lifecycle::retry(source, Some("unvalidated")).is_err(),
+                "{case}"
+            );
+            assert!(
+                !agent_task_lifecycle::run_record_exists("unvalidated").unwrap(),
+                "{case}"
+            );
+            let (change_started_tx, change_started_rx) = mpsc::sync_channel(0);
+            let (change_done_tx, change_done_rx) = mpsc::sync_channel(0);
+            let changed_marker = marker.clone();
+            let changer = std::thread::spawn(move || {
+                change_started_rx
+                    .recv()
+                    .expect("wait for initial preflight");
+                std::fs::write(changed_marker, "changed").expect("change workspace concurrently");
+                change_done_tx.send(()).expect("report workspace change");
+            });
+            let calls = std::sync::atomic::AtomicUsize::new(0);
+            let error = crate::agent_task_service::retry_with_preflight(
+                source,
+                Some("cook-generic-lab-replay-race-attempt-2"),
+                false,
+                false,
+                |plan| {
+                    assert!(plan.metadata["generic_lab_command_replay"].is_object());
+                    let call = calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                    let identity = std::fs::read_to_string(&marker).expect("read workspace");
+                    if call == 0 {
+                        assert_eq!(identity, "recorded", "initial preflight succeeds");
+                        change_started_tx.send(()).expect("start workspace change");
+                        change_done_rx.recv().expect("wait for workspace change");
+                        return Ok(());
+                    }
+                    if identity != "recorded" {
+                        return Err(Error::validation_invalid_argument(
+                            "workspace",
+                            "generic Lab replay workspace changed during retry admission",
+                            None,
+                            None,
+                        ));
+                    }
+                    Ok(())
+                },
+            )
+            .expect_err("locked retry revalidation rejects the concurrent workspace change");
+            changer.join().expect("workspace changer");
+
+            assert_eq!(
+                calls.load(std::sync::atomic::Ordering::SeqCst),
+                expected_calls,
+                "{case}"
+            );
+            assert!(
+                error.message.contains("changed during retry admission"),
+                "{case}"
+            );
+            assert!(
+                !agent_task_lifecycle::run_record_exists("cook-generic-lab-replay-race-attempt-2")
+                    .expect("check retry reservation"),
+                "{case}: revalidation failure must leave no successor"
+            );
+        });
+    }
+}
+
+#[test]
+fn cook_lab_workspace_stage_failure_advertises_runtime_refresh_and_retry() {
+    homeboy_core::test_support::with_isolated_home(|_| {
+        let run_id = "cook-invalid-input-attempt-1";
+        let mut options = batch_cook_options(
+            "cook-invalid-input",
+            Arc::new(AdmissionFailingAttemptDispatcher {
+                message: "invalid controller-owned Lab handoff input",
+                runtime_recovery: Some(
+                    agent_task_lifecycle::AgentTaskLabRuntimeRecovery::refresh_homeboy(
+                        "homeboy-lab",
+                        "homeboy 1.2.3+required",
+                        "required",
+                    ),
+                ),
+                phase: "lab_staging_controller",
+                retryable: false,
+            }),
+        );
+        options.provider_transport.provider_invocation =
+            Some(homeboy_core::command_invocation::CommandInvocation {
+                argv: vec!["fixture-provider".to_string()],
+
+                ..Default::default()
+            });
+        options.identity.initial_run_id = run_id.to_string();
+        options.retry_policy.max_attempts = 2;
+
+        let result = run_cook(CookContext::new(options, Arc::new(UnusedExecutor)))
+            .expect("cook returns the persisted input failure");
+
+        assert_eq!(result.exit_code, 1);
+        assert_eq!(result.value.status, "pre_execution_failure");
+        assert_eq!(result.value.attempts.len(), 1);
+        assert_eq!(result.value.history_run_ids, vec![run_id]);
+        let context = result
+            .value
+            .failure_context
+            .as_ref()
+            .expect("failure context");
+        let runtime_actions: Vec<_> = context
+            .legal_actions
+            .iter()
+            .filter(|action| action.action == "refresh_lab_runtime")
+            .collect();
+        assert_eq!(runtime_actions.len(), 1);
+        assert_eq!(
+            runtime_actions[0].command,
+            "homeboy runner refresh-homeboy homeboy-lab --ref required --reconnect"
+        );
+        // No provider ran, so the recipe replays the attempt once repaired.
+        assert_eq!(
+            context.recovery_step,
+            Some(crate::agent_task_service::CookRecoveryStep::Retry)
+        );
+        assert!(context
+            .next_actions
+            .iter()
+            .all(|action| action.action != "refresh_lab_runtime"));
+        assert_eq!(
+            result.value.terminal_phase.as_deref(),
+            Some("lab_staging_controller")
+        );
+        assert_eq!(
+            result.value.terminal_failure_classification.as_deref(),
+            Some("invalid_input")
+        );
+        let record = agent_task_lifecycle::reconcile_status(run_id).expect("attempt exists");
+        assert!(record.provider_handles.is_empty());
+        assert_eq!(record.metadata["provider_executions_consumed"], 0);
+    });
+}
+
+#[test]
+fn concurrent_missing_task_base_capture_serializes_and_reuses_its_sha() {
+    homeboy_core::test_support::with_isolated_home(|_| {
+        let temp = tempfile::tempdir().expect("temporary repository");
+        let repository = temp.path().join("repository");
+        std::fs::create_dir(&repository).expect("create repository");
+        let git = |args: &[&str]| {
+            assert!(Command::new("git")
+                .args(args)
+                .current_dir(&repository)
+                .status()
+                .expect("run git")
+                .success());
+        };
+        git(&["init", "-b", "main"]);
+        std::fs::write(repository.join("fixture.txt"), "base\n").expect("write base");
+        git(&["add", "fixture.txt"]);
+        git(&[
+            "-c",
+            "user.name=Homeboy Test",
+            "-c",
+            "user.email=test@example.com",
+            "commit",
+            "-m",
+            "base",
+        ]);
+        let expected_sha = String::from_utf8(
+            Command::new("git")
+                .args(["rev-parse", "HEAD"])
+                .current_dir(&repository)
+                .output()
+                .expect("resolve base")
+                .stdout,
+        )
+        .expect("base is UTF-8")
+        .trim()
+        .to_string();
+        git(&[
+            "remote",
+            "add",
+            "origin",
+            repository.to_str().expect("repository path"),
+        ]);
+        let destination = temp.path().join("destination");
+        git(&[
+            "worktree",
+            "add",
+            "-b",
+            "fixture-candidate",
+            destination.to_str().expect("destination path"),
+            "HEAD",
+        ]);
+
+        let roots = homeboy_core::paths::PathRoots::from_environment().expect("isolated roots");
+        let store = CookRecipeStore::new(roots.clone());
+        let lifecycle_store = AgentTaskLifecycleStore::new(roots);
+        let cook_id = "cook-concurrent-task-base-capture";
+        let mut options = batch_cook_options(cook_id, Arc::new(AcceptedDetachedAttemptDispatcher));
+        options.workspace.source_worktree_path = Some(repository.clone());
+        options.identity.initial_plan.tasks[0].workspace.root =
+            Some(destination.display().to_string());
+        options.identity.initial_plan.tasks[0].workspace.kind =
+            Some("homeboy-worktree".to_string());
+        options.identity.initial_plan.tasks[0]
+            .workspace
+            .materialization = serde_json::json!({
+            "kind": "homeboy-worktree",
+            "id": options.workspace.to_worktree.clone(),
+            "root": destination,
+            "branch": "fixture-candidate",
+        });
+        homeboy_core::worktree::adopt(homeboy_core::worktree::WorktreeAdoptOptions {
+            handle: options.workspace.to_worktree.clone(),
+            path: destination.display().to_string(),
+            kind: Some("test-fixture".to_string()),
+            provenance: None,
+        })
+        .expect("register destination workspace");
+        store
+            .persist_initial_recipe(&options)
+            .expect("persist incomplete recipe");
+        materialize_initial_cook_attempt_with_stores(&store, &lifecycle_store, &options)
+            .expect("materialize initial attempt");
+
+        let capture_counter = Arc::new(WorkspaceBaseCaptureHook {
+            workspace: repository.clone(),
+            count: AtomicUsize::new(0),
+            fail_after_recipe_persistence: AtomicBool::new(false),
+        });
+        *WORKSPACE_BASE_CAPTURE_HOOK
+            .lock()
+            .expect("install workspace base capture counter") = Some(Arc::clone(&capture_counter));
+        // Two controllers reach the base capture together. Only the capture is
+        // concurrent: whole spines of one Cook cannot run side by side, because
+        // `run_cook_with_runtime` admits a single driver per Cook (#15566).
+        let mut winner_options = options.clone();
+        let mut loser_options = options.clone();
+        let barrier = Arc::new(Barrier::new(2));
+        let (winner, loser) = std::thread::scope(|scope| {
+            let winner = scope.spawn(|| {
+                barrier.wait();
+                pin_and_persist_initial_cook_workspace_base(
+                    &store,
+                    &lifecycle_store,
+                    &mut winner_options,
+                )
+            });
+            let loser = scope.spawn(|| {
+                barrier.wait();
+                pin_and_persist_initial_cook_workspace_base(
+                    &store,
+                    &lifecycle_store,
+                    &mut loser_options,
+                )
+            });
+            (
+                winner.join().expect("capture owner joins"),
+                loser.join().expect("capture peer joins"),
+            )
+        });
+        winner.expect("first concurrent controller captures the missing base");
+        loser.expect("second concurrent controller reuses the captured base");
+        for captured in [&winner_options, &loser_options] {
+            assert_eq!(
+                captured.workspace.task_base_sha.as_deref(),
+                Some(expected_sha.as_str()),
+                "each controller proceeds from the one captured base"
+            );
+        }
+        *WORKSPACE_BASE_CAPTURE_HOOK
+            .lock()
+            .expect("remove workspace base capture counter") = None;
+        assert_eq!(
+            capture_counter.count.load(Ordering::SeqCst),
+            1,
+            "only the recovered claim owner reaches origin"
+        );
+        let recipe = store.load_recipe(cook_id).expect("captured recipe");
+        assert_eq!(
+            recipe.finalization["task_base_sha"],
+            serde_json::json!(expected_sha)
+        );
+        assert_eq!(
+            store
+                .load_recipe(cook_id)
+                .expect("reloaded recipe")
+                .finalization["task_base_sha"],
+            serde_json::json!(expected_sha)
+        );
+    });
+}
+
+/// The controller's authenticated transport is not the only authority for a
+/// base that was already fetched. Terminalizing here consumed zero provider
+/// executions and produced no worktree, purely because one network call failed.
+#[test]
+fn cook_base_pin_falls_back_to_the_fetched_tracking_ref_when_origin_is_unreachable() {
+    homeboy_core::test_support::with_isolated_home(|_| {
+        let temp = tempfile::tempdir().expect("temporary repository");
+        let (repository, head) = unreachable_origin_repository(temp.path(), true);
+
+        let mut options = batch_cook_options(
+            "cook-base-transport-fallback",
+            Arc::new(AcceptedDetachedAttemptDispatcher),
+        );
+        options.workspace.source_worktree_path = Some(repository.clone());
+        pin_cook_workspace_base_at(&mut options, &repository)
+            .expect("an already-fetched base admits the cook");
+
+        assert_eq!(
+            options.workspace.task_base_sha.as_deref(),
+            Some(head.as_str())
+        );
+        let recorded = &options.identity.initial_plan.metadata["cook_workspace_base"];
+        assert_eq!(recorded["sha"], head);
+        assert_eq!(recorded["base"], "main");
+        assert_eq!(
+            recorded["provenance"], "local_remote_tracking_ref",
+            "evidence must show the base was not verified against the remote"
+        );
+        assert_eq!(recorded["remote_freshness"], "unverified");
+    });
+}
+
+/// Without a local base the run has nothing immutable to pin, so it must still
+/// fail before provider execution rather than invent a base.
+#[test]
+fn cook_base_pin_still_fails_when_origin_is_unreachable_and_nothing_was_fetched() {
+    homeboy_core::test_support::with_isolated_home(|_| {
+        let temp = tempfile::tempdir().expect("temporary repository");
+        let (repository, _) = unreachable_origin_repository(temp.path(), false);
+
+        let mut options = batch_cook_options(
+            "cook-base-transport-no-fallback",
+            Arc::new(AcceptedDetachedAttemptDispatcher),
+        );
+        options.workspace.source_worktree_path = Some(repository.clone());
+        let error = pin_cook_workspace_base_at(&mut options, &repository)
+            .expect_err("no local base is available to pin");
+
+        assert_eq!(error.retryable, Some(true));
+        assert!(options.workspace.task_base_sha.is_none());
+    });
+}
+
+/// Build a checkout whose `origin` is unreachable, optionally retaining the
+/// remote-tracking ref a previous fetch would have left behind.
+#[cfg(test)]
+fn unreachable_origin_repository(temp: &Path, with_tracking_ref: bool) -> (PathBuf, String) {
+    let repository = temp.join("repository");
+    std::fs::create_dir(&repository).expect("create repository");
+    let git = |args: &[&str]| {
+        assert!(Command::new("git")
+            .args(args)
+            .current_dir(&repository)
+            .status()
+            .expect("run git")
+            .success());
+    };
+    git(&["init", "-b", "main"]);
+    std::fs::write(repository.join("fixture.txt"), "base\n").expect("write base");
+    git(&["add", "fixture.txt"]);
+    git(&[
+        "-c",
+        "user.name=Homeboy Test",
+        "-c",
+        "user.email=test@example.com",
+        "commit",
+        "-m",
+        "base",
+    ]);
+    let head = String::from_utf8(
+        Command::new("git")
+            .args(["rev-parse", "HEAD"])
+            .current_dir(&repository)
+            .output()
+            .expect("resolve HEAD")
+            .stdout,
+    )
+    .expect("HEAD is UTF-8")
+    .trim()
+    .to_string();
+    if with_tracking_ref {
+        git(&["update-ref", "refs/remotes/origin/main", &head]);
+    }
+    // Port 1 refuses immediately, so the preflight fails as transport without
+    // depending on any external network.
+    git(&[
+        "remote",
+        "add",
+        "origin",
+        "https://127.0.0.1:1/repository.git",
+    ]);
+    (repository, head)
+}
