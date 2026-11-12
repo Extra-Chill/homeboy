@@ -132,7 +132,7 @@ pub fn run(args: RunnerArgs) -> CmdResult<RunnerCommandOutput> {
             full,
         } => map_doctor(
             doctor::run_with_options(
-                &runner_id,
+                &super::selection::resolve(runner_id)?,
                 doctor::RunnerDoctorOptions {
                     path,
                     extensions: required_extensions,
@@ -163,7 +163,7 @@ pub fn run(args: RunnerArgs) -> CmdResult<RunnerCommandOutput> {
             adopt_live_lease,
             expected_live_pid,
         } => map_registry(connect(
-            &id,
+            &super::selection::resolve(id)?,
             registry::RunnerConnectInput {
                 adopt_live_lease,
                 expected_live_pid,
@@ -201,9 +201,10 @@ pub fn run(args: RunnerArgs) -> CmdResult<RunnerCommandOutput> {
         RunnerCommand::Reconcile { id, attest_absent } => {
             map_registry(status_mod::reconcile(&id, attest_absent))
         }
-        RunnerCommand::Disconnect { id, local_recovery } => {
-            map_registry(registry::disconnect(&id, local_recovery))
-        }
+        RunnerCommand::Disconnect { id, local_recovery } => map_registry(registry::disconnect(
+            &super::selection::resolve(id)?,
+            local_recovery,
+        )),
         RunnerCommand::RefreshHomeboy {
             runner_id,
             select,

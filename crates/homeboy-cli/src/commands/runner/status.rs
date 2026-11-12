@@ -20,8 +20,13 @@ use super::types::{
 const DEFAULT_STATUS_SESSION_LIMIT: usize = 20;
 
 pub(super) fn status(id: Option<&str>, full: bool) -> CmdResult<RunnerOutput> {
-    if let Some(id) = id {
-        let runners = runner::list()?;
+    let runners = runner::list()?;
+    let remote_ids = super::selection::remote_ids(&runners);
+    let default_id = match remote_ids.as_slice() {
+        [id] => Some(id.as_str()),
+        _ => None,
+    };
+    if let Some(id) = id.or(default_id) {
         if is_controller_local_runner(&runners, id) {
             return Ok((controller_local_status_output(id), 0));
         }
@@ -87,7 +92,6 @@ pub(super) fn status(id: Option<&str>, full: bool) -> CmdResult<RunnerOutput> {
 
     let lab_readiness = runner::lab_runner_readiness()?;
     let preferred_lab_runner = lab_readiness.selected_runner_id.clone();
-    let runners = runner::list()?;
     let sessions = non_local_sessions(&runners, runner::persisted_statuses()?);
     let capabilities = execution_capabilities(&runners, &sessions, Some(&lab_readiness));
     if !full {

@@ -222,7 +222,8 @@ pub(super) enum RunnerCommand {
     Doctor {
         /// Runner ID. Use `local`, `localhost`, or `self` for this machine;
         /// other values resolve through `homeboy runner` configuration.
-        runner_id: String,
+        /// Omit to select the only configured non-local runner.
+        runner_id: Option<String>,
 
         /// Component/workspace path to use as the extension parity probe cwd.
         #[arg(long)]
@@ -257,8 +258,8 @@ pub(super) enum RunnerCommand {
     },
     /// Connect to a runner by starting a loopback-only remote daemon and SSH tunnel
     Connect {
-        /// Runner ID
-        id: String,
+        /// Runner ID. Omit to select the only configured non-local runner.
+        id: Option<String>,
 
         /// Operator-confirm a live lease/PID/build adoption within the trusted remote SSH UID boundary; never stops or replaces a daemon
         #[arg(long)]
@@ -272,7 +273,7 @@ pub(super) enum RunnerCommand {
     Inventory { id: String },
     /// Show persisted runner tunnel status
     Status {
-        /// Runner ID. Omit to show all runner session states.
+        /// Runner ID. Omit to select the only non-local runner, or show all session states otherwise.
         id: Option<String>,
 
         /// Return complete status, runtime diagnostics, and followups.
@@ -312,8 +313,8 @@ pub(super) enum RunnerCommand {
     },
     /// Close a runner tunnel and remove its persisted session state
     Disconnect {
-        /// Runner ID
-        id: String,
+        /// Runner ID. Omit to select the only configured non-local runner.
+        id: Option<String>,
 
         /// Retire only this controller's matching local tunnel/session state after a read-only SSH probe proves zero active jobs; it never stops the remote daemon
         #[arg(long)]
@@ -690,6 +691,30 @@ mod tests {
             "--unknown"
         ])
         .is_err());
+    }
+
+    #[test]
+    fn runner_operator_commands_accept_omitted_ids_and_flags() {
+        for args in [
+            vec!["doctor", "--repair", "--scope", "lab-offload", "--full"],
+            vec!["connect"],
+            vec!["disconnect", "--local-recovery"],
+            vec!["status", "--full"],
+        ] {
+            let cli = Cli::try_parse_from(["homeboy", "runner"].into_iter().chain(args))
+                .expect("runner ID is optional");
+            assert!(matches!(
+                cli.command,
+                Commands::Runner(RunnerArgs {
+                    command: RunnerCommand::Doctor {
+                        runner_id: None,
+                        ..
+                    } | RunnerCommand::Connect { id: None, .. }
+                        | RunnerCommand::Disconnect { id: None, .. }
+                        | RunnerCommand::Status { id: None, .. }
+                })
+            ));
+        }
     }
 
     #[test]
