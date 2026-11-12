@@ -4,6 +4,14 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.458.54] - 2026-11-12
+
+### Added
+- an unpublished Cook leaves its review form on its task issue
+
+### Fixed
+- a staged merge candidate publishes as that merge
+
 ## [0.458.53] - 2026-11-12
 
 ### Fixed
