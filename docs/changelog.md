@@ -4,6 +4,11 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.458.49] - 2026-11-12
+
+### Fixed
+- a retry's candidate supersedes the earlier attempt's candidate at the destination HEAD
+
 ## [0.458.48] - 2026-11-12
 
 ### Changed
