@@ -4,6 +4,12 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.458.35] - 2026-11-12
+
+### Fixed
+- candidates keep the merges they carry
+- harvest Lab candidates after controller store-lock loss; recover takes over dead claims
+
 ## [0.458.34] - 2026-11-11
 
 ### Changed
