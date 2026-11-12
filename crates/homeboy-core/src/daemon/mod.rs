@@ -1913,6 +1913,77 @@ fn request_own_foreground_stop(lease_id: &str) -> bool {
     true
 }
 
+// The hook is inert outside unbounded daemon serve; CLI/library panics keep
+// their normal behavior. Any daemon thread panic is fatal, including poison.
+static FATAL_SERVE_PANICS: AtomicBool = AtomicBool::new(false);
+struct FatalServePanics;
+impl FatalServePanics {
+    fn enter() -> Self {
+        static INSTALL: std::sync::Once = std::sync::Once::new();
+        INSTALL.call_once(|| {
+            let previous = std::panic::take_hook();
+            std::panic::set_hook(Box::new(move |info| {
+                previous(info);
+                if FATAL_SERVE_PANICS.load(Ordering::Acquire) {
+                    eprintln!("fatal daemon thread panic; exiting for service-manager restart");
+                    std::process::exit(1);
+                }
+            }));
+        });
+        FATAL_SERVE_PANICS.store(true, Ordering::Release);
+        Self
+    }
+}
+impl Drop for FatalServePanics {
+    fn drop(&mut self) {
+        FATAL_SERVE_PANICS.store(false, Ordering::Release);
+    }
+}
+
+fn dispatch_connection(
+    sender: &mpsc::SyncSender<TcpStream>,
+    mut pending: TcpStream,
+    shutdown: impl Fn() -> bool,
+) -> Result<bool> {
+    loop {
+        if shutdown() {
+            return Ok(false);
+        }
+        match sender.try_send(pending) {
+            Ok(()) => return Ok(true),
+            Err(mpsc::TrySendError::Full(stream)) => {
+                pending = stream;
+                std::thread::sleep(Duration::from_millis(10));
+            }
+            Err(mpsc::TrySendError::Disconnected(_)) => {
+                return Err(Error::internal_io(
+                    "daemon connection workers stopped".to_string(),
+                    Some("dispatch daemon connection".to_string()),
+                ))
+            }
+        }
+    }
+}
+
+fn health_failures(previous: usize, healthy: bool) -> usize {
+    if healthy {
+        0
+    } else {
+        previous.saturating_add(1)
+    }
+}
+
+fn probe_self_health(address: SocketAddr) -> std::io::Result<bool> {
+    let timeout = Duration::from_secs(5);
+    let mut stream = TcpStream::connect_timeout(&address, timeout)?;
+    stream.set_read_timeout(Some(timeout))?;
+    stream.set_write_timeout(Some(timeout))?;
+    stream.write_all(b"GET /health HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n")?;
+    let mut response = [0; 12];
+    stream.read_exact(&mut response)?;
+    Ok(response.starts_with(b"HTTP/1.1 200"))
+}
+
 fn serve_listener_with_analysis_runner_locked<R>(
     listener: TcpListener,
     analysis_runner: R,
@@ -1924,6 +1995,8 @@ fn serve_listener_with_analysis_runner_locked<R>(
 where
     R: AnalysisJobRunner,
 {
+    // Unit fixtures share a process with unrelated, intentionally panicking tests.
+    let _fatal_panics = (request_limit.is_none() && !cfg!(test)).then(FatalServePanics::enter);
     if let Some(flag) = shutdown.as_ref() {
         let _ = SERVING_SHUTDOWN.set(Arc::clone(flag));
         listener.set_nonblocking(true).map_err(|error| {
@@ -1993,7 +2066,9 @@ where
                 return;
             }
             let current = health_store.health_revision.load(Ordering::Acquire);
-            if current != revision || refreshed.elapsed() >= Duration::from_secs(5) {
+            if (current != revision && refreshed.elapsed() >= Duration::from_secs(1))
+                || refreshed.elapsed() >= Duration::from_secs(5)
+            {
                 refresh_daemon_freshness_snapshot(&health_store);
                 revision = current;
                 refreshed = Instant::now();
@@ -2045,6 +2120,23 @@ where
             let _ = handle_connection(stream, &worker_store, worker_runner.clone(), loopback_bind);
         }));
     }
+    // Only workers retain receivers: their death must disconnect dispatch.
+    drop(connection_rx);
+    let (watchdog_shutdown_tx, watchdog_shutdown_rx) = mpsc::channel();
+    let watchdog = (request_limit.is_none() && !cfg!(test)).then(|| std::thread::spawn(move || {
+        let mut failures = 0;
+        let mut address = local_addr;
+        if address.ip().is_unspecified() {
+            address.set_ip(if address.is_ipv4() { std::net::Ipv4Addr::LOCALHOST.into() } else { std::net::Ipv6Addr::LOCALHOST.into() });
+        }
+        while watchdog_shutdown_rx.recv_timeout(Duration::from_secs(10)) == Err(mpsc::RecvTimeoutError::Timeout) {
+            failures = health_failures(failures, probe_self_health(address).unwrap_or(false));
+            if failures >= 3 {
+                eprintln!("fatal daemon self-health watchdog: /health unanswered on {address} for {failures} consecutive probes; exiting for restart");
+                std::process::exit(1);
+            }
+        }
+    }));
     let mut accepted = 0;
     let mut serve_result = Ok(());
     let shutdown_set = || {
@@ -2088,24 +2180,12 @@ where
                 // Never block on a full queue: when every worker is busy a
                 // blocking send would wedge this loop, and with it every
                 // shutdown and drain check (#17891).
-                let mut pending = stream;
-                loop {
-                    match connection_tx.try_send(pending) {
-                        Ok(()) => break,
-                        Err(std::sync::mpsc::TrySendError::Full(stream)) => {
-                            if shutdown_set() {
-                                break 'serve;
-                            }
-                            pending = stream;
-                            std::thread::sleep(Duration::from_millis(10));
-                        }
-                        Err(std::sync::mpsc::TrySendError::Disconnected(_)) => {
-                            serve_result = Err(Error::internal_io(
-                                "daemon connection workers stopped".to_string(),
-                                Some("dispatch daemon connection".to_string()),
-                            ));
-                            break 'serve;
-                        }
+                match dispatch_connection(&connection_tx, stream, shutdown_set) {
+                    Ok(true) => {}
+                    Ok(false) => break 'serve,
+                    Err(error) => {
+                        serve_result = Err(error);
+                        break 'serve;
                     }
                 }
                 accepted += 1;
@@ -2170,6 +2250,7 @@ where
         }
     }
 
+    let _ = watchdog_shutdown_tx.send(());
     let _ = health_shutdown_tx.send(());
     let _ = local_shutdown_tx.send(());
     let _ = completion_shutdown_tx.send(());
@@ -2183,6 +2264,7 @@ where
         ("orchestration-reconciler", orchestration_reconciler),
         ("work-intent-deliverer", work_intent_deliverer),
     ];
+    helpers.extend(watchdog.map(|monitor| ("self-health-watchdog", monitor)));
     helpers.extend(lifetime_monitor.map(|monitor| ("daemon-lifetime", monitor)));
     join_with_deadline(helpers, drain_deadline);
     // Termination evidence and the lease live in the state directory. Once it
@@ -5749,6 +5831,40 @@ fn daemon_job_store() -> &'static JobStore {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn dispatch_ends_when_all_workers_die() {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let peer = std::net::TcpStream::connect(listener.local_addr().unwrap()).unwrap();
+        let (stream, _) = listener.accept().unwrap();
+        let (sender, receiver) = std::sync::mpsc::sync_channel(1);
+        let worker = std::thread::spawn(move || drop(receiver));
+        worker.join().unwrap();
+        let (done_tx, done_rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            done_tx
+                .send(super::dispatch_connection(&sender, stream, || false).is_err())
+                .unwrap();
+        });
+        assert!(done_rx
+            .recv_timeout(std::time::Duration::from_secs(1))
+            .unwrap());
+        use std::io::Read;
+        let mut peer = peer;
+        peer.set_read_timeout(Some(std::time::Duration::from_secs(1)))
+            .unwrap();
+        assert_eq!(peer.read(&mut [0; 1]).unwrap(), 0);
+    }
+
+    #[test]
+    fn watchdog_counts_only_consecutive_unanswered_health_probes() {
+        let mut failures = 0;
+        for healthy in [false, false, true, false, false, false] {
+            failures = super::health_failures(failures, healthy);
+        }
+        assert_eq!(failures, 3);
+        assert_eq!(super::health_failures(failures, true), 0);
+    }
+
     use super::*;
 
     // Admission lifecycle tests own their host observation, not the CI host's PSI.

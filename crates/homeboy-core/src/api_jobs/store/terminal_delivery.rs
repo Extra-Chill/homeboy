@@ -42,11 +42,12 @@ impl JobStore {
     }
 
     fn step_delivery_rows(&self, due_only: bool) -> Result<Vec<(u32, StepTerminalDelivery)>> {
-        let Some(path) = self.persistence_path() else {
+        let Some(persistence) = &self.persistence else {
             return Ok(Vec::new());
         };
-        let connection = super::super::persistence::open_ledger(&path)?;
-        let mut statement = connection.prepare(
+        let guard = persistence.connection()?;
+        let connection = guard.as_ref().expect("initialized store connection");
+        let mut statement = connection.prepare_cached(
             "SELECT attempts, payload FROM step_terminal_deliveries AS delivery WHERE receipt IS NULL AND (?1 = 0 OR (next_attempt_ms <= ?2 AND NOT EXISTS (SELECT 1 FROM daemon_jobs AS job WHERE job.job_id = delivery.job_id AND job.active = 1))) AND (CASE WHEN json_valid(payload) THEN json_extract(payload, '$.daemon_scope') END) IS ?3 ORDER BY next_attempt_ms, rowid LIMIT 32"
         ).map_err(sql_error)?;
         let scope = self.daemon_scope.as_ref().map(DaemonScope::as_str);
@@ -68,10 +69,11 @@ impl JobStore {
 
     /// Receipt ACK is idempotent; an incompatible receipt fails closed.
     pub fn acknowledge_step_terminal_delivery(&self, job_id: &str, receipt: &Value) -> Result<()> {
-        let path = self.persistence_path().ok_or_else(|| {
+        let persistence = self.persistence.as_ref().ok_or_else(|| {
             Error::internal_unexpected("terminal delivery requires a durable store")
         })?;
-        let connection = super::super::persistence::open_ledger(&path)?;
+        let guard = persistence.connection()?;
+        let connection = guard.as_ref().expect("initialized store connection");
         let receipt = serde_json::to_string(receipt)
             .map_err(|error| Error::internal_json(error.to_string(), None))?;
         let changed = connection.execute("UPDATE step_terminal_deliveries SET receipt = ?2, payload = '', last_error = NULL WHERE job_id = ?1 AND receipt IS NULL", params![job_id, receipt]).map_err(sql_error)?;
@@ -99,7 +101,7 @@ impl JobStore {
     pub fn deliver_pending_step_terminals(&self) -> Result<()> {
         static DRAIN: std::sync::Mutex<()> = std::sync::Mutex::new(());
         let _drain = DRAIN.lock().expect("terminal delivery drain");
-        let Some(path) = self.persistence_path() else {
+        let Some(persistence) = &self.persistence else {
             return Ok(());
         };
         let mut first_error = None;
@@ -110,7 +112,7 @@ impl JobStore {
                 }
                 Err(error) => {
                     let delay = (1000_u64 << attempts.min(6)).min(60_000);
-                    super::super::persistence::open_ledger(&path)?.execute(
+                    persistence.connection()?.as_ref().expect("initialized store connection").execute(
                         "UPDATE step_terminal_deliveries SET attempts = attempts + 1, next_attempt_ms = ?2, last_error = ?3 WHERE job_id = ?1 AND receipt IS NULL",
                         params![delivery.job_id, (timestamp_ms() + delay) as i64, crate::redaction::redact_string(&error.message)],
                     ).map_err(sql_error)?;
