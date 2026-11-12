@@ -606,7 +606,13 @@ impl AgentTaskScheduleSupport {
             return;
         }
 
-        let missing = missing_required_typed_artifacts(outcome, request);
+        let mut missing = missing_required_typed_artifacts(outcome, request);
+        // Homeboy proved this attempt changed nothing, so its absent patch is
+        // that proof, not a broken contract. Failing it here would skip the
+        // no-change feedback attempt Cook owes it (#15294).
+        if outcome.is_verified_unchanged_attempt() {
+            missing.retain(|name| name != "patch");
+        }
         if missing.is_empty() {
             return;
         }

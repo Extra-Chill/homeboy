@@ -232,6 +232,48 @@ fn missing_required_typed_artifacts_fails_succeeded_outcome() {
 }
 
 #[test]
+fn a_verified_unchanged_attempt_needs_no_patch_but_keeps_other_contracts() {
+    // Homeboy's own proof that nothing changed stands in for the patch, so the
+    // attempt reaches Cook's no-change feedback instead of failing (#17955).
+    for (verified, required, missing) in [
+        (true, vec!["patch"], None),
+        (
+            true,
+            vec!["patch", "transcript"],
+            Some(json!(["transcript"])),
+        ),
+        (false, vec!["patch"], Some(json!(["patch"]))),
+    ] {
+        let plan = plan_with_required_artifacts(&required);
+        let mut outcome = AgentTaskOutcome {
+            task_id: "task-1".to_string(),
+            status: AgentTaskOutcomeStatus::Succeeded,
+            ..Default::default()
+        };
+        if verified {
+            crate::agent_task_provider::record_verified_unchanged_empty_attempt(&mut outcome);
+        }
+        AgentTaskScheduleSupport::classify_missing_required_typed_artifacts(
+            &mut outcome,
+            &plan.tasks[0],
+        );
+        let diagnostic = outcome
+            .diagnostics
+            .iter()
+            .find(|diagnostic| diagnostic.class == "agent_task.required_typed_artifacts_missing");
+        assert_eq!(
+            diagnostic.map(|diagnostic| diagnostic.data["missing"].clone()),
+            missing,
+            "verified={verified} required={required:?}"
+        );
+        assert_eq!(
+            outcome.status == AgentTaskOutcomeStatus::Succeeded,
+            diagnostic.is_none()
+        );
+    }
+}
+
+#[test]
 fn nested_executor_failure_context_wins_over_missing_required_artifacts() {
     let scheduler = AgentTaskScheduler::new(Arc::new(NestedFailedStatusMissingArtifactsExecutor));
 
