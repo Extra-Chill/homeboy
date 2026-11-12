@@ -3412,6 +3412,7 @@ fn reserve_admission_observed(
             "state": "reserved",
             "daemon_lease_id": daemon_lease.lease_id.clone(),
             "idempotency_key": idempotency_key,
+            "superseded_reservations": body.get("superseded_reservations").cloned().unwrap_or_else(|| json!([])),
         },
         "workspace_owner_lease": serde_json::Value::Null,
     });

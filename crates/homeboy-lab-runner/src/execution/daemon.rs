@@ -739,6 +739,59 @@ pub(crate) fn reserve_daemon_admission(
     idempotency_key: Option<&str>,
     workspace_owner_registration: Option<WorkspaceOwnerRegistration>,
 ) -> Result<DaemonAdmissionReservation> {
+    reserve_admission_generations(idempotency_key, |key, superseded| {
+        reserve_daemon_admission_generation(
+            runner_id,
+            local_url,
+            command,
+            expected_daemon_lease_id,
+            key,
+            workspace_owner_registration.clone(),
+            superseded,
+        )
+    })
+}
+
+// Replays walk the same chain, so a lost success response reuses the live
+// generation rather than reserving capacity twice. Only an exact-key terminal
+// refusal permits advancing; transport and capacity errors keep their key.
+fn reserve_admission_generations<T>(
+    key: Option<&str>,
+    mut reserve: impl FnMut(Option<&str>, &[Value]) -> Result<T>,
+) -> Result<T> {
+    let mut current = key.map(str::to_string);
+    let mut superseded = Vec::new();
+    loop {
+        match reserve(current.as_deref(), &superseded) {
+            Err(error)
+                if current.is_some()
+                    && error.details["reason"] == "terminal_admission_reservation"
+                    && error.details["field"] == "idempotency_key"
+                    && error.details["id"].as_str() == current.as_deref()
+                    && error.details["reservation_job_id"].as_str().is_some()
+                    && superseded.len() < 32 =>
+            {
+                superseded.push(json!({
+                    "idempotency_key": current,
+                    "reservation_job_id": error.details["reservation_job_id"],
+                }));
+                current = Some(format!("{}:admission:{}", key.unwrap(), superseded.len()));
+            }
+            result => return result,
+        }
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn reserve_daemon_admission_generation(
+    runner_id: &str,
+    local_url: &str,
+    command: &str,
+    expected_daemon_lease_id: &str,
+    idempotency_key: Option<&str>,
+    workspace_owner_registration: Option<WorkspaceOwnerRegistration>,
+    superseded: &[Value],
+) -> Result<DaemonAdmissionReservation> {
     let client = Client::builder()
         .no_proxy()
         .timeout(Duration::from_secs(10))
@@ -754,6 +807,7 @@ pub(crate) fn reserve_daemon_admission(
         "command": command,
         "expected_daemon_lease_id": expected_daemon_lease_id,
         "idempotency_key": idempotency_key,
+        "superseded_reservations": superseded,
         "admission_lease_protocol": 1,
         "pressure_thresholds": crate::load(runner_id)?.settings.pressure_thresholds,
     });
@@ -785,7 +839,9 @@ pub(crate) fn reserve_daemon_admission(
             Some(response.status_code),
             "/admissions",
         );
-        if error.details["execution_step_disposition"] == "runner_ineligible" {
+        if error.details["execution_step_disposition"] == "runner_ineligible"
+            || error.details["reason"] == "terminal_admission_reservation"
+        {
             return Err(error);
         }
         return Err(Error::validation_invalid_argument(
@@ -1239,6 +1295,54 @@ fn spawn_admission_renewer(
 mod admission_tests {
     use super::*;
     use std::sync::atomic::{AtomicUsize, Ordering};
+
+    fn terminal_conflict(key: &str) -> Error {
+        let mut error = Error::validation_invalid_argument(
+            "idempotency_key",
+            "terminal",
+            Some(key.into()),
+            None,
+        );
+        error.details["reason"] = json!("terminal_admission_reservation");
+        error.details["reservation_job_id"] = json!("old-job");
+        error.retryable = Some(true);
+        error
+    }
+
+    #[test]
+    fn terminal_admission_readmits_under_the_next_generation() {
+        let mut admissions = Vec::new();
+        let admitted = reserve_admission_generations(Some("retry"), |key, superseded| {
+            admissions.push(key.unwrap().to_string());
+            if key == Some("retry") {
+                return Err(terminal_conflict("retry"));
+            }
+            assert_eq!(
+                superseded,
+                &[json!({"idempotency_key": "retry", "reservation_job_id": "old-job"})]
+            );
+            Ok("new-job")
+        })
+        .unwrap();
+        assert_eq!(admitted, "new-job");
+        assert_eq!(admissions, ["retry", "retry:admission:1"]);
+    }
+
+    #[test]
+    fn unrelated_conflicts_and_transport_failures_do_not_rotate_keys() {
+        for error in [
+            terminal_conflict("another-owner"),
+            Error::internal_unexpected("transport"),
+        ] {
+            let mut calls = 0;
+            assert!(reserve_admission_generations(Some("retry"), |_, _| {
+                calls += 1;
+                Err::<(), _>(error.clone())
+            })
+            .is_err());
+            assert_eq!(calls, 1);
+        }
+    }
 
     #[test]
     fn admission_http_pressure_refusal_preserves_capacity_wait_contract() {

@@ -1178,6 +1178,28 @@ impl JobStore {
         workspace_owner_lease: Option<crate::workspace_claim::WorkspaceOwnerLease>,
     ) -> Result<AdmissionReservation> {
         self.durable_transaction(|inner| {
+            // Terminal rows are not retained in the live mirror. Consult the
+            // exact-key history before allowing a new reservation identity.
+            let history = self.jobs_with_history(
+                inner,
+                sql_store::TerminalJobs::AdmissionKey(idempotency_key),
+            )?;
+            if let Some(stored) = history.values().find(|stored| {
+                stored.job.operation == "runner.admission"
+                    && stored.job.status.is_terminal()
+                    && stored.admission_idempotency_key.as_deref() == Some(idempotency_key)
+            }) {
+                let mut error = Error::validation_invalid_argument(
+                    "idempotency_key",
+                    "admission idempotency key belongs to a terminal reservation",
+                    Some(idempotency_key.to_string()),
+                    None,
+                );
+                error.details["reason"] = serde_json::json!("terminal_admission_reservation");
+                error.details["reservation_job_id"] = serde_json::json!(stored.job.id);
+                error.retryable = Some(true);
+                return Err(error);
+            }
             if let Some(stored) = inner
                 .jobs
                 .values_mut()
@@ -1187,12 +1209,16 @@ impl JobStore {
                 .min_by_key(|stored| (stored.job.created_at_ms, stored.job.id))
             {
                 if stored.job.status.is_terminal() {
-                    return Err(Error::validation_invalid_argument(
+                    let mut error = Error::validation_invalid_argument(
                         "idempotency_key",
                         "admission idempotency key belongs to a terminal reservation",
                         Some(idempotency_key.to_string()),
                         None,
-                    ));
+                    );
+                    error.details["reason"] = serde_json::json!("terminal_admission_reservation");
+                    error.details["reservation_job_id"] = serde_json::json!(stored.job.id);
+                    error.retryable = Some(true);
+                    return Err(error);
                 }
                 if stored
                     .local_runner

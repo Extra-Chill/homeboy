@@ -3,6 +3,7 @@
 //! own daemon scope; scope-less (pre-scope) records belong to none (#16104).
 use super::*;
 use crate::test_support::with_isolated_home;
+use serde_json::json;
 
 fn scope(name: &str) -> DaemonScope {
     DaemonScope::from_state_dir(Path::new(&format!("/state/runner-daemons/runner/{name}")))
@@ -50,6 +51,46 @@ fn startup_admission_expiry_fails_only_its_own_scope() {
         for untouched in [other, scopeless] {
             assert_eq!(restarted.get(untouched).unwrap().status, JobStatus::Queued);
         }
+    });
+}
+
+#[test]
+fn terminal_admission_conflict_identifies_superseded_reservation() {
+    with_isolated_home(|home| {
+        let store = daemon(&ledger(home), "a");
+        let now = timestamp_ms();
+        let first = store
+            .create_or_renew_admission_at(json!({}), "retry", now, None)
+            .unwrap();
+        store
+            .reconcile_expired_admissions_at(now + ADMISSION_RESERVATION_LEASE_MS + 1)
+            .unwrap();
+        let error = store
+            .create_or_renew_admission_at(
+                json!({}),
+                "retry",
+                now + ADMISSION_RESERVATION_LEASE_MS + 2,
+                None,
+            )
+            .unwrap_err();
+        assert_eq!(error.retryable, Some(true));
+        assert_eq!(error.details["reason"], "terminal_admission_reservation");
+        assert_eq!(error.details["id"], "retry");
+        assert_eq!(
+            error.details["reservation_job_id"],
+            first.job.id.to_string()
+        );
+        let second = store
+            .create_or_renew_admission_at(
+                json!({}),
+                "retry:admission:1",
+                now + ADMISSION_RESERVATION_LEASE_MS + 2,
+                None,
+            )
+            .unwrap();
+        assert_ne!(first.job.id, second.job.id);
+        assert_eq!(store.get(first.job.id).unwrap().status, JobStatus::Failed);
+        assert_eq!(second.job.status, JobStatus::Queued);
     });
 }
 

@@ -675,6 +675,7 @@ pub(super) fn read_active_jobs_readonly(path: &Path) -> Result<Option<Vec<Stored
 pub(super) enum TerminalJobs<'a> {
     All,
     ControllerType(&'a str),
+    AdmissionKey(&'a str),
     /// Controller jobs of one type whose request has `field == value`.
     ControllerRequest {
         job_type: &'a str,
@@ -696,6 +697,12 @@ pub(super) fn read_terminal_jobs_readonly(
     const TERMINAL: &str = "SELECT body FROM daemon_jobs WHERE active = 0";
     match filter {
         TerminalJobs::All => read_job_bodies(&connection, path, TERMINAL, []),
+        TerminalJobs::AdmissionKey(key) => read_job_bodies(
+            &connection,
+            path,
+            "SELECT body FROM daemon_jobs WHERE active = 0 AND json_extract(body, '$.job.operation') = 'runner.admission' AND json_extract(body, '$.admission_idempotency_key') = ?1",
+            [key],
+        ),
         TerminalJobs::ControllerType(job_type) => read_job_bodies(
             &connection,
             path,
