@@ -25,6 +25,8 @@ fn unsupported_daemon_api_method(method: &str) -> Error {
 #[derive(Debug, Clone, Copy, Default)]
 pub(super) struct DaemonPostOptions {
     pub(super) connection_close: bool,
+    /// Whole-request deadline, overriding the client default.
+    pub(super) timeout: Option<std::time::Duration>,
 }
 
 pub(super) struct DaemonHttpTextResponse {
@@ -38,6 +40,10 @@ pub fn canonical_daemon_body<'a>(data: &'a Value, context: &str) -> Result<&'a V
 }
 
 fn with_daemon_post_options(request: RequestBuilder, options: DaemonPostOptions) -> RequestBuilder {
+    let request = match options.timeout {
+        Some(timeout) => request.timeout(timeout),
+        None => request,
+    };
     if options.connection_close {
         request.header(CONNECTION, "close")
     } else {
