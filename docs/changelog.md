@@ -4,6 +4,14 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.458.48] - 2026-11-12
+
+### Changed
+- prune provider, route, recipe, and observation tests (slice D)
+
+### Fixed
+- global --output always writes the JSON result for artifact get
+
 ## [0.458.47] - 2026-11-12
 
 ### Changed
