@@ -20,6 +20,7 @@ mod lifecycle;
 mod log_projection;
 mod recipe_run;
 mod registry;
+mod selection;
 mod status;
 mod types;
 

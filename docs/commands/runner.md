@@ -138,9 +138,23 @@ Configure a preferred runner with:
 homeboy config set /lab/preferred_runner '"<runner-id>"'
 ```
 
+### Runner ID defaults
+
+`doctor`, `connect`, and `disconnect` accept an omitted runner ID when exactly
+one non-local runner is configured. Local runners do not compete with that
+default. With several non-local runners, these commands list the IDs to choose
+from without probing or mutating any runner; with none, they request an explicit
+ID. Pass `local` explicitly to diagnose this machine.
+
+`status` also selects the sole non-local runner when its ID is omitted. With
+zero or several non-local runners it retains the all-runner session view.
+Explicit IDs always take precedence; selection does not depend on live sessions
+or the preferred Lab runner.
+
 ### `doctor`
 
 ```sh
+homeboy runner doctor
 homeboy runner doctor local
 homeboy runner doctor <runner-id>
 homeboy runner doctor <runner-id> --path <component-path> --extension rust
