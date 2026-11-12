@@ -1067,8 +1067,82 @@ fn strict_admission_rejection(
     )
 }
 
+/// Cadence for renewing a healthy admission: half of the daemon's 30 s
+/// reservation lease (`ADMISSION_RESERVATION_LEASE_MS`).
+const ADMISSION_RENEWAL_INTERVAL: Duration = Duration::from_secs(15);
+/// Retry cadence after a renewal could not reach the daemon.
+const ADMISSION_RENEWAL_RETRY_INTERVAL: Duration = Duration::from_secs(1);
+/// How long transport failures are tolerated after the last confirmed renewal.
+/// It stays below the daemon's 30 s lease, so a renewal confirmed inside this
+/// window still lands before the server-side reservation can lapse.
+const ADMISSION_RENEWAL_TRANSPORT_GRACE: Duration = Duration::from_secs(25);
+
+/// Outcome of one admission renewal round trip.
+#[derive(Debug)]
+enum AdmissionRenewalAttempt {
+    Renewed {
+        expires_at_ms: u64,
+        owner: Option<WorkspaceOwnerLease>,
+    },
+    /// The daemon answered and refused, or answered without renewal authority.
+    Rejected(String),
+    /// The daemon could not be reached or its response could not be read: a
+    /// transport gap, not a verdict on the lease (#15265).
+    Unreachable(String),
+}
+
+fn classify_admission_renewal_response(
+    response: Result<DaemonHttpTextResponse>,
+) -> AdmissionRenewalAttempt {
+    let response = match response {
+        Ok(response) => response,
+        Err(error) => return AdmissionRenewalAttempt::Unreachable(error.message),
+    };
+    let Ok(envelope) = serde_json::from_str::<DaemonEnvelope>(&response.body) else {
+        // A truncated or non-JSON body is what a dropping tunnel produces.
+        return AdmissionRenewalAttempt::Unreachable(format!(
+            "unreadable daemon admission renewal response (HTTP {})",
+            response.status_code
+        ));
+    };
+    if !envelope.success {
+        let detail = envelope
+            .error
+            .as_ref()
+            .and_then(|error| error.get("message").and_then(Value::as_str))
+            .unwrap_or("daemon refused admission lease renewal");
+        return AdmissionRenewalAttempt::Rejected(detail.to_string());
+    }
+    let body = envelope.data.and_then(|data| {
+        canonical_daemon_body(&data, "daemon admission renewal response")
+            .ok()
+            .cloned()
+    });
+    let expires_at_ms = body
+        .as_ref()
+        .and_then(|body| body.pointer("/lease/expires_at_ms").and_then(Value::as_u64))
+        .filter(|expires_at_ms| *expires_at_ms > 0);
+    let Some(expires_at_ms) = expires_at_ms else {
+        return AdmissionRenewalAttempt::Rejected(
+            "daemon did not confirm admission lease renewal".to_string(),
+        );
+    };
+    let owner = body
+        .as_ref()
+        .and_then(|body| serde_json::from_value(body["workspace_owner_lease"].clone()).ok());
+    AdmissionRenewalAttempt::Renewed {
+        expires_at_ms,
+        owner,
+    }
+}
+
 /// Renew at half the daemon's bounded lease interval while staging keeps the
 /// handoff alive. Explicit release remains authoritative when the context ends.
+///
+/// A renewal that cannot reach the daemon is retried until the transport grace
+/// window closes; only an explicit refusal, or a gap long enough for the server
+/// lease to lapse, records a failure. One dropped request over a flaky tunnel
+/// must not fail an admission the daemon still holds (#15265).
 fn spawn_admission_renewer(
     local_url: String,
     job_id: String,
@@ -1078,16 +1152,21 @@ fn spawn_admission_renewer(
 ) -> (Sender<()>, std::thread::JoinHandle<()>) {
     let (stop, shutdown) = mpsc::channel();
     let renewer = std::thread::spawn(move || {
-        while shutdown.recv_timeout(Duration::from_secs(15)).is_err() {
+        let mut last_confirmed = Instant::now();
+        let mut wait = ADMISSION_RENEWAL_INTERVAL;
+        let fail = |failure: String| {
+            health
+                .lock()
+                .expect("admission renewal health lock")
+                .failure = Some(failure);
+        };
+        while shutdown.recv_timeout(wait).is_err() {
             let Ok(client) = Client::builder()
                 .no_proxy()
                 .timeout(Duration::from_secs(10))
                 .build()
             else {
-                health
-                    .lock()
-                    .expect("admission renewal health lock")
-                    .failure = Some("build daemon renewal client".to_string());
+                fail("build daemon renewal client".to_string());
                 return;
             };
             let mut payload = json!({ "admission_token": token });
@@ -1105,53 +1184,46 @@ fn spawn_admission_renewer(
                 &payload,
                 DaemonPostOptions::default(),
             );
-            let body = response
-                .ok()
-                .and_then(|response| serde_json::from_str::<DaemonEnvelope>(&response.body).ok())
-                .and_then(|envelope| envelope.data)
-                .and_then(|data| {
-                    canonical_daemon_body(&data, "daemon admission renewal response")
-                        .ok()
-                        .cloned()
-                });
-            let expires_at_ms = body
-                .as_ref()
-                .and_then(|body| body.pointer("/lease/expires_at_ms").and_then(Value::as_u64));
-            let renewed_owner = body.as_ref().and_then(|body| {
-                serde_json::from_value(body["workspace_owner_lease"].clone()).ok()
-            });
-            match (expires_at_ms, renewed_owner) {
-                (Some(expires_at_ms), owner) if expires_at_ms > 0 => {
-                    if workspace_owner_lease
+            match classify_admission_renewal_response(response) {
+                AdmissionRenewalAttempt::Renewed {
+                    expires_at_ms,
+                    owner,
+                } => {
+                    let mut current_owner = workspace_owner_lease
                         .lock()
-                        .expect("admission owner lease lock")
-                        .is_some()
-                        && owner.is_none()
-                    {
-                        health
-                            .lock()
-                            .expect("admission renewal health lock")
-                            .failure =
-                            Some("daemon did not return renewed workspace owner lease".to_string());
-                        return;
+                        .expect("admission owner lease lock");
+                    match owner {
+                        Some(owner) => *current_owner = Some(owner),
+                        None if current_owner.is_some() => {
+                            drop(current_owner);
+                            fail("daemon did not return renewed workspace owner lease".to_string());
+                            return;
+                        }
+                        None => {}
                     }
-                    if let Some(owner) = owner {
-                        *workspace_owner_lease
-                            .lock()
-                            .expect("admission owner lease lock") = Some(owner);
-                    }
+                    drop(current_owner);
                     health
                         .lock()
                         .expect("admission renewal health lock")
                         .lease_expires_at_ms = Some(expires_at_ms);
+                    last_confirmed = Instant::now();
+                    wait = ADMISSION_RENEWAL_INTERVAL;
                 }
-                _ => {
-                    health
-                        .lock()
-                        .expect("admission renewal health lock")
-                        .failure =
-                        Some("daemon did not confirm admission lease renewal".to_string());
+                AdmissionRenewalAttempt::Rejected(failure) => {
+                    fail(failure);
                     return;
+                }
+                AdmissionRenewalAttempt::Unreachable(detail) => {
+                    let gap = last_confirmed.elapsed();
+                    if gap >= ADMISSION_RENEWAL_TRANSPORT_GRACE {
+                        fail(format!(
+                            "daemon admission lease renewal unreachable for {}s, past the {}s grace window: {detail}",
+                            gap.as_secs(),
+                            ADMISSION_RENEWAL_TRANSPORT_GRACE.as_secs(),
+                        ));
+                        return;
+                    }
+                    wait = ADMISSION_RENEWAL_RETRY_INTERVAL;
                 }
             }
         }
@@ -1304,6 +1376,53 @@ mod admission_tests {
             .expect_err("renewal failure must be observable before dispatch");
         assert!(error.message.contains("renewal failed"));
         assert!(!error.message.contains("opaque-token"));
+    }
+
+    #[test]
+    fn renewal_transport_gaps_are_retried_and_refusals_are_failures() {
+        let text = |status_code: u16, body: &str| {
+            Ok(DaemonHttpTextResponse {
+                status_code,
+                body: body.to_string(),
+            })
+        };
+        // A dropped request or a truncated body over a flaky tunnel is a
+        // transport gap the renewer retries, never a lease verdict (#15265).
+        assert!(matches!(
+            classify_admission_renewal_response(Err(Error::internal_unexpected(
+                "error sending request for url"
+            ))),
+            AdmissionRenewalAttempt::Unreachable(_)
+        ));
+        assert!(matches!(
+            classify_admission_renewal_response(text(200, "{\"success\":tr")),
+            AdmissionRenewalAttempt::Unreachable(_)
+        ));
+        // An answer that refuses or omits renewal authority is final.
+        match classify_admission_renewal_response(text(
+            409,
+            r#"{"success":false,"error":{"message":"admission reservation expired"}}"#,
+        )) {
+            AdmissionRenewalAttempt::Rejected(reason) => {
+                assert_eq!(reason, "admission reservation expired")
+            }
+            other => panic!("expected rejection, got {other:?}"),
+        }
+        assert!(matches!(
+            classify_admission_renewal_response(text(200, r#"{"success":true,"data":{}}"#)),
+            AdmissionRenewalAttempt::Rejected(_)
+        ));
+        let renewed = text(
+            200,
+            r#"{"success":true,"data":{"body":{"lease":{"expires_at_ms":4242}}}}"#,
+        );
+        assert!(matches!(
+            classify_admission_renewal_response(renewed),
+            AdmissionRenewalAttempt::Renewed {
+                expires_at_ms: 4242,
+                owner: None
+            }
+        ));
     }
 
     #[test]
