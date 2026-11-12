@@ -3915,10 +3915,18 @@ impl LabStagingStageOperations for ProductionLabStagingOperations {
                 .map(|runner_job_id| (runner_job_id, None))
                 .ok_or(error)?,
         };
-        // Direct-daemon authority can expire while `/exec` is in flight.
+        // The admission reservation only authorizes submission. Once `/exec`
+        // has accepted a runner job, that job is the authority: a renewal gap
+        // while `/exec` was in flight is not a reason to cancel live work, so
+        // record it and bind the accepted job for observation (#15265).
         if let Err(error) = daemon_authority.prove_server_owned_expiry_or_cancellation_authority() {
-            self.cancel_and_reconcile_runner_job(request, &runner_job_id)?;
-            return Err(error);
+            homeboy_core::log_status!(
+                "lab-staging",
+                "runner job `{}` was accepted for `{}` after its admission renewal lapsed; keeping the accepted job: {}",
+                runner_job_id,
+                request.recipe.run_id,
+                error.message
+            );
         }
         if cancellation.is_cancelled() {
             self.cancel_and_reconcile_runner_job(request, &runner_job_id)?;
