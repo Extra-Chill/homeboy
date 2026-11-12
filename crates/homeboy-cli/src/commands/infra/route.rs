@@ -3362,11 +3362,29 @@ impl crate::agents::agent_task_service::AgentTaskCookAttemptDispatcher
             // A queued attempt waits through transient substrate refusals
             // (pressure, readiness, runtime promotion, runner connect) instead
             // of terminalizing, while no runner has accepted its job (#17765).
+            agent_task_lifecycle::AgentTaskLifecycleStore::from_environment()?.mutate_record(
+                run_id,
+                |record| {
+                    record.metadata["lab_admission_wait"] =
+                        serde_json::json!({ "started_at": chrono::Utc::now().to_rfc3339() });
+                    true
+                },
+            )?;
             let outcome = homeboy::core::substrate_wait::wait_through(
                 "Lab handoff",
                 homeboy::core::substrate_wait::SUBSTRATE_WAIT_DEADLINE,
                 || false,
-                |_, _| {},
+                |error, _| {
+                    if let Ok(store) =
+                        agent_task_lifecycle::AgentTaskLifecycleStore::from_environment()
+                    {
+                        let _ = store.mutate_record(run_id, |record| {
+                            record.metadata["lab_admission_wait"]["blocker"] =
+                                serde_json::json!(error.message);
+                            true
+                        });
+                    }
+                },
                 || {
                     let outcome = lab_routing::dispatch_lab_offload(
                         LabRoutingRequest {

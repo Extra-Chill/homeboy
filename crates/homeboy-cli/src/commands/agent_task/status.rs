@@ -387,6 +387,20 @@ fn status_without_feedback(args: StatusArgs) -> CmdResult<Value> {
         // Provider response identity, distinct from the requested routing tier.
         value["served_models"] = json!(record.served_models);
         attach_lab_snapshot_failure_projection(&mut value, &record);
+        let admission = agent_task_service_direct::queued_lab_admission(&record);
+        attach_lab_admission_wait(&mut value, admission.as_ref());
+        if let Some(wait) = admission
+            .as_ref()
+            .filter(|wait| !wait.live_driver && wait.liveness.is_reconcilable())
+        {
+            let probe = agent_task_lifecycle::runner_diagnostic_probe(&record);
+            if let Some(diagnostic) =
+                queued_runner_ownership_diagnostic(&record, wait.liveness, &probe)
+            {
+                value["reason"] = json!(diagnostic.message);
+                value["runner_ownership_diagnostic"] = collected_diagnostic_value(diagnostic);
+            }
+        }
         if let Some(diagnostic) = lab_staging_root_cause(&record) {
             value["blocker_summary"] = json!(diagnostic.message);
             value["next_action"] = json!({
@@ -494,6 +508,9 @@ fn compact_control_plane_status(value: Value) -> Value {
             .map(|gates| gates.len().saturating_sub(COMPACT_REF_LIMIT)).unwrap_or_default(),
         "publication": bounded_control_plane_value(value.get("publication").unwrap_or(&Value::Null)),
         "recovery": bounded_control_plane_value(value.get("recovery").unwrap_or(&Value::Null)),
+        "waiting_for": value.get("waiting_for"),
+        "lab_admission_wait": bounded_control_plane_value(value.get("lab_admission_wait").unwrap_or(&Value::Null)),
+        "runner_ownership_diagnostic": bounded_control_plane_value(value.get("runner_ownership_diagnostic").unwrap_or(&Value::Null)),
         "next_action": { "command": next_action },
         "action_eligibility": {
             "actions": selected_action,
@@ -2555,9 +2572,13 @@ pub(super) fn diagnose(args: DiagnoseArgs) -> CmdResult<Value> {
     let record = durable_read.record;
     let aggregate = durable_read.aggregate;
     let runner_diagnostic_probe = agent_task_lifecycle::runner_diagnostic_probe(&record);
-    let liveness = agent_task_service::liveness_for_record(&record, chrono::Utc::now());
-    let queued_runner_ownership =
-        queued_runner_ownership_diagnostic(&record, liveness, &runner_diagnostic_probe);
+    let admission = agent_task_service_direct::queued_lab_admission(&record);
+    let queued_runner_ownership = admission
+        .as_ref()
+        .filter(|wait| !wait.live_driver && wait.liveness.is_reconcilable())
+        .and_then(|wait| {
+            queued_runner_ownership_diagnostic(&record, wait.liveness, &runner_diagnostic_probe)
+        });
     let mut hydrated_evidence = Vec::new();
     let mut total_hydrated_evidence = 0;
     // The current promotion lifecycle denial is the active blocker. Older
@@ -2721,6 +2742,7 @@ pub(super) fn diagnose(args: DiagnoseArgs) -> CmdResult<Value> {
     }
     attach_durable_read_availability(&mut value, &durable_read.unavailable_sources);
     attach_cook_completion(&mut value, &record);
+    attach_lab_admission_wait(&mut value, admission.as_ref());
     if let Some(selection) = target.selection {
         value["candidate_selection"] = json!(selection);
     }
@@ -5230,6 +5252,8 @@ fn enforce_compact_status_budget(mut value: Value) -> Value {
         "notification_delivery",
         "notification_resolution",
         "transport_recovery",
+        "waiting_for",
+        "lab_admission_wait",
         "diagnostic_summary",
         "failure_reasons",
         "execution_states",
@@ -5752,9 +5776,29 @@ fn runner_cancellation_diagnostic(record: &AgentTaskRunRecord) -> Option<Collect
     })
 }
 
-/// A queued runner-backed record must retain its ownership diagnosis until a
-/// runner job id is durably projected. The liveness model is shared with
-/// controller-upgrade admission so both surfaces explain the same blocker.
+/// Admission is queueing, not a stalled provider execution. Preserve the same
+/// driver-lock observation used by the recovery planner.
+fn attach_lab_admission_wait(
+    value: &mut Value,
+    admission: Option<&agent_task_service_direct::QueuedLabAdmission>,
+) {
+    if let Some(admission) = admission.filter(|wait| wait.live_driver) {
+        value["waiting_for"] = json!("lab_admission");
+        value["lab_admission_wait"] = admission.wait.clone();
+        let message = format!(
+            "Waiting for Lab admission on {}.",
+            admission.wait["runner_id"].as_str().unwrap_or("Lab")
+        );
+        value["reason"] = json!(message);
+        value["summary"] = json!(message);
+        value["diagnosis_outcome"] = json!("waiting_for_admission");
+        if let Some(run_id) = value["run_id"].as_str() {
+            let command = format!("homeboy agent-task status {} --watch", quote_arg(run_id));
+            value["next_commands"] = json!([command]);
+        }
+    }
+}
+
 fn queued_runner_ownership_diagnostic(
     record: &AgentTaskRunRecord,
     liveness: agent_task_service::AgentTaskLiveness,

@@ -4562,10 +4562,17 @@ pub(crate) fn cook_failure_context_with_stores(
             // The kernel driver lock is the one liveness fact: a live driver
             // owns every transition, so recovery has no step to take, which
             // is what diagnose reports for the same Cook (#17494).
-            let live_driver =
-                super::cook_recipe::CookRecipeStore::for_lifecycle_store(lifecycle_store)
-                    .foreign_cook_driver(cook_id)
-                    .is_ok_and(|driver| driver.is_some());
+            let admission = record.as_ref().and_then(|record| {
+                super::lab_admission::queued_lab_admission_in_store(record, lifecycle_store)
+            });
+            let live_driver = admission
+                .as_ref()
+                .map(|wait| wait.live_driver)
+                .unwrap_or_else(|| {
+                    super::cook_recipe::CookRecipeStore::for_lifecycle_store(lifecycle_store)
+                        .foreign_cook_driver(cook_id)
+                        .is_ok_and(|driver| driver.is_some())
+                });
             // The previous `recover`'s no-progress marker is a planner input,
             // so every surface agrees with what `recover` performs (#17650).
             let no_progress = super::cook_recovery::matching_no_progress(
@@ -4579,7 +4586,9 @@ pub(crate) fn cook_failure_context_with_stores(
                 lifecycle_store
                     .read_record(&chronological_latest_run_id)
                     .is_ok_and(|record| {
-                        agent_task_lifecycle::disconnected_runner_recovery_available(&record)
+                        admission.as_ref().is_some_and(|wait| {
+                            !wait.live_driver && wait.liveness.is_reconcilable()
+                        }) || agent_task_lifecycle::disconnected_runner_recovery_available(&record)
                     }),
                 live_driver,
                 recovery_legal,
