@@ -556,7 +556,7 @@ fn verified_initial_cook_candidate_baseline(
             message: "initial Cook candidate source HEAD changed before retry".to_string(),
         });
     }
-    let index = tempfile::NamedTempFile::new().map_err(|error| HarvestError::Git {
+    let index = homeboy_core::git::private_index(root).map_err(|error| HarvestError::Git {
         command: "create initial Cook candidate verification index".to_string(),
         cwd: root.to_path_buf(),
         message: error.to_string(),

@@ -100,16 +100,13 @@ pub fn candidate_fingerprint(path: &str) -> Result<AgentTaskPromotionCandidate> 
 /// describe content that is not on disk. `read-tree` writes entries with no
 /// stat data, so every working-tree file is re-hashed.
 fn candidate_tree(path: &str) -> Result<String> {
-    let scratch = |context: &str| {
-        tempfile::NamedTempFile::new()
-            .map_err(|error| Error::internal_io(error.to_string(), Some(context.to_string())))
-    };
+    let scratch = || homeboy_core::git::private_index(Path::new(path));
     let real_index = text(run_git(
         path,
         &["rev-parse", "--path-format=absolute", "--git-path", "index"],
     )?);
     let real_index = Path::new(real_index.trim());
-    let candidate = scratch(path)?;
+    let candidate = scratch()?;
     let git = |index: &tempfile::NamedTempFile, args: &[&str], context: &str| {
         homeboy_core::git::run_git_bytes_with_env(
             Path::new(path),
@@ -124,7 +121,7 @@ fn candidate_tree(path: &str) -> Result<String> {
     // A checkout without an index (for example `worktree add --no-checkout`)
     // has staged nothing beyond `HEAD`.
     let staged_tree = if real_index.exists() {
-        let staged = scratch(path)?;
+        let staged = scratch()?;
         std::fs::copy(real_index, staged.path()).map_err(|error| {
             Error::internal_io(error.to_string(), Some(real_index.display().to_string()))
         })?;

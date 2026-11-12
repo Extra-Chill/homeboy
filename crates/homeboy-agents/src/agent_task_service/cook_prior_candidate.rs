@@ -228,12 +228,7 @@ pub(crate) fn preserve_prior_attempt_candidate(
     let head_tree = git_output(&owner.path, &["rev-parse", "--verify", "HEAD^{tree}"])?;
     // A private index keeps the snapshot independent of the user-visible
     // index and of any concurrent stash in the shared repository.
-    let index = tempfile::NamedTempFile::new().map_err(|error| {
-        Error::internal_io(
-            error.to_string(),
-            Some("create prior Cook candidate preservation index".to_string()),
-        )
-    })?;
+    let index = homeboy_core::git::private_index(&owner.path)?;
     let index_path = index.path().display().to_string();
     let index_env: &[(&str, &str)] = &[("GIT_INDEX_FILE", index_path.as_str())];
     git_output_with_env(&owner.path, &["read-tree", &head], index_env)?;
