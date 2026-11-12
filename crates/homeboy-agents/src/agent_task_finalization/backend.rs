@@ -962,16 +962,16 @@ fn publication_gh_output(path: &str, args: &[&str]) -> Result<std::process::Outp
     let credential = publication_credential(path)?;
     let mut command = std::process::Command::new("gh");
     command.args(args).current_dir(path);
-    // gh may otherwise select a fork as its default repository after `repo fork`.
-    if publication_route(path)?.route == "fork" {
-        if let Some(repo) = homeboy_core::git::release_download::detect_remote_url(Path::new(path))
-            .and_then(|url| homeboy_core::git::release_download::parse_github_url(&url))
-        {
-            command.env(
-                "GH_REPO",
-                format!("{}/{}/{}", repo.host, repo.owner, repo.repo),
-            );
-        }
+    // Publication targets the checkout's origin. Without GH_REPO, gh resolves
+    // a GitHub fork to its parent (or to a fork after `repo fork`), so PR
+    // reads and writes would land on another repository's PR numbers.
+    if let Some(repo) = homeboy_core::git::release_download::detect_remote_url(Path::new(path))
+        .and_then(|url| homeboy_core::git::release_download::parse_github_url(&url))
+    {
+        command.env(
+            "GH_REPO",
+            format!("{}/{}/{}", repo.host, repo.owner, repo.repo),
+        );
     }
     if let Some((repo, credential)) = &credential {
         command
@@ -1249,6 +1249,44 @@ mod remote_base_tests {
                     route.head_repository
                 );
             }
+        });
+    }
+
+    /// A checkout of a GitHub fork publishes directly to that fork. gh must
+    /// target the origin there too: unpinned, it resolves the fork's parent,
+    /// so PR numbers and quarantine writes land on someone else's PRs.
+    #[test]
+    fn every_publication_gh_call_targets_the_checkout_origin() {
+        homeboy_core::test_support::with_isolated_home(|home| {
+            let (repo, _origin) = publication_repo();
+            git(
+                repo.path(),
+                &[
+                    "remote",
+                    "set-url",
+                    "origin",
+                    "https://github.com/Extra-Chill/blocks-everywhere.git",
+                ],
+            );
+            let bin = home.path().join("bin");
+            std::fs::create_dir_all(&bin).unwrap();
+            let gh = bin.join("gh");
+            std::fs::write(&gh, "#!/bin/sh\nprintf '%s' \"$GH_REPO\"\n").unwrap();
+            std::fs::set_permissions(&gh, std::os::unix::fs::PermissionsExt::from_mode(0o755))
+                .unwrap();
+            let path = std::env::join_paths(
+                std::iter::once(bin)
+                    .chain(std::env::split_paths(&std::env::var_os("PATH").unwrap())),
+            )
+            .unwrap();
+            let _path = homeboy_core::test_support::EnvVarGuard::set("PATH", path);
+            let path = repo.path().to_str().unwrap();
+            assert_eq!(publication_route(path).unwrap().route, "direct");
+            let output = publication_gh_output(path, &["pr", "view", "139"]).unwrap();
+            assert_eq!(
+                String::from_utf8_lossy(&output.stdout),
+                "github.com/Extra-Chill/blocks-everywhere"
+            );
         });
     }
 
