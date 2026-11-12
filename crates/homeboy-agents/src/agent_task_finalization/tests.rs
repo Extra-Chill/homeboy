@@ -119,14 +119,14 @@ impl AgentTaskPrFinalizationBackend for MockBackend {
     fn publish_tree(
         &mut self,
         _path: &str,
-        _tree: &str,
+        _candidate: &crate::agent_task::AgentTaskCandidate,
         _parent: &str,
         _message: &str,
         _dates: &(String, String),
     ) -> Result<String> {
         if self.real_git {
             return RealAgentTaskPrFinalizationBackend
-                .publish_tree(_path, _tree, _parent, _message, _dates);
+                .publish_tree(_path, _candidate, _parent, _message, _dates);
         }
         self.committed = true;
         self.commit_calls += 1;

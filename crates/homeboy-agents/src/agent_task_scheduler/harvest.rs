@@ -277,7 +277,21 @@ fn candidate_from_workspace_with_parent(
         return Ok(None);
     }
     let head = ensure_head_descends_from_base(root, base)?;
-    let parent = parent.unwrap_or(&head);
+    // A flattened continuation keeps what the agent merged (trunk, an
+    // upstream) as later parents, so the merge survives into promotion and
+    // publication instead of conflicting again (#17346).
+    let mut parents = vec![parent.unwrap_or(&head).to_string()];
+    if let Some(parent) = parent {
+        parents.extend(
+            homeboy_core::git::merged_parents(root, parent, &head).map_err(|error| {
+                HarvestError::Git {
+                    command: format!("list merges in {parent}..{head}"),
+                    cwd: root.to_path_buf(),
+                    message: error.to_string(),
+                }
+            })?,
+        );
+    }
     let index = tempfile::NamedTempFile::new().map_err(|error| HarvestError::Git {
         command: "create candidate harvest Git index".to_string(),
         cwd: root.to_path_buf(),
@@ -303,16 +317,11 @@ fn candidate_from_workspace_with_parent(
         ("GIT_COMMITTER_EMAIL", "homeboy@localhost"),
         ("GIT_COMMITTER_DATE", date.as_str()),
     ];
-    let commit_args = [
-        "-c",
-        "commit.gpgSign=false",
-        "commit-tree",
-        tree.as_str(),
-        "-p",
-        parent,
-        "-m",
-        "homeboy: cook candidate",
-    ];
+    let mut commit_args = vec!["-c", "commit.gpgSign=false", "commit-tree", tree.as_str()];
+    for parent in &parents {
+        commit_args.extend(["-p", parent.as_str()]);
+    }
+    commit_args.extend(["-m", "homeboy: cook candidate"]);
     let candidate_sha = git_output_with_env(root, &commit_args, identity_env)?;
     pin_candidate_ref(root, run_id, &candidate_sha)?;
     Ok(Some(crate::agent_task::AgentTaskCandidate {
@@ -1548,6 +1557,15 @@ mod committed_harvest_tests {
                 git(&attempt_root, &["rev-parse", "HEAD^"]),
                 outcome.candidate.as_ref().unwrap().candidate_sha
             );
+            // The agent also merges trunk, which moved past the base (#17346).
+            let remediated = git(&attempt_root, &["rev-parse", "HEAD"]);
+            git(&attempt_root, &["checkout", "-q", "-b", "trunk", &base]);
+            std::fs::write(attempt_root.join("trunk.txt"), "trunk\n").unwrap();
+            git(&attempt_root, &["add", "trunk.txt"]);
+            git(&attempt_root, &["commit", "-qm", "trunk moved"]);
+            let trunk = git(&attempt_root, &["rev-parse", "HEAD"]);
+            git(&attempt_root, &["checkout", "-q", "--detach", &remediated]);
+            git(&attempt_root, &["merge", "-q", "--no-edit", "trunk"]);
             let corrected_tree = git(&attempt_root, &["rev-parse", "HEAD^{tree}"]);
             running.request = request;
             // The real follow-up can start from a clean derived checkout of
@@ -1583,6 +1601,17 @@ mod committed_harvest_tests {
                     ]
                 ),
                 base
+            );
+            // Flattened onto the base, the candidate keeps trunk as a parent.
+            assert_eq!(
+                git(
+                    &attempt_root,
+                    &[
+                        "rev-parse",
+                        &format!("{}^2", outcome.candidate.as_ref().unwrap().candidate_sha)
+                    ]
+                ),
+                trunk
             );
 
             std::fs::write(workspace.join("unrelated.txt"), "user bytes\n").unwrap();
@@ -1626,6 +1655,8 @@ mod committed_harvest_tests {
                 outcome.candidate.as_ref().unwrap().tree_sha
             );
             assert_eq!(git(&workspace, &["rev-parse", "HEAD"]), base);
+            // The destination stages the merge as Git does: committing there ships it.
+            assert_eq!(git(&workspace, &["rev-parse", "MERGE_HEAD"]), trunk);
             assert!(git(
                 &workspace,
                 &["log", "--format=%s", &format!("{base}..HEAD")]

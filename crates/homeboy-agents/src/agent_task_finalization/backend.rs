@@ -389,14 +389,21 @@ impl AgentTaskPrFinalizationBackend for RealAgentTaskPrFinalizationBackend {
     fn publish_tree(
         &mut self,
         path: &str,
-        tree: &str,
+        candidate: &crate::agent_task::AgentTaskCandidate,
         parent: &str,
         message: &str,
         dates: &(String, String),
     ) -> Result<String> {
+        let merged =
+            homeboy_core::git::merged_parents(Path::new(path), parent, &candidate.candidate_sha)?;
+        let mut args = vec!["commit-tree", candidate.tree_sha.as_str(), "-p", parent];
+        for merged in &merged {
+            args.extend(["-p", merged.as_str()]);
+        }
+        args.extend(["-m", message]);
         let output = std::process::Command::new("git")
             .current_dir(path)
-            .args(["commit-tree", tree, "-p", parent, "-m", message])
+            .args(&args)
             .env("GIT_AUTHOR_DATE", &dates.0)
             .env("GIT_COMMITTER_DATE", &dates.1)
             .output()
@@ -479,6 +486,8 @@ impl AgentTaskPrFinalizationBackend for RealAgentTaskPrFinalizationBackend {
             path,
             &["update-ref", &format!("refs/heads/{head}"), commit_sha],
         )?;
+        // HEAD is now the published merge; conclude the pending one.
+        homeboy_core::git::record_pending_merge(Path::new(path), &[])?;
         let upstream_ref = format!("refs/remotes/{push_remote}/{head}");
         let existing_upstream =
             git_output(path, &["rev-parse", "--symbolic-full-name", "@{upstream}"]).ok();
@@ -1418,25 +1427,66 @@ mod remote_base_tests {
 
     /// #17874: a promoted candidate is staged in the destination. Publishing
     /// it leaves the destination clean at the pushed head, so a follow-up
-    /// Cook can attribute the worktree and removal is safe.
+    /// Cook can attribute the worktree and removal is safe. #17346: a
+    /// candidate that merged trunk publishes that merge, not a flat tree.
     #[test]
     fn publishing_a_staged_candidate_leaves_the_destination_clean_at_the_pushed_head() {
         let (repo, _origin) = publication_repo();
         let path = repo.path().to_str().unwrap();
         let base = git_output(path, &["rev-parse", "HEAD"]).unwrap();
+        let trunk = git_output(
+            path,
+            &[
+                "commit-tree",
+                &format!("{base}^{{tree}}"),
+                "-p",
+                &base,
+                "-m",
+                "trunk moved",
+            ],
+        )
+        .unwrap();
         std::fs::write(repo.path().join("feature.txt"), "candidate").unwrap();
         std::fs::write(repo.path().join("added.txt"), "added").unwrap();
         git(repo.path(), &["add", "-A"]);
         let mut backend = RealAgentTaskPrFinalizationBackend;
 
-        let (candidate, _) = backend.prepare_manual_candidate(path, &base).unwrap();
+        let (mut candidate, _) = backend.prepare_manual_candidate(path, &base).unwrap();
+        candidate.candidate_sha = git_output(
+            path,
+            &[
+                "commit-tree",
+                &candidate.tree_sha,
+                "-p",
+                &base,
+                "-p",
+                &trunk,
+                "-m",
+                "candidate",
+            ],
+        )
+        .unwrap();
+        homeboy_core::git::record_pending_merge(repo.path(), &[trunk.clone()]).unwrap();
         let dates = backend.candidate_dates(path, &base).unwrap();
         let published = backend
-            .publish_tree(path, &candidate.tree_sha, &base, "publish", &dates)
+            .publish_tree(path, &candidate, &base, "publish", &dates)
             .unwrap();
         let tracking = backend.push_branch(path, &published, "feature").unwrap();
 
+        assert_eq!(
+            git_output(
+                path,
+                &[
+                    "rev-parse",
+                    &format!("{published}^1"),
+                    &format!("{published}^2")
+                ]
+            )
+            .unwrap(),
+            format!("{base}\n{trunk}")
+        );
         assert_eq!(git_output(path, &["status", "--porcelain"]).unwrap(), "");
+        assert!(git_output(path, &["rev-parse", "-q", "--verify", "MERGE_HEAD"]).is_err());
         assert_eq!(git_output(path, &["rev-parse", "HEAD"]).unwrap(), published);
         assert_eq!(tracking.verified_remote_sha, published);
     }

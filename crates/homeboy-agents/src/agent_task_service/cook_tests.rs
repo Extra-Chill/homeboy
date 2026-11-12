@@ -13548,7 +13548,7 @@ impl AgentTaskPrFinalizationBackend for CaptureBackend {
     fn publish_tree(
         &mut self,
         _path: &str,
-        _tree: &str,
+        _candidate: &crate::agent_task::AgentTaskCandidate,
         _parent: &str,
         _message: &str,
         _dates: &(String, String),
@@ -13559,7 +13559,7 @@ impl AgentTaskPrFinalizationBackend for CaptureBackend {
         self.committed = true;
         if self.commit_real {
             let sha = RealAgentTaskPrFinalizationBackend
-                .publish_tree(_path, _tree, _parent, _message, _dates)?;
+                .publish_tree(_path, _candidate, _parent, _message, _dates)?;
             homeboy_core::git::run_git(
                 std::path::Path::new(_path),
                 &["update-ref", "HEAD", &sha],

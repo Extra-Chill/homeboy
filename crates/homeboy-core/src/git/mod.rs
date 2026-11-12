@@ -2,6 +2,8 @@ mod changes;
 mod shallow;
 pub use shallow::{deepen_shallow_source, is_shallow_repository, shallow_source_remote};
 mod commits;
+mod merge_parents;
+pub use merge_parents::{merged_parents, record_pending_merge};
 mod gh_client;
 mod github;
 pub use github::cook_ci;
