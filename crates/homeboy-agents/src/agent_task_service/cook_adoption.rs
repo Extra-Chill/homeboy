@@ -676,6 +676,9 @@ pub(crate) fn adopt_cook_candidate_with_dispatcher_and_backend_for_attempt_with_
         "ai_model": adoption_ai_model,
         "ai_model_source": ai_model_source,
     });
+    // Detailed results from this candidate supersede historical pending/deferred
+    // compatibility state before feedback decides whether publication may run.
+    promotion.normalize_gate_outcome();
     let promotion_value = serde_json::to_value(&promotion)
         .map_err(|error| Error::internal_json(error.to_string(), None))?;
     lifecycle_store.record_promotion(&record.run_id, promotion_value)?;
@@ -897,7 +900,12 @@ pub(crate) fn adopt_cook_candidate_with_dispatcher_and_backend_for_attempt_with_
         // Name the verdict the feedback actually reached. Only a red declared
         // gate is a gate failure; green gates with another unmet requirement
         // must not be reported as failed verification (#9692).
-        let (status, reason) = if feedback.failed_gates.is_empty() {
+        let (status, reason) = if feedback.status == AgentTaskCookLoopStatus::GatesDeferred {
+            (
+                "gates_deferred".to_string(),
+                super::cook::gates_deferred_stop_reason(&promotion, cook_id),
+            )
+        } else if feedback.failed_gates.is_empty() {
             let status = serde_json::to_value(feedback.status)
                 .ok()
                 .and_then(|value| value.as_str().map(str::to_string))
@@ -976,8 +984,12 @@ pub(crate) fn adopt_cook_candidate_with_dispatcher_and_backend_for_attempt_with_
         status: &status,
         disposition: CookDisposition::Terminal,
         attempts: vec![attempt],
+        stop_reason: (!publication_succeeded).then(|| {
+            format!(
+                "adopted candidate publication blocked: {status}. Next: homeboy agent-task recover {cook_id}"
+            )
+        }),
         finalization: Some(finalization),
-        stop_reason: None,
         exit_code,
         invocation_latest_run_id: Some(record.run_id.as_str()),
     }))

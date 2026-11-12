@@ -8039,7 +8039,10 @@ fn plain_text(output: &str) -> String {
 
 /// A deferred gate never executed, so the stop reason names each typed cause
 /// and the concrete next step instead of a candidate verdict (#16932).
-fn gates_deferred_stop_reason(promotion: &AgentTaskPromotionReport, cook_id: &str) -> String {
+pub(super) fn gates_deferred_stop_reason(
+    promotion: &AgentTaskPromotionReport,
+    cook_id: &str,
+) -> String {
     let causes = promotion
         .deterministic_gates
         .iter()
