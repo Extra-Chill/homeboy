@@ -120,6 +120,12 @@ fn harvest_candidate_commit_with_bundle(
         }
         return Ok(());
     };
+    // A provider no-op is measured against its starting HEAD, which can
+    // already contain destination work. A harvested candidate supersedes that
+    // attempt-local no-change proof: Cook must gate the full base..candidate.
+    if let Some(metadata) = outcome.metadata.as_object_mut() {
+        metadata.remove(crate::agent_task::HOMEBOY_EMPTY_ATTEMPT_VERIFIED_KEY);
+    }
     let candidate_sha = candidate.candidate_sha.clone();
     // The commit is promotion authority, but callers still need durable,
     // inspectable patch evidence after the attempt checkout has been reaped.
@@ -304,6 +310,11 @@ fn candidate_from_workspace_with_parent(
     let tree = git_output_with_env(root, &["write-tree"], index_env)?;
     if tree == git_output(root, &["rev-parse", &format!("{base}^{{tree}}")])? {
         return Ok(None);
+    }
+    // A clean committed destination is already an immutable candidate; do not
+    // manufacture an empty child commit merely because the provider was a no-op.
+    if parent.is_none() && tree == git_output(root, &["rev-parse", "HEAD^{tree}"])? {
+        return candidate_from_committed_head(root, base, run_id);
     }
     let date = format!(
         "@{} +0000",
@@ -1478,6 +1489,80 @@ mod committed_harvest_tests {
     }
 
     #[test]
+    fn cook_destination_commit_is_gated_without_provider_edits() {
+        homeboy_core::test_support::with_isolated_home(|_| {
+            use crate::agent_task_promotion::{
+                promote, AgentTaskPromotionRequest, AgentTaskPromotionStatus,
+            };
+            let temp = tempfile::tempdir().unwrap();
+            let (workspace, base) = candidate_attempt_repo(temp.path());
+            std::fs::write(workspace.join("file.txt"), "finished\n").unwrap();
+            git(&workspace, &["commit", "-am", "finished destination work"]);
+            let head = git(&workspace, &["rev-parse", "HEAD"]);
+            let mut running =
+                committed_harvest_running_task(temp.path(), &workspace, None, base.clone());
+            running.request.metadata = serde_json::json!({
+                "cook_workspace_base_snapshot": {
+                    "resolved_base": base,
+                    "destination_head": head,
+                },
+            });
+            let preflight = prepare_committed_harvest(
+                &running.request,
+                None,
+                &HarvestExecutionContext::default(),
+            )
+            .unwrap();
+            assert_eq!(preflight.base_sha.as_deref(), Some(base.as_str()));
+            let scratch = tempfile::tempdir().unwrap();
+            let attempt = prepare_attempt_workspace(
+                &mut running.request,
+                preflight.base_sha.as_deref(),
+                preflight.candidate_baseline.as_ref(),
+                scratch.path(),
+            )
+            .unwrap()
+            .unwrap();
+            assert_eq!(git(attempt.root(), &["rev-parse", "HEAD"]), head);
+            // The provider inspects the finished commit and makes no edits or
+            // patch declaration. Harvest must still supply the complete candidate.
+            let mut outcome = committed_harvest_preflight_outcome(running.task_id.clone());
+            crate::agent_task_provider::record_verified_unchanged_empty_attempt(&mut outcome);
+            harvest_candidate_commit_with_bundle(&mut outcome, &running, true).unwrap();
+            assert!(
+                outcome.metadata[crate::agent_task::HOMEBOY_EMPTY_ATTEMPT_VERIFIED_KEY].is_null()
+            );
+            assert_eq!(outcome.candidate.as_ref().unwrap().candidate_sha, head);
+            let plan = AgentTaskPlan::new("destination-plan", vec![running.request.clone()]);
+            let run =
+                crate::agent_task_lifecycle::submit_plan(&plan, Some("destination-run")).unwrap();
+            let report = promote(AgentTaskPromotionRequest {
+                source: serde_json::to_string(&outcome).unwrap(),
+                source_run_id: Some(run.run_id),
+                source_path: None,
+                source_worktree_path: Some(workspace.clone()),
+                base_ref: None,
+                task_base_sha: Some(base),
+                candidate_ref: None,
+                to_worktree: workspace.display().to_string(),
+                task_id: None,
+                artifact_id: None,
+                dry_run: false,
+                gates: crate::agent_task_gate::VerifyGateOptions {
+                    verify: vec!["test \"$(cat file.txt)\" = finished".into()],
+                    ..Default::default()
+                },
+                provider_invocation: None,
+                repository_integrity_evidence: None,
+            })
+            .unwrap();
+            assert_eq!(report.status, AgentTaskPromotionStatus::Applied);
+            assert!(!report.gate_results.is_empty());
+            assert_eq!(git(&workspace, &["rev-parse", "HEAD"]), head);
+        });
+    }
+
+    #[test]
     fn gate_feedback_harvest_promotes_over_the_staged_baseline_only() {
         homeboy_core::test_support::with_isolated_home(|_| {
             use crate::agent_task_promotion::{
@@ -1842,13 +1927,7 @@ mod committed_harvest_tests {
             index_before
         );
         assert_eq!(candidate.base_sha, base);
-        assert_eq!(
-            git(
-                &workspace,
-                &["rev-parse", &format!("{}^", candidate.candidate_sha)]
-            ),
-            head
-        );
+        assert_eq!(candidate.candidate_sha, head);
         assert_eq!(candidate.tree_sha, final_worktree_tree(&workspace));
     }
 

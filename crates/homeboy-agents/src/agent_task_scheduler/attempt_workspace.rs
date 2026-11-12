@@ -790,7 +790,18 @@ pub(super) fn prepare_attempt_workspace_in_root(
     } else {
         None
     };
-    let base = remote_base.as_deref().unwrap_or(base);
+    // Admission pins both the publication base and the destination HEAD. The
+    // former bounds harvest; the latter is the work the provider must inspect.
+    // Starting at the publication base would silently discard existing commits
+    // when the provider correctly has nothing left to edit.
+    let destination_head =
+        request.metadata["cook_workspace_base_snapshot"]["destination_head"].as_str();
+    let destination_head = match destination_head {
+        Some(head) if git_output(&root, &["merge-base", base, head])? == base => Some(head),
+        // A behind destination still starts at the pinned publication base.
+        _ => None,
+    };
+    let checkout_base = remote_base.as_deref().or(destination_head).unwrap_or(base);
     let identity = format!("attempt-{}", uuid::Uuid::new_v4());
     // The attempt checkout is a child of the scheduler's durably registered
     // scratch lease, never an untracked system-temporary worktree.
@@ -810,7 +821,13 @@ pub(super) fn prepare_attempt_workspace_in_root(
     }
     git_output(
         &root,
-        &["worktree", "add", "--detach", &attempt_root_string, base],
+        &[
+            "worktree",
+            "add",
+            "--detach",
+            &attempt_root_string,
+            checkout_base,
+        ],
     )?;
     // Deny push from the attempt checkout as defense-in-depth for the executor
     // git-mutation boundary (#8486). The provider produces candidate artifacts
