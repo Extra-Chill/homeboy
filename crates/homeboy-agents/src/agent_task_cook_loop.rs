@@ -738,6 +738,11 @@ fn build_no_change_follow_up_request(
         "to_worktree": options.promotion_report.to_worktree,
         "no_change_feedback": true,
         "failed_gates": agent_visible_failed_gates,
+        // The agent's own account of what it left unfinished.
+        "incomplete_reason": options
+            .review_form
+            .as_ref()
+            .and_then(|form| form.incomplete_reason()),
     });
     request.source_refs.push(AgentTaskSourceRef {
         kind: "agent-task-run".to_string(),
@@ -1867,6 +1872,10 @@ mod tests {
     /// while budget remains, keeping the original task and adding feedback.
     #[test]
     fn no_change_on_a_change_task_retries_with_feedback() {
+        let mut incomplete = valid_review_form();
+        incomplete.completion =
+            Some(crate::agent_task_review_dossier::AiReviewCompletion::Incomplete);
+        incomplete.incomplete_reason = "The candidate regressed parity; reverted.".to_string();
         let options = |status, gates, run| AgentTaskCookLoopOptions {
             source_request: source_request(),
             promotion_report: promotion_report_with_changed_files(status, gates, Vec::new()),
@@ -1874,7 +1883,7 @@ mod tests {
             max_attempts: 3,
             source_run_id: Some(run),
             current_diff: String::new(),
-            review_form: None,
+            review_form: Some(incomplete.clone()),
             metadata: Value::Null,
         };
 
@@ -1890,6 +1899,11 @@ mod tests {
         // prompt, and the feedback is data for the operator's template.
         assert_eq!(request.instructions, source_request().instructions);
         assert_eq!(request.inputs["cook_loop"]["no_change_feedback"], true);
+        // An agent that gave up says why; the next attempt starts from it.
+        assert_eq!(
+            request.inputs["cook_loop"]["incomplete_reason"],
+            "The candidate regressed parity; reverted."
+        );
         assert_eq!(request.inputs["cook_loop"]["max_attempts"], 3);
         assert_eq!(request.inputs["cook_loop"]["next_attempt"], 2);
         assert_eq!(request.metadata["cook_loop"]["kind"], "no-change-feedback");
