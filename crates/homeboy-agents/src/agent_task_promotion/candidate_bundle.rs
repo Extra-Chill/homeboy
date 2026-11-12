@@ -212,10 +212,12 @@ pub(crate) fn materialize_candidate_tree_with_feedback(
         repo,
         &["read-tree", "-u", "-m", previous, &candidate.candidate_sha],
     )?;
-    // Preserve the immutable commit (including merge parents) on the branch,
-    // rather than leaving a staged-only candidate after a gate failure.
-    git(repo, &["reset", "--soft", &candidate.candidate_sha])?;
-    Ok(())
+    // HEAD stays on the base, so a merge the candidate carries is staged the
+    // way Git stages any merge: gates committing this checkout ship it too.
+    homeboy_core::git::record_pending_merge(
+        repo,
+        &homeboy_core::git::merged_parents(repo, &candidate.base_sha, &candidate.candidate_sha)?,
+    )
 }
 
 pub(crate) fn fetch_run_candidates(
