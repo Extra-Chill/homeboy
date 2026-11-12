@@ -4,6 +4,11 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.458.52] - 2026-11-12
+
+### Fixed
+- a repro that did not run on base names its cause instead of passing
+
 ## [0.458.51] - 2026-11-12
 
 ### Fixed
