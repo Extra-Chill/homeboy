@@ -45,6 +45,7 @@ fn missing_transport_child_projection_resolves_without_recursion_or_provider_dis
         retry_policy: CookRetryPolicy { max_attempts: 2 },
         finalization: CookFinalization {
             publish_incomplete_draft: false,
+            tracker_note: true,
             no_finalize: true,
             draft_pr: false,
             base: "main".to_string(),
@@ -192,6 +193,7 @@ fn exercise_historical_runtime_retry(compatible_binary: &str, expected_identity_
         retry_policy: CookRetryPolicy { max_attempts: 2 },
         finalization: CookFinalization {
             publish_incomplete_draft: false,
+            tracker_note: true,
             no_finalize: true,
             draft_pr: false,
             base: "main".to_string(),

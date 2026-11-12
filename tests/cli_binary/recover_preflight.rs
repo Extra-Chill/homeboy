@@ -81,6 +81,7 @@ fn cook_fixture(
         retry_policy: CookRetryPolicy { max_attempts: 1 },
         finalization: CookFinalization {
             publish_incomplete_draft: false,
+            tracker_note: true,
             no_finalize: false,
             draft_pr: false,
             base: "main".to_string(),
