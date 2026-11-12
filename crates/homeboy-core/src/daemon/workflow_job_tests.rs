@@ -1066,6 +1066,24 @@ fn fan_out_runs_items_two_at_a_time_and_joins() {
                 vec!["succeeded", "failed", "succeeded"]
             );
             assert_eq!(status["steps"]["report"]["outcome"], "succeeded");
+            // Progress events say where the instance is; the checkpoint holds
+            // what it produced. The last one counts the settled items.
+            let progress = store
+                .events(job_id)
+                .unwrap()
+                .into_iter()
+                .filter(|event| event.kind == crate::api_jobs::JobEventKind::Progress)
+                .filter_map(|event| event.data)
+                .collect::<Vec<_>>();
+            assert!(!progress.is_empty());
+            assert!(progress
+                .iter()
+                .all(|data| data["steps"]["work"]["items"].is_object()
+                    && data["steps"]["work"]["output"].is_null()));
+            assert_eq!(
+                progress.last().unwrap()["steps"]["work"]["items"]["done"],
+                3
+            );
             let log = std::fs::read_to_string(&log).unwrap();
             assert_eq!(log.matches("start-").count(), 3, "{log}");
             assert!(!log.contains("running-3"), "more than two items ran: {log}");
