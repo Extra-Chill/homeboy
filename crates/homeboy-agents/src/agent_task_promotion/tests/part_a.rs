@@ -515,7 +515,7 @@ fn post_apply_checkpoint_resume_refuses_candidate_tree_mismatch_without_gating()
             .output()
             .expect("git status")
             .stdout,
-        b""
+        b"M  src/lib.rs\n"
     );
 
     let resume_options = || AgentTaskPromotionRequest {

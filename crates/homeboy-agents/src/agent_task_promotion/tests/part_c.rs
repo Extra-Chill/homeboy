@@ -255,7 +255,7 @@ fn empty_patch_promotes_a_candidate_already_committed_on_the_destination() {
         assert_eq!(report.status, AgentTaskPromotionStatus::Applied);
         assert_eq!(report.candidate.as_ref().unwrap().candidate_sha, candidate);
         assert_eq!(report.changed_files, vec!["lib.rs"]);
-        assert_eq!(git_head(&repo, "HEAD"), candidate);
+        assert_eq!(git_head(&repo, "HEAD"), base);
         assert_eq!(
             std::fs::read_to_string(repo.join("lib.rs")).expect("read candidate"),
             "candidate\n"

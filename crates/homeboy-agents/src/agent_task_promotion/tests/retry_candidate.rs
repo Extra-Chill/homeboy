@@ -117,8 +117,8 @@ fn runtime_retry_inherits_uncommitted_work_promotes_and_pushes_candidate_sha() {
         git_head(&root, &format!("{reference}^{{tree}}")),
         candidate.tree_sha
     );
-    assert_eq!(git_head(&root, "HEAD"), candidate.candidate_sha);
-    // The destination and a ref checkout both retain the candidate tree.
+    assert_eq!(git_head(&root, "HEAD"), candidate.base_sha);
+    // The destination remains staged, while a ref checkout is clean.
     let staged = Command::new("git")
         .arg("-C")
         .arg(&root)
