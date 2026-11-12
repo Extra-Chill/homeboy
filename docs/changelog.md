@@ -4,6 +4,16 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.458.47] - 2026-11-12
+
+### Changed
+- staging-failure status asserts the terminal phase
+
+### Fixed
+- gate output reaches logs, evidence, and diagnose
+- artifact retrieval uses --to/-o so global --output stays the JSON result
+- environment gate failures stop with the candidate preserved
+
 ## [0.458.46] - 2026-11-12
 
 ### Fixed
