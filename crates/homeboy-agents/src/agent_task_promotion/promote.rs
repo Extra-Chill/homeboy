@@ -4400,12 +4400,7 @@ fn post_apply_report(
 
 /// Capture the complete candidate delta without changing the destination index.
 fn candidate_current_diff(worktree_path: &Path) -> Result<String> {
-    let index = tempfile::NamedTempFile::new().map_err(|error| {
-        Error::internal_io(
-            error.to_string(),
-            Some("create gate-feedback candidate index".to_string()),
-        )
-    })?;
+    let index = homeboy_core::git::private_index(worktree_path)?;
     let index_path = index.path().display().to_string();
     for arguments in [vec!["read-tree", "HEAD"], vec!["add", "--all"]] {
         let output = Command::new("git")

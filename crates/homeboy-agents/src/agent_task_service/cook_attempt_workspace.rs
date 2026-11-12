@@ -144,9 +144,8 @@ pub(crate) fn reset_attempt_workspace_to_base(
     }
     let reference = format!("refs/homeboy/attempt-reset/{label}");
     git(workspace, &["check-ref-format", &reference], None)?;
-    let index_dir =
-        tempfile::tempdir().map_err(|error| Error::internal_io(error.to_string(), None))?;
-    let index = index_dir.path().join("index");
+    let index_file = homeboy_core::git::private_index(workspace)?;
+    let index = index_file.path().to_path_buf();
     git(workspace, &["read-tree", "HEAD"], Some(&index))?;
     git(workspace, &["add", "--all"], Some(&index))?;
     let tree = git(workspace, &["write-tree"], Some(&index))?;

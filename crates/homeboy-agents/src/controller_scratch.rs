@@ -2162,18 +2162,12 @@ fn recover_authoritative_workspace(
 }
 
 /// Capture the full non-ignored worktree on top of HEAD without changing the
-/// real index (including any staged/unstaged split). The temporary directory
-/// removes the index and any lock file on both success and failure.
+/// real index (including any staged/unstaged split).
 fn recovery_patch(workspace: &Path) -> Result<Vec<u8>> {
-    let temporary = tempfile::tempdir().map_err(|error| {
-        Error::internal_io(
-            error.to_string(),
-            Some("create recovery index directory".to_string()),
-        )
-    })?;
+    let index = homeboy_core::git::private_index(workspace)?;
     let env = vec![(
         "GIT_INDEX_FILE".to_string(),
-        temporary.path().join("index").display().to_string(),
+        index.path().display().to_string(),
     )];
     git::run_git_with_env(
         workspace,

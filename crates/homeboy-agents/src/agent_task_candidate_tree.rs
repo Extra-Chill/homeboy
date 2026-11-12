@@ -37,7 +37,7 @@ pub(crate) fn validate_immutable_candidate_tree(root: &Path, candidate_sha: &str
 }
 
 pub(crate) fn workspace_tree(root: &Path) -> Result<String> {
-    let index = tempfile::NamedTempFile::new().map_err(|error| invalid(&error.to_string()))?;
+    let index = homeboy_core::git::private_index(root)?;
     let index_path = index.path().display().to_string();
     git_with_index(root, &["read-tree", "HEAD"], &index_path)?;
     git_with_index(root, &["add", "--all"], &index_path)?;

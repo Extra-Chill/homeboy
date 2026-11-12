@@ -170,12 +170,7 @@ pub(crate) fn materialize_initial_candidate_baseline(
         ));
     }
     let base = git_output(source_root, &["rev-parse", "HEAD"])?;
-    let index = tempfile::NamedTempFile::new().map_err(|error| {
-        Error::internal_io(
-            error.to_string(),
-            Some("create Cook candidate Git index".to_string()),
-        )
-    })?;
+    let index = homeboy_core::git::private_index(source_root)?;
     let index_path = index.path().display().to_string();
     git_output_with_env(
         source_root,
@@ -891,12 +886,7 @@ fn materialize_follow_up_baseline_at(
         .with_retryable(false)
     })?;
     crate::agent_task_promotion::validate_candidate_commit(&source_root, &immutable)?;
-    let index = tempfile::NamedTempFile::new().map_err(|error| {
-        Error::internal_io(
-            error.to_string(),
-            Some("create cook baseline Git index".to_string()),
-        )
-    })?;
+    let index = homeboy_core::git::private_index(&source_root)?;
     let index_path = index.path().display().to_string();
     git_output_with_env(
         &source_root,

@@ -298,7 +298,7 @@ fn candidate_from_workspace_with_parent(
             })?,
         );
     }
-    let index = tempfile::NamedTempFile::new().map_err(|error| HarvestError::Git {
+    let index = homeboy_core::git::private_index(root).map_err(|error| HarvestError::Git {
         command: "create candidate harvest Git index".to_string(),
         cwd: root.to_path_buf(),
         message: error.to_string(),
