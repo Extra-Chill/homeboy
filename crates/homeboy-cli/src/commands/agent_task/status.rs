@@ -5846,22 +5846,43 @@ fn attach_lab_admission_wait(
     }
 }
 
+/// Callers pass only an orphaned queued admission (free driver lock and
+/// reconcilable liveness), so this names the same owner `recover` resumes.
 fn queued_runner_ownership_diagnostic(
     record: &AgentTaskRunRecord,
     liveness: agent_task_service::AgentTaskLiveness,
     probe: &agent_task_lifecycle::AgentTaskRunnerDiagnosticProbe,
 ) -> Option<CollectedDiagnostic> {
-    (record.state() == agent_task_lifecycle::AgentTaskRunState::Queued
-        && record.runner_id().is_some()
-        && probe.skipped_reason == Some("missing_runner_job_id"))
-    .then(|| CollectedDiagnostic {
+    if record.state() != agent_task_lifecycle::AgentTaskRunState::Queued {
+        return None;
+    }
+    let phase = record.metadata.pointer("/cook_progress/phase");
+    if record.runner_id().is_none() {
+        // Before runner selection the Cook driver is the only owner.
+        return Some(CollectedDiagnostic {
+            task_id: "controller".to_string(),
+            class: "agent_task.queued_driver_missing".to_string(),
+            message: format!(
+                "The Cook is queued at {} but no live driver owns it.",
+                phase.and_then(Value::as_str).unwrap_or("admission")
+            ),
+            source: "controller_ownership".to_string(),
+            data: json!({
+                "causal_phase": phase,
+                "liveness": liveness.as_str(),
+                "liveness_reconcilable": liveness.is_reconcilable(),
+                "ownership": "controller",
+            }),
+        });
+    }
+    (probe.skipped_reason == Some("missing_runner_job_id")).then(|| CollectedDiagnostic {
         task_id: "runner".to_string(),
         class: "agent_task.runner_missing_pid".to_string(),
         message: "Runner-owned execution is queued at provider_start without a runner PID."
             .to_string(),
         source: "runner_ownership".to_string(),
         data: json!({
-            "causal_phase": record.metadata.pointer("/cook_progress/phase"),
+            "causal_phase": phase,
             "liveness": liveness.as_str(),
             "liveness_reconcilable": liveness.is_reconcilable(),
             "ownership": "runner",
