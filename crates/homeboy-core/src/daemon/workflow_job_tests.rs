@@ -239,6 +239,7 @@ fn resume_from_a_next_pass_instance_keeps_its_iteration_and_previous() {
         .with_daemon_lease("workflow-resume-pass-test".into());
         let definition = json!({
             "schema": "homeboy/workflow/v1", "id": "resume-pass",
+            "inputs": {"slug": {"default": "default"}},
             "next_pass": {"max_iterations": 3},
             "steps": [
                 {"id": "import", "exec": sh("touch import-{{inputs.iteration}}")},
@@ -251,6 +252,7 @@ fn resume_from_a_next_pass_instance_keeps_its_iteration_and_previous() {
             json!({"outputs": {"evaluate": {"verdict": "retry"}}, "unchanged_passes": 1});
         original.inputs.insert("iteration".into(), json!(3));
         original.inputs.insert("previous".into(), previous.clone());
+        original.inputs.insert("slug".into(), json!("chain-20"));
         original.instance = original.definition.instance_id(&original.inputs, None);
         let job = admit(&store, &original);
         crate::daemon::start_controller_job(job, &store).unwrap();
@@ -262,9 +264,11 @@ fn resume_from_a_next_pass_instance_keeps_its_iteration_and_previous() {
         fixed["steps"][2]["exec"] = sh("touch finish");
         let mut resumed = request(fixed, home.path());
         assert_eq!(resumed.inputs["iteration"], 1);
-        resumed
-            .definition
-            .carry_resumed_pass(&mut resumed.inputs, &original.inputs);
+        resumed.definition.carry_resumed_inputs(
+            &mut resumed.inputs,
+            &original.inputs,
+            &BTreeMap::new(),
+        );
         resumed.resumed_from = Some(original.instance.clone());
         resumed.instance = resumed.definition.instance_id_with_resume(
             &resumed.inputs,
@@ -277,6 +281,7 @@ fn resume_from_a_next_pass_instance_keeps_its_iteration_and_previous() {
         let view = workflow_status(&store, &resumed.instance).unwrap();
         assert_eq!(view["inputs"]["iteration"], 3);
         assert_eq!(view["inputs"]["previous"], previous);
+        assert_eq!(view["inputs"]["slug"], "chain-20");
         assert_eq!(view["steps"]["import"]["reused"], true);
         assert_eq!(view["steps"]["evaluate"]["reused"], true);
         assert!(!home.path().join("import-3").exists());

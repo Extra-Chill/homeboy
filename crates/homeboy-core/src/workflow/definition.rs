@@ -747,19 +747,21 @@ impl WorkflowDefinition {
         Ok(resolved)
     }
 
-    /// A resumed next-pass instance continues the source's pass: carry its
-    /// `iteration` and `previous` so iteration-dependent step keys still match.
-    pub fn carry_resumed_pass(
+    /// A resumed instance continues its source: every input the definition
+    /// still declares and the caller did not provide keeps the source's value,
+    /// and a next-pass instance keeps its `iteration` and `previous` so
+    /// iteration-dependent step keys still match.
+    pub fn carry_resumed_inputs(
         &self,
         inputs: &mut BTreeMap<String, Value>,
         source: &BTreeMap<String, Value>,
+        provided: &BTreeMap<String, Value>,
     ) {
-        if self.next_pass.is_none() {
-            return;
-        }
-        for name in ["iteration", "previous"] {
-            if let Some(value) = source.get(name) {
-                inputs.insert(name.into(), value.clone());
+        for (name, value) in source {
+            let declared = self.inputs.contains_key(name)
+                || (self.next_pass.is_some() && matches!(name.as_str(), "iteration" | "previous"));
+            if declared && !provided.contains_key(name) {
+                inputs.insert(name.clone(), value.clone());
             }
         }
     }

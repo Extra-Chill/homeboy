@@ -622,7 +622,10 @@ fn next_pass(request: &WorkflowJobRequest, state: &InstanceState) -> Result<Opti
         let definition = WorkflowDefinition::parse(&text)?;
         definition.validate(&|_| true)?;
         if definition.digest() != request.definition_digest {
-            return Err(invalid(format!("definition changed between passes: {path}; restart the workflow to use the new definition")));
+            return Err(invalid(format!(
+                "definition changed between passes: {path}; continue the chain on the new definition with `homeboy workflow run {path} --resume-from {}`",
+                request.instance
+            )));
         }
     }
     let iteration = request
