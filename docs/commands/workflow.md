@@ -177,7 +177,7 @@ A step runs with `env_clear()` plus its admitted environment:
 - `inputs.previous` is null on the first pass; thereafter it contains `outputs` (a map keyed by step id) and `unchanged_passes`. A step can read the whole object with `{{inputs.previous}}`.
 - `stop_unchanged` counts consecutive passes with equal JSON values at the chosen output pointer, including the first observation. A changed value resets the count to 1; a missing output is an error.
 - Each pass has its own status, step jobs and budget. Parent/children links and `--wait` follow the chain. Child admission is idempotent across recovery.
-- Definitions and admitted environments/programs are pinned. For file-based admission, a modified or missing definition ends the chain before the next pass with an error naming the `workflow run <file> --resume-from <instance>` command that continues it on the edited definition. Registry files are checked too; stdin/inline/built-in definitions remain pinned snapshots. `next_pass` cannot be combined with `every`.
+- Each pass is pinned to the definition it ran. For file-based admission, the next pass reads the file again, so an edit takes effect on the next pass without restarting the chain. An edit the chain's admission does not cover (a changed `env`, a new exec program, or a first `cook`/`homeboy` step) ends the chain with an error naming the `workflow run <file> --resume-from <instance>` command that admits it; so does a missing or invalid file. Registry files are checked too; stdin/inline/built-in definitions remain pinned snapshots. `next_pass` cannot be combined with `every`.
 
 ### Cadence (`every`)
 
