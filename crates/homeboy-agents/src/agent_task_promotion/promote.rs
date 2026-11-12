@@ -869,7 +869,7 @@ fn promote_candidate(
     })?;
     super::destination::check_run(&path, options.source_run_id.as_deref())?;
     let feedback = outcome.metadata.get("gate_feedback_baseline");
-    let destination_head_alignment = align_ignored_pr_head(&path, options, outcome, commit)?;
+    let destination_head_alignment = align_superseded_head(&path, options, outcome, commit)?;
     if !options.dry_run || destination_head_alignment.is_none() {
         super::candidate_bundle::validate_destination(&path, commit, feedback)?;
     }
@@ -1005,20 +1005,26 @@ fn promote_candidate(
     })
 }
 
-/// Supersede only the exact local head explicitly ignored by PR resolution.
-fn align_ignored_pr_head(
+/// Supersede a destination head that a newer candidate replaces: the exact
+/// local head PR resolution ignored, or an earlier attempt's recorded Homeboy
+/// candidate on the same base. A retry builds its candidate from the base, so
+/// the earlier candidate a prior promotion left at HEAD is not unrelated work.
+/// Any other movement stays refused by `validate_destination`.
+fn align_superseded_head(
     path: &Path,
     options: &AgentTaskPromotionRequest,
     outcome: &AgentTaskOutcome,
     candidate: &crate::agent_task::AgentTaskCandidate,
 ) -> Result<Option<Value>> {
     let head = git_output(path, &["rev-parse", "HEAD"])?;
+    if head == candidate.base_sha || head == candidate.candidate_sha {
+        return Ok(None);
+    }
     let resolution = &outcome.metadata["source_provenance"]["cook_pr_head_resolution"];
-    if head == candidate.base_sha
-        || resolution["local_head_ignored"].as_bool() != Some(true)
-        || resolution["remote_head"].as_str() != Some(candidate.base_sha.as_str())
-        || resolution["local_head"].as_str() != Some(head.as_str())
-    {
+    let ignored_pr_head = resolution["local_head_ignored"].as_bool() == Some(true)
+        && resolution["remote_head"].as_str() == Some(candidate.base_sha.as_str())
+        && resolution["local_head"].as_str() == Some(head.as_str());
+    if !ignored_pr_head && !is_superseded_candidate(path, &head, &candidate.base_sha)? {
         return Ok(None);
     }
     validate_candidate_commit(path, candidate)?;
@@ -1047,6 +1053,23 @@ fn align_ignored_pr_head(
     Ok(Some(
         json!({"from": head, "to": candidate.base_sha, "ref": reference}),
     ))
+}
+
+/// An earlier Homeboy candidate on `base`: a recorded candidate ref points at
+/// `head`, and `head` descends from `base`.
+fn is_superseded_candidate(path: &Path, head: &str, base: &str) -> Result<bool> {
+    let recorded = git_output(
+        path,
+        &[
+            "for-each-ref",
+            "--points-at",
+            head,
+            "--format=%(refname)",
+            "refs/homeboy/candidates/",
+        ],
+    )?;
+    Ok(!recorded.is_empty()
+        && git_output(path, &["merge-base", "--is-ancestor", base, head]).is_ok())
 }
 
 fn valid_git_object_id(value: &str) -> bool {

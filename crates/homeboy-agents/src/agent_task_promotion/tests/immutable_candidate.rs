@@ -270,6 +270,51 @@ fn moved_destination_is_a_typed_error_and_never_materializes() {
     });
 }
 
+/// A retry after an incomplete verdict builds its candidate from the Cook
+/// base, while the earlier attempt's promotion left that attempt's candidate
+/// at the destination HEAD. The newer candidate supersedes it.
+#[test]
+fn an_earlier_attempts_candidate_at_head_is_superseded_by_the_retry() {
+    fixture(|repo, candidate, store| {
+        std::fs::write(repo.join("earlier"), "attempt 1\n").unwrap();
+        git(repo, &["add", "."]);
+        git(repo, &["commit", "-m", "earlier attempt candidate"]);
+        let earlier = git_head(repo, "HEAD");
+        git(
+            repo,
+            &["update-ref", "refs/homeboy/candidates/attempt-1", &earlier],
+        );
+        let mut options = request(repo, Some(candidate.clone()));
+        options.source_run_id = Some("attempt-2".into());
+        let mut provider = FakePromotionWorkspaceProvider {
+            workspace_path: Some(repo.into()),
+            ..Default::default()
+        };
+        let report = promote_with_provider_and_checkpoint_in_observation_store(
+            options,
+            &mut provider,
+            &mut |_| Ok(()),
+            store,
+        )
+        .unwrap();
+        assert_eq!(
+            report.status,
+            super::super::AgentTaskPromotionStatus::Applied
+        );
+        assert_eq!(
+            report.provenance["destination_head_alignment"],
+            json!({"from": earlier, "to": candidate.base_sha, "ref": "refs/homeboy/superseded/attempt-2"})
+        );
+        assert_eq!(git_head(repo, "HEAD"), candidate.base_sha);
+        assert_eq!(git_head(repo, "refs/homeboy/superseded/attempt-2"), earlier);
+        assert!(!repo.join("earlier").exists());
+        assert_eq!(
+            std::fs::read_to_string(repo.join("dirty")).unwrap(),
+            "uncommitted\n"
+        );
+    });
+}
+
 #[test]
 fn recorded_tree_mismatch_is_a_typed_error_before_destination_mutation() {
     fixture(|repo, mut candidate, store| {
