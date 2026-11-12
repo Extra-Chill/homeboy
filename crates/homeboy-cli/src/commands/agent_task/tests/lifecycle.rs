@@ -2459,11 +2459,9 @@ fn recover_preflight_probe(id: &str) -> (Value, i32) {
     report
 }
 
-/// `resume` and `retry` also serve non-Cook runs, so they stay. Given a Cook
-/// ID whose durable state names a recovery step they hand it to `recover`
-/// instead of deciding one; an exact attempt ID keeps their own behavior.
+/// Resume delegates recovery; retry resolves the mission to an attempt.
 #[test]
-fn resume_and_retry_delegate_a_cook_id_to_recover_instead_of_re_deciding() {
+fn resume_delegates_recovery_while_retry_resolves_the_cook_id() {
     let cook_id = "cook-cli-recover-delegation";
     let run_id = "cook-cli-recover-delegation-attempt-1";
     with_temp_home(|| {
@@ -2490,30 +2488,15 @@ fn resume_and_retry_delegate_a_cook_id_to_recover_instead_of_re_deciding() {
         );
 
         let before = homeboy::agents::agent_task_lifecycle::durable_state_for_test(&store);
-        for (run, force, new_run_id) in [
-            (false, false, None),
-            (true, true, None),
-            (true, false, Some("replacement".to_string())),
-        ] {
-            let error = super::super::run::retry(super::super::RetryArgs {
-                run_id: cook_id.to_string(),
-                new_run_id,
-                run,
-                force,
-                idempotency_key: None,
-            })
-            .expect_err("a non-plain retry of a Cook ID is refused toward recover");
-            let rendered = format!("{error:?}");
-            assert!(
-                rendered.contains(&format!("homeboy agent-task recover {cook_id}")),
-                "{rendered}"
-            );
-            assert!(rendered.contains(run_id), "{rendered}");
-        }
+        assert_eq!(
+            homeboy::agents::agent_task_service::resolve_retry_run_id(cook_id)
+                .expect("mission resolves for retry"),
+            run_id
+        );
         assert_eq!(
             homeboy::agents::agent_task_lifecycle::durable_state_for_test(&store),
             before,
-            "a refused Cook-ID retry must not mutate durable state"
+            "resolving a Cook-ID retry must not mutate durable state"
         );
     });
 }

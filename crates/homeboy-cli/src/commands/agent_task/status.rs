@@ -405,7 +405,7 @@ fn status_without_feedback(args: StatusArgs) -> CmdResult<Value> {
             value["blocker_summary"] = json!(diagnostic.message);
             value["next_action"] = json!({
                 "description": "Repair or recreate the malformed private Lab staging recipe, then retry the run.",
-                "command": format!("homeboy agent-task retry {}", quote_arg(&record.run_id)),
+                "command": format!("homeboy agent-task retry {}", quote_arg(record.metadata["cook_id"].as_str().unwrap_or(&record.run_id))),
             });
             value["lab_staging_diagnostic"] = collected_diagnostic_value(diagnostic);
         }
@@ -2720,7 +2720,10 @@ pub(super) fn diagnose(args: DiagnoseArgs) -> CmdResult<Value> {
         queued_runner_ownership.is_some(),
     );
     let next_commands = if lab_staging_root_cause(&record).is_some() {
-        vec![format!("homeboy agent-task retry {}", quote_arg(run_id))]
+        vec![format!(
+            "homeboy agent-task retry {}",
+            quote_arg(record.metadata["cook_id"].as_str().unwrap_or(run_id))
+        )]
     } else {
         next_commands
     };
@@ -6267,6 +6270,17 @@ impl RetryReplayAction {
 /// typed action share this one admission decision, so a human hint cannot claim
 /// a retry exists when route materialization will reject it.
 fn retry_replay_action(record: &AgentTaskRunRecord) -> RetryReplayAction {
+    // Candidate readers may be observing an older substantive attempt. Retry
+    // eligibility and the advertised action must describe the mutation target.
+    if let Ok(latest) = agent_task_service_direct::resolve_retry_run_id(&record.run_id) {
+        if latest != record.run_id {
+            if let Ok(store) = agent_task_lifecycle::AgentTaskLifecycleStore::from_environment() {
+                if let Ok(latest_record) = store.read_record_bounded(&latest) {
+                    return retry_replay_action(&latest_record);
+                }
+            }
+        }
+    }
     let runner_id = record.runner_id().filter(|id| !id.trim().is_empty());
     let local_owner = match runner_id {
         Some(runner_id) => json!({ "placement": "runner", "runner_id": runner_id }),

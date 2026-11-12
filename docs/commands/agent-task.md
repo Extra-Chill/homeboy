@@ -109,7 +109,7 @@ publication.
 | `quarantine <run-id> --reason <text>` | Exclude one exact queued run while retaining its nonterminal lifecycle evidence. |
 | `rearm <run-id>` | Return one exact quarantined queued run to eligibility after repair. |
 | `resume <run-id>` | Resume a queued or stale-running durable run. Given a Cook ID whose durable state names a recovery step, it performs that step through `recover <cook-id>`. |
-| `retry <run-id>` | Submit a fresh durable run from an existing run's plan. A stopped Cook is recovered with `recover <cook-or-attempt-id>`, which owns the Cook's next-attempt provider-route overrides; `retry <cook-id> --run` performs the Cook's recovery step through `recover`, and any other retry of a Cook ID is refused toward it (pass the exact attempt ID for a plain retry). |
+| `retry <run-id>` | Submit a fresh durable run from an existing run's plan. A stopped Cook is recovered with `recover <cook-or-attempt-id>`, which owns the Cook's next-attempt provider-route overrides; `retry <cook-id> --run` performs the Cook's recovery step through `recover`. Any other retry of a Cook ID, or of a superseded attempt ID, resolves to the Cook's latest durable attempt and names it; a non-retryable latest attempt is refused with its state. |
 | `prompts save\|list\|show\|remove` | Manage markdown prompts in Homeboy-owned storage. |
 
 `homeboy runs list --kind agent-task` reads durable Cook discovery directly; `--active` adds the existing liveness buckets and per-record reconcile guidance. Both default to 20 newest rows. Use `--limit 1` for the newest match, `--cursor <next_cursor>` to continue a bounded page, or `--full` for all matching records. `--full` conflicts with `--limit` and `--cursor`.

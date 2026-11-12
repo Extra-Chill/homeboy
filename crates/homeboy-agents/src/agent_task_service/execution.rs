@@ -2922,6 +2922,38 @@ struct CookRetryAttempt {
     replaces_source_attempt: bool,
 }
 
+/// Resolve a mission or any of its attempts to the latest durable retry target.
+/// Recipe lineage, rather than candidate selection, owns this mutation target.
+pub fn resolve_retry_run_id(id: &str) -> Result<String> {
+    let store = agent_task_lifecycle::AgentTaskLifecycleStore::from_environment()?;
+    resolve_retry_run_id_in_store(&store, id)
+}
+
+fn resolve_retry_run_id_in_store(
+    store: &agent_task_lifecycle::AgentTaskLifecycleStore,
+    id: &str,
+) -> Result<String> {
+    let recipes = super::cook_recipe::CookRecipeStore::for_lifecycle_store(store);
+    let cook_id = if recipes.recipe_exists(id) {
+        Some(id.to_string())
+    } else {
+        let record = store.read_record_bounded(id)?;
+        record
+            .metadata
+            .get("cook_id")
+            .and_then(serde_json::Value::as_str)
+            .filter(|cook_id| recipes.recipe_exists(cook_id))
+            .map(str::to_string)
+    };
+    if let Some(cook_id) = cook_id {
+        let recipe = recipes.load_recipe(&cook_id)?;
+        if let Some(attempt) = recipe.attempts.last() {
+            return Ok(attempt.run_id.clone());
+        }
+    }
+    agent_task_lifecycle::resolve_run_id_in_store(store, id)
+}
+
 /// Verify retry admission before advertising a retry as executable.
 ///
 /// Recipe-backed Cook runs cannot fall back to generic lifecycle retry because
@@ -3035,7 +3067,11 @@ fn retry_admission_in_store(
     if has_cook_ownership && retry.is_none() {
         return Err(Error::validation_invalid_argument(
             "run_id",
-            "Cook-owned run is not eligible for a durable Cook retry",
+            format!(
+                "Cook attempt `{}` is not eligible for a durable Cook retry (state: {:?})",
+                source.run_id,
+                source.state()
+            ),
             Some(source.run_id.clone()),
             None,
         ));
@@ -3990,6 +4026,24 @@ mod tests {
         let source = store.read_record(run_id).expect("read source attempt");
 
         (context, store, workspace, source)
+    }
+
+    #[test]
+    fn retry_resolves_mission_and_superseded_attempt_to_latest_durable_attempt() {
+        let (_context, store, _workspace, source) = reserved_retry_fixture();
+        let recipes = super::super::cook_recipe::CookRecipeStore::for_lifecycle_store(&store);
+        let mut recipe = recipes.load_recipe("rooted-retry-cook").unwrap();
+        let mut latest = recipe.attempts[0].clone();
+        latest.run_id = format!("{}-transport-retry", source.run_id);
+        let latest_id = latest.run_id.clone();
+        recipe.attempts.push(latest);
+        recipes.persist_recipe(&recipe).unwrap();
+        for id in ["rooted-retry-cook", source.run_id.as_str()] {
+            assert_eq!(
+                resolve_retry_run_id_in_store(&store, id).unwrap(),
+                latest_id
+            );
+        }
     }
 
     #[test]
