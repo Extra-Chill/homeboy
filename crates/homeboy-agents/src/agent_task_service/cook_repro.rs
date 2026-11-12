@@ -134,14 +134,7 @@ pub(crate) fn run_repro_on_base(
                                 )
                             })();
                             run_dir.finish(gate.is_ok());
-                            let gate = gate?;
-                            Ok(CookReproBaseResult {
-                                command: command.clone(),
-                                exit_code: gate.exit_code,
-                                status: gate.status,
-                                failed_on_base: gate.status == AgentTaskGateStatus::Failed,
-                                gate,
-                            })
+                            repro_base_result(command, gate?)
                         })
                         .collect::<Result<Vec<_>>>()
                 },
@@ -152,6 +145,30 @@ pub(crate) fn run_repro_on_base(
         schema: COOK_REPRO_BASE_SCHEMA.to_string(),
         base_sha: base_sha.to_string(),
         results,
+    })
+}
+
+/// A repro proves the issue only by running: a pass means it does not
+/// reproduce, a failure means it does. A gate that produced no evidence
+/// (unavailable runner, deferred placement, skipped) is an infrastructure
+/// failure that names its cause, never a pass on base.
+fn repro_base_result(command: &str, gate: AgentTaskGateReport) -> Result<CookReproBaseResult> {
+    let failed_on_base = match gate.status {
+        AgentTaskGateStatus::Failed => true,
+        AgentTaskGateStatus::Succeeded => false,
+        status => {
+            return Err(Error::internal_unexpected(format!(
+                "repro `{command}` did not run on base (gate {status:?}): {}",
+                gate.stderr.trim()
+            )))
+        }
+    };
+    Ok(CookReproBaseResult {
+        command: command.to_string(),
+        exit_code: gate.exit_code,
+        status: gate.status,
+        failed_on_base,
+        gate,
     })
 }
 
@@ -250,5 +267,42 @@ pub(crate) fn candidate_repro_verdict(
         AgentTaskReviewRepro::Verified
     } else {
         AgentTaskReviewRepro::FailedOnCandidate
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn only_a_repro_that_ran_decides_whether_base_reproduces() {
+        for (status, expected) in [
+            ("failed", Some(true)),
+            ("succeeded", Some(false)),
+            ("unavailable", None),
+            ("deferred", None),
+            ("skipped", None),
+        ] {
+            let gate: AgentTaskGateReport = serde_json::from_value(serde_json::json!({
+                "id": "gate-1",
+                "status": status,
+                "command": ["sh", "-c", "repro"],
+                "exit_code": 0,
+                "stdout": "",
+                "stderr": "could not reach runner daemon",
+            }))
+            .expect("gate report");
+            match (repro_base_result("repro", gate), expected) {
+                (Ok(result), Some(failed)) => assert_eq!(result.failed_on_base, failed, "{status}"),
+                (Err(error), None) => {
+                    assert!(error.message.contains("did not run on base"), "{status}");
+                    assert!(
+                        error.message.contains("could not reach runner daemon"),
+                        "{status}"
+                    );
+                }
+                (other, _) => panic!("{status}: {other:?}"),
+            }
+        }
     }
 }
