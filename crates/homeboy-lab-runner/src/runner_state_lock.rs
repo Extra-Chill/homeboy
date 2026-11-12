@@ -15,7 +15,7 @@ use chrono::Utc;
 use homeboy_core::error::{Error, Result};
 use homeboy_core::paths;
 
-const LOCK_TIMEOUT: Duration = Duration::from_secs(30);
+pub(crate) const LOCK_TIMEOUT: Duration = Duration::from_secs(30);
 
 /// The controller-local state directory of one runner below a config root.
 pub(crate) fn runner_state_dir_in_root(config_root: &Path, runner_id: &str) -> PathBuf {
@@ -68,6 +68,26 @@ fn with_lock_until<T>(
     lock_timeout: Duration,
     operation: impl FnOnce() -> Result<T>,
 ) -> Result<T> {
+    with_observed_lock(
+        lock_path,
+        runner_id,
+        phase,
+        lock_timeout,
+        || Ok(false),
+        operation,
+    )
+}
+
+/// `waiting` may extend the generic lock deadline when a lifecycle operation
+/// publishes its own bounded budget. Errors retain their infrastructure class.
+pub(crate) fn with_observed_lock<T>(
+    lock_path: PathBuf,
+    runner_id: &str,
+    phase: &str,
+    lock_timeout: Duration,
+    mut waiting: impl FnMut() -> Result<bool>,
+    operation: impl FnOnce() -> Result<T>,
+) -> Result<T> {
     const LOCK_RETRY: Duration = Duration::from_millis(25);
     if let Some(parent) = lock_path.parent() {
         std::fs::create_dir_all(parent).map_err(|error| {
@@ -104,7 +124,8 @@ fn with_lock_until<T>(
                     Some("lock runner state".to_string()),
                 ));
             }
-            if Instant::now() >= deadline {
+            let lifecycle_wait = waiting()?;
+            if !lifecycle_wait && Instant::now() >= deadline {
                 return Err(lock_timeout_error(&lock_path, runner_id, lock_timeout));
             }
             std::thread::sleep(LOCK_RETRY);
