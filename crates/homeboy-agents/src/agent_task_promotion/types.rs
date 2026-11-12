@@ -137,7 +137,11 @@ impl AgentTaskPromotionReport {
             )
         });
         let status = match self.status {
-            AgentTaskPromotionStatus::GateFailed if all_gates_passed => {
+            AgentTaskPromotionStatus::GateFailed
+            | AgentTaskPromotionStatus::GateDeferred
+            | AgentTaskPromotionStatus::VerificationPending
+                if all_gates_passed =>
+            {
                 AgentTaskPromotionStatus::Applied
             }
             AgentTaskPromotionStatus::GateFailed if only_unexecuted_gates_block => {

@@ -260,6 +260,61 @@ fn multi_attempt_substantive_adopt_uses_terminal_execution_lineage() {
 }
 
 #[test]
+fn adoption_supersedes_deferred_and_pending_status_with_passing_candidate_proof() {
+    for status in [
+        AgentTaskPromotionStatus::GateDeferred,
+        AgentTaskPromotionStatus::VerificationPending,
+    ] {
+        with_corrected_gate_candidate(|options, _, mut promotion| {
+            let sha = promotion.provenance["candidate_commit"]["candidate_sha"]
+                .as_str()
+                .unwrap()
+                .to_string();
+            // A status alone must never fabricate a passing verdict.
+            let mut unverified = promotion.clone();
+            unverified.status = status;
+            unverified.deterministic_gates.clear();
+            unverified.normalize_gate_outcome();
+            assert_eq!(unverified.status, status);
+            let mut deferred = promotion.clone();
+            deferred.status = AgentTaskPromotionStatus::GateDeferred;
+            deferred.deterministic_gates[0].status =
+                crate::agent_task_gate::AgentTaskGateStatus::Deferred;
+            deferred.normalize_gate_outcome();
+            assert_eq!(deferred.status, AgentTaskPromotionStatus::GateDeferred);
+
+            promotion.status = status;
+            test_lifecycle_store()
+                .record_promotion(
+                    &options.identity.initial_run_id,
+                    serde_json::to_value(&promotion).unwrap(),
+                )
+                .unwrap();
+            let mut backend = CaptureBackend {
+                hydrate_run_id: Some(options.identity.initial_run_id.clone()),
+                ..Default::default()
+            };
+            let result = adopt_cook_candidate_with_dispatcher_and_backend(
+                &options.identity.cook_id,
+                &sha,
+                AgentTaskCandidateAdoptionOptions::default(),
+                |_| Ok(None),
+                Arc::new(UnusedExecutor),
+                &mut backend,
+            )
+            .unwrap();
+            assert_eq!(result.exit_code, 0, "{result:#?}");
+            assert_eq!(result.value.status, "review_ready");
+            assert!(backend.created);
+            assert_eq!(
+                result.value.attempts[0].promotion.as_ref().unwrap().status,
+                AgentTaskPromotionStatus::Applied
+            );
+        });
+    }
+}
+
+#[test]
 fn replacement_gates_recover_attaches_proof_to_candidate_sha_without_artifacts() {
     with_corrected_gate_candidate(|options, target, promotion| {
         let (options, mut promotion) = make_multi_attempt(&options, &promotion, &target, false);
