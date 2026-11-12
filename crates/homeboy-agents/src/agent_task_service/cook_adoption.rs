@@ -910,9 +910,7 @@ pub(crate) fn adopt_cook_candidate_with_dispatcher_and_backend_for_attempt_with_
                 .ok()
                 .and_then(|value| value.as_str().map(str::to_string))
                 .unwrap_or_else(|| format!("{:?}", feedback.status));
-            let reason = format!(
-                "adopted candidate passed the original deterministic gates but did not complete: {status}"
-            );
+            let reason = adoption_incomplete_reason(feedback.status, &status);
             (status, reason)
         } else {
             (
@@ -993,6 +991,29 @@ pub(crate) fn adopt_cook_candidate_with_dispatcher_and_backend_for_attempt_with_
         exit_code,
         invocation_latest_run_id: Some(record.run_id.as_str()),
     }))
+}
+
+fn adoption_incomplete_reason(status: AgentTaskCookLoopStatus, label: &str) -> String {
+    if status == AgentTaskCookLoopStatus::GatesDeferred {
+        "adopted candidate verification was deferred; the candidate was not judged".to_string()
+    } else {
+        format!(
+            "adopted candidate passed the original deterministic gates but did not complete: {label}"
+        )
+    }
+}
+
+#[cfg(test)]
+mod outcome_tests {
+    use super::*;
+
+    #[test]
+    fn deferred_verification_does_not_claim_a_pass() {
+        let reason =
+            adoption_incomplete_reason(AgentTaskCookLoopStatus::GatesDeferred, "gates_deferred");
+        assert!(reason.contains("not judged"));
+        assert!(!reason.contains("passed"));
+    }
 }
 
 /// Keep the historical adoption key for recipes without declared tests: durable

@@ -1697,7 +1697,10 @@ where
     Reconnect: FnMut(&str) -> Result<()>,
 {
     let status = status_fn(runner_id)?;
-    if status.connected {
+    // The tunnel can die between /health and /runner/describe. A connected
+    // snapshot with unavailable observations is not ownership evidence: repair
+    // transport before the caller evaluates daemon recovery policy.
+    if status.connected && status.active_job_state != RunnerActiveJobState::Unavailable {
         return Ok(status);
     }
 
