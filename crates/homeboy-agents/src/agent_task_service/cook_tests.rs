@@ -11582,7 +11582,10 @@ if [ "$1 $2" = "pr list" ]; then
   exit 0
 fi
 while [ "$#" -gt 0 ]; do
-  if [ "$1" = "--body-file" ]; then shift; cat "$1" >> "$HOMEBOY_FAKE_GH_LOG"; fi
+  case "$1" in
+    --body-file) shift; cat "$1" >> "$HOMEBOY_FAKE_GH_LOG" ;;
+    body=@*) cat "${1#body=@}" >> "$HOMEBOY_FAKE_GH_LOG" ;;
+  esac
   shift
 done
 echo https://github.com/example/fixture/pull/1
@@ -11690,7 +11693,10 @@ echo https://github.com/example/fixture/pull/1
             assert!(requested.contains("--head candidate"), "{requested}");
             if existing_pr {
                 assert!(!requested.contains("pr create"), "{requested}");
-                assert!(requested.contains("pr comment 1"), "{requested}");
+                assert!(
+                    requested.contains("repos/example/fixture/issues/1/comments --method POST"),
+                    "{requested}"
+                );
                 assert!(
                     requested.contains("incomplete_reason: Two cells still need work"),
                     "{requested}"
@@ -11698,7 +11704,10 @@ echo https://github.com/example/fixture/pull/1
             } else {
                 assert!(requested.contains("pr create"), "{requested}");
                 assert!(requested.contains("--draft"), "{requested}");
-                assert!(!requested.contains("pr comment"), "{requested}");
+                assert!(
+                    !requested.contains("issues/1/comments --method POST"),
+                    "{requested}"
+                );
             }
             for expected in [
                 &gate_id,
