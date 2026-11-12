@@ -394,6 +394,31 @@ fn admission_reconnects_a_lost_tunnel_to_the_same_proven_daemon() {
 }
 
 #[test]
+fn admission_reprobes_when_describe_loses_a_previously_healthy_tunnel() {
+    let session = direct_ssh_session("lease-live");
+    let mut unavailable = admission_status(&session, true);
+    unavailable.active_job_state = RunnerActiveJobState::Unavailable;
+    let mut observations = [unavailable, admission_status(&session, true)].into_iter();
+    let mut reconnects = 0;
+    let admitted = status_for_admission_with(
+        "homeboy-lab",
+        |_| Ok(observations.next().expect("bounded to two observations")),
+        |_| {
+            reconnects += 1;
+            Ok(())
+        },
+    )
+    .expect("transport is restored before evaluating ownership");
+    assert_eq!(reconnects, 1);
+    assert!(admitted.connected);
+    assert_ne!(admitted.active_job_state, RunnerActiveJobState::Unavailable);
+    assert_eq!(
+        admitted.session.unwrap().remote_daemon_lease_id,
+        session.remote_daemon_lease_id
+    );
+}
+
+#[test]
 fn admission_reconnects_when_concurrent_rotation_removes_the_session() {
     let session = direct_ssh_session("lease-current");
     let mut disconnected = admission_status(&session, false);
