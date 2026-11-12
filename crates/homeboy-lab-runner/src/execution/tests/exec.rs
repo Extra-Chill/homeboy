@@ -509,36 +509,36 @@ fn daemon_submission_recovers_a_lost_tunnel_before_resending_to_the_same_lease()
     );
 }
 
+/// #17987: a daemon slow to admit under contention must not strand the gate.
+/// `/exec` is keyed, so an unanswered submission is resent to the same daemon
+/// until it answers, within a bounded number of attempts.
 #[test]
-fn daemon_submission_retries_once_against_a_fresh_admission_generation() {
-    let accepted = direct_daemon_session("lease-old", "http://127.0.0.1:1");
-    let submitted = std::cell::RefCell::new(Vec::new());
-    let response = submit_daemon_exec_with_session_recovery(
-        "http://127.0.0.1:1",
-        Some(&accepted),
-        |endpoint| {
-            submitted.borrow_mut().push(endpoint.to_string());
-            if submitted.borrow().len() == 1 {
-                Err(connect_error())
-            } else {
+fn unanswered_daemon_submission_is_resent_by_key_until_answered() {
+    for (case, unanswered, kind, expect_ok, expect_sent) in [
+        ("timeout then answered", 2, "timeout", true, 3),
+        ("reset then answered", 1, "request", true, 2),
+        ("never answered", usize::MAX, "timeout", false, 4),
+    ] {
+        let sent = std::cell::Cell::new(0);
+        let result = submit_daemon_exec_with_session_recovery(
+            "http://127.0.0.1:1",
+            None,
+            |endpoint| {
+                assert_eq!(endpoint, "http://127.0.0.1:1", "{case}");
+                sent.set(sent.get() + 1);
+                if sent.get() <= unanswered {
+                    return Err(transport_error(kind));
+                }
                 Ok(DaemonHttpTextResponse {
                     status_code: 200,
                     body: "{}".to_string(),
                 })
-            }
-        },
-        |session| {
-            assert_eq!(session.remote_daemon_lease_id.as_deref(), Some("lease-old"));
-            Ok("http://127.0.0.1:2".to_string())
-        },
-    )
-    .expect("an unaccepted request can retry once through the current generation");
-
-    assert_eq!(response.status_code, 200);
-    assert_eq!(
-        submitted.into_inner(),
-        ["http://127.0.0.1:1", "http://127.0.0.1:2"]
-    );
+            },
+            |_| panic!("{case}: an unanswered request keeps its daemon"),
+        );
+        assert_eq!(result.is_ok(), expect_ok, "{case}");
+        assert_eq!(sent.get(), expect_sent, "{case}");
+    }
 }
 
 #[test]
@@ -588,10 +588,14 @@ fn direct_daemon_session(lease: &str, local_url: &str) -> RunnerSession {
 }
 
 fn connect_error() -> Error {
+    transport_error("connect")
+}
+
+fn transport_error(kind: &str) -> Error {
     Error::new(
         homeboy_core::error::ErrorCode::InternalUnexpected,
-        "connection refused",
-        json!({ "daemon_transport_error": { "kind": "connect" } }),
+        "daemon transport failed",
+        json!({ "daemon_transport_error": { "kind": kind } }),
     )
 }
 

@@ -160,6 +160,7 @@ pub(super) fn exec_via_daemon(
                 &payload,
                 DaemonPostOptions {
                     connection_close: true,
+                    timeout: Some(DAEMON_EXEC_SUBMIT_TIMEOUT),
                 },
             )
         },
@@ -1466,9 +1467,21 @@ mod admission_tests {
     }
 }
 
-/// Recover only a connection that failed before the daemon could answer. A
-/// timeout or response failure may already represent an accepted non-idempotent
-/// `/exec`, so it is deliberately not retried here.
+/// Daemon `/exec` admission prepares the execution synchronously, so a
+/// contended Lab can take longer than an ordinary daemon query to answer.
+const DAEMON_EXEC_SUBMIT_TIMEOUT: Duration = Duration::from_secs(60);
+
+/// Submissions sent per endpoint before an unanswered `/exec` is reported as a
+/// transport failure.
+const DAEMON_EXEC_SUBMIT_ATTEMPTS: usize = 4;
+
+/// Submit one keyed `/exec` until the daemon answers.
+///
+/// The daemon admits a submission by its caller-owned `submission_key` and
+/// returns the already-active job for a repeated key, so an unanswered request
+/// is resent as-is: it either finds the job the first request created or
+/// creates it once. A connection lost before the daemon could answer recovers
+/// the accepted session's tunnel once and resends there.
 pub(super) fn submit_daemon_exec_with_session_recovery<Submit, Recover>(
     endpoint: &str,
     accepted_session: Option<&RunnerSession>,
@@ -1479,12 +1492,25 @@ where
     Submit: FnMut(&str) -> Result<DaemonHttpTextResponse>,
     Recover: FnMut(&RunnerSession) -> Result<String>,
 {
-    match submit(endpoint) {
-        Ok(response) => Ok(response),
+    let mut submit_until_answered = |endpoint: &str| {
+        let mut attempt = 1;
+        loop {
+            match submit(endpoint) {
+                Err(error)
+                    if daemon_submission_went_unanswered(&error)
+                        && attempt < DAEMON_EXEC_SUBMIT_ATTEMPTS =>
+                {
+                    attempt += 1;
+                }
+                result => return result,
+            }
+        }
+    };
+    match submit_until_answered(endpoint) {
         Err(error) if daemon_submission_connection_was_lost(&error) => {
             let accepted_session = accepted_session.ok_or(error)?;
             let recovered_endpoint = recover(accepted_session)?;
-            submit(&recovered_endpoint).map_err(|retry_error| {
+            submit_until_answered(&recovered_endpoint).map_err(|retry_error| {
                 if daemon_submission_connection_was_lost(&retry_error) {
                     recovered_admission_transport_error(
                         &accepted_session.runner_id,
@@ -1495,8 +1521,19 @@ where
                 }
             })
         }
-        Err(error) => Err(error),
+        result => result,
     }
+}
+
+/// The request reached the daemon, or may have, but no response came back.
+fn daemon_submission_went_unanswered(error: &Error) -> bool {
+    matches!(
+        error
+            .details
+            .pointer("/daemon_transport_error/kind")
+            .and_then(Value::as_str),
+        Some("timeout" | "request")
+    )
 }
 
 fn daemon_submission_connection_was_lost(error: &Error) -> bool {
