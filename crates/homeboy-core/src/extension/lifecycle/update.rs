@@ -101,7 +101,7 @@ pub fn update(
 
     if extension_dir.join(".git").exists() {
         let old_branch = git::current_branch(&extension_dir);
-        let old_revision = git::short_head_revision(&extension_dir);
+        let old_revision = git::head_sha(&extension_dir);
         let metadata = read_in_place_metadata(&extension_dir);
         if let Err(error) = git::pull_repo(&extension_dir) {
             return Err(compensate_or_preserve_dirty(
@@ -113,7 +113,7 @@ pub fn update(
                 &metadata,
             ));
         }
-        let new_revision = git::short_head_revision(&extension_dir);
+        let new_revision = git::head_sha(&extension_dir);
         write_source_metadata(&extension_dir, &source_url, new_revision.clone());
         let refreshed = (|| {
             let manifest = load_extension(extension_id)?;
