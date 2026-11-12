@@ -2491,6 +2491,9 @@ mod tests {
 
     fn valid_review_form() -> AiFilledReviewForm {
         AiFilledReviewForm {
+            used_for: String::new(),
+            evidence: Vec::new(),
+            evidence_required: false,
             pr_title: "fix(agent-task): guard the reload render path".to_string(),
             summary: "Fix the reload crash.".to_string(),
             what_changed: vec!["Guard the null render path.".to_string()],

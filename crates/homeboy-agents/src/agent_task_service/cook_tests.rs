@@ -358,6 +358,9 @@ fn deepest_typed_error_ignores_sibling_envelopes_and_json_strings() {
 /// finalization (which now sources reviewer prose from the form).
 fn test_review_form() -> crate::agent_task_review_dossier::AiFilledReviewForm {
     crate::agent_task_review_dossier::AiFilledReviewForm {
+        used_for: String::new(),
+        evidence: Vec::new(),
+        evidence_required: false,
         pr_title: "fix(agent-task): guard the reload render path".to_string(),
         summary: "Close the issue by guarding the reload path.".to_string(),
         what_changed: vec!["Add a null guard in the render path.".to_string()],

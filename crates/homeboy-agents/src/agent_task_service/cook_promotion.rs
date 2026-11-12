@@ -3256,7 +3256,17 @@ fn cook_review_dossier_with_stores_and_review_form(
             .as_ref(),
         verification_promotion,
     );
-    let mut evidence = Vec::new();
+    let mut evidence = terminal_form.evidence.clone();
+    if evidence.is_empty() {
+        evidence.push(AgentTaskReviewEvidence {
+            summary: if terminal_form.evidence_required {
+                "Required evidence is missing: the review form supplied no measurements or repro results."
+            } else {
+                "Measurement evidence is missing: the review form supplied no measurements, before/after observations or repro results."
+            }.into(),
+            url: None,
+        });
+    }
     if let Some(form) = review_form {
         evidence.push(AgentTaskReviewEvidence {
             summary: format!(
@@ -3333,6 +3343,7 @@ fn cook_review_dossier_with_stores_and_review_form(
             used: true,
             tool: lineage.tool,
             model: lineage.model,
+            contribution: terminal_form.used_for.clone(),
         },
         source_relationships: Vec::new(),
         overrides: Vec::new(),

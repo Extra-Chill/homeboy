@@ -923,6 +923,7 @@ fn manual_finalization_options(
             used: true,
             tool: String::new(),
             model: "operator-finalized; no Homeboy provider execution".to_string(),
+            contribution: String::new(),
         },
         source_relationships: args
             .closes

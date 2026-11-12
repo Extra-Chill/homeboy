@@ -2355,6 +2355,7 @@ pub(super) fn options() -> AgentTaskPrFinalizationOptions {
                 used: true,
                 tool: "Homeboy (Pi (GPT-5.5))".to_string(),
                 model: "GPT-5.5".to_string(),
+                contribution: String::new(),
             },
             source_relationships: Vec::new(),
             overrides: Vec::new(),
