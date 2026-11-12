@@ -438,13 +438,16 @@ pub struct ContainsQuery {
     pub commit: Option<String>,
     /// Issue number to resolve through the pull request that closed it.
     pub issue: Option<u64>,
-    /// Version to treat as installed. Defaults to the component checkout's version.
+    /// Explicit installed version; otherwise use binary identity or a labeled checkout.
     pub installed_version: Option<String>,
 }
 
 /// The full `homeboy release contains` answer.
 #[derive(Debug, Clone, Serialize)]
 pub struct ReleaseContainsReport {
+    pub(crate) version_source: VersionSource,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) checkout_version: Option<String>,
     pub(crate) command: String,
     pub(crate) component_id: String,
     pub(crate) resolved: ResolvedCommit,
@@ -456,6 +459,9 @@ pub struct ReleaseContainsReport {
 /// The full `homeboy release gap` answer.
 #[derive(Debug, Clone, Serialize)]
 pub struct ReleaseGapReport {
+    pub(crate) version_source: VersionSource,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) checkout_version: Option<String>,
     pub(crate) command: String,
     pub(crate) component_id: String,
     pub(crate) gap: ReleaseGapAssessment,
@@ -514,13 +520,15 @@ pub fn contains(query: &ContainsQuery) -> Result<ReleaseContainsReport> {
     let containing_tags = tags_containing(&scope.git_root, &resolved.commit)?;
     let installed_version =
         resolve_installed_version(&component, query.installed_version.as_deref())?;
-    let installed_tag = scope.tag_name(&installed_version);
+    let installed_tag = installed_version
+        .installed()
+        .map(|version| scope.tag_name(version));
 
     let containment = assess(
         ContainmentFacts {
             known_tags: &known_tags,
             containing_tags: &containing_tags,
-            installed_tag: Some(installed_tag.as_str()),
+            installed_tag: installed_tag.as_deref(),
         },
         tag_prefix.as_deref(),
     );
@@ -528,6 +536,8 @@ pub fn contains(query: &ContainsQuery) -> Result<ReleaseContainsReport> {
     let summary = contains_summary(&resolved, &containment, &installed_version);
 
     Ok(ReleaseContainsReport {
+        version_source: installed_version.source,
+        checkout_version: installed_version.checkout(),
         command: "release.contains".to_string(),
         component_id: component.id.clone(),
         resolved,
@@ -548,13 +558,15 @@ pub fn gap(
 
     let known_tags = list_tags(&scope.git_root)?;
     let installed_version = resolve_installed_version(&component, installed_override)?;
-    let installed_tag = scope.tag_name(&installed_version);
+    let installed_tag = scope.tag_name(&installed_version.version);
 
     let mut assessment = assess_gap(
         &known_tags,
         tag_prefix.as_deref(),
-        Some(installed_version.as_str()),
-        Some(installed_tag.as_str()),
+        installed_version.installed(),
+        installed_version
+            .installed()
+            .map(|_| installed_tag.as_str()),
     );
 
     // Only count commits when the installed release is genuinely behind and
@@ -567,7 +579,7 @@ pub fn gap(
                 count_commits_between(&scope.git_root, &installed_tag, &latest.tag);
             assessment.detail = gap_detail(
                 assessment.status,
-                Some(installed_version.as_str()),
+                installed_version.installed(),
                 Some(latest),
                 assessment.releases_behind,
                 assessment.commits_behind,
@@ -575,9 +587,24 @@ pub fn gap(
         }
     }
 
-    let summary = gap_summary(&assessment);
+    if installed_version.source == VersionSource::Checkout {
+        assessment.detail = format!(
+            "checkout {}; installed release gap unknown (no target-specific installed version)",
+            installed_version.version
+        );
+    }
+    let mut summary = gap_summary(&assessment);
+    if installed_version.source == VersionSource::Checkout {
+        summary[0] = format!(
+            "checkout {}, latest {}",
+            installed_version.version,
+            assessment.latest_tag.as_deref().unwrap_or("unknown")
+        );
+    }
 
     Ok(ReleaseGapReport {
+        version_source: installed_version.source,
+        checkout_version: installed_version.checkout(),
         command: "release.gap".to_string(),
         component_id: component.id.clone(),
         gap: assessment,
@@ -585,21 +612,58 @@ pub fn gap(
     })
 }
 
+/// Provenance of the version resolved for release queries.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum VersionSource {
+    RunningBinary,
+    Override,
+    Checkout,
+}
+
+#[derive(Debug)]
+struct ResolvedVersion {
+    version: String,
+    source: VersionSource,
+}
+
+impl ResolvedVersion {
+    fn installed(&self) -> Option<&str> {
+        (self.source != VersionSource::Checkout).then_some(self.version.as_str())
+    }
+
+    fn checkout(&self) -> Option<String> {
+        (self.source == VersionSource::Checkout).then(|| self.version.clone())
+    }
+}
+
 fn resolve_installed_version(
     component: &Component,
     installed_override: Option<&str>,
-) -> Result<String> {
-    match installed_override {
-        Some(version) => Ok(version.to_string()),
-        None => Ok(crate::release::version::read_component_version(component)?.version),
-    }
+) -> Result<ResolvedVersion> {
+    let (version, source) = if let Some(version) = installed_override {
+        (version.to_string(), VersionSource::Override)
+    } else if component.id == "homeboy" {
+        (
+            homeboy_core::build_identity::current().version,
+            VersionSource::RunningBinary,
+        )
+    } else {
+        // Deploy observations and receipts identify project/target deployments,
+        // not a unique installed version for a targetless component query.
+        (
+            crate::release::version::read_component_version(component)?.version,
+            VersionSource::Checkout,
+        )
+    };
+    Ok(ResolvedVersion { version, source })
 }
 
 /// Human-readable lines mirroring the shape the issue asked for.
 fn contains_summary(
     resolved: &ResolvedCommit,
     containment: &ContainmentAssessment,
-    installed_version: &str,
+    installed_version: &ResolvedVersion,
 ) -> Vec<String> {
     let mut lines = Vec::new();
     if let (Some(issue), Some(pr)) = (
@@ -624,7 +688,13 @@ fn contains_summary(
         None => "not comparable against this checkout's tags",
     };
     lines.push(format!(
-        "installed here:    {installed_version} — {verdict}"
+        "{} here:    {} — {verdict}",
+        if installed_version.source == VersionSource::Checkout {
+            "checkout"
+        } else {
+            "installed"
+        },
+        installed_version.version
     ));
 
     lines.push(containment.detail.clone());
@@ -1148,7 +1218,7 @@ mod tests {
     // -- gap ----------------------------------------------------------------
 
     #[test]
-    fn installed_version_defaults_to_the_resolved_component() {
+    fn installed_version_resolver_preserves_provenance_and_override_precedence() {
         let temp = tempfile::tempdir().expect("tempdir");
         std::fs::write(temp.path().join("plugin.php"), "Version: 1.2.3\n")
             .expect("write component version");
@@ -1163,14 +1233,74 @@ mod tests {
             ..Default::default()
         };
 
-        assert_eq!(
-            resolve_installed_version(&component, None).expect("component version"),
-            "1.2.3"
-        );
-        assert_eq!(
-            resolve_installed_version(&component, Some("9.8.7")).expect("override"),
-            "9.8.7"
-        );
+        let running = homeboy_core::build_identity::current().version;
+        for (id, checkout, override_version, expected, source) in [
+            (
+                "homeboy",
+                "0.397.0",
+                None,
+                running.as_str(),
+                VersionSource::RunningBinary,
+            ),
+            (
+                "homeboy",
+                "0.458.35",
+                None,
+                running.as_str(),
+                VersionSource::RunningBinary,
+            ),
+            (
+                "not-homeboy",
+                "1.2.3",
+                None,
+                "1.2.3",
+                VersionSource::Checkout,
+            ),
+            (
+                "homeboy",
+                "0.397.0",
+                Some("9.8.7"),
+                "9.8.7",
+                VersionSource::Override,
+            ),
+            (
+                "not-homeboy",
+                "1.2.3",
+                Some("9.8.7"),
+                "9.8.7",
+                VersionSource::Override,
+            ),
+        ] {
+            std::fs::write(
+                temp.path().join("plugin.php"),
+                format!("Version: {checkout}\n"),
+            )
+            .expect("write checkout version");
+            let component = Component {
+                id: id.to_string(),
+                ..component.clone()
+            };
+            let resolved =
+                resolve_installed_version(&component, override_version).expect("version");
+            assert_eq!(resolved.version, expected, "{id}: {checkout}");
+            assert_eq!(resolved.source, source);
+            assert_eq!(
+                resolved.installed(),
+                (source != VersionSource::Checkout).then_some(expected)
+            );
+            assert_eq!(
+                resolved.checkout().as_deref(),
+                (source == VersionSource::Checkout).then_some(expected)
+            );
+            assert_eq!(
+                serde_json::to_value(source).unwrap(),
+                match source {
+                    VersionSource::RunningBinary => "running_binary",
+                    VersionSource::Override => "override",
+                    VersionSource::Checkout => "checkout",
+                }
+            );
+        }
     }
 
     #[test]
