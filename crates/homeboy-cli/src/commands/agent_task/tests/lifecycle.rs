@@ -5541,6 +5541,27 @@ fn failure_reasons_ignore_successful_no_ops_and_surface_provider_failures() {
         super::super::status::failure_reasons_from_aggregate(&provider_failure)[0]["message"],
         "Pi CLI exited with status 1."
     );
+
+    // The agent's own incomplete verdict is the root cause, not the tail of
+    // its provider stream.
+    let incomplete = aggregate(
+        AgentTaskOutcomeStatus::ProviderError,
+        Some(AgentTaskFailureClassification::Provider),
+        json!({
+            "diagnostics": [{"class": "provider.process_stream", "message": "error: prompt tail"}],
+            "review_form": {
+                "pr_title": "fix: header parts", "summary": "Traced header references.",
+                "what_changed": ["Nothing kept."], "completion": "incomplete",
+                "incomplete_reason": "The fix retained all 3 trunk occurrences, so it was reverted."
+            }
+        }),
+    );
+    let reasons = super::super::status::failure_reasons_from_aggregate(&incomplete);
+    assert_eq!(reasons[0]["class"], "agent.incomplete");
+    assert_eq!(
+        reasons[0]["message"],
+        "The fix retained all 3 trunk occurrences, so it was reverted."
+    );
 }
 
 #[test]
