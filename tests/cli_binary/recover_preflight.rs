@@ -312,11 +312,11 @@ fn recover_preflight_names_the_retry_step_retry_route_overrides_used_to_reach() 
     );
 }
 
-/// `retry` stays for non-Cook runs. Given the Cook ID of a Cook whose step
-/// `recover --preflight` names, a non-plain retry is refused toward `recover`
-/// instead of re-deciding the Cook's step, and reserves nothing.
+/// An explicit retry of a Cook ID reserves from the Cook's latest durable
+/// attempt rather than refusing the ID (#17933), even while
+/// `recover --preflight` names a step for that Cook.
 #[test]
-fn retry_of_a_cook_id_with_a_recovery_step_is_refused_toward_recover() {
+fn explicit_retry_of_a_cook_id_reserves_from_its_latest_attempt() {
     use homeboy::agents::agent_task_lifecycle::{
         record_cook_attempt_in_store, record_pre_execution_failure_in_store,
     };
@@ -342,19 +342,18 @@ fn retry_of_a_cook_id_with_a_recovery_step_is_refused_toward_recover() {
     assert_eq!(code, Some(0), "{envelope:#}");
     assert_eq!(envelope["data"]["step"]["kind"], "retry", "{envelope:#}");
 
-    for extra in [&[][..], &["--run", "--force"][..]] {
-        let mut args = vec!["--placement", "local", "agent-task", "retry", cook_id];
-        args.extend_from_slice(extra);
-        let (code, envelope, _) = run_json(&context, &args);
-        assert_eq!(code, Some(2), "{extra:?}: {envelope:#}");
-        let rendered = envelope.to_string();
-        assert!(
-            rendered.contains(&format!("homeboy agent-task recover {cook_id}")),
-            "{extra:?}: {envelope:#}"
-        );
-        assert!(rendered.contains(run_id), "{extra:?}: {envelope:#}");
-    }
+    let (code, envelope, _) = run_json(
+        &context,
+        &["--placement", "local", "agent-task", "retry", cook_id],
+    );
+    assert_eq!(code, Some(0), "{envelope:#}");
+    assert!(
+        envelope
+            .to_string()
+            .contains(&format!("\"retry_of\":\"{run_id}\"")),
+        "{envelope:#}"
+    );
     let records = homeboy::agents::agent_task_lifecycle::list_records_in_store(&lifecycle_store)
         .expect("records");
-    assert_eq!(records.len(), 1, "refused Cook-ID retries reserve nothing");
+    assert_eq!(records.len(), 2, "the retry reserves one successor");
 }
