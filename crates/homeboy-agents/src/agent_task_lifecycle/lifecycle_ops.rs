@@ -4997,6 +4997,14 @@ fn converge_resolved_run_in_store(
     // from a fresh read under the store lock, not from a caller copy.
     lifecycle_store.mutate_record(resolved_run_id, reconcile_candidate_adoption)?;
     let mut record = lifecycle_store.read_record(resolved_run_id)?;
+    if super::lifecycle_runner_projection::lost_observation_write(&record) {
+        super::lab_handoff_reconciliation::observe_terminal_runner_record_in_store(
+            lifecycle_store,
+            &mut record,
+            true,
+        )?;
+        record = lifecycle_store.read_record(resolved_run_id)?;
+    }
     if recover_reserved_lab_runner_job_in_store(lifecycle_store, resolved_run_id)? {
         record = lifecycle_store.read_record(resolved_run_id)?;
     }

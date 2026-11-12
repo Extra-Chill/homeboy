@@ -260,6 +260,80 @@ fn retained_terminal_run(record: &AgentTaskRunRecord) -> homeboy_core::observati
 }
 
 #[test]
+fn agent_task_service_harvests_candidate_after_observation_write_loss() {
+    for already_failed in [false, true] {
+        with_isolated_home(|_| {
+            let record = accepted_detached_handoff("lost-write-candidate");
+            rewrite_record_for_test(&record.run_id, |record| {
+                record.metadata["runner_pid"] = json!(999_999u32);
+            })
+            .unwrap();
+            let store = test_lifecycle_store();
+            let plan = store.read_controller_plan(&record.run_id).unwrap();
+            if already_failed {
+                rewrite_record_for_test(&record.run_id, |record| {
+                    record.set_state_for_test(AgentTaskRunState::Failed);
+                    record.metadata["pre_execution_failure"] = json!({
+                        "phase": "lab_staging_controller", "message": "database is locked"
+                    });
+                })
+                .unwrap();
+            } else {
+                let preserved = record_pre_execution_failure_in_store(
+                    &store,
+                    &record.run_id,
+                    &plan,
+                    "lab_staging_controller",
+                    &Error::internal_unexpected("database is locked"),
+                )
+                .unwrap();
+                assert_eq!(preserved.state(), AgentTaskRunState::Running);
+                assert!(preserved.metadata["pre_execution_failure"].is_null());
+                assert_eq!(
+                    preserved.metadata["transport_follow_up_failure"]["retryable"],
+                    true
+                );
+            }
+            let mut source = retained_terminal_run(&record);
+            source.metadata_json["agent_task_run"]["state"] = json!("succeeded");
+            source.metadata_json["agent_task_aggregate"]["totals"]["succeeded"] = json!(1);
+            source.metadata_json["agent_task_aggregate"]["totals"]["failed"] = json!(0);
+            source.metadata_json["agent_task_aggregate"]["outcomes"][0]["status"] =
+                json!("succeeded");
+            source.metadata_json["agent_task_aggregate"]["outcomes"][0]["outputs"] = json!({
+                "review_form": {"completion": "complete", "summary": "Recovered candidate"}
+            });
+            source.metadata_json["agent_task_aggregate"]["outcomes"][0]["artifacts"] = json!([{
+                "schema": crate::agent_task::AGENT_TASK_ARTIFACT_SCHEMA,
+                "id": "workspace-diff", "kind": "patch", "role": "patch",
+                "path": "/runner/workspace/candidate.diff",
+                "metadata": {"executor_artifact_finalized": true}
+            }]);
+            let _provider =
+                RunnerContinuationTestGuard::install(Box::new(ReconciliationProvider {
+                    result: Mutex::new(Some(TestRunnerReconciliation::Retained(source))),
+                    recovered_runner_job_id: Mutex::new(None),
+                }));
+            crate::agent_task_service::reconcile_run(&record.run_id, false).unwrap();
+            let harvested = store.read_aggregate(&record.run_id).unwrap();
+            assert_eq!(
+                harvested.outcomes[0].status,
+                crate::agent_task::AgentTaskOutcomeStatus::Succeeded
+            );
+            assert_eq!(
+                harvested.outcomes[0].outputs["review_form"]["completion"],
+                "complete"
+            );
+            assert_eq!(harvested.outcomes[0].artifacts[0].id, "workspace-diff");
+            assert!(
+                store.read_record(&record.run_id).unwrap().metadata["pre_execution_failure"]
+                    .is_null()
+            );
+        });
+    }
+}
+
+#[test]
 fn reconcile_observes_terminal_lab_attempt_after_controller_exits() {
     with_isolated_home(|_| {
         let record = accepted_detached_handoff("retained-reconcile");

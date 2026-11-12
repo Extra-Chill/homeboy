@@ -282,6 +282,17 @@ pub(crate) fn adopt_cook_candidate_with_dispatcher_and_backend_for_attempt_with_
         cook_or_run_id,
         attempt,
     )?;
+    let record = if agent_task_lifecycle::recorded_store_contention(&record) {
+        agent_task_lifecycle::reconcile_status_in_store(
+            lifecycle_store,
+            &record.run_id,
+            agent_task_lifecycle::AgentTaskStatusOptions::default(),
+            true,
+        )?
+        .record
+    } else {
+        record
+    };
     let cook_id = &recipe.cook_id;
     let mut options = super::reconstruct_options_without_dispatcher(&recipe)?;
     let run_id = record.run_id.clone();

@@ -568,7 +568,10 @@ fn record_pre_execution_failure_locked(
     // and record the follow-up failure as a non-terminal, recoverable marker so
     // controller reconciliation can adopt the completed candidate without
     // rerunning the provider.
-    if record.has_recorded_provider_progress() {
+    if record.has_recorded_provider_progress()
+        || (record.has_accepted_lab_handoff()
+            && crate::agent_task_service::is_store_contention(error))
+    {
         return record_transport_follow_up_failure_in_store(lifecycle_store, record, phase, error)
             .map(|record| (record, None));
     }
@@ -818,6 +821,7 @@ fn record_transport_follow_up_failure_in_store(
             "schema": super::CANDIDATE_ADOPTION_RECOVERY_SCHEMA,
             "phase": phase,
             "reason": "post_provider_transport_failure",
+            "failure_classification": pre_execution_failure_classification(error),
             "error_code": error.code.as_str(),
             "message": error.message,
             "details": error.details.clone(),
@@ -937,6 +941,9 @@ fn candidate_adoption_recovery(phase: &str, error: &Error) -> Option<serde_json:
 pub(super) fn pre_execution_failure_classification(
     error: &Error,
 ) -> AgentTaskFailureClassification {
+    if crate::agent_task_service::is_store_contention(error) {
+        return AgentTaskFailureClassification::Transient;
+    }
     if error.details["pre_execution_phase"] == "gate_toolchain_preflight" {
         return AgentTaskFailureClassification::CapabilityMissing;
     }
@@ -958,7 +965,9 @@ pub(super) fn pre_execution_failure_classification(
 /// repairs the backing store, while the existing retry reservation still
 /// prevents duplicate active attempts.
 pub(super) fn pre_execution_failure_is_retryable(error: &Error) -> bool {
-    error.retryable == Some(true) || is_controller_infrastructure_failure(error)
+    error.retryable == Some(true)
+        || is_controller_infrastructure_failure(error)
+        || crate::agent_task_service::is_store_contention(error)
 }
 
 fn is_controller_infrastructure_failure(error: &Error) -> bool {
