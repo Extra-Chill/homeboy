@@ -2807,8 +2807,12 @@ pub(super) fn diagnose(args: DiagnoseArgs) -> CmdResult<Value> {
     let recovery_prefix =
         agent_task_service_direct::cook_recovery_command_prefix_for_record(&record);
     preserve_controller_owner_placement_with_prefix(&mut value, run_id, &recovery_prefix);
+    // Placement is an observation: an unreadable control-plane projection
+    // reports `pending` rather than failing the diagnosis.
     value["placement"] = crate::commands::run_placement::placement(
-        &serde_json::to_value(agent_task_service::control_plane_run(&record.run_id)?)
+        &agent_task_service::control_plane_run(&record.run_id)
+            .ok()
+            .and_then(|run| serde_json::to_value(run).ok())
             .unwrap_or(Value::Null),
     );
     Ok((value, 0))

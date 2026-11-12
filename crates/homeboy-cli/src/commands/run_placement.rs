@@ -59,20 +59,6 @@ fn location(run: &Value) -> Value {
     json!({"kind": "pending", "runner_id": null, "reason": "execution placement not yet decided"})
 }
 
-pub(crate) fn attach(run: &mut Value) {
-    if !run.is_object() {
-        return;
-    }
-    run["placement"] = placement(run);
-    for key in ["children", "tasks", "attempts"] {
-        if let Some(children) = run.get_mut(key).and_then(Value::as_array_mut) {
-            for child in children {
-                attach(child);
-            }
-        }
-    }
-}
-
 pub(crate) fn line(run: &Value) -> String {
     let placement = placement(run);
     match placement["kind"].as_str() {
@@ -95,25 +81,18 @@ mod tests {
     use super::*;
 
     #[test]
-    fn projection_keeps_decision_and_each_child_location() {
-        let mut run = json!({
+    fn projection_keeps_decision_fields_and_names_the_location() {
+        let run = json!({
             "placement": {"decision_id":"decision-1", "selected":"runner", "runner_id":"homeboy-lab"},
-            "children": [
-                {"owner":{"kind":"runner","id":"lab-2"}},
-                {"placement":{"selected":"controller"}},
-                {"state":"pending"}
-            ]
         });
-        attach(&mut run);
-        assert_eq!(run["placement"]["decision_id"], "decision-1");
-        assert_eq!(run["placement"]["kind"], "lab");
-        assert_eq!(run["children"][0]["placement"]["runner_id"], "lab-2");
-        assert_eq!(run["children"][1]["placement"]["kind"], "local");
-        assert_eq!(run["children"][2]["placement"]["kind"], "pending");
-        assert!(run.get("tasks").is_none());
-        let original = run.clone();
-        attach(&mut run);
-        assert_eq!(run, original);
+        let projected = placement(&run);
+        assert_eq!(projected["decision_id"], "decision-1");
+        assert_eq!(projected["kind"], "lab");
+        assert_eq!(projected["runner_id"], "homeboy-lab");
+        assert_eq!(
+            placement(&json!({"placement": projected.clone()})),
+            projected
+        );
     }
 
     #[test]
