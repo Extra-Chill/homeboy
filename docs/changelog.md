@@ -4,6 +4,11 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.459.0] - 2026-11-12
+
+### Added
+- a chain's next pass runs its edited definition
+
 ## [0.458.54] - 2026-11-12
 
 ### Added
