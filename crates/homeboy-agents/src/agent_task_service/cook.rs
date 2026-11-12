@@ -4984,7 +4984,9 @@ fn run_cook_reported(
                 &result.value.status,
                 result.exit_code == 0,
                 result.exit_code,
-            ) {
+            )
+            .and_then(|_| store.settle_continuations_driven_inline(&result.value.cook_id))
+            {
                 return durable_cook_error_report_with_store(
                     store,
                     lifecycle_store,

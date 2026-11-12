@@ -681,6 +681,47 @@ impl CookRecipeStore {
         Ok(())
     }
 
+    /// Settle the continuations a terminal Cook pass made redundant.
+    ///
+    /// A pass that reached its terminal phase ran the remaining phases of
+    /// every attempt it drove inline: a live driver owns the Cook, so the
+    /// continuation each terminal attempt enqueued stayed pending for that
+    /// driver (#15566). Nothing is left for them to run, and a pending
+    /// continuation keeps the Cook unsettled for everyone who waits on it.
+    /// Operator feedback no attempt has consumed still owes a pass, so its
+    /// continuation stays pending.
+    pub(crate) fn settle_continuations_driven_inline(&self, cook_id: &str) -> Result<()> {
+        let lifecycle_store = self.lifecycle_store();
+        if crate::agent_task_feedback::has_pending(&lifecycle_store, cook_id) {
+            return Ok(());
+        }
+        for attempt in self.load_recipe(cook_id)?.attempts {
+            if !lifecycle_store.record_exists(&attempt.run_id)? {
+                continue;
+            }
+            lifecycle_store.mutate_record(&attempt.run_id, |record| {
+                let Some(mut value) = lifecycle_continuation(record).cloned() else {
+                    return false;
+                };
+                if !record.state().is_terminal()
+                    || lifecycle_continuation_state(Some(&value)) != CookContinuationState::Pending
+                {
+                    return false;
+                }
+                let now = agent_task_lifecycle::now_timestamp();
+                value["state"] = serde_json::json!("completed");
+                value["completed_at"] = serde_json::json!(now);
+                value["settled_by"] = serde_json::json!("terminal_cook_pass");
+                record
+                    .ensure_metadata_object()
+                    .insert(LIFECYCLE_CONTINUATION_KEY.to_string(), value);
+                record.updated_at = Some(now);
+                true
+            })?;
+        }
+        Ok(())
+    }
+
     /// Queue feedback remediation against the existing terminal Cook attempt.
     /// Failed continuation records may be rearmed, but no new attempt or budget
     /// is created here; normal continuation admission remains authoritative.
@@ -4693,6 +4734,36 @@ mod tests {
                 .is_none(),
             "a claimed terminal continuation cannot be consumed twice"
         );
+    }
+
+    #[test]
+    fn terminal_pass_settles_the_continuation_its_driver_held_pending() {
+        let context = homeboy_core::test_support::HermeticTestContext::new();
+        let store = CookRecipeStore::new(context.path_roots());
+        store.persist_recipe(&recipe()).unwrap();
+        store.enqueue_terminal_continuation("cook", "run").unwrap();
+        let state = || continuation_state_in_store(&store, "cook", "run").unwrap();
+        // A live driver ran this attempt's continuation inline.
+        let _driver = store.try_acquire_cook_driver("cook").unwrap().unwrap();
+        assert_eq!(state(), CookContinuationState::Pending);
+        store
+            .lifecycle_store()
+            .mutate_record("run", |record| {
+                agent_task_lifecycle::set_run_state(
+                    record,
+                    agent_task_lifecycle::AgentTaskRunState::Succeeded,
+                );
+                true
+            })
+            .unwrap();
+
+        store.settle_continuations_driven_inline("cook").unwrap();
+
+        assert_eq!(state(), CookContinuationState::Completed);
+        assert!(store
+            .claim_continuation_for("cook", "run")
+            .unwrap()
+            .is_none());
     }
 
     #[test]
