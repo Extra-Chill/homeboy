@@ -1664,6 +1664,8 @@ pub struct CookFinalization {
     pub draft_pr: bool,
     /// Preserve an exhausted, gate-failed candidate as a draft PR.
     pub publish_incomplete_draft: bool,
+    /// Leave an unpublished Cook's review form on its task's GitHub issue.
+    pub tracker_note: bool,
     pub base: String,
     pub head: Option<String>,
     pub title: String,

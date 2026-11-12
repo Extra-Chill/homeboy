@@ -2524,6 +2524,7 @@ fn batch_cook_options(
         retry_policy: CookRetryPolicy { max_attempts: 1 },
         finalization: CookFinalization {
             publish_incomplete_draft: false,
+            tracker_note: true,
             no_finalize: true,
             draft_pr: false,
             base: "main".to_string(),
@@ -7129,6 +7130,7 @@ fn cook_returns_after_accepted_detached_attempt_without_waiting_for_daemon_compl
                 retry_policy: CookRetryPolicy { max_attempts: 1 },
                 finalization: CookFinalization {
                     publish_incomplete_draft: false,
+                    tracker_note: true,
                     no_finalize: true,
                     draft_pr: false,
                     base: "main".to_string(),

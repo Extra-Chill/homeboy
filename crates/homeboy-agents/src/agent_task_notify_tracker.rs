@@ -19,7 +19,7 @@ const PROBE_TIMEOUT: Duration = Duration::from_secs(10);
 
 /// A GitHub issue named by a Cook source ref.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(super) struct GithubIssueRef {
+pub(crate) struct GithubIssueRef {
     pub owner: String,
     pub repo: String,
     pub number: u64,
@@ -29,7 +29,7 @@ pub(super) struct GithubIssueRef {
 ///
 /// Owner and repo are restricted to GitHub's name charset, so the parsed parts
 /// are safe to place in a probe command line.
-pub(super) fn github_issue_ref(url: &str) -> Option<GithubIssueRef> {
+pub(crate) fn github_issue_ref(url: &str) -> Option<GithubIssueRef> {
     let path = url.trim().strip_prefix("https://github.com/")?;
     let path = path.split(['#', '?']).next()?.trim_end_matches('/');
     let mut parts = path.split('/');

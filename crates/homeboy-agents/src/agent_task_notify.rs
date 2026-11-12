@@ -549,6 +549,7 @@ fn gate_summary(gates: &[(&str, bool)]) -> String {
 /// terminal boundary — a `--continue` over an already-terminal cook, an adopted
 /// controller — would now re-announce an outcome the operator already has.
 pub(crate) fn cook_terminal(report: &AgentTaskCookReport, component: Option<&str>, exit_code: i32) {
+    tracker_note::post(&report.cook_id);
     cook_terminal_with(report, component, exit_code, tracker::resolved_tracker);
 }
 
@@ -876,6 +877,8 @@ mod terminal_work;
 
 #[path = "agent_task_notify_tracker.rs"]
 mod tracker;
+#[path = "agent_task_notify_tracker_note.rs"]
+mod tracker_note;
 
 #[cfg(test)]
 #[path = "agent_task_notify_tests.rs"]

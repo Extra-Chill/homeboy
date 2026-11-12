@@ -1138,6 +1138,7 @@ fn initial_recipe(options: &CookRequest) -> Result<AgentTaskCookRecipe> {
             "no_finalize": options.finalization.no_finalize,
             "draft_pr": options.finalization.draft_pr,
             "publish_incomplete_draft": options.finalization.publish_incomplete_draft,
+            "tracker_note": options.finalization.tracker_note,
             "base": options.finalization.base,
             "head": options.finalization.head,
             "title": options.finalization.title,
@@ -3187,6 +3188,11 @@ fn reconstruct_recipe_options(
                 })? as u32,
         },
         finalization: CookFinalization {
+            tracker_note: recipe
+                .finalization
+                .get("tracker_note")
+                .and_then(Value::as_bool)
+                .unwrap_or(true),
             publish_incomplete_draft: recipe
                 .finalization
                 .get("publish_incomplete_draft")

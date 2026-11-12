@@ -2098,6 +2098,7 @@ fn assert_cook_rearm_queue_ownership(block_capacity: bool) {
             retry_policy: homeboy::agents::agent_task_service::CookRetryPolicy { max_attempts: 2 },
             finalization: homeboy::agents::agent_task_service::CookFinalization {
                 publish_incomplete_draft: false,
+                tracker_note: true,
                 no_finalize: true,
                 draft_pr: false,
                 base: "main".to_string(),
@@ -2364,6 +2365,7 @@ fn persist_recipe_only_cook(cook_id: &str, run_id: &str) {
         retry_policy: homeboy::agents::agent_task_service::CookRetryPolicy { max_attempts: 1 },
         finalization: homeboy::agents::agent_task_service::CookFinalization {
             publish_incomplete_draft: false,
+            tracker_note: true,
             no_finalize: true,
             draft_pr: false,
             base: "main".to_string(),
@@ -2695,6 +2697,7 @@ fn persist_legacy_candidate_cook(cook_id: &str, run_id: &str, runtime_generation
         retry_policy: homeboy::agents::agent_task_service::CookRetryPolicy { max_attempts: 1 },
         finalization: homeboy::agents::agent_task_service::CookFinalization {
             publish_incomplete_draft: false,
+            tracker_note: true,
             no_finalize: true,
             draft_pr: false,
             base: "main".to_string(),
@@ -3034,6 +3037,7 @@ fn continuation_preflight_bypasses_model_provenance_for_retryable_pre_execution_
             retry_policy: homeboy::agents::agent_task_service::CookRetryPolicy { max_attempts: 2 },
             finalization: homeboy::agents::agent_task_service::CookFinalization {
                 publish_incomplete_draft: false,
+                tracker_note: true,
                 no_finalize: true,
                 draft_pr: false,
                 base: "main".to_string(),
@@ -3174,6 +3178,7 @@ fn cook_retry_run_recovers_a_historical_transport_recipe_after_zero_provider_exe
             retry_policy: homeboy::agents::agent_task_service::CookRetryPolicy { max_attempts: 1 },
             finalization: homeboy::agents::agent_task_service::CookFinalization {
                 publish_incomplete_draft: false,
+                tracker_note: true,
                 no_finalize: true,
                 draft_pr: false,
                 base: "main".to_string(),
@@ -3350,6 +3355,7 @@ fn diagnose_prioritizes_the_current_gate_denial_after_a_repaired_controller_fail
             retry_policy: homeboy::agents::agent_task_service::CookRetryPolicy { max_attempts: 2 },
             finalization: homeboy::agents::agent_task_service::CookFinalization {
                 publish_incomplete_draft: false,
+                tracker_note: true,
                 no_finalize: true,
                 draft_pr: false,
                 base: "main".to_string(),
@@ -6248,6 +6254,7 @@ fn cook_retry_run_executes_the_replacement_through_its_cook_lifecycle() {
             retry_policy: homeboy::agents::agent_task_service::CookRetryPolicy { max_attempts: 2 },
             finalization: homeboy::agents::agent_task_service::CookFinalization {
                 publish_incomplete_draft: false,
+                tracker_note: true,
                 no_finalize: true,
                 draft_pr: false,
                 base: "main".to_string(),
@@ -6330,6 +6337,7 @@ fn competing_retry_run_consumers_dispatch_a_queued_cook_replacement_exactly_once
             retry_policy: homeboy::agents::agent_task_service::CookRetryPolicy { max_attempts: 2 },
             finalization: homeboy::agents::agent_task_service::CookFinalization {
                 publish_incomplete_draft: false,
+                tracker_note: true,
                 no_finalize: true,
                 draft_pr: false,
                 base: "main".to_string(),

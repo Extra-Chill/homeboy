@@ -4,7 +4,7 @@ use crate::error::{Error, Result};
 use crate::git::release_download::GitHubRepo;
 
 use super::gh_client::GhClient;
-use super::github::{push_markdown_body_file_arg, resolve_component_github, GithubPrOutput};
+use super::github::{push_api_markdown_body_file_arg, resolve_component_github, GithubPrOutput};
 use super::github_comment_sections::{
     comment_matches_key, extract_footer, extract_header, merge_section, parse_comment_sections,
     render_comment,
@@ -93,6 +93,31 @@ pub fn pr_comment(component_id: Option<&str>, options: PrCommentOptions) -> Resu
     pr_comment_with_client(id, repo, &gh, options)
 }
 
+/// Post a comment on an issue or pull request in `repo`. They share one comments
+/// API, so every [`PrCommentMode`] behaves identically on either.
+pub fn repo_comment(repo: &GitHubRepo, options: PrCommentOptions) -> Result<GithubPrOutput> {
+    let id = format!("{}/{}", repo.owner, repo.repo);
+    pr_comment_with_client(id, repo.clone(), &GhClient::for_repo(repo), options)
+}
+
+/// Create one comment through the shared issue/PR comments API; returns its URL.
+fn create_comment(gh: &GhClient, repo: &GitHubRepo, number: u64, body: &str) -> Result<String> {
+    let mut args: Vec<String> = vec![
+        "api".into(),
+        format!(
+            "repos/{}/{}/issues/{}/comments",
+            repo.owner, repo.repo, number
+        ),
+        "--method".into(),
+        "POST".into(),
+        "--jq".into(),
+        ".html_url".into(),
+    ];
+    let mut body_files = Vec::new();
+    push_api_markdown_body_file_arg(&mut args, &mut body_files, "body", body)?;
+    Ok(gh.run(&args)?.trim().to_string())
+}
+
 fn pr_comment_with_client(
     id: String,
     repo: GitHubRepo,
@@ -175,18 +200,8 @@ fn pr_comment_fresh(
     gh: &GhClient,
     options: PrCommentOptions,
 ) -> Result<GithubPrOutput> {
-    let repo_flag = format!("{}/{}", repo.owner, repo.repo);
-    let mut args: Vec<String> = vec![
-        "pr".into(),
-        "comment".into(),
-        options.number.to_string(),
-        "-R".into(),
-        repo_flag,
-    ];
-    let mut body_files = Vec::new();
     let body = super::neutralize_mentions(&options.body);
-    push_markdown_body_file_arg(&mut args, &mut body_files, "--body-file", &body)?;
-    let output = gh.run(&args)?;
+    let url = create_comment(gh, &repo, options.number, &body)?;
     Ok(GithubPrOutput {
         component_id: id,
         owner: repo.owner,
@@ -194,7 +209,7 @@ fn pr_comment_fresh(
         action: "pr.comment.create".to_string(),
         success: true,
         number: Some(options.number),
-        url: Some(output.trim().to_string()),
+        url: Some(url),
         ..Default::default()
     })
 }
@@ -235,17 +250,7 @@ fn pr_comment_sticky_whole(
         });
     }
 
-    let repo_flag = format!("{}/{}", repo.owner, repo.repo);
-    let mut args: Vec<String> = vec![
-        "pr".into(),
-        "comment".into(),
-        pr_number.to_string(),
-        "-R".into(),
-        repo_flag,
-    ];
-    let mut body_files = Vec::new();
-    push_markdown_body_file_arg(&mut args, &mut body_files, "--body-file", &full_body)?;
-    let output = gh.run(&args)?;
+    let url = create_comment(gh, &repo, pr_number, &full_body)?;
     Ok(GithubPrOutput {
         component_id: id,
         owner: repo.owner,
@@ -253,7 +258,7 @@ fn pr_comment_sticky_whole(
         action: "pr.comment.create".to_string(),
         success: true,
         number: Some(pr_number),
-        url: Some(output.trim().to_string()),
+        url: Some(url),
         ..Default::default()
     })
 }
@@ -295,17 +300,7 @@ fn pr_comment_sectioned(
             section_order.as_deref(),
             footer.as_deref(),
         );
-        let repo_flag = format!("{}/{}", repo.owner, repo.repo);
-        let mut args: Vec<String> = vec![
-            "pr".into(),
-            "comment".into(),
-            pr_number.to_string(),
-            "-R".into(),
-            repo_flag,
-        ];
-        let mut body_files = Vec::new();
-        push_markdown_body_file_arg(&mut args, &mut body_files, "--body-file", &rendered)?;
-        let output = gh.run(&args)?;
+        let url = create_comment(gh, &repo, pr_number, &rendered)?;
         return Ok(GithubPrOutput {
             component_id: id,
             owner: repo.owner,
@@ -313,7 +308,7 @@ fn pr_comment_sectioned(
             action: "pr.comment.section.create".to_string(),
             success: true,
             number: Some(pr_number),
-            url: Some(output.trim().to_string()),
+            url: Some(url),
             ..Default::default()
         });
     }
@@ -520,7 +515,7 @@ mod tests {
                 homeboy_test_support::write_executable(
                     &fixture.path().join("gh"),
                     format!(
-                        "#!/bin/sh\necho \"$*\" >> {quoted_log}\ncase \"$1 $2\" in\n  '--version '| 'auth status') exit 0 ;;\n  'api repos/o/r/pulls/42') echo '{{\"state\":\"{state}\",\"head\":{{\"sha\":\"{head}\"}}}}' ;;\n  'api repos/o/r/issues/42/'*) case \"$*\" in *--jq*) echo ;; *) echo '[]' ;; esac ;;\n  'pr comment') echo 'https://github.com/o/r/pull/42#issuecomment-1' ;;\n  *) exit 99 ;;\nesac\n"
+                        "#!/bin/sh\necho \"$*\" >> {quoted_log}\ncase \"$1 $2\" in\n  '--version '| 'auth status') exit 0 ;;\n  'api repos/o/r/pulls/42') echo '{{\"state\":\"{state}\",\"head\":{{\"sha\":\"{head}\"}}}}' ;;\n  'api repos/o/r/issues/42/comments') case \"$*\" in *POST*) echo 'https://github.com/o/r/pull/42#issuecomment-1' ;; *) echo ;; esac ;;\n  'api repos/o/r/issues/42/'*) case \"$*\" in *--jq*) echo ;; *) echo '[]' ;; esac ;;\n  *) exit 99 ;;\nesac\n"
                     ),
                     0o755,
                 ).unwrap();
@@ -561,7 +556,11 @@ mod tests {
                 } else {
                     assert!(output.action.ends_with("create"));
                     assert!(!json.as_object().unwrap().contains_key("skip_reason"));
-                    assert_eq!(calls.matches("pr comment 42").count(), 1);
+                    assert_eq!(calls.matches("issues/42/comments --method POST").count(), 1);
+                    assert_eq!(
+                        output.url.as_deref(),
+                        Some("https://github.com/o/r/pull/42#issuecomment-1")
+                    );
                 }
             }
         }
