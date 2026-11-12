@@ -151,6 +151,8 @@ mod tests {
         record_pending_merge(repo, &[trunk2.clone()]).unwrap();
         assert_eq!(run(repo, &["rev-parse", "MERGE_HEAD"]), trunk2);
         // Committing there keeps both parents even where Git could fast-forward.
+        record_pending_merge(repo, &[]).unwrap();
+        assert!(git(repo, &["rev-parse", "-q", "--verify", "MERGE_HEAD"]).is_err());
         run(repo, &["reset", "-q", "--soft", &base]);
         record_pending_merge(repo, &[trunk2.clone()]).unwrap();
         run(repo, &["commit", "-qm", "staged merge"]);
@@ -158,7 +160,5 @@ mod tests {
             run(repo, &["rev-parse", "HEAD^1", "HEAD^2"]),
             format!("{base}\n{trunk2}")
         );
-        record_pending_merge(repo, &[]).unwrap();
-        assert!(git(repo, &["rev-parse", "-q", "--verify", "MERGE_HEAD"]).is_err());
     }
 }
