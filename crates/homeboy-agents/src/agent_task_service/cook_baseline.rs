@@ -24,7 +24,7 @@ use crate::agent_task_gate::{
     AgentTaskGateBaselineComparison, AgentTaskGateDifferentialResult, AgentTaskGateInvocation,
     AgentTaskGateStatus,
 };
-use crate::agent_task_promotion::AgentTaskPromotionReport;
+use crate::agent_task_promotion::{AgentTaskPromotionReport, AgentTaskPromotionStatus};
 use crate::agent_task_scheduler::AgentTaskPlan;
 use homeboy_core::{Error, Result};
 
@@ -876,15 +876,28 @@ fn materialize_follow_up_baseline_at(
                 None,
             )
         })?;
-    let immutable = immutable.ok_or_else(|| {
-        Error::validation_invalid_argument(
-            "promotion.candidate_commit",
-            "non-recoverable: baseline has no immutable candidate; run a new Cook",
-            None,
-            None,
-        )
-        .with_retryable(false)
-    })?;
+    // An attempt proven to change nothing has no candidate commit of its own:
+    // the unchanged target HEAD is the baseline its no-change retry builds on.
+    let immutable = match immutable {
+        Some(immutable) => immutable,
+        None if proved_no_changes(promotion) => crate::agent_task::AgentTaskCandidate {
+            base_sha: expected_head.to_string(),
+            candidate_sha: expected_head.to_string(),
+            tree_sha: git_output(
+                &source_root,
+                &["rev-parse", &format!("{expected_head}^{{tree}}")],
+            )?,
+        },
+        None => {
+            return Err(Error::validation_invalid_argument(
+                "promotion.candidate_commit",
+                "non-recoverable: baseline has no immutable candidate; run a new Cook",
+                None,
+                None,
+            )
+            .with_retryable(false))
+        }
+    };
     crate::agent_task_promotion::validate_candidate_commit(&source_root, &immutable)?;
     let index = homeboy_core::git::private_index(&source_root)?;
     let index_path = index.path().display().to_string();
@@ -971,6 +984,16 @@ fn materialize_follow_up_baseline_at(
     Ok(baseline)
 }
 
+fn proved_no_changes(promotion: &AgentTaskPromotionReport) -> bool {
+    promotion.changed_files.is_empty()
+        && matches!(
+            promotion.status,
+            AgentTaskPromotionStatus::NoChanges
+                | AgentTaskPromotionStatus::VerifiedNoChanges
+                | AgentTaskPromotionStatus::NoChangesGateFailed
+        )
+}
+
 fn parent_snapshot_from_current_process() -> Result<Option<Value>> {
     let Some(raw) = std::env::var(homeboy_core::observation::SOURCE_SNAPSHOT_METADATA_ENV).ok()
     else {
@@ -1031,6 +1054,43 @@ mod tests {
     };
     use homeboy_core::gate::HomeboyGateVisibility;
     use sha2::{Digest, Sha256};
+
+    /// A no-change retry (#17960) builds on the unchanged target HEAD: the
+    /// attempt it follows recorded no candidate commit because it made none.
+    #[test]
+    fn no_change_promotion_materializes_its_target_head_as_the_retry_baseline() {
+        homeboy_core::test_support::with_isolated_home(|home| {
+            let temp = tempfile::tempdir().expect("repository");
+            let root = temp.path();
+            git_output(root, &["init", "-b", "main"]).expect("init");
+            git_output(root, &["config", "user.name", "Homeboy Test"]).expect("name");
+            git_output(root, &["config", "user.email", "test@example.test"]).expect("email");
+            std::fs::write(root.join("README"), "base\n").expect("base file");
+            git_output(root, &["add", "README"]).expect("add");
+            git_output(root, &["commit", "-m", "base"]).expect("commit");
+            let head = git_output(root, &["rev-parse", "HEAD"]).expect("head");
+            let promotion: AgentTaskPromotionReport = serde_json::from_value(serde_json::json!({
+                "schema": "homeboy/agent-task-promotion-report/v1",
+                "status": "no_changes",
+                "source": {"kind": "aggregate", "task_id": "task", "run_id": "run-a"},
+                "to_worktree": "repo@fix",
+                "target": {"worktree": "repo@fix", "path": root, "head": head},
+                "changed_files": [],
+                "operator_notification": {"status": "completed", "message": "no changes"},
+                "provenance": {"worktree_path": root},
+            }))
+            .expect("promotion");
+
+            let baseline =
+                materialize_follow_up_baseline_in_root(&promotion, home.path(), "run-a", "task-2")
+                    .expect("a no-change promotion yields a retry baseline");
+            assert_eq!(baseline.capability.commit, head);
+            assert_eq!(
+                std::fs::read_to_string(baseline.path.join("README")).unwrap(),
+                "base\n"
+            );
+        });
+    }
 
     /// A follow-up baseline handed to a detached dispatcher must outlive the
     /// dispatch call: Lab staging materializes it from a separate controller
