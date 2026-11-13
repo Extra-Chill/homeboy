@@ -20,7 +20,7 @@ pub struct ReleaseOwnedMutationViolation {
     pub message: String,
 }
 
-/// Reject version-field and release-derived lockfile mutations that were not
+/// Reject configured version-field mutations that were not
 /// produced by the release version step. Target matching remains entirely
 /// configuration-driven: a target's configured regex identifies its version
 /// field, regardless of whether it is a PHP header, JSON manifest, or text file.
@@ -34,11 +34,6 @@ pub fn detect_manual_release_owned_mutations(
     }
 
     let targets = component.version_targets.as_deref().unwrap_or_default();
-    let derived_lockfiles = derived_lockfiles(targets);
-    let declared_lockfiles =
-        homeboy_core::component::drift::extension_declared_lockfile_paths(component)
-            .into_iter()
-            .collect::<BTreeSet<_>>();
     mutations
         .iter()
         .filter_map(|mutation| {
@@ -53,37 +48,6 @@ pub fn detect_manual_release_owned_mutations(
                 .filter_map(|path| normalize_path(path))
                 .any(|path| path == file);
 
-            if derived_lockfiles.contains(&file) || declared_lockfiles.contains(&file) {
-                let lockfile_manually_maintained = targets.iter().any(|target| {
-                    component
-                        .release
-                        .manual_version_targets
-                        .iter()
-                        .any(|configured| {
-                            normalize_path(configured) == normalize_path(&target.file)
-                        })
-                        && crate::release::planning_worktree::derived_release_lockfiles(
-                            &target.file,
-                        )
-                        .iter()
-                        .filter_map(|path| normalize_path(path))
-                        .any(|path| path == file)
-                });
-                let declared_lockfile_manually_maintained =
-                    manual_release_lockfile_is_allowed(component, &file);
-                return (!lockfile_manually_maintained && !declared_lockfile_manually_maintained)
-                    .then(|| {
-                        violation(
-                            &file,
-                            if declared_lockfiles.contains(&file) {
-                                "extension-declared release lockfile"
-                            } else {
-                                "release-derived lockfile"
-                            },
-                        )
-                    });
-            }
-
             let target = target?;
             let pattern = resolve_target_pattern(target).ok()?;
             let before = parse_versions(&mutation.before, &pattern)?;
@@ -92,15 +56,6 @@ pub fn detect_manual_release_owned_mutations(
                 .then(|| violation(&file, "configured version field"))
         })
         .collect()
-}
-
-fn manual_release_lockfile_is_allowed(component: &Component, file: &str) -> bool {
-    component
-        .release
-        .manual_release_lockfiles
-        .iter()
-        .filter_map(|path| normalize_path(path))
-        .any(|path| path == file)
 }
 
 pub(crate) fn derived_lockfiles(targets: &[VersionTarget]) -> BTreeSet<String> {
@@ -139,7 +94,7 @@ fn violation(file: &str, kind: &str) -> ReleaseOwnedMutationViolation {
     ReleaseOwnedMutationViolation {
         file: file.to_string(),
         message: format!(
-            "{file} changed a {kind}. This file is release-owned: revert the manual bump or lockfile change and let Homeboy's release `version` step generate it. Release-owned mutations require durable Homeboy release provenance; configure `release.manual_version_targets` only for intentional manual maintenance."
+            "{file} changed a {kind}. This file is release-owned: revert the manual bump and let Homeboy's release `version` step generate it. Release-owned mutations require durable Homeboy release provenance; configure `release.manual_version_targets` only for intentional manual maintenance."
         ),
     }
 }
@@ -247,48 +202,36 @@ mod tests {
     }
 
     #[test]
-    fn protects_derived_lockfiles_and_allows_a_target_scoped_opt_out() {
-        let mut component = component("Cargo.toml", r#"version\s*=\s*"([0-9.]+)""#);
-        assert_eq!(
-            detect_manual_release_owned_mutations(
+    fn dependency_lockfile_changes_are_not_release_mutations() {
+        let component = component("Cargo.toml", r#"version\s*=\s*"([0-9.]+)""#);
+        for (version, expected_files) in [("1.0.0", vec![]), ("1.0.1", vec!["Cargo.toml"])] {
+            let after = format!(
+                "[package]\nname = \"fixture\"\nversion = \"{version}\"\n[dependencies]\nserde = \"1\"\n"
+            );
+            let violations = detect_manual_release_owned_mutations(
                 &component,
-                &[mutation("Cargo.lock", "old", "new")],
-                None
-            )
-            .len(),
-            1
-        );
-
-        component
-            .release
-            .manual_version_targets
-            .push("Cargo.toml".to_string());
-        assert!(detect_manual_release_owned_mutations(
-            &component,
-            &[
-                mutation("Cargo.toml", r#"version = "1.0.0""#, r#"version = "1.0.1""#),
-                mutation("Cargo.lock", "old", "new")
-            ],
-            None
-        )
-        .is_empty());
-    }
-
-    #[test]
-    fn declared_lockfile_opt_out_is_exact_path_scoped() {
-        let mut component = Component::default();
-        component
-            .release
-            .manual_release_lockfiles
-            .push("./nested/package-lock.json".to_string());
-
-        assert!(manual_release_lockfile_is_allowed(
-            &component,
-            "nested/package-lock.json"
-        ));
-        assert!(!manual_release_lockfile_is_allowed(
-            &component,
-            "package-lock.json"
-        ));
+                &[
+                    mutation(
+                        "Cargo.toml",
+                        "[package]\nname = \"fixture\"\nversion = \"1.0.0\"\n[dependencies]\n",
+                        &after,
+                    ),
+                    mutation(
+                        "Cargo.lock",
+                        "version = 3\n",
+                        "version = 3\n[[package]]\nname = \"serde\"\nversion = \"1.0.0\"\n",
+                    ),
+                ],
+                None,
+            );
+            assert_eq!(
+                violations
+                    .iter()
+                    .map(|v| v.file.as_str())
+                    .collect::<Vec<_>>(),
+                expected_files,
+                "manifest version {version}"
+            );
+        }
     }
 }

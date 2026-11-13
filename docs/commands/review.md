@@ -52,6 +52,12 @@ debugging aids, not proof. See
 
 ## Individual Quality Gates
 
+Review lint rejects manual changes to configured version fields unless authorized
+by release provenance or `release.manual_version_targets`. Dependency and lockfile
+changes are allowed when configured versions remain unchanged, including derived
+and extension-declared lockfiles. `release.manual_release_lockfiles` remains
+accepted for compatibility but is no longer needed to exempt lockfile edits.
+
 ### Independent AI review
 
 `review ai` invokes an **operator-installed extension**, independently of lint
