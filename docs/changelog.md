@@ -4,6 +4,12 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.463.2] - 2026-11-13
+
+### Changed
+- exec the Linux execution supervisor instead of keeping a forked caller clone
+- workflow ab: fail closed off-Lab, fetch published commits on the runner, add --prepare
+
 ## [0.463.1] - 2026-11-13
 
 ### Fixed
