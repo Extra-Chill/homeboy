@@ -125,11 +125,8 @@ pub(super) fn sql_store_initialized(path: &Path) -> Result<bool> {
 
 pub(super) fn read_store_generation(connection: &Connection) -> rusqlite::Result<Option<i64>> {
     connection
-        .query_row(
-            "SELECT generation FROM daemon_store_state WHERE id = 1",
-            [],
-            |row| row.get(0),
-        )
+        .prepare_cached("SELECT generation FROM daemon_store_state WHERE id = 1")?
+        .query_row([], |row| row.get(0))
         .optional()
 }
 
@@ -185,14 +182,12 @@ pub(super) fn load_sql_store_for_compaction(
 /// never exceeds compaction's own measure. Once compaction is within budget,
 /// this stays false.
 pub(super) fn retention_due(
+    connection: &Connection,
     path: &Path,
     limit: usize,
     bytes: usize,
     inner: &super::store::JobStoreInner,
 ) -> Result<bool> {
-    let Some(connection) = open_sql_store_readonly(path)? else {
-        return Ok(false);
-    };
     let workflow = crate::daemon::workflow_job::WORKFLOW_JOB_TYPE;
     let (mut count, mut size): (usize, usize) = connection
         .query_row(
@@ -262,7 +257,7 @@ fn load_sql_store_view(
     let mut events_by_job: HashMap<String, Vec<JobEvent>> = HashMap::new();
     {
         let mut statement = connection
-            .prepare(if active_only {
+            .prepare_cached(if active_only {
                 "SELECT e.job_id, e.body FROM daemon_jobs j JOIN daemon_job_events e ON e.job_id = j.job_id WHERE j.active = 1 ORDER BY e.sequence"
             } else {
                 "SELECT job_id, body FROM daemon_job_events ORDER BY sequence"
@@ -284,7 +279,7 @@ fn load_sql_store_view(
 
     {
         let mut statement = connection
-            .prepare(if active_only {
+            .prepare_cached(if active_only {
                 "SELECT job_id, body FROM daemon_jobs WHERE active = 1"
             } else {
                 "SELECT job_id, body FROM daemon_jobs"
@@ -317,7 +312,7 @@ fn load_sql_store_view(
 
     {
         let mut statement = connection
-            .prepare("SELECT kind, key, body FROM daemon_job_submissions")
+            .prepare_cached("SELECT kind, key, body FROM daemon_job_submissions")
             .map_err(|error| store_error(path, "read daemon job submissions", error))?;
         let rows = statement
             .query_map([], |row| {
@@ -605,13 +600,13 @@ fn write_changes(
 /// Expired submission keys are written as replay tombstones in the same
 /// transaction and cleared from `durable` once it commits.
 pub(super) fn commit_sql_store(
+    connection: &mut Connection,
     path: &Path,
     durable: &mut DurableJobStore,
     synced: &std::sync::Mutex<SqlSyncState>,
     terminal_deliveries: &[crate::daemon::step_job::StepTerminalDelivery],
 ) -> Result<()> {
     let known = std::mem::take(&mut *synced.lock().expect("store sync mutex poisoned"));
-    let mut connection = open_sql_store(path)?;
     let transaction = connection
         .transaction_with_behavior(TransactionBehavior::Immediate)
         .map_err(|error| store_error(path, "begin daemon job store commit", error))?;
@@ -687,12 +682,10 @@ pub(super) enum TerminalJobs<'a> {
 
 /// Terminal job bodies (without events) that the live mirror no longer holds.
 pub(super) fn read_terminal_jobs_readonly(
+    connection: &Connection,
     path: &Path,
     filter: TerminalJobs<'_>,
 ) -> Result<Vec<StoredJob>> {
-    let Some(connection) = open_sql_store_readonly(path)? else {
-        return Ok(Vec::new());
-    };
     const TERMINAL: &str = "SELECT body FROM daemon_jobs WHERE active = 0";
     match filter {
         TerminalJobs::All => read_job_bodies(&connection, path, TERMINAL, []),
@@ -734,7 +727,7 @@ fn read_job_bodies<P: rusqlite::Params>(
     params: P,
 ) -> Result<Vec<StoredJob>> {
     let mut statement = connection
-        .prepare(query)
+        .prepare_cached(query)
         .map_err(|error| store_error(path, "read daemon job rows", error))?;
     let rows = statement
         .query_map(params, |row| row.get::<_, String>(0))
@@ -752,20 +745,20 @@ fn read_job_bodies<P: rusqlite::Params>(
 
 /// One job row, with its events only when `with_events` asks for them.
 pub(super) fn read_job_readonly(
+    connection: &Connection,
     path: &Path,
     job_id: Uuid,
     with_events: bool,
 ) -> Result<Option<StoredJob>> {
-    let Some(connection) = open_sql_store_readonly(path)? else {
-        return Ok(None);
-    };
     let Some(mut stored) = read_job_row(&connection, path, job_id)? else {
         return Ok(None);
     };
     if with_events {
         let invalid = |error| Error::config_invalid_json(path.display().to_string(), error);
         let mut statement = connection
-            .prepare("SELECT body FROM daemon_job_events WHERE job_id = ?1 ORDER BY sequence")
+            .prepare_cached(
+                "SELECT body FROM daemon_job_events WHERE job_id = ?1 ORDER BY sequence",
+            )
             .map_err(|error| store_error(path, "read daemon job events", error))?;
         let rows = statement
             .query_map([job_id.to_string()], |row| row.get::<_, String>(0))

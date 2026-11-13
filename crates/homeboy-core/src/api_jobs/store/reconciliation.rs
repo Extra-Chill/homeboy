@@ -245,7 +245,9 @@ impl JobStore {
         let mut evidence = self.active_daemon_job_recovery_evidence(current_lease_id, pid_is_alive);
         let inner = self.inner.lock().expect("job store mutex poisoned");
         for item in &mut evidence {
-            let stored = inner.jobs.get(&item.job_id).expect("evidence job exists");
+            let Some(stored) = inner.jobs.get(&item.job_id) else {
+                continue;
+            };
             match resolve_linked(stored) {
                 LinkedDurableRunResolution::None => {}
                 LinkedDurableRunResolution::Active(run_id) => {
@@ -380,7 +382,12 @@ impl JobStore {
                             );
                         serde_json::json!({ "run_id": run_id, "state": state })
                     });
-                let stored = inner.jobs.get_mut(job_id).expect("attested job exists");
+                let Some(stored) = inner.jobs.get_mut(job_id) else {
+                    continue;
+                };
+                if !matches!(stored.job.status, JobStatus::Queued | JobStatus::Running) {
+                    continue;
+                }
                 stored.job.status = JobStatus::Failed;
                 stored.job.updated_at_ms = now;
                 stored.job.finished_at_ms = Some(now);
@@ -447,7 +454,7 @@ impl JobStore {
         &self,
         resolve_terminal: impl Fn(&StoredJob) -> Option<RecoveredTerminalJob>,
     ) -> Result<Vec<Uuid>> {
-        let terminal = {
+        let candidates = {
             let inner = self.inner.lock().expect("job store mutex poisoned");
             inner
                 .jobs
@@ -461,15 +468,24 @@ impl JobStore {
                         || !stored_job_execution_liveness(stored, &local_child_liveness)
                             .driver_owned
                 })
-                .filter_map(|stored| resolve_terminal(stored).map(|result| (stored.job.id, result)))
+                .cloned()
                 .collect::<Vec<_>>()
         };
 
-        let mut reconciled = Vec::with_capacity(terminal.len());
-        for (job_id, result) in terminal {
+        let mut reconciled = Vec::with_capacity(candidates.len());
+        for candidate in candidates {
+            let Some(result) = resolve_terminal(&candidate) else {
+                continue;
+            };
+            let job_id = candidate.job.id;
             let now = timestamp_ms();
             self.durable_transaction(|inner| {
-                let stored = inner.jobs.get_mut(&job_id).expect("terminal job exists");
+                let Some(stored) = inner.jobs.get_mut(&job_id) else {
+                    return Ok(());
+                };
+                if !matches!(stored.job.status, JobStatus::Queued | JobStatus::Running) {
+                    return Ok(());
+                }
                 stored.job.status = result.status;
                 stored.job.updated_at_ms = now;
                 stored.job.finished_at_ms = Some(now);
@@ -877,6 +893,69 @@ impl JobStore {
             .collect();
         jobs.sort_by_key(|job| (job.updated_at_ms, job.job_id.clone()));
         jobs
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn repeated_store_reload_reuses_connection() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("connection-reuse.sqlite");
+        let store = JobStore::open_without_reconciliation(&path).unwrap();
+        let job = store.create("runner.exec");
+        for _ in 0..100 {
+            store.durable_transaction(|_| Ok(())).unwrap();
+            assert_eq!(store.get(job.id).unwrap().status, JobStatus::Queued);
+        }
+        store.start(job.id).unwrap();
+        assert_eq!(
+            JobStore::open_without_reconciliation(&path)
+                .unwrap()
+                .get(job.id)
+                .unwrap()
+                .status,
+            JobStatus::Running
+        );
+    }
+
+    #[test]
+    fn candidate_removed_or_terminal_during_resolution_is_skipped() {
+        for remove in [true, false] {
+            let store = JobStore::default();
+            let job = store.create("runner.exec");
+            let reconciled = store
+                .reconcile_terminal_linked_daemon_jobs_with_resolver(|_| {
+                    store
+                        .durable_transaction(|inner| {
+                            if remove {
+                                inner.jobs.remove(&job.id);
+                            } else {
+                                inner.jobs.get_mut(&job.id).unwrap().job.status =
+                                    JobStatus::Succeeded;
+                            }
+                            Ok(())
+                        })
+                        .unwrap();
+                    Some(RecoveredTerminalJob::test_result(
+                        JobStatus::Failed,
+                        "race",
+                        serde_json::json!({}),
+                        Vec::new(),
+                    ))
+                })
+                .unwrap();
+            assert!(reconciled.is_empty());
+            assert_eq!(
+                store.inner.lock().unwrap().jobs.contains_key(&job.id),
+                !remove
+            );
+            if !remove {
+                assert_eq!(store.get(job.id).unwrap().status, JobStatus::Succeeded);
+            }
+        }
     }
 }
 

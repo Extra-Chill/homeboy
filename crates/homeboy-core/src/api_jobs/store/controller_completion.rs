@@ -314,10 +314,8 @@ impl JobStore {
         let Some(persistence) = &self.persistence else {
             return Ok(None);
         };
-        let Some(connection) = super::super::persistence::open_ledger_readonly(&persistence.path)?
-        else {
-            return Ok(None);
-        };
+        let guard = persistence.connection()?;
+        let connection = guard.as_ref().expect("initialized store connection");
         let raw: Option<String> = connection
             .query_row(
                 "SELECT payload FROM controller_completions WHERE job_id = ?1",
@@ -364,7 +362,8 @@ impl JobStore {
                 Some("serialize controller completion custody".to_string()),
             )
         })?;
-        let mut connection = super::super::persistence::open_ledger(&persistence.path)?;
+        let mut guard = persistence.connection()?;
+        let connection = guard.as_mut().expect("initialized store connection");
         let transaction = connection.transaction().map_err(index_error)?;
         transaction
             .execute(
@@ -399,7 +398,10 @@ impl JobStore {
         if !persistence.path.exists() {
             return Ok(());
         }
-        super::super::persistence::open_ledger(&persistence.path)?
+        persistence
+            .connection()?
+            .as_ref()
+            .expect("initialized store connection")
             .execute(
                 "DELETE FROM controller_completions WHERE job_id = ?1",
                 [job_id.to_string()],
@@ -544,14 +546,12 @@ impl JobStore {
         let Some(persistence) = &self.persistence else {
             return Ok(());
         };
-        let Some(connection) = super::super::persistence::open_ledger_readonly(&persistence.path)?
-        else {
-            return Ok(());
-        };
+        let guard = persistence.connection()?;
+        let connection = guard.as_ref().expect("initialized store connection");
         // Only this scope's jobs: another scope's completion custody is
         // settled by its own daemon.
         let mut statement = connection
-            .prepare(
+            .prepare_cached(
                 "SELECT job_id, payload FROM controller_completions
                  WHERE (CASE WHEN json_valid(payload) THEN json_extract(payload, '$.daemon_scope') END) IS ?1
                  ORDER BY rowid LIMIT 32",
@@ -566,7 +566,7 @@ impl JobStore {
             .collect::<std::result::Result<Vec<_>, _>>()
             .map_err(index_error)?;
         drop(statement);
-        drop(connection);
+        drop(guard);
         let mut first_error = None;
         for (key, raw) in completions {
             let result = (|| {

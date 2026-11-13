@@ -201,6 +201,7 @@ pub(super) struct JobStorePersistence {
     /// generation the in-memory snapshot is authoritative and the reload is
     /// skipped; the per-job digests let a commit write only changed rows.
     pub(super) synced: Mutex<SqlSyncState>,
+    connection: Mutex<Option<rusqlite::Connection>>,
 }
 
 impl JobStorePersistence {
@@ -216,7 +217,19 @@ impl JobStorePersistence {
             terminal_job_retention_limit,
             terminal_job_retention_bytes,
             synced: Mutex::new(SqlSyncState::default()),
+            connection: Mutex::new(None),
         }
+    }
+
+    fn connection(&self) -> Result<MutexGuard<'_, Option<rusqlite::Connection>>> {
+        let mut connection = self
+            .connection
+            .lock()
+            .expect("store connection mutex poisoned");
+        if connection.is_none() {
+            *connection = Some(sql_store::open_sql_store(&self.path)?);
+        }
+        Ok(connection)
     }
 
     fn synced_generation(&self) -> Option<i64> {
@@ -521,16 +534,14 @@ impl JobStore {
             .persistence
             .as_ref()
             .filter(|persistence| persistence.path == path);
-        let connection = match sql_store::open_sql_store(path) {
-            Ok(connection) => connection,
-            Err(error) => {
-                if let Some(persistence) = persistence {
-                    persistence.forget_synced_state();
-                }
-                return Err(error);
-            }
-        };
-        let generation = sql_store::read_store_generation(&connection).map_err(|error| {
+        let persistence =
+            persistence.ok_or_else(|| Error::internal_unexpected("missing store persistence"))?;
+        let connection_guard = persistence.connection()?;
+        let connection = connection_guard
+            .as_ref()
+            .expect("initialized store connection");
+        let persistence = Some(persistence);
+        let generation = sql_store::read_store_generation(connection).map_err(|error| {
             Error::internal_io(
                 error.to_string(),
                 Some(format!(
@@ -546,7 +557,7 @@ impl JobStore {
         }
         // The caller holds the transaction lock, so no writer can commit
         // between the generation read above and this load.
-        let (durable, state) = match sql_store::load_sql_store(&connection, path) {
+        let (durable, state) = match sql_store::load_sql_store(connection, path) {
             Ok(loaded) => loaded,
             Err(error) => {
                 if let Some(persistence) = persistence {
@@ -624,9 +635,10 @@ impl JobStore {
     /// Retention is an explicit full-history operation, not part of live reload.
     fn load_history_for_compaction(&self, inner: &mut JobStoreInner) -> Result<()> {
         if let Some(persistence) = &self.persistence {
-            if let Some(connection) = sql_store::open_sql_store_readonly(&persistence.path)? {
+            let connection_guard = persistence.connection()?;
+            if let Some(connection) = connection_guard.as_ref() {
                 let (durable, baseline) =
-                    sql_store::load_sql_store_for_compaction(&connection, &persistence.path)?;
+                    sql_store::load_sql_store_for_compaction(connection, &persistence.path)?;
                 for stored in durable.jobs {
                     inner.jobs.entry(stored.job.id).or_insert(stored);
                 }
@@ -678,12 +690,17 @@ impl JobStore {
                 None,
             ));
         }
-        if sql_store::retention_due(
+        let retention_due = sql_store::retention_due(
+            persistence
+                .connection()?
+                .as_ref()
+                .expect("initialized store connection"),
             &persistence.path,
             persistence.terminal_job_retention_limit,
             persistence.terminal_job_retention_bytes,
             inner,
-        )? {
+        )?;
+        if retention_due {
             self.load_history_for_compaction(inner)?;
         }
         // Move the view out instead of cloning it: compaction and the commit
@@ -737,6 +754,10 @@ impl JobStore {
             persistence.terminal_job_retention_bytes,
         );
         let committed = sql_store::commit_sql_store(
+            persistence
+                .connection()?
+                .as_mut()
+                .expect("initialized store connection"),
             &persistence.path,
             &mut durable,
             &persistence.synced,
@@ -1759,9 +1780,15 @@ impl JobStore {
             return Ok(std::borrow::Cow::Borrowed(stored));
         }
         if let Some(persistence) = &self.persistence {
-            if let Some(stored) =
-                sql_store::read_job_readonly(&persistence.path, job_id, with_events)?
-            {
+            if let Some(stored) = sql_store::read_job_readonly(
+                persistence
+                    .connection()?
+                    .as_ref()
+                    .expect("initialized store connection"),
+                &persistence.path,
+                job_id,
+                with_events,
+            )? {
                 return Ok(std::borrow::Cow::Owned(stored));
             }
         }
@@ -1778,9 +1805,16 @@ impl JobStore {
         let mut jobs = HashMap::new();
         if let Some(persistence) = &self.persistence {
             jobs.extend(
-                sql_store::read_terminal_jobs_readonly(&persistence.path, filter)?
-                    .into_iter()
-                    .map(|stored| (stored.job.id, stored)),
+                sql_store::read_terminal_jobs_readonly(
+                    persistence
+                        .connection()?
+                        .as_ref()
+                        .expect("initialized store connection"),
+                    &persistence.path,
+                    filter,
+                )?
+                .into_iter()
+                .map(|stored| (stored.job.id, stored)),
             );
         }
         jobs.extend(inner.jobs.iter().map(|(id, stored)| (*id, stored.clone())));
