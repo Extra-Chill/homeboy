@@ -6238,6 +6238,23 @@ fn resolve_cook_pull_request(args: &mut AgentTaskCookArgs) -> homeboy::core::Res
             .as_deref()
             .filter(|path| Path::new(path).is_dir()))
         .unwrap_or(".");
+    // A pull request in another repository is context for the task, not the
+    // pull request this Cook updates, so its base and head do not apply.
+    // Compare repository names so a fork-first checkout still matches.
+    let repository_name = |url: &str| {
+        homeboy::core::git::release_download::parse_github_url(url)
+            .map(|repo| repo.repo.to_ascii_lowercase())
+    };
+    if let (Some(task), Some(checkout)) = (
+        repository_name(url),
+        homeboy::core::git::remote_origin_url(Path::new(path))
+            .as_deref()
+            .and_then(repository_name),
+    ) {
+        if task != checkout {
+            return Ok(());
+        }
+    }
     let (base, head) = cook_pull_request_refs(Path::new(path), url)?;
     for (flag, explicit, canonical) in [("base", &args.base, &base), ("head", &args.head, &head)] {
         if explicit.as_deref().is_some_and(|value| value != canonical) {
@@ -6536,6 +6553,28 @@ mod cook_pull_request_ref_tests {
                     "{error:?}"
                 );
             }
+            // A pull request in another repository is task context: its base
+            // and head never become this checkout's destination.
+            let mut input = parse(&[
+                "--to-worktree",
+                "repository@work",
+                "--base",
+                "trunk",
+                "--head",
+                "work",
+            ]);
+            input.dispatch.task_url = Some("https://github.com/example/other/pull/2951".into());
+            let resolved = {
+                let repository =
+                    crate::commands::agent_task::run::resolve_cook_repository(&mut input)
+                        .expect("repository");
+                resolve_cook_destination(input, repository.as_ref())
+            }
+            .expect("cross-repository task PR resolves");
+            assert_eq!(
+                (resolved.base.as_deref(), resolved.head.as_deref()),
+                (Some("trunk"), Some("work"))
+            );
         });
     }
 }
