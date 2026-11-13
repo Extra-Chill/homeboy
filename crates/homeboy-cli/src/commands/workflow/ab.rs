@@ -4,7 +4,7 @@
 //! refs to commits on the controller, picks the runner through the normal
 //! placement rules, and admits the recipe there: locally against the
 //! repository, or on a Lab runner (`workflow run --on`) against one
-//! snapshot-git workspace per commit. `ab-step` is the recipe's step verb.
+//! Git or snapshot workspace per commit. `ab-step` is the recipe's step verb.
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -18,6 +18,9 @@ use crate::cli_surface::Placement;
 use crate::commands::CmdResult;
 
 #[derive(Args)]
+#[command(
+    after_help = "Placement: auto and lab require a ready Lab runner and fail with its readiness reason otherwise. Only --placement local or lab-or-local may run on the controller."
+)]
 pub struct AbArgs {
     /// Component id or repository path
     target: String,
@@ -27,6 +30,9 @@ pub struct AbArgs {
     /// The ref under test
     #[arg(long, value_name = "REF")]
     candidate: String,
+    /// Preparation command run before --run, recorded separately; failure skips --run
+    #[arg(long, value_name = "COMMAND")]
+    prepare: Option<String>,
     /// Command run with `sh -c` in each checkout
     #[arg(long = "run", value_name = "COMMAND")]
     run: String,
@@ -60,6 +66,12 @@ enum AbStepCommand {
         base_sha: String,
         #[arg(long)]
         candidate_sha: String,
+        #[arg(long)]
+        prepare: Option<String>,
+        #[arg(long, default_value = "local")]
+        base_materialization: String,
+        #[arg(long, default_value = "local")]
+        candidate_materialization: String,
         #[arg(long = "run")]
         run: String,
         /// A JSON array of paths/globs, or one path/glob
@@ -109,20 +121,33 @@ pub(super) fn run(args: AbArgs) -> CmdResult<Value> {
     let compare = serde_json::to_string(&args.compare)
         .map_err(|error| Error::internal_json(error.to_string(), None))?;
 
-    let (base_repo, candidate_repo, isolated) = match &runner {
-        None => (repo.clone(), repo.clone(), false),
-        Some(runner) => (
-            PathBuf::from(sync_commit(runner, &repo, &base_sha)?),
-            PathBuf::from(sync_commit(runner, &repo, &candidate_sha)?),
-            true,
-        ),
-    };
+    let (base_repo, candidate_repo, base_materialization, candidate_materialization, isolated) =
+        match &runner {
+            None => (repo.clone(), repo.clone(), "local", "local", false),
+            Some(runner) => {
+                let (base, base_mode) = sync_commit(runner, &repo, &base_sha)?;
+                let (candidate, candidate_mode) = sync_commit(runner, &repo, &candidate_sha)?;
+                (
+                    PathBuf::from(base),
+                    PathBuf::from(candidate),
+                    base_mode,
+                    candidate_mode,
+                    true,
+                )
+            }
+        };
     let inputs = [
         ("base_repo", base_repo.display().to_string()),
         ("base_sha", base_sha.clone()),
         ("candidate_repo", candidate_repo.display().to_string()),
         ("candidate_sha", candidate_sha.clone()),
         ("run", args.run.clone()),
+        ("prepare", args.prepare.clone().unwrap_or_default()),
+        ("base_materialization", base_materialization.to_string()),
+        (
+            "candidate_materialization",
+            candidate_materialization.to_string(),
+        ),
         ("compare", compare),
         ("isolated", isolated.to_string()),
     ]
@@ -189,6 +214,9 @@ pub(super) fn step(args: AbStepArgs) -> CmdResult<Value> {
             base_sha,
             candidate_sha,
             run,
+            prepare,
+            base_materialization,
+            candidate_materialization,
             compare,
         } => {
             let (repo, sha) = match side.as_str() {
@@ -218,12 +246,19 @@ pub(super) fn step(args: AbStepArgs) -> CmdResult<Value> {
                 repo,
                 sha: &sha,
                 isolated: repos.isolated(),
+                prepare: prepare.as_deref(),
+                materialization: if side == "base" {
+                    &base_materialization
+                } else {
+                    &candidate_materialization
+                },
                 run: &run,
                 compare: &compare,
                 checkout_root: &root,
                 run_id,
             })?;
-            Ok((record, 0))
+            let code = i32::from(record["error"].as_str().is_some());
+            Ok((record, code))
         }
         AbStepCommand::Verdict { run, sides } => {
             let sides: Value = serde_json::from_str(&sides).map_err(|error| {
@@ -275,20 +310,24 @@ fn rev_parse(repo: &Path, reference: &str) -> Result<String> {
     )
 }
 
-/// `local` runs here; `lab` requires a ready Lab runner; `auto` and
-/// `lab-or-local` use one when it is ready and run here otherwise.
+/// Only explicit local placement permits controller execution.
 fn select_runner(placement: Placement) -> Result<Option<String>> {
     if placement == Placement::Local {
         return Ok(None);
     }
-    let runner = homeboy::core::parsed_command_preflight::captured_result()
-        .and_then(|preflight| preflight.placement.runner)
-        .map(|runner| runner.runner_id)
-        .or_else(|| homeboy::runner::resolve_default_lab_runner().ok().flatten());
-    if placement == Placement::Lab && runner.is_none() {
+    let readiness = homeboy::runner::lab_runner_readiness()?;
+    runner_from_readiness(placement, readiness)
+}
+
+fn runner_from_readiness(
+    placement: Placement,
+    readiness: homeboy::runner::LabRunnerReadiness,
+) -> Result<Option<String>> {
+    let runner = readiness.selected_runner_id;
+    if matches!(placement, Placement::Auto | Placement::Lab) && runner.is_none() {
         return Err(Error::validation_invalid_argument(
             "placement",
-            "`--placement lab` needs a ready Lab runner; use `--placement lab-or-local` to run here when none is ready",
+            format!("workflow ab requires a ready Lab runner: {}: {}; use --placement local or --placement lab-or-local to permit controller execution", readiness.state.as_str(), readiness.reasons.join(", ")),
             None,
             None,
         ));
@@ -296,9 +335,19 @@ fn select_runner(placement: Placement) -> Result<Option<String>> {
     Ok(runner)
 }
 
-/// Materialize `sha` on the runner as its own snapshot-git workspace and
-/// return its runner path.
-fn sync_commit(runner: &str, repo: &Path, sha: &str) -> Result<String> {
+/// Fetch origin-reachable commits on the runner; upload a Git snapshot for
+/// unpublished commits. Return the workspace path and materialization route.
+fn sync_commit(runner: &str, repo: &Path, sha: &str) -> Result<(String, &'static str)> {
+    let on_origin = !git(
+        repo,
+        &[
+            "for-each-ref",
+            "--format=%(refname)",
+            &format!("--contains={sha}"),
+            "refs/remotes/origin/",
+        ],
+    )?
+    .is_empty();
     let staging = tempfile::Builder::new()
         .prefix("homeboy-ab-")
         .tempdir()
@@ -313,10 +362,18 @@ fn sync_commit(runner: &str, repo: &Path, sha: &str) -> Result<String> {
         runner,
         homeboy::runner::runners::RunnerWorkspaceSyncOptions {
             path: checkout_arg.clone(),
-            mode: homeboy::runner::runners::RunnerWorkspaceSyncMode::SnapshotGit,
+            mode: if on_origin {
+                homeboy::runner::runners::RunnerWorkspaceSyncMode::Git
+            } else {
+                homeboy::runner::runners::RunnerWorkspaceSyncMode::SnapshotGit
+            },
             controller_routed_git: false,
             changed_since_base: None,
-            git_fetch_refs: Vec::new(),
+            git_fetch_refs: if on_origin {
+                vec![sha.to_string()]
+            } else {
+                Vec::new()
+            },
             snapshot_includes: Vec::new(),
             allow_dirty_lab_workspace: false,
             validation_dependency_ids: None,
@@ -324,7 +381,14 @@ fn sync_commit(runner: &str, repo: &Path, sha: &str) -> Result<String> {
         },
     );
     let _ = git(repo, &["worktree", "remove", "--force", &checkout_arg]);
-    Ok(synced?.0.remote_path)
+    Ok((
+        synced?.0.remote_path,
+        if on_origin {
+            "origin_fetch"
+        } else {
+            "snapshot"
+        },
+    ))
 }
 
 fn git(dir: &Path, args: &[&str]) -> Result<String> {
@@ -354,6 +418,104 @@ mod tests {
     use super::*;
     use crate::cli_surface::{Cli, Commands};
     use clap::Parser;
+
+    #[test]
+    fn workflow_ab_auto_refuses_unready_lab_before_admission() {
+        homeboy::core::test_support::with_isolated_home(|_| {
+            let dir = tempfile::tempdir().unwrap();
+            git(dir.path(), &["init", "-q"]).unwrap();
+            git(
+                dir.path(),
+                &[
+                    "-c",
+                    "user.name=t",
+                    "-c",
+                    "user.email=t@t",
+                    "commit",
+                    "--allow-empty",
+                    "-qm",
+                    "base",
+                ],
+            )
+            .unwrap();
+            for placement in [Placement::Auto, Placement::Lab] {
+                let error = run(AbArgs {
+                    target: dir.path().display().to_string(),
+                    base: "HEAD".into(),
+                    candidate: "HEAD".into(),
+                    prepare: None,
+                    run: "touch should-not-run".into(),
+                    compare: vec!["out".into()],
+                    instance: None,
+                    wait: true,
+                    placement,
+                })
+                .unwrap_err();
+                assert!(error.to_string().contains("absent"), "{error}");
+                assert!(!dir.path().join("should-not-run").exists());
+            }
+            let error = runner_from_readiness(
+                Placement::Auto,
+                homeboy::runner::LabRunnerReadiness {
+                    state: homeboy::runner::LabRunnerReadinessState::CapacityBlocked,
+                    selected_runner_id: None,
+                    available_runner_ids: vec![],
+                    reasons: vec!["pressure".into()],
+                    remediation_commands: vec![],
+                },
+            )
+            .unwrap_err();
+            assert!(error.to_string().contains("capacity_blocked: pressure"));
+        });
+    }
+
+    #[test]
+    fn workflow_ab_sync_fetches_origin_sha_and_snapshots_unpushed_sha() {
+        homeboy::core::test_support::with_isolated_home(|_| {
+            let dir = tempfile::tempdir().unwrap();
+            let origin = dir.path().join("origin");
+            let repo = dir.path().join("repo");
+            std::fs::create_dir(&origin).unwrap();
+            git(&origin, &["init", "-q"]).unwrap();
+            git(
+                &origin,
+                &[
+                    "-c",
+                    "user.name=t",
+                    "-c",
+                    "user.email=t@t",
+                    "commit",
+                    "--allow-empty",
+                    "-qm",
+                    "base",
+                ],
+            )
+            .unwrap();
+            git(dir.path(), &["clone", "origin", "repo"]).unwrap();
+            let base = rev_parse(&repo, "HEAD").unwrap();
+            git(
+                &repo,
+                &[
+                    "-c",
+                    "user.name=t",
+                    "-c",
+                    "user.email=t@t",
+                    "commit",
+                    "--allow-empty",
+                    "-qm",
+                    "unpushed",
+                ],
+            )
+            .unwrap();
+            let candidate = rev_parse(&repo, "HEAD").unwrap();
+            homeboy::runner::create(&json!({"id":"ab-fetch", "kind":"local", "workspace_root":dir.path().join("runner")}).to_string(), false).unwrap();
+            for (sha, expected) in [(&base, "origin_fetch"), (&candidate, "snapshot")] {
+                let (path, mode) = sync_commit("ab-fetch", &repo, sha).unwrap();
+                assert_eq!(mode, expected);
+                assert_eq!(rev_parse(Path::new(&path), "HEAD").unwrap(), *sha);
+            }
+        });
+    }
 
     #[test]
     fn workflow_ab_parses_repeatable_compare_and_step_verbs() {

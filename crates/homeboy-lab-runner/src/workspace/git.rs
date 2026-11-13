@@ -51,7 +51,7 @@ pub(super) fn git_snapshot_controlled(
     }
     super::super::source_materialization::validate_sanitized_git_remote(&remote_url)?;
     if controller_routed_git
-        || branch.is_none()
+        || (branch.is_none() && !git_fetch_refs.contains(&head))
         || super::super::source_materialization::requires_controller_routed_workspace_sync(
             &remote_url,
         )

@@ -324,7 +324,7 @@ fn sync_workspace_in_roots_controlled(
                     Some("prepared_source_view".to_string());
                 Ok(None)
             } else if options.controller_routed_git
-                || git.branch.is_none()
+                || (git.branch.is_none() && !git.git_fetch_refs.contains(&git.head))
                 || source_materialization::requires_controller_routed_workspace_sync(
                     &git.remote_url,
                 )
