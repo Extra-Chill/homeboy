@@ -1430,6 +1430,15 @@ impl CliRuntime {
             return std::process::ExitCode::from(2);
         }
 
+        if let Err(error) = place_required_environment(&mut cli) {
+            output_runtime::emit_json_result_for_identity(
+                Err(error),
+                output_file.as_deref(),
+                2,
+                &command_identity,
+            );
+            return std::process::ExitCode::from(2);
+        }
         if let Err(error) = project_cli_options(&mut cli) {
             output_runtime::emit_json_result_for_identity(
                 Err(error),
@@ -3019,6 +3028,55 @@ fn live_lab_readiness(
     runner_id
         .map(crate::runner::lab_runner_readiness_for_admission)
         .unwrap_or_else(crate::runner::refresh_lab_runner_readiness_for_admission)
+}
+
+fn place_required_environment(cli: &mut Cli) -> crate::core::Result<()> {
+    let Some(requested) = &cli.require_environment else {
+        return Ok(());
+    };
+    let mut offered = Vec::new();
+    for runner in crate::runner::runners::list()? {
+        if cli.runner.as_ref().is_some_and(|id| id != &runner.id) {
+            continue;
+        }
+        if cli.placement == crate::cli_surface::Placement::Local
+            && runner.kind != homeboy_runner_contract::RunnerKind::Local
+        {
+            continue;
+        }
+        if cli.placement.requests_lab() && runner.kind == homeboy_runner_contract::RunnerKind::Local
+        {
+            continue;
+        }
+        offered.push(homeboy_runner_contract::RunnerEnvironmentOffer {
+            environment: crate::runner::runners::RunnerDiscoveryService::environment(&runner.id)
+                .ok(),
+            runner_id: runner.id,
+        });
+    }
+    let selected = crate::runner::runners::select_environment_runner(requested, offered).map_err(
+        |diagnostic| {
+            let mut error = crate::core::Error::validation_invalid_argument(
+                "require_environment",
+                "no runner satisfies the requested environment",
+                None,
+                None,
+            );
+            error.code = crate::core::ErrorCode::RunnerEnvironmentMismatch;
+            error.details = serde_json::json!(diagnostic);
+            error
+        },
+    )?;
+    crate::commands::utils::execution_provenance::capture_environment(requested, &selected);
+    if crate::runner::runners::load(&selected.runner_id)?.kind
+        == homeboy_runner_contract::RunnerKind::Local
+    {
+        cli.placement = crate::cli_surface::Placement::Local;
+    } else {
+        cli.runner = Some(selected.runner_id);
+        cli.placement = crate::cli_surface::Placement::Lab;
+    }
+    Ok(())
 }
 
 fn parsed_command_runner_evidence(

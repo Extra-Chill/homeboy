@@ -68,6 +68,10 @@ pub struct Cli {
     )]
     pub placement: Placement,
 
+    /// Require an observed execution environment (comma-separated field=value).
+    #[arg(long, global = true)]
+    pub require_environment: Option<homeboy_runner_contract::RunnerEnvironmentRequirement>,
+
     /// Observe eligible durable work until terminal completion and return its
     /// exit status. By default, return after verified durable controller handoff
     /// with run identity and inspection commands. Placement is independent.

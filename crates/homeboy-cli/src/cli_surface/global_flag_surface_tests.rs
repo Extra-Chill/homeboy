@@ -36,6 +36,7 @@ fn root_global_flag_surface_is_pinned() {
             "notification-transport",
             "output",
             "placement",
+            "require-environment",
             "runner",
             "runner-env",
             "runner-secret-env",

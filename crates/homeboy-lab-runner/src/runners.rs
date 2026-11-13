@@ -22,6 +22,7 @@ pub use homeboy_runner_contract::{
 
 pub use crate::daemon_repair_codes;
 pub use crate::peer_session_maintenance;
+pub use crate::select_environment_runner;
 pub use crate::{
     apply_change_artifact, apply_workspace_patch, broker_auth_store_path,
     broker_submit_token_for_runner, broker_token_from_env, close_transport, connect,

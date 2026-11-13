@@ -243,6 +243,8 @@ pub struct RunnerReadiness {
 #[serde(deny_unknown_fields)]
 pub struct RunnerInspection {
     pub schema: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub environment: Option<crate::RunnerEnvironment>,
     pub descriptor: RunnerDescriptor,
     pub readiness: RunnerReadiness,
     pub capabilities: RunnerCapabilities,

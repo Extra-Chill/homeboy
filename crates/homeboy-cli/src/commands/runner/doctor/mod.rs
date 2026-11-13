@@ -229,12 +229,17 @@ const COMPACT_PROJECTION_BYTES: usize = 8 * 1024;
 /// is usable. `--full` remains a lossless, redacted evidence surface.
 pub(crate) fn output_projection(mut report: RunnerDoctorOutput, full: bool) -> serde_json::Value {
     ensure_failure(&mut report);
-    let value = serde_json::to_value(&report).unwrap_or(serde_json::Value::Null);
+    let environment =
+        homeboy::runner::runners::RunnerDiscoveryService::environment(&report.runner_id).ok();
+    let mut value = serde_json::to_value(&report).unwrap_or(serde_json::Value::Null);
+    value["environment"] = serde_json::json!(environment);
     if full {
         return homeboy::core::redaction::redact_json(&value);
     }
 
-    bounded_projection_envelope(compact_projection(&report))
+    let mut compact = compact_projection(&report);
+    compact["environment"] = serde_json::json!(environment);
+    bounded_projection_envelope(compact)
 }
 
 fn compact_projection(report: &RunnerDoctorOutput) -> serde_json::Value {
@@ -583,7 +588,15 @@ pub(crate) fn render_summary(payload: &serde_json::Value) -> Option<String> {
     let summary = payload.get("operator_summary")?;
     let checks = payload.get("checks")?.as_array()?.len();
     Some(format!(
-        "Runner doctor\nStatus: {}\nChecks shown: {checks}\nNext: {}",
+        "Runner doctor\nEnvironment: {}\nStatus: {}\nChecks shown: {checks}\nNext: {}",
+        payload
+            .get("environment")
+            .cloned()
+            .and_then(
+                |value| serde_json::from_value::<homeboy_runner_contract::RunnerEnvironment>(value)
+                    .ok()
+            )
+            .map_or_else(|| "unknown".to_string(), |env| env.to_string()),
         summary.get("state")?.as_str()?,
         summary.get("next_action")?.as_str()?,
     ))
