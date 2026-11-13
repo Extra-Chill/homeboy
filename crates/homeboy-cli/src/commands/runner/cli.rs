@@ -400,17 +400,23 @@ pub(super) enum RunnerCommand {
         after_help = "Use `homeboy runner exec [HOMEBOY_OPTIONS] <RUNNER> -- <COMMAND>...` to make the Homeboy/remote-command boundary explicit."
     )]
     Exec(RunnerExecArgs),
-    /// Hold new admission until five-minute load per logical CPU is below the threshold.
+    /// Hold new admission on the whole runner host until five-minute load per
+    /// logical CPU is below the threshold.
     Reserve {
         id: String,
+        /// Quiet threshold: five-minute load average per logical CPU (1.0 = full).
         #[arg(long, required_unless_present = "release")]
         quiet_below: Option<f64>,
+        /// Measurement window length, in minutes.
         #[arg(long, required_unless_present = "release")]
         window: Option<u64>,
+        /// Minutes to wait for quiet before giving up (default 30).
         #[arg(long)]
         wait_timeout: Option<u64>,
+        /// Free-text reason shown in runner status.
         #[arg(long)]
         reason: Option<String>,
+        /// Release the reservation with this id.
         #[arg(long, conflicts_with_all = ["quiet_below", "window", "wait_timeout", "reason"])]
         release: Option<String>,
     },

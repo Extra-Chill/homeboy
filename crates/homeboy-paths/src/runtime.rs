@@ -96,6 +96,13 @@ pub fn runtime_promotion_dir() -> Result<PathBuf> {
     Ok(runtime_promotion_dir_in_root(&homeboy_data()?))
 }
 
+/// Host-wide operator reservation. Every daemon running as one Unix user reads
+/// it, whatever its `HOMEBOY_DAEMON_STATE_DIR`: a quiet window holds the host,
+/// not one controller's daemon (#18017).
+pub fn runner_reservation_file() -> Result<PathBuf> {
+    Ok(homeboy_data()?.join("runner-reservation.json"))
+}
+
 /// Latest bounded launcher-owned termination evidence for this daemon store.
 pub fn daemon_termination_file() -> Result<PathBuf> {
     Ok(daemon_state_dir_in_root(&ambient_daemon_config_root()?).join("termination.json"))
