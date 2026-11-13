@@ -39,6 +39,9 @@ const AB_WORKFLOW: &str = r#"{
     "candidate_repo": { "required": true },
     "candidate_sha": { "required": true },
     "run": { "required": true },
+    "prepare": { "default": "" },
+    "base_materialization": { "default": "local" },
+    "candidate_materialization": { "default": "local" },
     "compare": { "required": true },
     "isolated": { "default": "false" }
   },
@@ -48,6 +51,9 @@ const AB_WORKFLOW: &str = r#"{
                   "--base-repo", "{{inputs.base_repo}}", "--base-sha", "{{inputs.base_sha}}",
                   "--candidate-repo", "{{inputs.candidate_repo}}", "--candidate-sha", "{{inputs.candidate_sha}}",
                   "--isolated", "{{inputs.isolated}}",
+                  "--prepare", "{{inputs.prepare}}",
+                  "--base-materialization", "{{inputs.base_materialization}}",
+                  "--candidate-materialization", "{{inputs.candidate_materialization}}",
                   "--run", "{{inputs.run}}", "--compare", "{{inputs.compare}}"] },
     { "id": "verdict", "needs": ["side"],
       "homeboy": ["workflow", "ab-step", "verdict", "--run", "{{inputs.run}}", "--sides", "{{steps.side.output/items}}"] },
@@ -79,6 +85,8 @@ pub struct AbSide<'a> {
     /// `repo` is already a dedicated checkout of `sha` (a Lab workspace):
     /// run there instead of adding a worktree.
     pub isolated: bool,
+    pub prepare: Option<&'a str>,
+    pub materialization: &'a str,
     pub run: &'a str,
     pub compare: &'a [String],
     pub checkout_root: &'a Path,
@@ -119,22 +127,36 @@ pub fn run_side(side: &AbSide<'_>) -> Result<Value> {
         ));
     }
 
-    let log_path = side.checkout_root.join(format!("{}.log", side.side));
-    let log = std::fs::File::create(&log_path).map_err(|error| io(error, &log_path))?;
-    let log_err = log.try_clone().map_err(|error| io(error, &log_path))?;
-    // The command stays in this process's group: the step job leads that
-    // group, so cancelling the step stops the command with it.
-    let status = Command::new("sh")
-        .arg("-c")
-        .arg(side.run)
-        .current_dir(&checkout)
-        .stdin(Stdio::null())
-        .stdout(Stdio::from(log))
-        .stderr(Stdio::from(log_err))
-        .status()
-        .map_err(|error| Error::internal_io(error.to_string(), Some("run A/B command".into())))?;
-
-    let (files, unmatched) = collect_files(&checkout, side.compare)?;
+    let prepare = side
+        .prepare
+        .filter(|command| !command.is_empty())
+        .map(|command| {
+            run_phase(
+                command,
+                &checkout,
+                &side
+                    .checkout_root
+                    .join(format!("{}.prepare.log", side.side)),
+            )
+        })
+        .transpose()?;
+    let prepare_failed = prepare
+        .as_ref()
+        .is_some_and(|phase| phase["exit_code"] != 0);
+    let run = if prepare_failed {
+        None
+    } else {
+        Some(run_phase(
+            side.run,
+            &checkout,
+            &side.checkout_root.join(format!("{}.log", side.side)),
+        )?)
+    };
+    let (files, unmatched) = if prepare_failed {
+        (BTreeMap::new(), Vec::new())
+    } else {
+        collect_files(&checkout, side.compare)?
+    };
     Ok(json!({
         "schema": AB_SIDE_SCHEMA,
         "side": side.side,
@@ -144,10 +166,34 @@ pub fn run_side(side: &AbSide<'_>) -> Result<Value> {
         "head_matches": true,
         "run_id": side.run_id,
         "checkout": checkout.display().to_string(),
-        "exit_code": status.code(),
+        "materialization": side.materialization,
+        "prepare": prepare,
+        "run": run,
+        "error": if prepare_failed { Some("prepare failed") } else { None },
+        "exit_code": run.as_ref().map(|phase| &phase["exit_code"]),
         "files": files,
         "unmatched": unmatched,
-        "log_tail": log_tail(&log_path),
+        "log_tail": run.as_ref().map(|phase| &phase["log_tail"]),
+    }))
+}
+
+fn run_phase(command: &str, checkout: &Path, log_path: &Path) -> Result<Value> {
+    let log = std::fs::File::create(log_path).map_err(|error| io(error, log_path))?;
+    let log_err = log.try_clone().map_err(|error| io(error, log_path))?;
+    let start = std::time::Instant::now();
+    // Inherit the supervised step's process group so cancellation stops both phases.
+    let status = Command::new("sh")
+        .args(["-c", command])
+        .current_dir(checkout)
+        .stdin(Stdio::null())
+        .stdout(Stdio::from(log))
+        .stderr(Stdio::from(log_err))
+        .status()
+        .map_err(|error| Error::internal_io(error.to_string(), Some("run A/B phase".into())))?;
+    Ok(json!({
+        "exit_code": status.code(),
+        "duration_ms": start.elapsed().as_millis(),
+        "log_tail": log_tail(log_path),
     }))
 }
 
@@ -196,6 +242,14 @@ pub fn verdict(sides: &Value, run: &str) -> Result<Value> {
     };
     let base = pick("base")?;
     let candidate = pick("candidate")?;
+    for record in [base, candidate] {
+        if record["error"].as_str().is_some() {
+            return Err(invalid(
+                "prepare",
+                format!("{}: prepare failed", record["side"]),
+            ));
+        }
+    }
     let files = |record: &Value| -> BTreeMap<String, String> {
         record["files"]
             .as_object()
@@ -308,6 +362,9 @@ fn side_summary(record: &Value, files: BTreeMap<String, String>) -> Value {
         "head_matches": record["head_matches"],
         "run_id": record["run_id"],
         "exit_code": record["exit_code"],
+        "materialization": record["materialization"],
+        "prepare": record["prepare"],
+        "run": record["run"],
         "unmatched": record["unmatched"],
         "files": files,
     })
@@ -526,6 +583,8 @@ mod tests {
                     repo: &dir.join("repo"),
                     sha,
                     isolated: false,
+                    prepare: None,
+                    materialization: "local",
                     run: "sh gen.sh",
                     compare: &compare,
                     checkout_root: &root,
@@ -539,6 +598,56 @@ mod tests {
         cleanup(&[&repo, &repo], false, &root);
         assert!(!root.exists());
         verdict
+    }
+
+    #[test]
+    fn workflow_ab_prepare_is_recorded_and_failure_skips_run() {
+        let dir = tempfile::tempdir().unwrap();
+        let (sha, _) = repo(dir.path(), false);
+        let root = dir.path().join("records");
+        for (prepare, fails) in [
+            ("echo prepared; echo dependency > dependency", false),
+            ("echo prep-error; exit 7", true),
+        ] {
+            let record = run_side(&AbSide {
+                side: "base",
+                repo: dir.path(),
+                sha: &sha,
+                isolated: false,
+                prepare: Some(prepare),
+                materialization: "snapshot",
+                run: "test -f dependency && sh gen.sh",
+                compare: &["out".into()],
+                checkout_root: &root,
+                run_id: "prepare-test".into(),
+            })
+            .unwrap();
+            assert_eq!(record["materialization"], "snapshot");
+            assert!(record["prepare"]["duration_ms"].is_number());
+            if fails {
+                assert_eq!(record["prepare"]["exit_code"], 7);
+                assert!(record["prepare"]["log_tail"]
+                    .as_str()
+                    .unwrap()
+                    .contains("prep-error"));
+                assert_eq!(record["error"], "prepare failed");
+                assert!(record["run"].is_null());
+                assert!(!root.join("base/out").exists());
+                assert!(verdict(
+                    &json!([record.clone(), {"schema": AB_SIDE_SCHEMA, "side":"candidate"}]),
+                    "x"
+                )
+                .unwrap_err()
+                .to_string()
+                .contains("prepare failed"));
+            } else {
+                assert_eq!(record["prepare"]["exit_code"], 0);
+                assert_eq!(record["run"]["exit_code"], 0);
+                assert!(record["files"]["out/a.txt"].is_string());
+                assert!(record["files"].get("dependency").is_none());
+            }
+        }
+        cleanup(&[dir.path(), dir.path()], false, &root);
     }
 
     #[test]
