@@ -1248,7 +1248,8 @@ fn retry_lineage_refuses_an_active_successor_and_requires_force_after_terminal_s
 
 /// #17650: a failed Cook successor that never reached provider work is
 /// evidence, not a competing retry, so the next retry needs no `--force`;
-/// a failed successor that consumed provider work still requires it.
+/// a failed successor that consumed provider work still requires it, unless
+/// the retry is of that successor itself.
 #[test]
 fn retry_lineage_does_not_require_force_after_continuation_only_cook_successors() {
     let context = homeboy_core::test_support::HermeticTestContext::new();
@@ -1289,6 +1290,20 @@ fn retry_lineage_does_not_require_force_after_continuation_only_cook_successors(
     let refused = reserve("continuation-only-third")
         .expect_err("a failed substantive successor still requires --force");
     assert_eq!(refused.details["field"], "force");
+
+    // Retrying the newest attempt continues its own chain instead of branching
+    // beside it, so it needs no --force: `recover` plans exactly this retry.
+    let next = retry_with_runtime_admission_in_store(
+        &lifecycle_store,
+        &substantive.run_id,
+        Some("continuation-only-next"),
+        false,
+        true,
+        None,
+        |_| Ok(json!({})),
+    )
+    .expect("retrying the newest attempt needs no --force");
+    assert_eq!(next.metadata["retry_of"], substantive.run_id);
 }
 
 /// The exact intent claim preserves the reserved run's complete lineage in
