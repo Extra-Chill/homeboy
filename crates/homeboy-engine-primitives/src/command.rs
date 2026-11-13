@@ -2305,12 +2305,80 @@ pub fn isolate_process_tree(command: &mut Command) {
     }
 }
 
+#[cfg(target_os = "linux")]
+struct ExecutionSupervisorExecutable {
+    path: std::ffi::CString,
+    command: std::ffi::CString,
+}
+
+#[cfg(target_os = "linux")]
+static EXECUTION_SUPERVISOR_EXECUTABLE: std::sync::OnceLock<ExecutionSupervisorExecutable> =
+    std::sync::OnceLock::new();
+
+/// Opt in to a fresh supervisor image. The first registration wins; callers
+/// must dispatch `__execution_supervisor` before initializing application state.
+#[cfg(target_os = "linux")]
+pub fn register_execution_supervisor_executable(
+    path: impl AsRef<std::path::Path>,
+) -> io::Result<()> {
+    use std::os::unix::ffi::OsStrExt;
+    let path = std::ffi::CString::new(path.as_ref().as_os_str().as_bytes())
+        .map_err(|error| io::Error::new(io::ErrorKind::InvalidInput, error))?;
+    let _ = EXECUTION_SUPERVISOR_EXECUTABLE.set(ExecutionSupervisorExecutable {
+        path,
+        command: std::ffi::CString::new("__execution_supervisor").unwrap(),
+    });
+    Ok(())
+}
+
+/// Enter the internal supervisor protocol after exec. This never initializes
+/// application state and exits directly when supervision is complete.
+#[cfg(target_os = "linux")]
+pub fn run_execution_supervisor_child(args: &[String]) -> ! {
+    if let [root, liveness, protocol] = args {
+        if let (Ok(root), Ok(liveness), Ok(protocol)) = (
+            root.parse::<u32>(),
+            liveness.parse::<RawFd>(),
+            protocol.parse::<RawFd>(),
+        ) {
+            if root > 0 && root <= i32::MAX as u32 && liveness >= -1 && protocol >= 0 {
+                execution_supervisor_loop(root, liveness, protocol);
+            }
+        }
+    }
+    unsafe { libc::_exit(1) }
+}
+
+/// NUL-terminated decimal formatting without allocation in the post-fork child.
+#[cfg(target_os = "linux")]
+fn supervisor_decimal(value: i32, buffer: &mut [u8; 12]) -> *const libc::c_char {
+    let negative = value < 0;
+    let mut value = value.unsigned_abs();
+    let mut index = buffer.len() - 1;
+    buffer[index] = 0;
+    loop {
+        index -= 1;
+        buffer[index] = b'0' + (value % 10) as u8;
+        value /= 10;
+        if value == 0 {
+            break;
+        }
+    }
+    if negative {
+        index -= 1;
+        buffer[index] = b'-';
+    }
+    buffer[index..].as_ptr().cast()
+}
+
 #[cfg(unix)]
 fn configure_isolated_process_tree(
     command: &mut Command,
     registration_fd: RawFd,
     liveness_read_fd: RawFd,
 ) {
+    #[cfg(target_os = "linux")]
+    let supervisor_executable = EXECUTION_SUPERVISOR_EXECUTABLE.get();
     unsafe {
         use std::os::unix::process::CommandExt;
 
@@ -2339,6 +2407,37 @@ fn configure_isolated_process_tree(
                     }
                     return Ok(());
                 }
+                if let Some(executable) = supervisor_executable {
+                    let mut descriptors_ready = true;
+                    for fd in [liveness_read_fd, registration_fd] {
+                        if fd >= 0 {
+                            let flags = libc::fcntl(fd, libc::F_GETFD);
+                            if flags < 0
+                                || libc::fcntl(fd, libc::F_SETFD, flags & !libc::FD_CLOEXEC) < 0
+                            {
+                                descriptors_ready = false;
+                            }
+                        }
+                    }
+                    if descriptors_ready {
+                        let mut root_buffer = [0; 12];
+                        let mut liveness_buffer = [0; 12];
+                        let mut protocol_buffer = [0; 12];
+                        let argv = [
+                            executable.path.as_ptr(),
+                            executable.command.as_ptr(),
+                            supervisor_decimal(root, &mut root_buffer),
+                            supervisor_decimal(liveness_read_fd, &mut liveness_buffer),
+                            supervisor_decimal(registration_fd, &mut protocol_buffer),
+                            std::ptr::null(),
+                        ];
+                        unsafe extern "C" {
+                            static environ: *const *const libc::c_char;
+                        }
+                        libc::execve(executable.path.as_ptr(), argv.as_ptr(), environ);
+                    }
+                }
+                // Failed exec (or no opt-in): retain the original supervision.
                 execution_supervisor_loop(root as u32, liveness_read_fd, registration_fd);
             }
             #[cfg(not(target_os = "linux"))]
@@ -2400,10 +2499,11 @@ fn execution_supervisor_loop(
     if protocol_write_fd < 0 || !write_all_fd(protocol_write_fd, &identity) {
         unsafe { libc::_exit(1) };
     }
-    // Close the std exec-error pipe write end inherited from Command::spawn.
-    // The root child still holds it, so spawn can return on root exec success
-    // or receive the root exec errno. Keeping this fd open would block spawn
-    // until the supervisor exits.
+    // In the in-place fallback, close the std exec-error pipe write end
+    // inherited from Command::spawn. After supervisor exec it is already closed
+    // by CLOEXEC. The root child still holds its copy, so spawn can return on
+    // root exec success or receive the root exec errno. Keep descriptor cleanup
+    // in both paths so no unrelated inherited descriptors survive.
     let mut keep = [-1; 2];
     let mut n = 0;
     if liveness_read_fd >= 0 {
@@ -3938,8 +4038,31 @@ mod adopted_child_reaping_tests {
         .expect("instant double-fork root completes")
     }
 
+    // These assertions inspect every zombie parented to the test process.
+    // Run in a dedicated harness so concurrent spawn/wait tests cannot change
+    // that process-wide snapshot between the before and after reads.
+    fn run_zombie_assertion_in_isolated_harness(name: &str) -> bool {
+        const MARKER: &str = "HOMEBOY_ZOMBIE_ASSERTION_CHILD";
+        if std::env::var(MARKER).ok().as_deref() == Some(name) {
+            return false;
+        }
+        let output = Command::new(std::env::current_exe().expect("test executable"))
+            .args(["--exact", name, "--nocapture"])
+            .env(MARKER, name)
+            .output()
+            .expect("isolated zombie assertion");
+        assert!(output.status.success(), "{output:?}");
+        true
+    }
+
     #[test]
     fn guarded_completion_reaps_instant_double_fork_without_touching_sibling() {
+        if run_zombie_assertion_in_isolated_harness(concat!(
+            "command::adopted_child_reaping_tests::",
+            "guarded_completion_reaps_instant_double_fork_without_touching_sibling"
+        )) {
+            return;
+        }
         let mut sibling = Command::new("sh");
         sibling
             .args(["-c", "exec sleep 30"])
@@ -3979,6 +4102,12 @@ mod adopted_child_reaping_tests {
 
     #[test]
     fn repeated_instant_double_forks_leave_no_adopted_zombies() {
+        if run_zombie_assertion_in_isolated_harness(concat!(
+            "command::adopted_child_reaping_tests::",
+            "repeated_instant_double_forks_leave_no_adopted_zombies"
+        )) {
+            return;
+        }
         let mut sibling = Command::new("sh");
         sibling
             .args(["-c", "exec sleep 30"])

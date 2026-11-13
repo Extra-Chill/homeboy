@@ -2,6 +2,18 @@ use homeboy::cli_runtime::CliRuntime;
 
 fn main() -> std::process::ExitCode {
     let args: Vec<String> = std::env::args().collect();
+    #[cfg(target_os = "linux")]
+    {
+        if args.get(1).map(String::as_str) == Some("__execution_supervisor") {
+            homeboy_core::engine::command::run_execution_supervisor_child(
+                args.get(2..).unwrap_or_default(),
+            );
+        }
+        if let Ok(executable) = std::env::current_exe() {
+            let _ =
+                homeboy_core::engine::command::register_execution_supervisor_executable(executable);
+        }
+    }
     // Stable, store-free installer query. Never initialize or migrate state here.
     if args.get(1).map(String::as_str) == Some("--observation-schema-version") {
         println!(
