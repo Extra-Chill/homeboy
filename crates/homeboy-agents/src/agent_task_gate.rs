@@ -430,9 +430,7 @@ impl VerifyGateOptions {
         }
     }
 
-    /// Toolchain preflight is opt-in. Gate commands are shell programs and may
-    /// be shell builtins, provider-owned aliases, or compound expressions, so
-    /// treating their first token as an executable changes their semantics.
+    /// Explicit initialization probes supplement inferred executable discovery.
     pub(crate) fn required_toolchains(&self) -> Vec<AgentTaskGateToolchainRequirement> {
         self.gate_toolchains.clone()
     }
@@ -5230,7 +5228,21 @@ pub fn preflight_gate_toolchains(
 }
 
 pub(crate) fn preflight_verify_gate_options(cwd: &Path, gates: &VerifyGateOptions) -> Result<()> {
-    if gates.required_toolchains().is_empty()
+    let inferred: Vec<_> = gates
+        .verify
+        .iter()
+        .chain(&gates.private_verify)
+        .flat_map(|gate| {
+            gate_runtime::executables(gate).into_iter().map(|command| {
+                AgentTaskGateToolchainRequirement {
+                    command,
+                    probe_arguments: vec![gate_runtime::RESOLVE_ONLY.into(), gate.clone()],
+                }
+            })
+        })
+        .collect();
+    if inferred.is_empty()
+        && gates.required_toolchains().is_empty()
         && gates.gate_target_probes().is_empty()
         && gates.gate_package_artifacts.is_empty()
         && gates.gate_environment.extension_inputs.is_empty()
@@ -5255,6 +5267,16 @@ pub(crate) fn preflight_verify_gate_options(cwd: &Path, gates: &VerifyGateOption
         environment.lab_runner = runner;
         environment.hydrate_rust_cache &= gates.hydrate_dependencies;
         environment.hydrate_dependencies &= gates.hydrate_dependencies;
+        if !inferred.is_empty() {
+            preflight_gate_toolchains(
+                cwd,
+                &environment,
+                &inferred,
+                &[],
+                None,
+                gates.gate_timeout(),
+            )?;
+        }
         preflight_gate_toolchains(
             cwd,
             &environment,
@@ -5312,6 +5334,8 @@ fn gate_target_preflight_error(
     error
 }
 
+mod gate_runtime;
+
 fn preflight_gate_toolchains_local(
     cwd: &Path,
     policy: &AgentTaskGateEnvironmentPolicy,
@@ -5331,6 +5355,33 @@ fn preflight_gate_toolchains_local(
     // the first child starts cannot make an otherwise successful probe fail.
     let mut started = None;
     for requirement in requirements {
+        if requirement.probe_arguments.first().map(String::as_str)
+            == Some(gate_runtime::RESOLVE_ONLY)
+        {
+            let path = selected_environment
+                .values
+                .get("PATH")
+                .cloned()
+                .or_else(|| {
+                    (policy.mode == AgentTaskGateEnvironmentMode::Inherit)
+                        .then(|| std::env::var("PATH").ok())
+                        .flatten()
+                })
+                .unwrap_or_else(|| "/usr/bin:/bin".into());
+            let command = &requirement.command;
+            let resolved = homeboy_engine_primitives::command_path::resolve_command_on_path(
+                command,
+                std::ffi::OsStr::new(&path),
+            );
+            if resolved.is_none() {
+                return Err(gate_runtime::unavailable(
+                    &requirement.probe_arguments[1],
+                    command,
+                    policy.lab_runner.as_deref().unwrap_or("local"),
+                ));
+            }
+            continue;
+        }
         let elapsed = started.map(|started: std::time::Instant| started.elapsed());
         let remaining = timeout.saturating_sub(elapsed.unwrap_or_default());
         if started.is_some() && remaining.is_zero() {
