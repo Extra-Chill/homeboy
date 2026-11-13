@@ -47,7 +47,7 @@ function ssh(c, command, options = {}) {
   return exec('ssh', ['-p', String(c.port), '-i', c.sshKey, '-o', 'BatchMode=yes', '-o', 'ConnectTimeout=5', '-o', 'StrictHostKeyChecking=accept-new', '-o', `UserKnownHostsFile=${c.directory}/known_hosts`, `${c.adminUser}@127.0.0.1`, 'powershell.exe', '-NoProfile', '-ExecutionPolicy', 'Bypass', '-EncodedCommand', encoded(command)], options);
 }
 function exists(c) { return spawnSync('docker', ['container', 'inspect', c.name], { stdio: 'ignore' }).status === 0; }
-function stop(c) { if (exists(c)) docker(c, 'stop', '-t', '120', c.name); }
+function stop(c) { if (exists(c)) exec('docker', ['stop', '-t', '120', c.name], { timeout: 180000 }); }
 function state(c) { return JSON.parse(fs.readFileSync(`${c.directory}/identity.json`, 'utf8')); }
 function writeJson(file, data) { fs.writeFileSync(file, JSON.stringify(data, null, 2) + '\n', { mode: 0o600 }); }
 function snapshot(c) {
@@ -102,13 +102,7 @@ async function prepare(c) {
   if (fs.existsSync(`${c.directory}/base/identity.json`)) restore(c);
   if (!exists(c)) bootstrap(c);
   await boot(c);
-  const guest = JSON.parse(ssh(c, `@{ build=[Environment]::OSVersion.ToString(); expired=@(Get-CimInstance SoftwareLicensingProduct | Where-Object { $_.Name -like '*Windows*' -and $_.PartialProductKey -and $_.LicenseStatus -ne 1 }).Count -gt 0 } | ConvertTo-Json -Compress`));
-  if (guest.expired) {
-    if (c.rebuilding) throw new ProviderError('image_expired', 'Fresh Windows image is not licensed');
-    stop(c); docker(c, 'rm', c.name);
-    for (const item of ['base', 'storage', 'identity.json', 'known_hosts']) fs.rmSync(`${c.directory}/${item}`, { force: true, recursive: true });
-    return prepare({ ...c, rebuilding: true });
-  }
+  const guest = { build: ssh(c, '[Environment]::OSVersion.ToString()').trim() };
   const previous = fs.existsSync(`${c.directory}/identity.json`) ? state(c) : null;
   const image = docker(c, 'inspect', '--format', '{{.Image}}', c.name);
   const identity = { build: guest.build, backendImageHash: image, imageHash: previous?.imageHash, installedAt: previous?.installedAt || new Date().toISOString(), expiresAt: previous?.expiresAt || new Date(Date.now() + 89 * 86400000).toISOString() };
