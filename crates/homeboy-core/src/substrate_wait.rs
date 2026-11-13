@@ -63,6 +63,10 @@ pub fn is_transient_refusal(code: &str, details: &serde_json::Value) -> bool {
         || details["substrate_wait"] == "runner_restarting"
         || reasons_transient(&details["runner_availability"]["reasons"])
         || reasons_transient(&details["readiness_reasons"])
+        // A Lab gate admission refusal states its own verdict: the
+        // submission re-check can see pressure return after the controller
+        // already waited it out (#18058).
+        || details["transient"] == true
 }
 
 pub fn is_transient_error(error: &Error) -> bool {
@@ -168,6 +172,21 @@ mod tests {
                     serde_json::json!({"readiness_reasons": ["daemon_freshness_unavailable", "daemon_unverified"]}),
                 ),
                 true,
+            ),
+            // #18058: the Lab gate's submission re-check refusal.
+            (
+                refusal(
+                    ErrorCode::RunnerLabTransportFailure,
+                    serde_json::json!({"stage": "admission", "reasons": ["pressure"], "freshness": "fresh", "transient": true}),
+                ),
+                true,
+            ),
+            (
+                refusal(
+                    ErrorCode::RunnerLabTransportFailure,
+                    serde_json::json!({"stage": "admission", "reasons": ["not_connected"], "freshness": "fresh", "transient": false}),
+                ),
+                false,
             ),
             (
                 refusal(
