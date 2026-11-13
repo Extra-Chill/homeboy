@@ -3256,7 +3256,12 @@ fn cook_review_dossier_with_stores_and_review_form(
             .as_ref(),
         verification_promotion,
     );
-    let mut evidence = terminal_form.evidence.clone();
+    let mut evidence: Vec<AgentTaskReviewEvidence> = terminal_form
+        .evidence
+        .iter()
+        .cloned()
+        .map(AgentTaskReviewEvidence::for_reviewers)
+        .collect();
     if evidence.is_empty() {
         evidence.push(AgentTaskReviewEvidence {
             summary: if terminal_form.evidence_required {
