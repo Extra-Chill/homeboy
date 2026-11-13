@@ -5580,9 +5580,10 @@ fn retry_unmaterialized_cook_admission_locked(
             retry_run_id = format!("retry-{}", uuid::Uuid::new_v4());
         }
     }
+    let chain = retry_chain_in_store(lifecycle_store, &source)?;
     if successors
         .iter()
-        .any(|record| successor_requires_force(record))
+        .any(|record| !chain.contains(&record.run_id) && successor_requires_force(record))
         && !force
     {
         return Err(Error::validation_invalid_argument(
@@ -5916,9 +5917,10 @@ where
                 requested_run_id = None;
             }
         }
+        let chain = retry_chain_in_store(lifecycle_store, &source)?;
         if successors
             .iter()
-            .any(|record| successor_requires_force(record))
+            .any(|record| !chain.contains(&record.run_id) && successor_requires_force(record))
             && !force
         {
             return Err(Error::validation_invalid_argument(
@@ -6152,6 +6154,30 @@ pub(crate) fn retry_root_run_id_in_store(
     for _ in 0..RETRY_LINEAGE_LIMIT {
         let Some(parent) = current.metadata.get("retry_of").and_then(Value::as_str) else {
             return Ok(current.run_id);
+        };
+        current = lifecycle_store.read_record(&sanitize_run_id(parent))?;
+    }
+    Err(Error::validation_invalid_argument(
+        "retry_of",
+        "retry lineage exceeds the supported depth",
+        Some(record.run_id.clone()),
+        None,
+    ))
+}
+
+/// The run being retried and the retries it descends from. Retrying it
+/// continues that chain, so they never compete with the new retry; only a
+/// successor on another branch does.
+fn retry_chain_in_store(
+    lifecycle_store: &AgentTaskLifecycleStore,
+    record: &AgentTaskRunRecord,
+) -> Result<std::collections::HashSet<String>> {
+    let mut chain = std::collections::HashSet::new();
+    let mut current = record.clone();
+    for _ in 0..RETRY_LINEAGE_LIMIT {
+        chain.insert(current.run_id.clone());
+        let Some(parent) = current.metadata.get("retry_of").and_then(Value::as_str) else {
+            return Ok(chain);
         };
         current = lifecycle_store.read_record(&sanitize_run_id(parent))?;
     }
