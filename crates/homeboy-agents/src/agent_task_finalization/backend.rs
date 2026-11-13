@@ -516,6 +516,31 @@ impl AgentTaskPrFinalizationBackend for RealAgentTaskPrFinalizationBackend {
             git_output(path, &["rev-parse", "--symbolic-full-name", "@{upstream}"]).ok();
         git_output(path, &["update-ref", &upstream_ref, &verified_remote_sha])?;
         if existing_upstream.as_deref() != Some(upstream_ref.as_str()) {
+            // A single-branch clone fetches only its default branch, and Git
+            // refuses an upstream outside the remote's fetch refspec. Track the
+            // published branch the way `git remote set-branches --add` does.
+            let wildcard = format!("refs/heads/*:refs/remotes/{push_remote}/*");
+            let exact = format!("refs/heads/{head}:{upstream_ref}");
+            let tracked = git_output(
+                path,
+                &[
+                    "config",
+                    "--get-all",
+                    &format!("remote.{push_remote}.fetch"),
+                ],
+            )
+            .unwrap_or_default()
+            .lines()
+            .any(|refspec| {
+                let refspec = refspec.trim().trim_start_matches('+');
+                refspec == wildcard || refspec == exact
+            });
+            if !tracked {
+                git_output(
+                    path,
+                    &["remote", "set-branches", "--add", &push_remote, head],
+                )?;
+            }
             git_output(
                 path,
                 &[
@@ -1540,28 +1565,36 @@ mod remote_base_tests {
 
     #[test]
     fn pushed_branch_without_upstream_tracks_verified_remote_head() {
-        let (repo, _origin) = publication_repo();
-        let commit_sha = git_output(repo.path().to_str().unwrap(), &["rev-parse", "HEAD"]).unwrap();
+        // A single-branch clone's fetch refspec covers only its default
+        // branch; the published branch still gets an upstream.
+        for refspec in [None, Some("+refs/heads/main:refs/remotes/origin/main")] {
+            let (repo, _origin) = publication_repo();
+            if let Some(refspec) = refspec {
+                git(repo.path(), &["config", "remote.origin.fetch", refspec]);
+            }
+            let commit_sha =
+                git_output(repo.path().to_str().unwrap(), &["rev-parse", "HEAD"]).unwrap();
 
-        let tracking = RealAgentTaskPrFinalizationBackend
-            .push_branch(repo.path().to_str().unwrap(), &commit_sha, "feature")
-            .expect("branch published");
+            let tracking = RealAgentTaskPrFinalizationBackend
+                .push_branch(repo.path().to_str().unwrap(), &commit_sha, "feature")
+                .expect("branch published");
 
-        assert_eq!(
-            upstream(repo.path()).unwrap(),
-            "refs/remotes/origin/feature"
-        );
-        assert_eq!(tracking.local_branch, "feature");
-        assert_eq!(tracking.remote, "origin");
-        assert_eq!(tracking.upstream_ref, "refs/remotes/origin/feature");
-        assert_eq!(
-            tracking.verified_remote_sha,
-            git_output(repo.path().to_str().unwrap(), &["rev-parse", "HEAD"]).unwrap()
-        );
-        assert_eq!(
-            git_output(repo.path().to_str().unwrap(), &["rev-parse", "@{upstream}"]).unwrap(),
-            tracking.verified_remote_sha
-        );
+            assert_eq!(
+                upstream(repo.path()).unwrap(),
+                "refs/remotes/origin/feature"
+            );
+            assert_eq!(tracking.local_branch, "feature");
+            assert_eq!(tracking.remote, "origin");
+            assert_eq!(tracking.upstream_ref, "refs/remotes/origin/feature");
+            assert_eq!(
+                tracking.verified_remote_sha,
+                git_output(repo.path().to_str().unwrap(), &["rev-parse", "HEAD"]).unwrap()
+            );
+            assert_eq!(
+                git_output(repo.path().to_str().unwrap(), &["rev-parse", "@{upstream}"]).unwrap(),
+                tracking.verified_remote_sha
+            );
+        }
     }
 
     #[test]
