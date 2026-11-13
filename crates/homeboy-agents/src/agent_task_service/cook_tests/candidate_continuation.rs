@@ -6,24 +6,26 @@ fn make_multi_attempt(
     promotion: &AgentTaskPromotionReport,
     target: &std::path::Path,
     green: bool,
+    attempt: u32,
 ) -> (CookRequest, AgentTaskPromotionReport) {
     let recipes = CookRecipeStore::from_current_data_root().unwrap();
     let store = test_lifecycle_store();
     let original = &options.identity.initial_run_id;
     let mut options = options.clone();
-    options.identity.initial_run_id = format!("{original}-attempt-2");
+    let base = original.split("-attempt-").next().unwrap();
+    options.identity.initial_run_id = format!("{base}-attempt-{attempt}");
     let run = &options.identity.initial_run_id;
     recipes
         .record_recipe_attempt(
             &options.identity.cook_id,
-            2,
+            attempt,
             run,
             &options.identity.initial_plan,
         )
         .unwrap();
     submit_plan_in_test_store(&store, &options.identity.initial_plan, Some(run)).unwrap();
     store
-        .record_cook_attempt(&options.identity.cook_id, 2, run)
+        .record_cook_attempt(&options.identity.cook_id, attempt, run)
         .unwrap();
     let aggregate = store.read_aggregate(original).unwrap();
     store
@@ -123,7 +125,29 @@ impl crate::agent_task_service::CookRecoveryPerformer for PublishCandidate {
 #[test]
 fn multi_attempt_candidate_recoverable_recover_publishes_candidate_sha() {
     with_corrected_gate_candidate(|options, target, promotion| {
-        let (options, promotion) = make_multi_attempt(&options, &promotion, &target, true);
+        let (superseded, promotion) = make_multi_attempt(&options, &promotion, &target, false, 2);
+        let (options, promotion) = make_multi_attempt(&superseded, &promotion, &target, true, 3);
+        // Every attempt of a Cook projects the Cook's one step, a superseded
+        // attempt included: its status names `recover <cook>`.
+        let plan =
+            crate::agent_task_service::plan_cook_recovery(&options.identity.cook_id).unwrap();
+        for run in [
+            &superseded.identity.initial_run_id,
+            &options.identity.initial_run_id,
+        ] {
+            let projected = crate::orchestration::project_record(
+                &agent_task_lifecycle::exact_record(run).unwrap(),
+                None,
+            )
+            .unwrap()
+            .recovery
+            .unwrap();
+            assert_eq!(
+                projected.step,
+                plan.step.action_name().unwrap_or("none"),
+                "{run}"
+            );
+        }
         let sha = promotion.provenance["candidate_commit"]["candidate_sha"]
             .as_str()
             .unwrap();
@@ -227,7 +251,7 @@ fn publication_failure_recover_publishes_same_candidate_without_provider_executi
 #[test]
 fn multi_attempt_substantive_adopt_uses_terminal_execution_lineage() {
     with_corrected_gate_candidate(|options, target, promotion| {
-        let (options, promotion) = make_multi_attempt(&options, &promotion, &target, true);
+        let (options, promotion) = make_multi_attempt(&options, &promotion, &target, true, 2);
         let sha = promotion.provenance["candidate_commit"]["candidate_sha"]
             .as_str()
             .unwrap();
@@ -317,7 +341,7 @@ fn adoption_supersedes_deferred_and_pending_status_with_passing_candidate_proof(
 #[test]
 fn replacement_gates_recover_attaches_proof_to_candidate_sha_without_artifacts() {
     with_corrected_gate_candidate(|options, target, promotion| {
-        let (options, mut promotion) = make_multi_attempt(&options, &promotion, &target, false);
+        let (options, mut promotion) = make_multi_attempt(&options, &promotion, &target, false, 2);
         let candidate = promotion.provenance["candidate_commit"].clone();
         promotion
             .provenance
