@@ -308,10 +308,6 @@ mod tests {
             .reason
             .as_deref()
             .is_some_and(|reason| reason.contains("not published")));
-        assert_eq!(
-            verdict.next_action,
-            "homeboy agent-task recover agent-task-verdict"
-        );
     }
 
     fn live_gate_driver_run(state: ControlPlaneRunState, phase: Option<&str>) -> ControlPlaneRun {
@@ -346,20 +342,10 @@ mod tests {
         assert!(!verdict.next_action.contains("recover"));
     }
 
+    /// #15017: a blocked finalization names its step, not a generic
+    /// "publication: not attempted".
     #[test]
-    fn live_gate_driver_absent_verdict_keeps_recover() {
-        let verdict = cook_verdict(&live_gate_driver_run(
-            ControlPlaneRunState::CandidateRecoverable,
-            None,
-        ));
-        assert_eq!(verdict.state, "candidate_recoverable");
-        assert_eq!(verdict.next_action, "homeboy agent-task recover cook-16058");
-    }
-
-    /// #15017: a blocked finalization names its step and the continuation that
-    /// recovers it, not a generic "publication: not attempted".
-    #[test]
-    fn blocked_finalization_names_the_step_and_its_continuation() {
+    fn blocked_finalization_names_the_step() {
         let mut run = resource(ControlPlaneRunState::CandidateRecoverable);
         run.blocker = Some(homeboy_control_plane_contract::ControlPlaneBlocker {
             details: None,
@@ -375,10 +361,6 @@ mod tests {
         assert_eq!(
             verdict.reason.as_deref(),
             Some("finalization: HEAD is behind or diverged from resolved base `main`")
-        );
-        assert_eq!(
-            verdict.next_action,
-            "homeboy agent-task recover agent-task-verdict"
         );
     }
 

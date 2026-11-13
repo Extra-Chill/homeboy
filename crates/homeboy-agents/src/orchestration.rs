@@ -4174,6 +4174,7 @@ pub fn project_record(
     // interruption; the reconcile action remains the mutating path.
     let record = &project_dead_candidate_adoption(record);
     let mut resource = project_summary_fields(record, plan)?;
+    resource.recovery = projected_cook_recovery(record);
     resource.action_eligibility =
         if crate::agent_task_service::live_cook_continuation(record).is_some() {
             None
@@ -4293,7 +4294,6 @@ fn project_summary_fields(
     resource.candidate = candidate(record, delivery.as_ref());
     resource.gates = gates(record, delivery.as_ref());
     resource.publication = delivery.as_ref().and_then(publication);
-    resource.recovery = projected_cook_recovery(record);
     project_live_gate_verification(&mut resource, record);
     if let Some(continuation) = crate::agent_task_service::live_cook_continuation(record) {
         resource.state = ControlPlaneRunState::Running;
@@ -4303,7 +4303,6 @@ fn project_summary_fields(
             id: continuation["owner_pid"].to_string(),
         });
         resource.blocker = None;
-        resource.recovery = None;
     }
     if let Some(fence) = record
         .metadata
@@ -4311,7 +4310,6 @@ fn project_summary_fields(
         .or_else(|| record.metadata.get("candidate_retirement"))
     {
         resource.state = ControlPlaneRunState::Cancelled;
-        resource.recovery = None;
         resource.phase = Some("cancelled".into());
         resource.blocker = Some(ControlPlaneBlocker {
             details: None,
@@ -4392,33 +4390,58 @@ fn project_live_gate_verification_in(
     }
     resource.state = ControlPlaneRunState::Running;
     resource.phase = Some(LIVE_GATE_VERIFYING_PHASE.to_string());
-    resource.recovery = None;
 }
 
-/// The one recovery step (#15925) projected into status and review when the
-/// durable Cook state names an adopt (#16181): a terminal `no_changes` attempt
-/// whose destination worktree holds commits ahead of its base is finalized by
-/// adopting that worktree HEAD, not by resuming. This reads the same
-/// [`plan_cook_recovery`] decision `agent-task recover` performs, so the
-/// projections and the recover entry point can never disagree. Every other
-/// state projects no recovery, leaving today's projections unchanged.
+/// The one recovery step (#15925) a Cook's durable state names, projected so
+/// `status`, `diagnose`, the Cook verdict and `review` read the decision
+/// [`plan_cook_recovery`] makes for `agent-task recover` instead of deciding
+/// again. A state with no step projects step `none` and the `diagnose`
+/// command, which explains why, so no surface ever names a step `recover`
+/// would not perform. Runs that are not Cooks project nothing.
 fn projected_cook_recovery(record: &AgentTaskRunRecord) -> Option<ControlPlaneRecovery> {
-    if crate::agent_task_service::cook_recovery_status(record) != "no_changes" {
-        return None;
-    }
-    let plan = crate::agent_task_service::plan_cook_recovery(&record.run_id).ok()?;
-    let crate::agent_task_service::CookRecoveryStep::Adopt { candidate_ref } = plan.step else {
-        return None;
+    let cook_id = record
+        .metadata
+        .get("cook_id")
+        .and_then(Value::as_str)
+        .map(str::to_string)
+        .or_else(|| {
+            crate::agent_task_lifecycle::is_unmaterialized_cook_admission(record)
+                .then(|| record.run_id.clone())
+        })?;
+    let quote = homeboy_core::engine::shell::quote_arg;
+    let Ok(plan) = crate::agent_task_service::plan_cook_recovery(&record.run_id) else {
+        return Some(ControlPlaneRecovery {
+            run: RunId::new(&record.run_id).ok()?,
+            step: "none".to_string(),
+            candidate_ref: None,
+            command: format!("homeboy agent-task diagnose {}", quote(&cook_id)),
+            cook_id,
+        });
+    };
+    let step = plan.step.action_name().unwrap_or("none").to_string();
+    let (candidate_ref, command) = match &plan.step {
+        crate::agent_task_service::CookRecoveryStep::Adopt { candidate_ref } => (
+            Some(candidate_ref.clone()),
+            format!(
+                "homeboy agent-task adopt {} --candidate-ref {candidate_ref}",
+                quote(&plan.cook_id)
+            ),
+        ),
+        step if step.is_none() => (
+            None,
+            format!("homeboy agent-task diagnose {}", quote(&plan.cook_id)),
+        ),
+        _ => (
+            None,
+            format!("homeboy agent-task recover {}", quote(&plan.cook_id)),
+        ),
     };
     Some(ControlPlaneRecovery {
-        cook_id: plan.cook_id.clone(),
         run: RunId::new(&plan.run_id).ok()?,
-        step: "adopt".to_string(),
-        candidate_ref: Some(candidate_ref.clone()),
-        command: format!(
-            "homeboy agent-task adopt {} --candidate-ref {candidate_ref}",
-            plan.cook_id
-        ),
+        cook_id: plan.cook_id,
+        step,
+        candidate_ref,
+        command,
     })
 }
 
@@ -8988,7 +9011,7 @@ mod tests {
                 let projected =
                     project_record(&store.read_record(&attempt_id).unwrap(), None).unwrap();
                 assert_eq!(projected.state, ControlPlaneRunState::Cancelled);
-                assert!(projected.recovery.is_none());
+                assert_eq!(projected.recovery.as_ref().unwrap().step, "none");
                 assert!(projected.blocker.unwrap().message.contains("operator stop"));
                 let fence = store
                     .read_cook_index(&cook_id)

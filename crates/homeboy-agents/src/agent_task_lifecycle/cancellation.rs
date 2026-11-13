@@ -1731,7 +1731,7 @@ mod tests {
             assert!(retired.metadata["cancellation_fence"]["cancelled_at"].is_string());
             assert!(!claim_cook_terminal_notification_in_store(&store, cook, "test").unwrap());
             let projection = crate::orchestration::project_record(&retired, None).unwrap();
-            assert!(projection.recovery.is_none());
+            assert_eq!(projection.recovery.unwrap().step, "none");
             assert_eq!(
                 projection.state,
                 homeboy_control_plane_contract::ControlPlaneRunState::Cancelled

@@ -902,6 +902,10 @@ fn control_plane_run_requires_action(
 ) -> bool {
     use homeboy_control_plane_contract::{ControlPlaneAction, ControlPlaneActionAvailability};
 
+    // A Cook requires action exactly when `agent-task recover` has a step.
+    if let Some(recovery) = &run.recovery {
+        return recovery.step != "none";
+    }
     run.action_eligibility.as_ref().is_some_and(|report| {
         report.actions.iter().any(|action| {
             matches!(
