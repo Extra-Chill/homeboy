@@ -12,7 +12,7 @@ Closes #18013.
 
 Resolution runs outside the store mutex. Reconciliation rechecks existence and active status after the authoritative transaction reload; vanished or terminal candidates are skipped. The remaining job-existence assertions in transaction closures were audited: selection, insertion, or explicit validation happens inside the same transaction; the attestation lookup was also made tolerant of absent live-mirror rows.
 
-Only connection workers retain queue receivers. Disconnected dispatch returns an error and closes the accepted socket. Unbounded daemon serve enables a fatal panic hook for all daemon threads; bounded/unit fixtures do not enable process exit. A separate TCP self-health probe restarts after three consecutive failures, with a five-second socket timeout and ten-second cadence.
+Only connection workers retain queue receivers. Disconnected dispatch returns an error and closes the accepted socket. Unbounded daemon serve enables a fatal panic hook for all daemon threads; bounded/unit fixtures do not enable process exit. A separate TCP self-health probe restarts after twelve consecutive failures (about two minutes at a ten-second cadence, five-second socket timeout), so handlers blocked on the admission fence never restart a busy daemon.
 
 The persistence owns a lazily initialized mutex-protected SQLite connection, shared by cloned stores. Existing process/advisory writer locks and immediate commit transactions are unchanged. Repeated read statements are cached. Path-only inspection remains independent and read-only.
 

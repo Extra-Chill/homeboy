@@ -1965,6 +1965,13 @@ fn dispatch_connection(
     }
 }
 
+/// Worker death and store poison already end the process directly. The
+/// watchdog is the backstop for a serving path that is wedged without either,
+/// so its window outlasts handlers legitimately blocked on the admission
+/// fence instead of restarting a busy but healthy daemon.
+const SELF_HEALTH_PROBE_INTERVAL: Duration = Duration::from_secs(10);
+const SELF_HEALTH_FAILURE_LIMIT: usize = 12;
+
 fn health_failures(previous: usize, healthy: bool) -> usize {
     if healthy {
         0
@@ -2129,9 +2136,9 @@ where
         if address.ip().is_unspecified() {
             address.set_ip(if address.is_ipv4() { std::net::Ipv4Addr::LOCALHOST.into() } else { std::net::Ipv6Addr::LOCALHOST.into() });
         }
-        while watchdog_shutdown_rx.recv_timeout(Duration::from_secs(10)) == Err(mpsc::RecvTimeoutError::Timeout) {
+        while watchdog_shutdown_rx.recv_timeout(SELF_HEALTH_PROBE_INTERVAL) == Err(mpsc::RecvTimeoutError::Timeout) {
             failures = health_failures(failures, probe_self_health(address).unwrap_or(false));
-            if failures >= 3 {
+            if failures >= SELF_HEALTH_FAILURE_LIMIT {
                 eprintln!("fatal daemon self-health watchdog: /health unanswered on {address} for {failures} consecutive probes; exiting for restart");
                 std::process::exit(1);
             }
