@@ -74,7 +74,11 @@ function restore(c) {
 async function wait(c) {
   const deadline = Date.now() + c.sshTimeout * 1000;
   while (Date.now() < deadline) {
-    try { ssh(c, '$ErrorActionPreference="Stop"; [Environment]::OSVersion.ToString()', { timeout: 10000 }); return; } catch { await sleep(2000); }
+    let status;
+    try { status = ssh(c, `if (Test-Path C:\\OEM\\bootstrap.failed) { 'failed:' + (Get-Content -Raw C:\\OEM\\bootstrap.failed) } elseif (Test-Path C:\\OEM\\bootstrap.done) { 'ready' } else { 'bootstrapping' }`, { timeout: 10000 }).trim(); } catch { status = 'unreachable'; }
+    if (status === 'ready') return;
+    if (status.startsWith('failed:')) throw new ProviderError('bootstrap_failed', status.slice(7).trim());
+    await sleep(status === 'unreachable' ? 2000 : 10000);
   }
   throw new ProviderError('ssh_timeout', `SSH not ready within ${c.sshTimeout}s`);
 }
