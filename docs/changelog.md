@@ -4,6 +4,14 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.461.0] - 2026-11-13
+
+### Added
+- typed runner environment for placement
+
+### Fixed
+- retire idle controller-scoped runner service daemons
+
 ## [0.460.1] - 2026-11-13
 
 ### Changed
