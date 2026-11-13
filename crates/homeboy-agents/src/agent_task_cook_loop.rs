@@ -518,7 +518,12 @@ fn build_follow_up_request(
 ) -> AgentTaskRequest {
     let mut request = options.source_request.clone();
     let next_attempt = options.attempt.saturating_add(1);
-    let agent_visible_failed_gates = agent_visible_gate_failures(failed_gates);
+    let mut agent_visible_failed_gates = agent_visible_gate_failures(failed_gates);
+    if let Some(root) = worktree_root_hint(&options.promotion_report) {
+        for failure in &mut agent_visible_failed_gates {
+            relative_to_checkout(failure, &root);
+        }
+    }
     request.schema = AGENT_TASK_REQUEST_SCHEMA.to_string();
     request.task_id = format!("{}-gate-fix-{}", request.task_id, next_attempt);
     request.parent_plan_id = request
@@ -1178,6 +1183,30 @@ fn gate_evidence_ref(run_id: &str, gate_id: &str) -> String {
     format!("homeboy://agent-task/run/{run_id}/gates#gate={gate_id}")
 }
 
+/// Gate output names files under the checkout the gate ran in, which is the
+/// promotion destination, not the next attempt's workspace. Shown verbatim, an
+/// agent follows those absolute paths and edits the destination instead of
+/// its own workspace, leaving the candidate unchanged and the destination
+/// drifted from it. Paths are made relative to the checkout root, so they name
+/// the same files in whatever workspace the agent runs in.
+fn relative_to_checkout(failure: &mut AgentTaskCookLoopGateFailure, root: &str) {
+    let root = root.trim_end_matches('/');
+    if root.is_empty() {
+        return;
+    }
+    let nested = format!("{root}/");
+    let relative = |text: &str| text.replace(&nested, "").replace(root, ".");
+    for text in [
+        &mut failure.stdout_tail,
+        &mut failure.stderr_tail,
+        &mut failure.failure_excerpt,
+        &mut failure.summary,
+        &mut failure.agent_feedback,
+    ] {
+        *text = relative(text);
+    }
+}
+
 fn worktree_root_hint(report: &AgentTaskPromotionReport) -> Option<String> {
     report
         .provenance
@@ -1207,9 +1236,10 @@ mod tests {
     fn gate_failure_excerpt_reaches_gate_fix_prompt() {
         let mut gate = failed_gate();
         gate.stdout = "running 2 tests\ntest parser::rejects_empty ... FAILED\n\nfailures:\n    parser::rejects_empty\n\ntest result: FAILED. 1 passed; 1 failed".to_string();
+        gate.stderr = "at /tmp/homeboy@fix-3676/crates/demo/src/parser.rs:42".to_string();
         gate.cwd = Some(crate::agent_task_gate::AgentTaskGateCwdEvidence {
-            requested: "/work".to_string(),
-            effective: "/work/crates/demo".to_string(),
+            requested: "/tmp/homeboy@fix-3676".to_string(),
+            effective: "/tmp/homeboy@fix-3676/crates/demo".to_string(),
         });
         let options = |source_request: AgentTaskRequest| AgentTaskCookLoopOptions {
             source_request,
@@ -1228,14 +1258,26 @@ mod tests {
         let excerpt = &report.failed_gates[0].failure_excerpt;
         assert!(excerpt.contains("exit code: 101"), "{excerpt}");
         assert!(excerpt.contains("parser::rejects_empty"), "{excerpt}");
-        assert!(excerpt.contains("cwd: /work/crates/demo (requested /work)"));
+        assert!(excerpt
+            .contains("cwd: /tmp/homeboy@fix-3676/crates/demo (requested /tmp/homeboy@fix-3676)"));
+        // The gate ran in the promotion destination; the next attempt sees the
+        // same files relative to its own workspace, never the destination path.
         let request = report.follow_up_request.expect("follow-up request");
-        assert!(request.instructions.contains(GATE_FAILURE_PROMPT_HEADING));
-        assert!(request.instructions.contains(excerpt.as_str()));
-        assert_eq!(
-            request.inputs["cook_loop"]["failed_gates"][0]["failure_excerpt"],
-            json!(excerpt)
+        let agent_excerpt = request.inputs["cook_loop"]["failed_gates"][0]["failure_excerpt"]
+            .as_str()
+            .expect("agent excerpt")
+            .to_string();
+        assert!(
+            agent_excerpt.contains("cwd: crates/demo (requested .)"),
+            "{agent_excerpt}"
         );
+        assert!(
+            agent_excerpt.contains("at crates/demo/src/parser.rs:42"),
+            "{agent_excerpt}"
+        );
+        assert!(request.instructions.contains(GATE_FAILURE_PROMPT_HEADING));
+        assert!(request.instructions.contains(agent_excerpt.as_str()));
+        assert!(!request.instructions.contains("/tmp/homeboy@fix-3676"));
 
         // A second gate-fix attempt replaces, never accumulates, the section.
         let second = evaluate_cook_loop(options(request))
