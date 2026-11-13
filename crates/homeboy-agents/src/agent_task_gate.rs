@@ -5208,8 +5208,20 @@ pub fn preflight_gate_toolchains(
 }
 
 pub(crate) fn preflight_verify_gate_options(cwd: &Path, gates: &VerifyGateOptions) -> Result<()> {
-    if gates.verify.is_empty()
-        && gates.private_verify.is_empty()
+    let inferred: Vec<_> = gates
+        .verify
+        .iter()
+        .chain(&gates.private_verify)
+        .flat_map(|gate| {
+            gate_runtime::executables(gate).into_iter().map(|command| {
+                AgentTaskGateToolchainRequirement {
+                    command,
+                    probe_arguments: vec![gate_runtime::RESOLVE_ONLY.into(), gate.clone()],
+                }
+            })
+        })
+        .collect();
+    if inferred.is_empty()
         && gates.required_toolchains().is_empty()
         && gates.gate_target_probes().is_empty()
         && gates.gate_package_artifacts.is_empty()
@@ -5235,18 +5247,11 @@ pub(crate) fn preflight_verify_gate_options(cwd: &Path, gates: &VerifyGateOption
         environment.lab_runner = runner;
         environment.hydrate_rust_cache &= gates.hydrate_dependencies;
         environment.hydrate_dependencies &= gates.hydrate_dependencies;
-        for gate in gates.verify.iter().chain(&gates.private_verify) {
-            let requirements: Vec<_> = gate_runtime::executables(gate)
-                .into_iter()
-                .map(|command| AgentTaskGateToolchainRequirement {
-                    command,
-                    probe_arguments: vec![gate_runtime::RESOLVE_ONLY.into(), gate.clone()],
-                })
-                .collect();
+        if !inferred.is_empty() {
             preflight_gate_toolchains(
                 cwd,
                 &environment,
-                &requirements,
+                &inferred,
                 &[],
                 None,
                 gates.gate_timeout(),
