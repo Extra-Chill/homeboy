@@ -4,6 +4,12 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.464.2] - 2026-11-13
+
+### Fixed
+- re-admitting a failed workflow retries it instead of returning it
+- an issue's PR is one GitHub links to close it, not one that mentions it
+
 ## [0.464.1] - 2026-11-13
 
 ### Fixed
