@@ -71,20 +71,36 @@ fn observe(value: &mut Reservation) {
         pressure.observed_load_per_cpu.map(|n| n as f64 / 10000.0),
     );
 }
+/// A panic elsewhere must not wedge admission behind a poisoned lock (#18013).
+fn lock() -> std::sync::MutexGuard<'static, ()> {
+    LOCK.lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+}
+/// Observe the reservation, persisting only lifecycle transitions so status
+/// reads and maintenance ticks do not rewrite the file.
 pub(super) fn current() -> Result<Option<Reservation>> {
-    let _lock = LOCK.lock().unwrap();
+    let _lock = lock();
     let mut value = load()?;
     if let Some(value) = value.as_mut() {
+        let before = (value.state.clone(), value.active_until);
         observe(value);
-        save(value)?;
+        if (value.state.clone(), value.active_until) != before {
+            save(value)?;
+        }
     }
     Ok(value)
 }
+/// Read-only admission check. It runs inside store transactions and the
+/// queued-job poll, so it never writes; `current()` persists transitions.
 pub(crate) fn holding(holder: Option<&str>) -> Result<Option<String>> {
-    Ok(current()?.filter(|r| !r.admits(holder)).map(|r| r.id))
+    let Some(mut value) = load()? else {
+        return Ok(None);
+    };
+    observe(&mut value);
+    Ok((!value.admits(holder)).then_some(value.id))
 }
 pub(super) fn update(body: Option<serde_json::Value>) -> Result<serde_json::Value> {
-    let _lock = LOCK.lock().unwrap();
+    let _lock = lock();
     let body = body.unwrap_or_default();
     let mut previous = load()?;
     if let Some(value) = previous.as_mut() {

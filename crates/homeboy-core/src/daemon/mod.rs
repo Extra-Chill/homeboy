@@ -5321,11 +5321,6 @@ pub(crate) fn admit_controller_job(
         controller_job.pending_admission_reason =
             Some(DAEMON_DRAINING_ADMISSION_REASON.to_string());
     }
-    if let Some(id) =
-        reservation::holding(request.request.get("reservation").and_then(|v| v.as_str()))?
-    {
-        controller_job.pending_admission_reason = Some(format!("reservation:{id}"));
-    }
     let outcome = job_store.admit_controller_job(
         format!("controller.{}", request.job_type),
         request.idempotency_key.clone(),
