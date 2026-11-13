@@ -872,18 +872,6 @@ pub(crate) fn control_plane_next_action(payload: &Value, run_id: &str) -> String
             return remedy.to_string();
         }
     }
-    // The projected single recovery step (#15925) is exactly what `recover`
-    // performs for this durable state; when the state names an adopt, that
-    // command outranks a resume that would replay nothing (#16181).
-    if let Some(command) = payload.pointer("/recovery/command").and_then(Value::as_str) {
-        return command.to_string();
-    }
-    // A blocked finalization is recovered by the Cook continuation that owns
-    // publication; resume only re-reads terminal evidence (#15017). `recover`
-    // performs that continuation as the Cook's one next step (#15925).
-    if string_value(payload, &["blocker", "code"]) == Some("finalization") {
-        return format!("homeboy agent-task recover {run_id}");
-    }
     if string_value(payload, &["blocker", "retry", "disposition"])
         == Some("automatic_reconciliation_scheduled")
     {
@@ -895,20 +883,26 @@ pub(crate) fn control_plane_next_action(payload: &Value, run_id: &str) -> String
         }
         return format!("homeboy agent-task status {run_id} --watch");
     }
-    // A verification-pending candidate holds a promoted but unverified
-    // change. Resume re-reads terminal evidence and cannot verify it; the
-    // cook continuation owns that recovery regardless of which blocker
-    // stalled the gates (#15668).
-    if string_value(payload, &["candidate", "state"]) == Some("verification_pending") {
-        let cook_id = string_value(payload, &["mission"]).unwrap_or(run_id);
-        return format!("homeboy agent-task recover {cook_id}");
-    }
-    if string_value(payload, &["state"]) == Some("candidate_recoverable")
-        && string_value(payload, &["owner", "kind"]) == Some("runner")
+    // A Cook's next step is the one `agent-task recover` performs, projected
+    // from its durable state (#15925). A Cook with no step names `diagnose`,
+    // which explains what is required; it is never re-decided here.
+    if let Some(recovery) = payload
+        .get("recovery")
+        .filter(|recovery| !recovery.is_null())
     {
-        if let Some(cook_id) = string_value(payload, &["mission"]) {
-            return format!("homeboy agent-task recover {cook_id}");
+        let command = string_value(recovery, &["command"]).unwrap_or_default();
+        if string_value(recovery, &["step"]) != Some("none") {
+            return command.to_string();
         }
+        let watching = matches!(
+            string_value(payload, &["state"]),
+            Some("running" | "queued")
+        );
+        return if watching {
+            format!("homeboy agent-task status {run_id} --watch")
+        } else {
+            command.to_string()
+        };
     }
     if string_value(payload, &["owner", "kind"]) == Some("runner") {
         let runner_id = string_value(payload, &["owner", "id"]);
@@ -2481,25 +2475,6 @@ mod tests {
     }
 
     #[test]
-    fn candidate_recoverable_runner_status_recommends_recover() {
-        let payload = json!({
-            "schema": "homeboy/control-plane-run/v1",
-            "run": "attempt-1",
-            "state": "candidate_recoverable",
-            "mission": "cook-15732",
-            "owner": { "id": "runner-7", "kind": "runner" },
-            "action_eligibility": { "actions": [{
-                "action": "resume", "availability": "unavailable",
-                "reason": "candidate_recoverable requires agent-task recover"
-            }] },
-            "artifacts": []
-        });
-        let summary = render_agent_task_summary(AgentTaskSummaryKind::Status, &payload).unwrap();
-        assert!(summary.contains("Next: homeboy agent-task recover cook-15732\n"));
-        assert!(!summary.contains("Next: homeboy agent-task resume attempt-1"));
-    }
-
-    #[test]
     fn queued_runner_proxy_status_recommends_runner_scoped_dispatch() {
         let payload = json!({
             "schema": "homeboy/control-plane-run/v1",
@@ -2693,72 +2668,6 @@ mod tests {
         assert!(summary.contains("  exit code: 101\n"), "{summary}");
         assert!(
             summary.contains("  test parser::rejects_empty ... FAILED\n"),
-            "{summary}"
-        );
-    }
-
-    #[test]
-    fn status_summary_routes_pending_cook_controller_failure_to_continuation() {
-        let payload = json!({
-            "schema": "homeboy/control-plane-run/v1",
-            "mission": "cook-14357",
-            "run": "cook-14357-attempt-1",
-            "state": "succeeded",
-            "candidate": { "state": "verification_pending" },
-            "blocker": {
-                "code": "controller_failure",
-                "message": "dependency hydration failed"
-            },
-            "artifacts": [],
-            "action_eligibility": {
-                "actions": [{
-                    "action": "review",
-                    "availability": "available"
-                }]
-            }
-        });
-
-        let summary = render_agent_task_summary(AgentTaskSummaryKind::Status, &payload).unwrap();
-        assert!(
-            summary.contains("Next: homeboy agent-task recover cook-14357\n"),
-            "{summary}"
-        );
-        assert!(
-            !summary.contains("Next: homeboy agent-task review"),
-            "{summary}"
-        );
-    }
-
-    /// #15668: any verification-pending candidate is recoverable through the
-    /// cook continuation, not only one stalled by a controller failure.
-    #[test]
-    fn status_summary_routes_every_verification_pending_candidate_to_continuation() {
-        let payload = json!({
-            "schema": "homeboy/control-plane-run/v1",
-            "mission": "cook-15668",
-            "run": "cook-15668-attempt-1",
-            "state": "candidate_recoverable",
-            "candidate": { "state": "verification_pending" },
-            "blocker": {
-                "code": "gate_transport.unavailable",
-                "message": "gates never ran"
-            },
-            "artifacts": [],
-            "action_eligibility": {
-                "actions": [{
-                    "action": "review",
-                    "availability": "available"
-                }]
-            }
-        });
-
-        let summary = render_agent_task_summary(AgentTaskSummaryKind::Status, &payload).unwrap();
-        assert!(
-            summary.contains("Next: homeboy agent-task recover cook-15668\n"),
-            "{summary}"
-        );
-        assert!(
-            !summary.contains("Next: homeboy agent-task review"),
             "{summary}"
         );
     }

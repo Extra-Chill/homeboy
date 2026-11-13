@@ -558,6 +558,9 @@ fn refused_publication_ends_the_terminal_continuation_without_regating() {
 enum WedgedCook {
     /// The candidate is applied but a Lab gate deferred.
     DeferredGateBeforePublish,
+    /// A deferred-gate candidate that was published anyway: the receipt is
+    /// the delivery, whatever gate status the attempt last recorded.
+    PublishedAfterDeferredGate,
     /// A provider liveness timeout left the attempt candidate-recoverable
     /// before any terminal continuation was scheduled.
     ContinuationNotScheduled,
@@ -617,6 +620,20 @@ fn wedge(case: WedgedCook, options: &CookRequest) {
     let run = &options.identity.initial_run_id;
     let store = test_lifecycle_store();
     match case {
+        WedgedCook::PublishedAfterDeferredGate => {
+            wedge(WedgedCook::DeferredGateBeforePublish, options);
+            agent_task_lifecycle::rewrite_record_for_test(run, |record| {
+                crate::agent_task_service::set_cook_delivery_artifact_for_test(
+                    &mut record.metadata,
+                    "/finalization",
+                    serde_json::json!({
+                        "status": "review_ready",
+                        "pr_url": "https://example.test/pr/7",
+                    }),
+                );
+            })
+            .unwrap();
+        }
         WedgedCook::DeferredGateBeforePublish => {
             let mut promotion = persisted_promotion_for_attempt(run).unwrap().unwrap();
             promotion.status = AgentTaskPromotionStatus::GateDeferred;
@@ -653,13 +670,14 @@ fn every_wedged_cook_state_has_one_progressing_recovery_step() {
     use crate::agent_task_service::CookRecoveryStep;
     for case in [
         WedgedCook::DeferredGateBeforePublish,
+        WedgedCook::PublishedAfterDeferredGate,
         WedgedCook::ContinuationNotScheduled,
         WedgedCook::WedgedTerminalDriver,
     ] {
         // A deferred gate never produced replacement proof; every other state
         // starts from the candidate the corrected gates verified.
         let fixture = |test: &dyn Fn(CookRequest)| match case {
-            WedgedCook::DeferredGateBeforePublish => {
+            WedgedCook::DeferredGateBeforePublish | WedgedCook::PublishedAfterDeferredGate => {
                 with_corrected_gate_failure(false, |options, _| test(options))
             }
             _ => with_corrected_gate_candidate(|options, _, _| test(options)),
@@ -669,7 +687,33 @@ fn every_wedged_cook_state_has_one_progressing_recovery_step() {
             let cook = &options.identity.cook_id;
             let run = &options.identity.initial_run_id;
             let plan = crate::agent_task_service::plan_cook_recovery(cook).unwrap();
+            // Status, diagnose and the Cook verdict read this projection: it
+            // names exactly the step `recover` performs, or none.
+            let projected = crate::orchestration::project_record(
+                &agent_task_lifecycle::exact_record(run).unwrap(),
+                None,
+            )
+            .unwrap()
+            .recovery
+            .expect("every Cook projects its recovery step");
+            assert_eq!(
+                projected.step,
+                plan.step.action_name().unwrap_or("none"),
+                "{case:?}: {plan:?}"
+            );
+            assert_eq!(
+                projected.command.contains("agent-task recover"),
+                !plan.step.is_none() && plan.step.action_name() != Some("adopt"),
+                "{case:?}: {projected:?}"
+            );
             match case {
+                WedgedCook::PublishedAfterDeferredGate => {
+                    assert!(plan.step.is_none(), "{case:?}: {plan:?}");
+                    assert!(
+                        format!("{:?}", plan.step).contains("https://example.test/pr/7"),
+                        "{plan:?}"
+                    );
+                }
                 WedgedCook::DeferredGateBeforePublish => {
                     // The recipe's own gates re-run before anything publishes.
                     assert_eq!(plan.status, "gate_environment_unavailable", "{case:?}");

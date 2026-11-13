@@ -713,7 +713,12 @@ fn plan_cook_recovery_for_cook(id: &str) -> Result<CookRecoveryPlan> {
     }
     let record = agent_task_lifecycle::exact_record(&run_id)?;
     let status = cook_recovery_status(&record);
-    let step = if super::cook_recipe::abandoned_cook_continuation(&record) {
+    let step = if let Some(pr) = published_pull_request(&record) {
+        // A recorded publication is the Cook's delivery, whatever gate or
+        // continuation status the attempt last recorded: re-running gates or
+        // continuing would only redo delivered work.
+        CookRecoveryStep::none(format!("The Cook is published as {pr}; review it there."))
+    } else if super::cook_recipe::abandoned_cook_continuation(&record) {
         CookRecoveryStep::Continue
     } else {
         super::cook_failure_context(&recipe.cook_id, Some(&run_id), &status)
@@ -728,6 +733,17 @@ fn plan_cook_recovery_for_cook(id: &str) -> Result<CookRecoveryPlan> {
         status,
         step,
     })
+}
+
+/// The pull request a publication receipt proves the attempt is published as
+/// (ready for review or as a draft).
+fn published_pull_request(record: &agent_task_lifecycle::AgentTaskRunRecord) -> Option<String> {
+    let delivery = super::CookDelivery::from_run_metadata(&record.metadata)?;
+    let publication = delivery.publication.as_ref().filter(|p| p.published)?;
+    publication
+        .pr_url
+        .clone()
+        .or_else(|| publication.pr_identity())
 }
 
 /// The recovery plan a verb that also serves non-Cook runs must hand to

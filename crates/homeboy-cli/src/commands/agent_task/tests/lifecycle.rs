@@ -1025,7 +1025,7 @@ fn finalized_existing_candidate_status_reads_one_durable_scope() {
                 assert_eq!(value["state"], "succeeded", "{value}");
                 assert!(value["blocker"].is_null(), "{value}");
                 assert!(value.get("reason").is_none(), "{value}");
-                assert!(value["recovery"].is_null(), "{value}");
+                assert_eq!(value["recovery"]["step"], "none", "{value}");
                 assert_eq!(value["candidate"]["id"], "task-a", "{value}");
                 assert_eq!(value["candidate"]["state"], "verified_no_changes");
                 assert_eq!(
