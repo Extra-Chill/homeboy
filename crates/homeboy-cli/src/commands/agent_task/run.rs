@@ -6245,12 +6245,24 @@ fn resolve_cook_pull_request(args: &mut AgentTaskCookArgs) -> homeboy::core::Res
         homeboy::core::git::release_download::parse_github_url(url)
             .map(|repo| repo.repo.to_ascii_lowercase())
     };
-    if let (Some(task), Some(checkout)) = (
-        repository_name(url),
-        homeboy::core::git::remote_origin_url(Path::new(path))
-            .as_deref()
-            .and_then(repository_name),
-    ) {
+    // The resolved repository's remote names the repository this Cook updates;
+    // without one, only a supplied checkout (never the process cwd) attests it.
+    let checkout = args
+        .repository_identity
+        .as_ref()
+        .and_then(|identity| identity.get("remote_identity"))
+        .and_then(Value::as_str)
+        .and_then(|remote| remote.trim_end_matches(".git").rsplit('/').next())
+        .filter(|name| !name.is_empty())
+        .map(str::to_ascii_lowercase)
+        .or_else(|| {
+            (path != ".")
+                .then(|| homeboy::core::git::remote_origin_url(Path::new(path)))
+                .flatten()
+                .as_deref()
+                .and_then(repository_name)
+        });
+    if let (Some(task), Some(checkout)) = (repository_name(url), checkout) {
         if task != checkout {
             return Ok(());
         }
