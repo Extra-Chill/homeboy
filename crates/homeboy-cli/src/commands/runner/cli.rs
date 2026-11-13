@@ -400,6 +400,20 @@ pub(super) enum RunnerCommand {
         after_help = "Use `homeboy runner exec [HOMEBOY_OPTIONS] <RUNNER> -- <COMMAND>...` to make the Homeboy/remote-command boundary explicit."
     )]
     Exec(RunnerExecArgs),
+    /// Hold new admission until five-minute load per logical CPU is below the threshold.
+    Reserve {
+        id: String,
+        #[arg(long, required_unless_present = "release")]
+        quiet_below: Option<f64>,
+        #[arg(long, required_unless_present = "release")]
+        window: Option<u64>,
+        #[arg(long)]
+        wait_timeout: Option<u64>,
+        #[arg(long)]
+        reason: Option<String>,
+        #[arg(long, conflicts_with_all = ["quiet_below", "window", "wait_timeout", "reason"])]
+        release: Option<String>,
+    },
     /// Execute an extension-owned recipe provider in one materialized workspace.
     RecipeRun {
         /// Runner ID

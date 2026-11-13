@@ -262,6 +262,23 @@ pub fn run(args: RunnerArgs) -> CmdResult<RunnerCommandOutput> {
                     .unwrap_or(homeboy::core::cleanup::RUNNER_MIN_AGE_HOURS),
             },
         )),
+        RunnerCommand::Reserve {
+            id,
+            quiet_below,
+            window,
+            wait_timeout,
+            reason,
+            release,
+        } => {
+            let value = homeboy::runner::reserve(
+                &id,
+                &serde_json::json!({"quiet_below": quiet_below, "window": window, "wait_timeout": wait_timeout, "reason": reason, "release": release}),
+            )?;
+            let (mut output, code) = super::registry::show(&id)?;
+            output.command = "runner.reserve".into();
+            output.extra.inventory = Some(value);
+            map_registry(Ok((output, code)))
+        }
         RunnerCommand::Exec(args) => map_execution(execute(args.into())),
         RunnerCommand::RecipeProviders => Ok((
             RunnerCommandOutput::RecipeRunProviders(Box::new(RecipeRunProvidersOutput {

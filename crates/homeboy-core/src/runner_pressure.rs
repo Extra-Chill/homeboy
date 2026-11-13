@@ -34,7 +34,11 @@ pub struct RunnerPressure {
     pub io: Option<u32>,
     pub memory: Option<u32>,
     pub load_fallback: bool,
+    /// Five-minute load per logical CPU, in ten-thousandths (1.0 = 10000).
+    pub observed_load_per_cpu: Option<u32>,
     pub admission_reason: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reservation: Option<serde_json::Value>,
 }
 
 impl RunnerPressure {
@@ -112,13 +116,14 @@ fn sample_host(thresholds: &PressureThresholds) -> RunnerPressure {
         memory: psi("memory", "full "),
         ..Default::default()
     };
+    pressure.observed_load_per_cpu = std::fs::read_to_string("/proc/loadavg")
+        .ok()
+        .and_then(|text| text.split_whitespace().nth(1)?.parse::<f64>().ok())
+        .zip(std::thread::available_parallelism().ok())
+        .map(|(load, cpus)| (load / cpus.get() as f64 * 10_000.0) as u32);
     if pressure.cpu.is_none() {
         pressure.load_fallback = true;
-        pressure.cpu = std::fs::read_to_string("/proc/loadavg")
-            .ok()
-            .and_then(|text| text.split_whitespace().nth(1)?.parse::<f64>().ok())
-            .zip(std::thread::available_parallelism().ok())
-            .map(|(load, cpus)| (load / cpus.get() as f64 * 10_000.0) as u32);
+        pressure.cpu = pressure.observed_load_per_cpu;
     }
     pressure.apply_thresholds(thresholds);
     pressure

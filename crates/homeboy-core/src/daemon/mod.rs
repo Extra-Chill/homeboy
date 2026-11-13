@@ -2668,6 +2668,11 @@ fn spawn_local_child_reservation_reconciler(
         maintenance_tick(|| {
             let _ = job_store.reconcile_expired_local_child_reservations();
             let _ = job_store.reconcile_expired_admissions();
+            for (id, state) in job_store.active_controller_jobs() {
+                if state.pending_admission_reason.is_some() {
+                    let _ = start_controller_job(id, &job_store);
+                }
+            }
             reconcile_pending_workspace_owner_releases();
             reconcile_terminal_workspace_owner_leases(&job_store);
         });
@@ -2794,6 +2799,9 @@ fn release_freed_heap() {}
 
 fn maintenance_tick(body: impl FnOnce()) {
     if maintenance_allowed() {
+        isolated_tick(|| {
+            let _ = reservation::current();
+        });
         isolated_tick(body);
     }
 }
@@ -3284,6 +3292,14 @@ where
                 Err(err) => error_response(404, err),
             }
         }
+        ("GET", "/reservation") => match reservation::current() {
+            Ok(value) => daemon_endpoint_response("reservation.status", json!(value)),
+            Err(error) => error_response(400, error),
+        },
+        ("POST", "/reservation") => match with_daemon_job_admission(|| reservation::update(body)) {
+            Ok(value) => daemon_endpoint_response("reservation.update", value),
+            Err(error) => error_response(400, error),
+        },
         ("POST", "/admissions") => {
             match with_daemon_job_admission(|| reserve_admission(body, job_store)) {
                 Ok(body) => daemon_endpoint_response("admissions.reserve", body),
@@ -3472,6 +3488,8 @@ fn daemon_endpoint_identity(path: &str) -> Result<serde_json::Value> {
     }))
 }
 
+pub(crate) mod reservation;
+
 fn reserve_admission(
     body: Option<serde_json::Value>,
     job_store: &JobStore,
@@ -3558,6 +3576,13 @@ fn reserve_admission_observed(
         .transpose()
         .map_err(|error| Error::internal_unexpected(error.to_string()))?
         .unwrap_or_default();
+    if let Some(id) = reservation::holding(body.get("reservation").and_then(|v| v.as_str()))? {
+        let mut error = crate::runner_pressure::RunnerPressure::default().admission_refusal();
+        error.details["reservation_id"] = json!(id);
+        error.details["admission_reason"] = json!(format!("reservation:{id}"));
+        error.message = format!("admission held by reservation {id}");
+        return Err(error);
+    }
     let pressure = sample(&thresholds);
     if pressure.admission_reason.is_some() {
         return Err(pressure.admission_refusal());
@@ -4793,6 +4818,7 @@ fn enqueue_exec_request(
     let mut run_ref_metadata =
         canonical_run_ref_metadata(lifecycle.as_ref(), workload.as_ref(), execution_metadata)
             .unwrap_or_else(|| json!({}));
+    run_ref_metadata["reservation"] = json!(dispatch.env.get("HOMEBOY_RUNNER_RESERVATION"));
     run_ref_metadata["runner_job_projection"] = json!({
         "runner_id": plan.runner_id,
         "command": crate::redaction::redact_argv_display(&plan.command),
@@ -5398,7 +5424,15 @@ pub(crate) fn start_controller_job(
         return job_store.get(job_id);
     }
     // Queued for the replacement: this draining lease never starts it.
-    if controller.pending_admission_reason.is_some() && intake_draining() {
+    if reservation::holding(
+        controller
+            .request
+            .get("reservation")
+            .and_then(|v| v.as_str()),
+    )?
+    .is_some()
+        || (controller.pending_admission_reason.is_some() && intake_draining())
+    {
         return job_store.get(job_id);
     }
     // Resolve the persisted type/version, not caller-controlled input, before
