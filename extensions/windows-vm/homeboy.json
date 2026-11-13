@@ -1,0 +1,8 @@
+{
+  "id": "windows-vm",
+  "version_targets": [{ "file": "windows-vm.json", "pattern": "\"version\":\\s*\"([0-9.]+)\"" }],
+  "self_checks": {
+    "lint": ["jq empty windows-vm.json homeboy.json", "find scripts tests -name '*.mjs' -print0 | xargs -0 -r -n1 node --check", "node ../tests/extension-shape-lint.mjs"],
+    "test": ["node --test tests/verify.test.mjs"]
+  }
+}

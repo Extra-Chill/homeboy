@@ -28,7 +28,8 @@
       "bash wordpress/scripts/test/full-suite-no-phpunit-smoke.sh",
       "bash wordpress/tests/node-test-result-parser-smoke.sh",
       "node tests/wp-codebox-install-overrides-persist-smoke.mjs",
-      "node ssh-checkout-deploy/tests/ssh-checkout-deploy.test.mjs"
+      "node ssh-checkout-deploy/tests/ssh-checkout-deploy.test.mjs",
+      "node --test windows-vm/tests/verify.test.mjs"
     ]
   }
 }
