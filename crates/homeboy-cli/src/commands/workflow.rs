@@ -261,8 +261,23 @@ fn admit_with_resume(
             definition.carry_resumed_inputs(&mut inputs, &source_inputs, provided);
         }
     }
-    let instance = definition.instance_id_with_resume(&inputs, instance_name, resumed_from);
-    // The same definition and inputs name the same instance: report it.
+    let mut resumed_from = resumed_from.map(str::to_string);
+    let mut instance =
+        definition.instance_id_with_resume(&inputs, instance_name, resumed_from.as_deref());
+    // The same definition and inputs name the same instance. A running or
+    // succeeded one is reported; a failed, cancelled or exhausted one is
+    // retried as a fresh instance resumed from it, which reuses its succeeded
+    // steps. Each retry's id derives from the one it retries, so re-admitting
+    // walks that chain to its live end.
+    while let Ok(view) = client.workflow(&instance) {
+        if !retries_on_readmission(&view) {
+            break;
+        }
+        let failed = std::mem::take(&mut instance);
+        instance = definition.instance_id_with_resume(&inputs, instance_name, Some(&failed));
+        resumed_from = Some(failed);
+    }
+    let resumed_from = resumed_from.as_deref();
     let disposition = match client.workflow(&instance) {
         Ok(_) => "reused",
         Err(_) => {
@@ -311,6 +326,15 @@ fn admit_with_resume(
     view["cancel_command"] = json!(format!("homeboy workflow cancel {instance}"));
     let code = if wait { exit_code(&view) } else { 0 };
     Ok((view, code))
+}
+
+/// Whether re-admitting the same workflow retries this instance instead of
+/// reporting it.
+fn retries_on_readmission(view: &Value) -> bool {
+    matches!(
+        view["status"].as_str(),
+        Some("failed" | "cancelled" | "budget_exhausted")
+    )
 }
 
 /// `workflow run` on a definition with `every`: register its admitted request

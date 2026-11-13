@@ -717,8 +717,9 @@ prints the compiled workflow and its instance id without admitting anything or
 performing ambient notification discovery.
 With `--run-plan` it admits the instance and returns its status plus
 `status_command` and `cancel_command`. The instance id is derived from the
-compiled definition, so re-running the same command reports the same instance;
-`--fanout-id NAME` runs the same batch as a separate instance.
+compiled definition, so re-running the same command reports the same running or
+succeeded instance, and retries a failed or cancelled one as a fresh instance
+resumed from it; `--fanout-id NAME` runs the same batch as a separate instance.
 
 Observe the batch through `runs` and control it through `workflow`:
 
