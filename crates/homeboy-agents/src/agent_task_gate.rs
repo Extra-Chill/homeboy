@@ -598,6 +598,26 @@ pub(crate) fn hydrate_gate_dependency_roots_for_component(
     if !enabled {
         return Ok(Vec::new());
     }
+    // One timing report covers the whole walk; per-root outcomes stay in the
+    // returned setup evidence (#18027).
+    homeboy_core::observation::phase_timing::time_with_outcome(
+        "stage.dependency_hydration",
+        || walk_gate_dependency_roots(checkout, workspace, policy, component_id, gate_commands),
+        |outcomes| {
+            outcomes.iter().any(|outcome| {
+                outcome.status == homeboy_core::deps::DependencyHydrationStatus::Failed
+            })
+        },
+    )
+}
+
+fn walk_gate_dependency_roots(
+    checkout: &Path,
+    workspace: &str,
+    policy: &homeboy_core::deps::DependencyHydrationPolicy,
+    component_id: Option<&str>,
+    gate_commands: Option<&[String]>,
+) -> Result<Vec<AgentTaskGateSetupEvidence>> {
     let mut candidates = vec![checkout.to_path_buf()];
     let mut pending = vec![checkout.to_path_buf()];
     while let Some(directory) = pending.pop() {
@@ -9338,6 +9358,46 @@ mod tests {
                 assert!(!root.join("tool/sub/deps").exists(), "{gate}");
             });
         }
+    }
+
+    #[test]
+    fn gate_dependency_hydration_records_one_phase_for_multiple_candidates() {
+        let timing_dir = tempfile::tempdir().unwrap();
+        let timing_store = homeboy_core::observation::ObservationStore::open_initialized_at(
+            timing_dir.path().join("timing.db"),
+        )
+        .unwrap();
+        let timing_run = timing_store
+            .start_run(homeboy_core::observation::NewRunRecord::builder("test").build())
+            .unwrap();
+        let _timing =
+            homeboy_core::observation::phase_timing::for_run(&timing_store, &timing_run.id);
+
+        homeboy_core::test_support::with_isolated_home(|_| {
+            let checkout = tempfile::tempdir().unwrap();
+            fs::create_dir_all(checkout.path().join("first/nested")).unwrap();
+            fs::create_dir_all(checkout.path().join("second")).unwrap();
+
+            let outcomes = hydrate_gate_dependency_roots_for_component(
+                checkout.path(),
+                true,
+                "fixture",
+                &homeboy_core::deps::DependencyHydrationPolicy::default(),
+                None,
+                None,
+            )
+            .unwrap();
+            assert!(outcomes.is_empty());
+
+            let spans = timing_store.phase_spans(&timing_run.id).unwrap().spans;
+            assert_eq!(
+                spans
+                    .iter()
+                    .filter(|span| span.id == "stage.dependency_hydration")
+                    .count(),
+                1
+            );
+        });
     }
 
     #[test]
