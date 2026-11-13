@@ -1,8 +1,5 @@
 use homeboy::cli_runtime::CliRuntime;
 
-#[global_allocator]
-static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
-
 fn main() -> std::process::ExitCode {
     let args: Vec<String> = std::env::args().collect();
     #[cfg(target_os = "linux")]

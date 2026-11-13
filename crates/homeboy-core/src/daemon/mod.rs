@@ -2606,6 +2606,7 @@ fn orchestration_tick_loop(
                 job_store.reconcile_controller_completions().map(|_| ())
             });
         });
+        isolated_tick(release_freed_heap);
         if shutdown.recv_timeout(interval) != Err(mpsc::RecvTimeoutError::Timeout) {
             return;
         }
@@ -2777,6 +2778,24 @@ fn draining_daemon_runs_no_maintenance_pass() {
         assert_eq!(calls.get(), 1);
     });
 }
+
+/// Return heap the daemon has freed to the operating system.
+///
+/// Job-store transactions materialize and drop whole snapshots on many
+/// threads. glibc keeps each thread arena's high-water mark, so a long-lived
+/// daemon's RSS ratchets up until the kernel OOM-kills it: a Lab daemon held
+/// 16 GB, and trimming a 7.8 GB one left 350 MB live.
+#[cfg(all(target_os = "linux", target_env = "gnu"))]
+fn release_freed_heap() {
+    // SAFETY: `malloc_trim` only releases free pages; it takes the allocator's
+    // own arena locks and touches no Rust-owned memory.
+    unsafe {
+        libc::malloc_trim(0);
+    }
+}
+
+#[cfg(not(all(target_os = "linux", target_env = "gnu")))]
+fn release_freed_heap() {}
 
 fn maintenance_tick(body: impl FnOnce()) {
     if maintenance_allowed() {
