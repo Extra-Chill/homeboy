@@ -139,8 +139,8 @@ async function run(c, o) {
     // Recover task cleanup even if the SSH session was interrupted. Never hide
     // inability to confirm cleanup behind the original transport error.
     try {
-      ssh(c, `$ErrorActionPreference='Stop'; $t=Get-ScheduledTask -TaskName 'homeboy-${id}' -ErrorAction SilentlyContinue; if ($t) { Stop-ScheduledTask -TaskName 'homeboy-${id}'; Unregister-ScheduledTask -TaskName 'homeboy-${id}' -Confirm:$false }`, { timeout: 30000 });
-    } catch { throw new ProviderError('cleanup_failed', `Cannot confirm task cleanup for run ${id}`, { runId: id }); }
+      ssh(c, `$ErrorActionPreference='Stop'; $t=Get-ScheduledTask -TaskName 'homeboy-${id}' -ErrorAction SilentlyContinue; if ($t) { Stop-ScheduledTask -TaskName 'homeboy-${id}'; Unregister-ScheduledTask -TaskName 'homeboy-${id}' -Confirm:$false }; exit 0`, { timeout: 30000 });
+    } catch { throw new ProviderError('cleanup_failed', `Cannot confirm task cleanup for run ${id}`, { runId: id, cause: error.message }); }
     // A nonzero guest status still carries the typed diagnostic on stdout.
     if (error.details?.diagnostic) {
       let guest;
