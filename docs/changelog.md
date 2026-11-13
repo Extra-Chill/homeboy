@@ -4,6 +4,16 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.460.1] - 2026-11-13
+
+### Changed
+- record only slow or failed passes
+- explicit retry of a Cook ID reserves from its latest attempt
+
+### Fixed
+- Lab admission waits out an in-place daemon restart
+- reserve a keyed admission again after an unconsumed release
+
 ## [0.460.0] - 2026-11-12
 
 ### Added
