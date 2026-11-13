@@ -35,6 +35,7 @@ fn main() -> std::process::ExitCode {
     if let Some(exit_code) = homeboy::cli_runtime::run_update_help_fast_path(&args) {
         return exit_code;
     }
+    homeboy_core::heap::spawn_heap_releaser();
     let runtime = CliRuntime::new();
     if let Some(exit_code) = runtime.run_startup_fast_path(&args) {
         return exit_code;
