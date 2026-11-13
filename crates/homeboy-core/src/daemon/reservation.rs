@@ -36,9 +36,18 @@ impl Reservation {
         }
     }
 }
-static LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+/// One reservation per runner: it lives beside the per-controller daemon
+/// state dirs (`runner-daemons/<runner>/controller-*/`), so every controller's
+/// daemon on the host reads it and a quiet window holds all of them (#18017).
 fn path() -> Result<PathBuf> {
-    Ok(state_path()?.with_file_name("runner-reservation.json"))
+    let state = state_path()?;
+    let scope = state.parent().and_then(Path::parent).ok_or_else(|| {
+        Error::internal_unexpected(format!(
+            "daemon state path {} has no runner scope",
+            state.display()
+        ))
+    })?;
+    Ok(scope.join("runner-reservation.json"))
 }
 fn load() -> Result<Option<Reservation>> {
     match std::fs::read(path()?) {
@@ -71,15 +80,27 @@ fn observe(value: &mut Reservation) {
         pressure.observed_load_per_cpu.map(|n| n as f64 / 10000.0),
     );
 }
-/// A panic elsewhere must not wedge admission behind a poisoned lock (#18013).
-fn lock() -> std::sync::MutexGuard<'static, ()> {
-    LOCK.lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner)
+/// Serializes read-modify-write across every daemon on the host. `flock`
+/// releases with its holder, so a crashed writer cannot wedge admission.
+fn lock() -> Result<std::fs::File> {
+    let lock_path = path()?.with_extension("lock");
+    if let Some(parent) = lock_path.parent() {
+        std::fs::create_dir_all(parent).map_err(|e| Error::internal_unexpected(e.to_string()))?;
+    }
+    let file = std::fs::OpenOptions::new()
+        .create(true)
+        .read(true)
+        .write(true)
+        .truncate(false)
+        .open(&lock_path)
+        .map_err(|e| Error::internal_unexpected(e.to_string()))?;
+    crate::config::lock_exclusive_bounded(&file, &lock_path, "lock runner reservation")?;
+    Ok(file)
 }
 /// Observe the reservation, persisting only lifecycle transitions so status
 /// reads and maintenance ticks do not rewrite the file.
 pub(super) fn current() -> Result<Option<Reservation>> {
-    let _lock = lock();
+    let _lock = lock()?;
     let mut value = load()?;
     if let Some(value) = value.as_mut() {
         let before = (value.state.clone(), value.active_until);
@@ -100,7 +121,7 @@ pub(crate) fn holding(holder: Option<&str>) -> Result<Option<String>> {
     Ok((!value.admits(holder)).then_some(value.id))
 }
 pub(super) fn update(body: Option<serde_json::Value>) -> Result<serde_json::Value> {
-    let _lock = lock();
+    let _lock = lock()?;
     let body = body.unwrap_or_default();
     let mut previous = load()?;
     if let Some(value) = previous.as_mut() {
@@ -174,12 +195,28 @@ pub(super) fn update(body: Option<serde_json::Value>) -> Result<serde_json::Valu
 mod tests {
     use super::*;
     #[test]
-    fn reservation_survives_reload_and_expires_without_holder() {
-        crate::test_support::with_isolated_home(|_| {
+    fn reservation_holds_every_daemon_on_the_host_and_expires_without_holder() {
+        crate::test_support::with_isolated_home(|home| {
+            let runner = home.path().join("runner-daemons/lab");
+            let own = runner.join("controller-own");
+            std::fs::create_dir_all(&own).unwrap();
+            let _own =
+                crate::test_support::EnvVarGuard::set(crate::paths::DAEMON_STATE_DIR_ENV, &own);
             super::super::tests::write_test_lease("reservation-restart");
             let created = update(Some(json!({"quiet_below": 0, "window": 1}))).unwrap();
+            let id = created["id"].as_str().unwrap();
+            // Another controller's daemon on the same host is held too (#18017).
+            let other = runner.join("controller-other");
+            std::fs::create_dir_all(&other).unwrap();
+            {
+                let _scope = crate::test_support::EnvVarGuard::set(
+                    crate::paths::DAEMON_STATE_DIR_ENV,
+                    &other,
+                );
+                assert_eq!(holding(None).unwrap().as_deref(), Some(id));
+            }
             let mut restored = load().unwrap().unwrap();
-            assert_eq!(restored.id, created["id"].as_str().unwrap());
+            assert_eq!(restored.id, id);
             restored.state = "active".into();
             restored.active_until = Some(0);
             save(&restored).unwrap();
