@@ -702,7 +702,7 @@ fn execution_step_deterministic_failure_and_cancellation_terminalize_without_suc
 }
 
 #[test]
-fn public_admission_pressure_refusal_keeps_cook_pending_resource_admission() {
+fn public_admission_capacity_wait_keeps_cook_pending_resource_admission() {
     with_isolated_home(|home| {
         let store = test_lifecycle_store();
         let subject = "pressure-wait";
@@ -717,12 +717,13 @@ fn public_admission_pressure_refusal_keeps_cook_pending_resource_admission() {
         struct PressureTransport;
         impl ExecutionStepTransport for PressureTransport {
             fn admission(&self, _: Vec<String>, _: Option<String>) -> homeboy_core::Result<i32> {
-                Err(homeboy_core::runner_pressure::RunnerPressure {
-                    cpu: Some(1001),
-                    admission_reason: Some("pressure".into()),
-                    ..Default::default()
-                }
-                .admission_refusal())
+                let mut error = homeboy_core::Error::invalid_argument(
+                    "admission",
+                    "runner capacity unavailable",
+                );
+                error.details["execution_step_disposition"] =
+                    serde_json::json!("runner_ineligible");
+                Err(error)
             }
         }
         let intent = current_intent(&store, subject);
@@ -750,7 +751,7 @@ fn public_admission_pressure_refusal_keeps_cook_pending_resource_admission() {
         assert_eq!(current_intent(&store, subject).epoch, intent.epoch + 1);
         assert!(serde_json::to_string(&record.metadata)
             .unwrap()
-            .contains("runner_pressure"));
+            .contains("runner_ineligible"));
     });
 }
 

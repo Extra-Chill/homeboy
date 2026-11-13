@@ -1,6 +1,6 @@
 //! Transient substrate refusals and the bounded wait through them.
 //!
-//! A Lab runner that is busy (pressure, capacity), whose readiness is not yet
+//! A Lab runner that is busy (capacity), whose readiness is not yet
 //! observed, whose daemon is mid-promotion, or whose admission endpoint timed
 //! out is not broken: re-observing clears it without anyone acting on the
 //! runner. Work that already holds its place in the queue waits through these
@@ -16,7 +16,6 @@ use crate::{Error, ErrorCode, Result};
 pub const TRANSIENT_ADMISSION_REASONS: &[&str] = &[
     "capacity_reached",
     "capacity_unknown",
-    "pressure",
     "daemon_freshness_unavailable",
     "daemon_unverified",
     "active_jobs_unavailable",
@@ -140,7 +139,7 @@ mod tests {
         }
         .admission_refusal();
         let cases = [
-            (pressure, true),
+            (pressure, false),
             (
                 refusal(
                     ErrorCode::InternalUnexpected,
@@ -158,7 +157,7 @@ mod tests {
             (
                 refusal(
                     ErrorCode::ValidationInvalidArgument,
-                    serde_json::json!({"runner_availability": {"reasons": ["capacity_reached", "pressure"]}}),
+                    serde_json::json!({"runner_availability": {"reasons": ["capacity_reached"]}}),
                 ),
                 true,
             ),

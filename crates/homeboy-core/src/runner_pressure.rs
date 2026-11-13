@@ -55,7 +55,6 @@ impl RunnerPressure {
         error.details["reason"] = serde_json::json!("runner_pressure");
         error.details["admission_reason"] = serde_json::json!("pressure");
         error.details["pressure"] = serde_json::json!(self);
-        error.details["execution_step_disposition"] = serde_json::json!("runner_ineligible");
         error
     }
 

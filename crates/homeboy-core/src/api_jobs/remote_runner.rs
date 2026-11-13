@@ -652,6 +652,9 @@ impl JobStore {
                 None,
             ));
         }
+        if let Some(envelope) = stored.pending_execution_envelope.as_ref() {
+            return Ok(Some(envelope.clone()));
+        }
         if is_runner_staged_execution(&stored) {
             return Ok(stored
                 .remote_runner
@@ -1148,6 +1151,8 @@ impl JobStore {
         inner.jobs.insert(
             job.id,
             StoredJob {
+                pending_admission_reason: None,
+                pending_execution_envelope: None,
                 job: job.clone(),
                 events: Vec::new(),
                 admission_idempotency_key: None,
