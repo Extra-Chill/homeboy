@@ -4,6 +4,11 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.461.1] - 2026-11-13
+
+### Fixed
+- prevent reconciliation races and fail fast on serving failure
+
 ## [0.461.0] - 2026-11-13
 
 ### Added
