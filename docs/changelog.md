@@ -4,6 +4,12 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.464.6] - 2026-11-13
+
+### Fixed
+- allow dependency lockfile changes through review lint
+- make the runner reservation host-wide across controller daemons
+
 ## [0.464.5] - 2026-11-13
 
 ### Fixed
