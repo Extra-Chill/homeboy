@@ -1,13 +1,13 @@
 //! Runner-service binary convergence (#15733).
 //!
-//! A runner host can run the Lab daemon from systemd user units: one scoped
-//! unit per controller (`runner service install`). Each unit executes a
+//! A runner host runs the Lab daemon from one systemd user unit that every
+//! controller shares (`runner service install`, #18063). Each unit executes a
 //! stable link into an immutable `_homeboy_binaries` slot, so upgrading the
 //! runner's configured binary does not change what a unit runs.
 //!
 //! The runner-side `homeboy upgrade` owns neither those slots nor the units,
 //! so the owner of a unit's binary is the controller-side runner convergence:
-//! this controller's scoped unit is repointed and restarted through the
+//! the host unit is repointed and restarted through the
 //! established `refresh-homeboy --reconnect` handoff, which refuses to restart
 //! a daemon with active jobs. Every unit is observed after convergence, and a
 //! runner whose in-scope unit still runs another version is never reported
@@ -19,8 +19,8 @@ use crate::{Runner, RunnerKind};
 use homeboy_core::Result;
 use homeboy_upgrade::upgrade::{RunnerServiceBinaryEntry, RunnerUpgradeEntry};
 
-/// Result of asking the established refresh handoff to converge this
-/// controller's runner-service unit.
+/// Result of asking the established refresh handoff to converge the runner's
+/// host service unit.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum ServiceRefreshOutcome {
     Refreshed,
@@ -113,7 +113,7 @@ fn attach_recovery(runner_id: &str, homeboy_path: &str, entry: &mut RunnerServic
     entry.recovery_commands = match entry.scope.as_str() {
         // The established idle-gated handoff: it refuses to restart a daemon
         // with active jobs and defers instead.
-        "controller" => vec![format!(
+        "host" => vec![format!(
             "homeboy runner refresh-homeboy {runner} --select {} --reconnect",
             shell_arg(homeboy_path)
         )],
@@ -125,14 +125,14 @@ fn shell_arg(value: &str) -> String {
     homeboy_core::engine::shell::quote_arg(value)
 }
 
-fn controller_unit<'a>(
+fn host_unit<'a>(
     entries: &'a mut [RunnerServiceBinaryEntry],
 ) -> Option<&'a mut RunnerServiceBinaryEntry> {
-    entries.iter_mut().find(|entry| entry.scope == "controller")
+    entries.iter_mut().find(|entry| entry.scope == "host")
 }
 
-/// Observe the runner's service units after convergence, refresh this
-/// controller's stale unit through the idle-gated handoff when the runner is
+/// Observe the runner's service units after convergence, refresh the
+/// stale host unit through the idle-gated handoff when the runner is
 /// service-managed, and fold any in-scope stale unit into the entry so it is
 /// never reported converged.
 pub(crate) fn converge_runner_service_binaries(
@@ -140,7 +140,7 @@ pub(crate) fn converge_runner_service_binaries(
     mut entry: RunnerUpgradeEntry,
     observe: &mut impl FnMut(&str) -> Result<Vec<ServiceUnitObservation>>,
     scope_of: &impl Fn(&str) -> Option<&'static str>,
-    controller_unit_name: &str,
+    host_unit_name: &str,
     refresh: &mut impl FnMut(&Runner, &str) -> ServiceRefreshOutcome,
 ) -> RunnerUpgradeEntry {
     let Some(target) = entry.new_version.clone() else {
@@ -162,8 +162,8 @@ pub(crate) fn converge_runner_service_binaries(
     let mut services = match observe_and_classify(&mut *observe) {
         Ok(services) => services,
         Err(error) if service_managed => vec![RunnerServiceBinaryEntry {
-            unit: controller_unit_name.to_string(),
-            scope: "controller".to_string(),
+            unit: host_unit_name.to_string(),
+            scope: "host".to_string(),
             binary: String::new(),
             binary_version: None,
             running_version: None,
@@ -184,30 +184,28 @@ pub(crate) fn converge_runner_service_binaries(
             return entry;
         }
     };
-    if service_managed && controller_unit(&mut services).is_none() {
+    if service_managed && host_unit(&mut services).is_none() {
         services.push(RunnerServiceBinaryEntry {
-            unit: controller_unit_name.to_string(),
-            scope: "controller".to_string(),
+            unit: host_unit_name.to_string(),
+            scope: "host".to_string(),
             binary: String::new(),
             binary_version: None,
             running_version: None,
             active_state: None,
             target_version: target.clone(),
             status: "unknown".to_string(),
-            reason: Some(
-                "runner is service-managed but this controller's unit was not found".to_string(),
-            ),
+            reason: Some("runner is service-managed but its host unit was not found".to_string()),
             recovery_commands: Vec::new(),
         });
     }
 
-    let controller_stale = controller_unit(&mut services)
+    let host_stale = host_unit(&mut services)
         .is_some_and(|unit| unit.status == "stale" && !unit.binary.is_empty());
-    if service_managed && controller_stale {
+    if service_managed && host_stale {
         match refresh(runner, &entry.homeboy_path) {
             ServiceRefreshOutcome::Refreshed => match observe_and_classify(&mut *observe) {
                 Ok(mut refreshed) => {
-                    if let Some(unit) = controller_unit(&mut refreshed) {
+                    if let Some(unit) = host_unit(&mut refreshed) {
                         if unit.status == "current" {
                             unit.status = "refreshed".to_string();
                         } else {
@@ -221,7 +219,7 @@ pub(crate) fn converge_runner_service_binaries(
                     services = refreshed;
                 }
                 Err(error) => {
-                    if let Some(unit) = controller_unit(&mut services) {
+                    if let Some(unit) = host_unit(&mut services) {
                         unit.status = "unknown".to_string();
                         unit.reason = Some(format!(
                             "unit was refreshed but could not be re-observed: {}",
@@ -231,13 +229,13 @@ pub(crate) fn converge_runner_service_binaries(
                 }
             },
             ServiceRefreshOutcome::Deferred(reason) => {
-                if let Some(unit) = controller_unit(&mut services) {
+                if let Some(unit) = host_unit(&mut services) {
                     unit.status = "pending".to_string();
                     unit.reason = Some(format!("{} not restarted: {reason}", unit.unit));
                 }
             }
             ServiceRefreshOutcome::Failed(reason) => {
-                if let Some(unit) = controller_unit(&mut services) {
+                if let Some(unit) = host_unit(&mut services) {
                     let stale = unit.reason.take().unwrap_or_default();
                     unit.reason = Some(format!("{stale}; refresh failed: {reason}"));
                 }
@@ -477,8 +475,8 @@ mod tests {
 
     fn scope(unit: &str) -> Option<&'static str> {
         match unit {
-            OWN => Some("controller"),
-            OTHER => Some("other_controller"),
+            OWN => Some("host"),
+            OTHER => Some("legacy_controller"),
             _ => None,
         }
     }
@@ -529,7 +527,7 @@ mod tests {
     }
 
     #[test]
-    fn only_other_controllers_stale_units_leave_the_runner_converged() {
+    fn only_legacy_host_stale_units_leave_the_runner_converged() {
         let entry = converge_runner_service_binaries(
             &runner(false),
             converged_entry("homeboy-lab", "0.417.15"),
@@ -542,7 +540,7 @@ mod tests {
         assert!(entry.success);
         assert!(entry.path_drift.is_none());
         assert_eq!(entry.service_binaries.len(), 1);
-        // Another controller's stale unit is reported but not ours to converge.
+        // A legacy per-controller unit is reported but retires through its own controller.
         let other = &entry.service_binaries[0];
         assert_eq!(other.status, "stale");
         assert!(!other.blocks_convergence());

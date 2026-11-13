@@ -84,11 +84,11 @@ convergence `failed`.
 
 ## Daemon State Directory
 
-Each (runner, controller) pair has exactly one daemon state directory on the
-runner host: `~/.config/homeboy/runner-daemons/<runner>/<controller>`. Direct SSH
-launches, every remote `daemon` command, and the service unit's
+Each runner host has exactly one daemon state directory per runner, shared by
+every controller (#18063): `~/.config/homeboy/runner-daemons/<runner>/host`.
+Direct SSH launches, every remote `daemon` command, and the service unit's
 `HOMEBOY_DAEMON_STATE_DIR` derive it from one function, so a restarted daemon
-reopens the job store its predecessor wrote.
+reopens the job store its predecessor wrote, whichever controller restarted it.
 
 ## Current Session
 
@@ -109,39 +109,44 @@ controller then never starts, replaces, rotates, or retires the remote daemon.
 
 `homeboy runner service install <runner-id>` requires an idle runner. It:
 
-1. Writes `~/.config/systemd/user/homeboy-runner-<id>-<controller>.service`.
-   The unit runs `homeboy daemon serve --addr 127.0.0.1:0` from the controller's
-   stable link `~/.local/share/homeboy/runner-service/<id>/controllers/<controller>/homeboy`,
-   in `runner-daemons/<id>/<controller>`, with `Restart=always`. The
-   controller scope is a readable sanitized prefix plus the full SHA-256 of the
-   raw controller ID, shared by service names, binary slots, and daemon state
-   paths so sanitized IDs cannot alias.
+1. Writes `~/.config/systemd/user/homeboy-runner-<id>-host.service`. The unit
+   runs `homeboy daemon serve --addr 127.0.0.1:0` from the stable link
+   `~/.local/share/homeboy/runner-service/<id>/host/homeboy`, in
+   `runner-daemons/<id>/host`.
 2. Stops the idle controller-started daemon so the unit takes the daemon owner lock.
 3. Waits for the unit's lease, then marks the runner `service_managed`.
 
+One host unit serves every controller. Controllers are clients: each keeps its
+own session and tunnel, and all of them share one daemon, one job store, one
+concurrency limit, and one reservation.
+
 For a service-managed runner:
 
-- **Connect** waits for the service's fresh lease, opens the tunnel, and
-  writes the session. It takes no runtime promotion lease, so attaching never
-  waits behind a running Cook's runtime pin.
+- **Connect** starts the host unit, installing it from the runner's configured
+  homeboy only when the host has none yet, waits for its fresh lease, opens the
+  tunnel, and writes the session. The daemon may run another build than this
+  controller configured: Lab contract compatibility admits it (#16577), and the
+  session records the build that actually runs. Connect takes no runtime
+  promotion lease, so attaching never waits behind a running Cook's runtime pin.
 - **Disconnect** closes the tunnel and removes the session. The daemon and its
   jobs keep running.
 - **Refresh** never rotates daemons. It builds the new binary, drains
-  through the active-job guard, rewrites the unit, repoints the unit's link, and restarts the unit. The daemon's own startup recovers anything a previous owner left
-  behind.
+  through the active-job guard (which counts every controller's jobs), rewrites
+  the unit, repoints the unit's link, and restarts the unit. Because the
+  session records the build the shared daemon runs, refresh refuses to select
+  an older one unless `--allow-downgrade` is passed. The daemon's own startup recovers anything a previous owner left
+  behind; other controllers reconnect with `homeboy runner connect`.
 
 The service needs systemd user lingering on the runner host
 (`loginctl enable-linger`) so the unit keeps running without a login session.
 
-Older releases used the unsuffixed `homeboy-runner-<id>.service`, shared binary
-link, and `daemon-generations/<id>/primary`; the intermediate controller-scoped
-scheme also used sanitized IDs without a hash. New installs never overwrite,
-stop, or adopt either legacy unit name/path. Such a unit may continue owning jobs
-while controllers move to hash-scoped units. Retire a legacy unit only after an
-operator verifies its exact unit and lease and confirms that it has no active
-jobs. Then stop and disable that specific unit; remove its unit file, binary
-link, or state directory only when no remaining controller depends on them.
-Do not use the new controller-scoped service commands to perform legacy cleanup.
+Before #18063 each controller ran its own unit,
+`homeboy-runner-<id>-<controller-prefix>-<sha256>.service`, with its own link and
+state directory. On connect or install, a controller retires its own legacy unit
+(unit file, drop-ins, and binary link; the state directory stays) once that
+daemon has no active job. A busy legacy daemon keeps running until a later
+connect finds it idle. Other controllers' legacy units retire when those
+controllers upgrade.
 
 ## Unreachable recorded host
 

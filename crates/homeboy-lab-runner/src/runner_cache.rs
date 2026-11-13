@@ -205,10 +205,11 @@ fn execute_direct(runner: &Runner, command: &str) -> Result<DirectOutput> {
 /// - `homeboy-<ref>/target/release/homeboy`: refresh source checkout.
 /// - `dev/<16-hex>/homeboy`: dev-sync native build slot.
 ///
-/// A slot is protected when the configured Homeboy path, any runner-service
-/// controller link, or `$HOME/.local/bin/homeboy` resolves into it. Service
-/// links are discovered by glob because other controllers' links are unknown
-/// to this controller; an unresolvable reference protects every slot.
+/// A slot is protected when the configured Homeboy path, a runner-service
+/// link, or `$HOME/.local/bin/homeboy` resolves into it. Service links are
+/// discovered by glob: each runner's host link, plus any legacy per-controller
+/// link another controller has not yet retired (#18063). An unresolvable
+/// reference protects every slot.
 fn slot_shell_functions(root: &str, configured: &str) -> String {
     const SLOT_FUNCTIONS: &str = r#"slot_binary() {
   case "$1" in
@@ -245,7 +246,7 @@ slot_protected() {
       return 0 ;;
   esac
   reference_protects configured_homeboy_path "$configured" && return 0
-  for reference in "$HOME"/.local/share/homeboy/runner-service/*/controllers/*/homeboy; do
+  for reference in "$HOME"/.local/share/homeboy/runner-service/*/host/homeboy "$HOME"/.local/share/homeboy/runner-service/*/controllers/*/homeboy; do
     reference_protects runner_service_link "$reference" && return 0
   done
   reference_protects local_bin_link "$HOME/.local/bin/homeboy" && return 0
@@ -403,8 +404,7 @@ mod tests {
         let service = content_addressed_slot(&root, 'b');
         let local_bin = content_addressed_slot(&root, 'c');
         let unreferenced = content_addressed_slot(&root, 'd');
-        let service_link =
-            home.join(".local/share/homeboy/runner-service/lab/controllers/other/homeboy");
+        let service_link = home.join(".local/share/homeboy/runner-service/lab/host/homeboy");
         fs::create_dir_all(service_link.parent().expect("service dir")).expect("service dir");
         symlink(service.join("homeboy"), &service_link).expect("service link");
         let local_bin_link = home.join(".local/bin/homeboy");

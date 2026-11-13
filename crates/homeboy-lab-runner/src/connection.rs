@@ -8,7 +8,6 @@ use chrono::{DateTime, Utc};
 use reqwest::blocking::Client;
 use serde::Deserialize;
 use serde_json::Value;
-use sha2::{Digest, Sha256};
 
 use homeboy_core::api_jobs::{
     ActiveRunnerJobSummary, JobClaimMetadata, JobStatus, RunnerJobSource,
@@ -29,32 +28,16 @@ use super::session::{
 };
 use super::{load, remote_runner_homeboy_path, Runner, RunnerKind};
 
-/// Collision-resistant, bounded path/unit component for controller ownership.
-/// Keep this shared by every direct-SSH and service-managed daemon location.
-pub(super) fn controller_scope_segment(controller_id: &str) -> String {
-    let prefix = paths::sanitize_path_segment(controller_id)
-        .chars()
-        .take(24)
-        .collect::<String>();
-    let prefix = if prefix.is_empty() {
-        "controller"
-    } else {
-        &prefix
-    };
-    let digest = format!("{:x}", Sha256::digest(controller_id.as_bytes()));
-    format!("{prefix}-{digest}")
-}
-
-/// The one daemon state directory for a (runner, controller) pair, relative to
-/// the runner user's `$HOME`. Direct SSH launches, remote daemon commands, and
-/// the service unit all derive their `HOMEBOY_DAEMON_STATE_DIR` from it, so a
-/// restarted daemon always reopens the job store its predecessor wrote and
-/// re-adopts its jobs.
-pub(super) fn daemon_state_dir(runner_id: &str, controller_id: &str) -> String {
+/// The runner host's one daemon state directory, relative to the runner
+/// user's `$HOME` (#18063). Every controller attached to the runner shares it:
+/// direct SSH launches, remote daemon commands, and the service unit all derive
+/// their `HOMEBOY_DAEMON_STATE_DIR` from it, so a restarted daemon always
+/// reopens the job store its predecessor wrote and re-adopts its jobs, whichever
+/// controller restarted it.
+pub(super) fn daemon_state_dir(runner_id: &str) -> String {
     format!(
-        ".config/homeboy/runner-daemons/{}/{}",
+        ".config/homeboy/runner-daemons/{}/host",
         paths::sanitize_path_segment(runner_id),
-        controller_scope_segment(controller_id)
     )
 }
 
@@ -2868,7 +2851,6 @@ pub(crate) fn await_daemon_restart(runner_id: &str) -> Result<()> {
 mod service;
 mod session_store;
 mod transport;
-#[cfg(test)]
 pub(crate) use transport::no_current_daemon_session_error;
 
 #[cfg(test)]
@@ -2880,7 +2862,8 @@ pub use service::{
 };
 pub(crate) use service::{
     observe_service_units, probe_runner_binary_version,
-    service_unit_name as runner_service_unit_name, service_unit_scope, ServiceUnitObservation,
+    service_binary_link as host_service_binary_link, service_unit_name as runner_service_unit_name,
+    service_unit_scope, ServiceUnitObservation,
 };
 use session_store::*;
 pub(crate) use session_store::{controller_id, read_session};

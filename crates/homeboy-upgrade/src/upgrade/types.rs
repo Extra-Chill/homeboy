@@ -136,8 +136,8 @@ pub struct RunnerCheckEntry {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct RunnerServiceBinaryEntry {
     pub unit: String,
-    /// `controller` (this controller's scoped unit) or `other_controller`
-    /// (owned and converged by another controller).
+    /// `host` (the runner's one host daemon unit) or `legacy_controller` (a
+    /// pre-#18063 per-controller unit its controller retires on upgrade).
     pub scope: String,
     /// Binary path the unit's `ExecStart` runs (usually a stable link).
     pub binary: String,
@@ -159,11 +159,10 @@ pub struct RunnerServiceBinaryEntry {
 
 impl RunnerServiceBinaryEntry {
     /// Whether this unit prevents the runner from being reported converged.
-    /// Other controllers' units converge through their own owners, so only
-    /// this controller's unit is in scope.
+    /// Legacy per-controller units retire through their own controllers, so
+    /// only the host unit is in scope.
     pub fn blocks_convergence(&self) -> bool {
-        self.scope == "controller"
-            && matches!(self.status.as_str(), "stale" | "unknown" | "pending")
+        self.scope == "host" && matches!(self.status.as_str(), "stale" | "unknown" | "pending")
     }
 }
 

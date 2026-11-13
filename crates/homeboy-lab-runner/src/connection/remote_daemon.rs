@@ -1419,6 +1419,22 @@ pub(super) fn remote_daemon_status(
     remote_daemon_status_with_timeout(client, homeboy, runner_id, REMOTE_DAEMON_STATUS_TIMEOUT)
 }
 
+/// Read-only status of the daemon in another state directory on the runner,
+/// relative to `$HOME`. Only legacy per-controller daemons (#18063) live
+/// outside the host state directory.
+pub(super) fn remote_daemon_status_in_state_dir(
+    client: &SshClient,
+    homeboy: &str,
+    runner_id: &str,
+    state_dir: &str,
+) -> std::result::Result<RemoteDaemonStatus, String> {
+    let command = format!(
+        "HOMEBOY_DAEMON_STATE_DIR=\"$HOME/{state_dir}\" {} daemon status --full",
+        shell::quote_arg(homeboy),
+    );
+    remote_daemon_status_command(client, runner_id, &command, REMOTE_DAEMON_STATUS_TIMEOUT)
+}
+
 pub(super) fn bounded_remote_daemon_status_with_timeout(
     client: &SshClient,
     homeboy: &str,
@@ -1434,9 +1450,37 @@ fn remote_daemon_status_with_timeout(
     runner_id: &str,
     timeout: Duration,
 ) -> std::result::Result<RemoteDaemonStatus, String> {
-    let command = remote_daemon_command(runner_id, homeboy, "daemon status --full");
+    remote_daemon_status_command(
+        client,
+        runner_id,
+        &host_daemon_status_command(runner_id, homeboy),
+        timeout,
+    )
+}
+
+/// `daemon status` for the host state directory, answered by the host unit's
+/// own binary when the runner host has one. Status judges freshness against
+/// the binary that runs it, so probing with the daemon's own build makes it
+/// measure liveness, not whether this controller configured the same build as
+/// the controller that last refreshed the shared daemon (#18063). A host
+/// without a unit (direct SSH) is probed by the configured binary.
+fn host_daemon_status_command(runner_id: &str, homeboy: &str) -> String {
+    format!(
+        r#"probe="$HOME/{link}"; [ -x "$probe" ] || probe={homeboy}; HOMEBOY_DAEMON_STATE_DIR="{state_dir}" "$probe" daemon status --full"#,
+        link = crate::connection::host_service_binary_link(runner_id),
+        homeboy = shell::quote_arg(homeboy),
+        state_dir = remote_daemon_state_dir(runner_id),
+    )
+}
+
+fn remote_daemon_status_command(
+    client: &SshClient,
+    runner_id: &str,
+    command: &str,
+    timeout: Duration,
+) -> std::result::Result<RemoteDaemonStatus, String> {
     let started = std::time::Instant::now();
-    let output = client.execute_with_timeout(&command, timeout);
+    let output = client.execute_with_timeout(command, timeout);
     crate::readonly_probe::record_probe_outcome(
         "runner_remote_daemon_status",
         Some(runner_id),
@@ -1658,75 +1702,17 @@ mod tests {
     }
 
     #[test]
-    fn daemon_lifecycle_command_uses_a_controller_scoped_state_directory() {
-        let controller =
-            crate::connection::controller_scope_segment(&crate::connection::controller_id());
+    fn every_daemon_lifecycle_command_targets_the_one_host_state_directory() {
+        // No controller segment: every controller reaches the same daemon (#18063).
+        let pinned =
+            "HOMEBOY_DAEMON_STATE_DIR=\"$HOME/.config/homeboy/runner-daemons/runner_a/host\"";
         assert_eq!(
             remote_daemon_ensure_running_command("/opt/homeboy", "runner/a", Some("op-1")),
-            format!("HOMEBOY_DAEMON_STATE_DIR=\"$HOME/.config/homeboy/runner-daemons/runner_a/{controller}\" HOMEBOY_DAEMON_IDLE_TIMEOUT_SECS=0 /opt/homeboy daemon ensure-running --replacement-operation-id op-1 --addr 127.0.0.1:0")
+            format!("{pinned} HOMEBOY_DAEMON_IDLE_TIMEOUT_SECS=0 /opt/homeboy daemon ensure-running --replacement-operation-id op-1 --addr 127.0.0.1:0")
         );
         assert_eq!(
-            remote_daemon_command("runner/a", "/opt/homeboy", "daemon status"),
-            format!("HOMEBOY_DAEMON_STATE_DIR=\"$HOME/.config/homeboy/runner-daemons/runner_a/{controller}\" /opt/homeboy daemon status")
-        );
-    }
-
-    #[test]
-    fn two_controllers_have_disjoint_daemon_stores_and_preserve_each_others_jobs() {
-        let first_store = remote_daemon_state_dir("shared-runner", "controller-a");
-        let second_store = remote_daemon_state_dir("shared-runner", "controller-b");
-        let first_scope = crate::connection::controller_scope_segment("controller-a");
-        let second_scope = crate::connection::controller_scope_segment("controller-b");
-        assert_ne!(first_store, second_store);
-        assert!(first_store.ends_with(&format!("/runner-daemons/shared-runner/{first_scope}")));
-        assert!(second_store.ends_with(&format!("/runner-daemons/shared-runner/{second_scope}")));
-        let first_status =
-            format!("HOMEBOY_DAEMON_STATE_DIR=\"{first_store}\" /opt/homeboy daemon status");
-        let second_start = format!("HOMEBOY_DAEMON_STATE_DIR=\"{second_store}\" /opt/homeboy daemon ensure-running --addr 127.0.0.1:0");
-        let first_stop = format!("HOMEBOY_DAEMON_STATE_DIR=\"{first_store}\" /opt/homeboy daemon stop --lease-id lease-a");
-        assert!(first_status.contains("/shared-runner/controller-a-"));
-        assert!(second_start.contains("/shared-runner/controller-b-"));
-        assert!(first_stop.contains("/shared-runner/controller-a-"));
-        assert!(!second_start.contains("/shared-runner/controller-a-"));
-    }
-
-    #[test]
-    fn in_place_restart_stops_and_starts_on_the_one_state_dir_the_service_unit_uses() {
-        let controller = crate::connection::controller_id();
-        let state_dir = remote_daemon_state_dir("homeboy-lab", &controller);
-        let stop = remote_daemon_command(
-            "homeboy-lab",
-            "/opt/homeboy",
-            "daemon stop --lease-id lease-a",
-        );
-        let start = remote_daemon_ensure_running_command("/opt/homeboy", "homeboy-lab", None);
-
-        assert_eq!(
-            state_dir,
-            format!(
-                "$HOME/{}",
-                crate::connection::daemon_state_dir("homeboy-lab", &controller)
-            ),
-            "the direct path and the service unit derive the dir from one function"
-        );
-        assert!(state_dir.starts_with("$HOME/.config/homeboy/runner-daemons/homeboy-lab/"));
-        let pinned = format!("HOMEBOY_DAEMON_STATE_DIR=\"{state_dir}\"");
-        assert!(stop.starts_with(&pinned), "{stop}");
-        assert!(start.starts_with(&pinned), "{start}");
-    }
-
-    #[test]
-    fn daemon_store_scope_does_not_alias_distinct_ids_with_equal_sanitized_prefixes() {
-        let first = remote_daemon_state_dir("shared-runner", "a/b-controller");
-        let second = remote_daemon_state_dir("shared-runner", "a_b-controller");
-        assert_ne!(first, second);
-        assert!(first.contains(&crate::connection::controller_scope_segment(
-            "a/b-controller"
-        )));
-        assert!(
-            second.contains(&crate::connection::controller_scope_segment(
-                "a_b-controller"
-            )),
+            remote_daemon_command("runner/a", "/opt/homeboy", "daemon stop --lease-id lease-a"),
+            format!("{pinned} /opt/homeboy daemon stop --lease-id lease-a")
         );
     }
 
@@ -2388,7 +2374,7 @@ pub(super) fn remote_daemon_ensure_running_command(
 }
 
 fn remote_daemon_command(runner_id: &str, homeboy: &str, args: &str) -> String {
-    let state_dir = remote_daemon_state_dir(runner_id, &crate::connection::controller_id());
+    let state_dir = remote_daemon_state_dir(runner_id);
     format!(
         "HOMEBOY_DAEMON_STATE_DIR=\"{state_dir}\" {} {args}",
         shell::quote_arg(homeboy),
@@ -2396,7 +2382,7 @@ fn remote_daemon_command(runner_id: &str, homeboy: &str, args: &str) -> String {
 }
 
 fn remote_resident_daemon_command(runner_id: &str, homeboy: &str, args: &str) -> String {
-    let state_dir = remote_daemon_state_dir(runner_id, &crate::connection::controller_id());
+    let state_dir = remote_daemon_state_dir(runner_id);
     format!(
         "HOMEBOY_DAEMON_STATE_DIR=\"{state_dir}\" {}=0 {} {args}",
         homeboy_core::daemon::DAEMON_IDLE_TIMEOUT_ENV,
@@ -2404,11 +2390,8 @@ fn remote_resident_daemon_command(runner_id: &str, homeboy: &str, args: &str) ->
     )
 }
 
-fn remote_daemon_state_dir(runner_id: &str, controller_id: &str) -> String {
-    format!(
-        "$HOME/{}",
-        crate::connection::daemon_state_dir(runner_id, controller_id)
-    )
+fn remote_daemon_state_dir(runner_id: &str) -> String {
+    format!("$HOME/{}", crate::connection::daemon_state_dir(runner_id))
 }
 
 /// Schema of `homeboy daemon plan` data (#15557 C5).
