@@ -2193,7 +2193,10 @@ mod tests {
             form.what_changed,
             vec!["First line wraps here".to_string(), "Second".to_string()]
         );
-        assert_eq!(form.evidence[0].summary, "before: FAIL x after: PASS &lt;/p>");
+        assert_eq!(
+            form.evidence[0].summary,
+            "before: FAIL x after: PASS &lt;/p>"
+        );
         form.validate().expect("flattened form is valid");
         scalar("summary", &form.summary).expect("flattened prose passes dossier validation");
         for entry in &form.what_changed {
