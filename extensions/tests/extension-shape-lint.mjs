@@ -14,6 +14,7 @@ const extensionIds = new Set([
   'nodejs',
   'rust',
   'ssh-checkout-deploy',
+  'windows-vm',
   'swift',
   'wordpress',
 ]);

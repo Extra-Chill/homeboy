@@ -1,0 +1,15 @@
+{
+  "name": "Windows VM",
+  "id": "windows-vm",
+  "version": "0.1.0",
+  "source_url": "https://github.com/Extra-Chill/homeboy",
+  "description": "Disposable Windows x64 KVM environment with verified SSH command execution",
+  "author": "Extra Chill",
+  "provides": { "file_extensions": ["mjs", "ps1", "json"] },
+  "environment_providers": [{
+    "id": "windows-vm",
+    "command": "node {{extension_path}}/scripts/windows-vm.mjs",
+    "capabilities": ["prepare", "reboot-cold", "run", "snapshot", "reset", "teardown"],
+    "environment": { "platform": "windows", "arch": "x86_64", "execution_kind": "vm" }
+  }]
+}

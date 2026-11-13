@@ -29,6 +29,7 @@ when a reusable integration needs documentation outside its owning project.
 | `nodejs` | Node.js project type — discovery, lint/test runners, and npm release lifecycle |
 | `go` | Go project type — Cargo-equivalent CLI integration for services and binaries |
 | `swift` | Swift project type — testing infrastructure for macOS, iOS, and Swift CLI projects |
+| `windows-vm` | Disposable Windows x64 KVM VM lifecycle, SSH runs and verified artifacts |
 | `managed-preview` | Provider command helpers for Homeboy managed service public previews |
 | `discord` | Outbound Discord run-completion notifications via Homeboy's transport-agnostic notify command |
 | `cloudflare-workers` | Immutable Cloudflare Worker deployment with rollback and durability gates |
