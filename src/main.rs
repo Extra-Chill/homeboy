@@ -9,10 +9,11 @@ fn main() -> std::process::ExitCode {
                 args.get(2..).unwrap_or_default(),
             );
         }
-        if let Ok(executable) = std::env::current_exe() {
-            let _ =
-                homeboy_core::engine::command::register_execution_supervisor_executable(executable);
-        }
+        // `/proc/self/exe` execs this exact image even after a self-upgrade
+        // replaces or deletes the file, so supervisor and controller never skew.
+        let _ = homeboy_core::engine::command::register_execution_supervisor_executable(
+            "/proc/self/exe",
+        );
     }
     // Stable, store-free installer query. Never initialize or migrate state here.
     if args.get(1).map(String::as_str) == Some("--observation-schema-version") {
