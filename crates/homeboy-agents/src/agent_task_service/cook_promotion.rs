@@ -2766,8 +2766,22 @@ pub(crate) fn recover_cook_pr_with_backend_and_review_form<B: AgentTaskPrFinaliz
     // agent's form is never consulted alongside it (#16441).
     let supplied_review_form = resolve_supplied_recovery_review_form(&run_id, review_form)?;
     let lifecycle_store = agent_task_lifecycle::AgentTaskLifecycleStore::from_environment()?;
+    let recipe_store = super::cook_recipe::CookRecipeStore::from_current_data_root()?;
+    // Without a supplied form or overrides, recovery publishes exactly as the
+    // Cook would have: a run whose agent recorded no usable review form
+    // becomes the incomplete draft instead of failing on the missing form.
+    if supplied_review_form.is_none() && overrides.is_empty() && !preflight {
+        return finalize_or_load_cook_pr_with_backend_with_stores(
+            &recipe_store,
+            &lifecycle_store,
+            &options,
+            &run_id,
+            &promotion,
+            backend,
+        );
+    }
     let finalization = cook_finalization_options_with_stores(
-        &super::cook_recipe::CookRecipeStore::from_current_data_root()?,
+        &recipe_store,
         &lifecycle_store,
         &options,
         &run_id,
