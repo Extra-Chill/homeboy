@@ -104,10 +104,12 @@ pub(crate) fn daemon_policy_env(
     let mut entries: Vec<(String, String)> =
         homeboy_runner_contract::RESOURCE_GUARD_POLICY_ENV_KEYS
             .iter()
+            .copied()
+            .chain(std::iter::once("HOMEBOY_DAEMON_IDLE_TIMEOUT_SECS"))
             .filter_map(|key| {
-                let value = env.get(*key)?.trim();
+                let value = env.get(key)?.trim();
                 (!value.is_empty() && value.bytes().all(|byte| byte.is_ascii_digit()))
-                    .then(|| ((*key).to_string(), value.to_string()))
+                    .then(|| (key.to_string(), value.to_string()))
             })
             .collect();
     entries.sort();
@@ -120,8 +122,14 @@ fn render_service_unit_with_env(
     startup_token: &str,
     daemon_env: &[(String, String)],
 ) -> String {
+    let idle_timeout = daemon_env
+        .iter()
+        .find(|(key, _)| key == "HOMEBOY_DAEMON_IDLE_TIMEOUT_SECS")
+        .map(|(_, value)| value.as_str())
+        .unwrap_or("21600");
     let policy_env: String = daemon_env
         .iter()
+        .filter(|(key, _)| key != "HOMEBOY_DAEMON_IDLE_TIMEOUT_SECS")
         .map(|(key, value)| format!("Environment={key}={value}\n"))
         .collect();
     format!(
@@ -134,8 +142,9 @@ Type=simple
 Environment=HOMEBOY_DAEMON_STATE_DIR=%h/{state_dir}
 Environment={token_env}={startup_token}
 Environment=PATH={path}
+Environment=HOMEBOY_DAEMON_IDLE_TIMEOUT_SECS={idle_timeout}
 {policy_env}ExecStart=%h/{link} daemon serve --addr 127.0.0.1:0
-Restart=always
+Restart=on-failure
 RestartSec=2s
 TimeoutStopSec=30s
 KillMode=process
@@ -315,13 +324,27 @@ fn service_target(runner_id: &str) -> Result<ServiceTarget> {
     })
 }
 
-/// Poll the read-only daemon status until the service daemon holds a fresh,
+fn start_service_script_for(runner_id: &str, controller_id: &str) -> String {
+    format!(
+        "systemctl --user start {}",
+        service_unit_name_for(runner_id, controller_id)
+    )
+}
+
+/// Start the unit, then poll read-only daemon status until it holds a fresh,
 /// reachable, loopback lease.
 fn wait_for_service_daemon(
     client: &SshClient,
     homeboy: &str,
     runner_id: &str,
 ) -> std::result::Result<RemoteDaemon, String> {
+    // All attach paths wake this controller's retired unit; active units are unchanged.
+    run_remote(
+        client,
+        &start_service_script_for(runner_id, &controller_id()),
+        "starting the runner service",
+    )
+    .map_err(|error| error.to_string())?;
     let deadline = Instant::now() + SERVICE_READY_TIMEOUT;
     let mut last: String;
     loop {
@@ -603,7 +626,7 @@ pub(crate) fn probe_runner_binary_version(
 }
 
 /// Attach to the runner's service daemon: wait for its lease, open the tunnel,
-/// and write the session. Nothing on the runner is started or stopped.
+/// and write the session. Start this controller's unit if it retired idle.
 pub(crate) fn connect_service_runner(runner_id: &str) -> Result<(RunnerConnectReport, i32)> {
     let session_path = session_path(runner_id)?;
     let target = service_target(runner_id)?;
@@ -782,7 +805,8 @@ mod tests {
         assert!(unit.contains(
             &format!("Environment=HOMEBOY_DAEMON_STATE_DIR=%h/.config/homeboy/runner-daemons/homeboy-lab/{}\n", controller_segment())
         ));
-        assert!(unit.contains("Restart=always"));
+        assert!(unit.contains("Restart=on-failure"));
+        assert!(unit.contains("Environment=HOMEBOY_DAEMON_IDLE_TIMEOUT_SECS=21600\n"));
         // A restart stops only the daemon; re-adoptable job children lead
         // their own sessions and must outlive it.
         assert!(unit.contains("KillMode=process"));
@@ -803,6 +827,7 @@ mod tests {
             ("HOMEBOY_RUNNER_RESOURCE_GUARD_RSS_BYTES", "68719476736"),
             ("HOMEBOY_RUNNER_RESOURCE_GUARD_PROCESS_COUNT", "512"),
             ("HOMEBOY_COMMAND", "/opt/homeboy"),
+            ("HOMEBOY_DAEMON_IDLE_TIMEOUT_SECS", " 3600 "),
         ]
         .into_iter()
         .map(|(key, value)| (key.to_string(), value.to_string()))
@@ -811,6 +836,10 @@ mod tests {
         assert_eq!(
             policy,
             vec![
+                (
+                    "HOMEBOY_DAEMON_IDLE_TIMEOUT_SECS".to_string(),
+                    "3600".to_string()
+                ),
                 (
                     "HOMEBOY_RUNNER_RESOURCE_GUARD_MAX_PROCESS_COUNT".to_string(),
                     "1024".to_string()
@@ -836,6 +865,12 @@ mod tests {
         );
         assert!(unit.contains("\nEnvironment=HOMEBOY_RUNNER_RESOURCE_GUARD_PROCESS_COUNT=512\n"));
         assert!(!unit.contains("HOMEBOY_COMMAND"));
+        assert!(unit.contains("Environment=HOMEBOY_DAEMON_IDLE_TIMEOUT_SECS=3600\n"));
+        assert_eq!(
+            unit.matches("Environment=HOMEBOY_DAEMON_IDLE_TIMEOUT_SECS=")
+                .count(),
+            1
+        );
         assert!(unit.contains(
             "Environment=HOMEBOY_RUNNER_RESOURCE_GUARD_RSS_BYTES=68719476736\nExecStart="
         ));
@@ -854,6 +889,10 @@ mod tests {
                 "1024\nExecStartPre=/bin/evil",
             ),
             ("HOMEBOY_RUNNER_RESOURCE_GUARD_RSS_BYTES", "-1"),
+            (
+                "HOMEBOY_DAEMON_IDLE_TIMEOUT_SECS",
+                "1\nExecStartPre=/bin/evil",
+            ),
         ]
         .into_iter()
         .map(|(key, value)| (key.to_string(), value.to_string()))
@@ -1025,6 +1064,21 @@ mod tests {
 
         let commands = std::fs::read_to_string(home.path().join("systemctl.log")).unwrap();
         assert!(commands.contains(&format!("enable {b_unit}")));
+        assert!(!commands.contains(&a_unit));
+        // The attach prelude wakes only B, even after a clean idle exit.
+        let status = std::process::Command::new("/bin/sh")
+            .arg("-c")
+            .arg(start_service_script_for("homeboy-lab", "controller-b"))
+            .env("HOME", home.path())
+            .env("PATH", format!("{}:/usr/bin:/bin", bin_dir.display()))
+            .status()
+            .unwrap();
+        assert!(status.success());
+        let commands = std::fs::read_to_string(home.path().join("systemctl.log")).unwrap();
+        assert_eq!(
+            commands.lines().last(),
+            Some(format!("--user start {b_unit}").as_str())
+        );
         assert!(!commands.contains(&a_unit));
         let b_rendered = std::fs::read_to_string(b_unit_path).unwrap();
         assert!(b_rendered.contains(&format!(

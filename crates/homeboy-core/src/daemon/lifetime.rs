@@ -60,7 +60,7 @@ pub(super) fn launch_idle_timeout(default: u64) -> Result<u64> {
     ))
 }
 
-/// Explicit foreground/service launches remain resident. Automatic launchers
+/// Explicit foreground launches remain resident. Automatic launchers and services
 /// supply the bounded default; zero explicitly selects a resident daemon.
 pub(super) fn configured_idle_timeout() -> Result<Option<Duration>> {
     std::env::var(IDLE_TIMEOUT_ENV)
@@ -177,27 +177,25 @@ pub(super) fn state_dir_removed(state_path: &Path) -> bool {
         .is_some_and(|dir| matches!(dir.try_exists(), Ok(false)))
 }
 
-/// A `serve` owns its lifetime exactly when the Homeboy CLI launched it: the
-/// launch carries a startup token. A hand-started foreground `serve` has no
-/// token and stays resident. A service-managed `serve` may carry a token but
-/// its manager owns its lifetime; an idle exit under `Restart=always` would
-/// only loop.
+/// CLI-launched and service-managed daemons enforce their configured idle
+/// window. A hand-started foreground `serve` without a token stays resident.
+/// Service units use `Restart=on-failure`, so a clean idle exit stays stopped.
 pub(super) fn owns_lifetime(
     startup_token: &str,
     service_manager: Option<super::DaemonServiceManager>,
 ) -> bool {
-    service_manager.is_none() && !startup_token.is_empty()
+    service_manager.is_some() || !startup_token.is_empty()
 }
 
-/// The lifetime policy this `serve` enforces. Resident and service-managed
-/// launches stop only for executable replacement, not ordinary idleness.
+/// The lifetime policy this `serve` enforces. Resident foreground launches
+/// stop only for executable replacement, not ordinary idleness.
 /// Read before publishing the lease so an invalid idle window fails startup.
 pub(super) fn owned_idle_lifetime(
     service_manager: Option<super::DaemonServiceManager>,
 ) -> Result<IdleLifetime> {
     let startup_token = std::env::var(super::DAEMON_STARTUP_TOKEN_ENV).unwrap_or_default();
     if !owns_lifetime(&startup_token, service_manager) {
-        // Resident and service-managed daemons have no ordinary idle timeout,
+        // Resident foreground daemons have no ordinary idle timeout,
         // but must still yield a replaced executable after owned work ends.
         return Ok(IdleLifetime::new(None, Instant::now()));
     }
@@ -205,6 +203,15 @@ pub(super) fn owned_idle_lifetime(
         configured_idle_timeout()?,
         Instant::now(),
     ))
+}
+
+static LAST_CONTROLLER_REQUEST: std::sync::Mutex<Option<Instant>> = std::sync::Mutex::new(None);
+
+/// A complete HTTP request is controller activity, including polling requests.
+pub(super) fn record_controller_request() {
+    *LAST_CONTROLLER_REQUEST
+        .lock()
+        .unwrap_or_else(|e| e.into_inner()) = Some(Instant::now());
 }
 
 /// One poll's view of this daemon's lifetime inputs.
@@ -220,6 +227,8 @@ pub(super) struct LifetimeObservation {
     pub(super) busy: bool,
     /// The executable this daemon started from was replaced (#15403).
     pub(super) binary_replaced: bool,
+    /// Most recent HTTP request; only ordinary idle retirement uses this clock.
+    pub(super) last_request: Option<Instant>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -283,8 +292,11 @@ impl IdleLifetime {
             return LifetimeDecision::Continue;
         }
         let idle_for = now.saturating_duration_since(self.last_activity);
+        let request_idle_for = observation.last_request.map_or(idle_for, |last| {
+            idle_for.min(now.saturating_duration_since(last))
+        });
         let reason = match self.timeout {
-            Some(timeout) if idle_for >= timeout => SelfStopReason::IdleTimeout(timeout),
+            Some(timeout) if request_idle_for >= timeout => SelfStopReason::IdleTimeout(timeout),
             // An idle daemon whose binary was replaced stops after a short
             // settle instead of serving stale code until its idle window
             // lapses; the next command starts the installed binary (#15403).
@@ -369,6 +381,9 @@ fn observe_lifetime(
             || (!binary_replaced && pending_admission())
             || launcher.is_some_and(LauncherIdentity::is_live),
         binary_replaced,
+        last_request: *LAST_CONTROLLER_REQUEST
+            .lock()
+            .unwrap_or_else(|e| e.into_inner()),
     }
 }
 
@@ -420,6 +435,14 @@ fn stop_if_still_idle(
     if observation.state_dir_removed || !observation.own_lease || observation.busy {
         return false;
     }
+    if let SelfStopReason::IdleTimeout(window) = reason {
+        if observation
+            .last_request
+            .is_some_and(|last| last.elapsed() < window)
+        {
+            return false;
+        }
+    }
     *held.lock().unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(SelfStop {
         reason,
         _guards: (lock, fence),
@@ -462,6 +485,7 @@ mod tests {
         own_lease: true,
         busy: false,
         binary_replaced: false,
+        last_request: None,
     };
 
     #[test]
@@ -478,6 +502,34 @@ mod tests {
                 300
             )))
         );
+        // Service-managed policy uses the same public decision boundary.
+        for (busy, request_age, expected_stop) in [
+            (false, None, true),
+            (false, Some(60), false),
+            (true, None, false),
+        ] {
+            assert!(owns_lifetime(
+                "",
+                Some(super::super::DaemonServiceManager::Systemd)
+            ));
+            let now = start + Duration::from_secs(21_600);
+            let observation = LifetimeObservation {
+                busy,
+                last_request: request_age.map(|age| now - Duration::from_secs(age)),
+                ..IDLE
+            };
+            let mut service = IdleLifetime::new(Some(Duration::from_secs(21_600)), start);
+            assert_eq!(
+                service.decide(now, &observation),
+                if expected_stop {
+                    LifetimeDecision::StopIfStillIdle(SelfStopReason::IdleTimeout(
+                        Duration::from_secs(21_600),
+                    ))
+                } else {
+                    LifetimeDecision::Continue
+                }
+            );
+        }
         // A stop that could not take the lifecycle lock retries only after
         // another complete idle window.
         assert_eq!(
@@ -618,6 +670,7 @@ mod tests {
             own_lease: false,
             busy: true,
             binary_replaced: false,
+            last_request: None,
         };
         assert_eq!(idle.decide(start, &removed), LifetimeDecision::StopNow);
     }
@@ -746,15 +799,14 @@ mod tests {
     }
 
     #[test]
-    fn only_a_cli_launched_unmanaged_serve_owns_its_lifetime() {
+    fn cli_and_service_launches_own_their_lifetime() {
         use crate::daemon::DaemonServiceManager;
         assert!(owns_lifetime("token", None));
         // A hand-started foreground serve has no startup token.
         assert!(!owns_lifetime("", None));
-        // A service-managed serve runs no lifetime monitor, token or not.
         for manager in [DaemonServiceManager::Systemd, DaemonServiceManager::Launchd] {
-            assert!(!owns_lifetime("token", Some(manager)));
-            assert!(!owns_lifetime("", Some(manager)));
+            assert!(owns_lifetime("token", Some(manager)));
+            assert!(owns_lifetime("", Some(manager)));
         }
     }
 
