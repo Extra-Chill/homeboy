@@ -4,6 +4,12 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.464.5] - 2026-11-13
+
+### Fixed
+- retrying the newest attempt continues its lineage without --force
+- project a Cook's recovery step from the Cook, not the attempt read
+
 ## [0.464.4] - 2026-11-13
 
 ### Changed
