@@ -16,7 +16,7 @@ pub(super) fn offline_github(home: &Path) -> PathBuf {
     let bin = home.join("bin");
     write_executable(
         &bin.join("gh"),
-        "#!/bin/sh\ncase \"$1\" in\napi) printf '[[]]';;\n*) exit 1;;\nesac\n",
+        "#!/bin/sh\ncase \"$1\" in\napi) printf '[]';;\n*) exit 1;;\nesac\n",
     );
     std::env::join_paths(std::iter::once(bin).chain(std::env::split_paths(
         &std::env::var_os("PATH").unwrap_or_default(),
