@@ -47,6 +47,7 @@ pub struct AgentTaskReviewTestStep {
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct AgentTaskReviewEvidence {
+    #[serde(deserialize_with = "prose_field")]
     pub summary: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub url: Option<String>,
@@ -2175,6 +2176,7 @@ mod tests {
                 "pr_title": "feat(render-video): add an ability",
                 "summary": "Adds a render plan.\n\nAlso adds\tsmoke tests for `<!-- wp:x /-->` and </p>.\r\n",
                 "what_changed": ["First line\nwraps here", "  ", "Second"],
+                "evidence": [{"summary": "before:\nFAIL x\nafter:\nPASS\t\r\u{0007}</p>"}],
                 "completion": "complete",
             }
         });
@@ -2190,6 +2192,10 @@ mod tests {
         assert_eq!(
             form.what_changed,
             vec!["First line wraps here".to_string(), "Second".to_string()]
+        );
+        assert_eq!(
+            form.evidence[0].summary,
+            "before: FAIL x after: PASS &lt;/p>"
         );
         form.validate().expect("flattened form is valid");
         scalar("summary", &form.summary).expect("flattened prose passes dossier validation");
