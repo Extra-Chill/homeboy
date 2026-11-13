@@ -59,6 +59,7 @@ homeboy-lab-contract = { path = "crates/contracts/homeboy-lab-contract" }
 
 # Core library dependencies
 base64 = "0.22"
+mimalloc = "=0.1.48"
 serde_json = "1.0"
 uuid = { version = "1.11", features = ["v4", "v5", "serde"] }
 # default-features disabled to drop reqwest's `default-tls` (native-tls/openssl),
