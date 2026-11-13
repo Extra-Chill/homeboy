@@ -3845,7 +3845,7 @@ mod tests {
         assert!(pinned.exists());
     }
 
-    /// Recovery preserves source, not ignored build output, independent of component metadata.
+    /// Recovery reproduces staged, unstaged, deleted and untracked changes and leaves the real index untouched.
     #[test]
     fn recovery_round_trips_mixed_changes_without_touching_linked_worktree_index() {
         let data_root = tempfile::tempdir().expect("data root");
@@ -3915,6 +3915,7 @@ mod tests {
         assert_eq!(fs::read(&index_path).unwrap(), original_index);
     }
 
+    /// Recovery preserves source, not ignored build output, independent of component metadata.
     #[test]
     fn recovery_preserves_worktree_without_changing_real_index() {
         for case in [
