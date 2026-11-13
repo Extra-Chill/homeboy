@@ -14,7 +14,8 @@ pub(super) fn executables(program: &str) -> Vec<String> {
     let mut quote = None;
     let mut escaped = false;
     let mut comment = false;
-    for ch in program.chars().chain(std::iter::once('\n')) {
+    let mut chars = program.chars().chain(std::iter::once('\n')).peekable();
+    while let Some(ch) = chars.next() {
         if comment {
             if ch != '\n' {
                 continue;
@@ -46,12 +47,18 @@ pub(super) fn executables(program: &str) -> Vec<String> {
             quote = Some(ch);
             continue;
         }
+        // `2>&1`, `>&2` and `<&0` duplicate a descriptor, and `&>`/`&>>`
+        // redirect both streams: those `&`s are redirect syntax, not lists.
+        if ch == '&' && (word.ends_with(['>', '<']) || chars.peek() == Some(&'>')) {
+            word.push(ch);
+            continue;
+        }
         if ch.is_whitespace() || ";|&()".contains(ch) {
             if !word.is_empty() {
                 words.push(std::mem::take(&mut word));
             }
             if ch == '\n' || ";|&()".contains(ch) {
-                if let Some(command) = words.iter().find(|word| !assignment(word)) {
+                if let Some(command) = command_word(&words) {
                     if !builtin(command)
                         && !command.contains(['$', '`', '*', '?', '/'])
                         && !commands.contains(command)
@@ -66,6 +73,44 @@ pub(super) fn executables(program: &str) -> Vec<String> {
         }
     }
     commands
+}
+
+/// The first word that is neither an assignment nor a redirection. A bare
+/// redirect operator (`>`, `2>`, `&>`) takes the next word as its target.
+fn command_word(words: &[String]) -> Option<&String> {
+    let mut words = words.iter();
+    while let Some(word) = words.next() {
+        if let Some(operator) = redirection(word) {
+            if operator.len() == word.len() {
+                words.next();
+            }
+            continue;
+        }
+        if !assignment(word) {
+            return Some(word);
+        }
+    }
+    None
+}
+
+/// The redirect operator a word starts with: optional descriptor digits, then
+/// `<`/`>` runs and an optional `&`, or `&>`/`&>>`.
+fn redirection(word: &str) -> Option<&str> {
+    let rest = word.trim_start_matches(|ch: char| ch.is_ascii_digit());
+    let start = word.len() - rest.len();
+    let operator = if let Some(after) = rest.strip_prefix("&>") {
+        2 + after.len() - after.trim_start_matches('>').len()
+    } else if rest.starts_with(['<', '>']) {
+        let after = rest.trim_start_matches(['<', '>']);
+        let mut len = rest.len() - after.len();
+        if after.starts_with('&') {
+            len += 1;
+        }
+        len
+    } else {
+        return None;
+    };
+    Some(&word[..start + operator])
 }
 
 fn assignment(word: &str) -> bool {
@@ -103,6 +148,13 @@ fn builtin(word: &str) -> bool {
             | "type"
             | "eval"
             | "exec"
+            | "wait"
+            | "kill"
+            | "trap"
+            | "jobs"
+            | "local"
+            | "declare"
+            | "let"
             | "if"
             | "then"
             | "else"
@@ -144,6 +196,14 @@ mod tests {
             ("./scripts/check.sh && vendor/bin/phpunit", vec![]),
             ("$RUNTIME -v", vec![]),
             ("# a gate\nphp -v # explanation", vec!["php"]),
+            (
+                "bash \"$IMPORT_LOOP_GATE\" >\"$acceptance\" 2>&1 & gate=$!; wait $gate",
+                vec!["bash"],
+            ),
+            ("cmd &>log; grep x log", vec!["cmd", "grep"]),
+            ("node a.mjs >&2 2>/dev/null", vec!["node"]),
+            ("> out php -v; 2>err <in node x", vec!["php", "node"]),
+            ("php -v & node x", vec!["php", "node"]),
         ] {
             assert_eq!(executables(program), expected, "{program}");
         }
