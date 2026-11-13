@@ -4,6 +4,11 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.464.10] - 2026-11-13
+
+### Changed
+- Run one runner daemon per host, shared by every controller
+
 ## [0.464.9] - 2026-11-13
 
 ### Changed
