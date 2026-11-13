@@ -625,18 +625,32 @@ fn validate_resume_provenance(
             None,
         ));
     }
+    let recorded_worktree = previous.pointer("/target/worktree").and_then(Value::as_str);
+    let recorded_path = previous.pointer("/target/path").and_then(Value::as_str);
     if previous.get("to_worktree").and_then(Value::as_str) != Some(options.to_worktree.as_str())
-        || previous.pointer("/target/worktree").and_then(Value::as_str)
-            != Some(options.to_worktree.as_str())
-        || previous.pointer("/target/path").and_then(Value::as_str)
-            != Some(target_path.to_string_lossy().as_ref())
+        || recorded_worktree != Some(options.to_worktree.as_str())
+        || recorded_path != Some(target_path.to_string_lossy().as_ref())
     {
-        return Err(Error::validation_invalid_argument(
+        // The candidate is already applied in the recorded worktree; name it so
+        // the operator can resume there instead of guessing.
+        let mut error = Error::validation_invalid_argument(
             "promotion",
-            "promotion resume target does not match the durable post-apply promotion",
-            None,
-            None,
-        ));
+            format!(
+                "promotion resume target `{}` does not match the durable post-apply promotion, which applied the candidate in `{}` ({})",
+                options.to_worktree,
+                recorded_worktree.unwrap_or("unknown"),
+                recorded_path.unwrap_or("no recorded path"),
+            ),
+            Some(options.to_worktree.clone()),
+            recorded_worktree.map(|worktree| {
+                vec![format!(
+                    "Resume with --to-worktree {worktree}; the candidate is already applied there."
+                )]
+            }),
+        );
+        error.details["recorded_target"] = previous.get("target").cloned().unwrap_or(Value::Null);
+        error.details["requested_worktree"] = Value::String(options.to_worktree.clone());
+        return Err(error);
     }
     Ok(())
 }
@@ -4594,6 +4608,44 @@ mod gate_setup_message_tests {
         assert_eq!(
             promotion_gate_workspace(&options, candidate, Some(component)),
             component
+        );
+    }
+
+    #[test]
+    fn resume_to_another_worktree_names_where_the_candidate_is_applied() {
+        let options = AgentTaskPromotionRequest {
+            source: String::new(),
+            source_run_id: None,
+            source_path: None,
+            source_worktree_path: None,
+            to_worktree: "repo@scratch".to_string(),
+            base_ref: None,
+            task_base_sha: None,
+            candidate_ref: None,
+            task_id: None,
+            artifact_id: None,
+            dry_run: false,
+            gates: Default::default(),
+            provider_invocation: None,
+            repository_integrity_evidence: None,
+        };
+        let previous = serde_json::json!({
+            "status": "gates_deferred",
+            "to_worktree": "repo@fix-issue",
+            "target": { "worktree": "repo@fix-issue", "path": "/work/repo@fix-issue" },
+        });
+        let error = validate_resume_provenance(&options, Path::new("/tmp/scratch"), &previous)
+            .expect_err("a different target is refused");
+        assert!(
+            error
+                .message
+                .contains("`repo@fix-issue` (/work/repo@fix-issue)"),
+            "{}",
+            error.message
+        );
+        assert_eq!(
+            error.details["recorded_target"]["worktree"],
+            "repo@fix-issue"
         );
     }
 
