@@ -2169,12 +2169,31 @@ fn recovery_patch(workspace: &Path) -> Result<Vec<u8>> {
         "GIT_INDEX_FILE".to_string(),
         index.path().display().to_string(),
     )];
-    git::run_git_with_env(
+    let real_index = git::run_git(
         workspace,
-        &["read-tree", "HEAD"],
-        "initialize recovery index",
-        &env,
+        &["rev-parse", "--git-path", "index"],
+        "resolve worktree index",
     )?;
+    let real_index = workspace.join(real_index.trim());
+    // Keep the stat cache so add only re-hashes changed files. Git resolves
+    // the per-worktree index for linked worktrees as well as normal checkouts.
+    match fs::copy(&real_index, index.path()) {
+        Ok(_) => {}
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            git::run_git_with_env(
+                workspace,
+                &["read-tree", "HEAD"],
+                "initialize recovery index",
+                &env,
+            )?;
+        }
+        Err(error) => {
+            return Err(Error::internal_io(
+                error.to_string(),
+                Some(format!("copy recovery index from {}", real_index.display())),
+            ));
+        }
+    }
     git::run_git_with_env(
         workspace,
         &["add", "-A", "--", "."],
@@ -3824,6 +3843,76 @@ mod tests {
         assert!(recent.exists());
         assert!(active.exists());
         assert!(pinned.exists());
+    }
+
+    /// Recovery reproduces staged, unstaged, deleted and untracked changes and leaves the real index untouched.
+    #[test]
+    fn recovery_round_trips_mixed_changes_without_touching_linked_worktree_index() {
+        let data_root = tempfile::tempdir().expect("data root");
+        let root = tempfile::tempdir().expect("root");
+        let (allocation, workspace, base) =
+            recorded_attempt(data_root.path(), root.path(), "mixed-recovery");
+        fs::write(workspace.join("history.txt"), "staged\n").expect("staged change");
+        run_git(&workspace, &["add", "history.txt"]);
+        fs::write(workspace.join("history.txt"), "unstaged\n").expect("unstaged change");
+        fs::remove_file(workspace.join("generated.txt")).expect("delete tracked file");
+        fs::write(workspace.join("untracked.bin"), b"new\0bytes\n").expect("untracked file");
+        let status = git_output(&workspace, &["status", "--porcelain=v1"]);
+        let staged = git_output(&workspace, &["diff", "--cached", "--binary"]);
+        let unstaged = git_output(&workspace, &["diff", "--binary"]);
+        let index_path = workspace.join(git_output(
+            &workspace,
+            &["rev-parse", "--git-path", "index"],
+        ));
+        let original_index = fs::read(&index_path).expect("real index");
+
+        let resource = finalize_and_read(data_root.path(), &allocation, "mixed-recovery");
+        let recovery = workspace_recovery(&resource);
+        assert_eq!(recovery["state"], "recovered");
+        assert_eq!(fs::read(&index_path).unwrap(), original_index);
+        assert_eq!(
+            git_output(&workspace, &["status", "--porcelain=v1"]),
+            status
+        );
+        assert_eq!(
+            git_output(&workspace, &["diff", "--cached", "--binary"]),
+            staged
+        );
+        assert_eq!(git_output(&workspace, &["diff", "--binary"]), unstaged);
+        assert_eq!(git_output(&workspace, &["show", ":history.txt"]), "staged");
+
+        let restored = root.path().join("restored");
+        run_git(
+            root.path(),
+            &[
+                "clone",
+                workspace.to_str().unwrap(),
+                restored.to_str().unwrap(),
+            ],
+        );
+        run_git(&restored, &["checkout", "--detach", &base]);
+        run_git(
+            &restored,
+            &["apply", recovery["patch"]["path"].as_str().unwrap()],
+        );
+        // The tracked file list plus the untracked file covers the whole fixture.
+        for file in git_output(
+            &workspace,
+            &["ls-files", "--cached", "--others", "--exclude-standard"],
+        )
+        .lines()
+        {
+            assert_eq!(
+                fs::read(restored.join(file)).ok(),
+                fs::read(workspace.join(file)).ok(),
+                "{file}"
+            );
+        }
+        assert_eq!(
+            git_output(&restored, &["status", "--porcelain=v1"]),
+            "D generated.txt\n M history.txt\n?? untracked.bin"
+        );
+        assert_eq!(fs::read(&index_path).unwrap(), original_index);
     }
 
     /// Recovery preserves source, not ignored build output, independent of component metadata.
