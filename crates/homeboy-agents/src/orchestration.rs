@@ -4409,7 +4409,9 @@ fn projected_cook_recovery(record: &AgentTaskRunRecord) -> Option<ControlPlaneRe
                 .then(|| record.run_id.clone())
         })?;
     let quote = homeboy_core::engine::shell::quote_arg;
-    let Ok(plan) = crate::agent_task_service::plan_cook_recovery(&record.run_id) else {
+    // The step belongs to the Cook, not this attempt: a superseded attempt
+    // names the same `recover <cook>` command, so it projects the Cook's plan.
+    let Ok(plan) = crate::agent_task_service::plan_cook_recovery(&cook_id) else {
         return Some(ControlPlaneRecovery {
             run: RunId::new(&record.run_id).ok()?,
             step: "none".to_string(),
