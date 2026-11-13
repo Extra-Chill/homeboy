@@ -4,6 +4,14 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.464.0] - 2026-11-13
+
+### Added
+- disposable Windows x64 KVM environment provider
+
+### Fixed
+- redirect operators are not commands in gate executable inference
+
 ## [0.463.2] - 2026-11-13
 
 ### Changed
