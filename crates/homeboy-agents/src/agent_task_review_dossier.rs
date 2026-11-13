@@ -260,7 +260,12 @@ pub fn review_form_output_declaration() -> crate::agent_task::AgentTaskOutputDec
             "type": "object",
             "required": ["pr_title", "summary", "what_changed", "completion"],
             "properties": {
-                "pr_title": { "type": "string", "minLength": 1, "maxLength": 256 },
+                "pr_title": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 256,
+                    "pattern": conventional_title_pattern(),
+                },
                 "completion": { "type": "string", "enum": ["complete", "incomplete"] },
                 "incomplete_reason": { "type": "string" },
                 "used_for": { "type": "string" },
@@ -281,6 +286,15 @@ pub fn review_form_output_declaration() -> crate::agent_task::AgentTaskOutputDec
         max_bytes: None,
         evidence_relationship: None,
     }
+}
+
+/// The conventional-subject rule `validate` enforces, declared in the schema
+/// the agent reads so its first title already satisfies it.
+fn conventional_title_pattern() -> String {
+    format!(
+        r"^({})(\([^)]+\))?!?: .*\S",
+        homeboy_core::git::CONVENTIONAL_COMMIT_TYPES.join("|")
+    )
 }
 
 /// The single AI-authored "form" — every non-deterministic slot of the review
@@ -2475,6 +2489,28 @@ mod tests {
             let error = form.validate().expect_err("title must be actionable");
             assert!(error.to_string().contains("review_form.pr_title"));
             assert!(error.to_string().contains("`pr_title`"));
+        }
+        // The declared pattern is the rule `validate` applies, so the agent
+        // reads the same title contract it is held to.
+        let pattern = Regex::new(
+            declaration.structural_schema["properties"]["pr_title"]["pattern"]
+                .as_str()
+                .expect("pr_title declares its conventional pattern"),
+        )
+        .unwrap();
+        for title in [
+            "fix: keep the segmented front page title",
+            "feat(render-video): add an ability",
+            "fix(agent-task)!: drop legacy reader",
+            "Preserve host-class identity on lowered form carriers",
+            "Fix wrapped universal border-box reset detection",
+            "wip: half done",
+            "feat(): empty scope",
+            "fix: ",
+        ] {
+            let mut form = valid_form();
+            form.pr_title = title.to_string();
+            assert_eq!(pattern.is_match(title), form.validate().is_ok(), "{title}");
         }
         let mut missing = serde_json::to_value(valid_form()).unwrap();
         missing.as_object_mut().unwrap().remove("pr_title");
