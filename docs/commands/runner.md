@@ -25,7 +25,7 @@ homeboy runner reserve <runner> --release <id>
 ```
 
 The reservation is host-wide: every daemon on the runner host (one per connected
-controller) reads the same reservation file under the Homeboy data directory, so
+controller) reads the same reservation file in `runner-daemons/<runner>/`, so
 all of them durably hold new admission immediately, without stopping running work.
 `--quiet-below` is the five-minute load average divided by logical CPU count
 (1.0 means one runnable task per CPU), sampled by the same pressure observer as
