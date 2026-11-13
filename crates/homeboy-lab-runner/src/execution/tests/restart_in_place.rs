@@ -418,7 +418,7 @@ fn expected_state_dir() -> String {
     format!(
         "{}/{}",
         std::env::var("HOME").expect("HOME"),
-        crate::connection::daemon_state_dir(RUNNER, &crate::connection::controller_id())
+        crate::connection::daemon_state_dir(RUNNER)
     )
 }
 
@@ -605,7 +605,7 @@ fn service_refresh_repoints_and_restarts_the_unit_in_place_and_keeps_its_re_adop
         assert!(
             rendered.contains(&format!(
                 "Environment=HOMEBOY_DAEMON_STATE_DIR=%h/{}",
-                crate::connection::daemon_state_dir(RUNNER, &crate::connection::controller_id())
+                crate::connection::daemon_state_dir(RUNNER)
             )),
             "{rendered}"
         );

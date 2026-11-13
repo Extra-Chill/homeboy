@@ -24,9 +24,10 @@ homeboy runner exec --reservation <id> <runner> -- <command>
 homeboy runner reserve <runner> --release <id>
 ```
 
-The reservation is host-wide: every daemon on the runner host (one per connected
-controller) reads the same reservation file in `runner-daemons/<runner>/`, so
-all of them durably hold new admission immediately, without stopping running work.
+The reservation is host-wide: the host daemon, and any legacy per-controller
+daemon not yet retired, reads the same reservation file in
+`runner-daemons/<runner>/`, so all of them durably hold new admission
+immediately, without stopping running work.
 `--quiet-below` is the five-minute load average divided by logical CPU count
 (1.0 means one runnable task per CPU), sampled by the same pressure observer as
 normal admission. Unknown load never counts as quiet. Window and timeout are
@@ -1114,8 +1115,9 @@ Recognized slot layouts:
 
 A slot is `selected` (never removed) when any of these resolve into it:
 the configured `homeboy_path` (`configured_homeboy_path:<path>`), any
-runner-service controller link `~/.local/share/homeboy/runner-service/*/controllers/*/homeboy`
-(`runner_service_link:<path>`, covering every controller's daemon), or
+runner-service link `~/.local/share/homeboy/runner-service/*/host/homeboy` or a legacy
+`~/.local/share/homeboy/runner-service/*/controllers/*/homeboy`
+(`runner_service_link:<path>`), or
 `~/.local/bin/homeboy` (`local_bin_link:<path>`). A reference that exists but
 cannot be resolved protects every slot (`ambiguous`, `unresolved_<kind>:<path>`).
 Process-owned slots are `active`. `dev-source` (dev-sync's source upload

@@ -1172,6 +1172,20 @@ fn sanitized_status_for_output(status: &RunnerStatusReport) -> RunnerStatusRepor
     status
 }
 
+/// The runner's current daemon session, reconnecting through the offload
+/// path when this controller's session names a daemon that is gone, for
+/// example after another controller restarted the shared host daemon.
+pub(crate) fn current_daemon_session(runner_id: &str) -> Result<crate::RunnerSession> {
+    let (_, exit_code) = connect_runner_for_offload(runner_id)?;
+    if exit_code != 0 {
+        return Err(crate::connection::no_current_daemon_session_error(
+            runner_id,
+        ));
+    }
+    crate::connection::read_session(runner_id)?
+        .ok_or_else(|| crate::connection::no_current_daemon_session_error(runner_id))
+}
+
 fn connect_runner_for_offload(runner_id: &str) -> Result<(RunnerConnectReport, i32)> {
     let lease = homeboy_core::runtime_promotion::acquire_waiting_for_compatible(
         "runner daemon reconnect",

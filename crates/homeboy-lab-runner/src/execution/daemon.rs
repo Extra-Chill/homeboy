@@ -273,7 +273,7 @@ pub(super) fn exec_via_daemon(
                     .renew_running_runner_exec_source_lease(run_id, token)?;
             }
             let job_id = current.id.to_string();
-            let reload = || owner_transport.reload(&runner.id);
+            let reload = || owner_transport.reload(&runner.id, &client, &job_id);
             let poll_failure = |err| {
                 terminal_runner_poll_failure(
                     runner,
@@ -327,7 +327,7 @@ pub(super) fn exec_via_daemon(
                 let endpoint = daemon_endpoint.borrow().clone();
                 let refreshed_endpoint = follow
                     .drain_to_end(&client, &endpoint, &job.id.to_string(), || {
-                        owner_transport.reload(&runner.id)
+                        owner_transport.reload(&runner.id, &client, &job.id.to_string())
                     })
                     .map_err(|error| {
                         lab_terminal_result_transport_error(runner, &cwd, &command, job, error)
@@ -2237,34 +2237,92 @@ fn reattach_failure_is_transient(error: &Error) -> bool {
 }
 
 /// A foreground follow owns only its replacement tunnel, not the persisted
-/// session's tunnel. Keeping the accepted owner immutable prevents reconnect
-/// from silently switching the job to a newly published daemon generation.
+/// session's tunnel. The follow stays on the daemon that accepted the job, so
+/// a reconnect never silently switches it to a newly published generation.
+/// The one hand-off is to a successor that re-adopted this exact job: an
+/// in-place restart (`refresh-homeboy`, possibly by another controller
+/// sharing the host daemon, #18063) stops the accepting lease, and the
+/// restarted daemon on the same state directory takes the job under its own
+/// lease.
 struct JobOwnerTransport {
-    owner: Option<RunnerSession>,
+    owner: std::cell::RefCell<Option<RunnerSession>>,
     temporary: std::cell::RefCell<Option<RunnerSession>>,
 }
 
 impl JobOwnerTransport {
     fn new(owner: Option<&RunnerSession>) -> Self {
         Self {
-            owner: owner.cloned(),
+            owner: std::cell::RefCell::new(owner.cloned()),
             temporary: std::cell::RefCell::new(None),
         }
     }
 
-    fn reload(&self, runner_id: &str) -> Result<Option<String>> {
-        if self.owner.is_none() {
+    fn reload(&self, runner_id: &str, client: &Client, job_id: &str) -> Result<Option<String>> {
+        if self.owner.borrow().is_none() {
             return refreshed_daemon_endpoint(runner_id);
         }
         self.reopen(|owner| crate::connection::reattach_job_owner(runner_id, owner))
+            .or_else(|mut error| {
+                // Whatever stopped the accepting lease, the job-lease check
+                // below is what makes following the successor safe. Until a
+                // successor reports the job, a failed reattach is lost
+                // contact, not a job outcome: keep polling inside the grace
+                // window while a restart is still bringing the daemon up.
+                error.retryable = Some(true);
+                self.follow_readopting_successor(
+                    job_id,
+                    || crate::lab_selection::current_daemon_session(runner_id),
+                    |endpoint| Ok(fetch_daemon_job(client, endpoint, job_id)?.daemon_lease_id),
+                )
+                .ok()
+                .flatten()
+                .map(Some)
+                .ok_or(error)
+            })
+    }
+
+    /// Hand the follow to the runner's current daemon only when that daemon
+    /// reports this job under its own lease, i.e. it re-adopted the job.
+    fn follow_readopting_successor(
+        &self,
+        job_id: &str,
+        current: impl FnOnce() -> Result<RunnerSession>,
+        job_lease: impl FnOnce(&str) -> Result<Option<String>>,
+    ) -> Result<Option<String>> {
+        let successor = current()?;
+        let owner_lease = self
+            .owner
+            .borrow()
+            .as_ref()
+            .and_then(|owner| owner.remote_daemon_lease_id.clone());
+        let (Some(lease), Some(endpoint)) = (
+            successor.remote_daemon_lease_id.clone(),
+            successor.local_url.clone(),
+        ) else {
+            return Ok(None);
+        };
+        if Some(&lease) == owner_lease.as_ref() || job_lease(&endpoint)? != Some(lease.clone()) {
+            return Ok(None);
+        }
+        homeboy_core::log_status!(
+            "runner",
+            "job {job_id} was re-adopted by restarted daemon lease {lease}; following it"
+        );
+        // The successor's tunnel is the persisted session's; only the
+        // follow's own temporary tunnel is closed.
+        if let Some(previous) = self.temporary.replace(None) {
+            crate::connection::close_transport(&previous);
+        }
+        *self.owner.borrow_mut() = Some(successor);
+        Ok(Some(endpoint))
     }
 
     fn reopen(
         &self,
         open: impl FnOnce(&RunnerSession) -> Result<RunnerSession>,
     ) -> Result<Option<String>> {
-        let owner = self.owner.as_ref().expect("admitted job owner");
-        let session = open(owner)?;
+        let owner = self.owner.borrow().clone().expect("admitted job owner");
+        let session = open(&owner)?;
         let endpoint = session.local_url.clone();
         if let Some(previous) = self.temporary.replace(Some(session)) {
             crate::connection::close_transport(&previous);
@@ -2319,12 +2377,48 @@ mod job_owner_transport_tests {
         assert_eq!(
             follow
                 .owner
+                .borrow()
                 .as_ref()
                 .unwrap()
                 .remote_daemon_lease_id
                 .as_deref(),
             Some("lease-old")
         );
+    }
+
+    #[test]
+    fn follow_moves_only_to_a_successor_that_readopted_the_job() {
+        let owner = crate::test_support::direct_ssh_session("lease-old");
+        let mut successor = crate::test_support::direct_ssh_session("lease-new");
+        successor.local_url = Some("http://127.0.0.1:5555".to_string());
+        // (lease the successor reports for the job, expected endpoint)
+        for (job_lease, adopted) in [
+            (None, None),
+            (Some("lease-old"), None),
+            (Some("lease-new"), Some("http://127.0.0.1:5555")),
+        ] {
+            let follow = JobOwnerTransport::new(Some(&owner));
+            let endpoint = follow
+                .follow_readopting_successor(
+                    "job",
+                    || Ok(successor.clone()),
+                    |_| Ok(job_lease.map(str::to_string)),
+                )
+                .unwrap();
+            assert_eq!(endpoint.as_deref(), adopted);
+            let followed = follow
+                .owner
+                .borrow()
+                .clone()
+                .unwrap()
+                .remote_daemon_lease_id;
+            let expected = if adopted.is_some() {
+                "lease-new"
+            } else {
+                "lease-old"
+            };
+            assert_eq!(followed.as_deref(), Some(expected));
+        }
     }
 }
 
