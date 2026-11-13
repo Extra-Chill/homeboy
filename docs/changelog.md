@@ -4,6 +4,14 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.464.9] - 2026-11-13
+
+### Changed
+- global mimalloc allocator (idle daemons hold 5x more RSS)
+
+### Fixed
+- normalize review evidence summaries
+
 ## [0.464.8] - 2026-11-13
 
 ### Fixed
