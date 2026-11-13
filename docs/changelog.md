@@ -4,6 +4,20 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.462.0] - 2026-11-13
+
+### Added
+- reject gates whose executable is missing from the gate environment at admission
+
+### Fixed
+- record one dependency hydration phase per cook gate walk
+- recover re-measures a recorded filesystem-reserve shortfall
+- status, diagnose and the verdict name the step recover performs
+- a task PR in another repository does not set the Cook's base
+- a Cook without a review form recovers as its incomplete draft
+- agent evidence keeps its summary when its URL is local
+- a single-branch clone tracks the branch it publishes
+
 ## [0.461.1] - 2026-11-13
 
 ### Fixed
