@@ -4,6 +4,11 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.464.4] - 2026-11-13
+
+### Changed
+- offline gh fake answers the closing-PR query with an empty URL list
+
 ## [0.464.3] - 2026-11-13
 
 ### Fixed
