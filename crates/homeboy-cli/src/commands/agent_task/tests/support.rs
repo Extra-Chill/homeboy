@@ -43,7 +43,7 @@ pub(crate) fn with_isolated_home<R>(body: impl FnOnce(&tempfile::TempDir) -> R) 
         std::fs::create_dir_all(&bin).unwrap();
         let original_path = std::env::var("PATH").unwrap();
         homeboy_test_support::write_executable(&bin.join("gh"), &format!(
-            "#!/bin/sh\ncase \"$*\" in api*timeline*) printf '[[]]' ;; 'pr list'*) printf '[]' ;; *) PATH='{}' exec gh \"$@\" ;; esac\n", original_path
+            "#!/bin/sh\ncase \"$*\" in api*closedByPullRequestsReferences*) printf '[]' ;; 'pr list'*) printf '[]' ;; *) PATH='{}' exec gh \"$@\" ;; esac\n", original_path
         ), 0o755).unwrap();
         let _path = homeboy::core::test_support::EnvVarGuard::set(
             "PATH",
