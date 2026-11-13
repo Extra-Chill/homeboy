@@ -3674,12 +3674,13 @@ fn issue_resolution_routes() {
             ),
             (vec!["open", "open"], None, ""),
         ] {
-            let events: Vec<Value> = states.iter().enumerate().map(|(n, state)| json!({
-                "event": "cross-referenced", "source": {"issue": {
-                    "state": state, "html_url": format!("https://github.com/example/fixture/pull/{}", n + 2),
-                    "pull_request": {}
-                }}
-            })).collect();
+            // GitHub's closing-PR query already omits merged and closed PRs.
+            let events: Vec<String> = states
+                .iter()
+                .enumerate()
+                .filter(|(_, state)| **state == "open")
+                .map(|(n, _)| format!("https://github.com/example/fixture/pull/{}", n + 2))
+                .collect();
             homeboy_test_support::write_executable(&bin.join("gh"), &format!(
                 "#!/bin/sh\ncase \"$*\" in api*) printf '%s' '{}' ;; 'pr view'*) printf '%s' '{{\"baseRefName\":\"main\",\"headRefName\":\"custom/pr-head\"}}' ;; *) printf '[]' ;; esac\n",
                 json!(events)

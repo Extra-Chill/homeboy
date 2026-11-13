@@ -1803,7 +1803,7 @@ mod preview_tests {
 
     fn issue_lookup_fixture() -> (tempfile::TempDir, homeboy::core::test_support::EnvVarGuard) {
         let bin = tempfile::tempdir().unwrap();
-        homeboy_test_support::write_executable(&bin.path().join("gh"), "#!/bin/sh\ncase \"$*\" in api*timeline*) printf '[[]]' ;; 'pr list'*) printf '[]' ;; *) exit 1 ;; esac\n", 0o755).unwrap();
+        homeboy_test_support::write_executable(&bin.path().join("gh"), "#!/bin/sh\ncase \"$*\" in api*closedByPullRequestsReferences*) printf '[]' ;; 'pr list'*) printf '[]' ;; *) exit 1 ;; esac\n", 0o755).unwrap();
         let _path = homeboy::core::test_support::EnvVarGuard::set(
             "PATH",
             format!(
@@ -6094,25 +6094,46 @@ fn resolve_cook_base(
 /// `gh` failure (TLS or connection timeouts, 5xx) is transient, so it is
 /// retried briefly and then reported as retryable rather than as the caller's
 /// argument error.
-fn issue_timeline(path: &str, url: &str) -> homeboy::core::Result<std::process::Output> {
+/// Open pull requests GitHub links to close the issue: a closing keyword or a
+/// Development-sidebar link. A pull request that only mentions the issue is
+/// not one, nor is one already merged or closed.
+fn issue_closing_pull_requests(
+    owner: &str,
+    repo: &str,
+    number: &str,
+    url: &str,
+) -> homeboy::core::Result<Vec<String>> {
+    const QUERY: &str = "query($owner:String!,$repo:String!,$number:Int!){repository(owner:$owner,name:$repo){issue(number:$number){closedByPullRequestsReferences(first:20,includeClosedPrs:false){nodes{url}}}}}";
     let mut stderr = String::new();
     for delay in [2, 5, 0] {
         let output = std::process::Command::new("gh")
-            // No `--slurp`: it needs gh >= 2.48, and Ubuntu 24.04 ships 2.45
-            // (homeboy#17735). `--paginate` alone emits one JSON array per page.
-            .args(["api", "--paginate", &format!("repos/{path}/timeline")])
+            .args([
+                "api",
+                "graphql",
+                "-f",
+                &format!("query={QUERY}"),
+                "-f",
+                &format!("owner={owner}"),
+                "-f",
+                &format!("repo={repo}"),
+                "-F",
+                &format!("number={number}"),
+                "--jq",
+                "[.data.repository.issue.closedByPullRequestsReferences.nodes[].url]",
+            ])
             .output()
             .map_err(|error| {
                 homeboy::core::Error::internal_io(
                     error.to_string(),
-                    Some("gh api issue timeline".into()),
+                    Some("gh api graphql issue closing pull requests".into()),
                 )
             })?;
         if output.status.success() {
-            return Ok(output);
+            return serde_json::from_slice(&output.stdout)
+                .map_err(|error| homeboy::core::Error::internal_json(error.to_string(), None));
         }
         stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
-        if stderr.contains("HTTP 404") || stderr.contains("Not Found") {
+        if stderr.contains("Could not resolve") || stderr.contains("Not Found") {
             return Err(homeboy::core::Error::validation_invalid_argument(
                 "task_url",
                 format!("could not resolve issue's linked PRs: {stderr}"),
@@ -6124,7 +6145,7 @@ fn issue_timeline(path: &str, url: &str) -> homeboy::core::Result<std::process::
     }
     Err(homeboy::core::Error::internal_io(
         format!("GitHub was unreachable while resolving the issue's linked PRs; retry the Cook: {stderr}"),
-        Some("gh api issue timeline".into()),
+        Some("gh api graphql issue closing pull requests".into()),
     )
     .with_retryable(true))
 }
@@ -6149,19 +6170,21 @@ fn resolve_cook_issue(args: &mut AgentTaskCookArgs) -> homeboy::core::Result<()>
             None,
         )
     })?;
-    let output = issue_timeline(path, &url)?;
-    let pages = parse_gh_paginated_arrays(&output.stdout)?;
-    let prs: std::collections::BTreeSet<String> = pages
-        .into_iter()
-        .flatten()
-        .filter(|event| event["event"] == "cross-referenced")
-        .filter_map(|event| {
-            let issue = &event["source"]["issue"];
-            (issue["state"] == "open" && issue["pull_request"].is_object())
-                .then(|| issue["html_url"].as_str().map(str::to_string))
-                .flatten()
-        })
-        .collect();
+    let mut parts = path.splitn(4, '/');
+    let (Some(owner), Some(repo), Some(_), Some(number)) =
+        (parts.next(), parts.next(), parts.next(), parts.next())
+    else {
+        return Err(homeboy::core::Error::validation_invalid_argument(
+            "task_url",
+            "expected a GitHub issue URL",
+            Some(url.clone()),
+            None,
+        ));
+    };
+    let prs: std::collections::BTreeSet<String> =
+        issue_closing_pull_requests(owner, repo, number, &url)?
+            .into_iter()
+            .collect();
     if prs.len() > 1 {
         return Err(homeboy::core::Error::validation_invalid_argument(
             "task_url",
@@ -6180,43 +6203,6 @@ fn resolve_cook_issue(args: &mut AgentTaskCookArgs) -> homeboy::core::Result<()>
         args.issue_resolution = Some(json!({"route": "fresh_branch", "issue_url": url}));
     }
     Ok(())
-}
-
-/// Parse `gh api --paginate` output for an array endpoint: one JSON array per
-/// page, concatenated (optionally whitespace-separated).
-fn parse_gh_paginated_arrays(stdout: &[u8]) -> homeboy::core::Result<Vec<Vec<Value>>> {
-    serde_json::Deserializer::from_slice(stdout)
-        .into_iter::<Vec<Value>>()
-        .collect::<std::result::Result<Vec<_>, _>>()
-        .map_err(|error| homeboy::core::Error::internal_json(error.to_string(), None))
-}
-
-#[cfg(test)]
-mod gh_paginate_tests {
-    use super::parse_gh_paginated_arrays;
-
-    #[test]
-    fn concatenated_pages_parse_without_slurp() {
-        let pages = parse_gh_paginated_arrays(
-            b"[{\"event\":\"a\"}][{\"event\":\"b\"},{\"event\":\"c\"}]\n[]",
-        )
-        .unwrap();
-        assert_eq!(pages.len(), 3);
-        assert_eq!(pages.into_iter().flatten().count(), 3);
-        assert!(parse_gh_paginated_arrays(b"").unwrap().is_empty());
-        assert!(parse_gh_paginated_arrays(b"[{]").is_err());
-    }
-
-    #[test]
-    fn linked_pr_resolution_does_not_require_gh_slurp() {
-        let source = include_str!("run.rs");
-        let call = source
-            .split("fn resolve_cook_issue")
-            .nth(1)
-            .and_then(|body| body.split("fn parse_gh_paginated_arrays").next())
-            .unwrap();
-        assert!(!call.contains(concat!("\"--", "slurp\"")));
-    }
 }
 
 fn resolve_cook_pull_request(args: &mut AgentTaskCookArgs) -> homeboy::core::Result<()> {
@@ -6484,7 +6470,7 @@ mod cook_pull_request_ref_tests {
                 "origin",
                 "https://github.com/example/repo.git",
             ]);
-            std::fs::write(&gh, "#!/bin/sh\ncase \"$*\" in api*) printf '[{\"event\":\"cross-referenced\",\"source\":{\"issue\":{\"state\":\"open\",\"html_url\":\"https://github.com/example/repo/pull/1895\",\"pull_request\":{}}}}]';; *list*) printf '[{\"state\":\"OPEN\",\"url\":\"https://github.com/example/repo/pull/1895\"}]';; *) printf '{\"baseRefName\":\"release\",\"headRefName\":\"feature\"}';; esac\n").unwrap();
+            std::fs::write(&gh, "#!/bin/sh\ncase \"$*\" in api*) printf '[\"https://github.com/example/repo/pull/1895\"]';; *list*) printf '[{\"state\":\"OPEN\",\"url\":\"https://github.com/example/repo/pull/1895\"}]';; *) printf '{\"baseRefName\":\"release\",\"headRefName\":\"feature\"}';; esac\n").unwrap();
             let mut issue = parse(&[]);
             issue.dispatch.task_url = Some("https://github.com/example/repo/issues/7".into());
             let resolved = {
@@ -6512,7 +6498,7 @@ mod cook_pull_request_ref_tests {
             std::fs::write(
                 &gh,
                 format!(
-                    "#!/bin/sh\nif [ ! -f {flag} ]; then touch {flag}; echo 'net/http: TLS handshake timeout' >&2; exit 1; fi\nprintf '[{{\"event\":\"cross-referenced\",\"source\":{{\"issue\":{{\"state\":\"open\",\"html_url\":\"https://github.com/example/repo/pull/1895\",\"pull_request\":{{}}}}}}}}]'\n",
+                    "#!/bin/sh\nif [ ! -f {flag} ]; then touch {flag}; echo 'net/http: TLS handshake timeout' >&2; exit 1; fi\nprintf '[\"https://github.com/example/repo/pull/1895\"]'\n",
                     flag = flaked.display()
                 ),
             )
