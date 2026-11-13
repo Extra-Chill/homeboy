@@ -52,6 +52,20 @@ pub struct AgentTaskReviewEvidence {
     pub url: Option<String>,
 }
 
+impl AgentTaskReviewEvidence {
+    /// Agent-reported evidence as reviewers can use it: a URL a reviewer
+    /// cannot open (a local file, a loopback host) is dropped and the summary
+    /// stays as text.
+    pub fn for_reviewers(mut self) -> Self {
+        if self.url.as_deref().is_some_and(|url| {
+            validate_reviewer_url("evidence.url", url, "agent evidence").is_err()
+        }) {
+            self.url = None;
+        }
+        self
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct AiReviewVerificationClaim {
     pub command: String,
@@ -3322,6 +3336,30 @@ mod tests {
 
         // IPv6 literals are now operator-only, matching the IPv4 literal policy.
         assert!(!is_reviewer_url("https://[::1]/evidence"));
+
+        // Agent evidence keeps its summary and drops a URL reviewers cannot
+        // open, so the dossier validates instead of failing finalization.
+        for (url, kept) in [
+            ("file:///home/agent/run/findings.json", None),
+            ("https://127.0.0.1/x", None),
+            (
+                "https://example.com/evidence",
+                Some("https://example.com/evidence"),
+            ),
+        ] {
+            let evidence = AgentTaskReviewEvidence {
+                summary: "Acceptance run".into(),
+                url: Some(url.into()),
+            }
+            .for_reviewers();
+            assert_eq!(
+                (evidence.summary.as_str(), evidence.url.as_deref()),
+                ("Acceptance run", kept)
+            );
+            let mut value = dossier();
+            value.evidence.push(evidence);
+            value.validate(&default_profile()).unwrap();
+        }
 
         // The rejection reaches the real validation boundary, not just the helper.
         let mut value = dossier();
