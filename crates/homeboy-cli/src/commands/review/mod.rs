@@ -2693,7 +2693,7 @@ mod tests {
     }
 
     #[test]
-    fn direct_review_lint_guards_version_targets_and_derived_lockfiles() {
+    fn direct_review_lint_guards_version_targets_but_allows_lockfile_changes() {
         let dir = tempfile::tempdir().unwrap();
         let root = dir.path();
         let git = |args: &[&str]| {
@@ -2771,11 +2771,6 @@ mod tests {
         std::fs::write(root.join("package-lock.json"), "changed lockfile").unwrap();
         git(&["add", "."]);
         git(&["commit", "-m", "lockfile candidate"]);
-        let error = reject_manual_release_owned_edits_for_lint(&component, &args).unwrap_err();
-        assert!(error.message.contains("package-lock.json"));
-        assert!(error.message.contains("release-derived lockfile"));
-        assert!(!error.message.contains("configured version field"));
-        component.release.manual_version_targets = vec!["package.json".to_string()];
         assert!(reject_manual_release_owned_edits_for_lint(&component, &args).is_ok());
     }
 
