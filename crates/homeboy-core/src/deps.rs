@@ -201,11 +201,20 @@ pub fn hydrate_declared_dependencies(
     package_root: &str,
     policy: &DependencyHydrationPolicy,
 ) -> Result<Vec<DependencyHydrationOutcome>> {
-    hydrate_declared_dependencies_for_component(path, workspace, package_root, policy, None)
+    crate::observation::phase_timing::time_with_outcome(
+        "stage.dependency_hydration",
+        || hydrate_declared_dependencies_for_component(path, workspace, package_root, policy, None),
+        |outcomes| {
+            outcomes
+                .iter()
+                .any(|outcome| outcome.status == DependencyHydrationStatus::Failed)
+        },
+    )
 }
 
 /// Hydrate declared dependencies using a component identity already recorded at
 /// admission. When `component_id` is known, the worktree path is not re-resolved.
+/// This per-root primitive is untimed; callers time their complete hydration operation.
 pub fn hydrate_declared_dependencies_for_component(
     path: &Path,
     workspace: &str,
@@ -214,23 +223,13 @@ pub fn hydrate_declared_dependencies_for_component(
     component_id: Option<&str>,
 ) -> Result<Vec<DependencyHydrationOutcome>> {
     let deadline = Instant::now() + policy.timeout;
-    crate::observation::phase_timing::time_with_outcome(
-        "stage.dependency_hydration",
-        || {
-            hydrate_declared_dependencies_unlocked(
-                path,
-                workspace,
-                package_root,
-                policy,
-                deadline,
-                component_id.map(str::to_string),
-            )
-        },
-        |outcomes| {
-            outcomes
-                .iter()
-                .any(|outcome| outcome.status == DependencyHydrationStatus::Failed)
-        },
+    hydrate_declared_dependencies_unlocked(
+        path,
+        workspace,
+        package_root,
+        policy,
+        deadline,
+        component_id.map(str::to_string),
     )
 }
 
