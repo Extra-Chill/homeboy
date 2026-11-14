@@ -335,17 +335,7 @@ fn retry_availability(
         return unavailable("acceptance rejection repair budget is exhausted for this lineage");
     }
     if super::is_unmaterialized_cook_admission(record) {
-        if !record.metadata["unmaterialized_cook_admission"]["binding"]["admission_inputs"]
-            .as_object()
-            .is_some_and(|intent| intent.get("argv").is_some_and(serde_json::Value::is_array))
-        {
-            return unavailable(
-                "terminal unmaterialized Cook admission lacks its durable replay intent",
-            );
-        }
-        return available(
-            "terminal unmaterialized Cook admission retains its immutable replay binding; retry will reserve a new admission and revalidate runner readiness",
-        );
+        return unavailable(super::unmaterialized_cook_retry_error(record).message);
     }
     if record.metadata["cook_id"].is_string() {
         // The projection reads the same installation the record came from.
@@ -656,7 +646,7 @@ mod tests {
     }
 
     #[test]
-    fn exhausted_unmaterialized_cook_retry_uses_its_replay_binding_not_plan_identity() {
+    fn exhausted_unmaterialized_cook_retry_requires_a_fresh_cook() {
         let mut record = record(AgentTaskRunState::Failed, false);
         record.metadata["unmaterialized_cook_admission"] = serde_json::json!({
             "state": "exhausted",
@@ -673,7 +663,7 @@ mod tests {
 
         assert_eq!(
             decision(&report, ControlPlaneAction::Retry),
-            ControlPlaneActionAvailability::Available
+            ControlPlaneActionAvailability::Unavailable
         );
     }
 

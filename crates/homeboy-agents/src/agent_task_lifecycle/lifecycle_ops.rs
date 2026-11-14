@@ -5492,176 +5492,61 @@ pub fn retry(run_id: &str, requested_run_id: Option<&str>) -> Result<AgentTaskRu
     retry_with_force_in_store(&lifecycle_store, run_id, requested_run_id, false)
 }
 
-/// Reserve a new controller-owned admission for a terminal Cook that never
-/// materialized an executable task plan. Its replay inputs were already made
-/// durable by the original admission, so retry rebinds that immutable intent to
-/// a fresh Cook id instead of inventing a workspace root.
-pub fn retry_unmaterialized_cook_admission_in_store(
-    lifecycle_store: &AgentTaskLifecycleStore,
-    source_run_id: &str,
-    retry_run_id: &str,
-    force: bool,
-) -> Result<(AgentTaskRunRecord, bool)> {
-    with_retry_lineage_reservation_in_store(lifecycle_store, source_run_id, || {
-        retry_unmaterialized_cook_admission_locked(
-            lifecycle_store,
-            source_run_id,
-            retry_run_id,
-            force,
-        )
-    })
-}
-
-fn retry_unmaterialized_cook_admission_locked(
-    lifecycle_store: &AgentTaskLifecycleStore,
-    source_run_id: &str,
-    retry_run_id: &str,
-    force: bool,
-) -> Result<(AgentTaskRunRecord, bool)> {
-    let source = lifecycle_store.read_record(&sanitize_run_id(source_run_id))?;
-    if !source.state().is_terminal() || !is_unmaterialized_cook_admission(&source) {
-        return Err(Error::validation_invalid_argument(
-            "run_id",
-            "retry requires a terminal unmaterialized Cook admission",
-            Some(source.run_id),
-            None,
-        ));
-    }
-    let root_run_id = retry_root_run_id_in_store(lifecycle_store, &source)?;
-    let mut retry_run_id = retry_run_id.to_string();
-    if let Ok(existing) = lifecycle_store.read_record(&retry_run_id) {
-        let source_request_ref =
-            source.metadata["unmaterialized_cook_admission"]["binding"]["request_ref"].as_str();
-        let existing_request_ref =
-            existing.metadata["unmaterialized_cook_admission"]["binding"]["request_ref"].as_str();
-        if is_unmaterialized_cook_admission(&existing)
-            && existing.metadata["unmaterialized_cook_admission"]["binding"]["retry_of"]
-                == source.run_id
-            && existing.metadata["unmaterialized_cook_admission"]["binding"]["worktree_ref"]
-                == source.metadata["unmaterialized_cook_admission"]["binding"]["worktree_ref"]
-            && source_request_ref.is_some()
-            && source_request_ref == existing_request_ref
+/// Refuse retries that have no executable plan or admission owner. The saved
+/// command is operator guidance, not a queued replay promise.
+pub fn unmaterialized_cook_retry_error(source: &AgentTaskRunRecord) -> Error {
+    let argv = source
+        .metadata
+        .pointer("/unmaterialized_cook_admission/binding/admission_inputs/argv")
+        .and_then(Value::as_array);
+    let mut command = vec!["homeboy".to_string()];
+    let mut skip_run_id = false;
+    if let Some(argv) = argv {
+        // Admission argv includes argv[0]; accept only one executable prefix.
+        let mut arguments = argv.iter().filter_map(Value::as_str).peekable();
+        if arguments
+            .peek()
+            .is_some_and(|argument| *argument == "homeboy")
         {
-            if !force && !existing.state().is_terminal() {
-                return Ok((existing, false));
+            arguments.next();
+        }
+        let mut forwarded = false;
+        for argument in arguments {
+            if argument == "--" {
+                forwarded = true;
             }
-            if force {
-                retry_run_id = format!("retry-{}", uuid::Uuid::new_v4());
+            if forwarded {
+                command.push(argument.to_string());
+                continue;
             }
-        } else {
-            return Err(Error::validation_invalid_argument(
-                "run_id",
-                "retry run id already belongs to a different durable admission",
-                Some(retry_run_id.to_string()),
-                None,
-            ));
-        }
-    }
-    let mut successors = lifecycle_store
-        .read_records()?
-        .into_iter()
-        .filter(|record| record.run_id != root_run_id)
-        .filter(|record| {
-            retry_root_run_id_in_store(lifecycle_store, record)
-                .ok()
-                .as_deref()
-                == Some(&root_run_id)
-        })
-        .collect::<Vec<_>>();
-    successors.sort_by(|left, right| left.run_id.cmp(&right.run_id));
-    if let Some(active) = successors
-        .iter()
-        .find(|record| !record.state().is_terminal())
-    {
-        if !force {
-            return Err(active_retry_successor_error(active));
-        }
-        if retry_run_id == active.run_id {
-            retry_run_id = format!("retry-{}", uuid::Uuid::new_v4());
-        }
-    }
-    let chain = retry_chain_in_store(lifecycle_store, &source)?;
-    if successors
-        .iter()
-        .any(|record| !chain.contains(&record.run_id) && successor_requires_force(record))
-        && !force
-    {
-        return Err(Error::validation_invalid_argument(
-            "force",
-            format!(
-                "retry lineage rooted at '{}' already has terminal successor(s); use --force to create another retry",
-                root_run_id
-            ),
-            Some(root_run_id.clone()),
-            None,
-        ));
-    }
-    let mut binding = source.metadata["unmaterialized_cook_admission"]["binding"].clone();
-    let intent = binding
-        .get_mut("admission_inputs")
-        .and_then(Value::as_object_mut)
-        .ok_or_else(|| {
-            Error::validation_invalid_argument(
-                "cook_admission.admission_inputs",
-                "terminal unmaterialized Cook admission has no admission inputs",
-                Some(source.run_id.clone()),
-                None,
-            )
-        })?;
-    intent.insert("cook_id".to_string(), json!(retry_run_id));
-    let argv = intent
-        .get_mut("argv")
-        .and_then(Value::as_array_mut)
-        .ok_or_else(|| {
-            Error::validation_invalid_argument(
-                "cook_admission.admission_inputs",
-                "terminal unmaterialized Cook admission has no admission argv",
-                Some(source.run_id.clone()),
-                None,
-            )
-        })?;
-    let mut rewritten = false;
-    for index in 0..argv.len() {
-        let Some(argument) = argv[index].as_str() else {
-            continue;
-        };
-        if argument == "--run-id" {
-            if let Some(value) = argv.get_mut(index + 1) {
-                *value = json!(retry_run_id);
-                rewritten = true;
+            if skip_run_id {
+                skip_run_id = false;
+                continue;
             }
-            break;
-        }
-        if argument.starts_with("--run-id=") {
-            argv[index] = json!(format!("--run-id={retry_run_id}"));
-            rewritten = true;
-            break;
+            if argument == "--run-id" {
+                skip_run_id = true;
+            } else if !argument.starts_with("--run-id=") {
+                command.push(argument.to_string());
+            }
         }
     }
-    if !rewritten {
-        argv.extend([json!("--run-id"), json!(retry_run_id)]);
-    }
-    binding["retry_of"] = json!(source.run_id);
-    let record = record_unmaterialized_cook_admission_with_metadata_in_store(
-        lifecycle_store,
-        &retry_run_id,
-        binding,
-        "queued",
-        "retrying terminal unmaterialized Cook admission",
-        serde_json::Map::from_iter([
-            ("retry_of".to_string(), json!(source.run_id)),
-            ("retried_from".to_string(), json!(source.run_id)),
-            ("retry_root".to_string(), json!(root_run_id)),
-            ("retry_requested_at".to_string(), json!(now_timestamp())),
-        ]),
-    )?;
-    persist_retry_lineage_in_store(
-        lifecycle_store,
-        &source.run_id,
-        &root_run_id,
-        &record.run_id,
-    )?;
-    Ok((record, true))
+    let guidance = if command.len() > 1 {
+        format!(
+            "re-launch with: {}",
+            homeboy_core::engine::shell::quote_args(&command)
+        )
+    } else {
+        "re-run the original homeboy agent-task cook command with a fresh --run-id".to_string()
+    };
+    Error::validation_invalid_argument(
+        "retry",
+        format!(
+            "Cook '{}' has no replayable materialization identity; {guidance}",
+            source.run_id
+        ),
+        Some(source.run_id.clone()),
+        None,
+    )
 }
 
 /// Whether a persisted plan contains enough source identity to offer a retry

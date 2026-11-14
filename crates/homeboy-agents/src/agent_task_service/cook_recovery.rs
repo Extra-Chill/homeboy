@@ -687,9 +687,8 @@ pub fn plan_cook_recovery(id: &str) -> Result<CookRecoveryPlan> {
 }
 
 /// A Cook that failed before materializing (its admission failed) has no
-/// durable recipe. Its recorded admission request is the replay intent:
-/// recovery re-admits it through the same `retry` path, which reserves a new
-/// admission from that request and revalidates runner readiness.
+/// durable recipe. The retry boundary refuses it with the saved Cook command;
+/// no empty admission is reserved without an execution owner.
 fn unmaterialized_cook_recovery_plan(
     record: &agent_task_lifecycle::AgentTaskRunRecord,
 ) -> Option<CookRecoveryPlan> {
@@ -2231,10 +2230,9 @@ mod tests {
         assert_ne!(refused.code.as_str(), STORE_BUSY_CODE);
     }
 
-    /// #17709: a Cook whose admission failed has no durable recipe; recover
-    /// re-admits it from its recorded request through the retry path.
+    /// Failed admissions have no recipe or execution owner for a retry.
     #[test]
-    fn cook_recover_readmits_an_unmaterialized_failed_cook() {
+    fn cook_recover_refuses_an_unmaterialized_failed_cook() {
         struct RetryPerformer(std::cell::RefCell<Vec<String>>);
         impl CookRecoveryPerformer for RetryPerformer {
             fn continue_cook(
@@ -2296,15 +2294,13 @@ mod tests {
             let performer = RetryPerformer(Default::default());
             let (report, exit_code) =
                 recover_cook(cook_id, CookRecoveryRequest::default(), &performer).unwrap();
-            assert_eq!(exit_code, 0, "{report:?}");
+            assert_eq!(exit_code, 1, "{report:?}");
             assert_eq!(*performer.0.borrow(), [cook_id.to_string()]);
-            assert_ne!(report.run_id, cook_id);
-            let readmitted = store.read_record(&report.run_id).unwrap();
-            assert!(agent_task_lifecycle::is_unmaterialized_cook_admission(
-                &readmitted
-            ));
-            assert!(!readmitted.state().is_terminal());
-            assert_eq!(readmitted.metadata["retry_of"], cook_id);
+            assert_eq!(report.run_id, cook_id);
+            assert!(serde_json::to_value(report).unwrap()["failure"]["message"]
+                .as_str()
+                .unwrap()
+                .contains("no replayable materialization identity"));
         });
     }
 
