@@ -390,6 +390,15 @@ impl LocalControllerJobClient {
                 None,
             )
         })?;
+        Self::at(&state.address, state_path)
+    }
+
+    pub fn connect() -> Result<Self> {
+        let daemon = ensure_running(DEFAULT_ADDR)?;
+        Self::at(&daemon.address, state_path()?)
+    }
+
+    fn at(address: &str, state_path: PathBuf) -> Result<Self> {
         let client = reqwest::blocking::Client::builder()
             .no_proxy()
             .timeout(Duration::from_secs(10))
@@ -398,67 +407,56 @@ impl LocalControllerJobClient {
                 Error::internal_unexpected(format!("build local controller-job client: {error}"))
             })?;
         Ok(Self {
-            endpoint: format!("http://{}", state.address),
+            endpoint: format!("http://{address}"),
             state_path,
             client,
             admission_guard: Mutex::new(None),
         })
     }
 
-    pub fn connect() -> Result<Self> {
-        let daemon = ensure_running(DEFAULT_ADDR)?;
-        let client = reqwest::blocking::Client::builder()
-            .no_proxy()
-            .timeout(Duration::from_secs(10))
-            .build()
-            .map_err(|error| {
-                Error::internal_unexpected(format!("build local controller-job client: {error}"))
-            })?;
-        Ok(Self {
-            endpoint: format!("http://{}", daemon.address),
-            state_path: state_path()?,
-            client,
-            admission_guard: Mutex::new(None),
-        })
-    }
-
-    /// Persist a cancellation request and return the daemon's current job
-    /// projection. The controller continues provider shutdown asynchronously.
-    pub fn cancel(&self, job_id: &str, reason: &str) -> Result<crate::api_jobs::Job> {
-        let (_, response) = self.send_to_serving_daemon(
-            &format!("cancel local controller job `{job_id}`"),
-            |endpoint| {
-                self.client
-                    .post(format!("{endpoint}/controller/jobs/{job_id}/cancel"))
-                    .json(&json!({ "reason": reason }))
-                    .send()
-            },
-        )?;
+    /// Read a controller-job endpoint's response: it must succeed and carry
+    /// the job. Returns the job and the full response value.
+    fn job_response(
+        response: reqwest::blocking::Response,
+        operation: &str,
+    ) -> Result<(crate::api_jobs::Job, serde_json::Value)> {
         let status = response.status();
         let value: serde_json::Value = response.json().map_err(|error| {
             Error::internal_json(
                 error.to_string(),
-                Some("parse local controller-job cancellation response".to_string()),
+                Some(format!("parse {operation} response")),
             )
         })?;
         if !status.is_success()
             || value.get("success").and_then(serde_json::Value::as_bool) != Some(true)
         {
             return Err(Error::internal_unexpected(format!(
-                "local controller job `{job_id}` cancellation was not accepted: {value}"
+                "{operation} failed: {value}"
             )));
         }
-        let job: crate::api_jobs::Job =
-            serde_json::from_value(controller_job_response(&value).cloned().ok_or_else(|| {
-                Error::internal_unexpected("local controller-job cancellation response has no job")
-            })?)
-            .map_err(|error| {
-                Error::internal_json(
-                    error.to_string(),
-                    Some("parse local controller job".to_string()),
-                )
-            })?;
-        Ok(job)
+        let job = controller_job_response(&value).cloned().ok_or_else(|| {
+            Error::internal_unexpected(format!("{operation} response has no job"))
+        })?;
+        let job = serde_json::from_value(job).map_err(|error| {
+            Error::internal_json(
+                error.to_string(),
+                Some("parse local controller job".to_string()),
+            )
+        })?;
+        Ok((job, value))
+    }
+
+    /// Persist a cancellation request and return the daemon's current job
+    /// projection. The controller continues provider shutdown asynchronously.
+    pub fn cancel(&self, job_id: &str, reason: &str) -> Result<crate::api_jobs::Job> {
+        let operation = format!("cancel local controller job `{job_id}`");
+        let response = self.send_to_serving_daemon(&operation, |endpoint| {
+            self.client
+                .post(format!("{endpoint}/controller/jobs/{job_id}/cancel"))
+                .json(&json!({ "reason": reason }))
+                .send()
+        })?;
+        Ok(Self::job_response(response, &operation)?.0)
     }
 
     /// Send one request to whichever daemon serves the lease.
@@ -472,12 +470,12 @@ impl LocalControllerJobClient {
         &self,
         operation: &str,
         send: impl Fn(&str) -> reqwest::Result<reqwest::blocking::Response>,
-    ) -> Result<(String, reqwest::blocking::Response)> {
+    ) -> Result<reqwest::blocking::Response> {
         let deadline = std::time::Instant::now() + DAEMON_HANDOFF_WAIT;
         let mut endpoint = self.endpoint.clone();
         loop {
             match send(&endpoint) {
-                Ok(response) => return Ok((endpoint, response)),
+                Ok(response) => return Ok(response),
                 Err(error) if error.is_connect() && std::time::Instant::now() < deadline => {
                     std::thread::sleep(Duration::from_millis(250));
                     if let Ok(Some(state)) =
@@ -504,38 +502,15 @@ impl LocalControllerJobClient {
         request: serde_json::Value,
     ) -> Result<ControllerJobSubmission> {
         let _admission_guard = self.admission_guard.lock().unwrap().take();
-        let (endpoint, response) =
-            self.send_to_serving_daemon("submit local controller job", |endpoint| {
-                self.client
-                    .post(format!("{endpoint}/controller/jobs"))
-                    .json(&request)
-                    .send()
-            })?;
-        let status = response.status();
-        let value: serde_json::Value = response.json().map_err(|error| {
-            Error::internal_json(
-                error.to_string(),
-                Some("parse local controller-job submission".to_string()),
-            )
+        let response = self.send_to_serving_daemon("submit local controller job", |endpoint| {
+            self.client
+                .post(format!("{endpoint}/controller/jobs"))
+                .json(&request)
+                .send()
         })?;
-        if !status.is_success()
-            || value.get("success").and_then(serde_json::Value::as_bool) != Some(true)
-        {
-            return Err(Error::internal_unexpected(format!(
-                "local controller job submission failed: {value}"
-            )));
-        }
-        let job: crate::api_jobs::Job =
-            serde_json::from_value(controller_job_response(&value).cloned().ok_or_else(|| {
-                Error::internal_unexpected("local controller-job submission response has no job")
-            })?)
-            .map_err(|error| {
-                Error::internal_json(
-                    error.to_string(),
-                    Some("parse local controller job".to_string()),
-                )
-            })?;
-        let disposition = match daemon_endpoint_payload(&value)
+        let (job, value) = Self::job_response(response, "submit local controller job")?;
+        let payload = daemon_endpoint_payload(&value);
+        let disposition = match payload
             .and_then(|payload| payload.pointer("/submission/disposition"))
             .and_then(serde_json::Value::as_str)
         {
@@ -547,44 +522,13 @@ impl LocalControllerJobClient {
                 ));
             }
         };
-        let pending_admission = daemon_endpoint_payload(&value)
+        let pending_admission = payload
             .and_then(|payload| payload.pointer("/admission/reason"))
             .and_then(serde_json::Value::as_str)
             .map(str::to_owned);
-        let response = self
-            .client
-            .post(format!("{endpoint}/controller/jobs/{}/start", job.id))
-            .send()
-            .map_err(|error| {
-                Error::internal_unexpected(format!(
-                    "start local controller job `{}`: {error}",
-                    job.id
-                ))
-            })?;
-        let status = response.status();
-        let value: serde_json::Value = response.json().map_err(|error| {
-            Error::internal_json(
-                error.to_string(),
-                Some("parse local controller-job start".to_string()),
-            )
-        })?;
-        if !status.is_success()
-            || value.get("success").and_then(serde_json::Value::as_bool) != Some(true)
-        {
-            return Err(Error::internal_unexpected(format!(
-                "local controller job start failed: {value}"
-            )));
-        }
-        let job: crate::api_jobs::Job =
-            serde_json::from_value(controller_job_response(&value).cloned().ok_or_else(|| {
-                Error::internal_unexpected("local controller-job start response has no job")
-            })?)
-            .map_err(|error| {
-                Error::internal_json(
-                    error.to_string(),
-                    Some("parse local controller job".to_string()),
-                )
-            })?;
+        // Start through the serving lease too: the daemon that admitted the
+        // job may be replaced before it starts.
+        let job = self.start(&job.id.to_string())?;
         Ok(ControllerJobSubmission {
             job,
             disposition,
@@ -593,42 +537,18 @@ impl LocalControllerJobClient {
     }
 
     pub fn status(&self, job_id: &str) -> Result<crate::api_jobs::Job> {
-        let (_, response) = self.send_to_serving_daemon(
-            &format!("read local controller job `{job_id}`"),
-            |endpoint| self.client.get(format!("{endpoint}/jobs/{job_id}")).send(),
-        )?;
-        let status = response.status();
-        let value: serde_json::Value = response.json().map_err(|error| {
-            Error::internal_json(
-                error.to_string(),
-                Some("parse local controller-job status".to_string()),
-            )
+        let operation = format!("read local controller job `{job_id}`");
+        let response = self.send_to_serving_daemon(&operation, |endpoint| {
+            self.client.get(format!("{endpoint}/jobs/{job_id}")).send()
         })?;
-        if !status.is_success()
-            || value.get("success").and_then(serde_json::Value::as_bool) != Some(true)
-        {
-            return Err(Error::internal_unexpected(format!(
-                "local controller job status failed: {value}"
-            )));
-        }
-        let job: crate::api_jobs::Job =
-            serde_json::from_value(controller_job_response(&value).cloned().ok_or_else(|| {
-                Error::internal_unexpected("local controller-job status response has no job")
-            })?)
-            .map_err(|error| {
-                Error::internal_json(
-                    error.to_string(),
-                    Some("parse local controller job".to_string()),
-                )
-            })?;
-        Ok(job)
+        Ok(Self::job_response(response, &operation)?.0)
     }
 
     /// `GET /workflows/<instance>`: the daemon's pure projection of one
     /// workflow instance from its job ledger.
     pub fn workflow(&self, instance: &str) -> Result<serde_json::Value> {
         let path = format!("/workflows/{instance}");
-        let (_, response) = self.send_to_serving_daemon(&format!("read {path}"), |endpoint| {
+        let response = self.send_to_serving_daemon(&format!("read {path}"), |endpoint| {
             self.client.get(format!("{endpoint}{path}")).send()
         })?;
         let payload = self.workflow_payload(response, &path)?;
@@ -640,7 +560,7 @@ impl LocalControllerJobClient {
     /// `GET /workflows`.
     pub fn workflow_list(&self) -> Result<serde_json::Value> {
         let path = "/workflows";
-        let (_, response) = self.send_to_serving_daemon(&format!("read {path}"), |endpoint| {
+        let response = self.send_to_serving_daemon(&format!("read {path}"), |endpoint| {
             self.client.get(format!("{endpoint}{path}")).send()
         })?;
         self.workflow_payload(response, path)
@@ -669,7 +589,7 @@ impl LocalControllerJobClient {
     ) -> Result<serde_json::Value> {
         let path = format!("/workflows/{instance}/approvals");
         let actor = std::env::var("USER").unwrap_or_else(|_| "local-operator".to_string());
-        let (_, response) = self.send_to_serving_daemon(&format!("post {path}"), |endpoint| {
+        let response = self.send_to_serving_daemon(&format!("post {path}"), |endpoint| {
             self.client
                 .post(format!("{endpoint}{path}"))
                 .json(&json!({ "step": step, "decision": decision, "reason": reason, "actor": actor }))
@@ -681,7 +601,7 @@ impl LocalControllerJobClient {
     /// `GET /workflows/cadences`: every registered workflow cadence.
     pub fn workflow_cadences(&self) -> Result<serde_json::Value> {
         let path = "/workflows/cadences";
-        let (_, response) = self.send_to_serving_daemon(&format!("read {path}"), |endpoint| {
+        let response = self.send_to_serving_daemon(&format!("read {path}"), |endpoint| {
             self.client.get(format!("{endpoint}{path}")).send()
         })?;
         self.workflow_payload(response, path)
@@ -694,7 +614,7 @@ impl LocalControllerJobClient {
     ) -> Result<serde_json::Value> {
         let _admission_guard = self.admission_guard.lock().unwrap().take();
         let path = "/workflows/cadences";
-        let (_, response) = self.send_to_serving_daemon(&format!("post {path}"), |endpoint| {
+        let response = self.send_to_serving_daemon(&format!("post {path}"), |endpoint| {
             self.client
                 .post(format!("{endpoint}{path}"))
                 .json(request)
@@ -706,7 +626,7 @@ impl LocalControllerJobClient {
     /// `POST /workflows/cadences/<workflow>/cancel`.
     pub fn cancel_workflow_cadence(&self, workflow: &str) -> Result<serde_json::Value> {
         let path = format!("/workflows/cadences/{workflow}/cancel");
-        let (_, response) = self.send_to_serving_daemon(&format!("post {path}"), |endpoint| {
+        let response = self.send_to_serving_daemon(&format!("post {path}"), |endpoint| {
             self.client.post(format!("{endpoint}{path}")).send()
         })?;
         self.workflow_payload(response, &path)
@@ -739,37 +659,13 @@ impl LocalControllerJobClient {
     }
 
     pub fn start(&self, job_id: &str) -> Result<crate::api_jobs::Job> {
-        let (_, response) = self.send_to_serving_daemon(
-            &format!("start local controller job `{job_id}`"),
-            |endpoint| {
-                self.client
-                    .post(format!("{endpoint}/controller/jobs/{job_id}/start"))
-                    .send()
-            },
-        )?;
-        let status = response.status();
-        let value: serde_json::Value = response.json().map_err(|error| {
-            Error::internal_json(
-                error.to_string(),
-                Some("parse local controller-job start".to_string()),
-            )
+        let operation = format!("start local controller job `{job_id}`");
+        let response = self.send_to_serving_daemon(&operation, |endpoint| {
+            self.client
+                .post(format!("{endpoint}/controller/jobs/{job_id}/start"))
+                .send()
         })?;
-        if !status.is_success()
-            || value.get("success").and_then(serde_json::Value::as_bool) != Some(true)
-        {
-            return Err(Error::internal_unexpected(format!(
-                "local controller job start failed: {value}"
-            )));
-        }
-        serde_json::from_value(controller_job_response(&value).cloned().ok_or_else(|| {
-            Error::internal_unexpected("local controller-job start response has no job")
-        })?)
-        .map_err(|error| {
-            Error::internal_json(
-                error.to_string(),
-                Some("parse local controller job".to_string()),
-            )
-        })
+        Ok(Self::job_response(response, &operation)?.0)
     }
 }
 
@@ -8249,6 +8145,72 @@ mod tests {
                 .join()
                 .expect("server")
                 .starts_with("GET /workflows "));
+        });
+    }
+
+    #[test]
+    fn submission_starts_its_job_on_the_daemon_that_replaced_the_admitting_one() {
+        crate::test_support::with_isolated_home(|_| {
+            let job = serde_json::to_value(
+                JobStore::open_without_reconciliation(&paths::observation_db().unwrap())
+                    .unwrap()
+                    .create("runner.exec"),
+            )
+            .unwrap();
+            let serve = |listener: std::net::TcpListener, body: serde_json::Value| {
+                std::thread::spawn(move || {
+                    let (mut stream, _) = listener.accept().expect("accept");
+                    let mut request = [0_u8; 8192];
+                    let read = std::io::Read::read(&mut stream, &mut request).expect("read");
+                    let body = json!({"success": true, "data": {"body": body}}).to_string();
+                    std::io::Write::write_all(
+                        &mut stream,
+                        format!(
+                            "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{body}",
+                            body.len()
+                        )
+                        .as_bytes(),
+                    )
+                    .expect("respond");
+                    String::from_utf8_lossy(&request[..read]).to_string()
+                })
+            };
+            // The admitting daemon answers the submission, then is replaced.
+            let admitting = std::net::TcpListener::bind("127.0.0.1:0").expect("bind admitting");
+            let admitting_address = admitting.local_addr().expect("admitting address");
+            let admitted = serve(
+                admitting,
+                json!({"job": job, "submission": {"disposition": "created"}}),
+            );
+            let replacement = std::net::TcpListener::bind("127.0.0.1:0").expect("bind new");
+            write_test_lease_at(
+                "replacement",
+                &replacement.local_addr().expect("new address").to_string(),
+            );
+            let started = serve(replacement, json!({"job": job}));
+            let client = LocalControllerJobClient {
+                endpoint: format!("http://{admitting_address}"),
+                state_path: state_path().expect("state path"),
+                client: reqwest::blocking::Client::builder()
+                    .no_proxy()
+                    .build()
+                    .expect("client"),
+                admission_guard: Mutex::new(None),
+            };
+
+            let submission = client
+                .submit_with_disposition(json!({}))
+                .expect("the replacement starts the admitted job");
+
+            assert_eq!(serde_json::to_value(&submission.job).unwrap(), job);
+            assert!(admitted
+                .join()
+                .unwrap()
+                .starts_with("POST /controller/jobs "));
+            assert!(started.join().unwrap().starts_with(&format!(
+                "POST /controller/jobs/{}/start ",
+                job["id"].as_str().unwrap()
+            )));
         });
     }
 
