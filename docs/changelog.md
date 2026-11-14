@@ -4,6 +4,15 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.464.17] - 2026-11-14
+
+### Changed
+- Delete multi-daemon compensation; make cross-controller restarts admission-safe (#18063 part 2)
+
+### Fixed
+- a restated Pi output gets the same correction turn as a first answer
+- wait through pressure in the Lab readiness preflight like gate execution
+
 ## [0.464.16] - 2026-11-14
 
 ### Fixed
