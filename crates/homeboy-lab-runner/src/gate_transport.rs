@@ -125,6 +125,10 @@ fn lab_gate_public_error(error: &Error, artifact_ref: String) -> Error {
         "gate_disposition": error.details.get("gate_disposition"),
         "job_id": error.details.get("job_id"),
         "readiness_reasons": error.details.get("readiness_reasons"),
+        // The admission verdict must survive the public wrapper, or the
+        // substrate wait classifies a pressure refusal as permanent (#18058).
+        "reasons": error.details.get("reasons"),
+        "transient": error.details.get("transient"),
         "artifact_ref": artifact_ref,
     });
     details["diagnostic"] = homeboy_core::redaction::redact_json(&serde_json::json!({
@@ -1114,6 +1118,20 @@ mod public_error_tests {
             None,
             None,
         )
+    }
+
+    #[test]
+    fn pressure_refusal_stays_transient_through_the_public_error() {
+        let admission = LabGateAdmission {
+            accepts_jobs: false,
+            reasons: vec!["pressure".to_string()],
+            freshness: LabGateFreshness::Fresh,
+            next_action: None,
+        };
+        let refusal = admission.refusal("homeboy-lab", None);
+        let public = lab_gate_public_error(&refusal, "homeboy://run/x/artifact/y".into());
+
+        assert!(homeboy_core::substrate_wait::is_transient_error(&public));
     }
 
     #[test]
