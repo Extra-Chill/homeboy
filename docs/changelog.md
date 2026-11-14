@@ -4,6 +4,11 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.464.11] - 2026-11-14
+
+### Changed
+- one process-wide heap releaser instead of a daemon-only malloc_trim
+
 ## [0.464.10] - 2026-11-13
 
 ### Changed
