@@ -4,6 +4,12 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.464.16] - 2026-11-14
+
+### Fixed
+- run Homeboy children from the daemon's own build
+- keep the failure cause when the compact report trims to budget
+
 ## [0.464.15] - 2026-11-14
 
 ### Fixed
