@@ -6482,7 +6482,7 @@ mod cook_pull_request_ref_tests {
                 "origin",
                 "https://github.com/example/repo.git",
             ]);
-            std::fs::write(&gh, "#!/bin/sh\ncase \"$*\" in api*) printf '[\"https://github.com/example/repo/pull/1895\"]';; *list*) printf '[{\"state\":\"OPEN\",\"url\":\"https://github.com/example/repo/pull/1895\"}]';; *) printf '{\"baseRefName\":\"release\",\"headRefName\":\"feature\"}';; esac\n").unwrap();
+            std::fs::write(&gh, "#!/bin/sh\ncase \"$*\" in api*) printf '[{\"state\":\"OPEN\",\"url\":\"https://github.com/example/repo/pull/1895\"}]';; *list*) printf '[{\"state\":\"OPEN\",\"url\":\"https://github.com/example/repo/pull/1895\"}]';; *) printf '{\"baseRefName\":\"release\",\"headRefName\":\"feature\"}';; esac\n").unwrap();
             let mut issue = parse(&[]);
             issue.dispatch.task_url = Some("https://github.com/example/repo/issues/7".into());
             let resolved = {
@@ -6510,7 +6510,7 @@ mod cook_pull_request_ref_tests {
             std::fs::write(
                 &gh,
                 format!(
-                    "#!/bin/sh\nif [ ! -f {flag} ]; then touch {flag}; echo 'net/http: TLS handshake timeout' >&2; exit 1; fi\nprintf '[\"https://github.com/example/repo/pull/1895\"]'\n",
+                    "#!/bin/sh\nif [ ! -f {flag} ]; then touch {flag}; echo 'net/http: TLS handshake timeout' >&2; exit 1; fi\nprintf '[{\"state\":\"OPEN\",\"url\":\"https://github.com/example/repo/pull/1895\"}]'\n",
                     flag = flaked.display()
                 ),
             )
