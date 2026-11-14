@@ -2760,7 +2760,7 @@ fn persist_legacy_candidate_cook(cook_id: &str, run_id: &str, runtime_generation
 }
 
 /// #16441: a Cook recorded by an older Homeboy build is not pinned to it.
-/// `recover --preflight` passes its recipe phase and the recipe reconstructs
+/// Continuation preflight passes its recipe phase and the recipe reconstructs
 /// through the same strict dispatcher-bound path continuation and retry use.
 #[test]
 fn recover_preflight_admits_a_candidate_recorded_by_an_older_homeboy_build() {
@@ -2774,10 +2774,18 @@ fn recover_preflight_admits_a_candidate_recorded_by_an_older_homeboy_build() {
         assert_eq!(recipe.runtime_generation, older);
         assert_ne!(older, homeboy::core::build_identity::current().display);
 
-        let (probe, _) = recover_preflight_probe(cook_id);
-        assert_eq!(probe["status"], "candidate_recoverable", "{probe:#}");
-        assert_eq!(probe["step"], json!({ "kind": "continue" }));
-        let phases = probe["admission"]["phases"].as_array().expect("phases");
+        let (probe, _) = super::super::run::preflight_continue_cook(CookContinueArgs {
+            cook_or_attempt_id: cook_id.to_string(),
+            rearm: false,
+            timeout_ms: None,
+            backend: None,
+            selector: None,
+            model: None,
+            acknowledge_model_override: false,
+            full: false,
+        })
+        .expect("continuation preflight reports its phases");
+        let phases = probe["phases"].as_array().expect("phases");
         assert!(
             phases
                 .iter()
@@ -2807,20 +2815,31 @@ fn recover_preflight_admits_a_candidate_recorded_by_an_older_homeboy_build() {
     });
 }
 
-/// #16441: a refused `recover` names its blocking phase's message in the
-/// command summary instead of "exited 1 without reporting a failure cause".
+/// A terminal attempt whose candidate continuation refuses has no recovery
+/// step: `recover` performs nothing and its summary names the refusal
+/// instead of planning a continuation that fails admission (#16441).
 #[test]
-fn blocked_recover_reports_the_blocking_message_in_its_summary() {
+fn recover_without_admissible_candidate_plans_no_step_and_names_the_refusal() {
     with_temp_home(|| {
         let cook_id = "cook-blocked-recover-summary";
         let run_id = "cook-blocked-recover-summary-attempt-1";
         persist_legacy_candidate_cook(cook_id, run_id, None);
-        let (probe, exit_code) = recover_preflight_probe(cook_id);
+        let performer = FixtureCookRecoveryPerformer {
+            executor: Arc::new(CountingCookExecutor::default()),
+        };
+        let (probe, exit_code) = super::super::recover::recover_with(
+            super::super::RecoverArgs {
+                id: cook_id.to_string(),
+                ..Default::default()
+            },
+            &performer,
+        )
+        .expect("recover reports its step");
+        assert_eq!(performer.executor.executions.load(Ordering::SeqCst), 0);
         assert_eq!(exit_code, 1, "{probe:#}");
-        assert_eq!(probe["admission"]["admitted"], false);
+        assert_eq!(probe["step"]["kind"], "none", "{probe:#}");
         let blocker = "non-recoverable: outcome has no immutable candidate";
-        assert_eq!(probe["failure"]["code"], "agent_task.recover_blocked");
-        assert_eq!(probe["failure"]["details"]["phase"], "candidate_admission");
+        assert_eq!(probe["failure"]["code"], "agent_task.recover_no_step");
         assert!(
             probe["failure"]["message"]
                 .as_str()
@@ -2841,7 +2860,6 @@ fn blocked_recover_reports_the_blocking_message_in_its_summary() {
         let response = serde_json::to_value(response).expect("serialize response");
         let summary = response["summary"].as_str().expect("summary");
         assert!(summary.contains(blocker), "{summary}");
-        assert!(summary.contains("candidate_admission"), "{summary}");
         assert!(
             !summary.contains("without reporting a failure cause"),
             "{summary}"
@@ -2893,19 +2911,14 @@ fn continuation_preflight_rejects_legacy_patch_only_terminal_candidate() {
             filesystem_snapshot(&homeboy::core::paths::homeboy_data().expect("data root")),
             before
         );
-        let (probe, probe_exit_code) = recover_preflight_probe(cook_id);
-        // A terminal candidate used to need `cook-continue --preflight`;
-        // recover names continuation and reports the same admission blocker.
-        assert_eq!(probe_exit_code, 1, "{probe:#}");
+        let (probe, _) = recover_preflight_probe(cook_id);
+        // Recovery plans from the same candidate admission, so it names no
+        // continuation this preflight refuses.
         assert_eq!(probe["status"], "candidate_recoverable");
-        assert_eq!(probe["step"], json!({ "kind": "continue" }));
-        assert_eq!(probe["admission"]["admitted"], false);
-        assert_eq!(
-            probe["admission"]["schema"],
-            "homeboy/agent-task-cook-continuation-preflight/v1"
-        );
-        assert!(probe["admission"]["phases"]
-            .to_string()
+        assert_eq!(probe["step"]["kind"], "none", "{probe:#}");
+        assert!(probe["step"]["reason"]
+            .as_str()
+            .expect("reason")
             .contains("non-recoverable: outcome has no immutable candidate"));
         assert_eq!(
             filesystem_snapshot(&homeboy::core::paths::homeboy_data().expect("data root")),

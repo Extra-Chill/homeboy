@@ -764,6 +764,98 @@ fn admitted_repository_integrity_evidence(
         .transpose()
 }
 
+/// The provider outcome a continuation promotes, with its aggregate.
+fn continuation_outcome<'a>(
+    run_id: &str,
+    aggregate: Option<&'a AgentTaskAggregate>,
+) -> Result<(
+    &'a AgentTaskAggregate,
+    &'a crate::agent_task::AgentTaskOutcome,
+)> {
+    let aggregate = aggregate.ok_or_else(|| {
+        Error::validation_invalid_argument(
+            "agent_task_aggregate",
+            "authoritative observation has no mirrored agent-task aggregate",
+            Some(run_id.to_string()),
+            None,
+        )
+    })?;
+    let outcome = aggregate
+        .selected_outcome()
+        .or_else(|| {
+            (aggregate.outcomes.len() == 1)
+                .then(|| aggregate.outcomes.first())
+                .flatten()
+        })
+        .ok_or_else(|| {
+            Error::validation_invalid_argument(
+                "provider_model",
+                "Cook promotion has no selected provider outcome",
+                Some(run_id.to_string()),
+                None,
+            )
+        })?;
+    Ok((aggregate, outcome))
+}
+
+/// The outcome's immutable candidate, or `None` for a verified no-change
+/// outcome. Any other outcome without a candidate cannot be promoted.
+fn continuation_candidate(
+    outcome: &crate::agent_task::AgentTaskOutcome,
+) -> Result<Option<&crate::agent_task::AgentTaskCandidate>> {
+    if outcome.candidate.is_none()
+        && (outcome.is_verified_unchanged_attempt()
+            || outcome.status == crate::agent_task::AgentTaskOutcomeStatus::NoOp)
+    {
+        return Ok(None);
+    }
+    outcome.candidate.as_ref().map(Some).ok_or_else(|| {
+        Error::validation_invalid_argument(
+            "source.candidate",
+            "non-recoverable: outcome has no immutable candidate; run a new Cook",
+            None,
+            None,
+        )
+    })
+}
+
+/// Why continuation cannot admit this terminal attempt's candidate: the
+/// `candidate_admission` check `recover --preflight` runs, read from the same
+/// durable evidence, so the planner never names a continuation it refuses.
+pub(crate) fn continuation_candidate_refusal(
+    lifecycle_store: &agent_task_lifecycle::AgentTaskLifecycleStore,
+    record: &agent_task_lifecycle::AgentTaskRunRecord,
+) -> Option<String> {
+    if !super::cook_continuation_requires_model_provenance(record)
+        || recorded_finalization_receipt(&record.metadata).is_some_and(|receipt| !receipt.is_null())
+    {
+        return None;
+    }
+    let promotion = persisted_promotion_from_record(&record.run_id, record.clone())
+        .ok()
+        .flatten();
+    if promotion.as_ref().is_some_and(|promotion| {
+        !matches!(
+            promotion.status,
+            AgentTaskPromotionStatus::VerificationPending | AgentTaskPromotionStatus::GateDeferred
+        )
+    }) {
+        return None;
+    }
+    let (_, aggregate) = lifecycle_store
+        .read_record_with_aggregate_bounded(&record.run_id)
+        .ok()?;
+    let result =
+        continuation_outcome(&record.run_id, aggregate.as_ref()).and_then(|(_, outcome)| {
+            if promotion.is_some() {
+                Ok(None)
+            } else {
+                continuation_candidate(outcome)
+            }
+        });
+    result.err().map(|error| error.message)
+}
+
 /// Observe the exact persisted promote-or-load decision without opening a
 /// writable store, applying a patch, or running verification gates.
 pub fn preflight_cook_promotion_in_store(
@@ -815,29 +907,7 @@ pub fn preflight_cook_promotion_for_observation_in_store(
             }));
         }
     }
-    let aggregate = aggregate.ok_or_else(|| {
-        Error::validation_invalid_argument(
-            "agent_task_aggregate",
-            "authoritative observation has no mirrored agent-task aggregate",
-            Some(run_id.to_string()),
-            None,
-        )
-    })?;
-    let outcome = aggregate
-        .selected_outcome()
-        .or_else(|| {
-            (aggregate.outcomes.len() == 1)
-                .then(|| aggregate.outcomes.first())
-                .flatten()
-        })
-        .ok_or_else(|| {
-            Error::validation_invalid_argument(
-                "provider_model",
-                "Cook promotion has no selected provider outcome",
-                Some(run_id.to_string()),
-                None,
-            )
-        })?;
+    let (aggregate, outcome) = continuation_outcome(run_id, aggregate)?;
     if let Some(promotion) = persisted_promotion_from_record(run_id, record.clone())? {
         let behavior = if promotion.status == AgentTaskPromotionStatus::GateDeferred {
             "resume_deferred_gates"
@@ -880,33 +950,20 @@ pub fn preflight_cook_promotion_for_observation_in_store(
         provider_invocation: options.provider_transport.provider_invocation.clone(),
         repository_integrity_evidence: None,
     };
-    {
-        if outcome.candidate.is_none()
-            && (outcome.is_verified_unchanged_attempt()
-                || outcome.status == crate::agent_task::AgentTaskOutcomeStatus::NoOp)
-        {
-            return Ok(
-                json!({"behavior": "no_changes", "artifact_id": Value::Null, "candidate_fingerprint": Value::Null, "execution_only_checks": []}),
-            );
-        }
-        let candidate = outcome.candidate.as_ref().ok_or_else(|| {
-            Error::validation_invalid_argument(
-                "source.candidate",
-                "non-recoverable: outcome has no immutable candidate; run a new Cook",
-                None,
-                None,
-            )
-        })?;
-        if let Some(path) = promotion_options.source_worktree_path.as_deref() {
-            crate::agent_task_promotion::validate_candidate_commit(path, candidate)?;
-        }
-        return Ok(json!({
-            "behavior": "promote_new",
-            "artifact_id": Value::Null,
-            "candidate_fingerprint": candidate,
-            "execution_only_checks": ["promotion_target_resolution", "candidate_materialization", "verification_gates"],
-        }));
+    let Some(candidate) = continuation_candidate(outcome)? else {
+        return Ok(
+            json!({"behavior": "no_changes", "artifact_id": Value::Null, "candidate_fingerprint": Value::Null, "execution_only_checks": []}),
+        );
+    };
+    if let Some(path) = promotion_options.source_worktree_path.as_deref() {
+        crate::agent_task_promotion::validate_candidate_commit(path, candidate)?;
     }
+    Ok(json!({
+        "behavior": "promote_new",
+        "artifact_id": Value::Null,
+        "candidate_fingerprint": candidate,
+        "execution_only_checks": ["promotion_target_resolution", "candidate_materialization", "verification_gates"],
+    }))
 }
 
 fn persisted_promotion_execution_only_checks(
@@ -4616,6 +4673,9 @@ pub(crate) fn cook_failure_context_with_stores(
                 cook_id,
                 record.as_ref(),
             );
+            let continuation_refusal = record
+                .as_ref()
+                .and_then(|record| continuation_candidate_refusal(lifecycle_store, record));
             cook_recovery_actions_with_prefix(
                 status,
                 &chronological_latest_run_id,
@@ -4635,6 +4695,7 @@ pub(crate) fn cook_failure_context_with_stores(
                 exact_checkpoint_candidate_mismatch(&diagnostic),
                 continuation_state == Some(super::cook_recipe::CookContinuationState::Failed),
                 continuation_state == Some(super::cook_recipe::CookContinuationState::Completed),
+                continuation_refusal.as_deref(),
                 agent_incomplete_reason(lifecycle_store, record_run_id).as_deref(),
                 adoptable_candidate_ref.as_deref(),
                 delivered_candidate,
@@ -5318,6 +5379,7 @@ fn cook_recovery_actions(
         false,
         None,
         None,
+        None,
         DeliveredCandidateFacts::default(),
         None,
         lab_runtime_recovery,
@@ -5338,6 +5400,7 @@ fn cook_recovery_actions_with_prefix(
     exact_checkpoint_candidate_mismatch: bool,
     continuation_rearm_required: bool,
     continuation_completed: bool,
+    continuation_refusal: Option<&str>,
     agent_incomplete_reason: Option<&str>,
     adoptable_candidate_ref: Option<&str>,
     delivered_candidate: DeliveredCandidateFacts,
@@ -5360,6 +5423,7 @@ fn cook_recovery_actions_with_prefix(
             exact_checkpoint_candidate_mismatch,
             continuation_rearm_required,
             continuation_completed,
+            continuation_refusal,
             run_id,
             agent_incomplete_reason,
             adoptable_candidate_ref,
