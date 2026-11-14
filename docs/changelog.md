@@ -4,6 +4,11 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.465.0] - 2026-11-14
+
+### Added
+- pin each concurrent step to its own CPU slice
+
 ## [0.464.17] - 2026-11-14
 
 ### Changed
