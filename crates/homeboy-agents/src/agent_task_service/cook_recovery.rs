@@ -231,12 +231,8 @@ format!(
     // to re-read the same verdict (#16772).
     let publishable = inputs.verified_unpublished && !status_is_settled(&status);
     if status == CookStatus::CandidateRecoverable || publishable {
-        if let Some(reason) = inputs.agent_incomplete_reason {
-            return CookRecoveryStep::none(format!(
-                "The agent's review form declares the task incomplete: {reason}. Continuing would re-read the same verdict, so `recover` cannot publish this candidate on its own. If the task is in fact done, publish it with a complete review form via `{command}`, otherwise start a fresh Cook.",
-                reason = reason.trim_end_matches('.'),
-                command = incomplete_review_recovery_command(inputs.run_id)
-            ));
+        if let Some(step) = agent_incomplete_stop(inputs) {
+            return step;
         }
     }
     // A gate-green candidate publishes; without a usable review form it
@@ -317,8 +313,25 @@ format!(
     continuation_step(inputs)
 }
 
+/// The agent declared the task incomplete: no step that re-reads its verdict
+/// can publish the candidate (#16772).
+fn agent_incomplete_stop(inputs: &CookRecoveryInputs<'_>) -> Option<CookRecoveryStep> {
+    inputs.agent_incomplete_reason.map(|reason| {
+        CookRecoveryStep::none(format!(
+            "The agent's review form declares the task incomplete: {reason}. Continuing would re-read the same verdict, so `recover` cannot publish this candidate on its own. If the task is in fact done, publish it with a complete review form via `{command}`, otherwise start a fresh Cook.",
+            reason = reason.trim_end_matches('.'),
+            command = incomplete_review_recovery_command(inputs.run_id)
+        ))
+    })
+}
+
 /// Continue the Cook, rearming its failed terminal continuation first.
 fn continuation_step(inputs: &CookRecoveryInputs<'_>) -> CookRecoveryStep {
+    // Continuation replays the same attempt and re-reads its agent's
+    // verdict, so an incomplete review form stops it whatever the status.
+    if let Some(step) = agent_incomplete_stop(inputs) {
+        return step;
+    }
     if let Some(refusal) = inputs.continuation_refusal {
         return CookRecoveryStep::none(format!(
             "Continuation cannot admit this attempt's candidate: {refusal}. Inspect it with `homeboy agent-task diagnose {}`.",
@@ -1727,6 +1740,36 @@ mod tests {
             CookRecoveryStep::Continue,
             "other recoverable candidates still continue"
         );
+        // Every continuation re-reads the verdict; steps that replace the
+        // gates or start a fresh attempt do not.
+        for (status, configure, expected) in [
+            (
+                "gate_environment_unavailable",
+                (|i: &mut CookRecoveryInputs| i.continuation_rearm_required = true)
+                    as fn(&mut CookRecoveryInputs),
+                None,
+            ),
+            ("succeeded", |i| i.continuation_rearm_required = true, None),
+            (
+                "gate_failed",
+                |i| i.applied_gate_failure = true,
+                Some(CookRecoveryStep::ReplaceGates),
+            ),
+            (
+                "pre_execution_failure",
+                |i| i.retry_admitted = true,
+                Some(CookRecoveryStep::Retry),
+            ),
+        ] {
+            let decided = step(status, |inputs| {
+                inputs.agent_incomplete_reason = Some(reason);
+                configure(inputs);
+            });
+            match expected {
+                Some(expected) => assert_eq!(decided, expected, "{status}"),
+                None => assert!(decided.is_none(), "{status}: {decided:?}"),
+            }
+        }
     }
 
     #[test]

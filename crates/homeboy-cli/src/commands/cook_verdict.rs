@@ -292,6 +292,18 @@ mod tests {
         let verdict = cook_verdict(&run);
         assert!(verdict.reason.unwrap().contains("regression not covered"));
         assert_eq!(verdict.next_action, command);
+        // The planner's own step outranks the review-form remedy.
+        run.recovery = Some(homeboy_control_plane_contract::ControlPlaneRecovery {
+            run: RunId::new("agent-task-verdict").expect("run id"),
+            cook_id: "cook-incomplete".into(),
+            step: "replace_gates".into(),
+            candidate_ref: None,
+            command: "homeboy agent-task recover cook-incomplete".into(),
+        });
+        assert_eq!(
+            cook_verdict(&run).next_action,
+            "homeboy agent-task recover cook-incomplete"
+        );
     }
 
     #[test]
