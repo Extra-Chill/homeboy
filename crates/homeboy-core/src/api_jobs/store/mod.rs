@@ -3250,6 +3250,26 @@ impl JobStore {
         })
     }
 
+    /// Whether this daemon holds a pre-spawn child reservation: a job admitted
+    /// to a child slot whose process has not bound yet. A stop waits for these
+    /// to settle so an in-place restart does not strand an admitted job
+    /// between reservation and spawn (#18063).
+    pub(crate) fn has_pending_local_child_spawn(&self) -> bool {
+        self.inner
+            .lock()
+            .expect("job store mutex poisoned")
+            .jobs
+            .values()
+            .any(|stored| {
+                stored.job.status == JobStatus::Queued
+                    && self.owns(stored)
+                    && stored
+                        .local_child
+                        .as_ref()
+                        .is_some_and(|child| child.process.is_none())
+            })
+    }
+
     /// Terminalize expired pre-spawn reservations. A PID-bound child has
     /// atomically claimed the reservation and is intentionally left to normal
     /// child liveness recovery, even when the original admission deadline has

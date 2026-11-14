@@ -36,9 +36,9 @@ impl Reservation {
         }
     }
 }
-/// One reservation per runner: it lives beside the per-controller daemon
-/// state dirs (`runner-daemons/<runner>/controller-*/`), so every controller's
-/// daemon on the host reads it and a quiet window holds all of them (#18017).
+/// One reservation per runner: it lives beside the host daemon's state dir
+/// (`runner-daemons/<runner>/host/`), so a quiet window holds the one daemon
+/// every controller shares (#18017, #18063).
 fn path() -> Result<PathBuf> {
     let state = state_path()?;
     let scope = state.parent().and_then(Path::parent).ok_or_else(|| {
@@ -195,26 +195,16 @@ pub(super) fn update(body: Option<serde_json::Value>) -> Result<serde_json::Valu
 mod tests {
     use super::*;
     #[test]
-    fn reservation_holds_every_daemon_on_the_host_and_expires_without_holder() {
+    fn reservation_holds_the_host_daemon_and_expires_without_holder() {
         crate::test_support::with_isolated_home(|home| {
-            let runner = home.path().join("runner-daemons/lab");
-            let own = runner.join("controller-own");
-            std::fs::create_dir_all(&own).unwrap();
-            let _own =
-                crate::test_support::EnvVarGuard::set(crate::paths::DAEMON_STATE_DIR_ENV, &own);
+            let host = home.path().join("runner-daemons/lab/host");
+            std::fs::create_dir_all(&host).unwrap();
+            let _host =
+                crate::test_support::EnvVarGuard::set(crate::paths::DAEMON_STATE_DIR_ENV, &host);
             super::super::tests::write_test_lease("reservation-restart");
             let created = update(Some(json!({"quiet_below": 0, "window": 1}))).unwrap();
             let id = created["id"].as_str().unwrap();
-            // Another controller's daemon on the same host is held too (#18017).
-            let other = runner.join("controller-other");
-            std::fs::create_dir_all(&other).unwrap();
-            {
-                let _scope = crate::test_support::EnvVarGuard::set(
-                    crate::paths::DAEMON_STATE_DIR_ENV,
-                    &other,
-                );
-                assert_eq!(holding(None).unwrap().as_deref(), Some(id));
-            }
+            assert_eq!(holding(None).unwrap().as_deref(), Some(id));
             let mut restored = load().unwrap().unwrap();
             assert_eq!(restored.id, id);
             restored.state = "active".into();

@@ -1419,22 +1419,6 @@ pub(super) fn remote_daemon_status(
     remote_daemon_status_with_timeout(client, homeboy, runner_id, REMOTE_DAEMON_STATUS_TIMEOUT)
 }
 
-/// Read-only status of the daemon in another state directory on the runner,
-/// relative to `$HOME`. Only legacy per-controller daemons (#18063) live
-/// outside the host state directory.
-pub(super) fn remote_daemon_status_in_state_dir(
-    client: &SshClient,
-    homeboy: &str,
-    runner_id: &str,
-    state_dir: &str,
-) -> std::result::Result<RemoteDaemonStatus, String> {
-    let command = format!(
-        "HOMEBOY_DAEMON_STATE_DIR=\"$HOME/{state_dir}\" {} daemon status --full",
-        shell::quote_arg(homeboy),
-    );
-    remote_daemon_status_command(client, runner_id, &command, REMOTE_DAEMON_STATUS_TIMEOUT)
-}
-
 pub(super) fn bounded_remote_daemon_status_with_timeout(
     client: &SshClient,
     homeboy: &str,

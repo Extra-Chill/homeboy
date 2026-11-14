@@ -125,7 +125,7 @@ pub struct RunnerCheckEntry {
     pub selected_binary_status: String,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub service_binaries: Vec<RunnerServiceBinaryEntry>,
-    /// True only when the selected binary and every in-scope service binary
+    /// True only when the selected binary and the host service binary
     /// already run `target_version`.
     pub converged: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -136,9 +136,6 @@ pub struct RunnerCheckEntry {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct RunnerServiceBinaryEntry {
     pub unit: String,
-    /// `host` (the runner's one host daemon unit) or `legacy_controller` (a
-    /// pre-#18063 per-controller unit its controller retires on upgrade).
-    pub scope: String,
     /// Binary path the unit's `ExecStart` runs (usually a stable link).
     pub binary: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -159,10 +156,8 @@ pub struct RunnerServiceBinaryEntry {
 
 impl RunnerServiceBinaryEntry {
     /// Whether this unit prevents the runner from being reported converged.
-    /// Legacy per-controller units retire through their own controllers, so
-    /// only the host unit is in scope.
     pub fn blocks_convergence(&self) -> bool {
-        self.scope == "host" && matches!(self.status.as_str(), "stale" | "unknown" | "pending")
+        matches!(self.status.as_str(), "stale" | "unknown" | "pending")
     }
 }
 

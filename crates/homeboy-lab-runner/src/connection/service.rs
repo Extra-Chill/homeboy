@@ -68,86 +68,6 @@ fn service_state_dir(runner_id: &str) -> String {
     super::daemon_state_dir(runner_id)
 }
 
-/// The per-controller unit a controller installed before #18063. Each
-/// controller retires only its own, once its daemon is idle; the shared host
-/// unit has already taken over new work by then.
-struct LegacyControllerUnit {
-    unit: String,
-    link_dir: String,
-    state_dir: String,
-}
-
-impl LegacyControllerUnit {
-    fn of(runner_id: &str, controller_id: &str) -> Self {
-        use sha2::{Digest, Sha256};
-        let prefix: String = paths::sanitize_path_segment(controller_id)
-            .chars()
-            .take(24)
-            .collect();
-        let prefix = if prefix.is_empty() {
-            "controller".to_string()
-        } else {
-            prefix
-        };
-        let segment = format!("{prefix}-{:x}", Sha256::digest(controller_id.as_bytes()));
-        let runner = paths::sanitize_path_segment(runner_id);
-        Self {
-            unit: format!("homeboy-runner-{runner}-{segment}.service"),
-            link_dir: format!(".local/share/homeboy/runner-service/{runner}/controllers/{segment}"),
-            state_dir: format!(".config/homeboy/runner-daemons/{runner}/{segment}"),
-        }
-    }
-
-    /// Stop, disable and delete the unit and its binary link when the unit
-    /// file exists. The state directory stays: it is history, not a daemon.
-    fn present_script(&self) -> String {
-        format!(
-            r#"[ -f "$HOME/.config/systemd/user/{unit}" ] && echo present || true"#,
-            unit = self.unit
-        )
-    }
-
-    fn retire_script(&self) -> String {
-        format!(
-            r#"unit_dir="$HOME/.config/systemd/user"
-[ -f "$unit_dir/{unit}" ] || exit 0
-systemctl --user disable --now {unit} 2>/dev/null || true
-rm -rf "$unit_dir/{unit}" "$unit_dir/{unit}.d" "$HOME/{link_dir}"
-systemctl --user daemon-reload
-echo retired"#,
-            unit = self.unit,
-            link_dir = self.link_dir,
-        )
-    }
-}
-
-/// Retire this controller's legacy per-controller unit once its daemon has no
-/// active job. A busy legacy daemon keeps running and finishes its work; the
-/// next attach retires it. Best effort: attaching to the host daemon never
-/// depends on it.
-fn retire_legacy_controller_unit(client: &SshClient, homeboy: &str, runner_id: &str) {
-    let legacy = LegacyControllerUnit::of(runner_id, &controller_id());
-    let present = run_remote(
-        client,
-        &legacy.present_script(),
-        "finding the legacy service",
-    )
-    .is_ok_and(|stdout| stdout.trim() == "present");
-    if !present {
-        return;
-    }
-    let idle =
-        super::remote_daemon_status_in_state_dir(client, homeboy, runner_id, &legacy.state_dir)
-            .is_ok_and(|status| status.active_jobs == 0);
-    if idle {
-        let _ = run_remote(
-            client,
-            &legacy.retire_script(),
-            "retiring the legacy runner service",
-        );
-    }
-}
-
 #[cfg(test)]
 pub(crate) fn render_service_unit(runner_id: &str, startup_token: &str) -> String {
     render_service_unit_with_env(runner_id, startup_token, &[])
@@ -478,7 +398,6 @@ pub fn install(runner_id: &str) -> Result<RunnerServiceReport> {
     )?;
     let daemon =
         wait_for_service_daemon(&target, homeboy, runner_id).map_err(Error::internal_unexpected)?;
-    retire_legacy_controller_unit(client, homeboy, runner_id);
 
     super::super::merge(Some(runner_id), r#"{"service_managed":true}"#, &[])?;
     Ok(report_for(runner_id, homeboy, Some(&daemon)))
@@ -537,36 +456,14 @@ pub(crate) struct ServiceUnitObservation {
     pub active_state: Option<String>,
 }
 
-/// Classify a unit against this runner's naming: the host unit, a legacy
-/// per-controller unit (#18063), or `None` for any other unit. That includes a
-/// unit for a different runner whose id merely shares a prefix and an unscoped
-/// `homeboy-runner-<runner>.service`, which Homeboy no longer manages.
-pub(crate) fn service_unit_scope(runner_id: &str, unit: &str) -> Option<&'static str> {
-    if unit == service_unit_name(runner_id) {
-        return Some("host");
-    }
-    let scoped = unit
-        .strip_prefix(&format!(
-            "homeboy-runner-{}-",
-            paths::sanitize_path_segment(runner_id)
-        ))?
-        .strip_suffix(".service")?;
-    // A legacy controller scope segment always ends in `-<sha256 hex>`;
-    // anything else is another runner such as `<runner>-2`.
-    let (_, digest) = scoped.rsplit_once('-')?;
-    (digest.len() == 64 && digest.bytes().all(|byte| byte.is_ascii_hexdigit()))
-        .then_some("legacy_controller")
-}
-
-/// Read-only shell that lists every controller-scoped runner unit for
-/// `runner_id` with
+/// Read-only shell that reports the runner's host unit, when installed, with
 /// the binary its `ExecStart` runs, that binary's version, the version of the
 /// executable the main process is running, and the unit's active state. It
 /// never starts, stops, reloads, or rewrites anything.
 pub(crate) fn service_inventory_script(runner_id: &str) -> String {
     format!(
         r#"unit_dir="$HOME/.config/systemd/user"
-for unit_path in "$unit_dir"/homeboy-runner-{segment}-*.service; do
+for unit_path in "$unit_dir"/{unit}; do
   [ -f "$unit_path" ] || continue
   unit=$(basename "$unit_path")
   exec_line=$(sed -n 's/^ExecStart=//p' "$unit_path" | tail -n 1)
@@ -581,7 +478,7 @@ for unit_path in "$unit_dir"/homeboy-runner-{segment}-*.service; do
   fi
   printf '{marker}\t%s\t%s\t%s\t%s\t%s\n' "$unit" "$binary" "$binary_version" "$running_version" "$active"
 done"#,
-        segment = paths::sanitize_path_segment(runner_id),
+        unit = service_unit_name(runner_id),
         marker = SERVICE_INVENTORY_MARKER,
     )
 }
@@ -680,27 +577,54 @@ pub(crate) fn connect_service_runner(runner_id: &str) -> Result<(RunnerConnectRe
             "the runner's homeboy did not report a build identity".to_string(),
         ));
     };
-    let daemon = match wait_for_service_daemon(&target, homeboy, runner_id) {
-        Ok(daemon) => daemon,
-        Err(message) => {
-            return Ok(failed_connect(
-                runner_id,
-                session_path,
-                RunnerFailureKind::DaemonStartupFailure,
-                message,
-            ))
+    // Another controller may restart the shared host daemon between choosing
+    // its lease and attaching to it. Follow the restart to the successor
+    // instead of refusing the connect.
+    let deadline = Instant::now() + SERVICE_READY_TIMEOUT;
+    let (connection, expected_identity, expected_version) = loop {
+        let daemon = match wait_for_service_daemon(&target, homeboy, runner_id) {
+            Ok(daemon) => daemon,
+            Err(message) => {
+                return Ok(failed_connect(
+                    runner_id,
+                    session_path,
+                    RunnerFailureKind::DaemonStartupFailure,
+                    message,
+                ))
+            }
+        };
+        let attached_lease = daemon.lease_id.clone();
+        // The host daemon serves every controller, so it may run another build
+        // than this controller's configured homeboy. Lab contract compatibility
+        // admits it (#16577); the session records the build that actually runs.
+        let expected_identity = daemon
+            .build_identity
+            .clone()
+            .filter(|identity| !identity.trim().is_empty())
+            .unwrap_or_else(|| expected_identity.clone());
+        let expected_version = daemon.version.clone().unwrap_or(identity.version.clone());
+        match connect_remote_daemon(connection_daemon::RemoteDaemonConnectRequest {
+            server: &target.server,
+            homeboy,
+            daemon,
+            expected_version: &expected_version,
+            expected_identity: &expected_identity,
+            runner_id,
+            session_path: &session_path,
+            unresponsive_recovery: None,
+        }) {
+            Ok(connection) => break (connection, expected_identity, expected_version),
+            Err(_)
+                if Instant::now() < deadline
+                    && host_daemon_was_replaced(
+                        attached_lease.as_deref(),
+                        remote_daemon_status(client, homeboy, runner_id)
+                            .ok()
+                            .as_ref(),
+                    ) => {}
+            Err(report) => return Ok(*report),
         }
     };
-    // The host daemon serves every controller, so it may run another build
-    // than this controller's configured homeboy. Lab contract compatibility
-    // admits it (#16577); the session records the build that actually runs.
-    let expected_identity = daemon
-        .build_identity
-        .clone()
-        .filter(|identity| !identity.trim().is_empty())
-        .unwrap_or(expected_identity);
-    let expected_version = daemon.version.clone().unwrap_or(identity.version.clone());
-    retire_legacy_controller_unit(client, homeboy, runner_id);
     let connection_daemon::RemoteDaemonConnection {
         local_port,
         tunnel_pid,
@@ -708,19 +632,7 @@ pub(crate) fn connect_service_runner(runner_id: &str) -> Result<(RunnerConnectRe
         local_url,
         daemon,
         ..
-    } = match connect_remote_daemon(connection_daemon::RemoteDaemonConnectRequest {
-        server: &target.server,
-        homeboy,
-        daemon,
-        expected_version: &expected_version,
-        expected_identity: &expected_identity,
-        runner_id,
-        session_path: &session_path,
-        unresponsive_recovery: None,
-    }) {
-        Ok(connection) => connection,
-        Err(report) => return Ok(*report),
-    };
+    } = connection;
 
     if let Some(previous) = read_session(runner_id)? {
         if previous.tunnel_pid != tunnel_pid {
@@ -777,6 +689,20 @@ pub(crate) fn connect_service_runner(runner_id: &str) -> Result<(RunnerConnectRe
         },
         0,
     ))
+}
+
+/// Whether the host daemon this connect attached to was replaced while it
+/// attached: the host now reports another lease, or none that is fresh yet.
+fn host_daemon_was_replaced(
+    attached_lease: Option<&str>,
+    status: Option<&RemoteDaemonStatus>,
+) -> bool {
+    let Some(status) = status else { return false };
+    let current = status
+        .daemon
+        .as_ref()
+        .and_then(|daemon| daemon.lease_id.as_deref());
+    !status.fresh || current != attached_lease
 }
 
 /// Detach from a service runner: close the tunnel and remove the session. The
@@ -1009,6 +935,28 @@ mod tests {
         String::from_utf8_lossy(&output.stdout).into_owned()
     }
 
+    /// A connect follows another controller's in-place restart of the host
+    /// daemon, and gives up only when the daemon it attached to still holds
+    /// the host or the host cannot be observed.
+    #[test]
+    fn connect_retries_only_after_the_attached_daemon_was_replaced() {
+        let status = |fresh, lease| {
+            super::super::tests::remote_daemon_status_for_test(fresh, true, 0, lease, 7)
+        };
+        for (status, replaced) in [
+            (Some(status(true, "restarted")), true),
+            (Some(status(false, "attached")), true),
+            (Some(status(true, "attached")), false),
+            (None, false),
+        ] {
+            assert_eq!(
+                host_daemon_was_replaced(Some("attached"), status.as_ref()),
+                replaced,
+                "{status:?}"
+            );
+        }
+    }
+
     /// Two controllers on different builds attach to one host unit: the first
     /// installs it from its binary, the second only starts it, so it never
     /// repoints a daemon another controller's jobs run on (#18063).
@@ -1046,60 +994,6 @@ mod tests {
             &repoint_script("homeboy-lab", &second.display().to_string(), "t2", &[]),
         );
         assert_eq!(std::fs::read_link(&link).unwrap(), second);
-    }
-
-    /// A controller retires exactly the unit it installed before #18063, by its
-    /// original name, and leaves other controllers' units and its job history.
-    #[test]
-    fn legacy_controller_unit_retires_by_its_original_name() {
-        let legacy = LegacyControllerUnit::of("homeboy-lab", "controller-a");
-        let segment =
-            "controller-a-7ba589c761abd60ec4522bf2515a16e74c0f20f169edbfb84f03481dc4d2e40a";
-        assert_eq!(
-            legacy.unit,
-            format!("homeboy-runner-homeboy-lab-{segment}.service")
-        );
-        assert_eq!(
-            legacy.state_dir,
-            format!(".config/homeboy/runner-daemons/homeboy-lab/{segment}")
-        );
-        assert_eq!(
-            service_unit_scope("homeboy-lab", &legacy.unit),
-            Some("legacy_controller")
-        );
-        assert_eq!(
-            service_unit_scope("homeboy-lab", &service_unit_name("homeboy-lab")),
-            Some("host")
-        );
-        assert_eq!(
-            service_unit_scope("homeboy-lab", &service_unit_name("homeboy-lab-2")),
-            None
-        );
-
-        let home = tempfile::tempdir().expect("runner home");
-        let unit_dir = home.path().join(".config/systemd/user");
-        let other = LegacyControllerUnit::of("homeboy-lab", "controller-b");
-        std::fs::create_dir_all(unit_dir.join(format!("{}.d", legacy.unit))).unwrap();
-        for unit in [&legacy.unit, &other.unit] {
-            std::fs::write(unit_dir.join(unit), "unit").unwrap();
-        }
-        std::fs::create_dir_all(home.path().join(&legacy.link_dir)).unwrap();
-        std::fs::create_dir_all(home.path().join(&legacy.state_dir)).unwrap();
-
-        assert_eq!(
-            run_in_runner_home(home.path(), &legacy.retire_script()).trim(),
-            "retired"
-        );
-        assert!(!unit_dir.join(&legacy.unit).exists());
-        assert!(!unit_dir.join(format!("{}.d", legacy.unit)).exists());
-        assert!(!home.path().join(&legacy.link_dir).exists());
-        assert!(home.path().join(&legacy.state_dir).exists());
-        assert!(unit_dir.join(&other.unit).exists());
-        // Retiring again finds nothing to do.
-        assert_eq!(
-            run_in_runner_home(home.path(), &legacy.retire_script()).trim(),
-            ""
-        );
     }
 
     #[test]
@@ -1181,8 +1075,8 @@ mod tests {
         )));
     }
 
-    /// #15733: the inventory sees every scoped unit, resolves `%h` in
-    /// `ExecStart`, reads each binary's version, and never invokes a mutating
+    /// #15733: the inventory sees the host unit, resolves `%h` in
+    /// `ExecStart`, reads its binary's version, and never invokes a mutating
     /// systemctl verb. An unscoped `homeboy-runner-<runner>.service` is not a
     /// Homeboy-managed unit and is not inventoried.
     #[test]
