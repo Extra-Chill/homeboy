@@ -97,6 +97,7 @@ pub mod daemon;
 pub mod deps;
 pub mod duration;
 pub mod engine;
+pub mod heap;
 pub use homeboy_lab_contract::env_materialization_plan;
 // error moved to the internal `homeboy-error` crate. Re-exported here so existing
 // `crate::error::*` call sites keep working unchanged.
