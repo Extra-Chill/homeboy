@@ -193,10 +193,16 @@ where
         .and_then(|workload| workload.agent_task.as_ref())
         .and_then(|agent_task| agent_task.wait_budget_ms);
     let wait_timeout = runner_exec_wait_timeout(&flow.runner.settings, workload_budget_ms);
-    let deadline = Instant::now() + wait_timeout.timeout;
+    let mut deadline = Instant::now() + wait_timeout.timeout;
+    let mut last_observed = Instant::now();
     let mut observed_terminal_daemon_job = job.status.is_terminal();
     let mut reported_progress_sequence = 0;
     while !job.status.is_terminal() {
+        let now = Instant::now();
+        if job.status == JobStatus::Queued {
+            deadline += now.duration_since(last_observed);
+        }
+        last_observed = now;
         if let Some(status) = flow.run_id.as_deref().and_then(|run_id| {
             observed_agent_task_terminal_job_status(run_id, flow.run_id_owns_generic_exec)
         }) {

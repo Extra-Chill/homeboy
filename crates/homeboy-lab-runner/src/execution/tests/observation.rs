@@ -8,6 +8,42 @@ use homeboy_core::api_jobs::{Job, JobStatus};
 use std::cell::RefCell;
 use std::time::Duration;
 
+#[test]
+fn queued_admission_outlives_execution_budget_and_remains_cancellable() {
+    let reads = std::cell::Cell::new(0);
+    let result = follow_daemon_job_to_terminal(
+        "http://runner".into(),
+        "queued-gate",
+        Duration::from_millis(10),
+        &|| false,
+        |_| {
+            reads.set(reads.get() + 1);
+            Ok(job(if reads.get() < 4 {
+                JobStatus::Queued
+            } else {
+                JobStatus::Succeeded
+            }))
+        },
+        || Ok(None),
+    )
+    .unwrap();
+    assert_eq!(result.0.status, JobStatus::Succeeded);
+    let reads = std::cell::Cell::new(0);
+    let error = follow_daemon_job_to_terminal(
+        "http://runner".into(),
+        "queued-gate",
+        Duration::from_millis(10),
+        &|| reads.get() > 1,
+        |_| {
+            reads.set(reads.get() + 1);
+            Ok(job(JobStatus::Queued))
+        },
+        || Ok(None),
+    )
+    .unwrap_err();
+    assert!(error.message.contains("cancelled"));
+}
+
 fn job(status: JobStatus) -> Job {
     let mut job: Job = serde_json::from_value(serde_json::json!({
         "id": "7f0b7a7e-2f0e-4c4e-9a37-7a3e3c1f0001",

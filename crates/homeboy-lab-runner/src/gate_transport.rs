@@ -434,20 +434,30 @@ fn execute_owned(
         error.details["stage"] = serde_json::json!("admission");
         return Err(error);
     }
-    // Admission is observed before materializing any source or selecting
-    // private HOME. The controller already waited out transient refusals;
-    // native exec rechecks the live daemon at submission.
-    let (admission, snapshot) =
-        observe_gate_admission(&request.runner_id).map_err(|mut error| {
-            error.details["gate_disposition"] = serde_json::json!("unavailable");
-            error.details["stage"] = serde_json::json!("admission");
-            error
-        })?;
-    if !admission.accepts_jobs {
+    // Observe identity/freshness, not a prediction of host capacity. The
+    // executing daemon owns the durable capacity queue.
+    let runner = crate::load(&request.runner_id)?;
+    let snapshot = crate::runner_admission_snapshot(&request.runner_id)?;
+    let refusal = crate::lab::offload::metadata::lab_runner_admission_refusal(
+        &snapshot.status,
+        crate::lab::offload::metadata::require_exact_runner_version(&runner.settings),
+    );
+    if !snapshot.status.connected || refusal.is_some() {
+        let admission = LabGateAdmission {
+            accepts_jobs: false,
+            reasons: if snapshot.status.connected {
+                Vec::new()
+            } else {
+                vec!["not_connected".to_string()]
+            },
+            freshness: refusal.map_or(LabGateFreshness::Fresh, |reason| {
+                LabGateFreshness::Refused(reason.code().to_string())
+            }),
+            next_action: snapshot.summary.next_action.clone(),
+        };
         return Err(admission.refusal(&request.runner_id, None));
     }
     let status = &snapshot.status;
-    let runner = crate::load(&request.runner_id)?;
     let input_store = materialize_gate_inputs(&runner, &request.environment.data_inputs)?;
     let resource_run = homeboy_core::engine::run_dir::RunDir::create()?;
     let resource_invocation = homeboy_core::engine::invocation::InvocationGuard::acquire(

@@ -1360,6 +1360,7 @@ struct ExecRequest {
 enum StagedDirectExecution {
     Adoption(Uuid, RunnerExecutionEnvelope),
     Recovered(Uuid, RunnerExecutionEnvelope, String),
+    RecoveredDirect(Uuid, String),
 }
 
 /// Direct-daemon transport adapter for the canonical runner submission.
@@ -2517,6 +2518,7 @@ fn spawn_local_child_reservation_reconciler(
         maintenance_tick(|| {
             let _ = job_store.reconcile_expired_local_child_reservations();
             let _ = job_store.reconcile_expired_admissions();
+            let _ = job_store.reconcile_direct_admissions();
             for (id, state) in job_store.active_controller_jobs() {
                 if state.pending_admission_reason.is_some() {
                     let _ = start_controller_job(id, &job_store);
@@ -3321,16 +3323,6 @@ fn reserve_admission(
     body: Option<serde_json::Value>,
     job_store: &JobStore,
 ) -> Result<serde_json::Value> {
-    reserve_admission_observed(body, job_store, crate::runner_pressure::sample)
-}
-
-fn reserve_admission_observed(
-    body: Option<serde_json::Value>,
-    job_store: &JobStore,
-    sample: impl FnOnce(
-        &crate::runner_pressure::PressureThresholds,
-    ) -> crate::runner_pressure::RunnerPressure,
-) -> Result<serde_json::Value> {
     let body = body.unwrap_or_else(|| json!({}));
     if body
         .get("admission_lease_protocol")
@@ -3396,13 +3388,6 @@ fn reserve_admission_observed(
         .filter(|value| !value.is_empty());
     let daemon_lease = heartbeat_lease()?;
     validate_admission_lease(expected_daemon_lease_id, &daemon_lease.lease_id)?;
-    let thresholds = body
-        .get("pressure_thresholds")
-        .cloned()
-        .map(serde_json::from_value::<crate::runner_pressure::PressureThresholds>)
-        .transpose()
-        .map_err(|error| Error::internal_unexpected(error.to_string()))?
-        .unwrap_or_default();
     if let Some(reservation) =
         reservation::holding(body.get("reservation").and_then(|v| v.as_str()))?
     {
@@ -3419,10 +3404,6 @@ fn reserve_admission_observed(
             reservation.eta().unwrap_or_default()
         );
         return Err(error);
-    }
-    let pressure = sample(&thresholds);
-    if pressure.admission_reason.is_some() {
-        return Err(pressure.admission_refusal());
     }
     let metadata = json!({
         "runner_job_projection": {
@@ -4385,11 +4366,11 @@ fn recover_staged_direct_jobs_after_owner_death(
         if let Err(error) = enqueue_exec_request(
             request,
             job_store,
-            Some(StagedDirectExecution::Recovered(
-                job.id,
-                envelope,
-                proven_dead_lease.clone(),
-            )),
+            Some(if job_store.has_pending_direct_execution(job.id)? {
+                StagedDirectExecution::RecoveredDirect(job.id, proven_dead_lease.clone())
+            } else {
+                StagedDirectExecution::Recovered(job.id, envelope, proven_dead_lease.clone())
+            }),
         ) {
             // No child existed at the proven-dead boundary. A preparation
             // failure is terminal evidence for the normal retry lifecycle,
@@ -4611,7 +4592,9 @@ fn enqueue_exec_request(
         Some(StagedDirectExecution::Recovered(job_id, expected_envelope, _)) => {
             runner_exec_driver::prepare_staged_exec(prepare_request, *job_id, expected_envelope)?
         }
-        None => runner_exec_driver::prepare_exec(prepare_request)?,
+        None | Some(StagedDirectExecution::RecoveredDirect(..)) => {
+            runner_exec_driver::prepare_exec(prepare_request)?
+        }
     };
     let source_snapshot = Some(plan.source_snapshot.clone());
 
@@ -4655,6 +4638,13 @@ fn enqueue_exec_request(
     let mut run_ref_metadata =
         canonical_run_ref_metadata(lifecycle.as_ref(), workload.as_ref(), execution_metadata)
             .unwrap_or_else(|| json!({}));
+    run_ref_metadata["pressure_thresholds"] = request
+        .runner
+        .as_ref()
+        .and_then(|runner| runner.pointer("/settings/pressure_thresholds"))
+        .cloned()
+        .unwrap_or_else(|| json!(crate::runner_pressure::PressureThresholds::default()));
+    run_ref_metadata["pending_execution_envelope"] = json!(request.envelope);
     run_ref_metadata["reservation"] = json!(dispatch.env.get("HOMEBOY_RUNNER_RESERVATION"));
     run_ref_metadata["runner_job_projection"] = json!({
         "runner_id": plan.runner_id,
@@ -4746,7 +4736,8 @@ fn enqueue_exec_request(
                 path_materialization_plan.clone(),
             )?,
         ),
-        Some(StagedDirectExecution::Recovered(job_id, _, proven_dead_lease_id)) => Some((
+        Some(StagedDirectExecution::Recovered(job_id, _, proven_dead_lease_id))
+        | Some(StagedDirectExecution::RecoveredDirect(job_id, proven_dead_lease_id)) => Some((
             job_store
                 .recover_proven_dead_adopted_staged_direct_execution(
                     job_id,
@@ -5834,13 +5825,30 @@ mod tests {
 
     use super::*;
 
-    // Admission lifecycle tests own their host observation, not the CI host's PSI.
-    fn reserve_admission(
-        body: Option<serde_json::Value>,
-        store: &JobStore,
-    ) -> Result<serde_json::Value> {
-        super::reserve_admission_observed(body, store, |_| Default::default())
+    #[test]
+    fn homeboy_children_run_the_daemon_build() {
+        let daemon = Path::new("/srv/runner-service/host/homeboy");
+        for (command, expected) in [
+            (
+                vec!["homeboy", "agent-task"],
+                "/srv/runner-service/host/homeboy",
+            ),
+            (
+                vec!["/home/lab/.local/bin/homeboy", "agent-task"],
+                "/srv/runner-service/host/homeboy",
+            ),
+            (vec!["bash", "-c"], "bash"),
+            (
+                vec!["/usr/bin/homeboy-extension", "x"],
+                "/usr/bin/homeboy-extension",
+            ),
+        ] {
+            let mut command = command.into_iter().map(str::to_string).collect::<Vec<_>>();
+            run_homeboy_child_from_daemon_build(&mut command, daemon);
+            assert_eq!(command[0], expected);
+        }
     }
+
     use crate::daemon::runner_exec_driver::{
         self, DaemonExecOutput, PreparedDaemonExec, PreparedDaemonExecRequest, RunnerExecDriver,
         RunnerExecPrepareRequest,
@@ -6641,47 +6649,86 @@ mod tests {
         runner_exec_driver::register_runner_exec_driver(Arc::new(EnqueueTestDriver));
     }
 
-    fn admission_with_cpu_pressure(cpu: u32) -> (Result<serde_json::Value>, usize) {
-        write_test_lease("pressure-test");
-        let store = JobStore::default();
-        let result = super::reserve_admission_observed(
-            Some(json!({
-                "runner_id": "lab",
-                "expected_daemon_lease_id": "pressure-test",
-                "admission_lease_protocol": 1,
-            })),
-            &store,
-            |thresholds| {
-                let mut pressure = crate::runner_pressure::RunnerPressure {
-                    cpu: Some(cpu),
-                    ..Default::default()
-                };
-                pressure.apply_thresholds(thresholds);
-                pressure
-            },
-        );
-        (result, store.active_runner_jobs().len())
-    }
-
     #[test]
-    fn admission_refused_above_pressure_threshold_with_free_slots() {
+    fn gate_submission_queues_under_pressure_then_returns_receipt_or_cancels() {
         with_isolated_home(|_| {
-            let (result, jobs) = admission_with_cpu_pressure(1001);
-            let error = result.unwrap_err();
-            assert_eq!(error.details["reason"], "runner_pressure");
-            assert_eq!(error.details["admission_reason"], "pressure");
-            assert_eq!(error.details["pressure"]["cpu"], 1001);
-            assert_eq!(error.retryable, Some(true));
-            assert_eq!(jobs, 0);
-        });
-    }
-
-    #[test]
-    fn admission_allowed_below_pressure_threshold() {
-        with_isolated_home(|_| {
-            let (result, jobs) = admission_with_cpu_pressure(999);
-            assert!(result.is_ok());
-            assert_eq!(jobs, 1);
+            register_enqueue_test_driver();
+            let ledger = tempfile::tempdir().unwrap();
+            let ledger_path = ledger.path().join("jobs.sqlite");
+            let store = JobStore::open_without_reconciliation(&ledger_path).unwrap();
+            let pressure = crate::test_support::EnvVarGuard::set(
+                crate::runner_pressure::SAMPLE_ENV,
+                r#"{"memory":10000}"#,
+            );
+            let submit = |key: &str| {
+                let mut body = crate::test_support::direct_exec_body(
+                    json!({
+                        "runner_id": "homeboy-lab", "cwd": "/tmp",
+                        "command": ["homeboy", "agent-task", "gate-execute"],
+                        "lifecycle": {"source": "agent-task-gate", "kind": "gate"}
+                    }),
+                    key,
+                );
+                // The real gate transport uses this same direct exec endpoint.
+                body["submission"]["envelope"]["mutation_policy"]["capture_patch"] = json!(false);
+                let response = route_with_job_store_and_body("POST", "/exec", Some(body), &store);
+                assert_eq!(response.status_code, 200, "{:?}", response.body);
+                let id: Uuid = response.body["body"]["job"]["id"]
+                    .as_str()
+                    .unwrap()
+                    .parse()
+                    .unwrap();
+                let deadline = Instant::now() + Duration::from_secs(5);
+                loop {
+                    let events = store.events(id).unwrap();
+                    if events.iter().any(|event| {
+                        event
+                            .data
+                            .as_ref()
+                            .is_some_and(|data| data["pending_admission_reason"] == "pressure")
+                    }) {
+                        break;
+                    }
+                    assert!(Instant::now() < deadline, "job never queued: {events:?}");
+                    std::thread::sleep(Duration::from_millis(10));
+                }
+                assert_eq!(store.get(id).unwrap().status, JobStatus::Queued);
+                let waiting = store.pending_admission_report(id).unwrap();
+                assert_eq!(waiting["message"], "waiting on Lab capacity");
+                assert_eq!(waiting["load"]["memory"], 10000);
+                assert!(waiting["budget"].is_object());
+                id
+            };
+            let running = submit("gate-pressure");
+            let reopened = JobStore::open_without_reconciliation(&ledger_path).unwrap();
+            assert_eq!(reopened.get(running).unwrap().status, JobStatus::Queued);
+            assert_eq!(
+                reopened.pending_admission_report(running).unwrap()["pending_admission_reason"],
+                "pressure"
+            );
+            assert!(reopened.has_pending_direct_execution(running).unwrap());
+            drop(reopened);
+            let cancelled = submit("gate-pressure-cancel");
+            let response = route_with_job_store_and_body(
+                "POST",
+                &format!("/jobs/{cancelled}/cancel"),
+                Some(json!({"reason":"Cook cancelled"})),
+                &store,
+            );
+            assert_eq!(response.status_code, 200, "{:?}", response.body);
+            assert_eq!(store.get(cancelled).unwrap().status, JobStatus::Cancelled);
+            drop(pressure);
+            let _quiet =
+                crate::test_support::EnvVarGuard::set(crate::runner_pressure::SAMPLE_ENV, "{}");
+            wait_for_daemon_job_status(&store, running, JobStatus::Succeeded);
+            let terminal = route_with_job_store("GET", &format!("/jobs/{running}"), &store);
+            assert_eq!(terminal.status_code, 200);
+            assert!(store
+                .events(running)
+                .unwrap()
+                .iter()
+                .any(|event| event.kind == crate::api_jobs::JobEventKind::Result));
+            assert_eq!(store.get(cancelled).unwrap().status, JobStatus::Cancelled);
         });
     }
 
