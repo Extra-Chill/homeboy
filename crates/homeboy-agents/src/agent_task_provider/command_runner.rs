@@ -1611,28 +1611,30 @@ pub(super) fn run_materialized_provider_command_once(
         &program,
         cwd.as_deref(),
     );
-    // The resume runs in the same launch environment as the first process.
-    let mut resume = Command::new(&program);
-    let resume = launch_context
-        .apply_declared_environment(&mut resume)
-        .is_ok()
-        .then(|| {
-            resume.envs(
-                env.iter()
-                    .map(|(key, value)| (key.as_str(), value.as_str())),
-            );
-            if let Some(cwd) = &cwd {
-                resume.current_dir(cwd);
-            }
-            resume
-        });
+    // Each resume runs in the same launch environment as the first process.
+    let resume = || {
+        let mut resume = Command::new(&program);
+        launch_context
+            .apply_declared_environment(&mut resume)
+            .is_ok()
+            .then(|| {
+                resume.envs(
+                    env.iter()
+                        .map(|(key, value)| (key.as_str(), value.as_str())),
+                );
+                if let Some(cwd) = &cwd {
+                    resume.current_dir(cwd);
+                }
+                resume
+            })
+    };
     let declarations = &request.request.output_declarations;
     super::pi::resume_for_unusable_outputs(
         &mut pi_outcome,
         &pi_request,
         &args,
         &request.artifacts_path,
-        resume,
+        &resume,
         &|outputs| {
             declarations
                 .iter()
