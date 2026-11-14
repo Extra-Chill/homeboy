@@ -2849,6 +2849,7 @@ mod tests {
                 declared_plan: None,
                 timeout_seconds: 30,
                 no_progress_timeout_seconds: 30,
+                candidate_subpath: None,
             };
             let context = homeboy_core::runner_job_execution_context::RunnerJobExecutionContext::direct_daemon(
                 Some("controller-cook"), "lab", "job", "homeboy", "reservation",

@@ -2654,3 +2654,122 @@ fn copy_snapshot_materializes_symlinked_dependency_contents() {
         "snapshot exclusions must also apply inside dereferenced dependencies"
     );
 }
+
+/// #17235: a subdirectory component's gate candidate is fingerprinted at the
+/// repository root. Materializing the subdirectory as its own Git root can
+/// never verify; materializing the request's repository root does, the gate
+/// runs from the component subpath, and changed component content still fails.
+#[test]
+fn snapshot_git_subdirectory_gate_candidate_verifies_at_repository_root() {
+    use homeboy_agents::agent_tasks::gate::placement::{candidate_subpath, LabGateRequest};
+    crate::test_support::with_isolated_home(|_| {
+        let roots = homeboy_core::paths::PathRoots::from_environment().expect("roots");
+        let source = tempfile::tempdir().expect("source repository");
+        let runner_root = tempfile::tempdir().expect("runner root");
+        let component = source.path().join("plugins/comp");
+        fs::create_dir_all(source.path().join(".github/workflows")).expect("workflows");
+        fs::create_dir_all(component.join("docs")).expect("component docs");
+        fs::write(source.path().join(".github/workflows/ci.yml"), "on: push\n").expect("ci");
+        fs::write(source.path().join("README.md"), "monorepo\n").expect("readme");
+        fs::write(component.join("comp.php"), "<?php // component\n").expect("component");
+        fs::write(component.join("docs/readme.md"), "docs\n").expect("docs");
+        for args in [
+            vec!["init", "--quiet", "-b", "main"],
+            vec!["add", "."],
+            vec![
+                "-c",
+                "user.name=Homeboy Test",
+                "-c",
+                "user.email=test@homeboy.invalid",
+                "commit",
+                "--quiet",
+                "-m",
+                "monorepo",
+            ],
+        ] {
+            assert!(std::process::Command::new("git")
+                .args(&args)
+                .current_dir(source.path())
+                .status()
+                .expect("git")
+                .success());
+        }
+        rooted_local_runner(&roots, "lab-subdir-gate", runner_root.path());
+        let sync = |path: &Path| {
+            crate::workspace::sync::sync_workspace(
+                "lab-subdir-gate",
+                RunnerWorkspaceSyncOptions {
+                    path: path.display().to_string(),
+                    mode: RunnerWorkspaceSyncMode::SnapshotGit,
+                    controller_routed_git: false,
+                    changed_since_base: None,
+                    git_fetch_refs: Vec::new(),
+                    snapshot_includes: Vec::new(),
+                    allow_dirty_lab_workspace: false,
+                    validation_dependency_ids: None,
+                    run_isolation_token: None,
+                },
+            )
+            .expect("materialize gate candidate")
+            .0
+        };
+
+        let candidate = homeboy_agents::agent_task_promotion::candidate_fingerprint(
+            &component.display().to_string(),
+        )
+        .expect("controller fingerprint");
+        let subpath = candidate_subpath(&component, &candidate).expect("subpath");
+        assert_eq!(subpath.as_deref(), Some("plugins/comp"));
+        let request: LabGateRequest = serde_json::from_value(serde_json::json!({
+            "schema": "homeboy/agent-task-lab-gate-request/v2",
+            "runner_id": "lab-subdir-gate",
+            "candidate": candidate,
+            "index": 0,
+            "argv": ["true"],
+            "label": "true",
+            "visibility": "visible",
+            "reveal_policy": "full_evidence",
+            "environment": {},
+            "package_artifacts": [],
+            "declared_plan": null,
+            "timeout_seconds": 30,
+            "no_progress_timeout_seconds": 30,
+            "candidate_subpath": subpath,
+        }))
+        .expect("Lab gate request");
+
+        // The pre-#17235 shape: the component subdirectory as its own root.
+        let subdirectory_root = sync(&component);
+        let error = request
+            .verify_materialized_candidate(Path::new(&subdirectory_root.remote_path))
+            .expect_err("a subdirectory-rooted workspace is not the candidate");
+        assert!(error
+            .message
+            .contains("differs from the controller candidate"));
+
+        let root = request
+            .materialization_root(&component)
+            .expect("materialization root");
+        assert_eq!(
+            root,
+            fs::canonicalize(source.path()).expect("canonical source")
+        );
+        let synced = sync(&root);
+        let remote = Path::new(&synced.remote_path);
+        request
+            .verify_materialized_candidate(remote)
+            .expect("repository-root workspace verifies");
+        let gate_cwd = request.gate_cwd(remote).expect("gate cwd");
+        assert_eq!(gate_cwd, remote.join("plugins/comp"));
+        assert!(gate_cwd.join("comp.php").is_file());
+
+        fs::write(gate_cwd.join("comp.php"), "<?php // altered\n").expect("alter component");
+        let error = request
+            .verify_materialized_candidate(remote)
+            .expect_err("changed component content is rejected");
+        assert_eq!(
+            error.details["differing_paths"],
+            serde_json::json!(["plugins/comp/comp.php"])
+        );
+    });
+}
