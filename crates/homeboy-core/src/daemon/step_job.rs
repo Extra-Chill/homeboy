@@ -716,13 +716,13 @@ fn run_step(mut checkpoint: StepJobCheckpoint, job: &ControllerJobHandle) -> Res
 
     // Launcher/continuation steps can submit execution steps themselves. They
     // must not hold heavy-work slots while waiting on their own children.
-    let _capacity_permit = if checkpoint.request.terminal_consumer == "agent-task.execution-step" {
-        let limit = checkpoint
-            .request
-            .env
-            .public_env
-            .get("HOMEBOY_LAB_CONCURRENCY_LIMIT")
-            .and_then(|limit| limit.parse().ok());
+    let limit = checkpoint
+        .request
+        .env
+        .public_env
+        .get("HOMEBOY_LAB_CONCURRENCY_LIMIT")
+        .and_then(|limit| limit.parse().ok());
+    let capacity_permit = if checkpoint.request.terminal_consumer == "agent-task.execution-step" {
         let Some(permit) = crate::lab_capacity::acquire_step(limit, |position, capacity| {
             if job.is_cancelled() {
                 return Ok(false);
@@ -783,6 +783,15 @@ fn run_step(mut checkpoint: StepJobCheckpoint, job: &ControllerJobHandle) -> Res
     // The child leads its own session: a daemon restart must not take the
     // step down, and cancellation addresses the child's whole tree.
     crate::process::detach_from_caller_session(&mut command);
+    if let Some(cpus) = capacity_permit.as_ref().and_then(|permit| {
+        crate::lab_capacity::cpu_slice(&crate::lab_capacity::allowed_cpus(), limit, permit.slot())
+    }) {
+        crate::lab_capacity::pin_command(&mut command, &cpus);
+        job.progress(json!({
+            "phase": "cpu_affinity",
+            "cpu_affinity": { "cpus": cpus, "slot": capacity_permit.as_ref().map(|permit| permit.slot()), "concurrency_limit": limit },
+        }))?;
+    }
     let process = command.spawn().map_err(|error| {
         let mut error = Error::internal_io(
             error.to_string(),

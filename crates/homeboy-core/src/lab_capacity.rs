@@ -33,16 +33,42 @@ pub fn observe(limit: Option<usize>) -> LabCapacity {
     }
 }
 
-static ACTIVE_STEPS: std::sync::Mutex<usize> = std::sync::Mutex::new(0);
+/// Occupied step slots; a permit holds its slot index until dropped.
+static ACTIVE_STEPS: std::sync::Mutex<Vec<bool>> = std::sync::Mutex::new(Vec::new());
 static NEXT_TICKET: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
 static STEP_QUEUE: std::sync::Mutex<Vec<usize>> = std::sync::Mutex::new(Vec::new());
 
-pub struct StepPermit;
+/// An admitted step's slot. The slot owns a fixed share of the CPUs, so
+/// concurrent steps never size themselves against the same cores.
+pub struct StepPermit {
+    slot: usize,
+}
+impl StepPermit {
+    pub fn slot(&self) -> usize {
+        self.slot
+    }
+}
 impl Drop for StepPermit {
     fn drop(&mut self) {
-        let mut active = ACTIVE_STEPS.lock().unwrap_or_else(|e| e.into_inner());
-        *active = active.saturating_sub(1);
+        let mut slots = ACTIVE_STEPS.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some(occupied) = slots.get_mut(self.slot) {
+            *occupied = false;
+        }
     }
+}
+
+/// The CPUs a step in `slot` may use: an equal, disjoint share of `allowed`
+/// for each of the `limit` concurrent steps. Tools that size themselves by
+/// CPU count (`nproc`, test runners, `make -j`) then fit their share. No
+/// limit, or a share that would cover every CPU, leaves the step unpinned.
+pub fn cpu_slice(allowed: &[usize], limit: Option<usize>, slot: usize) -> Option<Vec<usize>> {
+    let limit = limit.filter(|limit| *limit > 1)?;
+    let width = (allowed.len() / limit).max(1);
+    if width >= allowed.len() {
+        return None;
+    }
+    let start = (slot % limit) * width % allowed.len();
+    Some(allowed[start..(start + width).min(allowed.len())].to_vec())
 }
 
 /// FIFO admission for detached provider/gate steps owned by this daemon.
@@ -76,10 +102,19 @@ pub fn acquire_step(
             .unwrap_or(0)
             + 1;
         {
-            let mut active = ACTIVE_STEPS.lock().unwrap_or_else(|e| e.into_inner());
-            if position == 1 && *active < observation.effective_budget {
-                *active += 1;
-                return Ok(Some(StepPermit));
+            let mut slots = ACTIVE_STEPS.lock().unwrap_or_else(|e| e.into_inner());
+            let active = slots.iter().filter(|occupied| **occupied).count();
+            if position == 1 && active < observation.effective_budget {
+                let slot = slots
+                    .iter()
+                    .position(|occupied| !occupied)
+                    .unwrap_or(slots.len());
+                if slot == slots.len() {
+                    slots.push(true);
+                } else {
+                    slots[slot] = true;
+                }
+                return Ok(Some(StepPermit { slot }));
             }
         }
         if !waiting(position, &observation)? {
@@ -89,6 +124,52 @@ pub fn acquire_step(
     }
 }
 
+/// The CPUs this process may run on, in order.
+#[cfg(target_os = "linux")]
+pub fn allowed_cpus() -> Vec<usize> {
+    // SAFETY: `set` is a plain bitmask owned by this frame and sized for the call.
+    unsafe {
+        let mut set: libc::cpu_set_t = std::mem::zeroed();
+        if libc::sched_getaffinity(0, std::mem::size_of::<libc::cpu_set_t>(), &mut set) != 0 {
+            return Vec::new();
+        }
+        (0..libc::CPU_SETSIZE as usize)
+            .filter(|cpu| libc::CPU_ISSET(*cpu, &set))
+            .collect()
+    }
+}
+
+#[cfg(not(target_os = "linux"))]
+pub fn allowed_cpus() -> Vec<usize> {
+    Vec::new()
+}
+
+/// Pin the spawned process, and so its whole tree, to `cpus`.
+#[cfg(target_os = "linux")]
+pub fn pin_command(command: &mut std::process::Command, cpus: &[usize]) {
+    use std::os::unix::process::CommandExt;
+    // SAFETY: the mask is built before fork; the hook only issues the
+    // async-signal-safe `sched_setaffinity` syscall.
+    let set = unsafe {
+        let mut set: libc::cpu_set_t = std::mem::zeroed();
+        for cpu in cpus {
+            libc::CPU_SET(*cpu, &mut set);
+        }
+        set
+    };
+    unsafe {
+        command.pre_exec(move || {
+            if libc::sched_setaffinity(0, std::mem::size_of::<libc::cpu_set_t>(), &set) != 0 {
+                return Err(std::io::Error::last_os_error());
+            }
+            Ok(())
+        });
+    }
+}
+
+#[cfg(not(target_os = "linux"))]
+pub fn pin_command(_command: &mut std::process::Command, _cpus: &[usize]) {}
+
 pub fn queued_steps() -> usize {
     STEP_QUEUE.lock().unwrap_or_else(|e| e.into_inner()).len()
 }
@@ -96,6 +177,39 @@ pub fn queued_steps() -> usize {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn cpu_slices_are_disjoint_shares() {
+        let cpus = (0..32).collect::<Vec<_>>();
+        for (limit, slot, expected) in [
+            (Some(4), 0, Some((0..8).collect::<Vec<_>>())),
+            (Some(4), 3, Some((24..32).collect())),
+            (Some(3), 2, Some((20..30).collect())),
+            (Some(64), 40, Some(vec![8])),
+            (Some(1), 0, None),
+            (None, 0, None),
+        ] {
+            assert_eq!(cpu_slice(&cpus, limit, slot), expected, "{limit:?} {slot}");
+        }
+    }
+
+    /// A pinned step's tree sees only its share: `nproc` sizes to the slice.
+    #[test]
+    #[cfg(target_os = "linux")]
+    fn pinned_child_nproc_reports_its_slice() {
+        let allowed = allowed_cpus();
+        let Some(slice) = cpu_slice(&allowed, Some(2), 1) else {
+            return; // a single-CPU host has nothing to divide
+        };
+        let mut command = std::process::Command::new("sh");
+        command.args(["-c", "nproc"]);
+        pin_command(&mut command, &slice);
+        let output = command.output().expect("run nproc");
+        assert_eq!(
+            String::from_utf8_lossy(&output.stdout).trim(),
+            slice.len().to_string()
+        );
+    }
 
     #[test]
     fn budget_table() {
