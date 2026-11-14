@@ -6510,7 +6510,7 @@ mod cook_pull_request_ref_tests {
             std::fs::write(
                 &gh,
                 format!(
-                    "#!/bin/sh\nif [ ! -f {flag} ]; then touch {flag}; echo 'net/http: TLS handshake timeout' >&2; exit 1; fi\nprintf '[{\"state\":\"OPEN\",\"url\":\"https://github.com/example/repo/pull/1895\"}]'\n",
+                    "#!/bin/sh\nif [ ! -f {flag} ]; then touch {flag}; echo 'net/http: TLS handshake timeout' >&2; exit 1; fi\nprintf '[{{\"state\":\"OPEN\",\"url\":\"https://github.com/example/repo/pull/1895\"}}]'\n",
                     flag = flaked.display()
                 ),
             )
