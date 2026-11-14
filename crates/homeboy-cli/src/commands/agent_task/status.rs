@@ -5304,9 +5304,12 @@ fn enforce_compact_status_budget(mut value: Value) -> Value {
         .unwrap_or("homeboy agent-task status <run-id>")
         .to_string();
     let mut omitted = Vec::new();
-    // Ordered from supplementary evidence to the broad status tables. Core IDs,
-    // state, and the full-output command always survive this final pass.
+    // Ordered from supplementary evidence to the broad status tables, then the
+    // failure cause: a failed Cook's `failure_context` is what explains it, so
+    // it is the last section given up. Core IDs, state, and the full-output
+    // command always survive this final pass.
     for section in [
+        "durable_candidate",
         "notification_delivery",
         "notification_resolution",
         "transport_recovery",
@@ -5316,7 +5319,6 @@ fn enforce_compact_status_budget(mut value: Value) -> Value {
         "failure_reasons",
         "execution_states",
         "candidate_adoption",
-        "failure_context",
         "finalization",
         "selected_candidate",
         "attempts",
@@ -5339,6 +5341,7 @@ fn enforce_compact_status_budget(mut value: Value) -> Value {
         "identity",
         "runner_probe",
         ACTIONABLE_METADATA_KEY,
+        "failure_context",
     ] {
         if let Some(removed) = object.remove(section) {
             omitted.push(json!({ "section": section, "count": compact_section_count(&removed) }));
@@ -7485,6 +7488,35 @@ mod tests {
         assert!(context.get("next_action").is_none());
         assert!(serde_json::to_vec(&compact).unwrap().len() < 2 * 1024);
         assert_eq!(compact_cook_report(report.clone(), true), report);
+    }
+
+    /// A failed Cook's compact output keeps its cause: an oversized candidate
+    /// projection is given up before `failure_context`, so the command result
+    /// names the controller error rather than "exited 1 without reporting a
+    /// failure cause".
+    #[test]
+    fn compact_status_budget_keeps_failure_cause_over_candidate_projection() {
+        let large = "x".repeat(COMPACT_STATUS_BYTE_LIMIT);
+        let compact = enforce_compact_status_budget(json!({
+            "schema": "homeboy/agent-task-cook/v1",
+            "view": "summary",
+            "cook_id": "cook-cause",
+            "status": "durable_failure",
+            "durable_candidate": { "canonical_candidate": large },
+            "attempts": [{ "run_id": "run-cause", "aggregate_path": "x".repeat(COMPACT_STATUS_BYTE_LIMIT / 4) }],
+            "failure_context": {
+                "phase": "controller",
+                "reason_code": "validation.invalid_argument",
+                "diagnostic": { "message": "baseline has no immutable candidate" }
+            }
+        }));
+
+        assert!(serialized_len(&compact) <= COMPACT_STATUS_BYTE_LIMIT);
+        assert_eq!(
+            compact["failure_context"]["diagnostic"]["message"],
+            "baseline has no immutable candidate"
+        );
+        assert!(compact.get("durable_candidate").is_none());
     }
 
     #[test]
