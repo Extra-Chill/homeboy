@@ -589,6 +589,23 @@ homeboy_engine_primitives::provider_registry_arc! {
     active: pub(crate) fn active_transport,
 }
 
+/// Every Lab gate execution, readiness preflight included, waits through
+/// transient substrate refusals such as pressure instead of failing the Cook
+/// (#17776, #18058).
+fn execute_through_substrate_waits(
+    cwd: &Path,
+    request: &LabGateRequest,
+    supervision: Option<&GateSupervision>,
+) -> Result<LabGateReceipt> {
+    homeboy_core::substrate_wait::wait_through(
+        "Lab gate execution",
+        homeboy_core::substrate_wait::SUBSTRATE_WAIT_DEADLINE,
+        || supervision.is_some_and(|policy| (policy.is_cancelled)()),
+        |_, _| {},
+        || active_transport().execute(cwd, request, supervision),
+    )
+}
+
 pub(super) fn dispatch(
     cwd: &Path,
     request: &LabGateRequest,
@@ -603,13 +620,7 @@ pub(super) fn dispatch(
     for attempt in 0..2 {
         // Admission can pass while the daemon republishes its lease; the
         // gate never ran, so it waits like admission does (#17776).
-        let result = match homeboy_core::substrate_wait::wait_through(
-            "Lab gate execution",
-            homeboy_core::substrate_wait::SUBSTRATE_WAIT_DEADLINE,
-            || supervision.is_some_and(|policy| (policy.is_cancelled)()),
-            |_, _| {},
-            || active_transport().execute(cwd, request, supervision),
-        ) {
+        let result = match execute_through_substrate_waits(cwd, request, supervision) {
             Ok(receipt) => receipt,
             Err(error) => {
                 let error = gate_execute_unavailable(error, "transport", None);
@@ -969,7 +980,7 @@ pub(super) fn preflight(
         timeout_seconds: timeout.as_secs().max(1),
         no_progress_timeout_seconds: timeout.as_secs().max(1),
     };
-    let receipt = active_transport().execute(cwd, &request, None)?;
+    let receipt = execute_through_substrate_waits(cwd, &request, None)?;
     request.verify_receipt(&receipt)?;
     if receipt
         .readiness
@@ -1740,6 +1751,61 @@ mod tests {
             fs::set_permissions(&php, fs::Permissions::from_mode(0o755)).unwrap();
             let receipt = execute_with_context(request, root.path(), &context).unwrap();
             assert_eq!(receipt.readiness.unwrap()["status"], "ready");
+        });
+    }
+
+    /// #18058: a readiness preflight refused for pressure waits it out like a
+    /// gate does, instead of failing the Cook before it starts.
+    #[test]
+    fn pressure_refused_preflight_waits_then_reports_ready() {
+        struct PressureOnce {
+            previous: Arc<dyn LabGateTransport>,
+            refused: std::sync::atomic::AtomicBool,
+        }
+        impl LabGateTransport for PressureOnce {
+            fn declared_runner(&self, command: &str) -> Result<Option<String>> {
+                self.previous.declared_runner(command)
+            }
+            fn execute(
+                &self,
+                cwd: &Path,
+                request: &LabGateRequest,
+                supervision: Option<&GateSupervision>,
+            ) -> Result<LabGateReceipt> {
+                if request.runner_id != "pressured-runner" {
+                    return self.previous.execute(cwd, request, supervision);
+                }
+                if !self.refused.swap(true, std::sync::atomic::Ordering::SeqCst) {
+                    let admission = LabGateAdmission {
+                        accepts_jobs: false,
+                        reasons: vec!["pressure".to_string()],
+                        freshness: LabGateFreshness::Fresh,
+                        next_action: None,
+                    };
+                    return Err(admission.refusal(&request.runner_id, None));
+                }
+                execute_with_context(request.clone(), cwd, &runner_context("pressured-runner"))
+            }
+        }
+        homeboy_core::test_support::with_isolated_home(|_| {
+            let previous = active_transport();
+            register_lab_gate_transport(Arc::new(PressureOnce {
+                previous,
+                refused: std::sync::atomic::AtomicBool::new(false),
+            }));
+            let root = tempfile::tempdir().unwrap();
+            repository(root.path());
+            let environment = request(root.path()).environment;
+
+            preflight(
+                root.path(),
+                "pressured-runner",
+                &environment,
+                &[],
+                &[],
+                Duration::from_secs(30),
+            )
+            .unwrap();
         });
     }
 
