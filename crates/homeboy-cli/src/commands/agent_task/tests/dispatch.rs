@@ -3666,20 +3666,26 @@ fn issue_resolution_routes() {
             "https://github.com/example/fixture.git",
         );
         for (states, expected_route, expected_head) in [
-            (vec!["open"], Some("pr_rework"), "custom/pr-head"),
+            (vec!["OPEN"], Some("pr_rework"), "custom/pr-head"),
             (
-                vec!["closed", "closed"],
+                vec!["MERGED", "MERGED"],
                 Some("fresh_branch"),
                 "fix/issue-1-fixture-2",
             ),
-            (vec!["open", "open"], None, ""),
+            (vec!["MERGED", "OPEN"], Some("pr_rework"), "custom/pr-head"),
+            (vec!["OPEN", "OPEN"], None, ""),
         ] {
-            // GitHub's closing-PR query already omits merged and closed PRs.
-            let events: Vec<String> = states
+            // GitHub's closing-PR query omits closed PRs but returns merged
+            // ones, so the fake answers with every state it reports.
+            let events: Vec<_> = states
                 .iter()
                 .enumerate()
-                .filter(|(_, state)| **state == "open")
-                .map(|(n, _)| format!("https://github.com/example/fixture/pull/{}", n + 2))
+                .map(|(n, state)| {
+                    json!({
+                        "url": format!("https://github.com/example/fixture/pull/{}", n + 2),
+                        "state": state,
+                    })
+                })
                 .collect();
             homeboy_test_support::write_executable(&bin.join("gh"), &format!(
                 "#!/bin/sh\ncase \"$*\" in api*) printf '%s' '{}' ;; 'pr view'*) printf '%s' '{{\"baseRefName\":\"main\",\"headRefName\":\"custom/pr-head\"}}' ;; *) printf '[]' ;; esac\n",

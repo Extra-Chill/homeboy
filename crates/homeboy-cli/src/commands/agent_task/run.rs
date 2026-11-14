@@ -6103,7 +6103,7 @@ fn issue_closing_pull_requests(
     number: &str,
     url: &str,
 ) -> homeboy::core::Result<Vec<String>> {
-    const QUERY: &str = "query($owner:String!,$repo:String!,$number:Int!){repository(owner:$owner,name:$repo){issue(number:$number){closedByPullRequestsReferences(first:20,includeClosedPrs:false){nodes{url}}}}}";
+    const QUERY: &str = "query($owner:String!,$repo:String!,$number:Int!){repository(owner:$owner,name:$repo){issue(number:$number){closedByPullRequestsReferences(first:20,includeClosedPrs:false){nodes{url state}}}}}";
     let mut stderr = String::new();
     for delay in [2, 5, 0] {
         let output = std::process::Command::new("gh")
@@ -6119,7 +6119,7 @@ fn issue_closing_pull_requests(
                 "-F",
                 &format!("number={number}"),
                 "--jq",
-                "[.data.repository.issue.closedByPullRequestsReferences.nodes[].url]",
+                ".data.repository.issue.closedByPullRequestsReferences.nodes",
             ])
             .output()
             .map_err(|error| {
@@ -6129,8 +6129,20 @@ fn issue_closing_pull_requests(
                 )
             })?;
         if output.status.success() {
-            return serde_json::from_slice(&output.stdout)
-                .map_err(|error| homeboy::core::Error::internal_json(error.to_string(), None));
+            // `includeClosedPrs:false` still returns merged PRs; only an
+            // open PR is a candidate this Cook can rework.
+            #[derive(serde::Deserialize)]
+            struct Node {
+                url: String,
+                state: String,
+            }
+            let nodes: Vec<Node> = serde_json::from_slice(&output.stdout)
+                .map_err(|error| homeboy::core::Error::internal_json(error.to_string(), None))?;
+            return Ok(nodes
+                .into_iter()
+                .filter(|node| node.state == "OPEN")
+                .map(|node| node.url)
+                .collect());
         }
         stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
         if stderr.contains("Could not resolve") || stderr.contains("Not Found") {
@@ -6470,7 +6482,7 @@ mod cook_pull_request_ref_tests {
                 "origin",
                 "https://github.com/example/repo.git",
             ]);
-            std::fs::write(&gh, "#!/bin/sh\ncase \"$*\" in api*) printf '[\"https://github.com/example/repo/pull/1895\"]';; *list*) printf '[{\"state\":\"OPEN\",\"url\":\"https://github.com/example/repo/pull/1895\"}]';; *) printf '{\"baseRefName\":\"release\",\"headRefName\":\"feature\"}';; esac\n").unwrap();
+            std::fs::write(&gh, "#!/bin/sh\ncase \"$*\" in api*) printf '[{\"state\":\"OPEN\",\"url\":\"https://github.com/example/repo/pull/1895\"}]';; *list*) printf '[{\"state\":\"OPEN\",\"url\":\"https://github.com/example/repo/pull/1895\"}]';; *) printf '{\"baseRefName\":\"release\",\"headRefName\":\"feature\"}';; esac\n").unwrap();
             let mut issue = parse(&[]);
             issue.dispatch.task_url = Some("https://github.com/example/repo/issues/7".into());
             let resolved = {
@@ -6498,7 +6510,7 @@ mod cook_pull_request_ref_tests {
             std::fs::write(
                 &gh,
                 format!(
-                    "#!/bin/sh\nif [ ! -f {flag} ]; then touch {flag}; echo 'net/http: TLS handshake timeout' >&2; exit 1; fi\nprintf '[\"https://github.com/example/repo/pull/1895\"]'\n",
+                    "#!/bin/sh\nif [ ! -f {flag} ]; then touch {flag}; echo 'net/http: TLS handshake timeout' >&2; exit 1; fi\nprintf '[{{\"state\":\"OPEN\",\"url\":\"https://github.com/example/repo/pull/1895\"}}]'\n",
                     flag = flaked.display()
                 ),
             )
