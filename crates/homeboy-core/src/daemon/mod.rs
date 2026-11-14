@@ -4931,11 +4931,6 @@ fn enqueue_exec_request(
             existing_job,
             move |job| {
                 let mut plan = plan;
-                run_homeboy_child_from_daemon_build(
-                    &mut plan.command,
-                    &lifetime::launchable_executable()
-                        .map_err(|error| Error::internal_io(error.to_string(), None))?,
-                );
                 if let Some(limit) = plan.concurrency_limit {
                     plan.env.insert("HOMEBOY_LAB_CONCURRENCY_LIMIT".to_string(), limit.to_string());
                 }
@@ -5955,19 +5950,6 @@ fn daemon_job_store() -> &'static JobStore {
     DAEMON_JOB_STORE.get_or_init(JobStore::default)
 }
 
-/// A Homeboy child authenticates against this daemon's build-specific store and
-/// refuses any other build, so it runs the daemon's own executable. The
-/// runner's configured `homeboy` lags a controller-driven service refresh until
-/// the runner itself upgrades; launching it would fail every job in that window
-/// with "daemon child build skew".
-fn run_homeboy_child_from_daemon_build(command: &mut [String], daemon_executable: &Path) {
-    if let Some(program) = command.first_mut().filter(|program| {
-        Path::new(program.as_str()).file_name() == Some(std::ffi::OsStr::new("homeboy"))
-    }) {
-        *program = daemon_executable.display().to_string();
-    }
-}
-
 #[cfg(test)]
 mod tests {
     #[test]
@@ -6005,30 +5987,6 @@ mod tests {
     }
 
     use super::*;
-
-    #[test]
-    fn homeboy_children_run_the_daemon_build() {
-        let daemon = Path::new("/srv/runner-service/host/homeboy");
-        for (command, expected) in [
-            (
-                vec!["homeboy", "agent-task"],
-                "/srv/runner-service/host/homeboy",
-            ),
-            (
-                vec!["/home/lab/.local/bin/homeboy", "agent-task"],
-                "/srv/runner-service/host/homeboy",
-            ),
-            (vec!["bash", "-c"], "bash"),
-            (
-                vec!["/usr/bin/homeboy-extension", "x"],
-                "/usr/bin/homeboy-extension",
-            ),
-        ] {
-            let mut command = command.into_iter().map(str::to_string).collect::<Vec<_>>();
-            run_homeboy_child_from_daemon_build(&mut command, daemon);
-            assert_eq!(command[0], expected);
-        }
-    }
 
     // Admission lifecycle tests own their host observation, not the CI host's PSI.
     fn reserve_admission(

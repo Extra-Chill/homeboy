@@ -27,7 +27,7 @@ use super::Runner;
 
 struct DaemonPreparedPlan {
     _private_files: super::staged_workspace::PrivateAtFileCleanup,
-    plan: PreparedRunnerProcess,
+    runner: Runner,
     extension_env_providers: Vec<String>,
     authoritative_run_id: Option<String>,
     staged: Option<DaemonStagedPlan>,
@@ -171,11 +171,22 @@ fn prepare_daemon_exec(
         validate_require_paths_on_host: request.validate_require_paths_on_host,
     })?;
     super::command_path::front_selected_homeboy_on_path(&mut plan.env);
+    // A Homeboy child authenticates against this daemon's build-specific store.
+    // Select its executable before the daemon records the execution context.
+    if let Some(program) = plan.command.first_mut().filter(|program| {
+        std::path::Path::new(program.as_str()).file_name() == Some(std::ffi::OsStr::new("homeboy"))
+    }) {
+        *program = homeboy_core::daemon::daemon_launchable_executable()
+            .map_err(|error| homeboy_core::error::Error::internal_io(error.to_string(), None))?
+            .display()
+            .to_string();
+    }
+    // The private token keeps only runner metadata, not a second process plan.
     Ok(PreparedDaemonExec::new(PreparedDaemonExecRequest {
         runner_id: plan.runner.id.clone(),
         cwd: plan.cwd.clone(),
-        command: plan.command.clone(),
-        env: plan.env.clone(),
+        command: plan.command,
+        env: plan.env,
         secret_env_names: plan.secret_env_names.clone(),
         source_snapshot: plan.source_snapshot.clone(),
         require_paths: plan.require_paths.clone(),
@@ -187,7 +198,7 @@ fn prepare_daemon_exec(
         extension_env_provenance: serde_json::json!({ "providers": request.extension_env_providers.clone() }),
         plan_token: Arc::new(DaemonPreparedPlan {
             _private_files: private_files,
-            plan,
+            runner: plan.runner,
             extension_env_providers: request.extension_env_providers,
             authoritative_run_id,
             staged,
@@ -212,8 +223,6 @@ fn execute_daemon_exec(
             )
         })?;
 
-    // The daemon may have mutated `prepared.env` (e.g. injecting the child
-    // reservation id) between prepare and execute, so run with that env.
     if execution_context.verify_integrity().is_err()
         || execution_context.runner_id() != prepared.runner_id
         || execution_context.runtime_id()
@@ -232,8 +241,17 @@ fn execute_daemon_exec(
             ]),
         ));
     }
-    let mut plan = base.plan.clone();
-    plan.env = prepared.env.clone();
+    // Spawn exactly the process descriptor verified above, including the
+    // environment the daemon updated with the child reservation after prepare.
+    let mut plan = PreparedRunnerProcess {
+        runner: base.runner.clone(),
+        cwd: prepared.cwd.clone(),
+        command: prepared.command.clone(),
+        env: prepared.env.clone(),
+        secret_env_names: prepared.secret_env_names.clone(),
+        source_snapshot: prepared.source_snapshot.clone(),
+        require_paths: prepared.require_paths.clone(),
+    };
     if let Some(staged) = &base.staged {
         // Revalidate immediately before providers can inspect the workspace or
         // a child can be spawned. The retained descriptor remains authoritative
@@ -316,6 +334,81 @@ fn execute_daemon_exec(
         extension_env_provenance,
         diagnostic_hints,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const CHILD_PROBE_ENV: &str = "HOMEBOY_DAEMON_EXEC_DRIVER_CHILD_PROBE";
+
+    #[test]
+    fn daemon_exec_child_probe() {
+        if std::env::var_os(CHILD_PROBE_ENV).is_some() {
+            println!(
+                "daemon-exec-child={}",
+                std::env::current_exe().unwrap().display()
+            );
+        }
+    }
+
+    #[test]
+    fn daemon_exec_spawns_the_recorded_daemon_runtime() {
+        let workspace = tempfile::tempdir().unwrap();
+        let daemon_executable = homeboy_core::daemon::daemon_launchable_executable().unwrap();
+        // This nonexistent controller slot must never be launched. The daemon
+        // executable here is the test harness; an exact test acts as its probe.
+        let controller_homeboy = workspace.path().join("controller-slot/homeboy");
+        assert_ne!(controller_homeboy, daemon_executable);
+        let driver = RunnerDaemonExecDriver;
+        let prepared = driver
+            .prepare(RunnerExecPrepareRequest {
+                runner_id: "daemon-exec-test".to_string(),
+                runner: None,
+                project_id: None,
+                cwd: Some(workspace.path().display().to_string()),
+                command: vec![
+                    controller_homeboy.display().to_string(),
+                    "--exact".to_string(),
+                    "daemon_exec_driver::tests::daemon_exec_child_probe".to_string(),
+                    "--nocapture".to_string(),
+                ],
+                env: std::collections::HashMap::from([(
+                    CHILD_PROBE_ENV.to_string(),
+                    "1".to_string(),
+                )]),
+                secret_env_names: Vec::new(),
+                secret_env_plan: None,
+                capture_patch: false,
+                raw_exec: false,
+                source_snapshot: None,
+                require_paths: Vec::new(),
+                extension_env_providers: Vec::new(),
+                authoritative_run_id: None,
+                validate_require_paths_on_host: false,
+            })
+            .unwrap();
+        assert_eq!(prepared.command[0], daemon_executable.display().to_string());
+        let context = RunnerJobExecutionContext::direct_daemon(
+            None,
+            &prepared.runner_id,
+            "daemon-exec-job",
+            &prepared.command[0],
+            "daemon-exec-reservation",
+        )
+        .unwrap();
+        let output = driver
+            .execute(&prepared, &context, Box::new(|| false), None, false, None)
+            .unwrap();
+        assert_eq!(output.exit_code, 0, "{}", output.stderr);
+        let observed_runtime = output
+            .stdout
+            .lines()
+            .find_map(|line| line.strip_prefix("daemon-exec-child="))
+            .expect("spawned daemon executable must report its own path");
+        assert_eq!(observed_runtime, daemon_executable.to_str().unwrap());
+        assert_eq!(observed_runtime, context.runtime_id());
+    }
 }
 
 /// Register the runner daemon-exec driver with core. Called once at startup.
