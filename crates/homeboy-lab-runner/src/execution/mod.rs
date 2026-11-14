@@ -1600,8 +1600,7 @@ pub(super) fn fire_runner_direct_notification(
         Ok(store) => store,
         Err(_) => return,
     };
-    let already_delivered = store.is_notification_delivered(run_id).unwrap_or(true);
-    if already_delivered {
+    if !store.claim_notification(run_id).unwrap_or(false) {
         return;
     }
     let run = store.get_run(run_id).ok().flatten();
@@ -1609,10 +1608,14 @@ pub(super) fn fire_runner_direct_notification(
     // The store is already open for the delivery guard; reuse it so the
     // runner's direct delivery carries the same structured detail the
     // controller's notifier does.
-    let outcome = homeboy_core::notify::dispatch(&event);
-    if outcome.delivered {
-        let _ = store.mark_notification_delivered(run_id, "runner-direct");
-    }
+    let _ = homeboy_core::notify_outbox::dispatch_with_outbox(
+        &event,
+        Some(homeboy_core::notify_outbox::NotifyOnceMarker::new(
+            "run",
+            run_id,
+            "runner-direct",
+        )),
+    );
 }
 
 pub(super) fn runner_direct_notification_event(

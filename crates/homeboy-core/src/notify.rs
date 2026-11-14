@@ -486,8 +486,11 @@ pub fn dispatch(event: &NotifyEvent) -> NotifyOutcome {
     // Capture structured delivery results, not just the exit code.
     match command.output() {
         Ok(output) => {
-            let delivered = output.status.success();
             let result = parse_transport_result(&output.stdout);
+            let delivered = output.status.success()
+                && result
+                    .as_ref()
+                    .is_none_or(|result| result["status"] == "delivered");
             // Missing transport configuration is not an undeliverable event.
             // Keep the result/error for configuration diagnostics, but give all
             // producers the same disposition as an undeclared transport.
@@ -993,7 +996,7 @@ mod tests {
                 "test.run-completion",
                 home.path(),
                 "{\"schema\":\"test/notification-result/v1\",\"status\":\"failed\",\"error\":{\"kind\":\"auth_error\"}}",
-                1,
+                0,
             );
             let route = NotificationRoute::new("test.run-completion", "route-42").unwrap();
             let outcome = dispatch(&NotifyEvent::run_completed_with_route(

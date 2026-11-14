@@ -10,7 +10,7 @@
 //! Absence from a poll is **not** proof of completion. The running set arrives
 //! as a query result, and any bound or ordering churn in that query can evict a
 //! live run from the page. A false completion is not a harmless extra ping: the
-//! daemon marks the notification delivered before dispatching, so a run that is
+//! daemon claims notification ownership before dispatching, so a run that is
 //! wrongly reported burns its exactly-once marker while still running, and the
 //! real completion is then suppressed on every path. Departure is therefore a
 //! *candidate*, confirmed against the run's actual status by the caller-supplied

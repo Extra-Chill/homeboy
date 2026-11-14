@@ -50,7 +50,7 @@ async function main() {
     const delivered = await sendToSession(validation, rendered.content);
     return finish(
       delivered.ok
-        ? { schema: 'homeboy/discord-notification-result/v1', status: 'delivered', delivery: proof, attempts: 1, ...notes }
+        ? { schema: 'homeboy/discord-notification-result/v1', status: 'delivered', delivery: proof, receipt: delivered.receipt, attempts: 1, ...notes }
         : { ...failure(delivered.kind || 'delivery_error', delivered.error, proof, 1, delivered.httpStatus), ...notes },
     );
   }
@@ -359,7 +359,7 @@ function sendToSessionCommand(validation, content) {
     child.once('close', (code) =>
       resolve(
         code === 0
-          ? { ok: true }
+          ? { ok: true, receipt: { exit_code: code } }
           : { ok: false, error: `Session delivery command exited with status ${code}: ${compact(stderr).slice(0, 200)}` },
       ),
     );
@@ -399,7 +399,7 @@ async function sendToSessionOverHttp(validation, content) {
   if (exit !== undefined && exit !== 0) {
     return { ok: false, error: `Session delivery endpoint reported exit status ${exit}.` };
   }
-  return { ok: true };
+  return { ok: true, receipt: { http_status: response.status, ...(exit === undefined ? {} : { exit_code: exit }) } };
 }
 
 function ensureApiBase(base) {

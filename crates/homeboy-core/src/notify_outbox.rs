@@ -332,6 +332,7 @@ pub fn dispatch_with_outbox(
     let config_root = config_root.as_deref();
     let outcome = notify::dispatch(event);
     if outcome.delivered {
+        record_receipt(once_marker.as_ref(), &outcome);
         return NotifyOutboxDispatch {
             outcome,
             disposition: NotifyOutboxDisposition::Delivered,
@@ -577,6 +578,19 @@ fn claim(config_root: &Path, path: &Path) -> Option<PathBuf> {
     std::fs::rename(path, &target).ok().map(|()| target)
 }
 
+fn record_receipt(marker: Option<&NotifyOnceMarker>, outcome: &NotifyOutcome) {
+    let Some(marker) = marker.filter(|marker| marker.subject_kind == "run") else {
+        return;
+    };
+    if let Ok(store) = crate::observation::ObservationStore::open_initialized() {
+        let _ = store.record_notification_receipt(
+            &marker.subject_id,
+            &marker.claimed_by,
+            &outcome.result.clone().unwrap_or(serde_json::Value::Null),
+        );
+    }
+}
+
 fn apply_attempt(
     config_root: &Path,
     claimed: &Path,
@@ -589,6 +603,7 @@ fn apply_attempt(
     entry.last_attempt_at = Some(now.to_rfc3339());
 
     if outcome.delivered {
+        record_receipt(entry.once_marker.as_ref(), &outcome);
         report.delivered += 1;
         report.entries.push(NotifyOutboxDrainEntry {
             entry_id: entry.entry_id.clone(),
@@ -815,6 +830,28 @@ mod tests {
         assert_eq!(backoff_after(8), Duration::from_secs(640));
         // Beyond the budget the ladder still saturates rather than overflowing.
         assert_eq!(backoff_after(64), Duration::from_secs(MAX_BACKOFF_SECS));
+    }
+
+    #[test]
+    fn zero_exit_without_delivery_stays_in_the_public_outbox() {
+        crate::test_support::with_isolated_home(|_| {
+            install_transport(
+                "outbox.no-delivery",
+                vec![
+                    "sh",
+                    "-c",
+                    "printf '%s\\n' '{\"status\":\"failed\",\"attempts\":1}'",
+                ],
+            );
+            set_default_transport("outbox.no-delivery");
+            let dispatch = dispatch_with_outbox(&event("gate-admission-failure"), None);
+            assert!(!dispatch.outcome.delivered);
+            assert!(matches!(
+                dispatch.disposition,
+                NotifyOutboxDisposition::Queued { .. }
+            ));
+            assert_eq!(pending_entries().len(), 1);
+        });
     }
 
     #[test]

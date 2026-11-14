@@ -217,6 +217,26 @@ fn safe_transport_result(result: Option<&Value>) -> Option<Value> {
             _ => {}
         }
     }
+    if let Some(mode) = object
+        .get("delivery")
+        .and_then(|delivery| delivery["mode"].as_str())
+    {
+        if matches!(mode, "session" | "bot" | "webhook") {
+            safe.insert("delivery_mode".to_string(), json!(mode));
+        }
+    }
+    if let Some(receipt) = object.get("receipt").and_then(Value::as_object) {
+        let receipt: Map<String, Value> = ["exit_code", "http_status"]
+            .into_iter()
+            .filter_map(|key| {
+                receipt
+                    .get(key)
+                    .filter(|value| value.is_number())
+                    .map(|value| (key.to_string(), value.clone()))
+            })
+            .collect();
+        safe.insert("receipt".to_string(), Value::Object(receipt));
+    }
     (!safe.is_empty()).then_some(Value::Object(safe))
 }
 
