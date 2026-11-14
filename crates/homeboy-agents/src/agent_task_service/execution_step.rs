@@ -607,6 +607,17 @@ pub(super) fn consume_execution_terminal_in_store(
             }
         };
         let mut next = intent.clone();
+        if runner_ineligible && next.runner.is_none() {
+            // An unpinned Cook refused by a busy Lab waits on the runner the
+            // refusal names, so the daemon probes its eligibility (#18058).
+            next.runner = diagnostic.as_ref().and_then(|value| {
+                [&value["details"], &value["data"]]
+                    .into_iter()
+                    .find_map(|details| details["runner_eligible"].as_str())
+                    .map(str::to_string)
+            });
+            next.step.wait.runner_eligible = next.runner.clone();
+        }
         if runner_ineligible {
             let Some(epoch) = next.epoch.checked_add(1) else {
                 failure = Some(invalid("execution scheduling epoch exhausted"));

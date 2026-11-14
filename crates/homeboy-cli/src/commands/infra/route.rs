@@ -2554,14 +2554,22 @@ pub(crate) fn execute_admitted_cook_arguments(
             &required,
         )?
         .map_err(|reason| {
+            // A busy Lab (pressure, capacity) is a wait, not a failure: name
+            // the runner to wait on so the step waits in the daemon queue
+            // instead of failing into recovery backoff (#18058). Agents owns
+            // the durable wait disposition and budget; any other unpinned
+            // selection failure remains a genuine recovery failure.
+            let wait_target = cli.runner.clone().or_else(|| {
+                homeboy::core::substrate_wait::reasons_are_transient([reason.as_str()])
+                    .then(|| homeboy::runner::lab_runner_wait_target().ok().flatten())
+                    .flatten()
+            });
             let mut error = Error::validation_invalid_argument("runner", reason, None, None);
             error.retryable = Some(true);
-            // Readiness evidence only; agents owns the durable wait
-            // disposition and budget. Unpinned timed selection failures
-            // remain genuine recovery failures.
-            if cli.runner.is_some() {
+            if let Some(runner) = wait_target {
                 error.details["execution_step_disposition"] =
                     serde_json::json!("runner_ineligible");
+                error.details["runner_eligible"] = serde_json::json!(runner);
             }
             error
         })?;
