@@ -148,6 +148,9 @@ pub(crate) struct CookRecoveryInputs<'a> {
     pub continuation_rearm_required: bool,
     /// A completed terminal continuation cannot be claimed again.
     pub continuation_completed: bool,
+    /// Why continuation's candidate admission refuses this attempt; recovery
+    /// then has no continuation to perform.
+    pub continuation_refusal: Option<&'a str>,
     /// The attempt whose recorded review form is consulted below.
     pub run_id: &'a str,
     /// `incomplete_reason` of a recorded review form that declares the task
@@ -316,6 +319,12 @@ format!(
 
 /// Continue the Cook, rearming its failed terminal continuation first.
 fn continuation_step(inputs: &CookRecoveryInputs<'_>) -> CookRecoveryStep {
+    if let Some(refusal) = inputs.continuation_refusal {
+        return CookRecoveryStep::none(format!(
+            "Continuation cannot admit this attempt's candidate: {refusal}. Inspect it with `homeboy agent-task diagnose {}`.",
+            inputs.run_id
+        ));
+    }
     if inputs.continuation_rearm_required {
         CookRecoveryStep::Rearm
     } else {

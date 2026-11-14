@@ -5108,13 +5108,19 @@ fn cook_recovery_operator_feedback_reaches_dispatch_and_survives_pre_execution_f
         }
     }
     for (continue_attempt, dispatch) in [(true, true), (false, true), (false, false)] {
-        homeboy_core::test_support::with_isolated_home(|_| {
+        homeboy_core::test_support::with_isolated_home(|home| {
             let cook_id = "cook-feedback-recovery";
             let options = if continue_attempt {
                 let options =
                     batch_cook_options(cook_id, Arc::new(AcceptedDetachedAttemptDispatcher));
                 super::super::persist_initial_recipe(&options).unwrap();
                 super::super::materialize_initial_cook_attempt(&options).unwrap();
+                // Continuation admits only an attempt with an immutable candidate.
+                seed_candidate_commit_aggregate(
+                    &options.identity.initial_run_id,
+                    &options.identity.initial_plan,
+                    &home.path().join("candidate-repo"),
+                );
                 agent_task_lifecycle::rewrite_record_for_test(
                     &options.identity.initial_run_id,
                     |record| {
