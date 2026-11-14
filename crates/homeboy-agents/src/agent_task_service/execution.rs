@@ -2561,6 +2561,7 @@ fn retryable_cook_attempt(
     }
     let mut pending_attempt = None;
     let mut materialized_attempt_seen = false;
+    let mut orphaned_attempt = false;
     for recipe_attempt in recipe
         .attempts
         .iter()
@@ -2574,8 +2575,16 @@ fn retryable_cook_attempt(
             lifecycle_store,
             &recipe_attempt.run_id,
         )? {
-            if materialized_attempt_seen {
+            // The recipe records an attempt before the lifecycle reserves
+            // it. One that continues this source, or replaces a terminal
+            // sibling, was interrupted between those writes: its recorded
+            // lineage is the reservation's durable source edge, so it is
+            // materialized instead of stranding the Cook.
+            let continues_source = super::cook_lineage::recipe_attempt_lineage(recipe_attempt)
+                .is_some_and(|lineage| lineage.source_run_id == source.run_id);
+            if materialized_attempt_seen || continues_source {
                 pending_attempt = Some(recipe_attempt);
+                orphaned_attempt = true;
                 break;
             }
             return Err(Error::validation_invalid_argument(
@@ -2669,7 +2678,7 @@ fn retryable_cook_attempt(
             attempt: pending_attempt.attempt,
             pending_run_id: Some(pending_attempt.run_id.clone()),
             plan: pending_attempt.plan.clone(),
-            recipe_replacement: materialized_attempt_seen,
+            recipe_replacement: materialized_attempt_seen || orphaned_attempt,
             replaces_source_attempt: false,
         }));
     }
