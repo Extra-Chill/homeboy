@@ -3961,9 +3961,29 @@ fn retry_descends_from_recipe(
 
 /// Load and validate the AI-authored review form for a finalizing run.
 ///
-/// The cook loop's review-form gate guarantees a valid form before finalization
-/// is reached. Unavailable forms take the incomplete-draft publication path
-/// instead. Missing or incomplete forms remain errors here.
+/// Resolve the human-facing subject from the selected review form or declared issue title.
+pub fn candidate_publication_title(
+    store: &agent_task_lifecycle::AgentTaskLifecycleStore,
+    run_id: &str,
+) -> Result<String> {
+    if let Ok(form) = review_form_for_finalization_in_store(store, run_id) {
+        return Ok(form.pr_title);
+    }
+    super::load_recipe_for_attempt(run_id)?
+        .and_then(|recipe| recipe.finalization["title"].as_str().map(str::to_owned))
+        .filter(|title| !title.trim().is_empty())
+        .ok_or_else(|| {
+            Error::validation_invalid_argument(
+                "candidate",
+                "Cook has no publication title",
+                None,
+                None,
+            )
+        })
+}
+
+/// The cook loop guarantees a valid form before finalization. Missing or
+/// incomplete forms remain errors here.
 fn review_form_for_finalization_in_store(
     lifecycle_store: &agent_task_lifecycle::AgentTaskLifecycleStore,
     run_id: &str,

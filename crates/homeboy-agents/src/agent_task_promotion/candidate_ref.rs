@@ -7,14 +7,18 @@ use serde_json::Value;
 /// Best-effort: the ref is an operator convenience, so a candidate object that
 /// is absent from the destination (for example a Lab-produced commit) records
 /// `candidate_ref_error` instead of failing the promotion it annotates.
-pub(crate) fn pin_applied_candidate(cook_id: &str, promotion: &mut Value) -> Result<()> {
-    if let Err(error) = try_pin_applied_candidate(cook_id, promotion) {
+pub(crate) fn pin_applied_candidate(
+    cook_id: &str,
+    promotion: &mut Value,
+    title: &str,
+) -> Result<()> {
+    if let Err(error) = try_pin_applied_candidate(cook_id, promotion, title) {
         promotion["candidate_ref_error"] = Value::String(error.message);
     }
     Ok(())
 }
 
-fn try_pin_applied_candidate(cook_id: &str, promotion: &mut Value) -> Result<()> {
+fn try_pin_applied_candidate(cook_id: &str, promotion: &mut Value, title: &str) -> Result<()> {
     if !matches!(
         promotion["status"].as_str(),
         Some("verification_pending" | "applied" | "gate_failed" | "gate_deferred")
@@ -61,7 +65,8 @@ fn try_pin_applied_candidate(cook_id: &str, promotion: &mut Value) -> Result<()>
         ));
     }
     git(&["check-ref-format", &reference])?;
-    git(&["update-ref", &reference, sha])?;
+    let published = homeboy_core::git::publication_candidate(path, sha, title)?;
+    git(&["update-ref", &reference, &published])?;
     promotion["candidate_ref"] = Value::String(reference);
     Ok(())
 }
@@ -81,7 +86,7 @@ fn missing_candidate_object_records_error_without_failing() {
         "target": {"path": dir.path()},
         "candidate": {"candidate_sha": "0123456789abcdef0123456789abcdef01234567", "tree_sha": "abc"}
     });
-    pin_applied_candidate("cook", &mut promotion).unwrap();
+    pin_applied_candidate("cook", &mut promotion, "fix: candidate").unwrap();
     assert!(promotion.get("candidate_ref").is_none());
     assert!(promotion["candidate_ref_error"].is_string());
 }

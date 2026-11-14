@@ -171,21 +171,13 @@ fn preserve_candidate(repo: &Path, cook: &str) -> Result<()> {
         let reference = format!("refs/homeboy/candidates/{cook}");
         git(repo, &["check-ref-format", &reference])?;
         let head = git(repo, &["rev-parse", "HEAD"])?;
-        let commit = git(
-            repo,
-            &[
-                "-c",
-                "user.name=Homeboy",
-                "-c",
-                "user.email=homeboy@localhost",
-                "commit-tree",
-                &tree,
-                "-p",
-                &head,
-                "-m",
-                "Preserve staged Cook candidate before recovery",
-            ],
-        )?;
+        let recipe = crate::agent_task_service::load_recipe(cook)?;
+        let title = recipe.finalization["title"]
+            .as_str()
+            .filter(|title| !title.trim().is_empty())
+            .ok_or_else(|| owner_mismatch("Cook has no publication title"))?;
+        homeboy_core::git::validate_publication_identity(&repo.to_string_lossy())?;
+        let commit = git(repo, &["commit-tree", &tree, "-p", &head, "-m", title])?;
         git(repo, &["update-ref", &reference, &commit])?;
     }
     Ok(())
