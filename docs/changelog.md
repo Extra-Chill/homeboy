@@ -4,6 +4,13 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.465.1] - 2026-11-14
+
+### Fixed
+- refuse ownerless unmaterialized Cook retries
+- a submitted controller job starts through the serving lease
+- an unpinned Cook refused by a busy Lab waits on the Lab runner instead of failing into recovery backoff
+
 ## [0.465.0] - 2026-11-14
 
 ### Added
