@@ -2229,6 +2229,74 @@ pub(crate) fn finalize_or_load_cook_pr_with_backend<B: AgentTaskPrFinalizationBa
     )
 }
 
+/// A gate-green candidate that publishes only as an incomplete draft: its
+/// gates are proven inherited failures, or its agent recorded no usable review
+/// form (#17671).
+struct IncompleteDraft {
+    /// Why the review form is unusable; `None` for an unverified draft.
+    reason: Option<String>,
+    /// The agent's invalid form, whose title and summary the draft keeps.
+    invalid_form: Option<crate::agent_task_review_dossier::AiFilledReviewForm>,
+}
+
+/// Whether publication without a supplied form yields an incomplete draft.
+/// Automatic finalization and `recover --preflight` read this one decision,
+/// so preflight never refuses a candidate `recover` publishes as a draft.
+fn incomplete_draft_publication(
+    lifecycle_store: &agent_task_lifecycle::AgentTaskLifecycleStore,
+    run_id: &str,
+    promotion: &AgentTaskPromotionReport,
+) -> Result<Option<IncompleteDraft>> {
+    // Eligible gates that include no pass are proven inherited failures: the
+    // candidate is publishable, but only as a draft without verified commands.
+    let unverified = crate::agent_task_review_dossier::verified_commands_from_promotion(promotion)
+        .is_empty()
+        && promotion.deterministic_gates.iter().any(|gate| {
+            gate.status == crate::agent_task_gate::AgentTaskGateStatus::AcceptedInheritedFailure
+        });
+    if crate::agent_task_review_dossier::verified_commands_from_promotion(promotion).is_empty()
+        && !unverified
+    {
+        return Err(Error::validation_invalid_argument(
+            "verification",
+            "Cook cannot publish a test command without matching successful visible durable gate evidence bound to the promoted candidate",
+            None,
+            None,
+        ));
+    }
+    // The unverified draft carries no review form, so it reads none.
+    let mut invalid_form = None;
+    let review_failure = if unverified {
+        None
+    } else {
+        let aggregate = lifecycle_store.read_aggregate(run_id)?;
+        match super::cook::review_form_from_aggregate(&aggregate) {
+            Ok(Some(form)) => {
+                let failure = form.validate().err().map(|error| error.to_string());
+                // The draft still carries the agent's own title and summary.
+                invalid_form = failure.is_some().then_some(form);
+                failure
+            }
+            Ok(None) => Some(
+                aggregate
+                    .outcomes
+                    .iter()
+                    .flat_map(|outcome| &outcome.diagnostics)
+                    .map(|diagnostic| diagnostic.class.clone())
+                    .next()
+                    .unwrap_or_else(|| "missing review_form output".to_string()),
+            ),
+            Err(error) => Some(error.to_string()),
+        }
+    };
+    Ok(
+        (unverified || review_failure.is_some()).then_some(IncompleteDraft {
+            reason: review_failure,
+            invalid_form,
+        }),
+    )
+}
+
 pub(crate) fn finalize_or_load_cook_pr_with_backend_with_stores<
     B: AgentTaskPrFinalizationBackend,
 >(
@@ -2254,50 +2322,13 @@ pub(crate) fn finalize_or_load_cook_pr_with_backend_with_stores<
             ]),
         ));
     }
-    // Eligible gates that include no pass are proven inherited failures: the
-    // candidate is publishable, but only as a draft without verified commands.
-    let unverified = crate::agent_task_review_dossier::verified_commands_from_promotion(&promotion)
-        .is_empty()
-        && promotion.deterministic_gates.iter().any(|gate| {
-            gate.status == crate::agent_task_gate::AgentTaskGateStatus::AcceptedInheritedFailure
-        });
-    if crate::agent_task_review_dossier::verified_commands_from_promotion(&promotion).is_empty()
-        && !unverified
+    let draft = incomplete_draft_publication(lifecycle_store, successful_run_id, &promotion)?;
+    if let Some(IncompleteDraft {
+        reason,
+        invalid_form,
+    }) = draft
     {
-        return Err(Error::validation_invalid_argument(
-            "verification",
-            "Cook cannot publish a test command without matching successful visible durable gate evidence bound to the promoted candidate",
-            None,
-            None,
-        ));
-    }
-    // The unverified draft carries no review form, so it reads none.
-    let mut invalid_form = None;
-    let review_failure = if unverified {
-        None
-    } else {
-        let aggregate = lifecycle_store.read_aggregate(successful_run_id)?;
-        match super::cook::review_form_from_aggregate(&aggregate) {
-            Ok(Some(form)) => {
-                let failure = form.validate().err().map(|error| error.to_string());
-                // The draft still carries the agent's own title and summary.
-                invalid_form = failure.is_some().then_some(form);
-                failure
-            }
-            Ok(None) => Some(
-                aggregate
-                    .outcomes
-                    .iter()
-                    .flat_map(|outcome| &outcome.diagnostics)
-                    .map(|diagnostic| diagnostic.class.clone())
-                    .next()
-                    .unwrap_or_else(|| "missing review_form output".to_string()),
-            ),
-            Err(error) => Some(error.to_string()),
-        }
-    };
-    if unverified || review_failure.is_some() {
-        if let Some(reason) = review_failure {
+        if let Some(reason) = reason {
             lifecycle_store.record_metadata_value(
                 successful_run_id,
                 "review_form_unavailable",
@@ -2827,15 +2858,29 @@ pub(crate) fn recover_cook_pr_with_backend_and_review_form<B: AgentTaskPrFinaliz
     // Without a supplied form or overrides, recovery publishes exactly as the
     // Cook would have: a run whose agent recorded no usable review form
     // becomes the incomplete draft instead of failing on the missing form.
-    if supplied_review_form.is_none() && overrides.is_empty() && !preflight {
-        return finalize_or_load_cook_pr_with_backend_with_stores(
-            &recipe_store,
-            &lifecycle_store,
-            &options,
-            &run_id,
-            &promotion,
-            backend,
-        );
+    if supplied_review_form.is_none() && overrides.is_empty() {
+        if preflight {
+            let mut normalized = promotion.clone();
+            normalized.normalize_gate_outcome();
+            if let Some(draft) =
+                incomplete_draft_publication(&lifecycle_store, &run_id, &normalized)?
+            {
+                return Ok(json!({
+                    "status": "validated",
+                    "publication": "draft",
+                    "reason": draft.reason,
+                }));
+            }
+        } else {
+            return finalize_or_load_cook_pr_with_backend_with_stores(
+                &recipe_store,
+                &lifecycle_store,
+                &options,
+                &run_id,
+                &promotion,
+                backend,
+            );
+        }
     }
     let finalization = cook_finalization_options_with_stores(
         &recipe_store,
