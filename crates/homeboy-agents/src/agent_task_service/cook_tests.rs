@@ -10242,6 +10242,23 @@ fn malformed_agent_review_form_recovers_by_publishing_a_supplied_form() {
                 .step,
             crate::agent_task_service::CookRecoveryStep::Publish
         );
+        // Preflight validates the draft `recover` would publish, rather than
+        // refusing the agent's unusable form.
+        let (preview, _) = crate::agent_task_service::recover_cook(
+            cook_id,
+            crate::agent_task_service::CookRecoveryRequest {
+                preflight: true,
+                ..Default::default()
+            },
+            &performer,
+        )
+        .expect("preflight validates the draft publication");
+        assert!(preview.failure.is_none(), "{:?}", preview.failure);
+        assert_eq!(
+            preview.admission.expect("publication preview")["publication"],
+            "draft"
+        );
+        assert!(!performer.created.get());
 
         let (published, exit_code) = crate::agent_task_service::recover_cook(
             cook_id,
