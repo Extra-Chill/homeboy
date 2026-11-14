@@ -863,11 +863,9 @@ pub(crate) fn control_plane_next_action(payload: &Value, run_id: &str) -> String
             .map(|identity| format!("review the published PR: {identity}"))
             .unwrap_or_else(|| format!("homeboy runs evidence {run_id}"));
     }
-    if string_value(payload, &["blocker", "code"]).is_some_and(|code| {
-        code.starts_with("resource_guard.")
-            || code.starts_with("outcome.")
-            || code == "review_form.incomplete"
-    }) {
+    if string_value(payload, &["blocker", "code"])
+        .is_some_and(|code| code.starts_with("resource_guard.") || code.starts_with("outcome."))
+    {
         if let Some(remedy) = string_value(payload, &["blocker", "reason"]) {
             return remedy.to_string();
         }
@@ -886,6 +884,18 @@ pub(crate) fn control_plane_next_action(payload: &Value, run_id: &str) -> String
     // A Cook's next step is the one `agent-task recover` performs, projected
     // from its durable state (#15925). A Cook with no step names `diagnose`,
     // which explains what is required; it is never re-decided here.
+    // An incomplete agent review form names its operator remedy only when
+    // the planner has no step of its own; the planner's step otherwise wins.
+    if string_value(payload, &["blocker", "code"]) == Some("review_form.incomplete")
+        && payload
+            .get("recovery")
+            .and_then(|recovery| string_value(recovery, &["step"]))
+            .is_none_or(|step| step == "none")
+    {
+        if let Some(remedy) = string_value(payload, &["blocker", "reason"]) {
+            return remedy.to_string();
+        }
+    }
     if let Some(recovery) = payload
         .get("recovery")
         .filter(|recovery| !recovery.is_null())
