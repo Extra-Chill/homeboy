@@ -91,30 +91,23 @@ pub fn report(
             .clone()
             .or_else(|| common::remote_line(client, "command -v homeboy")),
     };
-    if let Some(status) = persisted_status {
+    if let Some(status) = persisted_status.filter(|status| status.session.is_some()) {
         match runner::runner_capability_handshake(runner, status, homeboy_command) {
             Ok(handshake) => {
-                if let Some(check) = checks::homeboy_version_skew_check(
+                checks.extend(checks::homeboy_version_skew_checks(
                     local_homeboy_version,
                     &handshake,
-                    runner
-                        .settings
-                        .require_exact_homeboy_version
-                        .unwrap_or(false),
                     runner_id,
-                    &server.id,
-                ) {
-                    checks.push(check);
-                }
+                ));
             }
-            Err(error) => checks.push(checks::error(
-                "homeboy.version_skew",
-                format!("Could not observe runner compatibility: {error}"),
-                Some("Restore runner connectivity and re-run doctor".to_string()),
-                BTreeMap::new(),
-            )),
+            Err(error) => checks.extend(build_observation_errors(&error.to_string())),
         }
+    } else {
+        checks.extend(build_observation_errors(
+            "runner daemon status is unavailable",
+        ));
     }
+
     checks.push(if homeboy.path.is_some() {
         checks::ok(
             "homeboy",
@@ -580,4 +573,18 @@ pub(super) fn default_artifact_root_for_home(home: &str) -> Option<String> {
         return Some("/.local/share/homeboy/artifacts".to_string());
     }
     Some(format!("{home}/.local/share/homeboy/artifacts"))
+}
+
+fn build_observation_errors(reason: &str) -> Vec<RunnerCheck> {
+    ["homeboy.controller_daemon", "homeboy.daemon_command"]
+        .into_iter()
+        .map(|id| {
+            checks::error(
+                id,
+                format!("Could not observe runner builds: {reason}"),
+                Some("Restore runner connectivity and re-run doctor".to_string()),
+                BTreeMap::new(),
+            )
+        })
+        .collect()
 }

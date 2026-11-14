@@ -345,7 +345,7 @@ mod tests {
         let runner = json!({
             "status": "warn",
             "checks": [
-                { "id": "homeboy.version_skew", "status": "warn", "message": "skew" }
+                { "id": "homeboy.daemon_command", "status": "warn", "message": "skew" }
             ]
         });
         let verdict = combine_verdict(&provider, &runner);
