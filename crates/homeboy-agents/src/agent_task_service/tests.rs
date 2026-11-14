@@ -1012,8 +1012,8 @@ fn execution_step_runner_ineligible_deferrals_never_consume_recovery_budget() {
             let mut delivery = terminal_delivery(&intent);
             delivery.outcome = homeboy_core::daemon::step_job::StepTerminalOutcome::Failed;
             delivery.error = Some(serde_json::json!({
-                "message": "pinned runner stopped accepting jobs before provisioning",
-                "details": {"execution_step_disposition": "runner_ineligible"},
+                "message": "pressure",
+                "details": {"execution_step_disposition": "runner_ineligible", "runner_eligible": "homeboy-lab"},
             }));
             let receipt = consume_execution_terminal_in_store(&store, &delivery).unwrap();
             assert_eq!(receipt["disposition"], "runner_wait");
@@ -1027,6 +1027,13 @@ fn execution_step_runner_ineligible_deferrals_never_consume_recovery_budget() {
             assert_eq!(next.epoch, epoch + 1);
             assert_eq!(next.recovery_attempt, 0);
             assert_eq!(next.step.env, intent.step.env);
+            // #18058: an unpinned Cook refused by a busy Lab waits in the
+            // daemon queue on the runner the refusal names.
+            assert_eq!(next.runner.as_deref(), Some("homeboy-lab"));
+            assert_eq!(
+                next.step.wait.runner_eligible.as_deref(),
+                Some("homeboy-lab")
+            );
         }
     });
 }
