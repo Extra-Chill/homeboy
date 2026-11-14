@@ -188,15 +188,36 @@ fn output_instructions(request: &Value) -> String {
 /// fresh attempt has to re-read the repository and often fails (#16821).
 /// `invalid` lists `(output, error)` pairs for present-but-invalid outputs and
 /// re-checks the resumed reply. `args` are the first run's arguments, ending
-/// with its prompt. Any failure leaves `result` unchanged.
+/// with its prompt; `command` builds each resume process. Any failure leaves
+/// `result` unchanged.
+///
+/// An output restated for an omission faces the same contract as a first
+/// answer: when it fails, the session gets the same correction turn.
 pub(super) fn resume_for_unusable_outputs(
     result: &mut AgentTaskOutcome,
     request: &Value,
     args: &[String],
     artifacts: &Path,
-    command: Option<Command>,
+    command: &dyn Fn() -> Option<Command>,
     invalid: &dyn Fn(&Value) -> Vec<(String, String)>,
 ) {
+    for turn in 1..=2 {
+        if !resume_turn(result, request, args, artifacts, turn, command(), invalid) {
+            return;
+        }
+    }
+}
+
+/// One tool-less resume turn. Returns whether it changed `result`.
+fn resume_turn(
+    result: &mut AgentTaskOutcome,
+    request: &Value,
+    args: &[String],
+    artifacts: &Path,
+    turn: usize,
+    command: Option<Command>,
+    invalid: &dyn Fn(&Value) -> Vec<(String, String)>,
+) -> bool {
     let missing_index = result
         .diagnostics
         .iter()
@@ -218,10 +239,10 @@ pub(super) fn resume_for_unusable_outputs(
         Vec::new()
     };
     if missing.is_empty() && rejected.is_empty() {
-        return;
+        return false;
     }
     let (Some(mut command), true) = (command, args.iter().any(|a| a == "--session")) else {
-        return;
+        return false;
     };
     let mut feedback = Vec::new();
     if !missing.is_empty() {
@@ -243,9 +264,14 @@ pub(super) fn resume_for_unusable_outputs(
         output_instructions(request)
     ));
     let task = safe_segment(request["task_id"].as_str().unwrap_or_default());
-    let stdout_path = artifacts.join(format!("{task}-pi-resume.jsonl"));
+    let suffix = if turn == 1 {
+        String::new()
+    } else {
+        format!("-{turn}")
+    };
+    let stdout_path = artifacts.join(format!("{task}-pi-resume{suffix}.jsonl"));
     let Ok(stdout) = std::fs::File::create(&stdout_path) else {
-        return;
+        return false;
     };
     let Ok(mut child) = command
         .args(&resume_args)
@@ -254,7 +280,7 @@ pub(super) fn resume_for_unusable_outputs(
         .stderr(Stdio::null())
         .spawn()
     else {
-        return;
+        return false;
     };
     let deadline = Instant::now() + RESUME_TIMEOUT;
     let status = loop {
@@ -264,14 +290,14 @@ pub(super) fn resume_for_unusable_outputs(
             _ => {
                 let _ = child.kill();
                 let _ = child.wait();
-                return;
+                return false;
             }
         }
     };
     let stream = std::fs::read_to_string(&stdout_path).unwrap_or_default();
     let resumed = outcome(request, &stream, "", status.code(), "", None);
     let Value::Object(supplied) = resumed.outputs.clone() else {
-        return;
+        return false;
     };
     let mut merged = result.outputs.clone();
     if !merged.is_object() {
@@ -299,7 +325,7 @@ pub(super) fn resume_for_unusable_outputs(
         }
     }
     if corrected.is_empty() && !all_missing_restated {
-        return;
+        return false;
     }
     result.outputs = merged;
     if all_missing_restated {
@@ -332,6 +358,7 @@ pub(super) fn resume_for_unusable_outputs(
             }),
         });
     }
+    true
 }
 
 fn structured_answer(text: &str) -> Option<Value> {

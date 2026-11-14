@@ -285,6 +285,22 @@ fn provider_validates_declared_outputs() {
         );
     }
 
+    // An output restated for an omission faces the same contract as a first
+    // answer: a plain title gets the same correction turn.
+    let restated_pi = FakePi::new(&format!(
+        "case \"$*\" in\n*--no-tools*)\nif [ -e \"$0.turn\" ]; then\n{}\nelse\n: > \"$0.turn\"\n{}\nfi\n;;\n*)\n{}\n;;\nesac",
+        FakePi::answer(&form("fix(sync): restore categories after pull")),
+        FakePi::answer(&form("Restore categories after pull")),
+        FakePi::answer(r#"{"outputs":{}}"#),
+    ));
+    form_request.executor.config = restated_pi.config();
+    let restated = run_provider_command_once(&form_request, &provider);
+    assert_eq!(restated.status, AgentTaskOutcomeStatus::Succeeded);
+    assert_eq!(
+        restated.outputs["review_form"]["pr_title"],
+        "fix(sync): restore categories after pull"
+    );
+
     let malformed_pi = FakePi::new(&FakePi::answer(
         r#"{"outputs":{"inspection":{"verdict":42}}}"#,
     ));
