@@ -18,6 +18,15 @@ impl Reservation {
     fn admits(&self, holder: Option<&str>) -> bool {
         !self.held() || (self.state == "active" && holder == Some(self.id.as_str()))
     }
+    pub(super) fn eta(&self) -> Option<String> {
+        let end = match self.state.as_str() {
+            "waiting_for_quiet" => self.wait_until,
+            "active" => self.active_until?,
+            _ => return None,
+        };
+        chrono::DateTime::from_timestamp_millis(i64::try_from(end).ok()?)
+            .map(|time| time.to_rfc3339())
+    }
     fn held(&self) -> bool {
         matches!(self.state.as_str(), "waiting_for_quiet" | "active")
     }
@@ -111,14 +120,22 @@ pub(super) fn current() -> Result<Option<Reservation>> {
     }
     Ok(value)
 }
+/// Only admission-holding reservations belong in the runner's pressure status.
+pub(super) fn status() -> Result<Option<serde_json::Value>> {
+    Ok(current()?.filter(Reservation::held).map(|value| {
+        let mut status = json!(value);
+        status["eta"] = json!(value.eta());
+        status
+    }))
+}
 /// Read-only admission check. It runs inside store transactions and the
 /// queued-job poll, so it never writes; `current()` persists transitions.
-pub(crate) fn holding(holder: Option<&str>) -> Result<Option<String>> {
+pub(crate) fn holding(holder: Option<&str>) -> Result<Option<Reservation>> {
     let Some(mut value) = load()? else {
         return Ok(None);
     };
     observe(&mut value);
-    Ok((!value.admits(holder)).then_some(value.id))
+    Ok((!value.admits(holder)).then_some(value))
 }
 pub(super) fn update(body: Option<serde_json::Value>) -> Result<serde_json::Value> {
     let _lock = lock()?;
@@ -204,7 +221,7 @@ mod tests {
             super::super::tests::write_test_lease("reservation-restart");
             let created = update(Some(json!({"quiet_below": 0, "window": 1}))).unwrap();
             let id = created["id"].as_str().unwrap();
-            assert_eq!(holding(None).unwrap().as_deref(), Some(id));
+            assert_eq!(holding(None).unwrap().unwrap().id, id);
             let mut restored = load().unwrap().unwrap();
             assert_eq!(restored.id, id);
             restored.state = "active".into();
@@ -212,6 +229,46 @@ mod tests {
             save(&restored).unwrap();
             assert_eq!(current().unwrap().unwrap().state, "expired");
             assert!(holding(None).unwrap().is_none());
+        });
+    }
+
+    #[test]
+    fn reservation_status_reports_only_held_reservations_with_eta() {
+        crate::test_support::with_isolated_home(|home| {
+            let host = home.path().join("runner-daemons/lab/host");
+            let _host =
+                crate::test_support::EnvVarGuard::set(crate::paths::DAEMON_STATE_DIR_ENV, &host);
+            let created = update(Some(json!({
+                "quiet_below": 0, "window": 1, "reason": "measurement"
+            })))
+            .unwrap();
+            let original: Reservation = serde_json::from_value(created).unwrap();
+            for (state, expected_end) in [
+                ("waiting_for_quiet", Some(original.wait_until)),
+                ("active", Some(original.wait_until + 60000)),
+                ("released", None),
+                ("expired", None),
+                ("reservation_wait_timeout", None),
+            ] {
+                let mut value = original.clone();
+                value.state = state.into();
+                value.active_until = Some(original.wait_until + 60000);
+                save(&value).unwrap();
+                let reported = status().unwrap();
+                if let Some(end) = expected_end {
+                    let reported = reported.expect(state);
+                    assert_eq!(reported["id"], original.id);
+                    assert_eq!(reported["state"], state);
+                    assert_eq!(reported["reason"], "measurement");
+                    let eta = chrono::DateTime::parse_from_rfc3339(
+                        reported["eta"].as_str().expect("RFC 3339 ETA"),
+                    )
+                    .unwrap();
+                    assert_eq!(eta.timestamp_millis(), end as i64, "{state}");
+                } else {
+                    assert!(reported.is_none(), "{state} is not a live blocker");
+                }
+            }
         });
     }
 
