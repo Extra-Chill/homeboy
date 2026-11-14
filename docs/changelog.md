@@ -4,6 +4,11 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.464.14] - 2026-11-14
+
+### Fixed
+- count only open PRs when resolving an issue's linked PRs
+
 ## [0.464.13] - 2026-11-14
 
 ### Fixed
