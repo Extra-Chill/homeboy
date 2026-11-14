@@ -5670,6 +5670,52 @@ fn execution_step_reservation_before_recipe_and_index_repairs_and_executes_provi
     });
 }
 
+/// A recipe-recorded attempt whose lifecycle reservation never landed (the
+/// Cook exited between the two writes) is materialized from its recorded
+/// lineage, instead of refusing every later recovery of the Cook.
+#[test]
+fn retryable_pre_provider_retry_materializes_orphaned_recipe_attempt() {
+    use super::super::cook_lineage::{CookAttemptLineage, CookLineageKind};
+    for kind in [CookLineageKind::Retry, CookLineageKind::GateFix] {
+        homeboy_core::test_support::with_isolated_home(|_| {
+            let options = retryable_pre_provider_cook("cook-retry-orphaned-attempt", 2);
+            let orphaned_run_id = format!("{}-attempt-2-orphan", options.identity.cook_id);
+            super::super::cook_recipe::record_recipe_attempt_with_lineage_in_store(
+                &super::super::cook_recipe::default_store().expect("Cook recipe store"),
+                &options.identity.cook_id,
+                2,
+                &orphaned_run_id,
+                &options.identity.initial_plan,
+                Some(CookAttemptLineage {
+                    source_run_id: options.identity.initial_run_id.clone(),
+                    kind,
+                    source_patch_sha256: None,
+                }),
+            )
+            .expect("persist the attempt before its interrupted reservation");
+            assert!(!agent_task_lifecycle::run_record_exists(&orphaned_run_id)
+                .expect("probe missing lifecycle reservation"));
+
+            let recovered = crate::agent_task_service::retry(
+                &options.identity.initial_run_id,
+                None,
+                true,
+                true,
+            )
+            .unwrap_or_else(|error| panic!("{kind:?} orphan: {error:?}"));
+
+            assert_eq!(recovered.record.run_id, orphaned_run_id, "{kind:?}");
+            assert!(recovered.run, "{kind:?}");
+            assert_eq!(recovered.record.metadata["cook_attempt"], 2, "{kind:?}");
+            assert_eq!(
+                recovered.record.metadata["cook_retry_recipe_recovery"]["status"],
+                "materialized_orphaned_replacement",
+                "{kind:?}"
+            );
+        });
+    }
+}
+
 #[test]
 fn retryable_pre_provider_retry_concurrently_claims_one_successor() {
     homeboy_core::test_support::with_isolated_home(|_| {
