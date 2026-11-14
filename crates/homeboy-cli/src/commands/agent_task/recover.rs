@@ -218,10 +218,9 @@ mod tests {
     use crate::cli_surface::{Cli, Commands};
     use crate::commands::agent_task::AgentTaskCommand;
 
-    /// #17768: recover returns once the retry is admitted, with the new run
-    /// id, its state and follow-up commands, instead of waiting on the run.
+    /// A pressure-refused admission must not produce an ownerless queued retry.
     #[test]
-    fn recover_returns_after_retry_admission_with_the_new_run_id() {
+    fn recover_refuses_pressure_failed_unmaterialized_admission_without_a_successor() {
         use homeboy::agents::agent_task_lifecycle;
         crate::test_support::with_isolated_home(|_| {
             let cook_id = "cook-recover-admission";
@@ -233,10 +232,10 @@ mod tests {
                     "schema": "homeboy/unmaterialized-cook-binding/v1",
                     "request_ref": "sha256:request",
                     "worktree_ref": "repo@branch",
-                    "admission_inputs": { "cook_id": cook_id, "argv": ["cook"] },
+                    "admission_inputs": { "cook_id": cook_id, "argv": ["agent-task", "cook", "--issue", "https://github.com/Extra-Chill/homeboy/issues/18096", "--run-id", cook_id] },
                 }),
                 "blocked_runner_unavailable",
-                "selected runner requires admitted connected readiness evidence",
+                "runner cannot accept jobs (reasons: pressure)",
             )
             .unwrap();
             store
@@ -260,22 +259,23 @@ mod tests {
                     || Ok(()),
                     || super::recover(args),
                 )
-                .expect("recover");
+                .expect("recover returns a terminal failure report");
 
-            assert_eq!(exit_code, 0, "{report}");
-            let run_id = report["run_id"].as_str().unwrap();
-            assert_ne!(run_id, cook_id);
-            let admitted = store.read_record(run_id).unwrap();
-            assert!(!admitted.state().is_terminal());
-            assert_eq!(report["result"]["admitted"], true);
-            assert_eq!(report["result"]["state"], report["status"]);
-            assert_eq!(
-                report["result"]["status_command"],
-                format!("homeboy agent-task status {run_id}")
+            assert_eq!(exit_code, 1);
+            assert_eq!(report["status"], "failed");
+            assert_eq!(report["failure"]["code"], "validation.invalid_argument");
+            let message = report["failure"]["message"].as_str().unwrap();
+            assert!(message.contains("no replayable materialization identity"));
+            assert!(message.contains("homeboy agent-task cook --issue https://github.com/Extra-Chill/homeboy/issues/18096"));
+            assert!(!message.contains(&format!("--run-id {cook_id}")));
+            let records = store.read_records().unwrap();
+            assert!(
+                records.iter().all(|record| record.run_id == cook_id),
+                "no ownerless successor may be persisted"
             );
             assert_eq!(
-                report["result"]["diagnose_command"],
-                format!("homeboy agent-task diagnose {run_id}")
+                store.read_record(cook_id).unwrap().state(),
+                agent_task_lifecycle::AgentTaskRunState::Failed
             );
         });
     }

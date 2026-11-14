@@ -1663,25 +1663,9 @@ where
         }
     }
     if unmaterialized_admission {
-        if let Some(route_override) = route_override.filter(|override_| !override_.is_empty()) {
-            validate_admission_route_override(&source, route_override)?;
-        }
-        let retry_run_id = new_run_id
-            .map(str::to_string)
-            .unwrap_or_else(|| format!("retry-{}", uuid::Uuid::new_v4()));
-        let (record, created) = agent_task_lifecycle::retry_unmaterialized_cook_admission_in_store(
-            &lifecycle_store,
-            &source.run_id,
-            &retry_run_id,
-            force,
-        )?;
-        return Ok(AgentTaskRetryServiceResult {
-            record,
-            // An admission is reconciled by the controller, never executed as
-            // the empty task plan a generic retry would otherwise submit.
-            run: false,
-            created,
-        });
+        return Err(agent_task_lifecycle::unmaterialized_cook_retry_error(
+            &source,
+        ));
     }
     let recovered_replacement = lifecycle_store.with_store_lock(|| {
         let Some(mut cook_retry) = retryable_cook_attempt(&lifecycle_store, &source)? else {
@@ -1911,47 +1895,6 @@ where
         run,
         created: false,
     })
-}
-
-fn validate_admission_route_override(
-    source: &agent_task_lifecycle::AgentTaskRunRecord,
-    route_override: &CookProviderRouteOverride,
-) -> Result<()> {
-    let binding = &source.metadata["unmaterialized_cook_admission"]["binding"];
-    let runtime = &binding["provider_runtime_refs"];
-    for (name, requested, persisted) in [
-        (
-            "backend",
-            route_override.backend.as_ref(),
-            runtime["backend"].as_str(),
-        ),
-        (
-            "selector",
-            route_override.selector.as_ref(),
-            runtime["selector"].as_str(),
-        ),
-        (
-            "model",
-            route_override.model.as_ref(),
-            runtime["model"].as_str(),
-        ),
-    ] {
-        if requested.is_some_and(|value| Some(value.as_str()) != persisted) {
-            return Err(admission_route_override_error(&source.run_id, name));
-        }
-    }
-    Ok(())
-}
-
-fn admission_route_override_error(run_id: &str, field: &str) -> Error {
-    Error::validation_invalid_argument(
-        "provider-route",
-        format!(
-            "terminal unmaterialized Cook retry cannot change persisted {field}; submit a fresh Cook for a new provider route or policy"
-        ),
-        Some(run_id.to_string()),
-        None,
-    )
 }
 
 fn apply_cook_timeout_override(

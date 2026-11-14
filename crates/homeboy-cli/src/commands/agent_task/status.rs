@@ -368,6 +368,16 @@ fn status_without_feedback(args: StatusArgs) -> CmdResult<Value> {
                 }
             }
         }
+        // A legacy retry reservation has neither an executable plan nor an
+        // admission driver. Never present it as healthy capacity waiting.
+        if record.state() == agent_task_lifecycle::AgentTaskRunState::Queued
+            && agent_task_lifecycle::is_unmaterialized_cook_admission(&record)
+            && record.metadata["retry_of"].is_string()
+        {
+            let error = agent_task_lifecycle::unmaterialized_cook_retry_error(&record);
+            value["reason"] = json!(error.message);
+            value["waiting_for"] = json!("operator");
+        }
         if let Some(promotion) = record
             .metadata
             .pointer("/cook_delivery/artifacts/promotion")

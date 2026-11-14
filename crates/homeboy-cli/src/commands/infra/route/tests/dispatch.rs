@@ -2774,7 +2774,7 @@ fn detached_cook_without_a_lab_runner_does_not_fall_back_to_local_execution() {
 }
 
 #[test]
-fn lab_cook_retry_recovers_terminal_unmaterialized_admission_without_a_workspace() {
+fn lab_cook_retry_refuses_terminal_unmaterialized_admission_without_a_workspace() {
     crate::test_support::with_isolated_home(|_| {
         let admission_args = [
             "homeboy",
@@ -2895,123 +2895,8 @@ fn lab_cook_retry_recovers_terminal_unmaterialized_admission_without_a_workspace
         )
             },
         )
-        .expect("recover terminal admission through the control plane");
-        let recovered =
-            agent_task_lifecycle::exact_record("recovered-run").expect("replacement admission");
-        assert!(recovered.tasks.is_empty());
-        assert_eq!(
-            recovered.metadata["unmaterialized_cook_admission"]["binding"]["worktree_ref"],
-            "homeboy@fix-issue-11291-homeboy"
-        );
-        assert_eq!(
-            recovered.metadata["unmaterialized_cook_admission"]["binding"]["retry_of"],
-            "failed-run"
-        );
-        assert_eq!(
-            recovered.metadata["unmaterialized_cook_admission"]["binding"]["request_ref"],
-            "sha256:failed-run-request"
-        );
-        assert_eq!(
-            recovered.metadata["unmaterialized_cook_admission"]["binding"]["input_publication"]
-                ["published_root"],
-            binding["input_publication"]["published_root"]
-        );
-        let store = agent_task_lifecycle::AgentTaskLifecycleStore::from_environment().unwrap();
-        let intent = crate::agents::agent_task_service::load_execution_intent(
-            &store,
-            recovered.metadata["execution_scheduling"]["current_intent_id"]
-                .as_str()
-                .unwrap(),
-        )
-        .unwrap();
-        assert!(intent.authorizes(&recovered));
-        assert_eq!(
-            intent.recovery_attempt, 0,
-            "reservation does not spend recovery budget"
-        );
-        assert_eq!(
-            recovered.metadata["unmaterialized_cook_admission"]["binding"]["admission_inputs"]
-                ["cook_id"],
-            "recovered-run"
-        );
-        assert!(
-            recovered.metadata["unmaterialized_cook_admission"]["binding"]["admission_inputs"]
-                ["argv"]
-                .as_array()
-                .expect("replay argv")
-                .windows(2)
-                .any(|pair| pair == ["--run-id", "recovered-run"])
-        );
-
-        let equivalent_override =
-            homeboy::agents::agent_task_service::retry_with_provider_route_override(
-                "failed-run",
-                Some("equivalent-override-run"),
-                true,
-                true,
-                homeboy::agents::agent_task_service::CookProviderRouteOverride {
-                    backend: Some("fixture".to_string()),
-                    ..Default::default()
-                },
-            )
-            .expect("accept an equivalent provider route override");
-        assert!(!equivalent_override.run);
-        let intent = crate::agents::agent_task_service::load_execution_intent(
-            &store,
-            equivalent_override.record.metadata["execution_scheduling"]["current_intent_id"]
-                .as_str()
-                .unwrap(),
-        )
-        .unwrap();
-        assert!(intent.authorizes(&equivalent_override.record));
-        for (run_id, override_) in [
-            (
-                "changed-backend-run",
-                homeboy::agents::agent_task_service::CookProviderRouteOverride {
-                    backend: Some("other".to_string()),
-                    ..Default::default()
-                },
-            ),
-            (
-                "changed-model-run",
-                homeboy::agents::agent_task_service::CookProviderRouteOverride {
-                    model: Some("other-model".to_string()),
-                    acknowledge_model_override: true,
-                    ..Default::default()
-                },
-            ),
-        ] {
-            let error = homeboy::agents::agent_task_service::retry_with_provider_route_override(
-                "failed-run",
-                Some(run_id),
-                false,
-                true,
-                override_,
-            )
-            .expect_err("route changes require a fresh Cook");
-            assert!(error.message.contains("submit a fresh Cook"));
-            assert!(agent_task_lifecycle::exact_record(run_id).is_err());
-        }
-
-        let mut unrelated_binding = binding.clone();
-        unrelated_binding["request_ref"] = serde_json::json!("sha256:other-request");
-        agent_task_lifecycle::prepare_unmaterialized_cook_admission(
-            "requested-id-collision",
-            unrelated_binding,
-            "queued",
-            "unrelated admission",
-        )
-        .expect("persist unrelated admission");
-        let error = homeboy::agents::agent_task_service::retry(
-            "failed-run",
-            Some("requested-id-collision"),
-            false,
-            true,
-        )
-        .expect_err("unrelated requested retry id is rejected");
-        assert!(error
-            .message
-            .contains("already belongs to a different durable admission"));
+        .expect_err("an unmaterialized admission has no retry execution owner");
+        assert!(agent_task_lifecycle::exact_record("recovered-run").is_err());
     });
 }
 
