@@ -471,42 +471,49 @@ fn explicit_job_data_directory_remains_authoritative() {
     );
 }
 
+/// A lost tunnel, or a daemon that stops answering because another controller
+/// restarted the shared host daemon (#18063), recovers the session once and
+/// resends the keyed submission there.
 #[test]
-fn daemon_submission_recovers_a_lost_tunnel_before_resending_to_the_same_lease() {
-    let accepted = direct_daemon_session("lease-live", "http://127.0.0.1:1");
-    let submitted = std::cell::RefCell::new(Vec::new());
-    let recovered = std::cell::Cell::new(false);
+fn daemon_submission_recovers_the_session_before_resending() {
+    for (case, error, failed_sends) in [
+        ("lost tunnel", connect_error as fn() -> Error, 1),
+        ("restarted daemon", || transport_error("request"), 4),
+    ] {
+        let accepted = direct_daemon_session("lease-live", "http://127.0.0.1:1");
+        let submitted = std::cell::RefCell::new(Vec::new());
+        let recovered = std::cell::Cell::new(false);
 
-    let response = submit_daemon_exec_with_session_recovery(
-        "http://127.0.0.1:1",
-        Some(&accepted),
-        |endpoint| {
-            submitted.borrow_mut().push(endpoint.to_string());
-            if submitted.borrow().len() == 1 {
-                return Err(connect_error());
-            }
-            Ok(DaemonHttpTextResponse {
-                status_code: 200,
-                body: "{}".to_string(),
-            })
-        },
-        |session| {
-            recovered.set(true);
-            assert_eq!(
-                session.remote_daemon_lease_id.as_deref(),
-                Some("lease-live")
-            );
-            Ok("http://127.0.0.1:2".to_string())
-        },
-    )
-    .expect("recovered tunnel submits once to the proven daemon");
+        let response = submit_daemon_exec_with_session_recovery(
+            "http://127.0.0.1:1",
+            Some(&accepted),
+            |endpoint| {
+                submitted.borrow_mut().push(endpoint.to_string());
+                if endpoint.ends_with(":1") {
+                    return Err(error());
+                }
+                Ok(DaemonHttpTextResponse {
+                    status_code: 200,
+                    body: "{}".to_string(),
+                })
+            },
+            |session| {
+                recovered.set(true);
+                assert_eq!(
+                    session.remote_daemon_lease_id.as_deref(),
+                    Some("lease-live")
+                );
+                Ok("http://127.0.0.1:2".to_string())
+            },
+        )
+        .unwrap_or_else(|error| panic!("{case}: {error:?}"));
 
-    assert!(recovered.get());
-    assert_eq!(response.status_code, 200);
-    assert_eq!(
-        submitted.into_inner(),
-        ["http://127.0.0.1:1", "http://127.0.0.1:2"]
-    );
+        assert!(recovered.get(), "{case}");
+        assert_eq!(response.status_code, 200, "{case}");
+        let submitted = submitted.into_inner();
+        assert_eq!(submitted.len(), failed_sends + 1, "{case}");
+        assert_eq!(submitted.last().unwrap(), "http://127.0.0.1:2", "{case}");
+    }
 }
 
 /// #17987: a daemon slow to admit under contention must not strand the gate.

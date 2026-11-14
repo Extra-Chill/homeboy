@@ -304,27 +304,4 @@ mod tests {
             "0.417.15"
         );
     }
-
-    #[test]
-    fn only_in_scope_unconverged_service_units_block_convergence() {
-        let unit = |scope: &str, status: &str| crate::upgrade::RunnerServiceBinaryEntry {
-            unit: "u.service".to_string(),
-            scope: scope.to_string(),
-            binary: "/b".to_string(),
-            binary_version: None,
-            running_version: None,
-            active_state: None,
-            target_version: "0.417.15".to_string(),
-            status: status.to_string(),
-            reason: None,
-            recovery_commands: Vec::new(),
-        };
-        assert!(unit("host", "stale").blocks_convergence());
-        assert!(unit("host", "pending").blocks_convergence());
-        assert!(unit("host", "unknown").blocks_convergence());
-        assert!(!unit("legacy_controller", "stale").blocks_convergence());
-        assert!(!unit("host", "current").blocks_convergence());
-        assert!(!unit("host", "refreshed").blocks_convergence());
-        assert!(!unit("host", "inactive").blocks_convergence());
-    }
 }

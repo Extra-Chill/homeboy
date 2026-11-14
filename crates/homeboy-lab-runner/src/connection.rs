@@ -2863,7 +2863,7 @@ pub use service::{
 pub(crate) use service::{
     observe_service_units, probe_runner_binary_version,
     service_binary_link as host_service_binary_link, service_unit_name as runner_service_unit_name,
-    service_unit_scope, ServiceUnitObservation,
+    ServiceUnitObservation,
 };
 use session_store::*;
 pub(crate) use session_store::{controller_id, read_session};

@@ -207,8 +207,7 @@ fn execute_direct(runner: &Runner, command: &str) -> Result<DirectOutput> {
 ///
 /// A slot is protected when the configured Homeboy path, a runner-service
 /// link, or `$HOME/.local/bin/homeboy` resolves into it. Service links are
-/// discovered by glob: each runner's host link, plus any legacy per-controller
-/// link another controller has not yet retired (#18063). An unresolvable
+/// discovered by glob: each runner's host link (#18063). An unresolvable
 /// reference protects every slot.
 fn slot_shell_functions(root: &str, configured: &str) -> String {
     const SLOT_FUNCTIONS: &str = r#"slot_binary() {
@@ -246,7 +245,7 @@ slot_protected() {
       return 0 ;;
   esac
   reference_protects configured_homeboy_path "$configured" && return 0
-  for reference in "$HOME"/.local/share/homeboy/runner-service/*/host/homeboy "$HOME"/.local/share/homeboy/runner-service/*/controllers/*/homeboy; do
+  for reference in "$HOME"/.local/share/homeboy/runner-service/*/host/homeboy; do
     reference_protects runner_service_link "$reference" && return 0
   done
   reference_protects local_bin_link "$HOME/.local/bin/homeboy" && return 0
@@ -470,8 +469,7 @@ mod tests {
             assert!(slot.exists());
         }
 
-        let late_link =
-            home.join(".local/share/homeboy/runner-service/lab/controllers/late/homeboy");
+        let late_link = home.join(".local/share/homeboy/runner-service/late/host/homeboy");
         fs::create_dir_all(late_link.parent().expect("late dir")).expect("late dir");
         symlink(unreferenced.join("homeboy"), &late_link).expect("late link");
         let refused = run_shell_as(

@@ -1599,8 +1599,10 @@ const DAEMON_EXEC_SUBMIT_ATTEMPTS: usize = 4;
 /// The daemon admits a submission by its caller-owned `submission_key` and
 /// returns the already-active job for a repeated key, so an unanswered request
 /// is resent as-is: it either finds the job the first request created or
-/// creates it once. A connection lost before the daemon could answer recovers
-/// the accepted session's tunnel once and resends there.
+/// creates it once. A connection lost before the daemon could answer, or a
+/// daemon that never answers (for example because another controller restarted
+/// the shared host daemon, #18063), recovers the runner's session once and
+/// resends there.
 pub(super) fn submit_daemon_exec_with_session_recovery<Submit, Recover>(
     endpoint: &str,
     accepted_session: Option<&RunnerSession>,
@@ -1626,7 +1628,10 @@ where
         }
     };
     match submit_until_answered(endpoint) {
-        Err(error) if daemon_submission_connection_was_lost(&error) => {
+        Err(error)
+            if daemon_submission_connection_was_lost(&error)
+                || daemon_submission_went_unanswered(&error) =>
+        {
             let accepted_session = accepted_session.ok_or(error)?;
             let recovered_endpoint = recover(accepted_session)?;
             submit_until_answered(&recovered_endpoint).map_err(|retry_error| {
@@ -2239,11 +2244,12 @@ fn reattach_failure_is_transient(error: &Error) -> bool {
 /// A foreground follow owns only its replacement tunnel, not the persisted
 /// session's tunnel. The follow stays on the daemon that accepted the job, so
 /// a reconnect never silently switches it to a newly published generation.
-/// The one hand-off is to a successor that re-adopted this exact job: an
-/// in-place restart (`refresh-homeboy`, possibly by another controller
-/// sharing the host daemon, #18063) stops the accepting lease, and the
-/// restarted daemon on the same state directory takes the job under its own
-/// lease.
+/// The one hand-off is to a successor that re-adopted this exact job or
+/// settled it: an in-place restart (`refresh-homeboy`, possibly by another
+/// controller sharing the host daemon, #18063) stops the accepting lease, and
+/// the restarted daemon on the same state directory either takes the job under
+/// its own lease or records its terminal outcome (for example a job stopped
+/// between reservation and spawn).
 struct JobOwnerTransport {
     owner: std::cell::RefCell<Option<RunnerSession>>,
     temporary: std::cell::RefCell<Option<RunnerSession>>,
@@ -2272,7 +2278,10 @@ impl JobOwnerTransport {
                 self.follow_readopting_successor(
                     job_id,
                     || crate::lab_selection::current_daemon_session(runner_id),
-                    |endpoint| Ok(fetch_daemon_job(client, endpoint, job_id)?.daemon_lease_id),
+                    |endpoint| {
+                        let job = fetch_daemon_job(client, endpoint, job_id)?;
+                        Ok((job.daemon_lease_id, job.status.is_terminal()))
+                    },
                 )
                 .ok()
                 .flatten()
@@ -2282,12 +2291,13 @@ impl JobOwnerTransport {
     }
 
     /// Hand the follow to the runner's current daemon only when that daemon
-    /// reports this job under its own lease, i.e. it re-adopted the job.
+    /// reports this job under its own lease (it re-adopted the job) or reports
+    /// the job terminal (its outcome is settled and only needs reading).
     fn follow_readopting_successor(
         &self,
         job_id: &str,
         current: impl FnOnce() -> Result<RunnerSession>,
-        job_lease: impl FnOnce(&str) -> Result<Option<String>>,
+        job_state: impl FnOnce(&str) -> Result<(Option<String>, bool)>,
     ) -> Result<Option<String>> {
         let successor = current()?;
         let owner_lease = self
@@ -2301,12 +2311,16 @@ impl JobOwnerTransport {
         ) else {
             return Ok(None);
         };
-        if Some(&lease) == owner_lease.as_ref() || job_lease(&endpoint)? != Some(lease.clone()) {
+        if Some(&lease) == owner_lease.as_ref() {
+            return Ok(None);
+        }
+        let (job_lease, terminal) = job_state(&endpoint)?;
+        if !terminal && job_lease.as_ref() != Some(&lease) {
             return Ok(None);
         }
         homeboy_core::log_status!(
             "runner",
-            "job {job_id} was re-adopted by restarted daemon lease {lease}; following it"
+            "job {job_id} was re-adopted or settled by restarted daemon lease {lease}; following it"
         );
         // The successor's tunnel is the persisted session's; only the
         // follow's own temporary tunnel is closed.
@@ -2387,22 +2401,23 @@ mod job_owner_transport_tests {
     }
 
     #[test]
-    fn follow_moves_only_to_a_successor_that_readopted_the_job() {
+    fn follow_moves_only_to_a_successor_that_readopted_or_settled_the_job() {
         let owner = crate::test_support::direct_ssh_session("lease-old");
         let mut successor = crate::test_support::direct_ssh_session("lease-new");
         successor.local_url = Some("http://127.0.0.1:5555".to_string());
-        // (lease the successor reports for the job, expected endpoint)
-        for (job_lease, adopted) in [
-            (None, None),
-            (Some("lease-old"), None),
-            (Some("lease-new"), Some("http://127.0.0.1:5555")),
+        // (lease and terminality the successor reports for the job, expected endpoint)
+        for (job_lease, terminal, adopted) in [
+            (None, false, None),
+            (Some("lease-old"), false, None),
+            (Some("lease-new"), false, Some("http://127.0.0.1:5555")),
+            (Some("lease-old"), true, Some("http://127.0.0.1:5555")),
         ] {
             let follow = JobOwnerTransport::new(Some(&owner));
             let endpoint = follow
                 .follow_readopting_successor(
                     "job",
                     || Ok(successor.clone()),
-                    |_| Ok(job_lease.map(str::to_string)),
+                    |_| Ok((job_lease.map(str::to_string), terminal)),
                 )
                 .unwrap();
             assert_eq!(endpoint.as_deref(), adopted);

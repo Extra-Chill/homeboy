@@ -2226,6 +2226,15 @@ where
     // One budget covers the connection workers and the helpers, so a stop
     // never waits on back-to-back drains.
     let drain_deadline = Instant::now() + HELPER_DRAIN_DEADLINE;
+    // Another controller sharing this host daemon may restart it while a job
+    // it admitted is between child reservation and spawn. Let that spawn land
+    // so the successor re-adopts a running child instead of expiring the
+    // reservation and failing the job (#18063).
+    if shutdown_requested {
+        while job_store.has_pending_local_child_spawn() && Instant::now() < drain_deadline {
+            std::thread::sleep(Duration::from_millis(50));
+        }
+    }
     let connection_results = if shutdown_requested {
         // A requested stop must not wait on a request still in flight; it ends
         // with the process and durable state is already crash-safe (#15483).
