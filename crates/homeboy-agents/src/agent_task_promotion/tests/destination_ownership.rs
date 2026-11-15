@@ -3,78 +3,89 @@ use crate::agent_task_promotion::destination;
 
 #[test]
 fn cook_recovery_two_cooks_refuses_foreign_destination_and_preserves_staged_tree() {
-    let temp = tempfile::tempdir().unwrap();
-    let repo = temp.path().join("repo");
-    std::fs::create_dir(&repo).unwrap();
-    git(&repo, &["init", "-q"]);
-    git(&repo, &["config", "user.name", "Test"]);
-    git(&repo, &["config", "user.email", "test@example.com"]);
-    std::fs::write(repo.join("file"), "base\n").unwrap();
-    git(&repo, &["add", "."]);
-    git(&repo, &["commit", "-qm", "base"]);
-    let a = temp.path().join("a");
-    let b = temp.path().join("b");
-    git(
-        &repo,
-        &["worktree", "add", "-b", "cook-a", a.to_str().unwrap()],
-    );
-    git(
-        &repo,
-        &["worktree", "add", "-b", "cook-b", b.to_str().unwrap()],
-    );
-    destination::record(&a, "cook-a").unwrap();
-    destination::record(&b, "cook-b").unwrap();
-    let base = git_head(&b, "HEAD");
-    git(&repo, &["update-ref", "refs/remotes/origin/trunk", &base]);
-    std::fs::write(b.join("file"), "foreign candidate\n").unwrap();
-    git(&b, &["add", "file"]);
-    git(&b, &["commit", "-qm", "Cook B candidate"]);
-    let candidate = crate::agent_task::AgentTaskCandidate {
-        base_sha: base.clone(),
-        candidate_sha: git_head(&b, "HEAD"),
-        tree_sha: git_head(&b, "HEAD^{tree}"),
-    };
-    assert!(crate::agent_task_promotion::materialize_candidate_tree(&a, &candidate).is_err());
-    std::fs::write(a.join("file"), "unpublished candidate\n").unwrap();
-    git(&a, &["add", "file"]);
-    let tree = String::from_utf8(
-        Command::new("git")
-            .arg("-C")
-            .arg(&a)
-            .arg("write-tree")
-            .output()
-            .unwrap()
-            .stdout,
-    )
-    .unwrap()
-    .trim()
-    .to_string();
-    let head = git_head(&a, "HEAD");
-    let error = destination::before_reset(&a, "cook-b").unwrap_err();
-    assert!(error.message.contains("destination belongs to Cook cook-a"));
-    assert!(destination::check_run(&a, Some("cook-b")).is_err());
-    let staged = String::from_utf8(
-        Command::new("git")
-            .arg("-C")
-            .arg(&a)
-            .arg("write-tree")
-            .output()
-            .unwrap()
-            .stdout,
-    )
-    .unwrap()
-    .trim()
-    .to_string();
-    assert_eq!(staged, tree);
-    assert_eq!(git_head(&a, "HEAD"), head);
-    destination::before_reset(&a, "cook-a").unwrap();
-    git(&a, &["reset", "--hard", "HEAD"]);
-    assert_eq!(git_head(&a, "refs/homeboy/candidates/cook-a^{tree}"), tree);
-    assert_eq!(std::fs::read_to_string(a.join("file")).unwrap(), "base\n");
-    assert!(destination::check(&b, Some("cook-b")).is_ok());
-    assert_eq!(git_head(&repo, "refs/remotes/origin/trunk"), base);
-    git(&a, &["checkout", "-b", "unexpected"]);
-    assert!(destination::before_reset(&a, "cook-a").is_err());
+    homeboy_core::test_support::with_isolated_home(|_| {
+        seed_recipe("cook-a");
+        let temp = tempfile::tempdir().unwrap();
+        let repo = temp.path().join("repo");
+        std::fs::create_dir(&repo).unwrap();
+        git(&repo, &["init", "-q"]);
+        git(
+            &repo,
+            &[
+                "config",
+                "remote.origin.url",
+                "https://example.test/repo.git",
+            ],
+        );
+        git(&repo, &["config", "user.name", "Test"]);
+        git(&repo, &["config", "user.email", "test@example.com"]);
+        std::fs::write(repo.join("file"), "base\n").unwrap();
+        git(&repo, &["add", "."]);
+        git(&repo, &["commit", "-qm", "base"]);
+        let a = temp.path().join("a");
+        let b = temp.path().join("b");
+        git(
+            &repo,
+            &["worktree", "add", "-b", "cook-a", a.to_str().unwrap()],
+        );
+        git(
+            &repo,
+            &["worktree", "add", "-b", "cook-b", b.to_str().unwrap()],
+        );
+        destination::record(&a, "cook-a").unwrap();
+        destination::record(&b, "cook-b").unwrap();
+        let base = git_head(&b, "HEAD");
+        git(&repo, &["update-ref", "refs/remotes/origin/trunk", &base]);
+        std::fs::write(b.join("file"), "foreign candidate\n").unwrap();
+        git(&b, &["add", "file"]);
+        git(&b, &["commit", "-qm", "Cook B candidate"]);
+        let candidate = crate::agent_task::AgentTaskCandidate {
+            base_sha: base.clone(),
+            candidate_sha: git_head(&b, "HEAD"),
+            tree_sha: git_head(&b, "HEAD^{tree}"),
+        };
+        assert!(crate::agent_task_promotion::materialize_candidate_tree(&a, &candidate).is_err());
+        std::fs::write(a.join("file"), "unpublished candidate\n").unwrap();
+        git(&a, &["add", "file"]);
+        let tree = String::from_utf8(
+            Command::new("git")
+                .arg("-C")
+                .arg(&a)
+                .arg("write-tree")
+                .output()
+                .unwrap()
+                .stdout,
+        )
+        .unwrap()
+        .trim()
+        .to_string();
+        let head = git_head(&a, "HEAD");
+        let error = destination::before_reset(&a, "cook-b").unwrap_err();
+        assert!(error.message.contains("destination belongs to Cook cook-a"));
+        assert!(destination::check_run(&a, Some("cook-b")).is_err());
+        let staged = String::from_utf8(
+            Command::new("git")
+                .arg("-C")
+                .arg(&a)
+                .arg("write-tree")
+                .output()
+                .unwrap()
+                .stdout,
+        )
+        .unwrap()
+        .trim()
+        .to_string();
+        assert_eq!(staged, tree);
+        assert_eq!(git_head(&a, "HEAD"), head);
+        destination::before_reset(&a, "cook-a").unwrap();
+        git(&a, &["reset", "--hard", "HEAD"]);
+        assert_eq!(git_head(&a, "refs/homeboy/candidates/cook-a^{tree}"), tree);
+        assert_eq!(std::fs::read_to_string(a.join("file")).unwrap(), "base\n");
+        assert!(destination::check(&b, Some("cook-b")).is_ok());
+        assert_eq!(git_head(&repo, "refs/remotes/origin/trunk"), base);
+        git(&a, &["checkout", "-b", "unexpected"]);
+        assert!(destination::before_reset(&a, "cook-a").is_err());
+    });
 }
 
 /// A destination follows its Cook's lineage and outlives a terminal owner: a
@@ -84,10 +95,19 @@ fn cook_recovery_two_cooks_refuses_foreign_destination_and_preserves_staged_tree
 fn destination_passes_to_retries_and_to_successors_of_a_terminal_cook() {
     use crate::agent_task_lifecycle as lifecycle;
     homeboy_core::test_support::with_isolated_home(|home| {
+        seed_recipe("cook-a");
         let store = lifecycle::AgentTaskLifecycleStore::from_environment().unwrap();
         let repo = home.path().join("repo");
         std::fs::create_dir(&repo).unwrap();
         git(&repo, &["init", "-q", "-b", "fix/issue-1"]);
+        git(
+            &repo,
+            &[
+                "config",
+                "remote.origin.url",
+                "https://example.test/repo.git",
+            ],
+        );
         git(&repo, &["config", "user.name", "Test"]);
         git(&repo, &["config", "user.email", "test@example.com"]);
         std::fs::write(repo.join("file"), "base\n").unwrap();
@@ -147,4 +167,49 @@ fn destination_passes_to_retries_and_to_successors_of_a_terminal_cook() {
         );
         assert!(destination::check(&repo, Some("cook-b")).is_ok());
     });
+}
+
+fn seed_recipe(cook: &str) {
+    use crate::agent_task_service::*;
+    let options = CookRequest {
+        identity: CookIdentity {
+            cook_id: cook.into(),
+            initial_run_id: cook.into(),
+            initial_plan: crate::agent_task_scheduler::AgentTaskPlan::new(
+                "candidate-test",
+                vec![serde_json::from_value(serde_json::json!({
+                    "schema": crate::agent_task::AGENT_TASK_REQUEST_SCHEMA,
+                    "task_id": "candidate", "executor": {"backend": "test"},
+                    "instructions": "change", "workspace": {"root": "/tmp"}, "inputs": {}
+                }))
+                .unwrap()],
+            ),
+        },
+        workspace: CookWorkspace {
+            to_worktree: "fixture@candidate".into(),
+            source_worktree_path: None,
+            task_base_sha: None,
+            source_refs: vec![],
+        },
+        provider_transport: CookProviderTransport {
+            provider_invocation: None,
+            attempt_dispatcher: None,
+        },
+        gates: Default::default(),
+        retry_policy: CookRetryPolicy { max_attempts: 1 },
+        finalization: CookFinalization {
+            publish_incomplete_draft: false,
+            tracker_note: true,
+            no_finalize: true,
+            draft_pr: false,
+            base: "main".into(),
+            head: Some("cook/head".into()),
+            title: "fix: preserve candidate".into(),
+            commit_message: "fix: preserve candidate".into(),
+            protected_branches: vec![],
+        },
+        harvest_context:
+            crate::agent_task_scheduler::HarvestExecutionContext::from_current_process().unwrap(),
+    };
+    persist_initial_recipe(&options).unwrap();
 }

@@ -45,6 +45,8 @@ pub(super) fn run(command: CandidateCommand) -> crate::commands::CmdResult<Value
         &target.run_id,
     )?;
     let recipe = homeboy::agents::agent_task_service::load_recipe_for_attempt(&target.run_id)?;
+    let title =
+        homeboy::agents::agent_task_service::candidate_publication_title(&store, &target.run_id)?;
     let promotion = &record.metadata["cook_delivery"]["artifacts"]["promotion"];
     let branch = recipe
         .as_ref()
@@ -66,7 +68,7 @@ pub(super) fn run(command: CandidateCommand) -> crate::commands::CmdResult<Value
     let reference = format!("refs/homeboy/candidates/{cook}");
     if let Some(source) = promotion.pointer("/target/path").and_then(Value::as_str) {
         if git(Path::new(source), &["show-ref", "--verify", &reference]).is_ok() {
-            return checkout_from(&into, source, &reference, branch);
+            return checkout_from(&into, source, &reference, branch, &title);
         }
     }
     let observation = homeboy::core::observation::ObservationStore::open_initialized()?;
@@ -121,7 +123,13 @@ pub(super) fn run(command: CandidateCommand) -> crate::commands::CmdResult<Value
             ))
         }
     };
-    checkout_from(&into, &fetched.output_path.to_string_lossy(), &sha, branch)
+    checkout_from(
+        &into,
+        &fetched.output_path.to_string_lossy(),
+        &sha,
+        branch,
+        &title,
+    )
 }
 
 fn ensure_clean(into: &Path) -> Result<()> {
@@ -141,11 +149,13 @@ fn checkout_from(
     source: &str,
     revision: &str,
     branch: &str,
+    title: &str,
 ) -> crate::commands::CmdResult<Value> {
     ensure_clean(into)?;
     git(into, &["check-ref-format", "--branch", branch])?;
     git(into, &["fetch", "--no-tags", "--", source, revision])?;
-    let sha = git(into, &["rev-parse", "FETCH_HEAD^{commit}"])?;
+    let sha =
+        homeboy::core::git::publication_candidate(&into.to_string_lossy(), "FETCH_HEAD", title)?;
     git(into, &["checkout", "-B", branch, &sha, "--"])?;
     let path = into
         .canonicalize()
@@ -372,18 +382,58 @@ mod tests {
                 ],
             )
             .unwrap();
+            git(
+                &destination,
+                &[
+                    "remote",
+                    "set-url",
+                    "origin",
+                    "https://example.test/repo.git",
+                ],
+            )
+            .unwrap();
+            git(&destination, &["config", "user.name", "Operator"]).unwrap();
+            git(
+                &destination,
+                &["config", "user.email", "operator@example.test"],
+            )
+            .unwrap();
             std::fs::write(source.join("file"), "candidate").unwrap();
-            git(&source, &["commit", "-am", "candidate"]).unwrap();
+            git(
+                &source,
+                &[
+                    "-c",
+                    "user.name=Homeboy",
+                    "-c",
+                    "user.email=homeboy@localhost",
+                    "commit",
+                    "-am",
+                    "homeboy: cook candidate",
+                ],
+            )
+            .unwrap();
             let sha = git(&source, &["rev-parse", "HEAD"]).unwrap();
             let run_id = "checkout-attempt";
             let lifecycle =
                 homeboy::agents::agent_task_lifecycle::AgentTaskLifecycleStore::from_environment()
                     .unwrap();
+            use homeboy::agents::agent_task_service::*;
+            let options = CookRequest {
+                identity: CookIdentity { cook_id: "checkout-cook".into(), initial_run_id: run_id.into(), initial_plan: test_plan() },
+                workspace: CookWorkspace { to_worktree: "fixture@candidate".into(), source_worktree_path: None, task_base_sha: None, source_refs: vec![] },
+                provider_transport: CookProviderTransport { provider_invocation: None, attempt_dispatcher: None },
+                gates: Default::default(),
+                retry_policy: CookRetryPolicy { max_attempts: 1 },
+                finalization: CookFinalization { publish_incomplete_draft: false, tracker_note: true, no_finalize: true, draft_pr: false, base: "main".into(), head: Some("cook/head".into()), title: "fix: publish useful candidates".into(), commit_message: "fix: publish useful candidates".into(), protected_branches: vec![] },
+                harvest_context: homeboy::agents::agent_task_scheduler::HarvestExecutionContext::from_current_process().unwrap(),
+            };
+            persist_initial_recipe(&options).unwrap();
             let mut plan = test_plan();
             plan.metadata["cook_id"] = json!("checkout-cook");
             plan.metadata["cook_attempt"] = json!(1);
             homeboy::agents::agent_task_lifecycle::submit_plan(&plan, Some(run_id)).unwrap();
             homeboy::agents::agent_task_lifecycle::rewrite_record_for_test(run_id, |record| {
+                record.set_state_for_test(homeboy::agents::agent_task_lifecycle::AgentTaskRunState::Succeeded);
                 record.metadata = json!({"cook_id": "checkout-cook", "cook_delivery": {"artifacts": {"promotion": {
                     "target": {"path": source, "branch": "cook/head"}
                 }}}});
@@ -420,7 +470,17 @@ mod tests {
                 into: destination.clone(),
             })
             .unwrap();
-            assert_eq!(value["candidate_sha"], sha);
+            let published_sha = git(&destination, &["rev-parse", "HEAD"]).unwrap();
+            assert_eq!(value["candidate_sha"], published_sha);
+            assert_eq!(git(&destination, &["show", "-s", "--format=%an <%ae>|%cn <%ce>|%s", "HEAD"]).unwrap(), "Operator <operator@example.test>|Operator <operator@example.test>|fix: publish useful candidates");
+            assert_eq!(
+                git(&destination, &["rev-parse", "HEAD^{tree}"]).unwrap(),
+                git(&source, &["rev-parse", "HEAD^{tree}"]).unwrap()
+            );
+            assert_eq!(
+                git(&destination, &["rev-parse", "HEAD^"]).unwrap(),
+                git(&source, &["rev-parse", "HEAD^"]).unwrap()
+            );
             assert_eq!(
                 git(&destination, &["branch", "--show-current"]).unwrap(),
                 "cook/head"
@@ -440,7 +500,10 @@ mod tests {
             .unwrap_err()
             .to_string()
             .contains("uncommitted changes"));
-            assert_eq!(git(&destination, &["rev-parse", "HEAD"]).unwrap(), sha);
+            assert_eq!(
+                git(&destination, &["rev-parse", "HEAD"]).unwrap(),
+                published_sha
+            );
         });
     }
 

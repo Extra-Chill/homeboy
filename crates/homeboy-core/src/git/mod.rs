@@ -1,3 +1,5 @@
+mod publication_candidate;
+pub use publication_candidate::publication_candidate;
 mod changes;
 mod shallow;
 pub use shallow::{deepen_shallow_source, is_shallow_repository, shallow_source_remote};

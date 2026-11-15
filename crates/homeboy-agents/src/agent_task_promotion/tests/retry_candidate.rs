@@ -108,11 +108,21 @@ fn runtime_retry_inherits_uncommitted_work_promotes_and_pushes_candidate_sha() {
         report.candidate.as_ref().unwrap().candidate_sha,
         candidate.candidate_sha
     );
+    git(
+        &root,
+        &[
+            "config",
+            "remote.origin.url",
+            "https://example.test/repo.git",
+        ],
+    );
     let mut status_json = serde_json::to_value(&report).unwrap();
-    super::super::pin_applied_candidate("retry-cook", &mut status_json).unwrap();
+    super::super::pin_applied_candidate("retry-cook", &mut status_json, "fix: retry candidate")
+        .unwrap();
     let reference = status_json["candidate_ref"].as_str().unwrap();
     assert_eq!(reference, "refs/homeboy/candidates/retry-cook");
-    assert_eq!(git_head(&root, reference), candidate.candidate_sha);
+    let published_sha = git_head(&root, reference);
+    assert_ne!(published_sha, candidate.candidate_sha);
     assert_eq!(
         git_head(&root, &format!("{reference}^{{tree}}")),
         candidate.tree_sha
