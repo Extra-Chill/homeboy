@@ -70,7 +70,7 @@ pub(in crate::git) use client::resolve_component_github;
 pub(in crate::git) use pr_view_record::{parse_pr_view, pr_view_args, PrViewRecord};
 
 // Public probe/token helpers.
-pub use client::{gh_probe_succeeds, github_token_from_env_or_gh};
+pub use client::{gh_probe_succeeds, github_token_from_env_or_gh, publication_repository};
 
 // Issue operations.
 pub use issues::{issue_close, issue_comment, issue_create, issue_edit, issue_find};

@@ -1137,7 +1137,9 @@ pub fn render_review_dossier(
     blocks.join("\n\n") + "\n"
 }
 
-fn render_source_relationships(relationships: &[AgentTaskReviewIssueRelationship]) -> String {
+pub(crate) fn render_source_relationships(
+    relationships: &[AgentTaskReviewIssueRelationship],
+) -> String {
     relationships
         .iter()
         .map(|item| {

@@ -24,6 +24,13 @@ use super::super::resolve_target;
 /// component's per-host GitHub config (proxy/env), so `gh` operations target the
 /// component's actual host — including GitHub Enterprise — instead of silently
 /// defaulting to `github.com`.
+/// The GitHub repository pull requests for this checkout are published to:
+/// the component's `remote_url`, else the detected remote. Issue links in a PR
+/// body are relative to this repository.
+pub fn publication_repository(component_id: Option<&str>, path: &str) -> Result<GitHubRepo> {
+    resolve_component_github(component_id, Some(path)).map(|(_, repo, _)| repo)
+}
+
 pub(in crate::git) fn resolve_component_github(
     component_id: Option<&str>,
     path_override: Option<&str>,

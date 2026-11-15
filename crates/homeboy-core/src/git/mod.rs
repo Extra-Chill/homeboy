@@ -59,6 +59,7 @@ pub use commits::{
     find_version_release_commit_with_prefix, matches_release_subject, release_commit_subject,
 };
 pub use gh_client::{github_cli_env, GhClient};
+pub use github::publication_repository;
 pub use github::push_markdown_body_file_arg;
 pub use github::{
     gh_probe_succeeds, github_token_from_env_or_gh, issue_close, issue_comment, issue_create,
