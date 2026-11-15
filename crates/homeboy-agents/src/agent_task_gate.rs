@@ -616,6 +616,19 @@ fn walk_gate_dependency_roots(
     component_id: Option<&str>,
     gate_commands: Option<&[String]>,
 ) -> Result<Vec<AgentTaskGateSetupEvidence>> {
+    let component = match homeboy_core::deps::resolve_dependency_hydration_component(
+        checkout,
+        workspace,
+        ".",
+        policy,
+        component_id,
+    )? {
+        homeboy_core::deps::DependencyHydrationComponent::Resolved(component) => component,
+        homeboy_core::deps::DependencyHydrationComponent::Unavailable => return Ok(Vec::new()),
+        homeboy_core::deps::DependencyHydrationComponent::DeadlineExceeded(outcome) => {
+            return Ok(vec![outcome]);
+        }
+    };
     let mut candidates = vec![checkout.to_path_buf()];
     let mut pending = vec![checkout.to_path_buf()];
     while let Some(directory) = pending.pop() {
@@ -700,12 +713,8 @@ fn walk_gate_dependency_roots(
         {
             continue;
         }
-        let mut outcomes = homeboy_core::deps::hydrate_declared_dependencies_for_component(
-            &candidate,
-            workspace,
-            relative,
-            policy,
-            component_id,
+        let mut outcomes = homeboy_core::deps::hydrate_declared_dependencies_with_component(
+            &component, &candidate, workspace, relative, policy,
         )?;
         let failed = outcomes
             .iter()
@@ -8895,6 +8904,48 @@ mod tests {
             None,
             Some(&gates),
         )
+    }
+
+    #[test]
+    fn dependency_walk_resolves_component_once() {
+        homeboy_core::test_support::with_isolated_home(|_| {
+            let checkout = tempfile::tempdir().expect("checkout");
+            let root = checkout.path();
+            fs::write(
+                root.join("homeboy.json"),
+                r#"{"id":"fixture-deps","deps":{"provider":"fixture","commands":{"install":{"argv":["sh","-c","printf hydrated >> hydration-count"]}}}}"#,
+            )
+            .expect("dependency provider");
+            for index in 0..40 {
+                fs::create_dir_all(root.join(format!("plain-{index}/nested")))
+                    .expect("plain nested directories");
+            }
+
+            let before = homeboy_core::deps::hydration_component_resolution_count();
+            let evidence = hydrate_gate_dependency_roots_for_component(
+                root,
+                true,
+                "fixture",
+                &homeboy_core::deps::DependencyHydrationPolicy::default(),
+                None,
+                None,
+            )
+            .expect("dependency walk");
+            assert_eq!(
+                homeboy_core::deps::hydration_component_resolution_count() - before,
+                1
+            );
+            assert_eq!(evidence.len(), 1);
+            assert_eq!(evidence[0].package_root, ".");
+            assert_eq!(
+                evidence[0].status,
+                homeboy_core::deps::DependencyHydrationStatus::Succeeded
+            );
+            assert_eq!(
+                fs::read_to_string(root.join("hydration-count")).unwrap(),
+                "hydrated"
+            );
+        });
     }
 
     #[test]

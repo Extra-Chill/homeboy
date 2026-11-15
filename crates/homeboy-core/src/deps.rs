@@ -223,14 +223,27 @@ pub fn hydrate_declared_dependencies_for_component(
     component_id: Option<&str>,
 ) -> Result<Vec<DependencyHydrationOutcome>> {
     let deadline = Instant::now() + policy.timeout;
-    hydrate_declared_dependencies_unlocked(
+    match resolve_dependency_hydration_component_until(
         path,
         workspace,
         package_root,
         policy,
         deadline,
-        component_id.map(str::to_string),
-    )
+        component_id,
+    )? {
+        DependencyHydrationComponent::Resolved(component) => {
+            hydrate_declared_dependencies_unlocked(
+                &component,
+                path,
+                workspace,
+                package_root,
+                policy,
+                deadline,
+            )
+        }
+        DependencyHydrationComponent::Unavailable => Ok(Vec::new()),
+        DependencyHydrationComponent::DeadlineExceeded(outcome) => Ok(vec![outcome]),
+    }
 }
 
 /// The directories where the dependency providers resolved at `path` would run
@@ -244,33 +257,104 @@ pub fn dependency_selection_roots(path: &Path, allow_default: bool) -> Result<Ve
     provider::dependency_selection_roots(path, allow_default)
 }
 
-fn hydrate_declared_dependencies_unlocked(
+/// Component resolution preserves the hydration deadline and unavailable-component
+/// behavior without requiring callers to repeat resolution for each package root.
+pub enum DependencyHydrationComponent {
+    Resolved(Component),
+    Unavailable,
+    DeadlineExceeded(DependencyHydrationOutcome),
+}
+
+#[cfg(any(test, feature = "test-support"))]
+thread_local! {
+    static HYDRATION_COMPONENT_RESOLUTIONS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+/// Number of hydration component resolutions on this thread (for regression tests).
+#[cfg(any(test, feature = "test-support"))]
+pub fn hydration_component_resolution_count() -> usize {
+    HYDRATION_COMPONENT_RESOLUTIONS.with(|count| count.get())
+}
+
+/// Resolve once for a checkout under a fresh hydration deadline.
+pub fn resolve_dependency_hydration_component(
+    path: &Path,
+    workspace: &str,
+    package_root: &str,
+    policy: &DependencyHydrationPolicy,
+    component_id: Option<&str>,
+) -> Result<DependencyHydrationComponent> {
+    resolve_dependency_hydration_component_until(
+        path,
+        workspace,
+        package_root,
+        policy,
+        Instant::now() + policy.timeout,
+        component_id,
+    )
+}
+
+fn resolve_dependency_hydration_component_until(
     path: &Path,
     workspace: &str,
     package_root: &str,
     policy: &DependencyHydrationPolicy,
     deadline: Instant,
-    component_id: Option<String>,
-) -> Result<Vec<DependencyHydrationOutcome>> {
-    let path_arg = path.display().to_string();
-    let component_path_arg = path_arg.clone();
-    let component = match run_with_hydration_deadline(policy, deadline, move |_| {
-        Ok(
-            component::resolve_effective(component_id.as_deref(), Some(&component_path_arg), None)
-                .ok(),
-        )
-    })? {
-        Some(Some(component)) => component,
-        Some(None) => return Ok(Vec::new()),
-        None => {
-            return Ok(vec![deadline_hydration_outcome(
+    component_id: Option<&str>,
+) -> Result<DependencyHydrationComponent> {
+    #[cfg(any(test, feature = "test-support"))]
+    HYDRATION_COMPONENT_RESOLUTIONS.with(|count| count.set(count.get() + 1));
+    let component_path_arg = path.display().to_string();
+    let component_id = component_id.map(str::to_string);
+    Ok(
+        match run_with_hydration_deadline(policy, deadline, move |_| {
+            Ok(component::resolve_effective(
+                component_id.as_deref(),
+                Some(&component_path_arg),
+                None,
+            )
+            .ok())
+        })? {
+            Some(Some(component)) => DependencyHydrationComponent::Resolved(component),
+            Some(None) => DependencyHydrationComponent::Unavailable,
+            None => DependencyHydrationComponent::DeadlineExceeded(deadline_hydration_outcome(
                 policy,
                 workspace,
                 package_root,
-            )])
-        }
-    };
-    let mut component = component;
+            )),
+        },
+    )
+}
+
+/// Hydrate one root from a previously resolved component, with its own deadline.
+/// Provider discovery uses the candidate path without resolving component identity again.
+/// Callers time their complete hydration operation.
+pub fn hydrate_declared_dependencies_with_component(
+    component: &Component,
+    path: &Path,
+    workspace: &str,
+    package_root: &str,
+    policy: &DependencyHydrationPolicy,
+) -> Result<Vec<DependencyHydrationOutcome>> {
+    hydrate_declared_dependencies_unlocked(
+        component,
+        path,
+        workspace,
+        package_root,
+        policy,
+        Instant::now() + policy.timeout,
+    )
+}
+
+fn hydrate_declared_dependencies_unlocked(
+    component: &Component,
+    path: &Path,
+    workspace: &str,
+    package_root: &str,
+    policy: &DependencyHydrationPolicy,
+    deadline: Instant,
+) -> Result<Vec<DependencyHydrationOutcome>> {
+    let mut component = component.clone();
     if hydration_deadline_expired(policy, deadline) {
         return Ok(vec![deadline_hydration_outcome(
             policy,
@@ -278,7 +362,7 @@ fn hydrate_declared_dependencies_unlocked(
             package_root,
         )]);
     }
-    component.local_path = path_arg;
+    component.local_path = path.display().to_string();
     let component_for_discovery = component.clone();
     let path_for_discovery = path.to_path_buf();
     let Some(providers) = run_with_hydration_deadline(policy, deadline, move |control| {
