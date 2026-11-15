@@ -6675,13 +6675,16 @@ mod tests {
                 let options =
                     workspace_prune_page_options(policy, false, Some(&cursors), "cursor-test");
                 let (page, _) = prune_automatic_workspace_page("cursor-test", options).unwrap();
-                assert_eq!(page.candidates.len(), 1, "{page:?}");
-                let path = page.candidates[0].remote_path.clone();
+                let paths: Vec<String> = page
+                    .candidates
+                    .iter()
+                    .map(|candidate| candidate.remote_path.clone())
+                    .collect();
                 save_remote_workspace_cursors(
                     pass,
                     &[remote_workspace_category(page, false).unwrap()],
                 );
-                path
+                paths
             };
 
             let mut first = begin();
@@ -6690,19 +6693,25 @@ mod tests {
                 "cursor-test".to_string(),
                 Some("obsolete".to_string()),
             );
-            let first_path = run_phase(&mut first);
+            let first_page = run_phase(&mut first);
+            assert_eq!(first_page.len(), 1);
             assert!(first.remote_workspace_cursors().contains_key("cursor-test"));
             first.finish("partial", None).unwrap();
 
             let mut second = begin();
+            let second_page = run_phase(&mut second);
+            assert_eq!(second_page.len(), 1);
             assert_ne!(
-                run_phase(&mut second),
-                first_path,
+                second_page, first_page,
                 "second pass resumes past the first page"
             );
-            second.finish("completed", None).unwrap();
-            // The second page reaches the last workspace: the scan is complete and
-            // the cursor is cleared, so the next pass starts from the beginning.
+            second.finish("partial", None).unwrap();
+
+            // The third page finds the end: the scan is complete and the cursor is
+            // cleared, so the next pass starts again from the beginning.
+            let mut third = begin();
+            assert!(run_phase(&mut third).is_empty());
+            third.finish("completed", None).unwrap();
             assert!(begin().remote_workspace_cursors().is_empty());
         });
     }
