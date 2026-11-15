@@ -4,6 +4,14 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.465.5] - 2026-11-15
+
+### Changed
+- run an admitted runner exec through its own worker module
+
+### Fixed
+- the executing daemon queues pressure-refused exec and gate jobs
+
 ## [0.465.4] - 2026-11-15
 
 ### Fixed
