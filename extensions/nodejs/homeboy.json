@@ -34,6 +34,7 @@
       "bash scripts/runtime/nodejs-invocation-runtime-smoke.sh",
       "node scripts/trace/trace-helpers-smoke.mjs",
       "bash tests/local-workspace-deps-smoke.sh",
+      "bash tests/local-workspace-deps-concurrency-smoke.sh",
       "bash tests/node-helpers-packaged-project-scripts-smoke.sh",
       "bash tests/nodejs-dev-overlay-browser-result-shapes-smoke.sh",
       "cd .. && bash nodejs/tests/playwright-utility-smoke.sh",
