@@ -2725,8 +2725,8 @@ fn completion_notify_pass(
         // A transient store error is not evidence of completion.
         Err(_) => completion_tracker::RunTerminality::Unresolved,
     });
-    // Claim each completion's exactly-once marker first, then decide how to
-    // announce what this pass actually won.
+    // Claim delivery ownership, not transport success. The outbox records
+    // the receipt only after a successful send.
     let mut claimed: Vec<(String, Option<crate::observation::RunRecord>)> = Vec::new();
     for completed_id in completed {
         let already_delivered = store
@@ -2737,18 +2737,14 @@ fn completion_notify_pass(
         }
         // Loaded by the terminality resolver above; no second read.
         let run = terminal_runs.remove(&completed_id);
-        let won_race = store
-            .mark_notification_delivered(&completed_id, "controller")
-            .unwrap_or(false);
+        let won_race = store.claim_notification(&completed_id).unwrap_or(false);
         if won_race {
             claimed.push((completed_id, run));
         }
     }
     for (event, once_marker) in completion_notifications(claimed) {
-        // Outbox-backed: a transport outage no longer destroys the
-        // completion of a detached run. A per-run exactly-once marker is
-        // already consumed and is carried into the entry so the outbox
-        // settles it rather than re-claiming it.
+        // The outbox owns retries and records delivery only after transport
+        // success; the claim prevents a second observer from sending too.
         let _ = crate::notify_outbox::dispatch_with_outbox(&event, once_marker);
     }
 }

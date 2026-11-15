@@ -2123,6 +2123,39 @@ impl ObservationStore {
         Ok(rows > 0)
     }
 
+    /// Claim ownership of delivery without claiming that a transport delivered it.
+    pub fn claim_notification(&self, run_id: &str) -> Result<bool> {
+        let rows = execute_with_retry(&self.connection, "claim notification", || {
+            self.connection.execute(
+                "UPDATE runs SET metadata_json = json_set(COALESCE(metadata_json, '{}'), '$.notification_claimed', 1) WHERE id = ?1 AND json_extract(COALESCE(metadata_json, '{}'), '$.notification_claimed') IS NULL AND json_extract(COALESCE(metadata_json, '{}'), '$.notification_delivered') IS NULL",
+                params![run_id],
+            )
+        })?;
+        Ok(rows > 0)
+    }
+
+    /// Persist the successful transport receipt, never an attempted send.
+    pub fn record_notification_receipt(
+        &self,
+        run_id: &str,
+        delivered_by: &str,
+        receipt: &serde_json::Value,
+    ) -> Result<()> {
+        let marker = serde_json::json!({
+            "at": chrono::Utc::now().to_rfc3339(),
+            "by": delivered_by,
+            "transport_result": receipt,
+        })
+        .to_string();
+        execute_with_retry(&self.connection, "record notification receipt", || {
+            self.connection.execute(
+                "UPDATE runs SET metadata_json = json_set(COALESCE(metadata_json, '{}'), '$.notification_delivered', json(?1)) WHERE id = ?2",
+                params![marker, run_id],
+            )
+        })?;
+        Ok(())
+    }
+
     /// Settle an active or previously settled run to its owner's latest outcome.
     /// Changed terminal outcomes re-arm completion notifications; matching rows
     /// are untouched.
@@ -2145,7 +2178,7 @@ impl ObservationStore {
                     finished_at = ?2,
                     metadata_json = CASE WHEN status = 'running' THEN metadata_json ELSE
                         json_set(
-                            json_remove(COALESCE(metadata_json, '{}'), '$.notification_delivered'),
+                            json_remove(COALESCE(metadata_json, '{}'), '$.notification_delivered', '$.notification_claimed'),
                             '$.status_correction', json_object(
                                 'previous_status', status, 'status', ?1, 'at', ?2
                             )

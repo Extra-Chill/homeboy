@@ -447,6 +447,46 @@ fn seed_run_with_route(run_id: &str, destination: &str) {
 }
 
 #[test]
+fn gate_admission_failure_reaches_session_once_with_receipt() {
+    homeboy_core::test_support::with_isolated_home(|home| {
+        let sender = home.path().join("session-sender.sh");
+        let calls = home.path().join("session-calls");
+        std::fs::write(
+            &sender,
+            format!(
+                "#!/bin/sh\nprintf '%s\\n' \"$*\" >> '{}'\n",
+                calls.display()
+            ),
+        )
+        .unwrap();
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&sender, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let script = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../extensions/discord/scripts/notify.mjs");
+        let sender_env = format!("HOMEBOY_SESSION_SEND_COMMAND={}", sender.display());
+        install_transport(
+            "extension",
+            vec!["env", &sender_env, "node", script.to_str().unwrap()],
+        );
+        seed_run_with_route("admission-run", "discord:v1:thread:123456789012345678");
+        let mut failed = report("pre_execution_failure", None);
+        failed.cook_id = "admission-cook".to_string();
+        failed.latest_run_id = Some("admission-run".to_string());
+        failed.stop_reason = Some("gate admission rejected: runner unavailable".to_string());
+        cook_terminal(&failed, None, 1);
+        cook_terminal(&failed, None, 1);
+        let observed = std::fs::read_to_string(calls)
+            .unwrap_or_else(|error| panic!("{error}: {:?}", latest_delivery("admission-cook")));
+        assert_eq!(observed.matches("--thread").count(), 1);
+        assert!(observed.contains("gate admission rejected: runner unavailable"));
+        let delivery = latest_delivery("admission-cook");
+        assert_eq!(delivery["status"], "delivered");
+        assert_eq!(delivery["transport_result"]["delivery_mode"], "session");
+        assert_eq!(delivery["transport_result"]["receipt"]["exit_code"], 0);
+    });
+}
+
+#[test]
 fn started_announcement_is_durable_once_per_cook_across_recipe_reentry() {
     homeboy_core::test_support::with_isolated_home(|_| {
         install_transport("extension", vec!["false"]);
