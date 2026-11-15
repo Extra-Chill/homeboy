@@ -131,6 +131,33 @@ builds="$(grep -c build "$builds_log")"
 [ "$builds" -eq "$CONSUMERS" ] || fail "expected ${CONSUMERS} serialized builds without a cache, got ${builds}"
 echo "ok: ${CONSUMERS} parallel consumers without a cache serialize their builds"
 
+# --- The package's own component build overlaps its consumers -----------------
+# A workspace package is often also a component (extrachill-tokens), so the
+# nodejs build-runner installs and builds it in the same directory while the
+# consumers build it as an override. The runner holds the same lock.
+: > "$builds_log"
+comp_src="${TMP_DIR}/component-monorepo"
+make_source "$comp_src"
+make_consumers "${TMP_DIR}/component-consumer"
+component_build() {
+    bash -c 'source "$1"; homeboy_local_workspace_lock_acquire "$2" h || exit 1; ( cd "$2" && node build.js ); rc=$?; homeboy_local_workspace_lock_release h; exit $rc' \
+        _ "$HELPER" "${comp_src}/packages/shared"
+}
+component_build > "${TMP_DIR}/component.out" 2>&1 &
+component_pid=$!
+run_parallel "$comp_src" "${TMP_DIR}/component-consumer" || fail "consumers collided with the package's own component build"
+wait "$component_pid" || { sed 's/^/  /' "${TMP_DIR}/component.out" >&2; fail "component build collided with its consumers"; }
+assert_installed "${TMP_DIR}/component-consumer"
+echo "ok: the package's own component build and its consumers never overlap"
+
+# Locks on different directories nest (component dir, then dependency dir).
+nest_a="${TMP_DIR}/nest-a"; nest_b="${TMP_DIR}/nest-b"; mkdir -p "$nest_a" "$nest_b"
+bash -c 'source "$1"; homeboy_local_workspace_lock_acquire "$2" a && homeboy_local_workspace_lock_acquire "$3" b \
+    && homeboy_local_workspace_lock_release b && homeboy_local_workspace_lock_release a \
+    && HOMEBOY_LOCAL_WORKSPACE_DEP_LOCK_TIMEOUT=1 homeboy_local_workspace_lock_acquire "$2" c' \
+    _ "$HELPER" "$nest_a" "$nest_b" || fail "nested locks on different directories failed"
+echo "ok: locks on different directories nest and release"
+
 # --- A stale lock from a dead process does not wedge builds -------------------
 : > "$builds_log"
 stale_src="${TMP_DIR}/stale-monorepo"
@@ -138,7 +165,7 @@ make_source "$stale_src"
 make_consumers "${TMP_DIR}/stale-consumer"
 lock_root="${TMPDIR:-/tmp}/homeboy-local-workspace-deps-locks"
 mkdir -p "$lock_root"
-stale_key="$(printf '%s' "$(cd "${stale_src}" && pwd)" | { command -v sha256sum >/dev/null 2>&1 && sha256sum || shasum -a 256; } | awk '{print $1}')"
+stale_key="$(printf '%s' "$(cd "${stale_src}" && pwd -P)" | { command -v sha256sum >/dev/null 2>&1 && sha256sum || shasum -a 256; } | awk '{print $1}')"
 mkdir -p "${lock_root}/${stale_key}.lock"
 printf '%s' 999999999 > "${lock_root}/${stale_key}.lock/pid"
 HOMEBOY_LOCAL_WORKSPACE_DEP_LOCK=mkdir run_parallel "$stale_src" "${TMP_DIR}/stale-consumer" \

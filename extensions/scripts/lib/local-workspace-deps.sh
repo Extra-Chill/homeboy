@@ -257,7 +257,8 @@ _homeboy_local_workspace_dep_one() {
     # once on a cold cache. Serialize per source directory and re-check the
     # cache once the lock is held, so the first consumer builds and the rest
     # reuse its tarball (homeboy#18163).
-    if ! _homeboy_local_workspace_dep_lock "$source_abs"; then
+    local lock_handle=""
+    if ! homeboy_local_workspace_lock_acquire "$source_abs" lock_handle; then
         echo "[local-workspace-deps] '$name': could not acquire the build lock for $source_abs" >&2
         rm -rf "$pack_dest"
         return 1
@@ -267,7 +268,7 @@ _homeboy_local_workspace_dep_one() {
         cp "$cached"/*.tgz "$pack_dest/"
     elif ! _homeboy_local_workspace_dep_build_and_pack \
         "$name" "$source_abs" "$pack_abs" "$pm" "$build_cmd" "$pack_dest"; then
-        _homeboy_local_workspace_dep_unlock
+        homeboy_local_workspace_lock_release lock_handle
         rm -rf "$pack_dest"
         return 1
     fi
@@ -276,7 +277,7 @@ _homeboy_local_workspace_dep_one() {
     tarball="$(find "$pack_dest" -maxdepth 1 -name '*.tgz' -type f 2>/dev/null | head -1)"
     if [ -z "$tarball" ] || [ ! -f "$tarball" ]; then
         echo "[local-workspace-deps] '$name': no tarball produced in $pack_dest" >&2
-        _homeboy_local_workspace_dep_unlock
+        homeboy_local_workspace_lock_release lock_handle
         rm -rf "$pack_dest"
         return 1
     fi
@@ -284,7 +285,7 @@ _homeboy_local_workspace_dep_one() {
         mkdir -p "${cached}.tmp.$$" && cp "$tarball" "${cached}.tmp.$$/" \
             && mv "${cached}.tmp.$$" "$cached" 2>/dev/null || rm -rf "${cached}.tmp.$$"
     fi
-    _homeboy_local_workspace_dep_unlock
+    homeboy_local_workspace_lock_release lock_handle
 
     local sha256
     sha256="$(_homeboy_local_workspace_dep_sha256 < "$tarball")"
@@ -329,31 +330,37 @@ _homeboy_local_workspace_dep_cache_dir() {
     printf '%s' "${root}/${commit}"
 }
 
-# Per-source-directory build lock. Uses flock(1) where available (the kernel
-# drops it when the holder dies) and otherwise an atomic mkdir lock whose
+# Per-directory build lock, shared by every path that installs or builds in a
+# workspace package directory: consumer overrides below and the package's own
+# component build (nodejs build-runner). Uses flock(1) where available (the
+# kernel drops it when the holder dies) and otherwise an atomic mkdir lock whose
 # holder PID is checked, so a lock left by a killed build is reclaimed.
 # HOMEBOY_LOCAL_WORKSPACE_DEP_LOCK_TIMEOUT bounds the wait (default 1800s).
 # HOMEBOY_LOCAL_WORKSPACE_DEP_LOCK=mkdir forces the portable fallback.
-_HOMEBOY_LWD_LOCK_DIR=""
-_HOMEBOY_LWD_LOCK_FD=""
-_homeboy_local_workspace_dep_lock() {
-    local source_abs="$1" root key timeout waited=0 holder
+#
+# homeboy_local_workspace_lock_acquire <dir> <handle_var>
+# homeboy_local_workspace_lock_release <handle_var>
+# The handle ("fd:N" or "dir:PATH") is stored in <handle_var>, so locks on
+# different directories can nest (component dir, then its dependency dirs).
+homeboy_local_workspace_lock_acquire() {
+    local dir="$1" handle_var="$2" root key timeout waited=0 holder fd
+    dir="$(cd "$dir" 2>/dev/null && pwd -P)" || return 1
     root="${TMPDIR:-/tmp}/homeboy-local-workspace-deps-locks"
     mkdir -p "$root" || return 1
-    key="$(printf '%s' "$source_abs" | _homeboy_local_workspace_dep_sha256)"
+    key="$(printf '%s' "$dir" | _homeboy_local_workspace_dep_sha256)"
     timeout="${HOMEBOY_LOCAL_WORKSPACE_DEP_LOCK_TIMEOUT:-1800}"
     # Named fd allocation (`exec {fd}>`) needs bash >= 4.1.
     if [ "${HOMEBOY_LOCAL_WORKSPACE_DEP_LOCK:-}" != mkdir ] && command -v flock >/dev/null 2>&1 \
         && { [ "${BASH_VERSINFO[0]}" -gt 4 ] || { [ "${BASH_VERSINFO[0]}" -eq 4 ] && [ "${BASH_VERSINFO[1]}" -ge 1 ]; }; }; then
-        exec {_HOMEBOY_LWD_LOCK_FD}>"${root}/${key}.flock" || return 1
-        if ! flock -n "$_HOMEBOY_LWD_LOCK_FD"; then
-            echo "[local-workspace-deps] waiting for another build of $source_abs"
-            if ! flock -w "$timeout" "$_HOMEBOY_LWD_LOCK_FD"; then
-                exec {_HOMEBOY_LWD_LOCK_FD}>&-
-                _HOMEBOY_LWD_LOCK_FD=""
+        exec {fd}>"${root}/${key}.flock" || return 1
+        if ! flock -n "$fd"; then
+            echo "[local-workspace-deps] waiting for another build in $dir" >&2
+            if ! flock -w "$timeout" "$fd"; then
+                exec {fd}>&-
                 return 1
             fi
         fi
+        printf -v "$handle_var" 'fd:%s' "$fd"
         return 0
     fi
     local lock="${root}/${key}.lock" announced=""
@@ -364,7 +371,7 @@ _homeboy_local_workspace_dep_lock() {
             continue
         fi
         if [ -z "$announced" ]; then
-            echo "[local-workspace-deps] waiting for another build of $source_abs"
+            echo "[local-workspace-deps] waiting for another build in $dir" >&2
             announced=1
         fi
         [ "$waited" -lt "$timeout" ] || return 1
@@ -372,19 +379,18 @@ _homeboy_local_workspace_dep_lock() {
         waited=$((waited + 1))
     done
     printf '%s' "$$" > "${lock}/pid"
-    _HOMEBOY_LWD_LOCK_DIR="$lock"
+    printf -v "$handle_var" 'dir:%s' "$lock"
     return 0
 }
 
-_homeboy_local_workspace_dep_unlock() {
-    if [ -n "$_HOMEBOY_LWD_LOCK_FD" ]; then
-        exec {_HOMEBOY_LWD_LOCK_FD}>&-
-        _HOMEBOY_LWD_LOCK_FD=""
-    fi
-    if [ -n "$_HOMEBOY_LWD_LOCK_DIR" ]; then
-        rm -rf "$_HOMEBOY_LWD_LOCK_DIR"
-        _HOMEBOY_LWD_LOCK_DIR=""
-    fi
+homeboy_local_workspace_lock_release() {
+    local handle_var="$1" handle fd
+    handle="${!handle_var:-}"
+    case "$handle" in
+        fd:*) fd="${handle#fd:}"; exec {fd}>&- ;;
+        dir:*) rm -rf "${handle#dir:}" ;;
+    esac
+    printf -v "$handle_var" '%s' ""
 }
 
 _homeboy_local_workspace_dep_sha256() {
