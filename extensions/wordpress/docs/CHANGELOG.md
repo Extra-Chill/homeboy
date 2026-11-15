@@ -2,6 +2,11 @@
 
 All notable changes to the **wordpress** extension will be documented in this file.
 
+## [3.54.5] - 2026-11-15
+
+### Fixed
+- invalidate PHP-FPM opcache for each component after deploy swap
+
 ## [3.54.4] - 2026-11-11
 
 ### Fixed
