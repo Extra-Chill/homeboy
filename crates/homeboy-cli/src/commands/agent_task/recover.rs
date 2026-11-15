@@ -222,8 +222,12 @@ mod tests {
     #[test]
     fn recover_refuses_pressure_failed_unmaterialized_admission_without_a_successor() {
         use homeboy::agents::agent_task_lifecycle;
-        crate::test_support::with_isolated_home(|_| {
+        crate::test_support::with_isolated_home(|home| {
             let cook_id = "cook-recover-admission";
+            let prompt = home.path().join("prompt.txt");
+            std::fs::write(&prompt, "Fix it.").unwrap();
+            let route = home.path().join("route.txt");
+            std::fs::write(&route, "discord:v1:thread:1").unwrap();
             let store = agent_task_lifecycle::AgentTaskLifecycleStore::from_environment().unwrap();
             agent_task_lifecycle::record_unmaterialized_cook_admission_in_store(
                 &store,
@@ -232,7 +236,14 @@ mod tests {
                     "schema": "homeboy/unmaterialized-cook-binding/v1",
                     "request_ref": "sha256:request",
                     "worktree_ref": "repo@branch",
-                    "admission_inputs": { "cook_id": cook_id, "argv": ["agent-task", "cook", "--issue", "https://github.com/Extra-Chill/homeboy/issues/18096", "--run-id", cook_id] },
+                    "admission_inputs": {
+                        "cook_id": cook_id,
+                        "argv": ["agent-task", "cook", "--issue", "https://github.com/Extra-Chill/homeboy/issues/18096", "--prompt", "homeboy-admission-ref:0:p", "--notification-route=homeboy-admission-ref:1:r", "--run-id", cook_id],
+                        "input_refs": [
+                            { "kind": "prompt", "path": prompt, "sha256": "sha256:p", "argv_token": "homeboy-admission-ref:0:p" },
+                            { "kind": "notification-route", "path": route, "sha256": "sha256:r", "argv_token": "homeboy-admission-ref:1:r" },
+                        ],
+                    },
                 }),
                 "blocked_runner_unavailable",
                 "runner cannot accept jobs (reasons: pressure)",
@@ -263,10 +274,16 @@ mod tests {
 
             assert_eq!(exit_code, 1);
             assert_eq!(report["status"], "failed");
-            assert_eq!(report["failure"]["code"], "validation.invalid_argument");
+            assert_eq!(report["failure"]["code"], "agent_task.recover_no_step");
             let message = report["failure"]["message"].as_str().unwrap();
             assert!(message.contains("no replayable materialization identity"));
-            assert!(message.contains("homeboy agent-task cook --issue https://github.com/Extra-Chill/homeboy/issues/18096"));
+            // The relaunch is runnable: admission tokens resolve to the stored
+            // prompt file and the recorded route, and the run identity is dropped.
+            assert!(message.contains(&format!(
+                "homeboy agent-task cook --issue https://github.com/Extra-Chill/homeboy/issues/18096 --prompt @{} --notification-route=discord:v1:thread:1",
+                prompt.display()
+            )), "{message}");
+            assert!(!message.contains("homeboy-admission-ref"));
             assert!(!message.contains(&format!("--run-id {cook_id}")));
             let records = store.read_records().unwrap();
             assert!(

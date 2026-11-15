@@ -163,6 +163,7 @@ pub mod lifecycle {
         reconcile_terminal_artifact_projection, record_execution_placement_outcome,
         recover_unmaterialized_cook_input_publication_in_store, retry, run_id_for_aggregate_path,
         run_record_exists, run_record_exists_readonly, submit_plan,
+        unmaterialized_cook_relaunch_command, unmaterialized_cook_relaunch_guidance,
         unmaterialized_cook_retry_error,
     };
     pub use super::super::agent_task_lifecycle::{
