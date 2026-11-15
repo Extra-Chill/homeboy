@@ -51,6 +51,9 @@ use crate::commands::utils::watch::{
 const COMPACT_REF_LIMIT: usize = 12;
 const COMPACT_TASK_LIMIT: usize = 12;
 const COMPACT_TEXT_LIMIT: usize = 512;
+/// A runnable command is the point of status; one that embeds durable input
+/// paths (a Cook re-launch) is kept whole up to this size.
+const COMPACT_COMMAND_LIMIT: usize = 2048;
 const COMPACT_ACTION_LIMIT: usize = 4;
 const COMPACT_ACTION_BYTE_LIMIT: usize = 512;
 const COMPACT_STATUS_BYTE_LIMIT: usize = 16 * 1024;
@@ -473,7 +476,7 @@ fn compact_control_plane_status(value: Value) -> Value {
         .unwrap_or_else(|| {
             crate::commands::agent_task_summary::control_plane_next_action(&value, run_id)
         });
-    let next_action = if next_action.len() <= COMPACT_TEXT_LIMIT {
+    let next_action = if next_action.len() <= COMPACT_COMMAND_LIMIT {
         next_action
     } else {
         "homeboy runs evidence <run-id>".to_string()
@@ -519,7 +522,7 @@ fn compact_control_plane_status(value: Value) -> Value {
         "gates_omitted": value.get("gates").and_then(Value::as_array)
             .map(|gates| gates.len().saturating_sub(COMPACT_REF_LIMIT)).unwrap_or_default(),
         "publication": bounded_control_plane_value(value.get("publication").unwrap_or(&Value::Null)),
-        "recovery": bounded_control_plane_value(value.get("recovery").unwrap_or(&Value::Null)),
+        "recovery": compact_recovery(value.get("recovery").unwrap_or(&Value::Null)),
         "waiting_for": value.get("waiting_for"),
         "lab_admission_wait": bounded_control_plane_value(value.get("lab_admission_wait").unwrap_or(&Value::Null)),
         "runner_ownership_diagnostic": bounded_control_plane_value(value.get("runner_ownership_diagnostic").unwrap_or(&Value::Null)),
@@ -596,6 +599,20 @@ fn compact_control_plane_status(value: Value) -> Value {
             .unwrap_or_else(|| bounded_control_plane_value(blocker_summary));
     }
     enforce_control_plane_status_budget(compact)
+}
+
+fn compact_recovery(recovery: &Value) -> Value {
+    let mut compact = bounded_control_plane_value(recovery);
+    if let Some(command) = recovery
+        .get("command")
+        .and_then(Value::as_str)
+        .filter(|command| command.len() <= COMPACT_COMMAND_LIMIT)
+    {
+        if compact.is_object() {
+            compact["command"] = json!(command);
+        }
+    }
+    compact
 }
 
 fn bounded_control_plane_value(value: &Value) -> Value {

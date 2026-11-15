@@ -111,10 +111,6 @@ fn explicit_retry_of_an_unmaterialized_cook_is_not_refused_toward_itself() {
                 },
             )
             .unwrap();
-        let plan = homeboy::agents::agent_task_service::cook_recovery_delegation(cook_id)
-            .expect("the failed admission is delegated to recover");
-        assert_eq!(plan.run_id, cook_id);
-
         let outcome = super::super::run::retry(super::super::RetryArgs {
             run_id: cook_id.to_string(),
             new_run_id: None,

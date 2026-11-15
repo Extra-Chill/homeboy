@@ -4420,6 +4420,22 @@ fn projected_cook_recovery(record: &AgentTaskRunRecord) -> Option<ControlPlaneRe
             cook_id,
         });
     };
+    // A Cook that never materialized has no step; it re-launches from its
+    // saved admission inputs.
+    if plan.step.is_none() && crate::agent_task_lifecycle::is_unmaterialized_cook_admission(record)
+    {
+        if let Some(command) =
+            crate::agent_task_lifecycle::unmaterialized_cook_relaunch_command(record)
+        {
+            return Some(ControlPlaneRecovery {
+                run: RunId::new(&plan.run_id).ok()?,
+                cook_id: plan.cook_id,
+                step: "relaunch".to_string(),
+                candidate_ref: None,
+                command,
+            });
+        }
+    }
     let step = plan.step.action_name().unwrap_or("none").to_string();
     let (candidate_ref, command) = match &plan.step {
         crate::agent_task_service::CookRecoveryStep::Adopt { candidate_ref } => (

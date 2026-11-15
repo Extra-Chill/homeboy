@@ -687,8 +687,8 @@ pub fn plan_cook_recovery(id: &str) -> Result<CookRecoveryPlan> {
 }
 
 /// A Cook that failed before materializing (its admission failed) has no
-/// durable recipe. The retry boundary refuses it with the saved Cook command;
-/// no empty admission is reserved without an execution owner.
+/// durable recipe and no execution owner, so `recover` has no step for it: the
+/// plan names the `cook` command that re-launches it from its saved inputs.
 fn unmaterialized_cook_recovery_plan(
     record: &agent_task_lifecycle::AgentTaskRunRecord,
 ) -> Option<CookRecoveryPlan> {
@@ -698,21 +698,13 @@ fn unmaterialized_cook_recovery_plan(
     {
         return None;
     }
-    let replayable = record
-        .metadata
-        .pointer("/unmaterialized_cook_admission/binding/admission_inputs/argv")
-        .is_some_and(Value::is_array);
     Some(CookRecoveryPlan {
         cook_id: record.run_id.clone(),
         run_id: record.run_id.clone(),
         status: cook_recovery_status(record),
-        step: if replayable {
-            CookRecoveryStep::Retry
-        } else {
-            CookRecoveryStep::none(
-                "The Cook failed before materializing and recorded no admission request to replay; re-run the original Cook command.",
-            )
-        },
+        step: CookRecoveryStep::none(agent_task_lifecycle::unmaterialized_cook_relaunch_guidance(
+            record,
+        )),
     })
 }
 
@@ -771,18 +763,13 @@ fn published_pull_request(record: &agent_task_lifecycle::AgentTaskRunRecord) -> 
 /// [`recover_cook`] instead of deciding a Cook's next step itself.
 ///
 /// `Some` only when `id` is a durable Cook ID (the Cook alias, not one exact
-/// attempt) or a Cook that failed before materializing, whose durable state
-/// names a step `recover` performs. `None` keeps
+/// attempt) whose durable state names a step `recover` performs. `None` keeps
 /// the calling verb's own behavior: a non-Cook run, an exact attempt ID, an
 /// in-flight Cook (for example a queued admission `resume` re-arms), a Cook
 /// whose state admits no step, or a Cook whose recovery plan cannot be read.
 pub fn cook_recovery_delegation(id: &str) -> Option<CookRecoveryPlan> {
     if super::load_recipe(id).is_err() {
-        // A Cook that failed before materializing re-admits through the
-        // same recovery step `recover` performs.
-        let store = agent_task_lifecycle::AgentTaskLifecycleStore::from_environment().ok()?;
-        return unmaterialized_cook_recovery_plan(&store.read_record(id).ok()?)
-            .filter(|plan| !plan.step.is_none());
+        return None;
     }
     // Replacement gates need explicit operator authorization that the
     // delegating verb never carries, so only `recover` performs them.
@@ -936,14 +923,20 @@ fn recover_cook_once(
         } else {
             // A Cook whose admission never materialized has no recipe: no
             // provider ran, so there is no candidate to re-gate.
-            let command = format!("homeboy agent-task recover {}", plan.cook_id);
+            let next = match &plan.step {
+                CookRecoveryStep::None { reason } => reason.clone(),
+                _ => format!(
+                    "recover it without --regate: `homeboy agent-task recover {}`",
+                    plan.cook_id
+                ),
+            };
             return Err(Error::validation_invalid_argument(
                 "regate",
                 format!(
-                    "Cook has no durable recipe because its admission never materialized, so no provider ran and there is no candidate to re-gate; recover it without --regate: `{command}`"
+                    "Cook has no durable recipe because its admission never materialized, so no provider ran and there is no candidate to re-gate. {next}"
                 ),
                 Some(id.into()),
-                Some(vec![command]),
+                None,
             ));
         };
         let candidate = recipe
@@ -2298,13 +2291,10 @@ mod tests {
                 })
                 .unwrap();
 
-            let plan = plan_cook_recovery(cook_id).expect("unmaterialized Cook is recoverable");
-            assert_eq!(plan.step, CookRecoveryStep::Retry);
-            // `retry <cook> --run` delegates to this same recovery step.
-            assert_eq!(
-                cook_recovery_delegation(cook_id).map(|plan| plan.step),
-                Some(CookRecoveryStep::Retry)
-            );
+            // Planning and applying agree: there is no step, only a relaunch.
+            let plan = plan_cook_recovery(cook_id).expect("unmaterialized Cook is planned");
+            assert!(plan.step.is_none(), "{:?}", plan.step);
+            assert!(cook_recovery_delegation(cook_id).is_none());
 
             let performer = RetryPerformer(Default::default());
             // With no recipe there is no candidate: `--regate` names the step
@@ -2320,19 +2310,25 @@ mod tests {
             )
             .unwrap_err();
             assert_eq!(refused.details["field"], "regate", "{refused:?}");
-            assert!(refused
-                .message
-                .contains(&format!("`homeboy agent-task recover {cook_id}`")));
+            assert!(refused.message.contains("re-launch with: homeboy cook"));
 
-            let (report, exit_code) =
-                recover_cook(cook_id, CookRecoveryRequest::default(), &performer).unwrap();
-            assert_eq!(exit_code, 1, "{report:?}");
-            assert_eq!(*performer.0.borrow(), [cook_id.to_string()]);
-            assert_eq!(report.run_id, cook_id);
-            assert!(serde_json::to_value(report).unwrap()["failure"]["message"]
-                .as_str()
-                .unwrap()
-                .contains("no replayable materialization identity"));
+            for preflight in [true, false] {
+                let (report, exit_code) = recover_cook(
+                    cook_id,
+                    CookRecoveryRequest {
+                        preflight,
+                        ..Default::default()
+                    },
+                    &performer,
+                )
+                .unwrap();
+                assert_eq!(exit_code, i32::from(!preflight), "{report:?}");
+                let CookRecoveryStep::None { reason } = &report.step else {
+                    panic!("{report:?}")
+                };
+                assert!(reason.contains("re-launch with: homeboy cook"));
+            }
+            assert!(performer.0.borrow().is_empty(), "no retry is attempted");
         });
     }
 

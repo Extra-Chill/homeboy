@@ -5495,58 +5495,88 @@ pub fn retry(run_id: &str, requested_run_id: Option<&str>) -> Result<AgentTaskRu
 /// Refuse retries that have no executable plan or admission owner. The saved
 /// command is operator guidance, not a queued replay promise.
 pub fn unmaterialized_cook_retry_error(source: &AgentTaskRunRecord) -> Error {
-    let argv = source
-        .metadata
-        .pointer("/unmaterialized_cook_admission/binding/admission_inputs/argv")
-        .and_then(Value::as_array);
-    let mut command = vec!["homeboy".to_string()];
-    let mut skip_run_id = false;
-    if let Some(argv) = argv {
-        // Admission argv includes argv[0]; accept only one executable prefix.
-        let mut arguments = argv.iter().filter_map(Value::as_str).peekable();
-        if arguments
-            .peek()
-            .is_some_and(|argument| *argument == "homeboy")
-        {
-            arguments.next();
-        }
-        let mut forwarded = false;
-        for argument in arguments {
-            if argument == "--" {
-                forwarded = true;
-            }
-            if forwarded {
-                command.push(argument.to_string());
-                continue;
-            }
-            if skip_run_id {
-                skip_run_id = false;
-                continue;
-            }
-            if argument == "--run-id" {
-                skip_run_id = true;
-            } else if !argument.starts_with("--run-id=") {
-                command.push(argument.to_string());
-            }
-        }
-    }
-    let guidance = if command.len() > 1 {
-        format!(
-            "re-launch with: {}",
-            homeboy_core::engine::shell::quote_args(&command)
-        )
-    } else {
-        "re-run the original homeboy agent-task cook command with a fresh --run-id".to_string()
-    };
     Error::validation_invalid_argument(
         "retry",
-        format!(
-            "Cook '{}' has no replayable materialization identity; {guidance}",
-            source.run_id
-        ),
+        unmaterialized_cook_relaunch_guidance(source),
         Some(source.run_id.clone()),
         None,
     )
+}
+
+/// Why an unmaterialized Cook cannot be retried, and the runnable `cook`
+/// command that re-launches it from its durable admission inputs.
+pub fn unmaterialized_cook_relaunch_guidance(source: &AgentTaskRunRecord) -> String {
+    let guidance = unmaterialized_cook_relaunch_command(source).map_or_else(
+        || "re-run the original homeboy agent-task cook command with a fresh --run-id".to_string(),
+        |command| format!("re-launch with: {command}"),
+    );
+    format!(
+        "Cook '{}' has no replayable materialization identity; {guidance}",
+        source.run_id
+    )
+}
+
+/// The recorded admission argv without its run identity, with each admission
+/// token resolved to a value `cook` accepts: the stored prompt file as
+/// `@<path>`, and other recorded values inline.
+pub fn unmaterialized_cook_relaunch_command(source: &AgentTaskRunRecord) -> Option<String> {
+    let inputs = source
+        .metadata
+        .pointer("/unmaterialized_cook_admission/binding/admission_inputs")?;
+    let tokens = inputs["input_refs"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(|reference| {
+            let token = reference["argv_token"].as_str()?;
+            let path = reference["path"].as_str()?;
+            let value = if reference["kind"] == "prompt" {
+                format!("@{path}")
+            } else {
+                std::fs::read_to_string(path).ok()?
+            };
+            Some((token, value))
+        })
+        .collect::<Vec<_>>();
+    let resolve = |argument: &str| {
+        for (token, value) in &tokens {
+            if argument == *token {
+                return value.clone();
+            }
+            if let Some(flag) = argument
+                .strip_suffix(token)
+                .filter(|flag| flag.ends_with('='))
+            {
+                return format!("{flag}{value}");
+            }
+        }
+        argument.to_string()
+    };
+    let mut arguments = inputs["argv"]
+        .as_array()?
+        .iter()
+        .filter_map(Value::as_str)
+        .peekable();
+    // Admission argv includes argv[0]; accept only one executable prefix.
+    if arguments.peek() == Some(&"homeboy") {
+        arguments.next();
+    }
+    let mut command = vec!["homeboy".to_string()];
+    let mut forwarded = false;
+    let mut skip_run_id = false;
+    for argument in arguments {
+        forwarded |= argument == "--";
+        if forwarded {
+            command.push(argument.to_string());
+        } else if skip_run_id {
+            skip_run_id = false;
+        } else if argument == "--run-id" {
+            skip_run_id = true;
+        } else if !argument.starts_with("--run-id=") {
+            command.push(resolve(argument));
+        }
+    }
+    (command.len() > 1).then(|| homeboy_core::engine::shell::quote_args(&command))
 }
 
 /// Whether a persisted plan contains enough source identity to offer a retry
