@@ -148,12 +148,11 @@ fn prepare_daemon_exec(
     );
     let authoritative_run_id = request.authoritative_run_id;
     // This driver runs inside the daemon, and its child reads the daemon's
-    // build-specific job store. Default the child's Homeboy to this binary
-    // instead of the configured one; a job's own selection still wins. If the
+    // build-specific job store, so the child's Homeboy is this binary. If the
     // path cannot be resolved the child's build stamp check names the skew.
     let mut env = request.env;
     if let Ok(daemon_executable) = homeboy_core::daemon::daemon_launchable_executable() {
-        super::command_path::default_daemon_child_homeboy(&mut env, &daemon_executable);
+        super::command_path::select_daemon_child_homeboy(&mut env, &daemon_executable);
     }
     let mut plan = prepare_daemon_local_process(RunnerProcessRequest {
         runner_id: request.runner_id,
