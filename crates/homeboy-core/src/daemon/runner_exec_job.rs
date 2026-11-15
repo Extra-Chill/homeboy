@@ -521,6 +521,24 @@ mod tests {
     }
 
     #[test]
+    fn startup_recovery_settles_a_child_that_exited_between_daemons() {
+        with_isolated_home(|home| {
+            let path = home.path().join("jobs.sqlite");
+            let (job_id, mut child) = spawn_then_lose_daemon(&path, "echo ok; exit 0");
+            // The child exits while no daemon supervises it (#18109).
+            child.wait().unwrap();
+            let store = restarted_daemon(&path);
+            super::super::recover_dead_generations(&store, "restarted-daemon").unwrap();
+            let job = wait_terminal(&store, job_id);
+
+            assert_eq!(job.status, JobStatus::Succeeded);
+            let result = result(&store, job_id);
+            assert_eq!(result["exit_code"], 0);
+            assert_eq!(result["stdout"], "ok\n");
+        });
+    }
+
+    #[test]
     fn cancelling_a_re_adopted_job_stops_its_process_tree() {
         with_isolated_home(|home| {
             let path = home.path().join("jobs.sqlite");
