@@ -6,6 +6,10 @@ use std::collections::BTreeMap;
 use std::io::Read;
 use std::time::{Duration, SystemTime};
 
+/// Marks a materialization failure that a fresh plan repairs: the runner has
+/// already dropped the bad blob, so the next plan reports it missing.
+pub(super) const REFETCH: &str = "retry plan to refetch";
+
 pub(in crate::workspace) fn store(remote: &str) -> PathBuf {
     let parent = Path::new(remote).parent().unwrap();
     let root = if parent.file_name().is_some_and(|n| n == "_lab_workspaces") {
@@ -118,7 +122,7 @@ pub(super) fn assemble(
             let blob = store.join(key(digest)?);
             if !valid(&blob, digest, control)? {
                 let _ = fs::remove_file(&blob);
-                return Err(io("blob corruption during assembly; retry plan to refetch"));
+                return Err(io(format!("blob corruption during assembly; {REFETCH}")));
             }
             // Execution views are mutable: sharing an inode with the cache
             // would let a build corrupt later stages (including chmod).

@@ -21,6 +21,31 @@ pub(super) fn sync_workspace_batch_in_roots(
     requests: Vec<(RunnerWorkspaceSyncOptions, Vec<String>)>,
     control: &WorkspaceControl,
 ) -> Result<Vec<RunnerWorkspaceSyncOutput>> {
+    // A blob that went bad between plan and commit was dropped by the runner
+    // before anything was published; one fresh plan re-sends it.
+    match sync_workspace_batch_once(roots, runner, requests.clone(), control) {
+        Err(error) if refetchable(&error) => {
+            sync_workspace_batch_once(roots, runner, requests, control)
+        }
+        result => result,
+    }
+}
+
+/// The runner's refetch marker: in the message when relayed over SSH, in the
+/// I/O detail when the runner is local.
+fn refetchable(error: &Error) -> bool {
+    error.message.contains(super::blobs::REFETCH)
+        || error.details["error"]
+            .as_str()
+            .is_some_and(|detail| detail.contains(super::blobs::REFETCH))
+}
+
+fn sync_workspace_batch_once(
+    roots: &homeboy_core::paths::PathRoots,
+    runner: &Runner,
+    requests: Vec<(RunnerWorkspaceSyncOptions, Vec<String>)>,
+    control: &WorkspaceControl,
+) -> Result<Vec<RunnerWorkspaceSyncOutput>> {
     let runner_id = runner.id.as_str();
     let workspace_root = runner
         .workspace_root
@@ -554,6 +579,8 @@ pub(super) fn invoke(
                 tar::Archive::new(reader)
                     .unpack(incoming.path())
                     .materialization("unpack", incoming.path(), "runner")?;
+                #[cfg(test)]
+                BEFORE_COMMIT.with(|hook| hook.take().map(|hook| hook()));
                 materialization_commit_controlled(incoming.path(), control)
             } else {
                 let binary = crate::remote_runner_homeboy_path(runner, "materialize Lab sources")?;
@@ -611,4 +638,6 @@ pub(super) fn materialization_script(root: &str, binary: &str, commit: bool) -> 
 }
 
 #[cfg(test)]
+#[cfg(test)]
+thread_local! { pub(crate) static BEFORE_COMMIT: std::cell::Cell<Option<Box<dyn FnOnce()>>> = const { std::cell::Cell::new(None) }; }
 thread_local! { pub(crate) static INVOCATIONS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) }; }
