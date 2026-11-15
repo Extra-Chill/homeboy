@@ -2,6 +2,11 @@
 
 All notable changes to the **nodejs** extension will be documented in this file.
 
+## [3.9.10] - 2026-11-15
+
+### Fixed
+- serialize local workspace dependency builds per source directory
+
 ## [3.9.9] - 2026-11-09
 
 ### Changed
