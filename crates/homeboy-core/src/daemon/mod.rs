@@ -583,8 +583,13 @@ impl LocalControllerJobClient {
 /// this does not start a daemon when none is resident. Controller upgrades use
 /// it to converge an existing daemon before reporting success.
 pub fn converge_current_build_idle_daemon() -> Result<bool> {
-    let status = read_status()?;
-    if !status.running || status.fresh || status.stale_serving() {
+    converge_idle_daemon(read_status()?)
+}
+
+/// A draining daemon replaces itself once its owned jobs finish, so there is
+/// nothing to converge and nothing to refuse.
+fn converge_idle_daemon(status: DaemonStatus) -> Result<bool> {
+    if !status.running || status.fresh || status.draining() {
         return Ok(false);
     }
 
@@ -781,7 +786,10 @@ impl DaemonStatus {
         self.running && self.reachable && self.fresh && !self.draining()
     }
 
-    fn draining(&self) -> bool {
+    /// A live daemon that is replacing itself: a stale build still busy with
+    /// owned jobs, or an explicit `recover --drain`. It serves only the runs
+    /// it already owns, and new roots wait for its replacement.
+    pub fn draining(&self) -> bool {
         if self.running
             && !self.fresh
             && self.freshness.active_jobs > 0
@@ -804,28 +812,11 @@ impl DaemonStatus {
         })
     }
 
-    /// A busy old build serves only the durable runs it already owns.
-    pub fn stale_serving(&self) -> bool {
-        self.running
-            && self.reachable
-            && !self.draining()
-            && !self.fresh
-            && self.freshness.active_jobs > 0
-            && matches!(
-                self.freshness.stale_reason_code,
-                Some(
-                    DaemonStaleReasonCode::VersionMismatch
-                        | DaemonStaleReasonCode::BuildIdentityMismatch
-                        | DaemonStaleReasonCode::ExecutableReplaced
-                )
-            )
-    }
-
     /// Structured admission evidence shared by status and Cook.
     pub fn admission_report(&self) -> serde_json::Value {
         json!({
-            "state": if self.draining() { "draining" } else if self.stale_serving() { "stale_serving" } else if self.admits_work() { "serving" } else { "unavailable" },
-            "waiting_for": if self.draining() || self.stale_serving() { Some("daemon_replacement") } else { None },
+            "state": if self.draining() { "draining" } else if self.admits_work() { "serving" } else { "unavailable" },
+            "waiting_for": self.draining().then_some("daemon_replacement"),
             "daemon_version": self.freshness.daemon_version,
             "active_jobs": self.freshness.active_jobs,
             "drain_holders": if self.draining() {
@@ -851,15 +842,6 @@ impl DaemonStatus {
         let mut summary = if self.draining() {
             format!(
                 "waiting_for: daemon_replacement; daemon draining: {} owned jobs remaining",
-                self.freshness.active_jobs
-            )
-        } else if self.stale_serving() {
-            format!(
-                "waiting_for: daemon_replacement; stale_serving: daemon v{}, {} owned jobs remaining",
-                self.freshness
-                    .daemon_version
-                    .as_deref()
-                    .unwrap_or("unknown"),
                 self.freshness.active_jobs
             )
         } else if self.running && self.reachable {
