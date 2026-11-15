@@ -542,7 +542,7 @@ fn stale_daemon_hands_a_running_workflow_step_to_its_replacement() {
         let shutdown = Arc::new(AtomicBool::new(false));
         let flag = shutdown.clone();
         let server = std::thread::spawn(move || {
-            serve_listener_with_analysis_runner_locked(
+            serve::serve_locked(
                 listener,
                 UnsupportedAnalysisJobRunner,
                 owner,
@@ -609,7 +609,7 @@ fn stale_daemon_hands_a_running_workflow_step_to_its_replacement() {
         let owner = acquire_daemon_owner_lock().unwrap();
         let flag = shutdown.clone();
         let replacement = std::thread::spawn(move || {
-            serve_listener_with_analysis_runner_locked(
+            serve::serve_locked(
                 listener,
                 UnsupportedAnalysisJobRunner,
                 owner,
