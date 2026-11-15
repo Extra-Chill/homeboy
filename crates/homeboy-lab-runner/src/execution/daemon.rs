@@ -1996,12 +1996,10 @@ where
         let interval = match read(&endpoint) {
             Ok(job) if job.status.is_terminal() => return Ok((job, endpoint)),
             Ok(job) => {
-                // Admission has no execution deadline. A queued Cook keeps its
-                // durable place until capacity clears or its owner cancels it.
+                // Admission has no execution deadline: the budget pauses while
+                // the job is queued, so a queued Cook keeps its durable place
+                // until capacity clears or its owner cancels it.
                 queued = job.status == homeboy_core::api_jobs::JobStatus::Queued;
-                if queued {
-                    deadline = Instant::now() + budget;
-                }
                 let interval = backoff;
                 backoff = backoff
                     .saturating_mul(2)
