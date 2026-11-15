@@ -130,7 +130,19 @@ impl RunnerExecWork {
         } = self;
         if crate::lab_capacity::is_gate(&job_store.get(job.job_id())?) {
             let reserve = crate::lab_capacity::gate_reserve(&crate::lab_capacity::allowed_cpus());
-            plan.cpus = (!reserve.is_empty()).then_some(reserve);
+            if !reserve.is_empty() {
+                let slot = job_store
+                    .local_child_gate_slot(job.job_id())?
+                    .ok_or_else(|| {
+                        Error::validation_invalid_argument(
+                            "gate_slot",
+                            "reserved gate has no durable slot",
+                            Some(job.job_id().to_string()),
+                            None,
+                        )
+                    })?;
+                plan.cpus = Some(crate::lab_capacity::gate_cpu_slice(&reserve, slot));
+            }
         }
         if let Some(limit) = plan.concurrency_limit {
             plan.env.insert(
