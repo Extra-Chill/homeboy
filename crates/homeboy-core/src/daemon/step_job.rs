@@ -101,6 +101,10 @@ pub struct StepJobRequest {
     pub key: String,
     /// Absolute path of the executable.
     pub program: String,
+    /// Orchestrates child steps and waits for them instead of doing heavy work.
+    /// Such steps must not hold capacity needed by their own children.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub waits_for_children: bool,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub args: Vec<String>,
     /// Absolute working directory of the child.
@@ -132,6 +136,7 @@ impl StepJobRequest {
             terminal_consumer: terminal_consumer.into(),
             key: key.into(),
             program: program.into(),
+            waits_for_children: false,
             args,
             cwd: cwd.into(),
             env,
@@ -139,6 +144,12 @@ impl StepJobRequest {
             root_durable_run_id: None,
             wait: StepWait::default(),
         }
+    }
+
+    /// Exempt an orchestration process that waits on its own child steps.
+    pub fn with_child_wait(mut self) -> Self {
+        self.waits_for_children = true;
+        self
     }
 
     pub fn with_linked_durable_run_id(mut self, run_id: impl Into<String>) -> Self {
@@ -247,6 +258,7 @@ impl StepJobRequest {
             "terminal_consumer": self.terminal_consumer,
             "key": self.key,
             "program": self.program,
+            "waits_for_children": self.waits_for_children,
             "args": crate::redaction::redact_argv(&self.args),
             "cwd": self.cwd,
             "env": {
@@ -722,7 +734,7 @@ fn run_step(mut checkpoint: StepJobCheckpoint, job: &ControllerJobHandle) -> Res
         .public_env
         .get("HOMEBOY_LAB_CONCURRENCY_LIMIT")
         .and_then(|limit| limit.parse().ok());
-    let capacity_permit = if checkpoint.request.terminal_consumer == "agent-task.execution-step" {
+    let capacity_permit = if !checkpoint.request.waits_for_children {
         let Some(permit) = crate::lab_capacity::acquire_step(limit, |position, capacity| {
             if job.is_cancelled() {
                 return Ok(false);
@@ -1207,6 +1219,7 @@ const STEP_JOB_REQUEST_FIELDS: &[&str] = &[
     "terminal_consumer",
     "key",
     "program",
+    "waits_for_children",
     "args",
     "cwd",
     "env",
@@ -1313,6 +1326,7 @@ mod forward_compat_tests {
     fn admission_field_lists_cover_every_serialized_field() {
         let mut full = request().with_linked_durable_run_id("linked");
         full.root_durable_run_id = Some("root".to_string());
+        full.waits_for_children = true;
         full.wait = StepWait {
             not_before: Some("2026-01-01T00:00:00Z".to_string()),
             runner_eligible: Some("lab".to_string()),
@@ -1562,6 +1576,66 @@ mod tests {
         let job_id = harness.job().unwrap().id.to_string();
         std::fs::read_to_string(step_job_dir(&job_id).unwrap().join(STEP_LOG_FILE))
             .unwrap_or_default()
+    }
+
+    #[test]
+    fn workflow_exec_waits_for_lab_capacity_before_spawning() {
+        with_isolated_home(|home| {
+            let workflow = serde_json::from_value(json!({
+                "schema": "homeboy/workflow-job-request/v1",
+                "instance": "wf-capacity-test",
+                "definition": {"schema": "homeboy/workflow/v1", "id": "capacity", "steps": []},
+                "definition_digest": "unused",
+                "inputs": {},
+                "homeboy_program": "/bin/true",
+                "cwd": home.path(),
+                "env": {"public_env": {"HOMEBOY_LAB_CONCURRENCY_LIMIT": "1"}}
+            }))
+            .unwrap();
+            let marker = home.path().join("spawned");
+            let submission = crate::workflow::advance::StepSubmission {
+                key: "workflow-exec-capacity".into(),
+                step: "import".into(),
+                iteration: 0,
+                attempt: 0,
+                kind: crate::workflow::advance::SubmissionKind::Exec {
+                    program: "/bin/sh".into(),
+                    args: vec![
+                        "-c".into(),
+                        "printf ran > \"$1\"".into(),
+                        "sh".into(),
+                        marker.display().to_string(),
+                    ],
+                    cwd: None,
+                },
+                not_before_ms: None,
+            };
+            let request = super::super::workflow_job::step_request(&workflow, &submission).unwrap();
+            let permit = crate::lab_capacity::acquire_step(Some(1), |_, _| Ok(true))
+                .unwrap()
+                .unwrap();
+            let harness = step_harness(&request, home.path());
+            harness.start_via_controller_boundary().unwrap();
+            let deadline = Instant::now() + Duration::from_secs(10);
+            while crate::lab_capacity::queued_steps() == 0 {
+                assert!(!marker.exists(), "workflow exec spawned without a permit");
+                assert!(
+                    Instant::now() < deadline,
+                    "workflow exec never queued for capacity"
+                );
+                std::thread::sleep(Duration::from_millis(20));
+            }
+            assert!(
+                !marker.exists(),
+                "workflow exec spawned while capacity was held"
+            );
+            drop(permit);
+            assert_eq!(
+                harness.wait_until_terminal().unwrap().status,
+                crate::api_jobs::JobStatus::Succeeded
+            );
+            assert_eq!(std::fs::read_to_string(marker).unwrap(), "ran");
+        });
     }
 
     #[test]

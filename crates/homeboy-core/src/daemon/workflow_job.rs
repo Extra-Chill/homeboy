@@ -1173,7 +1173,7 @@ pub fn step_request(
     let mut step = StepJobRequest::new(submission.key.clone(), program, args, cwd, env, consumer);
     step.root_durable_run_id = Some(request.instance.clone());
     if let Some(run_id) = linked_run {
-        step = step.with_linked_durable_run_id(run_id);
+        step = step.with_child_wait().with_linked_durable_run_id(run_id);
     }
     if let Some(not_before_ms) = submission.not_before_ms {
         let at = chrono::DateTime::<chrono::Utc>::from_timestamp_millis(not_before_ms as i64)

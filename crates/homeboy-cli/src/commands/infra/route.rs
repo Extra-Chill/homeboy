@@ -2863,6 +2863,9 @@ fn defer_until_runner_eligible(
         environment,
         homeboy::core::daemon::step_job::STEP_RECEIPT_CONSUMER,
     )
+    // It dispatches to the Lab runner and waits; the runner's own admission
+    // owns the heavy work, so this step holds no local capacity.
+    .with_child_wait()
     .with_wait(homeboy::core::daemon::step_job::StepWait {
         not_before: None,
         runner_eligible: Some(runner_id.clone()),
