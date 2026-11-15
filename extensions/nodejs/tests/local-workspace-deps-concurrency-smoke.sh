@@ -145,6 +145,10 @@ component_build() {
 }
 component_build > "${TMP_DIR}/component.out" 2>&1 &
 component_pid=$!
+# Start the consumers only once the component build is mid-build, so a missing
+# lock collides deterministically instead of depending on scheduling.
+for _ in $(seq 1 100); do [ -e "${comp_src}/packages/shared/.building" ] && break; sleep 0.05; done
+[ -e "${comp_src}/packages/shared/.building" ] || fail "component build never started"
 run_parallel "$comp_src" "${TMP_DIR}/component-consumer" || fail "consumers collided with the package's own component build"
 wait "$component_pid" || { sed 's/^/  /' "${TMP_DIR}/component.out" >&2; fail "component build collided with its consumers"; }
 assert_installed "${TMP_DIR}/component-consumer"

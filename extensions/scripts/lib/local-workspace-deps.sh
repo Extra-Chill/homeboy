@@ -257,9 +257,18 @@ _homeboy_local_workspace_dep_one() {
     # once on a cold cache. Serialize per source directory and re-check the
     # cache once the lock is held, so the first consumer builds and the rest
     # reuse its tarball (homeboy#18163).
-    local lock_handle=""
+    # The source root (where dependencies install) and, for a monorepo
+    # subpackage, the packed directory (where it builds, and where its own
+    # component build runs) are both locked: root first, then package.
+    local lock_handle="" pack_lock_handle=""
     if ! homeboy_local_workspace_lock_acquire "$source_abs" lock_handle; then
         echo "[local-workspace-deps] '$name': could not acquire the build lock for $source_abs" >&2
+        rm -rf "$pack_dest"
+        return 1
+    fi
+    if [ "$pack_abs" != "$source_abs" ] && ! homeboy_local_workspace_lock_acquire "$pack_abs" pack_lock_handle; then
+        echo "[local-workspace-deps] '$name': could not acquire the build lock for $pack_abs" >&2
+        homeboy_local_workspace_lock_release lock_handle
         rm -rf "$pack_dest"
         return 1
     fi
@@ -268,7 +277,7 @@ _homeboy_local_workspace_dep_one() {
         cp "$cached"/*.tgz "$pack_dest/"
     elif ! _homeboy_local_workspace_dep_build_and_pack \
         "$name" "$source_abs" "$pack_abs" "$pm" "$build_cmd" "$pack_dest"; then
-        homeboy_local_workspace_lock_release lock_handle
+        homeboy_local_workspace_lock_release pack_lock_handle; homeboy_local_workspace_lock_release lock_handle
         rm -rf "$pack_dest"
         return 1
     fi
@@ -277,7 +286,7 @@ _homeboy_local_workspace_dep_one() {
     tarball="$(find "$pack_dest" -maxdepth 1 -name '*.tgz' -type f 2>/dev/null | head -1)"
     if [ -z "$tarball" ] || [ ! -f "$tarball" ]; then
         echo "[local-workspace-deps] '$name': no tarball produced in $pack_dest" >&2
-        homeboy_local_workspace_lock_release lock_handle
+        homeboy_local_workspace_lock_release pack_lock_handle; homeboy_local_workspace_lock_release lock_handle
         rm -rf "$pack_dest"
         return 1
     fi
@@ -285,7 +294,7 @@ _homeboy_local_workspace_dep_one() {
         mkdir -p "${cached}.tmp.$$" && cp "$tarball" "${cached}.tmp.$$/" \
             && mv "${cached}.tmp.$$" "$cached" 2>/dev/null || rm -rf "${cached}.tmp.$$"
     fi
-    homeboy_local_workspace_lock_release lock_handle
+    homeboy_local_workspace_lock_release pack_lock_handle; homeboy_local_workspace_lock_release lock_handle
 
     local sha256
     sha256="$(_homeboy_local_workspace_dep_sha256 < "$tarball")"
