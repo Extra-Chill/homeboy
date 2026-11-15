@@ -2227,6 +2227,87 @@ mod tests {
         }
     }
 
+    #[test]
+    fn pinned_cook_uses_durable_lab_admission_under_pressure() {
+        use crate::commands::infra::route::{
+            cook_admission_decision, cook_requires_unmaterialized_admission_for_placement,
+            CookAdmissionDecision,
+        };
+        use crate::core::parsed_command_preflight::*;
+        let cli = Cli::parse_from([
+            "homeboy",
+            "--runner",
+            "homeboy-lab",
+            "agent-task",
+            "cook",
+            "--prompt",
+            "wait for the pinned Lab",
+            "--to-worktree",
+            "homeboy@queued",
+            "--verify",
+            "true",
+        ]);
+        let runner = Some("homeboy-lab".to_string());
+        let result = resolve_parsed_command_preflight(
+            Vec::new(),
+            parsed_command_preflight_input(&cli, &[]),
+            ParsedCommandPolicySnapshot {
+                resource_admission_evidence: ResourceAdmissionEvidence::Unavailable,
+                resource_policy: None,
+                lab_readiness: Some(configured_lab("capacity_blocked", &["pressure"])),
+                selected_runner_id: runner.clone(),
+                generic_route: GenericRoutePolicySnapshot {
+                    command_supports_lab: false,
+                    automatic_authorized: false,
+                    selected_runner_id: runner,
+                },
+                deferred_pressure_refusal: false,
+                runner_admitted: false,
+                auto_local_capacity_fallback: false,
+            },
+        )
+        .expect("pinned Cook waits rather than refusing launch");
+        assert!(cook_requires_unmaterialized_admission_for_placement(
+            cli.placement,
+            &result
+        ));
+        let CookAdmissionDecision::Indeterminate { reason, .. } = cook_admission_decision(&result)
+        else {
+            panic!("pinned Cook must queue");
+        };
+        assert!(reason.contains("queued for Lab admission (capacity_blocked: pressure)"));
+        assert_eq!(result.selected_runner_id.as_deref(), Some("homeboy-lab"));
+        crate::test_support::with_isolated_home(|_| {
+            use crate::agents::agent_task_lifecycle;
+            let record = agent_task_lifecycle::prepare_unmaterialized_cook_admission(
+                "pinned-pressure",
+                serde_json::json!({
+                    "request_ref": "pinned-pressure",
+                    "placement": {
+                        "runner_ref": result.selected_runner_id,
+                        "local_fallback": result.placement.fallback.local_allowed,
+                    },
+                }),
+                "queued",
+                &reason,
+            )
+            .expect("public lifecycle accepts the waiting pinned Cook");
+            assert_eq!(
+                record.state(),
+                agent_task_lifecycle::AgentTaskRunState::Queued
+            );
+            let persisted =
+                agent_task_lifecycle::exact_record("pinned-pressure").expect("durable admission");
+            let admission = &persisted.metadata["unmaterialized_cook_admission"];
+            assert_eq!(admission["requested_state"], "queued");
+            assert_eq!(
+                admission["binding"]["placement"]["runner_ref"],
+                "homeboy-lab"
+            );
+            assert_eq!(admission["binding"]["placement"]["local_fallback"], false);
+        });
+    }
+
     /// #17286: a configured but disconnected or stale Lab must never turn
     /// `--placement auto` Cook into controller execution. Preview and real
     /// admission reach the same typed refusal through one resolver.
