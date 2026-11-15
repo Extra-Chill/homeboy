@@ -171,13 +171,19 @@ fn preserve_candidate(repo: &Path, cook: &str) -> Result<()> {
         let reference = format!("refs/homeboy/candidates/{cook}");
         git(repo, &["check-ref-format", &reference])?;
         let head = git(repo, &["rev-parse", "HEAD"])?;
-        let recipe = crate::agent_task_service::load_recipe(cook)?;
-        let title = recipe.finalization["title"]
-            .as_str()
+        let recipe = crate::agent_task_service::load_recipe(cook).ok();
+        // Before a publication title exists, keep the destination's own subject.
+        // This ref only makes the staged tree reachable, even without a recipe.
+        let title = match recipe
+            .as_ref()
+            .and_then(|recipe| recipe.finalization["title"].as_str())
             .filter(|title| !title.trim().is_empty())
-            .ok_or_else(|| owner_mismatch("Cook has no publication title"))?;
+        {
+            Some(title) => title.to_owned(),
+            None => git(repo, &["log", "-1", "--format=%s", &head])?,
+        };
         homeboy_core::git::validate_publication_identity(&repo.to_string_lossy())?;
-        let commit = git(repo, &["commit-tree", &tree, "-p", &head, "-m", title])?;
+        let commit = git(repo, &["commit-tree", &tree, "-p", &head, "-m", &title])?;
         git(repo, &["update-ref", &reference, &commit])?;
     }
     Ok(())

@@ -94,82 +94,121 @@ fn cook_recovery_two_cooks_refuses_foreign_destination_and_preserves_staged_tree
 #[test]
 fn destination_passes_to_retries_and_to_successors_of_a_terminal_cook() {
     use crate::agent_task_lifecycle as lifecycle;
-    homeboy_core::test_support::with_isolated_home(|home| {
-        seed_recipe("cook-a");
-        let store = lifecycle::AgentTaskLifecycleStore::from_environment().unwrap();
-        let repo = home.path().join("repo");
-        std::fs::create_dir(&repo).unwrap();
-        git(&repo, &["init", "-q", "-b", "fix/issue-1"]);
-        git(
-            &repo,
-            &[
-                "config",
-                "remote.origin.url",
-                "https://example.test/repo.git",
-            ],
-        );
-        git(&repo, &["config", "user.name", "Test"]);
-        git(&repo, &["config", "user.email", "test@example.com"]);
-        std::fs::write(repo.join("file"), "base\n").unwrap();
-        git(&repo, &["add", "."]);
-        git(&repo, &["commit", "-qm", "base"]);
-        let durable = |id: &str, state, retry_of: Option<&str>| {
-            lifecycle::record_detached_cook_handoff_parent_in_store(&store, id).unwrap();
-            lifecycle::rewrite_record_for_test(id, |record| {
-                lifecycle::set_run_state(record, state);
-                if let Some(parent) = retry_of {
-                    record.metadata["retry_of"] = serde_json::json!(parent);
-                }
+    for title in [Some("fix: preserve candidate"), Some(""), Some("   "), None] {
+        homeboy_core::test_support::with_isolated_home(|home| {
+            if let Some(title) = title {
+                seed_recipe_with_title("cook-a", title);
+            }
+            let store = lifecycle::AgentTaskLifecycleStore::from_environment().unwrap();
+            let repo = home.path().join("repo");
+            std::fs::create_dir(&repo).unwrap();
+            git(&repo, &["init", "-q", "-b", "fix/issue-1"]);
+            git(
+                &repo,
+                &[
+                    "config",
+                    "remote.origin.url",
+                    "https://example.test/repo.git",
+                ],
+            );
+            git(&repo, &["config", "user.name", "Test"]);
+            git(&repo, &["config", "user.email", "test@example.com"]);
+            std::fs::write(repo.join("file"), "base\n").unwrap();
+            git(&repo, &["add", "."]);
+            git(&repo, &["commit", "-qm", "base"]);
+            let durable = |id: &str, state, retry_of: Option<&str>| {
+                lifecycle::record_detached_cook_handoff_parent_in_store(&store, id).unwrap();
+                lifecycle::rewrite_record_for_test(id, |record| {
+                    lifecycle::set_run_state(record, state);
+                    if let Some(parent) = retry_of {
+                        record.metadata["retry_of"] = serde_json::json!(parent);
+                    }
+                })
+                .unwrap();
+            };
+            durable("cook-a", lifecycle::AgentTaskRunState::Running, None);
+            durable(
+                "retry-a",
+                lifecycle::AgentTaskRunState::Running,
+                Some("cook-a"),
+            );
+            durable("cook-b", lifecycle::AgentTaskRunState::Queued, None);
+            destination::record(&repo, "cook-a").unwrap();
+
+            assert!(
+                destination::check(&repo, Some("cook-b")).is_err(),
+                "live owner"
+            );
+            assert!(
+                destination::check_run(&repo, Some("retry-a")).is_ok(),
+                "retry lineage"
+            );
+            assert!(
+                destination::check_run(&repo, Some("cook-b")).is_err(),
+                "foreign run"
+            );
+
+            lifecycle::rewrite_record_for_test("cook-a", |record| {
+                lifecycle::set_run_state(record, lifecycle::AgentTaskRunState::Failed);
             })
             .unwrap();
-        };
-        durable("cook-a", lifecycle::AgentTaskRunState::Running, None);
-        durable(
-            "retry-a",
-            lifecycle::AgentTaskRunState::Running,
-            Some("cook-a"),
-        );
-        durable("cook-b", lifecycle::AgentTaskRunState::Queued, None);
-        destination::record(&repo, "cook-a").unwrap();
-
-        assert!(
-            destination::check(&repo, Some("cook-b")).is_err(),
-            "live owner"
-        );
-        assert!(
-            destination::check_run(&repo, Some("retry-a")).is_ok(),
-            "retry lineage"
-        );
-        assert!(
-            destination::check_run(&repo, Some("cook-b")).is_err(),
-            "foreign run"
-        );
-
-        lifecycle::rewrite_record_for_test("cook-a", |record| {
-            lifecycle::set_run_state(record, lifecycle::AgentTaskRunState::Failed);
-        })
-        .unwrap();
-        assert!(
-            destination::check_run(&repo, Some("cook-b")).is_err(),
-            "runs never take over"
-        );
-        std::fs::write(repo.join("file"), "cook-a candidate\n").unwrap();
-        git(&repo, &["add", "file"]);
-        destination::check(&repo, Some("cook-b")).unwrap();
-        assert_eq!(
-            std::fs::read_to_string(repo.join("file")).unwrap(),
-            "cook-a candidate\n"
-        );
-        git(&repo, &["show", "refs/homeboy/candidates/cook-a:file"]);
-        assert!(
-            destination::check(&repo, Some("cook-a")).is_err(),
-            "ownership moved"
-        );
-        assert!(destination::check(&repo, Some("cook-b")).is_ok());
-    });
+            assert!(
+                destination::check_run(&repo, Some("cook-b")).is_err(),
+                "runs never take over"
+            );
+            std::fs::write(repo.join("file"), "cook-a candidate\n").unwrap();
+            git(&repo, &["add", "file"]);
+            let staged_tree = || {
+                let output = Command::new("git")
+                    .arg("-C")
+                    .arg(&repo)
+                    .arg("write-tree")
+                    .output()
+                    .unwrap();
+                assert!(output.status.success());
+                String::from_utf8(output.stdout).unwrap().trim().to_string()
+            };
+            let tree = staged_tree();
+            let head = git_head(&repo, "HEAD");
+            destination::check(&repo, Some("cook-b")).unwrap();
+            assert_eq!(
+                git_head(&repo, "refs/homeboy/candidates/cook-a^{tree}"),
+                tree
+            );
+            assert_eq!(git_head(&repo, "HEAD"), head);
+            assert_eq!(staged_tree(), tree);
+            let subject = Command::new("git")
+                .arg("-C")
+                .arg(&repo)
+                .args(["log", "-1", "--format=%s", "refs/homeboy/candidates/cook-a"])
+                .output()
+                .unwrap();
+            assert!(subject.status.success());
+            assert_eq!(
+                String::from_utf8(subject.stdout).unwrap().trim(),
+                title
+                    .filter(|title| !title.trim().is_empty())
+                    .unwrap_or("base")
+            );
+            assert_eq!(
+                std::fs::read_to_string(repo.join("file")).unwrap(),
+                "cook-a candidate\n"
+            );
+            git(&repo, &["show", "refs/homeboy/candidates/cook-a:file"]);
+            assert!(
+                destination::check(&repo, Some("cook-a")).is_err(),
+                "ownership moved"
+            );
+            assert!(destination::check(&repo, Some("cook-b")).is_ok());
+        });
+    }
 }
 
 fn seed_recipe(cook: &str) {
+    seed_recipe_with_title(cook, "fix: preserve candidate");
+}
+
+fn seed_recipe_with_title(cook: &str, title: &str) {
     use crate::agent_task_service::*;
     let options = CookRequest {
         identity: CookIdentity {
@@ -204,7 +243,7 @@ fn seed_recipe(cook: &str) {
             draft_pr: false,
             base: "main".into(),
             head: Some("cook/head".into()),
-            title: "fix: preserve candidate".into(),
+            title: title.into(),
             commit_message: "fix: preserve candidate".into(),
             protected_branches: vec![],
         },
