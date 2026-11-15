@@ -1387,45 +1387,18 @@ pub fn read_status_at_paths(path: PathBuf, jobs_path: PathBuf) -> Result<DaemonS
             }
         };
     }
-    // Every daemon of one Unix user shares this ledger, whatever its state
-    // dir (#16089). Scope it to this state dir's daemon scope (#16104) and to
-    // the lease it recorded, live or dead, so another controller's stamped
-    // work on a shared Lab host neither protects this daemon nor blocks its
-    // replacement, even before this state dir has a lease (#16798).
-    // Unstamped records have no proven owner and stay counted. A state dir
-    // with no lease cannot own a job another daemon stamped with its lease,
-    // even when that daemon predates scope stamps.
+    // Every daemon of one Unix user shares this ledger (#16089). Scope it to
+    // this state dir's daemon scope (#16104) and the lease it recorded, live
+    // or dead, so another controller's work on a shared Lab host neither
+    // protects this daemon nor blocks its replacement (#16798).
     let job_store = JobStore::open_without_reconciliation(&jobs_path)?
         .with_daemon_scope(daemon_scope_for_state_path(&path));
     let job_store = match validation.state.as_ref() {
         Some(state) => job_store.with_daemon_lease(state.lease_id.clone()),
         None => job_store,
     };
-    let active_job_recovery_evidence = job_store
-        .active_daemon_job_recovery_evidence(
-            validation
-                .running
-                .then(|| {
-                    validation
-                        .state
-                        .as_ref()
-                        .map(|state| state.lease_id.as_str())
-                })
-                .flatten(),
-            pid_is_running,
-        )
-        .into_iter()
-        // A dead generation's in-scope job awaiting attestation is reported
-        // whatever its lease: it is this scope's to attest (#17429).
-        .filter(|evidence| {
-            evidence.disposition
-                == crate::api_jobs::DaemonActiveJobRecoveryDisposition::NeedsAttestation
-                || match validation.state {
-                    Some(_) => job_store.executes_lease(evidence.daemon_lease_id.as_deref()),
-                    None => evidence.daemon_lease_id.is_none(),
-                }
-        })
-        .collect::<Vec<_>>();
+    let active_job_recovery_evidence =
+        job_store.active_daemon_job_recovery_evidence(validation.live_lease_id());
     // Restart-safe jobs (terminal evidence, awaiting attestation, driver
     // recovery) are reported as evidence but do not protect the daemon from
     // replacement; see `blocks_daemon_replacement`.
@@ -4004,24 +3977,11 @@ fn refresh_daemon_freshness_snapshot(job_store: &JobStore) {
 fn daemon_freshness_report(job_store: &JobStore) -> Result<DaemonFreshnessReport> {
     let path = state_path()?;
     let validation = validate_lease_file(&path)?;
-    // Restart-safe jobs do not protect this daemon from replacement either.
-    // Another daemon's jobs in the shared ledger neither occupy nor protect
-    // this daemon (#16089). Classified against the live lease, as `status`
-    // does, so this daemon's own work is never mistaken for a dead
-    // generation's job awaiting attestation.
-    let current_lease = validation
-        .running
-        .then(|| {
-            validation
-                .state
-                .as_ref()
-                .map(|state| state.lease_id.as_str())
-        })
-        .flatten();
+    // Restart-safe jobs do not protect this daemon from replacement, and
+    // another daemon's jobs in the shared ledger neither occupy nor protect it.
     let blocking_active_jobs = job_store
-        .active_daemon_job_recovery_evidence(current_lease, pid_is_running)
+        .active_daemon_job_recovery_evidence(validation.live_lease_id())
         .into_iter()
-        .filter(|evidence| job_store.executes_lease(evidence.daemon_lease_id.as_deref()))
         .filter(|evidence| evidence.disposition.blocks_daemon_replacement())
         .count();
     Ok(freshness_report_from_validation(
@@ -8762,7 +8722,7 @@ fn post_admits_owned_work(path: &str, body: Option<&serde_json::Value>, store: &
     let linked = request.as_ref().and_then(continuation_run_id);
     let lease = heartbeat_lease().ok();
     let Some(lease) = lease else { return false };
-    let evidence = store.active_daemon_job_recovery_evidence(Some(&lease.lease_id), pid_is_running);
+    let evidence = store.active_daemon_job_recovery_evidence(Some(&lease.lease_id));
     let mut owned: Vec<String> = evidence
         .iter()
         .filter(|job| job.daemon_lease_id.as_deref() == Some(lease.lease_id.as_str()))

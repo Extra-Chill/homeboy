@@ -34,6 +34,16 @@ pub(crate) struct DaemonLeaseValidation {
     pub(crate) invalid_pid: Option<u32>,
 }
 
+impl DaemonLeaseValidation {
+    /// The lease of the daemon serving right now, if one is.
+    pub(crate) fn live_lease_id(&self) -> Option<&str> {
+        self.state
+            .as_ref()
+            .filter(|_| self.running)
+            .map(|state| state.lease_id.as_str())
+    }
+}
+
 pub(crate) fn daemon_state_identity(state_path: &Path, jobs_path: &Path) -> Result<String> {
     let mut hasher = Sha256::new();
     hasher.update(b"daemon-state\0");

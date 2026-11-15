@@ -936,7 +936,6 @@ fn status_evidence_reports_linked_active_and_unresolved_as_blocking() {
 
     let evidence = store.active_daemon_job_recovery_evidence_with_linked_durable_run_resolver(
         Some("lease-dead"),
-        |_| false,
         |stored| match stored.job.id {
             id if id == active.id => LinkedDurableRunResolution::Active("run-active".to_string()),
             id if id == unresolved.id => {
