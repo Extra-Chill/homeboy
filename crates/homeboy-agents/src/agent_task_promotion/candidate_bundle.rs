@@ -160,6 +160,11 @@ pub(crate) fn validate_destination(
         .into());
     }
     if let Some(baseline) = feedback {
+        // The previous candidate was never laid onto this destination (or was
+        // rolled back): a clean base takes the new full candidate directly.
+        if clean_at(repo, &candidate.base_sha)? {
+            return Ok(());
+        }
         let previous = crate::agent_task_candidate_tree::validate_gate_feedback_candidate_baseline(
             repo, baseline,
         )?;
@@ -185,6 +190,12 @@ pub(crate) fn validate_destination(
     }
     Ok(())
 }
+/// The destination is checked out at `base` with no edits or untracked files.
+fn clean_at(repo: &Path, base: &str) -> Result<bool> {
+    Ok(git(repo, &["rev-parse", "HEAD"])? == base
+        && git(repo, &["status", "--porcelain", "--untracked-files=all"])?.is_empty())
+}
+
 pub fn materialize_candidate_tree(repo: &Path, candidate: &AgentTaskCandidate) -> Result<()> {
     super::destination::check(repo, None)?;
     materialize_candidate_tree_with_feedback(repo, candidate, None)
@@ -195,6 +206,7 @@ pub(crate) fn materialize_candidate_tree_with_feedback(
     candidate: &AgentTaskCandidate,
     feedback: Option<&serde_json::Value>,
 ) -> Result<()> {
+    let fresh_base = feedback.is_some() && clean_at(repo, &candidate.base_sha)?;
     validate_destination(repo, candidate, feedback)?;
     if feedback.is_none()
         && super::committed_changes::recover_candidate_destination(
@@ -207,6 +219,7 @@ pub(crate) fn materialize_candidate_tree_with_feedback(
         return Ok(());
     }
     let previous = feedback
+        .filter(|_| !fresh_base)
         .and_then(|baseline| baseline.pointer("/candidate_commit/candidate_sha"))
         .and_then(serde_json::Value::as_str)
         .unwrap_or("HEAD");
