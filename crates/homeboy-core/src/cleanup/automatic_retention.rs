@@ -6,6 +6,7 @@
 //! A crashed pass is reaped by its recorded process identity, so the next pass
 //! proceeds without waiting on an age heuristic.
 
+use std::collections::BTreeMap;
 use std::path::PathBuf;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
@@ -98,6 +99,8 @@ struct AutomaticRetentionState {
     last_finished_unix_ms: u64,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     cursor: Option<String>,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    remote_workspace_cursors: BTreeMap<String, String>,
 }
 
 /// One admitted retention pass. It holds the kind's exclusive running lease
@@ -114,6 +117,22 @@ impl AutomaticRetentionPass {
     /// The resume cursor the previous pass of this kind left behind.
     pub fn cursor(&self) -> Option<&str> {
         self.state.cursor.as_deref()
+    }
+
+    /// Remote workspace scan positions, keyed by runner id.
+    pub fn remote_workspace_cursors(&self) -> &BTreeMap<String, String> {
+        &self.state.remote_workspace_cursors
+    }
+
+    /// Save a runner's scan position, or clear it after a complete scan.
+    pub fn set_remote_workspace_cursor(&mut self, runner_id: String, cursor: Option<String>) {
+        if let Some(cursor) = cursor {
+            self.state
+                .remote_workspace_cursors
+                .insert(runner_id, cursor);
+        } else {
+            self.state.remote_workspace_cursors.remove(&runner_id);
+        }
     }
 
     /// Record the pass outcome and release the running lease.
