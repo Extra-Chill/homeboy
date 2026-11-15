@@ -84,6 +84,20 @@ spawns another daemon beside it:
   as `competing_serve` (the contender, its manager, and the holder that
   refused it) for as long as that holder is current.
 
+Ownership is also retained in `<state-dir>/service-manager-owner`, independently
+of the lease and lock. During a manager's restart delay (even with a missing
+lease and free lock), CLI auto-start refuses to take over. If intentionally
+switching to CLI-managed operation, first disable the service and stop its
+daemon, then remove only this ownership marker; do not delete the job store.
+
+CLI-spawned daemons use an allowlisted environment: user/home and executable
+search paths, temporary and XDG directories, locale/timezone, Homeboy root
+overrides, and the explicit `HOMEBOY_SESSION_SEND_COMMAND` service contract.
+Startup token, idle timeout, and launcher identity are set by Homeboy itself.
+Caller context, thread/run/requester identity, service-manager identity, and
+arbitrary ambient variables are not inherited. Credentials needed by a sender
+must be configured by the sender rather than borrowed from a launching session.
+
 On any host, while a live or starting daemon holds `owner.lock`, every start
 path refuses to spawn another daemon. The serving daemon records its holder
 identity (PID, process start identity, startup token) in `owner.lock`, and

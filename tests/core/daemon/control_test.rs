@@ -1008,6 +1008,80 @@ fn start_names_the_service_manager_that_owns_a_stale_daemon() {
     );
 }
 
+#[test]
+fn managed_dead_lease_never_spawns_even_when_owner_lock_is_available() {
+    let mut status = managed_status(Some(fake_daemon(4242, "lease-dead")), false);
+    status.running = false;
+    let error = super::start_or_return_live_with_operations(
+        || Ok(status),
+        || -> crate::error::Result<Option<()>> { panic!("ownership is checked before the lock") },
+        || panic!("managed lease must not be cleaned up"),
+        || panic!("must not spawn into the caller's cgroup"),
+    )
+    .unwrap_err();
+    assert!(error.message.contains("service manager systemd"));
+}
+
+#[test]
+fn managed_ownership_survives_missing_lease_and_unlocked_restart_window() {
+    with_isolated_home(|_| {
+        let path = super::super::state_path().unwrap();
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        super::super::service_manager::record_owner(crate::daemon::DaemonServiceManager::Systemd)
+            .unwrap();
+        assert!(!path.exists());
+        let error = super::start_or_return_live_unlocked("127.0.0.1:0").unwrap_err();
+        assert!(error.message.contains("owned by service manager systemd"));
+    });
+}
+
+#[test]
+fn daemon_environment_is_allowlisted_not_a_caller_session() {
+    let input = [
+        ("HOME", "/service/home"),
+        ("PATH", "/usr/bin"),
+        ("HOMEBOY_DATA_DIR", "/service/data"),
+        ("HOMEBOY_SESSION_SEND_COMMAND", "/service/send"),
+        ("HOMEBOY_CALLER_CONTEXT", "caller"),
+        ("HOMEBOY_SESSION_THREAD_ID", "thread"),
+        ("HOMEBOY_ACTIVE_RUN_ID", "run"),
+        ("HOMEBOY_REQUESTER", "requester"),
+        ("ARBITRARY_SESSION_SECRET", "secret"),
+        ("HOMEBOY_UNKNOWN_CONTEXT", "context"),
+        ("INVOCATION_ID", "caller-unit"),
+        ("XPC_SERVICE_NAME", "caller-service"),
+    ];
+    let mut command = std::process::Command::new("env");
+    super::configure_daemon_environment(
+        &mut command,
+        input
+            .into_iter()
+            .map(|(key, value)| (key.into(), value.into())),
+    );
+    let env: std::collections::BTreeMap<_, _> = command
+        .get_envs()
+        .filter_map(|(key, value)| {
+            value.map(|value| {
+                (
+                    key.to_string_lossy().to_string(),
+                    value.to_string_lossy().to_string(),
+                )
+            })
+        })
+        .collect();
+    assert_eq!(env.len(), 4, "only explicitly allowlisted keys survive");
+    assert_eq!(env["HOMEBOY_DATA_DIR"], "/service/data");
+    assert_eq!(env["HOMEBOY_SESSION_SEND_COMMAND"], "/service/send");
+    #[cfg(unix)]
+    {
+        // An actual child must not inherit unlisted ambient variables either.
+        let output = command.output().unwrap();
+        assert!(output.status.success());
+        let lines = String::from_utf8(output.stdout).unwrap();
+        assert_eq!(lines.lines().count(), 4);
+    }
+}
+
 fn managed_status(daemon: Option<super::DaemonStartResult>, fresh: bool) -> DaemonStatus {
     let mut status = fake_status(daemon, fresh);
     if let Some(state) = status.state.as_mut() {

@@ -55,6 +55,38 @@ impl DaemonServiceManager {
     }
 }
 
+/// Persist ownership independently of the ephemeral lease. A manager's restart
+/// delay must not become permission for a CLI to take over the store. Removing
+/// the daemon state directory explicitly resets this ownership declaration.
+pub(super) fn record_owner(manager: DaemonServiceManager) -> crate::error::Result<()> {
+    let path = super::state_path()?.with_file_name("service-manager-owner");
+    std::fs::write(&path, manager.as_str()).map_err(|error| {
+        crate::error::Error::internal_io(
+            error.to_string(),
+            Some(format!("write {}", path.display())),
+        )
+    })
+}
+
+pub(super) fn refuse_managed_spawn() -> crate::error::Result<()> {
+    let path = super::state_path()?.with_file_name("service-manager-owner");
+    match std::fs::read_to_string(&path) {
+        Ok(manager) => Err(crate::error::Error::internal_unexpected(format!(
+            "daemon is owned by service manager {}; Homeboy does not spawn its replacement",
+            manager.trim()
+        ))
+        .with_hint(
+            "Restart it through its service manager; recovery: homeboy daemon ensure-running"
+                .to_string(),
+        )),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(crate::error::Error::internal_io(
+            error.to_string(),
+            Some(format!("read {}", path.display())),
+        )),
+    }
+}
+
 /// Basename of this process's parent executable.
 fn parent_process_name() -> Option<String> {
     #[cfg(unix)]

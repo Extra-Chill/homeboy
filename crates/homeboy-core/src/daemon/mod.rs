@@ -6990,6 +6990,9 @@ fn write_state(
         runtime_paths: capture_daemon_runtime_snapshot(),
         service_manager,
     };
+    if let Some(manager) = service_manager {
+        service_manager::record_owner(manager)?;
+    }
     write_lease(&path, &state)?;
     Ok(state)
 }
