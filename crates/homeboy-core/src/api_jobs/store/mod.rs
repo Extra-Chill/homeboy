@@ -2379,13 +2379,14 @@ impl JobStore {
         idempotency_key: String,
         mut controller_job: ControllerJobState,
     ) -> Result<ControllerJobSubmissionOutcome> {
-        if let Some(id) = crate::daemon::reservation::holding(
+        if let Some(reservation) = crate::daemon::reservation::holding(
             controller_job
                 .request
                 .get("reservation")
                 .and_then(Value::as_str),
         )? {
-            controller_job.pending_admission_reason = Some(format!("reservation:{id}"));
+            controller_job.pending_admission_reason =
+                Some(format!("reservation:{}", reservation.id));
         }
         let fingerprint = controller_submission_fingerprint(&controller_job);
         let now = timestamp_ms();

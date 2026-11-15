@@ -294,10 +294,7 @@ pub(crate) fn freshness_report_from_validation(
             // The controller reapplies the configured runner thresholds.
             paths.pressure = Some(crate::runner_pressure::sample(&Default::default()));
             if let Some(pressure) = paths.pressure.as_mut() {
-                pressure.reservation = super::reservation::current()
-                    .ok()
-                    .flatten()
-                    .map(|r| serde_json::json!(r));
+                pressure.reservation = super::reservation::status().ok().flatten();
             }
             paths
         }),

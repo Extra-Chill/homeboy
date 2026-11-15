@@ -3403,11 +3403,21 @@ fn reserve_admission_observed(
         .transpose()
         .map_err(|error| Error::internal_unexpected(error.to_string()))?
         .unwrap_or_default();
-    if let Some(id) = reservation::holding(body.get("reservation").and_then(|v| v.as_str()))? {
+    if let Some(reservation) =
+        reservation::holding(body.get("reservation").and_then(|v| v.as_str()))?
+    {
         let mut error = crate::runner_pressure::RunnerPressure::default().admission_refusal();
+        let id = &reservation.id;
         error.details["reservation_id"] = json!(id);
         error.details["admission_reason"] = json!(format!("reservation:{id}"));
-        error.message = format!("admission held by reservation {id}");
+        error.message = format!(
+            "admission held by reservation {id} ({}) until {}",
+            reservation
+                .reason
+                .as_deref()
+                .unwrap_or("no reason provided"),
+            reservation.eta().unwrap_or_default()
+        );
         return Err(error);
     }
     let pressure = sample(&thresholds);
