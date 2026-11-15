@@ -7,11 +7,11 @@ single slot remains available for forward progress on a saturated host. Missing
 or invalid load data falls back to the CPU bound. Existing work is not killed
 when load rises.
 
-The budget is applied at one point: detached Cook execution steps (heavy
-provider/gate work) take a FIFO slot before launching. A waiting step polls
-actively and releases its ticket on cancellation, so it cannot block the queue.
-Launcher steps do not hold a slot while waiting for a nested execution step.
-Runner job reservations keep their configured concurrency limit unchanged. Waiting progress reports `waiting_for: lab_capacity`,
+Heavy execution and workflow steps take a slot before launching. Waiting owners
+with the fewest active slots go first, with arrival order breaking ties. A waiting
+step polls actively and releases its ticket on cancellation. Launcher steps do
+not hold a slot while waiting for children. By default, direct runner job
+reservations keep their configured concurrency limit unchanged. Waiting progress reports `waiting_for: lab_capacity`,
 `queue_position`, `load_average_1m`, and `effective_budget`. `eta_seconds` is null:
 load and provider durations do not support an honest completion estimate.
 
@@ -19,6 +19,23 @@ load and provider durations do not support an honest completion estimate.
 account capacity. `homeboy runner doctor` includes a `lab_capacity` check.
 Observations come from the execution daemon, not the controller's CPU/load.
 Disconnected or older daemons without the endpoint cannot supply observations.
+
+## Reserved gate lane
+
+Set `HOMEBOY_LAB_GATE_RESERVE=<n>` in the executing daemon environment to reserve
+the last `n` CPU ids in its allowed affinity mask. The count is clamped to leave
+at least one CPU for steps. Unset, invalid, or zero values preserve legacy behavior.
+Step slices exclude the reserve even without a configured step concurrency limit.
+
+Direct jobs already recorded with kind `runner.exec` use this lane (including
+Cook promotion gates); workflow steps remain on step permits. Direct children
+are pinned to the whole reserved mask. One durable child reservation per reserved
+CPU bounds concurrency, independently of the ordinary runner concurrency limit.
+Reservations count before spawn and survive daemon restart. Gates retain the
+memory pressure check but ignore host CPU PSI, load, and IO pressure. A full lane
+reports `pending_resource_admission` with `pending_admission_reason: gate_slot`.
+The daemon `/capacity` response includes `gate_reserve.reserved_cpus`,
+`active_slots`, and `queued_slots` (accepted gates not yet holding a child reservation).
 
 Detached child handles retain wait ownership on early supervisor returns;
 reapers wait only their own child PID and do not steal other command statuses.

@@ -128,6 +128,10 @@ impl RunnerExecWork {
             source_snapshot,
             path_materialization_plan,
         } = self;
+        if crate::lab_capacity::is_gate(&job_store.get(job.job_id())?) {
+            let reserve = crate::lab_capacity::gate_reserve(&crate::lab_capacity::allowed_cpus());
+            plan.cpus = (!reserve.is_empty()).then_some(reserve);
+        }
         if let Some(limit) = plan.concurrency_limit {
             plan.env.insert(
                 "HOMEBOY_LAB_CONCURRENCY_LIMIT".to_string(),

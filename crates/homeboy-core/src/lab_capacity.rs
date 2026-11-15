@@ -39,6 +39,44 @@ pub fn observe(limit: Option<usize>) -> LabCapacity {
     }
 }
 
+/// Reserve the last CPUs, leaving at least one for steps. One concurrent gate
+/// per reserved CPU; oversized requests are clamped to preserve step progress.
+/// Unset, invalid, or zero requests preserve the legacy admission policy.
+pub fn gate_reserve(allowed: &[usize]) -> Vec<usize> {
+    let requested = std::env::var("HOMEBOY_LAB_GATE_RESERVE")
+        .ok()
+        .and_then(|value| value.parse::<usize>().ok())
+        .unwrap_or(0);
+    let count = requested.min(allowed.len().saturating_sub(1));
+    allowed[allowed.len() - count..].to_vec()
+}
+
+/// Direct runner executions are the gate lane; workflow steps use step permits.
+pub fn is_gate(job: &crate::api_jobs::Job) -> bool {
+    job.runner_job_projection
+        .as_ref()
+        .is_some_and(|projection| projection.kind == "runner.exec")
+}
+
+/// Reserved gates ignore bulk CPU/IO pressure, but retain the memory guard.
+pub fn gate_admission_reason(
+    pressure: &crate::runner_pressure::RunnerPressure,
+    thresholds: &crate::runner_pressure::PressureThresholds,
+    active: usize,
+    slots: usize,
+) -> Option<String> {
+    if pressure
+        .memory
+        .is_some_and(|value| value > thresholds.memory.saturating_mul(100))
+    {
+        Some("pressure".into())
+    } else if active >= slots {
+        Some("gate_slot".into())
+    } else {
+        None
+    }
+}
+
 /// Queue and occupied slots share a lock so ranking and admission are atomic.
 #[derive(Default)]
 struct StepState {
@@ -86,10 +124,15 @@ impl Drop for StepPermit {
 /// CPU count (`nproc`, test runners, `make -j`) then fit their share. No
 /// limit, or a share that would cover every CPU, leaves the step unpinned.
 pub fn cpu_slice(allowed: &[usize], limit: Option<usize>, slot: usize) -> Option<Vec<usize>> {
+    let reserved = gate_reserve(allowed).len();
+    let allowed = &allowed[..allowed.len() - reserved];
+    if reserved > 0 && limit.unwrap_or(1) <= 1 {
+        return Some(allowed.to_vec());
+    }
     let limit = limit.filter(|limit| *limit > 1)?;
     let width = (allowed.len() / limit).max(1);
     if width >= allowed.len() {
-        return None;
+        return (reserved > 0).then(|| allowed.to_vec());
     }
     let start = (slot % limit) * width % allowed.len();
     Some(allowed[start..(start + width).min(allowed.len())].to_vec())
@@ -322,35 +365,55 @@ mod tests {
 
     #[test]
     fn cpu_slices_are_disjoint_shares() {
-        let cpus = (0..32).collect::<Vec<_>>();
-        for (limit, slot, expected) in [
-            (Some(4), 0, Some((0..8).collect::<Vec<_>>())),
-            (Some(4), 3, Some((24..32).collect())),
-            (Some(3), 2, Some((20..30).collect())),
-            (Some(64), 40, Some(vec![8])),
-            (Some(1), 0, None),
-            (None, 0, None),
-        ] {
-            assert_eq!(cpu_slice(&cpus, limit, slot), expected, "{limit:?} {slot}");
-        }
+        crate::test_support::with_isolated_home(|_| {
+            let cpus = (0..32).collect::<Vec<_>>();
+            for (limit, slot, expected) in [
+                (Some(4), 0, Some((0..8).collect::<Vec<_>>())),
+                (Some(4), 3, Some((24..32).collect())),
+                (Some(3), 2, Some((20..30).collect())),
+                (Some(64), 40, Some(vec![8])),
+                (Some(1), 0, None),
+                (None, 0, None),
+            ] {
+                assert_eq!(cpu_slice(&cpus, limit, slot), expected, "{limit:?} {slot}");
+            }
+        });
     }
 
     /// A pinned step's tree sees only its share: `nproc` sizes to the slice.
     #[test]
     #[cfg(target_os = "linux")]
     fn pinned_child_nproc_reports_its_slice() {
-        let allowed = allowed_cpus();
-        let Some(slice) = cpu_slice(&allowed, Some(2), 1) else {
-            return; // a single-CPU host has nothing to divide
-        };
-        let mut command = std::process::Command::new("sh");
-        command.args(["-c", "nproc"]);
-        pin_command(&mut command, &slice);
-        let output = command.output().expect("run nproc");
-        assert_eq!(
-            String::from_utf8_lossy(&output.stdout).trim(),
-            slice.len().to_string()
-        );
+        crate::test_support::with_isolated_home(|_| {
+            let allowed = allowed_cpus();
+            let Some(slice) = cpu_slice(&allowed, Some(2), 1) else {
+                return; // a single-CPU host has nothing to divide
+            };
+            let mut command = std::process::Command::new("sh");
+            command.args(["-c", "nproc"]);
+            pin_command(&mut command, &slice);
+            let output = command.output().expect("run nproc");
+            assert_eq!(
+                String::from_utf8_lossy(&output.stdout).trim(),
+                slice.len().to_string()
+            );
+        });
+    }
+
+    #[test]
+    fn reserve_excludes_cpus_even_without_a_step_limit() {
+        crate::test_support::with_isolated_home(|_| {
+            std::env::set_var("HOMEBOY_LAB_GATE_RESERVE", "2");
+            let allowed = vec![1, 3, 5, 7, 9];
+            for limit in [None, Some(1), Some(2), Some(16)] {
+                for slot in 0..16 {
+                    let slice = cpu_slice(&allowed, limit, slot).unwrap();
+                    assert!(!slice.is_empty());
+                    assert!(slice.iter().all(|cpu| ![7, 9].contains(cpu)));
+                }
+            }
+            std::env::remove_var("HOMEBOY_LAB_GATE_RESERVE");
+        });
     }
 
     #[test]
