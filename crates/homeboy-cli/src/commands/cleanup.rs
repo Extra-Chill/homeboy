@@ -6652,47 +6652,44 @@ mod tests {
                 .unwrap()
                 .unwrap()
             };
+            // One workspace per page, so a single pass cannot finish the scan.
+            let mut policy = cleanup::resolve_cleanup_policy(Default::default()).unwrap();
+            policy.runner_min_age_hours = 0;
+            policy.runner_workspace_page_limit = 1;
+            // The production phase: the pass's stored cursors in, the page out.
+            let run_phase = |pass: &mut cleanup::AutomaticRetentionPass| {
+                let cursors = serde_json::to_string(pass.remote_workspace_cursors()).unwrap();
+                let categories =
+                    remote_lab_workspace_categories(policy, false, Some(&cursors)).unwrap();
+                save_remote_workspace_cursors(pass, &categories);
+                let page = categories
+                    .into_iter()
+                    .find(|category| category.output["runner_id"] == "cursor-test")
+                    .expect("cursor-test runner scanned");
+                let candidates = page.output["candidates"].as_array().cloned().unwrap();
+                assert_eq!(candidates.len(), 1, "{:?}", page.output);
+                candidates[0]["remote_path"].as_str().unwrap().to_string()
+            };
+
             let mut first = begin();
-            // Seed an obsolete cursor as well: automatic scans recover rather than fail.
+            // An obsolete cursor restarts the scan instead of stranding the runner.
             first.set_remote_workspace_cursor(
                 "cursor-test".to_string(),
                 Some("obsolete".to_string()),
             );
-            let options =
-                |pass: &cleanup::AutomaticRetentionPass, limit| RunnerWorkspacePruneOptions {
-                    min_age_hours: 0,
-                    limit,
-                    passes: 1,
-                    cursor: pass.remote_workspace_cursors().get("cursor-test").cloned(),
-                    ..RunnerWorkspacePruneOptions::default()
-                };
-            let (page, _) =
-                prune_automatic_workspace_page("cursor-test", options(&first, 1)).unwrap();
-            assert!(!page.scan_complete);
-            assert_eq!(page.candidates.len(), 1, "{page:?}");
-            let cursor = page.continuation_cursor.clone().unwrap();
-            let first_path = page.candidates[0].remote_path.clone();
-            save_remote_workspace_cursors(
-                &mut first,
-                &[remote_workspace_category(page, false).unwrap()],
-            );
+            let first_path = run_phase(&mut first);
+            assert!(first.remote_workspace_cursors().contains_key("cursor-test"));
             first.finish("partial", None).unwrap();
 
             let mut second = begin();
-            assert_eq!(
-                second.remote_workspace_cursors().get("cursor-test"),
-                Some(&cursor)
-            );
-            let (page, _) =
-                prune_automatic_workspace_page("cursor-test", options(&second, 10)).unwrap();
-            assert!(page.scan_complete, "{page:?}");
-            assert_eq!(page.candidates.len(), 1, "{page:?}");
-            assert_ne!(page.candidates[0].remote_path, first_path);
-            save_remote_workspace_cursors(
-                &mut second,
-                &[remote_workspace_category(page, false).unwrap()],
+            assert_ne!(
+                run_phase(&mut second),
+                first_path,
+                "second pass resumes past the first page"
             );
             second.finish("completed", None).unwrap();
+            // The second page reaches the last workspace: the scan is complete and
+            // the cursor is cleared, so the next pass starts from the beginning.
             assert!(begin().remote_workspace_cursors().is_empty());
         });
     }
