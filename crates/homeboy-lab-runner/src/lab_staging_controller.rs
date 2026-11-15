@@ -668,7 +668,6 @@ fn handoff_refresh_options(
         mode,
         git_ref: Some(handoff_build_reference(requested)),
         reconnect: true,
-        force: false,
         // Automatic recovery must preserve #9088's monotonic upgrade contract.
         allow_downgrade: false,
         dry_run: false,

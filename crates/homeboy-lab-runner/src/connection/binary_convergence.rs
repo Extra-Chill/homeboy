@@ -131,7 +131,6 @@ pub(crate) fn converge_runner_binary_with(
             detail: None,
             blocking_job_ids: Vec::new(),
         },
-        ControllerReleaseInstall::DeferredByActiveJobs(job_ids) => pending(from, to, job_ids),
         ControllerReleaseInstall::Failed(detail) => {
             report(RunnerBinaryConvergenceStatus::Failed, from, Some(detail))
         }
@@ -287,21 +286,6 @@ mod tests {
         );
         assert_eq!(report.blocking_job_ids, ["job-1", "job-2"]);
         assert!(report.detail.unwrap().contains("job-1, job-2"));
-    }
-
-    #[test]
-    fn a_refresh_deferred_by_jobs_that_appeared_is_pending() {
-        let report = converge_runner_binary_with(
-            &release(),
-            || remote("0.438.2"),
-            no_jobs,
-            || ControllerReleaseInstall::DeferredByActiveJobs(vec!["job-3".to_string()]),
-        );
-        assert_eq!(
-            report.status,
-            RunnerBinaryConvergenceStatus::PendingActiveJobs
-        );
-        assert_eq!(report.blocking_job_ids, ["job-3"]);
     }
 
     #[test]

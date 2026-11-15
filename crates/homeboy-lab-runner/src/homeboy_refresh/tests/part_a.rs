@@ -9,174 +9,9 @@ use crate::{RunnerSession, RunnerSessionRole, RunnerTunnelMode};
 use homeboy_core::daemon::{DaemonFreshnessReport, DaemonStaleReasonCode};
 use std::cell::RefCell;
 
-/// Environment variables that redirect Cargo's output directory. A nested Cargo
-/// fixture that asserts a fixture-local `target/` path must not inherit these
-/// from the controller, `homeboy review`, or CI — otherwise the nested build
-/// succeeds while writing somewhere else entirely, and the assertion fails on a
-/// path that was never going to exist (#9846).
 #[test]
-fn routine_reconnect_refuses_to_interrupt_an_admitted_lab_offload() {
-    let admission = active_admission("0b77251a-b6a7-42a6-91a3-e49ff5f57c16");
-    let error = plan_daemon_restart("homeboy-lab", &[admission], false)
-        .expect_err("a job the restarted daemon cannot re-adopt defers the reconnect");
-
-    assert_eq!(
-        error.details["active_job_ids"],
-        serde_json::json!(["0b77251a-b6a7-42a6-91a3-e49ff5f57c16"])
-    );
-    assert!(error.message.contains("homeboy-lab"));
-    assert!(error.message.contains("--force"));
-    assert!(error.details["tried"][0]
-        .as_str()
-        .is_some_and(|command| command.contains("runner job logs homeboy-lab")));
-}
-
-#[test]
-fn forced_reconnect_reports_the_jobs_it_will_interrupt() {
-    let admission = active_admission("0b77251a-b6a7-42a6-91a3-e49ff5f57c16");
-    let mut re_adoptable = active_admission("6f1c1f5e-0d8e-4a43-9b1f-0c7d1f0a9b11");
-    re_adoptable.re_adoptable = true;
-    let restart = plan_daemon_restart("homeboy-lab", &[admission, re_adoptable], true)
-        .expect("explicit force permits interruption");
-
-    assert_eq!(
-        restart.interrupted_job_ids(),
-        vec![
-            "0b77251a-b6a7-42a6-91a3-e49ff5f57c16".to_string(),
-            "6f1c1f5e-0d8e-4a43-9b1f-0c7d1f0a9b11".to_string(),
-        ],
-        "--force interrupts every active job, re-adoptable or not"
-    );
-}
-
-#[test]
-fn re_adoptable_active_jobs_restart_the_daemon_in_place() {
-    let mut exec_job = active_admission("exec-job");
-    exec_job.re_adoptable = true;
-    let mut step_job = active_admission("step-job");
-    step_job.re_adoptable = true;
-
-    let restart = plan_daemon_restart("homeboy-lab", &[exec_job, step_job], false)
-        .expect("re-adoptable work never defers the reconnect");
-
-    assert_eq!(restart, DaemonRestart::InPlace);
-    assert!(
-        restart.interrupted_job_ids().is_empty(),
-        "an in-place restart interrupts nothing"
-    );
-    assert_eq!(
-        plan_daemon_restart("homeboy-lab", &[], false).expect("idle runner"),
-        DaemonRestart::InPlace,
-        "an idle runner restarts in place too"
-    );
-}
-
-/// #16680: with a connected daemon and one active re-adoptable exec job,
-/// refresh takes the `restart_in_place` route, which restarts the daemon on
-/// its state dir and rebinds the job's owner. It does not take disconnect
-/// plus connect, and for a service-managed runner it never defers and never
-/// interrupts the job. The restart itself is covered end to end in
-/// `execution::tests::restart_in_place`.
-#[test]
-fn re_adoptable_active_job_routes_refresh_through_restart_in_place() {
-    let session = crate::test_support::direct_ssh_session("lease-old");
-    let mut exec_job = active_admission("exec-job");
-    exec_job.re_adoptable = true;
-
-    for service_managed in [false, true] {
-        let restart = plan_daemon_restart("homeboy-lab", std::slice::from_ref(&exec_job), false)
-            .expect("a re-adoptable job never defers the refresh");
-        assert!(
-            restart.interrupted_job_ids().is_empty(),
-            "service_managed={service_managed}: the job is not interrupted"
-        );
-        assert_eq!(
-            refresh_reconnect_route(&restart, Some(&session), service_managed),
-            RefreshReconnectRoute::RestartInPlace(&session),
-            "service_managed={service_managed}: restart in place, not disconnect plus connect"
-        );
-    }
-}
-
-/// The negative case. A job the restarted daemon cannot re-adopt defers the
-/// refresh before any route is taken, so the daemon is neither stopped nor
-/// disconnected. `--force` takes the disconnect route instead and names the
-/// job it interrupts.
-#[test]
-fn non_re_adoptable_job_defers_refresh_and_force_interrupts_it() {
-    let session = crate::test_support::direct_ssh_session("lease-old");
-    let queued = active_admission("queued-job");
-
-    let deferred = plan_daemon_restart("homeboy-lab", std::slice::from_ref(&queued), false)
-        .expect_err("a non-re-adoptable job defers the refresh");
-    assert_eq!(
-        deferred.details["active_job_ids"],
-        serde_json::json!(["queued-job"])
-    );
-
-    for service_managed in [false, true] {
-        let forced = plan_daemon_restart("homeboy-lab", std::slice::from_ref(&queued), true)
-            .expect("--force permits the interruption");
-        assert_eq!(forced.interrupted_job_ids(), vec!["queued-job".to_string()]);
-        assert_eq!(
-            refresh_reconnect_route(&forced, Some(&session), service_managed),
-            RefreshReconnectRoute::Reconnect {
-                restart_service: service_managed,
-                disconnect: Some(&session),
-            },
-            "service_managed={service_managed}: --force disconnects the connected daemon"
-        );
-    }
-    assert_eq!(
-        refresh_reconnect_route(&DaemonRestart::InPlace, None, false),
-        RefreshReconnectRoute::Reconnect {
-            restart_service: false,
-            disconnect: None,
-        },
-        "with no connected daemon there is nothing to restart in place"
-    );
-}
-
-#[test]
-fn one_job_that_cannot_be_re_adopted_defers_the_whole_restart() {
-    let mut exec_job = active_admission("exec-job");
-    exec_job.re_adoptable = true;
-    let queued = active_admission("queued-job");
-
-    let error = plan_daemon_restart("homeboy-lab", &[exec_job, queued], false)
-        .expect_err("a non-re-adoptable job keeps the drain/defer behaviour");
-
-    assert_eq!(
-        error.details["active_job_ids"],
-        serde_json::json!(["queued-job"]),
-        "only the job that blocks the restart is named"
-    );
-}
-
-#[test]
-fn deferred_reconnect_reports_selected_binary_and_exact_active_job_followups() {
-    let job_id = "0b77251a-b6a7-42a6-91a3-e49ff5f57c16".to_string();
-    let followups = active_job_followups("homeboy-lab", std::slice::from_ref(&job_id));
-
-    let deferred = HomeboyReconnectDeferred {
-        reason: "active_daemon_jobs",
-        active_job_ids: vec![job_id.clone()],
-        selected_binary_path: "/runner/homeboy".to_string(),
-        followup_commands: followups.clone(),
-        ownership_contention: None,
-        blocking_jobs: Vec::new(),
-        select_command: String::new(),
-    };
-
-    assert_eq!(deferred.active_job_ids, vec![job_id]);
-    assert_eq!(deferred.selected_binary_path, "/runner/homeboy");
-    assert_eq!(
-        followups,
-        vec![
-            "homeboy runner job logs homeboy-lab 0b77251a-b6a7-42a6-91a3-e49ff5f57c16 --follow",
-            "homeboy runner refresh-homeboy homeboy-lab --reconnect",
-        ]
-    );
+fn refresh_with_active_jobs_restarts_in_place_and_preserves_job_ids() {
+    crate::execution::tests::restart_in_place::refresh_with_active_jobs_keeps_successor_ownership();
 }
 
 pub(super) fn active_admission(job_id: &str) -> homeboy_core::api_jobs::ActiveRunnerJobSummary {
@@ -368,15 +203,6 @@ fn materialization_race_restarts_the_newly_connected_daemon_and_preserves_active
     assert_eq!(
         operations.into_inner(),
         ["retire lease-old", "connect promoted binary"]
-    );
-
-    let mut active_job = active_admission("active-job");
-    active_job.re_adoptable = true;
-    assert_eq!(
-        plan_daemon_restart("lab", std::slice::from_ref(&active_job), false)
-            .expect("re-adoptable work restarts in place"),
-        DaemonRestart::InPlace,
-        "active re-adoptable work restarts the daemon in place instead of interrupting it"
     );
 }
 
@@ -690,60 +516,6 @@ fn reconnect_rollback_restores_its_own_selected_binary() {
 }
 
 #[test]
-fn homeboy_refresh_selection_restartability_matrix() {
-    for (restartable, reconnect, expected) in [
-        (false, false, "/stable/homeboy"),
-        (false, true, "/stable/homeboy"),
-        (true, false, "/stable/homeboy"),
-        (true, true, "/new/homeboy"),
-    ] {
-        crate::test_support::with_isolated_home(|_| {
-            crate::create(
-                r#"{"id":"lab-local","kind":"local","homeboy_path":"/stable/homeboy"}"#,
-                false,
-            )
-            .unwrap();
-            let roots = ambient_roots();
-            let lease =
-                acquire_runner_binary_promotion_in_roots(&roots, "lab-local", "new", |_| {})
-                    .unwrap();
-            let stage = should_stage_refresh(true, restartable, reconnect);
-            persist_refresh_candidate_in_roots(&roots, &lease, "lab-local", "/new/homeboy", stage)
-                .unwrap();
-            let runner = crate::load("lab-local").unwrap();
-            assert_eq!(runner.settings.homeboy_path.as_deref(), Some(expected));
-            assert_eq!(
-                runner.settings.staged_homeboy_path.as_deref(),
-                stage.then_some("/new/homeboy")
-            );
-            if stage {
-                // The same verified slot is consumed at the next replacement
-                // boundary, with no intermediate child selection.
-                persist_refresh_candidate_in_roots(
-                    &roots,
-                    &lease,
-                    "lab-local",
-                    "/new/homeboy",
-                    false,
-                )
-                .unwrap();
-                let selected = crate::load("lab-local").unwrap();
-                assert_eq!(
-                    selected.settings.homeboy_path.as_deref(),
-                    Some("/new/homeboy")
-                );
-                assert!(selected.settings.staged_homeboy_path.is_none());
-            } else {
-                assert!(
-                    !stage,
-                    "successful reconnect reports promotion, not staging"
-                );
-            }
-        });
-    }
-}
-
-#[test]
 fn rollback_failure_keeps_the_primary_refresh_error() {
     let error = rollback_refresh_error_with::<(), _>(
         Error::validation_invalid_argument("disconnect", "primary stop failure", None, None),
@@ -771,7 +543,6 @@ fn rollback_failure_persists_one_exact_previous_binary_continuation() {
             Error::internal_unexpected("rollback reconnect failed"),
             "lab runner",
             Some("/stable builds/homeboy"),
-            true,
         );
         let path = error.details["partial_state_path"]
             .as_str()
@@ -784,7 +555,7 @@ fn rollback_failure_persists_one_exact_previous_binary_continuation() {
         assert_eq!(state["previous_binary_path"], "/stable builds/homeboy");
         assert_eq!(
             state["continuation_command"],
-            "homeboy runner refresh-homeboy 'lab runner' --select '/stable builds/homeboy' --reconnect --force"
+            "homeboy runner refresh-homeboy 'lab runner' --select '/stable builds/homeboy' --reconnect"
         );
         assert_eq!(
             error.details["continuation_command"],
@@ -802,7 +573,7 @@ fn successful_rollback_does_not_publish_partial_state() {
         )
         .expect_err("primary failure remains visible");
         let error =
-            durable_refresh_partial_error_if_needed(primary, "lab", Some("/stable/homeboy"), false);
+            durable_refresh_partial_error_if_needed(primary, "lab", Some("/stable/homeboy"));
 
         assert!(error.details.get("partial_state").is_none());
         assert!(!refresh_partial_state_path("lab")

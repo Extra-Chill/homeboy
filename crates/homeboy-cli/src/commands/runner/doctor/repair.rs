@@ -812,13 +812,12 @@ fn refresh_outcome(
             git_ref.unwrap_or_else(|| format!("v{}", homeboy_product_identity::product_version())),
         ),
         reconnect: true,
-        force: false,
         allow_downgrade,
         dry_run: false,
     })
     .map_err(|error| error.message)
     .and_then(|(output, exit_code)| match exit_code {
-        0 if output.reconnect_deferred.is_none() => Ok(()),
+        0 => Ok(()),
         0 => Err(
             "runner refresh-homeboy staged the binary; selection waits for active jobs".to_string(),
         ),
