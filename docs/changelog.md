@@ -4,6 +4,14 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.465.13] - 2026-11-15
+
+### Changed
+- move the serve loop into daemon/serve.rs, split by phase
+
+### Fixed
+- share step slots by owner
+
 ## [0.465.12] - 2026-11-15
 
 ### Fixed
