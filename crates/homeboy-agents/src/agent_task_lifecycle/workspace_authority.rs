@@ -82,6 +82,8 @@ struct ReleasedBinding {
 enum BeginRelease {
     Began,
     AlreadyPending,
+    /// The release audit already fences off late terminal projections.
+    AlreadyReleased,
     /// The run is bound to a different runner workspace; nothing to freeze.
     Unbound,
 }
@@ -340,12 +342,7 @@ impl WorkspaceTerminalAuthorityStore {
             let (expected, payload) = match read_authority(store, run_id)? {
                 None => {
                     if was_released(store, run_id, runner_id, remote_workspace)? {
-                        return Err(Error::validation_invalid_argument(
-                            "workspace_terminal_authority",
-                            "workspace terminal authority was already released",
-                            Some(run_id.to_string()),
-                            None,
-                        ));
+                        return Ok(BeginRelease::AlreadyReleased);
                     }
                     // A release may begin before any terminal receipt exists;
                     // the pending record still blocks a racing projection.
@@ -873,9 +870,9 @@ mod tests {
             .coordination_record(NAMESPACE, "run-1")
             .unwrap()
             .is_none());
-        assert!(reopened
+        reopened
             .begin_release("run-1", "runner-1", "/runner/workspace")
-            .is_err());
+            .expect("completed release is idempotent");
         reopened
             .persist(receipt("job-1"))
             .expect("late projection is suppressed");

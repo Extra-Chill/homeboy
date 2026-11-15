@@ -289,6 +289,74 @@ fn prune_preserves_job_lifecycle_lease_when_authority_is_unavailable() {
 }
 
 #[test]
+fn workspace_authority_already_released_does_not_stop_prune_convergence() {
+    crate::test_support::with_isolated_home(|_| {
+        let roots = homeboy_core::paths::PathRoots::from_environment().expect("roots");
+        let runner_id = "lab-local-prune-released";
+        let runner_root = tempfile::tempdir().expect("runner root");
+        let source_parent = tempfile::tempdir().expect("source parent");
+        let source = source_parent.path().join("missing-source");
+        rooted_local_runner(&roots, runner_id, runner_root.path());
+        let workspaces: Vec<_> = ["a-normal", "b-released", "c-normal"]
+            .into_iter()
+            .map(|run_id| {
+                let workspace = runner_root.path().join("_lab_workspaces").join(run_id);
+                write_terminal_workspace(&workspace, &source, runner_root.path(), run_id);
+                let mut metadata: serde_json::Value =
+                    serde_json::from_slice(&workspace_metadata(&workspace)).expect("metadata");
+                metadata["resource_lifecycle"]["status"] = serde_json::json!("released");
+                fs::write(workspace_metadata_file(&workspace), metadata.to_string())
+                    .expect("released workspace metadata");
+                homeboy_agents::agent_task_lifecycle::persist_workspace_terminal_authority_for_test(
+                    run_id,
+                    runner_id,
+                    "job-1",
+                    &workspace.display().to_string(),
+                )
+                .expect("persist authority");
+                workspace
+            })
+            .collect();
+        let released = workspaces[1].display().to_string();
+        homeboy_agents::agent_task_lifecycle::begin_workspace_terminal_authority_release(
+            "b-released",
+            runner_id,
+            &released,
+        )
+        .expect("begin prior release");
+        homeboy_agents::agent_task_lifecycle::remove_workspace_terminal_authority(
+            "b-released",
+            runner_id,
+            &released,
+        )
+        .expect("complete prior release with bytes remaining");
+
+        let (output, exit_code) = prune_workspaces(
+            runner_id,
+            RunnerWorkspacePruneOptions {
+                apply: true,
+                converge: true,
+                min_age_hours: 0,
+                limit: 2,
+                passes: 10,
+                ..RunnerWorkspacePruneOptions::default()
+            },
+        )
+        .expect("drain continues past already-released authority");
+
+        assert_eq!(exit_code, 0);
+        assert_eq!(output.removed.len(), 3, "{}", prune_diagnosis(&output));
+        assert!(output
+            .removed
+            .iter()
+            .any(|entry| entry.remote_path == released));
+        assert!(output.total_removed_bytes > 0);
+        assert!(!output.has_more, "{}", prune_diagnosis(&output));
+        assert!(workspaces.iter().all(|workspace| !workspace.exists()));
+    });
+}
+
+#[test]
 fn retained_terminal_receipt_reclassifies_and_releases_compacted_workspace() {
     crate::test_support::with_isolated_home(|_| {
         let runner_id = "lab-local-prune-terminal-receipt";
