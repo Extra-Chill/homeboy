@@ -1087,11 +1087,11 @@ pub fn lab_runner_readiness_for_admission(runner_id: &str) -> Result<LabRunnerRe
             Some(runner_id),
             vec![candidate],
         )),
-        // A timed-out status probe is unobserved readiness, not a refusal.
-        Err(error) if error.code == homeboy_core::error::ErrorCode::RemoteCommandTimeout => {
+        // A timed-out or transport-lost probe is unobserved readiness, not a
+        // refusal; the shared classifier refuses every other failure.
+        Err(error) => {
             lab_runner_readiness_from_refresh_observations(Some(runner_id), vec![Err(error)])
         }
-        Err(error) => Err(error),
     }
 }
 
@@ -1134,12 +1134,9 @@ fn retry_admission_candidate(
             let message = format!(
                 "blocked_runner_unavailable: {error}; run homeboy runner connect {runner_id}"
             );
-            let mut blocker = if error.code == homeboy_core::error::ErrorCode::RemoteCommandTimeout
-            {
-                Error::new(error.code, message, serde_json::Value::Null)
-            } else {
-                Error::internal_unexpected(message)
-            };
+            // Keep the probe's typed code so admission can tell a lost
+            // transport from a definitive refusal.
+            let mut blocker = Error::new(error.code, message, serde_json::Value::Null);
             blocker.details = serde_json::json!({
                 "classification": "blocked_runner_unavailable",
                 "runner": runner_id,
@@ -1253,18 +1250,33 @@ fn lab_runner_readiness_from_refresh_observations(
     if observed_candidate || failures.is_empty() {
         return Ok(readiness);
     }
-    let timeout = failures.iter().all(|failure| {
-        failure.get("code").and_then(serde_json::Value::as_str)
-            == Some(homeboy_core::error::ErrorCode::RemoteCommandTimeout.as_str())
-    });
-    if timeout {
-        // Every status probe timed out: readiness is unobserved, so admission
-        // waits and re-observes instead of refusing on missing evidence.
+    // Every status probe timed out or lost its transport, for example while
+    // the runner daemon restarts: readiness is unobserved, so admission waits
+    // and re-observes (bounded by consecutive failed observations) instead of
+    // failing the work on missing evidence.
+    use homeboy_core::error::ErrorCode;
+    let codes = failures
+        .iter()
+        .map(|failure| failure.get("code").and_then(serde_json::Value::as_str))
+        .collect::<Vec<_>>();
+    let timeout = ErrorCode::RemoteCommandTimeout.as_str();
+    let transport = ErrorCode::RunnerLabTransportFailure.as_str();
+    let reason = if codes.iter().all(|code| *code == Some(timeout)) {
+        Some("status_probe_timeout")
+    } else if codes
+        .iter()
+        .all(|code| *code == Some(timeout) || *code == Some(transport))
+    {
+        Some("status_probe_transport_failure")
+    } else {
+        None
+    };
+    if let Some(reason) = reason {
         return Ok(LabRunnerReadiness {
             state: LabRunnerReadinessState::ReadinessUnobserved,
             selected_runner_id: preferred.map(str::to_string),
             available_runner_ids: Vec::new(),
-            reasons: vec!["status_probe_timeout".to_string()],
+            reasons: vec![reason.to_string()],
             remediation_commands: vec![preferred.map_or_else(
                 || "homeboy runner status --full".to_string(),
                 |runner_id| format!("homeboy runner status {runner_id}"),
@@ -1272,11 +1284,7 @@ fn lab_runner_readiness_from_refresh_observations(
         });
     }
     Err(homeboy_core::error::Error::new(
-        if timeout {
-            homeboy_core::error::ErrorCode::RemoteCommandTimeout
-        } else {
-            homeboy_core::error::ErrorCode::RunnerLabTransportFailure
-        },
+        ErrorCode::RunnerLabTransportFailure,
         "No Lab runner completed the bounded admission refresh",
         serde_json::json!({
             "runner_failures": failures,
@@ -2508,18 +2516,33 @@ mod tests {
         assert_eq!(readiness.reasons, ["status_probe_timeout"]);
         assert!(readiness.available_runner_ids.is_empty());
 
-        let error = lab_runner_readiness_from_refresh_observations(
+        let restarting = lab_runner_readiness_from_refresh_observations(
             None,
             vec![Err(homeboy_core::error::Error::new(
                 homeboy_core::error::ErrorCode::RunnerLabTransportFailure,
-                "lab-a unreachable",
+                "lab-a unreachable while its daemon restarts",
                 serde_json::Value::Null,
             ))],
         )
-        .expect_err("a transport failure is not a timeout");
+        .expect("a lost transport is unobserved readiness, not a refusal");
+        assert_eq!(
+            restarting.state,
+            LabRunnerReadinessState::ReadinessUnobserved
+        );
+        assert_eq!(restarting.reasons, ["status_probe_transport_failure"]);
+
+        let error = lab_runner_readiness_from_refresh_observations(
+            None,
+            vec![Err(homeboy_core::error::Error::new(
+                homeboy_core::error::ErrorCode::ValidationInvalidArgument,
+                "lab-a rejected the probe",
+                serde_json::Value::Null,
+            ))],
+        )
+        .expect_err("a definitive probe failure is not unobserved readiness");
         assert_eq!(
             error.details["runner_failures"][0]["code"],
-            homeboy_core::error::ErrorCode::RunnerLabTransportFailure.as_str()
+            homeboy_core::error::ErrorCode::ValidationInvalidArgument.as_str()
         );
     }
 
