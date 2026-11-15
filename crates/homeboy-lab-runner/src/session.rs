@@ -948,9 +948,7 @@ impl RunnerStatusReport {
             (
                 false,
                 Some(
-                    homeboy_core::daemon::DaemonStaleReasonCode::VersionMismatch
-                    | homeboy_core::daemon::DaemonStaleReasonCode::BuildIdentityMismatch
-                    | homeboy_core::daemon::DaemonStaleReasonCode::ExecutableReplaced
+                    homeboy_core::daemon::DaemonStaleReasonCode::LabContractVersionMismatch
                     | homeboy_core::daemon::DaemonStaleReasonCode::RuntimePathsDrift,
                 ),
             ) => {
@@ -1410,7 +1408,9 @@ mod status_serialization_tests {
         report.active_job_state = RunnerActiveJobState::Available;
         report.daemon_freshness = Some(DaemonFreshnessReport {
             fresh: false,
-            stale_reason_code: Some(homeboy_core::daemon::DaemonStaleReasonCode::VersionMismatch),
+            stale_reason_code: Some(
+                homeboy_core::daemon::DaemonStaleReasonCode::LabContractVersionMismatch,
+            ),
             restartable: false,
             lease_id: Some("known-lease".to_string()),
             pid: Some(1234),
@@ -1447,7 +1447,9 @@ mod status_serialization_tests {
         ));
         report.daemon_freshness = Some(DaemonFreshnessReport {
             fresh: false,
-            stale_reason_code: Some(homeboy_core::daemon::DaemonStaleReasonCode::VersionMismatch),
+            stale_reason_code: Some(
+                homeboy_core::daemon::DaemonStaleReasonCode::LabContractVersionMismatch,
+            ),
             restartable: false,
             lease_id: Some("known-lease".to_string()),
             pid: Some(1234),
@@ -1501,7 +1503,9 @@ mod status_serialization_tests {
         ));
         report.daemon_freshness = Some(DaemonFreshnessReport {
             fresh: false,
-            stale_reason_code: Some(homeboy_core::daemon::DaemonStaleReasonCode::VersionMismatch),
+            stale_reason_code: Some(
+                homeboy_core::daemon::DaemonStaleReasonCode::LabContractVersionMismatch,
+            ),
             restartable: false,
             lease_id: Some("known-lease".to_string()),
             pid: Some(1234),
@@ -1562,7 +1566,9 @@ mod status_serialization_tests {
         ));
         report.daemon_freshness = Some(DaemonFreshnessReport {
             fresh: false,
-            stale_reason_code: Some(homeboy_core::daemon::DaemonStaleReasonCode::VersionMismatch),
+            stale_reason_code: Some(
+                homeboy_core::daemon::DaemonStaleReasonCode::LabContractVersionMismatch,
+            ),
             restartable: false,
             lease_id: None,
             pid: None,

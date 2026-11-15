@@ -816,7 +816,7 @@ fn fake_daemon(pid: u32, lease_id: &str) -> super::DaemonStartResult {
 }
 
 fn fake_status(daemon: Option<super::DaemonStartResult>, fresh: bool) -> DaemonStatus {
-    let stale_reason_code = (!fresh).then_some(DaemonStaleReasonCode::VersionMismatch);
+    let stale_reason_code = (!fresh).then_some(DaemonStaleReasonCode::LabContractVersionMismatch);
     // The fixture models a live daemon whenever a lease is present, matching
     // the real projection where a version-mismatched lease keeps its live PID.
     let mut status = DaemonStatus {
@@ -865,6 +865,7 @@ fn fake_daemon_state(daemon: super::DaemonStartResult) -> DaemonState {
         state_path: daemon.state_path,
         started_at: "2026-01-01T00:00:00Z".to_string(),
         last_seen_at: "2026-01-01T00:00:00Z".to_string(),
+        lab_contract_version: homeboy_lab_contract::LAB_CONTRACT_VERSION,
         build_identity: BuildIdentity {
             version: "test".to_string(),
             git_commit: None,

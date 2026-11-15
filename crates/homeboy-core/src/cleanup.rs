@@ -3593,6 +3593,7 @@ mod tests {
 
     #[test]
     fn dry_run_detects_builtin_target_without_homeboy_json() {
+        let _home = crate::test_support::HomeGuard::new();
         let repo = TempDir::new().expect("repo tempdir");
         git(repo.path(), &["init", "-b", "main"]);
         write_file(
@@ -3671,6 +3672,7 @@ mod tests {
 
     #[test]
     fn artifact_cleanup_reclaims_idle_cargo_target_alongside_target() {
+        let _home = crate::test_support::HomeGuard::new();
         let repo = repo_with_ignored_artifacts();
         write_file(&repo.path().join("target/debug/app"), "target artifact");
         write_file(
@@ -3693,6 +3695,7 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn artifact_cleanup_keeps_cargo_target_with_active_cargo_lock() {
+        let _home = crate::test_support::HomeGuard::new();
         use std::os::unix::io::AsRawFd;
 
         let repo = repo_with_ignored_artifacts();
@@ -3723,6 +3726,7 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn artifact_cleanup_unlinks_cargo_target_symlink_without_following_it() {
+        let _home = crate::test_support::HomeGuard::new();
         let repo = repo_with_ignored_artifacts();
         let external = TempDir::new().expect("external artifact");
         write_file(&external.path().join("debug/app"), "external artifact");
@@ -4520,6 +4524,7 @@ mod tests {
 
     #[test]
     fn apply_removes_detached_temp_artifacts_from_explicit_temp_root() {
+        let _home = crate::test_support::HomeGuard::new();
         let repo = git_repo();
         let temp_root = TempDir::new().expect("temp root");
         write_file(
@@ -4606,6 +4611,7 @@ mod tests {
 
     #[test]
     fn apply_removes_only_target_from_temp_homeboy_source_checkout() {
+        let _home = crate::test_support::HomeGuard::new();
         let repo = git_repo();
         let temp_root = TempDir::new().expect("temp root");
         let checkout = temp_homeboy_checkout(temp_root.path(), "homeboy-main-4447-upgrade-full");
@@ -4641,6 +4647,7 @@ mod tests {
 
     #[test]
     fn temp_homeboy_checkout_target_honors_the_caller_age_gate() {
+        let _home = crate::test_support::HomeGuard::new();
         let repo = git_repo();
         let temp_root = TempDir::new().expect("temp root");
         let checkout = temp_homeboy_checkout(temp_root.path(), "homeboy-main-14394-age-gate");
@@ -4669,6 +4676,7 @@ mod tests {
 
     #[test]
     fn aged_idle_temp_homeboy_checkout_target_is_removed_after_the_caller_age_gate() {
+        let _home = crate::test_support::HomeGuard::new();
         let repo = git_repo();
         let temp_root = TempDir::new().expect("temp root");
         let checkout = temp_homeboy_checkout(temp_root.path(), "homeboy-main-14394-aged-target");
@@ -4703,6 +4711,7 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn temp_homeboy_checkout_target_with_a_held_lock_is_not_eligible_or_removed() {
+        let _home = crate::test_support::HomeGuard::new();
         let repo = git_repo();
         let temp_root = TempDir::new().expect("temp root");
         let checkout = temp_homeboy_checkout(temp_root.path(), "homeboy-main-14394-held-lock");
@@ -4858,6 +4867,7 @@ mod tests {
 
     #[test]
     fn apply_removes_only_target_from_partial_homeboy_temp() {
+        let _home = crate::test_support::HomeGuard::new();
         let repo = git_repo();
         let temp_root = TempDir::new().expect("temp root");
         let partial = temp_root.path().join("homeboy-upgrade-sync-main");
@@ -4889,6 +4899,7 @@ mod tests {
 
     #[test]
     fn zero_candidate_dry_run_omits_continuation() {
+        let _home = crate::test_support::HomeGuard::new();
         let repo = git_repo();
 
         let output = cleanup_artifacts(ArtifactCleanupOptions {
@@ -4981,6 +4992,7 @@ mod tests {
 
     #[test]
     fn repository_worktrees_scope_discovers_sibling_artifacts() {
+        let _home = crate::test_support::HomeGuard::new();
         let repo = git_repo();
         let sibling_parent = TempDir::new().expect("sibling parent");
         let sibling = sibling_parent.path().join("artifact-worktree");
@@ -5006,6 +5018,7 @@ mod tests {
 
     #[test]
     fn dry_run_can_sort_artifact_candidates_by_size_descending() {
+        let _home = crate::test_support::HomeGuard::new();
         let repo = git_repo();
         write_file(&repo.path().join("target/debug/app"), "small");
         write_file(&repo.path().join("dist/bundle.js"), &"m".repeat(256));
@@ -5042,6 +5055,7 @@ mod tests {
 
     #[test]
     fn limit_applies_after_size_sort_and_removes_only_selected_artifacts() {
+        let _home = crate::test_support::HomeGuard::new();
         let repo = git_repo();
         write_file(&repo.path().join("target/debug/app"), "small");
         write_file(&repo.path().join("dist/bundle.js"), &"m".repeat(256));
@@ -5083,6 +5097,7 @@ mod tests {
 
     #[test]
     fn apply_removes_declared_artifacts_only_and_preserves_dirty_source() {
+        let _home = crate::test_support::HomeGuard::new();
         let repo = git_repo();
         write_file(&repo.path().join("target/debug/app"), "artifact");
         write_file(&repo.path().join("src/lib.rs"), "changed source");
@@ -5117,6 +5132,7 @@ mod tests {
 
     #[test]
     fn apply_reports_remaining_and_cumulative_session_totals_across_retries() {
+        let _home = crate::test_support::HomeGuard::new();
         let repo = git_repo();
         write_file(&repo.path().join("target/debug/app"), "first");
 
@@ -5306,6 +5322,7 @@ mod tests {
 
     #[test]
     fn apply_skips_artifact_path_with_tracked_source_changes() {
+        let _home = crate::test_support::HomeGuard::new();
         let repo = git_repo();
         write_file(
             &repo.path().join("target/generated.rs"),

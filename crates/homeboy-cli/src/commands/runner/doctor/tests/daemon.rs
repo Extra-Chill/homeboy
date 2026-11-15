@@ -582,7 +582,9 @@ fn disconnected_lab_doctor_reuses_daemon_recovery_envelope() {
 fn disconnected_incompatible_daemon_with_unavailable_ownership_is_terminal() {
     let recovery = homeboy::core::daemon::DaemonFreshnessReport {
         fresh: false,
-        stale_reason_code: Some(homeboy::core::daemon::DaemonStaleReasonCode::VersionMismatch),
+        stale_reason_code: Some(
+            homeboy::core::daemon::DaemonStaleReasonCode::LabContractVersionMismatch,
+        ),
         restartable: false,
         lease_id: None,
         pid: None,

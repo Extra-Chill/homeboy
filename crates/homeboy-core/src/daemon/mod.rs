@@ -222,52 +222,17 @@ impl LocalControllerJobClient {
             ensure_running(DEFAULT_ADDR)?;
         }
         let admission_guard = acquire_daemon_admission_lock()?;
-        let prior = read_status()?;
-        match Self::connect() {
-            Ok(mut client) => {
-                client.admission_guard = Mutex::new(Some(admission_guard));
-                Ok(client)
-            }
-            Err(error) if prior.reachable && !prior.fresh => {
-                let daemon_identity = prior
-                    .state
-                    .as_ref()
-                    .map(|state| state.build_identity.display.clone());
-                let recovery_command = (prior.freshness.restartable
-                    && prior.freshness.active_jobs == 0)
-                    .then_some("homeboy daemon recover --yes");
-                let mut mismatch = Error::validation_invalid_argument(
-                    "daemon_build_identity",
-                    "controller jobs require a daemon running the current build",
-                    daemon_identity.clone(),
-                    None,
-                );
-                if let Some(recovery_command) = recovery_command {
-                    mismatch = mismatch.with_hint(format!("Next: {recovery_command}"));
-                }
-                mismatch.details = json!({
-                    "classification": "controller_job_daemon_build_mismatch",
-                    "daemon_build_identity": daemon_identity,
-                    "invoking_build_identity": build_identity::current().display,
-                    "stale_reason": prior.stale_reason,
-                    "stale_reason_code": prior.freshness.stale_reason_code,
-                    "active_jobs": prior.freshness.active_jobs,
-                    "recovery_command": recovery_command,
-                    "rotation_error": error.message,
-                });
-                Err(mismatch)
-            }
-            Err(error) => Err(error),
-        }
+        let mut client = Self::connect()?;
+        client.admission_guard = Mutex::new(Some(admission_guard));
+        Ok(client)
     }
 
     /// Connect to the current daemon build, first applying its canonical idle
     /// restart when authoritative status proves that no durable jobs are active.
     ///
     /// The lease-bound stop is a compare-and-swap on the daemon observed by the
-    /// report. A concurrent replacement therefore causes the stop to refuse
-    /// rather than terminating an unobserved owner, and the final connection
-    /// re-runs exact-build validation before any controller job is submitted.
+    /// report. A concurrent replacement causes the stop to refuse rather than
+    /// terminating an unobserved owner; connection rechecks compatibility.
     pub fn connect_current_build_recovering_idle() -> Result<Self> {
         let _ = converge_current_build_idle_daemon()?;
         Self::connect_current_build()
@@ -712,10 +677,12 @@ pub struct DaemonState {
     pub started_at: String,
     pub last_seen_at: String,
     pub build_identity: build_identity::BuildIdentity,
+    #[serde(default = "legacy_lab_contract_version")]
+    pub lab_contract_version: u32,
     /// The executable the daemon started from, so any reader can tell when
     /// an upgrade has since replaced it on disk.
     // v0.445.4 (v1) did not record executable identity. An empty identity
-    // means unknown, not replaced; build identity still determines freshness.
+    // means unknown, not replaced; executable identity is not compatibility.
     #[serde(default)]
     pub executable: ExecutableIdentity,
     pub runtime_paths: DaemonRuntimeSnapshot,
@@ -724,25 +691,28 @@ pub struct DaemonState {
     pub service_manager: Option<DaemonServiceManager>,
 }
 
+// Leases predating this field used Lab contract v7.
+fn legacy_lab_contract_version() -> u32 {
+    7
+}
+
 /// Independent observations of one daemon session lease.
 ///
 /// Each field answers exactly one question (#13621):
 ///
 /// - [`DaemonStatus::running`] — is the recorded daemon process alive?
 /// - [`DaemonStatus::reachable`] — is the daemon API reachable from the lease?
-/// - [`DaemonStatus::fresh`] — does the daemon binary match this Homeboy build?
+/// - [`DaemonStatus::fresh`] — is the daemon lease contract compatible?
 /// - [`DaemonStatus::replacement_blocked`] — is replacing it blocked, and why?
 ///
-/// A live daemon running an older build therefore reports
-/// `running: true, reachable: true, fresh: false`; process death is never
-/// inferred from a build mismatch. [`DaemonStatus::admits_work`] is the
-/// derived predicate for the one question that needs all three facts.
+/// Build identity is diagnostic, not a compatibility predicate.
+/// [`DaemonStatus::admits_work`] combines liveness, reachability and compatibility.
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
 pub struct DaemonStatus {
     /// The daemon process recorded by the lease is alive. This is pure
     /// process liveness: it says nothing about build compatibility.
     pub running: bool,
-    /// The daemon binary matches the invoking Homeboy build.
+    /// The daemon lease contract is compatible with the caller.
     pub fresh: bool,
     /// The daemon API endpoint is reachable from a live lease.
     pub reachable: bool,
@@ -790,24 +760,9 @@ impl DaemonStatus {
         self.running && self.reachable && self.fresh && !self.draining()
     }
 
-    /// A live daemon that is replacing itself: a stale build still busy with
-    /// owned jobs, or an explicit `recover --drain`. It serves only the runs
-    /// it already owns, and new roots wait for its replacement.
+    /// An explicitly requested `recover --drain` serves only owned runs;
+    /// new roots wait for its replacement.
     pub fn draining(&self) -> bool {
-        if self.running
-            && !self.fresh
-            && self.freshness.active_jobs > 0
-            && matches!(
-                self.freshness.stale_reason_code,
-                Some(
-                    DaemonStaleReasonCode::VersionMismatch
-                        | DaemonStaleReasonCode::BuildIdentityMismatch
-                        | DaemonStaleReasonCode::ExecutableReplaced
-                )
-            )
-        {
-            return true;
-        }
         self.freshness.lease_id.as_deref().is_some_and(|lease| {
             drain_path()
                 .ok()
@@ -849,15 +804,7 @@ impl DaemonStatus {
                 self.freshness.active_jobs
             )
         } else if self.running && self.reachable {
-            if self.freshness.stale_reason_code == Some(DaemonStaleReasonCode::VersionMismatch) {
-                format!(
-                    "daemon process is live and its API is reachable; live daemon from an older build ({}), with {} active job(s); replacement planned when idle",
-                    self.freshness.daemon_version.as_deref().unwrap_or("unknown"),
-                    self.freshness.active_jobs
-                )
-            } else {
-                "daemon process is live and its API is reachable".to_string()
-            }
+            "daemon process is live and its API is reachable".to_string()
         } else if self.running {
             "daemon process is live but its API is unreachable".to_string()
         } else if self.state.is_some() {
@@ -878,7 +825,7 @@ impl DaemonStatus {
             ));
         }
         if self.fresh {
-            summary.push_str("; binary is fresh (matches this Homeboy build)");
+            summary.push_str("; daemon contract is compatible");
         } else if let Some(reason) = &self.stale_reason {
             summary.push_str(&format!("; binary is stale: {reason}"));
         } else {
@@ -1019,9 +966,7 @@ pub enum DaemonStaleReasonCode {
     LeaseCorrupt,
     LeaseSchemaMismatch,
     PidDead,
-    BuildIdentityMismatch,
-    ExecutableReplaced,
-    VersionMismatch,
+    LabContractVersionMismatch,
     RuntimePathsDrift,
     TransportUnreachable,
     /// The controller's bounded observation of a connected daemon did not
@@ -6321,6 +6266,7 @@ mod tests {
             started_at: now.clone(),
             last_seen_at: now,
             build_identity: build_identity::current(),
+            lab_contract_version: homeboy_lab_contract::LAB_CONTRACT_VERSION,
             executable: lifetime::running_executable()
                 .expect("test executable identity")
                 .clone(),
@@ -6979,6 +6925,7 @@ fn write_state(
         started_at: now.clone(),
         last_seen_at: now,
         build_identity: build_identity::current(),
+        lab_contract_version: homeboy_lab_contract::LAB_CONTRACT_VERSION,
         executable: lifetime::running_executable()
             .map_err(|e| {
                 Error::internal_io(
@@ -7663,7 +7610,7 @@ mod owned_admission_tests {
 }
 
 fn intake_draining() -> bool {
-    daemon_draining() || lifetime::running_executable_replaced()
+    daemon_draining()
 }
 
 fn daemon_draining_error() -> Error {

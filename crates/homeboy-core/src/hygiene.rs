@@ -1507,6 +1507,7 @@ mod tests {
 
     #[test]
     fn dependency_hygiene_accepts_lab_snapshot_with_source_evidence() {
+        let _home = crate::test_support::HomeGuard::new();
         let source = tempfile::tempdir().unwrap();
         let dependency = tempfile::tempdir().unwrap();
         fs::write(source.path().join("README.md"), "source\n").unwrap();

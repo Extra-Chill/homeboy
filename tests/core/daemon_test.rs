@@ -1263,6 +1263,7 @@ fn daemon_state_for_test(pid: u32, address: &str) -> DaemonState {
         started_at: now.clone(),
         last_seen_at: now,
         build_identity: build_identity::current(),
+        lab_contract_version: homeboy_lab_contract::LAB_CONTRACT_VERSION,
         service_manager: None,
         executable: super::lifetime::running_executable()
             .expect("test executable identity")
@@ -1271,10 +1272,9 @@ fn daemon_state_for_test(pid: u32, address: &str) -> DaemonState {
     }
 }
 
-/// Make `state` stale by recording another build than the running one.
+/// Make `state` incompatible with the caller contract.
 fn make_stale(state: &mut DaemonState) {
-    state.build_identity.version = "0.0.0-stale".to_string();
-    state.build_identity.display = "homeboy 0.0.0-stale".to_string();
+    state.lab_contract_version += 1;
 }
 
 /// Write `state` as the lease. A lease naming this test process is live only
@@ -1289,38 +1289,6 @@ fn write_daemon_state_for_test(state: &DaemonState) -> Option<DaemonOwnerLock> {
     });
     std::fs::write(&path, serde_json::to_string(state).expect("state json")).expect("write state");
     owner
-}
-
-#[test]
-fn controller_job_client_rejects_a_live_daemon_from_another_build() {
-    let _home = HomeGuard::new();
-    let mut state = daemon_state_for_test(std::process::id(), "127.0.0.1:49152");
-    state.build_identity.version = "0.0.0-stale".to_string();
-    state.build_identity.display = "homeboy 0.0.0-stale+fixture".to_string();
-    let _owner = write_daemon_state_for_test(&state);
-
-    let error = match LocalControllerJobClient::connect_current_build() {
-        Ok(_) => panic!("typed controller jobs require the invoking daemon build"),
-        Err(error) => error,
-    };
-
-    assert_eq!(
-        error.details["classification"],
-        "controller_job_daemon_build_mismatch"
-    );
-    assert_eq!(
-        error.details["daemon_build_identity"],
-        "homeboy 0.0.0-stale+fixture"
-    );
-    assert_eq!(error.details["active_jobs"], 0);
-    assert_eq!(
-        error.details["recovery_command"],
-        "homeboy daemon recover --yes"
-    );
-    assert!(error
-        .hints
-        .iter()
-        .any(|hint| hint.message == "Next: homeboy daemon recover --yes"));
 }
 
 #[test]
@@ -1486,7 +1454,7 @@ fn health_route_refreshes_daemon_lease_heartbeat() {
 }
 
 #[test]
-fn read_status_classifies_a_replaced_executable_as_stale() {
+fn read_status_accepts_a_replaced_executable() {
     let _home = HomeGuard::new();
     let executable_dir = tempfile::tempdir().expect("executable fixture");
     let executable = executable_dir.path().join("homeboy");
@@ -1501,26 +1469,11 @@ fn read_status_classifies_a_replaced_executable_as_stale() {
 
     let status = read_status().expect("status");
 
-    // #13621: a replaced executable is staleness, not process death. The
-    // recorded PID stays live and its endpoint stays reachable, so liveness
-    // and reachability are reported independently of freshness.
     assert!(status.running);
-    assert!(!status.fresh);
+    assert!(status.fresh);
     assert!(status.reachable);
-    assert!(!status.admits_work());
-    assert!(status
-        .stale_reason
-        .as_deref()
-        .unwrap_or_default()
-        .contains("replaced on disk"));
-    assert_eq!(
-        status.freshness.stale_reason_code,
-        Some(DaemonStaleReasonCode::ExecutableReplaced)
-    );
-    assert_eq!(
-        serde_json::to_value(status.freshness.stale_reason_code).unwrap(),
-        serde_json::json!("executable_replaced")
-    );
+    assert!(status.admits_work());
+    assert_eq!(status.freshness.stale_reason_code, None);
 }
 
 #[test]
@@ -1568,7 +1521,7 @@ fn freshness_report_classifies_schema_mismatch() {
 }
 
 #[test]
-fn freshness_report_classifies_version_mismatch() {
+fn freshness_report_accepts_a_different_build() {
     let _home = HomeGuard::new();
     let mut state = daemon_state_for_test(std::process::id(), "127.0.0.1:49152");
     state.build_identity.version = "0.0.0".to_string();
@@ -1577,10 +1530,8 @@ fn freshness_report_classifies_version_mismatch() {
 
     let status = read_status().expect("status");
 
-    assert_eq!(
-        status.freshness.stale_reason_code,
-        Some(DaemonStaleReasonCode::VersionMismatch)
-    );
+    assert!(status.fresh);
+    assert_eq!(status.freshness.stale_reason_code, None);
 }
 
 /// The four daemon-status fixtures of #13621, each pinned deterministically:
@@ -1592,61 +1543,6 @@ fn freshness_report_classifies_version_mismatch() {
 /// This is the live reproduction the fix was written against: a reachable
 /// daemon with a live PID, a valid lease, and one protected active job used
 /// to report `running: false` because `running` encoded build compatibility.
-#[test]
-fn daemon_status_live_but_stale_daemon_reports_liveness_true_and_freshness_false() {
-    let _home = HomeGuard::new();
-    let mut state = daemon_state_for_test(std::process::id(), "127.0.0.1:49152");
-    state.build_identity.version = "0.0.0-stale".to_string();
-    state.build_identity.display = "homeboy 0.0.0-stale+fixture".to_string();
-    state.lease_id = "live-stale-lease".to_string();
-    let _owner = write_daemon_state_for_test(&state);
-    let path = crate::paths::observation_db().expect("jobs path");
-    let store = JobStore::open_without_reconciliation(&path)
-        .expect("store")
-        .with_daemon_lease(state.lease_id.clone());
-    let job = store.create("runner.exec");
-    store.start(job.id).expect("start job");
-
-    let status = read_status().expect("status");
-
-    assert!(
-        status.running,
-        "a live daemon process stays live regardless of build staleness"
-    );
-    assert!(status.reachable);
-    assert!(!status.fresh);
-    assert_eq!(
-        status.freshness.stale_reason_code,
-        Some(DaemonStaleReasonCode::VersionMismatch)
-    );
-    assert!(
-        !status.admits_work(),
-        "a stale busy daemon admits no new root work; it serves only its owned runs"
-    );
-    assert!(
-        status.replacement_blocked,
-        "the protected active job blocks replacement"
-    );
-    assert_eq!(
-        status.replacement_blocked_reason.as_deref(),
-        Some("1 active durable job(s) are protected from implicit replacement")
-    );
-    assert!(
-        status.summary.contains("daemon draining:"),
-        "{}",
-        status.summary
-    );
-    assert!(
-        status.summary.contains("binary is stale"),
-        "{}",
-        status.summary
-    );
-    assert!(
-        status.summary.contains("replacement is blocked"),
-        "{}",
-        status.summary
-    );
-}
 
 #[test]
 fn daemon_status_dead_lease_reports_a_dead_process_and_an_unblocked_idle_replacement() {
@@ -1729,7 +1625,7 @@ fn daemon_status_live_and_fresh_daemon_reports_every_independent_field_true() {
         status.summary
     );
     assert!(
-        status.summary.contains("binary is fresh"),
+        status.summary.contains("daemon contract is compatible"),
         "{}",
         status.summary
     );

@@ -23,8 +23,7 @@ use serde::Serialize;
 use super::acquire_daemon_job_admission_fence;
 use super::{
     acquire_daemon_operation_lock, parse_bind_addr, read_status, stop_unlocked,
-    try_acquire_daemon_owner_lock, DaemonStaleReasonCode, DaemonStartResult,
-    DAEMON_STARTUP_TOKEN_ENV,
+    try_acquire_daemon_owner_lock, DaemonStartResult, DAEMON_STARTUP_TOKEN_ENV,
 };
 
 const TEST_KEEP_DAEMON_IN_PROCESS_GROUP_ENV: &str = "HOMEBOY_TEST_KEEP_DAEMON_IN_PROCESS_GROUP";
@@ -169,18 +168,14 @@ pub struct ArtifactFetchOutcome {
 }
 
 /// Return a live daemon under the lifecycle lock, or start one when its lease
-/// is absent or its recorded PID is dead. A live daemon on another build is
-/// restarted in place: the stop interrupts its in-flight work and the
-/// replacement resumes that work from the same store (#15936).
+/// is absent or its recorded PID is dead. An incompatible live daemon is
+/// restarted in place, re-adopting running work from the same store.
 pub fn ensure_running(addr: &str) -> Result<DaemonStartResult> {
     let status = read_status()?;
     // A drain fences roots, not access to the lease: owned continuations and
     // read/cancel clients must still reach its per-request admission gate.
     if defers_to_drain(&status) {
         if let Some(state) = status.state {
-            if !status.fresh {
-                super::drain_then_replace(&state.lease_id)?;
-            }
             return Ok(DaemonStartResult {
                 pid: state.pid,
                 address: state.address,
@@ -190,7 +185,6 @@ pub fn ensure_running(addr: &str) -> Result<DaemonStartResult> {
         }
     }
     match stale_daemon_action(&status) {
-        Some(StaleDaemonAction::KeepRouting(daemon)) => return Ok(daemon),
         // A service manager starts the replacement itself; spawning one here
         // would race it for the owner lock (#17387).
         Some(StaleDaemonAction::RestartServiceManaged(lease_id)) => {
@@ -217,7 +211,6 @@ fn defers_to_drain(status: &super::DaemonStatus) -> bool {
 
 #[derive(Debug, PartialEq, Eq)]
 enum StaleDaemonAction<'a> {
-    KeepRouting(DaemonStartResult),
     RestartServiceManaged(&'a str),
     RestartInPlace(&'a str),
 }
@@ -228,27 +221,6 @@ fn stale_daemon_action(status: &super::DaemonStatus) -> Option<StaleDaemonAction
         .state
         .as_ref()
         .filter(|_| status.running && !status.fresh)?;
-    // A binary upgrade must not strand control of jobs on the previous
-    // build. Keep routing to its recorded, reachable endpoint while busy;
-    // status/plan retain the mismatch and defer replacement until idle.
-    if status.reachable
-        && status.freshness.active_jobs > 0
-        && matches!(
-            status.freshness.stale_reason_code,
-            Some(
-                DaemonStaleReasonCode::VersionMismatch
-                    | DaemonStaleReasonCode::BuildIdentityMismatch
-                    | DaemonStaleReasonCode::ExecutableReplaced
-            )
-        )
-    {
-        return Some(StaleDaemonAction::KeepRouting(DaemonStartResult {
-            pid: state.pid,
-            address: state.address.clone(),
-            state_path: state.state_path.clone(),
-            lease_id: state.lease_id.clone(),
-        }));
-    }
     Some(if state.service_manager.is_some() {
         StaleDaemonAction::RestartServiceManaged(&state.lease_id)
     } else {

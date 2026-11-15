@@ -980,27 +980,17 @@ fn daemon_freshness_report(
     local_url: &str,
     timeout: Duration,
 ) -> std::result::Result<DaemonFreshnessReport, String> {
-    // Freshness, including executable replacement, is a daemon health
-    // contract. A version response is only an identity compatibility fallback.
+    // Compatibility is a daemon health contract, independent of build identity.
     let DaemonVersionResponse { body, raw_body } =
         daemon_http_body_at_with_timeout(local_url, "health", timeout)?;
-    if let Some(mut report) = daemon_freshness_from_body(&body) {
-        if matches!(
-            report.stale_reason_code,
-            Some(
-                DaemonStaleReasonCode::VersionMismatch | DaemonStaleReasonCode::ExecutableReplaced
-            )
-        ) {
-            report.fresh = true;
-            report.stale_reason_code = None;
-        }
+    if let Some(report) = daemon_freshness_from_body(&body) {
         if report.fresh && daemon_version_identity_mismatch(&body, &raw_body)?.is_none() {
             return Ok(into_controller_frame(report, runner_id));
         }
         if report.fresh {
             let mut report = report;
             report.fresh = false;
-            report.stale_reason_code = Some(DaemonStaleReasonCode::VersionMismatch);
+            report.stale_reason_code = Some(DaemonStaleReasonCode::LabContractVersionMismatch);
             report.restartable = true;
             return Ok(into_controller_frame(report, runner_id));
         }
@@ -1010,7 +1000,7 @@ fn daemon_freshness_report(
     Ok(into_controller_frame(
         DaemonFreshnessReport {
             fresh: mismatch.is_none(),
-            stale_reason_code: mismatch.map(|_| DaemonStaleReasonCode::VersionMismatch),
+            stale_reason_code: mismatch.map(|_| DaemonStaleReasonCode::LabContractVersionMismatch),
             // A legacy version response has no daemon-owned job count, so it cannot
             // authorize replacement while the typed job endpoint is unavailable.
             restartable: false,
@@ -1098,7 +1088,7 @@ mod tests {
         DaemonHealthReport {
             freshness: DaemonFreshnessReport {
                 fresh: false,
-                stale_reason_code: Some(DaemonStaleReasonCode::VersionMismatch),
+                stale_reason_code: Some(DaemonStaleReasonCode::LabContractVersionMismatch),
                 restartable: true,
                 lease_id: Some(lease_id.to_string()),
                 pid: Some(pid),

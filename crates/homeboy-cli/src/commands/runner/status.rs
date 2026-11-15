@@ -535,9 +535,7 @@ fn daemon_stale_reason_code(reason: DaemonStaleReasonCode) -> &'static str {
         DaemonStaleReasonCode::LeaseCorrupt => "lease_corrupt",
         DaemonStaleReasonCode::LeaseSchemaMismatch => "lease_schema_mismatch",
         DaemonStaleReasonCode::PidDead => "pid_dead",
-        DaemonStaleReasonCode::BuildIdentityMismatch => "build_identity_mismatch",
-        DaemonStaleReasonCode::ExecutableReplaced => "executable_replaced",
-        DaemonStaleReasonCode::VersionMismatch => "version_mismatch",
+        DaemonStaleReasonCode::LabContractVersionMismatch => "lab_contract_version_mismatch",
         DaemonStaleReasonCode::RuntimePathsDrift => "runtime_paths_drift",
         DaemonStaleReasonCode::TransportUnreachable => "transport_unreachable",
         DaemonStaleReasonCode::ObservationUnavailable => "observation_unavailable",
@@ -1425,7 +1423,8 @@ fn runner_status_operator_commands_with_recovery_guidance(
     if let Some(freshness) = report.daemon_freshness.as_ref().filter(|freshness| {
         freshness.has_recovery_ownership_proof()
             && freshness.active_jobs > 0
-            && freshness.stale_reason_code == Some(DaemonStaleReasonCode::VersionMismatch)
+            && freshness.stale_reason_code
+                == Some(DaemonStaleReasonCode::LabContractVersionMismatch)
     }) {
         if let Some(command) = single_repair_command(freshness) {
             commands.push(RunnerOperatorCommand {

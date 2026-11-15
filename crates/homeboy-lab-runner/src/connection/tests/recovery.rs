@@ -612,7 +612,7 @@ fn idle_stale_status(work_evidence: RemoteDaemonWorkEvidence) -> RemoteDaemonSta
         0,
         "lease-stale",
         4444,
-        Some(DaemonStaleReasonCode::VersionMismatch),
+        Some(DaemonStaleReasonCode::LabContractVersionMismatch),
     );
     let daemon = status.daemon.as_mut().expect("daemon");
     daemon.version = Some("0.288.13".to_string());
@@ -837,7 +837,7 @@ fn stale_active_daemon_without_a_matching_session_fails_closed_without_replacing
         1,
         "lease-busy",
         4545,
-        Some(DaemonStaleReasonCode::VersionMismatch),
+        Some(DaemonStaleReasonCode::LabContractVersionMismatch),
     );
 
     assert!(remote_daemon_connect_action(None, &status)
@@ -848,7 +848,7 @@ fn stale_active_daemon_without_a_matching_session_fails_closed_without_replacing
     assert_eq!(recovery.active_jobs, 1);
     assert_eq!(
         recovery.stale_reason_code,
-        Some(DaemonStaleReasonCode::VersionMismatch)
+        Some(DaemonStaleReasonCode::LabContractVersionMismatch)
     );
     let warning = stale_reattach_warning_for_report("homeboy-lab", &recovery)
         .expect("stale reattach warning");
@@ -1839,7 +1839,7 @@ case "$1 $2" in
     if [ -f "{marker}" ]; then
       printf '%s\n' '{{"success":true,"data":{{"running":true,"fresh":true,"reachable":true,"freshness":{{"active_jobs":0}},"state":{{"address":"{address}","pid":222,"lease_id":"{post_lease_id}"}}}}}}'
     else
-      printf '%s\n' '{{"success":true,"data":{{"running":true,"fresh":false,"reachable":true,"freshness":{{"active_jobs":0,"stale_reason_code":"version_mismatch"}},"state":{{"address":"{address}","pid":111,"lease_id":"lease-old"}}}}}}'
+      printf '%s\n' '{{"success":true,"data":{{"running":true,"fresh":false,"reachable":true,"freshness":{{"active_jobs":0,"stale_reason_code":"lab_contract_version_mismatch"}},"state":{{"address":"{address}","pid":111,"lease_id":"lease-old"}}}}}}'
     fi
     ;;
   "daemon stop")

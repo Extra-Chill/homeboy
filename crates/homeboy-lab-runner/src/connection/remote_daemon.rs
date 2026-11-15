@@ -1437,23 +1437,12 @@ fn remote_daemon_status_with_timeout(
     remote_daemon_status_command(
         client,
         runner_id,
-        &host_daemon_status_command(runner_id, homeboy),
+        &format!(
+            "HOMEBOY_DAEMON_STATE_DIR=\"{}\" {} daemon status --full",
+            remote_daemon_state_dir(runner_id),
+            shell::quote_arg(homeboy),
+        ),
         timeout,
-    )
-}
-
-/// `daemon status` for the host state directory, answered by the host unit's
-/// own binary when the runner host has one. Status judges freshness against
-/// the binary that runs it, so probing with the daemon's own build makes it
-/// measure liveness, not whether this controller configured the same build as
-/// the controller that last refreshed the shared daemon (#18063). A host
-/// without a unit (direct SSH) is probed by the configured binary.
-fn host_daemon_status_command(runner_id: &str, homeboy: &str) -> String {
-    format!(
-        r#"probe="$HOME/{link}"; [ -x "$probe" ] || probe={homeboy}; HOMEBOY_DAEMON_STATE_DIR="{state_dir}" "$probe" daemon status --full"#,
-        link = crate::connection::host_service_binary_link(runner_id),
-        homeboy = shell::quote_arg(homeboy),
-        state_dir = remote_daemon_state_dir(runner_id),
     )
 }
 

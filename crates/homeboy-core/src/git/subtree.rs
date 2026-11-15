@@ -424,6 +424,7 @@ mod tests {
 
     #[test]
     fn publishes_nested_subtree_and_retries_identically() {
+        let _home = crate::test_support::HomeGuard::new();
         let _git = lock_git_wrapper();
         let root = tempfile::tempdir().unwrap();
         let remote = tempfile::tempdir().unwrap();
@@ -494,6 +495,7 @@ mod tests {
 
     #[test]
     fn rejects_destination_tree_conflict_without_force() {
+        let _home = crate::test_support::HomeGuard::new();
         let _git = lock_git_wrapper();
         let root = tempfile::tempdir().unwrap();
         let remote = tempfile::tempdir().unwrap();

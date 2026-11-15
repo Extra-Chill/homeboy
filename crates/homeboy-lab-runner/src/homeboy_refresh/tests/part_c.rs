@@ -88,7 +88,7 @@ fn refresh_readiness_blocks_a_post_refresh_executable_replacement() {
         "homeboy-lab",
         &readiness_report(freshness(
             false,
-            Some(DaemonStaleReasonCode::ExecutableReplaced),
+            Some(DaemonStaleReasonCode::LabContractVersionMismatch),
         )),
     );
 
@@ -123,7 +123,7 @@ fn incomplete_readiness_does_not_rewrite_daemon_refresh_compatibility_facts() {
         "homeboy-lab",
         &readiness_report(freshness(
             false,
-            Some(DaemonStaleReasonCode::VersionMismatch),
+            Some(DaemonStaleReasonCode::LabContractVersionMismatch),
         )),
     );
 
@@ -334,7 +334,7 @@ fn unconverged_readiness_produces_a_named_failure_not_a_silent_exit() {
         "homeboy-lab",
         &readiness_report(freshness(
             false,
-            Some(DaemonStaleReasonCode::VersionMismatch),
+            Some(DaemonStaleReasonCode::LabContractVersionMismatch),
         )),
     );
     assert_eq!(readiness.state, HomeboyRefreshReadinessState::Blocked);
@@ -378,7 +378,7 @@ fn unconverged_readiness_message_names_state_owners_and_next_action() {
         "homeboy-lab",
         &readiness_report(freshness(
             false,
-            Some(DaemonStaleReasonCode::VersionMismatch),
+            Some(DaemonStaleReasonCode::LabContractVersionMismatch),
         )),
     );
     assert_eq!(readiness.state, HomeboyRefreshReadinessState::Blocked);
