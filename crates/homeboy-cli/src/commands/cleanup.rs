@@ -1945,7 +1945,7 @@ fn automatic_retention() -> CmdResult<Value> {
     let kind = cleanup::AutomaticRetentionKind::Controller;
     let state_key = kind.state_key();
     let store = homeboy::core::observation::ObservationStore::open_initialized_for_lifecycle()?;
-    let Some(pass) = cleanup::begin_automatic_retention_pass(store, kind, SystemTime::now())?
+    let Some(mut pass) = cleanup::begin_automatic_retention_pass(store, kind, SystemTime::now())?
     else {
         return Ok((
             serde_json::json!({
@@ -1960,7 +1960,7 @@ fn automatic_retention() -> CmdResult<Value> {
     let retention = defaults::load_config().retention;
     let _residue = homeboy::core::worktree::retire_residue()?;
     let reconciliation = homeboy::agents::agent_task_service::reconcile_stale_active_runs(false)?;
-    let args = CleanupArgs {
+    let mut args = CleanupArgs {
         apply: true,
         include: AUTOMATIC_RETENTION_CATEGORIES.to_vec(),
         exclude: Vec::new(),
@@ -1973,7 +1973,6 @@ fn automatic_retention() -> CmdResult<Value> {
         cursor: None,
         command: None,
     };
-    let sweep = CleanupSweep::new(&args)?;
     // The rotation owns the whole pass budget, measured from its first phase.
     let mut budget = CleanupPassBudget::until(SystemTime::now().checked_add(Duration::from_secs(
         retention.automatic_retention_max_run_seconds,
@@ -1993,7 +1992,16 @@ fn automatic_retention() -> CmdResult<Value> {
     for phase in rotation_order {
         let started = match phase {
             AutomaticRetentionPhase::Category(category) => {
-                run_cleanup_category(&sweep, category, &mut budget, &mut categories)
+                // Only the remote workspace child receives the automatic per-runner map.
+                args.cursor = (category == CleanupCategoryArg::RemoteLabWorkspaces).then(|| {
+                    serde_json::to_string(pass.remote_workspace_cursors()).expect("cursor map")
+                });
+                let sweep = CleanupSweep::new(&args)?;
+                let started = run_cleanup_category(&sweep, category, &mut budget, &mut categories);
+                if category == CleanupCategoryArg::RemoteLabWorkspaces {
+                    save_remote_workspace_cursors(&mut pass, &categories);
+                }
+                started
             }
             owner => match budget.admit(CLEANUP_CATEGORY_MINIMUM_BUDGET) {
                 CleanupPhaseAdmission::Deferred(reason) => {
@@ -2053,7 +2061,7 @@ fn automatic_retention() -> CmdResult<Value> {
         }
     }
     rotation.next_phase = rotation.deferred.first().copied();
-    let cleanup = sweep.finish(categories)?;
+    let cleanup = CleanupSweep::new(&args)?.finish(categories)?;
     let cleanup_exit_code = cleanup.exit_code;
     // A category that ran out of budget, or a phase deferred to the next
     // pass, leaves the aggregate resumable, not broken. Reporting that as
@@ -2716,7 +2724,7 @@ fn run_cleanup_category(
                 &args,
                 deadline,
                 CleanupCategoryCommandOverrides::default(),
-                || remote_lab_workspace_categories(policy, apply),
+                || remote_lab_workspace_categories(policy, apply, args.cursor.as_deref()),
             );
         }
 
@@ -4566,11 +4574,38 @@ fn persisted_artifacts_category(
     })
 }
 
+fn save_remote_workspace_cursors(
+    pass: &mut cleanup::AutomaticRetentionPass,
+    categories: &[CleanupInventoryCategory],
+) {
+    for category in categories {
+        if category.category != "remote_lab_workspaces" || category.failure.is_some() {
+            continue;
+        }
+        let output = &category.output;
+        if let (Some(runner_id), Some(complete)) = (
+            output["runner_id"].as_str(),
+            output["scan_complete"].as_bool(),
+        ) {
+            let cursor = if complete {
+                None
+            } else {
+                output["continuation_cursor"].as_str().map(str::to_string)
+            };
+            pass.set_remote_workspace_cursor(runner_id.to_string(), cursor);
+        }
+    }
+}
+
 fn remote_lab_workspace_categories(
     policy: CleanupPolicy,
     apply: bool,
+    cursor: Option<&str>,
 ) -> homeboy::core::Result<Vec<CleanupInventoryCategory>> {
     let mut categories = Vec::new();
+    let cursors: BTreeMap<String, String> = cursor
+        .and_then(|cursor| serde_json::from_str(cursor).ok())
+        .unwrap_or_default();
     for status in runner::statuses()? {
         if !remote_workspace_cleanup_connected(&status) {
             categories.push(CleanupInventoryCategory {
@@ -4604,7 +4639,7 @@ fn remote_lab_workspace_categories(
             });
             continue;
         }
-        let output = match runner::prune_workspaces(
+        let output = match prune_automatic_workspace_page(
             &status.runner_id,
             RunnerWorkspacePruneOptions {
                 apply,
@@ -4614,7 +4649,7 @@ fn remote_lab_workspace_categories(
                 // wired here. See `cleanup::RUNNER_WORKSPACE_PAGE_LIMIT`.
                 limit: policy.runner_workspace_page_limit,
                 passes: CleanupPolicy::runner_workspace_passes(apply),
-                cursor: None,
+                cursor: cursors.get(&status.runner_id).cloned(),
                 ..RunnerWorkspacePruneOptions::default()
             },
         ) {
@@ -4636,6 +4671,25 @@ fn remote_lab_workspace_categories(
         categories.push(remote_workspace_category(output, apply)?);
     }
     Ok(categories)
+}
+
+fn prune_automatic_workspace_page(
+    runner_id: &str,
+    mut options: RunnerWorkspacePruneOptions,
+) -> homeboy::core::Result<(RunnerWorkspacePruneOutput, i32)> {
+    let result = runner::prune_workspaces(runner_id, options.clone());
+    // A cursor from an older root or cursor format must not strand this runner.
+    if options.cursor.is_some()
+        && result.as_ref().is_err_and(|error| {
+            error.details.get("field").and_then(Value::as_str) == Some("cursor")
+                && error.details.get("problem").and_then(Value::as_str)
+                    == Some("workspace prune cursor is invalid for this workspace root")
+        })
+    {
+        options.cursor = None;
+        return runner::prune_workspaces(runner_id, options);
+    }
+    result
 }
 
 fn remote_workspace_cleanup_connected(status: &runner::RunnerStatusReport) -> bool {
@@ -6559,6 +6613,88 @@ mod tests {
             CleanupPassBudget::until(None).admit(Duration::from_secs(3600)),
             CleanupPhaseAdmission::Run(None)
         ));
+    }
+
+    #[test]
+    fn automatic_retention_remote_workspace_cursor_resumes_and_resets() {
+        homeboy::test_support::with_isolated_home(|root| {
+            use homeboy::core::config::ConfigEntity;
+            use homeboy::runner::runners::Runner;
+
+            let roots = homeboy::core::paths::PathRoots::from_environment().unwrap();
+            let runner_root = root.path().join("runner-root");
+            let workspaces = runner_root.join("_lab_workspaces");
+            for name in ["a", "b"] {
+                let workspace = workspaces.join(name);
+                std::fs::create_dir_all(&workspace).unwrap();
+                let state = workspaces.join(format!("{name}-homeboy-state"));
+                std::fs::create_dir_all(&state).unwrap();
+                std::fs::write(
+                    state.join("runner-workspace.json"),
+                    serde_json::json!({
+                        "schema": "homeboy/runner-workspace/v1",
+                        "local_path": root.path().join("missing-source"),
+                    })
+                    .to_string(),
+                )
+                .unwrap();
+            }
+            std::fs::create_dir_all(Runner::config_dir_in_root(roots.config())).unwrap();
+            std::fs::write(Runner::config_path_in_root(roots.config(), "cursor-test"),
+                serde_json::json!({"id": "cursor-test", "kind": "local", "workspace_root": runner_root}).to_string()).unwrap();
+            let begin = || {
+                cleanup::begin_automatic_retention_pass(
+                    homeboy::core::observation::ObservationStore::open_initialized_for_lifecycle()
+                        .unwrap(),
+                    cleanup::AutomaticRetentionKind::Controller,
+                    SystemTime::now(),
+                )
+                .unwrap()
+                .unwrap()
+            };
+            let mut first = begin();
+            // Seed an obsolete cursor as well: automatic scans recover rather than fail.
+            first.set_remote_workspace_cursor(
+                "cursor-test".to_string(),
+                Some("obsolete".to_string()),
+            );
+            let options =
+                |pass: &cleanup::AutomaticRetentionPass, limit| RunnerWorkspacePruneOptions {
+                    min_age_hours: 0,
+                    limit,
+                    passes: 1,
+                    cursor: pass.remote_workspace_cursors().get("cursor-test").cloned(),
+                    ..RunnerWorkspacePruneOptions::default()
+                };
+            let (page, _) =
+                prune_automatic_workspace_page("cursor-test", options(&first, 1)).unwrap();
+            assert!(!page.scan_complete);
+            assert_eq!(page.candidates.len(), 1, "{page:?}");
+            let cursor = page.continuation_cursor.clone().unwrap();
+            let first_path = page.candidates[0].remote_path.clone();
+            save_remote_workspace_cursors(
+                &mut first,
+                &[remote_workspace_category(page, false).unwrap()],
+            );
+            first.finish("partial", None).unwrap();
+
+            let mut second = begin();
+            assert_eq!(
+                second.remote_workspace_cursors().get("cursor-test"),
+                Some(&cursor)
+            );
+            let (page, _) =
+                prune_automatic_workspace_page("cursor-test", options(&second, 10)).unwrap();
+            assert!(page.scan_complete, "{page:?}");
+            assert_eq!(page.candidates.len(), 1, "{page:?}");
+            assert_ne!(page.candidates[0].remote_path, first_path);
+            save_remote_workspace_cursors(
+                &mut second,
+                &[remote_workspace_category(page, false).unwrap()],
+            );
+            second.finish("completed", None).unwrap();
+            assert!(begin().remote_workspace_cursors().is_empty());
+        });
     }
 
     /// Every unattended phase is in the one rotation, and a pass resumes at
