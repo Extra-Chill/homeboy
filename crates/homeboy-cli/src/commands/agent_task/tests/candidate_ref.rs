@@ -21,6 +21,12 @@ fn agent_task_status_exposes_applied_candidate_ref_and_clean_git_tree() {
         git(&["init", "-b", "main"]);
         git(&["config", "user.name", "Test"]);
         git(&["config", "user.email", "test@example.test"]);
+        git(&[
+            "remote",
+            "add",
+            "origin",
+            "https://github.com/example/repo.git",
+        ]);
         std::fs::write(temp.path().join("file"), "base\n").unwrap();
         git(&["add", "."]);
         git(&["commit", "-m", "base"]);

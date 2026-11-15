@@ -4,6 +4,15 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.465.3] - 2026-11-15
+
+### Fixed
+- diagnose daemon and configured binary build skew
+- report Lab pressure as typed capacity refusal
+- nested Homeboy in a daemon child runs the daemon's build, not the controller's dispatch-time binary
+- link incomplete drafts to their issue and report the failed outcome cause
+- show only held reservations with RFC 3339 ETA
+
 ## [0.465.2] - 2026-11-15
 
 ### Changed
