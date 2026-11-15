@@ -161,6 +161,7 @@ pub enum ErrorCode {
     /// Admission was refused because measured free capacity is below a policy
     /// reserve, while the filesystem can still accept writes.
     ResourceCapacityReserve,
+    RunnerCapacityBusy,
 
     /// The filesystem could not accept a write because it is out of bytes or
     /// out of inodes. Distinct from [`ErrorCode::InternalIoError`] so callers
@@ -253,6 +254,7 @@ impl ErrorCode {
             ErrorCode::ObservationStoreBusy => "observation_store.busy",
 
             ErrorCode::ResourceCapacityReserve => "resource.capacity_reserve",
+            ErrorCode::RunnerCapacityBusy => "runner.capacity_busy",
 
             ErrorCode::StorageExhausted => "storage.exhausted",
 
@@ -318,6 +320,7 @@ impl ErrorCode {
             "git.command_failed" => Self::GitCommandFailed,
             "observation_store.busy" => Self::ObservationStoreBusy,
             "resource.capacity_reserve" => Self::ResourceCapacityReserve,
+            "runner.capacity_busy" => Self::RunnerCapacityBusy,
             "storage.exhausted" => Self::StorageExhausted,
             "internal.io_error" => Self::InternalIoError,
             "release_deadline_exceeded" => Self::ReleaseDeadlineExceeded,
