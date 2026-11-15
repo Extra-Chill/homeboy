@@ -1566,7 +1566,9 @@ fn resolve_default_lab_runner_from_candidates(
         }
     }
 
-    (best.len() == 1).then(|| best.into_iter().next().expect("checked len").id)
+    // Equally ready runners are interchangeable: pick one deterministically
+    // rather than refusing a ready Lab as unavailable.
+    best.into_iter().map(|candidate| candidate.id).min()
 }
 
 pub fn create(json_spec: &str, skip_existing: bool) -> Result<CreateOutput<Runner>> {
@@ -3496,6 +3498,19 @@ mod tests {
         );
 
         assert_eq!(selected.as_deref(), Some("lab-b"));
+    }
+
+    #[test]
+    fn default_lab_runner_selects_among_equally_ready_runners() {
+        let selected = resolve_default_lab_runner_from_candidates(
+            None,
+            vec![
+                default_lab_candidate("lab-b", true),
+                default_lab_candidate("lab-a", true),
+            ],
+        );
+
+        assert_eq!(selected.as_deref(), Some("lab-a"));
     }
 
     #[test]
