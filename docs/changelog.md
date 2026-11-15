@@ -4,6 +4,11 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.465.15] - 2026-11-15
+
+### Fixed
+- resume the Lab workspace prune across automatic retention passes
+
 ## [0.465.14] - 2026-11-15
 
 ### Changed
