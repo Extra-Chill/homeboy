@@ -50,6 +50,7 @@ pub mod recovery_actions;
 mod remote_runner;
 #[cfg(test)]
 mod restart_safe_jobs_tests;
+mod router;
 pub mod runner_exec_driver;
 pub mod runner_exec_job;
 mod runner_exec_worker;
@@ -2683,464 +2684,6 @@ fn completion_notifications(
     notifications
 }
 
-pub fn route(method: &str, path: &str) -> HttpResponse {
-    route_with_job_store(method, path, daemon_job_store())
-}
-
-/// In-process daemon dispatch against a caller-owned job store, with an optional
-/// request body. This is the same trusted-local router the network entry point
-/// uses after authentication; it lets callers in higher crates (e.g. the runner
-/// crate that registers the real `RunnerExecDriver`) exercise the `/exec` and
-/// file routes end to end without standing up an HTTP listener.
-pub fn route_with_body(
-    method: &str,
-    path: &str,
-    body: Option<serde_json::Value>,
-    job_store: &JobStore,
-) -> HttpResponse {
-    route_with_job_store_and_body(method, path, body, job_store)
-}
-
-fn route_with_job_store(method: &str, path: &str, job_store: &JobStore) -> HttpResponse {
-    route_with_job_store_and_body(method, path, None, job_store)
-}
-
-fn route_with_job_store_and_body(
-    method: &str,
-    path: &str,
-    body: Option<serde_json::Value>,
-    job_store: &JobStore,
-) -> HttpResponse {
-    route_with_job_store_and_body_and_runner(
-        method,
-        path,
-        body,
-        job_store,
-        UnsupportedAnalysisJobRunner,
-    )
-}
-
-fn route_with_job_store_and_body_and_runner<R>(
-    method: &str,
-    path: &str,
-    body: Option<serde_json::Value>,
-    job_store: &JobStore,
-    analysis_runner: R,
-) -> HttpResponse
-where
-    R: AnalysisJobRunner,
-{
-    // In-process dispatch (CLI internals, tests) is already inside the trust
-    // boundary; only the network entry point (`handle_connection`) authenticates
-    // broker traffic against the on-disk auth store.
-    route_with_job_store_and_body_and_runner_and_auth(
-        method,
-        path,
-        body,
-        job_store,
-        analysis_runner,
-        remote_runner::BrokerAuthContext::trusted_local(),
-    )
-}
-
-fn route_with_job_store_and_body_and_runner_and_auth<R>(
-    method: &str,
-    path: &str,
-    body: Option<serde_json::Value>,
-    job_store: &JobStore,
-    analysis_runner: R,
-    broker_auth: remote_runner::BrokerAuthContext,
-) -> HttpResponse
-where
-    R: AnalysisJobRunner,
-{
-    if method == "POST"
-        && intake_draining()
-        && matches!(
-            path.split('?').next().unwrap_or(path),
-            // `/controller/jobs` queues for the replacement in admission.
-            "/jobs" | "/exec" | "/runner/jobs" | "/admissions" | "/v1/control-plane/runs"
-        )
-        && !post_admits_owned_work(path, body.as_ref(), job_store)
-    {
-        return error_response(503, daemon_draining_error());
-    }
-    // Health must never reconcile or inspect the job ledger on a request worker.
-    if method == "GET" && path.split('?').next() == Some("/health") {
-        let lease = heartbeat_lease().ok();
-        let mut freshness = job_store
-            .daemon_freshness_snapshot
-            .lock()
-            .expect("health snapshot lock")
-            .clone();
-        if lease.is_none()
-            || freshness.as_ref().is_some_and(|snapshot| {
-                snapshot.lease_id.as_deref() != lease.as_ref().map(|lease| lease.lease_id.as_str())
-            })
-        {
-            // The cached lease is no longer proven live. Preserve the snapshot,
-            // but fail closed until the background updater observes this revision.
-            let stale_reason_code = if lease.is_none() {
-                state_path()
-                    .and_then(|path| validate_lease_file(&path))
-                    .ok()
-                    .and_then(|validation| validation.stale_reason_code)
-                    .unwrap_or(DaemonStaleReasonCode::LeaseMissing)
-            } else {
-                DaemonStaleReasonCode::LeaseMissing
-            };
-            if let Some(snapshot) = freshness.as_mut() {
-                snapshot.fresh = false;
-                snapshot.stale_reason_code = Some(stale_reason_code);
-            }
-            job_store.health_revision.fetch_add(1, Ordering::Release);
-        }
-        return HttpResponse {
-            status_code: 200,
-            body: json!({
-                "status": "ok",
-                "pid": std::process::id(),
-                "version": VERSION,
-                "build_identity": build_identity::current(),
-                "lease": lease,
-                "freshness": freshness,
-            }),
-            artifact: None,
-        };
-    }
-    // Expired reservations are reclaimed by the background reconciler. A
-    // request worker never runs a durable store transaction just to route.
-    match (method, path.split('?').next().unwrap_or(path)) {
-        ("GET", homeboy_runner_contract::RUNNER_API_DESCRIBE_PATH) => match describe_runner(job_store) {
-            Ok(body) => daemon_endpoint_response("runner.describe", body),
-            Err(error) => error_response(503, error),
-        },
-        ("GET", "/lifecycle/identity") => match daemon_endpoint_identity(path) {
-            Ok(body) => HttpResponse {
-                status_code: 200,
-                body,
-                artifact: None,
-            },
-            Err(err) => error_response(503, err),
-        },
-        ("POST", "/runner-inventory") => {
-            match crate::runner_inventory::owned_roots(body.as_ref().and_then(|value| value.get("workspace_root")).and_then(serde_json::Value::as_str).map(PathBuf::from)) {
-                Ok(roots) => daemon_endpoint_response("runner.inventory", json!(crate::runner_inventory::cached_scan(roots, Duration::from_secs(2)))),
-                Err(error) => error_response(500, error),
-            }
-        },
-        ("GET", "/version") => HttpResponse {
-            status_code: 200,
-            body: json!({
-                "version": VERSION,
-                "build_identity": build_identity::current(),
-                "lab_contract_version": homeboy_lab_contract::LAB_CONTRACT_VERSION,
-                "lab_handoff_capabilities": homeboy_lab_contract::required_lab_handoff_capabilities(),
-                "runtime_paths": daemon_runtime_paths_body(),
-                "lease": heartbeat_lease().ok(),
-                "freshness": daemon_freshness_report(job_store).ok(),
-            }),
-            artifact: None,
-        },
-        ("GET", "/capacity") => daemon_endpoint_response(
-            "daemon.capacity",
-            json!({
-                "capacity": crate::lab_capacity::observe(None),
-                "queued_steps": crate::lab_capacity::queued_steps(),
-                "queued_work": job_store.active_runner_jobs().into_iter()
-                    .filter(|job| job.status == JobStatus::Queued).collect::<Vec<_>>(),
-            }),
-        ),
-        ("GET", "/capabilities") => daemon_endpoint_response(
-            "daemon.capabilities",
-            json!({
-                "schema": "homeboy/daemon-capabilities/v1",
-                "capabilities": [
-                    crate::workspace_claim::WorkspaceClaimProtocol::current(),
-                    crate::workspace_claim::WorkspaceOwnerLeaseProtocol::current(),
-                    // The Runner API v1 operations the broker serves negotiate
-                    // through this list too (#13881).
-                    homeboy_runner_contract::RunnerApiWatchCapability::current(),
-                ],
-            }),
-        ),
-        ("GET", "/config/paths") => match config_paths_body() {
-            Ok(body) => HttpResponse {
-                status_code: 200,
-                body,
-                artifact: None,
-            },
-            Err(err) => error_response(500, err),
-        },
-        ("POST", "/health") | ("POST", "/version") | ("POST", "/config/paths") => HttpResponse {
-            status_code: 405,
-            body: json!({ "error": "method_not_allowed" }),
-            artifact: None,
-        },
-        ("POST", "/exec") => {
-            match with_daemon_job_admission(|| enqueue_exec_job(body, job_store)) {
-                Ok(body) => daemon_endpoint_response("jobs.exec", body),
-                Err(err) => error_response(400, err),
-            }
-        }
-        ("POST", "/workspace-claims/acquire") => match acquire_workspace_claim(body) {
-            Ok(body) => daemon_endpoint_response("workspace_claim.acquire", body),
-            Err(err) => error_response(400, err),
-        },
-        ("POST", "/workspace-claims/validate") => match validate_workspace_claim(body) {
-            Ok(body) => daemon_endpoint_response("workspace_claim.validate", body),
-            Err(err) => error_response(400, err),
-        },
-        ("POST", "/workspace-claims/release") => match release_workspace_claim(body) {
-            Ok(body) => daemon_endpoint_response("workspace_claim.release", body),
-            Err(err) => error_response(400, err),
-        },
-        ("POST", "/workspace-claims/authority") => match workspace_claim_authority_status(body) {
-            Ok(body) => daemon_endpoint_response("workspace_claim.authority", body),
-            Err(err) => error_response(400, err),
-        },
-        ("POST", "/workspace-owners/register") => match register_workspace_owner(body) {
-            Ok(body) => daemon_endpoint_response("workspace_owner.register", body),
-            Err(err) => error_response(400, err),
-        },
-        ("POST", "/workspace-owners/validate") => match validate_workspace_owner(body) {
-            Ok(body) => daemon_endpoint_response("workspace_owner.validate", body),
-            Err(err) => error_response(400, err),
-        },
-        ("POST", "/workspace-owners/renew") => match renew_workspace_owner(body) {
-            Ok(body) => daemon_endpoint_response("workspace_owner.renew", body),
-            Err(err) => error_response(400, err),
-        },
-        ("POST", "/workspace-owners/release") => match release_workspace_owner(body) {
-            Ok(body) => daemon_endpoint_response("workspace_owner.release", body),
-            Err(err) => error_response(400, err),
-        },
-        ("POST", "/controller/jobs") => {
-            match with_daemon_job_admission(|| {
-                let request = parse_controller_job_request(body)?;
-                let admission = admit_controller_job(request, job_store)?;
-                Ok(controller_job_admission_response(&admission, job_store))
-            }) {
-                Ok(body) => daemon_endpoint_response("controller.jobs.create", body),
-                Err(err) => error_response(400, err),
-            }
-        }
-        ("POST", path) if path.starts_with("/controller/jobs/") && path.ends_with("/start") => {
-            match parse_controller_job_path_id(path, "/start")
-                .and_then(|job_id| start_controller_job(job_id, job_store))
-            {
-                Ok(job) => daemon_endpoint_response(
-                    "controller.jobs.start",
-                    controller_job_operation_response(job),
-                ),
-                Err(err) => error_response(400, err),
-            }
-        }
-        ("POST", path) if path.starts_with("/controller/jobs/") && path.ends_with("/cancel") => {
-            match parse_controller_job_path_id(path, "/cancel")
-                .and_then(|job_id| parse_controller_job_cancel_reason(body).and_then(|reason| cancel_controller_job(job_id, &reason, job_store)))
-            {
-                Ok(job) => daemon_endpoint_response(
-                    "controller.jobs.cancel",
-                    controller_job_cancel_response(job),
-                ),
-                Err(err) => error_response(400, err),
-            }
-        }
-        ("GET", "/workflows") => {
-            daemon_endpoint_response("workflows.list", workflow_job::workflow_list(job_store))
-        }
-        ("GET", "/workflows/cadences") => match workflow_cadence::http_list(job_store) {
-            Ok(body) => daemon_endpoint_response("workflows.cadences.list", body),
-            Err(err) => error_response(400, err),
-        },
-        ("POST", "/workflows/cadences") => match workflow_cadence::http_register(body) {
-            Ok(body) => daemon_endpoint_response("workflows.cadences.register", body),
-            Err(err) => error_response(400, err),
-        },
-        ("POST", path) if path.starts_with("/workflows/cadences/") && path.ends_with("/cancel") => {
-            let workflow = path
-                .trim_start_matches("/workflows/cadences/")
-                .trim_end_matches("/cancel");
-            match workflow_cadence::http_cancel(workflow) {
-                Ok(body) => daemon_endpoint_response("workflows.cadences.cancel", body),
-                Err(err) => error_response(404, err),
-            }
-        }
-        ("POST", path) if path.starts_with("/workflows/") && path.ends_with("/approvals") => {
-            let instance = path
-                .trim_start_matches("/workflows/")
-                .trim_end_matches("/approvals");
-            match workflow_job::workflow_approve(job_store, instance, body) {
-                Ok(body) => daemon_endpoint_response("workflows.approve", body),
-                Err(err) => error_response(400, err),
-            }
-        }
-        ("GET", path) if path.starts_with("/workflows/") => {
-            match workflow_job::workflow_status(job_store, path.trim_start_matches("/workflows/")) {
-                Ok(body) => daemon_endpoint_response("workflows.status", body),
-                Err(err) => error_response(404, err),
-            }
-        }
-        ("GET", "/reservation") => match reservation::current() {
-            Ok(value) => daemon_endpoint_response("reservation.status", json!(value)),
-            Err(error) => error_response(400, error),
-        },
-        ("POST", "/reservation") => match with_daemon_job_admission(|| reservation::update(body)) {
-            Ok(value) => daemon_endpoint_response("reservation.update", value),
-            Err(error) => error_response(400, error),
-        },
-        ("POST", "/admissions") => {
-            match with_daemon_job_admission(|| reserve_admission(body, job_store)) {
-                Ok(body) => daemon_endpoint_response("admissions.reserve", body),
-                Err(err) => error_response(400, err),
-            }
-        }
-        ("POST", path) if path.starts_with("/admissions/") && path.ends_with("/release") => {
-            match release_admission(path, body, job_store) {
-                Ok(body) => daemon_endpoint_response("admissions.release", body),
-                Err(err) => error_response(400, err),
-            }
-        }
-        ("POST", path) if path.starts_with("/admissions/") && path.ends_with("/renew") => {
-            match renew_admission(path, body, job_store) {
-                Ok(body) => daemon_endpoint_response("admissions.renew", body),
-                Err(err) => error_response(400, err),
-            }
-        }
-        ("POST", "/jobs/reconcile-terminal") => {
-            match job_store.reconcile_terminal_linked_daemon_jobs() {
-                Ok(reconciled) => daemon_endpoint_response(
-                    "jobs.reconcile_terminal",
-                    json!({
-                        "reconciled_job_ids": reconciled,
-                        "reconciled_count": reconciled.len(),
-                        "policy": "jobs with durable terminal evidence (terminal linked durable run or recorded terminal result) are reconciled; live and unresolved jobs are preserved",
-                    }),
-                ),
-                Err(err) => error_response(400, err),
-            }
-        }
-        ("POST", "/lifecycle/stop") => match lifecycle_stop_request(body)
-            .and_then(|request| validate_lifecycle_stop_request(&request).map(|_| request))
-        {
-            Ok(request) => daemon_endpoint_response(
-                "lifecycle.stop",
-                json!({
-                    "lease_id": request.lease_id,
-                    "force": request.force,
-                    "accepted": true,
-                }),
-            ),
-            Err(err) => error_response(400, err),
-        },
-        ("GET", path) if path.starts_with("/controller/jobs/") && path.ends_with("/cancel") => {
-            HttpResponse {
-                status_code: 405,
-                body: json!({ "error": "method_not_allowed" }),
-                artifact: None,
-            }
-        }
-        ("GET", path) if path.starts_with("/controller/jobs/") && path.ends_with("/start") => {
-            method_not_allowed()
-        }
-        ("GET", "/exec")
-        | ("GET", "/admissions")
-        | ("GET", "/workspace-claims/acquire")
-        | ("GET", "/workspace-claims/validate")
-        | ("GET", "/workspace-claims/release")
-        | ("GET", "/workspace-claims/authority")
-        | ("GET", "/workspace-owners/register")
-        | ("GET", "/workspace-owners/validate")
-        | ("GET", "/workspace-owners/renew")
-        | ("GET", "/workspace-owners/release")
-        | ("GET", "/jobs/reconcile-terminal")
-        | ("GET", "/controller/jobs") => HttpResponse {
-            status_code: 405,
-            body: json!({ "error": "method_not_allowed" }),
-            artifact: None,
-        },
-        ("GET", "/lifecycle/stop") => method_not_allowed(),
-        ("POST", "/runner/staging/direct") | ("POST", "/runner/staging/capabilities") => {
-            remote_runner::route(method, path, body, job_store, &broker_auth)
-        }
-        ("POST", "/v1/control-plane/runs") => {
-            match authorize_control_plane_write(body, &broker_auth) {
-                Ok(body) => route_read_only_api(method, path, body, job_store, analysis_runner),
-                Err(error) => remote_runner::auth_or_bad_request(error),
-            }
-        }
-        ("POST", "/v1/control-plane/provider-effects/reconcile") => {
-            match authorize_control_plane_write(body, &broker_auth).and_then(|body| {
-                let request = serde_json::from_value::<homeboy_extension_contract::api::v1::ExtensionApiDeploymentProviderReconcileRequest>(
-                    body.ok_or_else(|| Error::validation_invalid_argument("body", "provider-effect reconciliation requires a JSON request body", None, None))?,
-                ).map_err(|error| Error::validation_invalid_argument("body", error.to_string(), None, None))?;
-                Ok(crate::control_plane::reconcile_deployment_provider_effect(&request))
-            }) {
-                Ok(response) => daemon_endpoint_response("control_plane.provider_effects.reconcile", serde_json::to_value(response).unwrap_or(serde_json::Value::Null)),
-                Err(error) => remote_runner::auth_or_bad_request(error),
-            }
-        }
-        ("POST", path) if is_control_plane_reference_registration(path) => {
-            match authorize_control_plane_write(body, &broker_auth) {
-                Ok(body) => route_read_only_api(method, path, body, job_store, analysis_runner),
-                Err(error) => remote_runner::auth_or_bad_request(error),
-            }
-        }
-        ("POST", path) if is_control_plane_event_append(path) => {
-            match authorize_control_plane_write(body, &broker_auth) {
-                Ok(body) => route_read_only_api(method, path, body, job_store, analysis_runner),
-                Err(error) => remote_runner::auth_or_bad_request(error),
-            }
-        }
-        _ => route_read_only_api(method, path, body, job_store, analysis_runner),
-    }
-}
-
-fn authorize_control_plane_write(
-    body: Option<serde_json::Value>,
-    broker_auth: &remote_runner::BrokerAuthContext,
-) -> Result<Option<serde_json::Value>> {
-    let Some(grant) = broker_auth.authorize(crate::broker_auth::BrokerScope::Submit, None)? else {
-        return Ok(body);
-    };
-    if grant.credential_id == "loopback-open" {
-        return Err(Error::broker_auth_denied(
-            "control-plane writes require a paired credential with submit scope",
-            None,
-            vec!["Pair a controller credential before mutating durable work.".to_string()],
-        ));
-    }
-    let mut body = body.unwrap_or_else(|| json!({}));
-    let object = body.as_object_mut().ok_or_else(|| {
-        Error::validation_invalid_argument(
-            "body",
-            "control-plane submission request body must be a JSON object",
-            None,
-            None,
-        )
-    })?;
-    object.insert(
-        "actor".to_string(),
-        serde_json::Value::String(format!("broker:{}", grant.credential_id)),
-    );
-    Ok(Some(body))
-}
-
-fn is_control_plane_reference_registration(path: &str) -> bool {
-    matches!(
-        http_api::route(HttpMethod::Post, path),
-        Ok(http_api::HttpEndpoint::ControlPlaneRunReferenceRegister { .. })
-    )
-}
-
-fn is_control_plane_event_append(path: &str) -> bool {
-    matches!(
-        http_api::route(HttpMethod::Post, path),
-        Ok(http_api::HttpEndpoint::ControlPlaneRunEventAppend { .. })
-    )
-}
-
 /// Read-only proof that a loopback endpoint is this daemon, bound to a fresh
 /// lease. Controllers supply an unpredictable nonce so a response cannot be
 /// replayed from a retained diagnostic or another request.
@@ -3177,6 +2720,14 @@ fn daemon_endpoint_identity(path: &str) -> Result<serde_json::Value> {
         },
     }))
 }
+
+use router::dispatch;
+#[cfg(test)]
+use router::{
+    authorize_control_plane_write, is_control_plane_event_append,
+    is_control_plane_reference_registration,
+};
+pub use router::{route, route_with_body};
 
 pub(crate) mod reservation;
 
@@ -6081,7 +5632,7 @@ mod tests {
                 );
                 // The real gate transport uses this same direct exec endpoint.
                 body["submission"]["envelope"]["mutation_policy"]["capture_patch"] = json!(false);
-                let response = route_with_job_store_and_body("POST", "/exec", Some(body), &store);
+                let response = route_with_body("POST", "/exec", Some(body), &store);
                 assert_eq!(response.status_code, 200, "{:?}", response.body);
                 let id: Uuid = response.body["body"]["job"]["id"]
                     .as_str()
@@ -6119,7 +5670,7 @@ mod tests {
             assert!(reopened.has_pending_direct_execution(running).unwrap());
             drop(reopened);
             let cancelled = submit("gate-pressure-cancel");
-            let response = route_with_job_store_and_body(
+            let response = route_with_body(
                 "POST",
                 &format!("/jobs/{cancelled}/cancel"),
                 Some(json!({"reason":"Cook cancelled"})),
@@ -6131,7 +5682,7 @@ mod tests {
             let _quiet =
                 crate::test_support::EnvVarGuard::set(crate::runner_pressure::SAMPLE_ENV, "{}");
             wait_for_daemon_job_status(&store, running, JobStatus::Succeeded);
-            let terminal = route_with_job_store("GET", &format!("/jobs/{running}"), &store);
+            let terminal = route_with_body("GET", &format!("/jobs/{running}"), None, &store);
             assert_eq!(terminal.status_code, 200);
             assert!(store
                 .events(running)
@@ -6162,15 +5713,15 @@ mod tests {
             let computed = serde_json::to_value(daemon_freshness_report(&store).unwrap()).unwrap();
             refresh_daemon_freshness_snapshot(&store);
             assert_eq!(computed["active_jobs"], 64);
-            let response = route_with_job_store("GET", "/health", &store);
+            let response = route_with_body("GET", "/health", None, &store);
             assert_eq!(response.body["freshness"], computed);
             // Clearing the cached evidence must not trigger an on-demand scan.
             *store.daemon_freshness_snapshot.lock().unwrap() = None;
-            let response = route_with_job_store("GET", "/health", &store);
+            let response = route_with_body("GET", "/health", None, &store);
             assert!(response.body["freshness"].is_null());
             refresh_daemon_freshness_snapshot(&store);
             assert_eq!(
-                route_with_job_store("GET", "/health", &store).body["freshness"],
+                route_with_body("GET", "/health", None, &store).body["freshness"],
                 computed
             );
 
@@ -6178,7 +5729,7 @@ mod tests {
             assert_eq!(computed["fresh"], true);
             fs::remove_file(state_path().unwrap()).unwrap();
             let revision = store.health_revision.load(Ordering::Acquire);
-            let response = route_with_job_store("GET", "/health", &store);
+            let response = route_with_body("GET", "/health", None, &store);
             assert!(response.body["lease"].is_null());
             assert_eq!(response.body["freshness"]["fresh"], false);
             assert_eq!(
@@ -6768,7 +6319,7 @@ mod tests {
                     .expect("durable store");
             store.fail_next_durable_writes(1);
             for path in ["/version", "/capabilities"] {
-                let response = route_with_job_store("GET", path, &store);
+                let response = route_with_body("GET", path, None, &store);
                 assert_eq!(response.status_code, 200, "{path}: {:?}", response.body);
             }
         });
@@ -9268,7 +8819,7 @@ where
         Ok(request) => request,
         Err(error) => return write_http_response(stream, &error_response(400, error)),
     };
-    let response = route_with_job_store_and_body_and_runner_and_auth(
+    let response = dispatch(
         method,
         path,
         parsed_body,
