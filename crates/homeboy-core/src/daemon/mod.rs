@@ -1751,7 +1751,6 @@ where
     {
         let _ = job_store.rearm_recovery_after_requested_stop(&stopped_lease);
     }
-    runner_exec_job::recover_runner_exec_jobs(&job_store);
     job_store.adopt_scopeless_controller_jobs()?;
     recover_controller_jobs(&job_store);
     // Built-in cadences (`homeboy.retention`) are registered unless the
@@ -4147,7 +4146,8 @@ fn enqueue_exec_job(
 /// other scopes in the shared ledger are never selected.
 ///
 /// Staged direct `runner.exec` handoffs run first: no child ever existed, so
-/// they are requeued under this generation. The store then reconciles the
+/// they are requeued under this generation. Runner exec children are then
+/// re-adopted, including ones that already exited. The store reconciles the
 /// rest: a running child is protected, a dead child is terminalized with its
 /// evidence, controller jobs are left to `recover_controller_jobs` for resume,
 /// and a running job with no child identity is left untouched for
@@ -4170,6 +4170,10 @@ fn recover_dead_generations_with(
     reconcile: impl FnOnce(&JobStore, &str) -> Result<crate::api_jobs::DaemonLeaseJobDiagnostics>,
 ) -> Result<crate::api_jobs::DaemonLeaseJobDiagnostics> {
     recover_staged_direct_jobs_after_owner_death(job_store, current_lease_id)?;
+    // A runner exec child that exited while no daemon supervised it left an
+    // exit record that only re-adoption reads. Re-adopt before reconciling, so
+    // the job settles with its real result instead of a dead lease (#18109).
+    runner_exec_job::recover_runner_exec_jobs(job_store);
     let diagnostics = reconcile(job_store, current_lease_id)?;
     if !diagnostics.needs_attestation_job_ids.is_empty() {
         eprintln!(

@@ -1107,6 +1107,22 @@ fn validate_terminal_result(job: &Job, result: &Value, transport: &str) -> Resul
     if !job.status.is_terminal() {
         return Ok(());
     }
+    // A job the daemon settled without a result (for example after a dead
+    // daemon lease) carries its cause on the job, not in the payload (#18109).
+    if result.as_object().is_some_and(|result| result.is_empty()) {
+        if let Some(reason) = job.stale_reason.as_deref() {
+            return Err(Error::validation_invalid_argument(
+                "runner",
+                format!(
+                    "runner job `{}` {} on {transport} without a result: {reason}",
+                    job.id,
+                    job.status.as_str(),
+                ),
+                None,
+                None,
+            ));
+        }
+    }
     serde_json::from_value::<homeboy_core::api_jobs::RemoteRunnerTerminalResult>(result.clone())
         .map_err(|error| {
             Error::validation_invalid_argument(
@@ -1179,6 +1195,12 @@ mod terminal_result_tests {
         assert!(malformed.message.contains("malformed terminal result"));
         assert_ne!(malformed.retryable, Some(true));
         assert!(validate_terminal_result(&job, &json!({"exit_code": 1}), "direct-daemon").is_ok());
+        job.stale_reason = Some("daemon lease owner process was not running".into());
+        let settled = validate_terminal_result(&job, &json!({}), "direct-daemon").unwrap_err();
+        assert!(settled
+            .message
+            .contains("daemon lease owner process was not running"));
+        assert!(!settled.message.contains("malformed"));
         job.status = JobStatus::Queued;
         assert!(validate_terminal_result(&job, &json!({}), "direct-daemon").is_ok());
     }
