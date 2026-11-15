@@ -5,6 +5,7 @@ pub mod baseline;
 pub mod differential;
 pub mod drift;
 pub mod durations;
+pub mod failure_digest;
 pub mod parsing;
 pub mod report;
 pub mod run;

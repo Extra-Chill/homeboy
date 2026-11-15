@@ -1313,6 +1313,9 @@ impl From<AgentTaskGateStatus> for HomeboyGateStatus {
     }
 }
 
+/// One failing test named by a failed deterministic gate.
+pub use homeboy_core::extension::test::failure_digest::TestFailureDigestEntry as AgentTaskGateFailedTest;
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct AgentTaskGateFailureEvidence {
     #[serde(default)]
@@ -1324,6 +1327,10 @@ pub struct AgentTaskGateFailureEvidence {
     pub stdout_tail: String,
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub stderr_tail: String,
+    /// Failing test ids with bounded message/output excerpts, recovered from
+    /// the full captured gate output before tails are cut (#18130).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub failed_tests: Vec<AgentTaskGateFailedTest>,
     pub agent_feedback: String,
     /// Producer-owned structured diagnostics carried in the gate sidecar.
     /// Homeboy treats their locations and suggested actions as opaque data.
@@ -5731,12 +5738,13 @@ fn gate_budget_failure_evidence(
         exit_code,
         stdout_tail: text_tail(stdout, 20),
         stderr_tail: text_tail(stderr, 20),
+        failed_tests: Vec::new(),
         agent_feedback: "The supervisor stopped verification before a candidate verdict. Inspect the gate runtime and its declared time/progress budget, then resume verification. Do not rewrite candidate code based on this supervisor termination.".to_string(),
         diagnostics: Vec::new(),
     })
 }
 
-fn gate_failure_evidence(
+pub(crate) fn gate_failure_evidence(
     command: &str,
     exit_code: i32,
     stdout: &str,
@@ -5745,6 +5753,7 @@ fn gate_failure_evidence(
 ) -> AgentTaskGateFailureEvidence {
     let stdout_tail = text_tail(stdout, 20);
     let stderr_tail = text_tail(stderr, 20);
+    let failed_tests = gate_failed_tests(stdout, stderr);
     let missing_script = npm_run_script(command).filter(|script| {
         stderr.contains(&format!("Missing script: \"{script}\""))
             || stderr.contains(&format!("Missing script: {script}"))
@@ -5835,6 +5844,10 @@ fn gate_failure_evidence(
             ),
             (None, None) if setup_failure =>
                 "Homeboy reported an infrastructure/setup error (exit 2), not a candidate verdict. Inspect the captured failure digest and repair the gate environment before resuming verification. Do not rewrite candidate code based on this failure.".to_string(),
+            (None, None) if !failed_tests.is_empty() => format!(
+                "A deterministic verification gate failed after the candidate patch was applied. Fix the code so `{command}` passes. These tests failed; use their messages and output as the primary failure evidence, then the captured stdout/stderr tails.\n{}",
+                failed_tests_feedback(&failed_tests)
+            ),
             (None, None) => format!(
                 "A deterministic verification gate failed after the candidate patch was applied. Fix the code so `{command}` passes, using the captured stdout/stderr tails as the primary failure evidence."
             ),
@@ -5848,9 +5861,81 @@ fn gate_failure_evidence(
         exit_code,
         stdout_tail,
         stderr_tail,
+        failed_tests,
         agent_feedback,
         diagnostics: Vec::new(),
     }
+}
+
+/// Failing tests named by the full captured gate output, read before the
+/// 20-line tails are cut (#18130). The test command prints a failure digest
+/// to stderr after the run, which survives the byte cap that a huge JSON
+/// result (every executed test id) would otherwise fill; a complete JSON
+/// result that still parses contributes its `failed_test_ids` as a fallback.
+fn gate_failed_tests(stdout: &str, stderr: &str) -> Vec<AgentTaskGateFailedTest> {
+    use homeboy_core::extension::test::failure_digest::{
+        parse_test_failure_digest, TEST_FAILURE_DIGEST_MAX_TESTS,
+    };
+    let digest = parse_test_failure_digest(&format!("{stderr}\n{stdout}"));
+    if !digest.is_empty() {
+        return digest;
+    }
+    let Ok(value) = serde_json::from_str::<serde_json::Value>(stdout.trim()) else {
+        return Vec::new();
+    };
+    let evidence = value
+        .pointer("/data/test_runtime_evidence")
+        .or_else(|| value.get("test_runtime_evidence"));
+    evidence
+        .and_then(|evidence| evidence.get("failed_test_ids"))
+        .and_then(serde_json::Value::as_array)
+        .map(|ids| {
+            ids.iter()
+                .filter_map(serde_json::Value::as_str)
+                .filter(|id| !id.trim().is_empty())
+                .take(TEST_FAILURE_DIGEST_MAX_TESTS)
+                .map(|id| AgentTaskGateFailedTest {
+                    id: id.trim().to_string(),
+                    file: String::new(),
+                    message: String::new(),
+                    output: String::new(),
+                })
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+/// Bounded agent-facing listing of failed tests.
+fn failed_tests_feedback(failed_tests: &[AgentTaskGateFailedTest]) -> String {
+    const MAX_BYTES: usize = 6 * 1024;
+    let mut out = String::new();
+    for test in failed_tests {
+        let mut entry = format!("- `{}`", test.id);
+        if !test.file.is_empty() {
+            entry.push_str(&format!(" ({})", test.file));
+        }
+        if !test.message.is_empty() {
+            entry.push_str(&format!(
+                "\n  message: {}",
+                test.message.replace('\n', "\n  ")
+            ));
+        }
+        if !test.output.is_empty() {
+            entry.push_str(&format!(
+                "\n  output: {}",
+                test.output.replace('\n', "\n  ")
+            ));
+        }
+        if out.len() + entry.len() + 1 > MAX_BYTES {
+            out.push_str("\n- … (more failed tests omitted)");
+            break;
+        }
+        if !out.is_empty() {
+            out.push('\n');
+        }
+        out.push_str(&entry);
+    }
+    out
 }
 
 /// Recognize infrastructure diagnostics conservatively: a plain missing file
@@ -6693,8 +6778,117 @@ mod rustup_location_tests {
     }
 }
 
+/// The captured output of a failed `homeboy review test` over a large suite
+/// (#18130): stdout is the tail-capped (64 KiB) sorted-key JSON result whose
+/// window holds only executed test ids, and stderr carries progress, the
+/// `[test-results]` summary and the failure digest printed after the run.
+#[cfg(test)]
+pub(crate) fn huge_review_test_failure_capture() -> (String, String) {
+    use homeboy_core::extension::test::{failure_digest, TestAnalysisInput, TestFailure};
+    let failing = "homeboy-agents::agent_task_gate::tests::needle_gate_regression";
+    let tests = (0..14_281)
+        .map(|index| {
+            format!("      {{ \"id\": \"homeboy-version::tests::passing_case_{index:05}\" }}")
+        })
+        .collect::<Vec<_>>()
+        .join(",\n");
+    let stdout = format!(
+        "{{\n  \"data\": {{\n    \"test_runtime_evidence\": {{\n      \"failed_test_ids\": [\"{failing}\"],\n      \"status\": \"complete\",\n      \"tests\": [\n{tests}\n      ],\n      \"workspace_fingerprint\": \"abc\"\n    }}\n  }},\n  \"success\": false\n}}\n"
+    );
+    let mut start = stdout.len() - 65_536;
+    while !stdout.is_char_boundary(start) {
+        start += 1;
+    }
+    let stdout = stdout[start..].to_string();
+    assert!(!stdout.contains(failing), "fixture must reproduce the cap");
+    let digest = failure_digest::render_test_failure_digest(&TestAnalysisInput {
+        failures: vec![TestFailure {
+            test_name: failing.to_string(),
+            test_file: "crates/homeboy-agents/src/agent_task_gate.rs".to_string(),
+            error_type: "panic".to_string(),
+            message: "assertion `left == right` failed: needle mismatch\n  left: 1\n right: 2"
+                .to_string(),
+            stdout_excerpt:
+                "thread 'needle' panicked at crates/homeboy-agents/src/agent_task_gate.rs:42:9"
+                    .to_string(),
+            stderr_excerpt: String::new(),
+            source_file: String::new(),
+            source_line: 0,
+        }],
+        total: 14_281,
+        passed: 14_255,
+    });
+    let stderr = format!(
+        "[test] phase=child command=test runner timeout=3600s\n[test-results] Total: 14281, Passed: 14255, Failed: 1, Skipped: 25\n{}\n",
+        digest.join("\n")
+    );
+    (stdout, stderr)
+}
+
 #[cfg(test)]
 mod tests {
+
+    #[test]
+    fn review_test_gate_evidence_names_failing_test_despite_stdout_cap() {
+        let (stdout, stderr) = huge_review_test_failure_capture();
+        let failing = "homeboy-agents::agent_task_gate::tests::needle_gate_regression";
+        let evidence =
+            gate_failure_evidence("homeboy review test homeboy", 100, &stdout, &stderr, None);
+        assert_eq!(
+            evidence.classification,
+            AgentTaskGateFailureClassification::CandidateCode
+        );
+        assert_eq!(
+            evidence.failed_tests.len(),
+            1,
+            "{:?}",
+            evidence.failed_tests
+        );
+        assert_eq!(evidence.failed_tests[0].id, failing);
+        assert!(evidence.failed_tests[0].message.contains("needle mismatch"));
+        assert!(evidence.failed_tests[0]
+            .output
+            .contains("panicked at crates/homeboy-agents/src/agent_task_gate.rs:42:9"));
+        assert!(
+            evidence.agent_feedback.contains(failing),
+            "{}",
+            evidence.agent_feedback
+        );
+        assert!(evidence.agent_feedback.contains("needle mismatch"));
+        assert!(evidence.agent_feedback.len() < 8 * 1024);
+
+        // The persisted gate report carries the structured field, and the
+        // shared excerpt (CLI status/diagnose and the gate-fix prompt) shows it.
+        let report = AgentTaskGateReport::new(
+            "homeboy-review-test",
+            legacy_gate_argv("homeboy review test homeboy"),
+            100,
+            &stdout,
+            &stderr,
+            Some(evidence),
+            AgentTaskGateVisibility::Visible,
+            AgentTaskGateRevealPolicy::FullEvidence,
+            AgentTaskGateEnvironment::default(),
+        );
+        let value = serde_json::to_value(&report).expect("report json");
+        assert_eq!(value["failure_evidence"]["failed_tests"][0]["id"], failing);
+        let excerpt = failure_excerpt::gate_failure_excerpt(&report).expect("excerpt");
+        assert!(excerpt.contains("failed tests (1):"), "{excerpt}");
+        assert!(excerpt.contains(failing), "{excerpt}");
+        assert!(excerpt.contains("needle mismatch"), "{excerpt}");
+    }
+
+    #[test]
+    fn review_test_gate_evidence_falls_back_to_complete_json_failed_ids() {
+        let stdout = r#"{"data":{"test_runtime_evidence":{"failed_test_ids":["a::fails"],"status":"complete","tests":[{"id":"a::fails"},{"id":"a::passes"}]}},"success":false}"#;
+        let evidence = gate_failure_evidence("homeboy review test demo", 1, stdout, "", None);
+        assert_eq!(evidence.failed_tests.len(), 1);
+        assert_eq!(evidence.failed_tests[0].id, "a::fails");
+        assert!(evidence.agent_feedback.contains("`a::fails`"));
+        let plain = gate_failure_evidence("./verify", 1, "boom", "", None);
+        assert!(plain.failed_tests.is_empty());
+        assert!(plain.agent_feedback.contains("stdout/stderr tails"));
+    }
     #[test]
     fn unresolved_component_lint_base_is_unavailable_without_verdict() {
         let workspace = tempfile::tempdir().unwrap();

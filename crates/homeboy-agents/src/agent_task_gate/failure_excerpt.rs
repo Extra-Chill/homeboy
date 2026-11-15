@@ -128,6 +128,19 @@ pub fn gate_failure_excerpt_from_value(gate: &Value) -> Option<String> {
         (None, None) => {}
     }
 
+    let failed_tests = gate
+        .pointer("/failure_evidence/failed_tests")
+        .or_else(|| gate.pointer("/evidence/failure_evidence/failed_tests"))
+        .and_then(Value::as_array)
+        .filter(|tests| !tests.is_empty());
+    if let Some(tests) = failed_tests {
+        lines.push(format!("failed tests ({}):", tests.len()));
+        lines.push(bound_bytes(
+            &failed_tests_excerpt(tests),
+            FAILED_TESTS_MAX_BYTES,
+        ));
+    }
+
     let stdout = str_at(gate, "/stdout")
         .or_else(|| str_at(gate, "/evidence/stdout"))
         .filter(|text| !text.trim().is_empty())
@@ -160,6 +173,26 @@ pub fn gate_failure_excerpt_from_value(gate: &Value) -> Option<String> {
         }
     }
     Some(homeboy_core::redaction::redact_string(&lines.join("\n")))
+}
+
+/// Maximum bytes of the failed-test section of an excerpt (#18130).
+const FAILED_TESTS_MAX_BYTES: usize = 4 * 1024;
+
+/// One block per structured failed test: id, then indented message/output.
+fn failed_tests_excerpt(tests: &[Value]) -> String {
+    let mut out = Vec::new();
+    for test in tests {
+        let Some(id) = str_at(test, "/id").filter(|id| !id.is_empty()) else {
+            continue;
+        };
+        out.push(format!("- {id}"));
+        for key in ["message", "output"] {
+            if let Some(text) = str_at(test, &format!("/{key}")).filter(|text| !text.is_empty()) {
+                out.push(format!("  {key}: {}", text.replace('\n', "\n    ")));
+            }
+        }
+    }
+    out.join("\n")
 }
 
 /// The relevant lines of a failed command's combined stderr/stdout: the lines

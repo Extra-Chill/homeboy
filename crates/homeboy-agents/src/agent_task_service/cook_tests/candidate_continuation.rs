@@ -846,6 +846,7 @@ fn applied_candidate_gate_verdicts_select_a_completing_recovery_step() {
                     exit_code: 1,
                     stdout_tail: String::new(),
                     stderr_tail: String::new(),
+                    failed_tests: Vec::new(),
                     agent_feedback: String::new(),
                     diagnostics: Vec::new(),
                 });
@@ -1087,6 +1088,7 @@ fn push_added_gate(
         exit_code: 1,
         stdout_tail: String::new(),
         stderr_tail: String::new(),
+        failed_tests: Vec::new(),
         agent_feedback: String::new(),
         diagnostics: Vec::new(),
     });

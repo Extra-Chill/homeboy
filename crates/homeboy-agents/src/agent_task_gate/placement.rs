@@ -875,6 +875,7 @@ fn fail_for_workspace_mutation(
                 exit_code: report.exit_code,
                 stdout_tail: text_tail(&report.stdout, 20),
                 stderr_tail: text_tail(&report.stderr, 20),
+                failed_tests: Vec::new(),
                 agent_feedback: feedback,
                 diagnostics: Vec::new(),
             });
