@@ -8136,73 +8136,74 @@ mod require_model_override_acknowledgement_for_cook_tests {
     }
 }
 
-/// Wall-clock ceiling on how long a queued local Cook dispatch waits for
-/// capacity before giving up with an actionable error, rather than queueing
-/// silently forever (#14732).
-const LOCAL_DISPATCH_QUEUE_MAX_WAIT: Duration = Duration::from_secs(30 * 60);
 /// How often a queued local Cook dispatch re-checks capacity.
 const LOCAL_DISPATCH_QUEUE_POLL_INTERVAL: Duration = Duration::from_secs(15);
 
-/// Admit, queue, or refuse a local Cook provider dispatch against the
+/// Admit or queue a local Cook provider dispatch against the
 /// resource-policy snapshot the controller already captured at preflight
 /// (`captured_pressure_severity` in `homeboy-core::lab_routing`, consulted
 /// today for pressure-driven Lab promotion but never for local dispatch).
 ///
 /// Returns `Ok(None)` when preflight captured no snapshot at all — a command
-/// resource policy never evaluated for this invocation — so the ceiling fails
+/// resource policy never evaluated for this invocation — so admission fails
 /// open rather than guessing at evidence it does not have.
 fn admit_local_cook_dispatch(
     run_id: &str,
 ) -> homeboy::core::Result<Option<homeboy::core::local_dispatch_admission::ActiveLocalDispatchLease>>
 {
-    let Some(context) = homeboy::core::resource_policy_context::captured_context() else {
+    if homeboy::core::resource_policy_context::captured_context().is_none() {
         return Ok(None);
-    };
+    }
     let data_root = homeboy::core::paths::homeboy_data()?;
     let run_id_for_notice = run_id.to_string();
     admit_local_cook_dispatch_with_clock(
         run_id,
         &data_root,
-        &context,
-        LOCAL_DISPATCH_QUEUE_MAX_WAIT,
+        || {
+            use crate::commands::resources::ResourceRecommendation;
+            // Refresh on every poll: a captured hot snapshot never cools on
+            // its own. Use the same lightweight pressure probe as preflight.
+            let (resources, _) = crate::commands::resources::run_preflight()?;
+            let severity = match resources.recommendation {
+                ResourceRecommendation::Ok => "ok",
+                ResourceRecommendation::Warm => "warm",
+                ResourceRecommendation::Hot => "hot",
+            };
+            Ok((
+                severity.to_string(),
+                resources.load.one,
+                resources.load.cpu_count,
+            ))
+        },
         LOCAL_DISPATCH_QUEUE_POLL_INTERVAL,
         std::thread::sleep,
-        move |active, ceiling| {
-            eprintln!(
-                "Local dispatch queued: {active} of {ceiling} local Cook provider slot(s) already in use on this machine; waiting for capacity before dispatching {run_id_for_notice}."
-            );
+        move |reason| {
+            eprintln!("Local dispatch queued for {run_id_for_notice}: {reason}.");
         },
     )
     .map(Some)
 }
 
 /// The testable core of [`admit_local_cook_dispatch`]: the clock and the queue
-/// notice are injected so the queue path — dispatch beyond the ceiling waits
-/// instead of running — is exercised deterministically, without a real wait.
+/// notice and pressure probe are injected for deterministic queue tests.
+/// There is no admission timeout: the enclosing workflow owns its deadline.
 fn admit_local_cook_dispatch_with_clock(
     run_id: &str,
     data_root: &Path,
-    context: &homeboy::core::resource_policy_context::ResourcePolicyContext,
-    max_wait: Duration,
+    mut pressure: impl FnMut() -> homeboy::core::Result<(String, Option<f64>, usize)>,
     poll_interval: Duration,
     mut sleep: impl FnMut(Duration),
-    mut on_queue: impl FnMut(usize, usize),
+    mut on_queue: impl FnMut(&str),
 ) -> homeboy::core::Result<homeboy::core::local_dispatch_admission::ActiveLocalDispatchLease> {
     use homeboy::core::local_dispatch_admission::{
         evaluate_local_dispatch_admission, try_admit_local_dispatch, LocalDispatchAdmission,
         LocalDispatchAttempt,
     };
 
-    let mut waited = Duration::ZERO;
     loop {
+        let (severity, load_one, cpu_count) = pressure()?;
         let attempt = try_admit_local_dispatch(data_root, run_id, |active| {
-            evaluate_local_dispatch_admission(
-                active,
-                &context.severity,
-                context.host.load_one,
-                context.host.cpu_count,
-                context.local_override,
-            )
+            evaluate_local_dispatch_admission(active, &severity, load_one, cpu_count, false)
         })?;
         let decision = match attempt {
             LocalDispatchAttempt::Admitted(lease) => return Ok(lease),
@@ -8212,31 +8213,9 @@ fn admit_local_cook_dispatch_with_clock(
             // An admitting decision always takes the slot in the same
             // transaction; re-run admission rather than trust a stale one.
             LocalDispatchAdmission::Admit => continue,
-            LocalDispatchAdmission::Refuse { reason } => {
-                return Err(homeboy::core::Error::validation_invalid_argument(
-                    "resource-policy",
-                    format!("Refusing local Cook dispatch: {reason}."),
-                    None,
-                    Some(vec![
-                        "Wait for pressure to fall (`homeboy self doctor`), route this cook through Lab, or pass --placement local only once you have independently confirmed the machine can take the load.".to_string(),
-                    ]),
-                ));
-            }
-            LocalDispatchAdmission::Queue { active, ceiling } => {
-                if waited >= max_wait {
-                    return Err(homeboy::core::Error::validation_invalid_argument(
-                        "resource-policy",
-                        format!(
-                            "Timed out after {}s waiting for local Cook dispatch capacity ({active} of {ceiling} slot(s) in use).",
-                            max_wait.as_secs()
-                        ),
-                        None,
-                        None,
-                    ));
-                }
-                on_queue(active, ceiling);
+            LocalDispatchAdmission::Queue { reason } => {
+                on_queue(&reason);
                 sleep(poll_interval);
-                waited += poll_interval;
             }
         }
     }
@@ -12998,14 +12977,9 @@ mod tests {
             }
         }
 
-        /// The user-facing behavior #14732 exists to fix: dispatching beyond
-        /// the concurrency ceiling queues instead of running immediately. Here
-        /// the ceiling (18 CPUs / 4 = 4) is already fully held by four other
-        /// leases; admission must queue rather than dispatch, and once a slot
-        /// frees — simulated deterministically inside the injected `sleep`,
-        /// never a real wait — it admits.
+        /// Warm pressure admits even beyond the old CPU/4 ceiling.
         #[test]
-        fn dispatch_beyond_the_ceiling_queues_then_admits_once_a_slot_frees() {
+        fn dispatch_beyond_the_old_ceiling_admits_without_waiting() {
             let temp = tempfile::tempdir().expect("temp dir");
             let data_root = temp.path();
             let holders: Vec<_> = (0..4)
@@ -13016,100 +12990,94 @@ mod tests {
                 .collect();
             assert_eq!(active_local_dispatch_count(data_root).unwrap(), 4);
 
-            let mut holders = Some(holders);
-            let mut queue_calls = Vec::new();
+            let _holders = holders;
             let result = admit_local_cook_dispatch_with_clock(
                 "queued-run",
                 data_root,
-                &context("warm", Some(10.0), 18),
-                Duration::from_secs(60),
+                || Ok(("warm".to_string(), Some(10.0), 18)),
                 Duration::from_secs(1),
-                |_interval| {
-                    // Deterministic stand-in for "time passes and capacity
-                    // frees up": release every held slot on the first queued
-                    // wait instead of actually sleeping.
-                    holders.take();
-                },
-                |active, ceiling| queue_calls.push((active, ceiling)),
+                |_| panic!("warm pressure must not wait"),
+                |_| panic!("warm pressure must not queue"),
             );
 
             assert!(result.is_ok(), "{:?}", result.err());
-            assert_eq!(
-                queue_calls,
-                vec![(4, 4)],
-                "must report the exact active/ceiling pair it queued behind"
+            assert_eq!(active_local_dispatch_count(data_root).unwrap(), 5);
+        }
+
+        /// Hot pressure queues without taking a lease, then admits when cool.
+        #[test]
+        fn hot_pressure_queues_then_admits_when_pressure_drops() {
+            let temp = tempfile::tempdir().expect("temp dir");
+            let data_root = temp.path();
+            let slept = std::cell::Cell::new(false);
+
+            let result = admit_local_cook_dispatch_with_clock(
+                "queued-run",
+                data_root,
+                || {
+                    Ok((
+                        if slept.get() { "ok" } else { "hot" }.to_string(),
+                        Some(30.4),
+                        18,
+                    ))
+                },
+                Duration::from_secs(1),
+                |_| {
+                    assert_eq!(active_local_dispatch_count(data_root).unwrap(), 0);
+                    slept.set(true);
+                },
+                |reason| {
+                    assert!(reason.contains("hot"));
+                    assert!(reason.contains("30.4"));
+                    assert!(reason.contains("18 CPU"));
+                },
             );
-            // The newly admitted dispatch now holds the one and only freed slot.
+
+            assert!(result.is_ok(), "{result:?}");
+            assert!(slept.get());
             assert_eq!(active_local_dispatch_count(data_root).unwrap(), 1);
         }
 
-        /// The other user-facing behavior #14732 exists to fix: once pressure
-        /// severity is already hot, Homeboy refuses admission — naming the
-        /// observed load — instead of warning and dispatching into it anyway.
-        /// A refusal is immediate: it never queues or sleeps first.
+        /// Regression: waiting past 1800s must not fail or take a lease.
         #[test]
-        fn admission_is_refused_when_pressure_is_hot_and_names_the_load() {
+        fn hot_queue_past_old_timeout_keeps_waiting_until_pressure_drops() {
             let temp = tempfile::tempdir().expect("temp dir");
             let data_root = temp.path();
-            let mut slept = false;
-
-            let result = admit_local_cook_dispatch_with_clock(
-                "refused-run",
-                data_root,
-                &context("hot", Some(30.4), 18),
-                Duration::from_secs(60),
-                Duration::from_secs(1),
-                |_interval| slept = true,
-                |_active, _ceiling| panic!("a hot refusal must not queue"),
-            );
-
-            let error = result.expect_err("hot pressure must refuse admission");
-            assert!(error.message.contains("hot"), "{}", error.message);
-            assert!(error.message.contains("30.4"), "{}", error.message);
-            assert!(error.message.contains("18 CPU"), "{}", error.message);
-            assert!(!slept, "a refusal must not wait first");
-            assert_eq!(
-                active_local_dispatch_count(data_root).unwrap(),
-                0,
-                "a refused dispatch must not acquire a lease"
-            );
-        }
-
-        /// A queue that never clears gives up with an actionable timeout
-        /// instead of hanging the operator's terminal forever.
-        #[test]
-        fn queue_that_never_clears_times_out_instead_of_hanging_forever() {
-            let temp = tempfile::tempdir().expect("temp dir");
-            let data_root = temp.path();
-            let _holder = acquire_local_dispatch_lease(data_root, "permanent-holder")
-                .expect("acquire holder lease");
-            let mut sleeps = 0;
+            let elapsed = std::cell::Cell::new(Duration::ZERO);
+            let mut queue_calls = 0;
 
             let result = admit_local_cook_dispatch_with_clock(
                 "never-admitted-run",
                 data_root,
-                &context("ok", Some(1.0), 4),
-                Duration::from_secs(3),
-                Duration::from_secs(1),
-                |_interval| sleeps += 1,
-                |_active, _ceiling| {},
+                || {
+                    Ok((
+                        if elapsed.get().as_secs() > 1830 {
+                            "warm"
+                        } else {
+                            "hot"
+                        }
+                        .to_string(),
+                        Some(30.4),
+                        32,
+                    ))
+                },
+                Duration::from_secs(15),
+                |interval| {
+                    assert_eq!(active_local_dispatch_count(data_root).unwrap(), 0);
+                    elapsed.set(elapsed.get() + interval);
+                },
+                |_| queue_calls += 1,
             );
 
-            let error = result.expect_err("a queue that never clears must time out");
-            assert!(error.message.contains("Timed out"), "{}", error.message);
-            assert!(sleeps > 0, "must have waited before timing out");
+            assert!(result.is_ok(), "{result:?}");
+            assert!(elapsed.get().as_secs() > 1800);
+            assert!(queue_calls > 120, "must still queue past the old timeout");
+            assert_eq!(active_local_dispatch_count(data_root).unwrap(), 1);
         }
 
-        /// `--placement local` is the one documented, operator-authorized
-        /// escape hatch from a hot-machine refusal elsewhere in resource
-        /// policy ("Local execution requires an explicit, authorized
-        /// `--placement local` override"). This admission gate honors that
-        /// same override instead of adding a second, stricter refusal the
-        /// documented override cannot get past. It still queues behind the
-        /// concurrency ceiling: an override authorizes running locally, not
-        /// skipping every other concurrent local dispatch.
+        /// A refreshed measurement, not the stale preflight snapshot, governs admission.
         #[test]
-        fn explicit_local_override_bypasses_the_hot_refusal_but_still_queues() {
+        fn refreshed_pressure_admits_after_hot_preflight() {
             let temp = tempfile::tempdir().expect("temp dir");
             let data_root = temp.path();
             let mut hot_context = context("hot", Some(30.4), 18);
@@ -13118,11 +13086,13 @@ mod tests {
             let result = admit_local_cook_dispatch_with_clock(
                 "override-run",
                 data_root,
-                &hot_context,
-                Duration::from_secs(60),
+                || {
+                    assert_eq!(hot_context.severity, "hot");
+                    Ok(("ok".to_string(), Some(1.0), 18))
+                },
                 Duration::from_secs(1),
                 |_interval| panic!("capacity is free; must not queue"),
-                |_active, _ceiling| panic!("capacity is free; must not queue"),
+                |_| panic!("capacity is free; must not queue"),
             );
             assert!(result.is_ok(), "{:?}", result.err());
             assert_eq!(active_local_dispatch_count(data_root).unwrap(), 1);
