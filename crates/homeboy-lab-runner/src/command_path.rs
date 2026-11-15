@@ -49,26 +49,24 @@ pub(crate) fn set_homeboy_command_selection(
         .or_insert_with(|| homeboy_path.display().to_string());
 }
 
-/// Default a direct daemon child's Homeboy to the daemon's own binary.
+/// Select the daemon's own binary as a direct daemon child's Homeboy.
 ///
-/// The child authenticates against the daemon's durable job store, and that
-/// store's format is build-specific (its schema is versioned per release). The
-/// configured `homeboy_path` can name another build after a refresh or
-/// upgrade, and a child launched from it cannot find the job that launched it.
-/// The daemon is the one build guaranteed to match, so it takes the place of
-/// configuration as the default. A job that selected its own binary keeps it:
-/// it runs before preparation and uses the same job-wins precedence as
-/// [`set_homeboy_command_selection`], so a bare `homeboy` argv resolves to the
-/// daemon and an explicit absolute path is left alone.
-pub(crate) fn default_daemon_child_homeboy(
+/// Every nested Homeboy the child launches authenticates against the daemon's
+/// build-specific job store and refuses any other build ("daemon child build
+/// skew"). A binary named by the job or by configuration is the controller's
+/// view of the runner at dispatch time; a refresh between dispatch and launch
+/// makes it another build. The daemon is the one build guaranteed to match.
+pub(crate) fn select_daemon_child_homeboy(
     env: &mut HashMap<String, String>,
     daemon_executable: &Path,
 ) {
     if !daemon_executable.is_absolute() {
         return;
     }
-    env.entry("HOMEBOY_COMMAND".to_string())
-        .or_insert_with(|| daemon_executable.display().to_string());
+    env.insert(
+        "HOMEBOY_COMMAND".to_string(),
+        daemon_executable.display().to_string(),
+    );
 }
 
 /// Put the selected Homeboy binary's directory first on `PATH`, so a nested
@@ -617,44 +615,32 @@ mod tests {
     }
 
     #[test]
-    fn daemon_binary_displaces_configured_binary_as_child_default() {
+    fn daemon_build_displaces_any_other_child_homeboy() {
+        // A job dispatched before a refresh still names the old slot; its
+        // nested Homeboy must run the daemon's build or fail the skew check.
+        for selected in [None, Some("/slots/old/homeboy")] {
+            let mut env = HashMap::new();
+            if let Some(selected) = selected {
+                env.insert("HOMEBOY_COMMAND".to_string(), selected.to_string());
+            }
+
+            select_daemon_child_homeboy(&mut env, Path::new("/slots/new/homeboy"));
+            normalize_runner_command_env_for_homeboy_path(&mut env, Some("/slots/old/homeboy"));
+            front_selected_homeboy_on_path(&mut env);
+
+            assert_eq!(env["HOMEBOY_COMMAND"], "/slots/new/homeboy");
+            assert_eq!(env["PATH"].split(':').next(), Some("/slots/new"));
+            assert_eq!(
+                env["PATH"]
+                    .split(':')
+                    .filter(|entry| *entry == "/slots/new")
+                    .count(),
+                1
+            );
+        }
+
         let mut env = HashMap::new();
-
-        default_daemon_child_homeboy(&mut env, Path::new("/slots/new/homeboy"));
-        normalize_runner_command_env_for_homeboy_path(&mut env, Some("/slots/old/homeboy"));
-        front_selected_homeboy_on_path(&mut env);
-
-        assert_eq!(env["HOMEBOY_COMMAND"], "/slots/new/homeboy");
-        assert_eq!(env["PATH"].split(':').next(), Some("/slots/new"));
-        assert_eq!(
-            env["PATH"]
-                .split(':')
-                .filter(|entry| *entry == "/slots/new")
-                .count(),
-            1
-        );
-    }
-
-    #[test]
-    fn job_selected_binary_survives_daemon_default() {
-        let mut env = HashMap::from([(
-            "HOMEBOY_COMMAND".to_string(),
-            "/build-b/homeboy".to_string(),
-        )]);
-
-        default_daemon_child_homeboy(&mut env, Path::new("/slots/new/homeboy"));
-        front_selected_homeboy_on_path(&mut env);
-
-        assert_eq!(env["HOMEBOY_COMMAND"], "/build-b/homeboy");
-        assert_eq!(env["PATH"].split(':').next(), Some("/build-b"));
-    }
-
-    #[test]
-    fn relative_daemon_executable_is_not_a_selection() {
-        let mut env = HashMap::new();
-
-        default_daemon_child_homeboy(&mut env, Path::new("homeboy"));
-
+        select_daemon_child_homeboy(&mut env, Path::new("homeboy"));
         assert!(!env.contains_key("HOMEBOY_COMMAND"));
     }
 
