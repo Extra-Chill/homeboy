@@ -4,6 +4,13 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.465.12] - 2026-11-15
+
+### Fixed
+- queue pinned runners under Lab capacity pressure
+- refetch a blob that went bad between plan and commit
+- select among equally ready Lab runners instead of refusing
+
 ## [0.465.11] - 2026-11-15
 
 ### Fixed
