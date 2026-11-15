@@ -331,3 +331,58 @@ fn a_blob_corrupted_between_plan_and_commit_is_refetched() {
         assert!(blobs::valid(&blob, &digest, &WorkspaceControl::default()).unwrap());
     });
 }
+
+#[test]
+fn a_received_blob_of_an_old_source_file_survives_a_concurrent_prune() {
+    crate::test_support::with_isolated_home(|_| {
+        let source = tempfile::tempdir().unwrap();
+        let runner_root = tempfile::tempdir().unwrap();
+        assert!(std::process::Command::new("git")
+            .args(["init", "-q"])
+            .current_dir(source.path())
+            .status()
+            .unwrap()
+            .success());
+        let file = source.path().join("file");
+        fs::write(&file, b"content\n").unwrap();
+        // An unchanged checkout file is routinely older than the store's age limit.
+        fs::File::options()
+            .write(true)
+            .open(&file)
+            .unwrap()
+            .set_modified(std::time::SystemTime::now() - std::time::Duration::from_secs(30 * 86400))
+            .unwrap();
+        crate::create(
+            &serde_json::json!({"id":"blobs", "kind":"local", "workspace_root":runner_root.path()})
+                .to_string(),
+            false,
+        )
+        .unwrap();
+        let staged = sync_workspace_batch_controlled(
+            "blobs",
+            vec![(options(source.path()), vec![])],
+            &WorkspaceControl::default(),
+        )
+        .unwrap();
+        let digest = staged[0]
+            .content
+            .as_ref()
+            .unwrap()
+            .0
+            .entries
+            .iter()
+            .filter_map(|e| e.sha256.clone())
+            .next()
+            .unwrap();
+        let store = blobs::store(&staged[0].remote_path);
+        let blob = store.join(blobs::key(&digest).unwrap());
+
+        // Another Cook's plan prunes the shared store before this one assembles.
+        blobs::prune(&store).unwrap();
+
+        assert!(
+            blobs::valid(&blob, &digest, &WorkspaceControl::default()).unwrap(),
+            "a just-received blob must not look expired to a concurrent prune"
+        );
+    });
+}

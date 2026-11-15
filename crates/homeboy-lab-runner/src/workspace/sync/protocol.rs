@@ -246,6 +246,12 @@ pub(super) fn materialization_commit_controlled(
                     super::blobs::REFETCH
                 )));
             }
+            // The transfer carries the source file's mtime; a blob enters the
+            // store as just used, or a concurrent age prune evicts it before
+            // assembly.
+            fs::File::open(blob.path())
+                .and_then(|file| file.set_modified(std::time::SystemTime::now()))
+                .materialization("set_modified", &blob.path(), "runner")?;
             fs::rename(blob.path(), store.join(key)).materialization(
                 "rename",
                 &blob.path(),
