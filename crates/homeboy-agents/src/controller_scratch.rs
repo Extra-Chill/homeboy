@@ -798,10 +798,26 @@ fn recovery_inventory(
     observation: &ObservationStore,
     now: std::time::SystemTime,
 ) -> Result<Vec<ControllerScratchRecovery>> {
+    Ok(recovery_inventory_page(retention, index, observation, now, None, usize::MAX, None)?.0)
+}
+
+/// Walk recovery evidence only as far as this page can report. Recursive sizing
+/// belongs inside this walk, never in an eager whole-store inventory.
+fn recovery_inventory_page(
+    retention: &RecoveryRetention,
+    index: &ControllerScratchIndex,
+    observation: &ObservationStore,
+    now: std::time::SystemTime,
+    cursor: Option<&str>,
+    limit: usize,
+    deadline: Option<Instant>,
+) -> Result<(Vec<ControllerScratchRecovery>, Option<String>)> {
     let root = retention.artifact_root.join(RECOVERY_DIR);
     let entries = match fs::read_dir(&root) {
         Ok(entries) => entries,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            return Ok((Vec::new(), None))
+        }
         Err(error) => {
             return Err(Error::internal_io(
                 error.to_string(),
@@ -809,11 +825,37 @@ fn recovery_inventory(
             ))
         }
     };
-    let mut recoveries = Vec::new();
-    for entry in entries {
-        let entry = entry.map_err(|error| {
+    let mut entries = entries
+        .collect::<std::io::Result<Vec<_>>>()
+        .map_err(|error| {
             Error::internal_io(error.to_string(), Some(format!("read {}", root.display())))
         })?;
+    entries.sort_by_key(|entry| entry.file_name());
+    // Sanitizing every lease id for every recovery made evidence collection
+    // quadratic in the store size. Build the ownership lookup once per page.
+    let mut leases_by_directory: BTreeMap<String, Vec<&ControllerScratchResource>> =
+        BTreeMap::new();
+    for resource in &index.resources {
+        leases_by_directory
+            .entry(paths::sanitize_path_segment(&resource.run_id))
+            .or_default()
+            .push(resource);
+    }
+    let mut recoveries = Vec::new();
+    let mut last = cursor.unwrap_or("").to_string();
+    let mut inspected = 0;
+    for entry in entries {
+        let name = entry.file_name().to_string_lossy().into_owned();
+        if cursor.is_some_and(|cursor| name.as_str() <= cursor) {
+            continue;
+        }
+        if recoveries.len() >= limit
+            || (inspected > 0 && deadline.is_some_and(|end| Instant::now() >= end))
+        {
+            return Ok((recoveries, Some(last)));
+        }
+        inspected += 1;
+        last = name;
         let path = entry.path();
         let metadata = fs::symlink_metadata(&path).map_err(|error| {
             Error::internal_io(error.to_string(), Some(format!("stat {}", path.display())))
@@ -827,11 +869,10 @@ fn recovery_inventory(
         // Directories are named by the sanitized run id; the index holds the
         // exact run ids that map to each one.
         let directory = entry.file_name().to_string_lossy().into_owned();
-        let leases: Vec<&ControllerScratchResource> = index
-            .resources
-            .iter()
-            .filter(|resource| paths::sanitize_path_segment(&resource.run_id) == directory)
-            .collect();
+        let leases = leases_by_directory
+            .get(&directory)
+            .map(Vec::as_slice)
+            .unwrap_or_default();
         let mut run_ids: Vec<&str> = leases
             .iter()
             .map(|resource| resource.run_id.as_str())
@@ -869,7 +910,7 @@ fn recovery_inventory(
         });
     }
     recoveries.sort_by(|left, right| left.path.cmp(&right.path));
-    Ok(recoveries)
+    Ok((recoveries, None))
 }
 
 pub(crate) fn register_outcome_resources_at(
@@ -1131,7 +1172,10 @@ fn cleanup_unlocked(
             None,
         ));
     }
+    let recovery_cursor =
+        cursor.and_then(|value| value.strip_prefix("controller-scratch-recovery:"));
     let cursor_key = cursor
+        .filter(|_| recovery_cursor.is_none())
         .map(|cursor| {
             cursor
                 .strip_prefix("controller-scratch:")
@@ -1153,16 +1197,32 @@ fn cleanup_unlocked(
         .transpose()?;
     let mut index = read_index_at_unlocked(index_path)?;
     // Enumerate identity only before walking. Filesystem walks, Git probes and
-    // lifecycle lookups happen only for resources the walk reaches. A stable
-    // path digest survives removal of earlier rows and avoids offset starvation.
+    // lifecycle lookups happen only for resources the walk reaches. Oldest
+    // creation time wins, with path as a deterministic tie-breaker. The cursor
+    // identifies a durable row (removal retains it), not a mutable offset.
     let mut ordered: Vec<_> = index
         .resources
         .iter()
         .enumerate()
         .map(|(position, resource)| (sha256(resource.path.as_bytes()), position))
-        .filter(|(key, _)| cursor_key.is_none_or(|cursor| key.as_str() > cursor))
         .collect();
-    ordered.sort_unstable();
+    ordered.sort_by(|(_, left), (_, right)| {
+        index.resources[*left]
+            .created_at
+            .cmp(&index.resources[*right].created_at)
+            .then_with(|| {
+                index.resources[*left]
+                    .path
+                    .cmp(&index.resources[*right].path)
+            })
+    });
+    if recovery_cursor.is_some() {
+        ordered.clear();
+    } else if let Some(key) = cursor_key {
+        if let Some(position) = ordered.iter().position(|(digest, _)| digest == key) {
+            ordered.drain(..=position);
+        }
+    }
     // Only durably registered resources are cleanup candidates. In particular,
     // do not infer ownership by scanning a shared system temporary directory.
     let mut skipped = Vec::new();
@@ -1319,7 +1379,7 @@ fn cleanup_unlocked(
         });
     }
     let uninspected_resource_count = ordered.len().saturating_sub(inspected_count);
-    let next_cursor = (uninspected_resource_count > 0)
+    let mut next_cursor = (uninspected_resource_count > 0)
         .then(|| format!("controller-scratch:{}", ordered[inspected_count - 1].0));
     let stale_registration_count = stranded.len();
     let mut stale_registrations_pruned = 0;
@@ -1340,7 +1400,7 @@ fn cleanup_unlocked(
     }
     let candidate_count = eligible.len();
     let estimated_bytes: u64 = eligible.iter().map(|candidate| candidate.size_bytes).sum();
-    let has_more = uninspected_resource_count > 0;
+    let mut has_more = uninspected_resource_count > 0;
     let mutation_candidate_count = candidate_count;
     let mutation_candidates = eligible;
     for candidate in &mutation_candidates {
@@ -1387,12 +1447,29 @@ fn cleanup_unlocked(
     if reconciled {
         write_index_at_unlocked(index_path, &index)?;
     }
-    // Recoveries are not rows of the paged index, so the first page owns them.
-    // Inspected after lease removal, so a lease reclaimed above no longer pins
-    // its run's recovery.
-    let recoveries = match cursor {
-        None => recovery_inventory(recovery, &index, observation, std::time::SystemTime::now())?,
-        Some(_) => Vec::new(),
+    // Recovery evidence is a second resumable phase, inspected after lease
+    // removal so a reclaimed lease no longer pins its run's recovery.
+    let recoveries = if has_more {
+        Vec::new()
+    } else if inspected_count > 0 && deadline.is_some_and(|end| Instant::now() >= end) {
+        next_cursor = Some("controller-scratch-recovery:".to_string());
+        has_more = true;
+        Vec::new()
+    } else {
+        let (rows, continuation) = recovery_inventory_page(
+            recovery,
+            &index,
+            observation,
+            std::time::SystemTime::now(),
+            recovery_cursor,
+            options.limit.saturating_sub(candidate_count),
+            deadline,
+        )?;
+        if let Some(continuation) = continuation {
+            next_cursor = Some(format!("controller-scratch-recovery:{continuation}"));
+            has_more = true;
+        }
+        rows
     };
     let recovery_retained_count = recoveries
         .iter()
@@ -5201,7 +5278,7 @@ mod tests {
             })
             .collect();
         // Index order is the sweep order; the first `limit` are retained.
-        paths.sort_by_key(|path| sha256(path.display().to_string().as_bytes()));
+        paths.sort();
         let (retained, reclaimable) = paths.split_at(2);
         let resources = paths
             .iter()
@@ -5247,6 +5324,92 @@ mod tests {
         assert_eq!(applied.applied_count, 2);
         assert!(reclaimable.iter().all(|path| !path.exists()));
         assert!(retained.iter().all(|path| path.join("evidence").is_file()));
+    }
+
+    /// Public cleanup must publish a partial page rather than eagerly sizing
+    /// all recovery evidence before returning. Resumption includes both phases.
+    #[test]
+    fn public_cleanup_drains_large_store_with_bounded_evidence() {
+        let context = homeboy_core::test_support::HermeticTestContext::new();
+        let _home = homeboy_core::test_support::HomeGuard::new();
+        let roots = context.path_roots();
+        let index_path = index_path().expect("index path");
+        let root = roots.data().join("controller-scratch/attempts");
+        let recovery = RecoveryRetention::configured().expect("recovery policy");
+        let recovery_root = recovery.artifact_root.join(RECOVERY_DIR);
+        fs::create_dir_all(&root).unwrap();
+        fs::create_dir_all(&recovery_root).unwrap();
+        let mut resources = Vec::new();
+        for number in 0..2048 {
+            let path = root.join(format!("attempt-{number:04}"));
+            fs::create_dir(&path).unwrap();
+            let mut row = resource(&path, &root);
+            row.run_id = format!("terminal-{number:04}");
+            row.lifecycle_state = "released".to_string();
+            row.ephemeral = true;
+            row.created_at = format!("2020-01-01T00:{:02}:{:02}Z", number / 60, number % 60);
+            let evidence = recovery_root.join(&row.run_id);
+            fs::create_dir(&evidence).unwrap();
+            fs::write(evidence.join("patch"), "retained patch").unwrap();
+            resources.push(row);
+        }
+        let index = ControllerScratchIndex {
+            schema: schema(),
+            resources,
+        };
+        write_index_at_unlocked(&index_path, &index).unwrap();
+        let observation = ObservationStore::open_initialized().unwrap();
+        let start = Instant::now();
+        assert_eq!(
+            recovery_inventory(
+                &recovery,
+                &index,
+                &observation,
+                std::time::SystemTime::now()
+            )
+            .unwrap()
+            .len(),
+            2048
+        );
+        let budget = start.elapsed() / 8;
+        let options = ControllerScratchCleanupOptions {
+            apply: true,
+            limit: 128,
+            full: false,
+            retention_override_seconds: Some(0),
+        };
+        let first = cleanup(options, None, Some(Instant::now() + budget)).unwrap();
+        assert!(first.candidate_count > 0);
+        assert!(first.applied_count > 0);
+        assert!(first.has_more);
+        assert!(first.inspected_count < 2048);
+        assert!(first.candidates[0].path.ends_with("attempt-0000"));
+        let mut removed = first.applied_count;
+        let mut cursor = first.next_cursor;
+        for _ in 0..64 {
+            let Some(current) = cursor.as_deref() else {
+                break;
+            };
+            let page = cleanup(options, Some(current), None).unwrap();
+            assert!(page.candidate_count <= options.limit);
+            removed += page.applied_count;
+            cursor = page.next_cursor;
+        }
+        assert!(cursor.is_none(), "both evidence phases must converge");
+        assert_eq!(removed, 2048);
+        assert_eq!(fs::read_dir(root).unwrap().count(), 0);
+        let evidence_page = cleanup(
+            options,
+            Some("controller-scratch-recovery:"),
+            Some(Instant::now() + budget),
+        )
+        .unwrap();
+        assert!(
+            evidence_page.has_more,
+            "recovery evidence must also be paged"
+        );
+        assert!(evidence_page.recovery_retained_count > 0);
+        assert!(evidence_page.recovery_retained_count <= options.limit);
     }
 
     #[test]

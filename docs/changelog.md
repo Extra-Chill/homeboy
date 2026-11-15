@@ -4,6 +4,18 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.465.17] - 2026-11-15
+
+### Fixed
+- bound recovery evidence collection and resume cleanup
+- continue workspace prune after completed authority releases
+
+## [0.465.16] - 2026-11-15
+
+### Fixed
+- fail steps with unknown child exit status
+- reserve CPU capacity for direct gate jobs
+
 ## [0.465.15] - 2026-11-15
 
 ### Fixed
