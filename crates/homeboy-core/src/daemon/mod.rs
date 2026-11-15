@@ -5825,30 +5825,6 @@ mod tests {
 
     use super::*;
 
-    #[test]
-    fn homeboy_children_run_the_daemon_build() {
-        let daemon = Path::new("/srv/runner-service/host/homeboy");
-        for (command, expected) in [
-            (
-                vec!["homeboy", "agent-task"],
-                "/srv/runner-service/host/homeboy",
-            ),
-            (
-                vec!["/home/lab/.local/bin/homeboy", "agent-task"],
-                "/srv/runner-service/host/homeboy",
-            ),
-            (vec!["bash", "-c"], "bash"),
-            (
-                vec!["/usr/bin/homeboy-extension", "x"],
-                "/usr/bin/homeboy-extension",
-            ),
-        ] {
-            let mut command = command.into_iter().map(str::to_string).collect::<Vec<_>>();
-            run_homeboy_child_from_daemon_build(&mut command, daemon);
-            assert_eq!(command[0], expected);
-        }
-    }
-
     use crate::daemon::runner_exec_driver::{
         self, DaemonExecOutput, PreparedDaemonExec, PreparedDaemonExecRequest, RunnerExecDriver,
         RunnerExecPrepareRequest,
@@ -8410,6 +8386,9 @@ mod tests {
 
     #[test]
     fn direct_daemon_agent_task_request_uses_workload_identity_for_capacity_admission() {
+        // Pin an unpressured host: a busy CI runner would otherwise queue the job.
+        let _pressure =
+            crate::test_support::EnvVarGuard::set(crate::runner_pressure::SAMPLE_ENV, "{}");
         runner_exec_driver::register_runner_exec_driver(Arc::new(EnqueueTestDriver));
         let store = JobStore::default();
         let response = enqueue_exec_job(

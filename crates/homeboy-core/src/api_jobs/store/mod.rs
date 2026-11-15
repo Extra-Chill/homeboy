@@ -2886,7 +2886,10 @@ impl JobStore {
                         thread::sleep(std::time::Duration::from_secs(1));
                         continue;
                     }
-                    Err(_) => return,
+                    Err(error) => {
+                        let _ = worker_store.fail(job_id, format!("admission failed: {error}"));
+                        return;
+                    }
                 }
                 match worker_store.reserve_local_child_with_runner_capacity(
                     job_id,
@@ -2899,7 +2902,10 @@ impl JobStore {
                 ) {
                     Ok(true) => break,
                     Ok(false) => thread::sleep(std::time::Duration::from_millis(10)),
-                    Err(_) => return,
+                    Err(error) => {
+                        let _ = worker_store.fail(job_id, format!("admission failed: {error}"));
+                        return;
+                    }
                 }
             }
             let _ = job_handle.progress(serde_json::json!({
