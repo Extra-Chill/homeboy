@@ -2,6 +2,11 @@
 
 All notable changes to the **nodejs** extension will be documented in this file.
 
+## [3.9.11] - 2026-11-15
+
+### Fixed
+- lock workspace package component builds against concurrent consumer builds
+
 ## [3.9.10] - 2026-11-15
 
 ### Fixed
