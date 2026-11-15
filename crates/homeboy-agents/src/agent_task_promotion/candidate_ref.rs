@@ -10,7 +10,7 @@ use serde_json::Value;
 pub(crate) fn pin_applied_candidate(
     cook_id: &str,
     promotion: &mut Value,
-    title: &str,
+    title: Option<&str>,
 ) -> Result<()> {
     if let Err(error) = try_pin_applied_candidate(cook_id, promotion, title) {
         promotion["candidate_ref_error"] = Value::String(error.message);
@@ -18,7 +18,11 @@ pub(crate) fn pin_applied_candidate(
     Ok(())
 }
 
-fn try_pin_applied_candidate(cook_id: &str, promotion: &mut Value, title: &str) -> Result<()> {
+fn try_pin_applied_candidate(
+    cook_id: &str,
+    promotion: &mut Value,
+    title: Option<&str>,
+) -> Result<()> {
     if !matches!(
         promotion["status"].as_str(),
         Some("verification_pending" | "applied" | "gate_failed" | "gate_deferred")
@@ -65,7 +69,12 @@ fn try_pin_applied_candidate(cook_id: &str, promotion: &mut Value, title: &str) 
         ));
     }
     git(&["check-ref-format", &reference])?;
-    let published = homeboy_core::git::publication_candidate(path, sha, title)?;
+    // Before a publication title exists, the candidate keeps its own subject.
+    let title = match title {
+        Some(title) => title.to_owned(),
+        None => git(&["log", "-1", "--format=%s", sha])?,
+    };
+    let published = homeboy_core::git::publication_candidate(path, sha, &title)?;
     git(&["update-ref", &reference, &published])?;
     promotion["candidate_ref"] = Value::String(reference);
     Ok(())
@@ -86,7 +95,7 @@ fn missing_candidate_object_records_error_without_failing() {
         "target": {"path": dir.path()},
         "candidate": {"candidate_sha": "0123456789abcdef0123456789abcdef01234567", "tree_sha": "abc"}
     });
-    pin_applied_candidate("cook", &mut promotion, "fix: candidate").unwrap();
+    pin_applied_candidate("cook", &mut promotion, Some("fix: candidate")).unwrap();
     assert!(promotion.get("candidate_ref").is_none());
     assert!(promotion["candidate_ref_error"].is_string());
 }

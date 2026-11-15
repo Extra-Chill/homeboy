@@ -7271,12 +7271,13 @@ pub fn record_promotion_in_store(
     let run_id = sanitize_run_id(run_id);
     let owner = lifecycle_store.read_record(&run_id)?;
     if let Some(cook_id) = owner.metadata.get("cook_id").and_then(Value::as_str) {
-        match crate::agent_task_service::candidate_publication_title(lifecycle_store, &run_id) {
-            Ok(title) => {
-                crate::agent_task_promotion::pin_applied_candidate(cook_id, &mut promotion, &title)?
-            }
-            Err(error) => promotion["candidate_ref_error"] = Value::String(error.message),
-        }
+        let title =
+            crate::agent_task_service::candidate_publication_title(lifecycle_store, &run_id).ok();
+        crate::agent_task_promotion::pin_applied_candidate(
+            cook_id,
+            &mut promotion,
+            title.as_deref(),
+        )?;
     }
     // The run state follows the delivery this promotion produces (see
     // `CookDelivery::lifecycle`): a candidate that has not completed
