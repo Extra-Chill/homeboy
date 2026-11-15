@@ -877,7 +877,8 @@ fn run_step(mut checkpoint: StepJobCheckpoint, job: &ControllerJobHandle) -> Res
 
 fn finish(job_id: &str, checkpoint: StepJobCheckpoint) -> Result<Value> {
     match checkpoint.exit_code {
-        Some(code) if code != 0 => {
+        Some(0) => Ok(checkpoint.result()),
+        Some(code) => {
             let cause = step_job_dir(job_id)
                 .ok()
                 .and_then(|dir| std::fs::read_to_string(dir.join(STEP_LOG_FILE)).ok())
@@ -889,7 +890,13 @@ fn finish(job_id: &str, checkpoint: StepJobCheckpoint) -> Result<Value> {
             error.details["exit_code"] = json!(code);
             Err(error)
         }
-        _ => Ok(checkpoint.result()),
+        None => {
+            let mut error = Error::internal_unexpected(
+                "step child exit status is unknown; refusing to report success",
+            );
+            error.details["step_outcome"] = json!("exit_status_unknown");
+            Err(error)
+        }
     }
 }
 
@@ -1892,7 +1899,9 @@ mod tests {
             restarted.recover_after_restart();
             let job = restarted.wait_until_terminal().unwrap();
             reaper.join().unwrap().unwrap();
-            assert_eq!(job.status, crate::api_jobs::JobStatus::Succeeded);
+            // Even a child that actually exits zero cannot be called successful
+            // when its adopting supervisor has no authoritative exit record.
+            assert_eq!(job.status, crate::api_jobs::JobStatus::Failed);
             assert_eq!(
                 std::fs::read_to_string(&counter).unwrap().lines().count(),
                 1,
