@@ -3096,7 +3096,19 @@ impl ProductionLabStagingOperations {
             runner_job_id,
             staging_poll_budget(request),
             &cancelled,
-        )?;
+        )
+        .map_err(|error| {
+            if error.details.get("http_status").and_then(Value::as_u64) == Some(404) {
+                let mut gone = Error::internal_unexpected(format!(
+                    "Lab staging runner job `{runner_job_id}` is gone; retry the Cook"
+                ))
+                .with_retryable(true);
+                gone.details = json!({"http_status": 404});
+                gone
+            } else {
+                error
+            }
+        })?;
         Ok(homeboy_core::api_jobs::RunnerJobLogSnapshot {
             job: observed.job,
             events: observed.events,
@@ -4275,7 +4287,11 @@ impl StageExecutionAdapter {
                 .observe_runner(request, checkpoint, runner_job_id, cancellation)
             {
                 Ok(()) => return Ok(()),
-                Err(error) if error.retryable == Some(true) => {
+                Err(error)
+                    if error.retryable == Some(true)
+                        && error.details.get("http_status").and_then(Value::as_u64)
+                            != Some(404) =>
+                {
                     let now = Instant::now();
                     if now >= deadline {
                         return Err(staging_poll_deadline_error(
@@ -4533,6 +4549,35 @@ impl StageExecutionAdapter {
 }
 
 impl LabStagingExecutionAdapter for StageExecutionAdapter {
+    fn resume(
+        &self,
+        request: &LabStagingExecutionRequest,
+        mut checkpoint: LabStagingCheckpoint,
+        cancellation: LabStagingCancellationToken,
+        job: ControllerJobHandle,
+    ) -> Result<LabStagingCheckpoint> {
+        if checkpoint.final_runner_job_id.is_none() {
+            match self.operations.recover_admitted_runner_job(request)? {
+                Some(job_id) => {
+                    checkpoint.final_runner_job_id = Some(job_id);
+                    checkpoint.phase = LabStagingPhase::ObserveRunner;
+                    checkpoint.stage_intent = None;
+                }
+                None => {
+                    // An admission intent may have escaped before its receipt.
+                    // Use the existing cancellation/absence contract, never a
+                    // fresh dispatch, to settle that boundary safely.
+                    self.cancel(request, &checkpoint)
+                        .map_err(|error| error.with_retryable(true))?;
+                    return Err(Error::internal_unexpected(
+                        "Lab staging dispatch has no runner job after daemon restart; retry the Cook",
+                    ).with_retryable(true));
+                }
+            }
+        }
+        self.execute(request, checkpoint, cancellation, job)
+    }
+
     fn execute(
         &self,
         request: &LabStagingExecutionRequest,
@@ -4563,9 +4608,17 @@ impl LabStagingExecutionAdapter for StageExecutionAdapter {
             None => self.operations.recover_admitted_runner_job(request)?,
         };
         match runner_job_id {
-            Some(job_id) => self
+            Some(job_id) => match self
                 .operations
-                .cancel_and_reconcile_runner_job(request, &job_id),
+                .cancel_and_reconcile_runner_job(request, &job_id)
+            {
+                Err(error)
+                    if error.details.get("http_status").and_then(Value::as_u64) == Some(404) =>
+                {
+                    Ok(())
+                }
+                result => result,
+            },
             None => {
                 if self.operations.cancel_active_staging_jobs(request)? > 0 {
                     Ok(())
@@ -4804,6 +4857,31 @@ impl ControllerJobDriver for LabStagingDispatchDriver {
     }
     fn linked_durable_run_id(&self, request: &Value) -> Option<String> {
         Self::envelope(request).ok().map(|envelope| envelope.run_id)
+    }
+    fn execution_owner(
+        &self,
+        request: &Value,
+        checkpoint: Option<&Value>,
+    ) -> Result<Option<controller_job_driver::ControllerJobExecutionOwner>> {
+        Self::envelope(request)?;
+        if let Some(checkpoint) = checkpoint {
+            Self::checkpoint(checkpoint.clone())?;
+        }
+        // This driver owns a controller-local observer, not the runner's
+        // executor. Runner admission and cancellation remain fenced by the
+        // durable run identity in the staging adapter. Reclaiming the observer
+        // must therefore remain safe across any number of daemon restarts.
+        Ok(Some(
+            controller_job_driver::ControllerJobExecutionOwner::None,
+        ))
+    }
+    fn recovery_checkpoint(&self, request: &Value) -> Result<Option<Value>> {
+        // Reconstruct identity only: recovery must never call prepare or launch
+        // a fresh staging pipeline when no checkpoint survived admission.
+        let envelope = Self::envelope(request)?;
+        serde_json::to_value(LabStagingCheckpoint::initial(&envelope))
+            .map(Some)
+            .map_err(|error| Error::internal_json(error.to_string(), None))
     }
     fn prepare(&self, request: Value) -> Result<Value> {
         let envelope = Self::envelope(&request)?;
@@ -8029,6 +8107,100 @@ mod tests {
         ) -> Result<()> {
             Ok(())
         }
+    }
+
+    #[test]
+    fn lab_staging_startup_recovers_dead_lease_dispatch_and_cancellation() {
+        crate::test_support::with_isolated_home(|root| {
+            clear_installed_adapter();
+            register();
+            // The transport fixture reports the recorded runner as terminal;
+            // use the production phase machine and driver, not a resume stub.
+            let operations = Arc::new(RecordedStageOperations::default());
+            install_production_execution_adapter(Arc::new(StageExecutionAdapter::new(
+                operations.clone(),
+            )));
+            for cancelled in [false, true] {
+                let run_id = if cancelled {
+                    "restart-cancel"
+                } else {
+                    "restart-result"
+                };
+                submit_recipe_run(run_id);
+                persist_lab_staging_recipe(
+                    run_id,
+                    "lab-1",
+                    &recipe_request(
+                        Some(recipe_command()),
+                        &["agent-task".into(), "run-plan".into()],
+                        HashMap::new(),
+                    ),
+                )
+                .expect("recipe");
+                let attachment =
+                    homeboy_agents::agent_task_lifecycle::load_private_run_attachment::<
+                        LabStagingRecipe,
+                    >(run_id, LAB_STAGING_RECIPE_ATTACHMENT_KIND)
+                    .expect("attachment");
+                let plan = homeboy_agents::agent_task_lifecycle::load_controller_plan(run_id)
+                    .expect("plan");
+                let envelope = LabStagingDispatchEnvelope::new(
+                    run_id,
+                    "lab-1",
+                    LabStagingInputRef::AgentTaskAttempt {
+                        run_id: run_id.into(),
+                        recipe: LabStagingRecipeRef::from_authority(
+                            attachment.payload_digest,
+                            &plan,
+                        )
+                        .expect("reference"),
+                    },
+                );
+                let path = root.path().join(format!("{run_id}.sqlite"));
+                let harness = ControllerJobHarness::durable(
+                    Arc::new(LabStagingDispatchDriver),
+                    serde_json::to_value(&envelope).unwrap(),
+                    &path,
+                    "dead-lease",
+                )
+                .unwrap();
+                if cancelled {
+                    // No prepare/checkpoint and no runner admission survived.
+                    harness
+                        .request_cancellation("cancel before dispatch")
+                        .unwrap();
+                } else {
+                    let mut checkpoint = LabStagingCheckpoint::initial(&envelope);
+                    checkpoint.phase = LabStagingPhase::ObserveRunner;
+                    checkpoint.source_snapshot_id = Some("snapshot-harness".into());
+                    checkpoint.workspace_id = Some("workspace-harness".into());
+                    checkpoint.runtime_id = Some("runtime-harness".into());
+                    checkpoint.hydration_id = Some("hydration-harness".into());
+                    checkpoint.final_runner_job_id = Some("runner-job-1".into());
+                    harness
+                        .handle()
+                        .checkpoint(serde_json::to_value(checkpoint).unwrap())
+                        .unwrap();
+                }
+                let restarted = harness.reopen(&path, "replacement-lease").unwrap();
+                restarted.recover_after_restart();
+                let terminal = restarted
+                    .wait_until_terminal()
+                    .expect("startup must settle stranded dispatch");
+                assert_eq!(
+                    terminal.status,
+                    if cancelled {
+                        homeboy_core::api_jobs::JobStatus::Cancelled
+                    } else {
+                        homeboy_core::api_jobs::JobStatus::Succeeded
+                    }
+                );
+            }
+            assert_eq!(operations.observation_calls.load(Ordering::SeqCst), 1);
+            assert!(!operations.calls().contains(&"dispatch"));
+            assert!(operations.calls().contains(&"prove-no-admission"));
+            clear_installed_adapter();
+        });
     }
 
     #[test]
