@@ -4,6 +4,12 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.465.7] - 2026-11-15
+
+### Fixed
+- preserve terminal Cook candidates without publication titles
+- one draining state; a busy stale daemon is left to replace itself
+
 ## [0.465.6] - 2026-11-15
 
 ### Changed
