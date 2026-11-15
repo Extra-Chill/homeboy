@@ -45,7 +45,7 @@ Portable repo config starts with `homeboy.json`:
 - [Workflows](docs/workflows/index.md) - task guides for reviews, CI reproduction, evidence, runners, local environments, releases, and deployments.
 - [Concepts](docs/concepts/index.md) - mental models for components, extensions, evidence, runners, and scope.
 - [Reference](docs/reference/index.md) - command, config, schema, output, and template references.
-- [Internals](docs/internals/index.md) - maintainer architecture, contracts, and docs-maintenance guidance.
+- [Internals](docs/internals/index.md) - maintainer architecture, contracts, and docs-maintenance guidance. Changing Homeboy? Start with the [engineering rules](docs/internals/developer-guide/engineering-rules.md).
 - [Operations](docs/operations/index.md) - runbooks for release-gate proof, runner setup, and artifact publication.
 
 ## Installation

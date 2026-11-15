@@ -1,11 +1,14 @@
 # Internals
 
-Internals docs are for people maintaining Homeboy itself: architecture, implementation contracts, developer guidance, and docs-maintenance rules.
+Internals docs are for people maintaining Homeboy itself: architecture, implementation contracts, developer guidance, and docs-maintenance rules. Start with the [engineering rules](developer-guide/engineering-rules.md).
 
 ## Developer Guide
 
+- [Engineering rules](developer-guide/engineering-rules.md)
 - [Architecture overview](developer-guide/architecture-overview.md)
 - [Architecture cleanup map](developer-guide/architecture-cleanup-map.md)
+- [Daemon lifecycle](developer-guide/daemon-lifecycle.md)
+- [Cook recovery](developer-guide/cook-recovery.md)
 - [Config directory structure](developer-guide/config-directory.md)
 - [Error handling patterns](developer-guide/error-handling.md)
 
