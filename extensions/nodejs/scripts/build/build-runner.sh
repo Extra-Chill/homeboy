@@ -36,6 +36,19 @@ source "${SCRIPT_DIR}/../lib/node-helpers.sh"
 source "${HOMEBOY_RUNTIME_LOCAL_WORKSPACE_DEPS:-${SCRIPT_DIR}/../../../scripts/lib/local-workspace-deps.sh}"
 homeboy_require_package_json
 homeboy_detect_package_manager
+
+# A workspace package can be both a component and another component's
+# local_workspace_dependencies source. Its install (`npm ci` deletes
+# node_modules) and build must not overlap a consumer building it in the same
+# directory, so hold the shared per-directory lock until the build ends
+# (homeboy#18163). The process exit releases it on every failure path.
+PROJECT_LOCK=""
+if ! homeboy_local_workspace_lock_acquire "${PROJECT_PATH}" PROJECT_LOCK; then
+    FAILED_STEP="Build lock unavailable"
+    FAILURE_OUTPUT="Timed out waiting for another build in ${PROJECT_PATH}."
+    exit 1
+fi
+
 homeboy_ensure_node_dependencies
 
 # Apply declared local-workspace-dependency overrides (no-op unless declared in
@@ -93,4 +106,5 @@ if [ $BUILD_EXIT -ne 0 ]; then
 fi
 
 homeboy_cleanup_step_capture "$OUTPUT_FILE"
+homeboy_local_workspace_lock_release PROJECT_LOCK
 exit $BUILD_EXIT
