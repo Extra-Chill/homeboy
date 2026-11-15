@@ -995,6 +995,45 @@ mod committed_harvest_tests {
     }
 
     #[test]
+    fn gate_feedback_baseline_adopts_current_dirty_tree_after_pr_advances() {
+        let temp = tempfile::tempdir().unwrap();
+        let (workspace, _) = candidate_attempt_repo(temp.path());
+        std::fs::write(workspace.join("file.txt"), "candidate\n").unwrap();
+        let mut request = gate_feedback_request(&workspace, candidate_patch(&workspace));
+        request.inputs["cook_loop"]["candidate_commit"] = serde_json::to_value(
+            crate::agent_task_candidate_tree::current_workspace_candidate(&workspace).unwrap(),
+        )
+        .unwrap();
+        git(&workspace, &["add", "."]);
+        git(&workspace, &["commit", "-m", "publish candidate"]);
+        std::fs::write(workspace.join("unrelated.txt"), "maintainer\n").unwrap();
+        git(&workspace, &["add", "."]);
+        git(&workspace, &["commit", "-m", "advance PR"]);
+        let head = git(&workspace, &["rev-parse", "HEAD"]);
+        std::fs::write(workspace.join("adopted.txt"), "adopted\n").unwrap();
+        let preflight =
+            prepare_committed_harvest(&request, None, &HarvestExecutionContext::default()).unwrap();
+        let admitted = preflight.candidate_baseline.as_ref().unwrap();
+        assert_eq!(admitted.base_sha, head);
+        assert_eq!(
+            admitted.tree_sha,
+            crate::agent_task_candidate_tree::workspace_tree(&workspace).unwrap()
+        );
+        assert!(preflight.source_provenance.unwrap()["baseline_admission"].is_object());
+        let scratch = tempfile::tempdir().unwrap();
+        prepare_attempt_workspace(
+            &mut request,
+            preflight.base_sha.as_deref(),
+            Some(admitted),
+            scratch.path(),
+        )
+        .unwrap();
+        let root = Path::new(request.workspace.root.as_deref().unwrap());
+        assert!(root.join("unrelated.txt").exists());
+        assert!(root.join("adopted.txt").exists());
+    }
+
+    #[test]
     fn gate_feedback_baseline_rejects_mismatched_or_extra_dirty_changes() {
         let temp = tempfile::tempdir().expect("tempdir");
         let workspace = temp.path().join("workspace");
