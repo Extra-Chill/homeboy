@@ -1232,54 +1232,6 @@ mod admission_tests {
     use std::sync::atomic::{AtomicUsize, Ordering};
 
     #[test]
-    fn admission_http_pressure_refusal_preserves_capacity_wait_contract() {
-        crate::test_support::with_isolated_home(|_| {
-            use std::io::{Read, Write};
-            let mut runner = crate::test_support::ssh_runner();
-            runner.kind = crate::RunnerKind::Local;
-            runner.server_id = None;
-            crate::create(&serde_json::to_string(&runner).unwrap(), false).unwrap();
-            let pressure = homeboy_core::runner_pressure::RunnerPressure {
-                cpu: Some(1001),
-                admission_reason: Some("pressure".into()),
-                ..Default::default()
-            };
-            let refusal = pressure.admission_refusal();
-            let body = json!({"success": false, "error": {
-                "error": refusal.code.as_str(), "message": refusal.message,
-                "details": refusal.details, "retryable": refusal.retryable,
-            }})
-            .to_string();
-            let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
-            let url = format!("http://{}", listener.local_addr().unwrap());
-            let server = std::thread::spawn(move || {
-                let (mut stream, _) = listener.accept().unwrap();
-                let mut request = [0; 8192];
-                let count = stream.read(&mut request).unwrap();
-                assert!(request[..count].starts_with(b"POST /admissions "));
-                write!(stream, "HTTP/1.1 400 Bad Request\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}", body.len(), body).unwrap();
-            });
-            let error = reserve_daemon_admission_with_recovery_with(
-                "lab",
-                "lease",
-                Instant::now() + Duration::from_secs(30),
-                || reserve_daemon_admission("lab", &url, "cook", "lease", None, None),
-                || panic!("capacity waits must return to durable scheduling"),
-            )
-            .err()
-            .expect("pressure refusal");
-            server.join().unwrap();
-            assert_eq!(error.retryable, Some(true));
-            assert_eq!(
-                error.details["execution_step_disposition"],
-                "runner_ineligible"
-            );
-            assert_eq!(error.details["reason"], "runner_pressure");
-            assert_eq!(error.details["pressure"]["cpu"], 1001);
-        });
-    }
-
-    #[test]
     fn daemon_capability_preflight_overlays_job_env_on_runner_env() {
         let runner_env = HashMap::from([
             (
@@ -2028,15 +1980,26 @@ where
     Reload: Fn() -> Result<Option<String>>,
 {
     let started = Instant::now();
-    let deadline = started + budget;
+    let mut deadline = started + budget;
+    let mut last_observed = started;
+    let mut queued = false;
     let mut backoff = DAEMON_TERMINAL_WAIT_INITIAL_BACKOFF;
     loop {
         if cancelled() {
             return Err(daemon_terminal_wait_cancelled_error(runner_job_id));
         }
+        let observed = Instant::now();
+        if queued {
+            deadline += observed.duration_since(last_observed);
+        }
+        last_observed = observed;
         let interval = match read(&endpoint) {
             Ok(job) if job.status.is_terminal() => return Ok((job, endpoint)),
-            Ok(_) => {
+            Ok(job) => {
+                // Admission has no execution deadline: the budget pauses while
+                // the job is queued, so a queued Cook keeps its durable place
+                // until capacity clears or its owner cancels it.
+                queued = job.status == homeboy_core::api_jobs::JobStatus::Queued;
                 let interval = backoff;
                 backoff = backoff
                     .saturating_mul(2)

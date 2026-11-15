@@ -332,6 +332,12 @@ pub(super) struct ControllerJobSubmission {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub(crate) struct StoredJob {
+    /// Durable admission state for direct exec and gate jobs, owned by the executing daemon.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) pending_admission_reason: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) pending_execution_envelope:
+        Option<crate::runner_execution_envelope::RunnerExecutionEnvelope>,
     pub(super) job: Job,
     /// Rows of their own in the SQL store, so a job row deserializes without
     /// them.
@@ -1676,9 +1682,16 @@ impl JobStore {
         // Admissions carry LocalRunnerJob solely to persist direct workspace
         // authority. Only a real runner execution consumes an admission.
         let consumes_admission = local_runner.is_some() && operation != "runner.admission";
+        let pending_execution_envelope = metadata
+            .as_ref()
+            .and_then(|value| value.get("pending_execution_envelope"))
+            .and_then(|value| serde_json::from_value(value.clone()).ok());
         inner.jobs.insert(
             job.id,
             StoredJob {
+                // The worker's first admission probe records any wait.
+                pending_admission_reason: None,
+                pending_execution_envelope,
                 job: job.clone(),
                 events: Vec::new(),
                 admission_idempotency_key: admission_idempotency_key.clone(),
@@ -2509,6 +2522,8 @@ impl JobStore {
                 data: Some(event_data),
             };
             let mut stored = StoredJob {
+                pending_admission_reason: None,
+                pending_execution_envelope: None,
                 job,
                 events: vec![initial_event],
                 admission_idempotency_key: None,
@@ -2737,9 +2752,20 @@ impl JobStore {
     /// Whether controller work waits in `pending_resource_admission` for a
     /// replacement daemon.
     pub(crate) fn has_pending_admissions(&self) -> bool {
-        self.active_controller_jobs()
-            .iter()
-            .any(|(_, state)| state.pending_admission_reason.is_some())
+        self.inner
+            .lock()
+            .expect("job store mutex poisoned")
+            .jobs
+            .values()
+            .any(|stored| {
+                self.owns(stored)
+                    && stored.job.status == JobStatus::Queued
+                    && (stored.pending_admission_reason.is_some()
+                        || stored
+                            .controller_job
+                            .as_ref()
+                            .is_some_and(|state| state.pending_admission_reason.is_some()))
+            })
     }
 
     pub(crate) fn active_controller_jobs(&self) -> Vec<(Uuid, ControllerJobState)> {
@@ -2854,6 +2880,17 @@ impl JobStore {
                         continue;
                     }
                 }
+                match worker_store.reconcile_direct_admission(job_id) {
+                    Ok(true) => {}
+                    Ok(false) => {
+                        thread::sleep(std::time::Duration::from_secs(1));
+                        continue;
+                    }
+                    Err(error) => {
+                        let _ = worker_store.fail(job_id, format!("admission failed: {error}"));
+                        return;
+                    }
+                }
                 match worker_store.reserve_local_child_with_runner_capacity(
                     job_id,
                     &request
@@ -2865,7 +2902,10 @@ impl JobStore {
                 ) {
                     Ok(true) => break,
                     Ok(false) => thread::sleep(std::time::Duration::from_millis(10)),
-                    Err(_) => return,
+                    Err(error) => {
+                        let _ = worker_store.fail(job_id, format!("admission failed: {error}"));
+                        return;
+                    }
                 }
             }
             let _ = job_handle.progress(serde_json::json!({
@@ -2902,6 +2942,120 @@ impl JobStore {
             }
         });
         Ok((JobRunner { job_id, handle }, true))
+    }
+
+    /// The executing daemon's admission reconciler, shared by the worker and
+    /// maintenance pass. Accepted work has no admission deadline.
+    fn reconcile_direct_admission(&self, job_id: Uuid) -> Result<bool> {
+        let (thresholds, previous) = {
+            let inner = self.inner.lock().expect("job store mutex poisoned");
+            let stored = self.read_stored_job(&inner, job_id, false)?;
+            if stored.job.status != JobStatus::Queued {
+                return Ok(false);
+            }
+            let thresholds = stored
+                .events
+                .iter()
+                .filter_map(|event| event.data.as_ref())
+                .find_map(|data| data.get("pressure_thresholds"))
+                .and_then(|value| serde_json::from_value(value.clone()).ok())
+                .unwrap_or_default();
+            (thresholds, stored.pending_admission_reason.clone())
+        };
+        let pressure = crate::runner_pressure::sample(&thresholds);
+        let admitted = pressure.admission_reason.is_none();
+        // The wait is recorded once when it starts, not on every probe.
+        if previous == pressure.admission_reason {
+            return Ok(admitted);
+        }
+        self.set_direct_pending_admission(job_id, pressure.admission_reason.clone())?;
+        if !admitted {
+            self.append_event(
+                job_id,
+                JobEventKind::Progress,
+                Some("waiting on Lab capacity".into()),
+                Some(serde_json::json!({
+                    "status": "pending_resource_admission",
+                    "pending_admission_reason": "pressure",
+                    "message": "waiting on Lab capacity",
+                    "load": pressure,
+                    "budget": thresholds,
+                })),
+            )?;
+        }
+        Ok(admitted)
+    }
+
+    pub(crate) fn has_pending_direct_execution(&self, job_id: Uuid) -> Result<bool> {
+        let inner = self.inner.lock().expect("job store mutex poisoned");
+        Ok(self
+            .read_stored_job(&inner, job_id, false)?
+            .pending_execution_envelope
+            .is_some())
+    }
+
+    pub(crate) fn reconcile_direct_admissions(&self) -> Result<()> {
+        let pending = {
+            let inner = self.inner.lock().expect("job store mutex poisoned");
+            inner
+                .jobs
+                .values()
+                .filter(|stored| {
+                    self.owns(stored)
+                        && stored.job.status == JobStatus::Queued
+                        && stored.pending_admission_reason.as_deref() == Some("pressure")
+                })
+                .map(|stored| stored.job.id)
+                .collect::<Vec<_>>()
+        };
+        for id in pending {
+            self.reconcile_direct_admission(id)?;
+        }
+        Ok(())
+    }
+
+    pub(crate) fn pending_admission_report(&self, job_id: Uuid) -> Result<Value> {
+        let inner = self.inner.lock().expect("job store mutex poisoned");
+        let stored = self.read_stored_job(&inner, job_id, false)?;
+        let reason = stored.pending_admission_reason.as_ref().or_else(|| {
+            stored
+                .controller_job
+                .as_ref()
+                .and_then(|state| state.pending_admission_reason.as_ref())
+        });
+        if stored.job.status != JobStatus::Queued || reason.is_none() {
+            return Ok(Value::Null);
+        }
+        let latest = stored
+            .events
+            .iter()
+            .rev()
+            .filter_map(|event| event.data.as_ref())
+            .find(|data| data["status"] == "pending_resource_admission");
+        Ok(serde_json::json!({
+            "status": "pending_resource_admission",
+            "pending_admission_reason": reason,
+            "message": "waiting on Lab capacity",
+            "load": latest.and_then(|data| data.get("load")),
+            "budget": latest.and_then(|data| data.get("budget")),
+        }))
+    }
+
+    pub(crate) fn set_direct_pending_admission(
+        &self,
+        job_id: Uuid,
+        reason: Option<String>,
+    ) -> Result<()> {
+        self.durable_transaction(|inner| {
+            let stored = inner
+                .jobs
+                .get_mut(&job_id)
+                .ok_or_else(|| Error::internal_unexpected("missing queued execution"))?;
+            if stored.job.status == JobStatus::Queued {
+                stored.pending_admission_reason = reason.clone();
+            }
+            Ok(())
+        })
     }
 
     fn run_background_with_start_policy<T, F>(
@@ -3221,6 +3375,7 @@ impl JobStore {
                     None,
                 ));
             }
+            stored.pending_admission_reason = None;
             stored.local_child = Some(LocalChildExecution {
                 reservation_id: reservation_id.clone(),
                 reservation_expires_at_ms,

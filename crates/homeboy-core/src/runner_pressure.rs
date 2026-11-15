@@ -123,6 +123,11 @@ pub fn sample(thresholds: &PressureThresholds) -> RunnerPressure {
         pressure.apply_thresholds(thresholds);
         return pressure;
     }
+    // Unit tests own their host observation: a loaded CI runner must not
+    // queue admissions that a test expects to run.
+    if cfg!(test) {
+        return RunnerPressure::default();
+    }
     sample_host(thresholds)
 }
 

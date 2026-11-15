@@ -157,10 +157,11 @@ impl JobStore {
                 });
                 let child_pid = ownership.pid;
                 let queued_for_replacement = job.status == JobStatus::Queued
-                    && stored
-                        .controller_job
-                        .as_ref()
-                        .is_some_and(|state| state.pending_admission_reason.is_some());
+                    && (stored.pending_admission_reason.is_some()
+                        || stored
+                            .controller_job
+                            .as_ref()
+                            .is_some_and(|state| state.pending_admission_reason.is_some()));
                 let disposition = if queued_for_replacement {
                     DaemonActiveJobRecoveryDisposition::QueuedForReplacement
                 } else if terminal_evidence.is_some() {
