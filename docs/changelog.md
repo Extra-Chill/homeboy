@@ -4,6 +4,11 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.465.10] - 2026-11-15
+
+### Changed
+- move the HTTP router into daemon/router.rs with one route shape
+
 ## [0.465.9] - 2026-11-15
 
 ### Changed
