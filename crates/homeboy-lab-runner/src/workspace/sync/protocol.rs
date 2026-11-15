@@ -241,7 +241,10 @@ pub(super) fn materialization_commit_controlled(
             let digest = format!("sha256:{}", blob.file_name().to_string_lossy());
             let key = super::blobs::key(&digest)?;
             if !super::blobs::valid(&blob.path(), &digest, control)? {
-                return Err(io("transferred blob digest mismatch"));
+                return Err(io(format!(
+                    "transferred blob digest mismatch; {}",
+                    super::blobs::REFETCH
+                )));
             }
             fs::rename(blob.path(), store.join(key)).materialization(
                 "rename",

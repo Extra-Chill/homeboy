@@ -286,3 +286,48 @@ fn blob_retention_is_age_and_size_bounded_lru() {
     assert!(!older.exists());
     assert!(recent.exists());
 }
+
+#[test]
+fn a_blob_corrupted_between_plan_and_commit_is_refetched() {
+    crate::test_support::with_isolated_home(|_| {
+        let source = tempfile::tempdir().unwrap();
+        let runner_root = tempfile::tempdir().unwrap();
+        assert!(std::process::Command::new("git")
+            .args(["init", "-q"])
+            .current_dir(source.path())
+            .status()
+            .unwrap()
+            .success());
+        fs::write(source.path().join("file"), b"content\n").unwrap();
+        crate::create(
+            &serde_json::json!({"id":"blobs", "kind":"local", "workspace_root":runner_root.path()})
+                .to_string(),
+            false,
+        )
+        .unwrap();
+        let stage = || {
+            sync_workspace_batch_controlled(
+                "blobs",
+                vec![(options(source.path()), vec![])],
+                &WorkspaceControl::default(),
+            )
+        };
+        let warm = stage().unwrap();
+        let entry = warm[0].content.as_ref().unwrap().0.entries.iter();
+        let digest = entry.filter_map(|e| e.sha256.clone()).next().unwrap();
+        let blob = blobs::store(&warm[0].remote_path).join(blobs::key(&digest).unwrap());
+        let corrupt = blob.clone();
+        protocol_controller::BEFORE_COMMIT
+            .with(|hook| hook.set(Some(Box::new(move || fs::write(corrupt, b"bad").unwrap()))));
+        protocol_controller::INVOCATIONS.with(|c| c.set(0));
+
+        let repaired = stage().expect("the corrupt blob is refetched");
+
+        protocol_controller::INVOCATIONS.with(|c| assert_eq!(c.get(), 4, "plan+commit twice"));
+        assert_eq!(
+            fs::read(Path::new(&repaired[0].remote_path).join("file")).unwrap(),
+            b"content\n"
+        );
+        assert!(blobs::valid(&blob, &digest, &WorkspaceControl::default()).unwrap());
+    });
+}
