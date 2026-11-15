@@ -75,6 +75,8 @@ pub struct PreparedDaemonExec {
     /// set by the daemon once it holds the job's custody (#16681). A driver
     /// spawns the child there so it survives a daemon restart.
     pub output_dir: Option<std::path::PathBuf>,
+    /// Affinity chosen by daemon admission, applied at the actual spawn site.
+    pub cpus: Option<Vec<usize>>,
     /// Opaque driver-owned plan handle carried back into `execute`. The daemon
     /// never inspects it; it exists so the driver can reconstruct the full
     /// runner process without re-preparing.
@@ -125,6 +127,7 @@ impl PreparedDaemonExec {
             heartbeat_only_stall,
             extension_env_provenance,
             output_dir: None,
+            cpus: None,
             plan_token,
         }
     }

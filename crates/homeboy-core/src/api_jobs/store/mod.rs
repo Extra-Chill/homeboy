@@ -33,6 +33,8 @@ use crate::source_snapshot::SourceSnapshot;
 mod controller_completion;
 #[cfg(test)]
 mod daemon_scope_tests;
+#[cfg(test)]
+mod gate_reserve_tests;
 mod reconciliation;
 pub(super) mod terminal_delivery;
 
@@ -2947,7 +2949,8 @@ impl JobStore {
     /// The executing daemon's admission reconciler, shared by the worker and
     /// maintenance pass. Accepted work has no admission deadline.
     fn reconcile_direct_admission(&self, job_id: Uuid) -> Result<bool> {
-        let (thresholds, previous) = {
+        let reserve = crate::lab_capacity::gate_reserve(&crate::lab_capacity::allowed_cpus());
+        let (thresholds, previous, gate, active) = {
             let inner = self.inner.lock().expect("job store mutex poisoned");
             let stored = self.read_stored_job(&inner, job_id, false)?;
             if stored.job.status != JobStatus::Queued {
@@ -2960,9 +2963,31 @@ impl JobStore {
                 .find_map(|data| data.get("pressure_thresholds"))
                 .and_then(|value| serde_json::from_value(value.clone()).ok())
                 .unwrap_or_default();
-            (thresholds, stored.pending_admission_reason.clone())
+            (
+                thresholds,
+                stored.pending_admission_reason.clone(),
+                crate::lab_capacity::is_gate(&stored.job),
+                inner
+                    .jobs
+                    .values()
+                    .filter(|candidate| {
+                        crate::lab_capacity::is_gate(&candidate.job)
+                            && !candidate.job.status.is_terminal()
+                            && candidate.local_child.is_some()
+                            && candidate.job.id != job_id
+                    })
+                    .count(),
+            )
         };
-        let pressure = crate::runner_pressure::sample(&thresholds);
+        let mut pressure = crate::runner_pressure::sample(&thresholds);
+        if gate && !reserve.is_empty() {
+            pressure.admission_reason = crate::lab_capacity::gate_admission_reason(
+                &pressure,
+                &thresholds,
+                active,
+                reserve.len(),
+            );
+        }
         let admitted = pressure.admission_reason.is_none();
         // The wait is recorded once when it starts, not on every probe.
         if previous == pressure.admission_reason {
@@ -2976,7 +3001,7 @@ impl JobStore {
                 Some("waiting on Lab capacity".into()),
                 Some(serde_json::json!({
                     "status": "pending_resource_admission",
-                    "pending_admission_reason": "pressure",
+                    "pending_admission_reason": pressure.admission_reason,
                     "message": "waiting on Lab capacity",
                     "load": pressure,
                     "budget": thresholds,
@@ -2984,6 +3009,22 @@ impl JobStore {
             )?;
         }
         Ok(admitted)
+    }
+
+    pub(crate) fn gate_capacity(&self) -> Value {
+        let inner = self.inner.lock().expect("job store mutex poisoned");
+        let gates = inner
+            .jobs
+            .values()
+            .filter(|stored| {
+                crate::lab_capacity::is_gate(&stored.job) && !stored.job.status.is_terminal()
+            })
+            .collect::<Vec<_>>();
+        serde_json::json!({
+            "reserved_cpus": crate::lab_capacity::gate_reserve(&crate::lab_capacity::allowed_cpus()),
+            "active_slots": gates.iter().filter(|stored| stored.local_child.is_some()).count(),
+            "queued_slots": gates.iter().filter(|stored| stored.local_child.is_none()).count(),
+        })
     }
 
     pub(crate) fn has_pending_direct_execution(&self, job_id: Uuid) -> Result<bool> {
@@ -3003,7 +3044,10 @@ impl JobStore {
                 .filter(|stored| {
                     self.owns(stored)
                         && stored.job.status == JobStatus::Queued
-                        && stored.pending_admission_reason.as_deref() == Some("pressure")
+                        && matches!(
+                            stored.pending_admission_reason.as_deref(),
+                            Some("pressure" | "gate_slot")
+                        )
                 })
                 .map(|stored| stored.job.id)
                 .collect::<Vec<_>>()
@@ -3352,7 +3396,26 @@ impl JobStore {
                     ));
                 }
             }
-            if let Some((runner_id, capacity)) = runner_capacity {
+            let reserve = crate::lab_capacity::gate_reserve(&crate::lab_capacity::allowed_cpus());
+            let reserved_gate = !reserve.is_empty() && crate::lab_capacity::is_gate(&job.job);
+            if reserved_gate {
+                // The durable child reservation is the slot: count and reserve
+                // under the same transaction, including children re-adopted after restart.
+                let active = inner
+                    .jobs
+                    .values()
+                    .filter(|candidate| {
+                        candidate.job.id != job_id
+                            && !candidate.job.status.is_terminal()
+                            && candidate.local_child.is_some()
+                            && crate::lab_capacity::is_gate(&candidate.job)
+                    })
+                    .count();
+                if active >= reserve.len() {
+                    return Ok(false);
+                }
+            }
+            if let Some((runner_id, capacity)) = runner_capacity.filter(|_| !reserved_gate) {
                 let active = inner.jobs.values().filter(|candidate| {
                     candidate.job.id != job_id
                         && matches!(candidate.job.status, JobStatus::Queued | JobStatus::Running)

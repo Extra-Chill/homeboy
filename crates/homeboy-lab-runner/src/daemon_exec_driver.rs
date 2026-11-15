@@ -312,6 +312,7 @@ fn execute_daemon_exec(
             .and_then(|staged| staged.workspace.as_ref())
             .map(super::staged_workspace::StagedWorkspaceDirectory::fd),
         prepared.output_dir.as_deref(),
+        prepared.cpus.as_deref(),
     )?;
     let (stdout, stderr) = super::execution::redaction::redact_runner_exec_streams(
         output.stdout,

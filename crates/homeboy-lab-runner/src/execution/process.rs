@@ -531,6 +531,7 @@ pub(crate) fn execute_runner_process_until_cancelled_with_progress(
     child_started: Option<homeboy_core::daemon::runner_exec_driver::ExecChildStarted>,
     #[cfg(unix)] verified_cwd_fd: Option<std::os::fd::RawFd>,
     output_dir: Option<&Path>,
+    cpus: Option<&[usize]>,
 ) -> Result<ProcessOutput> {
     let temp_owner = runner_temp_owner(&plan.env)?;
     let mut command = match output_dir {
@@ -542,6 +543,9 @@ pub(crate) fn execute_runner_process_until_cancelled_with_progress(
         }
     };
     command.current_dir(&plan.cwd);
+    if let Some(cpus) = cpus {
+        homeboy_core::lab_capacity::pin_command(&mut command, cpus);
+    }
     #[cfg(unix)]
     if let Some(fd) = verified_cwd_fd {
         bind_verified_cwd(&mut command, fd);
@@ -665,6 +669,7 @@ mod tests {
             false,
             None,
             Some(directory.as_raw_fd()),
+            None,
             None,
         )
         .expect("execute from verified fd");
