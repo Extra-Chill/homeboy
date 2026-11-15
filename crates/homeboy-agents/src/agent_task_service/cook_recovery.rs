@@ -929,8 +929,23 @@ fn recover_cook_once(
                 None,
             ));
         }
-        let recipe = super::load_recipe(id)
-            .or_else(|error| super::load_recipe_for_attempt(id)?.ok_or(error))?;
+        let recipe = if super::recipe_exists(id)? {
+            super::load_recipe(id)?
+        } else if let Some(recipe) = super::load_recipe_for_attempt(id)? {
+            recipe
+        } else {
+            // A Cook whose admission never materialized has no recipe: no
+            // provider ran, so there is no candidate to re-gate.
+            let command = format!("homeboy agent-task recover {}", plan.cook_id);
+            return Err(Error::validation_invalid_argument(
+                "regate",
+                format!(
+                    "Cook has no durable recipe because its admission never materialized, so no provider ran and there is no candidate to re-gate; recover it without --regate: `{command}`"
+                ),
+                Some(id.into()),
+                Some(vec![command]),
+            ));
+        };
         let candidate = recipe
             .attempts
             .iter()
@@ -2292,6 +2307,23 @@ mod tests {
             );
 
             let performer = RetryPerformer(Default::default());
+            // With no recipe there is no candidate: `--regate` names the step
+            // that recovers it instead of failing on the missing recipe file.
+            let refused = recover_cook(
+                cook_id,
+                CookRecoveryRequest {
+                    regate: true,
+                    preflight: true,
+                    ..Default::default()
+                },
+                &performer,
+            )
+            .unwrap_err();
+            assert_eq!(refused.details["field"], "regate", "{refused:?}");
+            assert!(refused
+                .message
+                .contains(&format!("`homeboy agent-task recover {cook_id}`")));
+
             let (report, exit_code) =
                 recover_cook(cook_id, CookRecoveryRequest::default(), &performer).unwrap();
             assert_eq!(exit_code, 1, "{report:?}");
