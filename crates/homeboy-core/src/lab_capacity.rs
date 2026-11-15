@@ -1,5 +1,6 @@
 //! Small, admission-only CPU policy. Running work is never preempted.
 use serde::Serialize;
+use std::collections::BTreeMap;
 
 /// Leave one logical CPU per admitted heavy job, with one slot for forward progress.
 /// Missing load data falls back to the CPU bound, never above the configured cap.
@@ -16,6 +17,7 @@ pub struct LabCapacity {
     pub load_average_1m: Option<f64>,
     pub concurrency_limit: Option<usize>,
     pub effective_budget: usize,
+    pub active_slots_by_owner: BTreeMap<String, usize>,
 }
 
 pub fn observe(limit: Option<usize>) -> LabCapacity {
@@ -30,13 +32,35 @@ pub fn observe(limit: Option<usize>) -> LabCapacity {
         load_average_1m,
         concurrency_limit: limit,
         effective_budget: admission_budget(cpus, load_average_1m, limit.unwrap_or(usize::MAX)),
+        active_slots_by_owner: STEP_STATE
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .active_slots_by_owner(),
     }
 }
 
-/// Occupied step slots; a permit holds its slot index until dropped.
-static ACTIVE_STEPS: std::sync::Mutex<Vec<bool>> = std::sync::Mutex::new(Vec::new());
+/// Queue and occupied slots share a lock so ranking and admission are atomic.
+#[derive(Default)]
+struct StepState {
+    slots: Vec<Option<String>>,
+    queue: Vec<(usize, String)>,
+}
+
+impl StepState {
+    fn active_slots_by_owner(&self) -> BTreeMap<String, usize> {
+        let mut counts = BTreeMap::new();
+        for owner in self.slots.iter().flatten() {
+            *counts.entry(owner.clone()).or_default() += 1;
+        }
+        counts
+    }
+}
+
+static STEP_STATE: std::sync::Mutex<StepState> = std::sync::Mutex::new(StepState {
+    slots: Vec::new(),
+    queue: Vec::new(),
+});
 static NEXT_TICKET: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
-static STEP_QUEUE: std::sync::Mutex<Vec<usize>> = std::sync::Mutex::new(Vec::new());
 
 /// An admitted step's slot. The slot owns a fixed share of the CPUs, so
 /// concurrent steps never size themselves against the same cores.
@@ -50,9 +74,9 @@ impl StepPermit {
 }
 impl Drop for StepPermit {
     fn drop(&mut self) {
-        let mut slots = ACTIVE_STEPS.lock().unwrap_or_else(|e| e.into_inner());
-        if let Some(occupied) = slots.get_mut(self.slot) {
-            *occupied = false;
+        let mut state = STEP_STATE.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some(owner) = state.slots.get_mut(self.slot) {
+            *owner = None;
         }
     }
 }
@@ -71,52 +95,70 @@ pub fn cpu_slice(allowed: &[usize], limit: Option<usize>, slot: usize) -> Option
     Some(allowed[start..(start + width).min(allowed.len())].to_vec())
 }
 
-/// FIFO admission for detached provider/gate steps owned by this daemon.
+/// Admit the least-occupied owner first, breaking ties by ticket arrival.
 pub fn acquire_step(
     limit: Option<usize>,
+    owner: &str,
+    waiting: impl FnMut(usize, &LabCapacity) -> crate::Result<bool>,
+) -> crate::Result<Option<StepPermit>> {
+    acquire_step_with_observation(limit, owner, waiting, observe)
+}
+
+fn acquire_step_with_observation(
+    limit: Option<usize>,
+    owner: &str,
     mut waiting: impl FnMut(usize, &LabCapacity) -> crate::Result<bool>,
+    observation: impl Fn(Option<usize>) -> LabCapacity,
 ) -> crate::Result<Option<StepPermit>> {
     use std::sync::atomic::Ordering;
     let ticket = NEXT_TICKET.fetch_add(1, Ordering::Relaxed);
-    STEP_QUEUE
+    STEP_STATE
         .lock()
         .unwrap_or_else(|e| e.into_inner())
-        .push(ticket);
+        .queue
+        .push((ticket, owner.to_owned()));
     struct Queued(usize);
     impl Drop for Queued {
         fn drop(&mut self) {
-            STEP_QUEUE
+            STEP_STATE
                 .lock()
                 .unwrap_or_else(|e| e.into_inner())
-                .retain(|ticket| *ticket != self.0);
+                .queue
+                .retain(|(ticket, _)| *ticket != self.0);
         }
     }
     let _queued = Queued(ticket);
     loop {
-        let observation = observe(limit);
-        let position = STEP_QUEUE
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .iter()
-            .position(|candidate| *candidate == ticket)
-            .unwrap_or(0)
-            + 1;
-        {
-            let mut slots = ACTIVE_STEPS.lock().unwrap_or_else(|e| e.into_inner());
-            let active = slots.iter().filter(|occupied| **occupied).count();
+        let mut observation = observation(limit);
+        let position = {
+            let mut state = STEP_STATE.lock().unwrap_or_else(|e| e.into_inner());
+            let counts = state.active_slots_by_owner();
+            observation.active_slots_by_owner = counts.clone();
+            let rank = (counts.get(owner).copied().unwrap_or(0), ticket);
+            let position = 1 + state
+                .queue
+                .iter()
+                .filter(|(candidate, owner)| {
+                    (counts.get(owner).copied().unwrap_or(0), *candidate) < rank
+                })
+                .count();
+            let active = state.slots.iter().flatten().count();
             if position == 1 && active < observation.effective_budget {
-                let slot = slots
+                let slot = state
+                    .slots
                     .iter()
-                    .position(|occupied| !occupied)
-                    .unwrap_or(slots.len());
-                if slot == slots.len() {
-                    slots.push(true);
+                    .position(Option::is_none)
+                    .unwrap_or(state.slots.len());
+                if slot == state.slots.len() {
+                    state.slots.push(Some(owner.to_owned()));
                 } else {
-                    slots[slot] = true;
+                    state.slots[slot] = Some(owner.to_owned());
                 }
+                state.queue.retain(|(candidate, _)| *candidate != ticket);
                 return Ok(Some(StepPermit { slot }));
             }
-        }
+            position
+        };
         if !waiting(position, &observation)? {
             return Ok(None);
         }
@@ -171,12 +213,112 @@ pub fn pin_command(command: &mut std::process::Command, cpus: &[usize]) {
 pub fn pin_command(_command: &mut std::process::Command, _cpus: &[usize]) {}
 
 pub fn queued_steps() -> usize {
-    STEP_QUEUE.lock().unwrap_or_else(|e| e.into_inner()).len()
+    STEP_STATE
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .queue
+        .len()
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn waiting_owner_gets_a_slot_before_saturated_owners_queued_tickets() {
+        crate::test_support::with_isolated_home(|_| {
+            use std::sync::mpsc;
+            use std::time::Duration;
+
+            // Keep this independent of host load and CPU count.
+            fn observation(limit: Option<usize>) -> LabCapacity {
+                LabCapacity {
+                    cpus: 2,
+                    load_average_1m: Some(0.0),
+                    concurrency_limit: limit,
+                    effective_budget: 2,
+                    active_slots_by_owner: BTreeMap::new(),
+                }
+            }
+            let first = acquire_step_with_observation(Some(2), "A", |_, _| Ok(true), observation)
+                .unwrap()
+                .unwrap();
+            let second = acquire_step_with_observation(Some(2), "A", |_, _| Ok(true), observation)
+                .unwrap()
+                .unwrap();
+            assert_eq!(observe(Some(2)).active_slots_by_owner["A"], 2);
+            std::thread::scope(|scope| {
+                let (queued_tx, queued_rx) = mpsc::channel();
+                let (admitted_tx, admitted_rx) = mpsc::channel();
+                let (release_tx, release_rx) = mpsc::channel();
+                // Start each ticket only after its predecessor is actually queued.
+                for expected_position in 1..=2 {
+                    let queued_tx = queued_tx.clone();
+                    let admitted_tx = admitted_tx.clone();
+                    scope.spawn(move || {
+                        let mut reported = false;
+                        let permit = acquire_step_with_observation(
+                            Some(2),
+                            "A",
+                            |position, capacity| {
+                                if !reported {
+                                    assert_eq!(position, expected_position);
+                                    assert_eq!(capacity.active_slots_by_owner["A"], 2);
+                                    queued_tx.send(()).unwrap();
+                                    reported = true;
+                                }
+                                Ok(true)
+                            },
+                            observation,
+                        )
+                        .unwrap();
+                        admitted_tx.send("A").unwrap();
+                        drop(permit);
+                    });
+                    queued_rx.recv_timeout(Duration::from_secs(10)).unwrap();
+                }
+                scope.spawn(move || {
+                    let mut reported = false;
+                    let permit = acquire_step_with_observation(
+                        Some(2),
+                        "B",
+                        |position, _| {
+                            if !reported {
+                                assert_eq!(position, 1);
+                                queued_tx.send(()).unwrap();
+                                reported = true;
+                            }
+                            Ok(true)
+                        },
+                        observation,
+                    )
+                    .unwrap();
+                    admitted_tx.send("B").unwrap();
+                    release_rx.recv_timeout(Duration::from_secs(10)).unwrap();
+                    drop(permit);
+                });
+                queued_rx.recv_timeout(Duration::from_secs(10)).unwrap();
+                drop(first);
+                assert_eq!(
+                    admitted_rx.recv_timeout(Duration::from_secs(10)).unwrap(),
+                    "B"
+                );
+                assert_eq!(observe(Some(2)).active_slots_by_owner["B"], 1);
+                release_tx.send(()).unwrap();
+                drop(second);
+                assert_eq!(
+                    admitted_rx.recv_timeout(Duration::from_secs(10)).unwrap(),
+                    "A"
+                );
+                assert_eq!(
+                    admitted_rx.recv_timeout(Duration::from_secs(10)).unwrap(),
+                    "A"
+                );
+            });
+            assert!(observe(Some(2)).active_slots_by_owner.is_empty());
+            assert_eq!(queued_steps(), 0);
+        });
+    }
 
     #[test]
     fn cpu_slices_are_disjoint_shares() {
