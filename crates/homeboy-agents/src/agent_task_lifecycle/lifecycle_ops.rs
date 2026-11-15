@@ -5808,15 +5808,7 @@ where
             .any(|record| !chain.contains(&record.run_id) && successor_requires_force(record))
             && !force
         {
-            return Err(Error::validation_invalid_argument(
-                "force",
-                format!(
-                    "retry lineage rooted at '{}' already has terminal successor(s); use --force to create another retry",
-                    root_run_id
-                ),
-                Some(root_run_id),
-                None,
-            ));
+            return Err(terminal_retry_successor_error(&source.run_id, &root_run_id));
         }
     }
     let frozen_preparation = reservation_metadata
@@ -6085,6 +6077,20 @@ fn successor_requires_force(record: &AgentTaskRunRecord) -> bool {
         return true;
     }
     record.metadata["provider_executions_consumed"].as_u64() != Some(0)
+}
+
+/// `recover` reaches this refusal too, and it takes no `--force`, so the
+/// message names the one command that creates another retry.
+fn terminal_retry_successor_error(source_run_id: &str, root_run_id: &str) -> Error {
+    let command = format!("homeboy agent-task retry {source_run_id} --force");
+    Error::validation_invalid_argument(
+        "force",
+        format!(
+            "retry lineage rooted at '{root_run_id}' already has terminal successor(s); create another retry with `{command}`"
+        ),
+        Some(root_run_id.to_string()),
+        Some(vec![command]),
+    )
 }
 
 fn active_retry_successor_error(record: &AgentTaskRunRecord) -> Error {

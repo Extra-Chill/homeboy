@@ -1076,6 +1076,11 @@ fn retry_lineage_does_not_require_force_after_continuation_only_cook_successors(
     let refused = reserve("continuation-only-third")
         .expect_err("a failed substantive successor still requires --force");
     assert_eq!(refused.details["field"], "force");
+    // `recover` reaches this refusal and takes no `--force`, so it names the command.
+    assert!(
+        refused.message.contains("homeboy agent-task retry ")
+            && refused.message.contains(" --force`")
+    );
 
     // Retrying the newest attempt continues its own chain instead of branching
     // beside it, so it needs no --force: `recover` plans exactly this retry.
