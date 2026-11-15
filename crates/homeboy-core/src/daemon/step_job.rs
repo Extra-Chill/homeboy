@@ -734,19 +734,26 @@ fn run_step(mut checkpoint: StepJobCheckpoint, job: &ControllerJobHandle) -> Res
         .public_env
         .get("HOMEBOY_LAB_CONCURRENCY_LIMIT")
         .and_then(|limit| limit.parse().ok());
+    let owner = checkpoint
+        .request
+        .root_durable_run_id
+        .as_deref()
+        .or(checkpoint.request.linked_durable_run_id.as_deref())
+        .unwrap_or(&checkpoint.request.key);
     let capacity_permit = if !checkpoint.request.waits_for_children {
-        let Some(permit) = crate::lab_capacity::acquire_step(limit, |position, capacity| {
-            if job.is_cancelled() {
-                return Ok(false);
-            }
-            job.progress(json!({
-                "waiting_for": "lab_capacity", "queue_position": position,
-                "load_average_1m": capacity.load_average_1m,
-                "effective_budget": capacity.effective_budget,
-                "eta_seconds": null,
-            }))?;
-            Ok(true)
-        })?
+        let Some(permit) =
+            crate::lab_capacity::acquire_step(limit, owner, |position, capacity| {
+                if job.is_cancelled() {
+                    return Ok(false);
+                }
+                job.progress(json!({
+                    "waiting_for": "lab_capacity", "queue_position": position,
+                    "load_average_1m": capacity.load_average_1m,
+                    "effective_budget": capacity.effective_budget,
+                    "eta_seconds": null,
+                }))?;
+                Ok(true)
+            })?
         else {
             return Ok(checkpoint.result());
         };
@@ -1611,9 +1618,10 @@ mod tests {
                 not_before_ms: None,
             };
             let request = super::super::workflow_job::step_request(&workflow, &submission).unwrap();
-            let permit = crate::lab_capacity::acquire_step(Some(1), |_, _| Ok(true))
-                .unwrap()
-                .unwrap();
+            let permit =
+                crate::lab_capacity::acquire_step(Some(1), "capacity-test", |_, _| Ok(true))
+                    .unwrap()
+                    .unwrap();
             let harness = step_harness(&request, home.path());
             harness.start_via_controller_boundary().unwrap();
             let deadline = Instant::now() + Duration::from_secs(10);
