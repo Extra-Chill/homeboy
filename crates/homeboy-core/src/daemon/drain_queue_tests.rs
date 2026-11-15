@@ -80,7 +80,7 @@ fn admission_during_drain_queues_for_the_replacement_daemon_to_admit() {
         let store = lease_store("drain-lease");
         drain_then_replace("drain-lease").expect("drain");
 
-        let response = route_with_job_store_and_body(
+        let response = route_with_body(
             "POST",
             "/controller/jobs",
             Some(json!({
@@ -100,8 +100,12 @@ fn admission_during_drain_queues_for_the_replacement_daemon_to_admit() {
         assert_eq!(admitted["admission"]["reason"], "daemon_draining");
         let job_id = Uuid::parse_str(admitted["job"]["id"].as_str().unwrap()).unwrap();
         // The draining lease never starts it, and it does not hold the drain.
-        let started =
-            route_with_job_store("POST", &format!("/controller/jobs/{job_id}/start"), &store);
+        let started = route_with_body(
+            "POST",
+            &format!("/controller/jobs/{job_id}/start"),
+            None,
+            &store,
+        );
         assert_eq!(payload(&started)["job"]["status"], "queued");
         assert_eq!(daemon_freshness_report(&store).unwrap().active_jobs, 0);
         assert!(store.has_pending_admissions());

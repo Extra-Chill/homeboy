@@ -2635,7 +2635,7 @@ fn cancelling_daemon_exec_job_terminates_process_tree() {
         homeboy_engine_primitives::shell::quote_path(&child_pid_file.display().to_string());
     let marker_path = homeboy_engine_primitives::shell::quote_path(&marker.display().to_string());
 
-    let response = route_with_job_store_and_body(
+    let response = route_with_body(
         "POST",
         "/exec",
         Some(crate::test_support::direct_exec_body(
@@ -2676,7 +2676,7 @@ fn cancelling_daemon_exec_job_terminates_process_tree() {
         "cancelled daemon runner exec left a child process running"
     );
 
-    let follow_up = route_with_job_store_and_body(
+    let follow_up = route_with_body(
         "POST",
         "/exec",
         Some(crate::test_support::direct_exec_body(
@@ -2930,22 +2930,22 @@ fn routes_job_inspection_against_daemon_job_store() {
     let store = JobStore::default();
     let job = store.create("lint");
 
-    let list = route_with_job_store("GET", "/jobs", &store);
+    let list = route_with_body("GET", "/jobs", None, &store);
     assert_eq!(list.status_code, 200);
     assert_eq!(list.body["endpoint"], "jobs.list");
     assert_eq!(list.body["body"]["jobs"].as_array().unwrap().len(), 1);
 
-    let show = route_with_job_store("GET", &format!("/jobs/{}", job.id), &store);
+    let show = route_with_body("GET", &format!("/jobs/{}", job.id), None, &store);
     assert_eq!(show.status_code, 200);
     assert_eq!(show.body["endpoint"], "jobs.show");
     assert_eq!(show.body["body"]["job"]["operation"], "lint");
 
-    let events = route_with_job_store("GET", &format!("/jobs/{}/events", job.id), &store);
+    let events = route_with_body("GET", &format!("/jobs/{}/events", job.id), None, &store);
     assert_eq!(events.status_code, 200);
     assert_eq!(events.body["endpoint"], "jobs.events");
     assert_eq!(events.body["body"]["events"].as_array().unwrap().len(), 1);
 
-    let cancel = route_with_job_store("POST", &format!("/jobs/{}/cancel", job.id), &store);
+    let cancel = route_with_body("POST", &format!("/jobs/{}/cancel", job.id), None, &store);
     assert_eq!(cancel.status_code, 200);
     assert_eq!(cancel.body["endpoint"], "jobs.cancel");
     assert_eq!(cancel.body["body"]["job"]["status"], "cancelled");
@@ -3078,7 +3078,7 @@ fn daemon_http_error_envelope_includes_error_payload() {
 #[test]
 fn routes_json_body_to_analysis_enqueue() {
     let store = JobStore::default();
-    let response = route_with_job_store_and_body(
+    let response = route_with_body(
         "POST",
         "/lint",
         Some(serde_json::json!({
@@ -3099,7 +3099,7 @@ fn routes_json_body_to_analysis_enqueue() {
 #[test]
 fn route_with_body_refuses_exec_requests_without_runner_submission() {
     let _home = HomeGuard::new();
-    let response = route_with_job_store_and_body(
+    let response = route_with_body(
         "POST",
         "/exec",
         Some(serde_json::json!({
@@ -3129,7 +3129,7 @@ fn routes_exec_body_to_daemon_job() {
     super::tests::register_enqueue_test_driver();
     let _home = create_lab_local_runner();
     let store = JobStore::default();
-    let response = route_with_job_store_and_body(
+    let response = route_with_body(
         "POST",
         "/exec",
         Some(crate::test_support::direct_exec_body(
@@ -3338,7 +3338,7 @@ fn routes_exec_preserves_path_materialization_plan_on_job_metadata() {
             }
         ]
     });
-    let response = route_with_job_store_and_body(
+    let response = route_with_body(
         "POST",
         "/exec",
         Some(crate::test_support::direct_exec_body(
