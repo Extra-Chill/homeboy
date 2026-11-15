@@ -803,6 +803,19 @@ mod tests {
     }
 
     #[test]
+    fn a_busy_stale_daemon_is_left_to_replace_itself() {
+        for reason in [
+            DaemonStaleReasonCode::VersionMismatch,
+            DaemonStaleReasonCode::BuildIdentityMismatch,
+            DaemonStaleReasonCode::ExecutableReplaced,
+        ] {
+            let report = status(Some(reason), Vec::new(), 2);
+            assert!(!authorizes_automatic_idle_restart(&report));
+            assert!(!super::super::converge_idle_daemon(report).expect("no refusal"));
+        }
+    }
+
+    #[test]
     fn reachable_version_mismatch_with_active_jobs_never_offers_attestation() {
         let mut status = status(
             Some(super::super::DaemonStaleReasonCode::VersionMismatch),

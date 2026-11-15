@@ -374,7 +374,7 @@ pub(super) fn intercept_local_detached_cook(
         );
         if let Ok(status) = homeboy::core::daemon::read_status() {
             envelope["daemon_admission"] = status.admission_report();
-            if status.stale_serving() {
+            if status.draining() {
                 eprintln!("{}", status.render_summary());
             }
         }
