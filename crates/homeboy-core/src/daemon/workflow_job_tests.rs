@@ -571,8 +571,7 @@ fn stale_daemon_hands_a_running_workflow_step_to_its_replacement() {
         let child = store
             .controller_job_for_key(&format!("{}/a/1/1", request.instance))
             .unwrap();
-        let evidence =
-            store.active_daemon_job_recovery_evidence(Some(&lease.lease_id), pid_is_running);
+        let evidence = store.active_daemon_job_recovery_evidence(Some(&lease.lease_id));
         for id in [job_id, child.id] {
             assert_eq!(
                 evidence

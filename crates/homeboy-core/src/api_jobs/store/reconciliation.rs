@@ -114,10 +114,13 @@ impl JobStore {
     /// intentionally not used to infer ownership. A terminal linked durable run
     /// proves absence for a generic handoff, but driver-owned supervision must
     /// collect its own outcome: its launcher may outlive a linked attempt.
+    ///
+    /// Only jobs this store's daemon answers for are reported; see
+    /// [`Self::answers_for`]. `current_lease_id` is the lease of the daemon
+    /// serving right now, if one is.
     pub fn active_daemon_job_recovery_evidence(
         &self,
         current_lease_id: Option<&str>,
-        _pid_is_alive: impl Fn(u32) -> bool,
     ) -> Vec<DaemonActiveJobRecoveryEvidence> {
         let inner = self.inner.lock().expect("job store mutex poisoned");
         let mut evidence = inner
@@ -211,6 +214,13 @@ impl JobStore {
                 } else {
                     DaemonActiveJobRecoveryDisposition::BlockingAmbiguous
                 };
+                // A dead generation's in-scope job awaiting attestation is
+                // this scope's to attest whatever its lease (#17429).
+                if disposition != DaemonActiveJobRecoveryDisposition::NeedsAttestation
+                    && !self.answers_for(job.daemon_lease_id.as_deref())
+                {
+                    return None;
+                }
                 Some(DaemonActiveJobRecoveryEvidence {
                     job_id: job.id,
                     operation: job.operation.clone(),
@@ -240,10 +250,9 @@ impl JobStore {
     pub(crate) fn active_daemon_job_recovery_evidence_with_linked_durable_run_resolver(
         &self,
         current_lease_id: Option<&str>,
-        pid_is_alive: impl Fn(u32) -> bool,
         resolve_linked: impl Fn(&StoredJob) -> LinkedDurableRunResolution,
     ) -> Vec<DaemonActiveJobRecoveryEvidence> {
-        let mut evidence = self.active_daemon_job_recovery_evidence(current_lease_id, pid_is_alive);
+        let mut evidence = self.active_daemon_job_recovery_evidence(current_lease_id);
         let inner = self.inner.lock().expect("job store mutex poisoned");
         for item in &mut evidence {
             let Some(stored) = inner.jobs.get(&item.job_id) else {
@@ -799,6 +808,18 @@ impl JobStore {
         match (self.daemon_lease_id.as_deref(), job_lease_id) {
             (Some(own), Some(job)) => own == job,
             _ => true,
+        }
+    }
+
+    /// Whether this store's daemon answers for a job stamped with
+    /// `job_lease_id` in the shared ledger (#16089): its own lease, or an
+    /// unstamped record with no proven owner. A state dir with no lease
+    /// answers only for unstamped records: it cannot own a job another daemon
+    /// stamped, even one that predates scope stamps (#16798).
+    fn answers_for(&self, job_lease_id: Option<&str>) -> bool {
+        match self.daemon_lease_id.as_deref() {
+            Some(own) => job_lease_id.is_none_or(|job| job == own),
+            None => job_lease_id.is_none(),
         }
     }
 

@@ -466,7 +466,7 @@ fn staging_dispatch_cancelled_before_child_identity_is_reconciled_not_orphaned()
         .start_controller_execution(job_id)
         .expect("claim execution");
 
-    let evidence = store.active_daemon_job_recovery_evidence(None, |_| false);
+    let evidence = store.active_daemon_job_recovery_evidence(None);
     let item = evidence
         .iter()
         .find(|evidence| evidence.job_id == job_id)
@@ -517,7 +517,7 @@ fn terminal_linked_agent_task_cannot_leave_running_staging_dispatch_job() {
         .start_controller_execution(job_id)
         .expect("claim execution");
 
-    let evidence = store.active_daemon_job_recovery_evidence(None, |_| false);
+    let evidence = store.active_daemon_job_recovery_evidence(None);
     let item = evidence
         .iter()
         .find(|evidence| evidence.job_id == job_id)
@@ -563,7 +563,7 @@ fn unknown_unlinked_live_job_still_blocks_replacement() {
         .start_controller_execution(job_id)
         .expect("claim execution");
 
-    let evidence = store.active_daemon_job_recovery_evidence(None, |_| false);
+    let evidence = store.active_daemon_job_recovery_evidence(None);
     let item = evidence
         .iter()
         .find(|evidence| evidence.job_id == job_id)
@@ -608,7 +608,7 @@ fn checkpointed_in_daemon_staging_dispatch_is_preserved_for_resume_after_dead_le
         )
         .expect("publish checkpoint");
 
-    let evidence = store.active_daemon_job_recovery_evidence(Some("lease-dead"), |_| false);
+    let evidence = store.active_daemon_job_recovery_evidence(Some("lease-dead"));
     let item = evidence
         .iter()
         .find(|evidence| evidence.job_id == job_id)
@@ -648,7 +648,7 @@ fn uncheckpointed_in_daemon_staging_dispatch_is_left_for_attestation_after_dead_
         .start_controller_execution(job_id)
         .expect("claim execution");
 
-    let evidence = store.active_daemon_job_recovery_evidence(Some("lease-dead"), |_| false);
+    let evidence = store.active_daemon_job_recovery_evidence(Some("lease-dead"));
     let item = evidence
         .iter()
         .find(|evidence| evidence.job_id == job_id)
