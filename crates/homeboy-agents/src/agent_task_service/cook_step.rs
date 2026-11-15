@@ -174,6 +174,7 @@ pub fn cook_launch_step_request(
         env,
         COOK_STEP_TERMINAL_CONSUMER,
     )
+    .with_child_wait()
     .with_linked_durable_run_id(cook_id)
 }
 
