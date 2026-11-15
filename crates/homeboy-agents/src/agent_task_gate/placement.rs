@@ -103,6 +103,49 @@ pub struct LabGateRequest {
     pub declared_plan: Option<homeboy_engine_primitives::test_execution::TestExecutionPlan>,
     pub timeout_seconds: u64,
     pub no_progress_timeout_seconds: u64,
+    /// Repository-relative directory of the gate when the candidate is a
+    /// subdirectory component of its Git repository (#17235). The candidate
+    /// fingerprint always names the repository-root tree, so the Lab
+    /// materializes the repository root and runs the gate from this subpath
+    /// inside it. Absent for repository-root candidates.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub candidate_subpath: Option<String>,
+}
+
+/// The repository-relative subpath of a Git candidate's working directory, or
+/// `None` when the candidate is the repository root or not a Git workspace.
+/// The candidate fingerprint is repository-rooted (`candidate_tree` writes the
+/// whole index), so the Lab must materialize that same root (#17235).
+pub fn candidate_subpath(
+    cwd: &Path,
+    candidate: &AgentTaskPromotionCandidate,
+) -> Result<Option<String>> {
+    if !matches!(candidate, AgentTaskPromotionCandidate::Git { .. }) {
+        return Ok(None);
+    }
+    let prefix = homeboy_core::git::run_git(
+        cwd,
+        &["rev-parse", "--show-prefix"],
+        "resolve Lab gate candidate subpath",
+    )?;
+    let prefix = prefix.trim().trim_end_matches('/');
+    Ok((!prefix.is_empty()).then(|| prefix.to_string()))
+}
+
+/// A repository-relative gate subpath, as plain descending components.
+fn validated_subpath(subpath: &str) -> Result<&Path> {
+    let path = Path::new(subpath);
+    if subpath.is_empty()
+        || !path
+            .components()
+            .all(|component| matches!(component, std::path::Component::Normal(_)))
+    {
+        return Err(Error::invalid_argument(
+            "gate.candidate_subpath",
+            format!("Lab gate candidate subpath `{subpath}` is not a repository-relative path"),
+        ));
+    }
+    Ok(path)
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -172,8 +215,60 @@ impl LabGateRequest {
             })
     }
 
+    /// Controller side: the directory the Lab materializes for this gate. A
+    /// subdirectory candidate materializes its repository root, the tree its
+    /// fingerprint names, rather than the subdirectory as its own Git root.
+    pub fn materialization_root(&self, cwd: &Path) -> Result<PathBuf> {
+        let Some(subpath) = self.candidate_subpath.as_deref() else {
+            return Ok(cwd.to_path_buf());
+        };
+        let subpath = validated_subpath(subpath)?;
+        let canonical = fs::canonicalize(cwd).map_err(|error| {
+            Error::internal_io(error.to_string(), Some(cwd.display().to_string()))
+        })?;
+        let mut root = canonical.as_path();
+        if !root.ends_with(subpath) {
+            return Err(Error::invalid_argument(
+                "gate.candidate_subpath",
+                format!(
+                    "Lab gate candidate subpath `{}` is not a suffix of {}",
+                    subpath.display(),
+                    canonical.display()
+                ),
+            ));
+        }
+        for _ in subpath.components() {
+            root = root.parent().ok_or_else(|| {
+                Error::invalid_argument(
+                    "gate.candidate_subpath",
+                    "Lab gate candidate subpath escapes the filesystem root",
+                )
+            })?;
+        }
+        Ok(root.to_path_buf())
+    }
+
+    /// Runner side: the gate's working directory inside the materialized
+    /// repository root `root`.
+    pub fn gate_cwd(&self, root: &Path) -> Result<PathBuf> {
+        let Some(subpath) = self.candidate_subpath.as_deref() else {
+            return Ok(root.to_path_buf());
+        };
+        let cwd = root.join(validated_subpath(subpath)?);
+        if !cwd.is_dir() {
+            return Err(Error::invalid_argument(
+                "gate.candidate_subpath",
+                format!(
+                    "Lab gate candidate subpath `{subpath}` is not a directory of the materialized workspace"
+                ),
+            ));
+        }
+        Ok(cwd)
+    }
+
     /// Snapshot materialization may change the index projection and absolute
     /// path, but must retain the recorded HEAD and exact candidate tree.
+    /// `cwd` is the materialized repository root (see `candidate_subpath`).
     pub fn verify_materialized_candidate(&self, cwd: &Path) -> Result<()> {
         match self.materialized_candidate_mismatch(cwd)? {
             Some(mismatch) => Err(mismatch.error),
@@ -866,12 +961,14 @@ pub(super) fn preflight(
 ) -> Result<()> {
     // A skewed runner is admitted when it binds the readiness receipt; a
     // binding failure names the skew (#17761, #17856).
+    let candidate = candidate_fingerprint(&cwd.display().to_string())?;
     let request = LabGateRequest {
         schema: LabGateRequestSchema::V2,
         preflight_only: true,
         toolchains: toolchains.to_vec(),
         runner_id: runner_id.to_string(),
-        candidate: candidate_fingerprint(&cwd.display().to_string())?,
+        candidate_subpath: candidate_subpath(cwd, &candidate)?,
+        candidate,
         index: 0,
         argv: vec![],
         label: String::new(),
@@ -994,7 +1091,12 @@ fn execute_with_context_and_resources(
             "Lab gate requires the selected authenticated runner owner",
         ));
     }
+    // `cwd` is the materialized repository root: the candidate is verified
+    // there, and the gate runs from the candidate's subpath inside it.
     request.verify_materialized_candidate(cwd)?;
+    let root = cwd;
+    let cwd = request.gate_cwd(root)?;
+    let cwd = cwd.as_path();
     let mut environment = request.environment.clone();
     let mut playwright_provenance = None;
     environment.lab_runner = None;
@@ -1203,7 +1305,7 @@ fn execute_with_context_and_resources(
     }
     // The gate already ran: a changed tree fails it with its evidence intact.
     // Without an executed gate (or a typed tree diff) the mismatch stays fatal.
-    if let Some(mismatch) = request.materialized_candidate_mismatch(cwd)? {
+    if let Some(mismatch) = request.materialized_candidate_mismatch(root)? {
         match mismatch.mutation {
             Some(mutation) if readiness.is_none() => {
                 fail_for_workspace_mutation(&mut report, &request.label, mutation)
@@ -1619,6 +1721,7 @@ mod tests {
             declared_plan: None,
             timeout_seconds: 30,
             no_progress_timeout_seconds: 30,
+            candidate_subpath: None,
         }
     }
 
@@ -1783,6 +1886,147 @@ mod tests {
         assert!(error.message.contains("candidate.txt"));
         assert!(error.message.contains("plugins/example/tests/new.txt"));
         assert_ne!(error.details["expected_tree"], error.details["actual_tree"]);
+    }
+
+    fn git(root: &Path, args: &[&str]) {
+        assert!(Command::new("git")
+            .args(args)
+            .current_dir(root)
+            .status()
+            .unwrap()
+            .success());
+    }
+
+    /// A monorepo whose component lives in `plugins/comp` (#17235).
+    fn subdirectory_component_repository(root: &Path) -> PathBuf {
+        repository(root);
+        fs::create_dir_all(root.join(".github/workflows")).unwrap();
+        fs::write(root.join(".github/workflows/ci.yml"), "on: push\n").unwrap();
+        let component = root.join("plugins/comp");
+        fs::create_dir_all(component.join("docs")).unwrap();
+        fs::write(component.join("comp.php"), "<?php // component\n").unwrap();
+        fs::write(component.join("docs/readme.md"), "docs\n").unwrap();
+        git(root, &["add", "."]);
+        git(root, &["commit", "-qm", "component"]);
+        component
+    }
+
+    /// The Lab materializes the repository at the recorded HEAD: a clone.
+    fn lab_materialization(source: &Path, lab: &Path) -> PathBuf {
+        git(
+            lab,
+            &["clone", "-q", &source.display().to_string(), "workspace"],
+        );
+        let workspace = lab.join("workspace");
+        for args in [
+            vec!["config", "user.name", "Fixture"],
+            vec!["config", "user.email", "fixture@example.invalid"],
+        ] {
+            git(&workspace, &args);
+        }
+        workspace
+    }
+
+    fn subdirectory_request(component: &Path) -> LabGateRequest {
+        let mut request = request(component);
+        request.candidate_subpath = candidate_subpath(component, &request.candidate).unwrap();
+        request.argv = vec![
+            "sh".to_string(),
+            "-c".to_string(),
+            "test -f comp.php && test -f docs/readme.md && pwd -P".to_string(),
+        ];
+        request
+    }
+
+    #[test]
+    fn subdirectory_candidate_materializes_repository_root_and_gates_from_subpath() {
+        homeboy_core::test_support::with_isolated_home(|_| {
+            let controller = tempfile::tempdir().unwrap();
+            let component = subdirectory_component_repository(controller.path());
+            let request = subdirectory_request(&component);
+            assert_eq!(request.candidate_subpath.as_deref(), Some("plugins/comp"));
+            // The controller fingerprint is repository-rooted.
+            let AgentTaskPromotionCandidate::Git { fingerprint } = &request.candidate else {
+                panic!("subdirectory candidate is a Git candidate");
+            };
+            let head_tree = homeboy_core::git::run_git(
+                controller.path(),
+                &["rev-parse", "HEAD^{tree}"],
+                "head tree",
+            )
+            .unwrap();
+            assert_eq!(fingerprint.tree, head_tree.trim());
+            assert_eq!(
+                request.materialization_root(&component).unwrap(),
+                fs::canonicalize(controller.path()).unwrap()
+            );
+            let serialized = serde_json::to_value(&request).unwrap();
+            assert_eq!(serialized["candidate_subpath"], "plugins/comp");
+
+            let lab = tempfile::tempdir().unwrap();
+            let workspace = lab_materialization(controller.path(), lab.path());
+            request.verify_materialized_candidate(&workspace).unwrap();
+            let gate_cwd = request.gate_cwd(&workspace).unwrap();
+            assert_eq!(gate_cwd, workspace.join("plugins/comp"));
+
+            let receipt =
+                execute_with_context(request.clone(), &workspace, &lab_context()).unwrap();
+            assert_eq!(receipt.report.status, AgentTaskGateStatus::Succeeded);
+            assert_eq!(
+                receipt.report.stdout.trim(),
+                fs::canonicalize(&gate_cwd).unwrap().display().to_string()
+            );
+            request.verify_receipt(&receipt).unwrap();
+        });
+    }
+
+    #[test]
+    fn subdirectory_candidate_rejects_changed_component_content() {
+        homeboy_core::test_support::with_isolated_home(|_| {
+            let controller = tempfile::tempdir().unwrap();
+            let component = subdirectory_component_repository(controller.path());
+            let request = subdirectory_request(&component);
+            let lab = tempfile::tempdir().unwrap();
+            let workspace = lab_materialization(controller.path(), lab.path());
+            fs::write(
+                workspace.join("plugins/comp/comp.php"),
+                "<?php // altered\n",
+            )
+            .unwrap();
+
+            let error = request
+                .verify_materialized_candidate(&workspace)
+                .unwrap_err();
+            assert_eq!(
+                error.details["differing_paths"],
+                serde_json::json!(["plugins/comp/comp.php"])
+            );
+            assert!(execute_with_context(request, &workspace, &lab_context()).is_err());
+        });
+    }
+
+    #[test]
+    fn candidate_subpath_is_absent_for_root_candidates_and_contained_on_the_runner() {
+        let temp = tempfile::tempdir().unwrap();
+        repository(temp.path());
+        let mut request = request(temp.path());
+        assert_eq!(
+            candidate_subpath(temp.path(), &request.candidate).unwrap(),
+            None
+        );
+        assert!(serde_json::to_value(&request)
+            .unwrap()
+            .get("candidate_subpath")
+            .is_none());
+        assert_eq!(
+            request.materialization_root(temp.path()).unwrap(),
+            temp.path()
+        );
+        assert_eq!(request.gate_cwd(temp.path()).unwrap(), temp.path());
+        for subpath in ["../escape", "/absolute", "plugins/../..", "missing"] {
+            request.candidate_subpath = Some(subpath.to_string());
+            assert!(request.gate_cwd(temp.path()).is_err(), "{subpath}");
+        }
     }
 
     #[test]

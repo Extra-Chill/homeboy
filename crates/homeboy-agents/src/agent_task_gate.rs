@@ -2707,14 +2707,15 @@ fn run_gate_argv(
         // with 300s/1800s (#15856).
         let scope = crate::agent_task_promotion::active_gate_supervision();
         let supervision = execution.supervision.or(scope.as_deref());
+        let candidate =
+            crate::agent_task_promotion::candidate_fingerprint(&cwd.display().to_string())?;
         let request = placement::LabGateRequest {
             schema: placement::LabGateRequestSchema::V2,
             preflight_only: false,
             toolchains: vec![],
             runner_id,
-            candidate: crate::agent_task_promotion::candidate_fingerprint(
-                &cwd.display().to_string(),
-            )?,
+            candidate_subpath: placement::candidate_subpath(cwd, &candidate)?,
+            candidate,
             index,
             argv: command_vec,
             label: command.to_string(),

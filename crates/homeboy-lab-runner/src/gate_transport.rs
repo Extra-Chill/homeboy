@@ -506,9 +506,12 @@ fn execute_owned(
             .display()
             .to_string();
     }
+    // A subdirectory candidate materializes its repository root, the tree
+    // its fingerprint names; the gate runs from the subpath inside it (#17235).
+    let candidate_root = request.materialization_root(cwd)?;
     let mut candidate_workspace = materialize_gate_workspace(
         &request.runner_id,
-        cwd,
+        &candidate_root,
         crate::RunnerWorkspaceSyncMode::SnapshotGit,
         run_id,
         homeboy_agents::agent_tasks::gate::component_lint_base(&request.label),
