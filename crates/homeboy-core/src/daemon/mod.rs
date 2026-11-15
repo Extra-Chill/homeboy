@@ -8386,9 +8386,6 @@ mod tests {
 
     #[test]
     fn direct_daemon_agent_task_request_uses_workload_identity_for_capacity_admission() {
-        // Pin an unpressured host: a busy CI runner would otherwise queue the job.
-        let _pressure =
-            crate::test_support::EnvVarGuard::set(crate::runner_pressure::SAMPLE_ENV, "{}");
         runner_exec_driver::register_runner_exec_driver(Arc::new(EnqueueTestDriver));
         let store = JobStore::default();
         let response = enqueue_exec_job(
