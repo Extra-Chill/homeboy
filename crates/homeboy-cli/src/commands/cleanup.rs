@@ -4603,9 +4603,6 @@ fn remote_lab_workspace_categories(
     cursor: Option<&str>,
 ) -> homeboy::core::Result<Vec<CleanupInventoryCategory>> {
     let mut categories = Vec::new();
-    let cursors: BTreeMap<String, String> = cursor
-        .and_then(|cursor| serde_json::from_str(cursor).ok())
-        .unwrap_or_default();
     for status in runner::statuses()? {
         if !remote_workspace_cleanup_connected(&status) {
             categories.push(CleanupInventoryCategory {
@@ -4641,17 +4638,7 @@ fn remote_lab_workspace_categories(
         }
         let output = match prune_automatic_workspace_page(
             &status.runner_id,
-            RunnerWorkspacePruneOptions {
-                apply,
-                min_age_hours: policy.runner_min_age_hours,
-                // A page size, not a delete budget: `--limit` is a record
-                // budget for row-driven categories and is deliberately not
-                // wired here. See `cleanup::RUNNER_WORKSPACE_PAGE_LIMIT`.
-                limit: policy.runner_workspace_page_limit,
-                passes: CleanupPolicy::runner_workspace_passes(apply),
-                cursor: cursors.get(&status.runner_id).cloned(),
-                ..RunnerWorkspacePruneOptions::default()
-            },
+            workspace_prune_page_options(policy, apply, cursor, &status.runner_id),
         ) {
             Ok((output, _)) => output,
             Err(error) => {
@@ -4671,6 +4658,30 @@ fn remote_lab_workspace_categories(
         categories.push(remote_workspace_category(output, apply)?);
     }
     Ok(categories)
+}
+
+/// One remote workspace prune page for `runner_id`, resuming at that runner's
+/// position in `cursors` (the automatic pass's per-runner map, as JSON).
+fn workspace_prune_page_options(
+    policy: CleanupPolicy,
+    apply: bool,
+    cursors: Option<&str>,
+    runner_id: &str,
+) -> RunnerWorkspacePruneOptions {
+    let cursor = cursors
+        .and_then(|cursors| serde_json::from_str::<BTreeMap<String, String>>(cursors).ok())
+        .and_then(|mut cursors| cursors.remove(runner_id));
+    RunnerWorkspacePruneOptions {
+        apply,
+        min_age_hours: policy.runner_min_age_hours,
+        // A page size, not a delete budget: `--limit` is a record
+        // budget for row-driven categories and is deliberately not
+        // wired here. See `cleanup::RUNNER_WORKSPACE_PAGE_LIMIT`.
+        limit: policy.runner_workspace_page_limit,
+        passes: CleanupPolicy::runner_workspace_passes(apply),
+        cursor,
+        ..RunnerWorkspacePruneOptions::default()
+    }
 }
 
 fn prune_automatic_workspace_page(
@@ -6659,16 +6670,18 @@ mod tests {
             // The production phase: the pass's stored cursors in, the page out.
             let run_phase = |pass: &mut cleanup::AutomaticRetentionPass| {
                 let cursors = serde_json::to_string(pass.remote_workspace_cursors()).unwrap();
-                let categories =
-                    remote_lab_workspace_categories(policy, false, Some(&cursors)).unwrap();
-                save_remote_workspace_cursors(pass, &categories);
-                let page = categories
-                    .into_iter()
-                    .find(|category| category.output["runner_id"] == "cursor-test")
-                    .expect("cursor-test runner scanned");
-                let candidates = page.output["candidates"].as_array().cloned().unwrap();
-                assert_eq!(candidates.len(), 1, "{:?}", page.output);
-                candidates[0]["remote_path"].as_str().unwrap().to_string()
+                // The production per-runner body, minus the connection check
+                // a local test runner cannot pass.
+                let options =
+                    workspace_prune_page_options(policy, false, Some(&cursors), "cursor-test");
+                let (page, _) = prune_automatic_workspace_page("cursor-test", options).unwrap();
+                assert_eq!(page.candidates.len(), 1, "{page:?}");
+                let path = page.candidates[0].remote_path.clone();
+                save_remote_workspace_cursors(
+                    pass,
+                    &[remote_workspace_category(page, false).unwrap()],
+                );
+                path
             };
 
             let mut first = begin();
