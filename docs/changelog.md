@@ -4,6 +4,14 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.465.9] - 2026-11-15
+
+### Changed
+- Settle runner exec children that exited between daemons
+
+### Fixed
+- an unmaterialized Cook plans a runnable relaunch instead of a retry recover refuses
+
 ## [0.465.8] - 2026-11-15
 
 ### Changed
