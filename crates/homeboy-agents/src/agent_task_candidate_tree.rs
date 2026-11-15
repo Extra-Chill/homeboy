@@ -36,6 +36,41 @@ pub(crate) fn validate_immutable_candidate_tree(root: &Path, candidate_sha: &str
     Ok(())
 }
 
+/// Freeze the readable current workspace without modifying its index or checkout.
+/// A published head is used directly; uncommitted adopted changes get a private
+/// commit so provider admission still has an immutable baseline.
+pub(crate) fn current_workspace_candidate(
+    root: &Path,
+) -> Result<crate::agent_task::AgentTaskCandidate> {
+    let head = git(root, &["rev-parse", "HEAD"])?;
+    let tree = workspace_tree(root)?;
+    let head_tree = git(root, &["rev-parse", "HEAD^{tree}"])?;
+    let commit = if tree == head_tree {
+        head.clone()
+    } else {
+        git(
+            root,
+            &[
+                "-c",
+                "user.name=Homeboy",
+                "-c",
+                "user.email=homeboy@localhost",
+                "commit-tree",
+                &tree,
+                "-p",
+                &head,
+                "-m",
+                "homeboy: current Cook baseline",
+            ],
+        )?
+    };
+    Ok(crate::agent_task::AgentTaskCandidate {
+        base_sha: head,
+        candidate_sha: commit,
+        tree_sha: tree,
+    })
+}
+
 pub(crate) fn workspace_tree(root: &Path) -> Result<String> {
     let index = homeboy_core::git::private_index(root)?;
     let index_path = index.path().display().to_string();

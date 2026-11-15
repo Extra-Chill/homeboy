@@ -901,10 +901,16 @@ fn retry_rebuilds_follow_up_candidate_from_durable_promotion() {
             restored_task.metadata["verified_cook_baseline"]["source_run_id"],
             source_run
         );
+        // Retry admits the current workspace, not the historical promotion
+        // commit. Its private snapshot may have a different message/timestamp.
+        let baseline_commit = restored_task.metadata["verified_cook_baseline"]["baseline_commit"]
+            .as_str()
+            .expect("admitted baseline commit");
         assert_eq!(
-            restored_task.metadata["verified_cook_baseline"]["baseline_commit"],
-            candidate.candidate_sha
+            git(&["rev-parse", &format!("{baseline_commit}^{{tree}}")]),
+            candidate.tree_sha
         );
+        assert_eq!(git(&["rev-parse", &format!("{baseline_commit}^")]), head);
         assert_eq!(
             restored_task.metadata["verified_cook_baseline"]["baseline_tree"],
             candidate.tree_sha

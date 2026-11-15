@@ -44,6 +44,14 @@ fn admitted_gate_reads_snapshot_and_replays_after_source_mutation() {
     assert_eq!(report.environment.data_inputs, policy.data_inputs);
     let replay = report.environment.replay_policy();
     assert_eq!(replay.data_inputs, policy.data_inputs);
+    // The default store lives under the hermetic runner's HOME. Sealed tree
+    // directories must be writable again before that runner removes its root.
+    assert!(std::process::Command::new("chmod")
+        .args(["-R", "u+w"])
+        .arg(input.path_in(&root).unwrap())
+        .status()
+        .unwrap()
+        .success());
 }
 
 #[cfg(unix)]

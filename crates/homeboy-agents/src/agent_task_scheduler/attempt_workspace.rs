@@ -322,7 +322,7 @@ pub(super) fn prepare_committed_harvest(
             candidate_baseline: None,
         });
     }
-    let source_provenance = if let Some(capability) = derived_cook_baseline {
+    let mut source_provenance = if let Some(capability) = derived_cook_baseline {
         validate_derived_cook_baseline(root, request, capability, context)?;
         Some(serde_json::json!({
             "verified_cook_baseline": capability.verified_baseline_provenance(),
@@ -440,6 +440,13 @@ pub(super) fn prepare_committed_harvest(
                 .unwrap_or_else(|| verified_gate_feedback_baseline(root, request, &status))?,
         )
     };
+    if let Some(candidate) = candidate_baseline.as_ref() {
+        let evidence = source_provenance.get_or_insert_with(|| serde_json::json!({}));
+        evidence["baseline_admission"] = serde_json::json!({
+            "recorded_candidate": request.inputs.pointer("/cook_loop/candidate_commit"),
+            "admitted_candidate": candidate,
+        });
+    }
     #[cfg(test)]
     run_snapshot_fence_test_hook();
     // The fence deliberately reads after the hook/boundary: an earlier source
@@ -659,13 +666,22 @@ fn verified_gate_feedback_baseline(
             status: status.to_string(),
         });
     }
-    crate::agent_task_candidate_tree::validate_gate_feedback_candidate_baseline(
-        root,
-        &serde_json::Value::Object(cook_loop.clone()),
-    )
-    .map_err(|error| HarvestError::CandidateTreeMismatch {
-        message: error.message,
-    })
+    let baseline = serde_json::Value::Object(cook_loop.clone());
+    // Keep strict immutable validation for promotion; admission can instead
+    // freeze the current adopted workspace when a previous candidate drifted.
+    crate::agent_task_candidate_tree::validate_gate_feedback_candidate_baseline(root, &baseline)
+        .or_else(|error| {
+            if baseline
+                .get("candidate_commit")
+                .is_none_or(serde_json::Value::is_null)
+            {
+                return Err(error);
+            }
+            crate::agent_task_candidate_tree::current_workspace_candidate(root)
+        })
+        .map_err(|error| HarvestError::CandidateTreeMismatch {
+            message: error.message,
+        })
 }
 
 fn snapshot_harvest_error(cwd: &Path, message: String) -> HarvestError {

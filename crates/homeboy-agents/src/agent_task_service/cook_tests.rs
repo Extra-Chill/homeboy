@@ -8385,6 +8385,16 @@ fn verified_empty_attempt_dispatches_the_next_rotation_route() {
             .expect("fixture HEAD")
             .trim()
             .to_string();
+        // The PR advances after the previous promotion was recorded.
+        let previous_candidate = crate::agent_task_promotion::tests::candidate_snapshot::snapshot(
+            &repo,
+            &target_head,
+            &run_id,
+        );
+        std::fs::write(repo.join("unrelated.txt"), "maintainer change\n").unwrap();
+        git_output(&repo, &["add", "."]).unwrap();
+        git_output(&repo, &["commit", "-m", "advance published PR"]).unwrap();
+        let advanced_head = git_output(&repo, &["rev-parse", "HEAD"]).unwrap();
         let provenance_worktree = repo.display().to_string();
         let finalizations = Arc::new(AtomicUsize::new(0));
         let finalize_count = Arc::clone(&finalizations);
@@ -8403,7 +8413,7 @@ fn verified_empty_attempt_dispatches_the_next_rotation_route() {
                         "gate_results": [],
                         "operator_notification": {"status": "completed", "message": "complete"},
                         "verified_base": {"base": "main", "sha": target_head},
-                        "provenance": {"worktree_path": provenance_worktree, "candidate_commit": crate::agent_task_promotion::tests::candidate_snapshot::snapshot(std::path::Path::new(&provenance_worktree), &target_head, run_id)}
+                        "provenance": {"worktree_path": provenance_worktree, "candidate_commit": previous_candidate}
                     }))
                     .expect("no-change promotion fixture");
                 lifecycle_store.record_promotion(
@@ -8439,6 +8449,15 @@ fn verified_empty_attempt_dispatches_the_next_rotation_route() {
             .find(|attempt| attempt.attempt == 2)
             .expect("persisted follow-up attempt");
         let follow_up_task = &follow_up.plan.tasks[0];
+        let admitted_root = std::path::Path::new(follow_up_task.workspace.root.as_deref().unwrap());
+        assert_eq!(
+            git_output(admitted_root, &["rev-parse", "HEAD"]).unwrap(),
+            advanced_head
+        );
+        assert_eq!(
+            std::fs::read_to_string(admitted_root.join("unrelated.txt")).unwrap(),
+            "maintainer change\n"
+        );
         assert_eq!(
             follow_up_task.executor.model(),
             Some("fixture-fallback"),

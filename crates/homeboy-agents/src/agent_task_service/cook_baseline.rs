@@ -24,7 +24,7 @@ use crate::agent_task_gate::{
     AgentTaskGateBaselineComparison, AgentTaskGateDifferentialResult, AgentTaskGateInvocation,
     AgentTaskGateStatus,
 };
-use crate::agent_task_promotion::{AgentTaskPromotionReport, AgentTaskPromotionStatus};
+use crate::agent_task_promotion::AgentTaskPromotionReport;
 use crate::agent_task_scheduler::AgentTaskPlan;
 use homeboy_core::{Error, Result};
 
@@ -53,6 +53,7 @@ pub struct DerivedCookBaselineCapability {
     bound_task_id: String,
     parent_snapshot: Option<Value>,
     preexisting_candidate: bool,
+    baseline_admission: Option<Value>,
 }
 
 impl DerivedCookBaselineCapability {
@@ -91,6 +92,7 @@ impl DerivedCookBaselineCapability {
                     .or_else(|| snapshot.get("identity").cloned())
             }),
             "preexisting_candidate": self.preexisting_candidate,
+            "baseline_admission": self.baseline_admission,
         })
     }
 }
@@ -127,6 +129,7 @@ pub fn test_derived_cook_baseline_capability(
         bound_task_id: task_id.to_string(),
         parent_snapshot,
         preexisting_candidate: false,
+        baseline_admission: None,
     }
 }
 
@@ -240,6 +243,7 @@ pub(crate) fn materialize_initial_candidate_baseline(
             bound_task_id: task_id.to_string(),
             parent_snapshot: None,
             preexisting_candidate: true,
+            baseline_admission: None,
         },
     }))
 }
@@ -802,9 +806,9 @@ pub(crate) fn with_detached_base_checkout<T>(
 /// reaped (e.g. by tmp cleanup, disk-pressure cleanup, or `git worktree prune`).
 ///
 /// This reuses the same durable promotion data and worktree/patch logic as
-/// [`materialize_follow_up_baseline_in_root`] to deterministically recreate an identical
-/// worktree at the original path, preserving the baseline identity contract for
-/// the provider preflight and subsequent gate verification.
+/// [`materialize_follow_up_baseline_in_root`] to admit the current target at the
+/// original path. Historical identity is retained as drift evidence; the new
+/// capability binds provider preflight to the newly admitted immutable tree.
 pub(crate) fn re_materialize_follow_up_baseline(
     promotion: &AgentTaskPromotionReport,
     target_path: &std::path::Path,
@@ -844,78 +848,16 @@ fn materialize_follow_up_baseline_at(
                 None,
             )
         })?;
-    let expected_head = promotion.target.head.as_deref().ok_or_else(|| {
-        Error::validation_invalid_argument(
-            "promotion.target.head",
-            "gate-failed promotion did not record the immutable target HEAD",
-            None,
-            None,
-        )
-    })?;
-    if git_output(&source_root, &["rev-parse", "HEAD"])? != expected_head {
-        return Err(Error::validation_invalid_argument(
-            "promotion.target.head",
-            "promotion target HEAD changed after the gate-failed promotion; refusing cook retry baseline",
-            None,
-            None,
-        ));
-    }
+    let expected_head = promotion.target.head.as_deref();
     let parent_snapshot = parent_snapshot_from_current_process()?;
-    let immutable: Option<crate::agent_task::AgentTaskCandidate> = promotion
-        .provenance
-        .get("candidate_commit")
-        .filter(|value| !value.is_null())
-        .cloned()
-        .map(serde_json::from_value)
-        .transpose()
-        .map_err(|_| {
-            Error::validation_invalid_argument(
-                "promotion.candidate_commit",
-                "invalid candidate identity",
-                None,
-                None,
-            )
-        })?;
-    // An attempt proven to change nothing has no candidate commit of its own:
-    // the unchanged target HEAD is the baseline its no-change retry builds on.
-    let immutable = match immutable {
-        Some(immutable) => immutable,
-        None if proved_no_changes(promotion) => crate::agent_task::AgentTaskCandidate {
-            base_sha: expected_head.to_string(),
-            candidate_sha: expected_head.to_string(),
-            tree_sha: git_output(
-                &source_root,
-                &["rev-parse", &format!("{expected_head}^{{tree}}")],
-            )?,
-        },
-        None => {
-            return Err(Error::validation_invalid_argument(
-                "promotion.candidate_commit",
-                "non-recoverable: baseline has no immutable candidate; run a new Cook",
-                None,
-                None,
-            )
-            .with_retryable(false))
-        }
-    };
-    crate::agent_task_promotion::validate_candidate_commit(&source_root, &immutable)?;
-    let index = homeboy_core::git::private_index(&source_root)?;
-    let index_path = index.path().display().to_string();
-    git_output_with_env(
-        &source_root,
-        &["read-tree", expected_head],
-        &[("GIT_INDEX_FILE", &index_path)],
-    )?;
-    git_output_with_env(
-        &source_root,
-        &["add", "--all"],
-        &[("GIT_INDEX_FILE", &index_path)],
-    )?;
-    let target_tree = git_output_with_env(
-        &source_root,
-        &["write-tree"],
-        &[("GIT_INDEX_FILE", &index_path)],
-    )?;
+    // Historical identity is evidence, not authority over today's target.
+    let recorded_candidate = promotion.provenance.get("candidate_commit");
+    let immutable = crate::agent_task_candidate_tree::current_workspace_candidate(&source_root)?;
+    let drift = serde_json::json!({
+        "recorded_target_head": expected_head,
+        "recorded_candidate": recorded_candidate,
+        "admitted_candidate": immutable,
+    });
     let path = match target_path {
         Some(p) => p.to_path_buf(),
         None => {
@@ -961,17 +903,10 @@ fn materialize_follow_up_baseline_at(
             bound_task_id: bound_task_id.to_string(),
             parent_snapshot,
             preexisting_candidate: false,
+            baseline_admission: Some(drift),
         },
     };
     let (commit, tree) = (immutable.candidate_sha, immutable.tree_sha);
-    if tree != target_tree {
-        return Err(Error::validation_invalid_argument(
-            "promotion",
-            "promotion target contains extra, missing, or unrelated changes; refusing cook retry baseline",
-            None,
-            None,
-        ));
-    }
     let mut baseline = baseline;
     baseline.capability.canonical_path = baseline.path.canonicalize().map_err(|error| {
         Error::internal_io(
@@ -982,16 +917,6 @@ fn materialize_follow_up_baseline_at(
     baseline.capability.commit = commit;
     baseline.capability.tree = tree;
     Ok(baseline)
-}
-
-fn proved_no_changes(promotion: &AgentTaskPromotionReport) -> bool {
-    promotion.changed_files.is_empty()
-        && matches!(
-            promotion.status,
-            AgentTaskPromotionStatus::NoChanges
-                | AgentTaskPromotionStatus::VerifiedNoChanges
-                | AgentTaskPromotionStatus::NoChangesGateFailed
-        )
 }
 
 fn parent_snapshot_from_current_process() -> Result<Option<Value>> {

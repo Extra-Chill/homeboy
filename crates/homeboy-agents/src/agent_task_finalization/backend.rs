@@ -1460,8 +1460,8 @@ mod remote_base_tests {
             tree_sha: tree.clone(),
         });
         options.changed_files = vec!["feature.txt".into()];
-        let store =
-            crate::agent_task_lifecycle::AgentTaskLifecycleStore::from_environment().unwrap();
+        let context = homeboy_core::test_support::HermeticTestContext::new();
+        let store = crate::agent_task_lifecycle::AgentTaskLifecycleStore::new(context.path_roots());
         let mut backend = super::super::tests::MockBackend::default();
         backend.real_git = true;
         let first =
