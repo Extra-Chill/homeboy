@@ -2590,13 +2590,13 @@ pub(crate) fn cook_finalization_options_with_stores(
 }
 
 /// Source relationships for the Cook PR: the task's source refs mapped against
-/// the GitHub repository the PR is opened against, the worktree's `origin`.
-fn cook_task_issue_relationships(
+/// the GitHub repository the PR is published to.
+pub(super) fn cook_task_issue_relationships(
     source_refs: &[String],
     worktree: &Path,
 ) -> Vec<crate::agent_task_review_dossier::AgentTaskReviewIssueRelationship> {
-    let destination = homeboy_core::git::remote_origin_url(worktree)
-        .and_then(|remote| homeboy_core::git::release_download::parse_github_url(&remote));
+    let destination =
+        homeboy_core::git::publication_repository(None, &worktree.display().to_string()).ok();
     let mut relationships = Vec::new();
     for source_ref in source_refs {
         if let Some(relationship) = crate::agent_task_review_dossier::task_issue_relationship(

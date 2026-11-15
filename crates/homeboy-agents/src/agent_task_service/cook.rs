@@ -2371,6 +2371,29 @@ fn terminal_fallback_status(state: agent_task_lifecycle::AgentTaskRunState) -> C
 /// explicitly reports that it could not finish. That is a candidate-selection
 /// result, not a provider outage. Keep this narrow so other failures retain
 /// their provider diagnostics and recovery actions.
+/// Why a terminal run stopped: the failed outcome's own cause (for example a
+/// refused committed-change harvest), not just the lifecycle state.
+fn terminal_stop_reason(
+    run_id: &str,
+    state: agent_task_lifecycle::AgentTaskRunState,
+    aggregate: &crate::agent_task_schedule::AgentTaskAggregate,
+) -> String {
+    let cause = aggregate
+        .outcomes
+        .iter()
+        .filter(|outcome| outcome.status != crate::agent_task::AgentTaskOutcomeStatus::Succeeded)
+        .find_map(|outcome| {
+            outcome
+                .summary
+                .as_deref()
+                .filter(|summary| !summary.trim().is_empty())
+        });
+    match cause {
+        Some(cause) => format!("agent-task run {run_id} ended in state {state:?}: {cause}"),
+        None => format!("agent-task run {run_id} ended in state {state:?}"),
+    }
+}
+
 fn incomplete_no_candidate_reason(
     aggregate: &crate::agent_task_schedule::AgentTaskAggregate,
 ) -> Option<String> {
@@ -7223,10 +7246,7 @@ fn run_cook_spine(
                             .unwrap_or("cancel requested")
                     ))
                 } else {
-                    Some(format!(
-                        "agent-task run {run_id} ended in state {:?}",
-                        record.state()
-                    ))
+                    Some(terminal_stop_reason(&run_id, record.state(), &aggregate))
                 },
                 exit_code: 1,
                 invocation_latest_run_id: Some(&run_id),
@@ -7919,6 +7939,16 @@ pub(super) fn publish_incomplete_draft<
     body.push_str(&format!(
         "\nCandidate from attempt {attempt} (`{run_id}`).\n"
     ));
+    // The same issue links a complete Cook PR carries, so the next Cook for the
+    // task resolves this draft as its linked PR instead of starting over.
+    let relationships =
+        super::cook_promotion::cook_task_issue_relationships(&options.workspace.source_refs, root);
+    if !relationships.is_empty() {
+        body.push_str(&format!(
+            "\n{}\n",
+            crate::agent_task_review_dossier::render_source_relationships(&relationships)
+        ));
+    }
     if let Some(reason) = record.metadata["review_form_unavailable"]["message"]
         .as_str()
         .or((review_form_unavailable && !unverified).then_some("missing review_form output"))

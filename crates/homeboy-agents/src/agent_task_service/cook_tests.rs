@@ -536,6 +536,23 @@ fn review_form_aggregate(plan: &AgentTaskPlan) -> crate::agent_task_scheduler::A
 }
 
 #[test]
+fn terminal_stop_reason_names_the_failed_outcome_cause() {
+    let plan = compile_options("terminal-stop-reason")
+        .identity
+        .initial_plan;
+    let mut aggregate = review_form_aggregate(&plan);
+    aggregate.outcomes[0].status = crate::agent_task::AgentTaskOutcomeStatus::Failed;
+    aggregate.outcomes[0].summary = Some(
+        "workspace HEAD is no longer descended from the task base; refusing to harvest unrelated commits"
+            .to_string(),
+    );
+    assert_eq!(
+        terminal_stop_reason("run-1", AgentTaskRunState::Failed, &aggregate),
+        "agent-task run run-1 ended in state Failed: workspace HEAD is no longer descended from the task base; refusing to harvest unrelated commits"
+    );
+}
+
+#[test]
 fn startup_without_output_liveness_is_projected_without_becoming_a_timeout() {
     let plan = compile_options("startup-without-output-report")
         .identity
@@ -11835,6 +11852,7 @@ echo https://github.com/example/fixture/pull/1
                 "Two cells still need work",
                 "Candidate from attempt 1",
                 "https://github.com/example/fixture/issues/42",
+                "Closes #42",
             ] {
                 assert!(
                     requested.contains(expected),
