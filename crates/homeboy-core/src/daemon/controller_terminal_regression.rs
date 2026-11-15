@@ -1,6 +1,7 @@
 //! These tests also run against the original production boundary to reproduce
 //! the terminal-winner spin with test-owned cleanup rather than a leaked worker.
 
+use super::controller_supervisor::persist_controller_success_or_uncertainty;
 use super::*;
 use crate::api_jobs::{ControllerJobState, ControllerJobSubmissionOutcome};
 

@@ -1,6 +1,10 @@
 use super::controller_job_driver::{
     ControllerJobDriver, ControllerJobHandle, ControllerJobPublicError,
 };
+use super::controller_supervisor::{
+    persist_controller_cancellation, persist_controller_completion,
+    persist_controller_success_or_uncertainty,
+};
 use super::controller_terminal_regression::running_controller;
 use super::*;
 use serde_json::Value;
