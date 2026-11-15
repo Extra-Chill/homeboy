@@ -296,7 +296,7 @@ pub fn resolve_parsed_command_preflight(
     // operator-approved local routes, and a host with no configured runner
     // still resolves Auto locally. A busy or unobserved Lab is not a license
     // to probe providers on the controller either: it queues for Lab admission
-    // (see `auto_split_awaits_lab_admission`).
+    // (see `split_awaits_lab_admission`).
     let auto_split_placement_requires_lab = matches!(
         (
             &input.controller_execution,
@@ -316,13 +316,17 @@ pub fn resolve_parsed_command_preflight(
     // A busy, ineligible-for-now, or unobserved Lab is a wait, not a reason to
     // run on the controller or to refuse: the Cook keeps Lab placement and is
     // queued in pending resource admission until a runner admits it (#17705).
+    // Pinned split-placement work uses the same queue when its runner is at
+    // capacity; pinning chooses the runner, not whether it has room right now.
     // Hard substrate failures (disconnected, stale) still refuse below.
-    let auto_split_awaits_lab_admission = auto_split_placement_requires_lab
-        && !selected_runner_admitted
-        && policy
-            .lab_readiness
-            .as_ref()
-            .is_some_and(lab_readiness_awaits_admission);
+    let split_awaits_lab_admission = !selected_runner_admitted
+        && policy.lab_readiness.as_ref().is_some_and(|readiness| {
+            (auto_split_placement_requires_lab && lab_readiness_awaits_admission(readiness))
+                || (input.controller_execution == ControllerExecution::SplitPlacementCoordinator
+                    && matches!(input.runner, RunnerIntent::Explicit(_))
+                    && !matches!(input.placement, PlacementIntent::Local)
+                    && readiness.state == "capacity_blocked")
+        });
     let required = if matches!(input.placement, PlacementIntent::Lab)
         || matches!(
             input.runner,
@@ -345,7 +349,7 @@ pub fn resolve_parsed_command_preflight(
         )
         && matches!(input.runner, RunnerIntent::Default)
         && !auto_split_placement_requires_lab;
-    if preferred_runner_inadmissible && !auto_route_fallback && !auto_split_awaits_lab_admission {
+    if preferred_runner_inadmissible && !auto_route_fallback && !split_awaits_lab_admission {
         if auto_split_placement_requires_lab {
             return Err(lab_unavailable_error(
                 policy
@@ -397,7 +401,7 @@ pub fn resolve_parsed_command_preflight(
         } else {
             policy.selected_runner_id.clone()
         };
-    let selected = if auto_split_awaits_lab_admission {
+    let selected = if split_awaits_lab_admission {
         EffectiveExecutionPlacement::Lab
     } else if matches!(input.placement, PlacementIntent::Local) || selected_runner_id.is_none() {
         EffectiveExecutionPlacement::Local
@@ -464,7 +468,7 @@ pub fn resolve_parsed_command_preflight(
     };
     if auto_split_placement_requires_lab
         && selected_runner_id.is_none()
-        && !auto_split_awaits_lab_admission
+        && !split_awaits_lab_admission
     {
         return Err(lab_unavailable_error(
             policy
@@ -819,13 +823,12 @@ impl ParsedCommandPreflightResult {
         }
     }
 
-    /// Whether this auto split-placement Cook resolved to Lab placement while
+    /// Whether this split-placement Cook resolved to Lab placement while
     /// its Lab is busy or unobserved, so it waits in pending resource admission
     /// rather than running on the controller. Preview and dispatch read this
     /// same resolved decision.
     pub fn queued_for_lab_admission(&self) -> bool {
         self.input.controller_execution == ControllerExecution::SplitPlacementCoordinator
-            && self.placement.requested == Placement::Auto
             && self.placement.required == ExecutionPlacementRequirement::Lab
             && self.placement.selected == EffectiveExecutionPlacement::Lab
             && self
