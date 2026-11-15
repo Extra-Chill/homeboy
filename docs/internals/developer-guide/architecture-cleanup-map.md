@@ -11,7 +11,7 @@ Homeboy keeps the CLI layer thin:
 - `crates/homeboy-cli/src/cli_surface/` owns clap command shape, hidden compatibility aliases, and command-surface introspection.
 - `crates/homeboy-cli/src/command_contract/` owns command registry metadata, output families, and Lab portability contracts.
 - `crates/homeboy-cli/src/commands/` maps parsed arguments to responses and delegates durable behavior.
-- `tests/core/` owns reusable services, persistence, runner dispatch, artifact lifecycles, release/lint/test workflows, and extension contracts.
+- `crates/homeboy-core/src/` owns reusable services, persistence, runner dispatch, artifact lifecycles, release/lint/test workflows, and extension contracts. `tests/core/` holds integration tests compiled into `homeboy-core`.
 
 New command work should introduce or reuse a `core` service boundary before it
 adds orchestration. Command modules may contain small glue, validation, and
@@ -24,7 +24,7 @@ Recommended service boundaries:
 
 - Process execution: define an operation-specific `core` function or facade that receives typed inputs and returns typed output.
 - Filesystem mutation: keep path normalization and mutation in `core`, with commands passing requested intent.
-- Runner dispatch: route through `core::runners` facades rather than command-owned dispatch loops.
+- Runner dispatch: route through core runner services rather than command-owned dispatch loops.
 - Artifact persistence: persist through `core::artifacts` or operation-specific core result writers.
 
 ## Compatibility-Removal Inventory
@@ -35,10 +35,17 @@ docs cleanup PR.
 | Compatibility surface | Current owner | Current shape | Retirement criteria |
 | --- | --- | --- | --- |
 | Legacy placement aliases | `crates/homeboy-cli/src/cli_surface/` | Rejected parser inputs with targeted migration errors. | None: product policy is zero legacy placement support. |
-| Legacy component fields such as `build_command` | `crates/homeboy-cli/src/commands/component.rs`, `tests/core/extension/build/mod.rs`, `tests/core/extension/capability.rs` | Rejected with targeted errors while modern config uses extension/build script contracts. | Remove parse-time compatibility handling after persisted configs have been migrated and error telemetry shows the legacy field is no longer encountered. |
+| Legacy component fields such as `build_command` | `crates/homeboy-cli/src/commands/component.rs`, `crates/homeboy-core/src/extension/build/mod.rs` | Rejected with targeted errors while modern config uses extension/build script contracts. | Remove parse-time compatibility handling after persisted configs have been migrated and error telemetry shows the legacy field is no longer encountered. |
 | Legacy CLI aliases rejected by argument normalization | `crates/homeboy-cli/src/commands/utils/args.rs` | Rejection tests protect known old aliases from silently routing. | Keep rejection coverage until the aliases are old enough to delete from compatibility messaging. |
 | Legacy `node_script` extension fields | Extension/runtime manifests and config migrations, if still observed in downstream configs. | Historical extension runtime field name; modern manifests should use runtime command/script contracts. | Inventory live configs, migrate any remaining manifests, then add a rejection or schema cleanup PR. |
 | Old deleted command names | Command docs, shell completions, user scripts. | Some removed commands may still appear in docs or automation outside the command surface. | Run a command-surface/docs review, update references to supported commands, then remove compatibility notes. |
+
+## Decision Ownership
+
+Each question has one owning function, and callers ask it instead of
+re-deriving the answer. See the [engineering rules](engineering-rules.md) and the
+maintainer guides for the [daemon lifecycle](daemon-lifecycle.md) and
+[Cook recovery](cook-recovery.md).
 
 ## Tracking Rules
 
