@@ -894,7 +894,7 @@ fn stale_daemon_admission_snapshot(
     );
     status.daemon_freshness = Some(DaemonFreshnessReport {
         fresh: false,
-        stale_reason_code: Some(DaemonStaleReasonCode::VersionMismatch),
+        stale_reason_code: Some(DaemonStaleReasonCode::LabContractVersionMismatch),
         restartable: true,
         lease_id: lease_id.map(str::to_string),
         pid,

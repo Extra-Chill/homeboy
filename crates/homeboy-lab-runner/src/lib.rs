@@ -2089,7 +2089,7 @@ mod tests {
             configured_job_binary_build_identity: None,
             daemon_freshness: Some(DaemonFreshnessReport {
                 fresh: false,
-                stale_reason_code: Some(DaemonStaleReasonCode::VersionMismatch),
+                stale_reason_code: Some(DaemonStaleReasonCode::LabContractVersionMismatch),
                 restartable: true,
                 lease_id: Some("lease-current".to_string()),
                 pid: Some(1),
@@ -2180,7 +2180,7 @@ mod tests {
             configured_job_binary_build_identity: None,
             daemon_freshness: Some(DaemonFreshnessReport {
                 fresh: false,
-                stale_reason_code: Some(DaemonStaleReasonCode::VersionMismatch),
+                stale_reason_code: Some(DaemonStaleReasonCode::LabContractVersionMismatch),
                 restartable: true,
                 lease_id: Some("lease-current".to_string()),
                 pid: Some(1),

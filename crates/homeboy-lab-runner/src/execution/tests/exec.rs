@@ -784,7 +784,7 @@ fn nonfresh_daemon_admission_refusal_names_its_failing_check() {
             stale_lease,
             false,
             "lease_not_fresh",
-            "daemon reports itself stale (version_mismatch)",
+            "daemon reports itself stale (lab_contract_version_mismatch)",
             false,
             "refresh-homeboy",
         ),
@@ -944,7 +944,9 @@ fn refresh_execution_uses_the_connected_preflight_session_without_a_second_looku
 fn authoritative_drained_freshness() -> homeboy_core::daemon::DaemonFreshnessReport {
     homeboy_core::daemon::DaemonFreshnessReport {
         fresh: false,
-        stale_reason_code: Some(homeboy_core::daemon::DaemonStaleReasonCode::VersionMismatch),
+        stale_reason_code: Some(
+            homeboy_core::daemon::DaemonStaleReasonCode::LabContractVersionMismatch,
+        ),
         restartable: true,
         lease_id: Some("lease-stale".to_string()),
         pid: Some(4242),

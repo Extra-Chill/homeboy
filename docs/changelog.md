@@ -4,6 +4,11 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.465.18] - 2026-11-15
+
+### Changed
+- expect the fail-closed unknown-exit message for a killed execution step
+
 ## [0.465.17] - 2026-11-15
 
 ### Fixed

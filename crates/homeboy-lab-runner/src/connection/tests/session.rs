@@ -48,7 +48,7 @@ fn compact_daemon_status(
         "reachable": true,
         "freshness": {
             "active_jobs": active_jobs,
-            "stale_reason_code": fresh.then_some(serde_json::Value::Null).unwrap_or(serde_json::json!("version_mismatch")),
+            "stale_reason_code": fresh.then_some(serde_json::Value::Null).unwrap_or(serde_json::json!("lab_contract_version_mismatch")),
         },
         "daemon": daemon,
     }));

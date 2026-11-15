@@ -1431,7 +1431,7 @@ mod tests {
         // unreachable transport is neither. Fresh is always live.
         let live = matches!(
             stale_reason_code,
-            None | Some(daemon::DaemonStaleReasonCode::VersionMismatch)
+            None | Some(daemon::DaemonStaleReasonCode::LabContractVersionMismatch)
         );
         let replacement_blocked = !fresh && repair_plan.is_empty();
         let mut status = DaemonStatus {
@@ -1546,7 +1546,7 @@ mod tests {
 
         let initial = recovery_status(
             false,
-            Some(daemon::DaemonStaleReasonCode::VersionMismatch),
+            Some(daemon::DaemonStaleReasonCode::LabContractVersionMismatch),
             vec![daemon::DaemonRepairStep::executable(
                 actions::DAEMON_ENSURE_RUNNING,
                 actions::ensure_running(),
@@ -1634,7 +1634,7 @@ mod tests {
 
         let initial = recovery_status(
             false,
-            Some(daemon::DaemonStaleReasonCode::VersionMismatch),
+            Some(daemon::DaemonStaleReasonCode::LabContractVersionMismatch),
             vec![daemon::DaemonRepairStep::executable(
                 actions::DAEMON_ENSURE_RUNNING,
                 actions::ensure_running(),
@@ -1722,7 +1722,7 @@ mod tests {
         use daemon::recovery_actions as actions;
         let status = recovery_status(
             false,
-            Some(daemon::DaemonStaleReasonCode::VersionMismatch),
+            Some(daemon::DaemonStaleReasonCode::LabContractVersionMismatch),
             vec![
                 daemon::DaemonRepairStep::executable(
                     actions::DAEMON_STOP,
@@ -1803,7 +1803,7 @@ mod tests {
 
         let initial = recovery_status(
             false,
-            Some(daemon::DaemonStaleReasonCode::VersionMismatch),
+            Some(daemon::DaemonStaleReasonCode::LabContractVersionMismatch),
             vec![
                 daemon::DaemonRepairStep::executable(
                     actions::DAEMON_STOP,
@@ -1842,7 +1842,7 @@ mod tests {
 
         let initial = recovery_status(
             false,
-            Some(daemon::DaemonStaleReasonCode::VersionMismatch),
+            Some(daemon::DaemonStaleReasonCode::LabContractVersionMismatch),
             vec![daemon::DaemonRepairStep::executable(
                 actions::DAEMON_ENSURE_RUNNING,
                 actions::ensure_running(),
@@ -1855,7 +1855,7 @@ mod tests {
             || {
                 Ok(recovery_status(
                     false,
-                    Some(daemon::DaemonStaleReasonCode::VersionMismatch),
+                    Some(daemon::DaemonStaleReasonCode::LabContractVersionMismatch),
                     Vec::new(),
                 ))
             },
@@ -1881,7 +1881,7 @@ mod tests {
 
         let initial = recovery_status(
             false,
-            Some(daemon::DaemonStaleReasonCode::VersionMismatch),
+            Some(daemon::DaemonStaleReasonCode::LabContractVersionMismatch),
             vec![daemon::DaemonRepairStep::executable(
                 actions::DAEMON_ENSURE_RUNNING,
                 actions::ensure_running(),
