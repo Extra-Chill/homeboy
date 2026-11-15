@@ -42,7 +42,7 @@ fn serve_health(lease_id: &'static str, pid: u32) -> std::net::SocketAddr {
     addr
 }
 
-fn health_session(addr: std::net::SocketAddr) -> RunnerSession {
+pub(super) fn health_session(addr: std::net::SocketAddr) -> RunnerSession {
     RunnerSession {
         runner_id: "homeboy-lab".to_string(),
         mode: RunnerTunnelMode::DirectSsh,

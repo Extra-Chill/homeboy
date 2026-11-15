@@ -208,7 +208,7 @@ fn compact_doctor_puts_blockers_and_remediation_before_informational_checks() {
 fn compact_doctor_retains_safe_typed_runner_convergence_action() {
     let (mut report, _) = run("local").expect("local doctor report");
     report.checks = vec![types::RunnerCheck {
-        id: "homeboy.version_skew".to_string(),
+        id: "homeboy.daemon_command".to_string(),
         status: RunnerDoctorStatus::Warning,
         message: "controller is ahead".to_string(),
         remediation: Some("refresh runner".to_string()),
@@ -241,7 +241,7 @@ fn doctor_emits_refresh_next_action_for_version_skew_and_none_when_versions_matc
     report.status = RunnerDoctorStatus::Error;
     report.failure = None;
     report.checks = vec![types::RunnerCheck {
-        id: "homeboy.version_skew".to_string(),
+        id: "homeboy.daemon_command".to_string(),
         status: RunnerDoctorStatus::Error,
         message: "controller is ahead".to_string(),
         remediation: Some("refresh runner".to_string()),

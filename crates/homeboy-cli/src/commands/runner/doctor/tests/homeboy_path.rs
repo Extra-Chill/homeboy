@@ -220,142 +220,61 @@ fn lab_homeboy_path_shadow_accepts_matching_bare_homeboy() {
 }
 
 #[test]
-fn homeboy_version_skew_check_uses_lab_admission() {
-    use super::super::types::RunnerRepairAction;
-    use homeboy_lab_contract::{
-        required_lab_handoff_capabilities, LabCapabilityHandshake, LabRuntimeAncestry,
-        LabRuntimeIdentity, LAB_CONTRACT_VERSION,
+fn version_skew_checks_each_exact_build_pair() {
+    use homeboy_lab_contract::{LabCapabilityHandshake, LabRuntimeAncestry, LabRuntimeIdentity};
+    let identity = |build: &str| LabRuntimeIdentity {
+        build_identity: format!("homeboy {build}"),
+        lab_contract_version: None,
+        source_revision: String::new(),
+        clean: true,
     };
-
-    for (
-        name,
-        remote_build,
-        contract_version,
-        capabilities_match,
-        require_exact,
-        expected,
-        repair,
-    ) in [
+    for (daemon, command, expected) in [
         (
-            "compatible builds",
-            "0.289.0+runner",
-            LAB_CONTRACT_VERSION,
-            true,
-            false,
-            RunnerDoctorStatus::Ok,
-            false,
+            "1.0.0+same",
+            "1.0.0+same",
+            [RunnerDoctorStatus::Ok, RunnerDoctorStatus::Ok],
         ),
         (
-            "contract mismatch",
-            "0.289.0+runner",
-            LAB_CONTRACT_VERSION + 1,
-            true,
-            false,
-            RunnerDoctorStatus::Error,
-            true,
+            "1.0.0+other",
+            "1.0.0+same",
+            [RunnerDoctorStatus::Error, RunnerDoctorStatus::Error],
         ),
         (
-            "capability mismatch",
-            "0.289.0+runner",
-            LAB_CONTRACT_VERSION,
-            false,
-            false,
-            RunnerDoctorStatus::Error,
-            true,
+            "1.0.0+same",
+            "1.0.0+other",
+            [RunnerDoctorStatus::Ok, RunnerDoctorStatus::Error],
         ),
         (
-            "exact build required",
-            "0.289.0+runner",
-            LAB_CONTRACT_VERSION,
-            true,
-            true,
-            RunnerDoctorStatus::Error,
-            true,
+            "1.0.0+other",
+            "1.0.0+other",
+            [RunnerDoctorStatus::Error, RunnerDoctorStatus::Ok],
         ),
         (
-            "runner ahead",
-            "0.291.0+runner",
-            LAB_CONTRACT_VERSION,
-            true,
-            false,
-            RunnerDoctorStatus::Error,
-            false,
-        ),
-        (
-            "matching builds",
-            "0.290.0+controller",
-            LAB_CONTRACT_VERSION,
-            true,
-            false,
-            RunnerDoctorStatus::Ok,
-            false,
+            "",
+            "",
+            [RunnerDoctorStatus::Error, RunnerDoctorStatus::Error],
         ),
     ] {
-        let controller = LabRuntimeIdentity {
-            build_identity: "homeboy 0.290.0+controller".to_string(),
-            lab_contract_version: Some(LAB_CONTRACT_VERSION),
-            source_revision: String::new(),
-            clean: true,
-        };
-        let remote = LabRuntimeIdentity {
-            build_identity: format!("homeboy {remote_build}"),
-            lab_contract_version: Some(contract_version),
-            ..controller.clone()
-        };
-        let capabilities = required_lab_handoff_capabilities();
         let handshake = LabCapabilityHandshake {
-            controller,
-            required_capabilities: capabilities.clone(),
-            runner_command: remote.clone(),
-            runner_command_capabilities: if capabilities_match {
-                capabilities.clone()
-            } else {
-                Vec::new()
-            },
-            daemon: remote,
-            daemon_capabilities: capabilities,
+            controller: identity("1.0.0+same"),
+            runner_command: identity(command),
+            daemon: identity(daemon),
+            required_capabilities: vec![],
+            runner_command_capabilities: vec![],
+            daemon_capabilities: vec![],
             ancestry: LabRuntimeAncestry::Unknown,
         };
-        let check =
-            checks::homeboy_version_skew_check("0.290.0", &handshake, require_exact, "lab", "lab")
-                .expect(name);
-        assert_eq!(check.status, expected, "{name}");
-        assert_eq!(
-            check.details["local_build_identity"], "0.290.0+controller",
-            "{name}"
-        );
-        assert_eq!(
-            check.details["remote_build_identity"], remote_build,
-            "{name}"
-        );
-        assert_eq!(
-            check.remediation.is_some(),
-            expected == RunnerDoctorStatus::Error,
-            "{name}"
-        );
-        if repair {
-            assert!(
-                check
-                    .remediation
-                    .as_deref()
-                    .unwrap()
-                    .contains("homeboy runner connect"),
-                "{name}"
+        let checks = checks::homeboy_version_skew_checks("1.0.0", &handshake, "lab");
+        assert_eq!(checks.len(), 2);
+        for (check, expected) in checks.iter().zip(expected) {
+            assert_eq!(check.status, expected, "{daemon} / {command}");
+            assert_eq!(
+                check.remediation_action.is_some(),
+                expected == RunnerDoctorStatus::Error
             );
-            assert!(
-                matches!(check.remediation_action, Some(RunnerRepairAction::RefreshHomeboy { git_ref: Some(ref git_ref), allow_downgrade: false }) if git_ref == "v0.290.0"),
-                "{name}"
-            );
-        } else {
-            assert!(check.remediation_action.is_none(), "{name}");
         }
-        if name == "runner ahead" {
-            assert_eq!(check.details["direction"], "runner_ahead");
-            assert!(check
-                .remediation
-                .unwrap()
-                .contains("Upgrade the controller"));
-        }
+        assert_eq!(checks[0].details["daemon_build_identity"], daemon);
+        assert_eq!(checks[1].details["homeboy_path_build_identity"], command);
     }
 }
 

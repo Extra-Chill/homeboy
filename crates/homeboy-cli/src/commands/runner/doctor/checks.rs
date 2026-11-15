@@ -176,53 +176,41 @@ pub(crate) fn path_writable_check(
     }
 }
 
-pub(crate) fn homeboy_version_skew_check(
+pub(crate) fn homeboy_version_skew_checks(
     local_version: &str,
     handshake: &homeboy_lab_contract::LabCapabilityHandshake,
-    require_exact: bool,
     runner_id: &str,
-    server_id: &str,
-) -> Option<RunnerCheck> {
-    let admission = homeboy_lab_contract::admit_lab_runner(handshake, require_exact);
-    let local = normalize_homeboy_build_identity(&handshake.controller.build_identity);
-    let remote = normalize_homeboy_build_identity(&handshake.runner_command.build_identity);
-    let mut details = BTreeMap::new();
-    details.insert("local_version".to_string(), local_version.to_string());
-    details.insert("local_build_identity".to_string(), local.to_string());
-    details.insert("remote_build_identity".to_string(), remote.to_string());
-    details.insert("remote_version".to_string(), remote.to_string());
-    let remote_version = remote
-        .split('+')
-        .next()
-        .and_then(|version| semver::Version::parse(version).ok());
-    let controller_version = semver::Version::parse(local_version).ok();
-    let message = format!("Local Homeboy {local} differs from remote runner Homeboy {remote}");
-    if matches!((controller_version, remote_version), (Some(local), Some(remote)) if remote > local)
-    {
-        details.insert("direction".to_string(), "runner_ahead".to_string());
-        return Some(error("homeboy.version_skew", message,
-            Some(format!("Runner `{runner_id}` is ahead of this controller. Upgrade the controller; inspect with `homeboy ssh {server_id} -- homeboy --version`")), details));
-    }
-    if admission.compatible {
-        return Some(ok_with_details(
-            "homeboy.version_skew",
-            format!("Local Homeboy {local} is compatible with remote runner Homeboy {remote}"),
-            details,
-        ));
-    }
-    let message = admission.provenance.rejection_reason.unwrap_or(message);
-    let reference = format!("v{local_version}");
-    Some(error("homeboy.version_skew", message, Some(format!(
-        "Align runner with `homeboy runner connect {}`, which installs this controller's release on the runner; use runner dev-sync for unreleased builds",
-        shell::quote_arg(runner_id),
-    )), details).with_action(RunnerRepairAction::RefreshHomeboy {
-        git_ref: Some(reference), allow_downgrade: false,
-    }))
+) -> Vec<RunnerCheck> {
+    [
+        ("homeboy.controller_daemon", "controller", &handshake.controller, "daemon", &handshake.daemon),
+        ("homeboy.daemon_command", "daemon", &handshake.daemon, "homeboy_path", &handshake.runner_command),
+    ].into_iter().map(|(id, left_name, left, right_name, right)| {
+        let left = normalize_homeboy_build_identity(&left.build_identity);
+        let right = normalize_homeboy_build_identity(&right.build_identity);
+        let details = BTreeMap::from([
+            (format!("{left_name}_build_identity"), left.to_string()),
+            (format!("{right_name}_build_identity"), right.to_string()),
+        ]);
+        if !left.is_empty() && left == right {
+            ok_with_details(id, format!("{left_name} Homeboy {left} matches {right_name} Homeboy {right}"), details)
+        } else {
+            error(id, format!("{left_name} Homeboy {left} differs from {right_name} Homeboy {right}"), Some(format!(
+                "Converge the configured binary and daemon with `homeboy runner refresh-homeboy {} --ref v{local_version} --reconnect`; upgrade the controller first if the runner is newer, or use runner dev-sync for unreleased builds",
+                shell::quote_arg(runner_id),
+            )), details).with_action(RunnerRepairAction::RefreshHomeboy {
+                git_ref: Some(format!("v{local_version}")), allow_downgrade: false,
+            })
+        }
+    }).collect()
 }
 
 fn normalize_homeboy_build_identity(identity: &str) -> &str {
     let identity = identity.trim();
-    identity.strip_prefix("homeboy ").unwrap_or(identity)
+    identity
+        .strip_prefix("homeboy")
+        .filter(|suffix| suffix.is_empty() || suffix.starts_with(char::is_whitespace))
+        .unwrap_or(identity)
+        .trim()
 }
 
 pub fn ok(id: impl Into<String>, message: String, remediation: Option<String>) -> RunnerCheck {
