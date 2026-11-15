@@ -326,6 +326,46 @@ fn an_earlier_attempts_candidate_at_head_is_superseded_by_the_retry() {
     }
 }
 
+/// Gate feedback onto a destination that never received the previous
+/// candidate (clean at base) lays the new full candidate over the base.
+#[test]
+fn gate_feedback_onto_a_clean_base_destination_applies_the_new_candidate() {
+    fixture(|repo, candidate, store| {
+        std::fs::write(repo.join("earlier"), "attempt 1\n").unwrap();
+        git(repo, &["add", "."]);
+        git(repo, &["commit", "-m", "earlier attempt candidate"]);
+        let earlier = git_head(repo, "HEAD");
+        let earlier_tree = git_head(repo, "HEAD^{tree}");
+        git(repo, &["reset", "--hard", &candidate.base_sha]);
+        let mut options = request(repo, Some(candidate.clone()));
+        let mut source: Value = serde_json::from_str(&options.source).unwrap();
+        source["metadata"]["gate_feedback_baseline"] = json!({"candidate_commit": {
+            "base_sha": candidate.base_sha, "candidate_sha": earlier, "tree_sha": earlier_tree,
+        }});
+        options.source = source.to_string();
+        let mut provider = FakePromotionWorkspaceProvider {
+            workspace_path: Some(repo.into()),
+            ..Default::default()
+        };
+        let report = promote_with_provider_and_checkpoint_in_observation_store(
+            options,
+            &mut provider,
+            &mut |_| Ok(()),
+            store,
+        )
+        .unwrap();
+        assert_eq!(
+            report.status,
+            super::super::AgentTaskPromotionStatus::Applied
+        );
+        assert_eq!(
+            std::fs::read_to_string(repo.join("dirty")).unwrap(),
+            "uncommitted\n"
+        );
+        assert!(!repo.join("earlier").exists());
+    });
+}
+
 #[test]
 fn recorded_tree_mismatch_is_a_typed_error_before_destination_mutation() {
     fixture(|repo, mut candidate, store| {
