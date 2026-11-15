@@ -1128,6 +1128,16 @@ pub(super) fn lab_runner_availability_error(
         .and_then(|freshness| freshness.runtime_paths.as_ref())
         .and_then(|paths| paths.pressure.clone());
 
+    if reasons.iter().any(|reason| reason == "pressure") {
+        let mut error = pressure
+            .unwrap_or_default()
+            .capacity_refusal(selected_runner_id.as_deref());
+        error.details["runner_availability"] = serde_json::json!({
+            "selected": selected, "eligible": eligible, "reasons": reasons,
+        });
+        return error;
+    }
+
     let stale_daemon_recovery = selected_status
         .and_then(|status| status.stale_daemon.as_ref())
         .and_then(|warning| warning.safe_recovery_commands().into_iter().next());
@@ -1708,13 +1718,10 @@ mod daemon_repair_step_tests {
             vec![availability.clone()],
         );
 
-        assert!(
-            error
-                .message
-                .ends_with("cannot accept jobs (reasons: capacity_reached, pressure)"),
-            "{}",
-            error.message
-        );
+        assert_eq!(error.code, ErrorCode::RunnerCapacityBusy);
+        assert!(error.message.starts_with("Lab homeboy-lab busy"));
+        assert_eq!(error.details["runner_id"], "homeboy-lab");
+        assert_eq!(error.details["retry_after_seconds"], 30);
         let recorded = &error.details["runner_availability"];
         assert_eq!(
             recorded["reasons"],
@@ -1722,7 +1729,7 @@ mod daemon_repair_step_tests {
         );
         assert_eq!(recorded["selected"]["capacity"], 2);
         assert_eq!(recorded["selected"]["active_job_count"], 2);
-        assert_eq!(recorded["pressure"]["cpu"], 10_900);
+        assert_eq!(error.details["pressure"]["cpu"], 10_900);
     }
 
     #[test]

@@ -36,6 +36,7 @@ pub struct RunnerPressure {
     pub load_fallback: bool,
     /// Five-minute load per logical CPU, in ten-thousandths (1.0 = 10000).
     pub observed_load_per_cpu: Option<u32>,
+    pub logical_cpus: Option<usize>,
     pub admission_reason: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub reservation: Option<serde_json::Value>,
@@ -45,11 +46,27 @@ impl RunnerPressure {
     /// A pre-acceptance wait, using the execution scheduler's capacity deferral
     /// contract rather than consuming its infrastructure recovery budget.
     pub fn admission_refusal(&self) -> crate::Error {
-        let mut error = crate::Error::validation_invalid_argument(
-            "admission",
-            "admission: pressure — waiting for host pressure to clear",
-            None,
-            None,
+        self.capacity_refusal(None)
+    }
+
+    pub fn capacity_refusal(&self, runner_id: Option<&str>) -> crate::Error {
+        let retry_at = (chrono::Utc::now() + chrono::Duration::seconds(30)).to_rfc3339();
+        let host = runner_id.unwrap_or("host");
+        let load = match (self.observed_load_per_cpu, self.logical_cpus) {
+            (Some(load), Some(cpus)) => format!(
+                " (load {:.0}/{cpus} CPUs)",
+                load as f64 * cpus as f64 / 10_000.0
+            ),
+            _ => String::new(),
+        };
+        let mut error = crate::Error::new(
+            crate::ErrorCode::RunnerCapacityBusy,
+            format!("Lab {host} busy{load}; retry at {retry_at}"),
+            serde_json::json!({
+                "runner_id": runner_id,
+                "retry_at": retry_at,
+                "retry_after_seconds": 30,
+            }),
         )
         .with_retryable(true);
         error.details["reason"] = serde_json::json!("runner_pressure");
@@ -116,6 +133,9 @@ fn sample_host(thresholds: &PressureThresholds) -> RunnerPressure {
         memory: psi("memory", "full "),
         ..Default::default()
     };
+    pressure.logical_cpus = std::thread::available_parallelism()
+        .ok()
+        .map(|cpus| cpus.get());
     pressure.observed_load_per_cpu = std::fs::read_to_string("/proc/loadavg")
         .ok()
         .and_then(|text| text.split_whitespace().nth(1)?.parse::<f64>().ok())

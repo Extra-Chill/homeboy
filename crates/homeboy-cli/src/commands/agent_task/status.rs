@@ -2829,6 +2829,13 @@ pub(super) fn diagnose(args: DiagnoseArgs) -> CmdResult<Value> {
             .and_then(|run| serde_json::to_value(run).ok())
             .unwrap_or(Value::Null),
     );
+    if let Some(cause) = persisted_cook_failure_diagnostic(&record)
+        .filter(|cause| cause.class == "runner.capacity_busy")
+    {
+        if let Some(runner) = cause.data["runner_id"].as_str() {
+            value["placement"] = json!({"kind": "lab", "runner_id": runner});
+        }
+    }
     Ok((value, 0))
 }
 
@@ -2962,6 +2969,33 @@ fn attach_diagnose_actionable(
     current_lifecycle_denial: bool,
 ) {
     let run_id = record.run_id.as_str();
+    if let Some(cause) = persisted_cook_failure_diagnostic(record)
+        .filter(|cause| cause.class == "runner.capacity_busy")
+    {
+        let runner = cause.data["runner_id"].as_str();
+        let command = runner
+            .map(|runner| format!("homeboy runner status {} --full", quote_arg(runner)))
+            .unwrap_or_else(|| "homeboy runner list".to_string());
+        value["next_action_basis"] = json!(DIAGNOSE_ACTION_BASIS_DIAGNOSIS);
+        attach_actionable_metadata(
+            value,
+            CommandActionableMetadata {
+                run: Some(diagnose_run_ref(record, runner)),
+                next_actions: vec![CommandNextAction::new(
+                    format!(
+                        "wait until {} then inspect Lab capacity",
+                        cause.data["retry_at"]
+                            .as_str()
+                            .unwrap_or("the next admission check")
+                    ),
+                    command,
+                )
+                .with_kind(CommandNextActionKind::Show)],
+                ..Default::default()
+            },
+        );
+        return;
+    }
     if let Some(action) = lab_transport_repair_action(record) {
         if let Value::Object(map) = value {
             map.insert(

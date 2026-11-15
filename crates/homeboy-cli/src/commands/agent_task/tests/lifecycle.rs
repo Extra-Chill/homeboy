@@ -134,6 +134,55 @@ fn explicit_retry_of_an_unmaterialized_cook_is_not_refused_toward_itself() {
 }
 
 #[test]
+fn diagnose_recorded_pressure_refusal() {
+    with_isolated_home(|_| {
+        let run_id = "recorded-pressure";
+        let store = agent_task_lifecycle::AgentTaskLifecycleStore::from_environment().unwrap();
+        agent_task_lifecycle::record_unmaterialized_cook_admission_in_store(
+            &store,
+            run_id,
+            json!({"request_ref": "sha256:pressure"}),
+            "queued",
+            "eligible",
+        )
+        .unwrap();
+        // November 14 Lab observation: load 86 on 32 logical CPUs.
+        let error = homeboy::core::runner_pressure::RunnerPressure {
+            observed_load_per_cpu: Some(26875),
+            logical_cpus: Some(32),
+            admission_reason: Some("pressure".into()),
+            ..Default::default()
+        }
+        .capacity_refusal(Some("homeboy-lab"));
+        assert_eq!(error.code.as_str(), "runner.capacity_busy");
+        store.transition(run_id, store.read_record(run_id).unwrap().revision,
+            homeboy::agents::agent_task_lifecycle::AgentTaskTransition::Terminate {
+                outcome: homeboy::agents::agent_task_lifecycle::AgentTaskTerminalOutcome::Failed,
+                metadata: serde_json::Map::from_iter([("execution_step_failure".into(), json!({
+                    "message": error.message,
+                    "diagnostic": {"code": error.code.as_str(), "message": error.message, "details": error.details},
+                    "classification": "failed"
+                }))]),
+            }).unwrap();
+        let (value, _) = diagnose(DiagnoseArgs {
+            run_id: run_id.into(),
+            full: true,
+        })
+        .unwrap();
+        assert_eq!(value["root_cause"]["class"], "runner.capacity_busy");
+        assert!(value["root_cause"]["message"]
+            .as_str()
+            .unwrap()
+            .contains("load 86/32 CPUs"));
+        assert_eq!(value["placement"]["runner_id"], "homeboy-lab");
+        assert_eq!(value["next_action_basis"], "diagnosis");
+        assert!(value["_homeboy_actionable"]["next_actions"]
+            .to_string()
+            .contains("runner status homeboy-lab"));
+    });
+}
+
+#[test]
 fn admission_failure_is_visible_in_status_and_diagnose_without_provider_evidence() {
     with_isolated_home(|_| {
         let run_id = "run-cli-replay-admission-diagnostic";
