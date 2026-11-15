@@ -180,11 +180,7 @@ pub(crate) fn controller_frame_plan(
     // the same runner-side binary would reproduce the mismatch.
     if matches!(
         report.stale_reason_code,
-        Some(
-            DaemonStaleReasonCode::VersionMismatch
-                | DaemonStaleReasonCode::BuildIdentityMismatch
-                | DaemonStaleReasonCode::ExecutableReplaced
-        )
+        Some(DaemonStaleReasonCode::LabContractVersionMismatch)
     ) {
         return vec![action_step(
             RUNNER_REFRESH_HOMEBOY,
@@ -287,7 +283,11 @@ mod tests {
 
     #[test]
     fn identity_drift_refreshes_the_runner_binary_rather_than_reconnecting_it() {
-        let mut report = report(Some(DaemonStaleReasonCode::BuildIdentityMismatch), 0, true);
+        let mut report = report(
+            Some(DaemonStaleReasonCode::LabContractVersionMismatch),
+            0,
+            true,
+        );
         report.recovery_evidence = Some(DaemonRecoveryEvidence::Recoverable);
         assert_eq!(
             plan(&report),
@@ -300,7 +300,11 @@ mod tests {
 
     #[test]
     fn incompatible_daemon_without_ownership_evidence_has_no_repair_plan() {
-        let mut report = report(Some(DaemonStaleReasonCode::VersionMismatch), 0, false);
+        let mut report = report(
+            Some(DaemonStaleReasonCode::LabContractVersionMismatch),
+            0,
+            false,
+        );
         report.recovery_evidence = Some(DaemonRecoveryEvidence::Unavailable);
         report.ownership_evidence = Some("daemon lease owner could not be established".to_string());
 
@@ -352,9 +356,7 @@ mod tests {
             DaemonStaleReasonCode::PidDead,
             DaemonStaleReasonCode::LeaseMissing,
             DaemonStaleReasonCode::LeaseCorrupt,
-            DaemonStaleReasonCode::VersionMismatch,
-            DaemonStaleReasonCode::BuildIdentityMismatch,
-            DaemonStaleReasonCode::ExecutableReplaced,
+            DaemonStaleReasonCode::LabContractVersionMismatch,
             DaemonStaleReasonCode::RuntimePathsDrift,
             DaemonStaleReasonCode::TransportUnreachable,
             DaemonStaleReasonCode::LeaseSchemaMismatch,
@@ -392,7 +394,7 @@ mod tests {
         for code in [
             DaemonStaleReasonCode::PidDead,
             DaemonStaleReasonCode::LeaseMissing,
-            DaemonStaleReasonCode::VersionMismatch,
+            DaemonStaleReasonCode::LabContractVersionMismatch,
             DaemonStaleReasonCode::RuntimePathsDrift,
             DaemonStaleReasonCode::TransportUnreachable,
         ] {

@@ -652,6 +652,7 @@ mod tests {
             started_at: "now".to_string(),
             last_seen_at: "now".to_string(),
             build_identity: build_identity::current(),
+            lab_contract_version: homeboy_lab_contract::LAB_CONTRACT_VERSION,
             service_manager: None,
             executable: crate::daemon::ExecutableIdentity {
                 path: "/usr/local/bin/homeboy".into(),

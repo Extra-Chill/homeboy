@@ -1519,7 +1519,7 @@ fn stale_daemon_warning(runner_id: &str) -> RunnerStaleDaemonWarning {
 fn restartable_daemon_freshness() -> DaemonFreshnessReport {
     DaemonFreshnessReport {
         fresh: false,
-        stale_reason_code: Some(DaemonStaleReasonCode::VersionMismatch),
+        stale_reason_code: Some(DaemonStaleReasonCode::LabContractVersionMismatch),
         restartable: true,
         lease_id: Some("lease".to_string()),
         pid: None,

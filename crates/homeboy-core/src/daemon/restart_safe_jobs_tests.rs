@@ -112,8 +112,7 @@ fn stale_daemon_status(requests: &[serde_json::Value]) -> DaemonStatus {
     let _lock = acquire_daemon_owner_lock_at(&path, Duration::ZERO).expect("serve lock");
     let mut lease = write_state("127.0.0.1:31017".parse().unwrap(), None).expect("lease");
     lease.startup_token = "restart-safety-token".to_string();
-    lease.build_identity.version = "0.0.1".to_string();
-    lease.build_identity.display = "homeboy 0.0.1".to_string();
+    lease.lab_contract_version += 1;
     write_lease(&path, &lease).expect("stale lease");
     let store = JobStore::open_without_reconciliation(paths::observation_db().expect("jobs path"))
         .expect("durable store")

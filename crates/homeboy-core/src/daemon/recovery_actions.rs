@@ -216,6 +216,8 @@ pub fn plan_recovery(status: &DaemonStatus) -> DaemonRecoveryPlan {
 }
 
 /// Opt-in draining leaves the default recovery planner unchanged.
+/// Retained for explicit recovery of an incompatible Lab contract while jobs
+/// are protected; compatible build drift never enters this path.
 pub fn plan_recovery_with_drain(status: &DaemonStatus, drain: bool) -> DaemonRecoveryPlan {
     let freshness = &status.freshness;
     if drain
@@ -224,11 +226,7 @@ pub fn plan_recovery_with_drain(status: &DaemonStatus, drain: bool) -> DaemonRec
         && freshness.active_jobs > 0
         && matches!(
             freshness.stale_reason_code,
-            Some(
-                DaemonStaleReasonCode::VersionMismatch
-                    | DaemonStaleReasonCode::BuildIdentityMismatch
-                    | DaemonStaleReasonCode::ExecutableReplaced
-            )
+            Some(DaemonStaleReasonCode::LabContractVersionMismatch)
         )
     {
         return DaemonRecoveryPlan {
@@ -407,7 +405,7 @@ fn plan_recovery_steps(status: &DaemonStatus) -> DaemonRecoveryPlan {
     // Nothing is authorized. Say so, and hand back the read-only step that
     // produces the evidence a later pass would need, rather than an empty plan.
     let reason = match freshness.stale_reason_code {
-        Some(super::DaemonStaleReasonCode::VersionMismatch)
+        Some(super::DaemonStaleReasonCode::LabContractVersionMismatch)
             if status.running && status.reachable =>
         {
             status.render_summary()
@@ -557,8 +555,32 @@ mod tests {
         status
     }
 
+    #[test]
+    fn contract_incompatibility_drains_only_when_explicitly_requested() {
+        let incompatible = status(
+            Some(DaemonStaleReasonCode::LabContractVersionMismatch),
+            Vec::new(),
+            2,
+        );
+        assert!(!incompatible.draining());
+        assert!(!plan_recovery(&incompatible)
+            .steps
+            .iter()
+            .any(|step| step.code == DRAIN_THEN_REPLACE));
+        assert!(plan_recovery_with_drain(&incompatible, true)
+            .steps
+            .iter()
+            .any(|step| step.code == DRAIN_THEN_REPLACE));
+        let compatible = status(None, Vec::new(), 2);
+        assert!(compatible.admits_work());
+        assert!(!plan_recovery_with_drain(&compatible, true)
+            .steps
+            .iter()
+            .any(|step| step.code == DRAIN_THEN_REPLACE));
+    }
+
     /// The live reproduction this fix was written against: a reachable daemon
-    /// whose build identity no longer matches the current binary, zero active
+    /// whose Lab contract no longer matches the caller, zero active
     /// jobs, restartable. The dispatcher must resolve the authority-bound
     /// replacement with
     /// every argument already filled in — including the lease the fixture
@@ -566,7 +588,7 @@ mod tests {
     #[test]
     fn a_version_mismatch_report_resolves_the_restart_plan() {
         let status = status(
-            Some(super::super::DaemonStaleReasonCode::VersionMismatch),
+            Some(super::super::DaemonStaleReasonCode::LabContractVersionMismatch),
             vec![DaemonRepairStep::executable(
                 DAEMON_ENSURE_RUNNING,
                 ensure_running(),
@@ -585,7 +607,11 @@ mod tests {
                 .collect::<Vec<_>>(),
             vec![(DAEMON_ENSURE_RUNNING, "homeboy daemon ensure-running")]
         );
-        assert!(plan.reason.contains("VersionMismatch"), "{}", plan.reason);
+        assert!(
+            plan.reason.contains("LabContractVersionMismatch"),
+            "{}",
+            plan.reason
+        );
         for step in &plan.steps {
             assert!(step.action.is_some(), "{} carries no argv", step.code);
         }
@@ -595,7 +621,7 @@ mod tests {
     #[test]
     fn automatic_idle_restart_refuses_active_jobs_and_non_restart_plans() {
         let active = status(
-            Some(super::super::DaemonStaleReasonCode::VersionMismatch),
+            Some(super::super::DaemonStaleReasonCode::LabContractVersionMismatch),
             vec![DaemonRepairStep::executable(
                 DAEMON_ENSURE_RUNNING,
                 ensure_running(),
@@ -605,7 +631,7 @@ mod tests {
         assert!(!authorizes_automatic_idle_restart(&active));
 
         let mut inconsistent = status(
-            Some(super::super::DaemonStaleReasonCode::VersionMismatch),
+            Some(super::super::DaemonStaleReasonCode::LabContractVersionMismatch),
             vec![DaemonRepairStep::executable(
                 DAEMON_ENSURE_RUNNING,
                 ensure_running(),
@@ -618,7 +644,7 @@ mod tests {
         assert!(!authorizes_automatic_idle_restart(&inconsistent));
 
         let diagnosis = status(
-            Some(super::super::DaemonStaleReasonCode::VersionMismatch),
+            Some(super::super::DaemonStaleReasonCode::LabContractVersionMismatch),
             vec![DaemonRepairStep::executable(DAEMON_DIAGNOSE, diagnose())],
             0,
         );
@@ -765,90 +791,12 @@ mod tests {
         assert!(plan.required_confirmations.is_empty());
     }
 
-    #[test]
-    fn admission_reporting_and_opt_in_drain_table() {
-        for (reason, jobs, state) in [
-            (None, 2, "serving"),
-            (Some(DaemonStaleReasonCode::VersionMismatch), 2, "draining"),
-            (
-                Some(DaemonStaleReasonCode::BuildIdentityMismatch),
-                2,
-                "draining",
-            ),
-            (
-                Some(DaemonStaleReasonCode::ExecutableReplaced),
-                2,
-                "draining",
-            ),
-            (
-                Some(DaemonStaleReasonCode::VersionMismatch),
-                0,
-                "unavailable",
-            ),
-        ] {
-            let report = status(reason, Vec::new(), jobs);
-            let admission = report.admission_report();
-            assert_eq!(admission["state"], state);
-            assert_eq!(admission["active_jobs"], jobs);
-            assert_eq!(admission["daemon_version"], "0.326.1");
-            if state == "draining" {
-                assert!(!report.admits_work());
-                assert_eq!(admission["waiting_for"], "daemon_replacement");
-                assert!(matches!(
-                    plan_recovery(&report).lifecycle,
-                    Plan::Draining { .. }
-                ));
-            }
-        }
-    }
-
-    #[test]
-    fn a_busy_stale_daemon_is_left_to_replace_itself() {
-        for reason in [
-            DaemonStaleReasonCode::VersionMismatch,
-            DaemonStaleReasonCode::BuildIdentityMismatch,
-            DaemonStaleReasonCode::ExecutableReplaced,
-        ] {
-            let report = status(Some(reason), Vec::new(), 2);
-            assert!(!authorizes_automatic_idle_restart(&report));
-            assert!(!super::super::converge_idle_daemon(report).expect("no refusal"));
-        }
-    }
-
-    #[test]
-    fn reachable_version_mismatch_with_active_jobs_never_offers_attestation() {
-        let mut status = status(
-            Some(super::super::DaemonStaleReasonCode::VersionMismatch),
-            Vec::new(),
-            2,
-        );
-        status.active_job_recovery_evidence = vec![
-            recovery_evidence(Uuid::from_u128(1)),
-            crate::api_jobs::DaemonActiveJobRecoveryEvidence {
-                operation: "controller.lab.staging-dispatch".to_string(),
-                linked_durable_run_id: Some("active-staging-dispatch".to_string()),
-                linked_durable_run_state: Some(
-                    crate::api_jobs::DaemonLinkedDurableRunState::Active,
-                ),
-                ..recovery_evidence(Uuid::from_u128(2))
-            },
-        ];
-
-        let plan = plan_recovery(&status);
-
-        assert_eq!(plan.steps.len(), 1);
-        assert_eq!(plan.steps[0].code, DAEMON_DIAGNOSE);
-        assert!(!plan.executable);
-        assert!(plan.required_confirmations.is_empty());
-        assert!(matches!(plan.lifecycle, Plan::Draining { .. }));
-    }
-
     /// Replacement may proceed without any attestation when every active job
     /// carries durable terminal evidence: no workload remains.
     #[test]
     fn terminal_evidence_authorizes_automatic_idle_restart() {
         let mut status = status(
-            Some(super::super::DaemonStaleReasonCode::VersionMismatch),
+            Some(super::super::DaemonStaleReasonCode::LabContractVersionMismatch),
             vec![DaemonRepairStep::executable(
                 DAEMON_ENSURE_RUNNING,
                 ensure_running(),

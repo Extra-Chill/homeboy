@@ -107,7 +107,7 @@ fn reconcile_reports_remaining_daemon_skew() {
     let mut report = connected_report();
     report.daemon_freshness = Some(DaemonFreshnessReport {
         fresh: false,
-        stale_reason_code: Some(DaemonStaleReasonCode::VersionMismatch),
+        stale_reason_code: Some(DaemonStaleReasonCode::LabContractVersionMismatch),
         restartable: true,
         lease_id: None,
         pid: None,
@@ -130,7 +130,7 @@ fn reconcile_reports_remaining_daemon_skew() {
     );
     assert_eq!(
         outcome.remaining_blocker.as_deref(),
-        Some("daemon_version_mismatch")
+        Some("daemon_lab_contract_version_mismatch")
     );
     assert_eq!(
         outcome.next_action.as_deref(),
@@ -213,7 +213,7 @@ fn runner_command_failure_next_action_is_never_the_failed_command() {
     let mut stale_report = connected_report();
     stale_report.daemon_freshness = Some(DaemonFreshnessReport {
         fresh: false,
-        stale_reason_code: Some(DaemonStaleReasonCode::VersionMismatch),
+        stale_reason_code: Some(DaemonStaleReasonCode::LabContractVersionMismatch),
         restartable: true,
         lease_id: None,
         pid: None,
@@ -674,7 +674,7 @@ fn disconnected_split_view_status_exposes_bounded_reconciliation_command() {
         configured_job_binary_build_identity: None,
         daemon_freshness: Some(DaemonFreshnessReport {
             fresh: false,
-            stale_reason_code: Some(DaemonStaleReasonCode::VersionMismatch),
+            stale_reason_code: Some(DaemonStaleReasonCode::LabContractVersionMismatch),
             restartable: false,
             lease_id: Some("lease-23456".to_string()),
             pid: Some(23456),
@@ -843,7 +843,7 @@ fn terminal_ownership_suppresses_mutating_full_status_guidance_across_projection
     ));
     report.daemon_freshness = Some(DaemonFreshnessReport {
         fresh: false,
-        stale_reason_code: Some(DaemonStaleReasonCode::VersionMismatch),
+        stale_reason_code: Some(DaemonStaleReasonCode::LabContractVersionMismatch),
         restartable: false,
         lease_id: None,
         pid: None,

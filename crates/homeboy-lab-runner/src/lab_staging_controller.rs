@@ -6626,7 +6626,7 @@ mod tests {
             daemon_freshness: Some(homeboy_core::daemon::DaemonFreshnessReport {
                 fresh: false,
                 stale_reason_code: Some(
-                    homeboy_core::daemon::DaemonStaleReasonCode::VersionMismatch,
+                    homeboy_core::daemon::DaemonStaleReasonCode::LabContractVersionMismatch,
                 ),
                 restartable: false,
                 lease_id: Some("known-lease".to_string()),

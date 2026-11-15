@@ -20,8 +20,10 @@ use super::{
     DaemonRecoveryEvidence, DaemonRepairStep, DaemonRuntimeSnapshot, DaemonStaleReasonCode,
     DaemonState, DAEMON_LEASE_SCHEMA,
 };
+#[cfg(test)]
+use crate::build_identity;
 use crate::process::pid_is_running;
-use crate::{build_identity, Error, Result};
+use crate::{Error, Result};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct DaemonLeaseValidation {
@@ -133,28 +135,12 @@ pub(crate) fn validate_lease_file(path: &Path) -> Result<DaemonLeaseValidation> 
             "unsupported daemon lease schema",
         ));
     }
-    // A daemon whose executable was replaced in place (e.g. by `homeboy
-    // upgrade`) keeps running the old image. The on-disk binary can match
-    // this build while the live process does not (homeboy#15806). Compare
-    // the file identity the daemon recorded at startup with what its path
-    // names now.
-    if state.executable.replaced() {
+    if state.lab_contract_version != homeboy_lab_contract::LAB_CONTRACT_VERSION {
         return Ok(stale_lease(
             state,
             true,
-            DaemonStaleReasonCode::ExecutableReplaced,
-            "daemon executable was replaced on disk since the daemon started; restart required",
-        ));
-    }
-    let current_identity = build_identity::current();
-    if state.build_identity.version != current_identity.version
-        || state.build_identity.display != current_identity.display
-    {
-        return Ok(stale_lease(
-            state,
-            true,
-            DaemonStaleReasonCode::VersionMismatch,
-            "daemon build identity does not match current Homeboy binary",
+            DaemonStaleReasonCode::LabContractVersionMismatch,
+            "daemon Lab contract version does not match the caller",
         ));
     }
     if let Some(reason) = runtime_snapshot_stale_reason(&state.runtime_paths) {
@@ -353,6 +339,7 @@ mod tests {
             started_at: String::new(),
             last_seen_at: String::new(),
             build_identity: build_identity::current(),
+            lab_contract_version: homeboy_lab_contract::LAB_CONTRACT_VERSION,
             service_manager: None,
             executable: crate::daemon::ExecutableIdentity {
                 path: "/usr/local/bin/homeboy".into(),
@@ -372,7 +359,7 @@ mod tests {
             fresh: false,
             reachable: false,
             stale_reason: Some("test stale reason".to_string()),
-            stale_reason_code: Some(DaemonStaleReasonCode::VersionMismatch),
+            stale_reason_code: Some(DaemonStaleReasonCode::LabContractVersionMismatch),
             invalid_pid: None,
         }
     }
@@ -383,6 +370,56 @@ mod tests {
             .iter()
             .map(|step| (step.code.clone(), step.command.clone()))
             .collect()
+    }
+
+    #[test]
+    fn different_build_lease_is_compatible_unless_exact_is_required() {
+        use homeboy_lab_contract::{
+            admit_lab_runner, required_lab_handoff_capabilities, LabCapabilityHandshake,
+            LabRuntimeAncestry, LabRuntimeIdentity, LAB_CONTRACT_VERSION,
+        };
+
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("lease.json");
+        let mut state = restartable_validation(Some("compatible".into()))
+            .state
+            .unwrap();
+        state.pid = std::process::id();
+        state.build_identity.display = "homeboy different-build".into();
+        state.build_identity.version = "0.0.0".into();
+        fs::write(&path, serde_json::to_vec(&state).unwrap()).unwrap();
+        assert!(validate_lease_file(&path).unwrap().fresh);
+
+        let controller = LabRuntimeIdentity {
+            build_identity: crate::build_identity::current().display,
+            lab_contract_version: Some(LAB_CONTRACT_VERSION),
+            source_revision: "controller".into(),
+            clean: true,
+        };
+        let daemon = LabRuntimeIdentity {
+            build_identity: state.build_identity.display.clone(),
+            source_revision: "daemon".into(),
+            ..controller.clone()
+        };
+        let capabilities = required_lab_handoff_capabilities();
+        let handshake = LabCapabilityHandshake {
+            controller,
+            runner_command: daemon.clone(),
+            daemon,
+            required_capabilities: capabilities.clone(),
+            runner_command_capabilities: capabilities.clone(),
+            daemon_capabilities: capabilities,
+            ancestry: LabRuntimeAncestry::Unknown,
+        };
+        assert!(admit_lab_runner(&handshake, false).compatible);
+        assert!(!admit_lab_runner(&handshake, true).compatible);
+
+        state.lab_contract_version += 1;
+        fs::write(&path, serde_json::to_vec(&state).unwrap()).unwrap();
+        assert_eq!(
+            validate_lease_file(&path).unwrap().stale_reason_code,
+            Some(DaemonStaleReasonCode::LabContractVersionMismatch),
+        );
     }
 
     #[test]
