@@ -271,9 +271,17 @@ impl CookActivityProbe {
 /// unambiguously done work; excluding them would report a scaffolding cook as
 /// having produced nothing.
 pub fn worktree_files_changed(root: &Path) -> Option<usize> {
+    // This probe runs concurrently with provider writes. Git status normally
+    // refreshes the index under index.lock, which can make a provider's add or
+    // commit fail. Observation must never compete for that optional lock.
     let porcelain = homeboy_core::git::output_allow_empty(
         root,
-        &["status", "--porcelain", "--untracked-files=all"],
+        &[
+            "--no-optional-locks",
+            "status",
+            "--porcelain",
+            "--untracked-files=all",
+        ],
     )?;
     Some(count_porcelain_entries(&porcelain))
 }
@@ -305,6 +313,27 @@ fn git_head_sha(root: &Path) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn activity_probe_does_not_refresh_the_provider_index() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path();
+        let git = |args: &[&str]| {
+            homeboy_core::test_support::run_git_command(root, args);
+        };
+        git(&["init", "--quiet"]);
+        std::fs::write(root.join("tracked"), "base\n").unwrap();
+        git(&["add", "tracked"]);
+        // Force a stat-cache refresh without changing the indexed content.
+        // Ordinary git status would rewrite the index; a liveness read must not.
+        std::thread::sleep(std::time::Duration::from_millis(20));
+        std::fs::write(root.join("tracked"), "base\n").unwrap();
+        std::fs::write(root.join("untracked"), "new\n").unwrap();
+        let index = root.join(".git/index");
+        let before = std::fs::read(&index).unwrap();
+        assert_eq!(worktree_files_changed(root), Some(2));
+        assert_eq!(std::fs::read(index).unwrap(), before);
+    }
 
     #[test]
     fn counts_provider_written_files() {

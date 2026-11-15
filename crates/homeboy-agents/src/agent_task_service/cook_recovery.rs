@@ -262,6 +262,15 @@ format!(
             };
         }
     }
+    if status == CookStatus::PreExecutionFailure
+        && inputs.continuation_rearm_required
+        && inputs.continuation_refusal.is_none()
+    {
+        // Older Lab reports could label a successful provider result as a
+        // pre-execution failure. Candidate admission, not that stale label,
+        // authorizes replaying the failed terminal continuation.
+        return continuation_step(inputs);
+    }
     if status == CookStatus::PreExecutionFailure && inputs.applied_gate_failure {
         // Gate infrastructure can fail before a gate executes, after the
         // provider candidate was applied. Continue that candidate, not provider
@@ -1671,6 +1680,19 @@ mod tests {
         };
         configure(&mut inputs);
         cook_recovery_step(&inputs)
+    }
+
+    #[test]
+    fn failed_terminal_continuation_rearms_instead_of_retrying_provider() {
+        for status in ["failed", "pre_execution_failure"] {
+            assert_eq!(
+                step(status, |inputs| {
+                    inputs.continuation_rearm_required = true;
+                    inputs.retry_refusal = Some("provider already succeeded");
+                }),
+                CookRecoveryStep::Rearm
+            );
+        }
     }
 
     #[test]
