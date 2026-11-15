@@ -484,14 +484,13 @@ fn crash_case(fault: Fault) {
         assert_eq!(intent["receipt"]["job_id"], matching[0]["job_id"]);
     }
     if matches!(fault, Fault::Child) {
-        // The consumer classified the SIGKILLed child as a crash (signal
-        // exit, no publication) of the exact local admission step.
+        // A SIGKILLed child has no exit status, so the step fails closed
+        // (#18175) and the consumer records that failure for recovery.
         let failure = parent.metadata["execution_step_failure"]["message"]
             .as_str()
             .unwrap_or_default();
         assert!(
-            failure.contains("agent-task-exec:execution-chaos:2:0 ended before publication")
-                && failure.contains("exit None"),
+            failure.contains("step child exit status is unknown"),
             "{failure}\n{}",
             evidence(&context)
         );
