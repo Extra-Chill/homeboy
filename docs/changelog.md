@@ -4,6 +4,11 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.465.4] - 2026-11-15
+
+### Fixed
+- keep the candidate ref when a Cook has no publication title
+
 ## [0.465.3] - 2026-11-15
 
 ### Fixed
