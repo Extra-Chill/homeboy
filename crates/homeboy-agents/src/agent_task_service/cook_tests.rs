@@ -8468,6 +8468,7 @@ fn canonical_completion_accepts_green_and_proven_inherited_gate_evidence() {
             exit_code: 1,
             stdout_tail: String::new(),
             stderr_tail: String::new(),
+            failed_tests: Vec::new(),
             agent_feedback: String::new(),
             diagnostics: Vec::new(),
         });

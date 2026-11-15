@@ -1293,6 +1293,45 @@ mod tests {
     }
 
     #[test]
+    fn review_test_failing_ids_reach_gate_fix_prompt_despite_stdout_cap() {
+        let (stdout, stderr) = crate::agent_task_gate::huge_review_test_failure_capture();
+        let failing = "homeboy-agents::agent_task_gate::tests::needle_gate_regression";
+        let mut gate = failed_gate();
+        gate.failure_evidence = Some(crate::agent_task_gate::gate_failure_evidence(
+            "homeboy review test homeboy",
+            100,
+            &stdout,
+            &stderr,
+            None,
+        ));
+        gate.stdout = stdout;
+        gate.stderr = stderr;
+        let report = evaluate_cook_loop(AgentTaskCookLoopOptions {
+            source_request: source_request(),
+            promotion_report: promotion_report(AgentTaskPromotionStatus::GateFailed, vec![gate]),
+            attempt: 1,
+            max_attempts: 3,
+            source_run_id: Some("run-18130".to_string()),
+            current_diff: String::new(),
+            review_form: None,
+            metadata: Value::Null,
+        });
+        let request = report.follow_up_request.expect("follow-up request");
+        assert!(
+            request.instructions.contains(failing),
+            "{}",
+            request.instructions
+        );
+        assert!(request.instructions.contains("needle mismatch"));
+        let failed = &request.inputs["cook_loop"]["failed_gates"][0];
+        assert!(failed["agent_feedback"].as_str().unwrap().contains(failing));
+        assert!(failed["failure_excerpt"]
+            .as_str()
+            .unwrap()
+            .contains(failing));
+    }
+
+    #[test]
     fn red_gate_creates_follow_up_request_with_failure_evidence_and_diff() {
         let report = evaluate_cook_loop(AgentTaskCookLoopOptions {
             source_request: source_request(),
@@ -1528,6 +1567,7 @@ mod tests {
                         exit_code: 1,
                         stdout_tail: String::new(),
                         stderr_tail: "candidate gate failure".to_string(),
+                        failed_tests: Vec::new(),
                         agent_feedback: "Fix the candidate gate failure.".to_string(),
                         diagnostics: Vec::new(),
                     }),
@@ -2280,6 +2320,7 @@ mod tests {
                 exit_code: 1,
                 stdout_tail: String::new(),
                 stderr_tail: String::new(),
+                failed_tests: Vec::new(),
                 agent_feedback: "Use the structured diagnostic.".to_string(),
                 diagnostics: vec![diagnostic],
             }),
@@ -2840,6 +2881,7 @@ mod tests {
                 exit_code: 101,
                 stdout_tail: "running tests".to_string(),
                 stderr_tail: "boom".to_string(),
+                failed_tests: Vec::new(),
                 agent_feedback: "Update the patch so opaque-gate passes.".to_string(),
                 diagnostics: Vec::new(),
             }),
@@ -2915,6 +2957,7 @@ mod tests {
                 exit_code: 7,
                 stdout_tail: "secret fixture mismatch".to_string(),
                 stderr_tail: "private evaluator stack trace".to_string(),
+                failed_tests: Vec::new(),
                 agent_feedback: "Fix the randomized secret fixture mismatch.".to_string(),
                 diagnostics: Vec::new(),
             }),

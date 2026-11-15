@@ -2047,6 +2047,16 @@ fn run_main_test_workflow_inner(
     if failure_analysis_input.is_none() && !output.success {
         failure_analysis_input = parse_compiler_failures(&output.stdout, &output.stderr);
     }
+    // Name the failing tests on stderr after the run. The JSON result lists
+    // every executed test id and can be far larger than a caller's bounded
+    // output tail, which would otherwise hide the failures (#18130).
+    if !output.success {
+        if let Some(input) = failure_analysis_input.as_ref() {
+            for line in super::failure_digest::render_test_failure_digest(input) {
+                eprintln!("{line}");
+            }
+        }
+    }
     let mut findings = failure_analysis_input
         .as_ref()
         .and_then(homeboy_findings_from_test_analysis_input);

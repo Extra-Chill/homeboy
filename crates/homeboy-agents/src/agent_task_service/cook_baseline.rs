@@ -1237,6 +1237,7 @@ mod tests {
                     exit_code: 1,
                     stdout_tail: String::new(),
                     stderr_tail: candidate_output.to_string(),
+                    failed_tests: Vec::new(),
                     agent_feedback: "Repair the candidate gate failure.".to_string(),
                     diagnostics: Vec::new(),
                 });
@@ -1555,6 +1556,7 @@ mod tests {
                 exit_code,
                 stdout_tail: stdout,
                 stderr_tail: stderr,
+                failed_tests: Vec::new(),
                 agent_feedback: "Repair the candidate gate failure.".to_string(),
                 diagnostics: Vec::new(),
             });
