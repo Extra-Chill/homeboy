@@ -4,6 +4,13 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.465.19] - 2026-11-15
+
+### Fixed
+- wait through a lost runner transport at admission instead of failing the Cook
+- resume re-adopted steps after a daemon restart (revert #18177)
+- decide compatibility from schema and Lab contract, not build identity
+
 ## [0.465.18] - 2026-11-15
 
 ### Changed
