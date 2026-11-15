@@ -4,6 +4,16 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.465.2] - 2026-11-15
+
+### Changed
+- drop the v0.445.4 empty-owner-lock liveness probe
+
+### Fixed
+- record actual delivery and preserve retry routes
+- author human-facing candidates with publication identity
+- spawn the verified daemon child command
+
 ## [0.465.1] - 2026-11-14
 
 ### Fixed
