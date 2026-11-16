@@ -8298,10 +8298,40 @@ fn verified_empty_attempt_dispatches_the_next_rotation_route() {
         let cook_id = "cook-15881-rotate";
         let run_id = format!("{cook_id}-attempt-1");
         let dispatches = Arc::new(AtomicUsize::new(0));
+        #[derive(Debug)]
+        struct SchedulingBoundaryDispatcher {
+            source_run_id: String,
+            inner: RecordingDetachedAttemptDispatcher,
+        }
+
+        impl AgentTaskCookAttemptDispatcher for SchedulingBoundaryDispatcher {
+            fn durable_recipe(&self) -> Result<Value> {
+                self.inner.durable_recipe()
+            }
+
+            fn dispatch_attempt(
+                &self,
+                plan: AgentTaskPlan,
+                run_id: &str,
+                baseline: Option<&DerivedCookBaselineCapability>,
+            ) -> Result<()> {
+                let phases = test_lifecycle_store()
+                    .open_observation_initialized()?
+                    .phase_spans(&self.source_run_id)?;
+                assert!(
+                    phases.spans.iter().any(|span| span.id == "terminal.schedule_next_attempt"),
+                    "scheduling must finish before receiver staging, capacity waits, or provider execution"
+                );
+                self.inner.dispatch_attempt(plan, run_id, baseline)
+            }
+        }
         let mut options = batch_cook_options(
             cook_id,
-            Arc::new(RecordingDetachedAttemptDispatcher {
-                dispatches: Arc::clone(&dispatches),
+            Arc::new(SchedulingBoundaryDispatcher {
+                source_run_id: run_id.clone(),
+                inner: RecordingDetachedAttemptDispatcher {
+                    dispatches: Arc::clone(&dispatches),
+                },
             }),
         );
         options.identity.initial_run_id = run_id.clone();
