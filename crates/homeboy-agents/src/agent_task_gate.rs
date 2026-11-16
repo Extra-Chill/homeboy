@@ -6152,7 +6152,12 @@ fn cargo_selection(
             listed
         }
     };
-    let selected_count = selected_ids.len();
+    // `cargo test -q` prints no per-test lines; its summaries still count
+    // what the filter selected.
+    let selected_count = match selected_ids.len() {
+        0 => test_result.map_or(0, |result| result.total as usize),
+        count => count,
+    };
     let recovery = cargo_selection_recovery(
         &tokens,
         cargo_index,
@@ -7550,6 +7555,19 @@ mod tests {
             "",
         )
         .is_none());
+    }
+
+    #[test]
+    fn a_quiet_focused_gate_counts_tests_from_cargo_summaries() {
+        let command = "cargo test -q -p homeboy-lab-runner --lib workspace";
+        for (stdout, exit) in [
+            ("running 34 tests\n..................................\ntest result: ok. 34 passed; 0 failed; 0 ignored; 0 measured; 2018 filtered out; finished in 10.36s\n", 0),
+            ("running 0 tests\n\ntest result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 2052 filtered out; finished in 0.00s\n", 1),
+        ] {
+            let result = cargo_test_result(command, 0, stdout, "");
+            let selection = cargo_selection(command, &[], stdout, "", result.as_ref()).unwrap();
+            assert_eq!(effective_gate_exit_code(0, Some(&selection)), exit, "{stdout}");
+        }
     }
 
     #[test]
