@@ -4,6 +4,12 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.466.3] - 2026-11-16
+
+### Fixed
+- count a quiet focused cargo gate's tests from cargo's summaries
+- retain gate failure tails and termination signals
+
 ## [0.466.2] - 2026-11-16
 
 ### Fixed
