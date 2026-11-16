@@ -1215,3 +1215,6 @@ fn cook_recovery_classifies_stalled_gate_setup_as_gate_environment_unavailable()
         assert_eq!(plan.step, CookRecoveryStep::Regate, "{plan:?}");
     });
 }
+
+#[path = "candidate_continuation/pre_apply.rs"]
+mod pre_apply;

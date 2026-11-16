@@ -886,7 +886,17 @@ fn promote_candidate(
     let destination_head_alignment =
         align_superseded_head(&path, options, outcome, commit, feedback)?;
     if !options.dry_run || destination_head_alignment.is_none() {
-        super::candidate_bundle::validate_destination(&path, commit, feedback)?;
+        super::candidate_bundle::validate_destination(&path, commit, feedback).map_err(
+            |mut error| {
+                error.details["promotion_pre_apply_refusal"] = json!(true);
+                let paths = git_output(&path, &["status", "--porcelain", "--untracked-files=all"])
+                    .unwrap_or_default();
+                if !paths.is_empty() {
+                    error.message = format!("{}; destination paths: {paths}", error.message);
+                }
+                error
+            },
+        )?;
     }
     let base_tree = git_output(
         &path,

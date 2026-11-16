@@ -2235,6 +2235,30 @@ fn lifecycle_continuation(record: &agent_task_lifecycle::AgentTaskRunRecord) -> 
     record.metadata.get(LIFECYCLE_CONTINUATION_KEY)
 }
 
+/// Pre-apply refusals never acquired promotion authority. Interpret legacy
+/// Completed rows as failed too, but never reopen an applied promotion.
+fn rearmable_promotion_refusal(record: &agent_task_lifecycle::AgentTaskRunRecord) -> bool {
+    if record
+        .metadata
+        .pointer("/cook_delivery/artifacts/promotion")
+        .is_some()
+    {
+        return false;
+    }
+    let Some(failure) = record.metadata.get("cook_controller_failure") else {
+        return false;
+    };
+    failure.pointer("/details/promotion_pre_apply_refusal") == Some(&Value::Bool(true))
+        || failure
+            .get("message")
+            .and_then(Value::as_str)
+            .is_some_and(|message| {
+                message.contains("gate_feedback_candidate_baseline")
+                    && message
+                        .contains("candidate worktree differs from the adopted immutable commit")
+            })
+}
+
 /// The one claimability rule shared by the daemon gate and the claim, so a
 /// supervisor never spawns a worker that cannot claim. A Cook another live
 /// controller drives is not claimable: its driver owns every transition and
@@ -2818,7 +2842,14 @@ fn observe_continuation_state(
             {
                 return Ok(CookContinuationState::Pending);
             }
-            return Ok(state);
+            return Ok(
+                if state == CookContinuationState::Completed && rearmable_promotion_refusal(&record)
+                {
+                    CookContinuationState::Failed
+                } else {
+                    state
+                },
+            );
         }
     }
     Ok(CookContinuationState::Absent)
@@ -2899,7 +2930,9 @@ pub fn claim_continuation_for_recovery_and_clear_failure_in_store(
         let Some(mut continuation) = lifecycle_continuation(record).cloned() else {
             return false;
         };
-        if lifecycle_continuation_state(Some(&continuation)) != CookContinuationState::Failed
+        let state = lifecycle_continuation_state(Some(&continuation));
+        if !(state == CookContinuationState::Failed
+            || (state == CookContinuationState::Completed && rearmable_promotion_refusal(record)))
             || continuation.get("cook_id").and_then(Value::as_str) != Some(cook_id)
         {
             return false;
@@ -3375,7 +3408,12 @@ fn consume_claimed_with_dispatcher_policy(
                     == Some("terminal")
                 || super::CookDelivery::from_run_metadata(&current.metadata)
                     .is_some_and(|delivery| delivery.blocker.is_some());
-            if terminal {
+            if rearmable_promotion_refusal(&current) {
+                let diagnostic = current.metadata["cook_controller_failure"]["message"]
+                    .as_str()
+                    .unwrap_or("promotion refused before apply");
+                claim.fail(diagnostic)?;
+            } else if terminal {
                 claim.complete()?;
             } else {
                 claim.retry()?;
