@@ -211,6 +211,7 @@ mod tests {
             "remote_daemon_lease_id": "lease-1",
             "homeboy_version": "1.0.0",
             "homeboy_build_identity": "build-1",
+            "machine_id": "machine-1",
             "connected_at": "2026-08-30T00:00:00Z",
             "worker_identity": "worker-1",
             "worker_pid": 104,
