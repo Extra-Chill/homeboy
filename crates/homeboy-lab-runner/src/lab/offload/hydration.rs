@@ -240,6 +240,15 @@ fn hydrate_lab_workspace_dependencies_with_policy(
             remote_path,
         ));
     }
+    let cache = hydration_cache(runner_id, &local_workspace_root, remote_path, &plan)?;
+    if let Some(cache) = &cache {
+        if remote_checks_succeed(runner_id, remote_path, vec![cache.restore.clone()])? {
+            return Ok(LabWorkspaceHydrationOutput {
+                cache_source: Some("runner_lockfile_cache".to_string()),
+                ..LabWorkspaceHydrationOutput::reused_prepared_cache(remote_path)
+            });
+        }
+    }
     if offline_only {
         // Resolved inside the offline branch only: online hydration never
         // touches the controller package cache, so it keeps resolving nothing
@@ -250,6 +259,7 @@ fn hydrate_lab_workspace_dependencies_with_policy(
             &plan,
         )? {
             restore_controller_dependency_package(runner_id, remote_path, &package, &plan)?;
+            publish_hydration_cache(runner_id, remote_path, cache.as_ref())?;
             return Ok(LabWorkspaceHydrationOutput {
                 schema: HYDRATION_SCHEMA,
                 status: RESTORED_CONTROLLER_CACHE,
@@ -315,6 +325,7 @@ fn hydrate_lab_workspace_dependencies_with_policy(
         ));
     }
 
+    publish_hydration_cache(runner_id, remote_path, cache.as_ref())?;
     Ok(LabWorkspaceHydrationOutput {
         schema: HYDRATION_SCHEMA,
         status: HYDRATED,
@@ -323,6 +334,101 @@ fn hydrate_lab_workspace_dependencies_with_policy(
         cache_source: None,
         prepared_source_cache_observations: None,
     })
+}
+
+struct HydrationCache {
+    restore: String,
+    publish: String,
+}
+
+/// Only complete, lockfile-backed plans can be cached. The runner supplies the
+/// platform and executable identity: controller toolchains must not key runner artifacts.
+fn hydration_cache(
+    runner_id: &str,
+    local_root: &std::path::Path,
+    remote_path: &str,
+    plan: &[deps::DependencyInstallPlanStep],
+) -> Result<Option<HydrationCache>> {
+    if declared_output_checks_for_complete_plan(remote_path, plan)?.is_none() {
+        return Ok(None);
+    }
+    let locks = super::dependency_package::lockfile_identity(local_root)?;
+    if locks.is_empty() {
+        return Ok(None);
+    }
+    let runner = crate::load(runner_id)?;
+    let Some(root) = runner.workspace_root else {
+        return Ok(None);
+    };
+    let identity = homeboy_engine_primitives::content_hash::sha256_hex(
+        &serde_json::to_vec(&("lab-hydration-v1", plan, locks)).map_err(|error| {
+            Error::internal_json(
+                error.to_string(),
+                Some("hydration cache identity".to_string()),
+            )
+        })?,
+    );
+    let mut tools = Vec::new();
+    let mut outputs = Vec::new();
+    for step in plan {
+        let command = runner_hydration_command(&step.invocation)?;
+        // Adapter commands are commonly wrapped as `sh -c 'tool install'`.
+        // Fingerprint that tool as well as the shell, not just the wrapper.
+        let shell_tool = command
+            .get(1)
+            .filter(|arg| *arg == "-c")
+            .and_then(|_| command.get(2))
+            .and_then(|script| script.split_whitespace().next());
+        for program in command
+            .first()
+            .map(String::as_str)
+            .into_iter()
+            .chain(shell_tool)
+            .chain(std::iter::once(step.provider_id.as_str()))
+        {
+            let program = shell::quote_arg(program);
+            tools.push(format!(
+                "command -v {program}; {program} --version 2>/dev/null || true"
+            ));
+        }
+        for output in &step.outputs {
+            let path = deps::dependency_install_step_output_path(
+                std::path::Path::new(remote_path),
+                step,
+                output,
+            )?;
+            let relative = path
+                .strip_prefix(remote_path)
+                .map_err(|_| Error::internal_unexpected("hydration output escaped workspace"))?;
+            outputs.push(shell::quote_arg(&relative.display().to_string()));
+        }
+    }
+    let prefix = format!(
+        "cache={}; toolchain=$( (uname -sm; {}) | shasum -a 256 | awk '{{print $1}}'); archive=\"$cache/{identity}-$toolchain.tar\"; ",
+        shell::quote_arg(&format!("{}/_dependency_cache/hydration", root.trim_end_matches('/'))),
+        tools.join("; "),
+    );
+    let checks = declared_output_checks(remote_path, plan)?.join(" && ");
+    Ok(Some(HydrationCache {
+        restore: format!("{prefix}test -f \"$archive\" && tar -xf \"$archive\" && {checks}"),
+        publish: format!(
+            "{prefix}umask 077; mkdir -p \"$cache\" && tmp=$(mktemp \"$cache/.hydrate.XXXXXX\") && {{ tar -cf \"$tmp\" -- {} && mv -f \"$tmp\" \"$archive\"; }}; result=$?; test -z \"$tmp\" || rm -f \"$tmp\"; exit $result",
+            outputs.join(" "),
+        ),
+    }))
+}
+
+fn publish_hydration_cache(
+    runner_id: &str,
+    remote_path: &str,
+    cache: Option<&HydrationCache>,
+) -> Result<()> {
+    if let Some(cache) = cache {
+        if !remote_checks_succeed(runner_id, remote_path, vec![cache.publish.clone()])? {
+            homeboy_core::log_status!("deps", "could not publish runner hydration cache");
+        }
+    }
+    Ok(())
 }
 
 fn restore_controller_dependency_package(
@@ -1616,8 +1722,62 @@ mod tests {
         });
     }
 
-    /// A non-zero provider install exit fails hydration before the executor
-    /// starts, classified as workspace setup.
+    /// Reuse crosses fresh materializations through the public offline interface;
+    /// lockfile and runner toolchain changes both invalidate the saved tree.
+    #[test]
+    fn public_runner_hydration_reuses_lockfile_and_toolchain_cache() {
+        crate::test_support::with_isolated_home(|home| {
+            write_detected_node_adapter(home.path());
+            let bin = FakeBinGuard::install("npm", "#!/bin/sh\nif test \"$1\" = --version; then echo toolchain-v1; else mkdir -p node_modules; printf installed > node_modules/dependency; fi\n");
+            let family = tempfile::tempdir().expect("workspace family");
+            let mut spec: serde_json::Value =
+                serde_json::from_str(&bin.local_runner_spec("cache-runner")).unwrap();
+            spec["workspace_root"] = serde_json::json!(family.path());
+            crate::create(&spec.to_string(), false).expect("runner");
+            let source = tempfile::tempdir().expect("source");
+            std::fs::write(source.path().join("package.json"), "{}").unwrap();
+            std::fs::write(source.path().join("package-lock.json"), "lock-v1").unwrap();
+            std::fs::create_dir(source.path().join("node_modules")).unwrap();
+            std::fs::write(source.path().join("node_modules/dependency"), "installed").unwrap();
+            let hydrate = |online: bool| {
+                let workspace = tempfile::tempdir_in(family.path()).unwrap();
+                let hydrate = if online {
+                    hydrate_lab_workspace_dependencies
+                } else {
+                    hydrate_runner_workspace_dependencies
+                };
+                let output = hydrate(
+                    "cache-runner",
+                    source.path().to_str().unwrap(),
+                    workspace.path().to_str().unwrap(),
+                )
+                .expect("public hydration");
+                assert_eq!(
+                    std::fs::read_to_string(workspace.path().join("node_modules/dependency"))
+                        .unwrap(),
+                    "installed"
+                );
+                serde_json::to_value(output).unwrap()
+            };
+            assert_eq!(hydrate(true)["status"], HYDRATED);
+            let hit = hydrate(false);
+            assert_eq!(hit["status"], REUSED_PREPARED_CACHE);
+            assert_eq!(hit["cache_source"], "runner_lockfile_cache");
+            assert_eq!(hit["steps"], serde_json::json!([]));
+            std::fs::write(source.path().join("package-lock.json"), "lock-v2").unwrap();
+            assert_eq!(hydrate(true)["status"], HYDRATED);
+            assert_eq!(hydrate(false)["cache_source"], "runner_lockfile_cache");
+            homeboy_test_support::write_executable(
+                &bin._bin.path().join("npm"),
+                "#!/bin/sh\nif test \"$1\" = --version; then echo toolchain-v2; else mkdir -p node_modules; printf installed > node_modules/dependency; fi\n",
+                0o755,
+            )
+            .unwrap();
+            assert_eq!(hydrate(true)["status"], HYDRATED);
+            assert_eq!(hydrate(false)["cache_source"], "runner_lockfile_cache");
+        });
+    }
+
     #[test]
     fn hydration_failure_fails_before_executor() {
         crate::test_support::with_isolated_home(|_| {

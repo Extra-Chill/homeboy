@@ -335,7 +335,7 @@ fn file_mode(metadata: &fs::Metadata) -> u32 {
     }
 }
 
-fn lockfile_identity(workspace: &Path) -> Result<Vec<(String, String)>> {
+pub(super) fn lockfile_identity(workspace: &Path) -> Result<Vec<(String, String)>> {
     let names = [
         "Cargo.lock",
         "composer.lock",
