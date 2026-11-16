@@ -263,7 +263,7 @@ brings the runner's binary to the controller's release
 (see [Binary Convergence](../architecture/runner-connection.md#binary-convergence)),
 and stale-runner diagnostics recommend it. `refresh-homeboy` is for explicit
 refs (`--ref`), selecting an existing binary (`--select`), downgrades and
-rollbacks (`--allow-downgrade`), and forced reconnects; unreleased builds use
+rollbacks (`--allow-downgrade`), and in-place restarts; unreleased builds use
 `runner dev-sync`.
 
 Installs the controller's release tag by default. Materialize mode uses the
@@ -282,9 +282,11 @@ daemon, and configured binary. An intentional rollback requires
 Unreleased builds reach Lab only through `runner dev-sync`; a source-built
 controller no longer automatically converges Lab to its commit.
 
-Use `--reconnect` when the active daemon/session should be refreshed immediately.
-Without it, the JSON output includes follow-up `disconnect`, `connect`, and
-`status` commands so operators can restart a session at the right time. `runner
+Use `--reconnect` to restart the active daemon immediately in place. Running
+jobs are re-adopted by the successor on the same state directory; refresh never
+waits for idle or stages selection behind active jobs. A failed restart is
+reported as a typed failure, not deferred. Without `--reconnect`, the binary is
+selected immediately and the JSON output includes follow-up restart commands. `runner
 status` also reports controller, configured executable, active daemon version,
 build identity, drift signals, and refresh commands under
 `selected_lab_runner.runner_homeboy`.

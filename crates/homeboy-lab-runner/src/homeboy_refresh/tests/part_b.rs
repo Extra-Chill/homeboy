@@ -1124,7 +1124,6 @@ fn refresh_reobserves_a_replaced_binary_inside_staging() {
             },
             git_ref: None,
             reconnect: false,
-            force: false,
             allow_downgrade: true,
             dry_run: false,
         })
@@ -1180,7 +1179,6 @@ fn verified_selection_persists_on_controller_and_reports_reconnect_required() {
             },
             git_ref: None,
             reconnect: false,
-            force: false,
             allow_downgrade: true,
             dry_run: false,
         };
@@ -1254,7 +1252,6 @@ fn blocked_connect_preserves_successful_promotion_with_one_continuation() {
             },
             git_ref: None,
             reconnect: true,
-            force: false,
             allow_downgrade: true,
             dry_run: false,
         })
@@ -1349,7 +1346,6 @@ fn stale_session_refresh_blocker_starts_the_newly_selected_binary() {
                 },
                 git_ref: None,
                 reconnect: true,
-                force: false,
                 allow_downgrade: true,
                 dry_run: false,
             })

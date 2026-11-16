@@ -69,7 +69,7 @@ mod secrets;
 mod submission;
 
 #[cfg(test)]
-mod tests;
+pub(crate) mod tests;
 
 use extension_parity::{
     ensure_extension_materialized, plan_extension_parity, requested_setting_keys_for_command,

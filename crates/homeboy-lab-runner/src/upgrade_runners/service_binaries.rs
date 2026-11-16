@@ -24,8 +24,6 @@ use homeboy_upgrade::upgrade::{RunnerServiceBinaryEntry, RunnerUpgradeEntry};
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum ServiceRefreshOutcome {
     Refreshed,
-    /// The daemon is busy; the refresh was deferred without a restart.
-    Deferred(String),
     Failed(String),
 }
 
@@ -213,12 +211,6 @@ pub(crate) fn converge_runner_service_binaries(
                     }
                 }
             },
-            ServiceRefreshOutcome::Deferred(reason) => {
-                if let Some(unit) = host_unit(&mut services) {
-                    unit.status = "pending".to_string();
-                    unit.reason = Some(format!("{} not restarted: {reason}", unit.unit));
-                }
-            }
             ServiceRefreshOutcome::Failed(reason) => {
                 if let Some(unit) = host_unit(&mut services) {
                     let stale = unit.reason.take().unwrap_or_default();
@@ -276,7 +268,7 @@ pub(crate) fn converge_runner_service_binaries(
 }
 
 /// Production refresh: the `refresh-homeboy --select <path> --reconnect`
-/// handoff, never forced, so active jobs defer it instead of being killed.
+/// handoff. Running jobs are re-adopted by the restarted daemon.
 pub(crate) fn refresh_runner_service(runner: &Runner, homeboy_path: &str) -> ServiceRefreshOutcome {
     let options = crate::HomeboyBinaryRefreshOptions {
         runner_id: runner.id.clone(),
@@ -285,20 +277,10 @@ pub(crate) fn refresh_runner_service(runner: &Runner, homeboy_path: &str) -> Ser
         },
         git_ref: None,
         reconnect: true,
-        force: false,
         allow_downgrade: false,
         dry_run: false,
     };
     match crate::refresh_homeboy_binary(options) {
-        Ok((output, _)) if output.reconnect_deferred.is_some() => {
-            let deferred = output.reconnect_deferred.expect("checked above");
-            ServiceRefreshOutcome::Deferred(format!(
-                "{} ({} active job(s): {})",
-                deferred.reason,
-                deferred.active_job_ids.len(),
-                deferred.active_job_ids.join(", ")
-            ))
-        }
         Ok((output, 0)) if output.failure.is_none() => ServiceRefreshOutcome::Refreshed,
         Ok((output, exit_code)) => ServiceRefreshOutcome::Failed(format!(
             "refresh-homeboy exited {exit_code}: {}",
@@ -545,28 +527,6 @@ mod tests {
 
     /// A busy daemon is never restarted: the handoff defers and the unit is
     /// reported `pending`, naming the unit and the reason.
-    #[test]
-    fn busy_own_unit_is_pending_not_converged() {
-        let entry = converge_runner_service_binaries(
-            &runner(true),
-            converged_entry("homeboy-lab", "0.417.15"),
-            &mut |_| Ok(vec![unit(OWN, "0.417.14")]),
-            OWN,
-            &mut |_, _| {
-                ServiceRefreshOutcome::Deferred(
-                    "active_daemon_jobs (1 active job(s): job-1)".to_string(),
-                )
-            },
-        );
-
-        assert!(!entry.success);
-        let own = &entry.service_binaries[0];
-        assert_eq!(own.status, "pending");
-        let reason = own.reason.as_deref().unwrap();
-        assert!(reason.contains(OWN) && reason.contains("job-1"), "{reason}");
-        assert!(own.recovery_commands[0].contains("refresh-homeboy"));
-    }
-
     #[test]
     fn refresh_that_does_not_converge_the_unit_stays_blocking() {
         let entry = converge_runner_service_binaries(

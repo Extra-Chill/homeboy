@@ -508,14 +508,17 @@ fn assert_observer_follows_job_to_terminal(fixture: &RestartFixture) {
     );
 }
 
-#[test]
-fn direct_refresh_restarts_the_daemon_in_place_and_keeps_its_re_adoptable_job() {
+pub(crate) fn refresh_with_active_jobs_keeps_successor_ownership() {
     crate::test_support::with_isolated_home(|home| {
         let fixture = connected_runner_with_re_adoptable_job(home, false);
 
+        let route = crate::homeboy_refresh::refresh_reconnect_route(Some(&fixture.previous), false);
+        let crate::homeboy_refresh::RefreshReconnectRoute::RestartInPlace(session) = route else {
+            panic!("active work must restart in place, not disconnect");
+        };
         let (report, exit_code) = crate::connection::restart_daemon_in_place(
             RUNNER,
-            &fixture.previous,
+            session,
             fixture.homeboy.to_str().expect("binary path"),
         )
         .expect("restart in place");

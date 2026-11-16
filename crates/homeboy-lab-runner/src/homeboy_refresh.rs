@@ -132,7 +132,6 @@ pub struct HomeboyBinaryRefreshOptions {
     pub mode: HomeboyBinaryRefreshMode,
     pub git_ref: Option<String>,
     pub reconnect: bool,
-    pub force: bool,
     pub allow_downgrade: bool,
     pub dry_run: bool,
 }
@@ -167,22 +166,14 @@ pub struct HomeboyBinaryRefreshOutput {
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub phase_summary: Vec<HomeboyRefreshPhase>,
     pub daemon_refreshed: bool,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub interrupted_job_ids: Vec<String>,
     pub selected_binary_path: String,
     pub reconnect_required: bool,
     pub followup_commands: Vec<String>,
-    /// `staged` when the binary is verified and staged but selection waits
-    /// for blocking daemon jobs. Staging is success, not failure.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub status: Option<String>,
     /// The observed admission postcondition after a reconnect. A rotated daemon
     /// may be running yet still refuse admission, so daemon startup alone is
     /// not convergence.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub readiness: Option<HomeboyRefreshReadiness>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub reconnect_deferred: Option<HomeboyReconnectDeferred>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub failure: Option<HomeboyBinaryRefreshFailure>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -274,32 +265,6 @@ pub struct HomeboyBinaryRefreshRollback {
     pub requested: Option<String>,
     pub resolved: String,
     pub selected: String,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct HomeboyReconnectDeferred {
-    pub reason: &'static str,
-    pub active_job_ids: Vec<String>,
-    pub selected_binary_path: String,
-    pub followup_commands: Vec<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub ownership_contention: Option<String>,
-    /// The daemon jobs that defer selecting the staged binary.
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub blocking_jobs: Vec<HomeboyRefreshBlockingJob>,
-    /// The command that completes selection once the blocking jobs finish.
-    #[serde(default, skip_serializing_if = "String::is_empty")]
-    pub select_command: String,
-}
-
-/// One daemon job that defers selecting a staged binary.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub struct HomeboyRefreshBlockingJob {
-    pub id: String,
-    pub kind: String,
-    /// The controller run (session) that owns the job, or its source.
-    pub owner: String,
-    pub age_ms: u64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -431,9 +396,6 @@ pub(crate) enum ControllerReleaseInstall {
     Installed {
         identity: Option<String>,
     },
-    /// The daemon's active jobs deferred the replacement; selection was
-    /// restored so the current daemon keeps running them.
-    DeferredByActiveJobs(Vec<String>),
     Failed(String),
 }
 
@@ -459,7 +421,6 @@ pub(crate) fn install_controller_release_with(
         mode: HomeboyBinaryRefreshMode::Materialize,
         git_ref: Some(release_ref(&controller.version)),
         reconnect: true,
-        force: false,
         allow_downgrade: false,
         dry_run: false,
     });
@@ -467,9 +428,6 @@ pub(crate) fn install_controller_release_with(
         Ok(refreshed) => refreshed,
         Err(error) => return ControllerReleaseInstall::Failed(error.attributed_message()),
     };
-    if let Some(deferred) = output.reconnect_deferred {
-        return ControllerReleaseInstall::DeferredByActiveJobs(deferred.active_job_ids);
-    }
     if exit_code == 0 && output.daemon_refreshed {
         return ControllerReleaseInstall::Installed {
             identity: output
@@ -504,13 +462,10 @@ fn new_refresh_output(
         updated_fields: Vec::new(),
         phase_summary: Vec::new(),
         daemon_refreshed: false,
-        interrupted_job_ids: Vec::new(),
         selected_binary_path: plan.binary_path.clone(),
         reconnect_required: !plan.reconnect,
         followup_commands: plan.followup_commands.clone(),
-        status: None,
         readiness: None,
-        reconnect_deferred: None,
         failure: None,
         bootstrap_provenance: None,
         rollback: None,
@@ -647,26 +602,6 @@ fn refresh_homeboy_binary_inner_in_roots(
         Some(status) => refresh_promotion_authorities_in_roots(&plan.runner_id, status)?,
         None => fresh_refresh_promotion_authorities(),
     };
-    // Decide before touching the selected pointer. A serving daemon must keep
-    // its matching child until replacement is possible and requested.
-    let active_jobs = match post_lease_status.as_ref() {
-        Some(status) => {
-            super::connection::active_jobs_from_replacement_observation(status.clone())?
-        }
-        None => Vec::new(),
-    };
-    let restart = plan_daemon_restart(&plan.runner_id, &active_jobs, options.force);
-    let daemon_differs = post_lease_status.as_ref().is_some_and(|status| {
-        status.connected
-            && status
-                .session
-                .as_ref()
-                .and_then(|session| session.homeboy_build_identity.as_deref())
-                .and_then(build_identity_commit)
-                != Some(promotion_candidate.as_str())
-    });
-    let stage = should_stage_refresh(daemon_differs, restart.is_ok(), options.reconnect)
-        || (options.reconnect && restart.is_err());
     // Persist selection only after verifying the candidate and version policy.
     set_refresh_live_sub_phase("promote");
     let bootstrap = if diagnostic_ssh_bootstrap {
@@ -681,12 +616,11 @@ fn refresh_homeboy_binary_inner_in_roots(
                     &promotion_authorities,
                 )?;
                 Ok((
-                    persist_refresh_candidate_in_roots(
+                    promote_verified_runner_binary_in_roots(
                         roots,
                         &promotion_lease,
                         &plan.runner_id,
                         homeboy_path,
-                        stage,
                     )?,
                     rollback,
                 ))
@@ -711,12 +645,11 @@ fn refresh_homeboy_binary_inner_in_roots(
                 options.allow_downgrade,
                 &promotion_authorities,
             )?;
-            let updated_fields = persist_refresh_candidate_in_roots(
+            let updated_fields = promote_verified_runner_binary_in_roots(
                 roots,
                 &promotion_lease,
                 &plan.runner_id,
                 &selected_binary_path,
-                stage,
             )?;
             Ok(SshBootstrapPromotion {
                 identity,
@@ -787,20 +720,6 @@ fn refresh_homeboy_binary_inner_in_roots(
     output.rollback = rollback.clone();
     output.selected_binary_path = selected_binary_path.clone();
 
-    if stage {
-        output.selected_binary_path = previous_homeboy_path.unwrap_or_default();
-        phase_summary.retain(|phase| {
-            phase.name != "configuration_promotion" && phase.name != "bootstrap_promotion"
-        });
-        phase_summary.push(refresh_phase("staged", true, 0));
-        output.phase_summary = phase_summary;
-        return Ok(report_staged_selection(
-            output,
-            &active_jobs,
-            selected_binary_path,
-        ));
-    }
-
     // The status captured under the promotion lease is the reconnect authority:
     // an old daemon that appeared while materializing must be retired, while a
     // stale session for a disconnected runner must not block direct connect.
@@ -813,16 +732,13 @@ fn refresh_homeboy_binary_inner_in_roots(
     let refresh_owned_lease = refresh_session.clone().and_then(refresh_owned_lease);
 
     let mut daemon_refreshed = false;
-    let interrupted_job_ids;
     if options.reconnect {
         promotion_lease.assert_generation()?;
         set_refresh_live_sub_phase("reconnect");
-        let restart = restart?;
-        interrupted_job_ids = restart.interrupted_job_ids();
-        // When every active job is re-adoptable, restart the connected daemon on
+        // Restart the connected daemon on
         // its same state directory, so it re-adopts them and the controller
         // keeps observing them.
-        let route = refresh_reconnect_route(&restart, refresh_session.as_ref(), service_managed);
+        let route = refresh_reconnect_route(refresh_session.as_ref(), service_managed);
         let in_place_session = match route {
             RefreshReconnectRoute::RestartInPlace(session) => Some(session),
             RefreshReconnectRoute::Reconnect { .. } => None,
@@ -832,7 +748,7 @@ fn refresh_homeboy_binary_inner_in_roots(
             ..
         } = route
         {
-            // The operator forced the restart, or no daemon is connected. Point
+            // No daemon is connected. Point
             // the unit at the promoted binary and restart it; the reconnect
             // below attaches to the restarted daemon.
             if let Err(error) = super::connection::repoint_and_restart_runner_service(
@@ -858,12 +774,8 @@ fn refresh_homeboy_binary_inner_in_roots(
         }
         if let RefreshReconnectRoute::Reconnect { disconnect, .. } = route {
             if let Err(error) = disconnect_before_reconnect(disconnect, |session| {
-                super::connection::disconnect_with_session(
-                    &plan.runner_id,
-                    Some(session),
-                    options.force,
-                )
-                .and_then(|report| require_completed_disconnect(&plan.runner_id, &report))
+                super::connection::disconnect_with_session(&plan.runner_id, Some(session), false)
+                    .and_then(|report| require_completed_disconnect(&plan.runner_id, &report))
             }) {
                 return rollback_refresh_error_with(error, || {
                     restore_runner_homeboy_path_if_selected_in_roots(
@@ -879,7 +791,6 @@ fn refresh_homeboy_binary_inner_in_roots(
                         error,
                         &plan.runner_id,
                         previous_homeboy_path.as_deref(),
-                        options.force,
                     );
                     let mut phases = phase_summary.clone();
                     phases.push(refresh_phase("disconnect", true, 1));
@@ -909,15 +820,10 @@ fn refresh_homeboy_binary_inner_in_roots(
                 return Ok((
                     HomeboyBinaryRefreshOutput {
                         phase_summary,
-                        interrupted_job_ids,
                         reconnect_required: true,
                         followup_commands: readiness.continuation.clone().into_iter().collect(),
                         readiness: Some(readiness),
-                        failure: Some(refresh_verification_failure(
-                            &plan,
-                            exec_output.clone(),
-                            error.message,
-                        )),
+                        failure: Some(refresh_restart_failure(&plan, &exec_output, &error)),
                         bootstrap_provenance: Some(refresh_bootstrap_provenance(
                             diagnostic_ssh_bootstrap,
                             &plan,
@@ -957,7 +863,6 @@ fn refresh_homeboy_binary_inner_in_roots(
             return Ok((
                 HomeboyBinaryRefreshOutput {
                     phase_summary,
-                    interrupted_job_ids,
                     reconnect_required: true,
                     followup_commands: blocked_refresh_readiness(&plan)
                         .continuation
@@ -1018,7 +923,6 @@ fn refresh_homeboy_binary_inner_in_roots(
                 return Ok((
                     HomeboyBinaryRefreshOutput {
                         phase_summary,
-                        interrupted_job_ids,
                         reconnect_required: true,
                         followup_commands: blocked_refresh_readiness(&plan)
                             .continuation
@@ -1048,8 +952,6 @@ fn refresh_homeboy_binary_inner_in_roots(
         phase_summary.push(refresh_phase("reconnect_transport", true, 0));
         phase_summary.push(refresh_phase("daemon_identity_verification", true, 0));
         phase_summary.push(refresh_phase("admission_readiness", true, 0));
-    } else {
-        interrupted_job_ids = Vec::new();
     }
 
     let readiness = options
@@ -1078,7 +980,6 @@ fn refresh_homeboy_binary_inner_in_roots(
         HomeboyBinaryRefreshOutput {
             phase_summary,
             daemon_refreshed,
-            interrupted_job_ids,
             reconnect_required: reconnect_required_after_refresh(daemon_refreshed),
             followup_commands,
             readiness,
@@ -1210,15 +1111,14 @@ fn reconnect_transport_exit_code(connected: bool) -> i32 {
     }
 }
 
-/// How a reconnecting refresh reaches the promoted binary's daemon, once
-/// `plan_daemon_restart` has decided which active jobs (if any) it interrupts.
+/// How a refresh reaches the promoted binary while preserving running jobs.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum RefreshReconnectRoute<'a> {
+pub(crate) enum RefreshReconnectRoute<'a> {
     /// Restart the connected daemon on its own state directory and rebind its
     /// lease's jobs (`restart_in_place`). Nothing is disconnected and no
     /// active job is interrupted.
     RestartInPlace(&'a super::RunnerSession),
-    /// Retire whatever is connected (`disconnect`, honouring `--force`) and
+    /// Start a disconnected runner and
     /// connect afresh. A service-managed runner first repoints and restarts
     /// its unit (`service_restart`).
     Reconnect {
@@ -1227,15 +1127,12 @@ enum RefreshReconnectRoute<'a> {
     },
 }
 
-fn refresh_reconnect_route<'a>(
-    restart: &DaemonRestart,
+pub(crate) fn refresh_reconnect_route<'a>(
     refresh_session: Option<&'a super::RunnerSession>,
     service_managed: bool,
 ) -> RefreshReconnectRoute<'a> {
     match refresh_session {
-        Some(session) if *restart == DaemonRestart::InPlace => {
-            RefreshReconnectRoute::RestartInPlace(session)
-        }
+        Some(session) => RefreshReconnectRoute::RestartInPlace(session),
         disconnect => RefreshReconnectRoute::Reconnect {
             restart_service: service_managed,
             disconnect,
@@ -1420,6 +1317,16 @@ fn refresh_failure(
         verification: None,
         verification_kind: None,
     }
+}
+
+fn refresh_restart_failure(
+    plan: &HomeboyBinaryRefreshPlan,
+    execution: &RunnerExecOutput,
+    error: &Error,
+) -> HomeboyBinaryRefreshFailure {
+    let mut failure = refresh_verification_failure(plan, execution.clone(), error.message.clone());
+    failure.verification_kind = Some(error.code.as_str().to_string());
+    failure
 }
 
 fn refresh_verification_failure(
@@ -2224,11 +2131,10 @@ pub fn runner_dev_sync(options: RunnerDevSyncOptions) -> Result<(RunnerDevSyncOu
             },
             git_ref: None,
             reconnect: options.reconnect,
-            force: false,
             allow_downgrade: false,
             dry_run: false,
         })?;
-        if exit_code != 0 || refreshed.reconnect_deferred.is_some() {
+        if exit_code != 0 {
             return Ok((
                 dev_sync_failure_output(options, plan, None, Vec::new()),
                 exit_code.max(1),
@@ -2590,9 +2496,6 @@ fn refreshed_runner_patch_in_roots(runner_id: &str, homeboy_path: &str) -> Resul
         "homeboy_path": homeboy_path,
         "env": env,
     });
-    if runner.settings.staged_homeboy_path.is_some() {
-        patch["staged_homeboy_path"] = Value::Null;
-    }
     // Config merge deletes null object fields. A fresh runner has no such key,
     // and a null map value is not a valid initial environment value.
     if removed_daemon_state_dir {
@@ -2700,109 +2603,6 @@ fn restore_runner_homeboy_path_if_selected_in_roots(
     })
 }
 
-fn should_stage_refresh(daemon_differs: bool, restartable: bool, reconnect: bool) -> bool {
-    daemon_differs && (!restartable || !reconnect)
-}
-
-fn persist_refresh_candidate_in_roots(
-    roots: &homeboy_core::paths::PathRoots,
-    lease: &homeboy_core::runtime_promotion::RuntimePromotionLease,
-    runner_id: &str,
-    path: &str,
-    stage: bool,
-) -> Result<Vec<String>> {
-    if stage {
-        lease.assert_generation()?;
-        let patch = serde_json::json!({"staged_homeboy_path": path});
-        merge(Some(runner_id), &patch.to_string(), &[])?;
-        Ok(vec!["staged_homeboy_path".into()])
-    } else {
-        promote_verified_runner_binary_in_roots(roots, lease, runner_id, path)
-    }
-}
-
-/// Consume a staged build only at a replacement boundary. A dead/idle daemon
-/// (including drain_then_replace) and an explicit reconnect share this path.
-pub(crate) fn select_staged_on_reconnect(runner_id: &str) -> Result<bool> {
-    select_staged_build(runner_id, false)
-}
-
-pub(crate) fn select_staged_when_idle(runner_id: &str) -> Result<bool> {
-    select_staged_build(runner_id, true)
-}
-
-fn select_staged_build(runner_id: &str, idle_only: bool) -> Result<bool> {
-    let runner = load(runner_id)?;
-    let Some(path) = runner.settings.staged_homeboy_path else {
-        return Ok(false);
-    };
-    let admission = reconciled_refresh_admission_in_roots(runner_id)?;
-    let jobs = super::connection::active_jobs_from_replacement_observation(admission.status)?;
-    if (idle_only && !jobs.is_empty()) || plan_daemon_restart(runner_id, &jobs, false).is_err() {
-        return Ok(false);
-    }
-    let (output, code) = refresh_homeboy_binary(HomeboyBinaryRefreshOptions {
-        runner_id: runner_id.into(),
-        mode: HomeboyBinaryRefreshMode::Select { binary_path: path },
-        git_ref: None,
-        reconnect: true,
-        force: false,
-        allow_downgrade: false,
-        dry_run: false,
-    })?;
-    Ok(code == 0 && output.reconnect_deferred.is_none())
-}
-
-/// A verified binary staged behind live daemon jobs is success (#17761): it
-/// exits 0 with status `staged`, names the blocking jobs and the command that
-/// completes selection once they finish.
-fn report_staged_selection(
-    mut output: HomeboyBinaryRefreshOutput,
-    active_jobs: &[homeboy_core::api_jobs::ActiveRunnerJobSummary],
-    staged_binary_path: String,
-) -> (HomeboyBinaryRefreshOutput, i32) {
-    let blocking_jobs = active_jobs
-        .iter()
-        .filter(|job| !job.re_adoptable)
-        .map(|job| HomeboyRefreshBlockingJob {
-            id: job.job_id.clone(),
-            kind: job.kind.clone(),
-            owner: job
-                .durable_run_id
-                .clone()
-                .unwrap_or_else(|| job.source.clone()),
-            age_ms: job.elapsed_ms,
-        })
-        .collect::<Vec<_>>();
-    let blocking = blocking_jobs
-        .iter()
-        .map(|job| job.id.clone())
-        .collect::<Vec<_>>();
-    let followup_commands = active_job_followups(&output.runner_id, &blocking);
-    let select_command = followup_commands.last().cloned().unwrap_or_default();
-    output.status = Some("staged".to_string());
-    output.reconnect_required = true;
-    output.followup_commands = followup_commands.clone();
-    output.readiness = Some(HomeboyRefreshReadiness {
-        state: HomeboyRefreshReadinessState::Draining,
-        accepting_jobs: true,
-        daemon_fresh: false,
-        owners: blocking.clone(),
-        continuation: Some(select_command.clone()),
-    });
-    output.reconnect_deferred = Some(HomeboyReconnectDeferred {
-        reason: "active_daemon_jobs",
-        active_job_ids: blocking,
-        selected_binary_path: staged_binary_path,
-        followup_commands,
-        ownership_contention: None,
-        blocking_jobs,
-        select_command,
-    });
-    output.failure = None;
-    (output, 0)
-}
-
 fn rollback_refresh_error_with<T, Restore>(mut primary_error: Error, restore: Restore) -> Result<T>
 where
     Restore: FnOnce() -> Result<()>,
@@ -2826,14 +2626,12 @@ fn durable_refresh_partial_error(
     mut error: Error,
     runner_id: &str,
     previous_homeboy_path: Option<&str>,
-    force: bool,
 ) -> Error {
     let previous = previous_homeboy_path.unwrap_or("homeboy");
     let continuation_command = format!(
-        "homeboy runner refresh-homeboy {} --select {} --reconnect{}",
+        "homeboy runner refresh-homeboy {} --select {} --reconnect",
         quote_arg(runner_id),
         quote_arg(previous),
-        if force { " --force" } else { "" },
     );
     let state = serde_json::json!({
         "schema": "homeboy/runner-refresh-partial/v1",
@@ -2887,10 +2685,9 @@ fn durable_refresh_partial_error_if_needed(
     error: Error,
     runner_id: &str,
     previous_homeboy_path: Option<&str>,
-    force: bool,
 ) -> Error {
     if error.details.get("rollback_error").is_some() {
-        durable_refresh_partial_error(error, runner_id, previous_homeboy_path, force)
+        durable_refresh_partial_error(error, runner_id, previous_homeboy_path)
     } else {
         error
     }
@@ -3320,94 +3117,6 @@ fn refresh_followups(runner_id: &str, reconnect: bool) -> Vec<String> {
             format!("homeboy runner status {}", shell_arg(runner_id)),
         ]
     }
-}
-
-fn active_job_reconnect_error(runner_id: &str, job_ids: &[String]) -> Error {
-    let follow_commands = job_ids
-        .iter()
-        .map(|job_id| {
-            format!(
-                "homeboy runner job logs {} {} --follow",
-                shell_arg(runner_id),
-                shell_arg(job_id)
-            )
-        })
-        .collect::<Vec<_>>();
-    let mut error = Error::validation_invalid_argument(
-        "reconnect",
-        format!(
-            "runner `{runner_id}` has active daemon jobs a restarted daemon cannot re-adopt: {}. Wait for them to reach a terminal state before reconnecting, or rerun with --force to interrupt them",
-            job_ids.join(", ")
-        ),
-        Some(runner_id.to_string()),
-        Some(follow_commands),
-    );
-    error.details["active_job_ids"] = serde_json::json!(job_ids);
-    error.details["force_command"] = serde_json::json!(format!(
-        "homeboy runner refresh-homeboy {} --force --reconnect",
-        shell_arg(runner_id)
-    ));
-    error
-}
-
-/// How a refresh replaces the runner daemon on its one stable state directory.
-#[derive(Debug, Clone, PartialEq, Eq)]
-enum DaemonRestart {
-    /// Every active job is re-adoptable: restart the daemon in place and keep
-    /// observing those jobs across the lease change.
-    InPlace,
-    /// The operator forced the restart; these active jobs are interrupted.
-    Interrupting(Vec<String>),
-}
-
-impl DaemonRestart {
-    fn interrupted_job_ids(&self) -> Vec<String> {
-        match self {
-            Self::InPlace => Vec::new(),
-            Self::Interrupting(job_ids) => job_ids.clone(),
-        }
-    }
-}
-
-/// Decide the restart from each active job's typed re-adoptability fact. A
-/// job the restarted daemon cannot re-adopt defers the reconnect unless the
-/// operator forces it.
-fn plan_daemon_restart(
-    runner_id: &str,
-    active_jobs: &[homeboy_core::api_jobs::ActiveRunnerJobSummary],
-    force: bool,
-) -> Result<DaemonRestart> {
-    if force {
-        return Ok(DaemonRestart::Interrupting(
-            active_jobs.iter().map(|job| job.job_id.clone()).collect(),
-        ));
-    }
-    let blocking = active_jobs
-        .iter()
-        .filter(|job| !job.re_adoptable)
-        .map(|job| job.job_id.clone())
-        .collect::<Vec<_>>();
-    if blocking.is_empty() {
-        return Ok(DaemonRestart::InPlace);
-    }
-    Err(active_job_reconnect_error(runner_id, &blocking))
-}
-
-fn active_job_followups(runner_id: &str, job_ids: &[String]) -> Vec<String> {
-    job_ids
-        .iter()
-        .map(|job_id| {
-            format!(
-                "homeboy runner job logs {} {} --follow",
-                shell_arg(runner_id),
-                shell_arg(job_id)
-            )
-        })
-        .chain(std::iter::once(format!(
-            "homeboy runner refresh-homeboy {} --reconnect",
-            shell_arg(runner_id)
-        )))
-        .collect()
 }
 
 fn non_empty<'a>(name: &str, value: &'a str) -> Result<&'a str> {
