@@ -421,10 +421,17 @@ fn stop_and_restart_in_place_resumes_in_flight_work_every_time() {
 }
 
 /// Case 10, Cook variant (#17440): the workflow's `cook --wait` observer
-/// and its provider must both survive requested stops in place.
+/// and its provider must both survive requested stops in place, including
+/// result harvesting after the provider subprocess exits (#18179).
 #[cfg(unix)]
 #[test]
 fn stop_and_restart_in_place_readopts_in_flight_workflow_cook() {
+    workflow_cook_restart_case(0);
+    workflow_cook_restart_case(2);
+}
+
+#[cfg(unix)]
+fn workflow_cook_restart_case(restarts: usize) {
     use homeboy::agents::agent_task_lifecycle::AgentTaskLifecycleStore;
     use homeboy_core::test_support::{HermeticTestContext, TestBinary};
     use serde_json::{json, Value};
@@ -447,7 +454,8 @@ fn stop_and_restart_in_place_readopts_in_flight_workflow_cook() {
     let command = || {
         let mut cmd = context.command(TestBinary::HomeboyFixture);
         cmd.env("HOMEBOY_FIXTURE_PROVIDER_RELEASE_SOCKET", &gate)
-            .env("HOMEBOY_FIXTURE_PROVIDER_EXECUTIONS_FILE", &ledger);
+            .env("HOMEBOY_FIXTURE_PROVIDER_EXECUTIONS_FILE", &ledger)
+            .env("HOMEBOY_FIXTURE_PROVIDER_EXITED_PROCESS", "1");
         cmd
     };
     let run = |args: &[&str]| -> Value {
@@ -498,7 +506,7 @@ fn stop_and_restart_in_place_readopts_in_flight_workflow_cook() {
     let definition = context.root().join("cook-workflow.json");
     std::fs::write(&definition, serde_json::to_vec(&json!({
         "schema": "homeboy/workflow/v1", "id": "cook-restart-proof",
-        "env": {"public": ["HOMEBOY_FIXTURE_PROVIDER_RELEASE_SOCKET", "HOMEBOY_FIXTURE_PROVIDER_EXECUTIONS_FILE"]},
+        "env": {"public": ["HOMEBOY_FIXTURE_PROVIDER_RELEASE_SOCKET", "HOMEBOY_FIXTURE_PROVIDER_EXECUTIONS_FILE", "HOMEBOY_FIXTURE_PROVIDER_EXITED_PROCESS"]},
         "steps": [{"id": "cook", "cook": {
             "repo": "workflow-chaos", "base": "main", "backend": "fixture", "placement": "local",
             "model": "fixture-model", "prompt": "make the deterministic fixture patch",
@@ -529,10 +537,28 @@ fn stop_and_restart_in_place_readopts_in_flight_workflow_cook() {
     let cook_id = step["run_id"].as_str().unwrap();
     let store = AgentTaskLifecycleStore::new(context.path_roots());
     let run_id = store.read_cook_index(cook_id).unwrap().latest_run_id;
-    assert!(!store.read_record(&run_id).unwrap().state().is_terminal());
-    for _ in 0..2 {
+    let held = store.read_record(&run_id).unwrap();
+    assert!(!held.state().is_terminal());
+    let owner = held.metadata["provider_executions"][0]["owner_pid"]
+        .as_u64()
+        .unwrap();
+    assert!(
+        !pid_alive(owner as i64),
+        "provider subprocess must have exited: {}",
+        held.metadata
+    );
+    for _ in 0..restarts {
         run(&["daemon", "stop"]);
         run(&["daemon", "ensure-running"]);
+        // Public lifecycle reconciliation must preserve the surviving Cook
+        // worker even though its provider subprocess has already exited.
+        homeboy::agents::agent_task_lifecycle::reconcile_status_in_store(
+            &store,
+            &run_id,
+            Default::default(),
+            true,
+        )
+        .unwrap();
         let after = run(&["runs", "show", instance]);
         assert_eq!(after["data"]["steps"]["cook"]["run_id"], step["run_id"]);
         assert_eq!(

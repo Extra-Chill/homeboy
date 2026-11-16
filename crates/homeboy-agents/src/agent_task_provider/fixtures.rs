@@ -4,6 +4,7 @@ use super::*;
 pub(super) fn run_fixture_provider(
     request: &AgentTaskRequest,
     artifact_root: &Path,
+    provenance: &crate::agent_task::AgentTaskArtifactsPathProvenance,
 ) -> AgentTaskOutcome {
     if let Some(path) = std::env::var_os("HOMEBOY_FIXTURE_PROVIDER_EXECUTIONS_FILE") {
         use std::io::Write;
@@ -16,6 +17,26 @@ pub(super) fn run_fixture_provider(
     }
     if let Some(path) = std::env::var_os("HOMEBOY_FIXTURE_PROVIDER_STARTED_FILE") {
         let _ = std::fs::write(path, "started\n");
+    }
+    // Exercise the real subprocess-exit/result-harvest window while the Cook
+    // worker is still alive. The release socket below holds that window open.
+    #[cfg(unix)]
+    if std::env::var_os("HOMEBOY_FIXTURE_PROVIDER_EXITED_PROCESS").is_some() {
+        let mut child = std::process::Command::new("sleep")
+            .arg("60")
+            .spawn()
+            .unwrap();
+        let pid = child.id();
+        crate::agent_task_lifecycle::record_provider_execution_process_in_store(
+            &crate::agent_task_lifecycle::AgentTaskLifecycleStore::from_environment().unwrap(),
+            provenance.run_id.as_deref().unwrap(),
+            &provenance.task_id,
+            provenance.attempt,
+            pid,
+        )
+        .unwrap();
+        child.kill().unwrap();
+        child.wait().unwrap();
     }
     // A test can hold actual provider work until its observing client exits,
     // without assuming the client can inspect and terminate within a delay.

@@ -4327,6 +4327,7 @@ fn pid_starttime_mismatch_reclaims_a_reused_provider_pid_without_signalling_it()
         )
         .expect("reserved");
         rewrite_record_for_test("owner-pid-reused", |record| {
+            record.metadata["runner_pid"] = json!(u32::MAX);
             record.metadata["provider_executions"][0]["owner_linux_starttime_ticks"] = json!(0);
         })
         .expect("reused PID fixture");
@@ -4364,6 +4365,7 @@ fn dead_local_provider_owner_terminalizes_running_reservation_once() {
             .spawn()
             .expect("start provider owner");
         rewrite_record_for_test("owner-dead", |record| {
+            record.metadata["runner_pid"] = json!(u32::MAX);
             record.metadata["provider_executions"][0]["owner_pid"] = json!(owner.id());
             record.metadata["provider_executions"][0]["owner_linux_starttime_ticks"] = Value::Null;
         })
@@ -4526,6 +4528,7 @@ fn dead_owner_does_not_call_late_provider_success_a_candidate_without_artifact()
             .spawn()
             .expect("start provider owner");
         rewrite_record_for_test("owner-late-success", |record| {
+            record.metadata["runner_pid"] = json!(u32::MAX);
             record.metadata["provider_executions"][0]["owner_pid"] = json!(owner.id());
             record.metadata["provider_executions"][0]["owner_linux_starttime_ticks"] = Value::Null;
         })
@@ -4583,6 +4586,7 @@ fn terminal_provider_failure_without_owner_persists_interrupted_owner_aggregate(
         )
         .expect("provider failure recorded");
         rewrite_record_for_test("provider-failed-no-owner", |record| {
+            record.metadata["runner_pid"] = json!(u32::MAX);
             let execution = record.metadata["provider_executions"][0]
                 .as_object_mut()
                 .expect("provider execution object");
@@ -4642,6 +4646,7 @@ fn terminal_provider_cancellation_without_owner_converges_and_is_idempotent() {
         )
         .expect("provider cancellation recorded");
         rewrite_record_for_test("provider-cancelled-no-owner", |record| {
+            record.metadata["runner_pid"] = json!(u32::MAX);
             let execution = record.metadata["provider_executions"][0]
                 .as_object_mut()
                 .expect("provider execution object");
@@ -4701,6 +4706,7 @@ fn interrupted_foreground_owner_converges_terminal_provider_failure() {
             .spawn()
             .expect("start foreground owner");
         rewrite_record_for_test("provider-failed-owner-dead", |record| {
+            record.metadata["runner_pid"] = json!(u32::MAX);
             record.metadata["provider_executions"][0]["owner_pid"] = json!(owner.id());
             record.metadata["provider_executions"][0]["owner_linux_starttime_ticks"] = Value::Null;
         })
