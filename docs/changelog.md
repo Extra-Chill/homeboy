@@ -4,6 +4,14 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.466.6] - 2026-11-16
+
+### Fixed
+- cache dependency hydration by lockfile and toolchain
+- exclude successful materialization calls from rerun counts
+- exclude successor execution from scheduling time
+- rank the recorded blocker above stream text in diagnose
+
 ## [0.466.5] - 2026-11-16
 
 ### Changed
