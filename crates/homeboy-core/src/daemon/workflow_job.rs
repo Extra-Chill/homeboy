@@ -173,8 +173,8 @@ pub enum WorkflowRunOutcome {
     /// cook, so a clean step exit settles it as failed; a failed or cancelled
     /// step job keeps its own status.
     Unknown,
-    /// The Cook has not settled: its run, or the terminal continuation that
-    /// promotes and finalizes it, is still in progress.
+    /// The Cook run record has not settled. Informational once the step job
+    /// is terminal: a stale run record cannot keep the workflow waiting.
     Pending,
     /// The Cook settled with this run state, and the terminal reason its run
     /// recorded when it did not succeed.
@@ -864,7 +864,7 @@ fn step_result(
                 cook_reason = (outcome != "succeeded")
                     .then(|| cook_terminal_error(cook_id, outcome, reason.as_deref()));
             }
-            let outcome = cook_step_outcome(resolved, status)?;
+            let outcome = cook_step_outcome(resolved, status);
             (
                 outcome,
                 output_path.and_then(|path| read_envelope_data(&path)),
@@ -918,24 +918,21 @@ fn step_result(
     })
 }
 
-/// A Cook step's outcome once its step job is terminal: `None` while the Cook
-/// has not settled, otherwise the outcome that overrides the job status.
-///
-/// The Cook process ending is only a wake-up: the Cook settles when its run
-/// (and its terminal continuation) does. A step that exited cleanly without
-/// ever recording a run did not cook, so it fails rather than inheriting the
-/// exit status.
+/// A settled Cook may refine its terminal step job's outcome, but a pending
+/// run record must not veto the job ledger. The step job owns waiting for the
+/// Cook and its terminal continuation; once terminal it settles the workflow
+/// on every observation, including the first after recovery. A clean exit
+/// without a recorded Cook run still fails rather than claiming success.
 fn cook_step_outcome(
     resolved: Option<WorkflowRunOutcome>,
     status: FinishedStatus,
-) -> Option<Option<String>> {
+) -> Option<String> {
     match resolved {
-        Some(WorkflowRunOutcome::Pending) => None,
-        Some(WorkflowRunOutcome::Settled { outcome, .. }) => Some(Some(outcome)),
+        Some(WorkflowRunOutcome::Settled { outcome, .. }) => Some(outcome),
         Some(WorkflowRunOutcome::Unknown) if status == FinishedStatus::Succeeded => {
-            Some(Some("failed".to_string()))
+            Some("failed".to_string())
         }
-        Some(WorkflowRunOutcome::Unknown) | None => Some(None),
+        Some(WorkflowRunOutcome::Pending | WorkflowRunOutcome::Unknown) | None => None,
     }
 }
 
