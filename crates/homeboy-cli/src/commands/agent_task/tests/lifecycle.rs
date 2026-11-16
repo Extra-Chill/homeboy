@@ -4813,6 +4813,78 @@ fn diagnose_prioritizes_structured_policy_denial_over_successful_provider_exit()
 }
 
 #[test]
+fn diagnose_recorded_destination_owner_failure_outranks_hydrated_process_stream() {
+    with_temp_home(|| {
+        let evidence_dir = tempfile::tempdir().expect("evidence dir");
+        let evidence_path = evidence_dir.path().join("executor-result.json");
+        std::fs::write(
+            &evidence_path,
+            serde_json::to_vec(&json!({
+                "diagnostics": [{
+                    "class": "agent_task.provider_malformed_json",
+                    "message": "executor wrapper returned malformed JSON",
+                    "data": {
+                        "stdout": "composer install: validating schema and installing dependencies"
+                    }
+                }]
+            }))
+            .expect("evidence json"),
+        )
+        .expect("write evidence");
+
+        let run_id = "run-cli-diagnose-destination-owner";
+        run_loaded_plan(
+            test_plan(),
+            Some(run_id),
+            Arc::new(ExecutorResultEvidenceFailureExecutor {
+                evidence_uri: format!("file://{}", evidence_path.display()),
+            }),
+        )
+        .expect("run completed with failed outcome");
+        let owner_cook = "cook-destination-owner";
+        let message = format!(
+            "destination_owner: branch fix/issue-6145-blocks-engine-2 is owned by Cook {owner_cook}"
+        );
+        agent_task_lifecycle::rewrite_record_for_test(run_id, |record| {
+            record.metadata["cook_operation_claims"] = json!([{
+                "operation_key": format!("promote:{run_id}"),
+                "state": "failed",
+                "result": {
+                    "code": "validation.invalid_argument",
+                    "message": message,
+                    "details": { "field": "destination_owner" },
+                    "deepest_cause": {
+                        "code": "validation.invalid_argument",
+                        "field": "destination_owner",
+                        "message": message
+                    }
+                }
+            }]);
+        })
+        .expect("persist destination owner failure");
+
+        let (value, exit_code) = diagnose(DiagnoseArgs {
+            run_id: run_id.to_string(),
+            full: false,
+        })
+        .expect("diagnose loaded");
+
+        assert_eq!(exit_code, 0);
+        assert_eq!(value["root_cause"]["class"], "validation.invalid_argument");
+        assert_eq!(value["root_cause"]["source"], "terminal_operation_failure");
+        let root_message = value["root_cause"]["message"].as_str().unwrap();
+        assert!(root_message.contains("destination_owner"));
+        assert!(root_message.contains(owner_cook));
+        assert!(value["diagnostic_chain"]
+            .as_array()
+            .expect("diagnostic chain")
+            .iter()
+            .any(|item| item["source"] == "hydrated_process_stream"
+                && item["class"] == "provider.process_stream"));
+    });
+}
+
+#[test]
 fn diagnose_prioritizes_provider_stream_cause_over_malformed_wrapper() {
     with_temp_home(|| {
         let evidence_dir = tempfile::tempdir().expect("evidence dir");

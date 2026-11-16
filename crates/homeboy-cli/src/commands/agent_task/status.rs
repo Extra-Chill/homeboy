@@ -5170,10 +5170,13 @@ struct CollectedDiagnostic {
 /// precede an otherwise successful provider-process observation: the latter
 /// describes the wrapper, not why the task failed.
 fn diagnostic_priority(item: &CollectedDiagnostic) -> (u8, u8, u8) {
-    // The recorded delivery blocker and review form are the run's own verdict.
+    // Recorded delivery/terminal-operation blockers and the review form are the run's own verdict.
     // Text-matched heuristics below (including untrusted stream output that
     // happens to say "valid" or "schema") can never outrank them.
-    let recorded_verdict = item.source == "current_lifecycle" || item.source == "review_form";
+    let recorded_verdict = matches!(
+        item.source.as_str(),
+        "current_lifecycle" | "terminal_operation_failure" | "review_form"
+    );
     let class = item.class.to_ascii_lowercase();
     let text = format!("{} {}", item.class, item.message).to_ascii_lowercase();
     let priority = if recorded_verdict {
