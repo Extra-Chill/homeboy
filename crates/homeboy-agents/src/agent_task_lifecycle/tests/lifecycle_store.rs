@@ -74,6 +74,30 @@ fn terminal_outcomes_are_countable_through_public_status_json() {
 }
 
 #[test]
+fn superseded_cook_outcome_preserves_owner_and_is_not_recoverable() {
+    let context = homeboy_core::test_support::HermeticTestContext::new();
+    let store = AgentTaskLifecycleStore::new(context.path_roots());
+    let mut cook = record(&store, "superseded", "terminal-outcomes");
+    let owner = json!({"cook_id": "active-cook", "run_id": "active-attempt"});
+    cook.metadata["superseded_by_active_cook"] = owner.clone();
+    // A queued admission has no terminal outcome, even with owner metadata.
+    store.write_record(&cook).unwrap();
+    let queued = store.read_record("superseded").unwrap();
+    assert!(queued.terminal_outcome.is_none());
+    assert!(!queued.recoverable);
+
+    cook.set_state_for_test(AgentTaskRunState::Cancelled);
+    store.write_record(&cook).unwrap();
+    let status = crate::agent_task_lifecycle::status_in_store(&store, "superseded").unwrap();
+    let status = serde_json::to_value(status).unwrap();
+    assert_eq!(
+        status["terminal_outcome"],
+        json!({"kind": "superseded_by_active_cook", "owner": owner})
+    );
+    assert_eq!(status["recoverable"], false);
+}
+
+#[test]
 fn active_scope_original_owner_survives_metadata_updates_and_cannot_be_reassigned() {
     let context = homeboy_core::test_support::HermeticTestContext::new();
     let store = AgentTaskLifecycleStore::new(context.path_roots());
