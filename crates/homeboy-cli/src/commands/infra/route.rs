@@ -2489,9 +2489,34 @@ fn terminal_cook_work_submission(
 fn schedule_terminal_cook_continuation(
     request: &serde_json::Value,
 ) -> homeboy::core::Result<serde_json::Value> {
-    let client = homeboy::core::daemon::LocalControllerJobClient::connect_current_build()?;
-    let job = client.submit(terminal_cook_work_submission(request)?)?;
-    Ok(serde_json::json!({ "scheduled": true, "job_id": job.id.to_string() }))
+    schedule_terminal_cook_continuation_with(request, |submission| {
+        let client = homeboy::core::daemon::LocalControllerJobClient::connect_current_build()?;
+        Ok(client.submit(submission)?.id.to_string())
+    })
+}
+
+/// Submit one terminal continuation unless durable state already superseded
+/// it (#18151). Both the work-intent outbox and the terminal projection path
+/// schedule through here, so a superseded generation is acknowledged instead
+/// of colliding with the attempt's active fence, which a job for another
+/// generation of the same attempt holds under a different request body.
+fn schedule_terminal_cook_continuation_with(
+    request: &serde_json::Value,
+    submit: impl FnOnce(serde_json::Value) -> homeboy::core::Result<String>,
+) -> homeboy::core::Result<serde_json::Value> {
+    let parsed = parse_terminal_cook_job(request)?;
+    let store = crate::agents::agent_task_service::CookRecipeStore::from_current_data_root()?;
+    if store.terminal_continuation_superseded(&parsed.run_id, parsed.generation) {
+        return Ok(serde_json::json!({
+            "scheduled": false,
+            "superseded": true,
+            "cook_id": parsed.cook_id,
+            "run_id": parsed.run_id,
+            "generation": parsed.generation,
+        }));
+    }
+    let job_id = submit(terminal_cook_work_submission(request)?)?;
+    Ok(serde_json::json!({ "scheduled": true, "job_id": job_id }))
 }
 
 pub(crate) fn register_execution_orchestration() {

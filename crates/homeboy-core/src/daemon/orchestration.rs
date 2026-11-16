@@ -146,7 +146,14 @@ pub fn drain_work_intents_with(
     Ok(serde_json::json!({ "scheduled": scheduled, "deferred": deferred }))
 }
 
+/// A delivered intent is acknowledged by a durable job receipt, or by its
+/// owner reporting it `superseded`: newer durable state already owns the work
+/// (for example a later generation of the same terminal continuation), so no
+/// job is owed and redelivering it could only collide with that owner (#18151).
 fn durable_job_receipt(receipt: Value) -> Result<Value> {
+    if receipt["superseded"] == true && receipt["scheduled"] == false {
+        return Ok(receipt);
+    }
     if receipt["scheduled"] != true || receipt["job_id"].as_str().is_none_or(str::is_empty) {
         return Err(crate::Error::internal_unexpected(
             "work intent scheduling returned no durable job receipt",
@@ -214,6 +221,34 @@ mod tests {
             .unwrap();
             assert_eq!(pass["scheduled"][0]["job_id"], "new-cook-during-upgrade");
             assert!(pass["deferred"].as_array().unwrap().is_empty());
+        });
+    }
+
+    #[test]
+    fn a_superseded_intent_is_acknowledged_without_a_job() {
+        with_isolated_home(|_| {
+            commit_intents(&["intent-stale-generation"]);
+            let pass = drain_work_intents_with(|_| {
+                Ok(serde_json::json!({ "scheduled": false, "superseded": true }))
+            })
+            .unwrap();
+            assert_eq!(pass["scheduled"][0]["superseded"], true);
+            assert_eq!(pass["deferred"], serde_json::json!([]));
+            let redelivered = drain_work_intents_with(|_| -> Result<Value> {
+                panic!("an acknowledged superseded intent is not redelivered")
+            })
+            .unwrap();
+            assert_eq!(
+                redelivered,
+                serde_json::json!({ "scheduled": [], "deferred": [] })
+            );
+
+            // An unscheduled receipt that does not claim supersession still
+            // keeps custody.
+            commit_intents(&["intent-no-receipt"]);
+            let pass =
+                drain_work_intents_with(|_| Ok(serde_json::json!({ "scheduled": false }))).unwrap();
+            assert_eq!(pass["deferred"][0]["id"], "intent-no-receipt");
         });
     }
 

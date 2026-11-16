@@ -2165,6 +2165,33 @@ impl CookRecipeStore {
             ),
         }
     }
+
+    /// Whether a terminal-continuation submission for `generation` of this
+    /// attempt is already superseded by durable continuation state, so it
+    /// must be acknowledged without submitting a controller job (#18151).
+    ///
+    /// Every retry bumps the generation and derives its own work intent, and
+    /// the attempt's continuation job consumes whichever generation is current
+    /// (claims are attempt-scoped). An older generation therefore names work
+    /// a newer intent already owns, and a completed continuation has nothing
+    /// left to run. Submitting either one only collides with the attempt's
+    /// active fence (`terminal-cook:<cook>:<run>`), which is bound to a
+    /// different request body, and the stale intent is redelivered for as
+    /// long as that job lives. The current generation of an unsettled
+    /// continuation is never superseded: its intent is what guarantees a job
+    /// once the attempt's active job ends.
+    pub fn terminal_continuation_superseded(&self, run_id: &str, generation: u64) -> bool {
+        let Ok(record) = self.lifecycle_store().read_record(run_id) else {
+            return false;
+        };
+        let value = lifecycle_continuation(&record);
+        let current_generation = value
+            .and_then(|value| value.get("generation"))
+            .and_then(Value::as_u64)
+            .unwrap_or(0);
+        generation < current_generation
+            || lifecycle_continuation_state(value) == CookContinuationState::Completed
+    }
 }
 
 #[derive(Clone, Copy)]
