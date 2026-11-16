@@ -35,6 +35,48 @@ pub(crate) fn render_runs_show_summary(payload: &Value) -> Option<String> {
     Some(render_run_detail(run))
 }
 
+/// Render agent-task hotspot phases alongside the Cook publication distribution.
+pub(crate) fn render_runs_hotspots_summary(payload: &Value) -> Option<String> {
+    if payload["variant"].as_str()? != "hotspots" {
+        return None;
+    }
+    let output = payload.get("payload")?;
+    let summary = output.get("cook_wall_time")?;
+    let metric = |key: &str| {
+        summary[key]
+            .as_f64()
+            .map(|ms| format!("{ms:.0}"))
+            .unwrap_or_else(|| "n/a".to_string())
+    };
+    let mut lines = vec![format!(
+        "Cook wall time (submission-to-PR ms): count={} p50={} p95={} mean={}",
+        summary["count"],
+        metric("p50_ms"),
+        metric("p95_ms"),
+        metric("mean_ms")
+    )];
+    if let Some(phases) = output
+        .pointer("/phase_hotspots/phases")
+        .and_then(Value::as_array)
+    {
+        for phase in phases {
+            lines.push(format!(
+                "  {}: p50={}ms p95={}ms",
+                phase["phase"].as_str().unwrap_or_default(),
+                phase["timing"]["p50_ms"],
+                phase["timing"]["p95_ms"]
+            ));
+        }
+    }
+    if let Some(comparison) = output
+        .pointer("/phase_hotspots/comparison")
+        .filter(|v| !v.is_null())
+    {
+        lines.push(format!("Comparison: {comparison}"));
+    }
+    Some(lines.join("\n"))
+}
+
 /// Keep the default command-result data aligned with the compact human view.
 /// Explicit JSON and `--output` continue to use the untouched handler result.
 pub(crate) fn project_runs_show_output(payload: &Value) -> Value {

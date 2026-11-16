@@ -300,6 +300,10 @@ pub(crate) fn run_command_output(
                         super::runs_summary::render_runs_field_selection(payload)
                     {
                         Some(rendered)
+                    } else if operator_output
+                        && payload.pointer("/payload/cook_wall_time").is_some()
+                    {
+                        super::runs_summary::render_runs_hotspots_summary(payload)
                     } else if summarize_logs {
                         render_agent_task_summary(
                             super::agent_task_summary::AgentTaskSummaryKind::Logs,

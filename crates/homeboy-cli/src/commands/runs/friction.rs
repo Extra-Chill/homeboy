@@ -118,26 +118,7 @@ pub(crate) fn friction(store: &ObservationStore, args: RunsFrictionArgs) -> CmdR
                         })
                 })
         });
-        let submission_to_pr_ms = if delivery
-            .and_then(|d| d.pointer("/publication/published"))
-            .and_then(Value::as_bool)
-            == Some(true)
-        {
-            let spans = store.phase_spans(&run.id)?;
-            spans
-                .span("publish")
-                .filter(|span| span.is_ok())
-                .and_then(|span| {
-                    let submitted = chrono::DateTime::parse_from_rfc3339(&run.started_at).ok()?;
-                    let published = chrono::DateTime::parse_from_rfc3339(&span.started_at).ok()?;
-                    Some(
-                        (published - submitted).num_milliseconds().max(0) as f64
-                            + span.duration_ms.unwrap_or(0.0),
-                    )
-                })
-        } else {
-            None
-        };
+        let submission_to_pr_ms = super::cook_timing::submission_to_pr_ms(store, run)?;
         cooks.insert(cook_id.to_string(), json!({"cook_id": cook_id, "run_id": run.id, "submitted_at": run.started_at, "manual_intervention_count": 0, "recover_count": 0, "retry_count": 0, "refusals": {}, "gate_green_unpublished": stranded, "submission_to_pr_ms": submission_to_pr_ms}));
     }
     for run in page.runs.iter().rev() {
