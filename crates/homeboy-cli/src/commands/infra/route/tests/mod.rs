@@ -111,6 +111,82 @@ fn next_attempt_continuation_schedules_while_previous_attempt_job_is_active() {
     });
 }
 
+/// Two terminal-cook intents for one attempt (#18151): the attempt's job for
+/// generation 0 holds the attempt fence while it consumes generations 1 and 2
+/// itself. The stale generation-1 intent is acknowledged as superseded instead
+/// of colliding with the fence forever; the current generation stays fenced
+/// until that job ends, then is superseded once the continuation completes.
+#[test]
+fn superseded_terminal_cook_intent_for_one_attempt_does_not_collide_with_its_fence() {
+    use homeboy::core::daemon::controller_job_driver::ControllerJobDriver;
+
+    homeboy::core::test_support::with_isolated_home(|_| {
+        register_execution_orchestration();
+        crate::agents::agent_task_service::register_work_job_driver();
+        let run_id = "attempt-1";
+        let plan = crate::agents::agent_tasks::scheduler::AgentTaskPlan::new("plan", Vec::new());
+        agent_task_lifecycle::submit_plan(&plan, Some(run_id)).unwrap();
+        let set_continuation = |state: &str, generation: u64| {
+            agent_task_lifecycle::rewrite_record_for_test(run_id, |record| {
+                record.metadata["cook_continuation"] = serde_json::json!({
+                    "cook_id": "cook", "run_id": run_id,
+                    "state": state, "generation": generation,
+                });
+            })
+            .unwrap();
+        };
+        let request = |generation: u64| {
+            serde_json::json!({
+                "schema": "homeboy/terminal-cook-continuation-request/v1",
+                "cook_id": "cook",
+                "run_id": run_id,
+                "generation": generation,
+            })
+        };
+        let driver: Arc<dyn ControllerJobDriver> =
+            Arc::new(crate::agents::agent_task_service::WorkJobDriver);
+        let harness = homeboy::core::test_support::ControllerJobHarness::new(
+            driver,
+            terminal_cook_work_submission(&request(0)).unwrap()["request"].clone(),
+        )
+        .expect("job store harness");
+        let schedule = |generation: u64| {
+            schedule_terminal_cook_continuation_with(&request(generation), |submission| {
+                harness
+                    .admit_keyed(submission)
+                    .map(|job| job.id.to_string())
+            })
+        };
+
+        set_continuation("pending", 0);
+        let holder = schedule(0).expect("generation 0 is admitted");
+        assert_eq!(holder["scheduled"], true);
+
+        // The holder consumed generation 1, which failed retryably: the
+        // continuation is now pending under generation 2.
+        set_continuation("pending", 2);
+        let stale = schedule(1).expect("a superseded generation is acknowledged");
+        assert_eq!(stale["scheduled"], false);
+        assert_eq!(stale["superseded"], true);
+        let current = schedule(2).expect_err("the current generation waits for the holder");
+        assert!(current
+            .message
+            .contains("controller idempotency key is already bound"));
+
+        // The holder completed the continuation; the outstanding intent owes
+        // no job.
+        set_continuation("completed", 2);
+        let settled = schedule(2).expect("a completed continuation is acknowledged");
+        assert_eq!(settled["superseded"], true);
+        assert!(!harness
+            .store()
+            .get(holder["job_id"].as_str().unwrap().parse().unwrap())
+            .expect("holder job")
+            .status
+            .is_terminal());
+    });
+}
+
 /// A claimed terminal continuation that failed retryably is handed to its
 /// next generation instead of failing the work job, and a terminally failed
 /// continuation is announced before the job fails (#15831).
