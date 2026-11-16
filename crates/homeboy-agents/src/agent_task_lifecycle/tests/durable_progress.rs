@@ -133,39 +133,21 @@ fn failed_action_retry_and_distinct_cooks_have_distinct_event_identities() {
             .submit_plan_with_runtime_admission(&test_plan(), run_id, |_| Ok(json!({})))
             .unwrap();
         let key = "control-plane-action:retry:https://github.com/example/repo/issues/1";
-        for attempt in [1, 2] {
-            assert_eq!(
-                claim_cook_operation_in_store(
-                    &store,
-                    run_id,
-                    key,
-                    std::time::Duration::from_secs(60)
-                )
-                .unwrap(),
-                ClaimOutcome::Acquired
-            );
-            fail_cook_operation_in_store(
-                &store,
-                run_id,
-                key,
-                json!({
-                    "outcome": "failed", "verify": [format!("gate-{attempt}")]
-                }),
-            )
-            .unwrap();
+        // Exercise action-event projection independently of Cook ownership.
+        // Historical action evidence still projects through write_record_guarded.
+        for attempt in 1..=3 {
+            store
+                .mutate_record(run_id, |record| {
+                    record.metadata["cook_operation_claims"] = json!([{
+                        "operation_key": key,
+                        "event_identity": format!("attempt-{attempt}"),
+                        "leased_at": record.submitted_at,
+                        "result": {"outcome": if attempt == 3 { "succeeded" } else { "failed" }},
+                    }]);
+                    true
+                })
+                .unwrap();
         }
-        assert_eq!(
-            claim_cook_operation_in_store(&store, run_id, key, std::time::Duration::from_secs(60))
-                .unwrap(),
-            ClaimOutcome::Acquired
-        );
-        let result = json!({"outcome": "succeeded", "verify": ["corrected"]});
-        complete_cook_operation_in_store(&store, run_id, key, result.clone()).unwrap();
-        assert_eq!(
-            claim_cook_operation_in_store(&store, run_id, key, std::time::Duration::from_secs(60))
-                .unwrap(),
-            ClaimOutcome::AlreadyCompleted(result)
-        );
         let before = durable_events(&store, run_id);
         store.mutate_record(run_id, |_| true).unwrap();
         assert_eq!(

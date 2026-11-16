@@ -607,7 +607,7 @@ fn claim_pre_artifact_interruption_retry_with_stores(
         &operation_key,
         PRE_ARTIFACT_INTERRUPTION_CLAIM_LEASE,
     )? {
-        agent_task_lifecycle::ClaimOutcome::Acquired => {
+        agent_task_lifecycle::ClaimOutcome::Acquired(_lease) => {
             let next_run_id = replacement_run_id.clone().unwrap_or_else(|| {
                 agent_task_lifecycle::cook_attempt_run_id(cook_id, next_attempt)
             });
@@ -627,14 +627,10 @@ fn claim_pre_artifact_interruption_retry_with_stores(
                     run_id,
                 )?;
             }
-            lifecycle_store.complete_cook_operation(
-                run_id,
-                &operation_key,
-                serde_json::json!({
-                    "next_attempt": next_attempt,
-                    "next_run_id": next_run_id,
-                }),
-            )?;
+            _lease.complete(serde_json::json!({
+                "next_attempt": next_attempt,
+                "next_run_id": next_run_id,
+            }))?;
             Ok(Some((next_attempt, next_run_id)))
         }
         agent_task_lifecycle::ClaimOutcome::AlreadyCompleted(result) => {
@@ -987,23 +983,15 @@ fn finalize_with_operation_claim_in_store(
             agent_task_lifecycle::ClaimOutcome::LeaseHeld => finalize(options, run_id, promotion),
             // This pass owns the operation. Finalize, then record the result as the
             // claim's immutable completion.
-            agent_task_lifecycle::ClaimOutcome::Acquired => {
+            agent_task_lifecycle::ClaimOutcome::Acquired(_lease) => {
                 let finalization = match finalize(options, run_id, promotion) {
                     Ok(finalization) => finalization,
                     Err(error) => {
-                        lifecycle_store.fail_cook_operation(
-                            run_id,
-                            &operation_key,
-                            bounded_error_diagnostic(&error),
-                        )?;
+                        _lease.fail(bounded_error_diagnostic(&error))?;
                         return Err(error);
                     }
                 };
-                lifecycle_store.complete_cook_operation(
-                    run_id,
-                    &operation_key,
-                    finalization.clone(),
-                )?;
+                _lease.complete(finalization.clone())?;
                 Ok(finalization)
             }
         }
@@ -1180,19 +1168,12 @@ pub(super) fn promotion_claim_held_by_live_owner(
         return false;
     }
     let operation_key = promotion_operation_key(run_id);
-    let owned_by_this_process = lifecycle_store
-        .operation_claim(run_id, &operation_key)
-        .ok()
-        .flatten()
-        .and_then(|claim| claim.owner_pid)
-        .is_some_and(|pid| pid == std::process::id());
-    !owned_by_this_process
-        && agent_task_lifecycle::operation_lease_is_active_in_store(
-            lifecycle_store,
-            run_id,
-            &operation_key,
-        )
-        .unwrap_or(false)
+    agent_task_lifecycle::operation_lease_is_active_in_store(
+        lifecycle_store,
+        run_id,
+        &operation_key,
+    )
+    .unwrap_or(false)
 }
 
 fn promote_with_operation_claim_in_store(
@@ -1228,22 +1209,16 @@ fn promote_with_operation_claim_in_store(
         }
         // This pass owns the operation. Promote, then record the result as the
         // claim's immutable completion.
-        agent_task_lifecycle::ClaimOutcome::Acquired => {
+        agent_task_lifecycle::ClaimOutcome::Acquired(_lease) => {
             let promotion = match promote_or_load_attempt_in_store(lifecycle_store, options, run_id)
             {
                 Ok(promotion) => promotion,
                 Err(error) => {
-                    lifecycle_store.fail_cook_operation(
-                        run_id,
-                        &operation_key,
-                        bounded_error_diagnostic(&error),
-                    )?;
+                    _lease.fail(bounded_error_diagnostic(&error))?;
                     return Err(error);
                 }
             };
-            lifecycle_store.complete_cook_operation(
-                run_id,
-                &operation_key,
+            _lease.complete(
                 serde_json::to_value(&promotion)
                     .map_err(|error| Error::internal_json(error.to_string(), None))?,
             )?;
@@ -3770,7 +3745,7 @@ fn dispatch_bound_cook_follow_up(
                 RETRY_DISPATCH_CLAIM_LEASE,
                 &dispatch_intent,
             )? {
-                agent_task_lifecycle::ClaimOutcome::Acquired => {
+                agent_task_lifecycle::ClaimOutcome::Acquired(_lease) => {
                     let dispatched = dispatcher.dispatch_attempt(
                         follow_up_plan,
                         &next_run_id,
@@ -3801,14 +3776,10 @@ fn dispatch_bound_cook_follow_up(
                         )
                         .with_retryable(true)
                     })?;
-                    lifecycle_store.complete_cook_operation(
-                        &next_run_id,
-                        &operation_key,
-                        serde_json::json!({
-                            "dispatched_run_id": next_run_id,
-                            "dispatch_receipt": receipt,
-                        }),
-                    )?;
+                    _lease.complete(serde_json::json!({
+                        "dispatched_run_id": next_run_id,
+                        "dispatch_receipt": receipt,
+                    }))?;
                 }
                 agent_task_lifecycle::ClaimOutcome::LeaseHeld => {
                     // A receiver receipt survives a controller crash after the

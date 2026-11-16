@@ -438,7 +438,7 @@ impl AgentTaskLifecycleStore {
         operation_key: &str,
         lease: Duration,
     ) -> Result<super::ClaimOutcome> {
-        super::operation_claims::claim_cook_operation_in_store(self, run_id, operation_key, lease)
+        super::cook_effects::claim_cook_operation_in_store(self, run_id, operation_key, lease)
     }
 
     pub fn complete_cook_operation(
@@ -447,12 +447,7 @@ impl AgentTaskLifecycleStore {
         operation_key: &str,
         result: Value,
     ) -> Result<()> {
-        super::operation_claims::complete_cook_operation_in_store(
-            self,
-            run_id,
-            operation_key,
-            result,
-        )
+        super::cook_effects::complete_cook_operation_in_store(self, run_id, operation_key, result)
     }
 
     pub fn fail_cook_operation(
@@ -461,7 +456,7 @@ impl AgentTaskLifecycleStore {
         operation_key: &str,
         result: Value,
     ) -> Result<()> {
-        super::operation_claims::fail_cook_operation_in_store(self, run_id, operation_key, result)
+        super::cook_effects::fail_cook_operation_in_store(self, run_id, operation_key, result)
     }
 
     pub(crate) fn aggregate_source_exact(&self, run_id: &str) -> Result<(String, PathBuf)> {
@@ -518,7 +513,7 @@ impl AgentTaskLifecycleStore {
         run_id: &str,
         operation_key: &str,
     ) -> Result<Option<super::OperationClaim>> {
-        super::operation_claims::operation_claim_in_store(self, run_id, operation_key)
+        super::cook_effects::operation_claim_in_store(self, run_id, operation_key)
     }
 
     pub fn checkpoint_candidate_adoption_remediation(
@@ -2367,14 +2362,6 @@ pub(super) fn write_record_guarded(
             record.metadata["client_context"] = json!({});
         }
         record.metadata["client_context"]["requester"] = requester.clone();
-    }
-    if record.metadata.get("cook_operation_claims").is_none() {
-        if let Some(claims) = existing_metadata
-            .pointer("/agent_task_run/metadata/cook_operation_claims")
-            .cloned()
-        {
-            record.metadata["cook_operation_claims"] = claims;
-        }
     }
     let run = homeboy_control_plane_contract::RunId::new(&record.run_id).map_err(|error| {
         Error::validation_invalid_argument(

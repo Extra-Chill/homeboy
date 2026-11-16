@@ -667,33 +667,20 @@ pub(super) fn resume_cook_behind_foreign_promotion_claim(
         })
         .expect("seed verification-pending continuation");
 
-    // The original Cook process owns the promotion claim and is running gates.
-    let mut owner = std::process::Command::new("sleep")
-        .arg("30")
-        .spawn()
-        .expect("spawn promotion owner fixture");
-    let owner_identity = homeboy_core::process::process_start_identity(owner.id())
-        .expect("inspect promotion owner")
-        .expect("kernel identity");
-    let owner_pid = owner.id();
-    lifecycle_store
-        .mutate_record(&run_id, |record| {
-            record.metadata["cook_operation_claims"] = serde_json::json!([{
-                "operation_key": promotion_operation_key(&run_id),
-                "state": "running",
-                "leased_at": "2026-01-01T00:00:00+00:00",
-                // Owner identity, not this deadline, decides liveness.
-                "lease_deadline": "2026-01-01T00:30:00+00:00",
-                "owner_pid": owner_pid,
-                "owner_process_start_identity": owner_identity,
-            }]);
-            true
-        })
-        .expect("seed foreign promotion claim");
-    if !live_owner {
-        owner.kill().expect("stop promotion owner fixture");
-        owner.wait().expect("reap promotion owner fixture");
-    }
+    let lease_window = std::time::Duration::from_millis(100);
+    let agent_task_lifecycle::ClaimOutcome::Acquired(owner) = lifecycle_store
+        .claim_cook_operation(&run_id, &promotion_operation_key(&run_id), lease_window)
+        .expect("seed promotion effect")
+    else {
+        panic!("expected owner");
+    };
+    let owner = if live_owner {
+        Some(owner)
+    } else {
+        drop(owner);
+        std::thread::sleep(lease_window * 2);
+        None
+    };
 
     let in_progress_run_id = run_id.clone();
     let mut side_effects = if live_owner {
@@ -726,10 +713,7 @@ pub(super) fn resume_cook_behind_foreign_promotion_claim(
         CookMode::Resume,
     )
     .expect("Cook reports the held promotion claim");
-    if live_owner {
-        owner.kill().expect("stop promotion owner fixture");
-        owner.wait().expect("reap promotion owner fixture");
-    }
+    drop(owner);
     let record = lifecycle_store.read_record(&run_id).expect("read Cook run");
     (result, record)
 }
