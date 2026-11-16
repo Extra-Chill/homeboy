@@ -1033,7 +1033,8 @@ fn ensure_running_defers_a_stale_service_managed_daemon_to_its_manager() {
         super::stale_daemon_action(&plain),
         Some(super::StaleDaemonAction::RestartInPlace("lease-plain"))
     );
-    let fresh = managed_status(Some(fake_daemon(4242, "lease-fresh")), true);
+    let mut fresh = managed_status(Some(fake_daemon(4242, "lease-fresh")), true);
+    fresh.state.as_mut().unwrap().build_identity = crate::build_identity::current();
     assert_eq!(super::stale_daemon_action(&fresh), None);
 }
 
