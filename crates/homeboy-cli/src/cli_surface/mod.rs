@@ -35,7 +35,8 @@ pub struct Cli {
     pub output: Option<PathBuf>,
 
     /// Print the command's human summary (state, blocker, next step) as plain
-    /// text instead of the JSON envelope. `--output` still writes the JSON.
+    /// text instead of the JSON envelope. Commands without a summary still
+    /// print JSON, and `--output` always writes the JSON.
     #[arg(long = "human", global = true)]
     pub human: bool,
 

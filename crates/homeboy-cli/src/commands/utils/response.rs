@@ -365,19 +365,16 @@ impl<T: Serialize> CommandResultEnvelope<T> {
 
     /// The human summary `--human` prints instead of the JSON envelope: the
     /// envelope's own summary, then any next-action commands it does not
-    /// already name.
-    pub(crate) fn summary_text(&self) -> String {
-        let mut text = self
-            .summary
-            .clone()
-            .unwrap_or_else(|| format!("{} {}", self.command, self.status));
+    /// already name. `None` when the command has no summary.
+    pub(crate) fn summary_text(&self) -> Option<String> {
+        let mut text = self.summary.clone()?;
         for action in &self.next_actions {
             if !text.contains(&action.command) {
                 text.push_str(&format!("\nNext: {}", action.command));
             }
         }
         text.push('\n');
-        text
+        Some(text)
     }
 }
 
@@ -429,10 +426,13 @@ pub(crate) fn set_human_output(enabled: bool) {
 pub(crate) fn print_response<T: Serialize>(response: &CommandResultEnvelope<T>) -> Result<()> {
     use std::io::{self, Write};
 
-    let payload = if HUMAN_OUTPUT.load(std::sync::atomic::Ordering::Relaxed) {
-        response.summary_text()
-    } else {
-        response.stdout_json()?
+    let summary = HUMAN_OUTPUT
+        .load(std::sync::atomic::Ordering::Relaxed)
+        .then(|| response.summary_text())
+        .flatten();
+    let payload = match summary {
+        Some(summary) => summary,
+        None => response.stdout_json()?,
     };
     let stdout = io::stdout();
     let mut handle = stdout.lock();
