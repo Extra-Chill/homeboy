@@ -111,40 +111,26 @@ fn foreign_destination_owner(
 /// that run is only one attempt: its Cook's driver can still be applying a
 /// later attempt's candidate there and running gates against it. A second
 /// Cook that shares the destination would apply its own patch on top of that
-/// candidate, so admission refuses it and names the owner instead.
+/// candidate, so admission yields successfully and names the owner instead.
 pub(crate) fn require_destination_free_of_live_cook(
     lifecycle_store: &AgentTaskLifecycleStore,
     options: &CookRequest,
-) -> Result<()> {
+) -> Result<Option<Value>> {
     let Some(owner) = foreign_destination_owner(lifecycle_store, options)? else {
-        return Ok(());
+        return Ok(None);
     };
     let Some(owner_cook) = owner.cook_id.as_deref() else {
-        return Ok(());
+        return Ok(None);
     };
     if !cook_driver_is_live(owner_cook)? {
-        return Ok(());
+        return Ok(None);
     }
-    let mut error = Error::validation_invalid_argument(
-        "to_worktree",
-        format!(
-            "destination `{}` belongs to Cook `{owner_cook}`, whose driver is still running in it",
-            owner.handle
-        ),
-        Some(owner.handle.clone()),
-        Some(vec![
-            format!("Wait for `homeboy agent-task status {owner_cook} --wait` to settle, then rerun this Cook."),
-            format!("Or stop it with `homeboy agent-task cancel {owner_cook}` and rerun this Cook."),
-            "Or give this Cook its own destination with a different `--head`.".to_string(),
-        ]),
-    );
-    error.details["destination_owner"] = serde_json::json!({
+    Ok(Some(serde_json::json!({
         "cook_id": owner_cook,
         "run_id": owner.run_id,
         "worktree": owner.handle,
         "path": owner.record.worktree_path,
-    });
-    Err(error)
+    })))
 }
 
 /// Whether another process holds the Cook's driver lock.

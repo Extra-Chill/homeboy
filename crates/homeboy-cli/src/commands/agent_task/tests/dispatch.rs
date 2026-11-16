@@ -3728,6 +3728,55 @@ fn issue_resolution_routes() {
 }
 
 #[test]
+fn cook_admission_retires_merged_destination_without_an_explicit_source_checkout() {
+    with_isolated_home(|_| {
+        let primary = tempfile::tempdir().unwrap();
+        init_runtime_component_checkout(primary.path());
+        homeboy_test_support::git::run(
+            primary.path(),
+            &[
+                "remote",
+                "add",
+                "origin",
+                "https://github.com/example/fixture.git",
+            ],
+        );
+        register_component(
+            "fixture",
+            primary.path(),
+            "https://github.com/example/fixture.git",
+        );
+        let bin = primary.path().join("bin");
+        std::fs::create_dir(&bin).unwrap();
+        homeboy_test_support::write_executable(&bin.join("gh"), "#!/bin/sh\ncase \"$*\" in 'pr list'*'--head fix/issue-18199-fixture --json'*) printf '[{\"state\":\"MERGED\",\"url\":\"https://github.com/example/fixture/pull/18200\"}]' ;; *) printf '[]' ;; esac\n", 0o755).unwrap();
+        let _path = homeboy::core::test_support::EnvVarGuard::set(
+            "PATH",
+            format!("{}:{}", bin.display(), std::env::var("PATH").unwrap()),
+        );
+        let input = cook_args_from_cli(
+            [
+                "homeboy",
+                "agent-task",
+                "cook",
+                "--prompt",
+                "reopened issue",
+                "--repo",
+                "fixture",
+                "--task-url",
+                "https://github.com/example/fixture/issues/18199",
+                "--base",
+                "main",
+                "--no-finalize",
+            ]
+            .map(str::to_string)
+            .to_vec(),
+        );
+        let resolved = super::super::run::resolve_cook_destination(input, None).unwrap();
+        assert_eq!(resolved.head.as_deref(), Some("fix/issue-18199-fixture-2"));
+    });
+}
+
+#[test]
 fn derived_generation_skips_another_source_checkout_but_reuses_same_source() {
     with_isolated_home(|_| {
         // Task destinations are siblings of the source checkout. Keep them inside

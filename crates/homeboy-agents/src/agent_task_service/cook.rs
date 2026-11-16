@@ -5491,14 +5491,29 @@ fn run_cook_spine(
         && !cook_workspace_lookup_pending(&options.identity.initial_plan)
         && !cook_has_provider_execution_in_store(lifecycle_store, &options.identity.cook_id)?
     {
-        super::cook_prior_candidate::require_destination_free_of_live_cook(
+        if let Some(owner) = super::cook_prior_candidate::require_destination_free_of_live_cook(
             lifecycle_store,
             &options,
-        )
-        .map_err(|mut error| {
-            error.details["cook_materialized_by_invocation"] = materialized_by_invocation.into();
-            error
-        })?;
+        )? {
+            lifecycle_store.record_metadata_value(
+                &options.identity.initial_run_id,
+                "superseded_by_active_cook",
+                owner.clone(),
+            )?;
+            return Ok(stores.report(CookReportInput {
+                cook_id: options.identity.cook_id.clone(),
+                status: "superseded_by_active_cook",
+                disposition: CookDisposition::Terminal,
+                attempts: Vec::new(),
+                finalization: None,
+                stop_reason: Some(format!(
+                    "destination owned by active Cook {}",
+                    owner["cook_id"].as_str().unwrap_or_default()
+                )),
+                exit_code: 0,
+                invocation_latest_run_id: Some(&options.identity.initial_run_id),
+            }));
+        }
     }
     // A re-cook of the same issue derives the same native worktree, which can
     // still hold the previous failed Cook's uncommitted candidate. Preserve it
