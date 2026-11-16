@@ -2229,24 +2229,15 @@ pub(crate) fn finalize_or_load_cook_pr_with_backend<B: AgentTaskPrFinalizationBa
     )
 }
 
-/// A gate-green candidate that publishes only as an incomplete draft: its
-/// gates are proven inherited failures, or its agent recorded no usable review
-/// form (#17671).
-struct IncompleteDraft {
-    /// Why the review form is unusable; `None` for an unverified draft.
-    reason: Option<String>,
-    /// The agent's invalid form, whose title and summary the draft keeps.
-    invalid_form: Option<crate::agent_task_review_dossier::AiFilledReviewForm>,
-}
-
-/// Whether publication without a supplied form yields an incomplete draft.
+/// The reviewer-visible gap that requires draft publication.
 /// Automatic finalization and `recover --preflight` read this one decision,
 /// so preflight never refuses a candidate `recover` publishes as a draft.
-fn incomplete_draft_publication(
+fn draft_publication_gap(
     lifecycle_store: &agent_task_lifecycle::AgentTaskLifecycleStore,
     run_id: &str,
     promotion: &AgentTaskPromotionReport,
-) -> Result<Option<IncompleteDraft>> {
+    supplied_form: bool,
+) -> Result<Option<String>> {
     // Eligible gates that include no pass are proven inherited failures: the
     // candidate is publishable, but only as a draft without verified commands.
     let unverified = crate::agent_task_review_dossier::verified_commands_from_promotion(promotion)
@@ -2264,19 +2255,12 @@ fn incomplete_draft_publication(
             None,
         ));
     }
-    // The unverified draft carries no review form, so it reads none.
-    let mut invalid_form = None;
-    let review_failure = if unverified {
+    let review_failure = if unverified || supplied_form {
         None
     } else {
         let aggregate = lifecycle_store.read_aggregate(run_id)?;
         match super::cook::review_form_from_aggregate(&aggregate) {
-            Ok(Some(form)) => {
-                let failure = form.validate().err().map(|error| error.to_string());
-                // The draft still carries the agent's own title and summary.
-                invalid_form = failure.is_some().then_some(form);
-                failure
-            }
+            Ok(Some(form)) => form.validate().err().map(|error| error.to_string()),
             Ok(None) => Some(
                 aggregate
                     .outcomes
@@ -2289,12 +2273,16 @@ fn incomplete_draft_publication(
             Err(error) => Some(error.to_string()),
         }
     };
-    Ok(
-        (unverified || review_failure.is_some()).then_some(IncompleteDraft {
-            reason: review_failure,
-            invalid_form,
-        }),
-    )
+    Ok(if unverified {
+        Some("No deterministic gate passed on this candidate; every gate failure is inherited from the base".to_string())
+    } else {
+        review_failure.map(|reason| {
+            format!(
+                "Review form unavailable: {}; completion not assessed; deterministic gates passed",
+                reason.replace(['\n', '\r'], " ")
+            )
+        })
+    })
 }
 
 pub(crate) fn finalize_or_load_cook_pr_with_backend_with_stores<
@@ -2321,38 +2309,6 @@ pub(crate) fn finalize_or_load_cook_pr_with_backend_with_stores<
                 format!("homeboy agent-task recover {successful_run_id}"),
             ]),
         ));
-    }
-    let draft = incomplete_draft_publication(lifecycle_store, successful_run_id, &promotion)?;
-    if let Some(IncompleteDraft {
-        reason,
-        invalid_form,
-    }) = draft
-    {
-        if let Some(reason) = reason {
-            lifecycle_store.record_metadata_value(
-                successful_run_id,
-                "review_form_unavailable",
-                serde_json::json!({"phase": "review_form", "message": reason}),
-            )?;
-        }
-        let mut value = super::cook::publish_incomplete_draft(
-            lifecycle_store,
-            options,
-            &promotion,
-            invalid_form.as_ref(),
-            0,
-            successful_run_id,
-            &[],
-            true,
-            backend,
-        )?;
-        let out_of_scope =
-            remediation_out_of_scope_changes(lifecycle_store, successful_run_id, &promotion);
-        if !out_of_scope.is_empty() {
-            value["review_dossier"]["out_of_scope_changes"] = serde_json::json!(out_of_scope);
-        }
-        lifecycle_store.record_cook_finalization(successful_run_id, value.clone())?;
-        return Ok(value);
     }
     let finalization = cook_finalization_options_with_stores(
         store,
@@ -2512,8 +2468,26 @@ pub(crate) fn cook_finalization_options_with_stores(
         .as_deref()
         .or(recorded_component_id.as_deref());
     let review_profile = resolve_review_profile(selected_component_id, &path)?;
-    review_dossier.validate(&review_profile)?;
-    let form_title = if options.finalization.title.is_empty() {
+    let gap = draft_publication_gap(
+        lifecycle_store,
+        successful_run_id,
+        promotion,
+        review_form.is_some(),
+    )?;
+    let draft_pr = options.finalization.draft_pr || gap.is_some();
+    review_dossier.validate_for_publication(&review_profile, draft_pr)?;
+    let form_title = if options.finalization.title.is_empty() && gap.is_some() {
+        let aggregate = lifecycle_store.read_aggregate(successful_run_id)?;
+        let form = review_form.map(|form| form.form.clone()).or_else(|| {
+            super::cook::review_form_from_aggregate(&aggregate)
+                .ok()
+                .flatten()
+        });
+        Some(super::cook::draft_title(
+            form.as_ref().and_then(|form| form.specific_title()),
+            promotion,
+        ))
+    } else if options.finalization.title.is_empty() {
         Some(terminal_form_title(
             lifecycle_store,
             successful_run_id,
@@ -2584,7 +2558,7 @@ pub(crate) fn cook_finalization_options_with_stores(
         verified_candidate_tree: None,
         inherited_gate_evidence: None,
         protected_branches: options.finalization.protected_branches.clone(),
-        draft_pr: options.finalization.draft_pr,
+        draft_pr,
         repository_integrity_evidence: promotion.repository_integrity_evidence.clone(),
     })
 }
@@ -2855,33 +2829,6 @@ pub(crate) fn recover_cook_pr_with_backend_and_review_form<B: AgentTaskPrFinaliz
     let supplied_review_form = resolve_supplied_recovery_review_form(&run_id, review_form)?;
     let lifecycle_store = agent_task_lifecycle::AgentTaskLifecycleStore::from_environment()?;
     let recipe_store = super::cook_recipe::CookRecipeStore::from_current_data_root()?;
-    // Without a supplied form or overrides, recovery publishes exactly as the
-    // Cook would have: a run whose agent recorded no usable review form
-    // becomes the incomplete draft instead of failing on the missing form.
-    if supplied_review_form.is_none() && overrides.is_empty() {
-        if preflight {
-            let mut normalized = promotion.clone();
-            normalized.normalize_gate_outcome();
-            if let Some(draft) =
-                incomplete_draft_publication(&lifecycle_store, &run_id, &normalized)?
-            {
-                return Ok(json!({
-                    "status": "validated",
-                    "publication": "draft",
-                    "reason": draft.reason,
-                }));
-            }
-        } else {
-            return finalize_or_load_cook_pr_with_backend_with_stores(
-                &recipe_store,
-                &lifecycle_store,
-                &options,
-                &run_id,
-                &promotion,
-                backend,
-            );
-        }
-    }
     let finalization = cook_finalization_options_with_stores(
         &recipe_store,
         &lifecycle_store,
@@ -3334,25 +3281,32 @@ fn cook_review_dossier_with_stores_and_review_form(
     let gate_count = verification_promotion.gate_results.len();
     // Every reviewer-visible verification line derives from a passed, visible
     // gate bound to the promoted candidate; without one there is nothing to show.
-    if crate::agent_task_review_dossier::verified_commands_from_promotion(verification_promotion)
-        .is_empty()
-    {
-        return Err(Error::validation_invalid_argument(
-            "verification",
-            "Cook cannot publish a test command without matching successful visible durable gate evidence bound to the promoted candidate",
-            None,
-            None,
-        ));
-    }
+    let gap = draft_publication_gap(
+        lifecycle_store,
+        successful_run_id,
+        promotion,
+        review_form.is_some(),
+    )?;
 
     // A form-only follow-up owns reviewer metadata, not the candidate it carries
     // forward. Resolve the persisted Cook lineage so that follow-up prose cannot
     // erase the implementation attempt that produced the delivered patch.
     let terminal_form = match review_form {
         Some(form) => form.form.clone(),
+        None if gap.is_some() => {
+            let aggregate = lifecycle_store.read_aggregate(successful_run_id)?;
+            super::cook::review_form_from_aggregate(&aggregate)
+                .ok()
+                .flatten()
+                .unwrap_or(serde_json::from_value(json!({"summary": ""}))?)
+        }
         None => review_form_for_finalization_in_store(lifecycle_store, successful_run_id)?,
     };
-    let verified_commands = terminal_form.verify_against_promotion(verification_promotion)?;
+    let verified_commands = if gap.is_some() {
+        crate::agent_task_review_dossier::verified_commands_from_promotion(verification_promotion)
+    } else {
+        terminal_form.verify_against_promotion(verification_promotion)?
+    };
     let out_of_scope_changes = remediation_out_of_scope_changes(
         lifecycle_store,
         source_run_id.unwrap_or(successful_run_id),
@@ -3437,17 +3391,41 @@ fn cook_review_dossier_with_stores_and_review_form(
             },
         ]);
     }
+    let mut summary = if gap.is_some() {
+        terminal_form.summary.clone()
+    } else {
+        lineage.summary.clone()
+    };
+    let mut what_changed = if gap.is_some() {
+        terminal_form.what_changed.clone()
+    } else {
+        lineage.what_changed.clone()
+    };
+    if let Some(gap) = gap {
+        if summary.trim().is_empty() {
+            summary = gap;
+        } else {
+            summary.push_str(&format!(" {gap}"));
+        }
+        if what_changed.iter().all(|line| line.trim().is_empty()) {
+            what_changed = promotion
+                .changed_files
+                .iter()
+                .map(|file| format!("Changed {file}"))
+                .collect();
+        }
+    }
     Ok(AgentTaskReviewDossier {
         schema: "homeboy/agent-task-review-dossier/v1".to_string(),
         summary: if review_form.is_some() {
             terminal_form.summary.clone()
         } else {
-            lineage.summary
+            summary
         },
         what_changed: if review_form.is_some() {
             terminal_form.what_changed.clone()
         } else {
-            lineage.what_changed
+            what_changed
         },
         how_to_test: Vec::new(),
         // Deterministic evidence: orchestrator-owned. Each candidate-bound
@@ -3982,8 +3960,7 @@ pub fn candidate_publication_title(
         })
 }
 
-/// The cook loop guarantees a valid form before finalization. Missing or
-/// incomplete forms remain errors here.
+/// Ready publication requires a valid, publishable recorded form.
 fn review_form_for_finalization_in_store(
     lifecycle_store: &agent_task_lifecycle::AgentTaskLifecycleStore,
     run_id: &str,

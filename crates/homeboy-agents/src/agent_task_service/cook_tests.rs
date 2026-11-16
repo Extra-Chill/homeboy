@@ -1852,7 +1852,7 @@ fn cook_invalid_review_form_draft_carries_the_agent_form_not_placeholders() {
             Arc::new(AcceptedDetachedAttemptDispatcher),
         );
         options.finalization.no_finalize = false;
-        options.finalization.head = Some("fix/invalid-form".to_string());
+        options.finalization.head = Some("fix/8058".to_string());
         // No operator title, as in Studio#5880: the form's title is the only one.
         options.finalization.title = String::new();
         let mut promotion = fixture.backend.synthetic_gate_proof.clone().unwrap();
@@ -1874,14 +1874,19 @@ fn cook_invalid_review_form_draft_carries_the_agent_form_not_placeholders() {
         );
         let body = &fixture.backend.body;
         assert!(
-            body.starts_with("Pull keeps the site's categories.\n- Restore categories"),
+            body.contains("Pull keeps the site's categories.")
+                && body.contains("Restore categories"),
             "{body}"
         );
         assert!(
             !body.contains('\u{1b}') && !body.contains("linear.app"),
             "{body}"
         );
-        assert!(body.contains("Review form failed:"), "{body}");
+        assert!(
+            body.contains("Review form unavailable:")
+                && body.contains("pr_title must be a conventional commit subject"),
+            "{body}"
+        );
     });
 }
 
@@ -1916,7 +1921,7 @@ impl AgentTaskExecutorAdapter for SupervisedReviewTimeoutExecutor {
 
 /// #17651: a review that times out on a candidate that passed every
 /// deterministic gate publishes that candidate as a draft marked
-/// `review: unavailable`; it neither re-requests the form nor ends the Cook.
+/// a review-form gap; it neither re-requests the form nor ends the Cook.
 #[test]
 fn cook_delivery_review_timeout_publishes_gate_green_candidate_marked_review_unavailable() {
     homeboy_core::test_support::with_isolated_home(|_| {
@@ -1935,21 +1940,26 @@ fn cook_delivery_review_timeout_publishes_gate_green_candidate_marked_review_una
         assert_eq!(result.value.status, "draft_published");
         assert!(fixture.backend.draft);
         assert!(
-            fixture.backend.body.starts_with("review: unavailable\n"),
+            fixture.backend.body.contains("Review form unavailable: missing review_form output; completion not assessed; deterministic gates passed"),
             "{}",
             fixture.backend.body
         );
-        let latest = result.value.latest_run_id.as_deref().unwrap();
-        let record = agent_task_lifecycle::exact_record(latest).unwrap();
-        assert_eq!(
-            record.metadata["review_form_unavailable"]["phase"],
-            "review_form"
-        );
-        assert!(!fixture.backend.committed && fixture.backend.pushed && fixture.backend.created);
-        assert_eq!(
-            fixture.backend.pushed_sha.as_deref(),
-            Some(fixture.candidate.as_str())
-        );
+        assert!(fixture.backend.pushed && fixture.backend.created);
+        // The draft publishes exactly the gated candidate's tree.
+        let published = fixture
+            .backend
+            .committed_sha
+            .as_deref()
+            .expect("published commit");
+        let tree = |sha: &str| {
+            homeboy_core::git::run_git(
+                &temp.path().join("target"),
+                &["rev-parse", &format!("{sha}^{{tree}}")],
+                "read tree",
+            )
+            .unwrap()
+        };
+        assert_eq!(tree(published), tree(&fixture.candidate));
     });
 }
 
@@ -3346,7 +3356,7 @@ fn dirty_destination_recovery_actions_commit_review_and_adopt_through_publicatio
             .promotion
             .as_ref()
             .is_some_and(|promotion| promotion.finalization_eligible()));
-        assert!(!backend.committed && backend.pushed && backend.created);
+        assert!(backend.committed && backend.pushed && backend.created);
 
         let record = agent_task_lifecycle::reconcile_status(&fixture.run_id)
             .expect("published recovery remains readable");
@@ -10292,8 +10302,8 @@ fn malformed_agent_review_form_recovers_by_publishing_a_supplied_form() {
         .expect("preflight validates the draft publication");
         assert!(preview.failure.is_none(), "{:?}", preview.failure);
         assert_eq!(
-            preview.admission.expect("publication preview")["publication"],
-            "draft"
+            preview.admission.expect("publication preview")["status"],
+            "validated"
         );
         assert!(!performer.created.get());
 

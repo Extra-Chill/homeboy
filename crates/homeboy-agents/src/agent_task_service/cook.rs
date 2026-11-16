@@ -7139,17 +7139,6 @@ fn run_cook_spine(
             && persisted_promotion_for_attempt_in_store(lifecycle_store, &run_id)?
                 .is_some_and(|promotion| promotion.applied_with_passing_verdict())
             && !matches!(review_form_from_aggregate(&aggregate), Ok(Some(form)) if form.validate().is_ok());
-        if review_form_unavailable {
-            lifecycle_store.record_metadata_value(
-                &run_id,
-                "review_form_unavailable",
-                serde_json::json!({
-                    "phase": "review_form",
-                    "message": "review form unavailable",
-                    "run_state": format!("{:?}", record.state()),
-                }),
-            )?;
-        }
         let persisted_terminal_status = record.metadata["cook_progress"]["terminal_status"]
             .as_str()
             .map(str::to_string);
@@ -7832,7 +7821,6 @@ fn publish_latest_incomplete_draft(
                     attempt.attempt,
                     &attempt.run_id,
                     &later,
-                    record.metadata.get("review_form_unavailable").is_some(),
                     &mut crate::agent_task_finalization::RealAgentTaskPrFinalizationBackend,
                 )
                 .map(|_| ());
@@ -7851,7 +7839,10 @@ fn publish_latest_incomplete_draft(
 /// A held draft's title names the change: the agent's own title, made a
 /// conventional subject when it is not one, or else the candidate's changed
 /// files. A Cook id is not a title a reviewer can act on (#17919).
-fn draft_title(agent_title: Option<&str>, promotion: &AgentTaskPromotionReport) -> String {
+pub(super) fn draft_title(
+    agent_title: Option<&str>,
+    promotion: &AgentTaskPromotionReport,
+) -> String {
     if let Some(title) = agent_title {
         if homeboy_core::git::is_conventional_subject(title) {
             return title.to_string();
@@ -7879,7 +7870,6 @@ pub(super) fn publish_incomplete_draft<
     attempt: u32,
     run_id: &str,
     later: &[String],
-    review_form_unavailable: bool,
     backend: &mut B,
 ) -> Result<Value> {
     use homeboy_core::git;
@@ -7899,20 +7889,12 @@ pub(super) fn publish_incomplete_draft<
         .trim()
         .to_string(),
     };
-    let record = lifecycle_store.read_record(run_id)?;
-    // A gated draft whose gates are all inherited failures has nothing verified.
-    let unverified = review_form_unavailable
-        && crate::agent_task_review_dossier::verified_commands_from_promotion(promotion).is_empty();
     let title = if options.finalization.title.is_empty() {
         draft_title(form.and_then(|form| form.specific_title()), promotion)
     } else {
         options.finalization.title.clone()
     };
-    let note = match (review_form_unavailable, unverified) {
-        (true, true) => "verification: unavailable\n\nNo deterministic gate passed on this candidate; every gate failure is inherited from the base",
-        (true, false) => "review: unavailable\n\nReview form unavailable: completion not assessed; deterministic gates passed",
-        (false, _) => "Incomplete candidate; deterministic verification failed.",
-    };
+    let note = "Incomplete candidate; deterministic verification failed.";
     let summary = form
         .filter(|form| !form.summary.trim().is_empty())
         .map(|form| {
@@ -7947,16 +7929,6 @@ pub(super) fn publish_incomplete_draft<
         body.push_str(&format!(
             "\n{}\n",
             crate::agent_task_review_dossier::render_source_relationships(&relationships)
-        ));
-    }
-    if let Some(reason) = record.metadata["review_form_unavailable"]["message"]
-        .as_str()
-        .or((review_form_unavailable && !unverified).then_some("missing review_form output"))
-        .filter(|_| review_form_unavailable)
-    {
-        body.push_str(&format!(
-            "\nReview form failed: {}\n",
-            reason.replace(['\n', '\r'], " ")
         ));
     }
     let out_of_scope =
@@ -7996,27 +7968,7 @@ pub(super) fn publish_incomplete_draft<
             gate.id, tail
         ));
     }
-    let sha = if review_form_unavailable {
-        let candidate = promotion
-            .provenance
-            .pointer("/candidate_checkout/commit")
-            .and_then(Value::as_str)
-            .or(promotion.candidate_ref.as_deref())
-            .ok_or_else(|| Error::git_command_failed("gated candidate SHA is missing"))?;
-        let base = promotion
-            .verified_base
-            .as_ref()
-            .ok_or_else(|| Error::git_command_failed("verified base SHA is missing"))?;
-        body.push_str(&format!(
-            "\nDiff stat:\n```text\n{}\n```\n",
-            git::run_git(
-                root,
-                &["diff", "--stat", &base.sha, candidate],
-                "describe gated candidate"
-            )?
-        ));
-        candidate.to_string()
-    } else {
+    let sha = {
         let (candidate, _) = backend.prepare_manual_candidate(
             path,
             &promotion
@@ -8032,20 +7984,16 @@ pub(super) fn publish_incomplete_draft<
     backend.push_branch(path, sha.trim(), &head)?;
     let pr = match backend.find_open_pr(None, path, &options.finalization.base, &head)? {
         Some(pr) => {
-            if review_form_unavailable {
-                backend.update_pr(None, path, pr.number, &title, &body)?
-            } else {
-                git::pr_comment(
-                    None,
-                    git::PrCommentOptions {
-                        number: pr.number,
-                        body,
-                        path: Some(path.to_string()),
-                        ..Default::default()
-                    },
-                )?;
-                pr
-            }
+            git::pr_comment(
+                None,
+                git::PrCommentOptions {
+                    number: pr.number,
+                    body,
+                    path: Some(path.to_string()),
+                    ..Default::default()
+                },
+            )?;
+            pr
         }
         None => backend.create_pr(
             None,
