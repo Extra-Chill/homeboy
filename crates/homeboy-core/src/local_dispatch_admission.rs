@@ -1,4 +1,4 @@
-//! Concurrency ceiling for locally dispatched Cook provider attempts (#14732).
+//! Pressure-driven admission for locally dispatched Cook provider attempts.
 //!
 //! Homeboy already captures a resource-policy snapshot at preflight
 //! ([`crate::resource_policy_context`]) and consults it for pressure-driven
@@ -12,10 +12,8 @@
 //! This module is the missing enforcement. A counting-semaphore coordination
 //! lease in the observation store (namespace [`NAMESPACE`], #15947) tracks how
 //! many local Cook provider dispatches are active on this machine right now, and a pure decision function ([`evaluate_local_dispatch_admission`])
-//! turns that count plus the already-captured pressure severity into one of
-//! three outcomes: admit, queue, or refuse. Refusal names the observed load so
-//! the operator sees the same evidence the resource-policy warning already
-//! computed, instead of a second silent saturation.
+//! admits while pressure is ok or warm and queues while it is hot. Active
+//! dispatch counts are tracked for observability, not used as a fixed ceiling.
 
 use std::cell::Cell;
 use std::path::{Path, PathBuf};
@@ -64,34 +62,17 @@ impl Drop for ActiveLocalDispatchLease {
 pub enum LocalDispatchAttempt {
     /// The decision admitted the dispatch and the slot is now held.
     Admitted(ActiveLocalDispatchLease),
-    /// The decision queued or refused the dispatch; no slot was taken.
+    /// The decision queued the dispatch; no slot was taken.
     NotAdmitted(LocalDispatchAdmission),
 }
 
 /// Decision produced by [`evaluate_local_dispatch_admission`].
 #[derive(Debug, Clone, PartialEq)]
 pub enum LocalDispatchAdmission {
-    /// Fewer local dispatches are active than the ceiling: dispatch now.
+    /// Pressure is not hot: dispatch now, regardless of active count.
     Admit,
-    /// The ceiling is already reached but pressure has not crossed the
-    /// refusal threshold: queue (wait for a slot) rather than dispatch
-    /// immediately.
-    Queue { active: usize, ceiling: usize },
-    /// Pressure severity already exceeds the refusal threshold: do not
-    /// dispatch or queue. `reason` names the observed load.
-    Refuse { reason: String },
-}
-
-/// How many local Cook provider dispatches this host admits concurrently.
-///
-/// A local provider attempt regularly bursts past one core (compiling,
-/// running a test suite, a second agent subprocess, ...), so admitting one
-/// dispatch per logical CPU saturates the machine exactly the way #14732
-/// observed (five cooks on an 18-CPU host). A quarter of the logical CPU
-/// count, floored at 1, leaves headroom for that burst while still using a
-/// multi-core host for more than one concurrent cook.
-pub fn concurrency_ceiling(cpu_count: usize) -> usize {
-    (cpu_count / 4).max(1)
+    /// Pressure is hot: wait for it to drop without taking a lease.
+    Queue { reason: String },
 }
 
 /// Decide whether another local Cook provider dispatch may start.
@@ -101,42 +82,27 @@ pub fn concurrency_ceiling(cpu_count: usize) -> usize {
 /// unrecognized snapshot fails open rather than blocking dispatch on a host
 /// this decision cannot evaluate.
 ///
-/// `local_override` is the resource-policy `--placement local` override
-/// already recorded on the captured context. It is the one documented,
-/// operator-authorized escape hatch from a hot-machine refusal elsewhere in
-/// resource policy ("Local execution requires an explicit, authorized
-/// `--placement local` override"), so a hot refusal here respects it too — an
-/// explicit override is a decision the operator already made, not one this
-/// ceiling second-guesses. The concurrency ceiling itself is a physical
-/// constraint, not a pressure judgment call, so it still queues even under an
-/// override: queueing delays the authorized run until a slot is free, it does
-/// not refuse it.
+/// Placement overrides authorize local execution but do not bypass waiting
+/// for hot pressure to drop. Counts and overrides are retained as inputs for
+/// callers sharing the resource-policy context; neither limits admission.
 pub fn evaluate_local_dispatch_admission(
-    active_count: usize,
+    _active_count: usize,
     severity: &str,
     load_one: Option<f64>,
     cpu_count: usize,
-    local_override: bool,
+    _local_override: bool,
 ) -> LocalDispatchAdmission {
-    if severity == "hot" && !local_override {
+    if severity == "hot" {
         let load = load_one
             .map(|load| format!("load average {load:.1} across {cpu_count} CPU(s)"))
             .unwrap_or_else(|| format!("elevated load across {cpu_count} CPU(s)"));
-        return LocalDispatchAdmission::Refuse {
+        return LocalDispatchAdmission::Queue {
             reason: format!(
-                "machine is hot ({load}); refusing to start another local Cook provider dispatch"
+                "machine is hot ({load}); waiting for pressure to drop before local Cook dispatch"
             ),
         };
     }
-    let ceiling = concurrency_ceiling(cpu_count);
-    if active_count >= ceiling {
-        LocalDispatchAdmission::Queue {
-            active: active_count,
-            ceiling,
-        }
-    } else {
-        LocalDispatchAdmission::Admit
-    }
+    LocalDispatchAdmission::Admit
 }
 
 fn open_store(data_root: &Path) -> Result<ObservationStore> {
@@ -204,7 +170,7 @@ pub fn active_local_dispatch_count(data_root: &Path) -> Result<usize> {
 /// `decide` receives the slots held by live dispatches and returns the
 /// admission decision (normally [`evaluate_local_dispatch_admission`]). The
 /// count and the acquire are judged inside the same IMMEDIATE transaction, so
-/// two concurrent callers can never both take the last slot.
+/// counting remains consistent across concurrent callers.
 pub fn try_admit_local_dispatch(
     data_root: &Path,
     run_id: &str,
@@ -233,7 +199,7 @@ pub fn try_admit_local_dispatch(
 /// Unconditionally acquire a slot for `run_id` below `data_root`.
 ///
 /// Callers that need admission use [`try_admit_local_dispatch`]; this only
-/// records a slot (for example a fixture filling the ceiling). The returned
+/// records a slot (for example an already-running dispatch). The returned
 /// guard releases the slot on drop.
 pub fn acquire_local_dispatch_lease(
     data_root: &Path,
@@ -254,99 +220,36 @@ mod tests {
     use super::*;
 
     #[test]
-    fn admits_below_the_ceiling() {
-        assert_eq!(
-            evaluate_local_dispatch_admission(0, "ok", Some(1.0), 18, false),
-            LocalDispatchAdmission::Admit
-        );
-        assert_eq!(
-            evaluate_local_dispatch_admission(3, "warm", Some(10.0), 18, false),
-            LocalDispatchAdmission::Admit
-        );
-    }
-
-    /// The regression this module exists to fix: dispatching more cooks than
-    /// the ceiling supports must queue the excess instead of running it.
-    #[test]
-    fn queues_once_the_ceiling_is_reached() {
-        // 18 CPUs -> ceiling of 4 (18 / 4, floored at 1). A 5th concurrent
-        // dispatch — exactly the reported scenario — must queue, not run.
-        assert_eq!(concurrency_ceiling(18), 4);
-        assert_eq!(
-            evaluate_local_dispatch_admission(4, "warm", Some(30.4), 18, false),
-            LocalDispatchAdmission::Queue {
-                active: 4,
-                ceiling: 4
+    fn admission_depends_on_pressure_not_active_count() {
+        for active in [0, 1, 8, 100, usize::MAX] {
+            for local_override in [false, true] {
+                for severity in ["ok", "warm", "unknown"] {
+                    assert_eq!(
+                        evaluate_local_dispatch_admission(
+                            active,
+                            severity,
+                            None,
+                            32,
+                            local_override
+                        ),
+                        LocalDispatchAdmission::Admit
+                    );
+                }
+                let admission = evaluate_local_dispatch_admission(
+                    active,
+                    "hot",
+                    Some(30.4),
+                    18,
+                    local_override,
+                );
+                let LocalDispatchAdmission::Queue { reason } = admission else {
+                    panic!("hot pressure must queue: {admission:?}");
+                };
+                assert!(reason.contains("hot"), "{reason}");
+                assert!(reason.contains("30.4"), "{reason}");
+                assert!(reason.contains("18 CPU"), "{reason}");
             }
-        );
-        assert_eq!(
-            evaluate_local_dispatch_admission(5, "ok", None, 18, false),
-            LocalDispatchAdmission::Queue {
-                active: 5,
-                ceiling: 4
-            }
-        );
-    }
-
-    /// The other regression this module exists to fix: a hot machine is
-    /// refused outright, with the load named in the reason, instead of
-    /// warned-about and dispatched into anyway.
-    #[test]
-    fn refuses_admission_when_pressure_is_already_hot_and_names_the_load() {
-        let admission = evaluate_local_dispatch_admission(0, "hot", Some(30.4), 18, false);
-        let LocalDispatchAdmission::Refuse { reason } = admission else {
-            panic!("expected a refusal, got {admission:?}");
-        };
-        assert!(reason.contains("hot"), "{reason}");
-        assert!(reason.contains("30.4"), "{reason}");
-        assert!(reason.contains("18 CPU"), "{reason}");
-    }
-
-    /// Refusal takes priority over queueing: a hot machine is refused even
-    /// when there happens to be room under the concurrency ceiling, because
-    /// the problem is pressure, not slot availability.
-    #[test]
-    fn hot_pressure_refuses_even_with_free_slots() {
-        assert!(matches!(
-            evaluate_local_dispatch_admission(0, "hot", Some(9.9), 18, false),
-            LocalDispatchAdmission::Refuse { .. }
-        ));
-    }
-
-    /// An explicit `--placement local` override is the one documented escape
-    /// hatch from a hot-machine refusal elsewhere in resource policy, so it
-    /// bypasses this refusal too. It does not bypass the concurrency ceiling:
-    /// a physical constraint queues even an authorized run.
-    #[test]
-    fn explicit_local_override_bypasses_the_hot_refusal_but_not_the_ceiling() {
-        assert_eq!(
-            evaluate_local_dispatch_admission(0, "hot", Some(30.4), 18, true),
-            LocalDispatchAdmission::Admit
-        );
-        assert_eq!(
-            evaluate_local_dispatch_admission(4, "hot", Some(30.4), 18, true),
-            LocalDispatchAdmission::Queue {
-                active: 4,
-                ceiling: 4
-            }
-        );
-    }
-
-    #[test]
-    fn unrecognized_severity_fails_open_to_ceiling_evaluation() {
-        assert_eq!(
-            evaluate_local_dispatch_admission(0, "unknown", None, 4, false),
-            LocalDispatchAdmission::Admit
-        );
-    }
-
-    #[test]
-    fn ceiling_never_drops_below_one() {
-        assert_eq!(concurrency_ceiling(0), 1);
-        assert_eq!(concurrency_ceiling(1), 1);
-        assert_eq!(concurrency_ceiling(3), 1);
-        assert_eq!(concurrency_ceiling(4), 1);
-        assert_eq!(concurrency_ceiling(8), 2);
+        }
     }
 
     #[test]
@@ -369,32 +272,24 @@ mod tests {
         assert_eq!(active_local_dispatch_count(data_root).unwrap(), 0);
     }
 
-    /// Two claimants racing for the last slot: exactly one wins, and the
-    /// loser sees the queue decision judged against the winner's slot.
+    /// Active leases do not limit admission while pressure is ok.
     #[test]
-    fn two_claimants_for_the_last_slot_admit_exactly_one() {
+    fn multiple_claimants_are_admitted_without_a_fixed_ceiling() {
         let temp = tempfile::tempdir().expect("temp dir");
         let data_root = temp.path();
-        // 4 CPUs -> ceiling of 1.
         let decide = |active| evaluate_local_dispatch_admission(active, "ok", None, 4, false);
 
         let first = try_admit_local_dispatch(data_root, "run-a", decide).expect("first attempt");
         let second = try_admit_local_dispatch(data_root, "run-b", decide).expect("second attempt");
 
         assert!(matches!(first, LocalDispatchAttempt::Admitted(_)));
-        assert!(matches!(
-            second,
-            LocalDispatchAttempt::NotAdmitted(LocalDispatchAdmission::Queue {
-                active: 1,
-                ceiling: 1
-            })
-        ));
-        assert_eq!(active_local_dispatch_count(data_root).unwrap(), 1);
+        assert!(matches!(second, LocalDispatchAttempt::Admitted(_)));
+        assert_eq!(active_local_dispatch_count(data_root).unwrap(), 2);
     }
 
-    /// A refused decision takes no slot.
+    /// A queued decision takes no slot.
     #[test]
-    fn a_refused_attempt_holds_no_slot() {
+    fn a_queued_attempt_holds_no_slot() {
         let temp = tempfile::tempdir().expect("temp dir");
         let data_root = temp.path();
         let attempt = try_admit_local_dispatch(data_root, "run-hot", |active| {
@@ -403,7 +298,7 @@ mod tests {
         .expect("attempt");
         assert!(matches!(
             attempt,
-            LocalDispatchAttempt::NotAdmitted(LocalDispatchAdmission::Refuse { .. })
+            LocalDispatchAttempt::NotAdmitted(LocalDispatchAdmission::Queue { .. })
         ));
         assert_eq!(active_local_dispatch_count(data_root).unwrap(), 0);
     }
@@ -489,7 +384,7 @@ mod tests {
 
         assert_eq!(active_local_dispatch_count(data_root).unwrap(), 0);
 
-        // And the freed slot admits a real dispatch on a ceiling of one.
+        // A real dispatch is admitted after the stale holder is reaped.
         let attempt = try_admit_local_dispatch(data_root, "fresh-run", |active| {
             evaluate_local_dispatch_admission(active, "ok", None, 4, false)
         })
