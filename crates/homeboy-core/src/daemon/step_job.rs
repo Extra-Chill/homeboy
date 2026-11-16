@@ -1002,7 +1002,10 @@ fn child_failure_cause(log: &str) -> Option<String> {
     })
 }
 
-/// Returns `false` when cancelled or when the linked durable run has ended.
+/// Returns `false` when cancelled, or when a declared wait (time or runner)
+/// would outlive its linked durable run. A step with nothing to wait for goes
+/// straight to its child, which owns authorization: recovery steps exist
+/// precisely for runs that are already terminal.
 fn await_wait(request: &StepJobRequest, job: &ControllerJobHandle) -> Result<bool> {
     let probe = runner_eligibility()
         .read()
@@ -1031,6 +1034,9 @@ fn await_wait_with(
     linked_terminal: impl Fn(&str) -> bool,
 ) -> Result<bool> {
     let wait = &request.wait;
+    if wait.is_empty() {
+        return Ok(!job.is_cancelled());
+    }
     let not_before = wait
         .not_before
         .as_deref()
@@ -1580,6 +1586,29 @@ mod tests {
             )
             .unwrap());
             fixtures.remove(&run_id);
+        });
+    }
+
+    /// A recovery step targets a terminal run by design; with nothing to wait
+    /// for it must spawn its child rather than finish without running.
+    #[test]
+    fn terminal_linked_run_without_a_wait_still_spawns() {
+        with_isolated_home(|_| {
+            let mut request = request("true", Default::default());
+            let run_id = uuid::Uuid::new_v4().to_string();
+            request.linked_durable_run_id = Some(run_id.clone());
+            let harness =
+                ControllerJobHarness::new(Arc::new(StepJobDriver), to_value(&request).unwrap())
+                    .unwrap();
+            assert!(await_wait_with(
+                &request,
+                &harness.handle(),
+                None,
+                || Duration::ZERO,
+                |_| panic!("an empty wait must not sleep"),
+                |_| true,
+            )
+            .unwrap());
         });
     }
 
