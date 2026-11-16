@@ -554,10 +554,10 @@ fn refused_publication_ends_the_terminal_continuation_without_regating() {
     with_own_green_gates(|options, _| {
         let (cook_id, run_id) = (&options.identity.cook_id, &options.identity.initial_run_id);
         let store = test_lifecycle_store();
-        // A failed execution without candidate recovery proof cannot publish.
+        // A recoverable candidate without its producing runtime's recovery
+        // proof cannot publish.
         agent_task_lifecycle::rewrite_record_for_test(run_id, |record| {
-            record.lifecycle.execution.state =
-                homeboy_core::run_lifecycle_record::RunExecutionState::Failed;
+            record.lifecycle.provider_runtime.clear();
         })
         .unwrap();
         let promotions = || {
