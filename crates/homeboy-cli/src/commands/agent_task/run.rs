@@ -6234,6 +6234,34 @@ fn resolve_cook_issue(args: &mut AgentTaskCookArgs) -> homeboy::core::Result<()>
     Ok(())
 }
 
+/// Handles are identities, not directories; missing destinations must not become
+/// subprocess working directories or remote lookup paths.
+fn cook_pull_request_checkout(args: &AgentTaskCookArgs) -> homeboy::core::Result<Option<PathBuf>> {
+    if let Some(workspace) = args.dispatch.workspace.as_deref() {
+        if Path::new(workspace).is_dir() {
+            return Ok(Some(PathBuf::from(workspace)));
+        }
+        if let Some(record) = homeboy::core::worktree::resolve_workspace_ref_if_present(workspace)?
+        {
+            let path = PathBuf::from(record.path());
+            if path.is_dir() {
+                return Ok(Some(path));
+            }
+        }
+    }
+    Ok(args
+        .dispatch
+        .cwd
+        .as_deref()
+        .map(PathBuf::from)
+        .filter(|path| path.is_dir())
+        .or_else(|| {
+            cook_provision_repository(args)
+                .map(PathBuf::from)
+                .filter(|path| path.is_dir())
+        }))
+}
+
 fn resolve_cook_pull_request(args: &mut AgentTaskCookArgs) -> homeboy::core::Result<()> {
     let Some(url) = args
         .dispatch
@@ -6243,16 +6271,7 @@ fn resolve_cook_pull_request(args: &mut AgentTaskCookArgs) -> homeboy::core::Res
     else {
         return Ok(());
     };
-    let repository = cook_provision_repository(args);
-    let path = args
-        .dispatch
-        .workspace
-        .as_deref()
-        .or(args.dispatch.cwd.as_deref())
-        .or(repository
-            .as_deref()
-            .filter(|path| Path::new(path).is_dir()))
-        .unwrap_or(".");
+    let path = cook_pull_request_checkout(args)?;
     // A pull request in another repository is context for the task, not the
     // pull request this Cook updates, so its base and head do not apply.
     // Compare repository names so a fork-first checkout still matches.
@@ -6271,9 +6290,8 @@ fn resolve_cook_pull_request(args: &mut AgentTaskCookArgs) -> homeboy::core::Res
         .filter(|name| !name.is_empty())
         .map(str::to_ascii_lowercase)
         .or_else(|| {
-            (path != ".")
-                .then(|| homeboy::core::git::remote_origin_url(Path::new(path)))
-                .flatten()
+            path.as_deref()
+                .and_then(homeboy::core::git::remote_origin_url)
                 .as_deref()
                 .and_then(repository_name)
         });
@@ -6282,7 +6300,7 @@ fn resolve_cook_pull_request(args: &mut AgentTaskCookArgs) -> homeboy::core::Res
             return Ok(());
         }
     }
-    let (base, head) = cook_pull_request_refs(Path::new(path), url)?;
+    let (base, head) = cook_pull_request_refs(path.as_deref(), url)?;
     for (flag, explicit, canonical) in [("base", &args.base, &base), ("head", &args.head, &head)] {
         if explicit.as_deref().is_some_and(|value| value != canonical) {
             return Err(homeboy::core::Error::validation_invalid_argument(
@@ -6317,14 +6335,22 @@ fn resolve_cook_pull_request(args: &mut AgentTaskCookArgs) -> homeboy::core::Res
     Ok(())
 }
 
-fn cook_pull_request_refs(path: &Path, url: &str) -> homeboy::core::Result<(String, String)> {
-    let output = std::process::Command::new("gh")
-        .args(["pr", "view", url, "--json", "baseRefName,headRefName"])
-        .current_dir(path)
-        .output()
-        .map_err(|error| {
-            homeboy::core::Error::internal_io(error.to_string(), Some("gh pr view".to_string()))
-        })?;
+fn cook_pull_request_refs(
+    path: Option<&Path>,
+    url: &str,
+) -> homeboy::core::Result<(String, String)> {
+    let mut command = std::process::Command::new("gh");
+    command.args(["pr", "view", url, "--json", "baseRefName,headRefName"]);
+    // Full GitHub URLs identify their repository without a checkout. Even for
+    // relative PR identifiers, never pass a missing path to process spawning.
+    if !url.starts_with("https://github.com/") {
+        if let Some(path) = path.filter(|path| path.is_dir()) {
+            command.current_dir(path);
+        }
+    }
+    let output = command.output().map_err(|error| {
+        homeboy::core::Error::internal_io(error.to_string(), Some("gh pr view".to_string()))
+    })?;
     if !output.status.success() {
         return Err(homeboy::core::Error::validation_invalid_argument(
             "task_url",
@@ -6424,7 +6450,7 @@ mod cook_pull_request_ref_tests {
             ),
         );
         assert_eq!(
-            cook_pull_request_refs(&linked, "https://github.com/example/repo/pull/1895")
+            cook_pull_request_refs(Some(&linked), "https://github.com/example/repo/pull/1895")
                 .expect("canonical PR refs"),
             ("release".to_string(), "feature".to_string())
         );
@@ -6452,6 +6478,34 @@ mod cook_pull_request_ref_tests {
                 };
                 *args
             };
+            // A destination handle may not exist yet (including after issue ->
+            // PR routing). It must not shadow the resolved repository checkout.
+            let mut pending = parse(&["--workspace", "repository@not-created"]);
+            assert_eq!(
+                super::cook_pull_request_checkout(&pending).unwrap(),
+                Some(repository.clone())
+            );
+            super::resolve_cook_pull_request(&mut pending).expect("pending workspace PR refs");
+            assert_eq!(pending.base.as_deref(), Some("release"));
+            assert_eq!(pending.head.as_deref(), Some("feature"));
+
+            pending.dispatch.cwd = Some(root.path().join("missing").display().to_string());
+            pending.dispatch.repo = Some("unresolved-repository".into());
+            assert_eq!(super::cook_pull_request_checkout(&pending).unwrap(), None);
+            super::resolve_cook_pull_request(&mut pending).expect("PR refs without a checkout");
+            assert_eq!(
+                cook_pull_request_refs(Some(&root.path().join("missing")), "1895")
+                    .expect("invalid cwd is never passed to spawn"),
+                ("release".into(), "feature".into())
+            );
+
+            homeboy::core::worktree::record_active_for_test("repository@existing", &linked);
+            pending.dispatch.workspace = Some("repository@existing".into());
+            assert_eq!(
+                super::cook_pull_request_checkout(&pending).unwrap(),
+                Some(linked.clone())
+            );
+
             for extra in [
                 vec![],
                 vec![
@@ -6500,7 +6554,7 @@ mod cook_pull_request_ref_tests {
                 "https://github.com/example/repo.git",
             ]);
             std::fs::write(&gh, "#!/bin/sh\ncase \"$*\" in api*) printf '[{\"state\":\"OPEN\",\"url\":\"https://github.com/example/repo/pull/1895\"}]';; *list*) printf '[{\"state\":\"OPEN\",\"url\":\"https://github.com/example/repo/pull/1895\"}]';; *) printf '{\"baseRefName\":\"release\",\"headRefName\":\"feature\"}';; esac\n").unwrap();
-            let mut issue = parse(&[]);
+            let mut issue = parse(&["--workspace", "repository@not-created"]);
             issue.dispatch.task_url = Some("https://github.com/example/repo/issues/7".into());
             let resolved = {
                 let mut input = issue.clone();
@@ -6516,7 +6570,10 @@ mod cook_pull_request_ref_tests {
             );
             assert_eq!(resolved.head.as_deref(), Some("feature"));
             assert_eq!(resolved.base.as_deref(), Some("release"));
-            assert_eq!(resolved.to_worktree.as_deref(), Some("repository@feature"));
+            assert_eq!(
+                resolved.dispatch.workspace.as_deref(),
+                Some("repository@not-created")
+            );
             assert_eq!(
                 homeboy::core::git::run_git(&linked, &["rev-parse", "HEAD"], "preserved PR head")
                     .unwrap(),
