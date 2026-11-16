@@ -4,6 +4,12 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.466.7] - 2026-11-16
+
+### Fixed
+- settle a failed Cook foreach item without waiting on its run record
+- admit Cook-derived gate-feedback baselines at the candidate
+
 ## [0.466.6] - 2026-11-16
 
 ### Fixed
