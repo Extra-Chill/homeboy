@@ -2812,6 +2812,13 @@ pub(super) fn diagnose(args: DiagnoseArgs) -> CmdResult<Value> {
         }
     }
 
+    // A controller/runner build skew can only survive as text behind a generic
+    // continuation exit. Name it as the root cause (#18206).
+    let build_skew =
+        provenance_build_skew_root_cause(&record, &nested_reasons, &runner_diagnostic_probe);
+    if let Some(diagnostic) = build_skew.clone() {
+        nested_reasons.insert(0, diagnostic);
+    }
     let ranked_reasons = ranked_diagnostics(nested_reasons);
     // The canonical Cook verdict, read exactly as `agent-task status --exact`
     // reads it (#15885). The raw lifecycle record can still say `succeeded`
@@ -2888,7 +2895,9 @@ pub(super) fn diagnose(args: DiagnoseArgs) -> CmdResult<Value> {
         current_lifecycle_diagnostic.is_some(),
         queued_runner_ownership.is_some(),
     );
-    let next_commands = if lab_staging_root_cause(&record).is_some() {
+    let next_commands = if let Some(skew) = build_skew.as_ref() {
+        provenance_build_skew_next_commands(&record, skew)
+    } else if lab_staging_root_cause(&record).is_some() {
         vec![format!(
             "homeboy agent-task retry {}",
             quote_arg(record.metadata["cook_id"].as_str().unwrap_or(run_id))
@@ -5315,7 +5324,8 @@ fn diagnostic_priority(item: &CollectedDiagnostic) -> (u8, u8, u8) {
     );
     let class = item.class.to_ascii_lowercase();
     let text = format!("{} {}", item.class, item.message).to_ascii_lowercase();
-    let priority = if recorded_verdict {
+    // Typed build skew explains every downstream continuation failure.
+    let priority = if recorded_verdict || class == RUNNER_VERSION_SKEW_CLASS {
         0
     } else if class == "agent_task.provider_liveness_timeout" {
         // The typed lifecycle timeout is authoritative. An unparsed provider
@@ -5894,6 +5904,81 @@ fn lab_staging_root_cause(record: &AgentTaskRunRecord) -> Option<CollectedDiagno
     })
 }
 
+/// Class of a controller/runner Homeboy build mismatch, shared with the typed
+/// gate and runner errors.
+const RUNNER_VERSION_SKEW_CLASS: &str = "runner.version_skew";
+
+/// Find the runner's provenance build-skew refusal anywhere the run retained
+/// it: collected diagnostics, the durable record, or the runner job snapshot.
+///
+/// Records written before the refusal was typed carry it only as text, while
+/// the Cook's own failure reads `internal.unexpected: terminal Cook
+/// continuation exited with status 1` (#18206). The skew is the cause, and the
+/// remedy is converging the runner, not retrying the same dispatch.
+fn provenance_build_skew_root_cause(
+    record: &AgentTaskRunRecord,
+    collected: &[CollectedDiagnostic],
+    runner_probe: &impl Serialize,
+) -> Option<CollectedDiagnostic> {
+    use homeboy::core::build_identity::ProvenanceBuildSkew;
+
+    let skew = collected
+        .iter()
+        .find_map(|item| {
+            ProvenanceBuildSkew::parse(&item.message)
+                .or_else(|| ProvenanceBuildSkew::parse(&item.data.to_string()))
+        })
+        .or_else(|| ProvenanceBuildSkew::parse(&record.metadata.to_string()))
+        .or_else(|| {
+            serde_json::to_string(runner_probe)
+                .ok()
+                .and_then(|probe| ProvenanceBuildSkew::parse(&probe))
+        })?;
+    let runner_id = record.runner_id();
+    let runner = runner_id
+        .map(|runner| format!("runner `{runner}`"))
+        .unwrap_or_else(|| "the runner".to_string());
+    Some(CollectedDiagnostic {
+        task_id: "controller".to_string(),
+        class: RUNNER_VERSION_SKEW_CLASS.to_string(),
+        message: format!(
+            "controller/runner build skew: {runner} daemon is Homeboy `{}` but its Lab job binary is Homeboy `{}`, so the daemon refused the job's provenance references",
+            skew.runner_build, skew.child_build
+        ),
+        source: "runner_build_skew".to_string(),
+        data: json!({
+            "runner_id": runner_id,
+            "child_build_identity": skew.child_build,
+            "runner_build_identity": skew.runner_build,
+            "controller_build_identity": homeboy::core::build_identity::current().display,
+            "convergence_commands": skew.convergence_commands(runner_id),
+            "next_action": skew.next_action(runner_id),
+        }),
+    })
+}
+
+/// Converge the runner first; retrying on the same skewed runner fails again.
+fn provenance_build_skew_next_commands(
+    record: &AgentTaskRunRecord,
+    skew: &CollectedDiagnostic,
+) -> Vec<String> {
+    skew.data["convergence_commands"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(Value::as_str)
+        .map(str::to_string)
+        .chain(std::iter::once(format!(
+            "homeboy agent-task retry {}",
+            quote_arg(
+                record.metadata["cook_id"]
+                    .as_str()
+                    .unwrap_or(record.run_id.as_str())
+            )
+        )))
+        .collect()
+}
+
 fn persisted_cook_failure_diagnostic(record: &AgentTaskRunRecord) -> Option<CollectedDiagnostic> {
     let terminal = record
         .metadata
@@ -6336,7 +6421,9 @@ fn collected_diagnostic_value_with_details(
         value["details"] = bounded_diagnostic_value(&item.data).unwrap_or(Value::Null);
     } else if item.source == "runner_ownership" {
         value["details"] = bounded_diagnostic_value(&item.data).unwrap_or(Value::Null);
-    } else if item.source == "current_lifecycle" && item.class == "lab_staging.json_parse" {
+    } else if (item.source == "current_lifecycle" && item.class == "lab_staging.json_parse")
+        || item.source == "runner_build_skew"
+    {
         value["details"] = bounded_diagnostic_value(&item.data).unwrap_or(Value::Null);
     } else if let Some(details) = item.data.get("worktree_provider_failure") {
         value["details"] = details.clone();

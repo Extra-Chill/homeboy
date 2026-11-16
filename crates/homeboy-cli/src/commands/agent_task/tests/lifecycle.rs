@@ -402,6 +402,75 @@ fn cancelled_lab_json_failure_is_compactly_visible_in_status_and_diagnose() {
     });
 }
 
+/// #18206: a terminal continuation that the runner refused for a build skew
+/// read as `internal.unexpected` with no next step. Diagnose names the skew,
+/// both builds, and the commands that converge the runner.
+#[test]
+fn continuation_lost_to_runner_build_skew_diagnoses_as_version_skew() {
+    with_temp_home(|| {
+        let run_id = "run-cli-continuation-build-skew";
+        agent_task_lifecycle::submit_plan(&test_plan(), Some(run_id)).expect("submit plan");
+        agent_task_lifecycle::rewrite_record_for_test(run_id, |record| {
+            record.metadata["cook_id"] = json!("cook-build-skew");
+            record.metadata["pre_execution_failure"] = json!({
+                "phase": "pre_provider",
+                "error_code": "internal.unexpected",
+                "message": "terminal Cook continuation exited with status 1",
+                "details": {},
+            });
+            record.metadata["cook_continuation"] = json!({
+                "state": "failed",
+                "diagnostic": "Invalid argument 'provenance_transport': cannot safely bound child provenance environment: child build `homeboy 0.465.1+3bc87452` does not support provenance references from runner build `homeboy 0.465.6+4b7c87df`",
+            });
+        })
+        .expect("record continuation failure");
+
+        let (diagnosis, exit_code) = diagnose(DiagnoseArgs {
+            run_id: run_id.to_string(),
+            full: false,
+        })
+        .expect("diagnose build skew");
+
+        assert_eq!(exit_code, 0);
+        assert_eq!(diagnosis["diagnosis_outcome"], "root_cause_identified");
+        assert_eq!(diagnosis["root_cause"]["class"], "runner.version_skew");
+        assert_eq!(
+            diagnosis["root_cause"]["details"]["child_build_identity"],
+            "homeboy 0.465.1+3bc87452"
+        );
+        assert_eq!(
+            diagnosis["root_cause"]["details"]["runner_build_identity"],
+            "homeboy 0.465.6+4b7c87df"
+        );
+        let next_action = diagnosis["root_cause"]["details"]["next_action"]
+            .as_str()
+            .expect("next action");
+        assert!(next_action.contains("homeboy 0.465.1+3bc87452"));
+        assert!(next_action.contains("homeboy 0.465.6+4b7c87df"));
+        assert!(diagnosis["summary"]
+            .as_str()
+            .is_some_and(|summary| summary.starts_with("runner.version_skew")));
+        let next_commands = diagnosis["next_commands"]
+            .as_array()
+            .expect("next commands")
+            .iter()
+            .filter_map(Value::as_str)
+            .collect::<Vec<_>>();
+        assert!(next_commands[0].starts_with("homeboy runner refresh-homeboy "));
+        assert!(next_commands[1].starts_with("homeboy runner doctor "));
+        assert!(next_commands[1].ends_with(" --repair"));
+        assert_eq!(
+            next_commands.last().copied(),
+            Some("homeboy agent-task retry cook-build-skew")
+        );
+        assert!(diagnosis["diagnostic_chain"]
+            .as_array()
+            .expect("chain")
+            .iter()
+            .any(|item| item["class"] == "internal.unexpected"));
+    });
+}
+
 #[test]
 fn historical_cook_snapshot_failure_projects_lifecycle_admission() {
     with_temp_home(|| {
