@@ -165,20 +165,54 @@ pub fn seed_status_purity_fixtures_for_test() -> super::Result<Vec<StatusPurityF
             Some(AgentTaskTerminalOutcome::CandidateRecoverable),
         ),
     ] {
-        seed_terminal_cook_attempt(&store, &plan, cook_id, run_id, outcome)?;
+        seed_terminal_cook_attempts(&store, &plan, cook_id, &[(run_id, outcome)])?;
         push(label, run_id);
     }
+
+    // The gate refused attempt 1's candidate; the retry then made no change.
+    let gate_refused = "purity-cook-gate-refused-attempt";
+    let no_change_retry = "purity-cook-gate-refused-retry";
+    seed_terminal_cook_attempts(
+        &store,
+        &plan,
+        "purity-cook-gate-refused",
+        &[
+            (
+                gate_refused,
+                Some(AgentTaskTerminalOutcome::CandidateRecoverable),
+            ),
+            (
+                no_change_retry,
+                Some(AgentTaskTerminalOutcome::PartialFailure),
+            ),
+        ],
+    )?;
+    for (run_id, delivery) in [
+        (
+            gate_refused,
+            serde_json::json!({"state": "blocked", "gates": [{"id": "gate-1", "state": "failed"}]}),
+        ),
+        (no_change_retry, serde_json::json!({"state": "no_change"})),
+    ] {
+        rewrite_record_for_test(run_id, |record| {
+            record.metadata["cook_delivery"] = serde_json::json!({
+                "schema": crate::agent_task_service::COOK_DELIVERY_SCHEMA,
+                "delivery": delivery,
+                "artifacts": {},
+            });
+        })?;
+    }
+    push("gate_refused_cook_after_no_change_retry", no_change_retry);
     Ok(fixtures)
 }
 
 const PURITY_RUNNER_JOB_ID: &str = "00000000-0000-0000-0000-000000015718";
 
-fn seed_terminal_cook_attempt(
+fn seed_terminal_cook_attempts(
     store: &AgentTaskLifecycleStore,
     plan: &crate::agent_task_scheduler::AgentTaskPlan,
     cook_id: &str,
-    run_id: &str,
-    outcome: Option<super::AgentTaskTerminalOutcome>,
+    attempts: &[(&str, Option<super::AgentTaskTerminalOutcome>)],
 ) -> super::Result<()> {
     use crate::agent_task_service::{
         AgentTaskCookRecipe, AgentTaskCookRecipeAttempt, CookRecipeStore, COOK_RECIPE_SCHEMA,
@@ -186,12 +220,15 @@ fn seed_terminal_cook_attempt(
     CookRecipeStore::new(store.roots().clone()).persist_recipe(&AgentTaskCookRecipe {
         schema: COOK_RECIPE_SCHEMA.to_string(),
         cook_id: cook_id.to_string(),
-        attempts: vec![AgentTaskCookRecipeAttempt {
-            lineage: None,
-            attempt: 1,
-            run_id: run_id.to_string(),
-            plan: plan.clone(),
-        }],
+        attempts: (1..)
+            .zip(attempts)
+            .map(|(attempt, (run_id, _))| AgentTaskCookRecipeAttempt {
+                lineage: None,
+                attempt,
+                run_id: run_id.to_string(),
+                plan: plan.clone(),
+            })
+            .collect(),
         promotion_transport: serde_json::json!({"provider_invocation": null, "attempt_dispatch": { "kind": "local" }}),
         gate_policy: serde_json::json!({"verify": [], "private_verify": [], "private_gate_reveal": "summary_only"}),
         retry_budget: serde_json::json!({"max_attempts": 1, "execution_budget": plan.options.execution_budget}),
@@ -201,21 +238,23 @@ fn seed_terminal_cook_attempt(
         sensitive_mappings: Vec::new(),
         harvest_context: Default::default(),
     })?;
-    store.submit_plan_with_runtime_admission(plan, run_id, |_| Ok(serde_json::json!({})))?;
-    super::record_cook_attempt_in_store(store, cook_id, 1, run_id)?;
-    super::record_run_aggregate_in_store(store, run_id, plan, &purity_aggregate(plan))?;
-    if let Some(outcome) = outcome {
-        let current = store.read_record(run_id)?;
-        store
-            .transition(
-                run_id,
-                current.revision,
-                super::AgentTaskTransition::Terminate {
-                    outcome,
-                    metadata: serde_json::Map::new(),
-                },
-            )
-            .map_err(super::Error::from)?;
+    for (attempt, (run_id, outcome)) in (1..).zip(attempts) {
+        store.submit_plan_with_runtime_admission(plan, run_id, |_| Ok(serde_json::json!({})))?;
+        super::record_cook_attempt_in_store(store, cook_id, attempt, run_id)?;
+        super::record_run_aggregate_in_store(store, run_id, plan, &purity_aggregate(plan))?;
+        if let Some(outcome) = *outcome {
+            let current = store.read_record(run_id)?;
+            store
+                .transition(
+                    run_id,
+                    current.revision,
+                    super::AgentTaskTransition::Terminate {
+                        outcome,
+                        metadata: serde_json::Map::new(),
+                    },
+                )
+                .map_err(super::Error::from)?;
+        }
     }
     Ok(())
 }
