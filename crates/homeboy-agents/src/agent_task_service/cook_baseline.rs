@@ -83,6 +83,7 @@ impl DerivedCookBaselineCapability {
         serde_json::json!({
             "source_run_id": self.source_run_id,
             "source_task_id": self.source_task_id,
+            "bound_task_id": self.bound_task_id,
             "baseline_commit": self.commit,
             "baseline_tree": self.tree,
             "parent_snapshot_identity": self.parent_snapshot.as_ref().and_then(|snapshot| {

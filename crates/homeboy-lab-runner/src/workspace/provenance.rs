@@ -1647,6 +1647,76 @@ mod tests {
             metadata: serde_json::Value::Null,
         }
     }
+    /// #18243: a Lab gate-feedback retry runs in the synced Cook-derived
+    /// checkout. That checkout's HEAD is the controller's baseline commit, so
+    /// the recorded candidate commit never reaches the runner. Admission must
+    /// use the baseline evidence the handoff carries for this task.
+    #[test]
+    fn lab_gate_feedback_retry_admits_the_synced_derived_baseline() {
+        if crate::test_support::isolated_process() {
+            return;
+        }
+        let _home = homeboy_core::test_support::HomeGuard::new();
+        crate::register_lab_workspace_provenance_provider();
+        let workspace = git_workspace();
+        let base = git(workspace.path(), &["rev-parse", "HEAD"]).expect("base");
+        std::fs::write(workspace.path().join("candidate.txt"), "candidate\n").expect("candidate");
+        git(workspace.path(), &["add", "--all"]).expect("stage baseline");
+        git(
+            workspace.path(),
+            &[
+                "-c",
+                "user.name=Homeboy",
+                "-c",
+                "user.email=homeboy@localhost",
+                "commit",
+                "--quiet",
+                "-m",
+                "homeboy: current Cook baseline",
+            ],
+        )
+        .expect("commit baseline");
+        let baseline = git(workspace.path(), &["rev-parse", "HEAD"]).expect("baseline");
+        let tree = git(workspace.path(), &["rev-parse", "HEAD^{tree}"]).expect("tree");
+        let snapshot = git_snapshot(workspace.path());
+        let mut lab = git_lab(workspace.path(), &snapshot);
+        let mut request = filesystem_snapshot_request(workspace.path());
+        request.metadata =
+            serde_json::json!({"cook_loop": {"kind": "deterministic-gate-feedback"}});
+        // The controller-side candidate commit, absent from the runner.
+        request.inputs = serde_json::json!({"cook_loop": {"candidate_commit": {
+            "base_sha": base, "candidate_sha": "c".repeat(40), "tree_sha": tree,
+        }}});
+        lab["source_provenance"] = serde_json::json!({"verified_cook_baseline": {
+            "source_task_id": "cook-task",
+            "bound_task_id": request.task_id,
+            "baseline_commit": baseline,
+            "baseline_tree": tree,
+            "preexisting_candidate": false,
+        }});
+
+        let dispatched = Arc::new(AtomicBool::new(false));
+        let aggregate = AgentTaskScheduler::new(Arc::new(FilesystemSnapshotProvider {
+            change_workspace: true,
+            dispatched: Arc::clone(&dispatched),
+        }))
+        .with_harvest_context(
+            HarvestExecutionContext::from_lab_transport(snapshot, lab).expect("Lab transport"),
+        )
+        .run(AgentTaskPlan::new("lab-gate-feedback", vec![request]));
+
+        assert!(dispatched.load(Ordering::SeqCst), "{aggregate:#?}");
+        let candidate = aggregate.outcomes[0].candidate.as_ref().expect("candidate");
+        assert_eq!(
+            git(
+                workspace.path(),
+                &["diff", "--name-only", &base, &candidate.candidate_sha]
+            )
+            .expect("candidate diff"),
+            "candidate.txt\nprovider-change.txt"
+        );
+    }
+
     #[test]
     fn filesystem_snapshot_dispatches_providers_and_harvests_only_changed_candidates() {
         if crate::test_support::isolated_process() {

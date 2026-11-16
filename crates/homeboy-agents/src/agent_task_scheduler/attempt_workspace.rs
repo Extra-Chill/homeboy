@@ -430,7 +430,9 @@ pub(super) fn prepare_committed_harvest(
         });
     }
     let status = git_status_ignoring_snapshot_excludes(root, context.snapshot_sync_excludes())?;
-    let candidate_baseline = if derived_cook_baseline.is_some() {
+    let candidate_baseline = if derived_cook_baseline.is_some()
+        || (status.trim().is_empty() && lab_derived_cook_baseline(root, request, context)?)
+    {
         // The derived checkout already sits at the validated candidate.
         None
     } else if status.trim().is_empty() {
@@ -642,6 +644,40 @@ fn verified_preexisting_cook_baseline(
             "non-recoverable: dirty Lab snapshot has no immutable candidate ({expected_tree}); run a new Cook"
         ),
     }))
+}
+
+/// The Lab half of a derived Cook baseline. The controller's process-local
+/// capability stays behind, so the runner admits the synced checkout through
+/// the baseline evidence its Lab handoff carries for this task, and only while
+/// HEAD is exactly that baseline commit and tree (#18243).
+fn lab_derived_cook_baseline(
+    root: &Path,
+    request: &AgentTaskRequest,
+    context: &HarvestExecutionContext,
+) -> Result<bool, HarvestError> {
+    let Some(baseline) = context
+        .lab_offload
+        .as_ref()
+        .and_then(|metadata| metadata.pointer("/source_provenance/verified_cook_baseline"))
+    else {
+        return Ok(false);
+    };
+    if baseline["preexisting_candidate"] == true
+        || baseline["bound_task_id"].as_str() != Some(request.task_id.as_str())
+    {
+        return Ok(false);
+    }
+    let head = git_output(root, &["rev-parse", "HEAD"])?;
+    let tree = git_output(root, &["rev-parse", "HEAD^{tree}"])?;
+    if baseline["baseline_commit"].as_str() != Some(head.as_str())
+        || baseline["baseline_tree"].as_str() != Some(tree.as_str())
+    {
+        return Err(snapshot_harvest_error(
+            root,
+            "Lab derived baseline HEAD/tree does not match its handoff evidence".to_string(),
+        ));
+    }
+    Ok(true)
 }
 
 /// A clean destination may still be waiting for a failed candidate to pass
