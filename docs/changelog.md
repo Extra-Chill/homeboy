@@ -4,6 +4,16 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.466.5] - 2026-11-16
+
+### Changed
+- record the interrupted observer as the run's local owner
+- publish form-less gate-green drafts through normal finalization
+
+### Fixed
+- rearm promotion refusals before candidate apply
+- preserve Cook worker custody across daemon restarts
+
 ## [0.466.4] - 2026-11-16
 
 ### Fixed
