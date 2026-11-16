@@ -553,6 +553,35 @@ fn execution_step_terminal_recovery_survives_exited_restart_and_lost_ack() {
 }
 
 #[test]
+fn execution_step_unknown_exit_preserves_missing_publication_context() {
+    with_isolated_home(|_| {
+        let store = test_lifecycle_store();
+        prepare_empty_admission("signal-exit");
+        let mut delivery = terminal_delivery(&current_intent(&store, "signal-exit"));
+        delivery.outcome = homeboy_core::daemon::step_job::StepTerminalOutcome::Failed;
+        delivery.exit_code = None;
+        delivery.error = Some(serde_json::json!({
+            "message": "step child exit status is unknown; refusing to report success",
+            "data": {"step_outcome": "exit_status_unknown"}
+        }));
+        consume_execution_terminal_in_store(&store, &delivery).unwrap();
+        let record = store.read_record("signal-exit").unwrap();
+        assert_eq!(
+            record.metadata["execution_step_failure"]["message"],
+            format!(
+                "execution step {} ended before publication (Failed, exit None)",
+                delivery.key
+            )
+        );
+        assert_eq!(
+            record.metadata["execution_scheduling"]["recovery_failures"],
+            1
+        );
+        assert_eq!(current_intent(&store, "signal-exit").recovery_attempt, 1);
+    });
+}
+
+#[test]
 fn execution_step_handed_to_lab_staging_is_not_replayed() {
     with_isolated_home(|_| {
         let store = test_lifecycle_store();
