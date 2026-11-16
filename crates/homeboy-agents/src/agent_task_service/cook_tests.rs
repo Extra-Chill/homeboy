@@ -11902,6 +11902,14 @@ fn exhausted_gate_failure_publishes_incomplete_draft_but_still_fails() {
                 &bin.join("gh"),
                 r#"#!/bin/sh
 printf '%s\n' "$*" >> "$HOMEBOY_FAKE_GH_LOG"
+if [ "$1 $2" = "repo view" ]; then
+  echo '{"nameWithOwner":"example/fixture"}'; exit 0
+fi
+if [ "$1 $2" = "pr view" ]; then
+  sha=$(git rev-parse HEAD)
+  printf '{"baseRefName":"main","headRefName":"candidate","headRefOid":"%s","headRepository":{"name":"fixture"},"headRepositoryOwner":{"login":"example"}}\n' "$sha"
+  exit 0
+fi
 if [ "$1 $2" = "pr list" ]; then
   if [ "$HOMEBOY_FAKE_EXISTING_PR" = "true" ]; then
     echo '[{"number":1,"title":"Existing draft","url":"https://github.com/example/fixture/pull/1","state":"OPEN","isDraft":true,"baseRefName":"main","headRefName":"candidate"}]'
@@ -11962,6 +11970,11 @@ echo https://github.com/example/fixture/pull/1
             .unwrap();
             failed.status = AgentTaskPromotionStatus::GateFailed;
             failed.target.path = Some(path.display().to_string());
+            failed.candidate = Some(crate::agent_task::AgentTaskCandidate {
+                base_sha: base_sha.clone(),
+                candidate_sha: git(path, &["rev-parse", "HEAD"]),
+                tree_sha: git(path, &["rev-parse", "HEAD^{tree}"]),
+            });
             failed.verified_base.as_mut().unwrap().sha = base_sha;
             failed.deterministic_gates[0].command = vec![
                 "sh".into(),
@@ -11977,6 +11990,20 @@ echo https://github.com/example/fixture/pull/1
             let gate_id = failed.deterministic_gates[0].id.clone();
             agent_task_lifecycle::record_promotion(run_id, serde_json::to_value(&failed).unwrap())
                 .unwrap();
+            let mut ready_options = options.clone();
+            ready_options.finalization.publish_incomplete_draft = false;
+            assert!(
+                super::super::cook_promotion::finalize_or_load_cook_pr_with_backend_with_stores(
+                    &recipes,
+                    &lifecycle,
+                    &ready_options,
+                    run_id,
+                    &failed,
+                    &mut crate::agent_task_finalization::RealAgentTaskPrFinalizationBackend,
+                )
+                .is_err(),
+                "gate-failed candidates must not publish without explicit opt-in"
+            );
             if timeout_after_failure {
                 let next_run = "incomplete-draft-attempt-2";
                 let mut recipe = recipes.load_recipe(cook_id).unwrap();
@@ -12023,11 +12050,7 @@ echo https://github.com/example/fixture/pull/1
             if existing_pr {
                 assert!(!requested.contains("pr create"), "{requested}");
                 assert!(
-                    requested.contains("repos/example/fixture/issues/1/comments --method POST"),
-                    "{requested}"
-                );
-                assert!(
-                    requested.contains("incomplete_reason: Two cells still need work"),
+                    requested.contains("repos/example/fixture/pulls/1"),
                     "{requested}"
                 );
             } else {
@@ -12041,9 +12064,7 @@ echo https://github.com/example/fixture/pull/1
             for expected in [
                 &gate_id,
                 "last gate output: two cells failed",
-                "Two cells still need work",
-                "Candidate from attempt 1",
-                "https://github.com/example/fixture/issues/42",
+                "Incomplete candidate; deterministic verification failed:",
                 "Closes #42",
             ] {
                 assert!(
@@ -12051,9 +12072,8 @@ echo https://github.com/example/fixture/pull/1
                     "missing {expected}: {requested}"
                 );
             }
-            if timeout_after_failure {
-                assert!(requested.contains("Attempt 2"), "{requested}");
-            }
+            assert!(!requested.contains("Later attempts"), "{requested}");
+            assert!(delivery_of(run_id).publication.is_some());
         });
     }
 }

@@ -144,6 +144,9 @@ pub struct AgentTaskReviewDossier {
     pub evidence: Vec<AgentTaskReviewEvidence>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub verified_commands: Vec<AgentTaskReviewVerifiedCommand>,
+    /// Orchestrator-owned plain-text tails of failed deterministic gates.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub failed_gate_output: Vec<(String, String)>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub changed_public_contracts: Vec<AgentTaskPublicContract>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -1202,6 +1205,14 @@ fn render_ai_disclosure(ai: &AgentTaskReviewAiAssistance) -> String {
 /// by CI and one collapsed block for provenance identifiers.
 fn render_verification(dossier: &AgentTaskReviewDossier) -> Option<String> {
     let mut visible = Vec::new();
+    for (id, output) in &dossier.failed_gate_output {
+        let tail = output
+            .lines()
+            .map(|line| format!("    {line}"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        visible.push(format!("Gate: {} — Failed\n\n{tail}", prose(id)));
+    }
     if !dossier.changed_public_contracts.is_empty() {
         visible.push(render_public_contract_evidence(dossier));
     }
@@ -2339,6 +2350,7 @@ mod tests {
             }],
             evidence: Vec::new(),
             verified_commands: Vec::new(),
+            failed_gate_output: Vec::new(),
             changed_public_contracts: Vec::new(),
             public_contract_evidence: None,
             verified_base: None,

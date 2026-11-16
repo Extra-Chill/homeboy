@@ -145,6 +145,17 @@ fn finalize_pr_with_backend_mode<B: AgentTaskPrFinalizationBackend>(
     publish: bool,
     lifecycle_store: &crate::agent_task_lifecycle::AgentTaskLifecycleStore,
 ) -> Result<AgentTaskPrFinalizationReport> {
+    if options.gate_failed_draft {
+        if options.manual_finalization {
+            return Err(Error::validation_invalid_argument(
+                "gate_failed_draft",
+                "failed-gate drafts require a durable promotion",
+                None,
+                None,
+            ));
+        }
+        options.draft_pr = true;
+    }
     let (publication_identity, _requester) =
         backend.publication_context(&options.run_id, lifecycle_store)?;
     // Recorded before preflight so the validated intent and the published
@@ -202,7 +213,11 @@ fn finalize_pr_with_backend_mode<B: AgentTaskPrFinalizationBackend>(
         validate_gate_proof_binding(&gate_proof, &options)?;
         durable_acceptance =
             validate_durable_acceptance(&options.run_id, &gate_proof.promotion, lifecycle_store)?;
-        validate_durable_publication_eligibility(&lifecycle, &gate_proof.promotion)?;
+        validate_durable_publication_eligibility(
+            &lifecycle,
+            &gate_proof.promotion,
+            options.gate_failed_draft,
+        )?;
         let durable_changed_files = normalize_changed_files(&gate_proof.promotion.changed_files);
         if normalize_changed_files(&options.changed_files) != durable_changed_files {
             return Err(changed_files_mismatch_error(
@@ -243,7 +258,9 @@ fn finalize_pr_with_backend_mode<B: AgentTaskPrFinalizationBackend>(
         }
         options.evidence.lifecycle = Some(lifecycle);
     }
-    validate_finalization_gates(&options.normalized_gate_results)?;
+    if !options.gate_failed_draft {
+        validate_finalization_gates(&options.normalized_gate_results)?;
+    }
     options.review_dossier.apply_overrides()?;
     let current_branch = backend.current_branch(&options.path)?;
     let head = options
@@ -670,7 +687,27 @@ fn validate_gate_proof_binding(
     options: &AgentTaskPrFinalizationOptions,
 ) -> Result<()> {
     use crate::agent_task_promotion::AgentTaskPromotionStatus;
-    if gate_proof.promotion.status != AgentTaskPromotionStatus::Applied
+    if options.gate_failed_draft
+        && (options.manual_finalization
+            || gate_proof.promotion.status != AgentTaskPromotionStatus::GateFailed
+            || gate_proof.promotion.changed_files.is_empty()
+            || !gate_proof
+                .promotion
+                .deterministic_gates
+                .iter()
+                .any(|gate| gate.status == crate::agent_task_gate::AgentTaskGateStatus::Failed))
+    {
+        return Err(Error::validation_invalid_argument(
+            "gate_failed_draft",
+            "failed-gate draft mode requires a non-empty gate-failed candidate",
+            None,
+            None,
+        ));
+    }
+    if !(options.gate_failed_draft
+        && gate_proof.promotion.status == AgentTaskPromotionStatus::GateFailed
+        && !gate_proof.promotion.changed_files.is_empty())
+        && gate_proof.promotion.status != AgentTaskPromotionStatus::Applied
         && !(gate_proof.promotion.status == AgentTaskPromotionStatus::VerifiedNoChanges
             && !gate_proof.promotion.changed_files.is_empty()
             && gate_proof.promotion.finalization_eligible())
@@ -1175,6 +1212,7 @@ pub(crate) fn authorized_replacement_gate_proof(promotion: &AgentTaskPromotionRe
 fn validate_durable_publication_eligibility(
     lifecycle: &RunLifecycleRecord,
     promotion: &AgentTaskPromotionReport,
+    gate_failed_draft: bool,
 ) -> Result<()> {
     let producing_runtime = lifecycle
         .provider_runtime
@@ -1191,6 +1229,13 @@ fn validate_durable_publication_eligibility(
     );
     // The same passing verdict recovery step selection uses: a proven
     // inherited failure passes and stays recorded as evidence (#17508).
+    let failed_draft = gate_failed_draft
+        && promotion.status == crate::agent_task_promotion::AgentTaskPromotionStatus::GateFailed;
+    if failed_draft && !promotion.changed_files.is_empty() && promotion.candidate.is_some() {
+        // The typed gated candidate is checked against the request and the
+        // publication tree by the engine, including for failed-gate drafts.
+        return Ok(());
+    }
     let green_gates = promotion.finalization_eligible();
     let green_fingerprinted_candidate =
         fingerprinted_candidate && promotion.applied_with_passing_verdict();

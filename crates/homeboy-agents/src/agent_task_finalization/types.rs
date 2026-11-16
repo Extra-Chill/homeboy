@@ -319,6 +319,8 @@ pub struct AgentTaskPrFinalizationOptions {
     pub protected_branches: Vec<String>,
     /// Create a draft PR for a new publication. Existing PR state is preserved.
     pub draft_pr: bool,
+    /// Explicit exhausted-Cook publication mode; waives only the green-gate requirement.
+    pub gate_failed_draft: bool,
     /// Evidence from the durable promotion receipt. Finalization must not
     /// discover mutable operator policy at its target checkout.
     pub repository_integrity_evidence: Option<RepositoryIntegrityEvidence>,
@@ -452,6 +454,7 @@ pub trait AgentTaskPrFinalizationBackend {
     ) -> Result<Option<AgentTaskPrRef>> {
         Ok(None)
     }
+    #[allow(clippy::too_many_arguments)]
     fn create_pr(
         &mut self,
         component_id: Option<&str>,

@@ -1193,6 +1193,26 @@ fn durable_finalization_requires_successful_provider_run_and_proof() {
 }
 
 #[test]
+fn failed_gate_draft_requires_explicit_mode_and_preserves_proof_bindings() {
+    let mut proof = successful_gate_proof();
+    proof.promotion.status = crate::agent_task_promotion::AgentTaskPromotionStatus::GateFailed;
+    proof.promotion.changed_files = vec!["src/lib.rs".into()];
+    proof.promotion.deterministic_gates[0].status =
+        crate::agent_task_gate::AgentTaskGateStatus::Failed;
+    let mut request = options();
+    request.manual_finalization = false;
+    request.draft_pr = true;
+    assert!(super::validate_gate_proof_binding(&proof, &request).is_err());
+    request.gate_failed_draft = true;
+    super::validate_gate_proof_binding(&proof, &request).unwrap();
+    proof.promotion.source.run_id = Some("other-run".into());
+    assert!(super::validate_gate_proof_binding(&proof, &request).is_err());
+    proof.promotion.source.run_id = Some(proof.run_id.clone());
+    proof.promotion.target.path = Some("other-target".into());
+    assert!(super::validate_gate_proof_binding(&proof, &request).is_err());
+}
+
+#[test]
 fn durable_finalization_discloses_terminal_successful_model_after_same_backend_rotation() {
     let mut backend = MockBackend {
         changed_files: vec!["src/lib.rs".to_string()],
@@ -2348,6 +2368,7 @@ pub(super) fn options() -> AgentTaskPrFinalizationOptions {
             }],
             evidence: Vec::new(),
             verified_commands: Vec::new(),
+            failed_gate_output: Vec::new(),
             changed_public_contracts: Vec::new(),
             public_contract_evidence: None,
             verified_base: None,
@@ -2364,6 +2385,7 @@ pub(super) fn options() -> AgentTaskPrFinalizationOptions {
         },
         review_profile: crate::agent_task_review_dossier::default_profile(),
         manual_finalization: true,
+        gate_failed_draft: false,
         candidate: None,
         expected_candidate_tree: None,
         verified_candidate_tree: None,
