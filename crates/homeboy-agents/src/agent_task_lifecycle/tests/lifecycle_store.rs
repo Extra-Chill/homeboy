@@ -6,7 +6,7 @@ use crate::agent_task_lifecycle::{
     AgentTaskLifecycleStore, AgentTaskRunRecord, AgentTaskRunState,
 };
 use homeboy_core::run_lifecycle_record::{RunExecutionState, RunLifecycleRecord};
-use serde_json::json;
+use serde_json::{json, Value};
 
 fn record(store: &AgentTaskLifecycleStore, run_id: &str, marker: &str) -> AgentTaskRunRecord {
     let plan = test_plan();
@@ -21,6 +21,55 @@ fn record(store: &AgentTaskLifecycleStore, run_id: &str, marker: &str) -> AgentT
         record.metadata = json!({ "store_marker": marker });
         record.set_state_for_test(AgentTaskRunState::Queued);
         record
+    }
+}
+
+#[test]
+fn terminal_outcomes_are_countable_through_public_status_json() {
+    let context = homeboy_core::test_support::HermeticTestContext::new();
+    let store = AgentTaskLifecycleStore::new(context.path_roots());
+    let cases = [
+        (
+            "published",
+            json!({"state": "published", "publication": {"status": "published", "published": true, "draft": false, "pr_url": "https://github.com/example/repo/pull/1"}}),
+            json!({"kind": "published", "pr": "https://github.com/example/repo/pull/1"}),
+        ),
+        (
+            "no_change",
+            json!({"state": "no_change"}),
+            json!({"kind": "no_change"}),
+        ),
+        (
+            "agent_declined",
+            json!({"state": "blocked", "blocker": {"code": "review_form.incomplete", "message": "agent declined", "evidence": "/review_form"}}),
+            json!({"kind": "agent_declined"}),
+        ),
+        (
+            "gate_refused",
+            json!({"state": "blocked", "gates": [{"id": "acceptance", "state": "failed"}]}),
+            json!({"kind": "gate_refused", "gate": "acceptance"}),
+        ),
+        (
+            "infrastructure",
+            Value::Null,
+            json!({"kind": "infrastructure", "error_code": "transport.disconnected"}),
+        ),
+    ];
+    for (id, delivery, expected) in cases {
+        let mut cook = record(&store, id, "terminal-outcomes");
+        cook.set_state_for_test(AgentTaskRunState::CandidateRecoverable);
+        cook.metadata["cook_id"] = json!(id);
+        if delivery.is_null() {
+            cook.metadata["pre_execution_failure"] =
+                json!({"error_code": "transport.disconnected"});
+        } else {
+            cook.metadata["cook_delivery"] = json!({"schema": "homeboy/cook-delivery/v2", "delivery": delivery, "artifacts": {}});
+        }
+        store.write_record(&cook).unwrap();
+        let status = crate::agent_task_lifecycle::status_in_store(&store, id).unwrap();
+        let status = serde_json::to_value(status).unwrap();
+        assert_eq!(status["terminal_outcome"], expected, "{id}");
+        assert_eq!(status["recoverable"], true, "{id}");
     }
 }
 

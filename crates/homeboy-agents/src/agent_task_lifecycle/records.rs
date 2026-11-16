@@ -94,8 +94,23 @@ impl AgentTaskRecordHealthSummary {
     }
 }
 
+/// What a terminal Cook accomplished, independent of whether it can resume.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum CookTerminalOutcome {
+    Published { pr: String },
+    NoChange,
+    AgentDeclined,
+    GateRefused { gate: String },
+    Infrastructure { error_code: String },
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct AgentTaskRunRecord {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub terminal_outcome: Option<CookTerminalOutcome>,
+    #[serde(default)]
+    pub recoverable: bool,
     pub schema: String,
     pub run_id: String,
     pub plan_id: String,
@@ -563,6 +578,8 @@ impl AgentTaskRunRecord {
         submitted_at: impl Into<String>,
     ) -> Self {
         Self {
+            terminal_outcome: None,
+            recoverable: false,
             schema: schemas::RUN.to_string(),
             run_id: run_id.into(),
             plan_id: plan_id.into(),
@@ -591,6 +608,84 @@ impl AgentTaskRunRecord {
             candidate: None,
             read_base: RecordReadBase::default(),
         }
+    }
+
+    /// Refresh the durable summary from the same facts status already exposes.
+    /// Also used when decoding older records that predate this summary.
+    pub(crate) fn refresh_terminal_outcome(&mut self) {
+        use crate::agent_task_service::{CookDelivery, CookDeliveryBlockerCode, CookDeliveryState};
+        self.recoverable = self.state == AgentTaskRunState::CandidateRecoverable;
+        self.terminal_outcome = None;
+        if !self.state.is_terminal() {
+            return;
+        }
+        let delivery = CookDelivery::from_run_metadata(&self.metadata);
+        self.terminal_outcome = Some(
+            if let Some(publication) = delivery
+                .as_ref()
+                .and_then(|delivery| delivery.publication.as_ref())
+                .filter(|publication| publication.published && publication.pr_identity().is_some())
+            {
+                CookTerminalOutcome::Published {
+                    pr: publication
+                        .pr_url
+                        .clone()
+                        .or_else(|| publication.pr_identity())
+                        .expect("published receipt has PR identity"),
+                }
+            } else if let Some(gate) = delivery.as_ref().and_then(|delivery| {
+                delivery
+                    .gates
+                    .iter()
+                    .find(|gate| gate.state == crate::agent_task_gate::AgentTaskGateStatus::Failed)
+            }) {
+                CookTerminalOutcome::GateRefused {
+                    gate: gate
+                        .id
+                        .clone()
+                        .unwrap_or_else(|| "unnamed_gate".to_string()),
+                }
+            } else if let Some(blocker) = delivery
+                .as_ref()
+                .and_then(|delivery| delivery.blocker.as_ref())
+                .filter(|blocker| blocker.code == CookDeliveryBlockerCode::GateFailed)
+            {
+                CookTerminalOutcome::GateRefused {
+                    gate: blocker.message.clone(),
+                }
+            } else if delivery.as_ref().is_some_and(|delivery| {
+                delivery.blocker.as_ref().is_some_and(|blocker| {
+                    blocker.code == CookDeliveryBlockerCode::ReviewFormIncomplete
+                })
+            }) {
+                CookTerminalOutcome::AgentDeclined
+            } else if delivery
+                .as_ref()
+                .is_some_and(|delivery| delivery.state == CookDeliveryState::NoChange)
+            {
+                CookTerminalOutcome::NoChange
+            } else {
+                CookTerminalOutcome::Infrastructure {
+                    error_code: self
+                        .metadata
+                        .pointer("/pre_execution_failure/error_code")
+                        .and_then(Value::as_str)
+                        .map(str::to_string)
+                        .or_else(|| {
+                            delivery
+                                .as_ref()
+                                .and_then(|delivery| delivery.blocker.as_ref())
+                                .map(|blocker| {
+                                    blocker
+                                        .cause
+                                        .clone()
+                                        .unwrap_or_else(|| blocker.code.as_str().to_string())
+                                })
+                        })
+                        .unwrap_or_else(|| "terminal_without_delivery".to_string()),
+                }
+            },
+        );
     }
 
     /// Merge response identities without changing their first-use ordering.
