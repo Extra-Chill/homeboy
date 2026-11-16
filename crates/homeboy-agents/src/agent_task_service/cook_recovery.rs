@@ -415,7 +415,7 @@ pub struct CookRecoveryPlan {
 /// reserves a fresh provider attempt with a changed parameter, so `recover`
 /// never applies one on its own: the operator names it, and the continuation
 /// handler validates it against the attempt's terminal state.
-#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CookRecoveryOverrides {
     /// Larger provider timeout for the successor attempt.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -427,7 +427,7 @@ pub struct CookRecoveryOverrides {
     pub selector: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub model: Option<String>,
-    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub acknowledge_model_override: bool,
 }
 
@@ -513,6 +513,15 @@ pub struct CookRecoveryRequest {
 /// service handlers the retired `verify-replacement`,
 /// `record-replacement-gate-proof` and `finalize-pr --recover` verbs called.
 pub trait CookRecoveryPerformer {
+    /// Admit slow continuation work through the durable execution outbox.
+    /// Workers return `None` to execute the already admitted step.
+    fn admit_step(
+        &self,
+        _plan: &CookRecoveryReport,
+        _overrides: &CookRecoveryOverrides,
+    ) -> Result<Option<Value>> {
+        Ok(None)
+    }
     /// Continue the Cook from `run_id`, optionally rearming its failed
     /// terminal continuation, promoting one named patch artifact, or reserving
     /// a successor attempt with explicit operator overrides.
@@ -830,6 +839,12 @@ pub fn cook_recovery_delegation(id: &str) -> Option<CookRecoveryPlan> {
 /// retries with backoff, then reports `observation_store.busy`. A step that
 /// left its durable state unchanged is recorded, so the next `recover` from
 /// that state reports [`CookRecoveryStep::Blocked`] instead of looping.
+pub fn prepare_admitted_recovery_continuation(run_id: &str) -> Result<()> {
+    let plan = plan_cook_recovery(run_id)?;
+    super::CookRecipeStore::from_current_data_root()?
+        .schedule_recovery_continuation(&plan.cook_id, run_id)
+}
+
 pub fn recover_cook(
     id: &str,
     request: CookRecoveryRequest,
@@ -1112,6 +1127,20 @@ fn recover_cook_once(
     };
     let run_id = report.run_id.clone();
     let run_id = run_id.as_str();
+    if !preflight
+        && (!overrides.is_empty()
+            || matches!(
+                report.step,
+                CookRecoveryStep::Continue | CookRecoveryStep::Regate | CookRecoveryStep::Rearm
+            ))
+    {
+        if let Some(admission) = performer.admit_step(&report, &overrides)? {
+            let mut report = report;
+            report.status = admission["status"].as_str().unwrap_or("admitted").into();
+            report.admission = Some(admission);
+            return Ok((report, 0));
+        }
+    }
     if !overrides.is_empty() {
         let result = performer.continue_cook(run_id, overrides.has_route_override(), &overrides);
         return Ok(finish_performed_step(report, result));

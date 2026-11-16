@@ -2,10 +2,9 @@
 //! (#16049 slice 4, #15925).
 //!
 //! The step is decided once in `homeboy-agents` from the Cook's durable state.
-//! This module only supplies the handlers that step names: the Cook
-//! continuation handler (`run::continue_cook` / `run::preflight_continue_cook`),
-//! `retry --run` (exact attempt) and `reconcile --apply`, so recovery adds no orchestration of
-//! its own. It is the only public Cook continuation command.
+//! Continuation, regate and rearm are frozen into the existing daemon execution
+//! outbox. Only its internal execution-step adapter runs those handlers; the
+//! public command returns admission, or optionally observes status/watch.
 
 use serde_json::Value;
 
@@ -19,8 +18,33 @@ use super::run::CookContinueArgs;
 use super::RecoverArgs;
 
 pub(super) fn recover(args: RecoverArgs) -> CmdResult<Value> {
-    let performer = CliCookRecoveryPerformer { full: args.full };
-    recover_with(args, &performer)
+    let wait = args.wait;
+    let full = args.full;
+    let timeout = args.timeout.clone();
+    let duration = crate::commands::utils::watch::parse_duration(
+        "--timeout",
+        if timeout.is_empty() { "30m" } else { &timeout },
+    )?;
+    if !args.preflight {
+        let id = agent_task_service::resolve_cook_continuation_run_id(&args.id)
+            .unwrap_or_else(|_| args.id.clone());
+        if let Some(receipt) = agent_task_service::recovery_step_in_flight(&id)? {
+            return Ok((receipt, 0));
+        }
+    }
+    let performer = CliCookRecoveryPerformer;
+    let (mut report, code) = recover_with(args, &performer)?;
+    if wait && report["admission"].is_object() {
+        let run_id = report["run_id"].as_str().unwrap().to_string();
+        let (status, exit_code) = super::status::wait_for_recovery_status(&run_id, full, duration)?;
+        if status["terminal"] != true {
+            report["message"] = serde_json::json!(format!("Timed out; the step stays owned by the daemon. homeboy agent-task status {run_id} --watch"));
+            return Ok((report, 1));
+        }
+        let step_exit = agent_task_service::recovery_step_exit_code(&run_id)?.unwrap_or(exit_code);
+        return Ok((status, step_exit));
+    }
+    Ok((report, code))
 }
 
 pub(super) fn recover_with(
@@ -150,20 +174,26 @@ pub(super) fn continuation_args(
     }
 }
 
-struct CliCookRecoveryPerformer {
-    full: bool,
-}
+struct CliCookRecoveryPerformer;
 
 impl CookRecoveryPerformer for CliCookRecoveryPerformer {
+    fn admit_step(
+        &self,
+        report: &agent_task_service::CookRecoveryReport,
+        overrides: &CookRecoveryOverrides,
+    ) -> homeboy::core::Result<Option<Value>> {
+        agent_task_service::admit_recovery_execution_step(report, overrides).map(Some)
+    }
     fn continue_cook(
         &self,
         run_id: &str,
         rearm: bool,
         overrides: &CookRecoveryOverrides,
     ) -> homeboy::core::Result<(Value, i32)> {
-        let mut args = continuation_args(run_id, rearm, overrides);
-        args.full = self.full;
-        super::run::continue_cook(args)
+        let _ = (run_id, rearm, overrides);
+        Err(homeboy::core::Error::internal_unexpected(
+            "recovery continuation must be admitted as a daemon execution step",
+        ))
     }
 
     fn preflight_continue_cook(
@@ -209,6 +239,46 @@ impl CookRecoveryPerformer for CliCookRecoveryPerformer {
             .map_err(|error| homeboy::core::Error::internal_json(error.to_string(), None))?;
         Ok((value, result.exit_code))
     }
+}
+
+/// Execute only the step frozen by the daemon intent; never admit recursively.
+pub(crate) fn execute_admitted_step(
+    run_id: &str,
+    step: &agent_task_service::CookRecoveryStep,
+    overrides: &CookRecoveryOverrides,
+) -> homeboy::core::Result<i32> {
+    let performer = CliCookRecoveryPerformer;
+    if !overrides.is_empty() {
+        return super::run::continue_cook(continuation_args(
+            run_id,
+            overrides.has_route_override(),
+            overrides,
+        ))
+        .map(|(_, code)| code);
+    }
+    let (_, code) = match step {
+        agent_task_service::CookRecoveryStep::Regate => performer.regate(run_id)?,
+        agent_task_service::CookRecoveryStep::Continue
+        | agent_task_service::CookRecoveryStep::Rearm => {
+            if *step == agent_task_service::CookRecoveryStep::Continue {
+                agent_task_service::prepare_admitted_recovery_continuation(run_id)?;
+            }
+            super::run::continue_cook(continuation_args(
+                run_id,
+                *step == agent_task_service::CookRecoveryStep::Rearm,
+                overrides,
+            ))?
+        }
+        _ => {
+            return Err(homeboy::core::Error::validation_invalid_argument(
+                "recovery",
+                "unsupported admitted step",
+                None,
+                None,
+            ))
+        }
+    };
+    Ok(code)
 }
 
 #[cfg(test)]
@@ -315,6 +385,42 @@ mod tests {
             assert!(request.regate);
             assert_eq!(request.preflight, preflight);
         }
+    }
+
+    #[test]
+    fn recover_wait_is_opt_in_and_timeout_requires_wait() {
+        for argv in [
+            vec!["homeboy", "agent-task", "recover", "cook-1"],
+            vec![
+                "homeboy",
+                "agent-task",
+                "recover",
+                "cook-1",
+                "--wait",
+                "--timeout",
+                "2s",
+            ],
+        ] {
+            assert!(Cli::try_parse_from(argv).is_ok());
+        }
+        assert!(Cli::try_parse_from([
+            "homeboy",
+            "agent-task",
+            "recover",
+            "cook-1",
+            "--timeout",
+            "2s"
+        ])
+        .is_err());
+        assert!(Cli::try_parse_from([
+            "homeboy",
+            "agent-task",
+            "recover",
+            "cook-1",
+            "--preflight",
+            "--wait"
+        ])
+        .is_err());
     }
 
     #[test]

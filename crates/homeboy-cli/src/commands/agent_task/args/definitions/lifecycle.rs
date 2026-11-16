@@ -456,6 +456,12 @@ pub struct ReplayProviderBoundaryArgs {
 }
 #[derive(Args, Debug, Default)]
 pub struct RecoverArgs {
+    /// Follow the admitted daemon step through status/watch.
+    #[arg(long, conflicts_with = "preflight")]
+    pub wait: bool,
+    /// Maximum wait; timing out never cancels daemon-owned work.
+    #[arg(long, default_value = "30m", requires = "wait")]
+    pub timeout: String,
     /// Re-run recorded gates on the newest candidate, without a provider attempt.
     #[arg(long)]
     pub regate: bool,
@@ -494,7 +500,7 @@ pub struct RecoverArgs {
     /// Confirm an explicit model override that pins this retry.
     #[arg(long, requires = "model")]
     pub acknowledge_model_override: bool,
-    /// Include the complete Cook report rather than the compact lifecycle view.
+    /// With `--wait`, report the complete lifecycle status rather than the bounded summary.
     #[arg(long)]
     pub full: bool,
     /// Replace-gates step: explicit operator authorization for the replacement

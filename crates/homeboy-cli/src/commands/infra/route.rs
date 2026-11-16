@@ -2624,6 +2624,14 @@ pub(crate) fn execute_admitted_cook_arguments(
 pub(crate) struct CliExecutionStepTransport;
 
 impl crate::agents::agent_task_service::ExecutionStepTransport for CliExecutionStepTransport {
+    fn recovery(
+        &self,
+        run_id: &str,
+        step: &crate::agents::agent_task_service::CookRecoveryStep,
+        overrides: &crate::agents::agent_task_service::CookRecoveryOverrides,
+    ) -> homeboy::core::Result<i32> {
+        crate::commands::agent_task::recover::execute_admitted_step(run_id, step, overrides)
+    }
     fn admission(&self, argv: Vec<String>, runner: Option<String>) -> homeboy::core::Result<i32> {
         execute_admitted_cook_arguments(argv, runner)
     }
