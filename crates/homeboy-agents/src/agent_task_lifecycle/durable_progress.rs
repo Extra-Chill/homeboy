@@ -216,7 +216,7 @@ pub(crate) fn prepared_progress_events(
         .metadata
         .get("cancellation_provenance")
         .and_then(Value::as_object)
-        .filter(|_| record.state() == AgentTaskRunState::Cancelled)
+        .filter(|_| record.state() == RunExecutionState::Cancelled)
     {
         events.push(prepare_provenance_event(
             &run,
@@ -552,7 +552,7 @@ fn prepare_request(
 /// revision, so each transition is recorded exactly once (#15718).
 pub(crate) fn prepared_transition_event(
     record: &AgentTaskRunRecord,
-    from: AgentTaskRunState,
+    from: RunExecutionState,
     transition: &str,
 ) -> Result<PreparedControlPlaneEventAppend> {
     let run = RunId::new(&record.run_id).map_err(|error| {

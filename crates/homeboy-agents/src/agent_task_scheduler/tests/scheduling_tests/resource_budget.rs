@@ -2,7 +2,7 @@
 //! cancellation behavior.
 
 use super::shared::*;
-use crate::agent_task_lifecycle::AgentTaskRunState;
+use homeboy_lifecycle_contract::RunExecutionState;
 
 mod resource_budget_tests {
     use super::*;
@@ -21,7 +21,7 @@ mod resource_budget_tests {
 
         assert_eq!(
             aggregate.status(),
-            crate::agent_task_lifecycle::AgentTaskRunState::Succeeded
+            homeboy_lifecycle_contract::RunExecutionState::Succeeded
         );
         assert_eq!(aggregate.totals.succeeded, 4);
         assert!(max_seen.load(Ordering::SeqCst) <= 2);
@@ -43,7 +43,7 @@ mod resource_budget_tests {
 
         assert_eq!(
             aggregate.status(),
-            crate::agent_task_lifecycle::AgentTaskRunState::Failed
+            homeboy_lifecycle_contract::RunExecutionState::Failed
         );
         assert_eq!(aggregate.totals.blocked, 1);
         assert_eq!(aggregate.queue.blocked, 1);
@@ -67,7 +67,7 @@ mod resource_budget_tests {
 
         let aggregate = scheduler.run(plan);
 
-        assert_eq!(aggregate.status(), AgentTaskRunState::Failed);
+        assert_eq!(aggregate.status(), RunExecutionState::Failed);
         assert_eq!(aggregate.totals.failed, 1);
         assert_eq!(attempts.load(Ordering::SeqCst), 1);
         assert_eq!(aggregate.queue.retry_budget_remaining, Some(0));

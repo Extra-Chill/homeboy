@@ -439,7 +439,7 @@ fn candidate_adoption_status_persists_running_stale_resume_and_completion() {
     )
     .expect("completed status")
     .record;
-    assert_eq!(completed.state(), AgentTaskRunState::Queued);
+    assert_eq!(completed.state(), RunExecutionState::Queued);
     let adoption = completed
         .candidate_adoption
         .expect("terminal attempt retained");
@@ -1059,7 +1059,7 @@ fn detached_lab_handoff_persists_inspectable_running_record() {
             let artifacts = artifacts(run_id).expect("artifacts resolve");
 
             assert_eq!(record.run_id, run_id);
-            assert_eq!(loaded.state(), AgentTaskRunState::Running);
+            assert_eq!(loaded.state(), RunExecutionState::Running);
             assert_eq!(loaded.tasks[0].state(), AgentTaskState::Running);
             assert_eq!(loaded.metadata["runner_id"], "homeboy-lab");
             assert_eq!(loaded.metadata["runner_job_id"], "job-123");
@@ -1205,7 +1205,7 @@ fn terminal_lab_record_persists_from_inside_a_config_lock_section() {
             remote_command: &command,
         })
         .expect("detached lab run");
-        record.set_state_for_test(AgentTaskRunState::Succeeded);
+        record.set_state_for_test(RunExecutionState::Succeeded);
 
         let (sender, receiver) = std::sync::mpsc::channel();
         std::thread::spawn(move || {
@@ -1223,7 +1223,7 @@ fn terminal_lab_record_persists_from_inside_a_config_lock_section() {
             .expect("terminal record persists");
 
         let stored = store::read_record("config-lock-nested-terminal").expect("stored record");
-        assert_eq!(stored.state(), AgentTaskRunState::Succeeded);
+        assert_eq!(stored.state(), RunExecutionState::Succeeded);
 
         let authority =
             crate::agent_task_lifecycle::workspace_authority::resolve_workspace_terminal_authority(
@@ -1403,7 +1403,7 @@ fn accepted_handoff_waits_for_authoritative_aggregate_after_terminal_daemon_stat
         reconcile_runner_job_snapshot_in_store(&lifecycle_store, &mut record, &snapshot)
             .expect("terminal daemon result records pending synchronization");
 
-        assert_eq!(record.state(), AgentTaskRunState::Running);
+        assert_eq!(record.state(), RunExecutionState::Running);
         assert_eq!(record.metadata["runner_job_status"], json!(job_status));
         assert_eq!(
             record.metadata["runner_result_synchronization"]["state"],
@@ -1434,7 +1434,7 @@ fn terminal_projection_keeps_prior_commit_when_interrupted_before_commit() {
 
         assert_eq!(record, before);
         let persisted = reconcile_status(&record.run_id).expect("persisted controller record");
-        assert_eq!(persisted.state(), AgentTaskRunState::Running);
+        assert_eq!(persisted.state(), RunExecutionState::Running);
         assert!(persisted.artifact_refs.is_empty());
         assert!(store::read_aggregate(&record.run_id).is_err());
     });
@@ -1520,7 +1520,7 @@ fn terminal_proxy_reconciliation_hydrates_persisted_nested_result_idempotently()
     .record;
     let artifact_report =
         artifacts_in_store(&lifecycle_store, &record.run_id).expect("hydrated artifacts");
-    assert_eq!(status.state(), AgentTaskRunState::Succeeded);
+    assert_eq!(status.state(), RunExecutionState::Succeeded);
     assert_eq!(artifact_report.artifacts.len(), 1);
     assert_eq!(artifact_report.artifacts[0].id, "final-patch");
     assert_eq!(artifact_report.artifacts[0].size_bytes, Some(18_928));
@@ -1604,7 +1604,7 @@ fn transport_proxy_snapshot_reconciliation_advances_queued_lifecycle() {
     )
     .expect("transport proxy reconciliation");
 
-    assert_eq!(record.state(), AgentTaskRunState::Succeeded);
+    assert_eq!(record.state(), RunExecutionState::Succeeded);
     assert_eq!(record.tasks[0].state(), AgentTaskState::Succeeded);
     assert_eq!(record.metadata["runner_job_status"], "succeeded");
     assert_eq!(
@@ -2061,7 +2061,7 @@ fn corrected_promotion_replaces_gate_failed_latest_proof() {
         .expect("gate failure lifecycle state");
     assert_eq!(
         gate_failed_record.state(),
-        AgentTaskRunState::CandidateRecoverable,
+        RunExecutionState::CandidateRecoverable,
         "a promoted candidate blocked by gates remains recoverable rather than successful"
     );
     let updated = record_promotion_in_store(&lifecycle_store, run_id, corrected.clone())
@@ -2085,7 +2085,7 @@ fn corrected_promotion_replaces_gate_failed_latest_proof() {
             .len(),
         2
     );
-    assert_eq!(updated.state(), AgentTaskRunState::CandidateRecoverable);
+    assert_eq!(updated.state(), RunExecutionState::CandidateRecoverable);
 }
 
 #[test]
@@ -2279,7 +2279,7 @@ fn lifecycle_store_round_trips_record_log_artifacts_and_lifecycle_contract() {
             run_record_exists_in_store(&lifecycle_store, "run/store-contract")
                 .expect("record exists")
         );
-        assert_eq!(loaded.state(), AgentTaskRunState::Succeeded);
+        assert_eq!(loaded.state(), RunExecutionState::Succeeded);
         assert_eq!(loaded.lifecycle.schema, RUN_LIFECYCLE_RECORD_SCHEMA);
         assert_eq!(
             loaded.lifecycle.execution.state,
@@ -2344,7 +2344,7 @@ fn retry_submits_new_run_from_existing_plan() {
     let loaded_plan = load_plan_in_store(&lifecycle_store, "run-retry").expect("retry plan loaded");
 
     assert_eq!(record.run_id, "run-retry");
-    assert_eq!(record.state(), AgentTaskRunState::Queued);
+    assert_eq!(record.state(), RunExecutionState::Queued);
     assert_eq!(record.metadata["retry_of"], json!("run-original"));
     assert_eq!(
         record.metadata["notification_route"]["route"],
@@ -2369,7 +2369,7 @@ fn mark_running_reclaims_stale_running_record() {
     let mut record = lifecycle_store
         .read_record("run-stale-dead-owner")
         .expect("record");
-    record.set_state_for_test(AgentTaskRunState::Running);
+    record.set_state_for_test(RunExecutionState::Running);
     record.metadata = json!({ "runner_pid": u32::MAX });
     lifecycle_store
         .write_record(&record)
@@ -2378,7 +2378,7 @@ fn mark_running_reclaims_stale_running_record() {
     let running =
         mark_running_in_store(&lifecycle_store, "run-stale-dead-owner").expect("reclaimed");
 
-    assert_eq!(running.state(), AgentTaskRunState::Running);
+    assert_eq!(running.state(), RunExecutionState::Running);
     assert_eq!(running.metadata["reclaimed_stale_running"], json!(true));
     assert_eq!(running.metadata["runner_pid"], json!(std::process::id()));
 }
@@ -2433,7 +2433,7 @@ fn cancel_run_signals_live_running_record() {
     let cancelled =
         cancel_run_in_store(&lifecycle_store, "run-cancel-live", None).expect("live run cancelled");
 
-    assert_eq!(cancelled.state(), AgentTaskRunState::Cancelled);
+    assert_eq!(cancelled.state(), RunExecutionState::Cancelled);
     assert_eq!(cancelled.tasks[0].state(), AgentTaskState::Cancelled);
     assert_eq!(
         cancelled.metadata["live_cancellation"]["owner_pid"],
@@ -2453,7 +2453,7 @@ fn cancel_run_signals_live_running_record() {
 }
 
 #[test]
-fn record_health_reports_older_schema_as_malformed_and_conflicting_projections() {
+fn record_health_reports_older_schema_as_malformed() {
     with_isolated_home(|_| {
         submit_plan(&test_plan(), Some("older-schema-record")).expect("submitted");
         // #11446 made the typed writer reject unsupported schemas. Use the raw
@@ -2474,17 +2474,6 @@ fn record_health_reports_older_schema_as_malformed_and_conflicting_projections()
             health.samples[0].reason,
             AgentTaskRecordHealthReason::MalformedMetadata
         );
-
-        submit_plan(&test_plan(), Some("conflicting-record")).expect("submitted");
-        rewrite_record_for_test("conflicting-record", |record| {
-            record.lifecycle.execution.state = RunExecutionState::Succeeded;
-        })
-        .expect("conflict stored");
-        let health =
-            record_health_summary_in_store(&test_lifecycle_store()).expect("conflict health");
-        assert_eq!(health.malformed, 1);
-        assert_eq!(health.conflicting, 1);
-        assert_eq!(health.quarantined, 0);
     });
 }
 
@@ -2646,8 +2635,8 @@ fn set_run_state_stamps_finished_at_for_candidate_recoverable_terminal_runs() {
             lifecycle_store.roots().data(),
         );
         rewrite_record_for_test(&record.run_id, |record| {
-            set_run_state(record, AgentTaskRunState::CandidateRecoverable);
-            assert_eq!(record.state(), AgentTaskRunState::CandidateRecoverable);
+            set_run_state(record, RunExecutionState::CandidateRecoverable);
+            assert_eq!(record.state(), RunExecutionState::CandidateRecoverable);
             assert!(
                 record.lifecycle.execution.finished_at.is_some(),
                 "a terminal CandidateRecoverable run must stamp finished_at"
@@ -2662,7 +2651,7 @@ fn set_run_state_stamps_finished_at_for_candidate_recoverable_terminal_runs() {
         .read_record(&record.run_id)
         .expect("read record");
     record.lifecycle.execution.finished_at = None;
-    set_run_state(&mut record, AgentTaskRunState::Running);
+    set_run_state(&mut record, RunExecutionState::Running);
     assert!(
         record.lifecycle.execution.finished_at.is_none(),
         "a non-terminal Running run must not stamp finished_at"
@@ -2738,7 +2727,7 @@ fn controller_local_status_answers_without_any_runner_interaction() {
             0,
             "a controller-local status must not interact with any runner"
         );
-        assert_eq!(outcome.record.state(), AgentTaskRunState::Running);
+        assert_eq!(outcome.record.state(), RunExecutionState::Running);
         assert!(outcome.runner_probe.controller_local);
         assert!(!outcome.runner_probe.performed);
         assert_eq!(
@@ -2981,7 +2970,7 @@ fn live_verification_pending_promotion_heartbeat_is_visible_to_logs_and_status()
                 lifecycle_store.roots().data(),
             );
             rewrite_record_for_test(run_id, |record| {
-                set_run_state(record, AgentTaskRunState::Running);
+                set_run_state(record, RunExecutionState::Running);
                 crate::agent_task_service::set_cook_delivery_artifact_for_test(
                     &mut record.metadata,
                     "/promotion",

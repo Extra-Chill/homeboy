@@ -168,7 +168,7 @@ fn execute_and_assert_one_initial_attempt(subject: &str) {
     assert_eq!(store.read_cook_index(subject).unwrap().latest_run_id, child);
     assert_eq!(
         store.read_record(&child).unwrap().state(),
-        AgentTaskRunState::Succeeded
+        RunExecutionState::Succeeded
     );
     assert!(!store
         .record_exists(&format!("{subject}-attempt-2"))
@@ -346,7 +346,7 @@ fn execution_step_concurrent_rearm_placement_and_cancel_fence_all_old_children()
                 assert_eq!(calls.load(Ordering::SeqCst), 0);
                 assert_eq!(
                     store.read_record(subject).unwrap().state(),
-                    AgentTaskRunState::Cancelled
+                    RunExecutionState::Cancelled
                 );
                 assert!(store.read_cook_index(subject).is_err());
                 assert_eq!(
@@ -521,7 +521,7 @@ fn execution_step_interrupted_spawn_gates_old_child_then_recovery_executes_once(
         assert_eq!(calls.load(Ordering::SeqCst), 1);
         assert_eq!(
             store.read_record("gate-retry").unwrap().state(),
-            AgentTaskRunState::Succeeded
+            RunExecutionState::Succeeded
         );
     });
 }
@@ -635,7 +635,7 @@ fn execution_step_runner_ineligible_then_eligible_across_daemon_restart_executes
         assert_eq!(store.read_cook_index(subject).unwrap().latest_run_id, child);
         assert_eq!(
             store.read_record(&child).unwrap().state(),
-            AgentTaskRunState::Succeeded
+            RunExecutionState::Succeeded
         );
         assert_eq!(
             store.read_record(&child).unwrap().metadata["provider_executions_consumed"],

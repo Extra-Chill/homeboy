@@ -1594,7 +1594,7 @@ mod tests {
                 .expect("interrupted parent remains addressable");
             assert_eq!(
                 parent.state(),
-                agent_task_lifecycle::AgentTaskRunState::Failed
+                homeboy_lifecycle_contract::RunExecutionState::Failed
             );
             assert_eq!(
                 parent.metadata["detached_cook_handoff"]["admission_state"],
@@ -1616,7 +1616,7 @@ mod tests {
                 .expect("first parent remains discoverable");
             assert_eq!(
                 parent.state(),
-                agent_task_lifecycle::AgentTaskRunState::Queued
+                homeboy_lifecycle_contract::RunExecutionState::Queued
             );
             assert_eq!(parent.metadata["detached_cook_handoff"]["state"], "pending");
             assert_eq!(
@@ -1632,7 +1632,7 @@ mod tests {
                 agent_task_lifecycle::exact_record(cook_id)
                     .expect("owner cleanup terminalizes parent")
                     .state(),
-                agent_task_lifecycle::AgentTaskRunState::Failed
+                homeboy_lifecycle_contract::RunExecutionState::Failed
             );
         });
     }
@@ -1737,7 +1737,7 @@ mod tests {
                 .expect("read redirected handoff parent");
             assert_eq!(
                 parent.state(),
-                agent_task_lifecycle::AgentTaskRunState::Succeeded
+                homeboy_lifecycle_contract::RunExecutionState::Succeeded
             );
             assert_eq!(
                 parent.metadata["detached_cook_handoff"]["state"],
@@ -1784,7 +1784,7 @@ mod tests {
                 agent_task_lifecycle::cancel_run(cook_id, None).expect("cancel pending handoff");
             assert_eq!(
                 cancelled.state(),
-                agent_task_lifecycle::AgentTaskRunState::Cancelled
+                homeboy_lifecycle_contract::RunExecutionState::Cancelled
             );
             assert!(
                 cancelled
@@ -1830,7 +1830,7 @@ mod tests {
                 .expect("cancel pending supervised handoff");
             assert_eq!(
                 cancelled.state(),
-                agent_task_lifecycle::AgentTaskRunState::Cancelled
+                homeboy_lifecycle_contract::RunExecutionState::Cancelled
             );
             assert_eq!(
                 cancelled.metadata["detached_cook_handoff"]["supervisor_job_id"],
@@ -1972,7 +1972,7 @@ mod tests {
                 .expect("read redirected handoff parent");
             assert_eq!(
                 parent.state(),
-                agent_task_lifecycle::AgentTaskRunState::Succeeded
+                homeboy_lifecycle_contract::RunExecutionState::Succeeded
             );
             assert_eq!(
                 parent.metadata["detached_cook_handoff"]["state"],
@@ -2060,7 +2060,7 @@ mod tests {
                 .expect("cancellation wins the handoff arbitration");
             assert_eq!(
                 cancelled.state(),
-                agent_task_lifecycle::AgentTaskRunState::Cancelled
+                homeboy_lifecycle_contract::RunExecutionState::Cancelled
             );
 
             assert!(
@@ -2077,7 +2077,7 @@ mod tests {
                 .expect("read cancellation-winning handoff parent");
             assert_eq!(
                 parent.state(),
-                agent_task_lifecycle::AgentTaskRunState::Cancelled
+                homeboy_lifecycle_contract::RunExecutionState::Cancelled
             );
             assert_eq!(
                 parent.metadata["detached_cook_handoff"]["cancellation_fence"]["state"],
@@ -2124,13 +2124,13 @@ mod tests {
             assert_eq!(cancelled.run_id, attempt_id);
             assert_eq!(
                 cancelled.state(),
-                agent_task_lifecycle::AgentTaskRunState::Cancelled
+                homeboy_lifecycle_contract::RunExecutionState::Cancelled
             );
             assert_eq!(
                 agent_task_lifecycle::exact_record(attempt_id)
                     .expect("read materialized cancelled attempt")
                     .state(),
-                agent_task_lifecycle::AgentTaskRunState::Cancelled
+                homeboy_lifecycle_contract::RunExecutionState::Cancelled
             );
         });
     }

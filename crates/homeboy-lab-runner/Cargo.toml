@@ -13,6 +13,7 @@ name = "homeboy_lab_runner"
 path = "src/lib.rs"
 
 [dependencies]
+homeboy-lifecycle-contract = { path = "../contracts/homeboy-lifecycle-contract" }
 homeboy-core = { version = "0.1.0", path = "../homeboy-core" }
 homeboy-extension-contract = { version = "0.1.0", path = "../contracts/homeboy-extension-contract" }
 homeboy-control-plane-contract = { version = "0.1.0", path = "../contracts/homeboy-control-plane-contract" }

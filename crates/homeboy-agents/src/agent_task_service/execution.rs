@@ -1353,11 +1353,11 @@ fn terminal_run_result_for_record(
 ) -> Result<Option<AgentTaskRunResult<AgentTaskAggregate>>> {
     if !matches!(
         record.state(),
-        agent_task_lifecycle::AgentTaskRunState::Succeeded
-            | agent_task_lifecycle::AgentTaskRunState::CandidateRecoverable
-            | agent_task_lifecycle::AgentTaskRunState::PartialFailure
-            | agent_task_lifecycle::AgentTaskRunState::Failed
-            | agent_task_lifecycle::AgentTaskRunState::Cancelled
+        homeboy_lifecycle_contract::RunExecutionState::Succeeded
+            | homeboy_lifecycle_contract::RunExecutionState::CandidateRecoverable
+            | homeboy_lifecycle_contract::RunExecutionState::PartialFailure
+            | homeboy_lifecycle_contract::RunExecutionState::Failed
+            | homeboy_lifecycle_contract::RunExecutionState::Cancelled
     ) {
         return Ok(None);
     }
@@ -1400,11 +1400,11 @@ fn terminal_run_result_for_record(
 /// `agent-task resume` on a CandidateRecoverable run exited 0 and reported
 /// success while nothing had been promoted (Extra-Chill/homeboy#15393).
 fn terminal_record_exit_code(
-    state: &agent_task_lifecycle::AgentTaskRunState,
+    state: &homeboy_lifecycle_contract::RunExecutionState,
     aggregate: &AgentTaskAggregate,
 ) -> i32 {
     match state {
-        agent_task_lifecycle::AgentTaskRunState::Succeeded => aggregate_exit_code(aggregate),
+        homeboy_lifecycle_contract::RunExecutionState::Succeeded => aggregate_exit_code(aggregate),
         _ => 1,
     }
 }
@@ -2472,8 +2472,8 @@ fn retryable_cook_attempt(
     });
     let failed_provider_without_candidate = matches!(
         source.state(),
-        agent_task_lifecycle::AgentTaskRunState::Failed
-            | agent_task_lifecycle::AgentTaskRunState::Cancelled
+        homeboy_lifecycle_contract::RunExecutionState::Failed
+            | homeboy_lifecycle_contract::RunExecutionState::Cancelled
     ) && !retryable_pre_execution_failure
         && agent_task_lifecycle::select_cook_candidate_in_store(lifecycle_store, cook_id)
             .ok()
@@ -2541,7 +2541,7 @@ fn retryable_cook_attempt(
             && record.metadata["cook_attempt"] == recipe_attempt.attempt;
         if materialized_attempt_seen
             && !owned_replacement
-            && record.state() == agent_task_lifecycle::AgentTaskRunState::Queued
+            && record.state() == homeboy_lifecycle_contract::RunExecutionState::Queued
         {
             for _ in 0..100 {
                 std::thread::sleep(Duration::from_millis(10));
@@ -2573,7 +2573,7 @@ fn retryable_cook_attempt(
         // attempt may be allocated below if the durable retry budget permits
         // it (#17650).
         if record.state().is_terminal()
-            && record.state() != agent_task_lifecycle::AgentTaskRunState::Succeeded
+            && record.state() != homeboy_lifecycle_contract::RunExecutionState::Succeeded
         {
             materialized_attempt_seen = true;
             continue;
@@ -2599,7 +2599,7 @@ fn retryable_cook_attempt(
                 replaces_source_attempt: false,
             }));
         }
-        if record.state() != agent_task_lifecycle::AgentTaskRunState::Queued {
+        if record.state() != homeboy_lifecycle_contract::RunExecutionState::Queued {
             return Err(Error::validation_invalid_argument(
                 "cook_recipe.attempts",
                 "pending Cook retry run is already active and must be resumed through its lifecycle",
@@ -3410,7 +3410,7 @@ mod terminal_exit_code_tests {
     /// success unless the run itself succeeded.
     #[test]
     fn terminal_exit_code_follows_the_run_state_not_a_clean_tally() {
-        use agent_task_lifecycle::AgentTaskRunState as State;
+        use homeboy_lifecycle_contract::RunExecutionState as State;
         let aggregate = clean_tally_aggregate();
         assert_eq!(
             aggregate_exit_code(&aggregate),
@@ -3865,7 +3865,7 @@ mod tests {
             let cancelled = store.read_record(run_id).expect("cancelled attempt");
             assert_eq!(
                 cancelled.state(),
-                agent_task_lifecycle::AgentTaskRunState::Cancelled
+                homeboy_lifecycle_contract::RunExecutionState::Cancelled
             );
             assert_eq!(
                 cancelled.metadata["cancellation_provenance"]["actor"],
@@ -3913,7 +3913,7 @@ mod tests {
             .expect("persist source attempt");
         store
             .mutate_record(run_id, |record| {
-                record.set_state_for_test(agent_task_lifecycle::AgentTaskRunState::Failed);
+                record.set_state_for_test(homeboy_lifecycle_contract::RunExecutionState::Failed);
                 record.metadata["cook_id"] = json!(cook_id);
                 record.metadata["cook_attempt"] = json!(1);
                 record.metadata["provider_executions_consumed"] = json!(0);
@@ -4179,7 +4179,7 @@ mod tests {
             let failed = store.read_record(&reservation.run_id).unwrap();
             assert_eq!(
                 failed.state(),
-                agent_task_lifecycle::AgentTaskRunState::Failed
+                homeboy_lifecycle_contract::RunExecutionState::Failed
             );
             let row = store
                 .open_observation_readonly()
@@ -4202,7 +4202,7 @@ mod tests {
             .record;
             assert_eq!(
                 status.state(),
-                agent_task_lifecycle::AgentTaskRunState::Failed
+                homeboy_lifecycle_contract::RunExecutionState::Failed
             );
             assert_eq!(
                 status.metadata["pre_execution_failure"]["phase"],
@@ -4350,7 +4350,7 @@ mod tests {
             let record = store.read_record(run_id).expect("rooted terminal record");
             assert_eq!(
                 record.state(),
-                agent_task_lifecycle::AgentTaskRunState::Succeeded
+                homeboy_lifecycle_contract::RunExecutionState::Succeeded
             );
             assert_eq!(
                 record.metadata["provider_executions"][0]["state"],

@@ -4712,8 +4712,8 @@ where
 
     if matches!(
         record.state(),
-        agent_task_lifecycle::AgentTaskRunState::Succeeded
-            | agent_task_lifecycle::AgentTaskRunState::CandidateRecoverable
+        homeboy_lifecycle_contract::RunExecutionState::Succeeded
+            | homeboy_lifecycle_contract::RunExecutionState::CandidateRecoverable
     ) {
         // Ordinary continuation consumes only the pending entry scheduled by
         // authoritative reconciliation or by the recovery step that selected
@@ -4957,8 +4957,8 @@ pub(crate) fn preflight_continue_cook(args: CookContinueArgs) -> CmdResult<Value
             .filter(|_| {
                 matches!(
                     record.state(),
-                    agent_task_lifecycle::AgentTaskRunState::Succeeded
-                        | agent_task_lifecycle::AgentTaskRunState::CandidateRecoverable
+                    homeboy_lifecycle_contract::RunExecutionState::Succeeded
+                        | homeboy_lifecycle_contract::RunExecutionState::CandidateRecoverable
                 )
             })
     {
@@ -5097,8 +5097,8 @@ pub(crate) fn preflight_continue_cook(args: CookContinueArgs) -> CmdResult<Value
     }
     if matches!(
         record.state(),
-        agent_task_lifecycle::AgentTaskRunState::Succeeded
-            | agent_task_lifecycle::AgentTaskRunState::CandidateRecoverable
+        homeboy_lifecycle_contract::RunExecutionState::Succeeded
+            | homeboy_lifecycle_contract::RunExecutionState::CandidateRecoverable
     ) {
         match agent_task_service::preflight_continuation_claim(&recipe.cook_id, &run_id, args.rearm)
         {
@@ -5544,7 +5544,7 @@ fn cook_continuation_status(
             }),
         )
     } else if waiting_for_capacity
-        || record.state() == agent_task_lifecycle::AgentTaskRunState::Queued
+        || record.state() == homeboy_lifecycle_contract::RunExecutionState::Queued
     {
         let command = runner_id
             .map(|runner_id| format!("homeboy runner status {runner_id}"))

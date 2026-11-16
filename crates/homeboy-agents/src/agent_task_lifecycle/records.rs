@@ -1,12 +1,45 @@
 use super::*;
+use homeboy_lifecycle_contract::RunExecutionState;
 
-use homeboy_core::run_lifecycle_status::RunLifecycleStatus;
 use homeboy_runner_contract::{WorkspaceClaim, WorkspaceIdentity, WorkspaceOwnerLease};
 
 pub(crate) mod schemas {
     pub(crate) const RUN: &str = "homeboy/agent-task-run/v1";
     pub(crate) const RUN_ARTIFACTS: &str = "homeboy/agent-task-run-artifacts/v1";
     pub(crate) const COOK_INDEX: &str = "homeboy/agent-task-cook-index/v1";
+}
+
+// Keep the indexed wire alias without storing a second state in memory.
+impl serde::Serialize for AgentTaskRunRecord {
+    fn serialize<S: serde::Serializer>(
+        &self,
+        serializer: S,
+    ) -> std::result::Result<S::Ok, S::Error> {
+        let mut value = AgentTaskRunRecord::serialize(self, serde_json::value::Serializer)
+            .map_err(serde::ser::Error::custom)?;
+        value["state"] = serde_json::to_value(self.state()).map_err(serde::ser::Error::custom)?;
+        value.serialize(serializer)
+    }
+}
+
+impl<'de> serde::Deserialize<'de> for AgentTaskRunRecord {
+    fn deserialize<D: serde::Deserializer<'de>>(
+        deserializer: D,
+    ) -> std::result::Result<Self, D::Error> {
+        let mut value = Value::deserialize(deserializer)?;
+        // A present lifecycle is authoritative, even when its state is Unknown.
+        if value.get("lifecycle").is_none() {
+            let state = value
+                .get("state")
+                .cloned()
+                .ok_or_else(|| serde::de::Error::missing_field("state"))?;
+            let state = serde_json::from_value(state).map_err(serde::de::Error::custom)?;
+            value["lifecycle"] =
+                serde_json::to_value(RunLifecycleRecord::with_execution_state(state))
+                    .map_err(serde::de::Error::custom)?;
+        }
+        AgentTaskRunRecord::deserialize(value).map_err(serde::de::Error::custom)
+    }
 }
 
 pub const AGENT_TASK_RECORD_HEALTH_SCHEMA: &str = "homeboy/agent-task-record-health/v1";
@@ -61,7 +94,6 @@ pub(crate) enum LocalOwnerLiveness {
 pub enum AgentTaskRecordHealthReason {
     MissingMetadata,
     MalformedMetadata,
-    ConflictingProjections,
     FixtureRunnerProvenance,
 }
 
@@ -78,7 +110,6 @@ pub struct AgentTaskRecordHealthSummary {
     pub schema: String,
     pub healthy: usize,
     pub malformed: usize,
-    pub conflicting: usize,
     pub fixture: usize,
     pub quarantined: usize,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -119,6 +150,7 @@ pub enum CookTerminalOutcome {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(remote = "Self")]
 pub struct AgentTaskRunRecord {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub terminal_outcome: Option<CookTerminalOutcome>,
@@ -127,11 +159,6 @@ pub struct AgentTaskRunRecord {
     pub schema: String,
     pub run_id: String,
     pub plan_id: String,
-    /// The run state. Private so no code outside the lifecycle store and the
-    /// transition module can assign it (#15718): read it through
-    /// [`Self::state`], change it through the typed writers in
-    /// `terminal_transition.rs`, which alone can mint a [`StateWriteAuthority`].
-    state: AgentTaskRunState,
     /// Monotonic run-level write revision, owned by the lifecycle store.
     ///
     /// Every committed write sets it to the stored revision plus one, whatever
@@ -596,7 +623,6 @@ impl AgentTaskRunRecord {
             schema: schemas::RUN.to_string(),
             run_id: run_id.into(),
             plan_id: plan_id.into(),
-            state: AgentTaskRunState::Queued,
             revision: 0,
             submitted_at: submitted_at.into(),
             updated_at: None,
@@ -627,9 +653,10 @@ impl AgentTaskRunRecord {
     /// Also used when decoding older records that predate this summary.
     pub(crate) fn refresh_terminal_outcome(&mut self) {
         use crate::agent_task_service::{CookDelivery, CookDeliveryBlockerCode, CookDeliveryState};
-        self.recoverable = self.state == AgentTaskRunState::CandidateRecoverable;
+        self.recoverable =
+            self.lifecycle.execution.state == RunExecutionState::CandidateRecoverable;
         self.terminal_outcome = None;
-        if !self.state.is_terminal() {
+        if !self.lifecycle.execution.state.is_terminal() {
             return;
         }
         let delivery = CookDelivery::from_run_metadata(&self.metadata);
@@ -723,29 +750,27 @@ impl AgentTaskRunRecord {
     }
 
     /// The stored run state.
-    pub fn state(&self) -> AgentTaskRunState {
-        self.state
+    pub fn state(&self) -> RunExecutionState {
+        self.lifecycle.execution.state
     }
 
-    /// Assign the run state. Only the transition module can mint the
-    /// [`StateWriteAuthority`] this demands, so the compiler rejects a direct
-    /// state write anywhere else (#15718).
-    pub(crate) fn write_state(&mut self, state: AgentTaskRunState, _: StateWriteAuthority) {
-        self.state = state;
+    /// Assign the lifecycle execution state through the transition writer.
+    pub(crate) fn write_state(&mut self, state: RunExecutionState, _: StateWriteAuthority) {
+        self.lifecycle.execution.state = state;
     }
 
     /// Fixture-only state assignment for tests that build records in a given
     /// state without driving them through the lifecycle. Never compiled into a
     /// production binary.
     #[cfg(any(test, feature = "test-support"))]
-    pub fn set_state_for_test(&mut self, state: AgentTaskRunState) {
-        self.state = state;
+    pub fn set_state_for_test(&mut self, state: RunExecutionState) {
+        self.lifecycle.execution.state = state;
     }
 
     /// Builder form of [`Self::set_state_for_test`].
     #[cfg(any(test, feature = "test-support"))]
-    pub fn with_state_for_test(mut self, state: AgentTaskRunState) -> Self {
-        self.state = state;
+    pub fn with_state_for_test(mut self, state: RunExecutionState) -> Self {
+        self.lifecycle.execution.state = state;
         self
     }
 
@@ -778,7 +803,7 @@ impl AgentTaskRunRecord {
     /// ownership or producing durable work. A leftover `runner_job_id` is not
     /// ownership once the runner's live-job view is authoritatively idle.
     pub(crate) fn is_ownerless_zero_artifact_queued_runner_record(&self) -> bool {
-        self.state == AgentTaskRunState::Queued
+        self.lifecycle.execution.state == RunExecutionState::Queued
             && self.runner_id().is_some()
             && self.runner_job_id().is_some()
             && self.lab_handoff.is_none()
@@ -821,10 +846,10 @@ impl AgentTaskRunRecord {
     /// that produced nothing to preserve.
     fn has_candidate_terminal_state(&self) -> bool {
         matches!(
-            self.state,
-            AgentTaskRunState::Succeeded
-                | AgentTaskRunState::CandidateRecoverable
-                | AgentTaskRunState::PartialFailure
+            self.lifecycle.execution.state,
+            RunExecutionState::Succeeded
+                | RunExecutionState::CandidateRecoverable
+                | RunExecutionState::PartialFailure
         )
     }
 
@@ -847,8 +872,8 @@ impl AgentTaskRunRecord {
         now: chrono::DateTime<chrono::Utc>,
     ) -> bool {
         matches!(
-            self.state,
-            AgentTaskRunState::Queued | AgentTaskRunState::Running
+            self.lifecycle.execution.state,
+            RunExecutionState::Queued | RunExecutionState::Running
         ) && self.lab_handoff.as_ref().is_some_and(|handoff| {
             handoff.is_valid()
                 && handoff.state == AgentTaskLabHandoffState::Pending
@@ -884,7 +909,7 @@ impl AgentTaskRunRecord {
     }
 
     pub(crate) fn annotate_stale_running(&mut self) {
-        if self.state != AgentTaskRunState::Running {
+        if self.lifecycle.execution.state != RunExecutionState::Running {
             return;
         }
 
@@ -943,7 +968,8 @@ impl AgentTaskRunRecord {
     /// longer available. Preserve the last confirmed heartbeat as evidence,
     /// while making its liveness explicitly unknown.
     pub(crate) fn annotate_runner_disconnected(&mut self) {
-        if self.state != AgentTaskRunState::Running || !self.is_runner_backed() {
+        if self.lifecycle.execution.state != RunExecutionState::Running || !self.is_runner_backed()
+        {
             return;
         }
         let metadata = self.ensure_metadata_object();
@@ -977,11 +1003,11 @@ impl AgentTaskRunRecord {
     pub(crate) fn has_live_execution_step_owner(&self) -> bool {
         let scheduling = &self.metadata["execution_scheduling"];
         if !scheduling["current_intent_id"].is_string()
-            || self.state == AgentTaskRunState::Cancelled
+            || self.lifecycle.execution.state == RunExecutionState::Cancelled
         {
             return false;
         }
-        if self.state == AgentTaskRunState::Queued {
+        if self.lifecycle.execution.state == RunExecutionState::Queued {
             return true;
         }
         let owner = &self.metadata["execution_step_owner"];
@@ -1112,18 +1138,6 @@ impl AgentTaskRunRecord {
             .and_then(Value::as_str)
     }
 
-    /// Whether the authoritative agent-task run state (`self.state`) and its
-    /// generic projection onto the durable lifecycle record
-    /// (`self.lifecycle.execution.state`) agree.
-    ///
-    /// `set_run_state` is the single writer that keeps these in lockstep; this
-    /// predicate is the same condition the record-health check uses to flag
-    /// `ConflictingProjections`. Exposed so callers (and a `debug_assert` in the
-    /// setter) can assert the invariant instead of silently diverging.
-    pub(crate) fn run_state_projections_agree(&self) -> bool {
-        RunExecutionState::from(self.state) == self.lifecycle.execution.state
-    }
-
     /// Whether this record carries liveness evidence recent enough to count as
     /// live: its `updated_at` heartbeat, or the running job's own progress
     /// evidence (see [`Self::latest_job_progress`]).
@@ -1158,7 +1172,7 @@ impl AgentTaskRunRecord {
     /// supervisor's throttled progress heartbeat. Returns the evidence source
     /// and when it was observed.
     pub fn latest_job_progress(&self) -> Option<(String, chrono::DateTime<chrono::Utc>)> {
-        if self.state != AgentTaskRunState::Running {
+        if self.lifecycle.execution.state != RunExecutionState::Running {
             return None;
         }
         let execution = self.metadata["provider_executions"]
@@ -1710,7 +1724,7 @@ mod tests {
     #[test]
     fn exact_step_owner_survives_reconciliation_without_a_caller_lease() {
         let mut record = legacy_record(Value::Object(execution_step_owner_fixture("cook")));
-        record.state = AgentTaskRunState::Running;
+        record.lifecycle.execution.state = RunExecutionState::Running;
 
         record.annotate_stale_running();
 
@@ -1723,9 +1737,9 @@ mod tests {
         record.metadata["execution_step_owner"]["intent_id"] = json!("superseded-step");
         assert!(!record.has_live_execution_step_owner());
         record.metadata["execution_step_owner"]["intent_id"] = json!("fixture-step");
-        record.state = AgentTaskRunState::Succeeded;
+        record.lifecycle.execution.state = RunExecutionState::Succeeded;
         assert!(record.has_live_execution_step_owner());
-        record.state = AgentTaskRunState::Cancelled;
+        record.lifecycle.execution.state = RunExecutionState::Cancelled;
         assert!(!record.has_live_execution_step_owner());
     }
 
@@ -1871,371 +1885,37 @@ mod tests {
     }
 }
 
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "snake_case")]
-pub enum AgentTaskRunState {
-    Queued,
-    Running,
-    Succeeded,
-    /// The run stopped holding a recoverable candidate: every outcome is
-    /// candidate-recoverable, or Cook delivery recorded that verdict.
-    CandidateRecoverable,
-    PartialFailure,
-    Failed,
-    Cancelled,
-}
-
-impl AgentTaskRunState {
-    /// The single definition of an aggregate's status, always a terminal
-    /// state. Any cancelled outcome cancels the run; a run whose outcomes are
-    /// all recoverable candidates is `CandidateRecoverable`; otherwise a
-    /// recoverable candidate counts as not failed. An aggregate with no
-    /// outcomes has no succeeded work and is `Failed`.
-    pub fn from_outcomes(outcomes: &[crate::agent_task::AgentTaskOutcome]) -> Self {
-        use crate::agent_task::AgentTaskOutcomeStatus::{
-            Cancelled, CandidateRecoverable, NoOp, Succeeded,
-        };
-        if outcomes.iter().any(|outcome| outcome.status == Cancelled) {
-            return Self::Cancelled;
-        }
-        if !outcomes.is_empty()
-            && outcomes
-                .iter()
-                .all(|outcome| outcome.status == CandidateRecoverable)
-        {
-            return Self::CandidateRecoverable;
-        }
-        let failed = outcomes
+/// The single definition of an aggregate's status, always a terminal
+/// state. Any cancelled outcome cancels the run; a run whose outcomes are
+/// all recoverable candidates is `CandidateRecoverable`; otherwise a
+/// recoverable candidate counts as not failed. An aggregate with no
+/// outcomes has no succeeded work and is `Failed`.
+pub fn run_state_from_outcomes(
+    outcomes: &[crate::agent_task::AgentTaskOutcome],
+) -> RunExecutionState {
+    use crate::agent_task::AgentTaskOutcomeStatus::{
+        Cancelled, CandidateRecoverable, NoOp, Succeeded,
+    };
+    if outcomes.iter().any(|outcome| outcome.status == Cancelled) {
+        return RunExecutionState::Cancelled;
+    }
+    if !outcomes.is_empty()
+        && outcomes
             .iter()
-            .any(|outcome| !matches!(outcome.status, Succeeded | NoOp | CandidateRecoverable));
-        let succeeded = outcomes
-            .iter()
-            .any(|outcome| matches!(outcome.status, Succeeded | NoOp));
-        match (succeeded, failed) {
-            (true, false) => Self::Succeeded,
-            (true, true) => Self::PartialFailure,
-            _ => Self::Failed,
-        }
+            .all(|outcome| outcome.status == CandidateRecoverable)
+    {
+        return RunExecutionState::CandidateRecoverable;
     }
-
-    /// Whether this is a terminal run state — the run has finished (successfully,
-    /// with a recoverable candidate, partially, or by failure/cancellation) and
-    /// will not transition further on its own.
-    ///
-    /// The single definition of run terminality. Every place that used to
-    /// enumerate this set inline (`matches!(state, Succeeded | CandidateRecoverable
-    /// | ...)`) delegates here, so adding or reclassifying a run state cannot
-    /// leave a stale copy behind.
-    pub fn is_terminal(self) -> bool {
-        matches!(
-            self,
-            AgentTaskRunState::Succeeded
-                | AgentTaskRunState::CandidateRecoverable
-                | AgentTaskRunState::PartialFailure
-                | AgentTaskRunState::Failed
-                | AgentTaskRunState::Cancelled
-        )
-    }
-
-    /// The run state transition graph: whether a committed record in `self`
-    /// may be replaced by one in `next`.
-    ///
-    /// The single definition of legal run state edges. Every record write
-    /// passes through `write_record_guarded`, which refuses an edge this
-    /// rejects with `agent_task_illegal_transition`, so no closure or prepared
-    /// record can commit a state change the graph does not name (#15718).
-    ///
-    /// | from | to |
-    /// |---|---|
-    /// | any | itself (annotation, idempotent re-projection) |
-    /// | `Queued`, `Running` | any |
-    /// | any terminal | `Queued` |
-    /// | `Cancelled` | `Running` |
-    /// | `CandidateRecoverable` | `Cancelled` |
-    /// | non-cancelled terminal | non-cancelled terminal |
-    pub fn can_transition_to(self, next: AgentTaskRunState) -> bool {
-        use AgentTaskRunState::*;
-        match (self, next) {
-            _ if self == next => true,
-            // A live run is claimed (`Start`, `BindLabHandoff`), returned to
-            // the queue (`Requeue`, `reset_for_requeue`) or finished.
-            (Queued | Running, _) => true,
-            // A finished run re-enters only through the queue: a plan
-            // resubmission (`Submit`), the zero-execution rearm
-            // (`rearm_pre_execution_record_inner`), and the reclaim of a
-            // detached Cook that failed before its handoff projected
-            // (`claim_detached_cook_handoff_parent_in_store`).
-            (_, Queued) => true,
-            // A runner's late acceptance of an expired Lab handoff supersedes
-            // the synthetic expiry cancellation (`BindLabHandoff`).
-            (Cancelled, Running) => true,
-            // Otherwise a cancellation is final: its `run.cancelled` receipt
-            // is immutable, so nothing may re-project the run as another
-            // outcome.
-            (Cancelled, _) => false,
-            // No other finished run resumes in place.
-            (_, Running) => false,
-            // A run stopped with a recoverable candidate is waiting on a
-            // decision, which the operator may make by cancelling it
-            // (`cancel`). Every other outcome refuses cancellation.
-            (CandidateRecoverable, Cancelled) => true,
-            (_, Cancelled) => false,
-            // Between the other outcomes a finished run is re-projected from
-            // later evidence: an aggregate (`apply_aggregate_to_record`), a
-            // Cook's `no_candidate` result, or a candidate adoption that
-            // supersedes a pre-execution failure.
-            _ => true,
-        }
-    }
-}
-
-/// Canonical projection of a run's aggregate state onto the generic
-/// `RunExecutionState` carried by `RunLifecycleRecord`.
-///
-/// The two enums share every agent-task variant 1:1 (`RunExecutionState`
-/// additionally models the generic `Unknown` default), so this single `From`
-/// keeps `record.state` and `record.lifecycle.execution.state` in lockstep
-/// instead of a hand-synced map.
-///
-/// That 1:1 claim was false until #6761: `CandidateRecoverable` mapped to
-/// `PartialFailure`, so two run states arrived at every serialized consumer as
-/// one string and the comment saying otherwise is why it went unnoticed. The
-/// projection is now injective, and
-/// `the_projection_is_injective` below fails if a future variant re-collapses
-/// it.
-impl From<AgentTaskRunState> for RunExecutionState {
-    fn from(state: AgentTaskRunState) -> Self {
-        match state {
-            AgentTaskRunState::Queued => RunExecutionState::Queued,
-            AgentTaskRunState::Running => RunExecutionState::Running,
-            AgentTaskRunState::Succeeded => RunExecutionState::Succeeded,
-            AgentTaskRunState::CandidateRecoverable => RunExecutionState::CandidateRecoverable,
-            AgentTaskRunState::PartialFailure => RunExecutionState::PartialFailure,
-            AgentTaskRunState::Failed => RunExecutionState::Failed,
-            AgentTaskRunState::Cancelled => RunExecutionState::Cancelled,
-        }
-    }
-}
-
-/// Projection of a run's aggregate state onto the canonical cross-runtime
-/// vocabulary, `RunLifecycleStatus`.
-///
-/// This exists so a consumer that only ever sees a serialized run — a
-/// persisted report, an HTTP response, a chat-plane message — can decide
-/// success, terminality, and retry without a process exit code. Rendering the
-/// state as `format!("{:?}", record.state)` and calling that a status, which is
-/// what several command boundaries still do, gives a machine consumer a
-/// `Debug` string it cannot branch on.
-///
-/// Written as an exhaustive match so a new `AgentTaskRunState` variant is a
-/// compile error here rather than a silent `Unknown`. It is pinned by test to
-/// agree with composing the two existing projections
-/// (`AgentTaskRunState -> RunExecutionState -> RunLifecycleStatus`), so this is
-/// a shortcut through them, not a second opinion.
-impl From<AgentTaskRunState> for RunLifecycleStatus {
-    fn from(state: AgentTaskRunState) -> Self {
-        match state {
-            AgentTaskRunState::Queued => RunLifecycleStatus::Queued,
-            AgentTaskRunState::Running => RunLifecycleStatus::Running,
-            AgentTaskRunState::Succeeded => RunLifecycleStatus::Succeeded,
-            // A stopped run that still holds a recoverable candidate is
-            // terminal and not successful, but it is not a partial failure
-            // either — the candidate is promotable. Carrying the distinction
-            // through is the whole point of #6761; both routes were changed
-            // together so this still agrees with the `RunExecutionState`
-            // projection above.
-            AgentTaskRunState::CandidateRecoverable => RunLifecycleStatus::CandidateRecoverable,
-            AgentTaskRunState::PartialFailure => RunLifecycleStatus::PartialFailure,
-            AgentTaskRunState::Failed => RunLifecycleStatus::Failed,
-            AgentTaskRunState::Cancelled => RunLifecycleStatus::Cancelled,
-        }
-    }
-}
-
-#[cfg(test)]
-mod run_state_lifecycle_projection_tests {
-    use super::*;
-
-    /// Every edge a production writer commits, named by its call site, is
-    /// legal; the edges no writer may take are refused.
-    #[test]
-    fn the_transition_graph_allows_every_production_edge_and_refuses_the_rest() {
-        use AgentTaskRunState::*;
-        let allowed = [
-            // `Start`, `BindLabHandoff`, `mark_running`, runner projection.
-            (Queued, Running),
-            (Running, Running),
-            // `Requeue`, `reset_for_requeue`.
-            (Running, Queued),
-            // Cancellation of a live run.
-            (Queued, Cancelled),
-            (Running, Cancelled),
-            // Pre-execution and aggregate terminalization.
-            (Queued, Failed),
-            (Running, Succeeded),
-            (Running, CandidateRecoverable),
-            (Running, PartialFailure),
-            (Running, Failed),
-            // Resubmission, zero-execution rearm, detached Cook reclaim.
-            (Failed, Queued),
-            (Cancelled, Queued),
-            (Succeeded, Queued),
-            // Late Lab acceptance of an expired handoff.
-            (Cancelled, Running),
-            // Operator cancel of a run waiting on a candidate decision.
-            (CandidateRecoverable, Cancelled),
-            // Candidate adoption superseding a pre-execution failure.
-            (Failed, Succeeded),
-            (CandidateRecoverable, Succeeded),
-            // A Cook's `no_candidate` result.
-            (Succeeded, PartialFailure),
-            // A controller failure attached before the aggregate projected.
-            (Succeeded, Failed),
-        ];
-        for (from, to) in allowed {
-            assert!(
-                from.can_transition_to(to),
-                "{from:?} -> {to:?} must be legal"
-            );
-        }
-        for state in ALL_RUN_STATES {
-            assert!(state.can_transition_to(state), "{state:?} -> itself");
-        }
-        let refused = [
-            (Succeeded, Running),
-            (Failed, Running),
-            (CandidateRecoverable, Running),
-            (PartialFailure, Running),
-            (Cancelled, Succeeded),
-            (Cancelled, CandidateRecoverable),
-            (Cancelled, PartialFailure),
-            (Cancelled, Failed),
-            (Succeeded, Cancelled),
-            (Failed, Cancelled),
-            (PartialFailure, Cancelled),
-        ];
-        for (from, to) in refused {
-            assert!(
-                !from.can_transition_to(to),
-                "{from:?} -> {to:?} must be refused"
-            );
-        }
-    }
-
-    /// Every `AgentTaskRunState`, so a new variant is a compile error in the
-    /// tests below rather than a silently unchecked one.
-    const ALL_RUN_STATES: [AgentTaskRunState; 7] = [
-        AgentTaskRunState::Queued,
-        AgentTaskRunState::Running,
-        AgentTaskRunState::Succeeded,
-        AgentTaskRunState::CandidateRecoverable,
-        AgentTaskRunState::PartialFailure,
-        AgentTaskRunState::Failed,
-        AgentTaskRunState::Cancelled,
-    ];
-
-    /// The defect #6761 fixed: `CandidateRecoverable` and `PartialFailure`
-    /// both projected to `PartialFailure`, so a consumer
-    /// reading only the serialized run could not tell "there is a candidate to
-    /// promote" from "this partially failed".
-    ///
-    /// Injectivity is the property that makes the projection safe to read as
-    /// the run's state. Asserting it directly means a future variant that
-    /// reuses an existing target fails here instead of silently re-collapsing
-    /// the vocabulary.
-    #[test]
-    fn the_projection_is_injective() {
-        let mut seen: Vec<(RunExecutionState, AgentTaskRunState)> = Vec::new();
-        for state in ALL_RUN_STATES {
-            let projected = RunExecutionState::from(state);
-            if let Some((_, first)) = seen.iter().find(|(target, _)| *target == projected) {
-                panic!(
-                    "{state:?} and {first:?} both project to {projected:?}; \
-                     the projection must stay injective (#6761)"
-                );
-            }
-            seen.push((projected, state));
-        }
-        assert_eq!(seen.len(), ALL_RUN_STATES.len());
-    }
-
-    /// The lifecycle status projection also preserves distinct states.
-    #[test]
-    fn the_lifecycle_status_projection_is_injective() {
-        let mut seen: Vec<(RunLifecycleStatus, AgentTaskRunState)> = Vec::new();
-        for state in ALL_RUN_STATES {
-            let projected = RunLifecycleStatus::from(state);
-            if let Some((_, first)) = seen.iter().find(|(target, _)| *target == projected) {
-                panic!(
-                    "{state:?} and {first:?} both project to {projected:?}; \
-                     lifecycle status could not distinguish them (#6761)"
-                );
-            }
-            seen.push((projected, state));
-        }
-        assert_eq!(seen.len(), ALL_RUN_STATES.len());
-    }
-
-    /// A recoverable run is terminal and unsuccessful, but it is not an
-    /// invitation to retry — the next action is promotion or resumption.
-    /// Reporting it retryable is how an orchestrator builds a retry loop
-    /// around a run that is waiting on a decision.
-    #[test]
-    fn recoverable_states_are_terminal_unsuccessful_and_not_retryable() {
-        let state = AgentTaskRunState::CandidateRecoverable;
-        let projected = RunLifecycleStatus::from(state);
-        assert!(projected.is_terminal(), "{state:?} must be terminal");
-        assert!(!projected.is_success(), "{state:?} must not claim success");
-        assert!(
-            !projected.is_retryable(),
-            "{state:?} must not instruct a retry"
-        );
-    }
-
-    /// The direct projection must never diverge from composing the two that
-    /// already existed. If it did, `record.state` and
-    /// `record.lifecycle.execution.state` would classify the same run
-    /// differently.
-    #[test]
-    fn the_direct_projection_agrees_with_the_composed_one() {
-        for state in [
-            AgentTaskRunState::Queued,
-            AgentTaskRunState::Running,
-            AgentTaskRunState::Succeeded,
-            AgentTaskRunState::CandidateRecoverable,
-            AgentTaskRunState::PartialFailure,
-            AgentTaskRunState::Failed,
-            AgentTaskRunState::Cancelled,
-        ] {
-            let composed = RunLifecycleStatus::from(RunExecutionState::from(state));
-
-            assert_eq!(
-                RunLifecycleStatus::from(state),
-                composed,
-                "{state:?} must project identically through both routes"
-            );
-        }
-    }
-
-    /// Run terminality already has one definition. The projection must not
-    /// become a second.
-    #[test]
-    fn the_projection_agrees_with_run_state_terminality() {
-        for state in [
-            AgentTaskRunState::Queued,
-            AgentTaskRunState::Running,
-            AgentTaskRunState::Succeeded,
-            AgentTaskRunState::CandidateRecoverable,
-            AgentTaskRunState::PartialFailure,
-            AgentTaskRunState::Failed,
-            AgentTaskRunState::Cancelled,
-        ] {
-            assert_eq!(
-                RunLifecycleStatus::from(state).is_terminal(),
-                state.is_terminal(),
-                "{state:?} terminality must match AgentTaskRunState::is_terminal"
-            );
-        }
+    let failed = outcomes
+        .iter()
+        .any(|outcome| !matches!(outcome.status, Succeeded | NoOp | CandidateRecoverable));
+    let succeeded = outcomes
+        .iter()
+        .any(|outcome| matches!(outcome.status, Succeeded | NoOp));
+    match (succeeded, failed) {
+        (true, false) => RunExecutionState::Succeeded,
+        (true, true) => RunExecutionState::PartialFailure,
+        _ => RunExecutionState::Failed,
     }
 }
 

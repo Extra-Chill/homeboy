@@ -1,5 +1,6 @@
 //! Agents-owned execution outbox. Submission inputs are frozen by the lifecycle
 //! writer, never reconstructed by the daemon draining the outbox.
+use homeboy_lifecycle_contract::RunExecutionState;
 use std::path::Path;
 use std::sync::{Arc, OnceLock};
 
@@ -9,7 +10,7 @@ use homeboy_core::{Error, Result};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 
-use crate::agent_task_lifecycle::{AgentTaskLifecycleStore, AgentTaskRunRecord, AgentTaskRunState};
+use crate::agent_task_lifecycle::{AgentTaskLifecycleStore, AgentTaskRunRecord};
 use crate::agent_task_scheduler::AgentTaskPlan;
 
 pub const EXECUTION_STEP_KIND: &str = "agent-task-execution-step";
@@ -116,7 +117,7 @@ impl ExecutionStepIntent {
     pub fn authorizes(&self, record: &AgentTaskRunRecord) -> bool {
         record.run_id == self.subject_id
             && (matches!(self.mode, ExecutionStepMode::Recovery { .. })
-                || record.state() == AgentTaskRunState::Queued)
+                || record.state() == RunExecutionState::Queued)
             && record.metadata["execution_scheduling"]["epoch"].as_u64() == Some(self.epoch)
             && record.metadata["execution_scheduling"]["current_intent_id"].as_str()
                 == Some(self.intent_id.as_str())
@@ -717,7 +718,7 @@ pub(super) fn consume_execution_terminal_in_store(
             // terminal result. Never manufacture another initial admission.
             disposition = "published";
             if !execution_record.state().is_terminal()
-                && !(execution_record.state() == AgentTaskRunState::Queued
+                && !(execution_record.state() == RunExecutionState::Queued
                     && execution_record.metadata["execution_scheduling"]["current_intent_id"]
                         .is_string())
             {

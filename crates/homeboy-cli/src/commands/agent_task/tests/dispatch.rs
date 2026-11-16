@@ -2910,7 +2910,7 @@ fn branch_scoped_active_stale_output_never_suggests_fleet_reconciliation() {
         persist_discovery_record(
             "branch-scoped-stale",
             "fix/scoped-stale",
-            AgentTaskRunState::Queued,
+            RunExecutionState::Queued,
         );
         agent_task_lifecycle::rewrite_record_for_test("branch-scoped-stale", |record| {
             record.metadata["runner_pid"] = json!(i32::MAX as u32);
@@ -2919,7 +2919,7 @@ fn branch_scoped_active_stale_output_never_suggests_fleet_reconciliation() {
         persist_discovery_record(
             "other-branch-stale",
             "fix/other-stale",
-            AgentTaskRunState::Queued,
+            RunExecutionState::Queued,
         );
         agent_task_lifecycle::rewrite_record_for_test("other-branch-stale", |record| {
             record.metadata["runner_pid"] = json!(i32::MAX as u32);
@@ -3000,7 +3000,7 @@ fn list_and_active_default_to_the_compact_page_limit() {
     });
 }
 
-fn persist_discovery_record(run_id: &str, branch: &str, state: AgentTaskRunState) {
+fn persist_discovery_record(run_id: &str, branch: &str, state: RunExecutionState) {
     let mut plan = test_plan();
     plan.tasks[0].workspace.branch = Some(branch.to_string());
     agent_task_lifecycle::submit_plan(&plan, Some(run_id)).expect("persist discovery run");
@@ -3017,7 +3017,7 @@ fn persist_discovery_record(run_id: &str, branch: &str, state: AgentTaskRunState
 fn list_pages_tied_keysets_across_insertions_and_deleted_boundaries() {
     with_isolated_home(|_| {
         for run_id in ["tie-a", "tie-b", "tie-c", "tie-d"] {
-            persist_discovery_record(run_id, "fix/ties", AgentTaskRunState::Queued);
+            persist_discovery_record(run_id, "fix/ties", RunExecutionState::Queued);
         }
 
         let first = run_discovery_page(vec![
@@ -3049,7 +3049,7 @@ fn list_pages_tied_keysets_across_insertions_and_deleted_boundaries() {
 
         // This tied insertion sorts before the emitted keyset boundary, so it
         // belongs to a later fresh walk rather than displacing an in-progress one.
-        persist_discovery_record("tie-z", "fix/ties", AgentTaskRunState::Queued);
+        persist_discovery_record("tie-z", "fix/ties", RunExecutionState::Queued);
         let lifecycle =
             homeboy::agents::agent_task_lifecycle::AgentTaskLifecycleStore::from_environment()
                 .expect("lifecycle store");
@@ -3096,7 +3096,7 @@ fn list_pages_tied_keysets_across_insertions_and_deleted_boundaries() {
 fn list_page_skips_legacy_schema_rows_and_continues_from_the_physical_keyset() {
     with_isolated_home(|_| {
         for run_id in ["page-a", "page-m-legacy", "page-z"] {
-            persist_discovery_record(run_id, "fix/page-health", AgentTaskRunState::Queued);
+            persist_discovery_record(run_id, "fix/page-health", RunExecutionState::Queued);
         }
         let lifecycle =
             homeboy::agents::agent_task_lifecycle::AgentTaskLifecycleStore::from_environment()
@@ -3151,7 +3151,7 @@ fn list_page_scopes_record_health_to_the_returned_task_url() {
         persist_discovery_record(
             "unrelated-m-legacy",
             "fix/unrelated",
-            AgentTaskRunState::Queued,
+            RunExecutionState::Queued,
         );
 
         let lifecycle =
@@ -3189,12 +3189,12 @@ fn list_page_scopes_record_health_to_the_returned_task_url() {
 #[test]
 fn list_sparse_scope_fills_matching_pages_without_duplicates_or_skips() {
     with_isolated_home(|_| {
-        persist_discovery_record("sparse-a", "fix/sparse", AgentTaskRunState::Running);
-        persist_discovery_record("sparse-b", "fix/sparse", AgentTaskRunState::Running);
-        persist_discovery_record("sparse-c", "fix/sparse", AgentTaskRunState::Running);
-        persist_discovery_record("sparse-z", "fix/sparse", AgentTaskRunState::Queued);
+        persist_discovery_record("sparse-a", "fix/sparse", RunExecutionState::Running);
+        persist_discovery_record("sparse-b", "fix/sparse", RunExecutionState::Running);
+        persist_discovery_record("sparse-c", "fix/sparse", RunExecutionState::Running);
+        persist_discovery_record("sparse-z", "fix/sparse", RunExecutionState::Queued);
         for run_id in ["unrelated-x", "unrelated-y", "unrelated-z"] {
-            persist_discovery_record(run_id, "fix/unrelated", AgentTaskRunState::Running);
+            persist_discovery_record(run_id, "fix/unrelated", RunExecutionState::Running);
         }
 
         let lifecycle =
@@ -3333,11 +3333,11 @@ fn list_sparse_scope_reports_incomplete_search_before_matches_beyond_window() {
             persist_discovery_record(
                 &format!("unrelated-{index:03}"),
                 "fix/unrelated",
-                AgentTaskRunState::Running,
+                RunExecutionState::Running,
             );
         }
         for run_id in ["match-a", "match-b", "match-c"] {
-            persist_discovery_record(run_id, "fix/window-match", AgentTaskRunState::Running);
+            persist_discovery_record(run_id, "fix/window-match", RunExecutionState::Running);
         }
 
         let first = run_discovery_page(vec![
@@ -4043,13 +4043,13 @@ fn cook_admits_a_project_attached_component_whose_repository_was_renamed() {
 #[test]
 fn cook_discovery_limit_one_keeps_list_filters_and_newest_order() {
     with_isolated_home(|_| {
-        persist_discovery_record("filtered-old", "fix/newest", AgentTaskRunState::Queued);
-        persist_discovery_record("filtered-new", "fix/newest", AgentTaskRunState::Queued);
+        persist_discovery_record("filtered-old", "fix/newest", RunExecutionState::Queued);
+        persist_discovery_record("filtered-new", "fix/newest", RunExecutionState::Queued);
         agent_task_lifecycle::rewrite_record_for_test("filtered-new", |record| {
             record.submitted_at = "2026-09-11T00:00:00Z".to_string();
         })
         .unwrap();
-        persist_discovery_record("excluded", "fix/other", AgentTaskRunState::Queued);
+        persist_discovery_record("excluded", "fix/other", RunExecutionState::Queued);
         let result = run_discovery_page(
             [
                 "homeboy",

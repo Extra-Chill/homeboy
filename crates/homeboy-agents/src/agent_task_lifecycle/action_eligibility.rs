@@ -1,10 +1,11 @@
-use super::{AgentTaskRunRecord, AgentTaskRunState, LocalOwnerLiveness};
+use super::{AgentTaskRunRecord, LocalOwnerLiveness};
 use crate::agent_task_schedule::AgentTaskPlan;
 use homeboy_control_plane_contract::{
     ControlPlaneAction, ControlPlaneActionAvailability, ControlPlaneActionConfirmation,
     ControlPlaneActionEligibility, ControlPlaneActionEligibilityReport, RunId,
     CONTROL_PLANE_ACTION_ELIGIBILITY_SCHEMA,
 };
+use homeboy_lifecycle_contract::RunExecutionState;
 
 /// Canonical non-mutating lifecycle action policy for CLI, daemon, and API projections.
 /// Mutation commands revalidate these snapshot decisions under their own locks.
@@ -28,7 +29,7 @@ pub(crate) fn lifecycle_action_eligibility_with_roots(
     let resume = resume_availability(record);
     let placement_update = placement_update_availability(record);
     let retry = retry_availability(record, plan, roots);
-    let quarantine = if record.state() == AgentTaskRunState::Queued {
+    let quarantine = if record.state() == RunExecutionState::Queued {
         available("queued run can be quarantined before admission")
     } else {
         unavailable("quarantine requires an exact queued run")
@@ -40,7 +41,7 @@ pub(crate) fn lifecycle_action_eligibility_with_roots(
     };
     let promotion = if matches!(
         record.state(),
-        AgentTaskRunState::Succeeded | AgentTaskRunState::CandidateRecoverable
+        RunExecutionState::Succeeded | RunExecutionState::CandidateRecoverable
     ) {
         indeterminate("promotion requires a target worktree and candidate preflight")
     } else {
@@ -171,7 +172,7 @@ fn placement_update_availability(
     record: &AgentTaskRunRecord,
 ) -> (ControlPlaneActionAvailability, String) {
     let admission = &record.metadata["unmaterialized_cook_admission"];
-    if record.state() != AgentTaskRunState::Queued || !admission.is_object() {
+    if record.state() != RunExecutionState::Queued || !admission.is_object() {
         return unavailable("placement updates require a queued unmaterialized Cook admission");
     }
     if record.metadata["provider_executions"]
@@ -219,12 +220,12 @@ fn indeterminate(reason: impl Into<String>) -> (ControlPlaneActionAvailability, 
 fn resource_guard_blocks_replay(record: &AgentTaskRunRecord) -> bool {
     matches!(
         record.state(),
-        AgentTaskRunState::Failed | AgentTaskRunState::PartialFailure
+        RunExecutionState::Failed | RunExecutionState::PartialFailure
     ) && homeboy_runner_contract::find_resource_guard_stop(&record.metadata).is_some()
 }
 
 fn resume_availability(record: &AgentTaskRunRecord) -> (ControlPlaneActionAvailability, String) {
-    if record.state() == AgentTaskRunState::CandidateRecoverable
+    if record.state() == RunExecutionState::CandidateRecoverable
         && record.runner_id().is_some()
         && record.runner_job_id().is_some()
         && record.metadata["cook_id"].as_str().is_some()
@@ -263,7 +264,7 @@ fn resume_availability(record: &AgentTaskRunRecord) -> (ControlPlaneActionAvaila
         );
     }
     match record.state() {
-        AgentTaskRunState::Queued => {
+        RunExecutionState::Queued => {
             if record.is_controller_pre_provider_phase()
                 && record.metadata["phase"] == "source_materialization"
             {
@@ -296,7 +297,7 @@ fn resume_availability(record: &AgentTaskRunRecord) -> (ControlPlaneActionAvaila
             }
             available("queued run can re-enter execution")
         }
-        AgentTaskRunState::Running => match record.local_owner_liveness() {
+        RunExecutionState::Running => match record.local_owner_liveness() {
             LocalOwnerLiveness::Live => unavailable("run has an authoritative live local owner"),
             LocalOwnerLiveness::Unverifiable => {
                 indeterminate("local owner identity cannot be verified without reconciliation")
@@ -321,9 +322,9 @@ fn retry_availability(
     }
     if !matches!(
         record.state(),
-        AgentTaskRunState::Failed
-            | AgentTaskRunState::Cancelled
-            | AgentTaskRunState::PartialFailure
+        RunExecutionState::Failed
+            | RunExecutionState::Cancelled
+            | RunExecutionState::PartialFailure
     ) {
         return unavailable("retry requires a failed, cancelled, or partial-failure run");
     }
@@ -378,7 +379,7 @@ fn retry_availability(
 mod tests {
     use super::*;
 
-    fn record(state: AgentTaskRunState, stale: bool) -> AgentTaskRunRecord {
+    fn record(state: RunExecutionState, stale: bool) -> AgentTaskRunRecord {
         let mut record: AgentTaskRunRecord = serde_json::from_value(serde_json::json!({
             "schema": "homeboy/agent-task-run/v1", "run_id": "run", "plan_id": "plan",
             "state": state, "submitted_at": "2026-01-01T00:00:00Z", "plan_path": "/plan"
@@ -403,13 +404,13 @@ mod tests {
     #[test]
     fn lifecycle_action_contract_covers_every_durable_state_without_false_promotion() {
         for state in [
-            AgentTaskRunState::Queued,
-            AgentTaskRunState::Running,
-            AgentTaskRunState::Succeeded,
-            AgentTaskRunState::CandidateRecoverable,
-            AgentTaskRunState::PartialFailure,
-            AgentTaskRunState::Failed,
-            AgentTaskRunState::Cancelled,
+            RunExecutionState::Queued,
+            RunExecutionState::Running,
+            RunExecutionState::Succeeded,
+            RunExecutionState::CandidateRecoverable,
+            RunExecutionState::PartialFailure,
+            RunExecutionState::Failed,
+            RunExecutionState::Cancelled,
         ] {
             let report = lifecycle_action_eligibility(&record(state, false), None);
             assert_eq!(report.schema, CONTROL_PLANE_ACTION_ELIGIBILITY_SCHEMA);
@@ -441,7 +442,7 @@ mod tests {
             }
             if matches!(
                 state,
-                AgentTaskRunState::Succeeded | AgentTaskRunState::CandidateRecoverable
+                RunExecutionState::Succeeded | RunExecutionState::CandidateRecoverable
             ) {
                 assert_eq!(
                     decision(&report, ControlPlaneAction::Promote),
@@ -459,17 +460,17 @@ mod tests {
 
         // A runner-backed run with a fresh heartbeat: the reconciler leaves it
         // alone, so Reconcile must not be advertised (it used to be).
-        let mut runner_fresh = record(AgentTaskRunState::Running, false);
+        let mut runner_fresh = record(RunExecutionState::Running, false);
         runner_fresh.metadata["runner_id"] = serde_json::json!("homeboy-lab");
         runner_fresh.updated_at = Some(fresh);
 
         // A queued run with no owner and an old timestamp: the reconciler
         // cancels it, so Reconcile must be advertised (it used to be withheld).
-        let mut queued_orphan = record(AgentTaskRunState::Queued, false);
+        let mut queued_orphan = record(RunExecutionState::Queued, false);
         queued_orphan.updated_at = Some(old.clone());
 
         // A running run flagged stale with no owner signal.
-        let mut running_stale = record(AgentTaskRunState::Running, true);
+        let mut running_stale = record(RunExecutionState::Running, true);
         running_stale.updated_at = Some(old);
 
         for (label, fixture, expected) in [
@@ -510,7 +511,7 @@ mod tests {
 
     #[test]
     fn stale_metadata_does_not_override_a_quarantine_guard() {
-        let mut record = record(AgentTaskRunState::Running, true);
+        let mut record = record(RunExecutionState::Running, true);
         record.metadata["queue_quarantine"] = serde_json::json!({"reason": "fixture"});
         let report = lifecycle_action_eligibility(&record, None);
 
@@ -522,7 +523,7 @@ mod tests {
 
     #[test]
     fn unmaterialized_cook_resume_is_projected_as_idempotent() {
-        let mut record = record(AgentTaskRunState::Queued, false);
+        let mut record = record(RunExecutionState::Queued, false);
         record.metadata["unmaterialized_cook_admission"] = serde_json::json!({
             "state": "blocked_runner_unavailable",
         });
@@ -546,7 +547,7 @@ mod tests {
 
     #[test]
     fn queued_runner_proxy_retry_is_not_resumable_but_local_queue_is() {
-        let mut proxy = record(AgentTaskRunState::Queued, false);
+        let mut proxy = record(RunExecutionState::Queued, false);
         proxy.metadata["kind"] = serde_json::json!("lab_offload_controller_proxy");
         proxy.metadata["runner_id"] = serde_json::json!("runner-7");
         proxy.metadata["phase"] = serde_json::json!("retry");
@@ -562,7 +563,7 @@ mod tests {
         );
         assert!(resume.reason.contains("owning runner"));
 
-        let local = lifecycle_action_eligibility(&record(AgentTaskRunState::Queued, false), None);
+        let local = lifecycle_action_eligibility(&record(RunExecutionState::Queued, false), None);
         assert_eq!(
             decision(&local, ControlPlaneAction::Resume),
             ControlPlaneActionAvailability::Available
@@ -571,7 +572,7 @@ mod tests {
 
     #[test]
     fn candidate_recoverable_cook_resume_names_recover() {
-        let mut record = record(AgentTaskRunState::CandidateRecoverable, false);
+        let mut record = record(RunExecutionState::CandidateRecoverable, false);
         record.metadata["runner_id"] = serde_json::json!("runner-7");
         record.metadata["runner_job_id"] = serde_json::json!("job-7");
         record.metadata["cook_id"] = serde_json::json!("cook-15732");
@@ -592,7 +593,7 @@ mod tests {
 
     #[test]
     fn unmaterialized_metadata_does_not_bypass_resume_safety_preconditions() {
-        for state in [AgentTaskRunState::Cancelled, AgentTaskRunState::Succeeded] {
+        for state in [RunExecutionState::Cancelled, RunExecutionState::Succeeded] {
             let mut record = record(state, false);
             record.metadata["unmaterialized_cook_admission"] = serde_json::json!({
                 "state": "blocked_runner_stale",
@@ -606,7 +607,7 @@ mod tests {
             );
         }
 
-        let mut running = record(AgentTaskRunState::Running, false);
+        let mut running = record(RunExecutionState::Running, false);
         running.metadata["unmaterialized_cook_admission"] = serde_json::json!({
             "state": "blocked_runner_stale",
         });
@@ -619,7 +620,7 @@ mod tests {
             ControlPlaneActionAvailability::Unavailable
         );
 
-        let mut quarantined = record(AgentTaskRunState::Queued, false);
+        let mut quarantined = record(RunExecutionState::Queued, false);
         quarantined.metadata["unmaterialized_cook_admission"] = serde_json::json!({
             "state": "blocked_runner_stale",
         });
@@ -632,7 +633,7 @@ mod tests {
             ControlPlaneActionAvailability::Unavailable
         );
 
-        let mut exhausted = record(AgentTaskRunState::Queued, false);
+        let mut exhausted = record(RunExecutionState::Queued, false);
         exhausted.metadata["unmaterialized_cook_admission"] = serde_json::json!({
             "state": "exhausted",
         });
@@ -647,7 +648,7 @@ mod tests {
 
     #[test]
     fn exhausted_unmaterialized_cook_retry_requires_a_fresh_cook() {
-        let mut record = record(AgentTaskRunState::Failed, false);
+        let mut record = record(RunExecutionState::Failed, false);
         record.metadata["unmaterialized_cook_admission"] = serde_json::json!({
             "state": "exhausted",
             "binding": {
@@ -669,7 +670,7 @@ mod tests {
 
     #[test]
     fn placement_update_is_available_only_before_execution_ownership() {
-        let mut record = record(AgentTaskRunState::Queued, false);
+        let mut record = record(RunExecutionState::Queued, false);
         record.metadata["unmaterialized_cook_admission"] = serde_json::json!({
             "state": "blocked_runner_unavailable",
             "binding": { "admission_inputs": { "argv": ["homeboy"] } },
@@ -693,7 +694,7 @@ mod tests {
 
     #[test]
     fn cancel_remains_available_for_a_live_owner_after_candidate_recovery() {
-        let mut record = record(AgentTaskRunState::CandidateRecoverable, false);
+        let mut record = record(RunExecutionState::CandidateRecoverable, false);
         record.metadata["runner_pid"] = serde_json::json!(std::process::id());
         assert_eq!(
             decision(
@@ -706,7 +707,7 @@ mod tests {
 
     #[test]
     fn cancel_eligibility_accepts_rooted_controller_staging_and_pending_runner_transport() {
-        let mut staging = record(AgentTaskRunState::Queued, false);
+        let mut staging = record(RunExecutionState::Queued, false);
         staging.metadata["lab_staging_controller_job_id"] = serde_json::json!("controller-job");
         assert_eq!(
             decision(
@@ -716,7 +717,7 @@ mod tests {
             ControlPlaneActionAvailability::Available
         );
 
-        let mut submission = record(AgentTaskRunState::Queued, false);
+        let mut submission = record(RunExecutionState::Queued, false);
         submission.metadata["runner_submission_intent"] = serde_json::json!({
             "state": "pending",
             "runner_id": "homeboy-lab",

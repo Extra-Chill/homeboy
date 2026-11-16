@@ -169,7 +169,7 @@ pub(crate) fn recorded_store_contention(record: &AgentTaskRunRecord) -> bool {
 
 /// Only the synthetic controller failure may be superseded by retained runner evidence.
 pub(crate) fn lost_observation_write(record: &AgentTaskRunRecord) -> bool {
-    record.state() == AgentTaskRunState::Failed
+    record.state() == RunExecutionState::Failed
         && record.has_accepted_lab_handoff()
         && record.metadata["pre_execution_failure"]["message"]
             .as_str()
@@ -247,7 +247,7 @@ pub(crate) fn reconcile_runner_job_snapshot_in_store(
     // through here, so binding cannot diverge across callers. Both steps no-op
     // once the run is already bound / no longer queued.
     bind_pending_lab_handoff_snapshot_in_store(lifecycle_store, record, snapshot)?;
-    let started = record.state() == AgentTaskRunState::Queued;
+    let started = record.state() == RunExecutionState::Queued;
     if started {
         start_run(record);
     }
@@ -592,15 +592,15 @@ fn project_terminal_runner_job_snapshot(
     record.updated_at = Some(now_timestamp());
     let (run_state, task_state, phase) = match snapshot.job.status {
         homeboy_core::api_jobs::JobStatus::Succeeded => (
-            AgentTaskRunState::Succeeded,
+            RunExecutionState::Succeeded,
             AgentTaskState::Succeeded,
             "completed",
         ),
         homeboy_core::api_jobs::JobStatus::Failed => {
-            (AgentTaskRunState::Failed, AgentTaskState::Failed, "failed")
+            (RunExecutionState::Failed, AgentTaskState::Failed, "failed")
         }
         homeboy_core::api_jobs::JobStatus::Cancelled => (
-            AgentTaskRunState::Cancelled,
+            RunExecutionState::Cancelled,
             AgentTaskState::Cancelled,
             "cancelled",
         ),
@@ -642,7 +642,7 @@ fn project_terminal_runner_job_snapshot(
     }
     metadata.insert(
         METADATA_KEY_RETRYABLE.to_string(),
-        json!(run_state != AgentTaskRunState::Succeeded),
+        json!(run_state != RunExecutionState::Succeeded),
     );
     metadata.remove(METADATA_KEY_STALE_RUNNING);
     metadata.remove(METADATA_KEY_STALE_RUNNING_REASON);

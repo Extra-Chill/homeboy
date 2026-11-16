@@ -8,12 +8,12 @@ fn finalized_receipt_fixture(
     HermeticTestContext,
     homeboy::agents::agent_task_lifecycle::AgentTaskLifecycleStore,
 ) {
-    use homeboy::agents::agent_task_lifecycle::AgentTaskRunState;
+    use homeboy_lifecycle_contract::RunExecutionState;
 
     let (context, lifecycle_store) = cook_fixture(cook_id, run_id, |lifecycle_store, _| {
         lifecycle_store
             .mutate_record(run_id, |record| {
-                record.set_state_for_test(AgentTaskRunState::Succeeded);
+                record.set_state_for_test(RunExecutionState::Succeeded);
                 true
             })
             .expect("terminalize run");

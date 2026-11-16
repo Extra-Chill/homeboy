@@ -11,6 +11,7 @@ name = "homeboy_agents"
 path = "src/lib.rs"
 
 [dependencies]
+homeboy-lifecycle-contract = { path = "../contracts/homeboy-lifecycle-contract" }
 homeboy-core = { version = "0.1.0", path = "../homeboy-core" }
 homeboy-control-plane-contract = { version = "0.1.0", path = "../contracts/homeboy-control-plane-contract" }
 homeboy-upgrade = { version = "0.1.0", path = "../homeboy-upgrade" }

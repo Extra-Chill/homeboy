@@ -54,7 +54,6 @@ pub(crate) fn with_isolated_home<R>(body: impl FnOnce(&tempfile::TempDir) -> R) 
 }
 pub(crate) use homeboy::agents::agent_tasks::lifecycle::{
     self as agent_task_lifecycle, reconcile_status as lifecycle_status, AgentTaskRunRecord,
-    AgentTaskRunState,
 };
 pub(crate) use homeboy::agents::agent_tasks::scheduler::{
     AgentTaskExecutionContext, AgentTaskState,
@@ -65,6 +64,7 @@ pub(crate) use homeboy::agents::agent_tasks::{
     AgentTaskPolicy, AgentTaskRequest, AgentTaskWorkspace, AGENT_TASK_ARTIFACT_SCHEMA,
     AGENT_TASK_OUTCOME_SCHEMA, AGENT_TASK_REQUEST_SCHEMA,
 };
+pub(crate) use homeboy_lifecycle_contract::RunExecutionState;
 pub(crate) use serde_json::{json, Value};
 pub(crate) use std::sync::{Arc, Mutex};
 

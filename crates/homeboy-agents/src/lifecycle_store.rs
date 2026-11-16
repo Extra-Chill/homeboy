@@ -1,3 +1,4 @@
+use homeboy_lifecycle_contract::RunExecutionState;
 use std::fs;
 use std::io::Read;
 use std::path::PathBuf;
@@ -11,8 +12,8 @@ use serde_json::{json, Value};
 use super::terminal_transition::{TerminalRecordCommit, TRANSITION_RETRY_ATTEMPTS};
 use super::{
     sanitize_run_id, AgentTaskAdvance, AgentTaskCookIndex, AgentTaskCookIndexAttempt,
-    AgentTaskCookLatestSubstantiveCandidate, AgentTaskRunRecord, AgentTaskRunState,
-    AgentTaskTransition, AgentTaskTransitionConflict, AgentTaskTransitionError,
+    AgentTaskCookLatestSubstantiveCandidate, AgentTaskRunRecord, AgentTaskTransition,
+    AgentTaskTransitionConflict, AgentTaskTransitionError,
 };
 use crate::agent_task_scheduler::{AgentTaskAggregate, AgentTaskPlan};
 use homeboy_core::engine::local_files::{
@@ -292,7 +293,7 @@ impl AgentTaskLifecycleStore {
     ) -> Result<Option<AgentTaskRunRecord>> {
         self.with_store_lock(|| {
             let mut record = self.read_record(run_id)?;
-            if record.state() != super::AgentTaskRunState::Queued
+            if record.state() != super::RunExecutionState::Queued
                 || record.metadata.get("queue_quarantine").is_some()
                 || !authorize(&record)
             {
@@ -326,7 +327,7 @@ impl AgentTaskLifecycleStore {
                 return Ok(false);
             }
             record.record_runner_metadata(false);
-            super::set_run_state(&mut record, super::AgentTaskRunState::Running);
+            super::set_run_state(&mut record, super::RunExecutionState::Running);
             record.metadata["execution_step_owner"] =
                 execution_step_owner(json!(intent.intent_id))?;
             self.advance_record_locked_without_terminal_projection(
@@ -1493,7 +1494,7 @@ impl AgentTaskLifecycleStore {
                     None,
                 ));
             }
-            if record.state() != AgentTaskRunState::Queued
+            if record.state() != RunExecutionState::Queued
                 || record.run_id != existing.run_id
                 || record.plan_id != existing.plan_id
             {
@@ -1622,7 +1623,7 @@ impl AgentTaskLifecycleStore {
     /// returns [`AgentTaskTransitionError::Conflict`] and writes nothing.
     ///
     /// The edge from the stored state to the committed one must be legal in
-    /// [`AgentTaskRunState::can_transition_to`]; an illegal edge is refused
+    /// [`RunExecutionState::can_transition_to`]; an illegal edge is refused
     /// with `agent_task_illegal_transition` and writes nothing.
     pub fn transition(
         &self,
@@ -1778,7 +1779,7 @@ impl AgentTaskLifecycleStore {
     pub(crate) fn project_terminal_aggregate(
         &self,
         prepared: &AgentTaskRunRecord,
-        decided_from: AgentTaskRunState,
+        decided_from: RunExecutionState,
         aggregate: &AgentTaskAggregate,
     ) -> Result<AgentTaskRunRecord> {
         let committed = self.with_store_lock(|| {
@@ -2127,7 +2128,7 @@ pub(super) struct RecordWriteGuard {
     /// Commit only while the stored revision still equals this value.
     pub expected_revision: u64,
     /// Run state the transition was decided from, recorded on its event.
-    pub from: AgentTaskRunState,
+    pub from: RunExecutionState,
     /// Stable name of a typed transition, recorded as a `run.transitioned`
     /// event. `None` for an annotation, which records no transition.
     pub transition: Option<&'static str>,
@@ -2171,7 +2172,7 @@ pub(super) enum GuardedRecordWrite {
     /// The stored revision moved; nothing was written.
     Conflict {
         actual_revision: u64,
-        actual_state: Option<AgentTaskRunState>,
+        actual_state: Option<RunExecutionState>,
     },
 }
 
@@ -2243,7 +2244,7 @@ pub(super) fn write_record_guarded(
     // Keep the first writer's identity on the run itself: daemon job receipts
     // may be pruned long before someone inspects the cancellation.
     let mut record = record.clone();
-    if record.state() == AgentTaskRunState::Cancelled
+    if record.state() == RunExecutionState::Cancelled
         && record.metadata.get("cancellation_actor").is_none()
     {
         record.ensure_metadata_object().insert(
@@ -2274,7 +2275,7 @@ pub(super) fn write_record_guarded(
     let stored_state = existing_metadata
         .pointer("/agent_task_run/state")
         .cloned()
-        .and_then(|state| serde_json::from_value::<AgentTaskRunState>(state).ok());
+        .and_then(|state| serde_json::from_value::<RunExecutionState>(state).ok());
     if let Some(guard) = guard {
         if guard.expected_revision != stored_revision {
             return Ok(GuardedRecordWrite::Conflict {
@@ -2525,8 +2526,8 @@ pub(super) fn write_record_guarded(
                 .metadata_json
                 .pointer("/agent_task_run/state")
                 .cloned()
-                .and_then(|state| serde_json::from_value::<AgentTaskRunState>(state).ok());
-            if !stored_state.is_some_and(AgentTaskRunState::is_terminal) {
+                .and_then(|state| serde_json::from_value::<RunExecutionState>(state).ok());
+            if !stored_state.is_some_and(RunExecutionState::is_terminal) {
                 return Err(Error::internal_unexpected(format!(
                     "agent-task record write refused by the terminal-row guard: run {} is stored as `{}` over a non-terminal typed record and the refused write projected `{}`",
                     record.run_id, committed.status, projected.status,
@@ -3226,13 +3227,14 @@ pub(crate) fn cook_owns_observation(
             && !record.has_recorded_provider_progress())
 }
 
-fn run_status(state: AgentTaskRunState) -> &'static str {
+fn run_status(state: RunExecutionState) -> &'static str {
     match state {
-        AgentTaskRunState::Queued | AgentTaskRunState::Running => RunStatus::Running.as_str(),
-        AgentTaskRunState::Succeeded => RunStatus::Pass.as_str(),
-        AgentTaskRunState::CandidateRecoverable => RunStatus::Fail.as_str(),
-        AgentTaskRunState::PartialFailure | AgentTaskRunState::Failed => RunStatus::Fail.as_str(),
-        AgentTaskRunState::Cancelled => RunStatus::Skipped.as_str(),
+        RunExecutionState::Queued | RunExecutionState::Running => RunStatus::Running.as_str(),
+        RunExecutionState::Succeeded => RunStatus::Pass.as_str(),
+        RunExecutionState::CandidateRecoverable => RunStatus::Fail.as_str(),
+        RunExecutionState::PartialFailure | RunExecutionState::Failed => RunStatus::Fail.as_str(),
+        RunExecutionState::Unknown => RunStatus::Fail.as_str(),
+        RunExecutionState::Cancelled => RunStatus::Skipped.as_str(),
     }
 }
 

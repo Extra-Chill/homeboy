@@ -21,14 +21,15 @@
 //! it read, so no production writer can commit a stale snapshot.
 //!
 //! Whatever the commit kind, the edge from the stored state to the committed
-//! one must be legal in [`AgentTaskRunState::can_transition_to`]. The single
+//! one must be legal in [`RunExecutionState::can_transition_to`]. The single
 //! write path refuses any other edge with [`AGENT_TASK_ILLEGAL_TRANSITION`];
 //! the per-kind rules below only narrow it.
 
 use super::*;
+use homeboy_lifecycle_contract::RunExecutionState;
 
 /// The terminal run states a typed transition may commit. Mirrors the
-/// terminal subset of [`AgentTaskRunState`] exactly.
+/// terminal subset of [`RunExecutionState`] exactly.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum AgentTaskTerminalOutcome {
@@ -40,24 +41,26 @@ pub enum AgentTaskTerminalOutcome {
 }
 
 impl AgentTaskTerminalOutcome {
-    pub fn run_state(self) -> AgentTaskRunState {
+    pub fn run_state(self) -> RunExecutionState {
         match self {
-            Self::Succeeded => AgentTaskRunState::Succeeded,
-            Self::CandidateRecoverable => AgentTaskRunState::CandidateRecoverable,
-            Self::PartialFailure => AgentTaskRunState::PartialFailure,
-            Self::Failed => AgentTaskRunState::Failed,
-            Self::Cancelled => AgentTaskRunState::Cancelled,
+            Self::Succeeded => RunExecutionState::Succeeded,
+            Self::CandidateRecoverable => RunExecutionState::CandidateRecoverable,
+            Self::PartialFailure => RunExecutionState::PartialFailure,
+            Self::Failed => RunExecutionState::Failed,
+            Self::Cancelled => RunExecutionState::Cancelled,
         }
     }
 
-    pub fn from_run_state(state: AgentTaskRunState) -> Option<Self> {
+    pub fn from_run_state(state: RunExecutionState) -> Option<Self> {
         match state {
-            AgentTaskRunState::Succeeded => Some(Self::Succeeded),
-            AgentTaskRunState::CandidateRecoverable => Some(Self::CandidateRecoverable),
-            AgentTaskRunState::PartialFailure => Some(Self::PartialFailure),
-            AgentTaskRunState::Failed => Some(Self::Failed),
-            AgentTaskRunState::Cancelled => Some(Self::Cancelled),
-            AgentTaskRunState::Queued | AgentTaskRunState::Running => None,
+            RunExecutionState::Succeeded => Some(Self::Succeeded),
+            RunExecutionState::CandidateRecoverable => Some(Self::CandidateRecoverable),
+            RunExecutionState::PartialFailure => Some(Self::PartialFailure),
+            RunExecutionState::Failed => Some(Self::Failed),
+            RunExecutionState::Cancelled => Some(Self::Cancelled),
+            RunExecutionState::Unknown | RunExecutionState::Queued | RunExecutionState::Running => {
+                None
+            }
         }
     }
 }
@@ -153,10 +156,10 @@ impl AgentTaskAdvance {
         match self {
             Self::Submit => None,
             Self::Start => (stored.state().is_terminal()
-                || prepared.state() != AgentTaskRunState::Running)
+                || prepared.state() != RunExecutionState::Running)
                 .then_some("start must move a live run to running"),
             Self::Requeue => (stored.state().is_terminal()
-                || prepared.state() != AgentTaskRunState::Queued)
+                || prepared.state() != RunExecutionState::Queued)
                 .then_some("requeue must return a live run to the queue"),
             Self::PendLabHandoff => (stored.state().is_terminal()
                 || prepared.state() != stored.state()
@@ -164,7 +167,7 @@ impl AgentTaskAdvance {
                 || handoff_state(prepared) != Some(AgentTaskLabHandoffState::Pending))
             .then_some("a pending Lab handoff requires a live, unaccepted run"),
             Self::BindLabHandoff => match (accepted(stored), accepted(prepared)) {
-                _ if prepared.state() != AgentTaskRunState::Running => {
+                _ if prepared.state() != RunExecutionState::Running => {
                     Some("binding a Lab handoff must leave the run running")
                 }
                 (_, None) => Some("binding a Lab handoff must accept a runner job"),
@@ -187,7 +190,7 @@ impl AgentTaskAdvance {
                 || accepted(stored).is_some()
                 || prepared.lab_handoff.is_some())
             .then_some("only a live, unaccepted Lab handoff can be released"),
-            Self::ExpireLabHandoff => (stored.state() != AgentTaskRunState::Cancelled
+            Self::ExpireLabHandoff => (stored.state() != RunExecutionState::Cancelled
                 || prepared.state() != stored.state()
                 || handoff_state(prepared) != Some(AgentTaskLabHandoffState::Expired))
             .then_some("only a cancelled run's Lab handoff can expire"),
@@ -249,7 +252,7 @@ impl AgentTaskTransition {
     }
 
     /// The state this transition commits.
-    pub fn target_state(&self) -> AgentTaskRunState {
+    pub fn target_state(&self) -> RunExecutionState {
         match self {
             Self::Terminate { outcome, .. } => outcome.run_state(),
             Self::ProjectAggregate { prepared, .. }
@@ -346,8 +349,8 @@ fn keep_committed_cancellation(
     stored: &AgentTaskRunRecord,
     mut prepared: AgentTaskRunRecord,
 ) -> AgentTaskRunRecord {
-    if stored.state() != AgentTaskRunState::Cancelled
-        || prepared.state() != AgentTaskRunState::Cancelled
+    if stored.state() != RunExecutionState::Cancelled
+        || prepared.state() != RunExecutionState::Cancelled
     {
         return prepared;
     }
@@ -402,14 +405,14 @@ fn validate_prepared_terminal_record(
 
 /// `reason_code` carried in the details of a refused transition: the commit
 /// would take the run along an edge the run state graph
-/// ([`AgentTaskRunState::can_transition_to`]) or the named transition does
+/// ([`RunExecutionState::can_transition_to`]) or the named transition does
 /// not allow. Nothing was written.
 pub const AGENT_TASK_ILLEGAL_TRANSITION: &str = "agent_task_illegal_transition";
 
 /// Refuse a commit that would move `stored` to `to` along an illegal edge.
 pub(crate) fn illegal_transition(
     stored: &AgentTaskRunRecord,
-    to: AgentTaskRunState,
+    to: RunExecutionState,
     transition: &str,
     problem: &str,
 ) -> Error {
@@ -418,8 +421,8 @@ pub(crate) fn illegal_transition(
 
 pub(crate) fn illegal_state_transition(
     run_id: &str,
-    from: AgentTaskRunState,
-    to: AgentTaskRunState,
+    from: RunExecutionState,
+    to: RunExecutionState,
     transition: &str,
     problem: &str,
 ) -> Error {
@@ -465,7 +468,7 @@ pub struct AgentTaskTransitionConflict {
     pub expected_revision: u64,
     pub actual_revision: u64,
     /// The stored state the conflicting writer left behind, when decodable.
-    pub actual_state: Option<AgentTaskRunState>,
+    pub actual_state: Option<RunExecutionState>,
     pub transition: &'static str,
 }
 
@@ -555,15 +558,12 @@ pub(crate) struct StateWriteAuthority(());
 
 const AUTHORITY: StateWriteAuthority = StateWriteAuthority(());
 
-/// Single authoritative setter for a run's state. It writes both the
-/// top-level run state and the derived `lifecycle.execution.state`
-/// projection together, so the two cannot silently diverge.
-pub(crate) fn set_run_state(record: &mut AgentTaskRunRecord, state: AgentTaskRunState) {
+/// Single authoritative setter for the lifecycle execution state.
+pub(crate) fn set_run_state(record: &mut AgentTaskRunRecord, state: RunExecutionState) {
     record.write_state(state, AUTHORITY);
     let timestamp = record.updated_at.clone().unwrap_or_else(now_timestamp);
-    record.lifecycle.execution.state = RunExecutionState::from(state);
     record.lifecycle.execution.updated_at = Some(timestamp.clone());
-    if state == AgentTaskRunState::Running && record.lifecycle.execution.started_at.is_none() {
+    if state == RunExecutionState::Running && record.lifecycle.execution.started_at.is_none() {
         record.lifecycle.execution.started_at = Some(timestamp.clone());
     }
     // A terminal run has finished executing, so stamp `finished_at` for the
@@ -573,18 +573,11 @@ pub(crate) fn set_run_state(record: &mut AgentTaskRunRecord, state: AgentTaskRun
         record.lifecycle.execution.finished_at = Some(timestamp.clone());
     }
     record.lifecycle.updated_at = Some(timestamp);
-    // Assert the invariant the record-health check enforces
-    // (`ConflictingProjections`) so a future edit that breaks the pairing
-    // fails fast in dev/tests rather than emitting divergent records.
-    debug_assert!(
-        record.run_state_projections_agree(),
-        "set_run_state must leave run-state projections in agreement"
-    );
 }
 
 /// Start the run: `Running`, and every task still `Queued` starts with it.
 pub(crate) fn start_run(record: &mut AgentTaskRunRecord) {
-    set_run_state(record, AgentTaskRunState::Running);
+    set_run_state(record, RunExecutionState::Running);
     for task in &mut record.tasks {
         if task.state() == AgentTaskState::Queued {
             task.write_state(AgentTaskState::Running, AUTHORITY);
@@ -597,7 +590,7 @@ pub(crate) fn start_run(record: &mut AgentTaskRunRecord) {
 /// their own outcome.
 pub(crate) fn settle_run(
     record: &mut AgentTaskRunRecord,
-    run_state: AgentTaskRunState,
+    run_state: RunExecutionState,
     task_state: AgentTaskState,
 ) {
     set_run_state(record, run_state);
@@ -613,7 +606,7 @@ pub(crate) fn settle_run(
 
 /// Return a zero-execution run to the queue and drop its exact-step owner.
 pub(crate) fn reset_for_requeue(record: &mut AgentTaskRunRecord) {
-    set_run_state(record, AgentTaskRunState::Queued);
+    set_run_state(record, RunExecutionState::Queued);
     record.lifecycle.execution.started_at = None;
     record.lifecycle.execution.finished_at = None;
     for task in &mut record.tasks {
@@ -643,7 +636,7 @@ pub(crate) fn project_task_state(task: &mut AgentTaskRunTask, state: AgentTaskSt
 /// is never handed back to the store.
 pub(crate) fn observed_with_run_state(
     record: &AgentTaskRunRecord,
-    state: AgentTaskRunState,
+    state: RunExecutionState,
 ) -> AgentTaskRunRecord {
     let mut observed = record.clone();
     observed.write_state(state, AUTHORITY);

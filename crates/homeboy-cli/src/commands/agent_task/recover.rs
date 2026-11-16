@@ -323,7 +323,8 @@ mod tests {
                 .mutate_record(cook_id, |record| {
                     record.metadata["detached_cook_handoff"]["state"] =
                         serde_json::json!("exited_before_handoff");
-                    record.set_state_for_test(agent_task_lifecycle::AgentTaskRunState::Failed);
+                    record
+                        .set_state_for_test(homeboy_lifecycle_contract::RunExecutionState::Failed);
                     true
                 })
                 .unwrap();
@@ -362,7 +363,7 @@ mod tests {
             );
             assert_eq!(
                 store.read_record(cook_id).unwrap().state(),
-                agent_task_lifecycle::AgentTaskRunState::Failed
+                homeboy_lifecycle_contract::RunExecutionState::Failed
             );
         });
     }

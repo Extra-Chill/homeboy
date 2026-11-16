@@ -10,10 +10,9 @@ use homeboy_control_plane_contract::{
     ControlPlaneSubmissionRequest, RunId, CONTROL_PLANE_SUBMISSION_ACKNOWLEDGEMENT_SCHEMA,
     CONTROL_PLANE_SUBMISSION_REQUEST_SCHEMA,
 };
+use homeboy_lifecycle_contract::RunExecutionState;
 
-use crate::agent_task_lifecycle::{
-    self, AgentTaskLifecycleStore, AgentTaskRunRecord, AgentTaskRunState,
-};
+use crate::agent_task_lifecycle::{self, AgentTaskLifecycleStore, AgentTaskRunRecord};
 use crate::agent_task_scheduler::{
     AgentTaskAggregate, AgentTaskPlan, AgentTaskScheduler, HarvestExecutionContext,
     SharedAgentTaskExecutor,
@@ -163,7 +162,7 @@ pub(crate) fn execute_claimed_plan(
         {
             return Ok(outcome);
         }
-        if existing.state() != AgentTaskRunState::Running {
+        if existing.state() != RunExecutionState::Running {
             return Err(Error::validation_invalid_argument(
                 "run",
                 format!(
@@ -253,7 +252,7 @@ pub(crate) fn stage_prepared_plan(
             {
                 return Ok(existing);
             }
-            if existing.state() == AgentTaskRunState::Running {
+            if existing.state() == RunExecutionState::Running {
                 return Err(Error::validation_invalid_argument(
                     "run",
                     format!("agent-task run '{}' is already running", existing.run_id),
@@ -325,7 +324,7 @@ pub(crate) fn reject_prepared_plan(
         }
         let submitted = if existing
             .as_ref()
-            .is_some_and(|record| record.state() == AgentTaskRunState::Running)
+            .is_some_and(|record| record.state() == RunExecutionState::Running)
         {
             lifecycle_store.write_controller_plan(request.run.as_str(), &prepared.plan)?;
             let binding = submission_metadata(request, &prepared.plan, &identity)
@@ -404,7 +403,7 @@ fn submit_prepared_plan_locked(
         // must agree, or a controller recovering a stale child's `run_plan`
         // dispatch (`refresh_stale_running_child_actions` resets the action
         // for redispatch) can never get far enough to reach that reclaim.
-        if existing.state() == AgentTaskRunState::Running
+        if existing.state() == RunExecutionState::Running
             && !accepted_runner_handoff_can_materialize(&existing)
             && existing.owner_process_is_running()
         {
@@ -682,10 +681,10 @@ fn submission_identity(
     };
     let plan_fingerprint = plan_fingerprint(plan)?;
     let queue_to_run = queued_plan_enrichment
-        && existing.state() == AgentTaskRunState::Queued
+        && existing.state() == RunExecutionState::Queued
         && !request.queue_only;
     let claimed_queue_to_run = claimed_plan_enrichment
-        && existing.state() == AgentTaskRunState::Running
+        && existing.state() == RunExecutionState::Running
         && metadata["queue_only"].as_bool() == Some(true)
         && !request.queue_only;
     let concurrent_queue_completion = queued_plan_enrichment
@@ -1022,7 +1021,7 @@ mod tests {
             .expect("execute prepared plan");
 
             assert_eq!(calls.load(Ordering::SeqCst), 1);
-            assert_eq!(outcome.record.state(), AgentTaskRunState::Succeeded);
+            assert_eq!(outcome.record.state(), RunExecutionState::Succeeded);
         });
     }
 
@@ -1064,7 +1063,7 @@ mod tests {
                 agent_task_lifecycle::status("submission-running-replay")
                     .expect("record")
                     .state(),
-                AgentTaskRunState::Running
+                RunExecutionState::Running
             );
         });
     }

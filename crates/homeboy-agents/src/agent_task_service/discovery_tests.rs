@@ -14,9 +14,9 @@ fn record(id: &str, state: &str, submitted_at: &str, metadata: Value) -> AgentTa
     }))
     .expect("record");
     let state = match state {
-        "queued" => agent_task_lifecycle::AgentTaskRunState::Queued,
-        "running" => agent_task_lifecycle::AgentTaskRunState::Running,
-        "succeeded" => agent_task_lifecycle::AgentTaskRunState::Succeeded,
+        "queued" => homeboy_lifecycle_contract::RunExecutionState::Queued,
+        "running" => homeboy_lifecycle_contract::RunExecutionState::Running,
+        "succeeded" => homeboy_lifecycle_contract::RunExecutionState::Succeeded,
         _ => unreachable!(),
     };
     agent_task_lifecycle::set_run_state(&mut record, state);
@@ -40,9 +40,9 @@ fn mission_discovery_uses_status_attempt_outcome() {
                 .unwrap();
             let mut selected = record(&attempt, "running", "2026-01-01T00:00:00Z", json!({}));
             let expected = match state {
-                "failed" => agent_task_lifecycle::AgentTaskRunState::Failed,
-                "running" => agent_task_lifecycle::AgentTaskRunState::Running,
-                _ => agent_task_lifecycle::AgentTaskRunState::Succeeded,
+                "failed" => homeboy_lifecycle_contract::RunExecutionState::Failed,
+                "running" => homeboy_lifecycle_contract::RunExecutionState::Running,
+                _ => homeboy_lifecycle_contract::RunExecutionState::Succeeded,
             };
             agent_task_lifecycle::set_run_state(&mut selected, expected);
             store.write_record(&selected).unwrap();

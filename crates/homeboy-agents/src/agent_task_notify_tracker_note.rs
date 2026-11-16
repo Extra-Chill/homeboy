@@ -99,7 +99,7 @@ fn durable_note(cook_id: &str) -> Option<(GithubIssueRef, String)> {
         .run_id
         .clone();
     let record = store.read_record(&run_id).ok()?;
-    if record.state() == crate::agent_task_lifecycle::AgentTaskRunState::Cancelled {
+    if record.state() == homeboy_lifecycle_contract::RunExecutionState::Cancelled {
         return None;
     }
     let aggregate = crate::agent_task_lifecycle::read_attempt_aggregate(&run_id).ok()?;

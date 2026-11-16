@@ -4,7 +4,6 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use homeboy::agents::agent_task::AgentTaskOutcome;
-use homeboy::agents::agent_task_lifecycle::AgentTaskRunState;
 use homeboy::agents::agent_task_scheduler::{
     AgentTaskArtifactPostprocessStep, AgentTaskExecutorAdapter, AgentTaskPlan, AgentTaskScheduler,
 };
@@ -14,6 +13,7 @@ use homeboy::core::artifacts::{
     ARTIFACT_POSTPROCESS_PLAN_SCHEMA,
 };
 use homeboy_engine_primitives::content_hash;
+use homeboy_lifecycle_contract::RunExecutionState;
 
 struct NoopExecutor;
 
@@ -158,7 +158,7 @@ fn scheduler_recovers_a_worker_killed_before_claim_creation() {
         let recovered = worker.join().expect("scheduler thread");
         assert_eq!(
             recovered.status(),
-            AgentTaskRunState::Succeeded,
+            RunExecutionState::Succeeded,
             "postprocess outcomes: {:#?}",
             recovered.outcomes
         );
@@ -215,8 +215,8 @@ fn scheduler_restart_adopts_a_live_worker_without_reinvoking_helper() {
         let first = first.join().expect("first scheduler");
         let restarted = restarted.join().expect("restarted scheduler");
 
-        assert_eq!(first.status(), AgentTaskRunState::Succeeded);
-        assert_eq!(restarted.status(), AgentTaskRunState::Succeeded);
+        assert_eq!(first.status(), RunExecutionState::Succeeded);
+        assert_eq!(restarted.status(), RunExecutionState::Succeeded);
         let versions = std::fs::read_dir(root.join("versions"))
             .expect("versions")
             .count();

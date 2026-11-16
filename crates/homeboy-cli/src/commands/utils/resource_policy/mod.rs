@@ -2294,7 +2294,7 @@ mod tests {
             .expect("public lifecycle accepts the waiting pinned Cook");
             assert_eq!(
                 record.state(),
-                agent_task_lifecycle::AgentTaskRunState::Queued
+                homeboy_lifecycle_contract::RunExecutionState::Queued
             );
             let persisted =
                 agent_task_lifecycle::exact_record("pinned-pressure").expect("durable admission");

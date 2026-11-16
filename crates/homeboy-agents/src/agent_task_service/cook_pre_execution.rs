@@ -1068,7 +1068,8 @@ mod tests {
                 .expect("write scheduler aggregate");
             let record = lifecycle_store
                 .mutate_record(run_id, |record| {
-                    record.set_state_for_test(agent_task_lifecycle::AgentTaskRunState::Failed);
+                    record
+                        .set_state_for_test(homeboy_lifecycle_contract::RunExecutionState::Failed);
                     record.metadata["provider_executions_consumed"] = serde_json::json!(0);
                     true
                 })
@@ -1387,7 +1388,9 @@ mod tests {
             .unwrap();
             store
                 .mutate_record(cook_id, |record| {
-                    record.set_state_for_test(agent_task_lifecycle::AgentTaskRunState::Cancelled);
+                    record.set_state_for_test(
+                        homeboy_lifecycle_contract::RunExecutionState::Cancelled,
+                    );
                     record.metadata["detached_cook_handoff"]["cancellation_fence"]["state"] =
                         serde_json::json!("cancelled");
                     true
@@ -1408,7 +1411,7 @@ mod tests {
         let left = left_store.read_record(run_id).unwrap();
         assert_eq!(
             left.state(),
-            agent_task_lifecycle::AgentTaskRunState::Cancelled
+            homeboy_lifecycle_contract::RunExecutionState::Cancelled
         );
         assert_eq!(
             left.metadata["cancel_reason"],

@@ -2455,7 +2455,7 @@ fn detached_retry_materializes_failed_plan_and_persists_bounded_preacceptance_fa
             agent_task_lifecycle::reconcile_status(&handoff.run_id).expect("failed retry");
         assert_eq!(
             replacement.state(),
-            homeboy::agents::agent_tasks::lifecycle::AgentTaskRunState::Failed
+            homeboy_lifecycle_contract::RunExecutionState::Failed
         );
         assert_eq!(
             replacement.metadata["pre_execution_failure"]["phase"],
@@ -4329,7 +4329,7 @@ fn execution_step_corrupt_published_inputs_preserve_staging_and_never_dispatch()
         assert!(staging.is_dir(), "verification must precede cleanup");
         assert_eq!(
             agent_task_lifecycle::exact_record(cook_id).unwrap().state(),
-            agent_task_lifecycle::AgentTaskRunState::Queued
+            homeboy_lifecycle_contract::RunExecutionState::Queued
         );
     });
 }

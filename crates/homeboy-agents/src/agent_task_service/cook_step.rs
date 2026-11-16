@@ -284,8 +284,8 @@ pub(super) fn workflow_cook_outcome(cook_id: &str) -> WorkflowRunOutcome {
             if record.runner_id().is_some()
                 && matches!(
                     record.state(),
-                    agent_task_lifecycle::AgentTaskRunState::Succeeded
-                        | agent_task_lifecycle::AgentTaskRunState::CandidateRecoverable
+                    homeboy_lifecycle_contract::RunExecutionState::Succeeded
+                        | homeboy_lifecycle_contract::RunExecutionState::CandidateRecoverable
                 ) =>
         {
             return WorkflowRunOutcome::Pending;
@@ -447,7 +447,7 @@ fn settle_missing_launch_index(
     let mut read_error = None;
     let mut repaired_index = None;
     store.transition_when(cook_id, |record| {
-        if record.state() == agent_task_lifecycle::AgentTaskRunState::Cancelled
+        if record.state() == homeboy_lifecycle_contract::RunExecutionState::Cancelled
             || record.metadata["detached_cook_handoff"]["cook_id"] != cook_id
             || record.metadata["detached_cook_handoff"]["state"] != "redirected"
         {
@@ -501,7 +501,8 @@ fn notify_cook_attempt(cook_id: &str, attempt_run_id: &str) -> Result<()> {
     if !record.state().is_terminal() {
         return Ok(());
     }
-    let exit_code = i32::from(record.state() != agent_task_lifecycle::AgentTaskRunState::Succeeded);
+    let exit_code =
+        i32::from(record.state() != homeboy_lifecycle_contract::RunExecutionState::Succeeded);
     crate::agent_task_notify::cook_terminal_for_attempt(
         cook_id,
         attempt_run_id,
@@ -516,16 +517,17 @@ pub(crate) fn finalize_detached_cook_attempt(cook_id: &str, attempt_run_id: &str
     notify_cook_attempt(cook_id, attempt_run_id)
 }
 
-fn attempt_status_label(state: agent_task_lifecycle::AgentTaskRunState) -> &'static str {
-    use agent_task_lifecycle::AgentTaskRunState;
+fn attempt_status_label(state: homeboy_lifecycle_contract::RunExecutionState) -> &'static str {
+    use homeboy_lifecycle_contract::RunExecutionState;
     match state {
-        AgentTaskRunState::Queued => "queued",
-        AgentTaskRunState::Running => "running",
-        AgentTaskRunState::Succeeded => "succeeded",
-        AgentTaskRunState::CandidateRecoverable => "candidate_recoverable",
-        AgentTaskRunState::PartialFailure => "partial_failure",
-        AgentTaskRunState::Failed => "failed",
-        AgentTaskRunState::Cancelled => "cancelled",
+        RunExecutionState::Queued => "queued",
+        RunExecutionState::Running => "running",
+        RunExecutionState::Succeeded => "succeeded",
+        RunExecutionState::CandidateRecoverable => "candidate_recoverable",
+        RunExecutionState::PartialFailure => "partial_failure",
+        RunExecutionState::Failed => "failed",
+        RunExecutionState::Unknown => "unknown",
+        RunExecutionState::Cancelled => "cancelled",
     }
 }
 
@@ -567,7 +569,7 @@ mod tests {
             agent_task_lifecycle::rewrite_record_for_test(cook_id, |record| {
                 agent_task_lifecycle::set_run_state(
                     record,
-                    agent_task_lifecycle::AgentTaskRunState::Cancelled,
+                    homeboy_lifecycle_contract::RunExecutionState::Cancelled,
                 );
                 record.metadata["detached_cook_handoff"]["state"] = json!("redirected");
             })
@@ -599,7 +601,7 @@ mod tests {
             let after = store.read_record(cook_id).unwrap();
             assert_eq!(
                 after.state(),
-                agent_task_lifecycle::AgentTaskRunState::Cancelled
+                homeboy_lifecycle_contract::RunExecutionState::Cancelled
             );
             assert_eq!(after.revision, before.revision);
             assert!(after.metadata.get("cook_controller_failure").is_none());
@@ -651,7 +653,7 @@ mod tests {
             let parent = store.read_record(cook_id).unwrap();
             assert_eq!(
                 parent.state(),
-                agent_task_lifecycle::AgentTaskRunState::Failed
+                homeboy_lifecycle_contract::RunExecutionState::Failed
             );
             assert_eq!(
                 parent.metadata["detached_cook_handoff"]["reason"],

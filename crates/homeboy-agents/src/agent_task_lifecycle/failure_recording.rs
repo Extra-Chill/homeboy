@@ -200,7 +200,8 @@ fn record_interrupted_local_owner_locked(
     } else {
         "owner_dead"
     };
-    let run_cancelled = AgentTaskRunState::from_outcomes(&outcomes) == AgentTaskRunState::Cancelled;
+    let run_cancelled = crate::agent_task_lifecycle::run_state_from_outcomes(&outcomes)
+        == RunExecutionState::Cancelled;
     let aggregate = AgentTaskAggregate {
         schema: AGENT_TASK_AGGREGATE_SCHEMA.to_string(),
         plan_id: plan.plan_id.clone(),
@@ -524,7 +525,7 @@ pub fn record_workspace_snapshot_fence_invalidation_in_store(
         let consumed = record.metadata["provider_executions_consumed"]
             .as_u64()
             .unwrap_or(u64::MAX);
-        if record.state() != AgentTaskRunState::Failed
+        if record.state() != RunExecutionState::Failed
             || !is_snapshot_invalidated
             || record.has_recorded_provider_progress()
             || consumed != 0
@@ -1897,15 +1898,15 @@ fn terminal_artifact_projection_readiness_for_record_with(
 /// `fail`: the lifecycle record still says `Succeeded` for those, and
 /// re-projecting it must not undo the correction (Extra-Chill/homeboy#15393).
 fn terminal_observation_status(
-    state: &AgentTaskRunState,
+    state: &RunExecutionState,
     existing_metadata: Option<&Value>,
 ) -> Option<&'static str> {
     let status = match state {
-        AgentTaskRunState::Succeeded => "pass",
-        AgentTaskRunState::CandidateRecoverable
-        | AgentTaskRunState::PartialFailure
-        | AgentTaskRunState::Failed
-        | AgentTaskRunState::Cancelled => "fail",
+        RunExecutionState::Succeeded => "pass",
+        RunExecutionState::CandidateRecoverable
+        | RunExecutionState::PartialFailure
+        | RunExecutionState::Failed
+        | RunExecutionState::Cancelled => "fail",
         _ => return None,
     };
     let corrected = existing_metadata
@@ -2871,15 +2872,15 @@ pub(crate) fn apply_aggregate_to_record(
 ) {
     record.updated_at = Some(now_timestamp());
     let terminal_state = aggregate.status();
-    if record.state() != AgentTaskRunState::Cancelled {
+    if record.state() != RunExecutionState::Cancelled {
         // A controller failure is durable terminal evidence. Never project an
         // aggregate as successful while that evidence remains attached.
         set_run_state(
             record,
-            if terminal_state == AgentTaskRunState::Succeeded
+            if terminal_state == RunExecutionState::Succeeded
                 && record.metadata.get("cook_controller_failure").is_some()
             {
-                AgentTaskRunState::Failed
+                RunExecutionState::Failed
             } else {
                 terminal_state
             },
@@ -3414,23 +3415,23 @@ mod terminal_observation_status_tests {
         let corrected =
             json!({ "status_correction": { "previous_status": "pass", "status": "fail" } });
         assert_eq!(
-            terminal_observation_status(&AgentTaskRunState::Succeeded, Some(&corrected)),
+            terminal_observation_status(&RunExecutionState::Succeeded, Some(&corrected)),
             Some("fail")
         );
         assert_eq!(
-            terminal_observation_status(&AgentTaskRunState::Succeeded, Some(&json!({}))),
+            terminal_observation_status(&RunExecutionState::Succeeded, Some(&json!({}))),
             Some("pass")
         );
         assert_eq!(
-            terminal_observation_status(&AgentTaskRunState::Succeeded, None),
+            terminal_observation_status(&RunExecutionState::Succeeded, None),
             Some("pass")
         );
         assert_eq!(
-            terminal_observation_status(&AgentTaskRunState::Failed, None),
+            terminal_observation_status(&RunExecutionState::Failed, None),
             Some("fail")
         );
         assert_eq!(
-            terminal_observation_status(&AgentTaskRunState::Running, None),
+            terminal_observation_status(&RunExecutionState::Running, None),
             None
         );
     }

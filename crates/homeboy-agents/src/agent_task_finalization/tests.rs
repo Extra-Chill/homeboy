@@ -14,8 +14,9 @@ use crate::{
 use homeboy_core::run_lifecycle_record::{
     ArtifactRetentionLifecycle, ArtifactRetentionStatus, CleanupLifecycle, CleanupState,
     ExternalRuntimeId, FinalizationLifecycle, FinalizationState, ProviderRuntimeLifecycle,
-    ProviderRuntimeState, RunExecutionLifecycle, RunExecutionState,
+    ProviderRuntimeState, RunExecutionLifecycle,
 };
+use homeboy_lifecycle_contract::RunExecutionState;
 use std::process::Command;
 
 /// Finalization reads `options.run_id`'s durable lifecycle record from the
@@ -1969,7 +1970,7 @@ fn durable_finalization_accepts_native_and_generic_evidence_but_omits_skipped_wo
 
         assert_eq!(
             record.state(),
-            crate::agent_task_lifecycle::AgentTaskRunState::Succeeded
+            homeboy_lifecycle_contract::RunExecutionState::Succeeded
         );
         assert_eq!(runtimes.len(), 2);
         assert_eq!(runtimes[0].external_runtime_ids[0].value, "native-run-123");

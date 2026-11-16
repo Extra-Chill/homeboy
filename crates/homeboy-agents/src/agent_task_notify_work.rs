@@ -62,7 +62,7 @@ pub(super) fn metadata(report: &AgentTaskCookReport, component: Option<&str>) ->
     };
     let cancelled = report.status == "cancelled"
         || record.as_ref().is_some_and(|record| {
-            record.state() == crate::agent_task_lifecycle::AgentTaskRunState::Cancelled
+            record.state() == homeboy_lifecycle_contract::RunExecutionState::Cancelled
         });
 
     let mut facts = Vec::new();

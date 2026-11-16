@@ -565,16 +565,16 @@ fn observed_agent_task_terminal_job_status(
 }
 
 fn exact_attempt_terminal_job_status(
-    state: homeboy_agents::agent_task_lifecycle::AgentTaskRunState,
+    state: homeboy_lifecycle_contract::RunExecutionState,
 ) -> Option<JobStatus> {
-    use homeboy_agents::agent_task_lifecycle::AgentTaskRunState;
+    use homeboy_lifecycle_contract::RunExecutionState;
     match state {
-        AgentTaskRunState::Cancelled => Some(JobStatus::Cancelled),
-        AgentTaskRunState::Succeeded | AgentTaskRunState::CandidateRecoverable => {
+        RunExecutionState::Cancelled => Some(JobStatus::Cancelled),
+        RunExecutionState::Succeeded | RunExecutionState::CandidateRecoverable => {
             Some(JobStatus::Succeeded)
         }
-        AgentTaskRunState::Failed | AgentTaskRunState::PartialFailure => Some(JobStatus::Failed),
-        AgentTaskRunState::Queued | AgentTaskRunState::Running => None,
+        RunExecutionState::Failed | RunExecutionState::PartialFailure => Some(JobStatus::Failed),
+        RunExecutionState::Unknown | RunExecutionState::Queued | RunExecutionState::Running => None,
     }
 }
 
@@ -659,11 +659,10 @@ mod tests {
     #[test]
     fn cancelled_exact_attempt_releases_observer_pin_with_queued_retry() {
         crate::test_support::with_isolated_home(|_| {
-            use homeboy_agents::agent_task_lifecycle::{
-                self, AgentTaskLifecycleStore, AgentTaskRunState,
-            };
+            use homeboy_agents::agent_task_lifecycle::{self, AgentTaskLifecycleStore};
             use homeboy_agents::agent_task_scheduler::AgentTaskPlan;
             use homeboy_core::runtime_promotion;
+            use homeboy_lifecycle_contract::RunExecutionState;
             let store = AgentTaskLifecycleStore::from_environment().unwrap();
             let plan = AgentTaskPlan::new("cancelled-observer", Vec::new());
             let original_id = "cancelled-observer-attempt-1";
@@ -715,7 +714,7 @@ mod tests {
             drop(lease);
             assert_eq!(
                 store.read_record(retry_id).unwrap().state(),
-                AgentTaskRunState::Queued
+                RunExecutionState::Queued
             );
         });
     }

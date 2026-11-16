@@ -1,11 +1,10 @@
+use homeboy_lifecycle_contract::RunExecutionState;
 use std::{
     process::{Child, Command, Output},
     time::{Duration, Instant},
 };
 
-use homeboy_agents::agent_task_lifecycle::{
-    self, AgentTaskLifecycleStore, AgentTaskRunState, LabOffloadProxyPlan,
-};
+use homeboy_agents::agent_task_lifecycle::{self, AgentTaskLifecycleStore, LabOffloadProxyPlan};
 use homeboy_core::{api_jobs::Job, daemon::ControllerJobRequest};
 use serde_json::{json, Value};
 
@@ -251,7 +250,7 @@ fn native_private_daemon_cancels_only_the_rooted_staging_owner() {
         assert_eq!(first_ack["terminal"], true);
         assert_eq!(
             other_root.read_record(RUN_ID).unwrap().state(),
-            AgentTaskRunState::Queued
+            RunExecutionState::Queued
         );
 
         let replay = cli(&binary, &cancel_args);
@@ -284,11 +283,11 @@ fn native_private_daemon_cancels_only_the_rooted_staging_owner() {
         assert!(status.status.success());
         assert_eq!(
             store.read_record(RUN_ID).unwrap().state(),
-            AgentTaskRunState::Cancelled
+            RunExecutionState::Cancelled
         );
         assert_eq!(
             other_root.read_record(RUN_ID).unwrap().state(),
-            AgentTaskRunState::Queued
+            RunExecutionState::Queued
         );
         let event_kinds = store
             .open_observation_readonly()

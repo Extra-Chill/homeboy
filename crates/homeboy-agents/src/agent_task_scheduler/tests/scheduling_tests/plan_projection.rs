@@ -2,7 +2,7 @@
 //! cancellation behavior.
 
 use super::shared::*;
-use crate::agent_task_lifecycle::AgentTaskRunState;
+use homeboy_lifecycle_contract::RunExecutionState;
 
 mod plan_projection_tests {
     use super::*;
@@ -86,7 +86,7 @@ mod plan_projection_tests {
 
         assert_eq!(
             aggregate.status(),
-            crate::agent_task_lifecycle::AgentTaskRunState::Succeeded
+            homeboy_lifecycle_contract::RunExecutionState::Succeeded
         );
         assert_eq!(aggregate.totals.succeeded, 2);
         assert_eq!(aggregate.totals.skipped, 0);
@@ -122,7 +122,7 @@ mod plan_projection_tests {
         let observed = observed.lock().expect("observed requests");
         let request = observed.first().expect("request dispatched");
 
-        assert_eq!(aggregate.status(), AgentTaskRunState::Succeeded);
+        assert_eq!(aggregate.status(), RunExecutionState::Succeeded);
         assert_eq!(request.component_contracts.len(), 1);
         assert_eq!(
             request.component_contracts[0].slug.as_deref(),
@@ -206,7 +206,7 @@ mod plan_projection_tests {
             .find(|request| request.task_id == "design")
             .expect("design request dispatched");
 
-        assert_eq!(aggregate.status(), AgentTaskRunState::Succeeded);
+        assert_eq!(aggregate.status(), RunExecutionState::Succeeded);
         assert_eq!(aggregate.totals.succeeded, 2);
         assert_eq!(design.instructions, "Build design");
     }

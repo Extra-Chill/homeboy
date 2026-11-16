@@ -90,7 +90,7 @@ fn gate_environment_failure_retains_candidate_and_diagnostic() {
             serde_json::to_value(blocker.code).unwrap(),
             "gate_environment_unavailable"
         );
-        assert_eq!(record.state(), AgentTaskRunState::CandidateRecoverable);
+        assert_eq!(record.state(), RunExecutionState::CandidateRecoverable);
         let output = blocker.output.as_deref().expect("diagnostic excerpt");
         for expected in [
             "gate: lint",
@@ -253,7 +253,7 @@ fn a_deferred_then_executed_gate_never_stays_gates_deferred() {
             "succeeded",
             CookDeliveryState::Verified,
             None,
-            AgentTaskRunState::Succeeded,
+            RunExecutionState::Succeeded,
             None,
         ),
         (
@@ -261,7 +261,7 @@ fn a_deferred_then_executed_gate_never_stays_gates_deferred() {
             "failed",
             CookDeliveryState::Blocked,
             Some(CookDeliveryBlockerCode::GateFailed),
-            AgentTaskRunState::CandidateRecoverable,
+            RunExecutionState::CandidateRecoverable,
             Some(CookStatus::GateFailed),
         ),
     ] {
@@ -271,7 +271,7 @@ fn a_deferred_then_executed_gate_never_stays_gates_deferred() {
         lifecycle_store
             .transition_when(run_id, |current| {
                 let mut prepared = current.clone();
-                set_run_state(&mut prepared, AgentTaskRunState::Succeeded);
+                set_run_state(&mut prepared, RunExecutionState::Succeeded);
                 Some(AgentTaskTransition::CommitRecord {
                     prepared: Box::new(prepared),
                 })
@@ -294,7 +294,7 @@ fn a_deferred_then_executed_gate_never_stays_gates_deferred() {
             deferred.metadata["cook_delivery"]["delivery"]["blocker"]["code"],
             "gate_environment_unavailable"
         );
-        assert_eq!(deferred.state(), AgentTaskRunState::CandidateRecoverable);
+        assert_eq!(deferred.state(), RunExecutionState::CandidateRecoverable);
         // The Cook loop recorded its deferred result.
         lifecycle_store
             .mutate_record(run_id, |record| {
@@ -354,7 +354,7 @@ fn a_no_change_gate_failure_is_recoverable_and_canonically_spelled() {
             .map(CookStatus::as_str),
         Some("no_changes_gate_failed")
     );
-    assert_eq!(record.state(), AgentTaskRunState::CandidateRecoverable);
+    assert_eq!(record.state(), RunExecutionState::CandidateRecoverable);
 }
 
 /// One recoverable run state (#15718): a run whose only task ends
@@ -384,8 +384,8 @@ fn a_candidate_recoverable_run_reads_the_same_before_and_after_delivery() {
 
     let before = record_run_aggregate_in_store(&lifecycle_store, run_id, &plan, &aggregate)
         .expect("aggregate recorded");
-    assert_eq!(aggregate.status(), AgentTaskRunState::CandidateRecoverable);
-    assert_eq!(before.state(), AgentTaskRunState::CandidateRecoverable);
+    assert_eq!(aggregate.status(), RunExecutionState::CandidateRecoverable);
+    assert_eq!(before.state(), RunExecutionState::CandidateRecoverable);
     assert_eq!(
         recover_eligibility(&before),
         ControlPlaneActionAvailability::Indeterminate
@@ -399,12 +399,12 @@ fn a_candidate_recoverable_run_reads_the_same_before_and_after_delivery() {
     .expect("delivery verdict recorded");
     assert_eq!(
         persisted_delivery(&after).lifecycle().run_state,
-        Some(AgentTaskRunState::CandidateRecoverable)
+        Some(RunExecutionState::CandidateRecoverable)
     );
-    assert_eq!(after.state(), AgentTaskRunState::CandidateRecoverable);
+    assert_eq!(after.state(), RunExecutionState::CandidateRecoverable);
     assert_eq!(
         lifecycle_store.read_record(run_id).expect("reread").state(),
-        AgentTaskRunState::CandidateRecoverable
+        RunExecutionState::CandidateRecoverable
     );
     assert_eq!(
         recover_eligibility(&after),

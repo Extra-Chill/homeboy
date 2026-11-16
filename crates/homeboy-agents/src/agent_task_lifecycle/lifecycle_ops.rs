@@ -254,7 +254,7 @@ pub fn claim_detached_cook_handoff_parent_in_store(
         .flatten();
     let claimed = lifecycle_store.mutate_record(&cook_id, |record| {
         let handoff = &record.metadata["detached_cook_handoff"];
-        let reclaimable_pre_projection_failure = record.state() == AgentTaskRunState::Failed
+        let reclaimable_pre_projection_failure = record.state() == RunExecutionState::Failed
             && handoff["state"] == "exited_before_handoff"
             && handoff["admission_state"] == "failed"
             && lifecycle_store.read_cook_index(&cook_id).is_err()
@@ -272,7 +272,7 @@ pub fn claim_detached_cook_handoff_parent_in_store(
             return false;
         }
         if reclaimable_pre_projection_failure {
-            set_run_state(record, AgentTaskRunState::Queued);
+            set_run_state(record, RunExecutionState::Queued);
             record.lifecycle.execution.finished_at = None;
             record.metadata["detached_cook_handoff"]["state"] = json!("pending");
             record.metadata["detached_cook_handoff"]["admission_state"] = json!("pre_supervisor");
@@ -876,7 +876,7 @@ pub fn rearm_unmaterialized_cook_admission(cook_id: &str) -> Result<AgentTaskRun
     else {
         return Ok(current);
     };
-    if current.state() != AgentTaskRunState::Queued {
+    if current.state() != RunExecutionState::Queued {
         return Ok(current);
     }
     // Probe the actual step authority rather than claiming that rewriting a
@@ -902,7 +902,7 @@ pub fn rearm_unmaterialized_cook_admission(cook_id: &str) -> Result<AgentTaskRun
         }
     }
     let updated = mutate_with_execution_intent(&store, &cook_id, |record| {
-        let queued = record.state() == AgentTaskRunState::Queued;
+        let queued = record.state() == RunExecutionState::Queued;
         let admission = &mut record.metadata["unmaterialized_cook_admission"];
         if !queued || !admission.is_object() {
             return Ok(false);
@@ -953,7 +953,7 @@ pub fn update_unmaterialized_cook_placement_in_store(
                     .as_str()
                     .is_some_and(|run_id| store.read_record(run_id).is_ok());
             let already_local = record.metadata["placement_update"]["placement"] == "local";
-            let queued = record.state() == AgentTaskRunState::Queued;
+            let queued = record.state() == RunExecutionState::Queued;
             let admission = &mut record.metadata["unmaterialized_cook_admission"];
             if !queued
                 || !admission.is_object()
@@ -1062,7 +1062,7 @@ pub fn require_detached_cook_handoff_fence_open_in_store(
     if record.metadata["detached_cook_handoff"]["cook_id"] != cook_id {
         return Ok(());
     }
-    if record.state() == AgentTaskRunState::Cancelled
+    if record.state() == RunExecutionState::Cancelled
         || record.metadata["detached_cook_handoff"]["cancellation_fence"]["state"] != "open"
     {
         return Err(Error::validation_invalid_argument(
@@ -1285,7 +1285,7 @@ pub fn cancel_reserved_detached_cook_handoff_attempt_if_cancelled_in_store(
     let Some(attempt_run_id) = handoff["materializing_attempt_run_id"].as_str() else {
         return Ok(false);
     };
-    if handoff["cook_id"] != cook_id || parent.state() != AgentTaskRunState::Cancelled {
+    if handoff["cook_id"] != cook_id || parent.state() != RunExecutionState::Cancelled {
         return Ok(false);
     }
     let Ok(child) = lifecycle_store.read_record(attempt_run_id) else {
@@ -1495,7 +1495,7 @@ pub fn detached_cook_admission_is_live(
     match record.metadata["detached_cook_handoff"]["admission_state"].as_str() {
         Some("supervising") => true,
         Some("unmaterialized") => {
-            record.state() == AgentTaskRunState::Queued
+            record.state() == RunExecutionState::Queued
                 && record.metadata["unmaterialized_cook_admission"]["state"]
                     .as_str()
                     .is_some_and(|state| {
@@ -1551,7 +1551,7 @@ pub fn expire_detached_cook_admission_in_store(
         cook_id,
         "detached Cook admission lease expired before child or supervisor ownership attached",
     )?;
-    Ok(terminal.state() == AgentTaskRunState::Failed
+    Ok(terminal.state() == RunExecutionState::Failed
         && terminal.metadata["detached_cook_handoff"]["admission_state"] == "failed")
 }
 
@@ -2312,7 +2312,7 @@ where
         {
             let owner = &existing.metadata["execution_step_owner"];
             let current_job = std::env::var(homeboy_core::daemon::step_job::STEP_JOB_ID_ENV).ok();
-            if existing.state() != AgentTaskRunState::Running
+            if existing.state() != RunExecutionState::Running
                 || owner["pid"].as_u64() != Some(u64::from(std::process::id()))
                 || owner["job_id"].as_str() != current_job.as_deref()
                 || owner["process_start_identity"]
@@ -2535,7 +2535,7 @@ where
         // only sets it when the record it mutates is already `Running`.
         // Preserve that state here so the reclaim it is about to record stays
         // durable evidence instead of silently reading as a fresh start.
-        if existing.state() == AgentTaskRunState::Running && !existing.owner_process_is_running() {
+        if existing.state() == RunExecutionState::Running && !existing.owner_process_is_running() {
             set_run_state(&mut record, existing.state());
         }
         let existing_fanout = canonical_fanout_mission(&existing.metadata)?;
@@ -2735,7 +2735,7 @@ where
             // pre-execution admission failure when the waiter wakes up.
             // Bounded: this run's own just-committed row, not history (#14962).
             if let Ok(cancelled) = lifecycle_store.read_record_bounded(&run_id) {
-                if cancelled.state() == AgentTaskRunState::Cancelled
+                if cancelled.state() == RunExecutionState::Cancelled
                     || cancelled.metadata["controller_admission_cancellation_requested"] == true
                 {
                     return Ok(cancelled);
@@ -3002,7 +3002,7 @@ pub fn mark_running_in_store(
     lifecycle_store.transition_when(&run_id, |stored| {
         let mut prepared = stored.clone();
         let record = &mut prepared;
-        if record.state() == AgentTaskRunState::Queued && record.metadata["execution_scheduling"].is_object() {
+        if record.state() == RunExecutionState::Queued && record.metadata["execution_scheduling"].is_object() {
             error = Some(Error::validation_invalid_argument(
                 "run_id", "queued execution is owned by its exact durable step", Some(run_id.clone()), None,
             ));
@@ -3017,7 +3017,7 @@ pub fn mark_running_in_store(
             ));
             return None;
         }
-        if record.state() == AgentTaskRunState::Running && record.owner_process_is_running() {
+        if record.state() == RunExecutionState::Running && record.owner_process_is_running() {
             error = Some(Error::validation_invalid_argument(
                 "run_id",
                 format!(
@@ -3042,7 +3042,7 @@ pub fn mark_running_in_store(
             ));
             return None;
         }
-        let reclaimed_stale = record.state() == AgentTaskRunState::Running;
+        let reclaimed_stale = record.state() == RunExecutionState::Running;
         record.updated_at = Some(now_timestamp());
         start_run(record);
         update_lifecycle_heartbeat(record);
@@ -3096,7 +3096,7 @@ pub fn defer_cook_runtime_admission_in_store(
         let record = &mut prepared;
         if !matches!(
             record.state(),
-            AgentTaskRunState::Queued | AgentTaskRunState::Running
+            RunExecutionState::Queued | RunExecutionState::Running
         ) || !crate::agent_task_service::has_unambiguous_zero_execution(record)
         {
             return None;
@@ -3648,8 +3648,8 @@ pub fn record_cook_terminal_result_in_store(
         // A cancelled Cook keeps its cancellation: the provenance that minted
         // its `run.cancelled` receipt is valid only on a `Cancelled` record
         // (#15718), and the cancellation is the cause of the missing candidate.
-        if terminal_status == "no_candidate" && record.state() != AgentTaskRunState::Cancelled {
-            set_run_state(record, AgentTaskRunState::PartialFailure);
+        if terminal_status == "no_candidate" && record.state() != RunExecutionState::Cancelled {
+            set_run_state(record, RunExecutionState::PartialFailure);
         }
         true
     })?;
@@ -3734,7 +3734,7 @@ pub fn record_provider_execution_terminal_with_model_in_store(
     let execution_key = format!("{task_id}:{attempt}");
     let mut found = false;
     let record = lifecycle_store.mutate_record(&run_id, |record| {
-        let cancelled = record.state() == AgentTaskRunState::Cancelled;
+        let cancelled = record.state() == RunExecutionState::Cancelled;
         let Some(execution) = record
             .ensure_metadata_object()
             .get_mut("provider_executions")
@@ -3968,7 +3968,7 @@ pub(crate) enum LocalProviderOwnerDecision {
 pub(crate) fn annotate_local_provider_ownership(
     record: &mut AgentTaskRunRecord,
 ) -> LocalProviderOwnerDecision {
-    if record.state() != AgentTaskRunState::Running || record.is_runner_backed() {
+    if record.state() != RunExecutionState::Running || record.is_runner_backed() {
         return LocalProviderOwnerDecision::NotApplicable;
     }
     let Some(executions) = record
@@ -4157,7 +4157,7 @@ pub fn claim_next_eligible_queued_run_with_preflight_and_filter_and_limit_in_sto
         .read_records()?
         .into_iter()
         .filter(|record| {
-            record.state() == AgentTaskRunState::Queued
+            record.state() == RunExecutionState::Queued
                 && !is_transport_proxy(record)
                 && !is_unmaterialized_cook_admission(record)
                 && record.metadata.get("queue_quarantine").is_none()
@@ -4298,7 +4298,7 @@ fn quarantine_queued_run_in_store(
 ) -> Result<()> {
     let diagnostic = redacted_queue_diagnostic(plan, error);
     let _ = lifecycle_store.mutate_record(&record.run_id, |quarantined| {
-        if quarantined.state() != AgentTaskRunState::Queued
+        if quarantined.state() != RunExecutionState::Queued
             || quarantined.metadata.get("queue_quarantine").is_some()
         {
             return false;
@@ -4433,7 +4433,7 @@ pub fn rearm_quarantined_run_in_store(
         })?;
     let mut failure = None;
     let updated = lifecycle_store.mutate_record(&run_id, |record| {
-        if record.state() != AgentTaskRunState::Queued
+        if record.state() != RunExecutionState::Queued
             || record.metadata.get("queue_quarantine").is_none()
         {
             return false;
@@ -4477,7 +4477,7 @@ pub fn quarantine_queued_run_exact_in_store(
     let operator_reason = normalized_operator_quarantine_reason(reason);
     lifecycle_store
         .mutate_record(&run_id, |record| {
-            if record.state() != AgentTaskRunState::Queued
+            if record.state() != RunExecutionState::Queued
                 || record.metadata.get("queue_quarantine").is_some()
             {
                 return false;
@@ -4675,9 +4675,9 @@ pub fn runner_diagnostic_probe(record: &AgentTaskRunRecord) -> AgentTaskRunnerDi
     let runner_job_id = record.runner_job_id().map(str::to_string);
     let applicable = matches!(
         record.state(),
-        AgentTaskRunState::Queued | AgentTaskRunState::Running
+        RunExecutionState::Queued | RunExecutionState::Running
     ) || (record.state().is_terminal()
-        && record.state() != AgentTaskRunState::Succeeded);
+        && record.state() != RunExecutionState::Succeeded);
     let skipped_reason = if is_controller_local(record) {
         Some(RUNNER_PROBE_SKIPPED_CONTROLLER_LOCAL)
     } else if !applicable {
@@ -4740,7 +4740,7 @@ pub fn runner_probe_plan(
         Some(RUNNER_PROBE_SKIPPED_CONTROLLER_LOCAL)
     } else if options.runner_probe == AgentTaskRunnerProbe::Never {
         Some(RUNNER_PROBE_SKIPPED_CALLER_OPTED_OUT)
-    } else if record.state() != AgentTaskRunState::Running {
+    } else if record.state() != RunExecutionState::Running {
         Some(RUNNER_PROBE_SKIPPED_NOT_RUNNING)
     } else {
         None
@@ -4826,7 +4826,7 @@ fn candidate_adoption_terminal_state_is_known(
     lifecycle_store: &AgentTaskLifecycleStore,
     record: &AgentTaskRunRecord,
 ) -> bool {
-    if record.state() != AgentTaskRunState::CandidateRecoverable
+    if record.state() != RunExecutionState::CandidateRecoverable
         || record.metadata.get("pre_execution_failure").is_none()
     {
         return false;
@@ -5156,7 +5156,7 @@ fn converge_resolved_run_in_store(
     // consumer owns execution and cannot inherit a local closure.
     if matches!(
         record.state(),
-        AgentTaskRunState::Succeeded | AgentTaskRunState::CandidateRecoverable
+        RunExecutionState::Succeeded | RunExecutionState::CandidateRecoverable
     ) {
         let recipe_by_cook_id = record
             .metadata
@@ -5462,10 +5462,10 @@ pub(crate) fn mark_resuming_in_store(
     let mut record = lifecycle_store.read_record(&sanitize_run_id(run_id))?;
     if matches!(
         record.state(),
-        AgentTaskRunState::Succeeded
-            | AgentTaskRunState::PartialFailure
-            | AgentTaskRunState::Failed
-            | AgentTaskRunState::Cancelled
+        RunExecutionState::Succeeded
+            | RunExecutionState::PartialFailure
+            | RunExecutionState::Failed
+            | RunExecutionState::Cancelled
     ) {
         return Err(Error::validation_invalid_argument(
             "run_id",
@@ -6125,7 +6125,7 @@ fn retry_chain_in_store(
 /// evidence rather than a competing attempt, so it does not (#17650).
 fn successor_requires_force(record: &AgentTaskRunRecord) -> bool {
     if !record.state().is_terminal()
-        || record.state() == AgentTaskRunState::Succeeded
+        || record.state() == RunExecutionState::Succeeded
         || record.metadata["cook_id"].as_str().is_none()
     {
         return true;

@@ -661,7 +661,7 @@ fn detached_attempt_terminal_preserves_cook_notification_for_final_report() {
         );
         store
             .mutate_record(attempt_id, |record| {
-                record.set_state_for_test(crate::agent_task_lifecycle::AgentTaskRunState::Failed);
+                record.set_state_for_test(homeboy_lifecycle_contract::RunExecutionState::Failed);
                 true
             })
             .expect("fail attempt");
@@ -674,7 +674,7 @@ fn detached_attempt_terminal_preserves_cook_notification_for_final_report() {
         let attempt = store.read_record(attempt_id).expect("raw provider record");
         assert_eq!(
             attempt.state(),
-            crate::agent_task_lifecycle::AgentTaskRunState::Failed
+            homeboy_lifecycle_contract::RunExecutionState::Failed
         );
         crate::agent_task_service::finalize_detached_cook_attempt(cook_id, attempt_id)
             .expect("detached finalizer");

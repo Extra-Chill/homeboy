@@ -20,6 +20,7 @@ path = "src/lib.rs"
 test-support = ["homeboy-core/test-support", "homeboy-agents/test-support", "dep:homeboy-test-support"]
 
 [dependencies]
+homeboy-lifecycle-contract = { path = "../contracts/homeboy-lifecycle-contract" }
 homeboy-test-support = { path = "../homeboy-test-support", optional = true }
 homeboy-core = { version = "0.1.0", path = "../homeboy-core" }
 homeboy-command-contract = { version = "0.1.0", path = "../contracts/homeboy-command-contract" }

@@ -433,7 +433,7 @@ mod tests {
             plan.metadata["cook_attempt"] = json!(1);
             homeboy::agents::agent_task_lifecycle::submit_plan(&plan, Some(run_id)).unwrap();
             homeboy::agents::agent_task_lifecycle::rewrite_record_for_test(run_id, |record| {
-                record.set_state_for_test(homeboy::agents::agent_task_lifecycle::AgentTaskRunState::Succeeded);
+                record.set_state_for_test(homeboy_lifecycle_contract::RunExecutionState::Succeeded);
                 record.metadata = json!({"cook_id": "checkout-cook", "cook_delivery": {"artifacts": {"promotion": {
                     "target": {"path": source, "branch": "cook/head"}
                 }}}});

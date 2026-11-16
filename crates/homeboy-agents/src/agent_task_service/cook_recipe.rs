@@ -660,8 +660,8 @@ impl CookRecipeStore {
         let record = lifecycle_store.read_record(run_id)?;
         if !matches!(
             record.state(),
-            agent_task_lifecycle::AgentTaskRunState::Succeeded
-                | agent_task_lifecycle::AgentTaskRunState::CandidateRecoverable
+            homeboy_lifecycle_contract::RunExecutionState::Succeeded
+                | homeboy_lifecycle_contract::RunExecutionState::CandidateRecoverable
         ) {
             return Ok(());
         }
@@ -3085,7 +3085,7 @@ fn continuation_source_run_id(
     recipe: &AgentTaskCookRecipe,
     latest_run_id: String,
 ) -> String {
-    use agent_task_lifecycle::AgentTaskRunState;
+    use homeboy_lifecycle_contract::RunExecutionState;
     let Ok(latest) = lifecycle_store.read_record(&latest_run_id) else {
         return latest_run_id;
     };
@@ -3095,7 +3095,7 @@ fn continuation_source_run_id(
     let empty_terminal_attempt =
         matches!(
             latest.state(),
-            AgentTaskRunState::Cancelled | AgentTaskRunState::Failed
+            RunExecutionState::Cancelled | RunExecutionState::Failed
         ) && !agent_task_lifecycle::attempt_preserves_candidate_or_gate(
             lifecycle_store,
             &latest_run_id,
@@ -3114,7 +3114,7 @@ fn continuation_source_run_id(
                 .is_ok_and(|record| {
                     matches!(
                         record.state(),
-                        AgentTaskRunState::CandidateRecoverable | AgentTaskRunState::Succeeded
+                        RunExecutionState::CandidateRecoverable | RunExecutionState::Succeeded
                     )
                 })
         })
@@ -4157,7 +4157,7 @@ mod tests {
         lifecycle_store
             .mutate_record("run", |record| {
                 record.set_state_for_test(
-                    agent_task_lifecycle::AgentTaskRunState::CandidateRecoverable,
+                    homeboy_lifecycle_contract::RunExecutionState::CandidateRecoverable,
                 );
                 true
             })
@@ -4178,7 +4178,8 @@ mod tests {
         let fail = |retryable: bool| {
             lifecycle_store
                 .mutate_record("retry", |record| {
-                    record.set_state_for_test(agent_task_lifecycle::AgentTaskRunState::Failed);
+                    record
+                        .set_state_for_test(homeboy_lifecycle_contract::RunExecutionState::Failed);
                     let metadata = record.ensure_metadata_object();
                     metadata.insert("provider_executions_consumed".into(), serde_json::json!(0));
                     metadata.insert("provider_run_ids".into(), serde_json::json!([]));
@@ -4212,8 +4213,8 @@ mod tests {
     #[test]
     fn continuation_and_reader_skip_empty_cancelled_or_failed_followup() {
         for state in [
-            agent_task_lifecycle::AgentTaskRunState::Cancelled,
-            agent_task_lifecycle::AgentTaskRunState::Failed,
+            homeboy_lifecycle_contract::RunExecutionState::Cancelled,
+            homeboy_lifecycle_contract::RunExecutionState::Failed,
         ] {
             let context = homeboy_core::test_support::HermeticTestContext::new();
             let (store, lifecycle_store) = rooted_stores(&context);
@@ -4221,7 +4222,7 @@ mod tests {
             lifecycle_store
                 .mutate_record("run", |record| {
                     record.set_state_for_test(
-                        agent_task_lifecycle::AgentTaskRunState::CandidateRecoverable,
+                        homeboy_lifecycle_contract::RunExecutionState::CandidateRecoverable,
                     );
                     record.ensure_metadata_object().insert(
                         "cook_delivery".into(),
@@ -4844,7 +4845,7 @@ mod tests {
             .mutate_record("run", |record| {
                 agent_task_lifecycle::set_run_state(
                     record,
-                    agent_task_lifecycle::AgentTaskRunState::Succeeded,
+                    homeboy_lifecycle_contract::RunExecutionState::Succeeded,
                 );
                 true
             })
@@ -5124,7 +5125,7 @@ mod tests {
         persist_recipe_run(&store, &lifecycle_store);
         lifecycle_store
             .mutate_record("run", |record| {
-                record.set_state_for_test(agent_task_lifecycle::AgentTaskRunState::Failed);
+                record.set_state_for_test(homeboy_lifecycle_contract::RunExecutionState::Failed);
                 true
             })
             .unwrap();
@@ -5456,7 +5457,9 @@ mod tests {
             store.enqueue_terminal_continuation("cook", "run").unwrap();
             lifecycle_store
                 .mutate_record("run", |record| {
-                    record.set_state_for_test(agent_task_lifecycle::AgentTaskRunState::Succeeded);
+                    record.set_state_for_test(
+                        homeboy_lifecycle_contract::RunExecutionState::Succeeded,
+                    );
                     record
                         .metadata
                         .as_object_mut()
@@ -5487,7 +5490,7 @@ mod tests {
                 Ok(serde_json::json!({}))
             })
             .unwrap();
-        record.set_state_for_test(agent_task_lifecycle::AgentTaskRunState::Succeeded);
+        record.set_state_for_test(homeboy_lifecycle_contract::RunExecutionState::Succeeded);
         crate::agent_task_service::set_cook_delivery_artifact_for_test(
             &mut record.metadata,
             "/promotion",

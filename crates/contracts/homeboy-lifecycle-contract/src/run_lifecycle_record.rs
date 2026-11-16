@@ -120,7 +120,7 @@ impl Default for RunExecutionLifecycle {
 /// # A recoverable state is distinct from partial failure
 ///
 /// `CandidateRecoverable` used to collapse into `PartialFailure` on the way in
-/// from `AgentTaskRunState`. They are not the same situation: a recoverable
+/// from `RunExecutionState`. They are not the same situation: a recoverable
 /// run stopped holding a promotable candidate a consumer can still act on,
 /// whereas `PartialFailure` is the terminal, unsuccessful, nothing-left-to-do
 /// case. Collapsing them meant a consumer reading only the serialized record
@@ -152,6 +152,80 @@ pub enum RunExecutionState {
     /// A state minted by a producer this binary does not know. Never guessed.
     #[serde(other)]
     Unknown,
+}
+
+impl RunExecutionState {
+    /// Whether this is a terminal run state — the run has finished (successfully,
+    /// with a recoverable candidate, partially, or by failure/cancellation) and
+    /// will not transition further on its own.
+    ///
+    /// The single definition of run terminality. Every place that used to
+    /// enumerate this set inline (`matches!(state, Succeeded | CandidateRecoverable
+    /// | ...)`) delegates here, so adding or reclassifying a run state cannot
+    /// leave a stale copy behind.
+    pub fn is_terminal(self) -> bool {
+        matches!(
+            self,
+            RunExecutionState::Succeeded
+                | RunExecutionState::CandidateRecoverable
+                | RunExecutionState::PartialFailure
+                | RunExecutionState::Failed
+                | RunExecutionState::Cancelled
+                | RunExecutionState::Unknown
+        )
+    }
+
+    /// The run state transition graph: whether a committed record in `self`
+    /// may be replaced by one in `next`.
+    ///
+    /// The single definition of legal run state edges. Every record write
+    /// passes through `write_record_guarded`, which refuses an edge this
+    /// rejects with `agent_task_illegal_transition`, so no closure or prepared
+    /// record can commit a state change the graph does not name (#15718).
+    ///
+    /// | from | to |
+    /// |---|---|
+    /// | any | itself (annotation, idempotent re-projection) |
+    /// | `Queued`, `Running` | any |
+    /// | any terminal | `Queued` |
+    /// | `Cancelled` | `Running` |
+    /// | `CandidateRecoverable` | `Cancelled` |
+    /// | non-cancelled terminal | non-cancelled terminal |
+    pub fn can_transition_to(self, next: RunExecutionState) -> bool {
+        use RunExecutionState::*;
+        match (self, next) {
+            (Unknown, _) | (_, Unknown) => self == next,
+            _ if self == next => true,
+            // A live run is claimed (`Start`, `BindLabHandoff`), returned to
+            // the queue (`Requeue`, `reset_for_requeue`) or finished.
+            (Queued | Running, _) => true,
+            // A finished run re-enters only through the queue: a plan
+            // resubmission (`Submit`), the zero-execution rearm
+            // (`rearm_pre_execution_record_inner`), and the reclaim of a
+            // detached Cook that failed before its handoff projected
+            // (`claim_detached_cook_handoff_parent_in_store`).
+            (_, Queued) => true,
+            // A runner's late acceptance of an expired Lab handoff supersedes
+            // the synthetic expiry cancellation (`BindLabHandoff`).
+            (Cancelled, Running) => true,
+            // Otherwise a cancellation is final: its `run.cancelled` receipt
+            // is immutable, so nothing may re-project the run as another
+            // outcome.
+            (Cancelled, _) => false,
+            // No other finished run resumes in place.
+            (_, Running) => false,
+            // A run stopped with a recoverable candidate is waiting on a
+            // decision, which the operator may make by cancelling it
+            // (`cancel`). Every other outcome refuses cancellation.
+            (CandidateRecoverable, Cancelled) => true,
+            (_, Cancelled) => false,
+            // Between the other outcomes a finished run is re-projected from
+            // later evidence: an aggregate (`apply_aggregate_to_record`), a
+            // Cook's `no_candidate` result, or a candidate adoption that
+            // supersedes a pre-execution failure.
+            _ => true,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -520,5 +594,33 @@ mod subsystem_state_tests {
                 serde_json::json!(label)
             );
         }
+    }
+}
+
+#[cfg(test)]
+mod execution_state_policy_tests {
+    use super::RunExecutionState::*;
+
+    #[test]
+    fn unknown_is_terminal_unsuccessful_and_cannot_transition() {
+        assert!(Unknown.is_terminal());
+        assert_ne!(Unknown, Succeeded);
+        assert!(Unknown.can_transition_to(Unknown));
+        for state in [
+            Queued,
+            Running,
+            Succeeded,
+            CandidateRecoverable,
+            PartialFailure,
+            Failed,
+            Cancelled,
+        ] {
+            assert!(!Unknown.can_transition_to(state));
+            assert!(!state.can_transition_to(Unknown));
+        }
+        assert!(Running.can_transition_to(Succeeded));
+        assert!(Failed.can_transition_to(Queued));
+        assert!(!Succeeded.can_transition_to(Running));
+        assert!(!Cancelled.can_transition_to(Succeeded));
     }
 }

@@ -2,7 +2,7 @@
 //! cancellation behavior.
 
 use super::shared::*;
-use crate::agent_task_lifecycle::AgentTaskRunState;
+use homeboy_lifecycle_contract::RunExecutionState;
 
 mod cancellation_tests {
     use super::*;
@@ -48,7 +48,7 @@ mod cancellation_tests {
         token.cancel();
         let aggregate = handle.join().expect("scheduler thread");
 
-        assert_eq!(aggregate.status(), AgentTaskRunState::Cancelled);
+        assert_eq!(aggregate.status(), RunExecutionState::Cancelled);
         assert!(aggregate.totals.cancelled >= 2);
         assert!(cancel_calls
             .lock()

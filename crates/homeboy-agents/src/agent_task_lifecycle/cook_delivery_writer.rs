@@ -103,19 +103,19 @@ fn delivery_run_state(
     previous: Option<&CookDelivery>,
     next: Option<&CookDelivery>,
     run: &AgentTaskRunRecord,
-) -> Option<AgentTaskRunState> {
+) -> Option<RunExecutionState> {
     let next = next?;
     // A cancelled run keeps its cancellation (#16046), and a receipt that
     // leaves the delivery unchanged moves nothing.
-    if run.state() == AgentTaskRunState::Cancelled || previous == Some(next) {
+    if run.state() == RunExecutionState::Cancelled || previous == Some(next) {
         return None;
     }
     match next.lifecycle().run_state? {
-        AgentTaskRunState::CandidateRecoverable => Some(AgentTaskRunState::CandidateRecoverable),
-        AgentTaskRunState::Succeeded => (run.state() == AgentTaskRunState::CandidateRecoverable
+        RunExecutionState::CandidateRecoverable => Some(RunExecutionState::CandidateRecoverable),
+        RunExecutionState::Succeeded => (run.state() == RunExecutionState::CandidateRecoverable
             && previous.is_some_and(CookDelivery::is_unverified)
             && run.candidate_adoption.is_none())
-        .then_some(AgentTaskRunState::Succeeded),
+        .then_some(RunExecutionState::Succeeded),
         _ => None,
     }
 }

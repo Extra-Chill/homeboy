@@ -93,7 +93,7 @@ pub fn seed_status_purity_fixtures_for_test() -> super::Result<Vec<StatusPurityF
 
     submit_plan(&plan, Some("purity-running-dead-owner"))?;
     rewrite_record_for_test("purity-running-dead-owner", |record| {
-        set_run_state(record, AgentTaskRunState::Running);
+        set_run_state(record, RunExecutionState::Running);
         record.metadata["runner_pid"] = serde_json::json!(u32::MAX);
         record.submitted_at = "2000-01-01T00:00:00+00:00".to_string();
         record.updated_at = None;

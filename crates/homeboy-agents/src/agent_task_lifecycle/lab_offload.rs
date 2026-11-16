@@ -711,7 +711,7 @@ pub(crate) fn record_detached_lab_run_with_submission_locked_in_store(
             ));
         }
     }
-    let expired_unaccepted_handoff = record.state() == AgentTaskRunState::Cancelled
+    let expired_unaccepted_handoff = record.state() == RunExecutionState::Cancelled
         && record.lab_handoff.as_ref().is_some_and(|handoff| {
             handoff.state == AgentTaskLabHandoffState::Expired
                 && handoff.authority == AgentTaskLabHandoffAuthority::Controller
@@ -720,10 +720,10 @@ pub(crate) fn record_detached_lab_run_with_submission_locked_in_store(
     if !expired_unaccepted_handoff
         && matches!(
             record.state(),
-            AgentTaskRunState::Succeeded
-                | AgentTaskRunState::PartialFailure
-                | AgentTaskRunState::Failed
-                | AgentTaskRunState::Cancelled
+            RunExecutionState::Succeeded
+                | RunExecutionState::PartialFailure
+                | RunExecutionState::Failed
+                | RunExecutionState::Cancelled
         )
     {
         // A terminal proxy must not be resurrected. A later runner job may
@@ -1142,7 +1142,7 @@ fn fail_missing_lab_attempt_plan_in_store(
     error: &Error,
 ) -> Result<()> {
     record.updated_at = Some(now_timestamp());
-    settle_run(record, AgentTaskRunState::Failed, AgentTaskState::Failed);
+    settle_run(record, RunExecutionState::Failed, AgentTaskState::Failed);
     let metadata = record.ensure_metadata_object();
     metadata.insert(
         "pre_execution_failure".to_string(),

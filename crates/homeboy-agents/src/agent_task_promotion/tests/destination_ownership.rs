@@ -126,13 +126,21 @@ fn destination_passes_to_retries_and_to_successors_of_a_terminal_cook() {
                 })
                 .unwrap();
             };
-            durable("cook-a", lifecycle::AgentTaskRunState::Running, None);
+            durable(
+                "cook-a",
+                homeboy_lifecycle_contract::RunExecutionState::Running,
+                None,
+            );
             durable(
                 "retry-a",
-                lifecycle::AgentTaskRunState::Running,
+                homeboy_lifecycle_contract::RunExecutionState::Running,
                 Some("cook-a"),
             );
-            durable("cook-b", lifecycle::AgentTaskRunState::Queued, None);
+            durable(
+                "cook-b",
+                homeboy_lifecycle_contract::RunExecutionState::Queued,
+                None,
+            );
             destination::record(&repo, "cook-a").unwrap();
 
             assert!(
@@ -149,7 +157,10 @@ fn destination_passes_to_retries_and_to_successors_of_a_terminal_cook() {
             );
 
             lifecycle::rewrite_record_for_test("cook-a", |record| {
-                lifecycle::set_run_state(record, lifecycle::AgentTaskRunState::Failed);
+                lifecycle::set_run_state(
+                    record,
+                    homeboy_lifecycle_contract::RunExecutionState::Failed,
+                );
             })
             .unwrap();
             assert!(
