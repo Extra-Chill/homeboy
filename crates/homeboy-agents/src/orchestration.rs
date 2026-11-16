@@ -6822,9 +6822,8 @@ mod tests {
     }
 
     fn live_gate_driver_candidate() -> AgentTaskRunRecord {
-        let mut value = serde_json::to_value(record(AGENT_TASK_RUN)).unwrap();
-        value["state"] = json!("candidate_recoverable");
-        let mut record: AgentTaskRunRecord = serde_json::from_value(value).unwrap();
+        let mut record = record(AGENT_TASK_RUN);
+        record.set_state_for_test(RunExecutionState::CandidateRecoverable);
         crate::agent_task_service::set_cook_delivery_artifact_for_test(
             &mut record.metadata,
             "/promotion/status",
@@ -7459,12 +7458,9 @@ mod tests {
     #[test]
     fn incomplete_review_snapshot_exposes_reason_and_override_command() {
         let mut snapshot = snapshot("incomplete-attempt", None);
-        snapshot.record = serde_json::from_value({
-            let mut value = serde_json::to_value(&snapshot.record).unwrap();
-            value["state"] = json!("candidate_recoverable");
-            value
-        })
-        .unwrap();
+        snapshot
+            .record
+            .set_state_for_test(RunExecutionState::CandidateRecoverable);
         snapshot.aggregate = Some(
             serde_json::from_value(json!({
                 "plan_id": "incomplete-attempt",
