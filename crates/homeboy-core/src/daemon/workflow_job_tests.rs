@@ -1213,6 +1213,69 @@ fn a_cook_step_that_exits_without_recording_its_run_fails() {
     );
 }
 
+/// #18229: the child finishes without an observing workflow runner. Recovery
+/// must settle the persisted running item even if its Cook record is pending.
+#[test]
+fn workflow_recovery_settles_a_terminal_foreach_job_with_a_pending_cook() {
+    with_isolated_home(|home| {
+        let path = home.path().join(crate::paths::OBSERVATION_DB_FILENAME);
+        let store = JobStore::open_without_reconciliation(&path)
+            .unwrap()
+            .with_daemon_lease("absent-workflow-observer".to_string());
+        let request = request(
+            json!({
+                "schema": "homeboy/workflow/v1",
+                "id": "terminal-item-recovery",
+                "steps": [
+                    {"id": "cook", "foreach": [1], "cook": {"prompt": "fix {{item}}"}},
+                    {"id": "after", "needs": ["cook"], "always": true,
+                     "exec": sh("true")}
+                ]
+            }),
+            home.path(),
+        );
+        register_workflow_run_outcome_resolver(Arc::new(|_| WorkflowRunOutcome::Pending));
+        let job_id = admit(&store, &request);
+        store.claim_controller_execution(job_id, false).unwrap();
+        let (state, commands) = advance(
+            &request.definition,
+            &request.initial_state(),
+            &Event::Start,
+            now_ms(),
+        );
+        commit_without_start(&request, job_id, &state, &commands, &store);
+        let key = state.steps["cook"].items[0].key.as_ref().unwrap();
+        let child = store.controller_job_for_key(key).unwrap();
+        // /bin/sh rejects the Cook CLI arguments and exits nonzero. Only the
+        // child runs: no workflow observer is present to consume its result.
+        crate::daemon::start_controller_job(child.id, &store).unwrap();
+        assert_eq!(
+            wait_terminal(&store, child.id, 20).status,
+            JobStatus::Failed
+        );
+        let before = workflow_status(&store, &request.instance).unwrap();
+        assert_eq!(before["steps"]["cook"]["items"][0]["phase"], "running");
+        assert_eq!(
+            before["steps"]["cook"]["items"][0]["job"]["status"],
+            "failed"
+        );
+
+        let restarted = JobStore::open_without_reconciliation(&path)
+            .unwrap()
+            .with_daemon_lease("replacement-workflow-observer".to_string());
+        crate::daemon::recover_controller_jobs(&restarted);
+        assert_eq!(
+            wait_terminal(&restarted, job_id, 20).status,
+            JobStatus::Failed
+        );
+        let after = workflow_status(&restarted, &request.instance).unwrap();
+        assert_eq!(after["steps"]["cook"]["items"][0]["phase"], "done");
+        assert_eq!(after["steps"]["cook"]["items"][0]["outcome"], "failed");
+        assert_eq!(after["steps"]["cook"]["phase"], "done");
+        assert_eq!(after["steps"]["after"]["outcome"], "succeeded");
+    });
+}
+
 /// #17758: a failed cook foreach item reports its Cook's terminal reason and
 /// the Cook id it launched, not the exit JSON of the process that waited on it.
 #[test]
