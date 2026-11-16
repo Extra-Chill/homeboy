@@ -24,6 +24,8 @@ mod extension_action_payload;
 mod fake_pi;
 #[path = "cli_binary/friction.rs"]
 mod friction;
+#[path = "cli_binary/friction_materialization.rs"]
+mod friction_materialization;
 #[path = "cli_binary/help_fast_path.rs"]
 mod help_fast_path;
 #[path = "cli_binary/notification_route_admission.rs"]

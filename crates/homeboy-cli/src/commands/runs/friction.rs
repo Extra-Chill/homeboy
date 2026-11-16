@@ -75,6 +75,7 @@ pub(crate) fn friction(store: &ObservationStore, args: RunsFrictionArgs) -> CmdR
     let mut commands = BTreeMap::new();
     let mut retries = BTreeMap::new();
     let mut previous = BTreeMap::new();
+    let mut rerun_failures = Vec::new();
     let mut cooks: BTreeMap<String, Value> = BTreeMap::new();
     let mut cook_aliases = BTreeMap::new();
     // Reuse the same canonical-run projection as hotspots, not runner mirrors.
@@ -160,11 +161,23 @@ pub(crate) fn friction(store: &ObservationStore, args: RunsFrictionArgs) -> CmdR
         if let Some(code) = &row.error_code {
             *refusals.entry(code.clone()).or_default() += 1;
         }
-        // Adjacency is scoped by caller, including interleaved agent sessions.
-        let key = row.caller_session.clone();
-        let identity = (row.command_path.clone(), row.run_id.clone());
-        if previous.insert(key, identity.clone()).as_ref() == Some(&identity) {
-            *retries.entry(row.command_path.clone()).or_default() += 1;
+        // Successful protocol calls (including materialization plan/commit)
+        // are not retries. Nor is a shared missing caller an identity.
+        if let Some(caller) = &row.caller_session {
+            let identity = (row.command_path.clone(), row.run_id.clone());
+            if let Some((prior_identity, failed, failure_id)) = previous.insert(
+                caller.clone(),
+                (identity.clone(), row.exit_code != 0, run.id.clone()),
+            ) {
+                if failed && prior_identity == identity {
+                    *retries.entry(row.command_path.clone()).or_default() += 1;
+                    rerun_failures.push(json!({
+                        "command": row.command_path,
+                        "run_id": run.id,
+                        "failure_run_id": failure_id,
+                    }));
+                }
+            }
         }
         if let Some(cook) = row
             .run_id
@@ -203,7 +216,7 @@ pub(crate) fn friction(store: &ObservationStore, args: RunsFrictionArgs) -> CmdR
         .collect();
     Ok((
         RunsOutput::Friction(
-            json!({"command": "runs.friction", "invocation_count": invocations.len(), "truncated": page.truncated, "invocations": invocations, "top_refusal_codes": ranked(refusals), "commands": ranked(commands), "immediate_reruns": ranked(retries), "highest_intervention_cooks": cooks, "stranded_green_cooks": stranded}),
+            json!({"command": "runs.friction", "invocation_count": invocations.len(), "truncated": page.truncated, "invocations": invocations, "top_refusal_codes": ranked(refusals), "commands": ranked(commands), "immediate_reruns": ranked(retries), "rerun_failures": rerun_failures, "highest_intervention_cooks": cooks, "stranded_green_cooks": stranded}),
         ),
         0,
     ))
