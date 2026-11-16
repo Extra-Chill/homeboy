@@ -248,7 +248,8 @@ fn infrastructure(message: String) -> Error {
     error
 }
 
-/// Retry only transport failures. Deterministic Git errors (missing refs,
+/// Retry only transport failures: errors the operation already typed as
+/// retryable, or Git transport text. Deterministic Git errors (missing refs,
 /// permissions, local conflicts) must not spend the infrastructure budget.
 pub fn retry_fetch<T>(mut fetch: impl FnMut() -> Result<T>) -> Result<T> {
     for attempt in 0..3 {
@@ -256,15 +257,16 @@ pub fn retry_fetch<T>(mut fetch: impl FnMut() -> Result<T>) -> Result<T> {
             Ok(value) => return Ok(value),
             Err(mut error) => {
                 let text = format!("{error:?}").to_ascii_lowercase();
-                if ![
-                    "ssl",
-                    "connection",
-                    "timed out",
-                    "could not resolve host",
-                    "unable to access",
-                ]
-                .iter()
-                .any(|needle| text.contains(needle))
+                if error.retryable != Some(true)
+                    && ![
+                        "ssl",
+                        "connection",
+                        "timed out",
+                        "could not resolve host",
+                        "unable to access",
+                    ]
+                    .iter()
+                    .any(|needle| text.contains(needle))
                 {
                     return Err(error);
                 }
