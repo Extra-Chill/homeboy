@@ -5465,7 +5465,6 @@ fn cook_recovery_actions(
     )
 }
 
-#[allow(clippy::too_many_arguments)]
 fn cook_recovery_actions_with_prefix(
     status: &str,
     run_id: &str,

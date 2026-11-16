@@ -454,7 +454,6 @@ pub trait AgentTaskPrFinalizationBackend {
     ) -> Result<Option<AgentTaskPrRef>> {
         Ok(None)
     }
-    #[allow(clippy::too_many_arguments)]
     fn create_pr(
         &mut self,
         component_id: Option<&str>,

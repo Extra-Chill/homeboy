@@ -776,7 +776,6 @@ pub(super) fn report_cook_progress(
     )
 }
 
-#[allow(clippy::too_many_arguments)]
 fn report_cook_progress_with_activity(
     lifecycle_store: &AgentTaskLifecycleStore,
     observer: Option<&CookProgressObserver<'_>>,

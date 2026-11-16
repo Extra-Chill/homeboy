@@ -704,9 +704,7 @@ fn validate_gate_proof_binding(
             None,
         ));
     }
-    if !(options.gate_failed_draft
-        && gate_proof.promotion.status == AgentTaskPromotionStatus::GateFailed
-        && !gate_proof.promotion.changed_files.is_empty())
+    if !options.gate_failed_draft
         && gate_proof.promotion.status != AgentTaskPromotionStatus::Applied
         && !(gate_proof.promotion.status == AgentTaskPromotionStatus::VerifiedNoChanges
             && !gate_proof.promotion.changed_files.is_empty()
