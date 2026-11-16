@@ -4,6 +4,16 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.468.7] - 2026-11-16
+
+### Changed
+- one run-state type, held once on the lifecycle record
+
+### Fixed
+- classify controller/runner build skew as runner.version_skew and refuse it before dispatch
+- a step with no wait spawns even when its linked run is terminal
+- refuse duplicate machine registrations at connect
+
 ## [0.468.6] - 2026-11-16
 
 ### Fixed
