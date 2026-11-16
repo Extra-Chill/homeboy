@@ -8,8 +8,7 @@
 //! The runner-side `homeboy upgrade` owns neither those slots nor the units,
 //! so the owner of a unit's binary is the controller-side runner convergence:
 //! the host unit is repointed and restarted through the
-//! established `refresh-homeboy --reconnect` handoff, which refuses to restart
-//! a daemon with active jobs. The unit is observed after convergence, and a
+//! established `refresh-homeboy` handoff, which re-adopts running jobs. The unit is observed after convergence, and a
 //! runner whose host unit still runs another version is never reported
 //! converged.
 
@@ -104,10 +103,9 @@ fn attach_recovery(runner_id: &str, homeboy_path: &str, entry: &mut RunnerServic
         entry.recovery_commands.clear();
         return;
     }
-    // The established idle-gated handoff: it refuses to restart a daemon
-    // with active jobs and defers instead.
+    // The in-place restart re-adopts running jobs.
     entry.recovery_commands = vec![format!(
-        "homeboy runner refresh-homeboy {} --select {} --reconnect",
+        "homeboy runner refresh-homeboy {} --select {}",
         shell_arg(runner_id),
         shell_arg(homeboy_path)
     )];
@@ -194,7 +192,7 @@ pub(crate) fn converge_runner_service_binaries(
                         } else {
                             let reason = unit.reason.take().unwrap_or_default();
                             unit.reason = Some(format!(
-                                "refresh-homeboy --reconnect completed but the unit is still {}: {reason}",
+                                "refresh-homeboy completed but the unit is still {}: {reason}",
                                 unit.status
                             ));
                         }
@@ -267,7 +265,7 @@ pub(crate) fn converge_runner_service_binaries(
     entry
 }
 
-/// Production refresh: the `refresh-homeboy --select <path> --reconnect`
+/// Production refresh: the `refresh-homeboy --select <path>`
 /// handoff. Running jobs are re-adopted by the restarted daemon.
 pub(crate) fn refresh_runner_service(runner: &Runner, homeboy_path: &str) -> ServiceRefreshOutcome {
     let options = crate::HomeboyBinaryRefreshOptions {
@@ -276,7 +274,6 @@ pub(crate) fn refresh_runner_service(runner: &Runner, homeboy_path: &str) -> Ser
             binary_path: homeboy_path.to_string(),
         },
         git_ref: None,
-        reconnect: true,
         allow_downgrade: false,
         dry_run: false,
     };

@@ -667,7 +667,6 @@ fn handoff_refresh_options(
         runner_id,
         mode,
         git_ref: Some(handoff_build_reference(requested)),
-        reconnect: true,
         // Automatic recovery must preserve #9088's monotonic upgrade contract.
         allow_downgrade: false,
         dry_run: false,
@@ -6909,7 +6908,7 @@ mod tests {
         assert_eq!(recovery.len(), 1);
         assert_eq!(
             recovery[0],
-            "homeboy runner refresh-homeboy lab-identity --ref v1.2.3 --reconnect"
+            "homeboy runner refresh-homeboy lab-identity --ref v1.2.3"
         );
         assert_eq!(
             error.details["homeboy_handoff_identity"]["configured_command_build_identity"],
@@ -6929,7 +6928,7 @@ mod tests {
         assert!(recovery.is_valid());
         assert_eq!(
             recovery.command(),
-            "homeboy runner refresh-homeboy lab-identity --ref v1.2.3 --reconnect"
+            "homeboy runner refresh-homeboy lab-identity --ref v1.2.3"
         );
     }
 

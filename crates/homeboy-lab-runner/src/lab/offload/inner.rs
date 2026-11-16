@@ -2528,7 +2528,7 @@ fn direct_daemon_admission_coordinates<'a>(
 /// - A runner can be `connected: true` while `accepts_jobs: false` because its
 ///   daemon is version-stale (`stale_daemon`). The old boolean gate *passed*
 ///   such a runner, so dispatch proceeded and then failed opaquely downstream
-///   (#8811), while the exact `runner refresh-homeboy ... --reconnect` recovery
+///   (#8811), while the exact `runner refresh-homeboy ...` recovery
 ///   command that status already computed was discarded.
 /// - A disconnected runner was rejected with a generic "requires a connected
 ///   daemon" message that omitted the structured reason and recovery evidence.
@@ -2699,7 +2699,7 @@ mod tests {
             &serde_json::json!({
                 "active_daemon_build_identity": "homeboy 0.353.1+old",
                 "refresh_commands": [
-                    "homeboy runner refresh-homeboy lab --ref v0.353.1 --reconnect",
+                    "homeboy runner refresh-homeboy lab --ref v0.353.1",
                     "homeboy runner connect lab"
                 ],
             }),
@@ -2707,7 +2707,7 @@ mod tests {
 
         assert_eq!(
             progress,
-            "Lab offload: runner `lab` Homeboy binary `/runner/homeboy`; active daemon homeboy 0.353.1+old; refresh with `homeboy runner refresh-homeboy lab --ref v0.353.1 --reconnect && homeboy runner connect lab`."
+            "Lab offload: runner `lab` Homeboy binary `/runner/homeboy`; active daemon homeboy 0.353.1+old; refresh with `homeboy runner refresh-homeboy lab --ref v0.353.1 && homeboy runner connect lab`."
         );
     }
 
@@ -3428,8 +3428,8 @@ mod tests {
             job_command_binary_version: "0.289.3".to_string(),
             active_daemon_control_plane_build_identity: None,
             job_command_binary_build_identity: None,
-            refresh_command:
-                "homeboy runner refresh-homeboy homeboy-lab --ref v0.289.3 --reconnect".to_string(),
+            refresh_command: "homeboy runner refresh-homeboy homeboy-lab --ref v0.289.3"
+                .to_string(),
             stale_runtime_paths: Vec::new(),
             changed_runtime_paths: vec![crate::RunnerChangedRuntimePath {
                 env: "HOMEBOY_PLUGIN_PATH".to_string(),

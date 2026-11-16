@@ -81,12 +81,12 @@ pub(crate) fn connect_action(runner_id: &str) -> ExecutableAction {
     )
 }
 
-/// `homeboy runner refresh-homeboy <id> --reconnect`.
+/// `homeboy runner refresh-homeboy <id>`.
 pub(crate) fn refresh_homeboy_action(runner_id: &str) -> ExecutableAction {
     refresh_homeboy_action_for_ref(runner_id, None)
 }
 
-/// `homeboy runner refresh-homeboy <id> [--ref <ref>] --reconnect`.
+/// `homeboy runner refresh-homeboy <id> [--ref <ref>]`.
 ///
 /// The recovery ref, when one is known, names the exact commit the runner's
 /// configured job binary should be rebuilt at. Reconnecting the same drifted
@@ -104,7 +104,6 @@ pub(crate) fn refresh_homeboy_action_for_ref(
         args.push("--ref".to_string());
         args.push(recovery_ref.to_string());
     }
-    args.push("--reconnect".to_string());
     runner_action(
         "runner.refresh_homeboy",
         format!("refresh runner {runner_id}"),
@@ -293,7 +292,7 @@ mod tests {
             plan(&report),
             vec![(
                 RUNNER_REFRESH_HOMEBOY.to_string(),
-                "homeboy runner refresh-homeboy homeboy-lab --reconnect".to_string()
+                "homeboy runner refresh-homeboy homeboy-lab".to_string()
             )]
         );
     }

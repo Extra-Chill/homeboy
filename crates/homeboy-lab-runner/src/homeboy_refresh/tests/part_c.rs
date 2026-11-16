@@ -130,8 +130,6 @@ fn incomplete_readiness_does_not_rewrite_daemon_refresh_compatibility_facts() {
     assert_eq!(readiness.state, HomeboyRefreshReadinessState::Blocked);
     // A completed rotation remains a completed daemon operation. The non-ready
     // readiness state and nonzero refresh result express incomplete convergence.
-    assert!(!reconnect_required_after_refresh(true));
-    assert!(reconnect_required_after_refresh(false));
     assert_eq!(
         readiness.continuation.as_deref(),
         Some("homeboy runner status homeboy-lab --full")
@@ -286,7 +284,6 @@ pub(super) fn unconverged_refresh_fixture() -> (HomeboyBinaryRefreshPlan, Runner
         git_ref: None,
         binary_path: "/runner/homeboy".to_string(),
         script: "fixture".to_string(),
-        reconnect: true,
         followup_commands: Vec::new(),
     };
     let execution = RunnerExecOutput {

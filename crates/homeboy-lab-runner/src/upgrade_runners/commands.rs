@@ -9,7 +9,7 @@ pub(crate) fn runner_binary_refresh_recovery_commands(
     target: &homeboy_product_identity::BuildIdentity,
 ) -> Vec<String> {
     vec![format!(
-        "homeboy runner refresh-homeboy {} --ref {} --reconnect",
+        "homeboy runner refresh-homeboy {} --ref {}",
         shell_arg(runner_id),
         shell_arg(&crate::homeboy_refresh::release_ref(&target.version))
     )]

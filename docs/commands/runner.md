@@ -253,9 +253,9 @@ and warnings when configured paths mix a stale checkout with the managed cache.
 ### `refresh-homeboy`
 
 ```sh
-homeboy runner refresh-homeboy <runner-id> --reconnect
+homeboy runner refresh-homeboy <runner-id>
 homeboy runner refresh-homeboy <runner-id> --ref v0.434.30 --dry-run
-homeboy runner refresh-homeboy <runner-id> --select /path/to/homeboy --reconnect
+homeboy runner refresh-homeboy <runner-id> --select /path/to/homeboy
 ```
 
 `homeboy runner connect <runner-id>` is the normal way to update a runner: it
@@ -282,19 +282,19 @@ daemon, and configured binary. An intentional rollback requires
 Unreleased builds reach Lab only through `runner dev-sync`; a source-built
 controller no longer automatically converges Lab to its commit.
 
-Use `--reconnect` to restart the active daemon immediately in place. Running
-jobs are re-adopted by the successor on the same state directory; refresh never
-waits for idle or stages selection behind active jobs. A failed restart is
-reported as a typed failure, not deferred. Without `--reconnect`, the binary is
-selected immediately and the JSON output includes follow-up restart commands. `runner
-status` also reports controller, configured executable, active daemon version,
+Refresh always restarts the active daemon in place on the promoted binary.
+Running jobs are re-adopted by the successor on the same state directory;
+refresh never waits for idle or stages selection behind active jobs. A failed
+restart is reported as a typed failure, not deferred. `reconnect_required` is
+always false; success requires the readiness postcondition. `runner status`
+also reports controller, configured executable, active daemon version,
 build identity, drift signals, and refresh commands under
 `selected_lab_runner.runner_homeboy`.
 
 Reconnect rollback restores the exact previously selected binary and publishes
 its session. If any rollback phase fails, Homeboy retains
 `runner-sessions/<runner-id>/refresh-partial.json`; the error names that path and
-one `refresh-homeboy --select <previous-path> --reconnect` continuation command.
+one `refresh-homeboy --select <previous-path>` continuation command.
 Do not delete the receipt as a recovery step.
 
 When a configured SSH runner is disconnected, `refresh-homeboy` automatically
@@ -686,7 +686,7 @@ Run the runner daemon as a systemd user unit that the runner owns. `install`
 requires an idle runner. It writes the unit, hands the controller-started
 daemon over to it, stops idle daemons left by earlier rotation, and marks the runner
 `service_managed`. After that, `connect` only attaches, `disconnect` only
-detaches, and `refresh-homeboy --reconnect` repoints the unit's binary and
+detaches, and `refresh-homeboy` repoints the unit's binary and
 restarts it instead of replacing the daemon. `status` reports the unit
 and the daemon lease it holds. See
 [Runner-Owned Service](../architecture/runner-connection.md#runner-owned-service).

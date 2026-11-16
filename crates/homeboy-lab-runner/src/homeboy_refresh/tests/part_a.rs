@@ -186,7 +186,7 @@ fn materialization_race_restarts_the_newly_connected_daemon_and_preserves_active
         !reconnect_restarts_existing_transport(&materialization_snapshot),
         "materialization began while the runner was disconnected"
     );
-    let post_lease_session = reconnect_session_after_promotion(true, &post_lease_status)
+    let post_lease_session = reconnect_session_after_promotion(&post_lease_status)
         .expect("the post-lease connected daemon is the one to retire");
     assert_eq!(
         post_lease_session.remote_daemon_lease_id.as_deref(),
@@ -555,7 +555,7 @@ fn rollback_failure_persists_one_exact_previous_binary_continuation() {
         assert_eq!(state["previous_binary_path"], "/stable builds/homeboy");
         assert_eq!(
             state["continuation_command"],
-            "homeboy runner refresh-homeboy 'lab runner' --select '/stable builds/homeboy' --reconnect"
+            "homeboy runner refresh-homeboy 'lab runner' --select '/stable builds/homeboy'"
         );
         assert_eq!(
             error.details["continuation_command"],
@@ -613,7 +613,6 @@ fn disconnected_ssh_refresh_dispatches_the_existing_script_with_bounded_transpor
         git_ref: Some("accepted-sha".to_string()),
         binary_path: "/runner/_homeboy_binaries".to_string(),
         script: "managed clone fetch build select".to_string(),
-        reconnect: true,
         followup_commands: Vec::new(),
     };
 
@@ -800,7 +799,6 @@ fn connected_refresh_keeps_daemon_execution_options() {
         git_ref: None,
         binary_path: "/runner/homeboy".to_string(),
         script: "probe".to_string(),
-        reconnect: false,
         followup_commands: Vec::new(),
     };
 

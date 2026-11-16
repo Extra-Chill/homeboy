@@ -811,7 +811,6 @@ fn refresh_outcome(
         git_ref: Some(
             git_ref.unwrap_or_else(|| format!("v{}", homeboy_product_identity::product_version())),
         ),
-        reconnect: true,
         allow_downgrade,
         dry_run: false,
     })

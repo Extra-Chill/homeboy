@@ -63,7 +63,7 @@ controller's build:
 Installing reuses `refresh-homeboy`'s verified release path pinned to the
 controller's exact tag `v<version>` (never `latest`, never a source build) into
 `_homeboy_binaries/homeboy-<sha256>/homeboy`, selects it, and replaces the daemon
-with `refresh-homeboy --reconnect`'s mechanism: an in-place restart, or the
+with `refresh-homeboy`'s mechanism: an in-place restart, or the
 service unit repoint and restart. That refresh holds its own runtime promotion
 lease and finishes before connect takes its lease; its reconnect attaches
 through the non-converging connect, so convergence never recurses.

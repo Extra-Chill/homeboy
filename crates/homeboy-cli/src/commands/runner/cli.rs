@@ -333,10 +333,6 @@ pub(super) enum RunnerCommand {
         #[arg(long = "ref")]
         git_ref: Option<String>,
 
-        /// Restart the daemon in place after updating homeboy_path; running jobs are re-adopted
-        #[arg(long)]
-        reconnect: bool,
-
         /// Permit replacing a newer managed runner build with an older Git revision
         #[arg(long)]
         allow_downgrade: bool,

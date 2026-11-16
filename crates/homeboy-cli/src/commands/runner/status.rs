@@ -1066,7 +1066,7 @@ enum RecoveryRefreshGuidance {
 fn recovery_refresh_command(runner_arg: &str, guidance: RecoveryRefreshGuidance) -> Option<String> {
     match guidance {
         RecoveryRefreshGuidance::Refresh(refresh_ref) => Some(format!(
-            "homeboy runner refresh-homeboy {runner_arg} --ref {refresh_ref} --reconnect"
+            "homeboy runner refresh-homeboy {runner_arg} --ref {refresh_ref}"
         )),
         RecoveryRefreshGuidance::IdentityDrift { .. } => None,
     }
@@ -1493,7 +1493,7 @@ mod tests {
             .find(|hint| hint.contains("stale daemon"))
             .expect("stale daemon hint");
         let job_binary_refresh = format!(
-            "homeboy runner refresh-homeboy homeboy-lab --ref v{} --reconnect",
+            "homeboy runner refresh-homeboy homeboy-lab --ref v{}",
             homeboy_product_identity::product_version()
         );
         assert!(hint.contains(&job_binary_refresh));
@@ -1529,7 +1529,7 @@ mod tests {
 
         assert_eq!(
             commands[0],
-            format!("homeboy runner refresh-homeboy homeboy-lab --ref {expected} --reconnect")
+            format!("homeboy runner refresh-homeboy homeboy-lab --ref {expected}")
         );
         assert_eq!(
             followups
@@ -1616,7 +1616,7 @@ mod tests {
             .as_mut()
             .expect("stale daemon")
             .refresh_command =
-            "homeboy runner refresh-homeboy homeboy-lab --ref 93bc3e103459 --reconnect".to_string();
+            "homeboy runner refresh-homeboy homeboy-lab --ref 93bc3e103459".to_string();
         let guidance = RecoveryRefreshGuidance::IdentityDrift {
             controller: Some("93bc3e103459".to_string()),
             runner: "7e29bde24e00".to_string(),
@@ -1642,7 +1642,7 @@ mod tests {
         assert_eq!(
             serialized["stale_daemon"]["recovery_commands"],
             serde_json::json!([format!(
-                "homeboy runner refresh-homeboy homeboy-lab --ref {} --reconnect",
+                "homeboy runner refresh-homeboy homeboy-lab --ref {}",
                 homeboy::runner::controller_refresh_ref()
             )])
         );
@@ -1655,7 +1655,7 @@ mod tests {
         assert_eq!(
             serialized["stale_daemon"]["refresh_command"],
             format!(
-                "homeboy runner refresh-homeboy homeboy-lab --ref {} --reconnect",
+                "homeboy runner refresh-homeboy homeboy-lab --ref {}",
                 homeboy::runner::controller_refresh_ref()
             )
         );
@@ -1696,7 +1696,7 @@ mod tests {
             ),
         );
         let refresh = format!(
-            "homeboy runner refresh-homeboy homeboy-lab --ref {} --reconnect",
+            "homeboy runner refresh-homeboy homeboy-lab --ref {}",
             homeboy::runner::controller_refresh_ref()
         );
         let commands = runner_status_operator_commands_with_recovery_guidance(

@@ -1371,7 +1371,7 @@ mod tests {
             "dry_run": true,
             "selected_binary_path": "/runner/homeboy",
             "daemon_refreshed": false,
-            "reconnect_required": true,
+            "reconnect_required": false,
             "phase_summary": (0..100).map(|_| serde_json::json!({ "name": "materialize", "status": "failed", "exit_code": 1 })).collect::<Vec<_>>(),
             "failure": { "exit_code": 1, "verification_kind": "history_diverged", "verification": "GitHub API unavailable", "stdout": "x".repeat(512 * 1024), "stderr": "y".repeat(512 * 1024) },
             "plan": { "script": "z".repeat(512 * 1024) },

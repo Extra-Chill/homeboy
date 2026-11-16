@@ -2630,7 +2630,7 @@ fn daemon_runtime_is_current(
 
 fn unverifiable_configured_identity_message(homeboy: &str) -> String {
     format!(
-        "configured runner executable `{homeboy}` did not report an immutable build identity; run `{} self identity` on the runner and ensure it reports `git_commit` or an exact `display`, then retry. If the binary is stale, run `homeboy runner refresh-homeboy <runner-id> --reconnect`",
+        "configured runner executable `{homeboy}` did not report an immutable build identity; run `{} self identity` on the runner and ensure it reports `git_commit` or an exact `display`, then retry. If the binary is stale, run `homeboy runner refresh-homeboy <runner-id>`",
         shell::quote_arg(homeboy),
     )
 }
@@ -2640,7 +2640,7 @@ fn stale_reattach_warning_for_report(
     report: &DaemonFreshnessReport,
 ) -> Option<String> {
     (!report.fresh).then(|| format!(
-        "Reattached the live remote daemon lease after drift ({:?}; {}); active jobs were preserved. Continue with `homeboy runner refresh-homeboy {runner_id} --reconnect` when its work is complete.",
+        "Reattached the live remote daemon lease after drift ({:?}; {}); active jobs were preserved. Continue with `homeboy runner refresh-homeboy {runner_id}` when its work is complete.",
         report.stale_reason_code,
         report.ownership_evidence.as_deref().unwrap_or("remote status freshness drift")
     ))

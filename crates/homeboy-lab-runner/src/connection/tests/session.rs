@@ -909,7 +909,6 @@ fn persisted_session_version_drift_rejects_admission_with_bounded_recovery() {
             "homeboy-lab",
             "--ref",
             &crate::controller_refresh_ref(),
-            "--reconnect",
         ]
     );
 }
@@ -1204,7 +1203,7 @@ fn runtime_path_warning_uses_rebuild_specific_message() {
     assert_eq!(
         warning.recovery_commands,
         [format!(
-            "homeboy runner refresh-homeboy homeboy-lab --ref {} --reconnect",
+            "homeboy runner refresh-homeboy homeboy-lab --ref {}",
             crate::controller_refresh_ref()
         )]
     );

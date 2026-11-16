@@ -10754,7 +10754,7 @@ fn selected_candidate_provenance_flags_cross_invocation_selection() {
         assert_eq!(runtime_actions.len(), 1);
         assert_eq!(
             runtime_actions[0].command,
-            "homeboy runner refresh-homeboy homeboy-lab --ref current --reconnect"
+            "homeboy runner refresh-homeboy homeboy-lab --ref current"
         );
         assert!(context
             .next_actions
@@ -12901,7 +12901,7 @@ fn cook_lab_workspace_stage_failure_advertises_runtime_refresh_and_retry() {
         assert_eq!(runtime_actions.len(), 1);
         assert_eq!(
             runtime_actions[0].command,
-            "homeboy runner refresh-homeboy homeboy-lab --ref required --reconnect"
+            "homeboy runner refresh-homeboy homeboy-lab --ref required"
         );
         // No provider ran, so the recipe replays the attempt once repaired.
         assert_eq!(

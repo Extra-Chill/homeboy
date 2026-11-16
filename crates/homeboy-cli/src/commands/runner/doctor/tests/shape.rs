@@ -255,7 +255,7 @@ fn doctor_emits_refresh_next_action_for_version_skew_and_none_when_versions_matc
     let projection = output_projection(report, true);
     assert_eq!(
         projection["failure"]["next_actions"][0]["command"],
-        "homeboy runner refresh-homeboy local --ref abc1234 --reconnect"
+        "homeboy runner refresh-homeboy local --ref abc1234"
     );
 
     let data = serde_json::to_value(crate::commands::runner::types::RunnerCommandOutput::Doctor(
@@ -270,7 +270,7 @@ fn doctor_emits_refresh_next_action_for_version_skew_and_none_when_versions_matc
     let envelope = serde_json::to_value(envelope).expect("envelope serializes");
     assert_eq!(
         envelope["next_actions"][0]["command"],
-        "homeboy runner refresh-homeboy local --ref abc1234 --reconnect"
+        "homeboy runner refresh-homeboy local --ref abc1234"
     );
 }
 

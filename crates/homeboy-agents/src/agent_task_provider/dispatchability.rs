@@ -1311,7 +1311,7 @@ mod tests {
             ExecutionPlacementRequirement::Lab,
             EffectiveExecutionPlacement::Local,
         );
-        let reason = "stale_daemon; active_daemon_control_plane_version != job_command_binary_version; run homeboy runner refresh-homeboy homeboy-lab --ref 0.438.1 --reconnect";
+        let reason = "stale_daemon; active_daemon_control_plane_version != job_command_binary_version; run homeboy runner refresh-homeboy homeboy-lab --ref 0.438.1";
         placement.fallback.reason = Some(reason.to_string());
 
         let error = admit_plan_provider_dispatchability(

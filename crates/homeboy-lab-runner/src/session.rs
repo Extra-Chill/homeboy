@@ -1290,8 +1290,8 @@ mod status_serialization_tests {
             job_command_binary_version: "0.299.0".to_string(),
             active_daemon_control_plane_build_identity: None,
             job_command_binary_build_identity: None,
-            refresh_command:
-                "homeboy runner refresh-homeboy homeboy-lab --ref v0.299.2 --reconnect".to_string(),
+            refresh_command: "homeboy runner refresh-homeboy homeboy-lab --ref v0.299.2"
+                .to_string(),
             stale_runtime_paths: Vec::new(),
             changed_runtime_paths: Vec::new(),
             message: "stale".to_string(),
@@ -1485,7 +1485,7 @@ mod status_serialization_tests {
         assert!(idle.safe_to_rotate);
         assert_eq!(
             idle.next_action.as_deref(),
-            Some("homeboy runner refresh-homeboy homeboy-lab --ref v0.428.2 --reconnect"),
+            Some("homeboy runner refresh-homeboy homeboy-lab --ref v0.428.2"),
             "once drained, the refresh is the next action again"
         );
     }
@@ -1533,7 +1533,7 @@ mod status_serialization_tests {
         assert_eq!(summary.active_job_count, Some(0));
         assert_eq!(
             summary.next_action.as_deref(),
-            Some("homeboy runner refresh-homeboy homeboy-lab --ref v0.371.0 --reconnect")
+            Some("homeboy runner refresh-homeboy homeboy-lab --ref v0.371.0")
         );
     }
 

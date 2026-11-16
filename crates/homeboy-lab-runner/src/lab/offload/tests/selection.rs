@@ -167,7 +167,7 @@ fn persisted_session_drift_rejects_the_real_availability_and_preflight_path() {
     assert_eq!(
         error.details["stale_daemon_recovery_command"],
         format!(
-            "homeboy runner refresh-homeboy homeboy-lab --ref {} --reconnect",
+            "homeboy runner refresh-homeboy homeboy-lab --ref {}",
             crate::controller_refresh_ref()
         )
     );

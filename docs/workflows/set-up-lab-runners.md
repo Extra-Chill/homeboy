@@ -121,7 +121,7 @@ Runner proof depends on the Homeboy binary actually used by the runner. `homeboy
 
 ```bash
 homeboy runner refresh-homeboy <runner-id> --ref v0.434.30 --dry-run
-homeboy runner refresh-homeboy <runner-id> --ref v0.434.30 --reconnect
+homeboy runner refresh-homeboy <runner-id> --ref v0.434.30
 homeboy runner status <runner-id>
 ```
 

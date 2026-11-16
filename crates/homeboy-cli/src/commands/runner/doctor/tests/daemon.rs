@@ -688,7 +688,7 @@ mod repair_dispatch {
     fn a_version_mismatch_step_dispatches_to_a_binary_refresh() {
         let step = DaemonRepairStep::executable(
             daemon_repair_codes::RUNNER_REFRESH_HOMEBOY,
-            action(&["runner", "refresh-homeboy", "lab", "--reconnect"]),
+            action(&["runner", "refresh-homeboy", "lab"]),
         );
 
         assert_eq!(
@@ -712,7 +712,6 @@ mod repair_dispatch {
                 "lab",
                 "--ref",
                 "abc123",
-                "--reconnect",
                 "--allow-downgrade",
             ]),
         );
@@ -749,7 +748,7 @@ mod repair_dispatch {
     fn an_untyped_recovery_command_is_reported_rather_than_executed() {
         let step = DaemonRepairStep::text(
             daemon_repair_codes::STALE_DAEMON_RECOVERY,
-            "homeboy runner refresh-homeboy lab --ref abc123 --reconnect",
+            "homeboy runner refresh-homeboy lab --ref abc123",
         );
 
         let DaemonRepairDispatch::NotAutomatable { reason } = dispatch_for(&step) else {

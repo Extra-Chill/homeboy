@@ -347,7 +347,6 @@ fn release_acquisition_publishes_a_verified_slot_without_a_git_checkout() {
         git_ref: Some(RELEASE_TAG.to_string()),
         binary_path: root.display().to_string(),
         script: String::new(),
-        reconnect: false,
         followup_commands: Vec::new(),
     };
     verify_materialized_identity(&materialize_plan, &stdout, &identity)
