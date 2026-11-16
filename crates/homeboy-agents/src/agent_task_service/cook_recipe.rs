@@ -3337,20 +3337,22 @@ fn consume_claimed_with_dispatcher_policy(
         }
     };
     let mut options = options;
-    if matches!(mode, CookMode::ContinueTerminal | CookMode::Adopt) {
-        // A terminal continuation finishes an accepted candidate; it spends no
-        // retry budget on new provider work, except one attempt that applies
-        // operator feedback still pending against the candidate (#17611).
-        let feedback_attempt = u32::from(crate::agent_task_feedback::has_pending(
-            &lifecycle_store,
-            &claim.continuation().cook_id,
-        ));
-        options.retry_policy.max_attempts = recipe
+    if matches!(mode, CookMode::ContinueTerminal) {
+        // A terminal continuation is the Cook loop of a detached attempt: it
+        // gates the candidate, so it keeps the recipe's retry budget for
+        // gate-feedback remediation (#18243). Operator feedback still pending
+        // against the candidate earns one attempt beyond the recorded ones
+        // even when that budget is spent (#17611).
+        let feedback_floor = recipe
             .attempts
             .last()
             .map(|attempt| attempt.attempt)
             .unwrap_or(0)
-            + feedback_attempt;
+            + u32::from(crate::agent_task_feedback::has_pending(
+                &lifecycle_store,
+                &claim.continuation().cook_id,
+            ));
+        options.retry_policy.max_attempts = options.retry_policy.max_attempts.max(feedback_floor);
     }
     if agent_task_lifecycle::run_record_exists_in_store(
         &lifecycle_store,
@@ -4776,9 +4778,11 @@ mod tests {
     }
 
     #[test]
-    fn terminal_continuation_accepts_historical_runtime_without_provider_replay() {
+    fn terminal_continuation_keeps_the_recipe_retry_budget_for_gate_feedback() {
         let context = homeboy_core::test_support::HermeticTestContext::new();
         let store = CookRecipeStore::new(context.path_roots());
+        // A detached attempt's gate failure is remediated by this continuation
+        // (#18243), so attempt 1 of 3 must leave two attempts available.
         let mut historical = recipe();
         historical.runtime_generation = "homeboy 0.291.2+96820fe8cc53".to_string();
         historical.retry_budget["max_attempts"] = serde_json::json!(3);
@@ -4810,7 +4814,7 @@ mod tests {
 
         assert_eq!(exit_code, 0);
         let options = observed.expect("terminal continuation reached normal cook boundary");
-        assert_eq!(options.retry_policy.max_attempts, 1);
+        assert_eq!(options.retry_policy.max_attempts, 3);
         assert_eq!(options.identity.initial_run_id, "run");
         assert_eq!(
             options.gates,
