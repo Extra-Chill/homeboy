@@ -999,6 +999,7 @@ struct StatusPoller {
     /// Waiting on a Cook admission: an attempt its replay is still
     /// materializing (recipe written, lifecycle record not yet) is not an end.
     await_materialization: bool,
+    recovery_step: bool,
 }
 
 impl WatchPoller for StatusPoller {
@@ -1009,11 +1010,24 @@ impl WatchPoller for StatusPoller {
     }
 
     fn is_terminal(&self, item: &Self::Item) -> bool {
+        if self.recovery_step {
+            return agent_task_service_direct::recovery_step_exit_code(&self.args.run_id)
+                .ok()
+                .flatten()
+                .is_some();
+        }
         if self.await_materialization && item.0["status"] == "recipe_only_recovery_required" {
             // The admission stays open until its replay materializes the
             // attempt or terminalizes the admission itself.
             return agent_task_lifecycle::exact_record(&self.args.run_id)
                 .map_or(true, |admission| admission.state().is_terminal());
+        }
+        if agent_task_service_direct::recovery_step_in_flight(&self.args.run_id)
+            .ok()
+            .flatten()
+            .is_some()
+        {
+            return false;
         }
         status_is_terminal(&item.0) && !cook_driver_still_owns(&item.0)
     }
@@ -1057,6 +1071,22 @@ pub(crate) fn wait_for_terminal_status(run_id: &str) -> CmdResult<Value> {
     )
 }
 
+pub(crate) fn wait_for_recovery_status(run_id: &str, timeout: Duration) -> CmdResult<Value> {
+    watch_status_until(
+        StatusArgs {
+            run_id: run_id.into(),
+            full: false,
+            exact: false,
+            strict_subject_exit: false,
+            watch: true,
+            interval: "1s".into(),
+            timeout: "30m".into(),
+        },
+        Some(timeout),
+        true,
+    )
+}
+
 fn watch_status_with_timeout(args: StatusArgs, timeout: Option<Duration>) -> CmdResult<Value> {
     watch_status_until(args, timeout, false)
 }
@@ -1071,6 +1101,10 @@ fn watch_status_until(
     let poller = StatusPoller {
         args: args.clone(),
         await_materialization,
+        recovery_step: agent_task_service_direct::recovery_step_in_flight(&args.run_id)
+            .ok()
+            .flatten()
+            .is_some(),
     };
     let started = Instant::now();
     let mut progress = StatusWatchProgress::default();
@@ -6731,6 +6765,7 @@ mod tests {
                     ..Default::default()
                 },
                 await_materialization: true,
+                recovery_step: false,
             };
             assert!(
                 poller.is_terminal(&handoff),
@@ -6819,6 +6854,7 @@ mod tests {
             let poller = StatusPoller {
                 args,
                 await_materialization: true,
+                recovery_step: false,
             };
             assert!(poller.is_terminal(&status));
             let watched = watch_loop(
@@ -6856,6 +6892,7 @@ mod tests {
                     ..Default::default()
                 },
                 await_materialization,
+                recovery_step: false,
             };
             agent_task_lifecycle::submit_plan(
                 &AgentTaskPlan::new("cook-a", Vec::new()),

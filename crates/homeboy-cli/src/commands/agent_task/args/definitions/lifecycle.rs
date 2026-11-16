@@ -456,6 +456,12 @@ pub struct ReplayProviderBoundaryArgs {
 }
 #[derive(Args, Debug, Default)]
 pub struct RecoverArgs {
+    /// Follow the admitted daemon step through status/watch.
+    #[arg(long, conflicts_with = "preflight")]
+    pub wait: bool,
+    /// Maximum wait; timing out never cancels daemon-owned work.
+    #[arg(long, default_value = "30m", requires = "wait")]
+    pub timeout: String,
     /// Re-run recorded gates on the newest candidate, without a provider attempt.
     #[arg(long)]
     pub regate: bool,

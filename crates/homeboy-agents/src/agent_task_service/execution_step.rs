@@ -32,6 +32,10 @@ pub struct RetryPreparation {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
 pub enum ExecutionStepMode {
+    Recovery {
+        step: super::CookRecoveryStep,
+        overrides: super::CookRecoveryOverrides,
+    },
     Admission {
         admission_request: Value,
     },
@@ -60,6 +64,14 @@ pub struct ExecutionStepIntent {
 /// remain in this service. A transport validates workspace input before claim.
 pub trait ExecutionStepTransport {
     fn admission(&self, argv: Vec<String>, runner: Option<String>) -> Result<i32>;
+    fn recovery(
+        &self,
+        _run_id: &str,
+        _step: &super::CookRecoveryStep,
+        _overrides: &super::CookRecoveryOverrides,
+    ) -> Result<i32> {
+        Err(invalid("transport does not support recovery"))
+    }
     fn queued_preflight(
         &self,
         _record: &AgentTaskRunRecord,
@@ -103,7 +115,8 @@ impl ExecutionStepIntent {
 
     pub fn authorizes(&self, record: &AgentTaskRunRecord) -> bool {
         record.run_id == self.subject_id
-            && record.state() == AgentTaskRunState::Queued
+            && (matches!(self.mode, ExecutionStepMode::Recovery { .. })
+                || record.state() == AgentTaskRunState::Queued)
             && record.metadata["execution_scheduling"]["epoch"].as_u64() == Some(self.epoch)
             && record.metadata["execution_scheduling"]["current_intent_id"].as_str()
                 == Some(self.intent_id.as_str())
@@ -332,6 +345,150 @@ pub(crate) fn prepare_execution_intent(
     Ok(())
 }
 
+/// Freeze recovery work in the same lifecycle outbox used by queued Cooks.
+pub fn admit_recovery_execution_step(
+    report: &super::CookRecoveryReport,
+    overrides: &super::CookRecoveryOverrides,
+) -> Result<Value> {
+    if let Some(blocker) = super::ensure_scheduling_daemon() {
+        return Err(invalid(format!("recovery daemon unavailable: {blocker}")));
+    }
+    let store = AgentTaskLifecycleStore::from_environment()?;
+    if !store.record_exists(&report.run_id)? {
+        let recipe = super::load_recipe(&report.cook_id)?;
+        super::reconcile_recipe_attempt_for_continuation(&recipe, &report.run_id)?;
+    }
+    let mut failure = None;
+    store.mutate_record(&report.run_id, |record| {
+        let result = (|| -> Result<Value> {
+            if let Some(previous) = current_execution_intent(&store, record)? {
+                if matches!(previous.mode, ExecutionStepMode::Recovery { .. })
+                    && record.metadata["recovery_step_terminal"]["intent_id"] != previous.intent_id
+                {
+                    return Ok(json!({"status": "step_in_flight", "intent_id": previous.intent_id,
+                        "job_id": record.metadata["recovery_step_job"]["job_id"], "status_command": format!("homeboy agent-task status {} --watch", report.run_id)}));
+                }
+            }
+            prepare_execution_intent(&store, record, None)?;
+            let work: WorkIntent = serde_json::from_value(record.metadata[PENDING_EXECUTION_INTENT].clone())
+                .map_err(|error| invalid(error.to_string()))?;
+            let mut intent = ExecutionStepIntent::parse(&work.payload)?;
+            intent.mode = ExecutionStepMode::Recovery { step: report.step.clone(), overrides: overrides.clone() };
+            // Recovery's gate/continuation adapter owns its recorded transport.
+            // Waiting on the terminal source's runner would discard this step.
+            intent.runner = None;
+            intent.step.wait.runner_eligible = None;
+            intent.step.waits_for_children = true;
+            record.metadata[PENDING_EXECUTION_INTENT] = serde_json::to_value(intent.work_intent()?)
+                .map_err(|error| invalid(error.to_string()))?;
+            Ok(json!({"status": "admitted", "intent_id": intent.intent_id,
+                "status_command": format!("homeboy agent-task status {} --watch", report.run_id)}))
+        })();
+        match result {
+            Ok(value) => { failure = Some(Ok(value)); true }
+            Err(error) => { failure = Some(Err(error)); false }
+        }
+    })?;
+    let mut receipt = failure.unwrap_or_else(|| Err(invalid("recovery record was not updated")))?;
+    if let Some(intent) = current_execution_intent(&store, &store.read_record(&report.run_id)?)? {
+        let job_id = recovery_job_id(&intent)?;
+        receipt["job_id"] = json!(job_id);
+        store.mutate_record(&report.run_id, |record| {
+            record.metadata["recovery_step_job"] =
+                json!({"intent_id": intent.intent_id, "job_id": job_id});
+            true
+        })?;
+    }
+    Ok(receipt)
+}
+
+/// Read ownership before planning or attempting any Cook driver lock.
+pub fn recovery_step_in_flight(run_id: &str) -> Result<Option<Value>> {
+    let store = AgentTaskLifecycleStore::from_environment()?;
+    let record = match store.read_record(run_id) {
+        Ok(record) => record,
+        Err(_) => return Ok(None),
+    };
+    let Some(intent) = current_execution_intent(&store, &record)? else {
+        return Ok(None);
+    };
+    if !matches!(intent.mode, ExecutionStepMode::Recovery { .. }) {
+        return Ok(None);
+    }
+    if record.metadata["recovery_step_terminal"]["intent_id"] == intent.intent_id {
+        return Ok(None);
+    }
+    let Some(job_id) = record.metadata["recovery_step_job"]["job_id"].as_str() else {
+        return Ok(Some(
+            json!({"status": "step_in_flight", "run_id": run_id, "intent_id": intent.intent_id}),
+        ));
+    };
+    let client = homeboy_core::daemon::LocalControllerJobClient::connect_existing_job(job_id)?;
+    if client.status(&job_id)?.status.is_terminal() {
+        return Ok(None);
+    }
+    Ok(Some(
+        json!({"status": "step_in_flight", "run_id": run_id, "job_id": job_id,
+        "intent_id": intent.intent_id, "status_command": format!("homeboy agent-task status {run_id} --watch")}),
+    ))
+}
+
+#[cfg(feature = "test-support")]
+thread_local! {
+    static RECOVERY_SUBMIT: std::cell::RefCell<Option<Box<dyn Fn(&ExecutionStepIntent) -> Result<String>>>> = std::cell::RefCell::new(None);
+}
+
+/// Exercise the public admission adapter against an owned step-job harness.
+#[cfg(feature = "test-support")]
+pub fn with_recovery_step_submit_for_test<R>(
+    submit: impl Fn(&ExecutionStepIntent) -> Result<String> + 'static,
+    body: impl FnOnce() -> R,
+) -> R {
+    struct Reset;
+    impl Drop for Reset {
+        fn drop(&mut self) {
+            RECOVERY_SUBMIT.with(|slot| *slot.borrow_mut() = None);
+        }
+    }
+    RECOVERY_SUBMIT.with(|slot| *slot.borrow_mut() = Some(Box::new(submit)));
+    let _reset = Reset;
+    body()
+}
+
+/// Terminal outcome of the admitted job, independent of the Cook's later steps.
+pub fn recovery_step_exit_code(run_id: &str) -> Result<Option<i32>> {
+    let store = AgentTaskLifecycleStore::from_environment()?;
+    let record = store.read_record(run_id)?;
+    if record.metadata["recovery_step_terminal"]["intent_id"]
+        == record.metadata["execution_scheduling"]["current_intent_id"]
+    {
+        if let Some(code) = record.metadata["recovery_step_terminal"]["exit_code"].as_i64() {
+            return Ok(Some(code as i32));
+        }
+    }
+    let Some(job_id) = record.metadata["recovery_step_job"]["job_id"].as_str() else {
+        return Ok(None);
+    };
+    let job = homeboy_core::daemon::LocalControllerJobClient::connect_existing_job(job_id)?
+        .status(job_id)?;
+    Ok(job
+        .status
+        .is_terminal()
+        .then(|| step_job::recorded_step_exit_code(job_id).unwrap_or(1)))
+}
+
+fn recovery_job_id(intent: &ExecutionStepIntent) -> Result<String> {
+    #[cfg(feature = "test-support")]
+    if let Some(result) =
+        RECOVERY_SUBMIT.with(|slot| slot.borrow().as_ref().map(|submit| submit(intent)))
+    {
+        return result;
+    }
+    // Submission is idempotent by step key, including before the outbox drains.
+    let client = homeboy_core::daemon::LocalControllerJobClient::connect_current_build()?;
+    Ok(client.submit(intent.step.submission()?)?.id.to_string())
+}
+
 pub fn register_execution_step_hooks() {
     static REGISTERED: OnceLock<()> = OnceLock::new();
     REGISTERED.get_or_init(|| {
@@ -394,6 +551,15 @@ pub(super) fn consume_execution_terminal_in_store(
         != Some(&delivery.key)
     {
         return Ok(json!({"acknowledged": true, "disposition": "stale"}));
+    }
+    if let Ok(intent) = load_execution_intent(store, &delivery.key) {
+        if matches!(intent.mode, ExecutionStepMode::Recovery { .. }) {
+            store.mutate_record(subject, |record| {
+                record.metadata["recovery_step_terminal"] = json!({"intent_id": delivery.key, "job_id": delivery.job_id, "exit_code": delivery.exit_code, "outcome": delivery.outcome});
+                true
+            })?;
+            return Ok(json!({"acknowledged": true, "disposition": "recovery_completed"}));
+        }
     }
     let Some(_subject_lock) = try_execution_subject_lock_in_store(store, subject)? else {
         // A terminal job is not authority to supersede another live exact
@@ -752,6 +918,18 @@ pub(super) fn schedule_execution_intent_with_cleanup(
 ) -> Result<Value> {
     let intent = ExecutionStepIntent::parse(payload)?;
     let receipt = schedule_execution_intent_with(payload, &mut submit)?;
+    if matches!(intent.mode, ExecutionStepMode::Recovery { .. }) {
+        let store = store_from_step_env(&intent.step)
+            .ok_or_else(|| invalid("recovery execution intent has no rooted environment"))?;
+        store.mutate_record(&intent.subject_id, |record| {
+            if record.metadata["execution_scheduling"]["current_intent_id"] != intent.intent_id {
+                return false;
+            }
+            record.metadata["recovery_step_job"] =
+                json!({"intent_id": intent.intent_id, "job_id": receipt["job_id"]});
+            true
+        })?;
+    }
     if let Some(previous) = &intent.superseded_intent_id {
         let store = store_from_step_env(&intent.step)
             .ok_or_else(|| invalid("replacement execution intent has no rooted environment"))?;
@@ -821,6 +999,9 @@ pub fn execute_execution_step(
         return Ok(75);
     };
     match &intent.mode {
+        ExecutionStepMode::Recovery { step, overrides } => {
+            transport.recovery(&intent.subject_id, step, overrides)
+        }
         ExecutionStepMode::Admission { admission_request } => {
             let record = crate::agent_task_lifecycle::recover_unmaterialized_cook_input_publication_in_store(&store, &intent.subject_id)?;
             if !intent.authorizes(&record) {

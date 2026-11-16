@@ -80,10 +80,10 @@ pub use cook_promotion::*;
 pub use cook_recipe::*;
 pub use cook_recovery::{
     cook_recovery_delegation, is_store_contention, is_store_contention_message, plan_cook_recovery,
-    recover_cook, with_store_contention_backoff, CookPublishRequest, CookRecoveryOverrides,
-    CookRecoveryPerformer, CookRecoveryPlan, CookRecoveryReport, CookRecoveryRequest,
-    CookRecoveryStep, CookReplaceGatesRequest, CookReplacementProof, COOK_RECOVERY_SCHEMA,
-    STORE_BUSY_CODE,
+    prepare_admitted_recovery_continuation, recover_cook, with_store_contention_backoff,
+    CookPublishRequest, CookRecoveryOverrides, CookRecoveryPerformer, CookRecoveryPlan,
+    CookRecoveryReport, CookRecoveryRequest, CookRecoveryStep, CookReplaceGatesRequest,
+    CookReplacementProof, COOK_RECOVERY_SCHEMA, STORE_BUSY_CODE,
 };
 pub(crate) use cook_recovery::{cook_recovery_status, incomplete_review_recovery_command};
 

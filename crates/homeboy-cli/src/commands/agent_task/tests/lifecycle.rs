@@ -2547,6 +2547,129 @@ fn resume_delegates_recovery_while_retry_resolves_the_cook_id() {
 }
 
 #[test]
+fn recover_public_entry_returns_before_blocking_gate_and_records_daemon_result() {
+    use homeboy::agents::agent_task_service as service;
+    use homeboy::core::daemon::step_job::StepJobDriver;
+    use homeboy::core::test_support::ControllerJobHarness;
+    with_temp_home(|| {
+        let cook_id = "cook-background-recover";
+        let run_id = "cook-background-recover-attempt-1";
+        persist_legacy_candidate_cook(cook_id, run_id, None);
+        let root = tempfile::tempdir().unwrap();
+        let release = root.path().join("release");
+        let started = root.path().join("started");
+        let gate = json!({"id": "gate-1", "status": "deferred", "command": ["sh", "-c", "true"], "exit_code": 1});
+        let promotion = json!({
+            "status": "gates_deferred", "source": {"kind": "run", "task_id": "provider", "run_id": run_id},
+            "to_worktree": "fixture@recover", "target": {"worktree": "fixture@recover"},
+            "candidate": null, "deterministic_gates": [gate],
+            "operator_notification": {"status": "blocked", "message": "gates_deferred"}
+        });
+        let _: homeboy::agents::agent_tasks::promotion::AgentTaskPromotionReport =
+            serde_json::from_value(promotion.clone()).unwrap();
+        test_lifecycle_store()
+            .record_promotion(run_id, promotion)
+            .unwrap();
+        assert_eq!(
+            service::plan_cook_recovery(run_id).unwrap().step,
+            service::CookRecoveryStep::Regate
+        );
+        service::register_execution_step_hooks();
+        let harness = Arc::new(std::sync::Mutex::new(None));
+        let captured = harness.clone();
+        let gate_started = started.clone();
+        let gate_release = release.clone();
+        let job_store = root.path().join("jobs.sqlite");
+        service::with_scheduling_daemon_start(
+            || Ok(()),
+            || {
+                service::with_recovery_step_submit_for_test(
+                    move |intent| {
+                        assert!(matches!(
+                            intent.mode,
+                            service::ExecutionStepMode::Recovery {
+                                step: service::CookRecoveryStep::Regate,
+                                ..
+                            }
+                        ));
+                        // The harness stands in for the daemon executable/transport,
+                        // retaining the production step driver and terminal consumer.
+                        let mut request = intent.step.clone();
+                        request.program = "/bin/sh".into();
+                        request.args = vec![
+                            "-c".into(),
+                            format!(
+                                "touch '{}'; while [ ! -f '{}' ]; do sleep 0.05; done; exit 7",
+                                gate_started.display(),
+                                gate_release.display()
+                            ),
+                        ];
+                        let owned = ControllerJobHarness::durable_queued(
+                            Arc::new(StepJobDriver),
+                            serde_json::to_value(request).unwrap(),
+                            &job_store,
+                            "recover-test",
+                        )?;
+                        let id = owned.job()?.id.to_string();
+                        owned.start_via_controller_boundary()?;
+                        let deadline =
+                            std::time::Instant::now() + std::time::Duration::from_secs(5);
+                        while !gate_started.exists() {
+                            assert!(
+                                std::time::Instant::now() < deadline,
+                                "gate never started during admission"
+                            );
+                            std::thread::sleep(std::time::Duration::from_millis(10));
+                        }
+                        *captured.lock().unwrap() = Some(owned);
+                        Ok(id)
+                    },
+                    || {
+                        let cli = crate::cli_surface::Cli::try_parse_from([
+                            "homeboy",
+                            "agent-task",
+                            "recover",
+                            run_id,
+                        ])
+                        .unwrap();
+                        let crate::cli_surface::Commands::AgentTask(args) = cli.command else {
+                            panic!("agent-task")
+                        };
+                        let began = std::time::Instant::now();
+                        let (report, code) = super::super::run(args).unwrap();
+                        assert_eq!(code, 0, "{report:#}");
+                        assert_eq!(report["status"], "admitted");
+                        assert_eq!(report["step"]["kind"], "regate");
+                        assert!(began.elapsed() < std::time::Duration::from_secs(5));
+                        assert!(!release.exists());
+                        assert!(started.exists(), "gate is blocked while recover returns");
+                        assert!(report["admission"]["job_id"].is_string());
+                    },
+                );
+            },
+        );
+        let owned = harness.lock().unwrap().take().unwrap();
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        while !started.exists() {
+            assert!(std::time::Instant::now() < deadline, "gate never started");
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        assert!(test_lifecycle_store().read_record(run_id).unwrap().metadata
+            ["recovery_step_terminal"]
+            .is_null());
+        std::fs::write(&release, "release").unwrap();
+        owned.wait_until_terminal().unwrap();
+        owned.store().deliver_pending_step_terminals().unwrap();
+        let record = test_lifecycle_store().read_record(run_id).unwrap();
+        assert_eq!(record.metadata["recovery_step_terminal"]["exit_code"], 7);
+        assert_eq!(
+            record.metadata["recovery_step_terminal"]["job_id"],
+            owned.job().unwrap().id.to_string()
+        );
+    });
+}
+
+#[test]
 fn recover_preflight_is_read_only_and_recover_reaches_the_continuation_report() {
     let cook_id = "cook-cli-recover";
     let run_id = "cook-cli-recover-attempt-1";
