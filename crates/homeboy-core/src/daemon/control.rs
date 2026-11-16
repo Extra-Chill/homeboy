@@ -646,7 +646,8 @@ fn owner_held_error(status: &super::DaemonStatus) -> Error {
 
 /// Daemons are store-scoped services, not continuations of the launching
 /// session. Keep only runtime locations and explicit service configuration;
-/// never forward a HOMEBOY_* wildcard (or arbitrary caller credentials).
+/// never forward a HOMEBOY_* or CARGO_* wildcard (both can contain caller
+/// context or credentials). Configuration namespaces below are service-wide.
 fn configure_daemon_environment(
     command: &mut Command,
     environment: impl IntoIterator<Item = (std::ffi::OsString, std::ffi::OsString)>,
@@ -668,11 +669,52 @@ fn configure_daemon_environment(
         "XDG_CACHE_HOME",
         "XDG_RUNTIME_DIR",
         "HOMEBOY_SESSION_SEND_COMMAND",
+        "HOMEBOY_NO_UPDATE_CHECK",
+        "CARGO_HOME",
+        "CARGO_TARGET_DIR",
+        "CARGO_BUILD_TARGET",
+        "CARGO_BUILD_JOBS",
+        "CARGO_ENCODED_RUSTFLAGS",
+        "CARGO_ENCODED_RUSTDOCFLAGS",
+        "RUSTUP_HOME",
+        "RUSTUP_TOOLCHAIN",
+        "RUSTC",
+        "RUSTDOC",
+        "RUSTFLAGS",
+        "RUSTDOCFLAGS",
+        "RUSTC_WRAPPER",
+        "RUSTC_WORKSPACE_WRAPPER",
+    ];
+    const CONFIG_PREFIXES: &[&str] = &[
+        "HOMEBOY_DAEMON_",
+        "HOMEBOY_TEST_",
+        "HOMEBOY_FIXTURE_",
+        "HOMEBOY_SANDBOX_",
+        "HOMEBOY_CARGO_",
+        "HOMEBOY_BUILD_",
+        "HOMEBOY_CONFIG_",
+        "XDG_",
+        "LC_",
+        "CARGO_PROFILE_",
+        "CARGO_TARGET_",
+    ];
+    // Explicitly guard caller identity even if a configuration namespace is
+    // broadened later. Other caller/task variables remain excluded by default.
+    const CALLER_CONTEXT: &[&str] = &[
+        "HOMEBOY_CALLER_CONTEXT",
+        "HOMEBOY_SESSION_THREAD_ID",
+        "HOMEBOY_ACTIVE_RUN_ID",
+        "HOMEBOY_REQUESTER",
     ];
     command.env_clear();
     for (name, value) in environment {
         if name.to_str().is_some_and(|name| {
-            RUNTIME.contains(&name) || crate::paths::HOMEBOY_ROOT_ENV_VARS.contains(&name)
+            !CALLER_CONTEXT.contains(&name)
+                && (RUNTIME.contains(&name)
+                    || crate::paths::HOMEBOY_ROOT_ENV_VARS.contains(&name)
+                    || CONFIG_PREFIXES
+                        .iter()
+                        .any(|prefix| name.starts_with(prefix)))
         }) {
             command.env(name, value);
         }
