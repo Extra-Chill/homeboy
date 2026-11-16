@@ -431,7 +431,7 @@ pub(super) fn prepare_committed_harvest(
     }
     let status = git_status_ignoring_snapshot_excludes(root, context.snapshot_sync_excludes())?;
     let candidate_baseline = if status.trim().is_empty() {
-        None
+        verified_clean_gate_feedback_baseline(root, request)?
     } else if let Some(baseline) = verified_initial_cook_candidate_baseline(root, request)? {
         Some(baseline)
     } else {
@@ -639,6 +639,38 @@ fn verified_preexisting_cook_baseline(
             "non-recoverable: dirty Lab snapshot has no immutable candidate ({expected_tree}); run a new Cook"
         ),
     }))
+}
+
+/// A clean destination may still be waiting for a failed candidate to pass
+/// gates. Resume that immutable candidate only while HEAD is its exact base.
+fn verified_clean_gate_feedback_baseline(
+    root: &Path,
+    request: &AgentTaskRequest,
+) -> Result<Option<crate::agent_task::AgentTaskCandidate>, HarvestError> {
+    if request.metadata["cook_loop"]["kind"] != "deterministic-gate-feedback" {
+        return Ok(None);
+    }
+    let Some(recorded) = request.inputs.pointer("/cook_loop/candidate_commit") else {
+        return Ok(None);
+    };
+    if recorded.is_null() {
+        return Ok(None);
+    }
+    let candidate: crate::agent_task::AgentTaskCandidate = serde_json::from_value(recorded.clone())
+        .map_err(|error| HarvestError::CandidateTreeMismatch {
+            message: error.to_string(),
+        })?;
+    crate::agent_task_promotion::validate_candidate_commit(root, &candidate).map_err(|error| {
+        HarvestError::CandidateTreeMismatch {
+            message: error.message,
+        }
+    })?;
+    if git_output(root, &["rev-parse", "HEAD"])? != candidate.base_sha {
+        return Err(HarvestError::CandidateTreeMismatch {
+            message: "clean gate feedback destination HEAD is not the candidate base".to_string(),
+        });
+    }
+    Ok(Some(candidate))
 }
 
 fn verified_gate_feedback_baseline(
