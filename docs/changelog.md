@@ -4,6 +4,12 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.468.2] - 2026-11-16
+
+### Fixed
+- a concurrently terminalized Cook effect completes idempotently
+- carry verified Cook baseline evidence to the runner child
+
 ## [0.468.1] - 2026-11-16
 
 ### Changed
