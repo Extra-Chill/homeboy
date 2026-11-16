@@ -6441,20 +6441,23 @@ mod cook_pull_request_ref_tests {
         )
         .expect("fake gh");
 
-        let _path = homeboy::core::test_support::EnvVarGuard::set(
-            "PATH",
-            format!(
-                "{}:{}",
-                bin.path().display(),
-                std::env::var("PATH").unwrap_or_default()
-            ),
-        );
-        assert_eq!(
-            cook_pull_request_refs(Some(&linked), "https://github.com/example/repo/pull/1895")
-                .expect("canonical PR refs"),
-            ("release".to_string(), "feature".to_string())
-        );
         crate::test_support::with_isolated_home(|_| {
+            // PATH is process-global: stage the fake `gh` only while the
+            // isolated-home guard holds the shared environment lock, so a
+            // concurrently restoring test cannot swap the real `gh` back in.
+            let _path = homeboy::core::test_support::EnvVarGuard::set(
+                "PATH",
+                format!(
+                    "{}:{}",
+                    bin.path().display(),
+                    std::env::var("PATH").unwrap_or_default()
+                ),
+            );
+            assert_eq!(
+                cook_pull_request_refs(Some(&linked), "https://github.com/example/repo/pull/1895")
+                    .expect("canonical PR refs"),
+                ("release".to_string(), "feature".to_string())
+            );
             let parse = |extra: &[&str]| {
                 let mut argv = vec![
                     "homeboy",
