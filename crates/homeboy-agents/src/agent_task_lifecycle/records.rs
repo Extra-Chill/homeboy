@@ -98,12 +98,24 @@ impl AgentTaskRecordHealthSummary {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum CookTerminalOutcome {
-    Published { pr: String },
+    /// `refused_gate` names the failed gate when the PR is an incomplete
+    /// draft of a refused candidate; it is absent for a verified publication.
+    Published {
+        pr: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        refused_gate: Option<String>,
+    },
     NoChange,
     AgentDeclined,
-    GateRefused { gate: String },
-    Infrastructure { error_code: String },
-    SupersededByActiveCook { owner: Value },
+    GateRefused {
+        gate: String,
+    },
+    Infrastructure {
+        error_code: String,
+    },
+    SupersededByActiveCook {
+        owner: Value,
+    },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -621,6 +633,24 @@ impl AgentTaskRunRecord {
             return;
         }
         let delivery = CookDelivery::from_run_metadata(&self.metadata);
+        let refused_gate = delivery.as_ref().and_then(|delivery| {
+            delivery
+                .gates
+                .iter()
+                .find(|gate| gate.state == crate::agent_task_gate::AgentTaskGateStatus::Failed)
+                .map(|gate| {
+                    gate.id
+                        .clone()
+                        .unwrap_or_else(|| "unnamed_gate".to_string())
+                })
+                .or_else(|| {
+                    delivery
+                        .blocker
+                        .as_ref()
+                        .filter(|blocker| blocker.code == CookDeliveryBlockerCode::GateFailed)
+                        .map(|blocker| blocker.message.clone())
+                })
+        });
         self.terminal_outcome = Some(
             if let Some(owner) = self.metadata.get("superseded_by_active_cook") {
                 CookTerminalOutcome::SupersededByActiveCook {
@@ -637,27 +667,10 @@ impl AgentTaskRunRecord {
                         .clone()
                         .or_else(|| publication.pr_identity())
                         .expect("published receipt has PR identity"),
+                    refused_gate,
                 }
-            } else if let Some(gate) = delivery.as_ref().and_then(|delivery| {
-                delivery
-                    .gates
-                    .iter()
-                    .find(|gate| gate.state == crate::agent_task_gate::AgentTaskGateStatus::Failed)
-            }) {
-                CookTerminalOutcome::GateRefused {
-                    gate: gate
-                        .id
-                        .clone()
-                        .unwrap_or_else(|| "unnamed_gate".to_string()),
-                }
-            } else if let Some(blocker) = delivery
-                .as_ref()
-                .and_then(|delivery| delivery.blocker.as_ref())
-                .filter(|blocker| blocker.code == CookDeliveryBlockerCode::GateFailed)
-            {
-                CookTerminalOutcome::GateRefused {
-                    gate: blocker.message.clone(),
-                }
+            } else if let Some(gate) = refused_gate {
+                CookTerminalOutcome::GateRefused { gate }
             } else if delivery.as_ref().is_some_and(|delivery| {
                 delivery.blocker.as_ref().is_some_and(|blocker| {
                     blocker.code == CookDeliveryBlockerCode::ReviewFormIncomplete
