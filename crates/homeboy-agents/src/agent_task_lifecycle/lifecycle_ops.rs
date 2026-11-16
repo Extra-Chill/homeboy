@@ -5298,7 +5298,9 @@ pub fn status_in_store(
     run_id: &str,
 ) -> Result<AgentTaskRunRecord> {
     let resolved_run_id = resolve_run_id_in_store(lifecycle_store, run_id)?;
-    lifecycle_store.read_record_bounded(&resolved_run_id)
+    let mut record = lifecycle_store.read_record_bounded(&resolved_run_id)?;
+    super::lab_handoff_reconciliation::project_removed_runner_job(&mut record);
+    Ok(record)
 }
 
 /// A sorted durable snapshot; explicit reconciliation owns all lifecycle repair.

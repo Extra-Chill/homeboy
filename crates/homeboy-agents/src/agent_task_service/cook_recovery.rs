@@ -724,7 +724,8 @@ fn plan_cook_recovery_for_cook(id: &str) -> Result<CookRecoveryPlan> {
             step: CookRecoveryStep::Continue,
         });
     }
-    let record = agent_task_lifecycle::exact_record(&run_id)?;
+    let mut record = agent_task_lifecycle::exact_record(&run_id)?;
+    agent_task_lifecycle::project_removed_runner_job(&mut record);
     let status = cook_recovery_status(&record);
     let step = if let Some(pr) = published_pull_request(&record) {
         // A recorded publication is the Cook's delivery, whatever gate or
@@ -1661,6 +1662,86 @@ pub(crate) fn cook_recovery_status(record: &agent_task_lifecycle::AgentTaskRunRe
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    struct RemovedRunner;
+    impl agent_task_lifecycle::RunnerContinuationProvider for RemovedRunner {
+        fn runner_job_log_snapshot(
+            &self,
+            _: &str,
+            _: &str,
+        ) -> Result<homeboy_core::api_jobs::RunnerJobLogSnapshot> {
+            Err(Error::internal_unexpected("runner removed"))
+        }
+        fn is_runner_connected(&self, _: &str) -> bool {
+            false
+        }
+        fn runner_authority(&self, _: &str) -> agent_task_lifecycle::RunnerAuthority {
+            agent_task_lifecycle::RunnerAuthority::Removed
+        }
+        fn run_continuation_exec(&self, _: &str, _: &str, _: &[String], _: &str) -> Result<i32> {
+            Err(Error::internal_unexpected("runner removed"))
+        }
+    }
+
+    #[test]
+    fn cook_recovery_redispatches_attempt_on_removed_runner() {
+        homeboy_core::test_support::with_isolated_home(|_| {
+            let options = super::super::cook::tests::compile_options("removed-runner");
+            super::super::persist_initial_recipe(&options).unwrap();
+            super::super::materialize_initial_cook_attempt(&options).unwrap();
+            let run = &options.identity.initial_run_id;
+            agent_task_lifecycle::record_lab_offload_phase(
+                run,
+                "removed-lab",
+                "lab_handoff_preacceptance",
+                Some("/workspace"),
+                None,
+                None,
+                Some(&options.identity.initial_plan),
+            )
+            .unwrap();
+            agent_task_lifecycle::record_detached_lab_run(
+                agent_task_lifecycle::DetachedLabRunRecord {
+                    run_id: run,
+                    runner_id: "removed-lab",
+                    runner_job_id: "lost-job",
+                    remote_workspace: "/workspace",
+                    remote_command: &[],
+                },
+            )
+            .unwrap();
+            let store = agent_task_lifecycle::AgentTaskLifecycleStore::from_environment().unwrap();
+            let original = store.read_record(run).unwrap();
+            let _provider =
+                agent_task_lifecycle::RunnerContinuationTestGuard::install(Box::new(RemovedRunner));
+            let status = agent_task_lifecycle::status(run).unwrap();
+            assert_eq!(
+                status.metadata["pre_execution_failure"]["error_code"],
+                "runner.job_lost"
+            );
+            let observed = super::super::project_cook_observation(&store, &original);
+            assert_eq!(
+                observed.metadata["pre_execution_failure"]["error_code"],
+                "runner.job_lost"
+            );
+            assert_eq!(observed.runner_id(), status.runner_id());
+            assert_eq!(store.read_record(run).unwrap(), original);
+            let plan = plan_cook_recovery(run).unwrap();
+            // Continue's existing runner.job_lost branch re-dispatches
+            // through the durable recipe instead of polling the old job.
+            assert_eq!(plan.step, CookRecoveryStep::Continue, "{plan:?}");
+            let settled = agent_task_lifecycle::reconcile_status(run).unwrap();
+            assert_eq!(
+                settled.metadata["pre_execution_failure"]["error_code"],
+                "runner.job_lost"
+            );
+            assert_eq!(status.runner_id(), settled.runner_id());
+            assert_eq!(
+                plan_cook_recovery(run).unwrap().step,
+                CookRecoveryStep::Continue
+            );
+        });
+    }
 
     fn step<'a>(
         status: &'a str,

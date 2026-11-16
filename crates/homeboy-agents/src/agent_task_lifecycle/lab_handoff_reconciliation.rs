@@ -242,7 +242,13 @@ pub(crate) fn reconcile_runner_job_state_in_store(
         return Ok(());
     }
     match super::runner_continuation::with_runner_continuation(|p| {
-        p.reconcile_runner_job(&runner_id, &job_id)
+        if p.runner_authority(&runner_id) == RunnerAuthority::Removed {
+            super::runner_continuation::RunnerJobReconciliation::ConfirmedAbsent {
+                checked_generations: 0,
+            }
+        } else {
+            p.reconcile_runner_job(&runner_id, &job_id)
+        }
     }) {
         super::runner_continuation::RunnerJobReconciliation::Snapshot(snapshot) => {
             reconcile_runner_job_snapshot_in_store(lifecycle_store, record, &snapshot)
@@ -262,6 +268,52 @@ pub(crate) fn reconcile_runner_job_state_in_store(
             Ok(())
         }
     }
+}
+
+/// Read-only projection of definitive configuration loss. Unknown configuration
+/// and disconnected configured runners are not proof that the job is lost.
+pub(crate) fn project_removed_runner_job(record: &mut AgentTaskRunRecord) {
+    if record.state() != AgentTaskRunState::Running
+        || !record.has_accepted_lab_handoff()
+        || !record.runner_id().is_some_and(|id| {
+            super::runner_continuation::runner_authority(id) == RunnerAuthority::Removed
+        })
+    {
+        return;
+    }
+    let error = lost_runner_job_error(record, 0);
+    settle_run(record, AgentTaskRunState::Failed, AgentTaskState::Failed);
+    let metadata = record.ensure_metadata_object();
+    metadata.insert("phase".into(), json!("accepted_lab_runner_job_lost"));
+    metadata.insert(METADATA_KEY_RETRYABLE.into(), json!(true));
+    metadata.insert(
+        "pre_execution_failure".into(),
+        json!({
+            "error_code": error.code.as_str(),
+            "message": error.message,
+            "retryable": true,
+        }),
+    );
+}
+
+fn lost_runner_job_error(record: &AgentTaskRunRecord, checked_generations: usize) -> Error {
+    let runner_job_id = record.runner_job_id().unwrap_or_default();
+    let message = if checked_generations == 0 {
+        format!("accepted Lab runner job '{runner_job_id}' was lost because runner '{}' is no longer configured", record.runner_id().unwrap_or_default())
+    } else {
+        format!("accepted Lab runner job '{runner_job_id}' was not found in any of {checked_generations} authoritative known daemon generation(s)")
+    };
+    let mut error = Error::new(
+        homeboy_core::error::ErrorCode::RunnerJobLost,
+        message,
+        Value::Null,
+    )
+    .with_hint(format!(
+        "Recover safely: homeboy agent-task recover {}",
+        record.run_id
+    ));
+    error.retryable = Some(true);
+    error
 }
 
 /// Observe retained runner authority without requiring a live transport job.
@@ -322,11 +374,7 @@ fn terminalize_lost_accepted_lab_job_in_store(
     let run_id = record.run_id.clone();
     let runner_id = record.runner_id().unwrap_or_default().to_string();
     let runner_job_id = record.runner_job_id().unwrap_or_default().to_string();
-    let mut error = Error::new(homeboy_core::error::ErrorCode::RunnerJobLost, format!(
-        "accepted Lab runner job '{runner_job_id}' was not found in any of {checked_generations} authoritative known daemon generation(s)"
-    ), Value::Null)
-    .with_hint(format!("Recover safely: homeboy agent-task recover {run_id}"));
-    error.retryable = Some(true);
+    let error = lost_runner_job_error(record, checked_generations);
     // The daemon no longer owns this accepted job, but its runner may still own
     // a service supervisor. Resolve that owner before replacing the run record
     // with a terminal failure so the cleanup proof remains durable.
@@ -352,7 +400,11 @@ fn terminalize_lost_accepted_lab_job_in_store(
     metadata.insert("phase".to_string(), json!("accepted_lab_runner_job_lost"));
     metadata.insert(
         "phase_activity".to_string(),
-        json!("accepted runner job was confirmed absent across authoritative daemon generations"),
+        json!(if checked_generations == 0 {
+            "accepted runner job was lost because its runner is no longer configured"
+        } else {
+            "accepted runner job was confirmed absent across authoritative daemon generations"
+        }),
     );
     metadata.insert("provider_executions_consumed".to_string(), json!(0));
     metadata.insert(METADATA_KEY_RETRYABLE.to_string(), json!(true));

@@ -1930,7 +1930,12 @@ pub(crate) fn project_cook_observation(
     store: &AgentTaskLifecycleStore,
     record: &agent_task_lifecycle::AgentTaskRunRecord,
 ) -> agent_task_lifecycle::AgentTaskRunRecord {
-    agent_task_lifecycle::observed_with_run_state(record, cook_observation_state(store, record))
+    let mut projected = record.clone();
+    agent_task_lifecycle::project_removed_runner_job(&mut projected);
+    agent_task_lifecycle::observed_with_run_state(
+        &projected,
+        cook_observation_state(store, &projected),
+    )
 }
 
 /// The state an operator observation surface shows for `record`. Pure: it

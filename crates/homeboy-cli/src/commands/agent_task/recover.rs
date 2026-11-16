@@ -30,11 +30,20 @@ pub(super) fn recover_with(
     let id = args.id.clone();
     let request = recovery_request(args)?;
     let (report, exit_code) = agent_task_service::recover_cook(&id, request, performer)?;
-    Ok((
-        serde_json::to_value(report)
-            .map_err(|error| homeboy::core::Error::internal_json(error.to_string(), None))?,
-        exit_code,
-    ))
+    let record = homeboy::agents::agent_task_lifecycle::exact_record(&report.run_id).ok();
+    let mut value = serde_json::to_value(report)
+        .map_err(|error| homeboy::core::Error::internal_json(error.to_string(), None))?;
+    let placement_source = record
+        .as_ref()
+        .map(|record| {
+            serde_json::json!({
+                "runner_id": record.runner_id(),
+                "metadata": record.metadata,
+            })
+        })
+        .unwrap_or(Value::Null);
+    value["placement"] = crate::commands::run_placement::placement(&placement_source);
+    Ok((value, exit_code))
 }
 
 /// Translate `recover` flags into the typed request the step decision

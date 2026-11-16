@@ -26,6 +26,7 @@ enum TestRunnerReconciliation {
     Snapshot(Box<homeboy_core::api_jobs::RunnerJobLogSnapshot>),
     Snapshots(Vec<homeboy_core::api_jobs::RunnerJobLogSnapshot>),
     ConfirmedAbsent(usize),
+    Removed,
     Unconfirmed,
     Retained(homeboy_core::observation::RunRecord),
 }
@@ -74,6 +75,7 @@ impl RunnerContinuationProvider for ReconciliationProvider {
             }
             Some(
                 TestRunnerReconciliation::Unconfirmed
+                | TestRunnerReconciliation::Removed
                 | TestRunnerReconciliation::Snapshots(_)
                 | TestRunnerReconciliation::Retained(_),
             )
@@ -98,7 +100,14 @@ impl RunnerContinuationProvider for ReconciliationProvider {
     }
 
     fn runner_authority(&self, _runner_id: &str) -> RunnerAuthority {
-        RunnerAuthority::Configured
+        if matches!(
+            *self.result.lock().unwrap(),
+            Some(TestRunnerReconciliation::Removed)
+        ) {
+            RunnerAuthority::Removed
+        } else {
+            RunnerAuthority::Configured
+        }
     }
 
     fn run_continuation_exec(
@@ -1560,6 +1569,38 @@ fn accepted_handoff_fails_after_confirmed_absence_across_generations() {
             .summary
             .as_deref()
             .is_some_and(|summary| { summary.contains("accepted Lab runner job") }));
+    });
+}
+
+#[test]
+fn cook_recovery_for_removed_runner_projects_loss_without_status_writes() {
+    with_isolated_home(|_| {
+        let run_id = "removed-runner-job";
+        let original = accepted_detached_handoff(run_id);
+        let _provider = RunnerContinuationTestGuard::install(Box::new(ReconciliationProvider {
+            result: Mutex::new(Some(TestRunnerReconciliation::Removed)),
+            recovered_runner_job_id: Mutex::new(None),
+        }));
+        let preview = status(run_id).expect("pure status projects loss");
+        assert_eq!(
+            preview.metadata["pre_execution_failure"]["error_code"],
+            "runner.job_lost"
+        );
+        assert!(disconnected_runner_recovery_available(&preview));
+        assert_eq!(
+            test_lifecycle_store().read_record(run_id).unwrap(),
+            original
+        );
+
+        let terminal = reconcile_status(run_id).expect("settle removed authority");
+        assert_eq!(
+            terminal.metadata["pre_execution_failure"]["error_code"],
+            "runner.job_lost"
+        );
+        assert_eq!(preview.runner_id(), terminal.runner_id());
+        assert_eq!(preview.runner_job_id(), terminal.runner_job_id());
+        assert!(disconnected_runner_recovery_available(&terminal));
+        assert_eq!(status(run_id).unwrap(), terminal);
     });
 }
 

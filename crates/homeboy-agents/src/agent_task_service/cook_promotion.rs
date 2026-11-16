@@ -4723,7 +4723,8 @@ pub(crate) fn cook_failure_context_with_stores(
                 &chronological_latest_run_id,
                 lifecycle_store
                     .read_record(&chronological_latest_run_id)
-                    .is_ok_and(|record| {
+                    .is_ok_and(|mut record| {
+                        agent_task_lifecycle::project_removed_runner_job(&mut record);
                         admission.as_ref().is_some_and(|wait| {
                             !wait.live_driver && wait.liveness.is_reconcilable()
                         }) || agent_task_lifecycle::disconnected_runner_recovery_available(&record)
