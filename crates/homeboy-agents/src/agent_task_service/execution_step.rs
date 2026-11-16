@@ -437,7 +437,7 @@ pub(super) fn consume_execution_terminal_in_store(
     let runner_ineligible = diagnostic.as_ref().is_some_and(|value| {
         value["details"]["execution_step_disposition"] == "runner_ineligible"
             || value["data"]["execution_step_disposition"] == "runner_ineligible"
-    }) || runner_availability_awaits_resources(&runner_availability);
+    });
     // A connected runner whose readiness is unobserved waits through the same
     // `runner_wait` requeue, bounded by consecutive failed observations.
     let readiness_unobserved = diagnostic
@@ -731,23 +731,6 @@ pub(super) fn consume_execution_terminal_in_store(
 /// unobserved-readiness admission waits.
 const EXECUTION_RECOVERY_LIMIT: u64 = 20;
 const READINESS_UNOBSERVED_OBSERVATIONS: &str = "readiness_unobserved_observations";
-
-/// A Lab refusal naming only capacity or pressure waits for a slot through the
-/// same `runner_wait` requeue fresh Cook admission uses. Any substrate reason
-/// (`not_connected`, `stale_daemon`, `active_jobs_unavailable`, ...) fails.
-fn runner_availability_awaits_resources(runner_availability: &Value) -> bool {
-    runner_availability["reasons"]
-        .as_array()
-        .is_some_and(|reasons| {
-            !reasons.is_empty()
-                && reasons.iter().all(|reason| {
-                    matches!(
-                        reason.as_str(),
-                        Some("capacity_reached" | "pressure" | "capacity_unknown")
-                    )
-                })
-        })
-}
 
 pub(crate) fn schedule_execution_intent_with(
     payload: &Value,

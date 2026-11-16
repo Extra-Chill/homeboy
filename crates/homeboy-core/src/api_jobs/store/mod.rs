@@ -2948,7 +2948,7 @@ impl JobStore {
 
     /// The executing daemon's admission reconciler, shared by the worker and
     /// maintenance pass. Accepted work has no admission deadline.
-    fn reconcile_direct_admission(&self, job_id: Uuid) -> Result<bool> {
+    pub(crate) fn reconcile_direct_admission(&self, job_id: Uuid) -> Result<bool> {
         let reserve = crate::lab_capacity::gate_reserve(&crate::lab_capacity::allowed_cpus());
         let (thresholds, previous, gate, active) = {
             let inner = self.inner.lock().expect("job store mutex poisoned");
@@ -2980,6 +2980,18 @@ impl JobStore {
             )
         };
         let mut pressure = crate::runner_pressure::sample(&thresholds);
+        if let Ok(controller) = self.controller_job_state(job_id) {
+            if controller
+                .request
+                .pointer("/wait/runner_eligible")
+                .and_then(Value::as_str)
+                .is_some()
+            {
+                // A controller may run on a different host from its selected Lab.
+                pressure.admission_reason =
+                    crate::daemon::step_job::admission_reason(&controller.request);
+            }
+        }
         if gate && !reserve.is_empty() {
             pressure.admission_reason = crate::lab_capacity::gate_admission_reason(
                 &pressure,
@@ -3053,7 +3065,9 @@ impl JobStore {
                 .collect::<Vec<_>>()
         };
         for id in pending {
-            self.reconcile_direct_admission(id)?;
+            if self.reconcile_direct_admission(id)? && self.controller_job_state(id).is_ok() {
+                crate::daemon::start_controller_job(id, self)?;
+            }
         }
         Ok(())
     }
@@ -3097,6 +3111,9 @@ impl JobStore {
                 .ok_or_else(|| Error::internal_unexpected("missing queued execution"))?;
             if stored.job.status == JobStatus::Queued {
                 stored.pending_admission_reason = reason.clone();
+                if let Some(controller) = stored.controller_job.as_mut() {
+                    controller.pending_admission_reason = reason.clone();
+                }
             }
             Ok(())
         })

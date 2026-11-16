@@ -3930,6 +3930,14 @@ pub(crate) fn start_controller_job(
     {
         return job_store.get(job_id);
     }
+    // Execution steps share the daemon's durable pressure queue with execs and
+    // gates. Do not spawn a child merely to discover a capacity refusal.
+    if controller.job_type == step_job::STEP_JOB_TYPE
+        && controller.request["terminal_consumer"] == "agent-task.execution-step"
+        && !job_store.reconcile_direct_admission(job_id)?
+    {
+        return job_store.get(job_id);
+    }
     // Resolve the persisted type/version, not caller-controlled input, before
     // claiming the job so unsupported work remains queued and recoverable.
     let _driver = controller_job_driver::driver(&controller.job_type, controller.version)?;
