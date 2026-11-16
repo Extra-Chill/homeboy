@@ -49,8 +49,13 @@ pub fn is_fixture_backend(_backend: &str) -> bool {
 pub(crate) fn fixture_provider_outcome(
     request: &AgentTaskExecutorRequest,
 ) -> Option<AgentTaskOutcome> {
-    is_fixture_backend(&request.request.executor.backend)
-        .then(|| super::fixtures::run_fixture_provider(&request.request, &request.artifacts_path))
+    is_fixture_backend(&request.request.executor.backend).then(|| {
+        super::fixtures::run_fixture_provider(
+            &request.request,
+            &request.artifacts_path,
+            &request.artifacts_path_provenance,
+        )
+    })
 }
 
 /// Run the deterministic test double when the request selects it.

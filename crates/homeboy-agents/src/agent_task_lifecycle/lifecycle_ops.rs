@@ -4013,7 +4013,12 @@ pub(crate) fn annotate_local_provider_ownership(
             _ => {}
         }
     }
-    if has_live_owner || (has_unverifiable_owner && !has_failed && !has_cancelled) {
+    // Provider exit does not release the Cook worker's custody: it still
+    // harvests the result and commits the aggregate after the subprocess exits.
+    if record.local_owner_liveness() == LocalOwnerLiveness::Live
+        || has_live_owner
+        || (has_unverifiable_owner && !has_failed && !has_cancelled)
+    {
         return LocalProviderOwnerDecision::StayRunning;
     }
     if !has_reconcilable_execution {
