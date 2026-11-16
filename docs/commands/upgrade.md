@@ -28,7 +28,7 @@ with the install script. This historical escape hatch does not disable the
 
 ### Runner convergence
 
-Each selected SSH runner goes through the same runner-binary convergence as `homeboy runner connect` (see [runner connection](../architecture/runner-connection.md#binary-convergence)). The target is the controller identity the upgrade just installed, not the build of the process running the upgrade. Convergence compares the runner's configured `homeboy_path` (its `self identity`) with that target and installs the target's exact release tag through `refresh-homeboy`'s verified release path only when the runner is older. It never downgrades, and it never replaces a daemon that has active jobs.
+Each selected SSH runner goes through the same runner-binary convergence as `homeboy runner connect` (see [runner connection](../architecture/runner-connection.md#binary-convergence)). The target is the controller identity the upgrade just installed, not the build of the process running the upgrade. Convergence compares the runner's configured `homeboy_path` (its `self identity`) with that target and installs the target's exact release tag through `refresh-homeboy`'s verified release path only when the runner is older. It never downgrades. Busy and idle runners use the same in-place refresh; the restarted daemon re-adopts active jobs.
 
 Outside an upgrade, `homeboy runner connect <runner>` runs this same convergence against the current controller, so it is the normal way to bring a single runner up to date. `homeboy runner refresh-homeboy` is for explicit refs (`--ref`), selecting an existing binary (`--select`), downgrades (`--allow-downgrade`), dev builds (`runner dev-sync`), and the manual fallback below when convergence failed.
 
@@ -38,7 +38,6 @@ Each convergence outcome maps onto the runner's upgrade entry like this:
 | --- | --- |
 | `converged` | `success: true`, `upgraded: true`, `new_version` is the target version |
 | `already_current` | `success: true`, `upgraded: false`; nothing is installed |
-| `pending_active_jobs` | `deferred: true`; `detail` names the blocking job IDs; recover with `homeboy upgrade --upgrade-runner <runner>` once they finish |
 | `failed`, `skipped_unverifiable` | `success: false`; `detail` keeps the attributed cause; recover with `homeboy runner refresh-homeboy <runner> --ref v<target>` |
 | `skipped_remote_newer`, `skipped_dev_build` | `success: false`, with no recovery command (the runner is never downgraded, and a dev build has no published release) |
 
@@ -180,9 +179,8 @@ resumption. A queued worker is not reported as successful completion. Only the
 controller admission window is fenced while existing Cooks finish. Runner jobs
 keep running and later complete through the upgraded controller. After the
 controller upgrade, each selected runner converges on the installed release:
-idle runners converge at once, and runners whose daemon has active jobs go in
-`runners_deferred` with `runner busy: the daemon has active jobs (<job-ids>); ...`.
-Deferred runners do not make the upgrade partial.
+busy and idle runners refresh in place, with active jobs re-adopted by the
+restarted daemon. No separate refresh command is needed.
 
 `homeboy upgrade` data payload:
 
@@ -193,7 +191,6 @@ Deferred runners do not make the upgrade partial.
 - `new_version`: Version after upgrade (may be null)
 - `upgraded`: Boolean indicating if upgrade was performed
 - `partial`: Present and true when a selected runner did not converge with the controller
-- `runners_deferred`: Busy runners whose opportunistic refresh was deferred
 - `message`: Human-readable status message
 - `restart_required`: Boolean indicating if a restart is needed (true only for source installs)
 - `extensions_updated`: Extension upgrade entries when installed extensions were checked

@@ -598,15 +598,7 @@ pub(crate) fn upgrade_runners(
             &status,
             &mut converge_configured_runner_binary,
         );
-        if entry.deferred {
-            homeboy_core::log_status!(
-                "upgrade",
-                "  {} deferred: {}",
-                entry.runner_id,
-                entry.detail
-            );
-            updated.push(entry);
-        } else if entry.success {
+        if entry.success {
             homeboy_core::log_status!(
                 "upgrade",
                 "  {} {}",
@@ -703,19 +695,6 @@ pub fn upgrade_runner_with_executor(
     let upgraded = match convergence.status {
         RunnerBinaryConvergenceStatus::Converged => true,
         RunnerBinaryConvergenceStatus::AlreadyCurrent => false,
-        RunnerBinaryConvergenceStatus::PendingActiveJobs => {
-            let mut entry = not_converged(
-                0,
-                format!("runner busy: {reason}"),
-                vec![format!(
-                    "homeboy upgrade --upgrade-runner {}",
-                    shell_arg(&runner.id)
-                )],
-            );
-            entry.success = true;
-            entry.deferred = true;
-            return entry;
-        }
         RunnerBinaryConvergenceStatus::Failed => {
             let mut entry = not_converged(
                 1,
@@ -766,7 +745,6 @@ pub fn upgrade_runner_with_executor(
         homeboy_path,
         success,
         upgraded,
-        deferred: false,
         previous_version,
         new_version: Some(target.version.trim_start_matches('v').to_string()),
         bare_homeboy_version: None,
@@ -818,10 +796,6 @@ mod upgrade_runner_tests {
         })
     }
 
-    fn no_jobs() -> std::result::Result<Vec<String>, String> {
-        Ok(Vec::new())
-    }
-
     fn no_exec(_: &str, _: RunnerExecOptions) -> Result<(runner::RunnerExecOutput, i32)> {
         panic!("a runner with no extension updates and no converged binary executes nothing")
     }
@@ -856,7 +830,6 @@ mod upgrade_runner_tests {
             converge_runner_binary_with(
                 target,
                 || remote("0.400.0"),
-                no_jobs,
                 || {
                     install_controller_release_with("lab", target, |options| {
                         refs.push(options.git_ref.clone());
@@ -877,25 +850,6 @@ mod upgrade_runner_tests {
     }
 
     #[test]
-    fn a_busy_daemon_defers_and_names_its_jobs() {
-        let entry = upgrade(|target| {
-            converge_runner_binary_with(
-                target,
-                || remote("0.400.0"),
-                || Ok(vec!["job-1".to_string(), "job-2".to_string()]),
-                || panic!("a busy daemon must not be replaced"),
-            )
-        });
-        assert!(entry.deferred && entry.success, "{entry:?}");
-        assert!(entry.detail.contains("job-1, job-2"), "{}", entry.detail);
-        assert_eq!(entry.exit_code, 0);
-        assert_eq!(
-            entry.recovery_commands,
-            ["homeboy upgrade --upgrade-runner lab"]
-        );
-    }
-
-    #[test]
     fn extensions_are_not_synced_onto_an_unconverged_binary() {
         let runner = ssh_runner("lab", Some("/homeboy"));
         let updates = [super::super::tests::extension_update("rust", "abcdef1")];
@@ -909,13 +863,12 @@ mod upgrade_runner_tests {
                 convergence: converge_runner_binary_with(
                     target,
                     || remote("0.400.0"),
-                    || Ok(vec!["job-1".to_string()]),
-                    || panic!("a busy daemon must not be replaced"),
+                    || ControllerReleaseInstall::Failed("refresh failed".to_string()),
                 ),
                 homeboy_path: "/homeboy".to_string(),
             },
         );
-        assert!(entry.deferred);
+        assert!(!entry.success);
         assert!(entry.extensions_synced.is_empty());
     }
 
@@ -925,16 +878,12 @@ mod upgrade_runner_tests {
             converge_runner_binary_with(
                 target,
                 || remote("0.400.0"),
-                no_jobs,
                 || ControllerReleaseInstall::Installed {
                     identity: Some(INSTALLED.to_string()),
                 },
             )
         });
-        assert!(
-            entry.success && entry.upgraded && !entry.deferred,
-            "{entry:?}"
-        );
+        assert!(entry.success && entry.upgraded, "{entry:?}");
         assert_eq!(entry.previous_version.as_deref(), Some("0.400.0"));
         assert_eq!(entry.new_version.as_deref(), Some("0.401.0"));
         assert_eq!(entry.homeboy_path, "/slot/homeboy");
@@ -948,7 +897,6 @@ mod upgrade_runner_tests {
             converge_runner_binary_with(
                 target,
                 || remote("0.401.0"),
-                no_jobs,
                 || panic!("a current binary must not be reinstalled"),
             )
         });
@@ -963,7 +911,6 @@ mod upgrade_runner_tests {
             converge_runner_binary_with(
                 target,
                 || remote("0.400.0"),
-                no_jobs,
                 || {
                     install_controller_release_with("lab", target, |_| {
                         let mut error = homeboy_core::Error::internal_unexpected("IO error");
@@ -976,7 +923,7 @@ mod upgrade_runner_tests {
                 },
             )
         });
-        assert!(!entry.success && !entry.deferred);
+        assert!(!entry.success);
         assert_eq!(entry.exit_code, 1);
         assert!(
             entry
@@ -990,12 +937,7 @@ mod upgrade_runner_tests {
     #[test]
     fn a_newer_runner_is_never_downgraded_and_not_reported_converged() {
         let entry = upgrade(|target| {
-            converge_runner_binary_with(
-                target,
-                || remote("0.402.0"),
-                no_jobs,
-                || panic!("never downgraded"),
-            )
+            converge_runner_binary_with(target, || remote("0.402.0"), || panic!("never downgraded"))
         });
         assert!(!entry.success, "{entry:?}");
         assert!(entry.recovery_commands.is_empty());

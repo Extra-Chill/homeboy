@@ -5,8 +5,8 @@
 //! the upgrade is still the old controller (#16845).
 //!
 //! Convergence is one decision over three observations: the target
-//! controller build, the configured remote binary's identity, and the
-//! daemon's active jobs. Installation reuses the verified release path of
+//! controller build and the configured remote binary's identity. Active jobs
+//! are re-adopted by the restarted daemon, not a reason to defer refresh. Installation reuses the verified release path of
 //! `refresh-homeboy` pinned to the target's exact version tag, so it never
 //! resolves "latest" and never builds from source. That refresh owns its own
 //! runtime-promotion lease and replaces the daemon through its existing
@@ -17,10 +17,7 @@
 use homeboy_product_identity::BuildIdentity;
 
 use super::remote_daemon::{remote_homeboy_identity, resolve_ssh_runner};
-use super::{
-    active_jobs_from_replacement_observation, load, normalize_homeboy_version_owned,
-    reconcile_status, remote_runner_homeboy_path,
-};
+use super::{load, normalize_homeboy_version_owned, remote_runner_homeboy_path};
 use crate::homeboy_refresh::{install_controller_release, ControllerReleaseInstall};
 use crate::{RunnerBinaryConvergence, RunnerBinaryConvergenceStatus};
 
@@ -42,7 +39,6 @@ pub(crate) fn converge_runner_binary(
     converge_runner_binary_with(
         controller,
         || configured_remote_binary(runner_id),
-        || active_daemon_job_ids(runner_id),
         || install_controller_release(runner_id, controller),
     )
 }
@@ -51,7 +47,6 @@ pub(crate) fn converge_runner_binary(
 pub(crate) fn converge_runner_binary_with(
     controller: &BuildIdentity,
     remote: impl FnOnce() -> Result<ObservedRemoteBinary, String>,
-    active_jobs: impl FnOnce() -> Result<Vec<String>, String>,
     install: impl FnOnce() -> ControllerReleaseInstall,
 ) -> RunnerBinaryConvergence {
     let to = Some(controller.display.clone());
@@ -60,7 +55,6 @@ pub(crate) fn converge_runner_binary_with(
         from,
         to: to.clone(),
         detail,
-        blocking_job_ids: Vec::new(),
     };
     // A dev or source build has no published release to install; the runner
     // binary is left alone and not even probed.
@@ -112,45 +106,16 @@ pub(crate) fn converge_runner_binary_with(
             Some("the runner's homeboy is newer than the controller; never downgraded".to_string()),
         );
     }
-    match active_jobs() {
-        Err(detail) => {
-            return report(
-                RunnerBinaryConvergenceStatus::Failed,
-                from,
-                Some(format!("could not list the daemon's active jobs: {detail}")),
-            )
-        }
-        Ok(job_ids) if !job_ids.is_empty() => return pending(from, to, job_ids),
-        Ok(_) => {}
-    }
     match install() {
         ControllerReleaseInstall::Installed { identity } => RunnerBinaryConvergence {
             status: RunnerBinaryConvergenceStatus::Converged,
             from,
             to: identity.or(to),
             detail: None,
-            blocking_job_ids: Vec::new(),
         },
         ControllerReleaseInstall::Failed(detail) => {
             report(RunnerBinaryConvergenceStatus::Failed, from, Some(detail))
         }
-    }
-}
-
-fn pending(
-    from: Option<String>,
-    to: Option<String>,
-    job_ids: Vec<String>,
-) -> RunnerBinaryConvergence {
-    RunnerBinaryConvergence {
-        status: RunnerBinaryConvergenceStatus::PendingActiveJobs,
-        from,
-        to,
-        detail: Some(format!(
-            "the daemon has active jobs ({}); the runner binary was left in place and converges once they finish",
-            job_ids.join(", ")
-        )),
-        blocking_job_ids: job_ids,
     }
 }
 
@@ -179,13 +144,6 @@ fn configured_remote_binary(runner_id: &str) -> Result<ObservedRemoteBinary, Str
     })
 }
 
-fn active_daemon_job_ids(runner_id: &str) -> Result<Vec<String>, String> {
-    let status = reconcile_status(runner_id).map_err(|error| error.message)?;
-    active_jobs_from_replacement_observation(status)
-        .map(|jobs| jobs.into_iter().map(|job| job.job_id).collect())
-        .map_err(|error| error.message)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -210,10 +168,6 @@ mod tests {
         })
     }
 
-    fn no_jobs() -> Result<Vec<String>, String> {
-        Ok(Vec::new())
-    }
-
     fn never_installs() -> ControllerReleaseInstall {
         panic!("convergence must not install")
     }
@@ -223,7 +177,6 @@ mod tests {
         let report = converge_runner_binary_with(
             &release(),
             || remote("0.438.2"),
-            no_jobs,
             || ControllerReleaseInstall::Installed {
                 identity: Some("homeboy 0.439.0+abc1234".to_string()),
             },
@@ -231,20 +184,17 @@ mod tests {
         assert_eq!(report.status, RunnerBinaryConvergenceStatus::Converged);
         assert_eq!(report.from.as_deref(), Some("homeboy 0.438.2+def5678"));
         assert_eq!(report.to.as_deref(), Some("homeboy 0.439.0+abc1234"));
-        assert!(report.blocking_job_ids.is_empty());
     }
 
     #[test]
     fn skips_when_the_remote_runs_the_controller_release() {
-        let report =
-            converge_runner_binary_with(&release(), || remote("0.439.0"), no_jobs, never_installs);
+        let report = converge_runner_binary_with(&release(), || remote("0.439.0"), never_installs);
         assert_eq!(report.status, RunnerBinaryConvergenceStatus::AlreadyCurrent);
     }
 
     #[test]
     fn never_downgrades_a_newer_remote() {
-        let report =
-            converge_runner_binary_with(&release(), || remote("0.440.0"), no_jobs, never_installs);
+        let report = converge_runner_binary_with(&release(), || remote("0.440.0"), never_installs);
         assert_eq!(
             report.status,
             RunnerBinaryConvergenceStatus::SkippedRemoteNewer
@@ -261,7 +211,6 @@ mod tests {
             let report = converge_runner_binary_with(
                 &dev,
                 || panic!("a dev build must not probe the runner"),
-                || panic!("a dev build must not list jobs"),
                 never_installs,
             );
             assert_eq!(
@@ -273,19 +222,38 @@ mod tests {
     }
 
     #[test]
-    fn active_jobs_hold_convergence_pending_and_name_the_jobs() {
-        let report = converge_runner_binary_with(
-            &release(),
-            || remote("0.438.2"),
-            || Ok(vec!["job-1".to_string(), "job-2".to_string()]),
-            never_installs,
-        );
-        assert_eq!(
-            report.status,
-            RunnerBinaryConvergenceStatus::PendingActiveJobs
-        );
-        assert_eq!(report.blocking_job_ids, ["job-1", "job-2"]);
-        assert!(report.detail.unwrap().contains("job-1, job-2"));
+    fn busy_runner_convergence_preserves_version_guards() {
+        for (version, expected, should_refresh) in [
+            ("0.438.2", RunnerBinaryConvergenceStatus::Converged, true),
+            (
+                "0.440.0",
+                RunnerBinaryConvergenceStatus::SkippedRemoteNewer,
+                false,
+            ),
+            (
+                "0.439.0",
+                RunnerBinaryConvergenceStatus::AlreadyCurrent,
+                false,
+            ),
+        ] {
+            // Active jobs belong to refresh, not convergence. Keep them alive
+            // across the refresh callback to model an always-busy shared Lab.
+            let active_jobs = vec!["active-job".to_string()];
+            let refreshed = std::cell::Cell::new(false);
+            let report = converge_runner_binary_with(
+                &release(),
+                || remote(version),
+                || {
+                    assert!(!active_jobs.is_empty());
+                    refreshed.set(true);
+                    ControllerReleaseInstall::Installed {
+                        identity: Some(release().display),
+                    }
+                },
+            );
+            assert_eq!(report.status, expected, "runner {version}");
+            assert_eq!(refreshed.get(), should_refresh, "runner {version}");
+        }
     }
 
     #[test]
@@ -293,7 +261,6 @@ mod tests {
         let report = converge_runner_binary_with(
             &release(),
             || remote("0.438.2"),
-            no_jobs,
             || ControllerReleaseInstall::Failed("checksum mismatch".to_string()),
         );
         assert_eq!(report.status, RunnerBinaryConvergenceStatus::Failed);
@@ -307,7 +274,6 @@ mod tests {
         let report = converge_runner_binary_with(
             &release(),
             || Err("ssh exited 255".to_string()),
-            no_jobs,
             never_installs,
         );
         assert_eq!(

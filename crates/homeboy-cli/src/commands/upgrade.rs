@@ -558,7 +558,6 @@ mod tests {
             extension_skips: Vec::new(),
             runners_updated: Vec::new(),
             runners_skipped: Vec::new(),
-            runners_deferred: Vec::new(),
             extensions_unrefreshed: Vec::new(),
             services_restarted: Vec::new(),
             services_pending_restart: Vec::new(),

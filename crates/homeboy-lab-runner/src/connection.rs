@@ -1695,43 +1695,6 @@ fn reconciled_active_job_count(
     daemon_active_count.unwrap_or(typed_job_count)
 }
 
-/// Apply the shared replacement guard to an operation's captured evidence.
-pub(crate) fn active_jobs_from_replacement_observation(
-    report: RunnerStatusReport,
-) -> Result<Vec<ActiveRunnerJobSummary>> {
-    let runner_id = &report.runner_id;
-    if !report.connected {
-        return Ok(Vec::new());
-    }
-    if report.active_job_state != RunnerActiveJobState::Available {
-        let mut error = Error::validation_invalid_argument(
-            "reconnect",
-            format!(
-                "runner `{runner_id}` is connected but its active daemon jobs could not be listed; refusing to replace the daemon"
-            ),
-            Some(runner_id.to_string()),
-            Some(vec![format!("homeboy runner status {}", shell::quote_arg(runner_id))]),
-        );
-        error.details["active_job_state"] = serde_json::json!(report.active_job_state);
-        return Err(error);
-    }
-    if let Some(error) = &report.active_job_error {
-        return Err(Error::validation_invalid_argument(
-            "reconnect",
-            format!(
-                "runner `{runner_id}` has an inconsistent active daemon job view ({}); refusing to replace the daemon",
-                error.message
-            ),
-            Some(runner_id.to_string()),
-            Some(vec![format!("homeboy runner status {}", shell::quote_arg(runner_id))]),
-        ));
-    }
-    if authoritative_zero_active_jobs(&report) {
-        return Ok(Vec::new());
-    }
-    Ok(report.active_jobs)
-}
-
 /// A daemon freshness report is the daemon's own job count. A daemon can
 /// authoritatively prove zero active jobs either by being restartable (a stale
 /// daemon safe to stop/start) or by being freshly `Recoverable` — a healthy

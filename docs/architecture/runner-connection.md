@@ -56,15 +56,15 @@ controller's build:
 | Runner identity unreadable | `skipped_unverifiable` |
 | Runner already at the controller's version | `already_current` |
 | Runner newer than the controller | `skipped_remote_newer` (never downgraded) |
-| Runner older, daemon has active jobs | `pending_active_jobs` with `blocking_job_ids`; connect attaches to the current daemon and a later connect converges |
-| Runner older, install succeeded | `converged` |
+| Runner older, busy or idle, refresh succeeded | `converged` |
 | Runner older, install failed (network, checksum, target) | `failed` with `detail`; connect proceeds with the existing binary |
 
 Installing reuses `refresh-homeboy`'s verified release path pinned to the
 controller's exact tag `v<version>` (never `latest`, never a source build) into
 `_homeboy_binaries/homeboy-<sha256>/homeboy`, selects it, and replaces the daemon
 with `refresh-homeboy`'s mechanism: an in-place restart, or the
-service unit repoint and restart. That refresh holds its own runtime promotion
+service unit repoint and restart. Active jobs are re-adopted by the restarted
+daemon rather than deferring convergence. That refresh holds its own runtime promotion
 lease and finishes before connect takes its lease; its reconnect attaches
 through the non-converging connect, so convergence never recurses.
 
