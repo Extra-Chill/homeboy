@@ -1838,16 +1838,33 @@ fn run_promotion_gates(
     // One gate round: toolchain admission and every gate command share it.
     let _identities = crate::agent_task_gate::placement::runner_identity_scope();
     let operation = || {
-        crate::agent_task_gate::verdict::with_data_root(observation_store.data_root(), || {
-            run_promotion_gates_inner(
-                options,
+        let snapshot = if !options.dry_run && worktree_path.is_dir() {
+            Some(crate::agent_task_candidate_tree::workspace_tree(
                 worktree_path,
-                expected_candidate,
-                committed_candidate,
-                gate_workspace,
-                observation_store,
-            )
-        })
+            )?)
+        } else {
+            None
+        };
+        let result =
+            crate::agent_task_gate::verdict::with_data_root(observation_store.data_root(), || {
+                run_promotion_gates_inner(
+                    options,
+                    worktree_path,
+                    expected_candidate,
+                    committed_candidate,
+                    gate_workspace,
+                    observation_store,
+                )
+            });
+        if result
+            .as_ref()
+            .map_or(true, |gates| gates.status.gate_failed())
+        {
+            if let Some(snapshot) = snapshot {
+                restore_failed_gate_workspace(worktree_path, &snapshot)?;
+            }
+        }
+        result
     };
     if let Some(run_id) = options.source_run_id.as_deref() {
         observation_store.time_run_phase_with_outcome(run_id, "gate", operation, |gates| {
@@ -1855,6 +1872,67 @@ fn run_promotion_gates(
         })
     } else {
         operation()
+    }
+}
+
+/// Undo only gate-written workspace changes, including newly created paths.
+/// A private index keeps the destination's staged candidate untouched, while
+/// read-tree restores deletions, file modes and symlinks from the snapshot.
+fn restore_failed_gate_workspace(root: &Path, snapshot: &str) -> Result<()> {
+    let current = crate::agent_task_candidate_tree::workspace_tree(root)?;
+    let index = homeboy_core::git::private_index(root)?;
+    let env = vec![(
+        "GIT_INDEX_FILE".to_string(),
+        index.path().display().to_string(),
+    )];
+    homeboy_core::git::run_git_with_env(
+        root,
+        &["read-tree", &current],
+        "snapshot failed promotion gate workspace",
+        &env,
+    )?;
+    homeboy_core::git::run_git_with_env(
+        root,
+        &["read-tree", "--reset", "-u", snapshot],
+        "restore failed promotion gate workspace",
+        &env,
+    )?;
+    Ok(())
+}
+
+#[cfg(test)]
+mod failed_gate_workspace_tests {
+    use super::*;
+
+    #[test]
+    fn gate_feedback_restore_preserves_preexisting_untracked_bytes_and_index() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path();
+        git_output(root, &["init", "-b", "main"]).unwrap();
+        git_output(root, &["config", "user.name", "Test"]).unwrap();
+        git_output(root, &["config", "user.email", "test@example.test"]).unwrap();
+        std::fs::write(root.join("tracked"), "base\n").unwrap();
+        git_output(root, &["add", "."]).unwrap();
+        git_output(root, &["commit", "-m", "base"]).unwrap();
+        std::fs::write(root.join("tracked"), "staged candidate\n").unwrap();
+        git_output(root, &["add", "."]).unwrap();
+        let index = git_output(root, &["write-tree"]).unwrap();
+        std::fs::write(root.join("user-file"), "user bytes\n").unwrap();
+        let snapshot = crate::agent_task_candidate_tree::workspace_tree(root).unwrap();
+        std::fs::write(root.join("user-file"), "gate output\n").unwrap();
+        std::fs::remove_file(root.join("tracked")).unwrap();
+        std::fs::write(root.join("generated"), "gate output\n").unwrap();
+        restore_failed_gate_workspace(root, &snapshot).unwrap();
+        assert_eq!(
+            std::fs::read_to_string(root.join("user-file")).unwrap(),
+            "user bytes\n"
+        );
+        assert_eq!(
+            std::fs::read_to_string(root.join("tracked")).unwrap(),
+            "staged candidate\n"
+        );
+        assert!(!root.join("generated").exists());
+        assert_eq!(git_output(root, &["write-tree"]).unwrap(), index);
     }
 }
 
