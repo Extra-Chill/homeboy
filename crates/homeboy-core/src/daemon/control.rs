@@ -188,9 +188,14 @@ pub fn ensure_running(addr: &str) -> Result<DaemonStartResult> {
         // A service manager starts the replacement itself; spawning one here
         // would race it for the owner lock (#17387).
         Some(StaleDaemonAction::RestartServiceManaged(lease_id)) => {
-            return restart_service_managed(lease_id, super::DaemonStatus::admits_work);
+            return restart_service_managed(lease_id, |replacement| {
+                replacement.admits_work() && !controller_build_differs(replacement)
+            });
         }
         Some(StaleDaemonAction::RestartInPlace(lease_id)) => restart_in_place(lease_id)?,
+        Some(StaleDaemonAction::DrainThenRestart(lease_id)) => {
+            super::drain_then_replace(lease_id)?;
+        }
         None => {}
     }
     ensure_running_locked(addr)
@@ -206,26 +211,51 @@ fn defers_to_drain(status: &super::DaemonStatus) -> bool {
     status.running
         && status.reachable
         && status.draining()
-        && (status.fresh || status.freshness.active_jobs > 0)
+        && ((status.fresh && !controller_build_differs(status)) || status.freshness.active_jobs > 0)
 }
 
 #[derive(Debug, PartialEq, Eq)]
-enum StaleDaemonAction<'a> {
+pub enum StaleDaemonAction<'a> {
     RestartServiceManaged(&'a str),
     RestartInPlace(&'a str),
+    DrainThenRestart(&'a str),
 }
 
-/// What `ensure_running` does about a live daemon that is not fresh.
-fn stale_daemon_action(status: &super::DaemonStatus) -> Option<StaleDaemonAction<'_>> {
+/// What `ensure_running` does about a live controller daemon that is not
+/// compatible or does not run the submitting CLI's build. This local lifecycle
+/// decision does not change Lab runner contract compatibility.
+pub fn stale_daemon_action(status: &super::DaemonStatus) -> Option<StaleDaemonAction<'_>> {
     let state = status
         .state
         .as_ref()
-        .filter(|_| status.running && !status.fresh)?;
-    Some(if state.service_manager.is_some() {
-        StaleDaemonAction::RestartServiceManaged(&state.lease_id)
-    } else {
-        StaleDaemonAction::RestartInPlace(&state.lease_id)
+        .filter(|_| status.running && (!status.fresh || controller_build_differs(status)))?;
+    Some(
+        if controller_build_differs(status) && status.freshness.active_jobs > 0 {
+            StaleDaemonAction::DrainThenRestart(&state.lease_id)
+        } else if state.service_manager.is_some() {
+            StaleDaemonAction::RestartServiceManaged(&state.lease_id)
+        } else {
+            StaleDaemonAction::RestartInPlace(&state.lease_id)
+        },
+    )
+}
+
+/// Only a CLI started from the daemon's own executable path speaks for the
+/// installed build. A development binary elsewhere must not restart (or
+/// downgrade) the shared controller daemon.
+fn controller_build_differs(status: &super::DaemonStatus) -> bool {
+    status.state.as_ref().is_some_and(|state| {
+        state.build_identity != crate::build_identity::current()
+            && submitted_from_daemon_executable(&state.executable.path)
     })
+}
+
+fn submitted_from_daemon_executable(daemon_executable: &std::path::Path) -> bool {
+    let canonical = |path: &std::path::Path| std::fs::canonicalize(path).ok();
+    std::env::current_exe()
+        .ok()
+        .and_then(|current| canonical(&current))
+        .is_some_and(|current| canonical(daemon_executable) == Some(current))
 }
 
 const SERVICE_MANAGED_RESTART_POLL: Duration = Duration::from_millis(250);
@@ -1331,6 +1361,64 @@ fn default_artifact_output_path(artifact_id: &str) -> PathBuf {
 #[cfg(test)]
 mod termination_tests {
     use super::*;
+
+    #[test]
+    fn submitting_cli_build_selects_reuse_restart_or_drain() {
+        crate::test_support::with_isolated_home(|_| {
+            let mut status = read_status().unwrap();
+            status.running = true;
+            status.reachable = true;
+            status.fresh = true;
+            status.state = Some(super::super::DaemonState {
+                schema: super::super::DAEMON_LEASE_SCHEMA.to_string(),
+                lease_id: "test-lease".into(),
+                startup_token: "test-token".into(),
+                address: "127.0.0.1:0".into(),
+                pid: 0,
+                state_path: String::new(),
+                started_at: String::new(),
+                last_seen_at: String::new(),
+                build_identity: crate::build_identity::current(),
+                lab_contract_version: homeboy_lab_contract::LAB_CONTRACT_VERSION,
+                executable: Default::default(),
+                runtime_paths: super::super::DaemonRuntimeSnapshot {
+                    pressure: None,
+                    pressure_thresholds: Default::default(),
+                    loaded_at: String::new(),
+                    paths: Vec::new(),
+                },
+                service_manager: None,
+            });
+            for (different_build, same_executable, active_jobs, expected) in [
+                (false, true, 0, None),
+                (true, true, 0, Some("restart")),
+                (true, true, 2, Some("drain")),
+                // A development binary elsewhere never restarts the shared daemon.
+                (true, false, 0, None),
+            ] {
+                status.state.as_mut().unwrap().executable.path = if same_executable {
+                    std::env::current_exe().unwrap()
+                } else {
+                    std::path::PathBuf::from("/nonexistent/homeboy")
+                };
+                status.state.as_mut().unwrap().build_identity = crate::build_identity::current();
+                if different_build {
+                    status.state.as_mut().unwrap().build_identity.display = "older build".into();
+                }
+                status.freshness.active_jobs = active_jobs;
+                let action = stale_daemon_action(&status);
+                let observed = action.map(|action| match action {
+                    StaleDaemonAction::RestartInPlace(_) => "restart",
+                    StaleDaemonAction::RestartServiceManaged(_) => "service restart",
+                    StaleDaemonAction::DrainThenRestart(_) => "drain",
+                });
+                assert_eq!(
+                    observed, expected,
+                    "different_build={different_build}, same_executable={same_executable}, active_jobs={active_jobs}"
+                );
+            }
+        });
+    }
 
     #[test]
     fn termination_output_reader_retains_only_a_bounded_redacted_tail() {
