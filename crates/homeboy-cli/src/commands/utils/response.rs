@@ -418,10 +418,22 @@ impl CommandResultEnvelope<()> {
     }
 }
 
+static HUMAN_OUTPUT: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// `--human`: stdout carries the envelope's plain-text summary instead of its
+/// JSON. `--output` files keep the JSON envelope.
+pub(crate) fn set_human_output(enabled: bool) {
+    HUMAN_OUTPUT.store(enabled, std::sync::atomic::Ordering::Relaxed);
+}
+
 pub(crate) fn print_response<T: Serialize>(response: &CommandResultEnvelope<T>) -> Result<()> {
     use std::io::{self, Write};
 
-    let payload = response.stdout_json()?;
+    let payload = if HUMAN_OUTPUT.load(std::sync::atomic::Ordering::Relaxed) {
+        response.summary_text()
+    } else {
+        response.stdout_json()?
+    };
     let stdout = io::stdout();
     let mut handle = stdout.lock();
     if let Err(e) = handle.write_all(payload.as_bytes()) {

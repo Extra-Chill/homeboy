@@ -1327,6 +1327,10 @@ impl CliRuntime {
             .flatten()
             .map(|path| path.to_string_lossy().to_string());
 
+        crate::commands::utils::response::set_human_output(
+            matches.try_get_one::<bool>("human").ok().flatten() == Some(&true),
+        );
+
         let artifact_root_override = matches
             .try_get_one::<std::path::PathBuf>("artifact_root")
             .ok()
@@ -1791,7 +1795,6 @@ impl CliRuntime {
                                         &command_identity,
                                         command_provenance,
                                         cli.placement,
-                                        cli.human,
                                     )
                                 },
                             )

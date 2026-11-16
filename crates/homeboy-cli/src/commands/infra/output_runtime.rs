@@ -455,20 +455,11 @@ impl CommandRun {
 
 pub struct OutputService<'a> {
     output_file: Option<&'a str>,
-    human: bool,
 }
 
 impl<'a> OutputService<'a> {
     pub fn new(output_file: Option<&'a str>) -> Self {
-        Self {
-            output_file,
-            human: false,
-        }
-    }
-
-    pub fn with_human(mut self, human: bool) -> Self {
-        self.human = human;
-        self
+        Self { output_file }
     }
 
     pub(crate) fn emit_json_result_for_identity(
@@ -535,12 +526,7 @@ impl<'a> OutputService<'a> {
         if let Some(stderr) = &run.presentation.stderr {
             eprint!("{}", stderr);
         }
-        let envelope = run.stdout_envelope();
-        if self.human {
-            print!("{}", envelope.summary_text());
-        } else {
-            output::print_response(&envelope).ok();
-        }
+        output::print_response(&run.stdout_envelope()).ok();
 
         exit_code
     }
@@ -561,10 +547,9 @@ pub fn run_command(
     identity: &CommandIdentity,
     provenance: CommandArgumentProvenance,
     placement: crate::cli_surface::Placement,
-    human: bool,
 ) -> i32 {
     let plan = command.response_plan(spec, output_file.is_some());
-    let output_service = OutputService::new(output_file).with_human(human);
+    let output_service = OutputService::new(output_file);
 
     let run = match crate::commands::raw_output::prepare_command_run(
         command,
