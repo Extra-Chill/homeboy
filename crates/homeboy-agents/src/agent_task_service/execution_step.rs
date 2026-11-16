@@ -379,6 +379,7 @@ pub fn admit_recovery_execution_step(
             // Waiting on the terminal source's runner would discard this step.
             intent.runner = None;
             intent.step.wait.runner_eligible = None;
+            intent.step.allows_terminal_linked_run = true;
             intent.step.waits_for_children = true;
             record.metadata[PENDING_EXECUTION_INTENT] = serde_json::to_value(intent.work_intent()?)
                 .map_err(|error| invalid(error.to_string()))?;
