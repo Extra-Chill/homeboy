@@ -103,6 +103,7 @@ pub enum CookTerminalOutcome {
     AgentDeclined,
     GateRefused { gate: String },
     Infrastructure { error_code: String },
+    SupersededByActiveCook { owner: Value },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -621,7 +622,11 @@ impl AgentTaskRunRecord {
         }
         let delivery = CookDelivery::from_run_metadata(&self.metadata);
         self.terminal_outcome = Some(
-            if let Some(publication) = delivery
+            if let Some(owner) = self.metadata.get("superseded_by_active_cook") {
+                CookTerminalOutcome::SupersededByActiveCook {
+                    owner: owner.clone(),
+                }
+            } else if let Some(publication) = delivery
                 .as_ref()
                 .and_then(|delivery| delivery.publication.as_ref())
                 .filter(|publication| publication.published && publication.pr_identity().is_some())

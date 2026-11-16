@@ -357,6 +357,8 @@ fn status_without_feedback(args: StatusArgs) -> CmdResult<Value> {
     // Status is a pure projection (#13697, #15718): every read below is
     // bounded and never initializes, migrates, or reconciles durable state.
     if let Ok(record) = bounded_exact_record(&target.run_id) {
+        value["terminal_outcome"] = json!(record.terminal_outcome);
+        value["recoverable"] = json!(record.recoverable);
         if record
             .metadata
             .get("unmaterialized_cook_admission")
@@ -532,6 +534,8 @@ fn compact_control_plane_status(value: Value) -> Value {
             "available_action_count": available
         },
         "presentation": "compact",
+        "terminal_outcome": bounded_control_plane_value(value.get("terminal_outcome").unwrap_or(&Value::Null)),
+        "recoverable": value.get("recoverable"),
     });
     // The bound model the run executes with (or its latest executor recorded)
     // belongs next to the state, so operators plan rotations on facts (#15854).
@@ -673,6 +677,8 @@ fn enforce_control_plane_status_budget(mut value: Value) -> Value {
                     | "next_action"
                     | "action_eligibility"
                     | "presentation"
+                    | "terminal_outcome"
+                    | "recoverable"
             )
         })
         .cloned()
@@ -707,6 +713,44 @@ fn deduplicate_control_plane_evidence(value: &mut Value) {
 mod compact_status_tests {
     use super::{compact_control_plane_status, deduplicate_control_plane_evidence};
     use serde_json::json;
+
+    #[test]
+    fn terminal_cook_status_exposes_record_outcome_by_cook_and_run_id() {
+        crate::test_support::with_isolated_home(|_| {
+            use homeboy::agents::agent_task_lifecycle::{
+                rewrite_record_for_test, seed_status_purity_fixtures_for_test,
+            };
+            seed_status_purity_fixtures_for_test().unwrap();
+            let run_id = "purity-cook-recoverable-attempt";
+            rewrite_record_for_test(run_id, |record| {
+                record.metadata["cook_delivery"] = json!({
+                    "schema": "homeboy/cook-delivery/v2",
+                    "delivery": { "state": "no_change" },
+                    "artifacts": {}
+                });
+            })
+            .unwrap();
+            for id in ["purity-cook-recoverable", run_id] {
+                for full in [false, true] {
+                    let (data, _) = super::status(super::StatusArgs {
+                        run_id: id.to_string(),
+                        full,
+                        exact: false,
+                        strict_subject_exit: false,
+                        watch: false,
+                        interval: "5s".to_string(),
+                        timeout: "30m".to_string(),
+                    })
+                    .unwrap();
+                    assert_eq!(
+                        data["terminal_outcome"]["kind"], "no_change",
+                        "{id}, full={full}"
+                    );
+                    assert_eq!(data["recoverable"], true, "{id}, full={full}");
+                }
+            }
+        });
+    }
 
     #[test]
     fn compact_status_names_the_bound_model_next_to_the_state() {
