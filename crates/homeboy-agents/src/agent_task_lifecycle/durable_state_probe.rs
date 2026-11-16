@@ -165,11 +165,12 @@ pub fn seed_status_purity_fixtures_for_test() -> super::Result<Vec<StatusPurityF
             Some(AgentTaskTerminalOutcome::CandidateRecoverable),
         ),
     ] {
-        seed_terminal_cook_attempts(&store, &plan, cook_id, &[(run_id, outcome)])?;
+        seed_terminal_cook_attempts(&store, &plan, cook_id, &[(run_id, outcome, true)])?;
         push(label, run_id);
     }
 
-    // The gate refused attempt 1's candidate; the retry then made no change.
+    // The gate refused attempt 1's candidate; the retry then made no change and
+    // left no executor evidence, so candidate selection keeps attempt 1.
     let gate_refused = "purity-cook-gate-refused-attempt";
     let no_change_retry = "purity-cook-gate-refused-retry";
     seed_terminal_cook_attempts(
@@ -180,10 +181,12 @@ pub fn seed_status_purity_fixtures_for_test() -> super::Result<Vec<StatusPurityF
             (
                 gate_refused,
                 Some(AgentTaskTerminalOutcome::CandidateRecoverable),
+                true,
             ),
             (
                 no_change_retry,
                 Some(AgentTaskTerminalOutcome::PartialFailure),
+                false,
             ),
         ],
     )?;
@@ -212,7 +215,7 @@ fn seed_terminal_cook_attempts(
     store: &AgentTaskLifecycleStore,
     plan: &crate::agent_task_scheduler::AgentTaskPlan,
     cook_id: &str,
-    attempts: &[(&str, Option<super::AgentTaskTerminalOutcome>)],
+    attempts: &[(&str, Option<super::AgentTaskTerminalOutcome>, bool)],
 ) -> super::Result<()> {
     use crate::agent_task_service::{
         AgentTaskCookRecipe, AgentTaskCookRecipeAttempt, CookRecipeStore, COOK_RECIPE_SCHEMA,
@@ -222,7 +225,7 @@ fn seed_terminal_cook_attempts(
         cook_id: cook_id.to_string(),
         attempts: (1..)
             .zip(attempts)
-            .map(|(attempt, (run_id, _))| AgentTaskCookRecipeAttempt {
+            .map(|(attempt, (run_id, _, _))| AgentTaskCookRecipeAttempt {
                 lineage: None,
                 attempt,
                 run_id: run_id.to_string(),
@@ -238,10 +241,12 @@ fn seed_terminal_cook_attempts(
         sensitive_mappings: Vec::new(),
         harvest_context: Default::default(),
     })?;
-    for (attempt, (run_id, outcome)) in (1..).zip(attempts) {
+    for (attempt, (run_id, outcome, executor_evidence)) in (1..).zip(attempts) {
         store.submit_plan_with_runtime_admission(plan, run_id, |_| Ok(serde_json::json!({})))?;
         super::record_cook_attempt_in_store(store, cook_id, attempt, run_id)?;
-        super::record_run_aggregate_in_store(store, run_id, plan, &purity_aggregate(plan))?;
+        if *executor_evidence {
+            super::record_run_aggregate_in_store(store, run_id, plan, &purity_aggregate(plan))?;
+        }
         if let Some(outcome) = *outcome {
             let current = store.read_record(run_id)?;
             store
