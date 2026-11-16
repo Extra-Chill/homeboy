@@ -9,34 +9,11 @@ use crate::{RunnerSession, RunnerSessionRole, RunnerTunnelMode};
 use homeboy_core::daemon::{DaemonFreshnessReport, DaemonStaleReasonCode};
 use std::cell::RefCell;
 
+// The restart-in-place harness drives Linux process supervision.
+#[cfg(target_os = "linux")]
 #[test]
 fn refresh_with_active_jobs_restarts_in_place_and_preserves_job_ids() {
     crate::execution::tests::restart_in_place::refresh_with_active_jobs_keeps_successor_ownership();
-}
-
-pub(super) fn active_admission(job_id: &str) -> homeboy_core::api_jobs::ActiveRunnerJobSummary {
-    homeboy_core::api_jobs::ActiveRunnerJobSummary {
-        runner_id: "homeboy-lab".to_string(),
-        job_id: job_id.to_string(),
-        operation: "runner.admission".to_string(),
-        source: "runner-daemon".to_string(),
-        kind: "runner.admission".to_string(),
-        status: homeboy_core::api_jobs::JobStatus::Queued,
-        command: "homeboy generic-workload".to_string(),
-        cwd: None,
-        started_at_ms: 1,
-        updated_at_ms: 1,
-        elapsed_ms: 0,
-        heartbeat_age_ms: 0,
-        claim: Default::default(),
-        claim_expires_in_ms: None,
-        lifecycle: None,
-        durable_run_id: None,
-        stale_reason: None,
-        active_child_count: None,
-        active_cell_count: None,
-        re_adoptable: false,
-    }
 }
 
 #[test]

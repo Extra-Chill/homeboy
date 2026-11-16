@@ -1,7 +1,6 @@
 #![cfg(test)]
 
 use super::*;
-use crate::{RunnerSession, RunnerSessionRole, RunnerTunnelMode};
 use std::time::Duration;
 
 #[test]
