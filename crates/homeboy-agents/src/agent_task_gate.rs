@@ -1894,6 +1894,19 @@ pub(crate) fn failure_fingerprint(
     )
 }
 
+/// Stable failure records retained alongside the digest for subset comparisons.
+pub(crate) fn failure_records(stdout: &str, stderr: &str) -> Vec<String> {
+    let lines = [stdout, stderr]
+        .into_iter()
+        .flat_map(str::lines)
+        .filter_map(normalize_failure_record)
+        .collect::<Vec<_>>();
+    let mut records = failure_identifying_records(&lines);
+    records.sort();
+    records.dedup();
+    records
+}
+
 /// Extract the records that identify *which* failure happened from normalized
 /// output lines: failed test names, compiler errors (with their `-->` location),
 /// and panic locations.
@@ -1938,6 +1951,10 @@ fn failure_identifying_records(lines: &[String]) -> Vec<String> {
             records.push(format!("test:{}", &captures[1]));
             continue;
         }
+        if let Some(captures) = patterns.js_failed_test.captures(trimmed) {
+            records.push(format!("test:{}", &captures[1]));
+            continue;
+        }
         if let Some(captures) = patterns.panic_location.captures(trimmed) {
             records.push(format!("panic:{}:{}", &captures[1], &captures[2]));
             continue;
@@ -1954,6 +1971,8 @@ fn failure_identifying_records(lines: &[String]) -> Vec<String> {
 
 struct FailurePatterns {
     failed_test: regex::Regex,
+    js_failed_test: regex::Regex,
+    run_total: regex::Regex,
     panic_location: regex::Regex,
     error_line: regex::Regex,
     location_column: regex::Regex,
@@ -1974,6 +1993,8 @@ fn failure_patterns() -> &'static FailurePatterns {
         let re = |pattern: &str| regex::Regex::new(pattern).expect("valid failure pattern");
         FailurePatterns {
             failed_test: re(r"^test (\S+) \.\.\. FAILED$"),
+            js_failed_test: re(r"^(?:FAIL\s+|[×✕]\s+)(.+?)(?:\s+\(?<duration>\)?)?$"),
+            run_total: re(r"^(\s*(?:Test Files|Tests)\b.*)\(\d+\)(\s*)$"),
             panic_location: re(r"panicked at ([^\s:]+):(\d+)(?::\d+)?"),
             error_line: re(r"^error(?:\[[A-Za-z0-9]+\])?: \S"),
             location_column: re(r"^(\S+?:\d+)(?::\d+)?$"),
@@ -1983,7 +2004,7 @@ fn failure_patterns() -> &'static FailurePatterns {
             ),
             absolute_path: re(r"(^|[\s('`\x22=\[])(/[^\s'`\x22:)\]]+)"),
             thread_id: re(r"(thread '[^']*') \(\d+\)"),
-            duration: re(r"\b(?:\d+h\s+)?(?:\d+m\s+)?\d+(?:\.\d+)?(?:ns|µs|us|ms|s)\b|\b\d+m\b"),
+            duration: re(r"\b(?:\d+h\s+)?(?:\d+m\s+)?\d+(?:\.\d+)?\s*(?:ns|µs|us|ms|s)\b|\b\d+m\b"),
             artifact_hash: re(r"-[0-9a-f]{16}\b"),
             shifting_count: re(r"\b\d+ (passed|ignored|measured|filtered out)\b"),
             timestamp: re(
@@ -2056,6 +2077,7 @@ fn normalize_failure_record(line: &str) -> Option<String> {
     let line = patterns.artifact_hash.replace_all(&line, "-<hash>");
     let line = patterns.duration.replace_all(&line, "<duration>");
     let line = patterns.shifting_count.replace_all(&line, "<n> $1");
+    let line = patterns.run_total.replace(&line, "${1}(<n>)$2");
     let line = patterns.address.replace_all(&line, "<address>");
     let leading = &line[..line.len() - line.trim_start().len()];
     let body = line.split_whitespace().collect::<Vec<_>>().join(" ");
@@ -2079,6 +2101,31 @@ mod baseline_tests {
     use std::time::Duration;
     #[cfg(unix)]
     use std::time::Instant;
+
+    #[test]
+    fn javascript_run_totals_and_failure_durations_are_normalized() {
+        for (base, candidate) in [
+            (
+                "Test Files 2 failed | 81 passed (83)",
+                "Test Files 2 failed | 82 passed (84)",
+            ),
+            (
+                "Tests 2 failed | 1204 passed (1206)",
+                "Tests 2 failed | 1205 passed (1207)",
+            ),
+        ] {
+            assert_eq!(
+                super::normalize_failure_record(base),
+                super::normalize_failure_record(candidate)
+            );
+        }
+        for marker in ["×", "✕"] {
+            assert_eq!(
+                super::failure_records(&format!("{marker} keeps hero fluid (12 ms)"), ""),
+                vec!["test:keeps hero fluid"],
+            );
+        }
+    }
 
     #[test]
     fn matching_baseline_failure_is_distinct_from_a_new_failure() {
