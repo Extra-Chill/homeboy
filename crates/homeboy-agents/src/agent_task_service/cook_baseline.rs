@@ -296,6 +296,11 @@ struct BaselineFacts {
     exit_code: i32,
     status: AgentTaskGateStatus,
     failure_fingerprint: String,
+    #[serde(default)]
+    failure_records: Vec<String>,
+    /// Separately retain exit/diagnostic identity so a subset cannot hide a new diagnostic.
+    #[serde(default)]
+    diagnostic_fingerprint: Option<String>,
     package_artifacts: Vec<AgentTaskGatePackageArtifactProvenance>,
 }
 
@@ -313,6 +318,16 @@ impl BaselineFacts {
                     .map(|e| e.diagnostics.as_slice())
                     .unwrap_or_default(),
             ),
+            failure_records: crate::agent_task_gate::failure_records(&gate.stdout, &gate.stderr),
+            diagnostic_fingerprint: Some(failure_fingerprint(
+                gate.exit_code,
+                "",
+                "",
+                gate.failure_evidence
+                    .as_ref()
+                    .map(|e| e.diagnostics.as_slice())
+                    .unwrap_or_default(),
+            )),
             package_artifacts: gate.environment.package_artifacts.clone(),
         }
     }
@@ -326,8 +341,20 @@ impl BaselineFacts {
     }
 
     fn apply(&self, gate: &mut AgentTaskGateReport, base_sha: &str, diagnostic: Option<String>) {
+        let candidate = Self::from_gate(gate);
+        // Old cache entries have no records: preserve their exact-digest behavior.
+        // Empty record sets must never make unrelated unrecognized output inherited.
+        let inherited_subset = !candidate.failure_records.is_empty()
+            && self.diagnostic_fingerprint.is_some()
+            && self.diagnostic_fingerprint == candidate.diagnostic_fingerprint
+            && candidate
+                .failure_records
+                .iter()
+                .all(|record| self.failure_records.contains(record));
         let matches = self.status == AgentTaskGateStatus::Failed
-            && self.failure_fingerprint == Self::from_gate(gate).failure_fingerprint;
+            && gate.status == AgentTaskGateStatus::Failed
+            && self.exit_code == candidate.exit_code
+            && (self.failure_fingerprint == candidate.failure_fingerprint || inherited_subset);
         gate.baseline_comparison = Some(AgentTaskGateBaselineComparison {
             base_ref: base_sha.to_string(),
             exit_code: self.exit_code,
@@ -979,6 +1006,95 @@ mod tests {
     };
     use homeboy_core::gate::HomeboyGateVisibility;
     use sha2::{Digest, Sha256};
+
+    #[test]
+    fn vitest_failure_attribution_uses_base_failure_subset() {
+        let failures = [
+            " × fluid readiness > keeps hero fluid 12ms\n FAIL  src/lib/fluid-readiness.test.ts > fluid readiness > keeps hero fluid\nAssertionError: expected true to be false\n",
+            " ✕ viewport class states > preserves disclosure baseline (8 ms)\n FAIL  src/lib/viewport-class-states.test.ts > viewport class states > preserves disclosure baseline\nAssertionError: expected hidden to be visible\n",
+            " × selectable set > captures selection 3ms\n FAIL  src/lib/selectable-set-capture.test.ts > selectable set > captures selection\nAssertionError: missing selection\n",
+        ];
+        let output = |indices: &[usize], extra_pass: bool| {
+            let mut output = String::from(" RUN  v3.2.4 /workspace/data-liberation-agent\n");
+            for index in indices {
+                output.push_str(failures[*index]);
+            }
+            if extra_pass {
+                output.push_str(" ✓ src/lib/new-passing.test.ts (1 test) 5ms\n");
+            }
+            output.push_str(&format!(
+                " Test Files  {} failed | {} passed ({})\n      Tests  {} failed | {} passed ({})\n Duration  2.34s\n",
+                indices.len(), 81 + usize::from(extra_pass), 81 + indices.len() + usize::from(extra_pass),
+                indices.len(), 1204 + usize::from(extra_pass), 1204 + indices.len() + usize::from(extra_pass),
+            ));
+            output
+        };
+        let gate = |output: String| {
+            AgentTaskGateReport::new(
+                "vitest",
+                crate::agent_task_gate::legacy_gate_argv("npx vitest run"),
+                1,
+                output,
+                "",
+                None,
+                HomeboyGateVisibility::Visible,
+                AgentTaskGateRevealPolicy::FullEvidence,
+                AgentTaskGateEnvironment::default(),
+            )
+        };
+        let base = BaselineFacts::from_gate(&gate(output(&[0, 1], false)));
+        // Exercise the durable cache as well as a freshly captured baseline.
+        let base: BaselineFacts =
+            serde_json::from_value(serde_json::to_value(base).unwrap()).unwrap();
+        for (name, indices, expected) in [
+            (
+                "extra passing file",
+                vec![0, 1],
+                AgentTaskGateDifferentialResult::BaselineRed,
+            ),
+            (
+                "new failure",
+                vec![0, 1, 2],
+                AgentTaskGateDifferentialResult::CandidateRegression,
+            ),
+            (
+                "fixed one failure",
+                vec![0],
+                AgentTaskGateDifferentialResult::BaselineRed,
+            ),
+        ] {
+            let mut candidate = gate(output(&indices, true).replace("12ms", "99ms"));
+            if indices == [0, 1] {
+                assert_eq!(
+                    base.failure_fingerprint,
+                    BaselineFacts::from_gate(&candidate).failure_fingerprint,
+                    "{name}"
+                );
+            }
+            candidate.failure_evidence = Some(AgentTaskGateFailureEvidence {
+                classification: AgentTaskGateFailureClassification::CandidateCode,
+                summary: "vitest failed".into(),
+                command: "npx vitest run".into(),
+                exit_code: 1,
+                stdout_tail: candidate.stdout.clone(),
+                stderr_tail: String::new(),
+                failed_tests: Vec::new(),
+                agent_feedback: "Repair the candidate failure.".into(),
+                diagnostics: Vec::new(),
+            });
+            base.apply(&mut candidate, "base", None);
+            assert_eq!(
+                candidate.baseline_comparison.as_ref().unwrap().result,
+                expected,
+                "{name}"
+            );
+            assert_eq!(
+                candidate.status == AgentTaskGateStatus::AcceptedInheritedFailure,
+                expected == AgentTaskGateDifferentialResult::BaselineRed,
+                "{name}"
+            );
+        }
+    }
 
     /// A no-change retry (#17960) builds on the unchanged target HEAD: the
     /// attempt it follows recorded no candidate commit because it made none.
