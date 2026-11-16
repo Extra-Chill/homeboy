@@ -5476,10 +5476,8 @@ fn run_cook_spine(
             error
         })?;
     }
-    // A Cook for the same issue derives the same native worktree. While the
-    // Cook that provisioned it still has a live driver, that driver can be
-    // applying a candidate there and gating it, so a second Cook is refused
-    // before it shares the destination.
+    // The destination marker and its owner's driver lock are authoritative,
+    // including for existing and explicit workspace paths. Yield before dispatch.
     if !persisted_finalization
         && !verification_pending_continuation
         && cook_attempt_needs_execution_with_store(
@@ -8435,7 +8433,7 @@ fn pin_initial_cook_workspace_base(options: &mut CookRequest) -> Result<()> {
 
 /// The local tree whose base and projected capacity Cook validates before it
 /// dispatches. A pending runner-owned workspace intentionally has no local path.
-fn cook_startup_workspace(options: &CookRequest) -> Option<&Path> {
+pub(super) fn cook_startup_workspace(options: &CookRequest) -> Option<&Path> {
     options
         .workspace
         .source_worktree_path
