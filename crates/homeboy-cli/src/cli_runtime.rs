@@ -1791,6 +1791,7 @@ impl CliRuntime {
                                         &command_identity,
                                         command_provenance,
                                         cli.placement,
+                                        cli.human,
                                     )
                                 },
                             )

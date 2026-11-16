@@ -619,7 +619,10 @@ fn execute_owned(
                     elapsed_ms: started.elapsed().as_millis(),
                     last_progress_ms_ago: None,
                     progress: None,
-                    output_tail: "waiting for admitted runner gate".to_string(),
+                    output_tail: format!(
+                        "waiting for admitted runner gate on {} (job {job_id})",
+                        request.runner_id
+                    ),
                 };
                 if let Err(error) = (policy.on_heartbeat)(&status) {
                     *heartbeat_error.borrow_mut() = Some(error);

@@ -362,6 +362,23 @@ impl<T: Serialize> CommandResultEnvelope<T> {
     pub(crate) fn stdout_json(&self) -> Result<String> {
         self.to_json().map(|json| format!("{json}\n"))
     }
+
+    /// The human summary `--human` prints instead of the JSON envelope: the
+    /// envelope's own summary, then any next-action commands it does not
+    /// already name.
+    pub(crate) fn summary_text(&self) -> String {
+        let mut text = self
+            .summary
+            .clone()
+            .unwrap_or_else(|| format!("{} {}", self.command, self.status));
+        for action in &self.next_actions {
+            if !text.contains(&action.command) {
+                text.push_str(&format!("\nNext: {}", action.command));
+            }
+        }
+        text.push('\n');
+        text
+    }
 }
 
 impl CommandResultEnvelope<()> {

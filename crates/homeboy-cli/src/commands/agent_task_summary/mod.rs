@@ -58,6 +58,7 @@ pub(crate) fn render_agent_task_summary(
         ) && !summary.starts_with("Cook preview")
             && !summary.contains("Placement:")
         {
+            summary.truncate(summary.trim_end().len());
             summary.push('\n');
             summary.push_str(&super::run_placement::line(payload));
             for child in payload["children"].as_array().into_iter().flatten() {
@@ -755,6 +756,9 @@ fn render_status_summary(payload: &Value) -> Option<String> {
         if !rendered.is_empty() {
             lines.push(format!("Gates: {rendered}"));
         }
+    }
+    if let Some(progress) = string_value(payload, &["progress"]) {
+        lines.push(format!("Progress: {progress}"));
     }
     if let Some(publication) = string_value(payload, &["publication", "state"]) {
         lines.push(format!("Publication: {publication}"));

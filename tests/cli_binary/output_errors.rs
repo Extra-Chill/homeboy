@@ -74,6 +74,38 @@ fn validation_error_writes_json_output_file() {
 }
 
 #[test]
+fn human_flag_prints_the_summary_and_keeps_json_in_the_output_file() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let output_path = dir.path().join("runner-unsupported.json");
+    register_local_runner(dir.path());
+
+    let output = homeboy_command()
+        .args(["--human", "--output"])
+        .arg(&output_path)
+        .args([
+            "runner",
+            "exec",
+            "lab-local",
+            "--require-path",
+            "relative-path",
+            "true",
+        ])
+        .env("HOME", dir.path())
+        .output()
+        .expect("run homeboy");
+
+    assert_eq!(output.status.code(), Some(2));
+    let file_json: Value =
+        serde_json::from_slice(&std::fs::read(&output_path).expect("read output file"))
+            .expect("output file json");
+    let summary = file_json["summary"].as_str().expect("envelope summary");
+    assert_eq!(
+        String::from_utf8_lossy(&output.stdout).trim_end(),
+        summary.trim_end()
+    );
+}
+
+#[test]
 fn artifact_destination_is_not_rejected_as_global_format() {
     let dir = tempfile::tempdir().expect("tempdir");
 
