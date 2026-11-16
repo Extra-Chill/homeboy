@@ -186,6 +186,7 @@ pub(super) fn retention_due(
     path: &Path,
     limit: usize,
     bytes: usize,
+    collection_window_ms: u64,
     inner: &super::store::JobStoreInner,
 ) -> Result<bool> {
     let workflow = crate::daemon::workflow_job::WORKFLOW_JOB_TYPE;
@@ -200,17 +201,38 @@ pub(super) fn retention_due(
         .map_err(|error| store_error(path, "measure terminal retention", error))?;
     for stored in inner.jobs.values().filter(|stored| {
         stored.job.status.is_terminal()
-            && !stored
+            && stored
                 .controller_job
                 .as_ref()
-                .is_some_and(|controller| controller.job_type == workflow)
+                .is_none_or(|controller| controller.job_type != workflow)
     }) {
         count += 1;
         size += serde_json::to_vec(stored)
             .map_err(|error| serialize_error(error, "terminal retention"))?
             .len();
     }
-    if count > limit || size > bytes {
+    let deadline = super::persistence::timestamp_ms().saturating_sub(collection_window_ms);
+    let eligible: bool = connection.query_row(
+        "SELECT EXISTS (SELECT 1 FROM daemon_jobs WHERE active = 0
+         AND COALESCE(json_extract(body, '$.controller_job.job_type'), '') != ?1
+         AND COALESCE(json_extract(body, '$.job.finished_at_ms'), json_extract(body, '$.job.updated_at_ms')) <= ?2)",
+        params![workflow, deadline as i64],
+        |row| row.get(0),
+    ).map_err(|error| store_error(path, "measure collection window", error))?;
+    let eligible = eligible
+        || inner.jobs.values().any(|stored| {
+            stored.job.status.is_terminal()
+                && stored
+                    .controller_job
+                    .as_ref()
+                    .is_none_or(|controller| controller.job_type != workflow)
+                && stored
+                    .job
+                    .finished_at_ms
+                    .unwrap_or(stored.job.updated_at_ms)
+                    <= deadline
+        });
+    if eligible && (count > limit || size > bytes) {
         return Ok(true);
     }
     let retention_ms = crate::defaults::load_config()

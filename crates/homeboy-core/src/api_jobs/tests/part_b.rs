@@ -1083,6 +1083,59 @@ fn test_open_with_event_retention() {
 }
 
 #[test]
+fn terminal_collection_window_preserves_recent_results_over_budget() {
+    let temp = tempfile::tempdir().expect("temp dir");
+    let path = temp.path().join(crate::paths::OBSERVATION_DB_FILENAME);
+    let store = JobStore::open_without_reconciliation(&path).expect("open store");
+    let old = store.create("runner.exec");
+    let recent = store.create("runner.exec");
+    for (job, age) in [(old.id, 25 * 60 * 60 * 1000), (recent.id, 60 * 1000)] {
+        store.start(job).expect("start");
+        store
+            .complete(
+                job,
+                Some(serde_json::json!({"output": "x".repeat(1_100_000)})),
+            )
+            .expect("complete");
+        // Seed historical completion times without sleeping; all retention is
+        // exercised by public store writes, including after a fresh open.
+        store
+            .durable_job_transaction(job, |inner| {
+                let stored = inner.jobs.get_mut(&job).expect("job");
+                let finished = crate::api_jobs::persistence::timestamp_ms() - age;
+                stored.job.finished_at_ms = Some(finished);
+                stored.job.updated_at_ms = finished;
+                Ok(())
+            })
+            .expect("age fixture");
+    }
+    drop(store);
+    let store = JobStore::open_without_reconciliation(&path).expect("reopen");
+    let newest = store.create("runner.exec");
+    store.start(newest.id).expect("start newest");
+    store
+        .complete(
+            newest.id,
+            Some(serde_json::json!({"output": "x".repeat(1_100_000)})),
+        )
+        .expect("complete newest");
+    assert!(store.get(old.id).is_err(), "25-hour result is evictable");
+    assert!(
+        store.get(recent.id).is_ok(),
+        "one-minute result remains collectible over budget"
+    );
+    let report = store.inner.lock().expect("store").compaction.clone();
+    store.create("young jobs over budget do not trigger compaction again");
+    assert_eq!(
+        serde_json::to_value(report).unwrap(),
+        serde_json::to_value(store.inner.lock().expect("store").compaction.clone()).unwrap()
+    );
+    drop(store);
+    let reopened = JobStore::open_without_reconciliation(&path).expect("reopen again");
+    assert!(reopened.get(recent.id).is_ok());
+}
+
+#[test]
 fn terminal_job_retention_compacts_existing_store_without_losing_active_recovery_evidence() {
     let temp = tempfile::tempdir().expect("temp dir");
     let path = temp.path().join(crate::paths::OBSERVATION_DB_FILENAME);

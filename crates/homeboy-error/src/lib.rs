@@ -131,6 +131,7 @@ pub enum ErrorCode {
     RigSchemaUnsupported,
     RunnerLabTransportFailure,
     RunnerControllerDisconnected,
+    RunnerJobLost,
     /// A Lab runner is configured, but none is ready for a Lab-preferring
     /// `--placement auto` workload. Auto never substitutes the controller.
     RunnerLabUnavailable,
@@ -229,6 +230,7 @@ impl ErrorCode {
             ErrorCode::RigSchemaUnsupported => "rig.schema_unsupported",
             ErrorCode::RunnerLabTransportFailure => "runner.lab_transport_failure",
             ErrorCode::RunnerControllerDisconnected => "runner.controller_disconnected",
+            ErrorCode::RunnerJobLost => "runner.job_lost",
             ErrorCode::RunnerLabUnavailable => "runner.lab_unavailable",
             ErrorCode::RunnerVersionSkew => "runner.version_skew",
             ErrorCode::RuntimePromotionContended => "runtime_promotion.contended",
@@ -301,6 +303,7 @@ impl ErrorCode {
             "rig.schema_unsupported" => Self::RigSchemaUnsupported,
             "runner.lab_transport_failure" => Self::RunnerLabTransportFailure,
             "runner.controller_disconnected" => Self::RunnerControllerDisconnected,
+            "runner.job_lost" => Self::RunnerJobLost,
             "runner.lab_unavailable" => Self::RunnerLabUnavailable,
             "runner.version_skew" => Self::RunnerVersionSkew,
             "runtime_promotion.contended" => Self::RuntimePromotionContended,

@@ -294,9 +294,11 @@ fn resume_from_a_next_pass_instance_keeps_its_iteration_and_previous() {
 fn workflow_history_survives_unrelated_terminal_byte_budget_churn() {
     with_isolated_home(|home| {
         let path = home.path().join(crate::paths::OBSERVATION_DB_FILENAME);
-        let store = JobStore::open_without_reconciliation(&path)
-            .unwrap()
-            .with_daemon_lease("workflow-retention-test".to_string());
+        let store = JobStore::open_without_reconciliation_with_retention_and_terminal_byte_limit(
+            &path, 1000, 1000, 1_048_576,
+        )
+        .unwrap()
+        .with_daemon_lease("workflow-retention-test".to_string());
         let original = request(
             json!({
                 "schema": "homeboy/workflow/v1", "id": "retained",
