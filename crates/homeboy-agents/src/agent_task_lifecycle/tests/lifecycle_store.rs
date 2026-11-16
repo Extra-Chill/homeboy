@@ -35,6 +35,11 @@ fn terminal_outcomes_are_countable_through_public_status_json() {
             json!({"kind": "published", "pr": "https://github.com/example/repo/pull/1"}),
         ),
         (
+            "incomplete_draft",
+            json!({"state": "published", "gates": [{"id": "gate-1", "state": "failed"}], "publication": {"status": "published", "published": true, "draft": true, "pr_url": "https://github.com/example/repo/pull/2"}}),
+            json!({"kind": "published", "pr": "https://github.com/example/repo/pull/2", "refused_gate": "gate-1"}),
+        ),
+        (
             "no_change",
             json!({"state": "no_change"}),
             json!({"kind": "no_change"}),
