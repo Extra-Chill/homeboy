@@ -5249,6 +5249,13 @@ fn diagnose_interrupted_local_owner_names_budget_and_duplication_instead_of_gene
                 "owner_identity": format!("{run_id}:task-a:1"),
             }]);
             record.metadata["provider_executions_consumed"] = json!(1);
+            // The interrupted observer is the run's local owner, as in a real Cook.
+            record.metadata["runner_pid"] = json!(owner.id());
+            record
+                .metadata
+                .as_object_mut()
+                .unwrap()
+                .remove("runner_process_start_identity");
         })
         .expect("observer fixture");
         owner.kill().expect("kill cook observer");
