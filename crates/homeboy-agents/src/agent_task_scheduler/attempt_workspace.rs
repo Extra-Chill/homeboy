@@ -699,17 +699,76 @@ fn verified_clean_gate_feedback_baseline(
         .map_err(|error| HarvestError::CandidateTreeMismatch {
             message: error.to_string(),
         })?;
-    crate::agent_task_promotion::validate_candidate_commit(root, &candidate).map_err(|error| {
-        HarvestError::CandidateTreeMismatch {
-            message: error.message,
-        }
-    })?;
+    resolve_gate_feedback_candidate(root, request, &candidate)?;
     if git_output(root, &["rev-parse", "HEAD"])? != candidate.base_sha {
         return Err(HarvestError::CandidateTreeMismatch {
             message: "clean gate feedback destination HEAD is not the candidate base".to_string(),
         });
     }
     Ok(Some(candidate))
+}
+
+/// A retry may execute in a fresh repository, not the controller repository
+/// that pins the candidate. Import objects only: never move its HEAD or index.
+fn resolve_gate_feedback_candidate(
+    root: &Path,
+    request: &AgentTaskRequest,
+    candidate: &crate::agent_task::AgentTaskCandidate,
+) -> Result<(), HarvestError> {
+    if crate::agent_task_promotion::validate_candidate_commit(root, candidate).is_ok() {
+        return Ok(());
+    }
+    let baseline = &request.inputs["cook_loop"];
+    let reference = baseline["candidate_ref"]
+        .as_str()
+        .map(str::to_string)
+        .or_else(|| {
+            baseline["source_run_id"].as_str().map(|id| {
+                format!(
+                    "refs/homeboy/candidates/{}",
+                    homeboy_core::paths::sanitize_path_segment(id)
+                )
+            })
+        });
+    if let Some(repository) = baseline["candidate_repository"].as_str() {
+        if let Some(reference) = reference.as_deref() {
+            let _ = git_output(
+                root,
+                &[
+                    "fetch",
+                    "--no-tags",
+                    "--no-write-fetch-head",
+                    "--",
+                    repository,
+                    reference,
+                ],
+            );
+        }
+        // Older reports did not carry candidate_ref; the immutable object can
+        // still be pinned in the persisted controller checkout.
+        if crate::agent_task_promotion::validate_candidate_commit(root, candidate).is_err() {
+            let _ = git_output(
+                root,
+                &[
+                    "fetch",
+                    "--no-tags",
+                    "--no-write-fetch-head",
+                    "--",
+                    repository,
+                    &candidate.candidate_sha,
+                ],
+            );
+        }
+    }
+    crate::agent_task_promotion::validate_candidate_commit(root, candidate).map_err(|error| {
+        HarvestError::CandidateBaselineUnavailable {
+            message: error.message,
+            run_id: baseline["source_run_id"]
+                .as_str()
+                .unwrap_or(&request.task_id)
+                .to_string(),
+        }
+    })
 }
 
 fn verified_gate_feedback_baseline(
@@ -738,6 +797,11 @@ fn verified_gate_feedback_baseline(
         });
     }
     let baseline = serde_json::Value::Object(cook_loop.clone());
+    if let Ok(candidate) = serde_json::from_value::<crate::agent_task::AgentTaskCandidate>(
+        baseline["candidate_commit"].clone(),
+    ) {
+        resolve_gate_feedback_candidate(root, request, &candidate)?;
+    }
     // Keep strict immutable validation for promotion; admission can instead
     // freeze the current adopted workspace when a previous candidate drifted.
     crate::agent_task_candidate_tree::validate_gate_feedback_candidate_baseline(root, &baseline)
