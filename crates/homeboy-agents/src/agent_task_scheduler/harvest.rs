@@ -995,6 +995,68 @@ mod committed_harvest_tests {
     }
 
     #[test]
+    fn gate_feedback_baseline_clean_at_base_preserves_candidate_and_harvests_remediation() {
+        let temp = tempfile::tempdir().unwrap();
+        let (workspace, base) = candidate_attempt_repo(temp.path());
+        std::fs::write(workspace.join("candidate.txt"), "candidate\n").unwrap();
+        git(&workspace, &["add", "candidate.txt"]);
+        git(&workspace, &["commit", "-m", "failed candidate"]);
+        let candidate = git(&workspace, &["rev-parse", "HEAD"]);
+        let tree = git(&workspace, &["rev-parse", "HEAD^{tree}"]);
+        let diff = git(&workspace, &["diff", &base, &candidate]);
+        git(&workspace, &["reset", "--hard", &base]);
+        assert!(git(&workspace, &["status", "--porcelain"]).is_empty());
+        let mut request = gate_feedback_request(&workspace, diff);
+        request.inputs["cook_loop"]["candidate_commit"] =
+            serde_json::json!({"base_sha":base,"candidate_sha":candidate,"tree_sha":tree});
+        let preflight =
+            prepare_committed_harvest(&request, None, &HarvestExecutionContext::default()).unwrap();
+        let scratch = tempfile::tempdir().unwrap();
+        let attempt = prepare_attempt_workspace(
+            &mut request,
+            preflight.base_sha.as_deref(),
+            preflight.candidate_baseline.as_ref(),
+            scratch.path(),
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(attempt.base_sha(), candidate);
+        assert_eq!(
+            std::fs::read_to_string(attempt.root().join("candidate.txt")).unwrap(),
+            "candidate\n"
+        );
+        std::fs::write(attempt.root().join("remediation.txt"), "fixed\n").unwrap();
+        git(attempt.root(), &["add", "remediation.txt"]);
+        git(attempt.root(), &["commit", "-m", "remediation"]);
+        let mut running = committed_harvest_running_task(
+            temp.path(),
+            attempt.root(),
+            None,
+            attempt.base_sha().to_string(),
+        );
+        running.request = request;
+        let mut outcome = committed_harvest_preflight_outcome(running.task_id.clone());
+        harvest_candidate_commit_with_bundle(&mut outcome, &running, false).unwrap();
+        let harvested = outcome.candidate.as_ref().unwrap();
+        assert_eq!(harvested.base_sha, base);
+        assert_eq!(
+            git(
+                attempt.root(),
+                &["rev-parse", &format!("{}^", harvested.candidate_sha)]
+            ),
+            base
+        );
+        assert_eq!(
+            git(
+                attempt.root(),
+                &["diff", "--name-only", &base, &harvested.candidate_sha]
+            ),
+            "candidate.txt\nremediation.txt"
+        );
+        assert_candidate_patch(&outcome, attempt.root());
+    }
+
+    #[test]
     fn gate_feedback_baseline_adopts_current_dirty_tree_after_pr_advances() {
         let temp = tempfile::tempdir().unwrap();
         let (workspace, _) = candidate_attempt_repo(temp.path());
