@@ -212,6 +212,9 @@ format!(
             inputs.run_id
         ));
     }
+    if removed_runner_attempt(inputs.run_id) {
+        return CookRecoveryStep::Reconcile;
+    }
     if inputs.disconnected_runner {
         return CookRecoveryStep::Continue;
     }
@@ -311,6 +314,26 @@ format!(
         ));
     }
     continuation_step(inputs)
+}
+
+/// Read the existing liveness classification without projecting or settling
+/// runner state. Only explicit recovery applies the single-run reconciliation.
+fn removed_runner_attempt(run_id: &str) -> bool {
+    let Ok(store) = agent_task_lifecycle::AgentTaskLifecycleStore::from_environment() else {
+        return false;
+    };
+    agent_task_lifecycle::exact_record(run_id).is_ok_and(|record| {
+        !record.state().is_terminal()
+            && agent_task_lifecycle::observe_runner_job_in_store(&store, &record).is_some_and(
+                |evidence| {
+                    evidence.observation
+                        == agent_task_lifecycle::RunnerJobObservation::RunnerRemoved
+                },
+            )
+            && super::discovery::discover_reconcile_run(record)
+                .liveness
+                .is_some_and(super::discovery::AgentTaskLiveness::is_reconcilable)
+    })
 }
 
 /// The agent declared the task incomplete: no step that re-reads its verdict
@@ -844,7 +867,8 @@ fn recover_cook_once(
         if let Ok(run_id) = super::resolve_cook_continuation_run_id(id) {
             if let Ok(record) = agent_task_lifecycle::exact_record(&run_id) {
                 if agent_task_lifecycle::recorded_store_contention(&record)
-                    || record.state() == agent_task_lifecycle::AgentTaskRunState::Running
+                    || (record.state() == agent_task_lifecycle::AgentTaskRunState::Running
+                        && !removed_runner_attempt(&run_id))
                 {
                     agent_task_lifecycle::reconcile_status(&run_id)?;
                 }
@@ -890,6 +914,19 @@ fn recover_cook_once(
         ));
     }
     let mut plan = plan_cook_recovery(id)?;
+    if !preflight
+        && plan.step == CookRecoveryStep::Reconcile
+        && removed_runner_attempt(&plan.run_id)
+    {
+        // Reuse the scoped repair, including its authoritative refresh and
+        // postcondition. Then plan from the durable runner.job_lost result so
+        // the existing candidate/recipe recovery runs in this same invocation.
+        let reconciliation = super::reconcile_run(&plan.run_id, false)?;
+        if let Some(failure) = reconciliation.failure_summary() {
+            return Err(Error::internal_unexpected(failure));
+        }
+        plan = plan_cook_recovery(id)?;
+    }
     if regate {
         let store = agent_task_lifecycle::AgentTaskLifecycleStore::from_environment()?;
         let fenced = store

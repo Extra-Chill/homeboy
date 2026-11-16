@@ -5203,6 +5203,114 @@ fn cook_recovery_operator_feedback_reaches_dispatch_and_survives_pre_execution_f
     }
 }
 
+#[test]
+fn recover_removed_runner_settles_and_dispatches_in_one_call() {
+    use crate::agent_task_service::{
+        CookRecoveryOverrides, CookRecoveryPerformer, CookRecoveryStep,
+    };
+    struct Recovery;
+    impl CookRecoveryPerformer for Recovery {
+        fn continue_cook(
+            &self,
+            _: &str,
+            _: bool,
+            _: &CookRecoveryOverrides,
+        ) -> Result<(Value, i32)> {
+            unreachable!("lost work must use durable-recipe retry")
+        }
+        fn preflight_continue_cook(&self, _: &str, _: bool) -> Result<(Value, i32)> {
+            unreachable!()
+        }
+        fn retry(&self, run: &str) -> Result<(Value, i32)> {
+            let record = agent_task_lifecycle::exact_record(run)?;
+            assert!(record.state().is_terminal());
+            assert!(serde_json::to_string(&record)
+                .unwrap()
+                .contains("runner.job_lost"));
+            let retry = crate::agent_task_service::retry(run, None, false, false)?;
+            execute_reserved_retry_fixture(
+                &retry.record.run_id,
+                Arc::new(ImmediateSuccessExecutor),
+            );
+            Ok((serde_json::json!({"run_id": retry.record.run_id}), 0))
+        }
+        fn reconcile(&self, _: &str) -> Result<(Value, i32)> {
+            unreachable!("scoped reconciliation must continue to retry")
+        }
+        fn adopt(&self, _: &str, _: &str) -> Result<(Value, i32)> {
+            unreachable!()
+        }
+    }
+    homeboy_core::test_support::with_isolated_home(|_| {
+        let _runner = agent_task_lifecycle::RunnerContinuationTestGuard::install(Box::new(
+            super::super::tests::RunnerAuthorityFixture::removed(),
+        ));
+        let cook = "cook-removed-runner";
+        let mut options = batch_cook_options(cook, Arc::new(AcceptedDetachedAttemptDispatcher));
+        options.retry_policy.max_attempts = 2;
+        persist_initial_recipe(&options).unwrap();
+        super::super::materialize_initial_cook_attempt(&options).unwrap();
+        let run = &options.identity.initial_run_id;
+        agent_task_lifecycle::record_detached_lab_run(agent_task_lifecycle::DetachedLabRunRecord {
+            run_id: run,
+            runner_id: "removed-lab",
+            runner_job_id: "accepted-job",
+            remote_workspace: "/runner/workspace",
+            remote_command: &["homeboy".into()],
+        })
+        .unwrap();
+        agent_task_lifecycle::rewrite_record_for_test(run, |record| {
+            record
+                .metadata
+                .as_object_mut()
+                .unwrap()
+                .remove("detached_cook_handoff");
+            record.submitted_at = "2000-01-01T00:00:00+00:00".into();
+            record.updated_at = Some("2000-01-01T00:00:00+00:00".into());
+        })
+        .unwrap();
+        let before = agent_task_lifecycle::exact_record(run).unwrap();
+        let plan = crate::agent_task_service::plan_cook_recovery(cook).unwrap();
+        assert_eq!(
+            plan.step,
+            CookRecoveryStep::Reconcile,
+            "{:?}",
+            super::super::discovery::discover_reconcile_run(before.clone())
+        );
+        let context =
+            crate::agent_task_service::cook_failure_context(cook, Some(run), &plan.status).unwrap();
+        assert!(context
+            .next_actions
+            .iter()
+            .any(|action| action.command.contains("recover")));
+        let (_, exit) = crate::agent_task_service::recover_cook(
+            cook,
+            crate::agent_task_service::CookRecoveryRequest {
+                preflight: true,
+                ..Default::default()
+            },
+            &Recovery,
+        )
+        .unwrap();
+        assert_eq!(exit, 0);
+        assert_eq!(
+            agent_task_lifecycle::exact_record(run).unwrap().revision,
+            before.revision
+        );
+        let (report, exit) =
+            crate::agent_task_service::recover_cook(cook, Default::default(), &Recovery).unwrap();
+        assert_eq!(exit, 0, "{report:?}");
+        assert_eq!(report.step, CookRecoveryStep::Retry);
+        assert_ne!(report.run_id, *run);
+        assert_eq!(
+            agent_task_lifecycle::exact_record(&report.run_id)
+                .unwrap()
+                .state(),
+            AgentTaskRunState::Succeeded
+        );
+    });
+}
+
 fn retryable_pre_provider_cook(cook_id: &str, max_attempts: u32) -> CookRequest {
     let mut options = batch_cook_options(cook_id, Arc::new(AcceptedDetachedAttemptDispatcher));
     options.identity.initial_run_id = format!("{cook_id}-attempt-1");

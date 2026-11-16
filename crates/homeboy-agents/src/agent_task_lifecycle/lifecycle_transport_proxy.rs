@@ -168,6 +168,11 @@ pub fn disconnected_runner_recovery_available(record: &AgentTaskRunRecord) -> bo
                 .and_then(Value::as_str),
             Some("runner.controller_disconnected" | "runner.job_lost")
         )
+        // A removed runner cannot return an existing result. Recovery must
+        // retry its durable recipe rather than try to reconnect the watch.
+        && !record.runner_id().is_some_and(|runner_id| {
+            super::runner_authority(runner_id) == super::RunnerAuthority::Removed
+        })
         && is_authenticated_transport_recovery_record(record)
 }
 

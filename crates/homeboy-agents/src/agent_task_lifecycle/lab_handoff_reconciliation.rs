@@ -310,7 +310,7 @@ pub(crate) fn observe_terminal_runner_record_in_store(
 /// at all — the runner branch dispatches a command the runner interprets
 /// against its own HOME — so passing this store's data root is precise rather
 /// than merely conservative.
-fn terminalize_lost_accepted_lab_job_in_store(
+pub(crate) fn terminalize_lost_accepted_lab_job_in_store(
     lifecycle_store: &AgentTaskLifecycleStore,
     record: &mut AgentTaskRunRecord,
     checked_generations: usize,
