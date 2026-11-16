@@ -91,7 +91,7 @@ fn remapped_lab_cook_spawns_and_harvests_from_runner_snapshot_identity() {
     .unwrap()
     .trim()
     .to_string();
-    let fake = node_pi(&format!("let cp=require('child_process');if(cp.execFileSync('git',['rev-parse','origin/trunk']).toString().trim()!=={base:?})throw Error('wrong base');cp.execFileSync('git',['diff','origin/trunk','--stat']);fs.writeFileSync('provider-change.txt','changed\\n');fs.writeFileSync({:?},JSON.stringify({{cwd:process.cwd(),workspace:launch.execution_cwd}}));answer('provider spawned');",marker));
+    let fake = node_pi(&format!("let cp=require('child_process');if(cp.execFileSync('git',['rev-parse','origin/trunk']).toString().trim()!=={base:?})throw Error('wrong base');cp.execFileSync('git',['diff','origin/trunk','--stat']);fs.writeFileSync('provider-change.txt','changed\\n');cp.execFileSync('git',['add','provider-change.txt']);cp.execFileSync('git',['-c','user.name=Homeboy','-c','user.email=homeboy@example.test','commit','-m','provider change'],{{stdio:'ignore'}});fs.writeFileSync({:?},JSON.stringify({{cwd:process.cwd(),workspace:launch.execution_cwd}}));answer('provider spawned');",marker));
     let mut request = fake.request("cook-provider");
     let provider = fake.provider();
     request.workspace.root = Some(source.display().to_string());
