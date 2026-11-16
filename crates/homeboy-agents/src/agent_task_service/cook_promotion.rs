@@ -1762,7 +1762,7 @@ pub fn verify_replacement_gates(
             error.details["claim"] = serde_json::to_value(claim).unwrap_or(Value::Null);
             Err(error)
         }
-        agent_task_lifecycle::ClaimOutcome::Acquired => {
+        agent_task_lifecycle::ClaimOutcome::Acquired(_lease) => {
             let result = verify_replacement_gates_owned(
                 &lifecycle_store,
                 &run_id,
@@ -1776,23 +1776,17 @@ pub fn verify_replacement_gates(
             })?;
             match result {
                 Ok(report) => {
-                    lifecycle_store.complete_cook_operation(
-                        &run_id,
-                        &operation_key,
+                    _lease.complete(
                         serde_json::to_value(&report)
                             .map_err(|error| Error::internal_json(error.to_string(), None))?,
                     )?;
                     Ok(report)
                 }
                 Err(error) => {
-                    lifecycle_store.fail_cook_operation(
-                        &run_id,
-                        &operation_key,
-                        serde_json::json!({
-                            "code": error.code.as_str(),
-                            "message": error.message.clone(),
-                        }),
-                    )?;
+                    _lease.fail(serde_json::json!({
+                        "code": error.code.as_str(),
+                        "message": error.message.clone(),
+                    }))?;
                     Err(error)
                 }
             }

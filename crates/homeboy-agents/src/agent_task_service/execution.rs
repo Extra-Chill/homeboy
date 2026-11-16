@@ -2323,7 +2323,7 @@ fn reserve_cook_retry_lifecycle(
         &operation_key,
         Duration::from_secs(30),
     )? {
-        agent_task_lifecycle::ClaimOutcome::Acquired => {
+        agent_task_lifecycle::ClaimOutcome::Acquired(_lease) => {
             // The Cook operation claim coordinates recipe/index binding; the
             // lifecycle retry lock also makes the first durable successor
             // idempotent across concurrent controllers and processes.
@@ -2345,12 +2345,7 @@ fn reserve_cook_retry_lifecycle(
                     preflight,
                 )?;
             let result = json!({ "run_id": retry_run_id });
-            if let Err(error) = agent_task_lifecycle::complete_cook_operation_in_store(
-                lifecycle_store,
-                &source.run_id,
-                &operation_key,
-                result,
-            ) {
+            if let Err(error) = _lease.complete(result) {
                 // The successor is the durable side effect. Once it is bound,
                 // the reservation stands; the claim's lease expires and the
                 // next retry completes it idempotently. The claim itself can no

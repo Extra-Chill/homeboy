@@ -2564,9 +2564,6 @@ where
         // A runner may re-submit the plan after the controller reserved a
         // side-effect claim. Claims are durable exactly-once ownership, not
         // plan-derived state, so replacing the record must retain them.
-        if let Some(claims) = existing.metadata.get("cook_operation_claims") {
-            record.metadata["cook_operation_claims"] = claims.clone();
-        }
         // Cook reports `provider_start` before a local executor or Lab runner
         // re-submits its materialized plan. That submission refreshes plan-owned
         // fields but must not erase Cook-owned execution identity. In particular,

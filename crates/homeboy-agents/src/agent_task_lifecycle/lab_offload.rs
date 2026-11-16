@@ -859,27 +859,8 @@ fn record_pending_dispatch_acceptance_receipt(
     runner_job_id: &str,
     accepted_at: &str,
 ) -> Result<()> {
-    let operation_keys = metadata
-        .get("cook_operation_claims")
-        .and_then(Value::as_array)
-        .into_iter()
-        .flatten()
-        .filter(|claim| {
-            claim["state"] == json!("running")
-                && claim["intent"]["schema"] == json!("homeboy/cook-dispatch-intent/v1")
-                && claim["intent"]["run_id"] == json!(run_id)
-                && claim["intent"]["operation_key"] == claim["operation_key"]
-        })
-        .filter_map(|claim| claim["operation_key"].as_str().map(str::to_string))
-        .collect::<Vec<_>>();
-    if operation_keys.len() > 1 {
-        return Err(Error::internal_unexpected(
-            "accepted Lab handoff has multiple pending retry dispatch intents",
-        ));
-    }
-    let Some(operation_key) = operation_keys.first() else {
-        return Ok(());
-    };
+    // Dispatch is content-addressed by the accepted run, just like its outbox effect.
+    let operation_key = format!("dispatch:{run_id}");
     let receipts = metadata
         .entry("cook_dispatch_acceptance_receipts".to_string())
         .or_insert_with(|| json!([]));

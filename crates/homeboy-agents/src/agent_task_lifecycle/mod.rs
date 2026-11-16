@@ -38,6 +38,7 @@ mod cancellation;
 mod control_plane_identities;
 mod conversion;
 mod cook_delivery_writer;
+mod cook_effects;
 mod cook_workspace_restore;
 mod durable_progress;
 #[cfg(any(test, feature = "test-support"))]
@@ -52,7 +53,6 @@ mod lifecycle_record_ops;
 mod lifecycle_runner_projection;
 mod lifecycle_transport_proxy;
 mod logs_projection;
-mod operation_claims;
 mod private_attachment;
 mod record_rebase;
 mod records;
@@ -80,6 +80,7 @@ pub use control_plane_identities::{
     canonical_fanout_mission, canonical_mission, split_transport_retry_suffix,
     CanonicalControlPlaneIdentities,
 };
+pub use cook_effects::*;
 pub use durable_progress::{record_promotion_progress, record_promotion_progress_in_store};
 #[cfg(any(test, feature = "test-support"))]
 #[doc(hidden)]
@@ -99,7 +100,6 @@ pub use lifecycle_store::AgentTaskLifecycleStore;
 pub(crate) use lifecycle_store::{snapshot_from_run, AgentTaskRecordPageRecord};
 pub use lifecycle_transport_proxy::*;
 pub use logs_projection::*;
-pub use operation_claims::*;
 pub use private_attachment::*;
 pub use records::*;
 #[cfg(any(test, feature = "test-support"))]
