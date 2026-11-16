@@ -778,7 +778,6 @@ pub(crate) fn preview_cook(
             .chain(&args.gates.private_verify)
             .cloned(),
     )?;
-    preflight_cook_gates(&args)?;
     if matches!(
         provision["action"].as_str(),
         Some("materialization_required" | "unresolved_provider")
@@ -1218,6 +1217,7 @@ fn cook_preview_resolved_request(args: &AgentTaskCookArgs, placement: Value) -> 
         "gates": {
             "public": args.gates.verify.len(),
             "private": args.gates.private_verify.len(),
+            "toolchain_check": "The gate toolchain check runs when the Cook is submitted",
             // The effective per-gate limits a Lab runner enforces (#15792).
             // On Lab, dependency setup and the gate command share this one
             // time limit (#16938).

@@ -4,7 +4,7 @@ use std::path::PathBuf;
 use std::process::{Command, Stdio};
 
 #[test]
-fn cook_previews_preflight_gate_targets_before_creating_runs() {
+fn cook_submissions_refuse_gates_that_fail_preflight() {
     for batch in [false, true] {
         let home = tempfile::tempdir().expect("home");
         let repository = tempfile::tempdir().expect("repository");
@@ -19,7 +19,13 @@ fn cook_previews_preflight_gate_targets_before_creating_runs() {
                 repo.to_str().unwrap(),
             ],
         );
-        let path = super::fake_pi::install(home.path(), "test model");
+        // The gate runs `homeboy`, so the submission must find this build on PATH.
+        let path = std::env::join_paths(
+            std::iter::once(homeboy_bin().parent().unwrap().to_path_buf()).chain(
+                std::env::split_paths(&super::fake_pi::install(home.path(), "test model")),
+            ),
+        )
+        .unwrap();
         let mut command = Command::new(homeboy_bin());
         command
             .current_dir(&repo)
@@ -34,7 +40,6 @@ fn cook_previews_preflight_gate_targets_before_creating_runs() {
         } else {
             command.args([
                 "cook",
-                "--preview",
                 "--goal",
                 "Check preflight",
                 "--head",
@@ -53,7 +58,7 @@ fn cook_previews_preflight_gate_targets_before_creating_runs() {
             command.arg("--task-url");
         }
         command.arg("https://github.com/Extra-Chill/homeboy/issues/17283");
-        let output = command.output().expect("preview");
+        let output = command.output().expect("Cook submission");
         let text = format!(
             "{}{}",
             String::from_utf8_lossy(&output.stdout),
@@ -68,13 +73,17 @@ fn cook_previews_preflight_gate_targets_before_creating_runs() {
             text.contains("Declare a gate that runs from the repository itself"),
             "{text}"
         );
-        assert!(
-            !home
-                .path()
-                .join(".local/share/homeboy/agent-task-runs")
-                .exists(),
-            "preview created a run"
-        );
+        // A batch is refused before admission; a single Cook records its
+        // refused submission (#18250).
+        if batch {
+            assert!(
+                !home
+                    .path()
+                    .join(".local/share/homeboy/agent-task-runs")
+                    .exists(),
+                "batch admission created a run before gate preflight: {text}"
+            );
+        }
     }
 }
 
