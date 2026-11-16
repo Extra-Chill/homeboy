@@ -1349,7 +1349,13 @@ mod declared_base_tests {
         .expect("declared base");
 
         assert!(stalled.exists(), "the first ls-remote must have stalled");
-        assert_eq!(base.sha, git(origin.path(), &["rev-parse", "HEAD"]).trim());
+        let head = Command::new("git")
+            .args(["rev-parse", "HEAD"])
+            .current_dir(origin.path())
+            .output()
+            .unwrap()
+            .stdout;
+        assert_eq!(base.sha, String::from_utf8(head).unwrap().trim());
     }
 
     #[cfg(unix)]
