@@ -916,6 +916,7 @@ fn manual_finalization_options(
         how_to_test,
         evidence: Vec::new(),
         verified_commands: Vec::new(),
+        failed_gate_output: Vec::new(),
         changed_public_contracts: evidence.changed_public_contracts.clone(),
         public_contract_evidence: evidence.public_contract_evidence.clone(),
         verified_base: None,
@@ -976,6 +977,7 @@ fn manual_finalization_options(
         repository_integrity_evidence: None,
         protected_branches: args.protected_branches,
         draft_pr: false,
+        gate_failed_draft: false,
     };
     Ok(options)
 }

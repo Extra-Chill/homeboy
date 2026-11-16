@@ -1402,7 +1402,7 @@ fn canonical_candidate_fingerprint(candidate: Option<&Value>) -> Value {
         return Value::Null;
     };
     serde_json::from_value::<AgentTaskPromotionCandidate>(candidate.clone())
-        .and_then(|candidate| serde_json::to_value(candidate).map_err(Into::into))
+        .and_then(serde_json::to_value)
         // Preserve malformed legacy data verbatim so an identity mismatch is
         // still inspectable rather than silently treated as equivalent.
         .unwrap_or_else(|_| candidate.clone())
@@ -1820,7 +1820,7 @@ fn verify_replacement_gates_owned(
     }
     let gate_timeout = gates.gate_timeout();
     let admitted_component_id = gates.gate_environment.admitted_component_id.clone();
-    let original = persisted_promotion_for_attempt(&run_id)?.ok_or_else(|| {
+    let original = persisted_promotion_for_attempt(run_id)?.ok_or_else(|| {
         Error::validation_invalid_argument(
             "cook_delivery.artifacts.promotion",
             "replacement gates require a persisted failed promotion",
@@ -1909,7 +1909,7 @@ fn verify_replacement_gates_owned(
     // The persisted candidate, not the mutable Cook selection, owns this
     // replay. A later retry may have an empty aggregate (or a different task).
     let (source, source_path) =
-        persisted_promotion_source_in_store(lifecycle_store, &original, &run_id)?;
+        persisted_promotion_source_in_store(lifecycle_store, &original, run_id)?;
     let observation_store = lifecycle_store.open_observation_initialized()?;
     let replacement_gate_workspace = replacement_component_workspace(&original, &target_path)?;
     let original_value = serde_json::to_value(&original)
@@ -2004,7 +2004,7 @@ fn verify_replacement_gates_owned(
             "automatic_rerun": false,
         });
     }
-    record_replacement_gate_proof(&run_id, replacement, Some(external_authorization))
+    record_replacement_gate_proof(run_id, replacement, Some(external_authorization))
 }
 
 pub(crate) fn persisted_promotion_source_in_store(
@@ -2232,6 +2232,18 @@ fn draft_publication_gap(
     promotion: &AgentTaskPromotionReport,
     supplied_form: bool,
 ) -> Result<Option<String>> {
+    if promotion.status == crate::agent_task_promotion::AgentTaskPromotionStatus::GateFailed {
+        let failed = promotion
+            .deterministic_gates
+            .iter()
+            .filter(|gate| gate.status == crate::agent_task_gate::AgentTaskGateStatus::Failed)
+            .map(|gate| gate.id.as_str())
+            .collect::<Vec<_>>();
+        return Ok(Some(format!(
+            "Incomplete candidate; deterministic verification failed: {}",
+            failed.join(", ")
+        )));
+    }
     // Eligible gates that include no pass are proven inherited failures: the
     // candidate is publishable, but only as a draft without verified commands.
     let unverified = crate::agent_task_review_dossier::verified_commands_from_promotion(promotion)
@@ -2291,7 +2303,10 @@ pub(crate) fn finalize_or_load_cook_pr_with_backend_with_stores<
 ) -> Result<Value> {
     let mut promotion = promotion.clone();
     promotion.normalize_gate_outcome();
-    if !promotion.finalization_eligible() {
+    let failed_draft = options.finalization.publish_incomplete_draft
+        && promotion.status == crate::agent_task_promotion::AgentTaskPromotionStatus::GateFailed
+        && !promotion.changed_files.is_empty();
+    if !(promotion.finalization_eligible() || failed_draft) {
         return Err(Error::validation_invalid_argument(
             "promotion",
             format!(
@@ -2436,7 +2451,14 @@ pub(crate) fn cook_finalization_options_with_stores(
         .map(|gate| format!("{}: baseline-red (`{}`)", gate.id, gate.command.join(" ")))
         .collect::<Vec<_>>();
     let inherited_failure_count = inherited_gates.len();
-    let attempt_summary = if inherited_failure_count == 0 {
+    let attempt_summary = if promotion.status
+        == crate::agent_task_promotion::AgentTaskPromotionStatus::GateFailed
+    {
+        format!(
+            "{} deterministic cook gate attempt(s) completed; verification failed",
+            promotion.deterministic_gates.len()
+        )
+    } else if inherited_failure_count == 0 {
         format!(
             "{} deterministic cook gate attempt(s) completed green",
             promotion.deterministic_gates.len()
@@ -2553,6 +2575,9 @@ pub(crate) fn cook_finalization_options_with_stores(
         inherited_gate_evidence: None,
         protected_branches: options.finalization.protected_branches.clone(),
         draft_pr,
+        gate_failed_draft: options.finalization.publish_incomplete_draft
+            && promotion.status
+                == crate::agent_task_promotion::AgentTaskPromotionStatus::GateFailed,
         repository_integrity_evidence: promotion.repository_integrity_evidence.clone(),
     })
 }
@@ -3450,6 +3475,19 @@ fn cook_review_dossier_with_stores_and_review_form(
         // provenance that changes how a reviewer should read the result.
         evidence,
         verified_commands,
+        failed_gate_output: promotion
+            .deterministic_gates
+            .iter()
+            .filter(|gate| gate.status == crate::agent_task_gate::AgentTaskGateStatus::Failed)
+            .map(|gate| {
+                let output = super::cook::plain_text(&format!("{}\n{}", gate.stdout, gate.stderr));
+                let lines = output.lines().collect::<Vec<_>>();
+                (
+                    gate.id.clone(),
+                    lines[lines.len().saturating_sub(40)..].join("\n"),
+                )
+            })
+            .collect(),
         changed_public_contracts: Vec::new(),
         public_contract_evidence: None,
         verified_base: None,
@@ -4189,7 +4227,7 @@ pub(crate) fn cook_report(
     };
     if report.exit_code != 0 {
         if let Some(run_id) = report.value.latest_run_id.clone() {
-            if let Some(record) = lifecycle_store.read_record(&run_id).ok() {
+            if let Ok(record) = lifecycle_store.read_record(&run_id) {
                 super::cook::apply_resource_guard_stop(
                     &mut report,
                     &record.metadata,
@@ -5121,9 +5159,7 @@ fn dirty_candidate_adoption_recovery_actions(
     {
         return None;
     }
-    if agent_task_lifecycle::candidate_adoption_recovery_outcome(record, task).is_none() {
-        return None;
-    }
+    agent_task_lifecycle::candidate_adoption_recovery_outcome(record, task)?;
     let workspace = record.metadata["pre_execution_failure"]["details"]["dirty_candidate_adoption"]
         ["workspace"]
         .as_str()?;
@@ -5153,7 +5189,7 @@ fn dirty_candidate_adoption_recovery_actions(
             command: format!(
                 "{prefix} agent-task adopt {} --candidate-ref HEAD --model {}",
                 quote_arg(cook_id),
-                quote_arg(&model),
+                quote_arg(model),
             ),
         },
     ];

@@ -955,7 +955,6 @@ fn finalization_operation_key(run_id: &str, promotion: &AgentTaskPromotionReport
 /// with the finalization result after it is durable. A resumed pass revalidates
 /// the existing PR idempotently, including its live Git and GitHub identities
 /// (#8357).
-
 fn finalize_with_operation_claim_in_store(
     lifecycle_store: &AgentTaskLifecycleStore,
     options: &CookRequest,
@@ -4289,9 +4288,7 @@ pub fn live_owner_continuation_denial(
     let child_owner_pid = child_provider_owner_pid.or(child_gate_owner_pid);
     let generic_owner_is_running = record.owner_process_is_running();
     if record.state().is_terminal() {
-        if child_owner_pid.is_none() {
-            return None;
-        }
+        child_owner_pid?;
     } else if !generic_owner_is_running && child_owner_pid.is_none() {
         return None;
     }
@@ -7789,7 +7786,6 @@ fn publish_latest_incomplete_draft(
     }
     let recipes = super::cook_recipe::CookRecipeStore::from_environment()?;
     let recipe = recipes.load_recipe(&options.identity.cook_id)?;
-    let mut later = Vec::new();
     for attempt in recipe.attempts.iter().rev() {
         let record = lifecycle_store.read_record(&attempt.run_id)?;
         if let Some(promotion) = super::recorded_promotion_report(&record.metadata)? {
@@ -7799,32 +7795,18 @@ fn publish_latest_incomplete_draft(
                 })?;
             if promotion.status == crate::agent_task_promotion::AgentTaskPromotionStatus::GateFailed
                 && !promotion.changed_files.is_empty()
-                && promotion
-                    .deterministic_gates
-                    .iter()
-                    .any(|gate| gate.status == crate::agent_task_gate::AgentTaskGateStatus::Failed)
             {
-                let aggregate = lifecycle_store.read_aggregate(&attempt.run_id)?;
-                let form = review_form_from_aggregate(&aggregate)?;
-                return publish_incomplete_draft(
+                return super::cook_promotion::finalize_or_load_cook_pr_with_backend_with_stores(
+                    &recipes,
                     lifecycle_store,
                     options,
-                    &promotion,
-                    form.as_ref(),
-                    attempt.attempt,
                     &attempt.run_id,
-                    &later,
+                    &promotion,
                     &mut crate::agent_task_finalization::RealAgentTaskPrFinalizationBackend,
                 )
                 .map(|_| ());
             }
         }
-        later.push(format!(
-            "Attempt {} ({}): {:?}; no non-empty gate-failed candidate.",
-            attempt.attempt,
-            attempt.run_id,
-            record.state()
-        ));
     }
     Ok(())
 }
@@ -7853,156 +7835,8 @@ pub(super) fn draft_title(
     }
 }
 
-pub(super) fn publish_incomplete_draft<
-    B: crate::agent_task_finalization::AgentTaskPrFinalizationBackend,
->(
-    lifecycle_store: &AgentTaskLifecycleStore,
-    options: &CookRequest,
-    promotion: &AgentTaskPromotionReport,
-    form: Option<&crate::agent_task_review_dossier::AiFilledReviewForm>,
-    attempt: u32,
-    run_id: &str,
-    later: &[String],
-    backend: &mut B,
-) -> Result<Value> {
-    use homeboy_core::git;
-    let path = promotion
-        .provenance
-        .get("worktree_path")
-        .and_then(Value::as_str)
-        .ok_or_else(|| Error::git_command_failed("candidate worktree path is missing"))?;
-    let root = Path::new(path);
-    let head = match options.finalization.head.as_ref() {
-        Some(head) => head.clone(),
-        None => git::run_git(
-            root,
-            &["branch", "--show-current"],
-            "resolve candidate branch",
-        )?
-        .trim()
-        .to_string(),
-    };
-    let title = if options.finalization.title.is_empty() {
-        draft_title(form.and_then(|form| form.specific_title()), promotion)
-    } else {
-        options.finalization.title.clone()
-    };
-    let note = "Incomplete candidate; deterministic verification failed.";
-    let summary = form
-        .filter(|form| !form.summary.trim().is_empty())
-        .map(|form| {
-            let mut summary = format!("{}\n", form.summary.trim());
-            for change in form
-                .what_changed
-                .iter()
-                .filter(|line| !line.trim().is_empty())
-            {
-                summary.push_str(&format!("- {}\n", change.trim()));
-            }
-            summary
-        });
-    let mut body = summary
-        .map(|summary| format!("{summary}\n"))
-        .unwrap_or_default();
-    body.push_str(&format!(
-        "{note}\n\nTask: {}\n\nincomplete_reason: {}\n",
-        options.workspace.source_refs.join("\n"),
-        form.map(|form| form.incomplete_reason.as_str())
-            .filter(|reason| !reason.trim().is_empty())
-            .unwrap_or("completion not assessed")
-    ));
-    body.push_str(&format!(
-        "\nCandidate from attempt {attempt} (`{run_id}`).\n"
-    ));
-    // The same issue links a complete Cook PR carries, so the next Cook for the
-    // task resolves this draft as its linked PR instead of starting over.
-    let relationships =
-        super::cook_promotion::cook_task_issue_relationships(&options.workspace.source_refs, root);
-    if !relationships.is_empty() {
-        body.push_str(&format!(
-            "\n{}\n",
-            crate::agent_task_review_dossier::render_source_relationships(&relationships)
-        ));
-    }
-    let out_of_scope =
-        super::cook_promotion::remediation_out_of_scope_changes(lifecycle_store, run_id, promotion);
-    if !out_of_scope.is_empty() {
-        body.push_str("\n## Out-of-scope changes\n");
-        for file in out_of_scope {
-            body.push_str(&format!("- `{file}`\n"));
-        }
-    }
-    if !later.is_empty() {
-        body.push_str(&format!("\nLater attempts:\n{}\n", later.join("\n")));
-    }
-    for gate in &promotion.deterministic_gates {
-        body.push_str(&format!("\nGate: {} — {:?}\n", gate.id, gate.status));
-        // A passing gate's status is the evidence; only a failure's output
-        // helps the reviewer, and it is reduced to plain text.
-        if matches!(
-            gate.status,
-            crate::agent_task_gate::AgentTaskGateStatus::Succeeded
-                | crate::agent_task_gate::AgentTaskGateStatus::Skipped
-        ) {
-            continue;
-        }
-        let output = plain_text(&format!("{}\n{}", gate.stdout, gate.stderr));
-        let tail = output
-            .lines()
-            .rev()
-            .take(40)
-            .collect::<Vec<_>>()
-            .into_iter()
-            .rev()
-            .collect::<Vec<_>>()
-            .join("\n");
-        body.push_str(&format!(
-            "\nGate output: {}\n\n```text\n{}\n```\n",
-            gate.id, tail
-        ));
-    }
-    let sha = {
-        let (candidate, _) = backend.prepare_manual_candidate(
-            path,
-            &promotion
-                .verified_base
-                .as_ref()
-                .ok_or_else(|| Error::git_command_failed("verified base SHA is missing"))?
-                .sha,
-        )?;
-        let dates = backend.candidate_dates(path, &candidate.candidate_sha)?;
-        backend.validate_publication_identity(path)?;
-        backend.publish_tree(path, &candidate, &candidate.base_sha, &title, &dates)?
-    };
-    backend.push_branch(path, sha.trim(), &head)?;
-    let pr = match backend.find_open_pr(None, path, &options.finalization.base, &head)? {
-        Some(pr) => {
-            git::pr_comment(
-                None,
-                git::PrCommentOptions {
-                    number: pr.number,
-                    body,
-                    path: Some(path.to_string()),
-                    ..Default::default()
-                },
-            )?;
-            pr
-        }
-        None => backend.create_pr(
-            None,
-            path,
-            &options.finalization.base,
-            &head,
-            &title,
-            &body,
-            true,
-        )?,
-    };
-    Ok(serde_json::json!({"status": "draft_published", "pr_number": pr.number, "pr_url": pr.url}))
-}
-
 /// Terminal output without ANSI escape sequences or other control characters.
-fn plain_text(output: &str) -> String {
+pub(super) fn plain_text(output: &str) -> String {
     let mut plain = String::with_capacity(output.len());
     let mut chars = output.chars().peekable();
     while let Some(ch) = chars.next() {
