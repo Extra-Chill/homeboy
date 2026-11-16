@@ -2835,6 +2835,52 @@ pub(super) fn diagnose(args: DiagnoseArgs) -> CmdResult<Value> {
         queued_runner_ownership.is_some(),
         current_lifecycle_diagnostic.is_some(),
     );
+    // Cook recovery owns the next-step decision, including its durable
+    // no-progress marker. Diagnostic classifications must not override it.
+    let recovery_plan = agent_task_service::load_recipe_for_attempt(run_id)
+        .ok()
+        .flatten()
+        .and_then(|_| agent_task_service_direct::plan_cook_recovery(run_id).ok());
+    if let Some(plan) = recovery_plan {
+        use homeboy::agents::agent_task_service::CookRecoveryStep;
+        let actions = match &plan.step {
+            CookRecoveryStep::Blocked { blocker, .. } => vec![CommandNextAction::new(
+                format!("recovery made no progress: {blocker}; cancel this Cook"),
+                format!("homeboy agent-task cancel {}", quote_arg(&plan.cook_id)),
+            )],
+            CookRecoveryStep::None { reason } => vec![CommandNextAction::new(
+                reason,
+                format!("homeboy agent-task status {}", quote_arg(&plan.cook_id)),
+            )
+            .with_kind(CommandNextActionKind::Show)],
+            CookRecoveryStep::Adopt { candidate_ref } => vec![CommandNextAction::new(
+                "adopt the preserved candidate",
+                format!(
+                    "homeboy agent-task adopt {} --candidate-ref {}",
+                    quote_arg(&plan.cook_id),
+                    quote_arg(candidate_ref)
+                ),
+            )],
+            _ => vec![CommandNextAction::new(
+                "perform the Cook's next recovery step",
+                format!("homeboy agent-task recover {}", quote_arg(&plan.cook_id)),
+            )],
+        };
+        value["next_commands"] = json!(actions
+            .iter()
+            .map(|action| &action.command)
+            .collect::<Vec<_>>());
+        value["recovery_step"] = json!(plan.step);
+        value["next_action_basis"] = json!(DIAGNOSE_ACTION_BASIS_DIAGNOSIS);
+        attach_actionable_metadata(
+            &mut value,
+            CommandActionableMetadata {
+                run: Some(diagnose_run_ref(&record, record.runner_id())),
+                next_actions: actions,
+                ..Default::default()
+            },
+        );
+    }
     let recovery_prefix =
         agent_task_service_direct::cook_recovery_command_prefix_for_record(&record);
     preserve_controller_owner_placement_with_prefix(&mut value, run_id, &recovery_prefix);

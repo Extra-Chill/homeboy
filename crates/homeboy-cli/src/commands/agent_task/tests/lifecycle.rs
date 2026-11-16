@@ -7331,6 +7331,85 @@ fn cook_status_follows_recovery_attempt_instead_of_historical_candidate() {
     });
 }
 
+/// A no-progress recovery must change diagnose's public next-step advice.
+#[test]
+fn diagnose_names_cancel_after_recovery_makes_no_progress() {
+    use homeboy::agents::agent_task_service::{self as service, CookRecoveryPerformer};
+    struct NoProgress;
+    impl CookRecoveryPerformer for NoProgress {
+        fn continue_cook(
+            &self,
+            run: &str,
+            _: bool,
+            _: &service::CookRecoveryOverrides,
+        ) -> homeboy::core::Result<(Value, i32)> {
+            Ok((
+                json!({"latest_run_id": run, "status": "continuation_not_scheduled"}),
+                0,
+            ))
+        }
+        fn preflight_continue_cook(&self, _: &str, _: bool) -> homeboy::core::Result<(Value, i32)> {
+            unreachable!()
+        }
+        fn retry(&self, run: &str) -> homeboy::core::Result<(Value, i32)> {
+            Ok((
+                json!({"latest_run_id": run, "status": "retry_not_scheduled"}),
+                0,
+            ))
+        }
+        fn reconcile(&self, _: &str) -> homeboy::core::Result<(Value, i32)> {
+            unreachable!()
+        }
+        fn adopt(&self, _: &str, _: &str) -> homeboy::core::Result<(Value, i32)> {
+            unreachable!()
+        }
+    }
+    with_temp_home(|| {
+        let cook = "diagnose-no-progress";
+        let run = "diagnose-no-progress-attempt-1";
+        persist_legacy_candidate_cook(cook, run, None);
+        let plan = agent_task_lifecycle::load_plan(run).unwrap();
+        let (_, aggregate) = test_lifecycle_store()
+            .read_record_with_aggregate_bounded(run)
+            .unwrap();
+        let mut aggregate = aggregate.unwrap();
+        aggregate.outcomes[0].candidate = Some(
+            serde_json::from_value(json!({
+                "base_sha": "a".repeat(40),
+                "candidate_sha": "b".repeat(40),
+                "tree_sha": "c".repeat(40)
+            }))
+            .unwrap(),
+        );
+        agent_task_lifecycle::record_run_aggregate(run, &plan, &aggregate).unwrap();
+        let (first, _) = service::recover_cook(cook, Default::default(), &NoProgress).unwrap();
+        assert_eq!(first.step, service::CookRecoveryStep::Continue);
+        let blocked = service::plan_cook_recovery(cook).unwrap();
+        assert!(matches!(
+            blocked.step,
+            service::CookRecoveryStep::Blocked { .. }
+        ));
+        for id in [cook, run] {
+            let (diagnosis, _) = diagnose(DiagnoseArgs {
+                run_id: id.into(),
+                full: false,
+            })
+            .unwrap();
+            assert_eq!(diagnosis["recovery_step"], json!(blocked.step));
+            let commands = diagnosis["next_commands"].to_string();
+            assert!(!commands.contains("agent-task recover"), "{diagnosis:#}");
+            assert!(commands.contains("agent-task cancel"), "{diagnosis:#}");
+            let actions = diagnosis["_homeboy_actionable"]["next_actions"].to_string();
+            assert!(!actions.contains("agent-task recover"), "{diagnosis:#}");
+            assert!(actions.contains("agent-task cancel"), "{diagnosis:#}");
+            assert!(
+                actions.contains("continuation_not_scheduled"),
+                "{diagnosis:#}"
+            );
+        }
+    });
+}
+
 #[test]
 fn real_failed_gate_is_visible_in_diagnose_and_failure_only_evidence() {
     with_temp_home(|| {
