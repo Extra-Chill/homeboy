@@ -430,7 +430,10 @@ pub(super) fn prepare_committed_harvest(
         });
     }
     let status = git_status_ignoring_snapshot_excludes(root, context.snapshot_sync_excludes())?;
-    let candidate_baseline = if status.trim().is_empty() {
+    let candidate_baseline = if derived_cook_baseline.is_some() {
+        // The derived checkout already sits at the validated candidate.
+        None
+    } else if status.trim().is_empty() {
         verified_clean_gate_feedback_baseline(root, request)?
     } else if let Some(baseline) = verified_initial_cook_candidate_baseline(root, request)? {
         Some(baseline)
