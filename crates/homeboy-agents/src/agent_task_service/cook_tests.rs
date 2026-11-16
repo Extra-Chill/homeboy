@@ -11402,23 +11402,48 @@ fn recook_preservation_leaves_unattributed_dirt_for_existing_admission() {
     });
 }
 
-/// A second Cook for the same issue derives the destination a still-driving
-/// Cook provisioned. The provisioning attempt being terminal says nothing about
-/// its Cook: the driver can be applying a later attempt's candidate there and
-/// gating it. The second Cook is refused by name, and that candidate is never
-/// preserved-and-reset out from under its driver.
+/// An existing workspace's marker, not its old provisioner, names the live
+/// owner. Admission and takeover must leave its marker and candidate untouched.
 #[test]
 fn a_destination_whose_cook_is_still_driving_supersedes_another_cook_before_dispatch() {
     use fs4::fs_std::FileExt;
     homeboy_core::test_support::with_isolated_home(|home| {
         let handle = "fixture@fix-issue-15884-fixture";
         let prior_cook = "cook-15884-driving";
+        let lifecycle_store = AgentTaskLifecycleStore::from_environment().unwrap();
+        crate::agent_task_lifecycle::record_detached_cook_handoff_parent_in_store(
+            &lifecycle_store,
+            prior_cook,
+        )
+        .unwrap();
         let prior_run = materialize_prior_cook_attempt(prior_cook, AgentTaskRunState::Failed);
-        let (_primary, target) = prior_candidate_destination(home.path(), handle, &prior_run);
+        // The registry provisioner is unrelated and terminal. Only the marker
+        // identifies the live owner of this existing workspace (#18247).
+        let provisioner =
+            materialize_prior_cook_attempt("old-provisioner", AgentTaskRunState::Succeeded);
+        let (_primary, target) = prior_candidate_destination(home.path(), handle, &provisioner);
+        crate::agent_task_promotion::destination::record(&target, prior_cook).unwrap();
+        let git_dir = git_output(&target, &["rev-parse", "--absolute-git-dir"]).unwrap();
+        let marker = std::path::Path::new(&git_dir).join("homeboy-cook-owner.json");
+        let marker_before = std::fs::read(&marker).unwrap();
         leave_prior_candidate(&target);
         let dirty = porcelain(&target);
-        let options = recook_options("cook-15884-second", handle, &target);
+        let mut options = recook_options("cook-15884-second", handle, &target);
+        let dispatches = Arc::new(AtomicUsize::new(0));
+        options.provider_transport.attempt_dispatcher =
+            Some(Arc::new(RecordingDetachedAttemptDispatcher {
+                dispatches: dispatches.clone(),
+            }));
+        options.workspace.to_worktree = target.display().to_string();
+        options.identity.initial_plan.tasks[0].metadata["worktree_provision"] =
+            serde_json::json!({"action": "existing", "kind": "explicit_cwd"});
         let lifecycle_store = AgentTaskLifecycleStore::from_environment().expect("lifecycle store");
+        lifecycle_store
+            .mutate_record(prior_cook, |record| {
+                record.set_state_for_test(AgentTaskRunState::Failed);
+                true
+            })
+            .unwrap();
 
         let lock_path = homeboy_core::paths::homeboy_data()
             .expect("data root")
@@ -11438,6 +11463,7 @@ fn a_destination_whose_cook_is_still_driving_supersedes_another_cook_before_disp
             .expect("a live owner supersedes admission without provider work");
         assert_eq!(result.exit_code, 0);
         assert_eq!(result.value.status, "superseded_by_active_cook");
+        assert_eq!(dispatches.load(Ordering::SeqCst), 0);
         assert!(
             homeboy_core::cook_status::CookStatus::from_status(&result.value.status)
                 .is_success_exit()
@@ -11461,10 +11487,13 @@ fn a_destination_whose_cook_is_still_driving_supersedes_another_cook_before_disp
             record.metadata["superseded_by_active_cook"]["cook_id"],
             prior_cook
         );
-        assert_eq!(
-            record.metadata["superseded_by_active_cook"]["run_id"],
-            prior_run
-        );
+        assert_eq!(std::fs::read(&marker).unwrap(), marker_before);
+        assert!(crate::agent_task_promotion::destination::check(
+            &target,
+            Some(&options.identity.cook_id)
+        )
+        .is_err());
+        assert_eq!(std::fs::read(&marker).unwrap(), marker_before);
         assert_eq!(
             super::super::cook_prior_candidate::preserve_prior_attempt_candidate(
                 &lifecycle_store,
@@ -11478,6 +11507,10 @@ fn a_destination_whose_cook_is_still_driving_supersedes_another_cook_before_disp
         // Once the owner's driver exits, its failed candidate is the #15775
         // re-cook case again.
         drop(driver);
+        homeboy_core::worktree::record_active_for_run_at_for_test(handle, &target, &prior_run);
+        options.workspace.to_worktree = handle.to_string();
+        options.identity.initial_plan.tasks[0].metadata["worktree_provision"] =
+            serde_json::Value::Null;
         super::super::cook_prior_candidate::require_destination_free_of_live_cook(
             &lifecycle_store,
             &options,

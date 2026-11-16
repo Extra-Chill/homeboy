@@ -77,6 +77,26 @@ pub(crate) fn record(repo: &Path, cook: &str) -> Result<()> {
     }
 }
 
+fn read_owner(repo: &Path) -> Result<Option<Owner>> {
+    match std::fs::read(marker(repo)?) {
+        Ok(bytes) => serde_json::from_slice(&bytes)
+            .map(Some)
+            .map_err(|e| owner_mismatch(e.to_string())),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(e) => Err(owner_mismatch(e.to_string())),
+    }
+}
+
+/// Admission uses the marker, never the run that provisioned the worktree.
+pub(crate) fn live_owner(repo: &Path, cook: &str) -> Result<Option<String>> {
+    let Some(owner) = read_owner(repo)? else {
+        return Ok(None);
+    };
+    Ok((!acts_for(&owner.cook, cook)
+        && crate::agent_task_service::cook_driver_is_live(&owner.cook)?)
+    .then_some(owner.cook))
+}
+
 /// Unmanaged Git checkouts remain caller-owned. A recorded destination admits
 /// its owner, a retry of the owner's lineage, and a Cook succeeding a terminal
 /// owner (which first preserves the owner's staged candidate).
@@ -109,17 +129,17 @@ fn lifecycle_admits(owner: &str, claimant: &str, succeed: bool) -> Option<bool> 
             return Some(false);
         }
     }
-    (succeed && store.read_record(owner).ok()?.state().is_terminal()).then_some(true)
+    (succeed
+        && !crate::agent_task_service::cook_driver_is_live(owner).ok()?
+        && store.read_record(owner).ok()?.state().is_terminal())
+    .then_some(true)
 }
 
 fn admit(repo: &Path, claimant: Option<&str>, succeed: bool) -> Result<()> {
     let path = marker(repo)?;
-    let bytes = match std::fs::read(&path) {
-        Ok(bytes) => bytes,
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(()),
-        Err(e) => return Err(owner_mismatch(e.to_string())),
+    let Some(owner) = read_owner(repo)? else {
+        return Ok(());
     };
-    let owner: Owner = serde_json::from_slice(&bytes).map_err(|e| owner_mismatch(e.to_string()))?;
     let branch = git(repo, &["symbolic-ref", "--short", "HEAD"])?;
     let admitted = match claimant {
         _ if branch != owner.branch => None,

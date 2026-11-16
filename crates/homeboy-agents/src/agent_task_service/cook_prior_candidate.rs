@@ -107,37 +107,40 @@ fn foreign_destination_owner(
 
 /// The other Cook whose live driver still works in the destination, if any.
 ///
-/// The worktree registry names the run that provisioned the destination, but
-/// that run is only one attempt: its Cook's driver can still be applying a
-/// later attempt's candidate there and running gates against it. A second
-/// Cook that shares the destination would apply its own patch on top of that
-/// candidate, so admission yields successfully and names the owner instead.
+/// The marker names the owner even for existing or explicit workspaces; the
+/// registry's provisioning run is not ownership evidence.
 pub(crate) fn require_destination_free_of_live_cook(
     lifecycle_store: &AgentTaskLifecycleStore,
     options: &CookRequest,
 ) -> Result<Option<Value>> {
-    let Some(owner) = foreign_destination_owner(lifecycle_store, options)? else {
+    let registered = homeboy_core::worktree::resolve_workspace_ref_if_present_in_root(
+        &options.workspace.to_worktree,
+        &lifecycle_store.data_root(),
+    )?;
+    let path = super::cook::cook_startup_workspace(options)
+        .map(Path::to_path_buf)
+        .or_else(|| match registered {
+            Some(homeboy_core::worktree::WorkspaceRefRecord::Task(record)) => {
+                Some(PathBuf::from(record.worktree_path))
+            }
+            _ => None,
+        });
+    let Some(path) = path else { return Ok(None) };
+    let Some(owner_cook) =
+        crate::agent_task_promotion::destination::live_owner(&path, &options.identity.cook_id)?
+    else {
         return Ok(None);
     };
-    let Some(owner_cook) = owner.cook_id.as_deref() else {
-        return Ok(None);
-    };
-    if !cook_driver_is_live(owner_cook)? {
-        return Ok(None);
-    }
     Ok(Some(serde_json::json!({
         "cook_id": owner_cook,
-        "run_id": owner.run_id,
-        "worktree": owner.handle,
-        "path": owner.record.worktree_path,
+        "worktree": options.workspace.to_worktree,
+        "path": path,
     })))
 }
 
 /// Whether another process holds the Cook's driver lock.
 pub(crate) fn cook_driver_is_live(cook_id: &str) -> Result<bool> {
-    Ok(super::CookRecipeStore::from_current_data_root()?
-        .foreign_cook_driver(cook_id)?
-        .is_some())
+    super::cook::cook_driver_is_live(cook_id)
 }
 
 /// Classify the destination's native lifecycle owner. Returns `None` unless
