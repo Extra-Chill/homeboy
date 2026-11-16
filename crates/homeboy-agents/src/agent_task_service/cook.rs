@@ -3315,7 +3315,7 @@ pub(crate) fn dispatch_cook_follow_up(
             None
         }
     };
-    let _schedule_phase = timing
+    let schedule_phase = timing
         .as_ref()
         .map(|store| store.run_phase_guard(source_run_id, "terminal.schedule_next_attempt"));
     validate_cook_follow_up_stores(recipe_store, lifecycle_store)?;
@@ -3463,6 +3463,7 @@ pub(crate) fn dispatch_cook_follow_up(
                 run_id: bound.run_id.clone(),
             });
         } else {
+            drop(schedule_phase);
             return dispatch_bound_cook_follow_up(
                 recipe_store,
                 lifecycle_store,
@@ -3659,6 +3660,9 @@ pub(crate) fn dispatch_cook_follow_up(
         .into_iter()
         .find(|bound| bound.run_id == next_run_id)
         .expect("attempt was atomically recorded with its lineage");
+    // The terminal event has synchronously admitted its successor. Receiver
+    // staging/acceptance (or an entire local execution) is not scheduling time.
+    drop(schedule_phase);
     dispatch_bound_cook_follow_up(
         recipe_store,
         lifecycle_store,
