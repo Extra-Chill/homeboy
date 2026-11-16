@@ -714,9 +714,19 @@ fn refresh_homeboy_binary_inner_in_roots(
     output.rollback = rollback.clone();
     output.selected_binary_path = selected_binary_path.clone();
 
-    if runner.kind != RunnerKind::Ssh {
-        // Only SSH runners host a daemon. Elsewhere the promoted binary is
-        // what the next job runs, so there is nothing to restart.
+    // The status captured under the promotion lease is the reconnect authority:
+    // an old daemon that appeared while materializing must be retired, while a
+    // stale session for a disconnected runner must not block direct connect.
+    let post_promotion_status = match post_lease_status {
+        Some(status) => status,
+        None => super::connection::status(&plan.runner_id)?,
+    };
+    let refresh_session = reconnect_session_after_promotion(&post_promotion_status);
+    let refresh_owned_lease = refresh_session.clone().and_then(refresh_owned_lease);
+    if runner.kind != RunnerKind::Ssh && refresh_session.is_none() {
+        // Direct connect serves SSH runners only. A non-SSH runner with no
+        // live daemon runs the promoted binary on its next job, so there is
+        // nothing to restart.
         return Ok((
             HomeboyBinaryRefreshOutput {
                 phase_summary,
@@ -734,16 +744,6 @@ fn refresh_homeboy_binary_inner_in_roots(
             0,
         ));
     }
-
-    // The status captured under the promotion lease is the reconnect authority:
-    // an old daemon that appeared while materializing must be retired, while a
-    // stale session for a disconnected runner must not block direct connect.
-    let post_promotion_status = match post_lease_status {
-        Some(status) => status,
-        None => super::connection::status(&plan.runner_id)?,
-    };
-    let refresh_session = reconnect_session_after_promotion(&post_promotion_status);
-    let refresh_owned_lease = refresh_session.clone().and_then(refresh_owned_lease);
 
     promotion_lease.assert_generation()?;
     set_refresh_live_sub_phase("reconnect");

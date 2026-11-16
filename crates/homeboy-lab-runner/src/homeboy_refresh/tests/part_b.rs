@@ -1133,7 +1133,7 @@ fn refresh_reobserves_a_replaced_binary_inside_staging() {
 }
 
 #[test]
-fn blocked_connect_preserves_successful_promotion_with_one_continuation() {
+fn daemonless_runner_refresh_promotes_without_reconnecting() {
     crate::test_support::with_isolated_home(|_| {
         let fixture = tempfile::tempdir().expect("fixture");
         let binary = fixture.path().join("homeboy");
@@ -1167,52 +1167,18 @@ fn blocked_connect_preserves_successful_promotion_with_one_continuation() {
             allow_downgrade: true,
             dry_run: false,
         })
-        .expect("blocked connect is a structured refresh result");
+        .expect("refresh result");
 
-        assert_eq!(exit_code, 1);
+        // A local runner has no daemon to restart; promotion completes the refresh.
+        assert_eq!(exit_code, 0, "{output:?}");
         assert_eq!(output.updated_fields, ["env", "homeboy_path"]);
-        assert_eq!(output.selected_binary_path, binary.display().to_string());
-        assert_eq!(output.plan.mode, "select");
-        assert_eq!(output.plan.git_ref, None);
         assert!(!output.daemon_refreshed);
         assert!(!output.reconnect_required);
-        assert_eq!(
-            output
-                .phase_summary
-                .iter()
-                .map(|phase| (phase.name, phase.status))
-                .collect::<Vec<_>>(),
-            vec![
-                ("select", "succeeded"),
-                ("identity_verification", "succeeded"),
-                ("bootstrap_promotion", "succeeded"),
-                ("configuration_promotion", "succeeded"),
-                ("reconnect_transport", "failed"),
-                ("daemon_identity_verification", "succeeded"),
-                ("admission_readiness", "failed"),
-            ]
-        );
-        let readiness = output.readiness.expect("blocked readiness");
-        assert_eq!(readiness.state, HomeboyRefreshReadinessState::Blocked);
-        assert_eq!(
-            readiness.continuation.as_deref(),
-            Some("homeboy runner connect lab-local")
-        );
-        assert_eq!(
-            output.followup_commands,
-            ["homeboy runner connect lab-local"]
-        );
-        let failure = output.failure.expect("typed reconnect partial failure");
-        assert_eq!(
-            failure.recovery_actions[0].command,
-            ["homeboy", "runner", "connect", "lab-local"]
-        );
-        assert!(failure
-            .verification
-            .as_deref()
-            .expect("reconnect verification")
-            .contains("promoted configured binary remains selected"));
-        assert!(output.bootstrap_provenance.is_some());
+        assert!(output.failure.is_none());
+        assert!(!output
+            .phase_summary
+            .iter()
+            .any(|phase| phase.name == "reconnect_transport"));
         assert_eq!(
             crate::load("lab-local")
                 .expect("reload controller registry")
@@ -1220,124 +1186,6 @@ fn blocked_connect_preserves_successful_promotion_with_one_continuation() {
                 .homeboy_path
                 .as_deref(),
             binary.to_str()
-        );
-    });
-}
-
-#[test]
-fn stale_session_refresh_blocker_starts_the_newly_selected_binary() {
-    crate::test_support::with_isolated_home(|_| {
-        let roots = homeboy_core::paths::PathRoots::from_environment().expect("roots");
-        let fixture = tempfile::tempdir().expect("fixture");
-        let second_binary = fixture.path().join("second-homeboy");
-        let commit = homeboy_product_identity::build_identity()
-            .git_commit
-            .unwrap_or_else(|| "exact-remote-sha".to_string());
-        std::fs::write(
-            &second_binary,
-            format!(
-                "#!/bin/sh\nprintf '%s\\n' '{{\"data\":{{\"version\":\"1.2.3\",\"git_commit\":\"{commit}\",\"git_dirty\":false}}}}'\n"
-            ),
-        )
-        .expect("write selected binary");
-        assert!(Command::new("chmod")
-            .args(["0755", second_binary.to_str().expect("binary path")])
-            .status()
-            .expect("make selected binary executable")
-            .success());
-        crate::create(
-            r#"{"id":"lab-local","kind":"local","homeboy_path":"/old/homeboy"}"#,
-            false,
-        )
-        .expect("runner");
-        let refresh = |binary: &Path| {
-            refresh_homeboy_binary(HomeboyBinaryRefreshOptions {
-                runner_id: "lab-local".to_string(),
-                mode: HomeboyBinaryRefreshMode::Select {
-                    binary_path: binary.display().to_string(),
-                },
-                git_ref: None,
-                allow_downgrade: true,
-                dry_run: false,
-            })
-        };
-
-        let controller_id = crate::connection::controller_id();
-        let session = RunnerSession {
-            runner_id: "lab-local".to_string(),
-            mode: RunnerTunnelMode::DirectSsh,
-            role: RunnerSessionRole::Controller,
-            server_id: Some("lab-local".to_string()),
-            controller_id: Some(controller_id.clone()),
-            broker_url: None,
-            remote_daemon_address: Some("127.0.0.1:7421".to_string()),
-            local_port: Some(7421),
-            local_url: Some("http://127.0.0.1:7421".to_string()),
-            tunnel_pid: None,
-            tunnel_process_start_identity: None,
-            proxy_forward: None,
-            remote_daemon_pid: Some(2),
-            remote_daemon_lease_id: Some("lease-existing".to_string()),
-            homeboy_version: "test".to_string(),
-            homeboy_build_identity: Some(format!("homeboy test+{commit}")),
-            connected_at: "2026-01-01T00:00:00Z".to_string(),
-            worker_identity: None,
-            worker_pid: None,
-            last_seen_at: None,
-        };
-        let session_path = homeboy_core::paths::runner_controller_session_file_in_root(
-            roots.config(),
-            "lab-local",
-            &controller_id,
-        );
-        std::fs::create_dir_all(session_path.parent().expect("session directory"))
-            .expect("create session directory");
-        std::fs::write(
-            session_path,
-            serde_json::to_vec(&session).expect("serialize connected session"),
-        )
-        .expect("persist connected session");
-        assert!(crate::connection::recorded_session("lab-local")
-            .expect("read connected session")
-            .is_some());
-
-        let (output, exit_code) = refresh(&second_binary).expect("connected refresh result");
-
-        assert_eq!(exit_code, 1);
-        assert_eq!(output.updated_fields, ["env", "homeboy_path"]);
-        assert_eq!(
-            output.selected_binary_path,
-            second_binary.display().to_string()
-        );
-        assert!(!output.daemon_refreshed);
-        assert!(!output.reconnect_required);
-        assert_eq!(
-            output
-                .phase_summary
-                .iter()
-                .map(|phase| (phase.name, phase.status))
-                .collect::<Vec<_>>(),
-            vec![
-                ("select", "succeeded"),
-                ("identity_verification", "succeeded"),
-                ("bootstrap_promotion", "succeeded"),
-                ("configuration_promotion", "succeeded"),
-                ("reconnect_transport", "failed"),
-                ("daemon_identity_verification", "succeeded"),
-                ("admission_readiness", "failed"),
-            ]
-        );
-        assert_eq!(
-            output.followup_commands,
-            ["homeboy runner connect lab-local"]
-        );
-        assert_eq!(
-            crate::load("lab-local")
-                .expect("reload controller registry")
-                .settings
-                .homeboy_path
-                .as_deref(),
-            second_binary.to_str()
         );
     });
 }
