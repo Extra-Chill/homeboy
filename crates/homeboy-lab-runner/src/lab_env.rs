@@ -53,7 +53,7 @@ fn subprocess_lab_offload_metadata(lab_metadata: &serde_json::Value) -> serde_js
             })
         });
 
-    serde_json::json!({
+    let mut projection = serde_json::json!({
         "schema": "homeboy/lab-offload-subprocess/v1",
         "dispatch_schema": lab_metadata.get("schema"),
         "runner_id": lab_metadata.get("runner_id"),
@@ -67,7 +67,12 @@ fn subprocess_lab_offload_metadata(lab_metadata: &serde_json::Value) -> serde_js
             "allow_dirty_lab_workspace": lab_metadata.pointer("/workspace_cleanliness/allow_dirty_lab_workspace"),
         },
         "workspace_verification": workspace_verification,
-    })
+    });
+    // The runner admits a synced derived Cook baseline from this evidence.
+    if let Some(source_provenance) = lab_metadata.get("source_provenance") {
+        projection["source_provenance"] = source_provenance.clone();
+    }
+    projection
 }
 
 /// Forward the preview metadata/public-url passthroughs plus CI context

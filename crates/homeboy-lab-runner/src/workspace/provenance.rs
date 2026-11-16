@@ -1650,7 +1650,7 @@ mod tests {
     /// #18243: a Lab gate-feedback retry runs in the synced Cook-derived
     /// checkout. That checkout's HEAD is the controller's baseline commit, so
     /// the recorded candidate commit never reaches the runner. Admission must
-    /// use the baseline evidence the handoff carries for this task.
+    /// use the baseline evidence the handoff projects to the runner child.
     #[test]
     fn lab_gate_feedback_retry_admits_the_synced_derived_baseline() {
         if crate::test_support::isolated_process() {
@@ -1687,13 +1687,21 @@ mod tests {
         request.inputs = serde_json::json!({"cook_loop": {"candidate_commit": {
             "base_sha": base, "candidate_sha": "c".repeat(40), "tree_sha": tree,
         }}});
-        lab["source_provenance"] = serde_json::json!({"verified_cook_baseline": {
-            "source_task_id": "cook-task",
-            "bound_task_id": request.task_id,
-            "baseline_commit": baseline,
-            "baseline_tree": tree,
-            "preexisting_candidate": false,
-        }});
+        crate::lab::offload::attach_verified_cook_baseline(
+            &mut lab,
+            Some(&serde_json::json!({
+                "source_task_id": "cook-task",
+                "bound_task_id": request.task_id,
+                "baseline_commit": baseline,
+                "baseline_tree": tree,
+                "preexisting_candidate": false,
+            })),
+        );
+        // The runner child receives the subprocess projection, not the dossier.
+        let lab = homeboy_core::observation::resolve_json_value(
+            &crate::lab_env::build_lab_offload_env(&lab)[LAB_OFFLOAD_METADATA_ENV],
+        )
+        .expect("projected Lab offload metadata");
 
         let dispatched = Arc::new(AtomicBool::new(false));
         let aggregate = AgentTaskScheduler::new(Arc::new(FilesystemSnapshotProvider {
