@@ -4,6 +4,11 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.468.6] - 2026-11-16
+
+### Fixed
+- refresh busy runners in place instead of deferring
+
 ## [0.468.5] - 2026-11-16
 
 ### Fixed
