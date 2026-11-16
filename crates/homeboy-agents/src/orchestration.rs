@@ -2477,6 +2477,7 @@ impl OrchestrationService<LifecycleStoreLookup> {
                                     "run_id": requested_id,
                                     "idempotent": true,
                                     "reconciliation": reconciliation,
+                                    "execution_step_wait": crate::agent_task_service::execution_step_wait(&current),
                                 }));
                                 (
                                     ControlPlaneActionOutcome::Succeeded,
@@ -4965,6 +4966,18 @@ fn blocker(
     record: &AgentTaskRunRecord,
     delivery: Option<&CookDelivery>,
 ) -> Option<ControlPlaneBlocker> {
+    if let Some(wait) = crate::agent_task_service::execution_step_wait(record) {
+        return Some(ControlPlaneBlocker {
+            details: Some(wait.clone()),
+            code: wait["reason"].as_str().map(str::to_string),
+            message: wait["message"].as_str().unwrap_or_default().to_string(),
+            state: Some("waiting".to_string()),
+            reason: wait["reason"].as_str().map(str::to_string),
+            retry: None,
+            daemon: None,
+            output: Some(wait.to_string()),
+        });
+    }
     if let Some(quarantine) = record.metadata.get("queue_quarantine") {
         let message = quarantine
             .get("reason")
@@ -4998,8 +5011,14 @@ fn blocker(
         if let Some(failure) = record.metadata.get("execution_step_failure") {
             if let Some(message) = failure["message"].as_str() {
                 return Some(ControlPlaneBlocker {
-                    details: missing_argument_details(&failure["diagnostic"]["details"]),
-                    code: failure["diagnostic"]["code"].as_str().map(str::to_string),
+                    details: failure["diagnostic"]
+                        .get("data")
+                        .cloned()
+                        .or_else(|| missing_argument_details(&failure["diagnostic"]["details"])),
+                    code: failure["diagnostic"]["data"]["wait_reason"]
+                        .as_str()
+                        .or_else(|| failure["diagnostic"]["code"].as_str())
+                        .map(str::to_string),
                     message: homeboy_core::redaction::redact_string(message),
                     state: failure["classification"].as_str().map(str::to_string),
                     reason: Some(redacted_bounded(message, MESSAGE_BOUND)),

@@ -879,6 +879,28 @@ pub fn rearm_unmaterialized_cook_admission(cook_id: &str) -> Result<AgentTaskRun
     if current.state() != AgentTaskRunState::Queued {
         return Ok(current);
     }
+    // Probe the actual step authority rather than claiming that rewriting a
+    // lifecycle string has cleared a daemon-side refusal.
+    if let Some(wait) = crate::agent_task_service::execution_step_wait(&current) {
+        if let Some(runner) = wait["runner_eligible"].as_str() {
+            let jobs = homeboy_core::api_jobs::JobStore::open_without_reconciliation(
+                homeboy_core::paths::observation_db()?,
+            )?;
+            let key = current.metadata["execution_scheduling"]["current_intent_id"]
+                .as_str()
+                .expect("live step has an intent");
+            let observation = jobs.recheck_step_runner_wait(key)?;
+            let reason = observation.as_ref().map(|wait| wait["reason"].clone());
+            let updated = store.mutate_record(&cook_id, |record| {
+                record.metadata["execution_step_resume_probe"] = json!({
+                    "runner_id": runner, "reason": reason,
+                    "checked_at": chrono::Utc::now().to_rfc3339(),
+                });
+                true
+            })?;
+            return Ok(updated.unwrap_or(current));
+        }
+    }
     let updated = mutate_with_execution_intent(&store, &cook_id, |record| {
         let queued = record.state() == AgentTaskRunState::Queued;
         let admission = &mut record.metadata["unmaterialized_cook_admission"];

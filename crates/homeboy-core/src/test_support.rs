@@ -278,7 +278,12 @@ impl ControllerJobHarness {
         let request_digest = crate::daemon::hex_digest(&request)?;
         let outcome = store.admit_controller_job(
             format!("controller.{}", driver.job_type()),
-            format!("test-controller-job:{}", Uuid::new_v4()),
+            request
+                .get("key")
+                .and_then(serde_json::Value::as_str)
+                .filter(|key| key.starts_with("agent-task-exec:"))
+                .map(str::to_string)
+                .unwrap_or_else(|| format!("test-controller-job:{}", Uuid::new_v4())),
             ControllerJobState {
                 job_type: driver.job_type().to_string(),
                 version: driver.version(),

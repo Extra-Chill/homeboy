@@ -5959,6 +5959,18 @@ fn attach_lab_admission_wait(
     admission: Option<&agent_task_service_direct::QueuedAdmission>,
 ) {
     if let Some(wait) = admission
+        .and_then(|admission| admission.wait.as_ref())
+        .filter(|wait| wait["runner_eligible"].is_string())
+    {
+        value["execution_step_wait"] = wait.clone();
+        value["reason"] = wait["message"].clone();
+        value["summary"] = wait["message"].clone();
+        value["blocker_summary"] = wait["message"].clone();
+        value["waiting_for"] = json!("runner_eligible");
+        value["next_commands"] = json!([wait["next_action"]]);
+        return;
+    }
+    if let Some(wait) = admission
         .filter(|admission| admission.live_driver)
         .and_then(|admission| admission.wait.as_ref())
     {

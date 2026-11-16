@@ -220,7 +220,13 @@ fn run(
                     // The driver has already produced this result. Retry only
                     // this projection, never the driver side effect.
                     if job.is_cancelled() {
-                        continue;
+                        // The driver has returned: no child can still be
+                        // spawning. Cancellation must win over its receipt.
+                        if driver_cancelled(job, driver.as_ref(), &prepared) {
+                            persist_controller_cancellation(job);
+                        }
+                        let _ = execute.join();
+                        break;
                     }
                     if !persist_controller_success_or_uncertainty(job, public) {
                         continue;
