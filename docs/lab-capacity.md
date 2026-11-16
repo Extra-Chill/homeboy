@@ -29,13 +29,18 @@ Step slices exclude the reserve even without a configured step concurrency limit
 
 Direct jobs already recorded with kind `runner.exec` use this lane (including
 Cook promotion gates); workflow steps remain on step permits. Direct children
-are pinned to the whole reserved mask. One durable child reservation per reserved
-CPU bounds concurrency, independently of the ordinary runner concurrency limit.
-Reservations count before spawn and survive daemon restart. Gates retain the
+are pinned to disjoint shares of the reserved mask. Set
+`HOMEBOY_LAB_GATE_SLOTS=<k>` to bound concurrent gates independently of CPU count
+and the ordinary runner concurrency limit. It defaults to 1 and is clamped to
+1 through the reserve size. Each admitted gate takes the lowest free slot index;
+its durable child reservation records that index atomically with admission.
+Reservations count before spawn and survive daemon restart. Finishing a gate
+frees its slot for reuse. Gates retain the
 memory pressure check but ignore host CPU PSI, load, and IO pressure. A full lane
 reports `pending_resource_admission` with `pending_admission_reason: gate_slot`.
 The daemon `/capacity` response includes `gate_reserve.reserved_cpus`,
-`active_slots`, and `queued_slots` (accepted gates not yet holding a child reservation).
+`slots`, `active` (entries with `slot`, `cpus`, and `job_id`), and `queued_slots`
+(accepted gates not yet holding a child reservation).
 
 Detached child handles retain wait ownership on early supervisor returns;
 reapers wait only their own child PID and do not steal other command statuses.

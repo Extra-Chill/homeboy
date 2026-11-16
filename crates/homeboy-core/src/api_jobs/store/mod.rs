@@ -423,6 +423,8 @@ pub(super) struct LocalChildExecution {
     reservation_id: String,
     reservation_expires_at_ms: u64,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    gate_slot: Option<usize>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(super) process: Option<LocalChildProcessIdentity>,
 }
 
@@ -3080,7 +3082,7 @@ impl JobStore {
                 &pressure,
                 &thresholds,
                 active,
-                reserve.len(),
+                crate::lab_capacity::gate_slots(&reserve),
             );
         }
         let admitted = pressure.admission_reason.is_none();
@@ -3115,11 +3117,34 @@ impl JobStore {
                 crate::lab_capacity::is_gate(&stored.job) && !stored.job.status.is_terminal()
             })
             .collect::<Vec<_>>();
+        let reserve = crate::lab_capacity::gate_reserve(&crate::lab_capacity::allowed_cpus());
+        let mut active = gates
+            .iter()
+            .filter_map(|stored| {
+                let slot = stored.local_child.as_ref()?.gate_slot?;
+                Some(serde_json::json!({
+                    "slot": slot,
+                    "cpus": crate::lab_capacity::gate_cpu_slice(&reserve, slot),
+                    "job_id": stored.job.id,
+                }))
+            })
+            .collect::<Vec<_>>();
+        active.sort_by_key(|entry| entry["slot"].as_u64());
         serde_json::json!({
-            "reserved_cpus": crate::lab_capacity::gate_reserve(&crate::lab_capacity::allowed_cpus()),
-            "active_slots": gates.iter().filter(|stored| stored.local_child.is_some()).count(),
+            "slots": crate::lab_capacity::gate_slots(&reserve),
+            "reserved_cpus": reserve,
+            "active": active,
             "queued_slots": gates.iter().filter(|stored| stored.local_child.is_none()).count(),
         })
+    }
+
+    pub(crate) fn local_child_gate_slot(&self, job_id: Uuid) -> Result<Option<usize>> {
+        let inner = self.inner.lock().expect("job store mutex poisoned");
+        Ok(self
+            .read_stored_job(&inner, job_id, false)?
+            .local_child
+            .as_ref()
+            .and_then(|child| child.gate_slot))
     }
 
     pub(crate) fn has_pending_direct_execution(&self, job_id: Uuid) -> Result<bool> {
@@ -3498,6 +3523,7 @@ impl JobStore {
             }
             let reserve = crate::lab_capacity::gate_reserve(&crate::lab_capacity::allowed_cpus());
             let reserved_gate = !reserve.is_empty() && crate::lab_capacity::is_gate(&job.job);
+            let mut gate_slot = None;
             if reserved_gate {
                 // The durable child reservation is the slot: count and reserve
                 // under the same transaction, including children re-adopted after restart.
@@ -3510,8 +3536,21 @@ impl JobStore {
                             && candidate.local_child.is_some()
                             && crate::lab_capacity::is_gate(&candidate.job)
                     })
-                    .count();
-                if active >= reserve.len() {
+                    .collect::<Vec<_>>();
+                let slots = crate::lab_capacity::gate_slots(&reserve);
+                if active.len() >= slots {
+                    return Ok(false);
+                }
+                gate_slot = (0..slots).find(|slot| {
+                    !active.iter().any(|candidate| {
+                        candidate
+                            .local_child
+                            .as_ref()
+                            .and_then(|child| child.gate_slot)
+                            == Some(*slot)
+                    })
+                });
+                if gate_slot.is_none() {
                     return Ok(false);
                 }
             }
@@ -3542,6 +3581,7 @@ impl JobStore {
             stored.local_child = Some(LocalChildExecution {
                 reservation_id: reservation_id.clone(),
                 reservation_expires_at_ms,
+                gate_slot,
                 process: None,
             });
             let sequence = self.next_event_sequence.fetch_add(1, Ordering::SeqCst) + 1;

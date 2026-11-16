@@ -39,8 +39,8 @@ pub fn observe(limit: Option<usize>) -> LabCapacity {
     }
 }
 
-/// Reserve the last CPUs, leaving at least one for steps. One concurrent gate
-/// per reserved CPU; oversized requests are clamped to preserve step progress.
+/// Reserve the last CPUs, leaving at least one for steps.
+/// Oversized requests are clamped to preserve step progress.
 /// Unset, invalid, or zero requests preserve the legacy admission policy.
 pub fn gate_reserve(allowed: &[usize]) -> Vec<usize> {
     let requested = std::env::var("HOMEBOY_LAB_GATE_RESERVE")
@@ -49,6 +49,21 @@ pub fn gate_reserve(allowed: &[usize]) -> Vec<usize> {
         .unwrap_or(0);
     let count = requested.min(allowed.len().saturating_sub(1));
     allowed[allowed.len() - count..].to_vec()
+}
+
+/// Gate concurrency is independent of CPU count; an empty reserve disables it.
+pub fn gate_slots(reserve: &[usize]) -> usize {
+    std::env::var("HOMEBOY_LAB_GATE_SLOTS")
+        .ok()
+        .and_then(|value| value.parse::<usize>().ok())
+        .unwrap_or(1)
+        .max(1)
+        .min(reserve.len())
+}
+
+/// A gate always pins to its slot's disjoint share, even with just one slot.
+pub fn gate_cpu_slice(reserve: &[usize], slot: usize) -> Vec<usize> {
+    cpu_share(reserve, Some(gate_slots(reserve)), slot, true).unwrap_or_default()
 }
 
 /// Direct runner executions are the gate lane; workflow steps use step permits.
@@ -125,14 +140,30 @@ impl Drop for StepPermit {
 /// limit, or a share that would cover every CPU, leaves the step unpinned.
 pub fn cpu_slice(allowed: &[usize], limit: Option<usize>, slot: usize) -> Option<Vec<usize>> {
     let reserved = gate_reserve(allowed).len();
-    let allowed = &allowed[..allowed.len() - reserved];
-    if reserved > 0 && limit.unwrap_or(1) <= 1 {
+    cpu_share(
+        &allowed[..allowed.len() - reserved],
+        limit,
+        slot,
+        reserved > 0,
+    )
+}
+
+fn cpu_share(
+    allowed: &[usize],
+    limit: Option<usize>,
+    slot: usize,
+    pin_full: bool,
+) -> Option<Vec<usize>> {
+    if allowed.is_empty() {
+        return None;
+    }
+    if pin_full && limit.unwrap_or(1) <= 1 {
         return Some(allowed.to_vec());
     }
     let limit = limit.filter(|limit| *limit > 1)?;
     let width = (allowed.len() / limit).max(1);
     if width >= allowed.len() {
-        return (reserved > 0).then(|| allowed.to_vec());
+        return pin_full.then(|| allowed.to_vec());
     }
     let start = (slot % limit) * width % allowed.len();
     Some(allowed[start..(start + width).min(allowed.len())].to_vec())
@@ -386,17 +417,38 @@ mod tests {
     fn pinned_child_nproc_reports_its_slice() {
         crate::test_support::with_isolated_home(|_| {
             let allowed = allowed_cpus();
-            let Some(slice) = cpu_slice(&allowed, Some(2), 1) else {
-                return; // a single-CPU host has nothing to divide
-            };
-            let mut command = std::process::Command::new("sh");
-            command.args(["-c", "nproc"]);
-            pin_command(&mut command, &slice);
-            let output = command.output().expect("run nproc");
-            assert_eq!(
-                String::from_utf8_lossy(&output.stdout).trim(),
-                slice.len().to_string()
-            );
+            let mut slices = cpu_slice(&allowed, Some(2), 1)
+                .into_iter()
+                .collect::<Vec<_>>();
+            if allowed.len() >= 5 {
+                std::env::set_var("HOMEBOY_LAB_GATE_RESERVE", "4");
+                let reserve = gate_reserve(&allowed);
+                assert_eq!(gate_slots(&reserve), 1);
+                std::env::set_var("HOMEBOY_LAB_GATE_SLOTS", "0");
+                assert_eq!(gate_slots(&reserve), 1);
+                std::env::set_var("HOMEBOY_LAB_GATE_SLOTS", "99");
+                assert_eq!(gate_slots(&reserve), 4);
+                std::env::set_var("HOMEBOY_LAB_GATE_SLOTS", "2");
+                let first = gate_cpu_slice(&reserve, 0);
+                let second = gate_cpu_slice(&reserve, 1);
+                assert_eq!(first.len(), 2);
+                assert_eq!(second.len(), 2);
+                assert!(first.iter().all(|cpu| !second.contains(cpu)));
+                slices.extend([first, second]);
+                std::env::remove_var("HOMEBOY_LAB_GATE_RESERVE");
+                std::env::remove_var("HOMEBOY_LAB_GATE_SLOTS");
+            }
+            for slice in slices {
+                let mut command = std::process::Command::new("sh");
+                command.args(["-c", "nproc"]);
+                pin_command(&mut command, &slice);
+                let output = command.output().expect("run nproc");
+                assert!(output.status.success());
+                assert_eq!(
+                    String::from_utf8_lossy(&output.stdout).trim(),
+                    slice.len().to_string()
+                );
+            }
         });
     }
 
