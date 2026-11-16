@@ -405,6 +405,16 @@ fn runner_eligibility() -> &'static RwLock<Option<StepRunnerEligibility>> {
     PROBE.get_or_init(|| RwLock::new(None))
 }
 
+/// Probe the runner selected by an execution step before spawning its child.
+pub(crate) fn admission_reason(request: &Value) -> Option<String> {
+    let runner = request.pointer("/wait/runner_eligible")?.as_str()?;
+    let probe = runner_eligibility()
+        .read()
+        .expect("step runner eligibility lock")
+        .clone()?;
+    probe(runner).err().filter(|reason| reason == "pressure")
+}
+
 fn terminal_consumers() -> &'static RwLock<BTreeMap<String, StepTerminalConsumer>> {
     static CONSUMERS: OnceLock<RwLock<BTreeMap<String, StepTerminalConsumer>>> = OnceLock::new();
     CONSUMERS.get_or_init(|| RwLock::new(BTreeMap::new()))
@@ -1967,6 +1977,56 @@ mod tests {
                 error["message"].as_str(),
                 Some("step child exited with status 1: adopted child crashed")
             );
+        });
+    }
+
+    #[test]
+    fn execution_step_pressure_waits_in_daemon_admission_queue() {
+        with_isolated_home(|home| {
+            let pressure = crate::test_support::EnvVarGuard::set(
+                crate::runner_pressure::SAMPLE_ENV,
+                r#"{"memory":9000}"#,
+            );
+            let marker = home.path().join("started");
+            let mut request = request(
+                &format!("touch {}", marker.display()),
+                EnvMaterializationPlan::default(),
+            );
+            request.terminal_consumer = "agent-task.execution-step".into();
+            let harness = step_harness(&request, home.path());
+            harness.start_via_controller_boundary().unwrap();
+            let job = harness.job().unwrap();
+            assert_eq!(job.status, crate::api_jobs::JobStatus::Queued);
+            assert_eq!(
+                harness.store().pending_admission_report(job.id).unwrap()
+                    ["pending_admission_reason"],
+                "pressure"
+            );
+            for _ in 0..3 {
+                harness.store().reconcile_direct_admissions().unwrap();
+            }
+            assert!(!marker.exists());
+            assert_eq!(
+                harness.job().unwrap().status,
+                crate::api_jobs::JobStatus::Queued
+            );
+            let events = harness.store().events(job.id).unwrap();
+            assert_eq!(
+                events
+                    .iter()
+                    .filter(|event| event.message.as_deref() == Some("waiting on Lab capacity"))
+                    .count(),
+                1
+            );
+            drop(pressure);
+            let _clear =
+                crate::test_support::EnvVarGuard::set(crate::runner_pressure::SAMPLE_ENV, "{}");
+            harness.store().reconcile_direct_admissions().unwrap();
+            assert_eq!(
+                harness.wait_until_terminal().unwrap().status,
+                crate::api_jobs::JobStatus::Succeeded
+            );
+            assert!(marker.exists());
         });
     }
 

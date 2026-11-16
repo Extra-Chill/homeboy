@@ -909,7 +909,7 @@ fn unobserved_readiness_fails_after_the_bound_with_readiness_evidence() {
 }
 
 #[test]
-fn capacity_blocked_retry_admission_queues_and_substrate_refusal_fails() {
+fn execution_step_substrate_refusal_fails() {
     with_isolated_home(|_| {
         let store = test_lifecycle_store();
         agent_task_lifecycle::submit_plan(&test_plan(), Some("lab-refusal-source")).unwrap();
@@ -943,13 +943,10 @@ fn capacity_blocked_retry_admission_queues_and_substrate_refusal_fails() {
                 ))
             }
         }
-        for (retry_id, reasons, queued) in [
-            (
-                "lab-refusal-capacity",
-                &["capacity_reached", "pressure"][..],
-                true,
-            ),
-            ("lab-refusal-substrate", &["not_connected"][..], false),
+        for (retry_id, reasons) in [
+            ("lab-refusal-substrate", &["not_connected"][..]),
+            ("lab-refusal-stale", &["stale_daemon"][..]),
+            ("lab-refusal-active", &["active_jobs_unavailable"][..]),
         ] {
             let retry = agent_task_lifecycle::retry_with_force_and_preflight_in_store(
                 &store,
@@ -984,21 +981,8 @@ fn capacity_blocked_retry_admission_queues_and_substrate_refusal_fails() {
                 failure["runner_availability"]["reasons"],
                 serde_json::json!(reasons)
             );
-            if queued {
-                assert_eq!(receipt["disposition"], "runner_wait");
-                assert_eq!(record.state(), AgentTaskRunState::Queued);
-                assert_eq!(
-                    record.metadata["execution_scheduling"]["recovery_failures"],
-                    0
-                );
-                assert_eq!(
-                    current_intent(&store, &retry.run_id).epoch,
-                    intent.epoch + 1
-                );
-            } else {
-                assert_eq!(receipt["disposition"], "failed");
-                assert_eq!(record.state(), AgentTaskRunState::Failed);
-            }
+            assert_eq!(receipt["disposition"], "failed");
+            assert_eq!(record.state(), AgentTaskRunState::Failed);
         }
     });
 }
