@@ -273,6 +273,28 @@ where
     actual.as_ref() == Some(expected)
 }
 
+/// Reject aliases before starting or adopting any daemon on the remote machine.
+fn ensure_machine_not_registered(runner_id: &str, machine_id: Option<&str>) -> Result<()> {
+    let Some(machine_id) = machine_id else {
+        return Ok(());
+    };
+    for runner in crate::list()? {
+        if runner.id == runner_id {
+            continue;
+        }
+        if read_session(&runner.id)?
+            .is_some_and(|session| session.machine_id.as_deref() == Some(machine_id))
+        {
+            return Err(Error::new(
+                homeboy_core::error::ErrorCode::RunnerMachineAlreadyRegistered,
+                format!("Machine is already registered as runner '{}'; use that runner, and `runner dev-sync {}` for testing a dev build", runner.id, runner.id),
+                serde_json::json!({ "runner_id": runner_id, "existing_runner_id": runner.id, "machine_id": machine_id }),
+            ));
+        }
+    }
+    Ok(())
+}
+
 pub fn connect(runner_id: &str) -> Result<(RunnerConnectReport, i32)> {
     connect_with_live_lease(runner_id, None)
 }
@@ -438,6 +460,7 @@ fn restart_direct_daemon_in_place(
             ))
         }
     };
+    ensure_machine_not_registered(runner_id, identity.machine_id.as_deref())?;
     let Some(configured_identity) = identity.build_identity.clone() else {
         return Ok(failed_connect(
             runner_id,
@@ -502,6 +525,7 @@ fn restart_direct_daemon_in_place(
         remote_daemon_lease_id: daemon.lease_id,
         homeboy_version: expected_version,
         homeboy_build_identity: Some(configured_identity),
+        machine_id: identity.machine_id.clone(),
         connected_at: Utc::now().to_rfc3339(),
         worker_identity: None,
         worker_pid: None,
@@ -619,6 +643,7 @@ fn connect_with_live_lease(
             message,
         ));
     };
+    ensure_machine_not_registered(runner_id, identity.machine_id.as_deref())?;
     let version = identity.version.clone();
     let daemon_recovery_capabilities = identity.daemon_recovery_capabilities.as_deref();
     let Some(configured_build_identity) = identity.build_identity.clone() else {
@@ -800,6 +825,7 @@ fn connect_with_live_lease(
                     daemon,
                     &version,
                     &configured_build_identity,
+                    identity.machine_id.as_deref(),
                 )?,
             )?;
         }
@@ -883,6 +909,7 @@ fn connect_with_live_lease(
                 &daemon,
                 &version,
                 &configured_build_identity,
+                identity.machine_id.as_deref(),
             )?,
         )?;
     }
@@ -970,6 +997,7 @@ fn connect_with_live_lease(
         remote_daemon_lease_id,
         homeboy_version: expected_version,
         homeboy_build_identity: Some(expected_identity),
+        machine_id: identity.machine_id.clone(),
         connected_at: Utc::now().to_rfc3339(),
         worker_identity: None,
         worker_pid: None,
@@ -1086,6 +1114,7 @@ fn pending_replacement_session(
     daemon: &RemoteDaemon,
     version: &str,
     identity: &str,
+    machine_id: Option<&str>,
 ) -> Result<RunnerSession> {
     Ok(RunnerSession {
         runner_id: runner_id.to_string(),
@@ -1104,6 +1133,7 @@ fn pending_replacement_session(
         remote_daemon_lease_id: daemon.lease_id.clone(),
         homeboy_version: version.to_string(),
         homeboy_build_identity: Some(identity.to_string()),
+        machine_id: machine_id.map(str::to_string),
         connected_at: Utc::now().to_rfc3339(),
         worker_identity: None,
         worker_pid: None,
@@ -2615,9 +2645,11 @@ fn reconcile_session_metadata(
     let version = normalize_homeboy_version_owned(observed_version);
     let identity = observed_identity.trim();
     let changed = session.homeboy_version != version
-        || session.homeboy_build_identity.as_deref() != Some(identity);
+        || session.homeboy_build_identity.as_deref() != Some(identity)
+        || session.machine_id != configured.machine_id;
     session.homeboy_version = version;
     session.homeboy_build_identity = Some(identity.to_string());
+    session.machine_id = configured.machine_id.clone();
     changed
 }
 

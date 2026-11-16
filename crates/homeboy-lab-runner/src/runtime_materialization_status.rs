@@ -267,6 +267,7 @@ mod tests {
                 remote_daemon_lease_id: Some("lease-456".to_string()),
                 homeboy_version: homeboy_product_identity::product_version().to_string(),
                 homeboy_build_identity: Some("homeboy current-build".to_string()),
+                machine_id: None,
                 connected_at: "2026-06-19T00:00:00Z".to_string(),
                 worker_identity: None,
                 worker_pid: None,

@@ -125,6 +125,7 @@ pub(super) fn connected_status(runner_id: &str) -> RunnerStatusReport {
             remote_daemon_lease_id: None,
             homeboy_version: "homeboy 0.0.0".to_string(),
             homeboy_build_identity: Some("homeboy 0.0.0+test".to_string()),
+            machine_id: None,
             connected_at: "2026-06-03T00:00:00Z".to_string(),
             worker_identity: Some("worker-1".to_string()),
             worker_pid: Some(1234),

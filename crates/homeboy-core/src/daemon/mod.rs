@@ -4367,7 +4367,7 @@ mod tests {
                 for _ in 0..3 {
                     let (mut stream, _) = listener.accept().unwrap();
                     let mut request = [0_u8; 8192];
-                    stream.read(&mut request).unwrap();
+                    let _request_length = stream.read(&mut request).unwrap();
                     let body = json!({
                         "success": true,
                         "data": { "body": {

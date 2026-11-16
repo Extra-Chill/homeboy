@@ -137,6 +137,7 @@ pub enum ErrorCode {
     RunnerLabUnavailable,
     /// Controller and runner run different Homeboy builds.
     RunnerVersionSkew,
+    RunnerMachineAlreadyRegistered,
     RuntimePromotionContended,
     RuntimePromotionWaitTimeout,
     DependencyStepFailed,
@@ -233,6 +234,7 @@ impl ErrorCode {
             ErrorCode::RunnerJobLost => "runner.job_lost",
             ErrorCode::RunnerLabUnavailable => "runner.lab_unavailable",
             ErrorCode::RunnerVersionSkew => "runner.version_skew",
+            ErrorCode::RunnerMachineAlreadyRegistered => "runner.machine_already_registered",
             ErrorCode::RuntimePromotionContended => "runtime_promotion.contended",
             ErrorCode::RuntimePromotionWaitTimeout => "runtime_promotion.wait_timeout",
             ErrorCode::DependencyStepFailed => "dependency_step_failed",
@@ -306,6 +308,7 @@ impl ErrorCode {
             "runner.job_lost" => Self::RunnerJobLost,
             "runner.lab_unavailable" => Self::RunnerLabUnavailable,
             "runner.version_skew" => Self::RunnerVersionSkew,
+            "runner.machine_already_registered" => Self::RunnerMachineAlreadyRegistered,
             "runtime_promotion.contended" => Self::RuntimePromotionContended,
             "runtime_promotion.wait_timeout" => Self::RuntimePromotionWaitTimeout,
             "dependency_step_failed" => Self::DependencyStepFailed,

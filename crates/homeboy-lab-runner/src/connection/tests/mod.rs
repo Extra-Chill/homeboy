@@ -627,6 +627,7 @@ pub(super) fn controller_session() -> RunnerSession {
         remote_daemon_lease_id: None,
         homeboy_version: "test".to_string(),
         homeboy_build_identity: Some("homeboy test+abc123".to_string()),
+        machine_id: None,
         connected_at: Utc::now().to_rfc3339(),
         worker_identity: Some("worker-1".to_string()),
         worker_pid: Some(1234),

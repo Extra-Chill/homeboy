@@ -75,6 +75,7 @@ impl Drop for StagingIdentityScope {
 #[derive(Debug, Default, Clone, PartialEq, Eq)]
 pub(super) struct RemoteHomeboyIdentity {
     pub(super) version: String,
+    pub(super) machine_id: Option<String>,
     pub(super) build_identity: Option<String>,
     pub(super) handoff: Option<(
         homeboy_lab_contract::LabRuntimeIdentity,
@@ -228,6 +229,11 @@ pub(super) fn parse_self_identity_output(output: &str) -> Option<RemoteHomeboyId
         parse_daemon_recovery_capabilities(&data["daemon_recovery_capabilities"]);
     Some(RemoteHomeboyIdentity {
         version: version.to_string(),
+        machine_id: data["machine_id"]
+            .as_str()
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .map(str::to_string),
         build_identity,
         handoff: Some((
             homeboy_lab_contract::LabRuntimeIdentity {

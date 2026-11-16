@@ -662,11 +662,12 @@ fn missing_daemon_capabilities_are_empty_and_malformed_capabilities_fail() {
 #[test]
 fn parses_self_identity_json_envelope() {
     let identity = parse_self_identity_output(
-        r#"{"success":true,"data":{"version":"0.228.13","display":"homeboy 0.228.13+19a41cd5102d"}}"#,
+        r#"{"success":true,"data":{"machine_id":"machine-123","version":"0.228.13","display":"homeboy 0.228.13+19a41cd5102d"}}"#,
     )
     .expect("identity");
 
     assert_eq!(identity.version, "0.228.13");
+    assert_eq!(identity.machine_id.as_deref(), Some("machine-123"));
     assert_eq!(
         identity.build_identity.as_deref(),
         Some("homeboy 0.228.13+19a41cd5102d")
@@ -919,6 +920,7 @@ fn observed_matching_daemon_identity_reconciles_stale_session_metadata() {
     session.homeboy_version = "0.298.0".to_string();
     session.homeboy_build_identity = Some("homeboy 0.298.0+old".to_string());
     let configured = RemoteHomeboyIdentity {
+        machine_id: None,
         version: "0.298.1".to_string(),
         build_identity: Some("homeboy 0.298.1+7d7b8e656466".to_string()),
         handoff: None,

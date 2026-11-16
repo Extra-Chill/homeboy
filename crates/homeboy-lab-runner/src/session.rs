@@ -1085,6 +1085,7 @@ mod status_serialization_tests {
             remote_daemon_lease_id: Some("lease".to_string()),
             homeboy_version: version.to_string(),
             homeboy_build_identity: Some(format!("homeboy {version}+0123456789ab")),
+            machine_id: None,
             connected_at: "2026-09-24T00:00:00Z".to_string(),
             worker_identity: Some("worker".to_string()),
             worker_pid: Some(43),

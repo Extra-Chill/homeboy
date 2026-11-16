@@ -826,6 +826,7 @@ mod tests {
             remote_daemon_lease_id: Some("lease-authoritative".to_string()),
             homeboy_version: "test".to_string(),
             homeboy_build_identity: Some("homeboy test+authoritative".to_string()),
+            machine_id: None,
             connected_at: "2026-01-01T00:00:00Z".to_string(),
             worker_identity: None,
             worker_pid: None,

@@ -972,6 +972,7 @@ fn persist_direct_daemon_cancel_session(daemon_url: &str) {
         remote_daemon_lease_id: None,
         homeboy_version: "test".to_string(),
         homeboy_build_identity: None,
+        machine_id: None,
         connected_at: chrono::Utc::now().to_rfc3339(),
         worker_identity: None,
         worker_pid: None,

@@ -42,6 +42,7 @@ fn configured_runner(id: &str, kind: RunnerKind) -> Runner {
 
 fn runner_session_fixture() -> RunnerSession {
     RunnerSession {
+        machine_id: None,
         runner_id: String::new(),
         mode: RunnerTunnelMode::DirectSsh,
         role: runner::RunnerSessionRole::Controller,

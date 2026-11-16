@@ -112,6 +112,8 @@ pub struct RunnerSession {
     pub homeboy_version: String,
     #[serde(default)]
     pub homeboy_build_identity: Option<String>,
+    #[serde(default)]
+    pub machine_id: Option<String>,
     pub connected_at: String,
     #[serde(default)]
     pub worker_identity: Option<String>,
@@ -170,6 +172,7 @@ mod tests {
                 "remote_daemon_lease_id": null,
                 "homeboy_version": "1.0.0",
                 "homeboy_build_identity": null,
+                "machine_id": null,
                 "connected_at": "2026-08-30T00:00:00Z",
                 "worker_identity": null,
                 "worker_pid": null,

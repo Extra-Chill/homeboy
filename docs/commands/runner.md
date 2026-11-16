@@ -8,6 +8,8 @@ homeboy runner <COMMAND>
 
 `runner` manages durable execution backends. SSH runners are a capability on a `homeboy server` record, so the common Lab flow uses one ID for the machine and its runner. Local runners remain standalone because they describe this machine rather than an SSH server. Both storage shapes share the same runner capability contract: workspace root, settings, environment, secret references, resources, and policy.
 
+Each controller allows one runner per machine; a second registration is refused at connect with `runner.machine_already_registered`.
+
 Runner configuration separates printable environment from secrets:
 
 - `env` is for non-secret values that are useful in diagnostics, such as `HOMEBOY_PUBLIC_ARTIFACT_BASE_URL`.

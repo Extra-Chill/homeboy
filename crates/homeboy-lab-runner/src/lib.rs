@@ -2280,6 +2280,7 @@ mod tests {
                 remote_daemon_lease_id: Some("lease".to_string()),
                 homeboy_version: version,
                 homeboy_build_identity: None,
+                machine_id: None,
                 connected_at: "2026-08-24T00:00:00Z".to_string(),
                 worker_identity: Some("worker".to_string()),
                 worker_pid: Some(43),

@@ -2692,6 +2692,7 @@ fn timed_out_recoverable_lab_candidate_hydrates_a_pathless_patch_idempotently() 
             remote_daemon_lease_id: None,
             homeboy_version: "test".to_string(),
             homeboy_build_identity: None,
+            machine_id: None,
             connected_at: now_timestamp(),
             worker_identity: None,
             worker_pid: None,
