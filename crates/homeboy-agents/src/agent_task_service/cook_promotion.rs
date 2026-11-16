@@ -4342,9 +4342,10 @@ pub(crate) fn pre_provider_diagnostic_cause<'a>(
     if provider_executions_consumed > 0 {
         return None;
     }
-    let diagnostic = diagnostics
-        .into_iter()
-        .find(|item| !item.class.trim().is_empty())?;
+    let diagnostic = diagnostics.into_iter().find(|item| {
+        item.class.starts_with("agent_task.committed_harvest_")
+            || item.data["pre_provider"] == Value::Bool(true)
+    })?;
     let phase = if diagnostic
         .class
         .starts_with("agent_task.committed_harvest_")

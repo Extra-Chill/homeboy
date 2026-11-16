@@ -624,6 +624,19 @@ fn pre_provider_outcome_failure_cause(
     Some((phase, classification, detail))
 }
 
+/// Lab may not project execution counters before terminal continuation fails.
+/// A successful outcome or a harvested commit is stronger evidence than a
+/// missing counter: neither can be a failure before provider execution.
+fn has_post_provider_result(aggregate: &crate::agent_task_scheduler::AgentTaskAggregate) -> bool {
+    aggregate.outcomes.iter().any(|outcome| {
+        outcome.status == crate::agent_task::AgentTaskOutcomeStatus::Succeeded
+            || outcome
+                .candidate
+                .as_ref()
+                .is_some_and(|candidate| candidate.candidate_sha != candidate.base_sha)
+    })
+}
+
 pub(crate) fn pre_execution_failure_report(
     stores: CookStores<'_>,
     cook_id: String,
@@ -632,6 +645,9 @@ pub(crate) fn pre_execution_failure_report(
     error: Error,
     invocation_latest_run_id: Option<&str>,
 ) -> AgentTaskRunResult<AgentTaskCookReport> {
+    let post_provider = invocation_latest_run_id
+        .and_then(|run_id| stores.lifecycle.read_aggregate(run_id).ok())
+        .is_some_and(|aggregate| has_post_provider_result(&aggregate));
     let phase = failure
         .phase
         .clone()
@@ -661,18 +677,34 @@ pub(crate) fn pre_execution_failure_report(
     };
     let mut report = stores.report(CookReportInput {
         cook_id,
-        status: "pre_execution_failure",
+        status: if post_provider {
+            "failed"
+        } else {
+            "pre_execution_failure"
+        },
         disposition: CookDisposition::Terminal,
         attempts,
         finalization: None,
-        stop_reason: Some(format!(
-            "pre-provider failure in phase `{phase}` classified as `{classification}`: {cause}"
-        )),
+        stop_reason: Some(if post_provider {
+            format!("post-provider continuation failure: {error_message}")
+        } else {
+            format!(
+                "pre-provider failure in phase `{phase}` classified as `{classification}`: {cause}"
+            )
+        }),
         exit_code: 1,
         invocation_latest_run_id,
     });
-    report.value.terminal_phase = failure.phase;
-    report.value.terminal_failure_classification = failure.classification;
+    report.value.terminal_phase = if post_provider {
+        Some("controller".to_string())
+    } else {
+        failure.phase
+    };
+    report.value.terminal_failure_classification = if post_provider {
+        Some("controller_failure".to_string())
+    } else {
+        failure.classification
+    };
     report
 }
 
@@ -918,6 +950,76 @@ mod tests {
     /// aggregate's own diagnostic, the report would say `unknown` next to a
     /// specific, already-durable reason code and never surface the git
     /// command or its stderr.
+    #[test]
+    fn successful_lab_provider_with_failed_continuation_is_post_provider() {
+        homeboy_core::test_support::with_isolated_home(|_| {
+            let lifecycle = AgentTaskLifecycleStore::from_environment().unwrap();
+            let recipe =
+                super::super::cook_recipe::CookRecipeStore::for_lifecycle_store(&lifecycle);
+            let run_id = "lab-success-failed-continuation";
+            let plan = plan(run_id, "provider-success");
+            lifecycle
+                .submit_plan_with_current_runtime(&plan, run_id)
+                .unwrap();
+            let aggregate = crate::agent_task_scheduler::AgentTaskAggregate {
+                schema: crate::agent_task::AGENT_TASK_AGGREGATE_SCHEMA.to_string(),
+                plan_id: plan.plan_id.clone(),
+                totals: crate::agent_task_scheduler::AgentTaskAggregateTotals::default(),
+                outcomes: vec![crate::agent_task::AgentTaskOutcome {
+                    task_id: plan.tasks[0].task_id.clone(),
+                    status: crate::agent_task::AgentTaskOutcomeStatus::Succeeded,
+                    candidate: Some(crate::agent_task::AgentTaskCandidate {
+                        base_sha: "base".into(),
+                        candidate_sha: "commit".into(),
+                        tree_sha: "tree".into(),
+                    }),
+                    diagnostics: vec![crate::agent_task::AgentTaskDiagnostic {
+                        class: "provider".into(),
+                        message: "Pi finished after 21 turn(s) and 47 tool call(s).".into(),
+                        data: serde_json::json!({}),
+                    }],
+                    ..Default::default()
+                }],
+                events: Vec::new(),
+                artifact_lineage: Vec::new(),
+                child_runs: Vec::new(),
+                artifact_bindings: Vec::new(),
+                queue: crate::agent_task_scheduler::AgentTaskQueueStatus::default(),
+            };
+            lifecycle.write_aggregate(run_id, &aggregate).unwrap();
+            assert!(super::super::cook_promotion::pre_provider_diagnostic_cause(
+                0,
+                aggregate
+                    .outcomes
+                    .iter()
+                    .flat_map(|outcome| &outcome.diagnostics)
+            )
+            .is_none());
+            let report = pre_execution_failure_report(
+                CookStores {
+                    recipe: &recipe,
+                    lifecycle: &lifecycle,
+                },
+                run_id.into(),
+                Vec::new(),
+                PreExecutionFailureDetails {
+                    retryable: false,
+                    phase: Some("pre_provider".into()),
+                    classification: Some("provider".into()),
+                    detail: None,
+                },
+                Error::internal_unexpected("terminal Cook continuation exited with status 1"),
+                Some(run_id),
+            );
+            assert_eq!(report.value.status, "failed");
+            assert_eq!(report.value.terminal_phase.as_deref(), Some("controller"));
+            assert_eq!(
+                report.value.terminal_failure_classification.as_deref(),
+                Some("controller_failure")
+            );
+        });
+    }
+
     #[test]
     fn pre_execution_failure_details_derives_committed_harvest_cause_from_outcome_aggregate() {
         homeboy_core::test_support::with_isolated_home(|_| {
