@@ -100,6 +100,7 @@ pub(crate) fn direct_ssh_session(lease_id: &str) -> RunnerSession {
         remote_daemon_lease_id: Some(lease_id.to_string()),
         homeboy_version: "test".to_string(),
         homeboy_build_identity: Some("homeboy test+abc123".to_string()),
+        machine_id: None,
         connected_at: Utc::now().to_rfc3339(),
         worker_identity: None,
         worker_pid: None,

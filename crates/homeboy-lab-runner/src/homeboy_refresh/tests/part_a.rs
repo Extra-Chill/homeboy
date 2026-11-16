@@ -42,6 +42,7 @@ pub(super) fn active_admission(job_id: &str) -> homeboy_core::api_jobs::ActiveRu
 #[test]
 fn refresh_preserves_only_its_direct_controller_lease_for_orphan_recovery() {
     let session = RunnerSession {
+        machine_id: None,
         runner_id: "lab".to_string(),
         mode: RunnerTunnelMode::DirectSsh,
         role: RunnerSessionRole::Controller,
@@ -131,6 +132,7 @@ fn reconnect_transport_state_matrix_preserves_disconnected_and_rotation_paths() 
 #[test]
 fn connected_refresh_rotates_before_connecting_the_promoted_binary() {
     let session = RunnerSession {
+        machine_id: None,
         runner_id: "lab".to_string(),
         mode: RunnerTunnelMode::DirectSsh,
         role: RunnerSessionRole::Controller,
@@ -232,6 +234,7 @@ fn refreshed_daemon_status(connected: bool, identity: Option<&str>) -> RunnerSta
             remote_daemon_lease_id: None,
             homeboy_version: "test".to_string(),
             homeboy_build_identity: Some(homeboy_build_identity.to_string()),
+            machine_id: None,
             connected_at: "2026-01-01T00:00:00Z".to_string(),
             worker_identity: None,
             worker_pid: None,

@@ -1747,6 +1747,7 @@ mod tests {
                 remote_daemon_lease_id: Some("lease-23456".to_string()),
                 homeboy_version: "homeboy 0.259.0".to_string(),
                 homeboy_build_identity: Some(format!("homeboy 0.259.0+{controller_commit}")),
+                machine_id: None,
                 connected_at: "2026-06-26T00:00:00Z".to_string(),
                 worker_identity: None,
                 worker_pid: None,

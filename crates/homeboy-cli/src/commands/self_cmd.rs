@@ -53,6 +53,7 @@ pub struct SelfIdentityArgs {}
 #[derive(Serialize)]
 struct SelfIdentityReport {
     active_binary: String,
+    machine_id: Option<String>,
     #[serde(flatten)]
     build_identity: build_identity::BuildIdentity,
     lab_contract_version: u32,
@@ -65,6 +66,7 @@ pub(crate) fn identity_report() -> Value {
         active_binary: std::env::current_exe()
             .map(|path| path.to_string_lossy().into_owned())
             .unwrap_or_else(|_| "unknown".to_string()),
+        machine_id: homeboy_core::process::machine_identity(),
         build_identity: build_identity::current(),
         lab_contract_version: homeboy_lab_contract::LAB_CONTRACT_VERSION,
         lab_handoff_capabilities: homeboy_lab_contract::required_lab_handoff_capabilities(),

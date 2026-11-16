@@ -668,6 +668,7 @@ mod tests {
             remote_daemon_lease_id: None,
             homeboy_version: "test".to_string(),
             homeboy_build_identity: None,
+            machine_id: None,
             connected_at: "now".to_string(),
             worker_identity: None,
             worker_pid: None,

@@ -280,6 +280,7 @@ fn replace_unresponsive_daemon(
         &replacement,
         request.expected_version,
         request.expected_identity,
+        None,
     )
     .and_then(|session| {
         super::replacement_journal::record_pending_replacement(request.runner_id, &session)

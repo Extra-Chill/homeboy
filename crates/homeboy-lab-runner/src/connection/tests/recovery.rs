@@ -1093,7 +1093,7 @@ fn remote_daemon_status_probe_has_a_bounded_deadline() {
 
 #[cfg(unix)]
 #[test]
-fn runner_connect_starts_a_missing_daemon_and_invalidates_cached_probes() {
+fn runner_connect_records_machine_refuses_alias_and_allows_reconnect() {
     crate::test_support::with_isolated_home(|home| {
         let daemon = home.path().join("remote-homeboy");
         let argv_path = home.path().join("recovery-argv");
@@ -1128,7 +1128,7 @@ fn runner_connect_starts_a_missing_daemon_and_invalidates_cached_probes() {
                 r#"#!/bin/sh
 case "$1 $2" in
   "self identity")
-printf '%s\n' '{{"success":true,"data":{{"version":"0.284.0","display":"homeboy 0.284.0+test","daemon_recovery_capabilities":[{{"id":"daemon-ensure-running-operation-id","version":1}}]}}}}'
+printf '%s\n' '{{"success":true,"data":{{"machine_id":"machine-connect-test","version":"0.284.0","display":"homeboy 0.284.0+test","daemon_recovery_capabilities":[{{"id":"daemon-ensure-running-operation-id","version":1}}]}}}}'
 ;;
 "daemon status")
   printf '%s\n' '{{"success":true,"data":{{"running":false,"fresh":false,"reachable":false,"freshness":{{"active_jobs":1}}}}}}'
@@ -1216,6 +1216,27 @@ esac
         assert_eq!(session.remote_daemon_pid, Some(42));
         assert!(session.local_url.is_some());
         assert_eq!(session.local_port, Some(address.port()));
+        assert_eq!(session.machine_id.as_deref(), Some("machine-connect-test"));
+        server::create(
+            &serde_json::json!({"id":"alias-runner", "host":"localhost", "user":"test"})
+                .to_string(),
+            false,
+        )
+        .expect("create alias server");
+        crate::create(
+            &serde_json::json!({"id":"alias-runner", "kind":"ssh", "homeboy_path":daemon})
+                .to_string(),
+            false,
+        )
+        .expect("configure alias runner");
+        let error = connect("alias-runner").expect_err("second machine registration refused");
+        assert_eq!(error.code.as_str(), "runner.machine_already_registered");
+        assert!(error.message.contains("local-runner"));
+        assert!(error.message.contains("runner dev-sync local-runner"));
+        assert!(read_session("alias-runner").expect("read alias").is_none());
+        let (reconnected, code) = connect("local-runner").expect("same runner reconnects");
+        assert_eq!(code, 0, "{reconnected:?}");
+        assert!(reconnected.connected);
         let argv = std::fs::read_to_string(argv_path).expect("read dispatched recovery argv");
         assert!(argv.starts_with("daemon\nensure-running\n"), "{argv}");
         assert!(argv.contains("\n--replacement-operation-id\n"), "{argv}");

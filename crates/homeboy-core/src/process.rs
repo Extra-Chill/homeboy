@@ -333,6 +333,35 @@ pub fn pid_is_running(pid: u32) -> bool {
     homeboy_engine_primitives::command::process_is_running(pid)
 }
 
+/// Stable OS machine identity, independent of the hostname and controller user.
+/// Unsupported platforms and hosts without an OS identity return `None`.
+pub fn machine_identity() -> Option<String> {
+    #[cfg(target_os = "macos")]
+    {
+        let mut uuid = [0_u8; 16];
+        let wait = libc::timespec {
+            tv_sec: 1,
+            tv_nsec: 0,
+        };
+        if unsafe { libc::gethostuuid(uuid.as_mut_ptr(), &wait) } != 0 {
+            return None;
+        }
+        Some(uuid.iter().map(|byte| format!("{byte:02x}")).collect())
+    }
+    #[cfg(target_os = "linux")]
+    {
+        ["/etc/machine-id", "/var/lib/dbus/machine-id"]
+            .iter()
+            .filter_map(|path| std::fs::read_to_string(path).ok())
+            .map(|value| value.trim().to_string())
+            .find(|value| !value.is_empty())
+    }
+    #[cfg(not(any(target_os = "macos", target_os = "linux")))]
+    {
+        None
+    }
+}
+
 /// Best-effort identity of the host on which local process evidence is valid.
 /// Callers hash this value before persistence; it is a scope boundary, not an
 /// authentication credential.

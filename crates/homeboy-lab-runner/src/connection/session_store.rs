@@ -163,9 +163,11 @@ pub(crate) fn controller_id() -> String {
         std::env::var("HOMEBOY_CONTROLLER_ID").ok().as_deref(),
         DERIVED
             .get_or_init(|| {
-                derive_controller_id(machine_identity().as_deref(), effective_uid(), || {
-                    hostname_fallback()
-                })
+                derive_controller_id(
+                    homeboy_core::process::machine_identity().as_deref(),
+                    effective_uid(),
+                    || hostname_fallback(),
+                )
             })
             .clone(),
     )
@@ -196,33 +198,6 @@ fn derive_controller_id(
             format!("controller-{}", &digest[..16])
         }
         None => format!("{}-uid-{uid}", hostname()),
-    }
-}
-
-fn machine_identity() -> Option<String> {
-    #[cfg(target_os = "macos")]
-    {
-        let mut uuid = [0_u8; 16];
-        let wait = libc::timespec {
-            tv_sec: 1,
-            tv_nsec: 0,
-        };
-        if unsafe { libc::gethostuuid(uuid.as_mut_ptr(), &wait) } != 0 {
-            return None;
-        }
-        Some(uuid.iter().map(|byte| format!("{byte:02x}")).collect())
-    }
-    #[cfg(target_os = "linux")]
-    {
-        ["/etc/machine-id", "/var/lib/dbus/machine-id"]
-            .iter()
-            .find_map(|path| std::fs::read_to_string(path).ok())
-            .map(|value| value.trim().to_string())
-            .filter(|value| !value.is_empty())
-    }
-    #[cfg(not(any(target_os = "macos", target_os = "linux")))]
-    {
-        None
     }
 }
 
@@ -1029,6 +1004,7 @@ mod tests {
             remote_daemon_lease_id: Some(lease_id.to_string()),
             homeboy_version: "test".to_string(),
             homeboy_build_identity: None,
+            machine_id: None,
             connected_at: "2026-07-17T00:00:00Z".to_string(),
             worker_identity: None,
             worker_pid: None,

@@ -413,6 +413,7 @@ fn connected_runner_with_re_adoptable_job(
         remote_daemon_lease_id: Some(OLD_LEASE.to_string()),
         homeboy_version: "0.283.0".to_string(),
         homeboy_build_identity: Some(OLD_IDENTITY.to_string()),
+        machine_id: None,
         connected_at: "2026-01-01T00:00:00Z".to_string(),
         worker_identity: None,
         worker_pid: None,

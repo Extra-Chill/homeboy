@@ -569,6 +569,7 @@ pub(crate) fn connect_service_runner(runner_id: &str) -> Result<(RunnerConnectRe
             ));
         }
     };
+    ensure_machine_not_registered(runner_id, identity.machine_id.as_deref())?;
     let Some(expected_identity) = identity.build_identity.clone() else {
         return Ok(failed_connect(
             runner_id,
@@ -656,6 +657,7 @@ pub(crate) fn connect_service_runner(runner_id: &str) -> Result<(RunnerConnectRe
         remote_daemon_lease_id: daemon.lease_id,
         homeboy_version: expected_version,
         homeboy_build_identity: Some(expected_identity),
+        machine_id: identity.machine_id.clone(),
         connected_at: Utc::now().to_rfc3339(),
         worker_identity: None,
         worker_pid: None,
