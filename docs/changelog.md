@@ -4,6 +4,19 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.468.0] - 2026-11-16
+
+### Added
+- pipeline foreach items with per_item admission
+
+### Changed
+- Cook operations lease through the control-plane outbox; delete the operation claim ledger
+
+### Fixed
+- admit the synced derived baseline for Lab gate-feedback retries
+- expose terminal outcome and recoverability in status
+- recover admits steps as daemon jobs and returns promptly
+
 ## [0.467.0] - 2026-11-16
 
 ### Added
