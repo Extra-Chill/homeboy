@@ -377,7 +377,7 @@ fn status_without_feedback(args: StatusArgs) -> CmdResult<Value> {
         }
         // A legacy retry reservation has neither an executable plan nor an
         // admission driver. Never present it as healthy capacity waiting.
-        if record.state() == agent_task_lifecycle::AgentTaskRunState::Queued
+        if record.state() == homeboy_lifecycle_contract::RunExecutionState::Queued
             && agent_task_lifecycle::is_unmaterialized_cook_admission(&record)
             && record.metadata["retry_of"].is_string()
         {
@@ -1005,7 +1005,7 @@ fn attach_promotion_replay(value: &mut Value, run_id: &str, requested_id: &str) 
     };
     let recoverable = matches!(
         record.state(),
-        agent_task_lifecycle::AgentTaskRunState::CandidateRecoverable
+        homeboy_lifecycle_contract::RunExecutionState::CandidateRecoverable
     ) || CookDelivery::from_run_metadata(&record.metadata).is_some_and(
         |delivery| delivery.blocker_code() == Some(CookDeliveryBlockerCode::GateFailed),
     );
@@ -6136,7 +6136,7 @@ fn queued_runner_ownership_diagnostic(
     liveness: agent_task_service::AgentTaskLiveness,
     probe: &agent_task_lifecycle::AgentTaskRunnerDiagnosticProbe,
 ) -> Option<CollectedDiagnostic> {
-    if record.state() != agent_task_lifecycle::AgentTaskRunState::Queued {
+    if record.state() != homeboy_lifecycle_contract::RunExecutionState::Queued {
         return None;
     }
     let phase = record.metadata.pointer("/cook_progress/phase");
@@ -6283,7 +6283,7 @@ fn bounded_value(value: &Value) -> Value {
 }
 
 /// Terminality of an untyped durable record, delegating to the single
-/// definition in `AgentTaskRunState::is_terminal`.
+/// definition in `RunExecutionState::is_terminal`.
 ///
 /// `status` reads records as untyped JSON, so the state has to be parsed back
 /// into the lifecycle enum instead of compared against an inline string list.

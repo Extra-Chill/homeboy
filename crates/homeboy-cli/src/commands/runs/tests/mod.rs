@@ -2349,7 +2349,7 @@ fn runs_show_cook_id_follows_latest_attempt_not_admission_pass() {
 
         lifecycle
             .mutate_record(attempt_id, |record| {
-                record.set_state_for_test(agent_task_lifecycle::AgentTaskRunState::Failed);
+                record.set_state_for_test(homeboy_lifecycle_contract::RunExecutionState::Failed);
                 true
             })
             .expect("fail attempt");
@@ -2408,7 +2408,7 @@ fn cook_row_mirrors_latest_attempt_through_recovery() {
         // filter and every other row reader agree with `agent-task status`.
         lifecycle
             .mutate_record(first, |record| {
-                record.set_state_for_test(agent_task_lifecycle::AgentTaskRunState::Failed);
+                record.set_state_for_test(homeboy_lifecycle_contract::RunExecutionState::Failed);
                 true
             })
             .expect("fail attempt 1");
@@ -2440,7 +2440,7 @@ fn cook_row_mirrors_latest_attempt_through_recovery() {
 
         lifecycle
             .mutate_record(second, |record| {
-                record.set_state_for_test(agent_task_lifecycle::AgentTaskRunState::Succeeded);
+                record.set_state_for_test(homeboy_lifecycle_contract::RunExecutionState::Succeeded);
                 true
             })
             .expect("pass attempt 2");

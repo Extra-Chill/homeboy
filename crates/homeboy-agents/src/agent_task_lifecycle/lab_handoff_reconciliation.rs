@@ -15,7 +15,7 @@ pub(crate) fn has_expired_pending_runner_submission_intent(
 ) -> bool {
     matches!(
         record.state(),
-        AgentTaskRunState::Queued | AgentTaskRunState::Running
+        RunExecutionState::Queued | RunExecutionState::Running
     ) && record.runner_job_id().is_none()
         && record.lab_handoff.as_ref().is_some_and(|handoff| {
             handoff.state == AgentTaskLabHandoffState::Pending
@@ -167,7 +167,7 @@ pub(crate) fn expire_unaccepted_lab_handoff_in_store(
 
     let mut record =
         cancel_run_in_store(lifecycle_store, run_id, Some(EXPIRED_LAB_HANDOFF_REASON))?;
-    if record.state() != AgentTaskRunState::Cancelled {
+    if record.state() != RunExecutionState::Cancelled {
         return Ok(false);
     }
     let expired_at = now_timestamp();
@@ -229,7 +229,7 @@ pub(crate) fn reconcile_runner_job_state_in_store(
     lifecycle_store: &AgentTaskLifecycleStore,
     record: &mut AgentTaskRunRecord,
 ) -> Result<()> {
-    if record.state() != AgentTaskRunState::Running {
+    if record.state() != RunExecutionState::Running {
         return Ok(());
     }
     let (Some(runner_id), Some(job_id)) = (
@@ -381,13 +381,13 @@ pub(crate) fn apply_runner_job_terminal_state(
 ) {
     let (run_state, task_state) = match status {
         homeboy_core::api_jobs::JobStatus::Succeeded => {
-            (AgentTaskRunState::Succeeded, AgentTaskState::Succeeded)
+            (RunExecutionState::Succeeded, AgentTaskState::Succeeded)
         }
         homeboy_core::api_jobs::JobStatus::Cancelled => {
-            (AgentTaskRunState::Cancelled, AgentTaskState::Cancelled)
+            (RunExecutionState::Cancelled, AgentTaskState::Cancelled)
         }
         homeboy_core::api_jobs::JobStatus::Failed => {
-            (AgentTaskRunState::Failed, AgentTaskState::Failed)
+            (RunExecutionState::Failed, AgentTaskState::Failed)
         }
         _ => return,
     };
@@ -421,7 +421,7 @@ pub(crate) fn apply_runner_job_terminal_state(
     }
     metadata.insert(
         "retryable".to_string(),
-        json!(run_state != AgentTaskRunState::Succeeded),
+        json!(run_state != RunExecutionState::Succeeded),
     );
     metadata.remove(METADATA_KEY_STALE_RUNNING);
     metadata.remove(METADATA_KEY_STALE_RUNNING_REASON);

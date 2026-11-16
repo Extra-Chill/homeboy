@@ -416,7 +416,7 @@ pub fn finish_candidate_adoption_in_store(
             if !finish_candidate_adoption_attempt(&mut next, &error) {
                 return None;
             }
-            set_run_state(&mut next, AgentTaskRunState::Succeeded);
+            set_run_state(&mut next, RunExecutionState::Succeeded);
             Some(AgentTaskTransition::CommitRecord {
                 prepared: Box::new(next),
             })
@@ -509,7 +509,7 @@ pub fn candidate_adoption_recovery_outcome(
     task: &AgentTaskRequest,
 ) -> Option<AgentTaskOutcome> {
     let expired_handoff = record.lab_handoff.as_ref().is_some_and(|handoff| {
-        record.state() == AgentTaskRunState::Cancelled
+        record.state() == RunExecutionState::Cancelled
             && record.aggregate_path.is_none()
             && record.totals.is_none()
             && record.artifact_refs.is_empty()
@@ -537,7 +537,7 @@ pub fn candidate_adoption_recovery_outcome(
         };
     let eligible_failed_preexecution = matches!(
         record.state(),
-        AgentTaskRunState::Failed | AgentTaskRunState::Succeeded
+        RunExecutionState::Failed | RunExecutionState::Succeeded
     ) && record.metadata["provider_executions_consumed"] == 0
         && record.provider_handles.is_empty()
         && no_runner_job_recorded(record)

@@ -5,6 +5,7 @@
 //! submission, running transitions, and scheduler invocation belong to
 //! [`crate::agent_task_submission_service`].
 
+use homeboy_lifecycle_contract::RunExecutionState;
 use serde::Serialize;
 use serde_json::Value;
 
@@ -13,7 +14,7 @@ use crate::agent_task_dispatch_plan::{
     build_dispatch_plan, build_dispatch_plan_with_provider_requirements,
     preflight_dispatch_provider_secrets,
 };
-use crate::agent_task_lifecycle::{AgentTaskRunRecord, AgentTaskRunState};
+use crate::agent_task_lifecycle::AgentTaskRunRecord;
 use crate::agent_task_provider::{
     default_backend, resolve_provider_for_backend, AgentTaskProviderCatalog,
 };
@@ -169,7 +170,7 @@ pub struct AgentTaskDispatchReport {
     pub schema: &'static str,
     pub run_id: String,
     pub plan_id: String,
-    pub state: AgentTaskRunState,
+    pub state: RunExecutionState,
     pub plan_path: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub aggregate_path: Option<String>,

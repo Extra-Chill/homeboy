@@ -1,3 +1,4 @@
+use homeboy_lifecycle_contract::RunExecutionState;
 use serde::Serialize;
 
 use crate::agent_task::{
@@ -10,7 +11,7 @@ use crate::agent_task::{
 use crate::agent_task_aggregate::AGENT_TASK_AGGREGATE_SCHEMA;
 use crate::agent_task_cook_loop::AGENT_TASK_COOK_FEEDBACK_REPORT_SCHEMA;
 use crate::agent_task_gate::AGENT_TASK_GATE_REPORT_SCHEMA;
-use crate::agent_task_lifecycle::AgentTaskRunState;
+
 use crate::agent_task_promotion::AGENT_TASK_PROMOTION_REPORT_SCHEMA;
 use crate::agent_task_provider::{
     provider_capability_contract, ProviderSchemaContract, AGENT_TASK_EXECUTOR_PROVIDER_SCHEMA,
@@ -268,7 +269,7 @@ pub fn agent_task_core_contract() -> AgentTaskCoreContract {
             ]),
             run_state: enum_values(&RUN_STATES),
             // An aggregate's status is the terminal run state it derives
-            // (`AgentTaskRunState::from_outcomes`).
+            // (`crate::agent_task_lifecycle::run_state_from_outcomes`).
             aggregate_status: enum_values(
                 &RUN_STATES
                     .into_iter()
@@ -342,14 +343,14 @@ fn string_vec(values: &[&str]) -> Vec<String> {
     values.iter().map(|value| value.to_string()).collect()
 }
 
-const RUN_STATES: [AgentTaskRunState; 7] = [
-    AgentTaskRunState::Queued,
-    AgentTaskRunState::Running,
-    AgentTaskRunState::Succeeded,
-    AgentTaskRunState::CandidateRecoverable,
-    AgentTaskRunState::PartialFailure,
-    AgentTaskRunState::Failed,
-    AgentTaskRunState::Cancelled,
+const RUN_STATES: [RunExecutionState; 7] = [
+    RunExecutionState::Queued,
+    RunExecutionState::Running,
+    RunExecutionState::Succeeded,
+    RunExecutionState::CandidateRecoverable,
+    RunExecutionState::PartialFailure,
+    RunExecutionState::Failed,
+    RunExecutionState::Cancelled,
 ];
 
 fn enum_values<T: Serialize>(variants: &[T]) -> Vec<String> {

@@ -9,10 +9,11 @@ use super::{succeeded_aggregate, test_plan};
 use crate::agent_task_lifecycle::terminal_transition::TerminalRecordCommit;
 use crate::agent_task_lifecycle::{
     apply_aggregate_transition_in_store, set_run_state, AgentTaskAggregateTransition,
-    AgentTaskLifecycleStore, AgentTaskRunRecord, AgentTaskRunState, AgentTaskTerminalOutcome,
-    AgentTaskTransition, AgentTaskTransitionError,
+    AgentTaskLifecycleStore, AgentTaskRunRecord, AgentTaskTerminalOutcome, AgentTaskTransition,
+    AgentTaskTransitionError,
 };
-use homeboy_core::run_lifecycle_record::{RunExecutionState, RunLifecycleRecord};
+use homeboy_core::run_lifecycle_record::RunLifecycleRecord;
+use homeboy_lifecycle_contract::RunExecutionState;
 use serde_json::json;
 
 const RUN_ID: &str = "stale-terminal-writer";
@@ -30,7 +31,7 @@ fn running_record(store: &AgentTaskLifecycleStore) -> AgentTaskRunRecord {
     }))
     .expect("decode minimal run record");
     record.lifecycle = RunLifecycleRecord::with_execution_state(RunExecutionState::Queued);
-    set_run_state(&mut record, AgentTaskRunState::Running);
+    set_run_state(&mut record, RunExecutionState::Running);
     record
 }
 
@@ -52,7 +53,7 @@ fn stale_terminal_projection_cannot_overwrite_a_concurrent_terminal_failure() {
 
     // Both writers observe the same running snapshot.
     let mut writer_b = store.read_record(RUN_ID).expect("writer B reads");
-    assert_eq!(writer_b.state(), AgentTaskRunState::Running);
+    assert_eq!(writer_b.state(), RunExecutionState::Running);
 
     // Writer A terminalizes first.
     store
@@ -60,7 +61,7 @@ fn stale_terminal_projection_cannot_overwrite_a_concurrent_terminal_failure() {
             record.metadata["cook_controller_failure"] = json!({
                 "reason": "writer A: provider exited with a controller failure",
             });
-            set_run_state(record, AgentTaskRunState::Failed);
+            set_run_state(record, RunExecutionState::Failed);
             record.updated_at = Some("2026-10-09T00:00:01Z".to_string());
             true
         })
@@ -81,7 +82,7 @@ fn stale_terminal_projection_cannot_overwrite_a_concurrent_terminal_failure() {
     let stored = store.read_record(RUN_ID).expect("read settled record");
     assert_eq!(
         stored.state(),
-        AgentTaskRunState::Failed,
+        RunExecutionState::Failed,
         "lost update: a stale terminal writer replaced writer A's terminal state"
     );
     assert_eq!(
@@ -161,7 +162,7 @@ fn transition_commits_at_the_expected_revision_and_records_one_event() {
         .transition(RUN_ID, current.revision, failed_with("provider exited"))
         .expect("current revision commits");
 
-    assert_eq!(committed.state(), AgentTaskRunState::Failed);
+    assert_eq!(committed.state(), RunExecutionState::Failed);
     assert_eq!(committed.revision, current.revision + 1);
     assert_eq!(committed.metadata["terminal_reason"], "provider exited");
     assert_eq!(committed.metadata["store_marker"], "base");
@@ -211,7 +212,7 @@ fn stale_transition_is_a_typed_conflict_and_writes_nothing() {
         AgentTaskTransitionError::Conflict(conflict) => {
             assert_eq!(conflict.expected_revision, stale.revision);
             assert_eq!(conflict.actual_revision, winner.revision);
-            assert_eq!(conflict.actual_state, Some(AgentTaskRunState::Failed));
+            assert_eq!(conflict.actual_state, Some(RunExecutionState::Failed));
             assert_eq!(conflict.transition, "terminate");
         }
         other => panic!("expected a transition conflict, got {other:?}"),
@@ -231,7 +232,7 @@ fn transition_when_redecides_from_the_fresh_record_and_skips_a_terminal_run() {
         })
         .unwrap()
         .expect("live run terminalizes");
-    assert_eq!(committed.state(), AgentTaskRunState::Failed);
+    assert_eq!(committed.state(), RunExecutionState::Failed);
     let second = store
         .transition_when(RUN_ID, |record| {
             (!record.state().is_terminal()).then(|| failed_with("second"))
@@ -268,7 +269,7 @@ fn a_projection_rebases_over_live_writes_but_not_over_another_terminal_state() {
         },
     )
     .expect("live intervening write rebases");
-    assert_eq!(snapshot.state(), AgentTaskRunState::Succeeded);
+    assert_eq!(snapshot.state(), RunExecutionState::Succeeded);
 
     // A re-projection decided from the same terminal state also commits.
     let mut terminal = store.read_record(RUN_ID).unwrap();
@@ -297,7 +298,7 @@ fn a_projection_rebases_over_live_writes_but_not_over_another_terminal_state() {
 fn prepared_cancellation(snapshot: &AgentTaskRunRecord) -> AgentTaskRunRecord {
     let mut prepared = snapshot.clone();
     prepared.metadata["cancellation_provenance"] = json!({ "cause": "stale caller" });
-    set_run_state(&mut prepared, AgentTaskRunState::Cancelled);
+    set_run_state(&mut prepared, RunExecutionState::Cancelled);
     prepared
 }
 
@@ -322,7 +323,7 @@ fn a_terminal_record_commit_rebases_over_live_writes_but_yields_to_a_terminal_wi
         .expect("live intervening write rebases")
     {
         TerminalRecordCommit::Committed(committed) => {
-            assert_eq!(committed.state(), AgentTaskRunState::Cancelled);
+            assert_eq!(committed.state(), RunExecutionState::Cancelled);
             assert_eq!(committed.revision, snapshot.revision + 2);
         }
         other => panic!("expected a commit, got {other:?}"),
@@ -359,7 +360,7 @@ fn a_non_terminal_annotation_cannot_mint_a_cancellation_receipt() {
     let context = homeboy_core::test_support::HermeticTestContext::new();
     let store = seeded(&context);
     let mut annotated = store.read_record(RUN_ID).unwrap();
-    assert_eq!(annotated.state(), AgentTaskRunState::Running);
+    assert_eq!(annotated.state(), RunExecutionState::Running);
     let before = annotated.revision;
     annotated.metadata["cancellation_provenance"] = json!({
         "actor": "runner",
@@ -384,7 +385,7 @@ fn a_non_terminal_annotation_cannot_mint_a_cancellation_receipt() {
             row.status.as_str(),
             &row.metadata_json["agent_task_run"]["state"]
         ),
-        (AgentTaskRunState::Running, "running", &json!("running")),
+        (RunExecutionState::Running, "running", &json!("running")),
         "the lifecycle read, `runs.status` and the active-run SQL disagree about the run"
     );
     let error = committed.expect_err("a live run cannot carry cancellation provenance");

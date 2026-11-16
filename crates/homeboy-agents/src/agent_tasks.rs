@@ -187,9 +187,8 @@ pub mod lifecycle {
         runner_diagnostic_probe, transition_execution_placement_for_continuation_in_store,
         AgentTaskAcceptanceVerdict, AgentTaskArtifactRef, AgentTaskDurableReadUnavailable,
         AgentTaskLifecycleStore, AgentTaskPreDispatchFailure, AgentTaskRemoteDispatchFailure,
-        AgentTaskRunRecord, AgentTaskRunState, AgentTaskRunnerDiagnosticProbe,
-        AgentTaskRunnerProbe, AgentTaskStatusOptions, ClaimOutcome, DetachedLabRunRecord,
-        LabOffloadProxyPlan,
+        AgentTaskRunRecord, AgentTaskRunnerDiagnosticProbe, AgentTaskRunnerProbe,
+        AgentTaskStatusOptions, ClaimOutcome, DetachedLabRunRecord, LabOffloadProxyPlan,
     };
     pub use super::super::agent_task_lifecycle::{
         exact_record, load_controller_plan, record_detached_lab_run, record_lab_offload_phase,

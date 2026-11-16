@@ -20,6 +20,7 @@ use super::super::cook_promotion::{
 use super::super::execution_step::execution_step_fixtures::{
     current_intent, kill_test_child_at_marker, step_harness, terminal_delivery, QueuedRunTransport,
 };
+use homeboy_lifecycle_contract::RunExecutionState;
 
 #[test]
 fn admitted_component_identity_survives_explicit_repository_selection() {
@@ -48,14 +49,13 @@ use crate::agent_task_finalization::{
     RealAgentTaskPrFinalizationBackend,
 };
 use crate::agent_task_lifecycle;
-use crate::agent_task_lifecycle::{AgentTaskLifecycleStore, AgentTaskRunState};
+use crate::agent_task_lifecycle::AgentTaskLifecycleStore;
 use crate::agent_task_scheduler::{
     AgentTaskExecutorAdapter, AgentTaskProviderRotationEntry, AgentTaskProviderRotationPolicy,
     AgentTaskScheduler, AgentTaskState,
 };
 use homeboy_core::run_lifecycle_record::{
-    ProviderRuntimeLifecycle, ProviderRuntimeState, RunExecutionLifecycle, RunExecutionState,
-    RunLifecycleRecord,
+    ProviderRuntimeLifecycle, ProviderRuntimeState, RunExecutionLifecycle, RunLifecycleRecord,
 };
 use homeboy_lab_contract::lab::transport_failure::{
     preacceptance_transport_error, LabJobAcceptanceDisposition, LabTransportOperation,
@@ -547,7 +547,7 @@ fn terminal_stop_reason_names_the_failed_outcome_cause() {
             .to_string(),
     );
     assert_eq!(
-        terminal_stop_reason("run-1", AgentTaskRunState::Failed, &aggregate),
+        terminal_stop_reason("run-1", RunExecutionState::Failed, &aggregate),
         "agent-task run run-1 ended in state Failed: workspace HEAD is no longer descended from the task base; refusing to harvest unrelated commits"
     );
 }
@@ -1010,7 +1010,7 @@ fn verified_unchanged_attempt_ends_as_no_changes_with_the_provider_message() {
             .expect("observe terminal Cook");
         assert_eq!(
             observed.state(),
-            agent_task_lifecycle::AgentTaskRunState::PartialFailure
+            homeboy_lifecycle_contract::RunExecutionState::PartialFailure
         );
     });
 }
@@ -1024,7 +1024,7 @@ fn finalizing_cook_applies_intentional_no_change_policy() {
             (
                 0,
                 "intentional_no_change",
-                agent_task_lifecycle::AgentTaskRunState::Succeeded,
+                homeboy_lifecycle_contract::RunExecutionState::Succeeded,
             ),
         ),
         (
@@ -1033,7 +1033,7 @@ fn finalizing_cook_applies_intentional_no_change_policy() {
             (
                 1,
                 "no_candidate",
-                agent_task_lifecycle::AgentTaskRunState::PartialFailure,
+                homeboy_lifecycle_contract::RunExecutionState::PartialFailure,
             ),
         ),
         (
@@ -1042,7 +1042,7 @@ fn finalizing_cook_applies_intentional_no_change_policy() {
             (
                 0,
                 "intentional_no_change",
-                agent_task_lifecycle::AgentTaskRunState::Succeeded,
+                homeboy_lifecycle_contract::RunExecutionState::Succeeded,
             ),
         ),
         (
@@ -1051,7 +1051,7 @@ fn finalizing_cook_applies_intentional_no_change_policy() {
             (
                 1,
                 "no_candidate",
-                agent_task_lifecycle::AgentTaskRunState::PartialFailure,
+                homeboy_lifecycle_contract::RunExecutionState::PartialFailure,
             ),
         ),
     ] {
@@ -1160,7 +1160,7 @@ fn a_succeeded_runner_result_without_an_aggregate_does_not_rerun_the_provider() 
         agent_task_lifecycle::submit_plan(&options.identity.initial_plan, Some(&run_id)).unwrap();
         agent_task_lifecycle::cancel_run(&run_id, Some("runner result projected")).unwrap();
         agent_task_lifecycle::rewrite_record_for_test(&run_id, |record| {
-            record.set_state_for_test(AgentTaskRunState::Succeeded);
+            record.set_state_for_test(RunExecutionState::Succeeded);
             if let Some(metadata) = record.metadata.as_object_mut() {
                 metadata.retain(|key, _| !key.starts_with("cancel"));
             }
@@ -1486,7 +1486,7 @@ fn agent_task_cook_rows_wait_for_verification_and_terminal_disposition() {
                     let record = store.read_record(id).unwrap();
                     assert_eq!(
                         record.state(),
-                        agent_task_lifecycle::AgentTaskRunState::CandidateRecoverable
+                        homeboy_lifecycle_contract::RunExecutionState::CandidateRecoverable
                     );
                     assert_eq!(store.read_aggregate(id).unwrap().totals.succeeded, 1);
                     assert_eq!(
@@ -1585,7 +1585,7 @@ fn terminal_cook_recovery_settles_rows_and_one_span_in_both_directions() {
                         &lifecycle_store,
                         &lifecycle_store.read_record(run_id).unwrap()
                     ),
-                    agent_task_lifecycle::AgentTaskRunState::CandidateRecoverable
+                    homeboy_lifecycle_contract::RunExecutionState::CandidateRecoverable
                 );
             } else if exit_code == 0 {
                 assert_eq!(
@@ -1593,7 +1593,7 @@ fn terminal_cook_recovery_settles_rows_and_one_span_in_both_directions() {
                         &lifecycle_store,
                         &lifecycle_store.read_record(run_id).unwrap()
                     ),
-                    agent_task_lifecycle::AgentTaskRunState::Succeeded
+                    homeboy_lifecycle_contract::RunExecutionState::Succeeded
                 );
             }
             let observation = lifecycle_store.open_observation_initialized().unwrap();
@@ -2319,7 +2319,7 @@ fn cook_runtime_admission_cancellation_stops_wait_before_provider_execution() {
                     .read_record(&options.identity.initial_run_id)
                     .expect("cancelled Cook record")
                     .state(),
-                AgentTaskRunState::Cancelled
+                RunExecutionState::Cancelled
             );
             let release = homeboy_core::paths::runtime_promotion_dir()
                 .expect("runtime promotion directory")
@@ -2730,7 +2730,7 @@ fn compiled_cook_binds_and_executes_the_first_ready_production_provider_route() 
 
         assert_eq!(
             aggregate.status(),
-            AgentTaskRunState::Succeeded,
+            RunExecutionState::Succeeded,
             "{aggregate:?}"
         );
         let executed: serde_json::Value =
@@ -2828,14 +2828,14 @@ fn supersede_previous_candidate_exact_and_fail_closed() {
     // A cancelled Cook leaves its promoted candidate staged exactly like a
     // recoverable one; a re-cook must set both aside (#17910).
     for stopped in [
-        agent_task_lifecycle::AgentTaskRunState::CandidateRecoverable,
-        agent_task_lifecycle::AgentTaskRunState::Cancelled,
+        homeboy_lifecycle_contract::RunExecutionState::CandidateRecoverable,
+        homeboy_lifecycle_contract::RunExecutionState::Cancelled,
     ] {
         supersede_previous_candidate_from(stopped);
     }
 }
 
-fn supersede_previous_candidate_from(stopped: agent_task_lifecycle::AgentTaskRunState) {
+fn supersede_previous_candidate_from(stopped: homeboy_lifecycle_contract::RunExecutionState) {
     homeboy_core::test_support::with_isolated_home(|_| {
         let repo = tempfile::tempdir().unwrap();
         let git = |args: &[&str]| {
@@ -3362,7 +3362,7 @@ fn dirty_destination_recovery_actions_commit_review_and_adopt_through_publicatio
             .expect("published recovery remains readable");
         assert_eq!(
             record.state(),
-            agent_task_lifecycle::AgentTaskRunState::Succeeded
+            homeboy_lifecycle_contract::RunExecutionState::Succeeded
         );
         assert_eq!(
             record.lifecycle.execution.state,
@@ -3677,7 +3677,7 @@ fn run_concurrent_first_cooks_recipe_creator_fixture() -> String {
     let plan_before = lifecycle_store
         .read_controller_plan(&creator_options.identity.initial_run_id)
         .expect("creator controller plan");
-    assert_eq!(record_before.state(), AgentTaskRunState::Running);
+    assert_eq!(record_before.state(), RunExecutionState::Running);
     assert_eq!(plan_before.plan_id, "creator-plan");
     assert_eq!(
         recipe.attempts[0].plan.plan_id, plan_before.plan_id,
@@ -3982,7 +3982,7 @@ impl CandidateAdoptionFixture {
         let record = agent_task_lifecycle::reconcile_status(&self.run_id).unwrap();
         assert_eq!(
             record.state(),
-            agent_task_lifecycle::AgentTaskRunState::Failed
+            homeboy_lifecycle_contract::RunExecutionState::Failed
         );
         assert!(candidate_adoption_source_in_store(
             &test_lifecycle_store(),
@@ -4406,12 +4406,12 @@ fn cook_persists_controller_admission_timeout_before_provider_execution() {
         )
         .expect("the latest zero-execution failure reserves a complete retry")
         .record;
-        assert_eq!(retry.state(), AgentTaskRunState::Queued);
+        assert_eq!(retry.state(), RunExecutionState::Queued);
         assert!(retry.metadata["execution_scheduling"]["current_intent_id"].is_string());
 
         assert_eq!(
             record.state(),
-            agent_task_lifecycle::AgentTaskRunState::Failed
+            homeboy_lifecycle_contract::RunExecutionState::Failed
         );
         assert!(record.provider_handles.is_empty());
         assert_eq!(record.metadata["provider_executions_consumed"], 0);
@@ -4672,7 +4672,7 @@ fn active_cooks_on_the_same_canonical_worktree_record_a_nonblocking_warning() {
             .expect("current Cook remains inspectable");
         assert_eq!(
             current.state(),
-            agent_task_lifecycle::AgentTaskRunState::Queued
+            homeboy_lifecycle_contract::RunExecutionState::Queued
         );
         assert_eq!(
             current.metadata["cook_active_worktree_warning"],
@@ -4741,7 +4741,7 @@ fn admission_refused_lifecycle_retry_dispatches_through_its_cook() {
         assert_eq!(status.run_id, retry.run_id);
         assert_eq!(
             status.state(),
-            agent_task_lifecycle::AgentTaskRunState::Succeeded
+            homeboy_lifecycle_contract::RunExecutionState::Succeeded
         );
         assert!(status.metadata["pre_execution_failure"].is_null());
         assert_eq!(status.metadata["provider_executions_consumed"], 1);
@@ -4757,7 +4757,7 @@ fn admission_refused_lifecycle_retry_dispatches_through_its_cook() {
         let original = agent_task_lifecycle::exact_record(first_run_id).unwrap();
         assert_eq!(
             original.state(),
-            agent_task_lifecycle::AgentTaskRunState::Failed
+            homeboy_lifecycle_contract::RunExecutionState::Failed
         );
         assert!(
             serde_json::to_string(&original.metadata["pre_execution_failure"])
@@ -5096,7 +5096,7 @@ fn cook_recovery_operator_feedback_reaches_dispatch_and_survives_pre_execution_f
         ) -> Result<(Value, i32)> {
             *self.consumed_attempt.borrow_mut() = run_id.to_string();
             agent_task_lifecycle::rewrite_record_for_test(run_id, |record| {
-                record.set_state_for_test(agent_task_lifecycle::AgentTaskRunState::Queued);
+                record.set_state_for_test(homeboy_lifecycle_contract::RunExecutionState::Queued);
                 record.lifecycle.execution.state = record.state().into();
             })?;
             run_loaded_plan_with_derived_cook_baseline(
@@ -5151,7 +5151,9 @@ fn cook_recovery_operator_feedback_reaches_dispatch_and_survives_pre_execution_f
                 agent_task_lifecycle::rewrite_record_for_test(
                     &options.identity.initial_run_id,
                     |record| {
-                        record.set_state_for_test(agent_task_lifecycle::AgentTaskRunState::Failed);
+                        record.set_state_for_test(
+                            homeboy_lifecycle_contract::RunExecutionState::Failed,
+                        );
                         record.lifecycle.execution.state = record.state().into();
                     },
                 )
@@ -5306,7 +5308,7 @@ fn recover_removed_runner_settles_and_dispatches_in_one_call() {
             agent_task_lifecycle::exact_record(&report.run_id)
                 .unwrap()
                 .state(),
-            AgentTaskRunState::Succeeded
+            RunExecutionState::Succeeded
         );
     });
 }
@@ -5939,7 +5941,7 @@ fn retryable_pre_provider_retry_returns_terminal_successor_without_reexecution()
         assert_eq!(retry.record.run_id, successor_run_id);
         assert_eq!(
             retry.record.state(),
-            agent_task_lifecycle::AgentTaskRunState::Succeeded
+            homeboy_lifecycle_contract::RunExecutionState::Succeeded
         );
         assert!(!retry.run);
         assert_eq!(
@@ -5974,7 +5976,7 @@ fn replayed_materialized_attempt_terminalizes_when_canonicalization_fails() {
                 .read_record(run_id)
                 .expect("queued replay record")
                 .state(),
-            AgentTaskRunState::Queued
+            RunExecutionState::Queued
         );
 
         let replay = run_cook(CookContext::new(options, Arc::new(UnusedExecutor)))
@@ -5983,7 +5985,7 @@ fn replayed_materialized_attempt_terminalizes_when_canonicalization_fails() {
         let record = lifecycle_store
             .read_record(run_id)
             .expect("terminal replay record");
-        assert_eq!(record.state(), AgentTaskRunState::Failed);
+        assert_eq!(record.state(), RunExecutionState::Failed);
         assert!(record.metadata.get("pre_execution_failure").is_some());
     });
 }
@@ -6317,7 +6319,7 @@ fn submit_terminal_lab_attempt(
         agent_task_lifecycle::exact_record(run_id)
             .expect("projected record")
             .state(),
-        agent_task_lifecycle::AgentTaskRunState::Succeeded,
+        homeboy_lifecycle_contract::RunExecutionState::Succeeded,
         "terminal Lab mirror projection must settle the lifecycle before enqueue"
     );
 }
@@ -6719,7 +6721,7 @@ fn cook_transport_preparation_failure_is_durable_and_resumes_after_runner_recove
         assert_eq!(blocked.run_id, first_run_id);
         assert_eq!(
             blocked.state(),
-            agent_task_lifecycle::AgentTaskRunState::Failed
+            homeboy_lifecycle_contract::RunExecutionState::Failed
         );
         assert_eq!(
             blocked.metadata["pre_execution_failure"]["retryable"],
@@ -6771,7 +6773,7 @@ fn cook_transport_preparation_failure_does_not_exhaust_cook_retries() {
             .expect("transport failure remains inspectable");
         assert_eq!(
             record.state(),
-            agent_task_lifecycle::AgentTaskRunState::Failed
+            homeboy_lifecycle_contract::RunExecutionState::Failed
         );
         assert_eq!(record.metadata["provider_executions_consumed"], 0);
     });
@@ -7393,7 +7395,7 @@ fn cook_returns_after_accepted_detached_attempt_without_waiting_for_daemon_compl
             agent_task_lifecycle::reconcile_status(run_id).expect("detached attempt record");
         assert_eq!(
             record.state(),
-            agent_task_lifecycle::AgentTaskRunState::Running
+            homeboy_lifecycle_contract::RunExecutionState::Running
         );
         assert_eq!(record.runner_id(), Some("fixture-lab"));
         assert_eq!(record.runner_job_id(), Some("accepted-daemon-job"));
@@ -7554,9 +7556,9 @@ fn adoption_resolves_durable_attempts() {
                 assert_eq!(
                     record.state(),
                     if cancelled {
-                        AgentTaskRunState::Cancelled
+                        RunExecutionState::Cancelled
                     } else {
-                        AgentTaskRunState::Queued
+                        RunExecutionState::Queued
                     },
                     "{case}/{id_case}"
                 );
@@ -8881,7 +8883,7 @@ fn cook_observation_agrees_across_real_stores_without_mutation() {
                 assert_eq!(observed.run_id, *run_id);
                 assert_eq!(canonical.run.as_str(), run_id);
                 assert_eq!(
-                    observed.state() == agent_task_lifecycle::AgentTaskRunState::Succeeded,
+                    observed.state() == homeboy_lifecycle_contract::RunExecutionState::Succeeded,
                     success,
                     "{name}"
                 );
@@ -8958,7 +8960,7 @@ fn production_cook_loop_loads_terminal_promotion_without_source_aggregate() {
         )
         .expect("index terminal attempt");
         agent_task_lifecycle::rewrite_record_for_test(run_id, |record| {
-            record.set_state_for_test(agent_task_lifecycle::AgentTaskRunState::Succeeded);
+            record.set_state_for_test(homeboy_lifecycle_contract::RunExecutionState::Succeeded);
         })
         .expect("terminalize fixture");
         agent_task_lifecycle::record_promotion(
@@ -9028,11 +9030,11 @@ fn production_cook_terminal_failure_and_cancellation_record_mission_span() {
         for (cook_id, state) in [
             (
                 "cook-timing-failed",
-                agent_task_lifecycle::AgentTaskRunState::Failed,
+                homeboy_lifecycle_contract::RunExecutionState::Failed,
             ),
             (
                 "cook-timing-cancelled",
-                agent_task_lifecycle::AgentTaskRunState::Cancelled,
+                homeboy_lifecycle_contract::RunExecutionState::Cancelled,
             ),
         ] {
             let run_id = format!("{cook_id}-attempt-1");
@@ -9052,7 +9054,7 @@ fn production_cook_terminal_failure_and_cancellation_record_mission_span() {
             lifecycle_store
                 .record_cook_attempt(cook_id, 1, &run_id)
                 .unwrap();
-            if state == agent_task_lifecycle::AgentTaskRunState::Cancelled {
+            if state == homeboy_lifecycle_contract::RunExecutionState::Cancelled {
                 agent_task_lifecycle::cancel_run(&run_id, Some("timing fixture")).unwrap();
             } else {
                 agent_task_lifecycle::rewrite_record_for_test(&run_id, |record| {
@@ -9432,7 +9434,7 @@ fn operator_attempt_cancel_preserves_earlier_candidate_for_recovery() {
         let candidate = store.read_record(run).unwrap();
         assert_eq!(
             candidate.state(),
-            agent_task_lifecycle::AgentTaskRunState::CandidateRecoverable
+            homeboy_lifecycle_contract::RunExecutionState::CandidateRecoverable
         );
         assert!(candidate.metadata.get("candidate_retirement").is_none());
         assert!(candidate.metadata.get("cancellation_fence").is_none());
@@ -11055,7 +11057,7 @@ fn dispatch_acceptance_receipt_is_awaited_and_terminal_attempts_stop_the_wait() 
         agent_task_lifecycle::submit_plan(&options.identity.initial_plan, Some(rejected)).unwrap();
         store
             .mutate_record(rejected, |record| {
-                record.set_state_for_test(agent_task_lifecycle::AgentTaskRunState::Failed);
+                record.set_state_for_test(homeboy_lifecycle_contract::RunExecutionState::Failed);
                 true
             })
             .unwrap();
@@ -11207,7 +11209,7 @@ fn prior_candidate_destination(
 }
 
 /// Materialize a prior Cook attempt and terminalize it as `state`.
-fn materialize_prior_cook_attempt(cook_id: &str, state: AgentTaskRunState) -> String {
+fn materialize_prior_cook_attempt(cook_id: &str, state: RunExecutionState) -> String {
     let prior = batch_cook_options(cook_id, Arc::new(AcceptedDetachedAttemptDispatcher));
     persist_initial_recipe(&prior).expect("persist prior Cook recipe");
     super::super::materialize_initial_cook_attempt(&prior).expect("materialize prior Cook");
@@ -11251,7 +11253,7 @@ fn recook_preserves_prior_failed_candidate_and_starts_from_clean_base() {
     homeboy_core::test_support::with_isolated_home(|home| {
         let handle = "fixture@fix-issue-15775-fixture";
         let prior_run =
-            materialize_prior_cook_attempt("cook-15775-prior", AgentTaskRunState::Failed);
+            materialize_prior_cook_attempt("cook-15775-prior", RunExecutionState::Failed);
         let (_primary, target) = prior_candidate_destination(home.path(), handle, &prior_run);
         leave_prior_candidate(&target);
         let head_before = git_output(&target, &["rev-parse", "HEAD"]).expect("HEAD");
@@ -11364,7 +11366,7 @@ fn recook_preservation_leaves_unattributed_dirt_for_existing_admission() {
 
         // A succeeded owner's leftovers are not a failed candidate.
         let succeeded =
-            materialize_prior_cook_attempt("cook-15775-succeeded", AgentTaskRunState::Succeeded);
+            materialize_prior_cook_attempt("cook-15775-succeeded", RunExecutionState::Succeeded);
         homeboy_core::worktree::record_active_for_run_at_for_test(handle, &target, &succeeded);
         assert_eq!(
             super::super::cook_prior_candidate::preserve_prior_attempt_candidate(
@@ -11376,7 +11378,7 @@ fn recook_preservation_leaves_unattributed_dirt_for_existing_admission() {
         );
 
         // This Cook's own candidate stays with its continuation paths.
-        let failed = materialize_prior_cook_attempt("cook-15775-own", AgentTaskRunState::Failed);
+        let failed = materialize_prior_cook_attempt("cook-15775-own", RunExecutionState::Failed);
         homeboy_core::worktree::record_active_for_run_at_for_test(handle, &target, &failed);
         let mut own = recook_options("cook-15775-own", handle, &target);
         own.identity.initial_run_id = failed.clone();
@@ -11419,11 +11421,11 @@ fn a_destination_whose_cook_is_still_driving_supersedes_another_cook_before_disp
             prior_cook,
         )
         .unwrap();
-        let prior_run = materialize_prior_cook_attempt(prior_cook, AgentTaskRunState::Failed);
+        let prior_run = materialize_prior_cook_attempt(prior_cook, RunExecutionState::Failed);
         // The registry provisioner is unrelated and terminal. Only the marker
         // identifies the live owner of this existing workspace (#18247).
         let provisioner =
-            materialize_prior_cook_attempt("old-provisioner", AgentTaskRunState::Succeeded);
+            materialize_prior_cook_attempt("old-provisioner", RunExecutionState::Succeeded);
         let (_primary, target) = prior_candidate_destination(home.path(), handle, &provisioner);
         crate::agent_task_promotion::destination::record(&target, prior_cook).unwrap();
         let git_dir = git_output(&target, &["rev-parse", "--absolute-git-dir"]).unwrap();
@@ -11443,7 +11445,7 @@ fn a_destination_whose_cook_is_still_driving_supersedes_another_cook_before_disp
         let lifecycle_store = AgentTaskLifecycleStore::from_environment().expect("lifecycle store");
         lifecycle_store
             .mutate_record(prior_cook, |record| {
-                record.set_state_for_test(AgentTaskRunState::Failed);
+                record.set_state_for_test(RunExecutionState::Failed);
                 true
             })
             .unwrap();
@@ -11536,7 +11538,7 @@ fn cook_takes_over_a_nonterminal_destination_after_driver_death() {
     homeboy_core::test_support::with_isolated_home(|home| {
         let handle = "fixture@fix-issue-16323-fixture";
         let prior_cook = "cook-16323-dead";
-        let prior_run = materialize_prior_cook_attempt(prior_cook, AgentTaskRunState::Running);
+        let prior_run = materialize_prior_cook_attempt(prior_cook, RunExecutionState::Running);
         let (_primary, target) = prior_candidate_destination(home.path(), handle, &prior_run);
         leave_prior_candidate(&target);
         let options = recook_options("cook-16323-takeover", handle, &target);
@@ -11573,7 +11575,7 @@ fn recook_preservation_is_a_noop_for_a_clean_prior_destination() {
     homeboy_core::test_support::with_isolated_home(|home| {
         let handle = "fixture@fix-issue-15775-fixture";
         let prior_run =
-            materialize_prior_cook_attempt("cook-15775-clean-prior", AgentTaskRunState::Failed);
+            materialize_prior_cook_attempt("cook-15775-clean-prior", RunExecutionState::Failed);
         let (_primary, target) = prior_candidate_destination(home.path(), handle, &prior_run);
         let options = recook_options("cook-15775-clean", handle, &target);
         let lifecycle_store = AgentTaskLifecycleStore::from_environment().expect("lifecycle store");
@@ -11599,7 +11601,7 @@ fn run_cook_preserves_prior_failed_candidate_before_detached_dispatch() {
     homeboy_core::test_support::with_isolated_home(|home| {
         let handle = "fixture@fix-issue-15775-fixture";
         let prior_run =
-            materialize_prior_cook_attempt("cook-15775-spine-prior", AgentTaskRunState::Failed);
+            materialize_prior_cook_attempt("cook-15775-spine-prior", RunExecutionState::Failed);
         let (_primary, target) = prior_candidate_destination(home.path(), handle, &prior_run);
         leave_prior_candidate(&target);
 
@@ -12182,7 +12184,7 @@ fn cook_repro_that_passes_on_base_stops_before_dispatch() {
         assert_eq!(dispatches.load(Ordering::SeqCst), 0);
         let record = agent_task_lifecycle::reconcile_status(&options.identity.initial_run_id)
             .expect("the stopped Cook has a durable run");
-        assert_eq!(record.state(), AgentTaskRunState::Failed);
+        assert_eq!(record.state(), RunExecutionState::Failed);
         assert_eq!(record.metadata["provider_executions_consumed"], 0);
     });
 }
@@ -12229,7 +12231,7 @@ fn cook_repro_that_fails_on_base_and_passes_on_candidate_is_verified() {
         assert_eq!(dispatches.load(Ordering::SeqCst), 1);
         let record = agent_task_lifecycle::reconcile_status(&options.identity.initial_run_id)
             .expect("the dispatched Cook has a durable run");
-        assert_ne!(record.state(), AgentTaskRunState::Failed);
+        assert_ne!(record.state(), RunExecutionState::Failed);
         let evidence = super::super::cook_repro::recorded_repro_base_evidence(
             &test_lifecycle_store(),
             &options.identity.cook_id,
@@ -12332,7 +12334,7 @@ fn materialized_cook_queues_same_attempt_then_dispatches_once_after_upgrade_rele
         assert_eq!(dispatcher_calls.load(Ordering::SeqCst), 0);
         assert_eq!(preparations.load(Ordering::SeqCst), 0);
         let record = agent_task_lifecycle::exact_record(&run_id).expect("durable queued attempt");
-        assert_eq!(record.state(), AgentTaskRunState::Queued);
+        assert_eq!(record.state(), RunExecutionState::Queued);
         assert_eq!(record.metadata["cook_runtime_admission"]["state"], "queued");
         assert_eq!(record.metadata["execution_scheduling"]["epoch"], 1);
         assert_eq!(record.metadata["provider_executions_consumed"], 0);
@@ -12353,7 +12355,7 @@ fn materialized_cook_queues_same_attempt_then_dispatches_once_after_upgrade_rele
                 75
             );
             let queued = lifecycle.read_record(&run_id).unwrap();
-            assert_eq!(queued.state(), AgentTaskRunState::Queued);
+            assert_eq!(queued.state(), RunExecutionState::Queued);
             assert_eq!(queued.metadata["provider_executions_consumed"], 0);
             assert_eq!(
                 queued.metadata["execution_scheduling"]["recovery_failures"],
@@ -12405,7 +12407,7 @@ fn materialized_cook_queues_same_attempt_then_dispatches_once_after_upgrade_rele
         let resumed = agent_task_lifecycle::exact_record(&run_id).expect("resumed attempt");
         assert_eq!(resumed.run_id, run_id);
         assert_eq!(resumed.metadata["provider_executions_consumed"], 0);
-        assert_eq!(resumed.state(), AgentTaskRunState::Running);
+        assert_eq!(resumed.state(), RunExecutionState::Running);
         assert!(resumed.metadata.get("queue_quarantine").is_none());
         let recipe = load_recipe(cook_id).expect("reconstructed durable Cook recipe");
         assert_eq!(recipe.attempts.len(), 1);
@@ -12522,7 +12524,7 @@ fn deferred_lab_cook_attempt_resumes_with_runner_placement_without_local_probe()
 
         assert_eq!(dispatches.load(Ordering::SeqCst), 1);
         let resumed = agent_task_lifecycle::exact_record(&run_id).expect("resumed attempt");
-        assert_eq!(resumed.state(), AgentTaskRunState::Running);
+        assert_eq!(resumed.state(), RunExecutionState::Running);
         assert!(resumed.metadata.get("queue_quarantine").is_none());
         let placement = super::super::execution::queued_cook_placement(&resumed)
             .expect("resumed attempt matches its recipe")

@@ -86,7 +86,7 @@ fn retained_cancellation_receipt(
 /// active-run SQL and the lifecycle read all disagree about. Checked once, by
 /// the single lifecycle write path, so no commit kind can bypass it.
 pub(crate) fn validate_cancellation_invariant(record: &AgentTaskRunRecord) -> Result<()> {
-    if record.state() == AgentTaskRunState::Cancelled
+    if record.state() == RunExecutionState::Cancelled
         || record.metadata.get("cancellation_provenance").is_none()
     {
         return Ok(());
@@ -226,10 +226,10 @@ fn retire_candidate_in_store(
 ) -> Result<bool> {
     Ok(store
         .mutate_record_locked_without_terminal_projection(run_id, |record| {
-            if record.state() != AgentTaskRunState::CandidateRecoverable {
+            if record.state() != RunExecutionState::CandidateRecoverable {
                 return false;
             }
-            set_run_state(record, AgentTaskRunState::Cancelled);
+            set_run_state(record, RunExecutionState::Cancelled);
             record.ensure_metadata_object().insert(
                 "candidate_retirement".into(),
                 json!({
@@ -509,8 +509,8 @@ pub(crate) fn cancel_exact_run_in_store_with_provenance(
         };
         let cancellation = if controller_cancelled {
             LiveCancellationOutcome::NotRunning
-        } else if record.state() == AgentTaskRunState::Running
-            || (record.state() == AgentTaskRunState::Queued
+        } else if record.state() == RunExecutionState::Running
+            || (record.state() == RunExecutionState::Queued
                 && record.runner_id().is_some()
                 && record.runner_job_id().is_some())
         {
@@ -554,7 +554,7 @@ pub(crate) fn cancel_exact_run_in_store_with_provenance(
             }
             let cancelled_at = now_timestamp();
             record.updated_at = Some(cancelled_at.clone());
-            settle_run(record, AgentTaskRunState::Cancelled, AgentTaskState::Cancelled);
+            settle_run(record, RunExecutionState::Cancelled, AgentTaskState::Cancelled);
             let runner_id = record.runner_id().map(str::to_string);
             let runner_job_id = record.runner_job_id().map(str::to_string);
             let record_run_id = record.run_id.clone();
@@ -655,7 +655,7 @@ pub(crate) fn cancel_exact_run_in_store_with_provenance(
         lifecycle_store.project_terminal_record_after_unlock(&record.run_id)?;
     }
     let record = committed.unwrap_or(lifecycle_store.read_record(&run_id)?);
-    if record.state() == AgentTaskRunState::Cancelled {
+    if record.state() == RunExecutionState::Cancelled {
         crate::controller_scratch::finalize_run_at_explicit_roots(
             &lifecycle_store.data_root(),
             &lifecycle_store.artifact_root(),
@@ -728,7 +728,7 @@ fn defer_cancellation_for_terminal_provider(
 }
 
 fn successful_provider_execution_is_pending_import(record: &AgentTaskRunRecord) -> bool {
-    record.state() == AgentTaskRunState::Running
+    record.state() == RunExecutionState::Running
         && !record.is_runner_backed()
         && record.metadata["provider_executions"]
             .as_array()
@@ -939,7 +939,7 @@ fn cancel_resolved_run_in_store(
         })?;
         return Ok(CancelResolvedOutcome::Cancelled(record));
     }
-    if record.state() == AgentTaskRunState::Cancelled {
+    if record.state() == RunExecutionState::Cancelled {
         let cancelled_at = record
             .metadata
             .get("cancelled_at")
@@ -959,9 +959,9 @@ fn cancel_resolved_run_in_store(
 
     if matches!(
         record.state(),
-        AgentTaskRunState::Succeeded
-            | AgentTaskRunState::PartialFailure
-            | AgentTaskRunState::Failed
+        RunExecutionState::Succeeded
+            | RunExecutionState::PartialFailure
+            | RunExecutionState::Failed
     ) {
         return Ok(CancelResolvedOutcome::AlreadyTerminal(record));
     }
@@ -970,7 +970,7 @@ fn cancel_resolved_run_in_store(
     // the aggregate. Its terminal reservation is durable proof that cancelling
     // now would overwrite completed work; leave the run joinable so the late
     // aggregate import is authoritative.
-    if record.state() == AgentTaskRunState::Running
+    if record.state() == RunExecutionState::Running
         && !record.is_runner_backed()
         && record.metadata["provider_executions"]
             .as_array()
@@ -1025,7 +1025,7 @@ fn cancel_resolved_run_in_store(
             let terminal = lifecycle_store.read_record(&record.run_id)?;
             return Ok(
                 if terminal.state().is_terminal()
-                    && terminal.state() != AgentTaskRunState::Cancelled
+                    && terminal.state() != RunExecutionState::Cancelled
                 {
                     CancelResolvedOutcome::RaceWonByTerminalRunnerResult(terminal)
                 } else {
@@ -1068,7 +1068,7 @@ fn cancel_resolved_run_in_store(
             let terminal = lifecycle_store.read_record(&record.run_id)?;
             return Ok(
                 if terminal.state().is_terminal()
-                    && terminal.state() != AgentTaskRunState::Cancelled
+                    && terminal.state() != RunExecutionState::Cancelled
                 {
                     CancelResolvedOutcome::RaceWonByTerminalRunnerResult(terminal)
                 } else {
@@ -1097,8 +1097,8 @@ fn cancel_resolved_run_in_store(
     // queued before the provider starts. Project cancellation to that job too.
     let cancellation = if controller_cancelled {
         LiveCancellationOutcome::NotRunning
-    } else if record.state() == AgentTaskRunState::Running
-        || (record.state() == AgentTaskRunState::Queued
+    } else if record.state() == RunExecutionState::Running
+        || (record.state() == RunExecutionState::Queued
             && record.runner_id().is_some()
             && record.runner_job_id().is_some())
     {
@@ -1120,7 +1120,7 @@ fn cancel_resolved_run_in_store(
                 },
             )?;
             return Ok(
-                if record.state().is_terminal() && record.state() != AgentTaskRunState::Cancelled {
+                if record.state().is_terminal() && record.state() != RunExecutionState::Cancelled {
                     CancelResolvedOutcome::RaceWonByTerminalRunnerResult(record)
                 } else {
                     CancelResolvedOutcome::Cancelled(record)
@@ -1149,7 +1149,7 @@ fn cancel_resolved_run_in_store(
         if record.state().is_terminal() {
             return false;
         }
-        if record.state() == AgentTaskRunState::Running
+        if record.state() == RunExecutionState::Running
             && !record.is_runner_backed()
             && record.metadata["provider_executions"]
                 .as_array()
@@ -1167,9 +1167,9 @@ fn cancel_resolved_run_in_store(
         }
 
         let cancelled_at = now_timestamp();
-        let was_stale_running = record.state() == AgentTaskRunState::Running;
+        let was_stale_running = record.state() == RunExecutionState::Running;
         record.updated_at = Some(cancelled_at.clone());
-        settle_run(record, AgentTaskRunState::Cancelled, AgentTaskState::Cancelled);
+        settle_run(record, RunExecutionState::Cancelled, AgentTaskState::Cancelled);
 
         let detached_handoff_parent =
             record.metadata["detached_cook_handoff"]["cook_id"] == record.run_id;
@@ -1252,7 +1252,7 @@ fn cancel_resolved_run_in_store(
         true
     })?
     .unwrap_or(lifecycle_store.read_record(&record.run_id)?);
-    if record.state() == AgentTaskRunState::Cancelled {
+    if record.state() == RunExecutionState::Cancelled {
         // The same two rooted side effects `cancel_exact_run_in_store` already
         // uses: scratch finalization needs both the data and artifact roots,
         // and admission release needs the controller-runtime store below this
@@ -1388,7 +1388,7 @@ pub(super) fn reconcile_controller_job_cancellation_in_store(
     let cancelled_at = now_timestamp();
     settle_run(
         record,
-        AgentTaskRunState::Cancelled,
+        RunExecutionState::Cancelled,
         AgentTaskState::Cancelled,
     );
     let metadata = record.ensure_metadata_object();
@@ -1568,10 +1568,10 @@ pub fn cancel(run_id: &str) -> Result<AgentTaskRunRecord> {
     let refuses_cancellation = |record: &AgentTaskRunRecord| {
         matches!(
             record.state(),
-            AgentTaskRunState::Succeeded
-                | AgentTaskRunState::PartialFailure
-                | AgentTaskRunState::Failed
-                | AgentTaskRunState::Cancelled
+            RunExecutionState::Succeeded
+                | RunExecutionState::PartialFailure
+                | RunExecutionState::Failed
+                | RunExecutionState::Cancelled
         )
     };
     let terminal_error = |record: AgentTaskRunRecord| {
@@ -1610,7 +1610,7 @@ fn cancel_record_with_opaque_provider_handles(record: &mut AgentTaskRunRecord) {
     record.updated_at = Some(cancelled_at.clone());
     settle_run(
         record,
-        AgentTaskRunState::Cancelled,
+        RunExecutionState::Cancelled,
         AgentTaskState::Cancelled,
     );
     for handle in &mut record.provider_handles {
@@ -1681,7 +1681,7 @@ mod tests {
             let cancelled = cancel_run(cook_id, None).expect("cancel detached Cook parent");
 
             assert_eq!(cancelled.run_id, cook_id);
-            assert_eq!(cancelled.state(), AgentTaskRunState::Cancelled);
+            assert_eq!(cancelled.state(), RunExecutionState::Cancelled);
             let error =
                 record_cook_attempt_in_store(&test_lifecycle_store(), cook_id, 1, attempt_id)
                     .expect_err("cancelled handoff fence rejects late Cook index publication");
@@ -1705,9 +1705,9 @@ mod tests {
                 (
                     1,
                     "retire-old-attempt-1",
-                    AgentTaskRunState::CandidateRecoverable,
+                    RunExecutionState::CandidateRecoverable,
                 ),
-                (2, "retire-old-attempt-2", AgentTaskRunState::Failed),
+                (2, "retire-old-attempt-2", RunExecutionState::Failed),
             ] {
                 submit_plan(&AgentTaskPlan::new(id, Vec::new()), Some(id)).unwrap();
                 record_cook_attempt_in_store(&store, cook, attempt, id).unwrap();
@@ -1722,7 +1722,7 @@ mod tests {
             cancel_run_in_store(&store, cook, Some("shipped in https://example.test/pr/1"))
                 .unwrap();
             let retired = store.read_record("retire-old-attempt-1").unwrap();
-            assert_eq!(retired.state(), AgentTaskRunState::Cancelled);
+            assert_eq!(retired.state(), RunExecutionState::Cancelled);
             assert_eq!(retired.metadata["candidate_evidence"], "preserved");
             assert_eq!(
                 retired.metadata["candidate_retirement"]["reason"],
@@ -1749,12 +1749,12 @@ mod tests {
             submit_plan(&AgentTaskPlan::new(id, Vec::new()), Some(id)).unwrap();
             store
                 .mutate_record(id, |record| {
-                    set_run_state(record, AgentTaskRunState::CandidateRecoverable);
+                    set_run_state(record, RunExecutionState::CandidateRecoverable);
                     true
                 })
                 .unwrap();
             let cancelled = cancel_run_in_store(&store, id, Some("superseded")).unwrap();
-            assert_eq!(cancelled.state(), AgentTaskRunState::Cancelled);
+            assert_eq!(cancelled.state(), RunExecutionState::Cancelled);
         });
     }
 
@@ -1846,7 +1846,7 @@ mod tests {
                 exact_record(attempt_id)
                     .expect("read durable child outcome")
                     .state(),
-                AgentTaskRunState::Cancelled
+                RunExecutionState::Cancelled
             );
             assert!(
                 !cancel_reserved_detached_cook_handoff_attempt_if_cancelled_in_store(
@@ -1878,7 +1878,7 @@ mod tests {
             )
             .expect("persist attempt");
             store::mutate_record(attempt_id, |record| {
-                set_run_state(record, AgentTaskRunState::Succeeded);
+                set_run_state(record, RunExecutionState::Succeeded);
                 true
             })
             .expect("terminalize attempt before index publication");
@@ -1891,7 +1891,7 @@ mod tests {
                 .expect("Cook cancellation converges after terminal index publication");
 
             assert_eq!(cancelled.run_id, attempt_id);
-            assert_eq!(cancelled.state(), AgentTaskRunState::Succeeded);
+            assert_eq!(cancelled.state(), RunExecutionState::Succeeded);
             assert!(cook_index_exists_in_store(&test_lifecycle_store(), cook_id)
                 .expect("inspect durable Cook index"));
         });
@@ -1912,7 +1912,7 @@ mod tests {
             let attempt_id_for_hook = attempt_id.to_string();
             install_before_resolved_cancellation_for_test(move || {
                 store::mutate_record(&attempt_id_for_hook, |record| {
-                    set_run_state(record, AgentTaskRunState::Succeeded);
+                    set_run_state(record, RunExecutionState::Succeeded);
                     true
                 })
                 .expect("attempt finishes after alias resolve");
@@ -1921,7 +1921,7 @@ mod tests {
             let cancelled = cancel_run(cook_id, None)
                 .expect("Cook alias cancel admits a just-finished attempt");
             assert_eq!(cancelled.run_id, attempt_id);
-            assert_eq!(cancelled.state(), AgentTaskRunState::Succeeded);
+            assert_eq!(cancelled.state(), RunExecutionState::Succeeded);
         });
     }
 
@@ -1940,7 +1940,7 @@ mod tests {
             let attempt_id_for_hook = attempt_id.to_string();
             install_before_resolved_cancellation_for_test(move || {
                 store::mutate_record(&attempt_id_for_hook, |record| {
-                    set_run_state(record, AgentTaskRunState::Succeeded);
+                    set_run_state(record, RunExecutionState::Succeeded);
                     true
                 })
                 .expect("attempt finishes after alias resolve");
@@ -1966,7 +1966,7 @@ mod tests {
             )
             .expect("persist attempt");
             store::mutate_record(attempt_id, |record| {
-                set_run_state(record, AgentTaskRunState::Succeeded);
+                set_run_state(record, RunExecutionState::Succeeded);
                 true
             })
             .expect("terminalize");
@@ -1982,8 +1982,8 @@ mod tests {
     fn repeated_cook_alias_cancellation_preserves_terminal_indexed_attempts() {
         homeboy_core::test_support::with_isolated_home(|_| {
             for (suffix, terminal_state) in [
-                ("succeeded", AgentTaskRunState::Succeeded),
-                ("failed", AgentTaskRunState::Failed),
+                ("succeeded", RunExecutionState::Succeeded),
+                ("failed", RunExecutionState::Failed),
             ] {
                 let cook_id = format!("cook-terminal-reservation-{suffix}");
                 let attempt_id = format!("{cook_id}-attempt-1");
@@ -2114,7 +2114,7 @@ mod tests {
                 .expect("submit child");
             store
                 .mutate_record(run_id, |record| {
-                    set_run_state(record, AgentTaskRunState::Running);
+                    set_run_state(record, RunExecutionState::Running);
                     true
                 })
                 .expect("mark child running");
@@ -2125,7 +2125,7 @@ mod tests {
 
         assert_eq!(
             left.read_record(run_id).expect("read left child").state(),
-            AgentTaskRunState::Cancelled
+            RunExecutionState::Cancelled
         );
     }
 
@@ -2143,7 +2143,7 @@ mod tests {
             .unwrap();
         store
             .mutate_record(run_id, |record| {
-                set_run_state(record, AgentTaskRunState::Running);
+                set_run_state(record, RunExecutionState::Running);
                 record.metadata["provider_executions"] = json!([{ "state": "succeeded" }]);
                 true
             })
@@ -2152,7 +2152,7 @@ mod tests {
         let record = cancel_exact_run_in_store(&store, run_id, Some("parent cancelled"))
             .expect("defer cancellation for successful provider");
 
-        assert_eq!(record.state(), AgentTaskRunState::Running);
+        assert_eq!(record.state(), RunExecutionState::Running);
         assert_eq!(
             record.metadata["cancellation_deferred_for_terminal_provider"]["reason"],
             "parent cancelled"

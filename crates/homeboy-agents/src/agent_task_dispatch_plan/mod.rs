@@ -762,10 +762,11 @@ mod tests {
     use crate::agent_task_dispatch_service::{
         dispatch, DispatchCoreInputs, DISPATCH_RESULT_SCHEMA,
     };
-    use crate::agent_task_lifecycle::{self as lifecycle, AgentTaskRunState};
+    use crate::agent_task_lifecycle::{self as lifecycle};
     use crate::agent_task_prompts;
     use crate::agent_task_scheduler::{AgentTaskExecutionContext, AgentTaskExecutorAdapter};
     use homeboy_core::test_support::with_isolated_home;
+    use homeboy_lifecycle_contract::RunExecutionState;
     use std::collections::HashMap;
     use std::sync::Arc;
 
@@ -1816,7 +1817,7 @@ mod tests {
             assert_eq!(result.value.schema, DISPATCH_RESULT_SCHEMA);
             assert_eq!(result.value.run_id, "dispatch-queued");
             assert!(result.value.queued);
-            assert_eq!(result.value.state, AgentTaskRunState::Queued);
+            assert_eq!(result.value.state, RunExecutionState::Queued);
             assert!(result.value.plan_path.ends_with("plan.json"));
             assert!(result.value.aggregate.is_none());
         });

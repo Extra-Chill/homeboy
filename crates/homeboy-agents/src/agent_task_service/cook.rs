@@ -840,7 +840,7 @@ fn admit_cook_runtime_generation(
                 .read_record(&pin_run_id)
                 .ok()
                 .is_some_and(|record| {
-                    record.state() == agent_task_lifecycle::AgentTaskRunState::Cancelled
+                    record.state() == homeboy_lifecycle_contract::RunExecutionState::Cancelled
                 })
         },
         |event| {
@@ -1915,8 +1915,8 @@ pub(crate) fn project_cook_observation(
 pub(crate) fn cook_observation_state(
     store: &AgentTaskLifecycleStore,
     record: &agent_task_lifecycle::AgentTaskRunRecord,
-) -> agent_task_lifecycle::AgentTaskRunState {
-    use agent_task_lifecycle::AgentTaskRunState;
+) -> homeboy_lifecycle_contract::RunExecutionState {
+    use homeboy_lifecycle_contract::RunExecutionState;
     let mut stored = record.state();
     // Cook settlement can survive a failed lifecycle write. Once its driver
     // has left, the settled run verdict owns terminality, not that stale write.
@@ -1929,8 +1929,8 @@ pub(crate) fn cook_observation_state(
                     .and_then(|s| s.get_run(&record.run_id))
                 {
                     stored = match run.status.as_str() {
-                        "pass" => AgentTaskRunState::Succeeded,
-                        "fail" | "error" => AgentTaskRunState::Failed,
+                        "pass" => RunExecutionState::Succeeded,
+                        "fail" | "error" => RunExecutionState::Failed,
                         _ => stored,
                     };
                 }
@@ -1940,9 +1940,9 @@ pub(crate) fn cook_observation_state(
     // Publication is the end-to-end receipt, not a second verdict derived
     // from a possibly older promotion or terminal-progress snapshot.
     if super::CookDelivery::from_run_metadata(&record.metadata).is_some_and(|d| d.published()) {
-        return AgentTaskRunState::Succeeded;
+        return RunExecutionState::Succeeded;
     }
-    if stored != AgentTaskRunState::Succeeded {
+    if stored != RunExecutionState::Succeeded {
         return stored;
     }
     let Some(cook_id) = record.metadata["cook_id"].as_str() else {
@@ -1962,7 +1962,7 @@ pub(crate) fn cook_observation_state(
     if terminal["phase"] == "terminal"
         && terminal["terminal_status"] == CookStatus::NoChanges.as_str()
     {
-        return AgentTaskRunState::PartialFailure;
+        return RunExecutionState::PartialFailure;
     }
     let recipes = CookRecipeStore::new(store.roots().clone());
     let recipe = recipes.load_recipe(cook_id).ok();
@@ -1984,7 +1984,7 @@ pub(crate) fn cook_observation_state(
     let finalized =
         super::CookDelivery::from_run_metadata(&record.metadata).is_some_and(|d| d.published());
     if !cook_success(true, verified, no_finalize, finalized) {
-        return AgentTaskRunState::CandidateRecoverable;
+        return RunExecutionState::CandidateRecoverable;
     }
     stored
 }
@@ -2334,9 +2334,9 @@ pub struct AgentTaskCookPrimaryFailure {
     pub diagnostic: Option<Value>,
 }
 
-fn terminal_fallback_status(state: agent_task_lifecycle::AgentTaskRunState) -> CookStatus {
+fn terminal_fallback_status(state: homeboy_lifecycle_contract::RunExecutionState) -> CookStatus {
     match state {
-        agent_task_lifecycle::AgentTaskRunState::Cancelled => CookStatus::Cancelled,
+        homeboy_lifecycle_contract::RunExecutionState::Cancelled => CookStatus::Cancelled,
         _ => CookStatus::ProviderFailure,
     }
 }
@@ -2349,7 +2349,7 @@ fn terminal_fallback_status(state: agent_task_lifecycle::AgentTaskRunState) -> C
 /// refused committed-change harvest), not just the lifecycle state.
 fn terminal_stop_reason(
     run_id: &str,
-    state: agent_task_lifecycle::AgentTaskRunState,
+    state: homeboy_lifecycle_contract::RunExecutionState,
     aggregate: &crate::agent_task_schedule::AgentTaskAggregate,
 ) -> String {
     let cause = aggregate
@@ -4902,7 +4902,7 @@ fn run_cook_reported(
                 lifecycle_store.read_record(&failure_options.identity.initial_run_id)
             {
                 if store.data_root() == lifecycle_store.data_root()
-                    && record.state() == agent_task_lifecycle::AgentTaskRunState::Queued
+                    && record.state() == homeboy_lifecycle_contract::RunExecutionState::Queued
                     && record.plan_id == failure_options.identity.initial_plan.plan_id
                 {
                     let phase = pre_execution_failure_phase(&error, None);
@@ -5704,7 +5704,8 @@ fn run_cook_spine(
                             .read_record(&lookup_run_id)
                             .ok()
                             .is_some_and(|record| {
-                                record.state() == agent_task_lifecycle::AgentTaskRunState::Cancelled
+                                record.state()
+                                    == homeboy_lifecycle_contract::RunExecutionState::Cancelled
                             })
                         {
                             break;
@@ -5748,7 +5749,7 @@ fn run_cook_spine(
                 .read_record(&options.identity.initial_run_id)
                 .ok()
                 .is_some_and(|record| {
-                    record.state() == agent_task_lifecycle::AgentTaskRunState::Cancelled
+                    record.state() == homeboy_lifecycle_contract::RunExecutionState::Cancelled
                 })
             {
                 return Ok(stores.report(CookReportInput {
@@ -6581,7 +6582,7 @@ fn run_cook_spine(
                         let harvest_context =
                             Some(cook_attempt_harvest_context(&options.harvest_context));
                         let result = if lifecycle_store.read_record(&run_id)?.state()
-                            == agent_task_lifecycle::AgentTaskRunState::Running
+                            == homeboy_lifecycle_contract::RunExecutionState::Running
                         {
                             run_claimed_loaded_plan_with_derived_cook_baseline_in_store(
                                 lifecycle_store,
@@ -6622,7 +6623,7 @@ fn run_cook_spine(
                     Ok(record)
                         if record.state().is_terminal()
                             || (record.state()
-                                == agent_task_lifecycle::AgentTaskRunState::Running
+                                == homeboy_lifecycle_contract::RunExecutionState::Running
                                 && !super::cook_recipe::has_unambiguous_zero_execution(
                                     &record,
                                 )) =>
@@ -6750,7 +6751,7 @@ fn run_cook_spine(
         // terminal result but before the run projection is terminalized. Repair
         // only this Cook attempt, never the active fleet, before deciding whether
         // an absent aggregate is safe to continue from.
-        if record.state() == agent_task_lifecycle::AgentTaskRunState::Running
+        if record.state() == homeboy_lifecycle_contract::RunExecutionState::Running
             && record.is_stale_running()
             && record.aggregate_path.is_none()
         {
@@ -6764,7 +6765,7 @@ fn run_cook_spine(
         let controller_owned_staging = record.lab_staging_controller_job_id().is_some();
         // This invocation owns the exact attempt, not its mission's latest
         // retry. Cancellation must end the observer and release its pin.
-        if record.state() == agent_task_lifecycle::AgentTaskRunState::Cancelled {
+        if record.state() == homeboy_lifecycle_contract::RunExecutionState::Cancelled {
             attempts.push(AgentTaskCookAttemptReport {
                 attempt,
                 run_id: run_id.clone(),
@@ -6786,8 +6787,8 @@ fn run_cook_spine(
         }
         if matches!(
             record.state(),
-            agent_task_lifecycle::AgentTaskRunState::Queued
-                | agent_task_lifecycle::AgentTaskRunState::Running
+            homeboy_lifecycle_contract::RunExecutionState::Queued
+                | homeboy_lifecycle_contract::RunExecutionState::Running
         ) && (record.runner_job_id().is_some() || controller_owned_staging)
         {
             // Detached staging or runner handoff has a durable owner. It owns
@@ -7178,8 +7179,8 @@ fn run_cook_spine(
         // terminal state; a failed form-only continuation of it does not.
         if !matches!(
             record.state(),
-            agent_task_lifecycle::AgentTaskRunState::Succeeded
-                | agent_task_lifecycle::AgentTaskRunState::CandidateRecoverable
+            homeboy_lifecycle_contract::RunExecutionState::Succeeded
+                | homeboy_lifecycle_contract::RunExecutionState::CandidateRecoverable
         ) && (adopted_continuation.is_none() || record.candidate_adoption.is_none())
             && !review_form_unavailable
         {
@@ -7195,7 +7196,7 @@ fn run_cook_spine(
                 .as_ref()
                 .and_then(|budget| budget_remaining(budget, budget_used));
             let no_candidate_reason = (record.state()
-                == agent_task_lifecycle::AgentTaskRunState::Failed)
+                == homeboy_lifecycle_contract::RunExecutionState::Failed)
                 .then(|| incomplete_no_candidate_reason(&aggregate))
                 .flatten();
             let status = if record.metadata["pre_execution_failure"].is_object() {
@@ -7993,11 +7994,11 @@ fn cook_attempt_needs_execution_with_store(
 fn cook_run_record_needs_execution(record: &agent_task_lifecycle::AgentTaskRunRecord) -> bool {
     (!matches!(
         record.state(),
-        agent_task_lifecycle::AgentTaskRunState::Succeeded
-            | agent_task_lifecycle::AgentTaskRunState::CandidateRecoverable
-            | agent_task_lifecycle::AgentTaskRunState::PartialFailure
-            | agent_task_lifecycle::AgentTaskRunState::Failed
-            | agent_task_lifecycle::AgentTaskRunState::Cancelled
+        homeboy_lifecycle_contract::RunExecutionState::Succeeded
+            | homeboy_lifecycle_contract::RunExecutionState::CandidateRecoverable
+            | homeboy_lifecycle_contract::RunExecutionState::PartialFailure
+            | homeboy_lifecycle_contract::RunExecutionState::Failed
+            | homeboy_lifecycle_contract::RunExecutionState::Cancelled
     ) || retryable_pre_execution_failure(record))
         && !record.lab_handoff.as_ref().is_some_and(|handoff| {
             handoff.state == agent_task_lifecycle::AgentTaskLabHandoffState::Accepted
@@ -8144,10 +8145,10 @@ fn supersede_previous_cook_candidate(
         // has exited.
         if !matches!(
             old.state(),
-            agent_task_lifecycle::AgentTaskRunState::CandidateRecoverable
-                | agent_task_lifecycle::AgentTaskRunState::PartialFailure
-                | agent_task_lifecycle::AgentTaskRunState::Failed
-                | agent_task_lifecycle::AgentTaskRunState::Cancelled
+            homeboy_lifecycle_contract::RunExecutionState::CandidateRecoverable
+                | homeboy_lifecycle_contract::RunExecutionState::PartialFailure
+                | homeboy_lifecycle_contract::RunExecutionState::Failed
+                | homeboy_lifecycle_contract::RunExecutionState::Cancelled
         ) {
             continue;
         }

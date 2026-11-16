@@ -1,10 +1,11 @@
-use homeboy::agents::agent_task_lifecycle::{AgentTaskLifecycleStore, AgentTaskRunState};
+use homeboy::agents::agent_task_lifecycle::AgentTaskLifecycleStore;
 use homeboy::agents::agent_task_service::{
     CookFinalization, CookIdentity, CookProviderTransport, CookRecipeStore, CookRequest,
     CookRetryPolicy, CookWorkspace,
 };
 use homeboy::agents::agent_tasks::scheduler::AgentTaskPlan;
 use homeboy::core::test_support::{HermeticTestContext, TestBinary};
+use homeboy_lifecycle_contract::RunExecutionState;
 use rusqlite::Connection;
 use serde_json::Value;
 use std::process::{Command, Output, Stdio};
@@ -67,7 +68,7 @@ fn missing_transport_child_projection_resolves_without_recursion_or_provider_dis
             .expect("persist lifecycle attempt");
         store
             .mutate_record(run_id, |record| {
-                record.set_state_for_test(AgentTaskRunState::Failed);
+                record.set_state_for_test(RunExecutionState::Failed);
                 record.metadata["cook_id"] = serde_json::json!(cook_id);
                 record.metadata["cook_attempt"] = serde_json::json!(1);
                 record.metadata["provider_executions_consumed"] = serde_json::json!(1);

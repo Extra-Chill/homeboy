@@ -2,7 +2,8 @@ use super::super::test_pi::FakePi;
 use super::common::{request, script};
 use super::*;
 use crate::agent_task::AgentTaskArtifactDeclaration;
-use crate::agent_task_lifecycle::AgentTaskRunState;
+use homeboy_lifecycle_contract::RunExecutionState;
+
 use crate::agent_task_scheduler::{
     AgentTaskExecutionBudget, AgentTaskProviderRotationEntry, AgentTaskProviderRotationPolicy,
 };
@@ -363,7 +364,7 @@ fn cook_admission_and_production_provider_execute_the_first_ready_fallback() {
     ))
     .run(plan);
 
-    assert_eq!(aggregate.status(), AgentTaskRunState::Succeeded);
+    assert_eq!(aggregate.status(), RunExecutionState::Succeeded);
     let executed: Value = serde_json::from_slice(&std::fs::read(marker).expect("execution marker"))
         .expect("execution identity");
     assert_eq!(executed["model"], "test/ready-model");
@@ -551,7 +552,7 @@ fn scheduler_rotates_from_an_incapable_plan_level_primary_to_a_capable_fallback(
     ))
     .run(plan);
 
-    assert_eq!(aggregate.status(), AgentTaskRunState::Succeeded);
+    assert_eq!(aggregate.status(), RunExecutionState::Succeeded);
     assert_eq!(
         aggregate.outcomes[0].metadata["execution_budget"]["executions_used"],
         1
@@ -707,7 +708,7 @@ fn provider_empty_stdout_records_failed_run_with_executor_evidence() {
 
     assert_eq!(
         record.state(),
-        crate::agent_task_lifecycle::AgentTaskRunState::Failed
+        homeboy_lifecycle_contract::RunExecutionState::Failed
     );
     assert_eq!(aggregate.outcomes[0].status, AgentTaskOutcomeStatus::Failed);
     assert!(aggregate.outcomes[0]
@@ -968,7 +969,7 @@ fn stalled_provider_is_killed_and_rotates_to_configured_fallback() {
 
     assert_eq!(
         aggregate.status(),
-        AgentTaskRunState::Succeeded,
+        RunExecutionState::Succeeded,
         "{aggregate:?}"
     );
     let attempts = aggregate.outcomes[0]
@@ -1598,12 +1599,12 @@ fn fixture_provider_timeout_retains_edits_but_not_a_clean_worktree() {
             let aggregate = crate::agent_task_lifecycle::read_aggregate(&run_id).unwrap();
             let outcome = &aggregate.outcomes[0];
             if mode == "clean_timeout" {
-                assert_eq!(aggregate.status(), AgentTaskRunState::Failed);
+                assert_eq!(aggregate.status(), RunExecutionState::Failed);
                 assert!(outcome.candidate.is_none());
             } else {
                 assert_eq!(
                     aggregate.status(),
-                    AgentTaskRunState::CandidateRecoverable,
+                    RunExecutionState::CandidateRecoverable,
                     "{outcome:?}"
                 );
                 assert_eq!(

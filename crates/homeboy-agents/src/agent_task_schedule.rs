@@ -412,7 +412,7 @@ mod plan {
 
 mod aggregate {
     use super::*;
-    use crate::agent_task_lifecycle::AgentTaskRunState;
+    use homeboy_lifecycle_contract::RunExecutionState;
 
     /// `status` is not stored: it is a function of `outcomes` (see
     /// [`AgentTaskAggregate::status`]). Serialization emits the derived value
@@ -468,9 +468,9 @@ mod aggregate {
     }
 
     impl AgentTaskAggregate {
-        /// Derived from the outcomes; see [`AgentTaskRunState::from_outcomes`].
-        pub fn status(&self) -> AgentTaskRunState {
-            AgentTaskRunState::from_outcomes(&self.outcomes)
+        /// Derived from the outcomes; see [`crate::agent_task_lifecycle::run_state_from_outcomes`].
+        pub fn status(&self) -> RunExecutionState {
+            crate::agent_task_lifecycle::run_state_from_outcomes(&self.outcomes)
         }
 
         /// Candidate aggregates record their controller decision on the winner.

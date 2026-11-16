@@ -9,12 +9,12 @@ use super::stub_lab_offload_submission;
 use crate::agent_task_lifecycle::{
     record_detached_lab_run_in_store, record_lab_offload_planned_with_submission_in_store,
     recover_transport_proxy_in_store, rewrite_record_for_test, AgentTaskLabHandoffState,
-    AgentTaskLifecycleStore, AgentTaskRunState, DetachedLabRunRecord, LabOffloadProxyPlan,
-    RunnerAuthority, RunnerContinuationProvider, RunnerContinuationTestGuard,
-    AGENT_TASK_TRANSITION_CONFLICT,
+    AgentTaskLifecycleStore, DetachedLabRunRecord, LabOffloadProxyPlan, RunnerAuthority,
+    RunnerContinuationProvider, RunnerContinuationTestGuard, AGENT_TASK_TRANSITION_CONFLICT,
 };
 use homeboy_core::api_jobs::RunnerJobLogSnapshot;
 use homeboy_core::{Error, Result};
+use homeboy_lifecycle_contract::RunExecutionState;
 use std::sync::Mutex;
 
 const RUN_ID: &str = "stale-proxy-recovery";
@@ -123,7 +123,7 @@ fn stale_proxy_recovery_cannot_unbind_a_concurrent_lab_handoff_acceptance() {
     })
     .expect("drop the stub runtime pin");
     let planned = store.read_record(RUN_ID).expect("planned proxy");
-    assert_eq!(planned.state(), AgentTaskRunState::Queued);
+    assert_eq!(planned.state(), RunExecutionState::Queued);
     assert!(planned.runner_job_id().is_none());
 
     let _provider = RunnerContinuationTestGuard::install(Box::new(AcceptsDuringAuthorityProbe {
@@ -135,7 +135,7 @@ fn stale_proxy_recovery_cannot_unbind_a_concurrent_lab_handoff_acceptance() {
     let stored = store.read_record(RUN_ID).expect("stored record");
     assert_eq!(
         stored.state(),
-        AgentTaskRunState::Running,
+        RunExecutionState::Running,
         "lost update: a stale recovery snapshot reverted the accepted handoff's running state"
     );
     assert_eq!(stored.runner_job_id(), Some(RUNNER_JOB_ID));
@@ -221,7 +221,7 @@ fn exhausted_transition_conflicts_are_retryable_controller_failures() {
         run_id: RUN_ID.to_string(),
         expected_revision: 25,
         actual_revision: 26,
-        actual_state: Some(AgentTaskRunState::Running),
+        actual_state: Some(RunExecutionState::Running),
         transition: "annotate",
     })
     .into();
@@ -252,7 +252,7 @@ fn non_terminal_snapshot_transitions_preserve_concurrent_progress() {
                 )
                 .accepted(RUNNER_JOB_ID, "2026-11-11T00:05:00Z".to_string()),
             );
-            set_run_state(&mut snapshot, AgentTaskRunState::Running);
+            set_run_state(&mut snapshot, RunExecutionState::Running);
         }
         store
             .mutate_record(RUN_ID, |record| {
@@ -271,7 +271,7 @@ fn non_terminal_snapshot_transitions_preserve_concurrent_progress() {
         assert_eq!(stored.metadata["controller_annotation"], "kept");
         assert_eq!(snapshot, stored);
         if kind.is_some() {
-            assert_eq!(stored.state(), AgentTaskRunState::Running);
+            assert_eq!(stored.state(), RunExecutionState::Running);
             assert_eq!(stored.runner_job_id(), Some(RUNNER_JOB_ID));
         }
     }
@@ -287,7 +287,7 @@ fn annotations_cannot_change_state_or_ownership() {
     planned_proxy(&store);
 
     let mut running = store.read_record(RUN_ID).expect("queued proxy");
-    crate::agent_task_lifecycle::set_run_state(&mut running, AgentTaskRunState::Running);
+    crate::agent_task_lifecycle::set_run_state(&mut running, RunExecutionState::Running);
     let error = store
         .commit_record(&mut running)
         .expect_err("an annotation cannot start the run");
@@ -328,7 +328,7 @@ fn annotations_cannot_change_state_or_ownership() {
     );
 
     let stored = store.read_record(RUN_ID).expect("stored");
-    assert_eq!(stored.state(), AgentTaskRunState::Queued);
+    assert_eq!(stored.state(), RunExecutionState::Queued);
     assert_eq!(
         stored.lab_handoff.as_ref().map(|handoff| handoff.state),
         Some(AgentTaskLabHandoffState::Pending)
@@ -381,7 +381,7 @@ fn a_late_lab_acceptance_after_expiry_keeps_the_receipt_and_every_view_agreeing(
             .expect("expire the handoff")
     );
     let expired = store.read_record(RUN_ID).expect("expired");
-    assert_eq!(expired.state(), AgentTaskRunState::Cancelled);
+    assert_eq!(expired.state(), RunExecutionState::Cancelled);
     let provenance = expired.metadata["cancellation_provenance"].clone();
     assert!(provenance.is_object(), "{:?}", expired.metadata);
     let run = homeboy_control_plane_contract::RunId::new(RUN_ID).unwrap();
@@ -429,7 +429,7 @@ fn a_late_lab_acceptance_after_expiry_keeps_the_receipt_and_every_view_agreeing(
     );
     assert_eq!(
         bound.metadata.get("cancellation_provenance").is_some(),
-        bound.state() == AgentTaskRunState::Cancelled,
+        bound.state() == RunExecutionState::Cancelled,
         "only a cancelled record carries cancellation provenance"
     );
     assert_eq!(
@@ -445,7 +445,7 @@ fn a_late_lab_acceptance_after_expiry_keeps_the_receipt_and_every_view_agreeing(
         Some("operator requested stop"),
     )
     .expect("operator cancellation converges");
-    assert_eq!(cancelled.state(), AgentTaskRunState::Cancelled);
+    assert_eq!(cancelled.state(), RunExecutionState::Cancelled);
     assert_eq!(
         cancelled.metadata["cancellation_provenance"], provenance,
         "the operator cancellation reuses the receipt's first cause"

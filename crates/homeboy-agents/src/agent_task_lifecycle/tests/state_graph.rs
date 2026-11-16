@@ -8,10 +8,11 @@
 
 use super::test_plan;
 use crate::agent_task_lifecycle::{
-    set_run_state, AgentTaskLifecycleStore, AgentTaskRunRecord, AgentTaskRunState,
-    AgentTaskTerminalOutcome, AgentTaskTransition, AGENT_TASK_ILLEGAL_TRANSITION,
+    set_run_state, AgentTaskLifecycleStore, AgentTaskRunRecord, AgentTaskTerminalOutcome,
+    AgentTaskTransition, AGENT_TASK_ILLEGAL_TRANSITION,
 };
-use homeboy_core::run_lifecycle_record::{RunExecutionState, RunLifecycleRecord};
+use homeboy_core::run_lifecycle_record::RunLifecycleRecord;
+use homeboy_lifecycle_contract::RunExecutionState;
 use serde_json::json;
 
 const RUN_ID: &str = "state-graph-run";
@@ -35,7 +36,7 @@ fn finished(
     }))
     .expect("decode minimal run record");
     record.lifecycle = RunLifecycleRecord::with_execution_state(RunExecutionState::Queued);
-    set_run_state(&mut record, AgentTaskRunState::Running);
+    set_run_state(&mut record, RunExecutionState::Running);
     store.write_record(&record).expect("commit running record");
     let running = store.read_record(RUN_ID).expect("running");
     store
@@ -99,10 +100,10 @@ fn a_mutation_cannot_resume_a_finished_run_in_place() {
     let context = homeboy_core::test_support::HermeticTestContext::new();
     let store = finished(&context, AgentTaskTerminalOutcome::Succeeded);
     let before = store.read_record(RUN_ID).unwrap();
-    assert_eq!(before.state(), AgentTaskRunState::Succeeded);
+    assert_eq!(before.state(), RunExecutionState::Succeeded);
 
     let committed = store.mutate_record(RUN_ID, |record| {
-        set_run_state(record, AgentTaskRunState::Running);
+        set_run_state(record, RunExecutionState::Running);
         true
     });
 
@@ -117,13 +118,13 @@ fn a_cancelled_run_cannot_be_reprojected_as_a_success() {
     let context = homeboy_core::test_support::HermeticTestContext::new();
     let store = finished(&context, AgentTaskTerminalOutcome::Cancelled);
     let before = store.read_record(RUN_ID).unwrap();
-    assert_eq!(before.state(), AgentTaskRunState::Cancelled);
+    assert_eq!(before.state(), RunExecutionState::Cancelled);
 
     let committed = store.mutate_record(RUN_ID, |record| {
         if let Some(metadata) = record.metadata.as_object_mut() {
             metadata.remove("cancellation_provenance");
         }
-        set_run_state(record, AgentTaskRunState::Succeeded);
+        set_run_state(record, RunExecutionState::Succeeded);
         true
     });
 
@@ -142,7 +143,7 @@ fn a_terminal_record_commit_cannot_leave_a_cancellation() {
     if let Some(metadata) = prepared.metadata.as_object_mut() {
         metadata.remove("cancellation_provenance");
     }
-    set_run_state(&mut prepared, AgentTaskRunState::Failed);
+    set_run_state(&mut prepared, RunExecutionState::Failed);
     let committed = store
         .transition(
             RUN_ID,
@@ -165,12 +166,12 @@ fn a_finished_run_is_still_reprojected_from_later_evidence() {
 
     let reprojected = store
         .mutate_record(RUN_ID, |record| {
-            set_run_state(record, AgentTaskRunState::Succeeded);
+            set_run_state(record, RunExecutionState::Succeeded);
             true
         })
         .expect("a failure may be re-projected from later evidence")
         .expect("written");
-    assert_eq!(reprojected.state(), AgentTaskRunState::Succeeded);
+    assert_eq!(reprojected.state(), RunExecutionState::Succeeded);
 }
 
 /// Two writers that both saw the run live can each decide it was cancelled.
@@ -193,12 +194,12 @@ fn a_second_cancellation_commit_keeps_the_first_cause() {
     }))
     .unwrap();
     record.lifecycle = RunLifecycleRecord::with_execution_state(RunExecutionState::Queued);
-    set_run_state(&mut record, AgentTaskRunState::Running);
+    set_run_state(&mut record, RunExecutionState::Running);
     store.write_record(&record).unwrap();
     let running = store.read_record(RUN_ID).unwrap();
     let cancelled_by = |actor: &str| {
         let mut prepared = running.clone();
-        set_run_state(&mut prepared, AgentTaskRunState::Cancelled);
+        set_run_state(&mut prepared, RunExecutionState::Cancelled);
         prepared.ensure_metadata_object().insert(
             "cancellation_provenance".to_string(),
             json!({ "actor": actor, "reason": format!("cancelled by {actor}") }),
@@ -225,7 +226,7 @@ fn a_second_cancellation_commit_keeps_the_first_cause() {
         )
         .expect("a second cancellation commit is not an idempotency conflict");
 
-    assert_eq!(second.state(), AgentTaskRunState::Cancelled);
+    assert_eq!(second.state(), RunExecutionState::Cancelled);
     assert_eq!(
         second.metadata["cancellation_provenance"]["actor"],
         json!("controller")

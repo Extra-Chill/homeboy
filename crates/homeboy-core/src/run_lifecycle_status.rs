@@ -1,8 +1,8 @@
+use homeboy_lifecycle_contract::RunExecutionState;
 use serde::{Deserialize, Serialize};
 
 use crate::api_jobs::JobStatus;
 use crate::cook_status::CookStatus;
-use crate::run_lifecycle_record::RunExecutionState;
 
 pub const RUN_LIFECYCLE_STATUS_SCHEMA: &str = "homeboy/run-lifecycle-status/v1";
 
@@ -157,9 +157,7 @@ impl From<&CookStatus> for RunLifecycleStatus {
             // Cook did not succeed either, and re-running it changes nothing.
             CookStatus::NoChanges | CookStatus::NoCandidate => Self::PartialFailure,
             // A candidate exists and can still be recovered. This matches the
-            // `AgentTaskRunState::CandidateRecoverable ->
-            // RunExecutionState::CandidateRecoverable` projection rather than
-            // inventing a second reading of the same situation. Both used to
+            // execution state's CandidateRecoverable projection. Both used to
             // say `PartialFailure`; they were changed together so the two
             // routes still agree.
             CookStatus::CandidateRecoverable => Self::CandidateRecoverable,

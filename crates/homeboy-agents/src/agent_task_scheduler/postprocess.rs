@@ -1325,11 +1325,11 @@ mod tests {
         AgentTaskExecutor, AgentTaskLimits, AgentTaskPolicy, AgentTaskWorkspace,
         AGENT_TASK_REQUEST_SCHEMA,
     };
-    use crate::agent_task_lifecycle::AgentTaskRunState;
     use homeboy_core::artifacts::{
         ArtifactPostprocessAction, ArtifactPostprocessPlan, ArtifactPostprocessRoot,
         ARTIFACT_POSTPROCESS_PLAN_SCHEMA,
     };
+    use homeboy_lifecycle_contract::RunExecutionState;
     use std::collections::BTreeMap;
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::Arc;
@@ -1497,8 +1497,8 @@ mod tests {
             assert_eq!(optional.status, AgentTaskOutcomeStatus::Succeeded);
             assert_eq!(optional.metadata["optional_failure"], true);
             assert_eq!(
-                AgentTaskRunState::from_outcomes(&outcomes),
-                AgentTaskRunState::Succeeded
+                crate::agent_task_lifecycle::run_state_from_outcomes(&outcomes),
+                RunExecutionState::Succeeded
             );
         });
     }

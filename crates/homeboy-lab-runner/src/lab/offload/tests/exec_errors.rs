@@ -86,7 +86,7 @@ fn lost_exec_response_reconciles_the_single_accepted_durable_job() {
             .expect("controller record");
         assert_eq!(
             record.state(),
-            homeboy_agents::agent_task_lifecycle::AgentTaskRunState::Running
+            homeboy_lifecycle_contract::RunExecutionState::Running
         );
         assert_eq!(record.runner_job_id(), Some("job-8525"));
         assert!(record.metadata.get("pre_execution_failure").is_none());

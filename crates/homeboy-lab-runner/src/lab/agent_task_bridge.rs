@@ -6,6 +6,7 @@
 //!   replays the run-plan aggregate into the controller's lifecycle store so
 //!   `homeboy agent-task status/logs` keeps working transparently.
 
+use homeboy_lifecycle_contract::RunExecutionState;
 #[cfg(test)]
 use std::fs;
 
@@ -15,7 +16,7 @@ use crate::agent_task_handoff_event::{
 use crate::agent_task_lifecycle_event::agent_task_run_plan_lifecycle_event_from_job_events;
 use homeboy_agents::agent_task::AgentTaskEvidenceRef;
 use homeboy_agents::agent_task_lifecycle::{
-    cook_attempt_run_id, AgentTaskArtifactRef, AgentTaskRunRecord, AgentTaskRunState,
+    cook_attempt_run_id, AgentTaskArtifactRef, AgentTaskRunRecord,
 };
 use homeboy_agents::agent_tasks::scheduler::{AgentTaskAggregate, AgentTaskAggregateTotals};
 #[cfg(test)]
@@ -178,7 +179,7 @@ pub(super) struct AgentTaskLabHandoff {
 pub(super) struct AgentTaskRunRecordSummary {
     pub run_id: String,
     pub plan_id: String,
-    pub state: AgentTaskRunState,
+    pub state: RunExecutionState,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub aggregate_path: Option<String>,
     #[serde(default)]
@@ -1132,7 +1133,7 @@ mod tests {
                 serde_json::from_str(&fs::read_to_string(aggregate_path).expect("aggregate"))
                     .expect("aggregate JSON");
 
-            assert_eq!(record.state(), AgentTaskRunState::Succeeded);
+            assert_eq!(record.state(), RunExecutionState::Succeeded);
             assert_eq!(record.metadata["runner_id"], "lab-default");
             assert_eq!(record.metadata["runner_job_id"], "job-completed-noop");
             assert_eq!(

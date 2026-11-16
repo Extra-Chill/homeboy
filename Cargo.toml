@@ -52,6 +52,7 @@ name = "homeboy"
 path = "src/main.rs"
 
 [dependencies]
+homeboy-lifecycle-contract = { path = "crates/contracts/homeboy-lifecycle-contract" }
 homeboy-product-identity = { path = "crates/homeboy-product-identity" }
 homeboy-cli = { path = "crates/homeboy-cli" }
 homeboy-core = { path = "crates/homeboy-core" }

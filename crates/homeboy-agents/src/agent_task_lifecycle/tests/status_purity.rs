@@ -70,7 +70,7 @@ fn reconcile_apply_owns_the_transitions_status_no_longer_performs() {
         let runner = "purity-pending-runner-snapshot";
         assert_eq!(
             store.read_record(runner).unwrap().state(),
-            AgentTaskRunState::Running
+            RunExecutionState::Running
         );
         rewrite_record_for_test(runner, |record| {
             record.metadata["runner_pid"] = json!(999_999u32);
@@ -78,7 +78,7 @@ fn reconcile_apply_owns_the_transitions_status_no_longer_performs() {
         .expect("controller exited");
         crate::agent_task_service::reconcile_run(runner, false).expect("reconcile runner run");
         let projected = store.read_record(runner).unwrap();
-        assert_eq!(projected.state(), AgentTaskRunState::Succeeded);
+        assert_eq!(projected.state(), RunExecutionState::Succeeded);
         assert_eq!(
             projected.metadata["terminal_transport_recovery"],
             "persisted_runner_job_events"
@@ -111,7 +111,7 @@ fn reconcile_apply_owns_the_transitions_status_no_longer_performs() {
         assert_eq!(report.reconciled, 1, "{report:?}");
         assert_eq!(
             store.read_record(orphan).unwrap().state(),
-            AgentTaskRunState::Cancelled
+            RunExecutionState::Cancelled
         );
     });
 }

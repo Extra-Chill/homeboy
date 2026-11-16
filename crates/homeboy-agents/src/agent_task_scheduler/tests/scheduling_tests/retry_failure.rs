@@ -2,7 +2,7 @@
 //! cancellation behavior.
 
 use super::shared::*;
-use crate::agent_task_lifecycle::AgentTaskRunState;
+use homeboy_lifecycle_contract::RunExecutionState;
 
 mod retry_failure_tests {
     use super::*;
@@ -22,7 +22,7 @@ mod retry_failure_tests {
 
         assert_eq!(
             aggregate.status(),
-            crate::agent_task_lifecycle::AgentTaskRunState::PartialFailure
+            homeboy_lifecycle_contract::RunExecutionState::PartialFailure
         );
         assert_eq!(aggregate.totals.queued, 0);
         assert_eq!(aggregate.totals.succeeded, 2);
@@ -48,7 +48,7 @@ mod retry_failure_tests {
 
         assert_eq!(
             aggregate.status(),
-            crate::agent_task_lifecycle::AgentTaskRunState::Failed
+            homeboy_lifecycle_contract::RunExecutionState::Failed
         );
         assert_eq!(aggregate.totals.failed, 1);
         assert_eq!(aggregate.totals.queued, 0);
@@ -66,7 +66,7 @@ mod retry_failure_tests {
 
         let aggregate = scheduler.run(plan);
 
-        assert_eq!(aggregate.status(), AgentTaskRunState::Succeeded);
+        assert_eq!(aggregate.status(), RunExecutionState::Succeeded);
         assert_eq!(aggregate.totals.succeeded, 1);
         assert_eq!(attempts.load(Ordering::SeqCst), 2);
         assert!(aggregate.events.iter().any(|event| {
@@ -87,7 +87,7 @@ mod retry_failure_tests {
 
         let aggregate = scheduler.run(plan);
 
-        assert_eq!(aggregate.status(), AgentTaskRunState::Succeeded);
+        assert_eq!(aggregate.status(), RunExecutionState::Succeeded);
         assert_eq!(attempts.load(Ordering::SeqCst), 2);
         assert!(aggregate.events.iter().any(|event| {
             event.task_id == "task-1"
@@ -106,7 +106,7 @@ mod retry_failure_tests {
 
         let aggregate = scheduler.run(plan);
 
-        assert_eq!(aggregate.status(), AgentTaskRunState::Failed);
+        assert_eq!(aggregate.status(), RunExecutionState::Failed);
         assert_eq!(attempts.load(Ordering::SeqCst), 1);
     }
 
@@ -120,7 +120,7 @@ mod retry_failure_tests {
 
         let aggregate = scheduler.run(plan);
 
-        assert_eq!(aggregate.status(), AgentTaskRunState::Succeeded);
+        assert_eq!(aggregate.status(), RunExecutionState::Succeeded);
         assert_eq!(attempts.load(Ordering::SeqCst), 2);
     }
 
@@ -136,7 +136,7 @@ mod retry_failure_tests {
 
         let aggregate = scheduler.run(plan);
 
-        assert_eq!(aggregate.status(), AgentTaskRunState::Failed);
+        assert_eq!(aggregate.status(), RunExecutionState::Failed);
         assert_eq!(attempts.load(Ordering::SeqCst), 2);
     }
 
@@ -152,7 +152,7 @@ mod retry_failure_tests {
 
         let aggregate = scheduler.run(plan);
 
-        assert_eq!(aggregate.status(), AgentTaskRunState::Failed);
+        assert_eq!(aggregate.status(), RunExecutionState::Failed);
         assert_eq!(attempts.load(Ordering::SeqCst), 2);
     }
 }

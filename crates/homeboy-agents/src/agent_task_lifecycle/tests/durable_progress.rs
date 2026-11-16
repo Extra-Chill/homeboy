@@ -588,7 +588,7 @@ fn oversize_pre_execution_failure_preserves_cause_and_terminal_record() {
         )
         .expect("original failure must terminalize, not fail event validation");
         let record = store.read_record(&run_id).expect("durable record");
-        assert_eq!(record.state(), AgentTaskRunState::Failed);
+        assert_eq!(record.state(), RunExecutionState::Failed);
         assert_eq!(record.metadata["pre_execution_failure"]["message"], message);
         assert_eq!(record.metadata["pre_execution_failure"]["details"], details);
         let aggregate: AgentTaskAggregate = serde_json::from_slice(
@@ -612,7 +612,7 @@ fn oversize_pre_execution_failure_preserves_cause_and_terminal_record() {
         let (snapshot, mirrored) = store
             .read_record_with_aggregate_bounded(&run_id)
             .expect("status snapshot resolves externalized evidence");
-        assert_eq!(snapshot.state(), AgentTaskRunState::Failed);
+        assert_eq!(snapshot.state(), RunExecutionState::Failed);
         assert_eq!(
             mirrored.expect("mirrored aggregate").events[0].message,
             aggregate.events[0].message

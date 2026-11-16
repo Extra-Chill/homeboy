@@ -68,9 +68,9 @@ fn status_totals_state(
     store: &AgentTaskLifecycleStore,
     run_id: &str,
 ) -> (
-    AgentTaskRunState,
+    RunExecutionState,
     AgentTaskAggregateTotals,
-    AgentTaskRunState,
+    RunExecutionState,
 ) {
     let aggregate = store.read_aggregate(run_id).expect("read aggregate");
     let record = store.read_record(run_id).expect("read record");
@@ -115,11 +115,11 @@ fn mixed_scheduler_outcomes_keep_status_and_totals() {
         record_run_aggregate_in_store(&store, "mixed-scheduler", &plan, &scheduled)
             .expect("record scheduler aggregate");
         let before = status_totals_state(&store, "mixed-scheduler");
-        assert_eq!(before.0, AgentTaskRunState::Succeeded);
+        assert_eq!(before.0, RunExecutionState::Succeeded);
         assert_eq!(before.1.succeeded, 1);
         assert_eq!(before.1.candidate_recoverable, 1);
         assert_eq!(before.1.recoverable_candidates, 1);
-        assert_eq!(before.2, AgentTaskRunState::Succeeded);
+        assert_eq!(before.2, RunExecutionState::Succeeded);
     });
 }
 
@@ -143,7 +143,7 @@ fn stale_persisted_status_reads_back_derived_from_outcomes() {
     fs::write(&aggregate_path, serde_json::to_vec(&stale).expect("bytes")).expect("write");
 
     let read = store.read_aggregate(run_id).expect("read aggregate");
-    assert_eq!(read.status(), AgentTaskRunState::Succeeded);
+    assert_eq!(read.status(), RunExecutionState::Succeeded);
     assert_eq!(
         serde_json::to_value(&read).expect("reserialize")["status"],
         "succeeded"
@@ -159,28 +159,28 @@ fn derived_status_is_the_run_state_the_store_records_for_every_outcome_mix() {
     let mut task_b = plan.tasks[0].clone();
     task_b.task_id = "task-b".to_string();
     plan.tasks.push(task_b);
-    let cases: [(&str, &[AgentTaskOutcomeStatus], AgentTaskRunState); 5] = [
+    let cases: [(&str, &[AgentTaskOutcomeStatus], RunExecutionState); 5] = [
         (
             "all-succeeded",
             &[Succeeded, Succeeded],
-            AgentTaskRunState::Succeeded,
+            RunExecutionState::Succeeded,
         ),
         (
             "mixed",
             &[Succeeded, Failed],
-            AgentTaskRunState::PartialFailure,
+            RunExecutionState::PartialFailure,
         ),
         (
             "all-candidate-recoverable",
             &[CandidateRecoverable, CandidateRecoverable],
-            AgentTaskRunState::CandidateRecoverable,
+            RunExecutionState::CandidateRecoverable,
         ),
         (
             "any-cancelled",
             &[Succeeded, Cancelled],
-            AgentTaskRunState::Cancelled,
+            RunExecutionState::Cancelled,
         ),
-        ("no-outcomes", &[], AgentTaskRunState::Failed),
+        ("no-outcomes", &[], RunExecutionState::Failed),
     ];
     for (run_id, statuses, expected) in cases {
         let outcomes: Vec<AgentTaskOutcome> = statuses

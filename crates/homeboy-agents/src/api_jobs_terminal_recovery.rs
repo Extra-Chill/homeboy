@@ -25,7 +25,7 @@ impl AgentTaskTerminalRecoveryProvider for AgentTaskTerminalRecoveryProviderImpl
         };
         store.read_record_bounded(run_id).is_ok_and(|record| {
             record.run_id == run_id
-                && record.state() == crate::agent_task_lifecycle::AgentTaskRunState::Cancelled
+                && record.state() == homeboy_lifecycle_contract::RunExecutionState::Cancelled
         })
     }
 
@@ -33,8 +33,8 @@ impl AgentTaskTerminalRecoveryProvider for AgentTaskTerminalRecoveryProviderImpl
         let resolved_run_id = crate::agent_task_lifecycle::resolve_run_id(run_id).ok()?;
         let result = agent_task_service::persisted_terminal_run_result(&resolved_run_id).ok()??;
         let status = match result.value.status() {
-            crate::agent_task_lifecycle::AgentTaskRunState::Succeeded => JobStatus::Succeeded,
-            crate::agent_task_lifecycle::AgentTaskRunState::Cancelled => JobStatus::Cancelled,
+            homeboy_lifecycle_contract::RunExecutionState::Succeeded => JobStatus::Succeeded,
+            homeboy_lifecycle_contract::RunExecutionState::Cancelled => JobStatus::Cancelled,
             _ => JobStatus::Failed,
         };
         let run_id = resolved_run_id;
@@ -100,16 +100,17 @@ mod tests {
     };
 
     use homeboy_core::api_jobs::RunnerJobLogSnapshot;
-    use homeboy_core::run_lifecycle_record::{RunExecutionState, RunLifecycleRecord};
+    use homeboy_core::run_lifecycle_record::RunLifecycleRecord;
     use serde_json::json;
 
     use super::*;
     use crate::agent_task_lifecycle::{
         AgentTaskLabHandoff, AgentTaskLabHandoffAuthority, AgentTaskLabHandoffState,
-        AgentTaskLifecycleStore, AgentTaskRunRecord, AgentTaskRunState, RunnerContinuationProvider,
+        AgentTaskLifecycleStore, AgentTaskRunRecord, RunnerContinuationProvider,
         RunnerContinuationTestGuard,
     };
     use crate::agent_task_scheduler::{AgentTaskAggregate, AgentTaskAggregateTotals};
+    use homeboy_lifecycle_contract::RunExecutionState;
 
     struct CountingRunnerProvider(Arc<AtomicUsize>);
 
@@ -172,7 +173,7 @@ mod tests {
                     workspace_claim: None,
                 });
                 record.metadata = json!({});
-                record.set_state_for_test(AgentTaskRunState::Running);
+                record.set_state_for_test(RunExecutionState::Running);
                 record
             };
             store.write_record(&record).expect("write linked record");
@@ -200,7 +201,7 @@ mod tests {
             assert!(!AgentTaskTerminalRecoveryProviderImpl.durable_run_is_cancelled("missing-run"));
             let mut cancelled = record.clone();
             cancelled.run_id = "cancelled-without-aggregate".to_string();
-            cancelled.set_state_for_test(AgentTaskRunState::Cancelled);
+            cancelled.set_state_for_test(RunExecutionState::Cancelled);
             cancelled.lifecycle =
                 RunLifecycleRecord::with_execution_state(RunExecutionState::Cancelled);
             store
@@ -213,7 +214,7 @@ mod tests {
                 .durable_run_is_cancelled("cook-alias-for-terminal-recovery"));
 
             let mut terminal_record = record;
-            terminal_record.set_state_for_test(AgentTaskRunState::Succeeded);
+            terminal_record.set_state_for_test(RunExecutionState::Succeeded);
             terminal_record.lifecycle =
                 RunLifecycleRecord::with_execution_state(RunExecutionState::Succeeded);
             // The record says Succeeded, so the aggregate carries a succeeded outcome.

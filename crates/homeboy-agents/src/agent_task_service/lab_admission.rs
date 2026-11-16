@@ -67,7 +67,7 @@ pub(crate) fn queued_admission_in_store(
     record: &agent_task_lifecycle::AgentTaskRunRecord,
     store: &agent_task_lifecycle::AgentTaskLifecycleStore,
 ) -> Option<QueuedAdmission> {
-    if record.state() != agent_task_lifecycle::AgentTaskRunState::Queued
+    if record.state() != homeboy_lifecycle_contract::RunExecutionState::Queued
         || record.runner_job_id().is_some()
     {
         return None;

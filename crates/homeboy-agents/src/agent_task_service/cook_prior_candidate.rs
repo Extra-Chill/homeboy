@@ -19,11 +19,12 @@
 //! own candidate, an owner that is still running, or an owner without a
 //! durable record) keeps its existing admission behavior.
 
+use homeboy_lifecycle_contract::RunExecutionState;
 use std::path::{Path, PathBuf};
 
 use serde_json::Value;
 
-use crate::agent_task_lifecycle::{AgentTaskLifecycleStore, AgentTaskRunState};
+use crate::agent_task_lifecycle::AgentTaskLifecycleStore;
 use homeboy_core::{Error, Result};
 
 use super::cook_baseline::{git_output, git_output_with_env};
@@ -40,7 +41,7 @@ const MAX_RECORDED_PATHS: usize = 50;
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct PriorAttemptOwner {
     pub run_id: String,
-    pub state: AgentTaskRunState,
+    pub state: RunExecutionState,
     pub handle: String,
     pub path: PathBuf,
 }
@@ -174,7 +175,7 @@ pub(crate) fn prior_failed_attempt_owner(
     // A crashed driver can leave a nonterminal attempt forever. The OS lock
     // probe above, not a PID or a stale lifecycle status, proves it no longer
     // holds the destination. Preserve its candidate just like a failed attempt.
-    if owner_record.state() == AgentTaskRunState::Succeeded
+    if owner_record.state() == RunExecutionState::Succeeded
         || (!owner_record.state().is_terminal() && owner_cook.is_none())
     {
         return Ok(None);

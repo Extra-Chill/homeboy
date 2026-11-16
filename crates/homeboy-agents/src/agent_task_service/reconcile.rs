@@ -71,7 +71,7 @@ pub struct AgentTaskReconcileRun {
     pub liveness: AgentTaskLiveness,
     pub source: String,
     /// State observed from the durable record after its runner/provider refresh.
-    pub authoritative_state: agent_task_lifecycle::AgentTaskRunState,
+    pub authoritative_state: homeboy_lifecycle_contract::RunExecutionState,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub stale_reason: Option<String>,
     /// `reconciled`, `would-reconcile` (preview), `no-op`, or `failed`.
@@ -832,16 +832,17 @@ impl homeboy_core::daemon::orchestration::OrchestrationDriver for AgentTaskOrche
 
 /// Snake_case labels for the run-state vocabulary, matching the enum's own
 /// serde renaming so a notification reads the same as the JSON report.
-fn run_state_label(state: agent_task_lifecycle::AgentTaskRunState) -> &'static str {
-    use agent_task_lifecycle::AgentTaskRunState;
+fn run_state_label(state: homeboy_lifecycle_contract::RunExecutionState) -> &'static str {
+    use homeboy_lifecycle_contract::RunExecutionState;
     match state {
-        AgentTaskRunState::Queued => "queued",
-        AgentTaskRunState::Running => "running",
-        AgentTaskRunState::Succeeded => "succeeded",
-        AgentTaskRunState::CandidateRecoverable => "candidate_recoverable",
-        AgentTaskRunState::PartialFailure => "partial_failure",
-        AgentTaskRunState::Failed => "failed",
-        AgentTaskRunState::Cancelled => "cancelled",
+        RunExecutionState::Queued => "queued",
+        RunExecutionState::Running => "running",
+        RunExecutionState::Succeeded => "succeeded",
+        RunExecutionState::CandidateRecoverable => "candidate_recoverable",
+        RunExecutionState::PartialFailure => "partial_failure",
+        RunExecutionState::Failed => "failed",
+        RunExecutionState::Unknown => "unknown",
+        RunExecutionState::Cancelled => "cancelled",
     }
 }
 
@@ -902,7 +903,7 @@ mod tests {
                 .expect("retained");
             assert_eq!(
                 retained.state(),
-                agent_task_lifecycle::AgentTaskRunState::Running
+                homeboy_lifecycle_contract::RunExecutionState::Running
             );
             assert_eq!(retained.updated_at, before.updated_at);
             assert!(retained.metadata.get("reconciliation").is_none());
@@ -940,7 +941,7 @@ mod tests {
                     run_id: format!("run-{index}"),
                     liveness: AgentTaskLiveness::Stale,
                     source: "runner:removed".to_string(),
-                    authoritative_state: agent_task_lifecycle::AgentTaskRunState::Running,
+                    authoritative_state: homeboy_lifecycle_contract::RunExecutionState::Running,
                     stale_reason: Some("runner_removed".to_string()),
                     action: "failed",
                     error: Some("idempotency_key too long".to_string()),
@@ -1006,7 +1007,7 @@ mod tests {
             let refreshed = agent_task_lifecycle::reconcile_status(run_id).expect("refreshed");
             assert_eq!(
                 refreshed.state(),
-                agent_task_lifecycle::AgentTaskRunState::Queued
+                homeboy_lifecycle_contract::RunExecutionState::Queued
             );
             assert!(refreshed.metadata.get("stale_running").is_none());
             assert!(refreshed.metadata.get("cancel_reason").is_none());
@@ -1044,7 +1045,7 @@ mod tests {
                 agent_task_lifecycle::reconcile_status(orphan_run_id).expect("ownerless run");
             assert_eq!(
                 terminal.state(),
-                agent_task_lifecycle::AgentTaskRunState::Cancelled
+                homeboy_lifecycle_contract::RunExecutionState::Cancelled
             );
             assert_eq!(terminal.metadata["cancel_reason"], "missing_runner_pid");
         });
@@ -1178,7 +1179,7 @@ mod tests {
             let retained = agent_task_lifecycle::reconcile_status(run_id).expect("retained run");
             assert_eq!(
                 retained.state(),
-                agent_task_lifecycle::AgentTaskRunState::Queued
+                homeboy_lifecycle_contract::RunExecutionState::Queued
             );
             assert!(retained.metadata.get("cancel_reason").is_none());
         });
@@ -1215,7 +1216,7 @@ mod tests {
             assert!(fenced_record_is_live(&fenced));
             assert_eq!(
                 fenced.state(),
-                agent_task_lifecycle::AgentTaskRunState::Queued
+                homeboy_lifecycle_contract::RunExecutionState::Queued
             );
         });
     }
@@ -1402,7 +1403,7 @@ mod tests {
             assert!(fenced_record_is_live(&fenced));
             assert_eq!(
                 fenced.state(),
-                agent_task_lifecycle::AgentTaskRunState::Queued
+                homeboy_lifecycle_contract::RunExecutionState::Queued
             );
         });
     }
@@ -1439,7 +1440,7 @@ mod tests {
             let cancelled = agent_task_lifecycle::reconcile_status(run_id).expect("cancelled run");
             assert_eq!(
                 cancelled.state(),
-                agent_task_lifecycle::AgentTaskRunState::Cancelled
+                homeboy_lifecycle_contract::RunExecutionState::Cancelled
             );
             assert_eq!(cancelled.metadata["cancel_reason"], "missing_runner_pid");
         });
@@ -1485,7 +1486,7 @@ mod tests {
                 assert_eq!(report.reconciled, 0, "{report:?}");
                 assert_eq!(
                     agent_task_lifecycle::exact_record(run_id).unwrap().state(),
-                    agent_task_lifecycle::AgentTaskRunState::Queued,
+                    homeboy_lifecycle_contract::RunExecutionState::Queued,
                     "a live controller heartbeat in `{phase}` must protect its unbound Lab attempt"
                 );
 
@@ -1497,7 +1498,7 @@ mod tests {
                 assert_eq!(expired.reconciled, 1, "{expired:?}");
                 assert_eq!(
                     agent_task_lifecycle::exact_record(run_id).unwrap().state(),
-                    agent_task_lifecycle::AgentTaskRunState::Cancelled,
+                    homeboy_lifecycle_contract::RunExecutionState::Cancelled,
                     "an expired unbound attempt remains recoverable by the stale-run watchdog"
                 );
             });
@@ -1607,7 +1608,7 @@ mod tests {
             assert_eq!(run.action, "reconciled");
             assert_ne!(
                 run.authoritative_state,
-                agent_task_lifecycle::AgentTaskRunState::Running,
+                homeboy_lifecycle_contract::RunExecutionState::Running,
                 "a cancelled run must not report itself as running",
             );
             assert!(run.authoritative_state.is_terminal());
@@ -1634,7 +1635,7 @@ mod tests {
                 agent_task_lifecycle::reconcile_status(cook_id).expect("read durable admission");
             assert_eq!(
                 parent.state(),
-                agent_task_lifecycle::AgentTaskRunState::Queued
+                homeboy_lifecycle_contract::RunExecutionState::Queued
             );
             assert_eq!(
                 parent.metadata["detached_cook_handoff"]["admission_state"],
@@ -1682,7 +1683,7 @@ mod tests {
                     agent_task_lifecycle::reconcile_status(cook_id).expect("read terminal parent");
                 assert_eq!(
                     parent.state(),
-                    agent_task_lifecycle::AgentTaskRunState::Failed
+                    homeboy_lifecycle_contract::RunExecutionState::Failed
                 );
                 assert_eq!(
                     parent.metadata["detached_cook_handoff"]["admission_state"],
@@ -1750,7 +1751,7 @@ mod tests {
             assert_eq!(run.action, "would-reconcile");
             assert_eq!(
                 run.authoritative_state,
-                agent_task_lifecycle::AgentTaskRunState::Running,
+                homeboy_lifecycle_contract::RunExecutionState::Running,
                 "preview mutates nothing, so the observed state is the state",
             );
             assert!(
@@ -1813,7 +1814,7 @@ mod tests {
             let retained = agent_task_lifecycle::exact_record(run_id).expect("retained run");
             assert_eq!(
                 retained.state(),
-                agent_task_lifecycle::AgentTaskRunState::Running
+                homeboy_lifecycle_contract::RunExecutionState::Running
             );
             assert!(retained.metadata.get("cancel_reason").is_none());
             assert!(retained.metadata.get("cancellation_provenance").is_none());
@@ -1912,7 +1913,7 @@ mod tests {
             let retained = agent_task_lifecycle::exact_record(run_id).expect("retained run");
             assert_eq!(
                 retained.state(),
-                agent_task_lifecycle::AgentTaskRunState::Running
+                homeboy_lifecycle_contract::RunExecutionState::Running
             );
             assert!(!retained.is_stale_running(), "{:?}", retained.metadata);
         });
@@ -1931,7 +1932,7 @@ mod tests {
             let cancelled = agent_task_lifecycle::exact_record(run_id).expect("cancelled run");
             assert_eq!(
                 cancelled.state(),
-                agent_task_lifecycle::AgentTaskRunState::Cancelled
+                homeboy_lifecycle_contract::RunExecutionState::Cancelled
             );
             assert_eq!(cancelled.metadata["cancel_reason"], "runner_job_not_found");
             let provenance = &cancelled.metadata["cancellation_provenance"];

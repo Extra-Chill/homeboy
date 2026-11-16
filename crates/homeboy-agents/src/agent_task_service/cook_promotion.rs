@@ -2172,11 +2172,11 @@ pub(crate) fn attempt_needs_execution_with_store(
 fn run_record_needs_execution(record: &agent_task_lifecycle::AgentTaskRunRecord) -> bool {
     !matches!(
         record.state(),
-        agent_task_lifecycle::AgentTaskRunState::Succeeded
-            | agent_task_lifecycle::AgentTaskRunState::CandidateRecoverable
-            | agent_task_lifecycle::AgentTaskRunState::PartialFailure
-            | agent_task_lifecycle::AgentTaskRunState::Failed
-            | agent_task_lifecycle::AgentTaskRunState::Cancelled
+        homeboy_lifecycle_contract::RunExecutionState::Succeeded
+            | homeboy_lifecycle_contract::RunExecutionState::CandidateRecoverable
+            | homeboy_lifecycle_contract::RunExecutionState::PartialFailure
+            | homeboy_lifecycle_contract::RunExecutionState::Failed
+            | homeboy_lifecycle_contract::RunExecutionState::Cancelled
     )
 }
 
@@ -5007,7 +5007,7 @@ mod gate_failure_diagnostic_tests {
 /// A cancelled attempt whose recorded provenance is anything but an operator's
 /// `agent-task cancel` request.
 fn cancelled_without_operator_request(record: &agent_task_lifecycle::AgentTaskRunRecord) -> bool {
-    record.state() == agent_task_lifecycle::AgentTaskRunState::Cancelled
+    record.state() == homeboy_lifecycle_contract::RunExecutionState::Cancelled
         && record
             .metadata
             .pointer("/cancellation_provenance/cause")

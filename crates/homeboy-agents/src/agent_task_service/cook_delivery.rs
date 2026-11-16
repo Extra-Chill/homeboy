@@ -20,6 +20,7 @@
 //! since loop feedback decides whether a verified candidate is publishable;
 //! [`publish_accepted`] finalizes policy-accepted ones.
 
+use homeboy_lifecycle_contract::RunExecutionState;
 use std::ops::ControlFlow;
 
 use homeboy_core::cook_status::{CookDisposition, CookStatus};
@@ -35,9 +36,7 @@ use super::AgentTaskRunResult;
 use crate::agent_task::AgentTaskCandidate;
 use crate::agent_task_gate::failure_excerpt::gate_failure_excerpt_from_value;
 use crate::agent_task_gate::AgentTaskGateStatus;
-use crate::agent_task_lifecycle::{
-    self, AgentTaskLifecycleStore, AgentTaskRunRecord, AgentTaskRunState,
-};
+use crate::agent_task_lifecycle::{self, AgentTaskLifecycleStore, AgentTaskRunRecord};
 use crate::agent_task_promotion::{AgentTaskPromotionReport, AgentTaskPromotionStatus};
 use crate::agent_task_timeout::expired_cook_deadline;
 
@@ -172,7 +171,7 @@ pub struct CookDeliveryLifecycle {
     /// The run state this delivery asks for. `CandidateRecoverable` while the
     /// candidate is unverified or rejected; `Succeeded` once it is verified.
     /// `None` when delivery says nothing about the run state.
-    pub run_state: Option<AgentTaskRunState>,
+    pub run_state: Option<RunExecutionState>,
     /// The Cook status this delivery reports on its own, if any.
     pub cook_status: Option<CookStatus>,
 }
@@ -441,13 +440,13 @@ impl CookDelivery {
     /// no-patch one is the canonical `no_changes_gate_failed`.
     pub fn lifecycle(&self) -> CookDeliveryLifecycle {
         use CookDeliveryBlockerCode as Code;
-        let recoverable = Some(AgentTaskRunState::CandidateRecoverable);
+        let recoverable = Some(RunExecutionState::CandidateRecoverable);
         let (run_state, cook_status) = match (self.state, self.blocker_code()) {
             (CookDeliveryState::Applied, _) if self.candidate.is_some() => (recoverable, None),
             (CookDeliveryState::Applied, _) => (None, None),
-            (CookDeliveryState::Verified, _) => (Some(AgentTaskRunState::Succeeded), None),
+            (CookDeliveryState::Verified, _) => (Some(RunExecutionState::Succeeded), None),
             (CookDeliveryState::Published, _) => (
-                Some(AgentTaskRunState::Succeeded),
+                Some(RunExecutionState::Succeeded),
                 Some(match self.publication.as_ref().is_some_and(|p| p.draft) {
                     true => CookStatus::DraftPublished,
                     false => CookStatus::ReviewReady,

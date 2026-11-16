@@ -160,7 +160,7 @@ pub fn recover_terminal_transport_proxy_evidence(run_id: &str) -> Result<bool> {
 /// A failed controller observation is not a failed runner execution. Only an
 /// authenticated, accepted handoff may be recovered without new admission.
 pub fn disconnected_runner_recovery_available(record: &AgentTaskRunRecord) -> bool {
-    record.state() == AgentTaskRunState::Failed
+    record.state() == RunExecutionState::Failed
         && matches!(
             record
                 .metadata

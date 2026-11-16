@@ -5178,9 +5178,7 @@ mod tests {
             let mut record = store.read_record(run_id).expect("materializing record");
             assert_eq!(record.metadata["phase"], "source_materialization");
             assert!(record.runner_job_id().is_none());
-            record.set_state_for_test(
-                homeboy_agents::agent_task_lifecycle::AgentTaskRunState::Cancelled,
-            );
+            record.set_state_for_test(homeboy_lifecycle_contract::RunExecutionState::Cancelled);
             store.write_record(&record).expect("durable cancellation");
             let error = worker
                 .join()
@@ -5215,7 +5213,7 @@ mod tests {
                 && span.duration_ms.is_some()));
             assert_eq!(
                 store.read_record(run_id).expect("terminal record").state(),
-                homeboy_agents::agent_task_lifecycle::AgentTaskRunState::Cancelled
+                homeboy_lifecycle_contract::RunExecutionState::Cancelled
             );
             let timeout_run = "source-deadline";
             submit_recipe_run(timeout_run);
@@ -5244,7 +5242,7 @@ mod tests {
                     .read_record(timeout_run)
                     .expect("failed source record")
                     .state(),
-                homeboy_agents::agent_task_lifecycle::AgentTaskRunState::Failed
+                homeboy_lifecycle_contract::RunExecutionState::Failed
             );
         });
     }
@@ -5562,8 +5560,7 @@ mod tests {
             homeboy_agents::agent_task_lifecycle::AgentTaskLifecycleStore::from_environment()
                 .expect("lifecycle store");
         let mut record = lifecycle.read_record(run_id).expect("attempt record");
-        record
-            .set_state_for_test(homeboy_agents::agent_task_lifecycle::AgentTaskRunState::Cancelled);
+        record.set_state_for_test(homeboy_lifecycle_contract::RunExecutionState::Cancelled);
         lifecycle
             .write_record(&record)
             .expect("terminalize attempt");
@@ -6196,11 +6193,11 @@ mod tests {
 
     #[test]
     fn terminal_receipt_replay_restores_one_durable_cook_completion_intent() {
-        use homeboy_agents::agent_task_lifecycle::AgentTaskRunState;
         use homeboy_agents::agent_task_scheduler::{AgentTaskAggregate, AgentTaskPlan};
         use homeboy_agents::agent_task_service::{
             AgentTaskCookRecipe, AgentTaskCookRecipeAttempt, CookRecipeStore,
         };
+        use homeboy_lifecycle_contract::RunExecutionState;
 
         // This fixture owns the explicit outbox drain below. Register the
         // agents scheduling seam without submitting a second controller job.
@@ -6243,7 +6240,7 @@ mod tests {
                     artifact_bindings: Vec::new(),
                     queue: Default::default(),
                 };
-                assert_eq!(aggregate.status(), AgentTaskRunState::Succeeded);
+                assert_eq!(aggregate.status(), RunExecutionState::Succeeded);
                 homeboy_agents::agent_task_lifecycle::record_completed_run(
                     &plan,
                     &aggregate,
@@ -6363,7 +6360,7 @@ mod tests {
                     homeboy_agents::agent_task_lifecycle::exact_record(run_id)
                         .unwrap()
                         .state(),
-                    homeboy_agents::agent_task_lifecycle::AgentTaskRunState::Succeeded
+                    homeboy_lifecycle_contract::RunExecutionState::Succeeded
                 );
             });
         }
@@ -9080,7 +9077,7 @@ mod tests {
                 homeboy_agents::agent_task_lifecycle::reconcile_status(run_id).expect("parent");
             assert!(matches!(
                 record.state(),
-                homeboy_agents::agent_task_lifecycle::AgentTaskRunState::Failed
+                homeboy_lifecycle_contract::RunExecutionState::Failed
             ));
             assert_eq!(
                 record.metadata["pre_execution_failure"]["phase"],

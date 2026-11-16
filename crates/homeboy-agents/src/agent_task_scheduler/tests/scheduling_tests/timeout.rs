@@ -2,7 +2,7 @@
 //! cancellation behavior.
 
 use super::shared::*;
-use crate::agent_task_lifecycle::AgentTaskRunState;
+use homeboy_lifecycle_contract::RunExecutionState;
 
 mod timeout_tests {
     use super::super::concurrency::concurrency_tests::init_git_workspace;
@@ -72,7 +72,7 @@ mod timeout_tests {
 
         assert_eq!(
             aggregate.status(),
-            AgentTaskRunState::Succeeded,
+            RunExecutionState::Succeeded,
             "{aggregate:#?}"
         );
         assert_eq!(calls.load(Ordering::SeqCst), 2);
@@ -99,7 +99,7 @@ mod timeout_tests {
 
         let aggregate = scheduler.run(plan);
 
-        assert_eq!(aggregate.status(), AgentTaskRunState::Failed);
+        assert_eq!(aggregate.status(), RunExecutionState::Failed);
         assert_eq!(
             aggregate.outcomes[0].status,
             AgentTaskOutcomeStatus::Timeout
@@ -137,7 +137,7 @@ mod timeout_tests {
 
         assert_eq!(
             aggregate.status(),
-            crate::agent_task_lifecycle::AgentTaskRunState::Failed
+            homeboy_lifecycle_contract::RunExecutionState::Failed
         );
         assert_eq!(aggregate.totals.timed_out, 1);
         assert_eq!(
@@ -189,7 +189,7 @@ mod timeout_tests {
 
         assert_eq!(
             aggregate.status(),
-            AgentTaskRunState::CandidateRecoverable,
+            RunExecutionState::CandidateRecoverable,
             "a non-empty attempt diff is recoverable rather than discarded"
         );
         let outcome = &aggregate.outcomes[0];
@@ -501,7 +501,7 @@ mod timeout_tests {
 
             assert_eq!(
                 aggregate.status(),
-                crate::agent_task_lifecycle::AgentTaskRunState::CandidateRecoverable,
+                homeboy_lifecycle_contract::RunExecutionState::CandidateRecoverable,
                 "{aggregate:#?}"
             );
             let outcome = &aggregate.outcomes[0];
@@ -630,7 +630,7 @@ mod timeout_tests {
 
         assert_eq!(
             aggregate.status(),
-            crate::agent_task_lifecycle::AgentTaskRunState::Failed
+            homeboy_lifecycle_contract::RunExecutionState::Failed
         );
         assert_eq!(aggregate.totals.succeeded, 0);
         assert_eq!(aggregate.totals.timed_out, 1);

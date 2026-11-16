@@ -13,6 +13,7 @@ use homeboy_core::worktree::{
     WorktreeAuthorityRefusal, TERMINAL_WORKSPACE_AUTHORITY_CAPABILITY,
     TERMINAL_WORKSPACE_AUTHORITY_SCHEMA,
 };
+use homeboy_lifecycle_contract::RunExecutionState;
 use homeboy_runner_contract::{
     WorkspaceClaim, WorkspaceClaimBinding, WorkspaceIdentity, WorkspaceOwnerLease,
 };
@@ -142,7 +143,7 @@ fn terminal_workspace_authority(
 
 /// The owning run's terminal state and the durable evidence that attests it.
 struct TerminalRun {
-    state: AgentTaskRunState,
+    state: RunExecutionState,
     revision: u64,
     evidence: String,
 }
@@ -171,10 +172,10 @@ fn controller_terminal_run(
             "owning run was dispatched to a runner that may hold a workspace claim",
         ));
     }
-    if !controller.state().is_terminal() || !controller.run_state_projections_agree() {
+    if !controller.state().is_terminal() {
         return Err(refuse(
             MissingActiveWorktreeReason::LiveRun,
-            "durable controller run is active or has conflicting state projection",
+            "durable controller run is active",
         ));
     }
     if controller
@@ -1835,7 +1836,7 @@ mod tests {
     fn controller_run(
         store: &AgentTaskLifecycleStore,
         run_id: &str,
-        state: AgentTaskRunState,
+        state: RunExecutionState,
         metadata: serde_json::Value,
     ) -> AgentTaskRunRecord {
         use homeboy_core::run_lifecycle_record::RunLifecycleRecord;
@@ -1862,7 +1863,7 @@ mod tests {
             let (provider, live) = provider(Ok(vec!["runner-a".into()]));
             let _provider = install_claim_provider(provider);
             let store = AgentTaskLifecycleStore::from_environment().expect("store");
-            let succeeded = AgentTaskRunState::Succeeded;
+            let succeeded = RunExecutionState::Succeeded;
             controller_run(&store, "local-run", succeeded, serde_json::json!({}));
             let mut handed_off =
                 controller_run(&store, "handed-off-run", succeeded, serde_json::json!({}));
@@ -1886,7 +1887,7 @@ mod tests {
             controller_run(
                 &store,
                 "running-run",
-                AgentTaskRunState::Running,
+                RunExecutionState::Running,
                 serde_json::json!({}),
             );
 
@@ -2006,7 +2007,7 @@ mod tests {
             controller_run(
                 &store,
                 "orphan-run",
-                AgentTaskRunState::Running,
+                RunExecutionState::Running,
                 serde_json::json!({}),
             );
             assert_eq!(

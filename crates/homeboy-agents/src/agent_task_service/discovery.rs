@@ -290,7 +290,7 @@ pub struct AgentTaskDiscoveryRun {
     /// Exact branch recorded for this run when its scoped worktree was materialized.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub branch: Option<String>,
-    pub state: agent_task_lifecycle::AgentTaskRunState,
+    pub state: homeboy_lifecycle_contract::RunExecutionState,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub repo: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -413,8 +413,7 @@ pub fn discover_runs_page(
     let (records, physical_count, physical_truncated, next) =
         if filter == AgentTaskDiscoveryFilter::Active {
             let (records, health) = store.read_active_records()?;
-            let physical_count =
-                health.healthy + health.malformed + health.conflicting + health.fixture;
+            let physical_count = health.healthy + health.malformed + health.fixture;
             active_health = Some(health);
             let records = records
                 .into_iter()
@@ -1181,7 +1180,7 @@ fn classify_liveness(
     if record.has_fresh_controller_pre_provider_heartbeat() {
         return AgentTaskLiveness::Active;
     }
-    if record.state() != agent_task_lifecycle::AgentTaskRunState::Running {
+    if record.state() != homeboy_lifecycle_contract::RunExecutionState::Running {
         if agent_task_lifecycle::has_expired_pending_runner_submission_intent(record, now) {
             return AgentTaskLiveness::Unreconciled;
         }
@@ -1238,7 +1237,7 @@ fn classify_liveness(
 }
 
 fn durable_queued_retry_is_live(record: &AgentTaskRunRecord) -> bool {
-    record.state() == agent_task_lifecycle::AgentTaskRunState::Queued
+    record.state() == homeboy_lifecycle_contract::RunExecutionState::Queued
         && record.metadata["retry_of"]
             .as_str()
             .is_some_and(|run_id| !run_id.is_empty())

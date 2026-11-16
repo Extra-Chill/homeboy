@@ -733,7 +733,7 @@ pub fn plan_cook_recovery(id: &str) -> Result<CookRecoveryPlan> {
 fn unmaterialized_cook_recovery_plan(
     record: &agent_task_lifecycle::AgentTaskRunRecord,
 ) -> Option<CookRecoveryPlan> {
-    if record.state() != agent_task_lifecycle::AgentTaskRunState::Failed
+    if record.state() != homeboy_lifecycle_contract::RunExecutionState::Failed
         || !agent_task_lifecycle::is_unmaterialized_cook_admission(record)
         || super::load_recipe(&record.run_id).is_ok()
     {
@@ -891,7 +891,7 @@ fn recover_cook_once(
         if let Ok(run_id) = super::resolve_cook_continuation_run_id(id) {
             if let Ok(record) = agent_task_lifecycle::exact_record(&run_id) {
                 if agent_task_lifecycle::recorded_store_contention(&record)
-                    || (record.state() == agent_task_lifecycle::AgentTaskRunState::Running
+                    || (record.state() == homeboy_lifecycle_contract::RunExecutionState::Running
                         && !removed_runner_attempt(&run_id))
                 {
                     agent_task_lifecycle::reconcile_status(&run_id)?;
@@ -1694,7 +1694,7 @@ fn resolve_cook_key(id: &str) -> Result<String> {
 /// The Cook status the recovery decision classifies. Delivery's typed read
 /// model decides first; otherwise the attempt's own lifecycle evidence.
 pub(crate) fn cook_recovery_status(record: &agent_task_lifecycle::AgentTaskRunRecord) -> String {
-    use agent_task_lifecycle::AgentTaskRunState as State;
+    use homeboy_lifecycle_contract::RunExecutionState as State;
     match record.state() {
         State::Queued => return "queued".to_string(),
         State::Running => return "running".to_string(),
@@ -1728,6 +1728,7 @@ pub(crate) fn cook_recovery_status(record: &agent_task_lifecycle::AgentTaskRunRe
         State::Succeeded => "succeeded",
         State::CandidateRecoverable => "candidate_recoverable",
         State::PartialFailure | State::Failed => "failed",
+        State::Unknown => "unknown",
         State::Cancelled => "cancelled",
     }
     .to_string()
@@ -2376,7 +2377,8 @@ mod tests {
                 .mutate_record(cook_id, |record| {
                     record.metadata["detached_cook_handoff"]["state"] =
                         serde_json::json!("exited_before_handoff");
-                    record.set_state_for_test(agent_task_lifecycle::AgentTaskRunState::Failed);
+                    record
+                        .set_state_for_test(homeboy_lifecycle_contract::RunExecutionState::Failed);
                     true
                 })
                 .unwrap();
