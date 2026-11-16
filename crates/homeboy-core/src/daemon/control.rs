@@ -240,11 +240,22 @@ pub fn stale_daemon_action(status: &super::DaemonStatus) -> Option<StaleDaemonAc
     )
 }
 
+/// Only a CLI started from the daemon's own executable path speaks for the
+/// installed build. A development binary elsewhere must not restart (or
+/// downgrade) the shared controller daemon.
 fn controller_build_differs(status: &super::DaemonStatus) -> bool {
-    status
-        .state
-        .as_ref()
-        .is_some_and(|state| state.build_identity != crate::build_identity::current())
+    status.state.as_ref().is_some_and(|state| {
+        state.build_identity != crate::build_identity::current()
+            && submitted_from_daemon_executable(&state.executable.path)
+    })
+}
+
+fn submitted_from_daemon_executable(daemon_executable: &std::path::Path) -> bool {
+    let canonical = |path: &std::path::Path| std::fs::canonicalize(path).ok();
+    std::env::current_exe()
+        .ok()
+        .and_then(|current| canonical(&current))
+        .is_some_and(|current| canonical(daemon_executable) == Some(current))
 }
 
 const SERVICE_MANAGED_RESTART_POLL: Duration = Duration::from_millis(250);
@@ -1378,11 +1389,18 @@ mod termination_tests {
                 },
                 service_manager: None,
             });
-            for (different_build, active_jobs, expected) in [
-                (false, 0, None),
-                (true, 0, Some("restart")),
-                (true, 2, Some("drain")),
+            for (different_build, same_executable, active_jobs, expected) in [
+                (false, true, 0, None),
+                (true, true, 0, Some("restart")),
+                (true, true, 2, Some("drain")),
+                // A development binary elsewhere never restarts the shared daemon.
+                (true, false, 0, None),
             ] {
+                status.state.as_mut().unwrap().executable.path = if same_executable {
+                    std::env::current_exe().unwrap()
+                } else {
+                    std::path::PathBuf::from("/nonexistent/homeboy")
+                };
                 status.state.as_mut().unwrap().build_identity = crate::build_identity::current();
                 if different_build {
                     status.state.as_mut().unwrap().build_identity.display = "older build".into();
@@ -1396,7 +1414,7 @@ mod termination_tests {
                 });
                 assert_eq!(
                     observed, expected,
-                    "different_build={different_build}, active_jobs={active_jobs}"
+                    "different_build={different_build}, same_executable={same_executable}, active_jobs={active_jobs}"
                 );
             }
         });
