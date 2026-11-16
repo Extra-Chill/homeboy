@@ -17,12 +17,6 @@ pub const GATE_FAILURE_EXCERPT_MAX_LINES: usize = 60;
 /// Maximum bytes of output included in an excerpt.
 pub const GATE_FAILURE_EXCERPT_MAX_BYTES: usize = 4 * 1024;
 
-/// Lines that identify where a failure is reported in typical runner output.
-const FAILURE_MARKERS: &[&str] = &["FAIL", "✗", "ENOENT", "error", "Error", "ERROR", "panicked"];
-/// Context lines kept before and after each marker line.
-const CONTEXT_BEFORE: usize = 3;
-const CONTEXT_AFTER: usize = 6;
-
 /// The failure excerpt for a gate report, or `None` when the gate did not
 /// fail or its policy withholds detailed evidence.
 pub fn gate_failure_excerpt(report: &AgentTaskGateReport) -> Option<String> {
@@ -108,8 +102,18 @@ pub fn gate_failure_excerpt_from_value(gate: &Value) -> Option<String> {
         }
         return Some(homeboy_core::redaction::redact_string(&lines.join("\n")));
     }
-    if let Some(exit_code) = exit_code {
+    if let Some(signal) = gate.get("signal").and_then(Value::as_i64) {
+        lines.push(format!("signal: {signal}"));
+    } else if let Some(exit_code) = exit_code {
         lines.push(format!("exit code: {exit_code}"));
+    }
+    if matches!(
+        str_at(gate, "/termination"),
+        Some("timed_out" | "no_progress")
+    ) {
+        if let Some(summary) = str_at(gate, "/failure_evidence/summary") {
+            lines.push(summary.to_string());
+        }
     }
     if let Some(effective) = str_at(gate, "/cwd/effective") {
         match str_at(gate, "/cwd/requested").filter(|requested| *requested != effective) {
@@ -160,7 +164,7 @@ pub fn gate_failure_excerpt_from_value(gate: &Value) -> Option<String> {
         lines.push("output:".to_string());
         lines.push(output);
     }
-    let tail = bound_bytes(&text_tail(&format!("{stdout}\n{stderr}"), 12), 1024);
+    let tail = bound_tail_bytes(&text_tail(&format!("{stdout}\n{stderr}"), 12), 1024);
     if !tail.trim().is_empty() {
         lines.push(format!("output tail:\n{tail}"));
     }
@@ -195,8 +199,7 @@ fn failed_tests_excerpt(tests: &[Value]) -> String {
     out.join("\n")
 }
 
-/// The relevant lines of a failed command's combined stderr/stdout: the lines
-/// around failure markers when present, else the plain tail, bounded to
+/// The final lines of a failed command's combined stderr/stdout, bounded to
 /// [`GATE_FAILURE_EXCERPT_MAX_LINES`] lines and
 /// [`GATE_FAILURE_EXCERPT_MAX_BYTES`] bytes.
 pub fn failure_output_excerpt(stdout: &str, stderr: &str) -> String {
@@ -208,47 +211,18 @@ pub fn failure_output_excerpt(stdout: &str, stderr: &str) -> String {
     if combined.is_empty() {
         return String::new();
     }
-    let lines: Vec<&str> = combined.lines().collect();
-    let markers: Vec<usize> = lines
-        .iter()
-        .enumerate()
-        .filter(|(_, line)| FAILURE_MARKERS.iter().any(|marker| line.contains(marker)))
-        .map(|(index, _)| index)
-        .collect();
-    let excerpt = if markers.is_empty() {
-        text_tail(&combined, GATE_FAILURE_EXCERPT_MAX_LINES)
-    } else {
-        let mut selected = vec![false; lines.len()];
-        for index in &markers {
-            let start = index.saturating_sub(CONTEXT_BEFORE);
-            let end = (index + CONTEXT_AFTER + 1).min(lines.len());
-            selected[start..end]
-                .iter_mut()
-                .for_each(|line| *line = true);
-        }
-        let mut out = Vec::new();
-        let mut kept = 0;
-        let mut previous: Option<usize> = None;
-        for (index, line) in lines.iter().enumerate() {
-            if !selected[index] {
-                continue;
-            }
-            if kept == GATE_FAILURE_EXCERPT_MAX_LINES {
-                out.push("...".to_string());
-                break;
-            }
-            if previous.is_some_and(|previous| previous + 1 != index)
-                || (previous.is_none() && index > 0)
-            {
-                out.push("...".to_string());
-            }
-            out.push((*line).to_string());
-            kept += 1;
-            previous = Some(index);
-        }
-        out.join("\n")
-    };
-    bound_bytes(&excerpt, GATE_FAILURE_EXCERPT_MAX_BYTES)
+    bound_tail_bytes(
+        &text_tail(&combined, GATE_FAILURE_EXCERPT_MAX_LINES),
+        GATE_FAILURE_EXCERPT_MAX_BYTES,
+    )
+}
+
+fn bound_tail_bytes(text: &str, max: usize) -> String {
+    let mut start = text.len().saturating_sub(max);
+    while !text.is_char_boundary(start) {
+        start += 1;
+    }
+    text[start..].to_string()
 }
 
 fn bound_bytes(text: &str, max: usize) -> String {

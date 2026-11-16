@@ -830,6 +830,9 @@ pub struct AgentTaskGateReport {
     /// controller wall-clock or progress-deadline termination.
     #[serde(default)]
     pub termination: AgentTaskGateTermination,
+    /// Signal that terminated the gate process, when available.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub signal: Option<i32>,
     /// Adapter-owned terminal result for a declared test plan. Shell gates do
     /// not set this because their result is intentionally just process status.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -1668,6 +1671,7 @@ impl AgentTaskGateReport {
             invocation,
             exit_code,
             termination: AgentTaskGateTermination::Completed,
+            signal: None,
             test_execution_outcome: None,
             stdout,
             stderr: stderr.into(),
@@ -1729,6 +1733,7 @@ impl AgentTaskGateReport {
             invocation,
             exit_code: 0,
             termination: AgentTaskGateTermination::Completed,
+            signal: None,
             test_execution_outcome: None,
             stdout: String::new(),
             stderr: String::new(),
@@ -3066,6 +3071,11 @@ fn run_gate_argv_local(
     report.test_result = test_result;
     report.cargo_selection = cargo_selection;
     report.termination = termination;
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::ExitStatusExt;
+        report.signal = output.status.signal();
+    }
     report.test_execution_outcome = declared_plan.map(|_| match termination {
         AgentTaskGateTermination::Completed if exit_code == 0 => {
             homeboy_engine_primitives::test_execution::TestExecutionOutcome::Passed
@@ -10046,6 +10056,39 @@ mod tests {
         assert!(tails
             .iter()
             .all(|tail| tail == "private gate output withheld"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn gate_failure_evidence_retains_last_phase_and_exit_reason() {
+        let worktree = tempfile::tempdir().expect("worktree");
+        for command in [
+            "yes first-phase | head -c 100000; printf '\\n'; printf '%6000s' x; printf '\\n%s\\n' second-phase-marker; exit 3",
+            "kill -TERM $$",
+        ] {
+            let report = run_gate_command_with_supervision(
+                worktree.path(),
+                1,
+                command,
+                AgentTaskGateVisibility::Visible,
+                AgentTaskGateRevealPolicy::FullEvidence,
+                None,
+                None,
+                &AgentTaskGateEnvironmentPolicy::default(),
+                &[],
+            )
+            .expect("gate");
+            let evidence = failure_excerpt::gate_failure_excerpt(&report).expect("failure evidence");
+            if command.starts_with("yes") {
+                assert!(evidence.contains("second-phase-marker"), "{evidence}");
+                assert!(failure_excerpt::failure_output_excerpt(&report.stdout, &report.stderr)
+                    .contains("second-phase-marker"));
+                assert!(evidence.contains("exit code: 3"), "{evidence}");
+                assert_eq!(serde_json::to_value(&report).unwrap()["exit_code"], 3);
+            } else {
+                assert!(evidence.contains("signal: 15"), "{evidence}");
+            }
+        }
     }
 
     #[test]
