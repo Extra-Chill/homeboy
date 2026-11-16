@@ -3420,6 +3420,10 @@ impl LabStagingStageOperations for ProductionLabStagingOperations {
         lab_metadata["workspace_cleanliness"] = json!({
             "allow_dirty_lab_workspace": request.recipe.allow_dirty_lab_workspace,
         });
+        crate::lab::offload::attach_verified_cook_baseline(
+            &mut lab_metadata,
+            request.recipe.verified_cook_baseline.as_ref(),
+        );
         let mut projection =
             crate::lab::offload::workspace_stage::durable_workspace_stage_projection(&stage);
         projection["lab_dispatch_metadata"] = lab_metadata;

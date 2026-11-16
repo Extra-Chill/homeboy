@@ -746,6 +746,19 @@ pub(crate) struct LabWorkspaceMetadataInputs<'a> {
     pub(crate) extra_synced_workspaces: &'a [RunnerWorkspaceSyncOutput],
 }
 
+/// Carry the controller-verified Cook baseline evidence into the Lab dispatch
+/// record. The runner admits a synced derived baseline from this evidence alone.
+pub(crate) fn attach_verified_cook_baseline(
+    lab_metadata: &mut serde_json::Value,
+    verified_cook_baseline: Option<&serde_json::Value>,
+) {
+    if let Some(verified_cook_baseline) = verified_cook_baseline {
+        lab_metadata["source_provenance"] = serde_json::json!({
+            "verified_cook_baseline": verified_cook_baseline,
+        });
+    }
+}
+
 /// Add verification metadata without changing the registered path-materialization
 /// metadata shape consumed by existing dispatch clients.
 pub(crate) fn attach_lab_workspace_metadata(
