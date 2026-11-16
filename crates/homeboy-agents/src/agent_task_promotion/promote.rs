@@ -1263,7 +1263,7 @@ mod declared_base_tests {
                 "HTTPS_PROXY".to_string(),
                 "socks5://proxy.example.test:8080".to_string(),
             )],
-            Duration::from_secs(5),
+            Duration::from_secs(1),
         )
         .expect_err("transport failure");
 
@@ -1291,6 +1291,73 @@ mod declared_base_tests {
         assert!(!stderr.contains("git-user"));
         assert!(!error.details.to_string().contains("git-secret"));
         assert!(!error.message.contains("resolveing"));
+    }
+
+    /// A resolver outage outlasts a sub-second retry burst. The preflight keeps
+    /// retrying within its window, so the Cook resolves its base once DNS is
+    /// back instead of failing the terminal continuation.
+    #[cfg(unix)]
+    #[test]
+    fn declared_base_rides_out_a_resolver_outage() {
+        let origin = tempfile::tempdir().expect("origin");
+        git(origin.path(), &["init", "-b", "main"]);
+        git(
+            origin.path(),
+            &[
+                "-c",
+                "user.name=t",
+                "-c",
+                "user.email=t@t",
+                "commit",
+                "--allow-empty",
+                "-m",
+                "base",
+            ],
+        );
+        let repo = tempfile::tempdir().expect("repo");
+        git(repo.path(), &["init", "-b", "main"]);
+        git(
+            repo.path(),
+            &["remote", "add", "origin", origin.path().to_str().unwrap()],
+        );
+        let real_git = String::from_utf8(
+            Command::new("sh")
+                .args(["-c", "command -v git"])
+                .output()
+                .unwrap()
+                .stdout,
+        )
+        .unwrap();
+        let fixture_dir = tempfile::tempdir().expect("fixture directory");
+        let failures = fixture_dir.path().join("failures");
+        let git_bin = write_git_fixture(
+            fixture_dir.path(),
+            &format!(
+                "#!/bin/sh
+if [ \"$1\" = ls-remote ] && [ $(wc -c < {failures} 2>/dev/null || echo 0) -lt 3 ]; then printf x >> {failures}; echo \"fatal: unable to access 'https://github.com/acme/repo.git/': Could not resolve host: github.com\" >&2; exit 128; fi\nexec {real_git} \"$@\"\n",
+                failures = failures.display(),
+                real_git = real_git.trim(),
+            ),
+        );
+
+        let base = capture_declared_base_with_git_and_timeout(
+            repo.path(),
+            Some("main"),
+            git_bin.to_str().expect("utf8 fixture path"),
+            &[],
+            Duration::from_secs(2),
+        )
+        .expect("the base resolves once the resolver recovers")
+        .expect("declared base");
+
+        assert_eq!(std::fs::read_to_string(&failures).unwrap(), "xxx");
+        let head = Command::new("git")
+            .args(["rev-parse", "HEAD"])
+            .current_dir(origin.path())
+            .output()
+            .unwrap()
+            .stdout;
+        assert_eq!(base.sha, String::from_utf8(head).unwrap().trim());
     }
 
     /// A single `ls-remote` that exceeds its deadline is retried in place, so
@@ -4166,9 +4233,9 @@ fn phase_gerund(phase: &str) -> &'static str {
     }
 }
 
-/// A transient transport failure (deadline, spawn, supervision) is retried in
-/// place within the shared fetch budget, so one slow `ls-remote` does not end
-/// the Cook's terminal continuation and wait for an operator.
+/// A transient transport failure (deadline, spawn, supervision, resolver) is
+/// retried in place for up to three preflight deadlines, so a DNS or network
+/// blip does not end the Cook's terminal continuation and wait for an operator.
 fn run_declared_base_git(
     worktree_path: &Path,
     git: &str,
@@ -4181,7 +4248,7 @@ fn run_declared_base_git(
     // A completed command whose stderr names a transport failure is retried
     // too; when retries run out, callers still classify its final output.
     let mut transport_failure = None;
-    homeboy_core::worktree::convergence::retry_fetch(|| {
+    homeboy_core::worktree::convergence::retry_fetch_within(timeout * 3, || {
         let output = run_declared_base_git_once(
             worktree_path,
             git,
