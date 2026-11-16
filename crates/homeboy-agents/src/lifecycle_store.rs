@@ -2334,6 +2334,7 @@ pub(super) fn write_record_guarded(
     // The store owns the revision: whatever the caller carried, the committed
     // row is one past the stored one. SQL repeats the bump atomically.
     record.revision = stored_revision + 1;
+    record.refresh_terminal_outcome();
     if let Some(owner) =
         existing_metadata.pointer("/agent_task_run/metadata/client_context/caller_context")
     {
@@ -3156,8 +3157,9 @@ fn parse_record_from_run(run: &RunRecord) -> Result<AgentTaskRunRecord> {
 
 fn normalize_decoded_record(
     run: &RunRecord,
-    record: AgentTaskRunRecord,
+    mut record: AgentTaskRunRecord,
 ) -> Result<AgentTaskRunRecord> {
+    record.refresh_terminal_outcome();
     if let Some(problem) = record.lab_handoff_validation_error() {
         return Err(Error::internal_json(
             problem,
