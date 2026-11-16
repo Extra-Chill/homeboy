@@ -122,6 +122,8 @@ fn lab_gate_public_error(error: &Error, artifact_ref: String) -> Error {
     let mut details = serde_json::json!({
         "entry_path": error.details.get("entry_path"),
         "stage": error.details.get("stage"),
+        "attempts": error.details.get("attempts"),
+        "last_error": error.details.get("last_error"),
         "gate_disposition": error.details.get("gate_disposition"),
         "job_id": error.details.get("job_id"),
         "readiness_reasons": error.details.get("readiness_reasons"),
@@ -771,8 +773,10 @@ fn execute_owned(
         .context()
         .tmp_dir
         .join("received-gate-receipt.json");
-    crate::lab::offload::lab_runner_file_transfer(&request.runner_id)?
-        .download_file(&receipt_file, &receipt_path.display().to_string())?;
+    download_gate_receipt(|| {
+        crate::lab::offload::lab_runner_file_transfer(&request.runner_id)?
+            .download_file(&receipt_file, &receipt_path.display().to_string())
+    })?;
     let bytes = std::fs::read(&receipt_path)
         .map_err(|error| Error::internal_io(error.to_string(), None))?;
     if location.get("sha256").and_then(serde_json::Value::as_str)
@@ -906,6 +910,98 @@ fn execute_owned(
     )?;
     resource_run.finish(true);
     Ok(receipt)
+}
+
+/// Retry only transfer observation of an already-finished gate. Projection and
+/// authority checks are deliberately outside this budget: retries cannot fix them.
+pub(crate) fn download_gate_receipt(mut download: impl FnMut() -> Result<()>) -> Result<()> {
+    const MAX_ATTEMPTS: usize = 3;
+    for attempt in 1..=MAX_ATTEMPTS {
+        let Err(mut error) = download() else {
+            return Ok(());
+        };
+        let retryable = error.code == homeboy_core::ErrorCode::RunnerLabTransportFailure
+            && error.retryable == Some(true)
+            && error
+                .details
+                .get("stage")
+                .and_then(serde_json::Value::as_str)
+                != Some("terminal_projection");
+        if !retryable || attempt == MAX_ATTEMPTS {
+            let last_error = serde_json::json!({
+                "code": error.code.as_str(), "message": error.message, "details": error.details,
+            });
+            error.message = format!(
+                "Lab gate receipt download failed after {attempt} attempt(s): {}",
+                error.message
+            );
+            error.details["stage"] = serde_json::json!("download");
+            error.details["attempts"] = serde_json::json!(attempt);
+            error.details["last_error"] = last_error;
+            error.details["gate_disposition"] = serde_json::json!("unavailable");
+            return Err(error);
+        }
+        std::thread::sleep(std::time::Duration::from_millis(100 * attempt as u64));
+    }
+    unreachable!("download budget is nonzero")
+}
+
+#[cfg(test)]
+#[test]
+fn receipt_download_recovers_the_real_receipt_after_a_retryable_failure() {
+    use homeboy_agents::agent_tasks::gate::*;
+    let root = tempfile::tempdir().unwrap();
+    let report = run_gate_command_with_supervision(
+        root.path(),
+        1,
+        "printf real-receipt",
+        AgentTaskGateVisibility::Visible,
+        AgentTaskGateRevealPolicy::FullEvidence,
+        None,
+        None,
+        &AgentTaskGateEnvironmentPolicy::default(),
+        &[],
+    )
+    .unwrap();
+    let receipt = LabGateReceipt {
+        schema: "homeboy/lab-gate-receipt/v1".into(),
+        request_sha256: "request".into(),
+        candidate: homeboy_agents::agent_task_promotion::candidate_fingerprint(
+            &root.path().display().to_string(),
+        )
+        .unwrap(),
+        execution_context: serde_json::json!({}),
+        report,
+        readiness: None,
+        materialization: None,
+        artifact_ref: None,
+        setup: vec![],
+    };
+    let remote = root.path().join("runner-receipt.json");
+    let local = root.path().join("received.json");
+    std::fs::write(&remote, serde_json::to_vec(&receipt).unwrap()).unwrap();
+    let mut attempts = 0;
+    download_gate_receipt(|| {
+        attempts += 1;
+        if attempts == 1 {
+            return Err(Error::new(
+                homeboy_core::ErrorCode::RunnerLabTransportFailure,
+                "opaque transfer failure",
+                serde_json::json!({"operation":"download"}),
+            )
+            .with_retryable(true));
+        }
+        std::fs::copy(&remote, &local).unwrap();
+        Ok(())
+    })
+    .unwrap();
+    let received: LabGateReceipt =
+        decode_gate_json("gate_receipt", &std::fs::read(local).unwrap(), false).unwrap();
+    assert_eq!(attempts, 2);
+    assert_eq!(
+        serde_json::to_value(received).unwrap(),
+        serde_json::to_value(receipt).unwrap()
+    );
 }
 
 /// Observation alone never authorizes stopping a remote job. Only an explicit
