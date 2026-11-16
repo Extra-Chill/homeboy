@@ -4,6 +4,11 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.468.3] - 2026-11-16
+
+### Fixed
+- read a settled Cook's outcome from its selected attempt
+
 ## [0.468.2] - 2026-11-16
 
 ### Fixed
