@@ -16,6 +16,60 @@ use super::*;
 
 const INSTANCE: &str = "wf-golden";
 
+/// The fast downstream job must finish while its slow upstream sibling is
+/// still running. Compare the entire join against the ordinary barrier mode.
+#[test]
+fn foreach_per_item_pipelines_without_changing_join() {
+    fn run(per_item: bool) -> Value {
+        let definition = parse_definition(&json!({
+            "schema": "homeboy/workflow/v1", "id": "pipeline",
+            "steps": [
+                {"id": "up", "foreach": ["slow", "fast"],
+                 "exec": {"program": "echo", "args": ["{{item}}"]}},
+                {"id": "down", "needs": ["up"], "per_item": per_item,
+                 "foreach": "{{steps.up.items}}", "max_parallel": 1,
+                 "exec": {"program": "echo", "args": ["{{item.output}}"]}}
+            ]
+        }));
+        let initial = InstanceState::new(&definition, INSTANCE, BTreeMap::new());
+        let (mut state, _) = advance(&definition, &initial, &Event::Start, 0);
+        let finish = |state: &InstanceState, step: &str, index: usize, now| {
+            advance(
+                &definition,
+                state,
+                &Event::StepFinished(StepResult {
+                    key: state.steps[step].items[index].key.clone().unwrap(),
+                    status: FinishedStatus::Succeeded,
+                    outcome: None,
+                    error: None,
+                    output: Some(json!(format!("result-{index}"))),
+                    run_id: None,
+                }),
+                now,
+            )
+        };
+        (state, _) = finish(&state, "up", 1, 10);
+        if per_item {
+            assert_eq!(state.steps["up"].items[0].phase, StepPhase::Running);
+            assert_eq!(state.steps["down"].items[1].phase, StepPhase::Running);
+            (state, _) = finish(&state, "down", 1, 20);
+            assert_eq!(state.steps["down"].items[1].phase, StepPhase::Done);
+            assert_eq!(state.steps["up"].items[0].phase, StepPhase::Running);
+            assert_eq!(state.steps["down"].phase, StepPhase::Running);
+        } else {
+            assert_eq!(state.steps["down"].phase, StepPhase::Pending);
+        }
+        (state, _) = finish(&state, "up", 0, 100);
+        (state, _) = finish(&state, "down", 0, 110);
+        if !per_item {
+            (state, _) = finish(&state, "down", 1, 120);
+        }
+        assert_eq!(state.status, InstanceStatus::Succeeded);
+        state.steps["down"].output.clone().unwrap()
+    }
+    assert_eq!(run(true), run(false));
+}
+
 #[test]
 fn foreach_failure_keeps_item_error_and_first_failure_reason() {
     let definition = parse_definition(&json!({

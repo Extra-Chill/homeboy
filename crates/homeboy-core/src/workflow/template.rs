@@ -74,6 +74,13 @@ fn parse_reference(raw: &str) -> Result<Reference, String> {
                 if field == "run_id" {
                     return Ok(Reference::StepRunId(step.to_string()));
                 }
+                // Shorthand for the existing foreach join's item array.
+                if field == "items" {
+                    return Ok(Reference::StepOutput {
+                        step: step.to_string(),
+                        pointer: "/items".to_string(),
+                    });
+                }
                 if let Some(pointer) = field.strip_prefix("output") {
                     if pointer.is_empty() || pointer.starts_with('/') {
                         return Ok(Reference::StepOutput {

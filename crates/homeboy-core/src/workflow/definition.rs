@@ -164,6 +164,9 @@ pub struct StepDefinition {
     /// resolves to one (`"{{steps.prepare.output/children}}"`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub foreach: Option<Value>,
+    /// Admit each item as soon as its matching upstream foreach item settles.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub per_item: bool,
     /// The most items of a `foreach` step running at once (default: all).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub max_parallel: Option<u32>,
@@ -275,6 +278,24 @@ pub enum StepKind<'a> {
 }
 
 impl StepDefinition {
+    /// The sole upstream item array, when this step opts into pipelining.
+    pub(crate) fn per_item_source(&self) -> Option<String> {
+        if !self.per_item {
+            return None;
+        }
+        let text = self.foreach.as_ref()?.as_str()?.trim();
+        let inner = text.strip_prefix("{{")?.strip_suffix("}}")?;
+        let references = template::references(&format!("{{{{{inner}}}}}")).ok()?;
+        match references.as_slice() {
+            [Reference::StepOutput { step, pointer }]
+                if pointer == "/items" && !inner.contains(['{', '}']) =>
+            {
+                Some(step.clone())
+            }
+            _ => None,
+        }
+    }
+
     pub fn kind(&self) -> StepKind<'_> {
         match (&self.cook, &self.homeboy, &self.exec, &self.approval) {
             (Some(cook), None, None, None) => StepKind::Cook(cook),
@@ -517,6 +538,19 @@ impl WorkflowDefinition {
                     return Err(invalid(
                         &format!("{field}.foreach"),
                         "`foreach` is a JSON array or a template that resolves to one",
+                    ));
+                }
+            }
+            if step.per_item {
+                let source = step
+                    .per_item_source()
+                    .and_then(|id| self.step(&id).map(|s| (id, s)));
+                if !source.is_some_and(|(id, source)| {
+                    source.foreach.is_some() && step.needs.contains(&id)
+                }) {
+                    return Err(invalid(
+                        &format!("{field}.per_item"),
+                        "requires `foreach` to be exactly `{{steps.<id>.items}}` or `{{steps.<id>.output/items}}`, naming a foreach step in `needs`",
                     ));
                 }
             }
@@ -993,6 +1027,41 @@ mod tests {
                 error.message
             );
         }
+    }
+
+    #[test]
+    fn per_item_requires_a_direct_foreach_source_and_whole_item_array() {
+        let mut value = base();
+        value["steps"][0]["foreach"] = json!(["a", "b"]);
+        value["steps"][1]["per_item"] = json!(true);
+        for source in [
+            "{{steps.evaluate.items}}",
+            "{{steps.evaluate.output/items}}",
+        ] {
+            value["steps"][1]["foreach"] = json!(source);
+            let parsed = definition(value.clone()).unwrap();
+            assert!(parsed.steps[1].per_item);
+            assert_eq!(
+                parsed.steps[1].per_item_source().as_deref(),
+                Some("evaluate")
+            );
+            assert_eq!(
+                serde_json::to_value(parsed).unwrap()["steps"][1]["per_item"],
+                true
+            );
+        }
+        for source in [
+            json!(["a"]),
+            json!("{{steps.evaluate.output/children}}"),
+            json!("prefix {{steps.evaluate.items}}"),
+            Value::Null,
+        ] {
+            value["steps"][1]["foreach"] = source;
+            assert!(definition(value.clone()).is_err());
+        }
+        value["steps"][1]["foreach"] = json!("{{steps.evaluate.items}}");
+        value["steps"][0].as_object_mut().unwrap().remove("foreach");
+        assert!(definition(value).is_err());
     }
 
     #[test]

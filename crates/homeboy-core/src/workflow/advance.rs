@@ -449,6 +449,17 @@ impl TemplateValues for InstanceState {
     }
 }
 
+/// The item record used both for admission and for the unchanged join output.
+fn item_output(item: &ItemState) -> Value {
+    serde_json::json!({
+        "item": item.item,
+        "outcome": item.outcome,
+        "run_id": item.run_id,
+        "output": item.output,
+        "error": item.error,
+    })
+}
+
 impl Machine<'_> {
     fn step_definition(&self, id: &str) -> &StepDefinition {
         self.definition
@@ -589,20 +600,12 @@ impl Machine<'_> {
     /// Expand a `foreach` step into its items and start the first wave.
     fn expand(&mut self, id: &str) {
         let definition = self.step_definition(id).clone();
-        let items = match definition.foreach.as_ref().expect("foreach step") {
-            Value::Array(items) => Ok(items.clone()),
-            Value::String(text) => template::resolve_value(text, &self.state).and_then(|value| {
-                match value {
-                    Value::Array(items) => Ok(items),
-                    // A template that rendered JSON text is still an array.
-                    Value::String(text) => match serde_json::from_str(&text) {
-                        Ok(Value::Array(items)) => Ok(items),
-                        _ => Err(format!("`foreach` resolved to `{text}`, not an array")),
-                    },
-                    other => Err(format!("`foreach` resolved to `{other}`, not an array")),
-                }
-            }),
-            other => Err(format!("`foreach` is `{other}`, not an array")),
+        let items = if let Some(source) = definition.per_item_source() {
+            // Reserve stable indices now; the pump fills each value only after
+            // the corresponding source item has finished all its attempts.
+            Ok(vec![Value::Null; self.state.steps[&source].items.len()])
+        } else {
+            self.resolve_foreach(&definition)
         };
         match items {
             Err(error) => {
@@ -619,6 +622,24 @@ impl Machine<'_> {
                 step.items = items.into_iter().map(ItemState::pending).collect();
                 self.pump(id);
             }
+        }
+    }
+
+    fn resolve_foreach(&self, definition: &StepDefinition) -> Result<Vec<Value>, String> {
+        match definition.foreach.as_ref().expect("foreach step") {
+            Value::Array(items) => Ok(items.clone()),
+            Value::String(text) => template::resolve_value(text, &self.state).and_then(|value| {
+                match value {
+                    Value::Array(items) => Ok(items),
+                    // A template that rendered JSON text is still an array.
+                    Value::String(text) => match serde_json::from_str(&text) {
+                        Ok(Value::Array(items)) => Ok(items),
+                        _ => Err(format!("`foreach` resolved to `{text}`, not an array")),
+                    },
+                    other => Err(format!("`foreach` resolved to `{other}`, not an array")),
+                }
+            }),
+            other => Err(format!("`foreach` is `{other}`, not an array")),
         }
     }
 
@@ -642,9 +663,23 @@ impl Machine<'_> {
             let next = step
                 .items
                 .iter()
-                .position(|item| item.phase == StepPhase::Pending && item.attempt == 0);
+                .enumerate()
+                .find(|(index, item)| {
+                    item.phase == StepPhase::Pending
+                        && item.attempt == 0
+                        && definition.per_item_source().is_none_or(|source| {
+                            self.state.steps[&source].items[*index].phase == StepPhase::Done
+                        })
+                })
+                .map(|(index, _)| index);
             match next {
-                Some(index) if running < limit => self.launch_item(id, index, None),
+                Some(index) if running < limit => {
+                    if let Some(source) = definition.per_item_source() {
+                        self.step(id).items[index].item =
+                            item_output(&self.state.steps[&source].items[index]);
+                    }
+                    self.launch_item(id, index, None);
+                }
                 _ => break,
             }
         }
@@ -670,13 +705,7 @@ impl Machine<'_> {
             "total": total,
             "succeeded": succeeded,
             "join": join,
-            "items": step.items.iter().map(|item| serde_json::json!({
-                "item": item.item,
-                "outcome": item.outcome,
-                "run_id": item.run_id,
-                "output": item.output,
-                "error": item.error,
-            })).collect::<Vec<_>>(),
+            "items": step.items.iter().map(item_output).collect::<Vec<_>>(),
         });
         self.step(id).output = Some(output);
         self.settle(id, outcome.to_string());
@@ -969,9 +998,17 @@ impl Machine<'_> {
                 if self.state.steps[id].phase != StepPhase::Pending {
                     continue;
                 }
+                let source = definition.per_item_source();
+                if let Some(source) = &source {
+                    let upstream = &self.state.steps[source];
+                    if upstream.phase == StepPhase::Pending {
+                        continue;
+                    }
+                }
                 let needs = definition
                     .needs
                     .iter()
+                    .filter(|need| source.as_ref() != Some(*need))
                     .map(|need| &self.state.steps[need])
                     .collect::<Vec<_>>();
                 if !needs.iter().all(|need| need.settled()) {
@@ -979,15 +1016,35 @@ impl Machine<'_> {
                 }
                 // Rejection is not an instance failure. An explicit passing gate
                 // that reads the rejected dependency can route its feedback.
-                let needs_succeeded = needs.iter().zip(&definition.needs).all(|(need, name)| {
-                    need.succeeded()
-                        || (need.outcome.as_deref() == Some("rejected")
-                            && definition
-                                .when
-                                .as_ref()
-                                .is_some_and(|gate| gate.matches_rejection(name, &self.state)))
+                let needs_succeeded = needs
+                    .iter()
+                    .zip(
+                        definition
+                            .needs
+                            .iter()
+                            .filter(|need| source.as_ref() != Some(*need)),
+                    )
+                    .all(|(need, name)| {
+                        need.succeeded()
+                            || (need.outcome.as_deref() == Some("rejected")
+                                && definition
+                                    .when
+                                    .as_ref()
+                                    .is_some_and(|gate| gate.matches_rejection(name, &self.state)))
+                    });
+                // A per-item dependency is an admission gate, not a success
+                // gate: failed source items are records too. A source that
+                // never expanded (skipped or failed to resolve) still blocks
+                // its dependents under the usual dependency rules.
+                let source_unavailable = source.as_ref().is_some_and(|source| {
+                    let step = &self.state.steps[source];
+                    step.settled() && !step.succeeded() && step.items.is_empty()
                 });
-                if (!needs_succeeded || self.state.failing) && !definition.always {
+                if (!needs_succeeded
+                    || source_unavailable
+                    || (self.state.failing && source.is_none()))
+                    && !definition.always
+                {
                     self.skip(id);
                     changed = true;
                     continue;
