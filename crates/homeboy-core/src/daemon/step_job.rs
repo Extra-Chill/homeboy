@@ -54,8 +54,8 @@ pub const LOCAL_COOK_SUPERVISOR_JOB_ID_ENV: &str = "HOMEBOY_LOCAL_COOK_SUPERVISO
 pub const STEP_JOB_STORE_ENV: &str = "HOMEBOY_STEP_JOB_STORE";
 /// Combined stdout/stderr of the child, below the job's artifact directory.
 pub const STEP_LOG_FILE: &str = "step.log";
-/// The observed exit of a child this daemon reaped, below the job's artifact
-/// directory. Absent when the child was re-adopted after a daemon restart.
+/// The exit status atomically recorded by the child wrapper, including when
+/// its supervising daemon has restarted.
 pub const STEP_EXIT_FILE: &str = "exit.json";
 
 const WAIT_POLL: Duration = Duration::from_millis(250);
@@ -467,7 +467,7 @@ pub fn step_job_dir(job_id: &str) -> Result<PathBuf> {
         .join(crate::paths::sanitize_path_segment(job_id)))
 }
 
-/// The exit code a daemon recorded for a step child it reaped, if any.
+/// The exit code recorded by a step's child wrapper, if any.
 pub fn recorded_step_exit_code(job_id: &str) -> Option<i32> {
     let bytes = std::fs::read(step_job_dir(job_id).ok()?.join(STEP_EXIT_FILE)).ok()?;
     let value: Value = serde_json::from_slice(&bytes).ok()?;
@@ -781,9 +781,8 @@ fn run_step(mut checkpoint: StepJobCheckpoint, job: &ControllerJobHandle) -> Res
     checkpoint.phase = StepPhase::Spawning;
     job.checkpoint(to_value(&checkpoint)?)?;
 
-    let mut command = Command::new(&request.program);
+    let mut command = step_command(&request, &dir);
     command
-        .args(&request.args)
         .current_dir(&request.cwd)
         .env_clear()
         .envs(&request.env.public_env)
@@ -811,15 +810,19 @@ fn run_step(mut checkpoint: StepJobCheckpoint, job: &ControllerJobHandle) -> Res
             "cpu_affinity": { "cpus": cpus, "slot": capacity_permit.as_ref().map(|permit| permit.slot()), "concurrency_limit": limit },
         }))?;
     }
-    let process = command.spawn().map_err(|error| {
-        let mut error = Error::internal_io(
-            error.to_string(),
-            Some(format!("spawn step program {}", request.program)),
-        );
-        error.details["classification"] = serde_json::json!("detached_launch_failed");
-        write_launch_error(&log_path, &error);
-        error
-    })?;
+    // Preserve launch errors for a missing program rather than launching a
+    // wrapper that can only report shell status 127.
+    let process = std::fs::metadata(&request.program)
+        .and_then(|_| command.spawn())
+        .map_err(|error| {
+            let mut error = Error::internal_io(
+                error.to_string(),
+                Some(format!("spawn step program {}", request.program)),
+            );
+            error.details["classification"] = serde_json::json!("detached_launch_failed");
+            write_launch_error(&log_path, &error);
+            error
+        })?;
     let mut process = crate::child_reaper::ReapingChild::from(process);
     // Capture the start identity while the child is still unreaped.
     let start_identity = match crate::process::process_start_identity(process.id()) {
@@ -869,7 +872,6 @@ fn run_step(mut checkpoint: StepJobCheckpoint, job: &ControllerJobHandle) -> Res
         }
     }
     checkpoint.phase = StepPhase::Exited;
-    write_exit_record(&dir, &checkpoint);
     job.checkpoint(to_value(&checkpoint)?)?;
     job.progress(checkpoint.progress())?;
     finish(&job_id, checkpoint)
@@ -877,7 +879,8 @@ fn run_step(mut checkpoint: StepJobCheckpoint, job: &ControllerJobHandle) -> Res
 
 fn finish(job_id: &str, checkpoint: StepJobCheckpoint) -> Result<Value> {
     match checkpoint.exit_code {
-        Some(code) if code != 0 => {
+        Some(0) => Ok(checkpoint.result()),
+        Some(code) => {
             let cause = step_job_dir(job_id)
                 .ok()
                 .and_then(|dir| std::fs::read_to_string(dir.join(STEP_LOG_FILE)).ok())
@@ -889,7 +892,11 @@ fn finish(job_id: &str, checkpoint: StepJobCheckpoint) -> Result<Value> {
             error.details["exit_code"] = json!(code);
             Err(error)
         }
-        _ => Ok(checkpoint.result()),
+        None => {
+            let mut error = Error::internal_unexpected("step child exit status is unknown");
+            error.details["step_outcome"] = json!("exit_status_unknown");
+            Err(error)
+        }
     }
 }
 
@@ -1134,16 +1141,20 @@ fn stop_child_tree(child: &StepChild) -> Result<()> {
     }
 }
 
-fn write_exit_record(dir: &Path, checkpoint: &StepJobCheckpoint) {
-    let record = json!({
-        "schema": STEP_EXIT_SCHEMA,
-        "exit_code": checkpoint.exit_code,
-        "observed_at": chrono::Utc::now().to_rfc3339(),
-    });
-    let _ = std::fs::write(
-        dir.join(STEP_EXIT_FILE),
-        serde_json::to_vec(&record).unwrap_or_default(),
-    );
+/// The wrapper survives the daemon and publishes the status before it exits.
+/// Pass paths and argv as arguments, never interpolate them into shell source.
+fn step_command(request: &StepJobRequest, dir: &Path) -> Command {
+    let mut command = Command::new("/bin/sh");
+    command
+        .arg("-c")
+        .arg(format!(
+            "record=$1; shift; \"$@\"; code=$?; printf '{{\"schema\":\"{STEP_EXIT_SCHEMA}\",\"exit_code\":%s}}\\n' \"$code\" > \"$record.tmp\" && /bin/mv -f \"$record.tmp\" \"$record\"; exit \"$code\""
+        ))
+        .arg("sh")
+        .arg(dir.join(STEP_EXIT_FILE))
+        .arg(&request.program)
+        .args(&request.args);
+    command
 }
 
 pub(crate) fn terminal_delivery(
@@ -1865,7 +1876,9 @@ mod tests {
             .unwrap();
             // Spawn the child the way the driver does, then record it as the
             // checkpoint a daemon would have published before it died.
-            let mut process = Command::new("/bin/sh").args(&request.args).spawn().unwrap();
+            let dir = step_job_dir(&harness.handle().job_id()).unwrap();
+            std::fs::create_dir_all(&dir).unwrap();
+            let mut process = step_command(&request, &dir).spawn().unwrap();
             let child = StepChild {
                 pid: process.id(),
                 start_identity: crate::process::process_start_identity(process.id())
@@ -1897,6 +1910,62 @@ mod tests {
                 std::fs::read_to_string(&counter).unwrap().lines().count(),
                 1,
                 "re-adoption must not spawn the child again"
+            );
+        });
+    }
+
+    #[test]
+    fn re_adopted_child_nonzero_exit_fails_with_its_cause() {
+        with_isolated_home(|home| {
+            let path = home.path().join("step-jobs.sqlite");
+            let request = request(
+                "sleep 1; echo 'adopted child crashed' >&2; exit 1",
+                EnvMaterializationPlan::default(),
+            );
+            register_step_job_driver();
+            let harness = ControllerJobHarness::durable(
+                Arc::new(StepJobDriver),
+                to_value(&request).unwrap(),
+                &path,
+                "original-lease",
+            )
+            .unwrap();
+            let job_id = harness.handle().job_id();
+            let dir = step_job_dir(&job_id).unwrap();
+            std::fs::create_dir_all(&dir).unwrap();
+            let log = std::fs::File::create(dir.join(STEP_LOG_FILE)).unwrap();
+            let mut process = step_command(&request, &dir)
+                .stdout(Stdio::from(log.try_clone().unwrap()))
+                .stderr(Stdio::from(log))
+                .spawn()
+                .unwrap();
+            let mut checkpoint = StepJobCheckpoint::waiting(request);
+            checkpoint.phase = StepPhase::Running;
+            checkpoint.child = Some(StepChild {
+                pid: process.id(),
+                start_identity: crate::process::process_start_identity(process.id())
+                    .unwrap()
+                    .unwrap(),
+            });
+            harness
+                .handle()
+                .checkpoint(to_value(&checkpoint).unwrap())
+                .unwrap();
+            let restarted = harness.reopen(&path, "replacement-lease").unwrap();
+            let reaper = std::thread::spawn(move || process.wait());
+            restarted.recover_after_restart();
+            let job = restarted.wait_until_terminal().unwrap();
+            reaper.join().unwrap().unwrap();
+            assert_eq!(job.status, crate::api_jobs::JobStatus::Failed);
+            assert_eq!(recorded_step_exit_code(&job_id), Some(1));
+            let pending = restarted
+                .store()
+                .pending_step_terminal_deliveries()
+                .unwrap();
+            let error = pending[0].error.as_ref().expect("step error");
+            assert_eq!(
+                error["message"].as_str(),
+                Some("step child exited with status 1: adopted child crashed")
             );
         });
     }
