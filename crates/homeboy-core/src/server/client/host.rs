@@ -31,8 +31,8 @@ pub fn server_host_resolves_only_to_loopback(host: &str, port: u16) -> Result<bo
 /// the configured host alias. ProxyJump and ProxyCommand always make the
 /// transport remote, even when the final hostname resolves to loopback.
 pub fn server_uses_loopback_transport(server: &Server) -> Result<bool, String> {
-    let mut command = std::process::Command::new("ssh");
-    command.arg("-G").args(ssh_args::server_option_args(
+    let mut args = vec!["-G".to_string()];
+    args.extend(ssh_args::server_option_args(
         server,
         ssh_args::SshArgOptions {
             disable_multiplexing: true,
@@ -40,20 +40,47 @@ pub fn server_uses_loopback_transport(server: &Server) -> Result<bool, String> {
             ..ssh_args::SshArgOptions::default()
         },
     ));
-    command.arg(format!("{}@{}", server.user, server.host));
-    let output = command
-        .output()
-        .map_err(|error| format!("expand SSH configuration: {error}"))?;
-    if !output.status.success() {
-        return Err(format!(
-            "expand SSH configuration: {}",
-            String::from_utf8_lossy(&output.stderr).trim()
-        ));
+    args.push(format!("{}@{}", server.user, server.host));
+    probe_loopback_transport(args.clone(), || {
+        let output = std::process::Command::new("ssh")
+            .args(&args)
+            .output()
+            .map_err(|error| format!("expand SSH configuration: {error}"))?;
+        if !output.status.success() {
+            return Err(format!(
+                "expand SSH configuration: {}",
+                String::from_utf8_lossy(&output.stderr).trim()
+            ));
+        }
+        server_uses_loopback_transport_from_ssh_config(
+            &String::from_utf8_lossy(&output.stdout),
+            |host, port| server_host_resolves_only_to_loopback(host, port),
+        )
+    })
+}
+
+pub(crate) fn probe_loopback_transport(
+    args: Vec<String>,
+    probe: impl FnOnce() -> Result<bool, String>,
+) -> Result<bool, String> {
+    // Key exactly the ssh -G argv, without reading configuration or identity files.
+    static CACHE: std::sync::OnceLock<
+        std::sync::Mutex<std::collections::HashMap<Vec<String>, bool>>,
+    > = std::sync::OnceLock::new();
+    let cache = CACHE.get_or_init(Default::default);
+    if let Some(value) = cache
+        .lock()
+        .unwrap_or_else(|error| error.into_inner())
+        .get(&args)
+    {
+        return Ok(*value);
     }
-    server_uses_loopback_transport_from_ssh_config(
-        &String::from_utf8_lossy(&output.stdout),
-        |host, port| server_host_resolves_only_to_loopback(host, port),
-    )
+    let value = probe()?;
+    cache
+        .lock()
+        .unwrap_or_else(|error| error.into_inner())
+        .insert(args, value);
+    Ok(value)
 }
 
 fn server_uses_loopback_transport_from_ssh_config(
@@ -271,6 +298,21 @@ mod tests {
         ssh_auth_failure, ssh_host_key_rejected, ssh_transport_unreachable, SshAuthFailure,
     };
     use std::net::{IpAddr, Ipv4Addr};
+
+    #[test]
+    fn loopback_probe_cache_keeps_successes_only() {
+        let args = vec![format!("cache-test-{}", uuid::Uuid::new_v4())];
+        use super::probe_loopback_transport as probe;
+        assert!(probe(args.clone(), || Err("transient probe failure".into())).is_err());
+        assert_eq!(probe(args.clone(), || Ok(false)), Ok(false));
+        assert_eq!(
+            probe(args.clone(), || Err("must use cached success".into())),
+            Ok(false)
+        );
+        let mut changed = args;
+        changed.push("different-port".into());
+        assert_eq!(probe(changed, || Ok(true)), Ok(true));
+    }
 
     #[test]
     fn a_remaining_interactive_factor_is_not_a_rejected_credential() {
