@@ -1778,6 +1778,8 @@ mod tests {
         });
     }
 
+    /// A non-zero provider install exit fails hydration before the executor
+    /// starts, classified as workspace setup.
     #[test]
     fn hydration_failure_fails_before_executor() {
         crate::test_support::with_isolated_home(|_| {
