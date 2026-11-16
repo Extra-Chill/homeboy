@@ -4,6 +4,12 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.466.1] - 2026-11-16
+
+### Fixed
+- pressure-refused execution steps wait in the daemon admission queue
+- recover stranded Lab staging-dispatch jobs after a restart
+
 ## [0.466.0] - 2026-11-16
 
 ### Added
