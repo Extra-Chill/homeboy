@@ -5169,10 +5169,14 @@ struct CollectedDiagnostic {
 /// Lower number = higher priority. Explicit provider-contract failures must
 /// precede an otherwise successful provider-process observation: the latter
 /// describes the wrapper, not why the task failed.
-fn diagnostic_priority(item: &CollectedDiagnostic) -> (u8, u8) {
+fn diagnostic_priority(item: &CollectedDiagnostic) -> (u8, u8, u8) {
+    // The recorded delivery blocker and review form are the run's own verdict.
+    // Text-matched heuristics below (including untrusted stream output that
+    // happens to say "valid" or "schema") can never outrank them.
+    let recorded_verdict = item.source == "current_lifecycle" || item.source == "review_form";
     let class = item.class.to_ascii_lowercase();
     let text = format!("{} {}", item.class, item.message).to_ascii_lowercase();
-    let priority = if item.source == "current_lifecycle" || item.source == "review_form" {
+    let priority = if recorded_verdict {
         0
     } else if class == "agent_task.provider_liveness_timeout" {
         // The typed lifecycle timeout is authoritative. An unparsed provider
@@ -5229,7 +5233,11 @@ fn diagnostic_priority(item: &CollectedDiagnostic) -> (u8, u8) {
     };
     // Stream provenance is causal only among equally actionable diagnostics;
     // it must not hide a stronger typed validation or fatal failure.
-    (priority, u8::from(item.source != "hydrated_process_stream"))
+    (
+        u8::from(!recorded_verdict),
+        priority,
+        u8::from(item.source != "hydrated_process_stream"),
+    )
 }
 
 /// Process streams are untrusted wrapper output. When a stream is JSON, its
@@ -7013,6 +7021,28 @@ mod tests {
             collected_diagnostic_value(diagnostics[0].clone())["details"]["canonical_path"],
             "/Users/chubes/Developer/homeboy@fix-11827"
         );
+    }
+
+    #[test]
+    fn recorded_gate_failure_outranks_process_stream_text() {
+        let diagnostics = ranked_diagnostics(vec![
+            CollectedDiagnostic {
+                task_id: "cook".to_string(),
+                class: "provider.process_stream".to_string(),
+                message: "Verifying lock file contents can be installed on current platform; validating schema".to_string(),
+                source: "hydrated_process_stream".to_string(),
+                data: Value::Null,
+            },
+            CollectedDiagnostic {
+                task_id: "promotion".to_string(),
+                class: "agent_task.promotion_gate_failed".to_string(),
+                message: "deterministic gate `gate-2` failed".to_string(),
+                source: "current_lifecycle".to_string(),
+                data: Value::Null,
+            },
+        ]);
+
+        assert_eq!(diagnostics[0].class, "agent_task.promotion_gate_failed");
     }
 
     #[test]
