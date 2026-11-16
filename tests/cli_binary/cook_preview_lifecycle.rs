@@ -19,7 +19,13 @@ fn cook_submissions_refuse_gates_that_fail_preflight() {
                 repo.to_str().unwrap(),
             ],
         );
-        let path = super::fake_pi::install(home.path(), "test model");
+        // The gate runs `homeboy`, so the submission must find this build on PATH.
+        let path = std::env::join_paths(
+            std::iter::once(homeboy_bin().parent().unwrap().to_path_buf()).chain(
+                std::env::split_paths(&super::fake_pi::install(home.path(), "test model")),
+            ),
+        )
+        .unwrap();
         let mut command = Command::new(homeboy_bin());
         command
             .current_dir(&repo)
