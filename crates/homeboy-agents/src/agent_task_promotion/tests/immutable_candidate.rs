@@ -367,6 +367,120 @@ fn gate_feedback_onto_a_clean_base_destination_applies_the_new_candidate() {
 }
 
 #[test]
+fn gate_feedback_applies_after_a_failed_gate_restores_its_workspace() {
+    for preexisting_user_file in [false, true] {
+        fixture(|repo, candidate, store| {
+            let mut provider = FakePromotionWorkspaceProvider {
+                run_verify_command: true,
+                workspace_path: Some(repo.into()),
+                ..Default::default()
+            };
+            let mut first = request(repo, Some(candidate.clone()));
+            first.gates.verify = vec![
+            "printf 'gate output\\n' > base; rm provider; printf 'generated\\n' > gate-created; exit 1".into(),
+        ];
+            let failed = promote_with_provider_and_checkpoint_in_observation_store(
+                first,
+                &mut provider,
+                &mut |_| Ok(()),
+                store,
+            )
+            .unwrap();
+            assert!(failed.status.gate_failed());
+            assert_eq!(
+                std::fs::read_to_string(repo.join("base")).unwrap(),
+                "base\n"
+            );
+            assert_eq!(
+                std::fs::read_to_string(repo.join("provider")).unwrap(),
+                "committed\n"
+            );
+            assert!(!repo.join("gate-created").exists());
+            if preexisting_user_file {
+                std::fs::write(repo.join("user-file"), "user bytes\n").unwrap();
+            } else {
+                crate::agent_task_candidate_tree::validate_immutable_candidate_tree(
+                    repo,
+                    &candidate.candidate_sha,
+                )
+                .unwrap();
+            }
+
+            // Build the feedback candidate without disturbing the staged first attempt.
+            let index = homeboy_core::git::private_index(repo).unwrap();
+            let env = vec![("GIT_INDEX_FILE".into(), index.path().display().to_string())];
+            homeboy_core::git::run_git_with_env(
+                repo,
+                &["read-tree", &candidate.tree_sha],
+                "feedback tree",
+                &env,
+            )
+            .unwrap();
+            homeboy_core::git::run_git_with_env(
+                repo,
+                &["update-index", "--force-remove", "dirty"],
+                "feedback edit",
+                &env,
+            )
+            .unwrap();
+            let tree =
+                homeboy_core::git::run_git_with_env(repo, &["write-tree"], "feedback tree", &env)
+                    .unwrap()
+                    .trim()
+                    .to_string();
+            let sha = homeboy_core::git::run_git(
+                repo,
+                &[
+                    "commit-tree",
+                    &tree,
+                    "-p",
+                    &candidate.candidate_sha,
+                    "-m",
+                    "feedback",
+                ],
+                "feedback commit",
+            )
+            .unwrap()
+            .trim()
+            .to_string();
+            let mut retry = request(
+                repo,
+                Some(AgentTaskCandidate {
+                    base_sha: candidate.base_sha.clone(),
+                    candidate_sha: sha,
+                    tree_sha: tree,
+                }),
+            );
+            let mut source: Value = serde_json::from_str(&retry.source).unwrap();
+            source["metadata"]["gate_feedback_baseline"] = json!({"candidate_commit": candidate});
+            retry.source = source.to_string();
+            let result = promote_with_provider_and_checkpoint_in_observation_store(
+                retry,
+                &mut provider,
+                &mut |_| Ok(()),
+                store,
+            );
+            if preexisting_user_file {
+                assert!(result
+                    .unwrap_err()
+                    .to_string()
+                    .contains("candidate worktree differs"));
+                assert_eq!(
+                    std::fs::read_to_string(repo.join("user-file")).unwrap(),
+                    "user bytes\n"
+                );
+            } else {
+                assert_eq!(
+                    result.unwrap().status,
+                    super::super::AgentTaskPromotionStatus::Applied
+                );
+                assert!(!repo.join("dirty").exists());
+            }
+        });
+    }
+}
+
+#[test]
 fn recorded_tree_mismatch_is_a_typed_error_before_destination_mutation() {
     fixture(|repo, mut candidate, store| {
         candidate.tree_sha = git_head(repo, "HEAD^{tree}");
