@@ -316,10 +316,6 @@ pub(crate) fn converge_service_binaries_for_entries_with(
     let mut converged = Vec::new();
     let mut not_converged = Vec::new();
     for entry in updated.into_iter().chain(skipped) {
-        if entry.deferred {
-            converged.push(entry);
-            continue;
-        }
         let entry = match runners
             .iter()
             .find(|runner| runner.id == entry.runner_id && runner.kind == RunnerKind::Ssh)
@@ -440,7 +436,6 @@ mod tests {
             homeboy_path: "/home/u/Developer/_homeboy_binaries/homeboy-new/homeboy".to_string(),
             success: true,
             upgraded: true,
-            deferred: false,
             previous_version: Some("0.417.14".to_string()),
             new_version: Some(version.to_string()),
             bare_homeboy_version: None,

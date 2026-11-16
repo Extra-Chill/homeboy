@@ -434,8 +434,6 @@ pub enum RunnerBinaryConvergenceStatus {
     Converged,
     /// The configured binary already runs the controller's release version.
     AlreadyCurrent,
-    /// The daemon has active jobs; a later convergence installs the release.
-    PendingActiveJobs,
     /// The controller is not a published release build.
     SkippedDevBuild,
     /// The configured binary is newer than the controller; never downgraded.
@@ -457,9 +455,6 @@ pub struct RunnerBinaryConvergence {
     pub to: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub detail: Option<String>,
-    /// Active daemon jobs that hold convergence pending.
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub blocking_job_ids: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize)]

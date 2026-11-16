@@ -490,11 +490,11 @@ recorded host, not a missing Homeboy install.
 
 A plain `runner connect` (no recovery flags) first converges the runner's
 configured Homeboy binary on the controller's release and reports the outcome in
-`binary_convergence` (`converged`, `already_current`, `pending_active_jobs` with
-`blocking_job_ids`, `skipped_dev_build`, `skipped_remote_newer`,
+`binary_convergence` (`converged`, `already_current`,
+`skipped_dev_build`, `skipped_remote_newer`,
 `skipped_unverifiable`, or `failed` with `detail`). It never downgrades, never
-interrupts active jobs, and a failed install still connects with the existing
-binary. See [Binary Convergence](../architecture/runner-connection.md#binary-convergence). A numeric DHCP address is not
+interrupts active jobs (the in-place refresh re-adopts them), and a failed install
+still connects with the existing binary. See [Binary Convergence](../architecture/runner-connection.md#binary-convergence). A numeric DHCP address is not
 stable: set a stable hostname or a DHCP reservation with `homeboy server set`,
 then reconnect. Host key verification stays on. See
 [Unreachable recorded host](../architecture/runner-connection.md#unreachable-recorded-host).

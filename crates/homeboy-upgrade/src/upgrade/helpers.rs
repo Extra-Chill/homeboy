@@ -546,9 +546,6 @@ fn run_controller_upgrade_with_operation(
                             RunnerConvergenceDisposition::NoRunnersConfigured => {
                                 "Already at latest version; no configured runners".to_string()
                             }
-                            RunnerConvergenceDisposition::Deferred => {
-                                "Already at latest version; busy runners deferred".to_string()
-                            }
                             RunnerConvergenceDisposition::Converged => {
                                 "Already at latest version; configured runners converged"
                                     .to_string()
@@ -567,7 +564,6 @@ fn run_controller_upgrade_with_operation(
                 extension_skips,
                 runners_updated,
                 runners_skipped,
-                runners_deferred: Vec::new(),
                 // No binary swap happened, so resident services already run the
                 // current binary and need no restart.
                 daemon_pending_restart: None,
@@ -998,7 +994,6 @@ fn run_controller_upgrade_with_operation(
                 extension_skips,
                 runners_updated,
                 runners_skipped,
-                runners_deferred: Vec::new(),
                 services_restarted,
                 services_pending_restart,
                 operation_id: None,
@@ -1053,7 +1048,6 @@ fn source_upgrade_noop_result(
         extension_skips: Vec::new(),
         runners_updated: Vec::new(),
         runners_skipped: Vec::new(),
-        runners_deferred: Vec::new(),
         extensions_unrefreshed: Vec::new(),
         services_restarted: Vec::new(),
         services_pending_restart: Vec::new(),
@@ -1119,7 +1113,6 @@ fn runner_preflight_failure_result(
         extension_skips: Vec::new(),
         runners_updated: Vec::new(),
         runners_skipped,
-        runners_deferred: Vec::new(),
         extensions_unrefreshed: Vec::new(),
         services_restarted: Vec::new(),
         services_pending_restart: Vec::new(),
@@ -1180,7 +1173,6 @@ fn extension_preflight_failure_result(
         extension_skips: Vec::new(),
         runners_updated: Vec::new(),
         runners_skipped: Vec::new(),
-        runners_deferred: Vec::new(),
         extensions_unrefreshed: Vec::new(),
         services_restarted: Vec::new(),
         services_pending_restart: Vec::new(),
@@ -1612,7 +1604,6 @@ fn run_targeted_runner_upgrade(
         extension_skips: Vec::new(),
         runners_updated,
         runners_skipped,
-        runners_deferred: Vec::new(),
         extensions_unrefreshed: Vec::new(),
         services_restarted: Vec::new(),
         services_pending_restart: Vec::new(),
@@ -1787,7 +1778,6 @@ fn runner_component_status(
     }
     let status = match disposition {
         RunnerConvergenceDisposition::Converged => "converged",
-        RunnerConvergenceDisposition::Deferred => "deferred",
         RunnerConvergenceDisposition::Partial => "partial",
         RunnerConvergenceDisposition::Skipped => "skipped",
         RunnerConvergenceDisposition::NoRunnersConfigured => "not_configured",
@@ -1795,9 +1785,8 @@ fn runner_component_status(
     component_status(
         status,
         &format!(
-            "{} converged, {} deferred, {} require repair",
-            updated.iter().filter(|runner| !runner.deferred).count(),
-            updated.iter().filter(|runner| runner.deferred).count(),
+            "{} converged, {} require repair",
+            updated.len(),
             skipped.len()
         ),
     )
@@ -1808,15 +1797,11 @@ fn runner_convergence_failed(
     skipped: &[RunnerUpgradeEntry],
     controller_version: Option<&str>,
 ) -> bool {
-    updated
-        .iter()
-        .chain(skipped)
-        .filter(|runner| !runner.deferred)
-        .any(|runner| {
-            !runner.success
-                || controller_version
-                    .is_some_and(|version| runner.new_version.as_deref() != Some(version))
-        })
+    updated.iter().chain(skipped).any(|runner| {
+        !runner.success
+            || controller_version
+                .is_some_and(|version| runner.new_version.as_deref() != Some(version))
+    })
 }
 
 /// Classify runner convergence from intent (`--skip-runners`) and evidence.
@@ -1838,9 +1823,6 @@ fn runner_convergence_disposition(
     }
     if updated.is_empty() && skipped.is_empty() {
         return RunnerConvergenceDisposition::NoRunnersConfigured;
-    }
-    if updated.iter().any(|runner| runner.deferred) {
-        return RunnerConvergenceDisposition::Deferred;
     }
     RunnerConvergenceDisposition::Converged
 }
@@ -1882,7 +1864,6 @@ fn upgrade_message(
         let runner_clause = match disposition {
             RunnerConvergenceDisposition::Skipped => "runner convergence skipped",
             RunnerConvergenceDisposition::NoRunnersConfigured => "no configured runners",
-            RunnerConvergenceDisposition::Deferred => "busy runners deferred",
             _ => "configured runners converged",
         };
         format!("Controller upgraded to {controller}{identity}; {runner_clause}")
@@ -2332,19 +2313,10 @@ fn controller_replacement_required_after_discovery(
     !source_noop && controller_replacement_proceeds(deliberate, source_decision, update_available)
 }
 
-fn split_deferred_runners(result: &mut UpgradeResult) {
-    let (deferred, updated) = std::mem::take(&mut result.runners_updated)
-        .into_iter()
-        .partition(|runner| runner.deferred);
-    result.runners_updated = updated;
-    result.runners_deferred = deferred;
-}
-
 fn complete_upgrade_operation(
     mut operation: UpgradeOperation,
     mut result: UpgradeResult,
 ) -> Result<UpgradeResult> {
-    split_deferred_runners(&mut result);
     let operation_id = operation.id().map(str::to_string);
     result.operation_id = operation_id.clone();
     if let Err(mut error) = operation.finish_completed_durable(&result) {
@@ -2361,9 +2333,6 @@ fn finish_completed_under_selection(
     result: &UpgradeResult,
     selection_guard: homeboy_core::runtime_promotion::RuntimeSelectionGuard,
 ) -> Result<()> {
-    let mut result = result.clone();
-    split_deferred_runners(&mut result);
-    let result = &result;
     let terminal = match operation.finish_completed_durable(result) {
         Ok(()) => Ok(()),
         Err(completion_error) => {
@@ -4544,7 +4513,6 @@ mod convergence_tests {
             homeboy_path: "/opt/homeboy/homeboy".to_string(),
             success: true,
             upgraded,
-            deferred: false,
             previous_version: Some(previous.to_string()),
             new_version: Some(current.to_string()),
             bare_homeboy_version: None,
@@ -4606,7 +4574,6 @@ mod convergence_tests {
             extension_skips: vec![stale_skip],
             runners_updated: vec![stale_runner.clone()],
             runners_skipped: vec![stale_runner],
-            runners_deferred: Vec::new(),
             extensions_unrefreshed: vec![UnrefreshedExtensionWarning {
                 extension_id: "wordpress".to_string(),
                 invoking_user: "alice".to_string(),
