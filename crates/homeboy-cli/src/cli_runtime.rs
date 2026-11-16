@@ -1327,6 +1327,15 @@ impl CliRuntime {
             .flatten()
             .map(|path| path.to_string_lossy().to_string());
 
+        // `--human` only changes how this process prints its envelope. Strip it
+        // before any routing so runners and detached children keep emitting
+        // the JSON the controller parses.
+        let human = matches.try_get_one::<bool>("human").ok().flatten() == Some(&true);
+        crate::commands::utils::response::set_human_output(human);
+        if human {
+            strip_human_flag(&mut normalized);
+        }
+
         let artifact_root_override = matches
             .try_get_one::<std::path::PathBuf>("artifact_root")
             .ok()
@@ -1956,6 +1965,18 @@ pub(crate) fn execution_step_cook_preflight(
     preflight::capture_result(result.clone());
     crate::commands::utils::execution_provenance::capture(&result);
     Ok(result)
+}
+
+fn strip_human_flag(args: &mut Vec<String>) {
+    let passthrough = args
+        .iter()
+        .position(|arg| arg == "--")
+        .unwrap_or(args.len());
+    let mut index = 0;
+    args.retain(|arg| {
+        index += 1;
+        index > passthrough || arg != "--human"
+    });
 }
 
 /// Config inspection must not initialize daemon reconciliation or provider

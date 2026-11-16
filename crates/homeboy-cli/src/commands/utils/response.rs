@@ -362,6 +362,20 @@ impl<T: Serialize> CommandResultEnvelope<T> {
     pub(crate) fn stdout_json(&self) -> Result<String> {
         self.to_json().map(|json| format!("{json}\n"))
     }
+
+    /// The human summary `--human` prints instead of the JSON envelope: the
+    /// envelope's own summary, then any next-action commands it does not
+    /// already name. `None` when the command has no summary.
+    pub(crate) fn summary_text(&self) -> Option<String> {
+        let mut text = self.summary.clone()?;
+        for action in &self.next_actions {
+            if !text.contains(&action.command) {
+                text.push_str(&format!("\nNext: {}", action.command));
+            }
+        }
+        text.push('\n');
+        Some(text)
+    }
 }
 
 impl CommandResultEnvelope<()> {
@@ -401,10 +415,25 @@ impl CommandResultEnvelope<()> {
     }
 }
 
+static HUMAN_OUTPUT: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// `--human`: stdout carries the envelope's plain-text summary instead of its
+/// JSON. `--output` files keep the JSON envelope.
+pub(crate) fn set_human_output(enabled: bool) {
+    HUMAN_OUTPUT.store(enabled, std::sync::atomic::Ordering::Relaxed);
+}
+
 pub(crate) fn print_response<T: Serialize>(response: &CommandResultEnvelope<T>) -> Result<()> {
     use std::io::{self, Write};
 
-    let payload = response.stdout_json()?;
+    let summary = HUMAN_OUTPUT
+        .load(std::sync::atomic::Ordering::Relaxed)
+        .then(|| response.summary_text())
+        .flatten();
+    let payload = match summary {
+        Some(summary) => summary,
+        None => response.stdout_json()?,
+    };
     let stdout = io::stdout();
     let mut handle = stdout.lock();
     if let Err(e) = handle.write_all(payload.as_bytes()) {

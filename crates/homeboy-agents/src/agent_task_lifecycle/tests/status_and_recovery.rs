@@ -3002,14 +3002,16 @@ fn live_verification_pending_promotion_heartbeat_is_visible_to_logs_and_status()
             "gate",
             Some("cargo test"),
             Some("gate elapsed=5000ms last-progress=100ms"),
-            Some("test output tail"),
+            Some("compiling\nwaiting for admitted runner gate on homeboy-lab (job job-7)\n"),
         )
         .expect("record live gate heartbeat");
 
         let log = logs(run_id).expect("logs");
         assert!(log.events.iter().any(|event| event.kind == "gate.started"));
         assert!(log.events.iter().any(|event| event.kind == "gate.heartbeat"
-            && event.data["output_tail"] == "test output tail"));
+            && event.data["output_tail"]
+                .as_str()
+                .is_some_and(|tail| tail.contains("waiting for admitted runner gate"))));
         let status = crate::orchestration::project_record(
             &lifecycle_store.read_record(run_id).expect("record"),
             None,
@@ -3022,5 +3024,14 @@ fn live_verification_pending_promotion_heartbeat_is_visible_to_logs_and_status()
         assert_eq!(status.phase.as_deref(), Some("gate"));
         assert_eq!(status.gates[0].id.as_deref(), Some("cargo test"));
         assert!(status.heartbeat_at.is_some());
+        // A quiet gate wait names what it is waiting on and for how long.
+        let progress = status.progress.expect("live progress line");
+        assert!(
+            progress.starts_with(
+                "cargo test: waiting for admitted runner gate on homeboy-lab (job job-7) ("
+            ),
+            "{progress}"
+        );
+        assert!(progress.ends_with("s)"), "{progress}");
     });
 }

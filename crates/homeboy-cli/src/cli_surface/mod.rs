@@ -34,6 +34,12 @@ pub struct Cli {
     #[arg(long, global = true, value_name = "PATH")]
     pub output: Option<PathBuf>,
 
+    /// Print the command's human summary (state, blocker, next step) as plain
+    /// text instead of the JSON envelope. Commands without a summary still
+    /// print JSON, and `--output` always writes the JSON.
+    #[arg(long = "human", global = true)]
+    pub human: bool,
+
     /// Installed notification transport id for this run, or its unambiguous
     /// short alias (`discord` for `discord.run-completion`). An unknown id
     /// lists the installed ids (also shown by `homeboy extension list`). Pair

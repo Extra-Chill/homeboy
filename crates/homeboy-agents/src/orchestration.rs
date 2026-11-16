@@ -4282,6 +4282,7 @@ fn project_summary_fields(
     resource.provider_route_notes =
         crate::agent_task_route_notes::provider_route_notes(record, plan);
     resource.heartbeat_at = heartbeat_at(record);
+    resource.progress = live_promotion_progress(record, Utc::now());
     resource.created_at = record.submitted_at.clone();
     resource.updated_at = record.updated_at.clone();
     resource.liveness = live_provider_liveness(record, plan, Utc::now());
@@ -5380,6 +5381,45 @@ fn executed_provider_model(record: &AgentTaskRunRecord) -> Option<String> {
                     .and_then(non_empty)
             })
         })
+}
+
+/// What a live promotion owner is doing right now: the gate (or phase), its
+/// latest output line, and how long the phase has run.
+fn live_promotion_progress(record: &AgentTaskRunRecord, now: DateTime<Utc>) -> Option<String> {
+    if !record.owner_process_is_running() {
+        return None;
+    }
+    let progress = record.metadata.get("promotion_progress")?;
+    if progress.get("active").and_then(Value::as_bool) != Some(true) {
+        return None;
+    }
+    let text = |key: &str| {
+        progress
+            .get(key)
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+    };
+    let subject = text("gate").or_else(|| text("phase"))?;
+    let latest = text("output_tail")
+        .and_then(|tail| {
+            tail.lines()
+                .rev()
+                .map(str::trim)
+                .find(|line| !line.is_empty())
+        })
+        .or_else(|| text("detail"));
+    let elapsed = text("started_at")
+        .and_then(|started| DateTime::parse_from_rfc3339(started).ok())
+        .map(|started| (now - started.with_timezone(&Utc)).num_seconds().max(0) as u64);
+    let mut line = match latest {
+        Some(latest) => format!("{subject}: {latest}"),
+        None => subject.to_string(),
+    };
+    if let Some(elapsed) = elapsed {
+        line.push_str(&format!(" ({}m{:02}s)", elapsed / 60, elapsed % 60));
+    }
+    Some(redacted_bounded(&line, MESSAGE_BOUND))
 }
 
 fn heartbeat_at(record: &AgentTaskRunRecord) -> Option<String> {

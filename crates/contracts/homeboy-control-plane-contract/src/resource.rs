@@ -165,6 +165,11 @@ pub struct ControlPlaneRun {
     pub provider_route_notes: Vec<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub heartbeat_at: Option<String>,
+    /// One bounded line naming what a live owner is doing or waiting on right
+    /// now, with how long it has been at it, so a quiet wait is not mistaken
+    /// for a hang.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub progress: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub liveness: Option<ControlPlaneLiveness>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -208,6 +213,7 @@ impl ControlPlaneRun {
             provider: None,
             provider_route_notes: Vec::new(),
             heartbeat_at: None,
+            progress: None,
             liveness: None,
             candidate: None,
             gates: Vec::new(),
