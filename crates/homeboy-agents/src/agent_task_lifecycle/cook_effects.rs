@@ -262,7 +262,17 @@ fn terminalize(
             evidence: json!({}),
         },
     };
-    db.terminalize_control_plane_effect(effect, fence, &terminal)?;
+    // The effect is content-addressed: a concurrent owner or crash recovery may
+    // terminalize it between the read above and this write. That is success.
+    if let Err(error) = db.terminalize_control_plane_effect(effect, fence, &terminal) {
+        if db
+            .control_plane_effect_status(effect)?
+            .is_some_and(|status| status.terminal.is_some())
+        {
+            return Ok(());
+        }
+        return Err(error);
+    }
     Ok(())
 }
 
