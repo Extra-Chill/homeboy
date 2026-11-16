@@ -4,6 +4,12 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.468.4] - 2026-11-16
+
+### Fixed
+- retry transient declared-base Git preflight failures in place
+- name the refused gate on an incomplete-draft publication
+
 ## [0.468.3] - 2026-11-16
 
 ### Fixed
