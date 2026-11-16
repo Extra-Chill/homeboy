@@ -10128,16 +10128,19 @@ fn interrupted_attempt_does_not_change_the_only_substantive_disclosure() {
         options.identity.initial_plan.tasks[0].executor.model = Some("second-model".to_string());
         options.gates.verify = vec!["cargo test --locked agent_task_promotion --lib".to_string()];
         persist_initial_recipe(&options).expect("persist interrupted recipe");
-        super::super::record_recipe_attempt(
-            cook_id,
-            2,
-            second_run_id,
-            &options.identity.initial_plan,
-        )
-        .expect("persist substantive retry");
+        // The retry names the interrupted source, which produced no candidate,
+        // so its binding carries a null tree (#18256).
+        let mut second_plan = options.identity.initial_plan.clone();
+        second_plan.tasks[0].inputs["cook_loop"]["artifact_provenance"] = serde_json::json!({
+            "source_run_id": first_run_id,
+            "source_task_id": second_plan.tasks[0].task_id,
+            "source_candidate_tree_sha": null,
+        });
+        super::super::record_recipe_attempt(cook_id, 2, second_run_id, &second_plan)
+            .expect("persist substantive retry");
         agent_task_lifecycle::submit_plan(&options.identity.initial_plan, Some(first_run_id))
             .expect("materialize interrupted attempt");
-        agent_task_lifecycle::submit_plan(&options.identity.initial_plan, Some(second_run_id))
+        agent_task_lifecycle::submit_plan(&second_plan, Some(second_run_id))
             .expect("materialize substantive retry");
         agent_task_lifecycle::record_cook_attempt_in_store(
             &test_lifecycle_store(),
@@ -10153,7 +10156,7 @@ fn interrupted_attempt_does_not_change_the_only_substantive_disclosure() {
             second_run_id,
         )
         .expect("index substantive retry");
-        seed_review_form_aggregate(second_run_id, &options.identity.initial_plan);
+        seed_review_form_aggregate(second_run_id, &second_plan);
 
         let mut backend = CaptureBackend::default();
         finalize_or_load_cook_pr_with_backend(

@@ -3637,7 +3637,10 @@ fn cook_contribution_source(
             )
         })?;
     let provenance = &task.inputs["cook_loop"]["artifact_provenance"];
-    if provenance.is_null() {
+    // A follow-up of an attempt that produced no candidate records the source
+    // run with a null tree: there is nothing to bind, so the chain ends here
+    // and this attempt's own candidate is the contribution.
+    if provenance.is_null() || provenance["source_candidate_tree_sha"].is_null() {
         return Ok(None);
     }
     let source = CookContributionSource {
