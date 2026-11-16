@@ -6,6 +6,21 @@ Homeboy owns durable orchestration and provider-neutral outcomes. Runtime
 providers own backend-specific execution. For the provider fanout ownership seam,
 see [`docs/architecture/provider-fanout-boundary.md`](../architecture/provider-fanout-boundary.md).
 
+## Runner-eligibility waits
+
+Queued Cook execution steps report the controller daemon's live runner wait in
+`status`, `diagnose`, and `resume`: runner, refusal reason, waiting-since time,
+and next action. `resume` probes eligibility again; it does not bypass the step's
+spawn gate. Build/freshness refusals recommend
+`homeboy runner refresh-homeboy <runner> --reconnect` and include recorded builds
+when available. Stale jobs recommend runner reconciliation.
+
+`daemon_incompatible`, `daemon_not_fresh`, and `stale_jobs` waits fail with a typed
+`runner_eligibility_timeout` after ten minutes. Configure the controller daemon's
+`HOMEBOY_RUNNER_WAIT_BUDGET_SECONDS` to override that budget. Recorded wait time
+survives daemon adoption. Capacity and pressure refusals continue waiting rather
+than failing on that budget.
+
 ## Declared gate host inputs
 
 `agent-task cook --gate-requirements '{"host_tools":["asset-cache"],"secrets":["ACCESS_TOKEN"]}'`

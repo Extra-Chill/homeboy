@@ -48,6 +48,15 @@ fn eligibility_from_readiness(readiness: RunnerReadiness) -> std::result::Result
 
 /// Register the runner eligibility check with core. Called once at startup.
 pub fn register() {
+    homeboy_core::daemon::step_job::register_step_runner_wait_context(std::sync::Arc::new(
+        |runner| {
+            let snapshot = crate::runner_status_admission_snapshot(runner).ok();
+            serde_json::json!({
+                "controller_build": homeboy_core::build_identity::current(),
+                "runner_build": snapshot.and_then(|snapshot| snapshot.summary.daemon_build_identity),
+            })
+        },
+    ));
     // A `step` that waits for a runner spawns only once that runner accepts jobs.
     homeboy_core::daemon::step_job::register_step_runner_eligibility(std::sync::Arc::new(
         runner_accepts_jobs,

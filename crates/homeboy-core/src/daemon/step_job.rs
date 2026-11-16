@@ -61,7 +61,33 @@ pub const STEP_EXIT_FILE: &str = "exit.json";
 const WAIT_POLL: Duration = Duration::from_millis(250);
 const RUNNER_WAIT_INITIAL: Duration = Duration::from_secs(1);
 const RUNNER_WAIT_CAP: Duration = Duration::from_secs(30);
-const RUNNER_WAIT_DEADLINE: Duration = Duration::from_secs(60 * 60);
+const RUNNER_WAIT_DEADLINE: Duration = Duration::from_secs(10 * 60);
+
+/// Non-transient runner refusals have a bounded convergence budget.
+pub fn runner_wait_budget() -> Duration {
+    Duration::from_secs(
+        std::env::var("HOMEBOY_RUNNER_WAIT_BUDGET_SECONDS")
+            .ok()
+            .and_then(|value| value.parse().ok())
+            .unwrap_or(RUNNER_WAIT_DEADLINE.as_secs()),
+    )
+}
+
+pub fn runner_wait_is_bounded(reason: &str) -> bool {
+    matches!(
+        reason,
+        "daemon_incompatible" | "daemon_not_fresh" | "stale_jobs"
+    )
+}
+
+/// Re-evaluate the same eligibility authority used by running steps.
+pub fn runner_wait_reason(runner: &str) -> Option<String> {
+    runner_eligibility()
+        .read()
+        .expect("step runner eligibility lock")
+        .clone()
+        .and_then(|probe| probe(runner).err())
+}
 const SUPERVISE_POLL: Duration = Duration::from_millis(100);
 const CANCEL_STOP_DEADLINE: Duration = Duration::from_secs(15);
 
@@ -415,6 +441,20 @@ pub(crate) fn admission_reason(request: &Value) -> Option<String> {
     probe(runner).err().filter(|reason| reason == "pressure")
 }
 
+pub type StepRunnerWaitContext = Arc<dyn Fn(&str) -> Value + Send + Sync>;
+static WAIT_CONTEXT: OnceLock<StepRunnerWaitContext> = OnceLock::new();
+
+pub fn register_step_runner_wait_context(context: StepRunnerWaitContext) {
+    let _ = WAIT_CONTEXT.set(context);
+}
+
+pub fn step_runner_wait_context(runner: &str) -> Value {
+    WAIT_CONTEXT
+        .get()
+        .map(|context| context(runner))
+        .unwrap_or(Value::Null)
+}
+
 fn terminal_consumers() -> &'static RwLock<BTreeMap<String, StepTerminalConsumer>> {
     static CONSUMERS: OnceLock<RwLock<BTreeMap<String, StepTerminalConsumer>>> = OnceLock::new();
     CONSUMERS.get_or_init(|| RwLock::new(BTreeMap::new()))
@@ -606,6 +646,8 @@ impl ControllerJobDriver for StepJobDriver {
             "pid": progress.get("pid").cloned().unwrap_or(Value::Null),
             "runner_eligible": progress.get("runner_eligible").cloned().unwrap_or(Value::Null),
             "reason": progress.get("reason").cloned().unwrap_or(Value::Null),
+            "waiting_since": progress.get("waiting_since").cloned().unwrap_or(Value::Null),
+            "builds": progress.get("builds").cloned().unwrap_or(Value::Null),
             "exit_code": progress.get("exit_code").cloned().unwrap_or(Value::Null),
         }))
     }
@@ -626,6 +668,8 @@ impl ControllerJobDriver for StepJobDriver {
                 "diagnostic": controller_job_driver::public_io_diagnostic(error),
                 "exit_code": error.details.get("exit_code").cloned().unwrap_or(Value::Null),
                 "step_outcome": error.details.get("step_outcome").cloned().unwrap_or(Value::Null),
+                "wait_reason": error.details.get("wait_reason").cloned().unwrap_or(Value::Null),
+                "runner_id": error.details.get("runner_id").cloned().unwrap_or(Value::Null),
                 "step_child": error.details.get("step_child").cloned().unwrap_or(Value::Null),
             }),
         }
@@ -731,7 +775,15 @@ fn run_step(mut checkpoint: StepJobCheckpoint, job: &ControllerJobHandle) -> Res
         StepPhase::Waiting => {}
     }
 
-    job.progress(checkpoint.progress())?;
+    // Preserve a durable wait observation across daemon adoption.
+    if job
+        .job()
+        .store()
+        .step_runner_wait(&checkpoint.request.key)?
+        .is_none()
+    {
+        job.progress(checkpoint.progress())?;
+    }
     if !await_wait(&checkpoint.request, job)? {
         return Ok(checkpoint.result());
     }
@@ -996,10 +1048,27 @@ fn await_wait_with(
             })
         })
         .transpose()?;
-    let deadline = now() + RUNNER_WAIT_DEADLINE;
+    let budget = runner_wait_budget();
+    let mut blocked_since = None;
+    let prior_wait = job.job().store().step_runner_wait(&request.key)?;
+    let waiting_since = prior_wait
+        .as_ref()
+        .and_then(|wait| wait["waiting_since"].as_str())
+        .map(str::to_string)
+        .unwrap_or_else(|| chrono::Utc::now().to_rfc3339());
+    let prior_elapsed = prior_wait
+        .as_ref()
+        .and_then(|wait| wait["waiting_since"].as_str())
+        .and_then(|since| chrono::DateTime::parse_from_rfc3339(since).ok())
+        .and_then(|since| {
+            (chrono::Utc::now() - since.with_timezone(&chrono::Utc))
+                .to_std()
+                .ok()
+        })
+        .unwrap_or_default();
     let mut next_probe = now();
     let mut backoff = RUNNER_WAIT_INITIAL;
-    let mut last_observation = None;
+    let mut last_observation: Option<std::result::Result<(), String>> = None;
     loop {
         if job.is_cancelled()
             || request
@@ -1012,15 +1081,29 @@ fn await_wait_with(
         let time_ready = not_before.is_none_or(|instant| chrono::Utc::now() >= instant);
         if let Some((runner, probe)) = &runner_probe {
             if let Some(Err(reason)) = &last_observation {
-                if now() >= deadline {
-                    return Err(Error::internal_unexpected(format!(
-                        "runner {runner} did not become eligible within {}s: {reason}",
-                        RUNNER_WAIT_DEADLINE.as_secs()
-                    )));
+                if blocked_since.is_some_and(|since| now() + prior_elapsed >= since + budget)
+                    && runner_wait_is_bounded(reason)
+                {
+                    let mut error = Error::internal_unexpected(format!(
+                        "runner {runner} eligibility wait budget exhausted: {reason}"
+                    ));
+                    error.details["step_outcome"] = json!("runner_eligibility_timeout");
+                    error.details["runner_id"] = json!(runner);
+                    error.details["wait_reason"] = json!(reason);
+                    return Err(error);
                 }
             }
             if now() >= next_probe {
                 let observation = probe(runner);
+                if observation
+                    .as_ref()
+                    .err()
+                    .is_some_and(|reason| runner_wait_is_bounded(reason))
+                {
+                    blocked_since.get_or_insert_with(&now);
+                } else if observation.is_ok() {
+                    blocked_since = None;
+                }
                 // A different refusal is still ineligible: don't reset backoff
                 // until eligibility itself changes.
                 if last_observation.as_ref().is_some_and(
@@ -1034,6 +1117,8 @@ fn await_wait_with(
                             "phase": "waiting",
                             "runner_eligible": runner,
                             "reason": reason,
+                            "waiting_since": waiting_since,
+                            "builds": step_runner_wait_context(runner),
                         }))?;
                     }
                 }
@@ -1050,8 +1135,13 @@ fn await_wait_with(
             return Ok(true);
         }
         let mut delay = next_probe.saturating_sub(now());
-        if !runner_ready {
-            delay = delay.min(deadline.saturating_sub(now()));
+        if let Some(since) = blocked_since.filter(|_| {
+            last_observation
+                .as_ref()
+                .and_then(|value| value.as_ref().err())
+                .is_some_and(|reason| runner_wait_is_bounded(reason))
+        }) {
+            delay = delay.min((since + budget).saturating_sub(now() + prior_elapsed));
         }
         if !time_ready {
             delay = if runner_probe.is_some() {
@@ -1453,14 +1543,14 @@ mod tests {
             let error = await_wait_with(
                 &request,
                 &harness.handle(),
-                Some(Arc::new(|_| Err("controller build mismatch".into()))),
+                Some(Arc::new(|_| Err("daemon_incompatible".into()))),
                 || elapsed.get(),
                 |delay| elapsed.set(elapsed.get() + delay),
                 |_| false,
             )
             .unwrap_err();
             assert!(error.to_string().contains(
-                "runner runner-a did not become eligible within 3600s: controller build mismatch"
+                "runner runner-a eligibility wait budget exhausted: daemon_incompatible"
             ));
             assert_eq!(elapsed.get(), RUNNER_WAIT_DEADLINE);
         });

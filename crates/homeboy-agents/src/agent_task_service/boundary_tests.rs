@@ -7,6 +7,87 @@ use homeboy_core::test_support::ControllerJobHarness;
 use std::process::Command;
 use std::time::{Duration, Instant};
 
+#[test]
+fn agent_task_execution_wait_blockers_and_budget() {
+    use homeboy_core::daemon::controller_job_driver::ControllerJobDriver;
+    with_isolated_home(|home| {
+        let store = test_lifecycle_store();
+        for (index, reason) in [
+            "daemon_incompatible",
+            "daemon_not_fresh",
+            "stale_jobs",
+            "capacity_reached",
+            "pressure",
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let subject = format!("wait-table-{index}");
+            let binding = admission_binding(&home.path().join("inputs"), &subject, None);
+            agent_task_lifecycle::record_unmaterialized_cook_admission_in_store(
+                &store, &subject, binding, "queued", "test",
+            )
+            .unwrap();
+            let intent = current_intent(&store, &subject);
+            let mut request = intent.step.clone();
+            request.wait.runner_eligible = Some("boundary-runner".into());
+            request.wait.not_before = None;
+            let harness = ControllerJobHarness::durable(
+                Arc::new(StepJobDriver),
+                serde_json::to_value(&request).unwrap(),
+                &homeboy_core::paths::observation_db().unwrap(),
+                "wait-table",
+            )
+            .unwrap();
+            let since = (chrono::Utc::now() - chrono::Duration::minutes(11)).to_rfc3339();
+            harness
+                .handle()
+                .progress(serde_json::json!({
+                    "phase": "waiting", "runner_eligible": "boundary-runner",
+                    "reason": reason, "waiting_since": since,
+                }))
+                .unwrap();
+            let record = store.read_record(&subject).unwrap();
+            let wait = execution_step_wait(&record).expect("live step wait");
+            assert_eq!(wait["reason"], reason);
+            assert_eq!(wait["waiting_since"], since);
+            let action = wait["next_action"].as_str().unwrap();
+            if matches!(reason, "daemon_incompatible" | "daemon_not_fresh") {
+                assert_eq!(
+                    action,
+                    "homeboy runner refresh-homeboy boundary-runner --reconnect"
+                );
+            } else {
+                assert!(!action.is_empty());
+            }
+            let resource = crate::orchestration::project_record(&record, None).unwrap();
+            assert!(serde_json::to_value(resource)
+                .unwrap()
+                .to_string()
+                .contains(reason));
+            if step_job::runner_wait_is_bounded(reason) {
+                let refusal = reason.to_string();
+                step_job::register_step_runner_eligibility(Arc::new(move |_| Err(refusal.clone())));
+                let resumed =
+                    agent_task_lifecycle::rearm_unmaterialized_cook_admission(&subject).unwrap();
+                assert_eq!(
+                    resumed.metadata["execution_step_resume_probe"]["reason"],
+                    reason
+                );
+                let prepared = StepJobDriver
+                    .prepare(serde_json::to_value(&request).unwrap())
+                    .unwrap();
+                let error = StepJobDriver
+                    .execute(prepared, harness.handle())
+                    .unwrap_err();
+                assert_eq!(error.details["step_outcome"], "runner_eligibility_timeout");
+                assert_eq!(error.details["wait_reason"], reason);
+            }
+        }
+        step_job::register_step_runner_eligibility(Arc::new(|_| Ok(())));
+    });
+}
+
 struct Materializer {
     subject: String,
     calls: Arc<AtomicUsize>,

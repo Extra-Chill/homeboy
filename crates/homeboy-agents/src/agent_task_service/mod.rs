@@ -37,7 +37,7 @@ mod cook_step;
 mod cook_supervision;
 mod discovery;
 mod lab_admission;
-pub use lab_admission::{queued_admission, QueuedAdmission};
+pub use lab_admission::{execution_step_wait, queued_admission, QueuedAdmission};
 mod execution;
 mod execution_step;
 /// Read-only process-tree activity sampling for a running Cook.

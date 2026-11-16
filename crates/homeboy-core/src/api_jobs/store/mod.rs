@@ -2192,6 +2192,59 @@ impl JobStore {
         .and_then(|tombstone| tombstone.terminal_job)
     }
 
+    /// Read the latest live runner-eligibility wait for an exact step key.
+    pub fn step_runner_wait(&self, key: &str) -> Result<Option<Value>> {
+        let Some(job) = self
+            .controller_job_for_key(key)
+            .filter(|job| !job.status.is_terminal())
+        else {
+            return Ok(None);
+        };
+        let events = self.events(job.id)?;
+        let latest = events
+            .iter()
+            .rev()
+            .filter_map(|event| event.data.as_ref().map(|data| (event, data)))
+            .find(|(_, data)| data.get("phase").is_some());
+        let Some((event, data)) = latest.filter(|(_, data)| {
+            data["phase"] == "waiting"
+                && data["runner_eligible"].is_string()
+                && data["reason"].is_string()
+        }) else {
+            return Ok(None);
+        };
+        let mut wait = data.clone();
+        if !wait["waiting_since"].is_string() {
+            wait["waiting_since"] = serde_json::json!(chrono::DateTime::from_timestamp_millis(
+                event.timestamp_ms as i64
+            )
+            .map(|time| time.to_rfc3339()));
+        }
+        wait["job_id"] = serde_json::json!(job.id);
+        Ok(Some(wait))
+    }
+
+    /// Explicit resume uses the live daemon probe and publishes its verdict.
+    /// The supervisor remains the sole authority allowed to spawn the child.
+    pub fn recheck_step_runner_wait(&self, key: &str) -> Result<Option<Value>> {
+        let Some(mut wait) = self.step_runner_wait(key)? else {
+            return Ok(None);
+        };
+        let runner = wait["runner_eligible"].as_str().expect("validated runner");
+        let reason = crate::daemon::step_job::runner_wait_reason(runner);
+        wait["builds"] = crate::daemon::step_job::step_runner_wait_context(runner);
+        wait["reason"] = serde_json::json!(reason);
+        wait["phase"] = serde_json::json!(if reason.is_some() {
+            "waiting"
+        } else {
+            "eligible"
+        });
+        if let Some(job) = self.controller_job_for_key(key) {
+            self.handle(job.id).progress(wait.clone())?;
+        }
+        Ok(Some(wait))
+    }
+
     /// Nonterminal controller jobs a parent submitted.
     pub(crate) fn active_controller_children(&self, parent_job_id: Uuid) -> Vec<Uuid> {
         let inner = self.inner.lock().expect("job store mutex poisoned");
