@@ -541,13 +541,13 @@ impl LabRunnerAdmissionRefusal {
                 "Retry once `homeboy runner status {runner_id}` can compare the daemon; check `homeboy runner doctor {runner_id}` if the probe keeps failing."
             ),
             Self::StaleRuntimePaths { .. } | Self::VersionDrift { .. } => format!(
-                "Drain or recover known jobs, then run `homeboy runner refresh-homeboy {runner_id} --reconnect` once `homeboy runner status {runner_id}` reports an authoritative zero active-job count."
+                "Drain or recover known jobs, then run `homeboy runner refresh-homeboy {runner_id}` once `homeboy runner status {runner_id}` reports an authoritative zero active-job count."
             ),
             Self::LeaseNotFresh { transient: true, .. } => format!(
                 "Retry once `homeboy runner status {runner_id}` observes the daemon lease; `homeboy runner connect {runner_id}` republishes it."
             ),
             Self::LeaseNotFresh { transient: false, .. } => format!(
-                "Restart the runner daemon with `homeboy runner refresh-homeboy {runner_id} --reconnect` once `homeboy runner status {runner_id}` reports an authoritative zero active-job count."
+                "Restart the runner daemon with `homeboy runner refresh-homeboy {runner_id}` once `homeboy runner status {runner_id}` reports an authoritative zero active-job count."
             ),
         }
     }

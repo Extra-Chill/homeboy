@@ -761,7 +761,7 @@ fn newer_runner_than_controller_points_to_controller_convergence_first() {
 
     let metadata = lab_runner_homeboy_metadata("homeboy-lab", "homeboy", &status);
     let expected = format!(
-        "homeboy runner refresh-homeboy homeboy-lab --ref {} --reconnect",
+        "homeboy runner refresh-homeboy homeboy-lab --ref {}",
         expected_controller_refresh_ref()
     );
     assert_eq!(
@@ -1087,7 +1087,7 @@ fn exact_active_daemon_target_remains_available_in_metadata_and_offload_error() 
         Some("homeboy 0.265.0+aaaaaaaa".to_string()),
     ));
     let refresh = format!(
-        "homeboy runner refresh-homeboy lab --ref {} --reconnect",
+        "homeboy runner refresh-homeboy lab --ref {}",
         crate::controller_refresh_ref()
     );
 

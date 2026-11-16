@@ -23,7 +23,6 @@ pub(super) fn ssh_bootstrap_plan() -> HomeboyBinaryRefreshPlan {
         git_ref: Some("v1.2.3".to_string()),
         binary_path: "/verified/homeboy".to_string(),
         script: String::new(),
-        reconnect: false,
         followup_commands: Vec::new(),
     }
 }

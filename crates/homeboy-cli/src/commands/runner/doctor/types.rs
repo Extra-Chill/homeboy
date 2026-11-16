@@ -330,7 +330,6 @@ impl RunnerRepairAction {
                     args.push("--ref".to_string());
                     args.push(git_ref.clone());
                 }
-                args.push("--reconnect".to_string());
                 if *allow_downgrade {
                     args.push("--allow-downgrade".to_string());
                 }

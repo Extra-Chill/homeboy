@@ -195,7 +195,7 @@ pub(crate) fn homeboy_version_skew_checks(
             ok_with_details(id, format!("{left_name} Homeboy {left} matches {right_name} Homeboy {right}"), details)
         } else {
             error(id, format!("{left_name} Homeboy {left} differs from {right_name} Homeboy {right}"), Some(format!(
-                "Converge the configured binary and daemon with `homeboy runner refresh-homeboy {} --ref v{local_version} --reconnect`; upgrade the controller first if the runner is newer, or use runner dev-sync for unreleased builds",
+                "Converge the configured binary and daemon with `homeboy runner refresh-homeboy {} --ref v{local_version}`; upgrade the controller first if the runner is newer, or use runner dev-sync for unreleased builds",
                 shell::quote_arg(runner_id),
             )), details).with_action(RunnerRepairAction::RefreshHomeboy {
                 git_ref: Some(format!("v{local_version}")), allow_downgrade: false,

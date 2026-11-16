@@ -101,8 +101,7 @@ fn reconcile_reports_remaining_daemon_skew() {
     let mut admission = admission_fixture();
     admission.daemon_fresh = false;
     admission.daemon_lease_verdict.fresh = false;
-    admission.next_action =
-        Some("homeboy runner refresh-homeboy homeboy-lab --reconnect".to_string());
+    admission.next_action = Some("homeboy runner refresh-homeboy homeboy-lab".to_string());
 
     let mut report = connected_report();
     report.daemon_freshness = Some(DaemonFreshnessReport {
@@ -134,7 +133,7 @@ fn reconcile_reports_remaining_daemon_skew() {
     );
     assert_eq!(
         outcome.next_action.as_deref(),
-        Some("homeboy runner refresh-homeboy homeboy-lab --reconnect")
+        Some("homeboy runner refresh-homeboy homeboy-lab")
     );
     assert_eq!(
         outcome.retry_predicate.as_deref(),

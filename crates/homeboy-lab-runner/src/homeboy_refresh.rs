@@ -131,7 +131,6 @@ pub struct HomeboyBinaryRefreshOptions {
     pub runner_id: String,
     pub mode: HomeboyBinaryRefreshMode,
     pub git_ref: Option<String>,
-    pub reconnect: bool,
     pub allow_downgrade: bool,
     pub dry_run: bool,
 }
@@ -147,7 +146,6 @@ pub struct HomeboyBinaryRefreshPlan {
     /// under; the exact slot path is only known once the script reports it.
     pub binary_path: String,
     pub script: String,
-    pub reconnect: bool,
     pub followup_commands: Vec<String>,
 }
 
@@ -400,7 +398,7 @@ pub(crate) enum ControllerReleaseInstall {
 }
 
 /// Install the `controller` release's exact tag into `runner_id` through the
-/// verified release path and replace its daemon with the `--reconnect`
+/// verified release path and replace its daemon with the in-place restart
 /// mechanism. Never a source build, never "latest", never a downgrade, and
 /// never interrupting a job the restarted daemon cannot re-adopt.
 pub(crate) fn install_controller_release(
@@ -420,7 +418,6 @@ pub(crate) fn install_controller_release_with(
         runner_id: runner_id.to_string(),
         mode: HomeboyBinaryRefreshMode::Materialize,
         git_ref: Some(release_ref(&controller.version)),
-        reconnect: true,
         allow_downgrade: false,
         dry_run: false,
     });
@@ -463,7 +460,7 @@ fn new_refresh_output(
         phase_summary: Vec::new(),
         daemon_refreshed: false,
         selected_binary_path: plan.binary_path.clone(),
-        reconnect_required: !plan.reconnect,
+        reconnect_required: false,
         followup_commands: plan.followup_commands.clone(),
         readiness: None,
         failure: None,
@@ -493,8 +490,7 @@ fn refresh_homeboy_binary_inner_in_roots(
                 git_ref: None,
                 binary_path: binary_path.to_string(),
                 script,
-                reconnect: options.reconnect,
-                followup_commands: refresh_followups(&runner_id, options.reconnect),
+                followup_commands: vec![format!("homeboy runner status {}", shell_arg(&runner_id))],
             }
         }
         HomeboyBinaryRefreshMode::Materialize => {
@@ -517,8 +513,7 @@ fn refresh_homeboy_binary_inner_in_roots(
                 git_ref: Some(git_ref.to_string()),
                 binary_path: binaries_dir,
                 script,
-                reconnect: options.reconnect,
-                followup_commands: refresh_followups(&runner_id, options.reconnect),
+                followup_commands: vec![format!("homeboy runner status {}", shell_arg(&runner_id))],
             }
         }
     };
@@ -688,7 +683,6 @@ fn refresh_homeboy_binary_inner_in_roots(
                                 plan.runner_id.clone(),
                                 "--select".to_string(),
                                 selected_binary_path.clone(),
-                                "--reconnect".to_string(),
                             ],
                         },
                     ];
@@ -727,143 +721,197 @@ fn refresh_homeboy_binary_inner_in_roots(
         Some(status) => status,
         None => super::connection::status(&plan.runner_id)?,
     };
-    let refresh_session =
-        reconnect_session_after_promotion(options.reconnect, &post_promotion_status);
+    let refresh_session = reconnect_session_after_promotion(&post_promotion_status);
     let refresh_owned_lease = refresh_session.clone().and_then(refresh_owned_lease);
 
-    let mut daemon_refreshed = false;
-    if options.reconnect {
-        promotion_lease.assert_generation()?;
-        set_refresh_live_sub_phase("reconnect");
-        // Restart the connected daemon on
-        // its same state directory, so it re-adopts them and the controller
-        // keeps observing them.
-        let route = refresh_reconnect_route(refresh_session.as_ref(), service_managed);
-        let in_place_session = match route {
-            RefreshReconnectRoute::RestartInPlace(session) => Some(session),
-            RefreshReconnectRoute::Reconnect { .. } => None,
-        };
-        if let RefreshReconnectRoute::Reconnect {
-            restart_service: true,
-            ..
-        } = route
-        {
-            // No daemon is connected. Point
-            // the unit at the promoted binary and restart it; the reconnect
-            // below attaches to the restarted daemon.
-            if let Err(error) = super::connection::repoint_and_restart_runner_service(
-                &plan.runner_id,
-                &selected_binary_path,
-            ) {
-                return rollback_refresh_error_with(error, || {
-                    restore_runner_homeboy_path_if_selected_in_roots(
-                        roots,
-                        &plan.runner_id,
-                        &selected_binary_path,
-                        previous_homeboy_path.as_deref(),
-                    )
-                    .map(|_| ())
-                })
-                .map_err(|error| {
-                    let mut phases = phase_summary.clone();
-                    phases.push(refresh_phase("service_restart", true, 1));
-                    refresh_error_with_phase_summary(error, &phases)
-                });
-            }
-            phase_summary.push(refresh_phase("service_restart", true, 0));
-        }
-        if let RefreshReconnectRoute::Reconnect { disconnect, .. } = route {
-            if let Err(error) = disconnect_before_reconnect(disconnect, |session| {
-                super::connection::disconnect_with_session(&plan.runner_id, Some(session), false)
-                    .and_then(|report| require_completed_disconnect(&plan.runner_id, &report))
-            }) {
-                return rollback_refresh_error_with(error, || {
-                    restore_runner_homeboy_path_if_selected_in_roots(
-                        roots,
-                        &plan.runner_id,
-                        &selected_binary_path,
-                        previous_homeboy_path.as_deref(),
-                    )
-                    .map(|_| ())
-                })
-                .map_err(|error| {
-                    let error = durable_refresh_partial_error_if_needed(
-                        error,
-                        &plan.runner_id,
-                        previous_homeboy_path.as_deref(),
-                    );
-                    let mut phases = phase_summary.clone();
-                    phases.push(refresh_phase("disconnect", true, 1));
-                    refresh_error_with_phase_summary(error, &phases)
-                });
-            }
-            if disconnect.is_some() {
-                phase_summary.push(refresh_phase("disconnect", true, 0));
-            }
-        }
-        let reconnected = match in_place_session {
-            Some(session) => super::connection::restart_daemon_in_place(
-                &plan.runner_id,
-                session,
-                &selected_binary_path,
-            )
-            .inspect(|(_, exit_code)| {
-                phase_summary.push(refresh_phase("restart_in_place", true, *exit_code));
-            }),
-            None => super::connection::connect(&plan.runner_id),
-        };
-        let (report, connect_exit_code) = match reconnected {
-            Ok(result) => result,
-            Err(error) => {
-                let readiness = blocked_refresh_readiness(&plan);
-                phase_summary.push(refresh_phase("reconnect_transport", true, 1));
-                return Ok((
-                    HomeboyBinaryRefreshOutput {
-                        phase_summary,
-                        reconnect_required: true,
-                        followup_commands: readiness.continuation.clone().into_iter().collect(),
-                        readiness: Some(readiness),
-                        failure: Some(refresh_restart_failure(&plan, &exec_output, &error)),
-                        bootstrap_provenance: Some(refresh_bootstrap_provenance(
-                            diagnostic_ssh_bootstrap,
-                            &plan,
-                            &bootstrap,
-                            &identity,
-                            &updated_fields,
-                        )),
-                        ..output
-                    },
-                    1,
-                ));
-            }
-        };
-        let daemon_identity_verification = (connect_exit_code == 0)
-            .then(|| {
-                verify_refreshed_daemon_topology(
+    promotion_lease.assert_generation()?;
+    set_refresh_live_sub_phase("reconnect");
+    // Restart the connected daemon on
+    // its same state directory, so it re-adopts them and the controller
+    // keeps observing them.
+    let route = refresh_reconnect_route(refresh_session.as_ref(), service_managed);
+    let in_place_session = match route {
+        RefreshReconnectRoute::RestartInPlace(session) => Some(session),
+        RefreshReconnectRoute::Reconnect { .. } => None,
+    };
+    if let RefreshReconnectRoute::Reconnect {
+        restart_service: true,
+        ..
+    } = route
+    {
+        // No daemon is connected. Point
+        // the unit at the promoted binary and restart it; the reconnect
+        // below attaches to the restarted daemon.
+        if let Err(error) = super::connection::repoint_and_restart_runner_service(
+            &plan.runner_id,
+            &selected_binary_path,
+        ) {
+            return rollback_refresh_error_with(error, || {
+                restore_runner_homeboy_path_if_selected_in_roots(
+                    roots,
                     &plan.runner_id,
-                    &identity,
-                    refresh_owned_lease.as_deref(),
+                    &selected_binary_path,
+                    previous_homeboy_path.as_deref(),
                 )
+                .map(|_| ())
             })
-            .transpose()
-            .map_err(|error| error.message);
-        daemon_refreshed = daemon_identity_verification.is_ok();
-        if !daemon_refreshed {
-            let reconnect_exit_code = if connect_exit_code == 0 {
-                1
-            } else {
-                connect_exit_code
-            };
-            phase_summary.push(refresh_phase(
-                "reconnect_transport",
-                true,
-                reconnect_exit_code,
-            ));
-            phase_summary.push(refresh_phase("daemon_identity_verification", true, 1));
+            .map_err(|error| {
+                let mut phases = phase_summary.clone();
+                phases.push(refresh_phase("service_restart", true, 1));
+                refresh_error_with_phase_summary(error, &phases)
+            });
+        }
+        phase_summary.push(refresh_phase("service_restart", true, 0));
+    }
+    if let RefreshReconnectRoute::Reconnect { disconnect, .. } = route {
+        if let Err(error) = disconnect_before_reconnect(disconnect, |session| {
+            super::connection::disconnect_with_session(&plan.runner_id, Some(session), false)
+                .and_then(|report| require_completed_disconnect(&plan.runner_id, &report))
+        }) {
+            return rollback_refresh_error_with(error, || {
+                restore_runner_homeboy_path_if_selected_in_roots(
+                    roots,
+                    &plan.runner_id,
+                    &selected_binary_path,
+                    previous_homeboy_path.as_deref(),
+                )
+                .map(|_| ())
+            })
+            .map_err(|error| {
+                let error = durable_refresh_partial_error_if_needed(
+                    error,
+                    &plan.runner_id,
+                    previous_homeboy_path.as_deref(),
+                );
+                let mut phases = phase_summary.clone();
+                phases.push(refresh_phase("disconnect", true, 1));
+                refresh_error_with_phase_summary(error, &phases)
+            });
+        }
+        if disconnect.is_some() {
+            phase_summary.push(refresh_phase("disconnect", true, 0));
+        }
+    }
+    let reconnected = match in_place_session {
+        Some(session) => super::connection::restart_daemon_in_place(
+            &plan.runner_id,
+            session,
+            &selected_binary_path,
+        )
+        .inspect(|(_, exit_code)| {
+            phase_summary.push(refresh_phase("restart_in_place", true, *exit_code));
+        }),
+        None => super::connection::connect(&plan.runner_id),
+    };
+    let (report, connect_exit_code) = match reconnected {
+        Ok(result) => result,
+        Err(error) => {
+            let readiness = blocked_refresh_readiness(&plan);
+            phase_summary.push(refresh_phase("reconnect_transport", true, 1));
             return Ok((
                 HomeboyBinaryRefreshOutput {
                     phase_summary,
-                    reconnect_required: true,
+                    followup_commands: readiness.continuation.clone().into_iter().collect(),
+                    readiness: Some(readiness),
+                    failure: Some(refresh_restart_failure(&plan, &exec_output, &error)),
+                    bootstrap_provenance: Some(refresh_bootstrap_provenance(
+                        diagnostic_ssh_bootstrap,
+                        &plan,
+                        &bootstrap,
+                        &identity,
+                        &updated_fields,
+                    )),
+                    ..output
+                },
+                1,
+            ));
+        }
+    };
+    let daemon_identity_verification = (connect_exit_code == 0)
+        .then(|| {
+            verify_refreshed_daemon_topology(
+                &plan.runner_id,
+                &identity,
+                refresh_owned_lease.as_deref(),
+            )
+        })
+        .transpose()
+        .map_err(|error| error.message);
+    let daemon_refreshed = daemon_identity_verification.is_ok();
+    if !daemon_refreshed {
+        let reconnect_exit_code = if connect_exit_code == 0 {
+            1
+        } else {
+            connect_exit_code
+        };
+        phase_summary.push(refresh_phase(
+            "reconnect_transport",
+            true,
+            reconnect_exit_code,
+        ));
+        phase_summary.push(refresh_phase("daemon_identity_verification", true, 1));
+        return Ok((
+            HomeboyBinaryRefreshOutput {
+                phase_summary,
+                followup_commands: blocked_refresh_readiness(&plan)
+                    .continuation
+                    .into_iter()
+                    .collect(),
+                readiness: Some(blocked_refresh_readiness(&plan)),
+                failure: Some(refresh_reconnect_failure(
+                    &plan,
+                    &identity,
+                    &exec_output,
+                    &report,
+                    daemon_identity_verification.err().as_deref(),
+                )?),
+                bootstrap_provenance: Some(refresh_bootstrap_provenance(
+                    diagnostic_ssh_bootstrap,
+                    &plan,
+                    &bootstrap,
+                    &identity,
+                    &updated_fields,
+                )),
+                ..output
+            },
+            reconnect_exit_code,
+        ));
+    }
+    // Identity verification proves the right daemon answered; the reconnect
+    // is not done until that daemon will actually admit a Lab handoff.
+    // Probe `/admissions` for readiness so an immediately following
+    // runner-pinned handoff converges onto this exact lease instead of
+    // hitting a not-fresh lease or a transport drop the initiating command
+    // never recovers (#9466).
+    if let Some(identity_commit) = identity
+        .get("data")
+        .unwrap_or(&identity)
+        .get("git_commit")
+        .and_then(Value::as_str)
+    {
+        if let Err(readiness_error) =
+            probe_reconnected_admission_readiness(&plan.runner_id, identity_commit)
+        {
+            // The readiness probe can discover that the newly connected
+            // transport vanished. Never certify a transient connect as a
+            // successful reconnect when its postcondition is disconnected.
+            // This arm returns `daemon_refreshed: false` directly, so it
+            // does not reassign the local first.
+            let transport_exit_code = reconnect_transport_exit_code(
+                super::connection::status(&plan.runner_id)
+                    .map(|status| status.is_connected())
+                    .unwrap_or(false),
+            );
+            phase_summary.push(refresh_phase(
+                "reconnect_transport",
+                true,
+                transport_exit_code,
+            ));
+            phase_summary.push(refresh_phase("daemon_identity_verification", true, 0));
+            phase_summary.push(refresh_phase("admission_readiness", true, 1));
+            return Ok((
+                HomeboyBinaryRefreshOutput {
+                    phase_summary,
                     followup_commands: blocked_refresh_readiness(&plan)
                         .continuation
                         .into_iter()
@@ -874,7 +922,7 @@ fn refresh_homeboy_binary_inner_in_roots(
                         &identity,
                         &exec_output,
                         &report,
-                        daemon_identity_verification.err().as_deref(),
+                        Some(readiness_error.message.as_str()),
                     )?),
                     bootstrap_provenance: Some(refresh_bootstrap_provenance(
                         diagnostic_ssh_bootstrap,
@@ -885,79 +933,14 @@ fn refresh_homeboy_binary_inner_in_roots(
                     )),
                     ..output
                 },
-                reconnect_exit_code,
+                1,
             ));
         }
-        // Identity verification proves the right daemon answered; the reconnect
-        // is not done until that daemon will actually admit a Lab handoff.
-        // Probe `/admissions` for readiness so an immediately following
-        // runner-pinned handoff converges onto this exact lease instead of
-        // hitting a not-fresh lease or a transport drop the initiating command
-        // never recovers (#9466).
-        if let Some(identity_commit) = identity
-            .get("data")
-            .unwrap_or(&identity)
-            .get("git_commit")
-            .and_then(Value::as_str)
-        {
-            if let Err(readiness_error) =
-                probe_reconnected_admission_readiness(&plan.runner_id, identity_commit)
-            {
-                // The readiness probe can discover that the newly connected
-                // transport vanished. Never certify a transient connect as a
-                // successful reconnect when its postcondition is disconnected.
-                // This arm returns `daemon_refreshed: false` directly, so it
-                // does not reassign the local first.
-                let transport_exit_code = reconnect_transport_exit_code(
-                    super::connection::status(&plan.runner_id)
-                        .map(|status| status.is_connected())
-                        .unwrap_or(false),
-                );
-                phase_summary.push(refresh_phase(
-                    "reconnect_transport",
-                    true,
-                    transport_exit_code,
-                ));
-                phase_summary.push(refresh_phase("daemon_identity_verification", true, 0));
-                phase_summary.push(refresh_phase("admission_readiness", true, 1));
-                return Ok((
-                    HomeboyBinaryRefreshOutput {
-                        phase_summary,
-                        reconnect_required: true,
-                        followup_commands: blocked_refresh_readiness(&plan)
-                            .continuation
-                            .into_iter()
-                            .collect(),
-                        readiness: Some(blocked_refresh_readiness(&plan)),
-                        failure: Some(refresh_reconnect_failure(
-                            &plan,
-                            &identity,
-                            &exec_output,
-                            &report,
-                            Some(readiness_error.message.as_str()),
-                        )?),
-                        bootstrap_provenance: Some(refresh_bootstrap_provenance(
-                            diagnostic_ssh_bootstrap,
-                            &plan,
-                            &bootstrap,
-                            &identity,
-                            &updated_fields,
-                        )),
-                        ..output
-                    },
-                    1,
-                ));
-            }
-        }
-        phase_summary.push(refresh_phase("reconnect_transport", true, 0));
-        phase_summary.push(refresh_phase("daemon_identity_verification", true, 0));
-        phase_summary.push(refresh_phase("admission_readiness", true, 0));
     }
-
-    let readiness = options
-        .reconnect
-        .then(|| refresh_readiness_postcondition(&plan.runner_id))
-        .transpose()?;
+    phase_summary.push(refresh_phase("reconnect_transport", true, 0));
+    phase_summary.push(refresh_phase("daemon_identity_verification", true, 0));
+    phase_summary.push(refresh_phase("admission_readiness", true, 0));
+    let readiness = Some(refresh_readiness_postcondition(&plan.runner_id)?);
     let converged = readiness
         .as_ref()
         .is_none_or(|readiness| readiness.state == HomeboyRefreshReadinessState::Ready);
@@ -980,7 +963,6 @@ fn refresh_homeboy_binary_inner_in_roots(
         HomeboyBinaryRefreshOutput {
             phase_summary,
             daemon_refreshed,
-            reconnect_required: reconnect_required_after_refresh(daemon_refreshed),
             followup_commands,
             readiness,
             failure,
@@ -1033,7 +1015,7 @@ fn failed_refresh_readiness(plan: &HomeboyBinaryRefreshPlan) -> HomeboyRefreshRe
         daemon_fresh: false,
         owners: Vec::new(),
         continuation: Some(format!(
-            "homeboy runner refresh-homeboy {} --reconnect",
+            "homeboy runner refresh-homeboy {}",
             shell_arg(&plan.runner_id)
         )),
     }
@@ -1079,12 +1061,6 @@ fn refresh_bootstrap_provenance(
     }
 }
 
-/// `daemon_refreshed` records a completed daemon operation. A later readiness
-/// failure can require reconciliation without requiring another reconnect.
-fn reconnect_required_after_refresh(daemon_refreshed: bool) -> bool {
-    !daemon_refreshed
-}
-
 /// A stale daemon is still a live transport that must be retired before its
 /// replacement starts. A disconnected status may retain an obsolete session
 /// record, but it has no transport to rotate.
@@ -1093,10 +1069,9 @@ fn reconnect_restarts_existing_transport(status: &super::RunnerStatusReport) -> 
 }
 
 fn reconnect_session_after_promotion(
-    reconnect: bool,
     status: &super::RunnerStatusReport,
 ) -> Option<super::RunnerSession> {
-    (reconnect && reconnect_restarts_existing_transport(status))
+    reconnect_restarts_existing_transport(status)
         .then(|| status.session.clone())
         .flatten()
 }
@@ -1569,7 +1544,7 @@ fn admission_readiness_timeout_error(expected_lease_id: &str, source: Error) -> 
         ),
         Some(expected_lease_id.to_string()),
         Some(vec![
-            "re-run `homeboy runner refresh-homeboy <runner> --reconnect` to reconcile the daemon session".to_string(),
+            "re-run `homeboy runner refresh-homeboy <runner>` to reconcile the daemon session".to_string(),
         ]),
     )
 }
@@ -2130,7 +2105,6 @@ pub fn runner_dev_sync(options: RunnerDevSyncOptions) -> Result<(RunnerDevSyncOu
                 binary_path: remote_binary.clone(),
             },
             git_ref: None,
-            reconnect: options.reconnect,
             allow_downgrade: false,
             dry_run: false,
         })?;
@@ -2575,7 +2549,7 @@ where
         ),
         Some(runner_id.to_string()),
         Some(vec![format!(
-            "Run `homeboy runner refresh-homeboy {} --select {} --reconnect` to write and reconnect the selected executable.",
+            "Run `homeboy runner refresh-homeboy {} --select {}` to write and reconnect the selected executable.",
             quote_arg(runner_id),
             quote_arg(homeboy_path)
         )]),
@@ -2629,7 +2603,7 @@ fn durable_refresh_partial_error(
 ) -> Error {
     let previous = previous_homeboy_path.unwrap_or("homeboy");
     let continuation_command = format!(
-        "homeboy runner refresh-homeboy {} --select {} --reconnect",
+        "homeboy runner refresh-homeboy {} --select {}",
         quote_arg(runner_id),
         quote_arg(previous),
     );
@@ -2991,7 +2965,7 @@ fn validate_dev_sync_binary_for_runner(runner: &super::Runner, binary: &Path) ->
             Some(binary.display().to_string()),
             Some(vec![
                 format!(
-                    "Build/select Homeboy on the runner with `homeboy runner refresh-homeboy {} --ref main --reconnect`.",
+                    "Build/select Homeboy on the runner with `homeboy runner refresh-homeboy {} --ref main`.",
                     shell_arg(&runner.id)
                 ),
                 format!(
@@ -3083,9 +3057,9 @@ fn dev_sync_next_actions(runner_id: &str, options: &RunnerDevSyncOptions) -> Vec
         return Vec::new();
     }
 
-    let mut actions = refresh_followups(runner_id, options.reconnect);
+    let mut actions = dev_sync_connection_followups(runner_id, options.reconnect);
     actions.push(format!(
-        "homeboy runner refresh-homeboy {} --ref {} --reconnect",
+        "homeboy runner refresh-homeboy {} --ref {}",
         shell_arg(runner_id),
         controller_refresh_ref()
     ));
@@ -3107,7 +3081,7 @@ fn release_binaries_dir(workspace_root: &str) -> String {
     format!("{}/_homeboy_binaries", workspace_root.trim_end_matches('/'))
 }
 
-fn refresh_followups(runner_id: &str, reconnect: bool) -> Vec<String> {
+fn dev_sync_connection_followups(runner_id: &str, reconnect: bool) -> Vec<String> {
     if reconnect {
         vec![format!("homeboy runner status {}", shell_arg(runner_id))]
     } else {

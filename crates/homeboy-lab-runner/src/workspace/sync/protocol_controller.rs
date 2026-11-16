@@ -298,7 +298,7 @@ fn sync_workspace_batch_once(
     let version = response.lab_contract_version;
     if version != CONTRACT {
         return Err(io(format!(
-            "Lab contract version mismatch: received {version}, expected {CONTRACT}; run homeboy runner refresh-homeboy {runner_id} --reconnect"
+            "Lab contract version mismatch: received {version}, expected {CONTRACT}; run homeboy runner refresh-homeboy {runner_id}"
         )));
     }
     let inventory = super::blobs::inventory(&plan.roots)?;
@@ -610,7 +610,7 @@ pub(super) fn invoke(
                     }
                     return super::super::util::shell_output_failure(output, "runner materialization call").map(|()| serde_json::Value::Null).map_err(|mut error| {
                     if error.message.contains("contract version mismatch") {
-                        error.message.push_str(&format!("; run homeboy runner refresh-homeboy {} --reconnect", runner.id));
+                        error.message.push_str(&format!("; run homeboy runner refresh-homeboy {}", runner.id));
                     }
                     if blobs.is_some() && error.code == ErrorCode::RunnerLabTransportFailure { error.details["workspace_sync"] = serde_json::json!({"command_started": true, "remote_effect_uncertain": true}); }
                     error

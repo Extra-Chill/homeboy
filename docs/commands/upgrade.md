@@ -39,14 +39,14 @@ Each convergence outcome maps onto the runner's upgrade entry like this:
 | `converged` | `success: true`, `upgraded: true`, `new_version` is the target version |
 | `already_current` | `success: true`, `upgraded: false`; nothing is installed |
 | `pending_active_jobs` | `deferred: true`; `detail` names the blocking job IDs; recover with `homeboy upgrade --upgrade-runner <runner>` once they finish |
-| `failed`, `skipped_unverifiable` | `success: false`; `detail` keeps the attributed cause; recover with `homeboy runner refresh-homeboy <runner> --ref v<target> --reconnect` |
+| `failed`, `skipped_unverifiable` | `success: false`; `detail` keeps the attributed cause; recover with `homeboy runner refresh-homeboy <runner> --ref v<target>` |
 | `skipped_remote_newer`, `skipped_dev_build` | `success: false`, with no recovery command (the runner is never downgraded, and a dev build has no published release) |
 
 Only a `converged` or `already_current` binary continues to:
 
 - sync every parent extension that has portable source metadata (`source_url` plus `source_revision`) to the runner, isolating failures per extension;
 - report a stale connected runner daemon (`stale_daemon`) whose session version does not match the target;
-- reconcile the runner-service unit binaries (`service_binaries`), restarting this controller's stale unit through the idle-gated `refresh-homeboy --reconnect` handoff.
+- reconcile the runner-service unit binaries (`service_binaries`), restarting this controller's stale unit through the in-place `refresh-homeboy` handoff.
 
 Controller upgrades install the verified binary, stop the resident daemon by
 its exact lease, and start the installed binary in the same state directory.

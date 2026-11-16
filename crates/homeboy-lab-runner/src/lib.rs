@@ -2219,7 +2219,7 @@ mod tests {
         assert_eq!(
             snapshot.summary.next_action.as_deref(),
             Some(
-                "homeboy runner refresh-homeboy homeboy-lab --ref d1a1a6d2092f250780ccf40a57a12becff2a164f --reconnect"
+                "homeboy runner refresh-homeboy homeboy-lab --ref d1a1a6d2092f250780ccf40a57a12becff2a164f"
             )
         );
     }
@@ -2710,12 +2710,12 @@ mod tests {
         let mut version_mismatch = default_lab_candidate("version-mismatch", true);
         version_mismatch.admission_fresh = false;
         version_mismatch.admission_remediation =
-            Some("homeboy runner refresh-homeboy version-mismatch --reconnect".to_string());
+            Some("homeboy runner refresh-homeboy version-mismatch".to_string());
         let version_mismatch = lab_runner_readiness_from_candidates(None, vec![version_mismatch]);
         assert_eq!(version_mismatch.state, LabRunnerReadinessState::Stale);
         assert_eq!(
             version_mismatch.remediation_commands,
-            ["homeboy runner refresh-homeboy version-mismatch --reconnect"]
+            ["homeboy runner refresh-homeboy version-mismatch"]
         );
 
         let mut lease_missing = default_lab_candidate("lease-missing", true);

@@ -45,7 +45,7 @@ struct RestartedDaemon {
 }
 
 impl RestartedDaemon {
-    fn serve(job: Job) -> Self {
+    fn serve(job: Job, lease_file: PathBuf) -> Self {
         let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("restarted daemon");
         listener
             .set_nonblocking(true)
@@ -72,6 +72,9 @@ impl RestartedDaemon {
                     .set_read_timeout(Some(Duration::from_secs(2)))
                     .expect("read timeout");
                 let path = request_path(&mut stream);
+                let active = serde_json::json!({"runner_id": RUNNER, "job_id": job.id, "operation": "runner.exec", "source": "runner-daemon", "kind": "runner.exec", "status": "running", "command": "work", "started_at_ms": 1, "updated_at_ms": 1, "elapsed_ms": 0, "heartbeat_age_ms": 0, "re_adoptable": true});
+                let restarted =
+                    std::fs::read_to_string(&lease_file).unwrap_or_default() == NEW_LEASE;
                 let (status, body) = match path.as_str() {
                     "/health" => (
                         "200 OK",
@@ -79,19 +82,49 @@ impl RestartedDaemon {
                             "freshness": {
                                 "fresh": true,
                                 "restartable": false,
-                                "lease_id": NEW_LEASE,
-                                "pid": NEW_PID,
+                                "lease_id": if restarted { NEW_LEASE } else { OLD_LEASE },
+                                "pid": if restarted { NEW_PID } else { 41 },
                                 "active_jobs": 1,
                             },
-                            "pid": NEW_PID,
+                            "pid": if restarted { NEW_PID } else { 41 },
                         }),
                     ),
                     "/version" => (
                         "200 OK",
                         serde_json::json!({
-                            "version": NEW_VERSION,
-                            "build_identity": { "display": NEW_IDENTITY },
+                            "version": if restarted { NEW_VERSION } else { "0.283.0" },
+                            "build_identity": { "display": if restarted { NEW_IDENTITY } else { OLD_IDENTITY } },
+                            "runtime_paths": {"stale": if restarted { vec![] } else { vec![serde_json::json!({"env":"HOMEBOY_TEST_PATH","path":"/old","loaded_fingerprint":"old","current_fingerprint":"new"})] }},
                         }),
+                    ),
+                    "/runner/describe" => (
+                        "200 OK",
+                        serde_json::json!({"success": true, "data": {"body": {
+                            "schema": "homeboy/runner-service-observation/v1",
+                            "lease_id": if restarted { NEW_LEASE } else { OLD_LEASE },
+                            "freshness": {"fresh": restarted, "stale_reason_code": if restarted { serde_json::Value::Null } else { serde_json::json!("lab_contract_version_mismatch") }, "restartable": false, "lease_id": if restarted { NEW_LEASE } else { OLD_LEASE }, "pid": if restarted { NEW_PID } else { 41 }, "active_jobs": if restarted { 1 } else { 0 }},
+                            "active_runner_job_count": if restarted { 1 } else { 0 },
+                            "active_runner_jobs": if restarted { vec![active] } else { vec![] },
+                            "stale_runner_jobs": []
+                        }}}),
+                    ),
+                    "/jobs/reconcile-terminal" => (
+                        "200 OK",
+                        serde_json::json!({"success": true, "data": {"body": {}}}),
+                    ),
+                    "/jobs" => (
+                        "200 OK",
+                        serde_json::json!({"success": true, "data": {"body": {"active_runner_jobs": [{"job_id": job.id, "re_adoptable": true}], "stale_runner_jobs": []}}}),
+                    ),
+                    "/admissions" => (
+                        "200 OK",
+                        serde_json::json!({"success": true, "data": {"body": {
+                            "daemon_lease_id": NEW_LEASE, "job": job, "admission_token": "token", "admission_lease_protocol": 1, "lease": {"renewable": true, "expires_at_ms": 9999999999999u64},
+                        }}}),
+                    ),
+                    path if path.starts_with("/admissions/") => (
+                        "200 OK",
+                        serde_json::json!({"success": true, "data": {"body": {}}}),
                     ),
                     path if path == job_path => {
                         job_polls += 1;
@@ -179,7 +212,7 @@ fi
 lease=$(cat '__LEASE__')
 case "$1 $2" in
   "self identity")
-    printf '%s\n' '{"success":true,"data":{"version":"__VERSION__","display":"__IDENTITY__"}}'
+    printf '%s\n' '{"success":true,"data":{"version":"__VERSION__","display":"__IDENTITY__","git_commit":"test","git_dirty":false}}'
     ;;
   "daemon stop")
     if [ "$3" != "--lease-id" ] || [ "$4" != "$lease" ]; then
@@ -206,7 +239,7 @@ case "$1 $2" in
         printf '%s\n' '{"success":true,"data":{"running":true,"reachable":true,"fresh":true,"active_jobs":1,"state":{"address":"__ADDRESS__","pid":__PID__,"lease_id":"__NEW_LEASE__","active_version":"__VERSION__","active_build":"__IDENTITY__"}}}'
         ;;
       *)
-        printf '%s\n' '{"success":true,"data":{"running":true,"reachable":true,"fresh":false,"active_jobs":1,"state":{"address":"127.0.0.1:1","pid":41,"lease_id":"__OLD_LEASE__","active_version":"0.283.0","active_build":"__OLD_IDENTITY__"}}}'
+        printf '%s\n' '{"success":true,"data":{"running":true,"reachable":true,"fresh":false,"active_jobs":1,"state":{"address":"__ADDRESS__","pid":41,"lease_id":"__OLD_LEASE__","active_version":"0.283.0","active_build":"__OLD_IDENTITY__"}}}'
         ;;
     esac
     ;;
@@ -223,7 +256,7 @@ const FAKE_CURL: &str = r#"#!/bin/sh
 for url; do :; done
 case "$url" in
   */version)
-    printf '%s\n' '{"version":"__VERSION__","build_identity":{"display":"__IDENTITY__"}}'
+    printf '%s\n' '{"version":"__VERSION__","build_identity":{"display":"__IDENTITY__","git_commit":"test","git_dirty":false}}'
     ;;
   */jobs)
     printf '%s\n' '{"success":true,"data":{"body":{"active_runner_jobs":[{"job_id":"__JOB__","re_adoptable":true}],"stale_runner_jobs":[]}}}'
@@ -274,28 +307,31 @@ fn connected_runner_with_re_adoptable_job(
 ) -> RestartFixture {
     let job_uuid = uuid::Uuid::new_v4();
     let job_id = job_uuid.to_string();
-    let daemon = RestartedDaemon::serve(Job {
-        id: job_uuid,
-        operation: "runner.exec".to_string(),
-        status: JobStatus::Running,
-        created_at_ms: 1_700_000_000_000,
-        updated_at_ms: 1_700_000_001_000,
-        started_at_ms: Some(1_700_000_000_000),
-        finished_at_ms: None,
-        event_count: 0,
-        source_snapshot: None,
-        path_materialization_plan: None,
-        stale_reason: None,
-        daemon_lease_id: Some(OLD_LEASE.to_string()),
-        target_runner_id: Some(RUNNER.to_string()),
-        target_project_id: None,
-        claim_id: None,
-        claimed_by_runner_id: None,
-        claimed_at_ms: None,
-        claim_expires_at_ms: None,
-        artifacts: Vec::new(),
-        runner_job_projection: None,
-    });
+    let daemon = RestartedDaemon::serve(
+        Job {
+            id: job_uuid,
+            operation: "runner.exec".to_string(),
+            status: JobStatus::Running,
+            created_at_ms: 1_700_000_000_000,
+            updated_at_ms: 1_700_000_001_000,
+            started_at_ms: Some(1_700_000_000_000),
+            finished_at_ms: None,
+            event_count: 0,
+            source_snapshot: None,
+            path_materialization_plan: None,
+            stale_reason: None,
+            daemon_lease_id: Some(OLD_LEASE.to_string()),
+            target_runner_id: Some(RUNNER.to_string()),
+            target_project_id: None,
+            claim_id: None,
+            claimed_by_runner_id: None,
+            claimed_at_ms: None,
+            claim_expires_at_ms: None,
+            artifacts: Vec::new(),
+            runner_job_projection: None,
+        },
+        home.path().join("remote-daemon-lease"),
+    );
 
     let homeboy = home.path().join("remote-homeboy");
     let homeboy_log = home.path().join("remote-homeboy.log");
@@ -347,6 +383,8 @@ fn connected_runner_with_re_adoptable_job(
             "id": RUNNER,
             "kind": "ssh",
             "homeboy_path": homeboy,
+            "workspace_root": home.path(),
+            "policy": { "allow_raw_exec": true },
             "service_managed": service_managed,
         })
         .to_string(),
@@ -512,29 +550,65 @@ pub(crate) fn refresh_with_active_jobs_keeps_successor_ownership() {
     crate::test_support::with_isolated_home(|home| {
         let fixture = connected_runner_with_re_adoptable_job(home, false);
 
-        let route = crate::homeboy_refresh::refresh_reconnect_route(Some(&fixture.previous), false);
-        let crate::homeboy_refresh::RefreshReconnectRoute::RestartInPlace(session) = route else {
-            panic!("active work must restart in place, not disconnect");
-        };
-        let (report, exit_code) = crate::connection::restart_daemon_in_place(
+        let mut live = fixture.previous.clone();
+        live.local_url = Some(fixture.daemon.url());
+        live.local_port = Some(
+            fixture
+                .daemon
+                .address
+                .rsplit_once(':')
+                .unwrap()
+                .1
+                .parse()
+                .unwrap(),
+        );
+        live.remote_daemon_address = Some(fixture.daemon.address.clone());
+        let roots = homeboy_core::paths::PathRoots::from_environment().unwrap();
+        let path = homeboy_core::paths::runner_controller_session_file_in_root(
+            roots.config(),
             RUNNER,
-            session,
-            fixture.homeboy.to_str().expect("binary path"),
-        )
-        .expect("restart in place");
-
-        assert_eq!(exit_code, 0, "{report:?}");
-        assert!(report.connected);
-        assert_eq!(report.remote_daemon_pid, Some(NEW_PID));
+            &crate::connection::controller_id(),
+        );
+        std::fs::write(path, serde_json::to_vec(&live).unwrap()).unwrap();
+        let promoted = home.path().join("promoted-homeboy");
+        let promoted_log = home.path().join("promoted-homeboy.log");
+        let script = std::fs::read_to_string(&fixture.homeboy).unwrap().replace(
+            fixture.homeboy_log.to_str().unwrap(),
+            promoted_log.to_str().unwrap(),
+        );
+        homeboy_test_support::write_executable(&promoted, script, 0o755).unwrap();
+        let (output, exit_code) =
+            crate::refresh_homeboy_binary(crate::HomeboyBinaryRefreshOptions {
+                runner_id: RUNNER.to_string(),
+                mode: crate::HomeboyBinaryRefreshMode::Select {
+                    binary_path: promoted.display().to_string(),
+                },
+                git_ref: None,
+                allow_downgrade: true,
+                dry_run: false,
+            })
+            .expect("refresh entry point");
+        assert_eq!(exit_code, 0, "{output:?}");
+        assert!(output.daemon_refreshed);
+        assert!(!output.reconnect_required);
+        assert_eq!(output.selected_binary_path, promoted.display().to_string());
+        assert!(output
+            .phase_summary
+            .iter()
+            .any(|phase| phase.name == "restart_in_place" && phase.exit_code == 0));
         assert_eq!(
-            report.remote_daemon_address.as_deref(),
-            Some(fixture.daemon.address.as_str())
+            crate::load(RUNNER)
+                .unwrap()
+                .settings
+                .homeboy_path
+                .as_deref(),
+            promoted.to_str()
         );
 
         // The exact old lease was stopped, then ensure-running started the
         // daemon again on the same HOMEBOY_DAEMON_STATE_DIR.
         let state_dir = expected_state_dir();
-        let invocations = daemon_invocations(&fixture.homeboy_log);
+        let invocations = daemon_invocations(&promoted_log);
         let stop = invocations
             .iter()
             .position(|(_, argv)| argv == &format!("daemon stop --lease-id {OLD_LEASE}"))

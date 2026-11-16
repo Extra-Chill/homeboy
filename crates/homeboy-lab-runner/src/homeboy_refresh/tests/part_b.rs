@@ -491,7 +491,7 @@ fn ssh_dev_sync_rejects_darwin_binary_before_upload() {
     assert!(err.message.contains("Darwin/Mach-O"));
     let tried = err.details["tried"].as_array().expect("tried remediation");
     assert!(tried.iter().any(|hint| hint.as_str().is_some_and(|hint| {
-        hint.contains("runner refresh-homeboy") && hint.contains("--ref main --reconnect")
+        hint.contains("runner refresh-homeboy") && hint.contains("--ref main")
     })));
 }
 
@@ -935,7 +935,7 @@ fn promotion_failure_names_the_exact_selected_executable_mutation() {
     let recovery = error.details["tried"][0]
         .as_str()
         .expect("exact repair command");
-    assert!(recovery.contains("--select /selected/homeboy --reconnect"));
+    assert!(recovery.contains("--select /selected/homeboy"));
 }
 
 #[test]
@@ -1123,99 +1123,12 @@ fn refresh_reobserves_a_replaced_binary_inside_staging() {
                 binary_path: binary.display().to_string(),
             },
             git_ref: None,
-            reconnect: false,
             allow_downgrade: true,
             dry_run: false,
         })
         .unwrap();
-        assert_eq!(code, 0, "{output:?}");
+        assert_eq!(code, 1, "{output:?}");
         assert_eq!(observe(), "homeboy 1.2.3+new");
-    });
-}
-
-#[test]
-fn verified_selection_persists_on_controller_and_reports_reconnect_required() {
-    crate::test_support::with_isolated_home(|_| {
-        let probes = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
-        let stale_probes = std::sync::Arc::clone(&probes);
-        let cached: String = crate::runner_probe_gate::deduplicated_probe(
-            "lab-local",
-            "refresh-invalidation",
-            "same-runtime-probe",
-            move || {
-                stale_probes.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-                Ok("missing".to_string())
-            },
-        )
-        .expect("cache pre-refresh capability answer");
-        assert_eq!(cached, "missing");
-
-        let fixture = tempfile::tempdir().expect("fixture");
-        let binary = fixture.path().join("homeboy");
-        let commit = homeboy_product_identity::build_identity()
-            .git_commit
-            .unwrap_or_else(|| "exact-remote-sha".to_string());
-        std::fs::write(
-            &binary,
-            format!(
-                "#!/bin/sh\nprintf '%s\\n' '{{\"data\":{{\"version\":\"1.2.3\",\"git_commit\":\"{commit}\",\"git_dirty\":false}}}}'\n"
-            ),
-        )
-        .expect("write selected binary");
-        let status = Command::new("chmod")
-            .args(["0755", binary.to_str().expect("binary path")])
-            .status()
-            .expect("make selected binary executable");
-        assert!(status.success());
-        crate::create(
-            r#"{"id":"lab-local","kind":"local","homeboy_path":"/old/homeboy"}"#,
-            false,
-        )
-        .expect("runner");
-        let options = HomeboyBinaryRefreshOptions {
-            runner_id: "lab-local".to_string(),
-            mode: HomeboyBinaryRefreshMode::Select {
-                binary_path: binary.display().to_string(),
-            },
-            git_ref: None,
-            reconnect: false,
-            allow_downgrade: true,
-            dry_run: false,
-        };
-
-        let (selected, exit_code) = refresh_homeboy_binary(options.clone()).expect("selection");
-        assert_eq!(exit_code, 0);
-        assert_eq!(selected.updated_fields, ["env", "homeboy_path"]);
-        assert_eq!(selected.selected_binary_path, binary.display().to_string());
-        assert!(!selected.daemon_refreshed);
-        assert!(selected.reconnect_required);
-        assert_eq!(
-            crate::load("lab-local")
-                .expect("reload controller registry")
-                .settings
-                .homeboy_path
-                .as_deref(),
-            binary.to_str()
-        );
-        let fresh_probes = std::sync::Arc::clone(&probes);
-        let refreshed: String = crate::runner_probe_gate::deduplicated_probe(
-            "lab-local",
-            "refresh-invalidation",
-            "same-runtime-probe",
-            move || {
-                fresh_probes.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-                Ok("present".to_string())
-            },
-        )
-        .expect("probe refreshed capability answer");
-        assert_eq!(refreshed, "present");
-        assert_eq!(probes.load(std::sync::atomic::Ordering::SeqCst), 2);
-
-        let (repeated, exit_code) = refresh_homeboy_binary(options).expect("repeat selection");
-        assert_eq!(exit_code, 0);
-        assert_eq!(repeated.updated_fields, ["env", "homeboy_path"]);
-        assert!(!repeated.daemon_refreshed);
-        assert!(repeated.reconnect_required);
     });
 }
 
@@ -1251,7 +1164,6 @@ fn blocked_connect_preserves_successful_promotion_with_one_continuation() {
                 binary_path: binary.display().to_string(),
             },
             git_ref: None,
-            reconnect: true,
             allow_downgrade: true,
             dry_run: false,
         })
@@ -1263,7 +1175,7 @@ fn blocked_connect_preserves_successful_promotion_with_one_continuation() {
         assert_eq!(output.plan.mode, "select");
         assert_eq!(output.plan.git_ref, None);
         assert!(!output.daemon_refreshed);
-        assert!(output.reconnect_required);
+        assert!(!output.reconnect_required);
         assert_eq!(
             output
                 .phase_summary
@@ -1345,7 +1257,6 @@ fn stale_session_refresh_blocker_starts_the_newly_selected_binary() {
                     binary_path: binary.display().to_string(),
                 },
                 git_ref: None,
-                reconnect: true,
                 allow_downgrade: true,
                 dry_run: false,
             })
@@ -1399,7 +1310,7 @@ fn stale_session_refresh_blocker_starts_the_newly_selected_binary() {
             second_binary.display().to_string()
         );
         assert!(!output.daemon_refreshed);
-        assert!(output.reconnect_required);
+        assert!(!output.reconnect_required);
         assert_eq!(
             output
                 .phase_summary

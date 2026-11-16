@@ -1785,7 +1785,7 @@ mod daemon_repair_step_tests {
                 .map(|step| step.command.clone())
                 .collect::<Vec<_>>(),
             [format!(
-                "homeboy runner refresh-homeboy homeboy-lab --ref {} --reconnect",
+                "homeboy runner refresh-homeboy homeboy-lab --ref {}",
                 crate::controller_refresh_ref()
             )]
         );

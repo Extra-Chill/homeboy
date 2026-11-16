@@ -10,7 +10,7 @@
 //! `refresh-homeboy` pinned to the target's exact version tag, so it never
 //! resolves "latest" and never builds from source. That refresh owns its own
 //! runtime-promotion lease and replaces the daemon through its existing
-//! `--reconnect` mechanism (in-place restart or service-unit repoint). It runs
+//! in-place restart mechanism (in-place restart or service-unit repoint). It runs
 //! before connect takes its own lease, and refresh's reconnect attaches
 //! through the non-converging connect, so convergence never re-enters itself.
 

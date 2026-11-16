@@ -991,7 +991,7 @@ fn admission_recovery_timeout_error(
         ),
         Some(runner_id.to_string()),
         Some(vec![format!(
-            "Re-run `homeboy runner refresh-homeboy {runner_id} --reconnect` once, then retry the batch."
+            "Re-run `homeboy runner refresh-homeboy {runner_id}` once, then retry the batch."
         )]),
     );
     // The provider never started and the staged workspace remains reusable.

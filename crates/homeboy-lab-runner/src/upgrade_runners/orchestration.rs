@@ -868,7 +868,7 @@ mod upgrade_runner_tests {
         assert_eq!(refs, [Some("v0.401.0".to_string())]);
         assert_eq!(
             entry.recovery_commands,
-            ["homeboy runner refresh-homeboy lab --ref v0.401.0 --reconnect"]
+            ["homeboy runner refresh-homeboy lab --ref v0.401.0"]
         );
         assert_eq!(
             runner_upgrade_target(None),

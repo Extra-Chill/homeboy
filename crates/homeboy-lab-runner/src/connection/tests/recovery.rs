@@ -855,7 +855,7 @@ fn stale_active_daemon_without_a_matching_session_fails_closed_without_replacing
     assert!(warning.contains("VersionMismatch"));
     assert!(warning.contains("active jobs were preserved"));
     assert!(warning.contains(
-        "Continue with `homeboy runner refresh-homeboy homeboy-lab --reconnect` when its work is complete."
+        "Continue with `homeboy runner refresh-homeboy homeboy-lab` when its work is complete."
     ));
     assert!(
         recovery.repair_plan.is_empty(),
