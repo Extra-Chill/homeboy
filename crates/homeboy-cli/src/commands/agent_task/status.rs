@@ -357,8 +357,10 @@ fn status_without_feedback(args: StatusArgs) -> CmdResult<Value> {
     // Status is a pure projection (#13697, #15718): every read below is
     // bounded and never initializes, migrates, or reconciles durable state.
     if let Ok(record) = bounded_exact_record(&target.run_id) {
-        value["terminal_outcome"] = json!(record.terminal_outcome);
-        value["recoverable"] = json!(record.recoverable);
+        let outcome = cook_outcome_record(&args, &record);
+        let outcome = outcome.as_ref().unwrap_or(&record);
+        value["terminal_outcome"] = json!(outcome.terminal_outcome);
+        value["recoverable"] = json!(outcome.recoverable);
         if record
             .metadata
             .get("unmaterialized_cook_admission")
@@ -752,6 +754,37 @@ mod compact_status_tests {
         });
     }
 
+    /// #18271: a Cook's outcome is the gate verdict on its candidate, not the
+    /// later no-change retry that status follows for continuation.
+    #[test]
+    fn cook_outcome_is_the_selected_attempts_gate_verdict() {
+        crate::test_support::with_isolated_home(|_| {
+            homeboy::agents::agent_task_lifecycle::seed_status_purity_fixtures_for_test().unwrap();
+            let status = |run_id: &str, exact| {
+                super::status(super::StatusArgs {
+                    run_id: run_id.to_string(),
+                    full: false,
+                    exact,
+                    strict_subject_exit: false,
+                    watch: false,
+                    interval: "5s".to_string(),
+                    timeout: "30m".to_string(),
+                })
+                .unwrap()
+                .0
+            };
+            let cook = status("purity-cook-gate-refused", false);
+            assert_eq!(
+                cook["terminal_outcome"],
+                json!({"kind": "gate_refused", "gate": "gate-1"}),
+                "{cook}"
+            );
+            assert_eq!(cook["recoverable"], true);
+            let retry = status("purity-cook-gate-refused-retry", true);
+            assert_eq!(retry["terminal_outcome"]["kind"], "no_change", "{retry}");
+        });
+    }
+
     #[test]
     fn compact_status_names_the_bound_model_next_to_the_state() {
         let value = json!({
@@ -933,6 +966,27 @@ mod compact_status_tests {
     fn duplicate_artifacts_uri(index: usize) -> String {
         format!("homeboy://{}-{index}", "u".repeat(8 * 1024))
     }
+}
+
+/// A settled Cook's outcome is its decisive attempt's: the attempt candidate
+/// selection and `diagnose` read. A later attempt that produced no candidate
+/// (a no-change retry, a retry that failed to start) does not replace the gate
+/// verdict on the candidate it followed. Running Cooks and exact reads keep
+/// the continuation attempt's own record.
+fn cook_outcome_record(
+    args: &StatusArgs,
+    continuation: &AgentTaskRunRecord,
+) -> Option<AgentTaskRunRecord> {
+    if args.exact || !continuation.state().is_terminal() {
+        return None;
+    }
+    let selected = resolve_cook_reader_target(&args.run_id, false).ok()?;
+    if selected.run_id == continuation.run_id {
+        return None;
+    }
+    bounded_exact_record(&selected.run_id)
+        .ok()
+        .filter(|record| record.state().is_terminal())
 }
 
 fn bounded_exact_record(run_id: &str) -> homeboy::core::Result<AgentTaskRunRecord> {
