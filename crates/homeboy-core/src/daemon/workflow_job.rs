@@ -924,13 +924,17 @@ fn step_result(
 /// The Cook process ending is only a wake-up: the Cook settles when its run
 /// (and its terminal continuation) does. A step that exited cleanly without
 /// ever recording a run did not cook, so it fails rather than inheriting the
-/// exit status.
+/// exit status. A step job that failed or was cancelled settles with its own
+/// status even while the Cook record looks pending (#18229): no continuation
+/// will turn a failed Cook process into success, and waiting on a record that
+/// may never settle strands the whole workflow.
 fn cook_step_outcome(
     resolved: Option<WorkflowRunOutcome>,
     status: FinishedStatus,
 ) -> Option<Option<String>> {
     match resolved {
-        Some(WorkflowRunOutcome::Pending) => None,
+        Some(WorkflowRunOutcome::Pending) if status == FinishedStatus::Succeeded => None,
+        Some(WorkflowRunOutcome::Pending) => Some(None),
         Some(WorkflowRunOutcome::Settled { outcome, .. }) => Some(Some(outcome)),
         Some(WorkflowRunOutcome::Unknown) if status == FinishedStatus::Succeeded => {
             Some(Some("failed".to_string()))
