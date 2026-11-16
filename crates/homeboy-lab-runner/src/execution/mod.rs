@@ -118,7 +118,8 @@ pub(crate) use handoff::runner_job_cancel_not_connected;
 #[cfg(test)]
 pub(crate) use process::child_provenance_env;
 pub(crate) use process::{
-    execute_runner_process_until_cancelled_with_progress, prepare_daemon_local_process,
+    execute_runner_process_until_cancelled_with_progress, preflight_provenance_build_skew,
+    prepare_daemon_local_process,
 };
 #[cfg(test)]
 pub(crate) use secrets::runner_exec_secret_env_names;

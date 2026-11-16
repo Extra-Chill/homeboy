@@ -3869,6 +3869,17 @@ impl LabStagingStageOperations for ProductionLabStagingOperations {
         lab_metadata["execution_bundle"] = execution_bundle;
         let (secret_handoff, env) =
             durable_dispatch_env(request, &lab_metadata, runtime_env, &runtime.payload.output)?;
+        // Fail before submission, not mid-continuation, when the daemon would
+        // refuse this job's provenance references (#18206).
+        crate::execution::preflight_provenance_build_skew(
+            &env,
+            verified_build_identity.as_deref(),
+            runner_status
+                .daemon_freshness
+                .as_ref()
+                .and_then(|freshness| freshness.daemon_build_identity.as_deref()),
+            &request.recipe.runner_id,
+        )?;
         crate::lab::secrets::preflight_lab_secret_env_handoff(
             &request.recipe.runner_id,
             Some(&runner),
