@@ -2007,7 +2007,6 @@ fn stale_replacement_force_stop_rejects_a_success_envelope_without_stop_action()
         let error = remote_daemon::remote_daemon_force_stop(
             &client,
             daemon.to_str().expect("daemon path"),
-            "local-runner",
             "lease-old",
         )
         .expect_err("malformed success response");

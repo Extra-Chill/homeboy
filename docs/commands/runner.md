@@ -1,5 +1,7 @@
 # `homeboy runner`
 
+One host daemon per machine, shared by every controller and runner id.
+
 ## Synopsis
 
 ```sh
@@ -28,7 +30,7 @@ homeboy runner reserve <runner> --release <id>
 
 The reservation is host-wide: the host daemon, and any legacy per-controller
 daemon not yet retired, reads the same reservation file in
-`runner-daemons/<runner>/`, so all of them durably hold new admission
+`runner-daemons/host/`, so all of them durably hold new admission
 immediately, without stopping running work.
 `--quiet-below` is the five-minute load average divided by logical CPU count
 (1.0 means one runnable task per CPU), sampled by the same pressure observer as
@@ -1119,7 +1121,7 @@ Recognized slot layouts:
 
 A slot is `selected` (never removed) when any of these resolve into it:
 the configured `homeboy_path` (`configured_homeboy_path:<path>`), any
-runner-service link `~/.local/share/homeboy/runner-service/*/host/homeboy` or a legacy
+runner-service link `~/.local/share/homeboy/runner-service/host/homeboy` or a legacy
 `~/.local/share/homeboy/runner-service/*/controllers/*/homeboy`
 (`runner_service_link:<path>`), or
 `~/.local/bin/homeboy` (`local_bin_link:<path>`). A reference that exists but

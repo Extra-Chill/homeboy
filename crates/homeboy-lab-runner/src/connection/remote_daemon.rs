@@ -1059,7 +1059,7 @@ pub(super) fn replace_owned_remote_daemon(
         replacement_operation_id,
         registry_lock_held,
     )?;
-    remote_daemon_force_stop(client, homeboy, runner_id, lease_id)?;
+    remote_daemon_force_stop(client, homeboy, lease_id)?;
     let replacement =
         remote_daemon_ensure_running(client, homeboy, runner_id, replacement_operation_id)?;
     Ok(verify_remote_daemon_replacement(
@@ -1097,8 +1097,7 @@ fn journal_ensure_running_replay(
     if replacement_operation_id.is_none() {
         return Ok(());
     }
-    let command =
-        remote_daemon_ensure_running_command(homeboy, runner_id, replacement_operation_id);
+    let command = remote_daemon_ensure_running_command(homeboy, replacement_operation_id);
     let write = if registry_lock_held {
         super::replacement_journal::record_replacement_operation_replay_locked(
             runner_id,
@@ -1445,7 +1444,7 @@ fn remote_daemon_status_with_timeout(
         runner_id,
         &format!(
             "HOMEBOY_DAEMON_STATE_DIR=\"{}\" {} daemon status --full",
-            remote_daemon_state_dir(runner_id),
+            remote_daemon_state_dir(),
             shell::quote_arg(homeboy),
         ),
         timeout,
@@ -1683,14 +1682,13 @@ mod tests {
     #[test]
     fn every_daemon_lifecycle_command_targets_the_one_host_state_directory() {
         // No controller segment: every controller reaches the same daemon (#18063).
-        let pinned =
-            "HOMEBOY_DAEMON_STATE_DIR=\"$HOME/.config/homeboy/runner-daemons/runner_a/host\"";
+        let pinned = "HOMEBOY_DAEMON_STATE_DIR=\"$HOME/.config/homeboy/runner-daemons/host\"";
         assert_eq!(
-            remote_daemon_ensure_running_command("/opt/homeboy", "runner/a", Some("op-1")),
+            remote_daemon_ensure_running_command("/opt/homeboy", Some("op-1")),
             format!("{pinned} HOMEBOY_DAEMON_IDLE_TIMEOUT_SECS=0 /opt/homeboy daemon ensure-running --replacement-operation-id op-1 --addr 127.0.0.1:0")
         );
         assert_eq!(
-            remote_daemon_command("runner/a", "/opt/homeboy", "daemon stop --lease-id lease-a"),
+            remote_daemon_command("/opt/homeboy", "daemon stop --lease-id lease-a"),
             format!("{pinned} /opt/homeboy daemon stop --lease-id lease-a")
         );
     }
@@ -1956,8 +1954,7 @@ fn remote_daemon_ensure_running(
     runner_id: &str,
     replacement_operation_id: Option<&str>,
 ) -> std::result::Result<RemoteDaemon, RemoteDaemonEnsureError> {
-    let command =
-        remote_daemon_ensure_running_command(homeboy, runner_id, replacement_operation_id);
+    let command = remote_daemon_ensure_running_command(homeboy, replacement_operation_id);
     let output = client.execute_with_timeout(&command, REMOTE_DAEMON_STATUS_TIMEOUT);
     if !output.success {
         // Every homeboy command failure exits 2 by convention (see
@@ -2330,7 +2327,6 @@ fn truncate_utf8(value: &str, max_bytes: usize) -> String {
 
 pub(super) fn remote_daemon_ensure_running_command(
     homeboy: &str,
-    runner_id: &str,
     replacement_operation_id: Option<&str>,
 ) -> String {
     // The admission generation behind a connected runner session must stay
@@ -2341,7 +2337,6 @@ pub(super) fn remote_daemon_ensure_running_command(
     // tunnel can no longer reach (#15585). Replaced generations still drain
     // under the bounded default, so this does not keep superseded daemons.
     remote_resident_daemon_command(
-        runner_id,
         homeboy,
         &format!(
             "daemon ensure-running {} --addr 127.0.0.1:0",
@@ -2352,16 +2347,16 @@ pub(super) fn remote_daemon_ensure_running_command(
     )
 }
 
-fn remote_daemon_command(runner_id: &str, homeboy: &str, args: &str) -> String {
-    let state_dir = remote_daemon_state_dir(runner_id);
+fn remote_daemon_command(homeboy: &str, args: &str) -> String {
+    let state_dir = remote_daemon_state_dir();
     format!(
         "HOMEBOY_DAEMON_STATE_DIR=\"{state_dir}\" {} {args}",
         shell::quote_arg(homeboy),
     )
 }
 
-fn remote_resident_daemon_command(runner_id: &str, homeboy: &str, args: &str) -> String {
-    let state_dir = remote_daemon_state_dir(runner_id);
+fn remote_resident_daemon_command(homeboy: &str, args: &str) -> String {
+    let state_dir = remote_daemon_state_dir();
     format!(
         "HOMEBOY_DAEMON_STATE_DIR=\"{state_dir}\" {}=0 {} {args}",
         homeboy_core::daemon::DAEMON_IDLE_TIMEOUT_ENV,
@@ -2369,8 +2364,8 @@ fn remote_resident_daemon_command(runner_id: &str, homeboy: &str, args: &str) ->
     )
 }
 
-fn remote_daemon_state_dir(runner_id: &str) -> String {
-    format!("$HOME/{}", crate::connection::daemon_state_dir(runner_id))
+fn remote_daemon_state_dir() -> String {
+    format!("$HOME/{}", crate::connection::daemon_state_dir())
 }
 
 /// Schema of `homeboy daemon plan` data (#15557 C5).
@@ -2383,10 +2378,9 @@ pub(crate) const REMOTE_DAEMON_PLAN_SCHEMA: &str = "homeboy/daemon-lifecycle-pla
 /// on what a generation's state means.
 pub(crate) fn remote_daemon_lifecycle_plan(
     client: &SshClient,
-    runner_id: &str,
     homeboy: &str,
 ) -> std::result::Result<homeboy_core::daemon::lifecycle_plan::Plan, String> {
-    let command = remote_daemon_command(runner_id, homeboy, "daemon plan");
+    let command = remote_daemon_command(homeboy, "daemon plan");
     let output = client.execute_with_timeout(&command, REMOTE_DAEMON_STATUS_TIMEOUT);
     if !output.success {
         return Err(command_failure_message(
@@ -2523,11 +2517,9 @@ fn attested_reconcile_refusal(
 pub(super) fn remote_daemon_force_stop(
     client: &SshClient,
     homeboy: &str,
-    runner_id: &str,
     lease_id: &str,
 ) -> std::result::Result<(), String> {
     let command = remote_daemon_command(
-        runner_id,
         homeboy,
         &format!("daemon stop --lease-id {}", shell::quote_arg(lease_id),),
     );
@@ -2572,7 +2564,7 @@ pub(super) fn restart_remote_daemon_in_place(
     previous_lease: &str,
     configured_identity: &str,
 ) -> std::result::Result<RemoteDaemon, String> {
-    remote_daemon_force_stop(client, homeboy, runner_id, previous_lease)?;
+    remote_daemon_force_stop(client, homeboy, previous_lease)?;
     let stopped = remote_daemon_status(client, homeboy, runner_id)?;
     if stopped.reachable
         && stopped

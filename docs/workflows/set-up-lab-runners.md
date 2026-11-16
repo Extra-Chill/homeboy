@@ -1,5 +1,7 @@
 # Set Up Lab Runners
 
+One host daemon per machine, shared by every controller and runner id.
+
 Use Lab runners when Homeboy should execute hot or remote-capable work somewhere other than the controller machine. A runner gives agents and CI a durable execution target with known workspace roots, Homeboy binary identity, environment, secrets, resource policy, and artifact behavior.
 
 ## Use This When

@@ -45,32 +45,19 @@ pub struct RunnerServiceReport {
     pub daemon_build_identity: Option<String>,
 }
 
-/// The runner host's one daemon unit. Every controller attached to the runner
-/// shares it (#18063).
-pub(crate) fn service_unit_name(runner_id: &str) -> String {
-    format!(
-        "homeboy-runner-{}-host.service",
-        paths::sanitize_path_segment(runner_id)
-    )
+/// The machine's one host daemon unit, shared by every controller and runner id.
+pub(crate) fn service_unit_name() -> String {
+    "homeboy-runner.service".to_string()
 }
 
 /// The stable binary link the unit executes, relative to `$HOME`.
-pub(crate) fn service_binary_link(runner_id: &str) -> String {
-    format!(
-        ".local/share/homeboy/runner-service/{}/host/homeboy",
-        paths::sanitize_path_segment(runner_id)
-    )
-}
-
-/// The daemon state directory, relative to `$HOME`. It is the directory the
-/// read-only `daemon status` probe already inspects for this runner.
-fn service_state_dir(runner_id: &str) -> String {
-    super::daemon_state_dir(runner_id)
+pub(crate) fn service_binary_link() -> String {
+    ".local/share/homeboy/runner-service/host/homeboy".to_string()
 }
 
 #[cfg(test)]
-pub(crate) fn render_service_unit(runner_id: &str, startup_token: &str) -> String {
-    render_service_unit_with_env(runner_id, startup_token, &[])
+pub(crate) fn render_service_unit(startup_token: &str) -> String {
+    render_service_unit_with_env(startup_token, &[])
 }
 
 /// The runner-owned resource-guard policy entries from a runner's `env`,
@@ -98,11 +85,7 @@ pub(crate) fn daemon_policy_env(
     entries
 }
 
-fn render_service_unit_with_env(
-    runner_id: &str,
-    startup_token: &str,
-    daemon_env: &[(String, String)],
-) -> String {
+fn render_service_unit_with_env(startup_token: &str, daemon_env: &[(String, String)]) -> String {
     let idle_timeout = daemon_env
         .iter()
         .find(|(key, _)| key == "HOMEBOY_DAEMON_IDLE_TIMEOUT_SECS")
@@ -115,7 +98,7 @@ fn render_service_unit_with_env(
         .collect();
     format!(
         r#"[Unit]
-Description=Homeboy runner daemon ({runner_id})
+Description=Homeboy runner daemon
 After=network-online.target
 
 [Service]
@@ -133,21 +116,21 @@ KillMode=process
 [Install]
 WantedBy=default.target
 "#,
-        state_dir = super::daemon_state_dir(runner_id),
+        state_dir = super::daemon_state_dir(),
         token_env = paths::DAEMON_STARTUP_TOKEN_ENV,
         path = SERVICE_PATH_PLACEHOLDER,
-        link = service_binary_link(runner_id),
+        link = service_binary_link(),
     )
 }
 
 /// Atomically point the unit's binary link at `binary`.
-fn point_binary_script(runner_id: &str, binary: &str) -> String {
+fn point_binary_script(binary: &str) -> String {
     format!(
         r#"link="$HOME/{link}"
 mkdir -p "$(dirname "$link")"
 ln -sfn {binary} "$link.next"
 mv -f "$link.next" "$link""#,
-        link = service_binary_link(runner_id),
+        link = service_binary_link(),
         binary = shell::quote_arg(binary),
     )
 }
@@ -157,12 +140,8 @@ mv -f "$link.next" "$link""#,
 /// repoint-and-restart (which only needs the file on disk to be current
 /// before its own restart), so a repoint always carries the daemon's startup
 /// token even when the unit predates this being rendered (#15087).
-fn write_unit_script(
-    runner_id: &str,
-    startup_token: &str,
-    daemon_env: &[(String, String)],
-) -> String {
-    let unit = service_unit_name(runner_id);
+fn write_unit_script(startup_token: &str, daemon_env: &[(String, String)]) -> String {
+    let unit = service_unit_name();
     format!(
         r#"unit_dir="$HOME/.config/systemd/user"
 mkdir -p "$unit_dir"
@@ -172,7 +151,7 @@ cat > "$unit_dir/{unit}.tmp" <<'HOMEBOY_UNIT'
 sed -i "s|{placeholder}|$service_path|" "$unit_dir/{unit}.tmp"
 mv -f "$unit_dir/{unit}.tmp" "$unit_dir/{unit}"
 systemctl --user daemon-reload"#,
-        unit_text = render_service_unit_with_env(runner_id, startup_token, daemon_env),
+        unit_text = render_service_unit_with_env(startup_token, daemon_env),
         resolve_path = resolve_service_path_script(),
         placeholder = SERVICE_PATH_PLACEHOLDER,
     )
@@ -193,33 +172,41 @@ esac"#,
     )
 }
 
-fn install_script(
-    runner_id: &str,
-    binary: &str,
-    startup_token: &str,
-    daemon_env: &[(String, String)],
-) -> String {
+// KillMode=process leaves exec children alive for startup recovery in the
+// shared job store. Retire legacy aliases only after the machine unit starts.
+// Stale aliases can fail stop/disable after their target has already retired.
+const RETIRE_LEGACY_UNITS: &str = r#"for old_unit in "$HOME/.config/systemd/user"/homeboy-runner-*-host.service; do
+  [ -e "$old_unit" ] || [ -L "$old_unit" ] || continue
+  old_name=$(basename "$old_unit")
+  systemctl --user stop "$old_name" || true
+  systemctl --user disable "$old_name" || true
+  rm -f "$old_unit"
+  old_id=${old_name#homeboy-runner-}
+  old_id=${old_id%-host.service}
+  [ "$old_id" != host ] || continue
+  rm -rf "$HOME/.local/share/homeboy/runner-service/$old_id" "$HOME/.config/homeboy/runner-daemons/$old_id"
+done
+systemctl --user daemon-reload"#;
+
+fn install_script(binary: &str, startup_token: &str, daemon_env: &[(String, String)]) -> String {
     format!(
         r#"set -eu
 {point}
 {write_unit}
-systemctl --user enable {unit}"#,
-        unit = service_unit_name(runner_id),
-        point = point_binary_script(runner_id, binary),
-        write_unit = write_unit_script(runner_id, startup_token, daemon_env),
+systemctl --user enable --now {unit}
+{RETIRE_LEGACY_UNITS}"#,
+        unit = service_unit_name(),
+        point = point_binary_script(binary),
+        write_unit = write_unit_script(startup_token, daemon_env),
     )
 }
 
-fn repoint_script(
-    runner_id: &str,
-    binary: &str,
-    startup_token: &str,
-    daemon_env: &[(String, String)],
-) -> String {
+fn repoint_script(binary: &str, startup_token: &str, daemon_env: &[(String, String)]) -> String {
     format!(
-        "{install}\nsystemctl --user restart {unit}",
-        install = install_script(runner_id, binary, startup_token, daemon_env),
-        unit = service_unit_name(runner_id),
+        "set -eu\n{point}\n{write_unit}\nsystemctl --user enable {unit}\nsystemctl --user restart {unit}\n{RETIRE_LEGACY_UNITS}",
+        point = point_binary_script(binary),
+        write_unit = write_unit_script(startup_token, daemon_env),
+        unit = service_unit_name(),
     )
 }
 
@@ -227,18 +214,19 @@ fn repoint_script(
 /// host has none yet. The first controller to attach after #18063 creates
 /// it; every later controller finds it and only starts it.
 fn ensure_host_unit_script(
-    runner_id: &str,
     binary: &str,
     startup_token: &str,
     daemon_env: &[(String, String)],
 ) -> String {
     format!(
-        r#"if [ ! -f "$HOME/.config/systemd/user/{unit}" ]; then
+        r#"set -eu
+if [ ! -f "$HOME/.config/systemd/user/{unit}" ]; then
 {install}
 fi
-systemctl --user start {unit}"#,
-        unit = service_unit_name(runner_id),
-        install = install_script(runner_id, binary, startup_token, daemon_env),
+systemctl --user start {unit}
+{RETIRE_LEGACY_UNITS}"#,
+        unit = service_unit_name(),
+        install = install_script(binary, startup_token, daemon_env),
     )
 }
 
@@ -290,7 +278,6 @@ fn wait_for_service_daemon(
     run_remote(
         client,
         &ensure_host_unit_script(
-            runner_id,
             homeboy,
             &uuid::Uuid::new_v4().to_string(),
             &daemon_policy_env(&target.runner.env),
@@ -327,7 +314,7 @@ fn wait_for_service_daemon(
         if Instant::now() >= deadline {
             return Err(format!(
                 "{last}. Inspect `systemctl --user status {}` on the runner.",
-                service_unit_name(runner_id)
+                service_unit_name()
             ));
         }
         std::thread::sleep(SERVICE_READY_POLL_INTERVAL);
@@ -337,9 +324,9 @@ fn wait_for_service_daemon(
 fn report_for(runner_id: &str, binary: &str, daemon: Option<&RemoteDaemon>) -> RunnerServiceReport {
     RunnerServiceReport {
         runner_id: runner_id.to_string(),
-        unit: service_unit_name(runner_id),
+        unit: service_unit_name(),
         binary: binary.to_string(),
-        state_dir: format!("~/{}", service_state_dir(runner_id)),
+        state_dir: format!("~/{}", super::daemon_state_dir()),
         active: daemon.is_some(),
         daemon_pid: daemon.and_then(|daemon| daemon.pid),
         daemon_lease_id: daemon.and_then(|daemon| daemon.lease_id.clone()),
@@ -371,16 +358,6 @@ pub fn install(runner_id: &str) -> Result<RunnerServiceReport> {
         ));
     }
 
-    run_remote(
-        client,
-        &install_script(
-            runner_id,
-            homeboy,
-            &uuid::Uuid::new_v4().to_string(),
-            &daemon_policy_env(&target.runner.env),
-        ),
-        "writing the runner service unit",
-    )?;
     if let Some(lease_id) = status
         .daemon
         .as_ref()
@@ -388,12 +365,15 @@ pub fn install(runner_id: &str) -> Result<RunnerServiceReport> {
     {
         // The controller-started daemon still owns the state directory. It is
         // idle, so stop it and let the unit take the owner lock.
-        remote_daemon_force_stop(client, homeboy, runner_id, lease_id)
-            .map_err(Error::internal_unexpected)?;
+        remote_daemon_force_stop(client, homeboy, lease_id).map_err(Error::internal_unexpected)?;
     }
     run_remote(
         client,
-        &format!("systemctl --user restart {}", service_unit_name(runner_id)),
+        &install_script(
+            homeboy,
+            &uuid::Uuid::new_v4().to_string(),
+            &daemon_policy_env(&target.runner.env),
+        ),
         "starting the runner service",
     )?;
     let daemon =
@@ -429,7 +409,6 @@ pub(crate) fn repoint_and_restart(runner_id: &str, binary: &str) -> Result<()> {
     run_remote(
         &target.client,
         &repoint_script(
-            runner_id,
             binary,
             &startup_token,
             &daemon_policy_env(&target.runner.env),
@@ -460,7 +439,7 @@ pub(crate) struct ServiceUnitObservation {
 /// the binary its `ExecStart` runs, that binary's version, the version of the
 /// executable the main process is running, and the unit's active state. It
 /// never starts, stops, reloads, or rewrites anything.
-pub(crate) fn service_inventory_script(runner_id: &str) -> String {
+pub(crate) fn service_inventory_script() -> String {
     format!(
         r#"unit_dir="$HOME/.config/systemd/user"
 for unit_path in "$unit_dir"/{unit}; do
@@ -478,7 +457,7 @@ for unit_path in "$unit_dir"/{unit}; do
   fi
   printf '{marker}\t%s\t%s\t%s\t%s\t%s\n' "$unit" "$binary" "$binary_version" "$running_version" "$active"
 done"#,
-        unit = service_unit_name(runner_id),
+        unit = service_unit_name(),
         marker = SERVICE_INVENTORY_MARKER,
     )
 }
@@ -517,7 +496,7 @@ pub(crate) fn observe_service_units(runner_id: &str) -> Result<Vec<ServiceUnitOb
     };
     let stdout = run_remote(
         &client,
-        &service_inventory_script(runner_id),
+        &service_inventory_script(),
         "inspecting runner service binaries",
     )?;
     Ok(parse_service_inventory(&stdout))
@@ -744,12 +723,12 @@ mod tests {
 
     #[test]
     fn unit_runs_serve_from_the_stable_link_in_the_runner_state_dir() {
-        let unit = render_service_unit("homeboy-lab", "test-startup-token");
+        let unit = render_service_unit("test-startup-token");
         assert!(unit.contains(
-            "ExecStart=%h/.local/share/homeboy/runner-service/homeboy-lab/host/homeboy daemon serve --addr 127.0.0.1:0"
+            "ExecStart=%h/.local/share/homeboy/runner-service/host/homeboy daemon serve --addr 127.0.0.1:0"
         ));
         assert!(unit.contains(
-            "Environment=HOMEBOY_DAEMON_STATE_DIR=%h/.config/homeboy/runner-daemons/homeboy-lab/host\n"
+            "Environment=HOMEBOY_DAEMON_STATE_DIR=%h/.config/homeboy/runner-daemons/host\n"
         ));
         assert!(unit.contains("Restart=on-failure"));
         assert!(unit.contains("Environment=HOMEBOY_DAEMON_IDLE_TIMEOUT_SECS=21600\n"));
@@ -757,10 +736,7 @@ mod tests {
         // their own sessions and must outlive it.
         assert!(unit.contains("KillMode=process"));
         assert!(unit.contains("WantedBy=default.target"));
-        assert_eq!(
-            service_unit_name("homeboy-lab"),
-            "homeboy-runner-homeboy-lab-host.service"
-        );
+        assert_eq!(service_unit_name(), "homeboy-runner.service");
     }
 
     #[test]
@@ -799,7 +775,7 @@ mod tests {
             "only allowlisted runner-owned policy keys are rendered"
         );
 
-        let unit = render_service_unit_with_env("homeboy-lab", "t", &policy);
+        let unit = render_service_unit_with_env("t", &policy);
         assert!(
             unit.contains("\nEnvironment=HOMEBOY_RUNNER_RESOURCE_GUARD_MAX_PROCESS_COUNT=1024\n")
         );
@@ -845,8 +821,8 @@ mod tests {
             "1024".to_string(),
         )];
         for script in [
-            install_script("homeboy-lab", "/opt/homeboy", "t", &policy),
-            repoint_script("homeboy-lab", "/opt/homeboy", "t", &policy),
+            install_script("/opt/homeboy", "t", &policy),
+            repoint_script("/opt/homeboy", "t", &policy),
         ] {
             assert!(
                 script.contains("Environment=HOMEBOY_RUNNER_RESOURCE_GUARD_MAX_PROCESS_COUNT=1024")
@@ -861,7 +837,7 @@ mod tests {
     /// (#15087).
     #[test]
     fn unit_carries_the_daemon_startup_token_env_var() {
-        let unit = render_service_unit("homeboy-lab", "a-fresh-token");
+        let unit = render_service_unit("a-fresh-token");
         assert!(unit.contains(&format!(
             "Environment={}=a-fresh-token",
             paths::DAEMON_STARTUP_TOKEN_ENV
@@ -870,8 +846,8 @@ mod tests {
 
     #[test]
     fn each_install_and_repoint_gets_its_own_fresh_startup_token() {
-        let first = render_service_unit("homeboy-lab", "token-a");
-        let second = render_service_unit("homeboy-lab", "token-b");
+        let first = render_service_unit("token-a");
+        let second = render_service_unit("token-b");
         assert!(first.contains("token-a"));
         assert!(!first.contains("token-b"));
         assert!(second.contains("token-b"));
@@ -890,7 +866,7 @@ mod tests {
                 .arg("-c")
                 .arg(format!(
                     "set -eu\n{}",
-                    point_binary_script("homeboy-lab", &binary.display().to_string())
+                    point_binary_script(&binary.display().to_string())
                 ))
                 .env("HOME", home.path())
                 .output()
@@ -902,7 +878,7 @@ mod tests {
             );
             let link = home
                 .path()
-                .join(".local/share/homeboy/runner-service/homeboy-lab/host/homeboy");
+                .join(".local/share/homeboy/runner-service/host/homeboy");
             assert_eq!(std::fs::read_link(&link).unwrap(), *binary);
         }
     }
@@ -969,40 +945,45 @@ mod tests {
         let second = home.path().join("homeboy-b");
         let unit = home
             .path()
-            .join(".config/systemd/user/homeboy-runner-homeboy-lab-host.service");
+            .join(".config/systemd/user/homeboy-runner.service");
         let link = home
             .path()
-            .join(".local/share/homeboy/runner-service/homeboy-lab/host/homeboy");
+            .join(".local/share/homeboy/runner-service/host/homeboy");
 
         for binary in [&first, &second] {
             run_in_runner_home(
                 home.path(),
-                &ensure_host_unit_script("homeboy-lab", &binary.display().to_string(), "t", &[]),
+                &ensure_host_unit_script(&binary.display().to_string(), "t", &[]),
             );
         }
 
         assert_eq!(std::fs::read_link(&link).unwrap(), first);
-        assert!(std::fs::read_to_string(&unit).unwrap().contains(
-            "HOMEBOY_DAEMON_STATE_DIR=%h/.config/homeboy/runner-daemons/homeboy-lab/host\n"
-        ));
+        assert!(std::fs::read_to_string(&unit)
+            .unwrap()
+            .contains("HOMEBOY_DAEMON_STATE_DIR=%h/.config/homeboy/runner-daemons/host\n"));
         let commands = std::fs::read_to_string(home.path().join("systemctl.log")).unwrap();
-        let unit_name = "homeboy-runner-homeboy-lab-host.service";
-        assert_eq!(commands.matches(&format!("enable {unit_name}")).count(), 1);
+        let unit_name = "homeboy-runner.service";
+        assert_eq!(
+            commands
+                .matches(&format!("enable --now {unit_name}"))
+                .count(),
+            1
+        );
         assert_eq!(commands.matches(&format!("start {unit_name}")).count(), 2);
 
         // A refresh is the one path that repoints the shared unit.
         run_in_runner_home(
             home.path(),
-            &repoint_script("homeboy-lab", &second.display().to_string(), "t2", &[]),
+            &repoint_script(&second.display().to_string(), "t2", &[]),
         );
         assert_eq!(std::fs::read_link(&link).unwrap(), second);
     }
 
     #[test]
     fn unit_path_is_resolved_from_the_runner_login_shell() {
-        let unit = render_service_unit("homeboy-lab", "t");
+        let unit = render_service_unit("t");
         assert!(unit.contains(&format!("Environment=PATH={SERVICE_PATH_PLACEHOLDER}")));
-        let write_unit = write_unit_script("homeboy-lab", "t", &[]);
+        let write_unit = write_unit_script("t", &[]);
         assert!(write_unit.contains("-lc 'printf %s \"$PATH\"'"));
         assert!(write_unit.contains(&format!(
             "sed -i \"s|{SERVICE_PATH_PLACEHOLDER}|$service_path|\""
@@ -1049,17 +1030,37 @@ mod tests {
     }
 
     #[test]
+    fn scripts_retire_legacy_units_only_after_starting_the_machine_unit() {
+        for (script, start) in [
+            (install_script("/opt/homeboy", "t", &[]), "enable --now"),
+            (repoint_script("/opt/homeboy", "t", &[]), "restart"),
+            (ensure_host_unit_script("/opt/homeboy", "t", &[]), "start"),
+        ] {
+            let started = script
+                .find(&format!("systemctl --user {start} homeboy-runner.service"))
+                .unwrap();
+            let retired = script.rfind("for old_unit in").unwrap();
+            assert!(started < retired);
+            let cleanup = &script[retired..];
+            assert!(cleanup.contains("/homeboy-runner-*-host.service"));
+            assert!(cleanup.contains("systemctl --user stop \"$old_name\""));
+            assert!(cleanup.contains("systemctl --user disable \"$old_name\""));
+            assert!(cleanup.contains("rm -f \"$old_unit\""));
+            assert!(cleanup.contains("runner-service/$old_id"));
+            assert!(cleanup.contains("runner-daemons/$old_id"));
+            assert!(cleanup.ends_with("systemctl --user daemon-reload"));
+        }
+    }
+
+    #[test]
     fn install_script_writes_the_rendered_unit_verbatim() {
-        let script = install_script("homeboy-lab", "/opt/homeboy", "install-token", &[]);
+        let script = install_script("/opt/homeboy", "install-token", &[]);
         let start = script.find("<<'HOMEBOY_UNIT'\n").unwrap() + "<<'HOMEBOY_UNIT'\n".len();
         let end = script.find("HOMEBOY_UNIT\nlogin_path=").unwrap();
-        assert_eq!(
-            &script[start..end],
-            render_service_unit("homeboy-lab", "install-token")
-        );
-        assert!(script.ends_with(&format!(
-            "systemctl --user enable {}",
-            service_unit_name("homeboy-lab")
+        assert_eq!(&script[start..end], render_service_unit("install-token"));
+        assert!(script.contains(&format!(
+            "systemctl --user enable --now {}",
+            service_unit_name()
         )));
     }
 
@@ -1068,13 +1069,10 @@ mod tests {
     /// carry one the next time refresh restarts it (#15087).
     #[test]
     fn repoint_script_rewrites_the_unit_with_a_fresh_token() {
-        let write_unit = write_unit_script("homeboy-lab", "repoint-token", &[]);
+        let write_unit = write_unit_script("repoint-token", &[]);
         assert!(write_unit.contains("repoint-token"));
         assert!(write_unit.contains("systemctl --user daemon-reload"));
-        assert!(write_unit.contains(&format!(
-            "cat > \"$unit_dir/{}.tmp\"",
-            service_unit_name("homeboy-lab")
-        )));
+        assert!(write_unit.contains(&format!("cat > \"$unit_dir/{}.tmp\"", service_unit_name())));
     }
 
     /// #15733: the inventory sees the host unit, resolves `%h` in
@@ -1104,7 +1102,7 @@ mod tests {
             .join(".local/share/homeboy/runner-service/homeboy-lab/homeboy");
         std::fs::create_dir_all(unscoped_link.parent().unwrap()).unwrap();
         std::os::unix::fs::symlink(&unscoped_slot, &unscoped_link).unwrap();
-        let own_link = home.path().join(service_binary_link("homeboy-lab"));
+        let own_link = home.path().join(service_binary_link());
         std::fs::create_dir_all(own_link.parent().unwrap()).unwrap();
         std::os::unix::fs::symlink(&own_slot, &own_link).unwrap();
 
@@ -1114,12 +1112,8 @@ mod tests {
             "[Service]\nExecStart=%h/.local/share/homeboy/runner-service/homeboy-lab/homeboy daemon serve --addr 127.0.0.1:0\n",
         )
         .unwrap();
-        let own_unit = service_unit_name("homeboy-lab");
-        std::fs::write(
-            unit_dir.join(&own_unit),
-            render_service_unit("homeboy-lab", "token"),
-        )
-        .unwrap();
+        let own_unit = service_unit_name();
+        std::fs::write(unit_dir.join(&own_unit), render_service_unit("token")).unwrap();
         std::fs::write(unit_dir.join("homeboy-runner-other.service"), "[Service]\n").unwrap();
 
         let bin_dir = home.path().join("bin");
@@ -1132,7 +1126,7 @@ mod tests {
             .arg("-c")
             .arg(format!(
                 "echo 'login banner'\n{}",
-                service_inventory_script("homeboy-lab")
+                service_inventory_script()
             ))
             .env("HOME", home.path())
             .env("PATH", format!("{}:/usr/bin:/bin", bin_dir.display()))
