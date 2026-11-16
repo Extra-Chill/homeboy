@@ -47,6 +47,21 @@ pub(super) fn executables(program: &str) -> Vec<String> {
             quote = Some(ch);
             continue;
         }
+        // `$(...)` and `$((...))` stay inside the current word: arithmetic
+        // operands are never commands, and a substitution's commands run
+        // under the gate itself rather than as literal PATH lookups.
+        if ch == '$' && chars.peek() == Some(&'(') {
+            word.push(ch);
+            consume_parenthesized(&mut chars, &mut word);
+            continue;
+        }
+        // A `(( expr ))` arithmetic command starts a command with `((`.
+        if ch == '(' && word.is_empty() && words.is_empty() && chars.peek() == Some(&'(') {
+            let mut arithmetic = String::from("(");
+            consume_parenthesized(&mut chars, &mut arithmetic);
+            words.push(arithmetic);
+            continue;
+        }
         // `2>&1`, `>&2` and `<&0` duplicate a descriptor, and `&>`/`&>>`
         // redirect both streams: those `&`s are redirect syntax, not lists.
         if ch == '&' && (word.ends_with(['>', '<']) || chars.peek() == Some(&'>')) {
@@ -60,7 +75,7 @@ pub(super) fn executables(program: &str) -> Vec<String> {
             if ch == '\n' || ";|&()".contains(ch) {
                 if let Some(command) = command_word(&words) {
                     if !builtin(command)
-                        && !command.contains(['$', '`', '*', '?', '/'])
+                        && !command.contains(['$', '`', '*', '?', '/', '('])
                         && !commands.contains(command)
                     {
                         commands.push(command.clone());
@@ -73,6 +88,45 @@ pub(super) fn executables(program: &str) -> Vec<String> {
         }
     }
     commands
+}
+
+/// Consume a balanced `( ... )` group (the opening `(` is still pending) into
+/// `word`, honouring nested parentheses and quotes.
+fn consume_parenthesized(
+    chars: &mut std::iter::Peekable<impl Iterator<Item = char>>,
+    word: &mut String,
+) {
+    let mut depth = 0usize;
+    let mut quote = None;
+    let mut escaped = false;
+    for ch in chars.by_ref() {
+        word.push(ch);
+        if escaped {
+            escaped = false;
+            continue;
+        }
+        if ch == '\\' && quote != Some('\'') {
+            escaped = true;
+            continue;
+        }
+        if let Some(q) = quote {
+            if ch == q {
+                quote = None;
+            }
+            continue;
+        }
+        match ch {
+            '\'' | '"' => quote = Some(ch),
+            '(' => depth += 1,
+            ')' => {
+                depth = depth.saturating_sub(1);
+                if depth == 0 {
+                    return;
+                }
+            }
+            _ => {}
+        }
+    }
 }
 
 /// The first word that is neither an assignment nor a redirection. A bare
@@ -162,8 +216,22 @@ fn builtin(word: &str) -> bool {
             | "for"
             | "do"
             | "done"
+            | "elif"
+            | "in"
             | "while"
             | "until"
+            | "select"
+            | "function"
+            | "time"
+            | "continue"
+            | "break"
+            | "getopts"
+            | "hash"
+            | "ulimit"
+            | "times"
+            | "readonly"
+            | "[["
+            | "]]"
             | "case"
             | "esac"
             | "!"
@@ -204,6 +272,17 @@ mod tests {
             ("node a.mjs >&2 2>/dev/null", vec!["node"]),
             ("> out php -v; 2>err <in node x", vec!["php", "node"]),
             ("php -v & node x", vec!["php", "node"]),
+            // #18253: shell keywords and arithmetic are never PATH lookups.
+            (
+                "n=0; for t in tests/*.php; do [ -f \"$t\" ] || continue; php \"$t\"; n=$((n+1)); done",
+                vec!["php"],
+            ),
+            ("while true; do break; done; node x", vec!["node"]),
+            ("if [ -f a ]; then :; elif [[ -f b ]]; then :; fi", vec![]),
+            ("(( n += 2 )); php -v", vec!["php"]),
+            ("x=$(git rev-parse HEAD); grep -q y \"$(pwd)/f\"", vec!["grep"]),
+            ("echo $(( (1+2) * 3 )) && composer -V", vec!["composer"]),
+            ("(cd src && make)", vec!["make"]),
         ] {
             assert_eq!(executables(program), expected, "{program}");
         }
