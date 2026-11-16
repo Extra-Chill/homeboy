@@ -4,6 +4,13 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.466.14] - 2026-11-16
+
+### Fixed
+- admit local Cook dispatches by measured pressure
+- keep the retry budget in terminal continuations so detached attempts get gate-feedback retries
+- rank recorded promotion failures above hydrated streams
+
 ## [0.466.13] - 2026-11-16
 
 ### Fixed
