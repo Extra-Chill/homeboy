@@ -1293,6 +1293,65 @@ mod declared_base_tests {
         assert!(!error.message.contains("resolveing"));
     }
 
+    /// A single `ls-remote` that exceeds its deadline is retried in place, so
+    /// one slow transport round trip does not end the terminal continuation.
+    #[cfg(unix)]
+    #[test]
+    fn declared_base_ls_remote_deadline_is_retried_in_place() {
+        let origin = tempfile::tempdir().expect("origin");
+        git(origin.path(), &["init", "-b", "main"]);
+        git(
+            origin.path(),
+            &[
+                "-c",
+                "user.name=t",
+                "-c",
+                "user.email=t@t",
+                "commit",
+                "--allow-empty",
+                "-m",
+                "base",
+            ],
+        );
+        let repo = tempfile::tempdir().expect("repo");
+        git(repo.path(), &["init", "-b", "main"]);
+        git(
+            repo.path(),
+            &["remote", "add", "origin", origin.path().to_str().unwrap()],
+        );
+        let real_git = String::from_utf8(
+            Command::new("sh")
+                .args(["-c", "command -v git"])
+                .output()
+                .unwrap()
+                .stdout,
+        )
+        .unwrap();
+        let fixture_dir = tempfile::tempdir().expect("fixture directory");
+        let stalled = fixture_dir.path().join("stalled");
+        let git_bin = write_git_fixture(
+            fixture_dir.path(),
+            &format!(
+                "#!/bin/sh\nif [ \"$1\" = ls-remote ] && [ ! -e {stalled} ]; then touch {stalled}; exec sleep 10; fi\nexec {real_git} \"$@\"\n",
+                stalled = stalled.display(),
+                real_git = real_git.trim(),
+            ),
+        );
+
+        let base = capture_declared_base_with_git_and_timeout(
+            repo.path(),
+            Some("main"),
+            git_bin.to_str().expect("utf8 fixture path"),
+            &[],
+            Duration::from_millis(800),
+        )
+        .expect("the retried ls-remote resolves the base")
+        .expect("declared base");
+
+        assert!(stalled.exists(), "the first ls-remote must have stalled");
+        assert_eq!(base.sha, git(origin.path(), &["rev-parse", "HEAD"]).trim());
+    }
+
     #[cfg(unix)]
     #[test]
     fn declared_base_timeout_surfaces_subphase_stderr_and_budget() {
@@ -1332,7 +1391,8 @@ mod declared_base_tests {
         )
         .expect_err("bounded transport timeout");
 
-        assert!(started.elapsed() < Duration::from_secs(3));
+        // Three bounded attempts, then the transport failure surfaces.
+        assert!(started.elapsed() < Duration::from_secs(5));
         assert_eq!(error.retryable, Some(true));
         let preflight = &error.details["git_base_preflight"];
         assert_eq!(preflight["phase"], "resolve");
@@ -4100,7 +4160,46 @@ fn phase_gerund(phase: &str) -> &'static str {
     }
 }
 
+/// A transient transport failure (deadline, spawn, supervision) is retried in
+/// place within the shared fetch budget, so one slow `ls-remote` does not end
+/// the Cook's terminal continuation and wait for an operator.
 fn run_declared_base_git(
+    worktree_path: &Path,
+    git: &str,
+    args: &[&str],
+    environment: &[(String, String)],
+    base_ref: &str,
+    phase: &str,
+    timeout: Duration,
+) -> Result<Output> {
+    // A completed command whose stderr names a transport failure is retried
+    // too; when retries run out, callers still classify its final output.
+    let mut transport_failure = None;
+    homeboy_core::worktree::convergence::retry_fetch(|| {
+        let output = run_declared_base_git_once(
+            worktree_path,
+            git,
+            args,
+            environment,
+            base_ref,
+            phase,
+            timeout,
+        )?;
+        if !output.status.success()
+            && is_git_transport_failure(&String::from_utf8_lossy(&output.stderr))
+        {
+            transport_failure = Some(output);
+            return Err(
+                Error::internal_unexpected("transient Git transport failure").with_retryable(true),
+            );
+        }
+        transport_failure = None;
+        Ok(output)
+    })
+    .or_else(|error| transport_failure.take().ok_or(error))
+}
+
+fn run_declared_base_git_once(
     worktree_path: &Path,
     git: &str,
     args: &[&str],
