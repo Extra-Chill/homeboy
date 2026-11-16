@@ -643,6 +643,11 @@ pub(crate) fn hydrate_base_gate_workspace(
     gate_commands: &[String],
     timeout: std::time::Duration,
 ) -> Result<()> {
+    // Lab execution hydrates on the runner before running the command. Its
+    // recorded extension/data input paths need not exist on this controller.
+    if environment.lab_runner.is_some() {
+        return Ok(());
+    }
     let hydration = crate::agent_task_gate::GateHydrationEnvironment::prepare(environment)?;
     let policy = homeboy_core::deps::DependencyHydrationPolicy {
         timeout,
@@ -972,6 +977,37 @@ pub(crate) fn git_output_with_env(
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn lab_baseline_hydration_does_not_resolve_runner_environment_on_controller() {
+        homeboy_core::test_support::with_isolated_home(|_| {
+            let workspace = tempfile::tempdir().unwrap();
+            let mut environment = crate::agent_task_gate::AgentTaskGateEnvironmentPolicy::default();
+            environment.preserve.insert(
+                "RUNNER_TOOL_HOME".into(),
+                "HOMEBOY_TEST_RUNNER_ONLY_TOOL_18243/toolchain".into(),
+            );
+            // This mapping is available only on the runner. Local preparation
+            // fails; Lab replay must leave its resolution to Lab execution.
+            assert!(hydrate_base_gate_workspace(
+                workspace.path(),
+                &environment,
+                None,
+                &[],
+                std::time::Duration::from_secs(1),
+            )
+            .is_err());
+            environment.lab_runner = Some("lab".into());
+            hydrate_base_gate_workspace(
+                workspace.path(),
+                &environment,
+                None,
+                &[],
+                std::time::Duration::from_secs(1),
+            )
+            .unwrap();
+        });
+    }
+
     use super::*;
     use crate::agent_task_gate::{
         AgentTaskGateEnvironment, AgentTaskGateFailureClassification, AgentTaskGateFailureEvidence,

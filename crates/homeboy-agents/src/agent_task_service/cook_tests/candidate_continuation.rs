@@ -470,6 +470,44 @@ fn candidate_recoverable_with_own_green_bound_gates_publishes() {
     });
 }
 
+/// A runner-only repository path must never disappear behind an exit status.
+#[test]
+fn lab_gate_terminal_continuation_records_runner_only_path_failure() {
+    with_corrected_gate_failure(true, |options, target| {
+        let (cook, run) = (&options.identity.cook_id, &options.identity.initial_run_id);
+        let store = test_lifecycle_store();
+        let mut promotion = persisted_promotion_for_attempt(run).unwrap().unwrap();
+        let runner_root = target.join("runner-only-checkout");
+        assert!(!runner_root.exists());
+        promotion.target.path = Some(runner_root.display().to_string());
+        promotion.deterministic_gates[0].environment.lab_runner = Some("lab".into());
+        store
+            .record_promotion(run, serde_json::to_value(promotion).unwrap())
+            .unwrap();
+        let recipes = CookRecipeStore::from_current_data_root().unwrap();
+        recipes.enqueue_terminal_continuation(cook, run).unwrap();
+        let claim = recipes.claim_continuation_for(cook, run).unwrap().unwrap();
+        let mut backend = CaptureBackend::default();
+        let result = crate::agent_task_service::consume_claimed_terminal_with_dispatcher(
+            claim,
+            |_| Ok(Some(Arc::new(AcceptedDetachedAttemptDispatcher))),
+            |options| continue_terminal(&options, &mut backend).map(|result| result.exit_code),
+        );
+        let record = store.read_record(run).unwrap();
+        let cause = record.metadata["cook_controller_failure"]["message"]
+            .as_str()
+            .unwrap();
+        assert!(!cause.contains("status 1"), "{cause}");
+        assert!(
+            cause.contains("canonicalize Cook gate repository root"),
+            "{cause}"
+        );
+        let error = result.expect_err("a non-zero Cook report must retain its cause");
+        assert_eq!(error.message, cause);
+        assert_eq!(record.metadata["cook_continuation"]["diagnostic"], cause);
+    });
+}
+
 #[test]
 fn live_continuation_is_visible_and_recovery_leaves_its_claim_untouched() {
     with_own_green_gates(|options, _| {

@@ -3421,6 +3421,24 @@ fn consume_claimed_with_dispatcher_policy(
             Ok(0)
         }
         Ok(exit_code) => {
+            // Cook reports controller errors as non-zero results. Preserve the
+            // recorded cause rather than reducing it to an anonymous status.
+            let diagnostic = lifecycle_store
+                .read_record(&claim.continuation().run_id)?
+                .metadata
+                .get("cook_controller_failure")
+                .cloned();
+            if let Some(diagnostic) = diagnostic {
+                let message = diagnostic["message"]
+                    .as_str()
+                    .unwrap_or("Cook controller failure");
+                claim.fail(message)?;
+                return Err(Error::new(
+                    homeboy_core::ErrorCode::InternalUnexpected,
+                    message,
+                    diagnostic.clone(),
+                ));
+            }
             // A refused publication is deterministic: another generation would
             // re-run the same gates and be refused again (#16441).
             let refusal = lifecycle_store

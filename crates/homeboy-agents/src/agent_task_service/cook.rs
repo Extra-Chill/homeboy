@@ -5122,27 +5122,25 @@ fn durable_cook_error_report_with_store(
             // cross-invocation Cook index and can name a prior session's run.
             invocation_latest_run_id: Some(&options.identity.initial_run_id),
         });
+        // Failure-context projection can fail (for example while reading runner-only
+        // evidence). Recording the cause must not depend on that projection.
+        let diagnostic = bounded_error_diagnostic(&error);
+        if agent_task_lifecycle::run_record_exists_in_store(
+            lifecycle_store,
+            &options.identity.initial_run_id,
+        )? {
+            agent_task_lifecycle::record_cook_controller_failure_in_store(
+                lifecycle_store,
+                &options.identity.initial_run_id,
+                &diagnostic,
+            )?;
+        }
         if let Some(context) = &mut report.value.failure_context {
             // This is a controller failure, not a provider attempt. Keep a
             // bounded, redacted cause so continuation never needs redispatch.
             context.phase = "controller".to_string();
             context.reason_code = error.code.as_str().to_string();
             context.diagnostic = Some(bounded_error_diagnostic(&error));
-            // The existence check and the write that follows it must name one
-            // installation: probing the ambient home and then recording into
-            // the injected one (or the reverse) is a check that answers about a
-            // record the write never touches.
-            let diagnostic = context.diagnostic.as_ref().expect("controller diagnostic");
-            if agent_task_lifecycle::run_record_exists_in_store(
-                lifecycle_store,
-                &options.identity.initial_run_id,
-            )? {
-                agent_task_lifecycle::record_cook_controller_failure_in_store(
-                    lifecycle_store,
-                    &options.identity.initial_run_id,
-                    diagnostic,
-                )?;
-            }
         }
         return Ok(report);
     }
