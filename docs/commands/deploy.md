@@ -298,6 +298,17 @@ A dependency that is not part of the current deploy is ignored. A dependency cyc
 
 After a successful deploy, Homeboy runs `post:deploy` hooks remotely via SSH on the deployment target. Hooks are resolved from extensions and components (see [hooks](../architecture/hooks.md)).
 
+Hooks are non-fatal: a failing hook never fails the deploy. Each hook's outcome is recorded on the component result instead, so it is always auditable:
+
+```json
+"post_deploy_hooks": [
+  { "command": "php -r '...' # opcache …", "success": true, "exit_code": 0,
+    "output": "opcache: /run/php/php8.4-fpm.sock: invalidated 42 file(s)" }
+]
+```
+
+`command` is the first line of the hook (truncated), and `output` is the tail of combined stdout and stderr (bounded). A failed hook also adds a `post:deploy hook failed (exit N): …` entry to `warnings`.
+
 Template variables available:
 
 | Variable | Description |

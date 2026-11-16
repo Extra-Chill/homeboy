@@ -65,7 +65,7 @@ pub(super) fn execute_git_deploy(input: GitDeployInput<'_>) -> ComponentDeployRe
             if let Ok(Some(summary)) = cleanup_build_dependencies(component, config) {
                 homeboy_core::log_status!("deploy", "Cleanup: {}", summary);
             }
-            run_component_hooks(
+            let hooks = run_component_hooks(
                 &mut phase_timings,
                 ctx,
                 component,
@@ -79,6 +79,7 @@ pub(super) fn execute_git_deploy(input: GitDeployInput<'_>) -> ComponentDeployRe
                 .with_versions(local_version.clone(), local_version)
                 .with_remote_path(install_dir.to_string())
                 .with_deploy_exit_code(Some(exit_code))
+                .with_post_deploy_hooks(hooks)
                 .with_phase_timings(phase_timings.into_report())
         }
         Ok(DeployResult {
@@ -234,13 +235,15 @@ pub(super) fn execute_file_deploy(input: FileDeployInput<'_>) -> ComponentDeploy
             }
 
             phase_clock::record(&mut timer, &subject, "permissions", started);
-            run_component_hooks(&mut timer, ctx, component, project, install_dir, base_path);
+            let hooks =
+                run_component_hooks(&mut timer, ctx, component, project, install_dir, base_path);
 
             ComponentDeployResult::new(component, base_path)
                 .with_status("deployed")
                 .with_versions(local_version.clone(), local_version)
                 .with_remote_path(install_dir.to_string())
                 .with_deploy_exit_code(Some(exit_code))
+                .with_post_deploy_hooks(hooks)
                 .with_phase_timings(timer.into_report())
         }
         Ok(super::super::types::DeployResult {
@@ -476,7 +479,7 @@ pub(super) fn execute_artifact_deploy(
                     component.id
                 );
             }
-            run_component_hooks(
+            let hooks = run_component_hooks(
                 &mut phase_timings,
                 ctx,
                 component,
@@ -492,6 +495,7 @@ pub(super) fn execute_artifact_deploy(
                 .with_artifact_inputs(artifact_input_metadata)
                 .with_build_exit_code(prepared.build_exit_code)
                 .with_deploy_exit_code(Some(exit_code))
+                .with_post_deploy_hooks(hooks)
                 .with_phase_timings(phase_timings.into_report());
             with_prepared_artifact_source(result, prepared)
         }
@@ -537,11 +541,11 @@ fn run_component_hooks(
     project: &Project,
     install_dir: &str,
     base_path: &str,
-) {
+) -> Vec<crate::types::PostDeployHookEvidence> {
     let subject = phase_clock::component_subject(&component.id);
     phase_clock::time(timer, &subject, "hooks", || {
         run_post_deploy_hooks(&ctx.client, component, project, install_dir, base_path)
-    });
+    })
 }
 
 pub(super) fn post_deploy_expected_version(prepared: &PreparedComponentDeploy) -> Option<&String> {

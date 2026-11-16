@@ -639,6 +639,52 @@ pub struct ComponentDeployResult {
     /// transfer, install, permissions, verify, hooks).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(crate) phase_timings: Option<PhaseTimingReport>,
+    /// Outcome of every `post:deploy` hook that ran for this component. Hooks
+    /// are non-fatal, so this is the only record of what they did.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub(crate) post_deploy_hooks: Vec<PostDeployHookEvidence>,
+}
+
+/// Bounded evidence for one `post:deploy` hook command.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct PostDeployHookEvidence {
+    /// First line of the command, truncated (hooks can be long heredocs).
+    pub command: String,
+    pub success: bool,
+    pub exit_code: i32,
+    /// Tail of combined stdout and stderr.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub output: String,
+}
+
+impl PostDeployHookEvidence {
+    const COMMAND_CHARS: usize = 160;
+    const OUTPUT_CHARS: usize = 2000;
+
+    pub(crate) fn from_result(result: &homeboy_core::engine::hooks::HookCommandResult) -> Self {
+        let first_line = result.command.lines().next().unwrap_or_default();
+        let mut command: String = first_line.chars().take(Self::COMMAND_CHARS).collect();
+        if command.len() < result.command.trim_end().len() {
+            command.push_str(" …");
+        }
+        let combined = [result.stdout.trim(), result.stderr.trim()]
+            .into_iter()
+            .filter(|part| !part.is_empty())
+            .collect::<Vec<_>>()
+            .join("\n");
+        let skip = combined.chars().count().saturating_sub(Self::OUTPUT_CHARS);
+        let output = if skip > 0 {
+            format!("…{}", combined.chars().skip(skip).collect::<String>())
+        } else {
+            combined
+        };
+        Self {
+            command,
+            success: result.success,
+            exit_code: result.exit_code,
+            output,
+        }
+    }
 }
 
 impl ComponentDeployResult {
@@ -698,6 +744,7 @@ impl ComponentDeployResult {
             deployment_provenance: None,
             deployment_provider: None,
             phase_timings: None,
+            post_deploy_hooks: Vec::new(),
         }
     }
 
@@ -755,6 +802,19 @@ impl ComponentDeployResult {
     }
 
     /// Set the component's phase timings; an empty report is omitted.
+    /// Record `post:deploy` hook outcomes; a failed hook becomes a warning so
+    /// a non-fatal failure is never silent.
+    pub(crate) fn with_post_deploy_hooks(mut self, hooks: Vec<PostDeployHookEvidence>) -> Self {
+        for hook in hooks.iter().filter(|hook| !hook.success) {
+            self.warnings.push(format!(
+                "post:deploy hook failed (exit {}): {}",
+                hook.exit_code, hook.command
+            ));
+        }
+        self.post_deploy_hooks = hooks;
+        self
+    }
+
     pub(super) fn with_phase_timings(mut self, report: PhaseTimingReport) -> Self {
         self.phase_timings = (!report.is_empty()).then_some(report);
         self

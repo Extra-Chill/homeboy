@@ -645,7 +645,7 @@ pub(super) fn run_post_deploy_hooks(
     project: &Project,
     install_dir: &str,
     base_path: &str,
-) {
+) -> Vec<crate::types::PostDeployHookEvidence> {
     let mut vars = HashMap::new();
     vars.insert(TemplateVars::COMPONENT_ID.to_string(), component.id.clone());
     vars.insert(
@@ -675,9 +675,20 @@ pub(super) fn run_post_deploy_hooks(
                     );
                 }
             }
+            result
+                .commands
+                .iter()
+                .map(crate::types::PostDeployHookEvidence::from_result)
+                .collect()
         }
         Err(e) => {
             homeboy_core::log_status!("deploy", "post:deploy hook error: {}", e);
+            vec![crate::types::PostDeployHookEvidence {
+                command: "post:deploy".to_string(),
+                success: false,
+                exit_code: -1,
+                output: e.to_string(),
+            }]
         }
     }
 }
@@ -928,6 +939,87 @@ mod tests {
             &project,
             "/tmp/fixture",
             "/tmp",
+        );
+    }
+
+    #[test]
+    fn post_deploy_hooks_return_bounded_evidence_for_each_command() {
+        let component = Component {
+            id: "fixture".to_string(),
+            ..Default::default()
+        };
+        let long_output = "x".repeat(5000);
+        let project = Project {
+            hooks: HashMap::from([(
+                HookEvent::PostDeploy,
+                vec![
+                    "echo 'invalidated 3 file(s)'".to_string(),
+                    format!("printf '%s\\nboom' '{long_output}' >&2; exit 7\n# second line"),
+                ],
+            )]),
+            ..Default::default()
+        };
+
+        let hooks = run_post_deploy_hooks(
+            &local_client(),
+            &component,
+            &project,
+            "/tmp/fixture",
+            "/tmp",
+        );
+
+        assert_eq!(hooks.len(), 2, "one evidence entry per hook command");
+        assert!(hooks[0].success);
+        assert_eq!(hooks[0].exit_code, 0);
+        assert_eq!(hooks[0].output, "invalidated 3 file(s)");
+
+        assert!(
+            !hooks[1].success,
+            "a failing hook is recorded, not swallowed"
+        );
+        assert_eq!(hooks[1].exit_code, 7);
+        assert!(
+            !hooks[1].command.contains("second line"),
+            "only the first line"
+        );
+        assert!(
+            hooks[1].command.chars().count() <= 162,
+            "command is truncated"
+        );
+        assert!(hooks[1].command.ends_with(" …"));
+        assert!(hooks[1].output.ends_with("boom"), "output keeps its tail");
+        assert!(hooks[1].output.chars().count() <= 2001, "output is bounded");
+    }
+
+    #[test]
+    fn failed_post_deploy_hook_becomes_a_deploy_warning() {
+        let component = Component {
+            id: "fixture".to_string(),
+            ..Default::default()
+        };
+        let hooks = vec![
+            crate::types::PostDeployHookEvidence {
+                command: "ok".to_string(),
+                success: true,
+                exit_code: 0,
+                output: String::new(),
+            },
+            crate::types::PostDeployHookEvidence {
+                command: "purge-cache".to_string(),
+                success: false,
+                exit_code: 2,
+                output: "denied".to_string(),
+            },
+        ];
+        let result = crate::types::ComponentDeployResult::new(&component, "/tmp")
+            .with_post_deploy_hooks(hooks);
+        let json = serde_json::to_value(&result).expect("serialize");
+
+        assert_eq!(json["post_deploy_hooks"].as_array().map(Vec::len), Some(2));
+        assert_eq!(json["post_deploy_hooks"][1]["exit_code"], 2);
+        assert_eq!(
+            json["warnings"],
+            serde_json::json!(["post:deploy hook failed (exit 2): purge-cache"])
         );
     }
 
