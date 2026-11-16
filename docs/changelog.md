@@ -4,6 +4,14 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.466.13] - 2026-11-16
+
+### Fixed
+- recover successful Lab providers after continuation failure
+- preserve service ownership and allowlist spawned environment
+- give reserved gates durable slots and disjoint CPU slices
+- honor live destination marker owners at Cook admission
+
 ## [0.466.12] - 2026-11-16
 
 ### Fixed
