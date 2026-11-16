@@ -413,7 +413,17 @@ pub(super) fn consume_execution_terminal_in_store(
                 .or_else(|| value.pointer("/data/failure_context/diagnostic"))
         })
         .cloned()
-        .or_else(|| delivery.error.clone());
+        .or_else(|| {
+            // A signal exit has no numeric status. The supervisor's generic
+            // refusal is not a child diagnostic: retain the execution identity
+            // and missing-publication context, just as for a recovered child
+            // whose exit status could not be observed. Parsed command failures
+            // above remain authoritative.
+            delivery.error.clone().filter(|error| {
+                error["data"]["step_outcome"] != "exit_status_unknown"
+                    && error["details"]["step_outcome"] != "exit_status_unknown"
+            })
+        });
     let reason = diagnostic
         .as_ref()
         .and_then(|value| value.get("message").and_then(Value::as_str))

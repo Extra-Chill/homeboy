@@ -375,6 +375,11 @@ pub(super) fn terminate_service_managed_daemon(state: &super::DaemonState) -> Re
             state.lease_id, state.pid
         )));
     }
+    // Also protect upgrades from daemons predating the durable ownership
+    // declaration: their shutdown removes the lease before the manager starts.
+    if let Some(manager) = current.service_manager {
+        super::service_manager::record_owner(manager)?;
+    }
     crate::process::signal_pid(state.pid, crate::process::SIGNAL_TERMINATE)
 }
 
@@ -560,6 +565,7 @@ fn start_or_return_live_unlocked_with_startup_token(
     addr: &str,
     startup_token: &str,
 ) -> Result<DaemonStartResult> {
+    super::service_manager::refuse_managed_spawn()?;
     let idle_timeout =
         super::lifetime::launch_idle_timeout(super::lifetime::DEFAULT_IDLE_TIMEOUT_SECS)?;
     start_or_return_live_with_operations(
@@ -603,6 +609,15 @@ where
             });
         }
     }
+    // Ownership outlives process liveness and the owner lock. In particular,
+    // Restart= leaves a window with neither a live PID nor a held lock.
+    if existing
+        .state
+        .as_ref()
+        .is_some_and(|state| state.service_manager.is_some())
+    {
+        return Err(owner_held_error(&existing));
+    }
     // A held owner lock is a live or starting daemon, whatever the lease says:
     // for example a service manager restarting its own. Spawning beside it
     // would only contend for the lock, so no path starts one (#17387).
@@ -616,7 +631,7 @@ where
 }
 
 fn owner_held_error(status: &super::DaemonStatus) -> Error {
-    match status.service_manager() {
+    match status.state.as_ref().and_then(|state| state.service_manager) {
         Some(manager) => Error::internal_unexpected(format!(
             "the daemon is owned by service manager {}; refusing to start another daemon beside it",
             manager.as_str()
@@ -628,6 +643,83 @@ fn owner_held_error(status: &super::DaemonStatus) -> Error {
         None => Error::internal_unexpected(
             "daemon owner lock is held by a live or starting daemon; refusing to start another daemon",
         ),
+    }
+}
+
+/// Daemons are store-scoped services, not continuations of the launching
+/// session. Keep only runtime locations and explicit service configuration;
+/// never forward a HOMEBOY_* or CARGO_* wildcard (both can contain caller
+/// context or credentials). Configuration namespaces below are service-wide.
+fn configure_daemon_environment(
+    command: &mut Command,
+    environment: impl IntoIterator<Item = (std::ffi::OsString, std::ffi::OsString)>,
+) {
+    const RUNTIME: &[&str] = &[
+        "HOME",
+        "USER",
+        "LOGNAME",
+        "PATH",
+        "TMPDIR",
+        "TMP",
+        "TEMP",
+        "LANG",
+        "LC_ALL",
+        "LC_CTYPE",
+        "TZ",
+        "XDG_CONFIG_HOME",
+        "XDG_DATA_HOME",
+        "XDG_CACHE_HOME",
+        "XDG_RUNTIME_DIR",
+        "HOMEBOY_SESSION_SEND_COMMAND",
+        "HOMEBOY_NO_UPDATE_CHECK",
+        "CARGO_HOME",
+        "CARGO_TARGET_DIR",
+        "CARGO_BUILD_TARGET",
+        "CARGO_BUILD_JOBS",
+        "CARGO_ENCODED_RUSTFLAGS",
+        "CARGO_ENCODED_RUSTDOCFLAGS",
+        "RUSTUP_HOME",
+        "RUSTUP_TOOLCHAIN",
+        "RUSTC",
+        "RUSTDOC",
+        "RUSTFLAGS",
+        "RUSTDOCFLAGS",
+        "RUSTC_WRAPPER",
+        "RUSTC_WORKSPACE_WRAPPER",
+    ];
+    const CONFIG_PREFIXES: &[&str] = &[
+        "HOMEBOY_DAEMON_",
+        "HOMEBOY_TEST_",
+        "HOMEBOY_FIXTURE_",
+        "HOMEBOY_SANDBOX_",
+        "HOMEBOY_CARGO_",
+        "HOMEBOY_BUILD_",
+        "HOMEBOY_CONFIG_",
+        "XDG_",
+        "LC_",
+        "CARGO_PROFILE_",
+        "CARGO_TARGET_",
+    ];
+    // Explicitly guard caller identity even if a configuration namespace is
+    // broadened later. Other caller/task variables remain excluded by default.
+    const CALLER_CONTEXT: &[&str] = &[
+        "HOMEBOY_CALLER_CONTEXT",
+        "HOMEBOY_SESSION_THREAD_ID",
+        "HOMEBOY_ACTIVE_RUN_ID",
+        "HOMEBOY_REQUESTER",
+    ];
+    command.env_clear();
+    for (name, value) in environment {
+        if name.to_str().is_some_and(|name| {
+            !CALLER_CONTEXT.contains(&name)
+                && (RUNTIME.contains(&name)
+                    || crate::paths::HOMEBOY_ROOT_ENV_VARS.contains(&name)
+                    || CONFIG_PREFIXES
+                        .iter()
+                        .any(|prefix| name.starts_with(prefix)))
+        }) {
+            command.env(name, value);
+        }
     }
 }
 
@@ -1073,7 +1165,10 @@ fn spawn_and_wait_for_lease_attempt(
             Some(format!("open {}", daemon_log.path.display())),
         )
     })?;
+    // Recheck at the actual spawn boundary, including startup retries.
+    super::service_manager::refuse_managed_spawn()?;
     let mut command = Command::new(exe);
+    configure_daemon_environment(&mut command, std::env::vars_os());
     // The spawned process is the daemon itself: its PID is the lease PID. The
     // startup token in argv is the portable, exact ownership proof used when a
     // platform cannot inspect a process environment.

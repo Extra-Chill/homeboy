@@ -1009,6 +1009,114 @@ fn start_names_the_service_manager_that_owns_a_stale_daemon() {
     );
 }
 
+#[test]
+fn managed_dead_lease_never_spawns_even_when_owner_lock_is_available() {
+    let mut status = managed_status(Some(fake_daemon(4242, "lease-dead")), false);
+    status.running = false;
+    let error = super::start_or_return_live_with_operations(
+        || Ok(status),
+        || -> crate::error::Result<Option<()>> { panic!("ownership is checked before the lock") },
+        || panic!("managed lease must not be cleaned up"),
+        || panic!("must not spawn into the caller's cgroup"),
+    )
+    .unwrap_err();
+    assert!(error.message.contains("service manager systemd"));
+}
+
+#[test]
+fn managed_ownership_survives_missing_lease_and_unlocked_restart_window() {
+    with_isolated_home(|_| {
+        let path = super::super::state_path().unwrap();
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        super::super::service_manager::record_owner(crate::daemon::DaemonServiceManager::Systemd)
+            .unwrap();
+        assert!(!path.exists());
+        let error = super::start_or_return_live_unlocked("127.0.0.1:0").unwrap_err();
+        assert!(error.message.contains("owned by service manager systemd"));
+    });
+}
+
+#[test]
+fn daemon_environment_is_allowlisted_not_a_caller_session() {
+    let allowed = [
+        ("HOME", "/service/home"),
+        ("PATH", "/usr/bin"),
+        ("HOMEBOY_DATA_DIR", "/service/data"),
+        ("HOMEBOY_SESSION_SEND_COMMAND", "/service/send"),
+        ("HOMEBOY_DAEMON_IDLE_TIMEOUT_SECS", "3"),
+        ("HOMEBOY_TEST_DAEMON_NAMESPACE", "hermetic"),
+        ("HOMEBOY_FIXTURE_PROVIDER_RELEASE_SOCKET", "/fixture/gate"),
+        ("HOMEBOY_SANDBOX_ROOT", "/sandbox"),
+        ("HOMEBOY_CARGO_TARGET_ROOT", "/cargo/targets"),
+        ("HOMEBOY_CONFIG_LOCK_TIMEOUT_SECS", "10"),
+        ("HOMEBOY_BUILD_CONCURRENCY", "2"),
+        ("TMPDIR", "/service/tmp"),
+        ("XDG_STATE_HOME", "/service/state"),
+        ("CARGO_HOME", "/cargo"),
+        ("CARGO_TARGET_DIR", "/cargo/target"),
+        ("CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_LINKER", "cc"),
+        ("CARGO_PROFILE_DEV_DEBUG", "0"),
+        ("RUSTUP_HOME", "/rustup"),
+        ("RUSTUP_TOOLCHAIN", "stable"),
+        ("RUSTFLAGS", "-C debuginfo=0"),
+    ];
+    let denied = [
+        ("HOMEBOY_CALLER_CONTEXT", "caller"),
+        ("HOMEBOY_SESSION_THREAD_ID", "thread"),
+        ("HOMEBOY_ACTIVE_RUN_ID", "run"),
+        ("HOMEBOY_REQUESTER", "requester"),
+        ("ARBITRARY_SESSION_SECRET", "secret"),
+        ("AWS_SECRET_ACCESS_KEY", "secret"),
+        ("GITHUB_TOKEN", "secret"),
+        ("HOMEBOY_BROKER_TOKEN", "secret"),
+        ("CARGO_REGISTRY_TOKEN", "secret"),
+        ("CARGO_REGISTRIES_PRIVATE_TOKEN", "secret"),
+        ("HOMEBOY_AGENT_TASK_EXECUTOR_CONFIG_JSON", "caller config"),
+        ("HOMEBOY_UNKNOWN_CONTEXT", "context"),
+        ("INVOCATION_ID", "caller-unit"),
+        ("XPC_SERVICE_NAME", "caller-service"),
+    ];
+    let mut command = std::process::Command::new("env");
+    super::configure_daemon_environment(
+        &mut command,
+        allowed
+            .into_iter()
+            .chain(denied)
+            .map(|(key, value)| (key.into(), value.into())),
+    );
+    let env: std::collections::BTreeMap<_, _> = command
+        .get_envs()
+        .filter_map(|(key, value)| {
+            value.map(|value| {
+                (
+                    key.to_string_lossy().to_string(),
+                    value.to_string_lossy().to_string(),
+                )
+            })
+        })
+        .collect();
+    let expected = allowed
+        .into_iter()
+        .map(|(key, value)| (key.to_string(), value.to_string()))
+        .collect::<std::collections::BTreeMap<_, _>>();
+    assert_eq!(env, expected, "only service configuration survives");
+    #[cfg(unix)]
+    {
+        // An actual child must not inherit unlisted ambient variables either.
+        let output = command.output().unwrap();
+        assert!(output.status.success());
+        let lines = String::from_utf8(output.stdout).unwrap();
+        let actual = lines
+            .lines()
+            .map(|line| {
+                let (key, value) = line.split_once('=').unwrap();
+                (key.to_string(), value.to_string())
+            })
+            .collect::<std::collections::BTreeMap<_, _>>();
+        assert_eq!(actual, expected);
+    }
+}
+
 fn managed_status(daemon: Option<super::DaemonStartResult>, fresh: bool) -> DaemonStatus {
     let mut status = fake_status(daemon, fresh);
     if let Some(state) = status.state.as_mut() {

@@ -388,7 +388,14 @@ fn terminate_exact_daemon(
         return Ok(DaemonTerminationOutcome::AlreadyAbsent);
     }
     signal_pid(state.pid, SIGNAL_TERMINATE)?;
-    if wait_for_pid_exit(state.pid, TERM_GRACE) {
+    // Active supervisors need the daemon's bounded drain budget to persist
+    // child exits. Idle or wedged old daemons retain the short escalation path.
+    let grace = if active_daemon_job_ids()?.is_empty() {
+        TERM_GRACE
+    } else {
+        super::shutdown_deadline::SHUTDOWN_GRACE
+    };
+    if wait_for_pid_exit(state.pid, grace) {
         return Ok(DaemonTerminationOutcome::Stopped(SIGNAL_TERMINATE));
     }
     if revalidate_exact_termination_target(path, identity, state)? == ExactTerminationTarget::Absent

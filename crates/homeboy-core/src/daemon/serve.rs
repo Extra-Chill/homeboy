@@ -160,6 +160,25 @@ where
             }
         }
     }
+    // A raw step's exit record is written by its supervising daemon thread.
+    // Give already-running steps the remainder of the bounded drain budget to
+    // publish that record before the process exits. Otherwise a short child
+    // can finish during restart with no surviving observer of its exit status.
+    // Do not wait on workflow drivers (which can wait indefinitely for input),
+    // and do not extend the shared shutdown deadline.
+    if shutdown_requested {
+        while Instant::now() < drain_deadline
+            && job_store.active_controller_jobs().iter().any(|(_, state)| {
+                state.job_type == "step"
+                    && state
+                        .checkpoint
+                        .as_ref()
+                        .is_some_and(|checkpoint| checkpoint["phase"] == "running")
+            })
+        {
+            std::thread::sleep(Duration::from_millis(50));
+        }
+    }
     helpers.stop(drain_deadline);
 
     // Termination evidence and the lease live in the state directory. Once it
