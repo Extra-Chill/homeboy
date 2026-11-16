@@ -172,6 +172,18 @@ fn decision_status(
             );
             true
         })?;
+        let mut record = agent_task_lifecycle::exact_record_in_store(lifecycle_store, run_id)?;
+        if agent_task_lifecycle::observe_runner_job_in_store(lifecycle_store, &record).is_some_and(
+            |evidence| {
+                evidence.observation == agent_task_lifecycle::RunnerJobObservation::RunnerRemoved
+            },
+        ) {
+            agent_task_lifecycle::terminalize_lost_accepted_lab_job_in_store(
+                lifecycle_store,
+                &mut record,
+                0,
+            )?;
+        }
         rooted_exact_status(lifecycle_store, run_id)
     }
 }

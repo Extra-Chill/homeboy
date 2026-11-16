@@ -5309,7 +5309,7 @@ fn record_stale_accepted_lab_handoff(run_id: &str, runner_id: &str) {
     .expect("age accepted handoff");
 }
 
-struct RunnerAuthorityFixture {
+pub(super) struct RunnerAuthorityFixture {
     authority: agent_task_lifecycle::RunnerAuthority,
     connected: bool,
     live_job_authority: agent_task_lifecycle::RunnerLiveJobAuthority,
@@ -5332,7 +5332,7 @@ impl RunnerAuthorityFixture {
         }
     }
 
-    fn removed() -> Self {
+    pub(super) fn removed() -> Self {
         Self {
             authority: agent_task_lifecycle::RunnerAuthority::Removed,
             connected: false,
