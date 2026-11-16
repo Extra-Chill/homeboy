@@ -500,7 +500,7 @@ pub struct RecoverArgs {
     /// Confirm an explicit model override that pins this retry.
     #[arg(long, requires = "model")]
     pub acknowledge_model_override: bool,
-    /// Include the complete Cook report rather than the compact lifecycle view.
+    /// With `--wait`, report the complete lifecycle status rather than the bounded summary.
     #[arg(long)]
     pub full: bool,
     /// Replace-gates step: explicit operator authorization for the replacement

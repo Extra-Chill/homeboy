@@ -1071,11 +1071,15 @@ pub(crate) fn wait_for_terminal_status(run_id: &str) -> CmdResult<Value> {
     )
 }
 
-pub(crate) fn wait_for_recovery_status(run_id: &str, timeout: Duration) -> CmdResult<Value> {
+pub(crate) fn wait_for_recovery_status(
+    run_id: &str,
+    full: bool,
+    timeout: Duration,
+) -> CmdResult<Value> {
     watch_status_until(
         StatusArgs {
             run_id: run_id.into(),
-            full: false,
+            full,
             exact: false,
             strict_subject_exit: false,
             watch: true,

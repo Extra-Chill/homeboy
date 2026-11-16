@@ -19,6 +19,7 @@ use super::RecoverArgs;
 
 pub(super) fn recover(args: RecoverArgs) -> CmdResult<Value> {
     let wait = args.wait;
+    let full = args.full;
     let timeout = args.timeout.clone();
     let duration = crate::commands::utils::watch::parse_duration(
         "--timeout",
@@ -35,7 +36,7 @@ pub(super) fn recover(args: RecoverArgs) -> CmdResult<Value> {
     let (mut report, code) = recover_with(args, &performer)?;
     if wait && report["admission"].is_object() {
         let run_id = report["run_id"].as_str().unwrap().to_string();
-        let (status, exit_code) = super::status::wait_for_recovery_status(&run_id, duration)?;
+        let (status, exit_code) = super::status::wait_for_recovery_status(&run_id, full, duration)?;
         if status["terminal"] != true {
             report["message"] = serde_json::json!(format!("Timed out; the step stays owned by the daemon. homeboy agent-task status {run_id} --watch"));
             return Ok((report, 1));
