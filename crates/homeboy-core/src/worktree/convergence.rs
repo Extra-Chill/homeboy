@@ -248,38 +248,61 @@ fn infrastructure(message: String) -> Error {
     error
 }
 
+/// How long a Git network operation keeps retrying transport failures. A
+/// resolver or Wi-Fi blip lasts seconds; a sub-second budget turned each one
+/// into a failed Cook continuation and an operator fallback.
+pub const TRANSPORT_RETRY_WINDOW: std::time::Duration = std::time::Duration::from_secs(30);
+
 /// Retry only transport failures: errors the operation already typed as
 /// retryable, or Git transport text. Deterministic Git errors (missing refs,
 /// permissions, local conflicts) must not spend the infrastructure budget.
-pub fn retry_fetch<T>(mut fetch: impl FnMut() -> Result<T>) -> Result<T> {
-    for attempt in 0..3 {
-        match fetch() {
+pub fn retry_fetch<T>(fetch: impl FnMut() -> Result<T>) -> Result<T> {
+    retry_fetch_within(TRANSPORT_RETRY_WINDOW, fetch)
+}
+
+/// [`retry_fetch`] with an explicit window. Transport failures back off
+/// exponentially (capped) until the next retry would start past `window`.
+pub fn retry_fetch_within<T>(
+    window: std::time::Duration,
+    mut fetch: impl FnMut() -> Result<T>,
+) -> Result<T> {
+    const FIRST_DELAY: std::time::Duration = std::time::Duration::from_millis(250);
+    const MAX_DELAY: std::time::Duration = std::time::Duration::from_secs(5);
+    let started = std::time::Instant::now();
+    let mut delay = FIRST_DELAY;
+    let mut attempts = 0u32;
+    loop {
+        attempts += 1;
+        let mut error = match fetch() {
             Ok(value) => return Ok(value),
-            Err(mut error) => {
-                let text = format!("{error:?}").to_ascii_lowercase();
-                if error.retryable != Some(true)
-                    && ![
-                        "ssl",
-                        "connection",
-                        "timed out",
-                        "could not resolve host",
-                        "unable to access",
-                    ]
-                    .iter()
-                    .any(|needle| text.contains(needle))
-                {
-                    return Err(error);
-                }
-                if attempt == 2 {
-                    error.retryable = Some(true);
-                    error.details["failure_class"] = serde_json::json!("infrastructure");
-                    return Err(error);
-                }
-                std::thread::sleep(std::time::Duration::from_millis(100 * (1 << attempt)));
-            }
+            Err(error) => error,
+        };
+        let text = format!("{error:?}").to_ascii_lowercase();
+        if error.retryable != Some(true)
+            && ![
+                "ssl",
+                "connection",
+                "timed out",
+                "could not resolve host",
+                "unable to access",
+            ]
+            .iter()
+            .any(|needle| text.contains(needle))
+        {
+            return Err(error);
         }
+        if started.elapsed() + delay > window {
+            error.retryable = Some(true);
+            error.details["failure_class"] = serde_json::json!("infrastructure");
+            error.details["transport_retry"] = serde_json::json!({
+                "attempts": attempts,
+                "window_ms": window.as_millis() as u64,
+            });
+            return Err(error);
+        }
+        std::thread::sleep(delay);
+        delay = (delay * 2).min(MAX_DELAY);
     }
-    unreachable!()
 }
 
 #[cfg(test)]
@@ -540,10 +563,21 @@ mod tests {
         })
         .unwrap();
         assert_eq!(attempts, 3);
-        let error = retry_fetch::<()>(|| Err(Error::git_command_failed("SSL connection failed")))
-            .unwrap_err();
+        // A transport outage is retried until the window is spent, not
+        // abandoned after a fixed sub-second burst.
+        let window = std::time::Duration::from_millis(1_000);
+        let started = std::time::Instant::now();
+        let error = retry_fetch_within::<()>(window, || {
+            Err(Error::git_command_failed(
+                "Could not resolve host: github.com",
+            ))
+        })
+        .unwrap_err();
+        assert!(started.elapsed() >= std::time::Duration::from_millis(750));
+        assert!(started.elapsed() <= window);
         assert_eq!(error.retryable, Some(true));
         assert_eq!(error.details["failure_class"], "infrastructure");
+        assert_eq!(error.details["transport_retry"]["attempts"], 3);
         let mut attempts = 0;
         let _ = retry_fetch::<()>(|| {
             attempts += 1;
