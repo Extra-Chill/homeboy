@@ -714,6 +714,27 @@ fn refresh_homeboy_binary_inner_in_roots(
     output.rollback = rollback.clone();
     output.selected_binary_path = selected_binary_path.clone();
 
+    if runner.kind != RunnerKind::Ssh {
+        // Only SSH runners host a daemon. Elsewhere the promoted binary is
+        // what the next job runs, so there is nothing to restart.
+        return Ok((
+            HomeboyBinaryRefreshOutput {
+                phase_summary,
+                followup_commands: plan.followup_commands.clone(),
+                bootstrap_provenance: Some(refresh_bootstrap_provenance(
+                    diagnostic_ssh_bootstrap,
+                    &plan,
+                    &bootstrap,
+                    &identity,
+                    &updated_fields,
+                )),
+                rollback,
+                ..output
+            },
+            0,
+        ));
+    }
+
     // The status captured under the promotion lease is the reconnect authority:
     // an old daemon that appeared while materializing must be retired, while a
     // stale session for a disconnected runner must not block direct connect.
