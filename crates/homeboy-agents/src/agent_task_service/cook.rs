@@ -5500,6 +5500,13 @@ fn run_cook_spine(
                 "superseded_by_active_cook",
                 owner.clone(),
             )?;
+            // The attempt never executes: settle it so no queued record is
+            // left for status, sweeps, or upgrade admission to wait on.
+            agent_task_lifecycle::cancel_run_in_store(
+                lifecycle_store,
+                &options.identity.initial_run_id,
+                Some("superseded_by_active_cook"),
+            )?;
             return Ok(stores.report(CookReportInput {
                 cook_id: options.identity.cook_id.clone(),
                 status: "superseded_by_active_cook",

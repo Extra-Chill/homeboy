@@ -11344,6 +11344,11 @@ fn a_destination_whose_cook_is_still_driving_supersedes_another_cook_before_disp
         let record = lifecycle_store
             .read_record(&options.identity.initial_run_id)
             .unwrap();
+        assert!(
+            record.state().is_terminal(),
+            "a superseded attempt must not stay queued: {:?}",
+            record.state()
+        );
         assert_eq!(
             record.metadata["superseded_by_active_cook"]["cook_id"],
             prior_cook
