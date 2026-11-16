@@ -881,7 +881,7 @@ pub(super) fn adopt_green_candidate_missing_review_form_with_scope(
     )
     .unwrap();
 
-    let mut gate_proof = serde_json::to_value(promotion("fixture-gate-proof")).unwrap();
+    let mut gate_proof = serde_json::to_value(promotion(&run_id)).unwrap();
     gate_proof["to_worktree"] = serde_json::json!(workspace_handle);
     gate_proof["target"] = serde_json::json!({
         "worktree": workspace_handle,
@@ -892,15 +892,22 @@ pub(super) fn adopt_green_candidate_missing_review_form_with_scope(
     let candidate_checkout = serde_json::json!({
         "schema": "homeboy/agent-task-gate-candidate-checkout/v2",
         "commit": candidate,
-        "tree": "fixture-candidate-tree",
+        "tree": git_output(&target, &["rev-parse", "HEAD^{tree}"]),
     });
     gate_proof["deterministic_gates"][0]["command"] =
         serde_json::json!(["sh", "-c", "test \"$(cat lib.rs)\" = candidate"]);
     gate_proof["deterministic_gates"][0]["candidate_checkout"] = candidate_checkout.clone();
     gate_proof["provenance"]["worktree_path"] = serde_json::json!(target.display().to_string());
     gate_proof["provenance"]["candidate_checkout"] = candidate_checkout;
+    gate_proof["candidate"] = serde_json::json!({
+        "base_sha": base,
+        "candidate_sha": candidate,
+        "tree_sha": git_output(&target, &["rev-parse", "HEAD^{tree}"]),
+    });
     let mut backend = CaptureBackend {
+        hydrate_gate_proof_run_id: Some(run_id.clone()),
         synthetic_gate_proof: Some(serde_json::from_value(gate_proof).unwrap()),
+        commit_real: true,
         ..Default::default()
     };
     let result = adopt_cook_candidate_with_dispatcher_and_backend(

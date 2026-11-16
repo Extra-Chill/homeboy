@@ -311,8 +311,10 @@ fn finalize_pr_with_backend_mode<B: AgentTaskPrFinalizationBackend>(
     options.review_dossier.evidence.dedup();
     options
         .review_dossier
-        .validate_preflight_fields(&options.review_profile)?;
-    options.review_dossier.validate(&options.review_profile)?;
+        .validate_preflight_for_publication(&options.review_profile, options.draft_pr)?;
+    options
+        .review_dossier
+        .validate_for_publication(&options.review_profile, options.draft_pr)?;
     let proof = build_finalization_proof(&options, options.normalized_gate_results.clone());
     let mut intent =
         build_pr_publication_intent(&options, &head, &changed_files, proof.clone(), &base);

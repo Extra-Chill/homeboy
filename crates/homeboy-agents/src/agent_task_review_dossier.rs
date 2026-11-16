@@ -767,6 +767,14 @@ impl AgentTaskReviewDossier {
     /// Report independent, operator-supplied dossier gaps together before a
     /// preflight asks the caller to reconstruct a large finalization command.
     pub fn validate_preflight_fields(&self, profile: &AgentTaskReviewProfile) -> Result<()> {
+        self.validate_preflight_for_publication(profile, false)
+    }
+
+    pub(crate) fn validate_preflight_for_publication(
+        &self,
+        profile: &AgentTaskReviewProfile,
+        draft: bool,
+    ) -> Result<()> {
         validate_profile(profile)?;
         let mut gaps = Vec::new();
         let mut missing = |field: &str, message: &str| {
@@ -785,7 +793,7 @@ impl AgentTaskReviewDossier {
         {
             missing("what_changed", "what changed is required");
         }
-        if self.how_to_test.is_empty() && self.verified_commands.is_empty() {
+        if !draft && self.how_to_test.is_empty() && self.verified_commands.is_empty() {
             missing("how_to_test", VERIFICATION_REQUIRED);
         }
         for (index, step) in self.how_to_test.iter().enumerate() {
@@ -853,6 +861,14 @@ impl AgentTaskReviewDossier {
     }
 
     pub fn validate(&self, profile: &AgentTaskReviewProfile) -> Result<()> {
+        self.validate_for_publication(profile, false)
+    }
+
+    pub(crate) fn validate_for_publication(
+        &self,
+        profile: &AgentTaskReviewProfile,
+        draft: bool,
+    ) -> Result<()> {
         validate_profile(profile)?;
         if self.schema != AGENT_TASK_REVIEW_DOSSIER_SCHEMA {
             return invalid("schema", "review dossier schema is not supported");
@@ -959,7 +975,7 @@ impl AgentTaskReviewDossier {
         {
             return invalid("what_changed", "what changed is required");
         }
-        if self.how_to_test.is_empty() && self.verified_commands.is_empty() {
+        if !draft && self.how_to_test.is_empty() && self.verified_commands.is_empty() {
             return invalid("how_to_test", VERIFICATION_REQUIRED);
         }
         Ok(())
