@@ -11408,7 +11408,7 @@ fn recook_preservation_leaves_unattributed_dirt_for_existing_admission() {
 /// gating it. The second Cook is refused by name, and that candidate is never
 /// preserved-and-reset out from under its driver.
 #[test]
-fn a_destination_whose_cook_is_still_driving_refuses_another_cook() {
+fn a_destination_whose_cook_is_still_driving_supersedes_another_cook_before_dispatch() {
     use fs4::fs_std::FileExt;
     homeboy_core::test_support::with_isolated_home(|home| {
         let handle = "fixture@fix-issue-15884-fixture";
@@ -11434,13 +11434,37 @@ fn a_destination_whose_cook_is_still_driving_refuses_another_cook() {
             .expect("driver lock");
         assert!(driver.try_lock_exclusive().expect("hold driver lock"));
 
-        let error = super::super::cook_prior_candidate::require_destination_free_of_live_cook(
-            &lifecycle_store,
-            &options,
-        )
-        .expect_err("a live owner Cook keeps its destination");
-        assert_eq!(error.details["destination_owner"]["cook_id"], prior_cook);
-        assert_eq!(error.details["destination_owner"]["run_id"], prior_run);
+        let result = run_cook(CookContext::new(options.clone(), Arc::new(UnusedExecutor)))
+            .expect("a live owner supersedes admission without provider work");
+        assert_eq!(result.exit_code, 0);
+        assert_eq!(result.value.status, "superseded_by_active_cook");
+        assert!(
+            homeboy_core::cook_status::CookStatus::from_status(&result.value.status)
+                .is_success_exit()
+        );
+        assert!(result.value.disposition.is_terminal());
+        assert!(result
+            .value
+            .stop_reason
+            .as_deref()
+            .unwrap()
+            .contains(prior_cook));
+        let record = lifecycle_store
+            .read_record(&options.identity.initial_run_id)
+            .unwrap();
+        assert!(
+            record.state().is_terminal(),
+            "a superseded attempt must not stay queued: {:?}",
+            record.state()
+        );
+        assert_eq!(
+            record.metadata["superseded_by_active_cook"]["cook_id"],
+            prior_cook
+        );
+        assert_eq!(
+            record.metadata["superseded_by_active_cook"]["run_id"],
+            prior_run
+        );
         assert_eq!(
             super::super::cook_prior_candidate::preserve_prior_attempt_candidate(
                 &lifecycle_store,

@@ -89,6 +89,8 @@ pub enum CookStatus {
     GreenNoFinalize,
     /// A verified provider review intentionally produced no candidate patch.
     IntentionalNoChange,
+    /// Yielded before dispatch to the live Cook that owns the destination.
+    SupersededByActiveCook,
     /// Verified no-change evidence cannot satisfy a task that requires a patch.
     NoCandidate,
     /// Finalization ran and found no changed files.
@@ -164,6 +166,7 @@ impl CookStatus {
             "draft_published" => Self::DraftPublished,
             "green_no_finalize" => Self::GreenNoFinalize,
             "intentional_no_change" => Self::IntentionalNoChange,
+            "superseded_by_active_cook" => Self::SupersededByActiveCook,
             "no_candidate" => Self::NoCandidate,
             "no_changes" => Self::NoChanges,
             "no_changes_gate_failed" => Self::NoChangesGateFailed,
@@ -203,6 +206,7 @@ impl CookStatus {
             Self::DraftPublished => "draft_published",
             Self::GreenNoFinalize => "green_no_finalize",
             Self::IntentionalNoChange => "intentional_no_change",
+            Self::SupersededByActiveCook => "superseded_by_active_cook",
             Self::NoCandidate => "no_candidate",
             Self::NoChanges => "no_changes",
             Self::NoChangesGateFailed => "no_changes_gate_failed",
@@ -269,6 +273,7 @@ impl CookStatus {
                 | Self::DraftPublished
                 | Self::GreenNoFinalize
                 | Self::IntentionalNoChange
+                | Self::SupersededByActiveCook
         )
     }
 }
@@ -447,6 +452,7 @@ mod tests {
             CookStatus::DraftPublished,
             CookStatus::GreenNoFinalize,
             CookStatus::IntentionalNoChange,
+            CookStatus::SupersededByActiveCook,
             CookStatus::NoCandidate,
             CookStatus::NoChanges,
             CookStatus::NoChangesGateFailed,

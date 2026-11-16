@@ -149,7 +149,8 @@ impl From<&CookStatus> for RunLifecycleStatus {
             | CookStatus::ReviewReady
             | CookStatus::DraftPublished
             | CookStatus::GreenNoFinalize
-            | CookStatus::IntentionalNoChange => Self::Succeeded,
+            | CookStatus::IntentionalNoChange
+            | CookStatus::SupersededByActiveCook => Self::Succeeded,
 
             // --- terminal, unsuccessful, not an invitation to retry ---
             // Finalization ran and produced nothing. Nothing failed, but the
@@ -289,6 +290,7 @@ mod tests {
             CookStatus::DraftPublished,
             CookStatus::GreenNoFinalize,
             CookStatus::IntentionalNoChange,
+            CookStatus::SupersededByActiveCook,
             CookStatus::NoCandidate,
             CookStatus::NoChanges,
             CookStatus::NoChangesGateFailed,
@@ -325,7 +327,9 @@ mod tests {
                 CookStatus::ReviewReady => RunLifecycleStatus::Succeeded,
                 CookStatus::DraftPublished => RunLifecycleStatus::Succeeded,
                 CookStatus::GreenNoFinalize => RunLifecycleStatus::Succeeded,
-                CookStatus::IntentionalNoChange => RunLifecycleStatus::Succeeded,
+                CookStatus::IntentionalNoChange | CookStatus::SupersededByActiveCook => {
+                    RunLifecycleStatus::Succeeded
+                }
                 CookStatus::NoCandidate => RunLifecycleStatus::PartialFailure,
                 CookStatus::NoChanges => RunLifecycleStatus::PartialFailure,
                 CookStatus::NoChangesGateFailed => RunLifecycleStatus::Failed,
@@ -439,6 +443,7 @@ mod tests {
                     | CookStatus::DraftPublished
                     | CookStatus::GreenNoFinalize
                     | CookStatus::IntentionalNoChange
+                    | CookStatus::SupersededByActiveCook
             );
             assert_eq!(is_success, expected_success, "{status} success claim");
         }

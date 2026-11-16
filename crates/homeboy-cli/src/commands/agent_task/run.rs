@@ -7550,6 +7550,15 @@ pub(super) fn fresh_derived_cook_branch(
     source_checkout: Option<&Path>,
 ) -> homeboy::core::Result<String> {
     use homeboy::core::worktree::convergence::PrHistory;
+    // Replayed admissions can carry only the component id, not a source
+    // checkout. PR history still retires a generation in that case.
+    let registered_source = if source_checkout.is_none() {
+        homeboy::core::component::inventory::registered_primary_by_id(repository)?
+            .map(|component| PathBuf::from(component.local_path))
+    } else {
+        None
+    };
+    let source_checkout = source_checkout.or(registered_source.as_deref());
     for generation in 1..=MAX_DERIVED_COOK_GENERATIONS {
         let branch = if generation == 1 {
             base.to_string()
