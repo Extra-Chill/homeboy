@@ -10,7 +10,7 @@ pub use crate::agent_task_gate::failure_excerpt::gate_failure_excerpt_from_value
 mod cook;
 mod cook_ci;
 pub use cook_ci::{cook_ci_status, repoll_cook_ci};
-mod cook_activity;
+pub(crate) mod cook_activity;
 mod cook_adoption;
 /// Fresh provider attempts start from a clean Cook base tree.
 mod cook_attempt_workspace;

@@ -215,6 +215,8 @@ pub struct AgentTaskReviewAiAssistance {
     pub used: bool,
     pub tool: String,
     pub model: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cook_seconds: Option<u64>,
     /// The agent's own account of how it contributed (review form `used_for`).
     #[serde(default)]
     pub contribution: String,
@@ -1191,8 +1193,17 @@ fn render_ai_disclosure(ai: &AgentTaskReviewAiAssistance) -> String {
     } else {
         prose(ai.contribution.trim().trim_end_matches('.'))
     };
+    let cook_time = ai
+        .cook_seconds
+        .map(|seconds| {
+            format!(
+                " Cook time: {}.",
+                crate::agent_task_service::cook_activity::format_duration(seconds)
+            )
+        })
+        .unwrap_or_default();
     format!(
-        "## AI disclosure\nTool: Homeboy Cook. Agent: {}. Model: {}.\n\n{contribution}, under the direction of the Cook requester. Gates were run by Homeboy. A human reviews before merge.",
+        "## AI disclosure\nTool: Homeboy Cook. Agent: {}. Model: {}.{cook_time}\n\n{contribution}, under the direction of the Cook requester. Gates were run by Homeboy. A human reviews before merge.",
         prose(&homeboy_tool_disclosure(&ai.tool)),
         prose(&strip_model_tiers(&ai.model))
     )
@@ -2346,6 +2357,7 @@ mod tests {
                 used: true,
                 tool: "Pi".into(),
                 model: "openai/gpt-5.6-terra".into(),
+                cook_seconds: None,
                 contribution: String::new(),
             },
             source_relationships: vec![AgentTaskReviewIssueRelationship {
@@ -2772,6 +2784,7 @@ mod tests {
             used: true,
             tool: "Homeboy (pi)".into(),
             model: "anthropic-claude-opus-5-5".into(),
+            cook_seconds: None,
             contribution: "Implemented the guard and its regression test.".into(),
         };
         value.evidence.push(AgentTaskReviewEvidence {
@@ -2853,6 +2866,17 @@ mod tests {
         // Shell programs are retained in the run, not dumped into the body.
         assert!(!body.contains(gate_command.trim_end()));
         assert_eq!(body.matches("## AI disclosure").count(), 1);
+        for (cook_seconds, expected_line) in [
+            (Some(872), "Tool: Homeboy Cook. Agent: Homeboy (pi). Model: anthropic-claude-opus-5-5. Cook time: 14m32s."),
+            (None, "Tool: Homeboy Cook. Agent: Homeboy (pi). Model: anthropic-claude-opus-5-5."),
+        ] {
+            value.ai_assistance.cook_seconds = cook_seconds;
+            let rendered = render_review_dossier(&value, &default_profile());
+            assert_eq!(
+                rendered.lines().find(|line| line.starts_with("Tool: ")),
+                Some(expected_line)
+            );
+        }
         assert_eq!(body.matches("## AI assistance").count(), 0);
         for retired in ["## How to test", "\\`", "\\_"] {
             assert!(!body.contains(retired), "retired `{retired}` in {body}");

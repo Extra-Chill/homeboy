@@ -3415,6 +3415,29 @@ fn cook_review_dossier_with_stores_and_review_form(
                 .collect();
         }
     }
+    // Use durable timestamps so re-rendering preserves the Cook wall time.
+    // Missing records or invalid timestamps must never block finalization.
+    let cook_seconds = (|| {
+        let mut attempts = store.load_recipe(&options.identity.cook_id).ok()?.attempts;
+        attempts.sort_by_key(|attempt| attempt.attempt);
+        let first = lifecycle_store
+            .read_record(&attempts.first()?.run_id)
+            .ok()?;
+        let successful = lifecycle_store.read_record(successful_run_id).ok()?;
+        let start = chrono::DateTime::parse_from_rfc3339(&first.submitted_at).ok()?;
+        let end = chrono::DateTime::parse_from_rfc3339(
+            successful
+                .updated_at
+                .as_deref()
+                .unwrap_or(&successful.submitted_at),
+        )
+        .ok()?;
+        let span = end.signed_duration_since(start);
+        if span < chrono::Duration::zero() {
+            return None;
+        }
+        u64::try_from(span.num_seconds()).ok()
+    })();
     Ok(AgentTaskReviewDossier {
         schema: "homeboy/agent-task-review-dossier/v1".to_string(),
         summary: if review_form.is_some() {
@@ -3442,6 +3465,7 @@ fn cook_review_dossier_with_stores_and_review_form(
             used: true,
             tool: lineage.tool,
             model: lineage.model,
+            cook_seconds,
             contribution: terminal_form.used_for.clone(),
         },
         source_relationships: Vec::new(),
