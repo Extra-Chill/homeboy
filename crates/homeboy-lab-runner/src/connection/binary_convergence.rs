@@ -4,10 +4,10 @@
 //! converges to the controller it just installed, because the process running
 //! the upgrade is still the old controller (#16845).
 //!
-//! Convergence is one decision over three observations: the target
-//! controller build and the configured remote binary's identity. Active jobs
-//! are re-adopted by the restarted daemon, not a reason to defer refresh. Installation reuses the verified release path of
-//! `refresh-homeboy` pinned to the target's exact version tag, so it never
+//! Convergence is one decision over two observations: the target controller
+//! build and the configured remote binary's identity. Active jobs are
+//! re-adopted by the restarted daemon, so they never defer convergence.
+//! Installation reuses the verified release path of `refresh-homeboy` pinned to the target's exact version tag, so it never
 //! resolves "latest" and never builds from source. That refresh owns its own
 //! runtime-promotion lease and replaces the daemon through its existing
 //! in-place restart mechanism (in-place restart or service-unit repoint). It runs
