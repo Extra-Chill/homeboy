@@ -161,11 +161,13 @@ pub fn recover_terminal_transport_proxy_evidence(run_id: &str) -> Result<bool> {
 /// authenticated, accepted handoff may be recovered without new admission.
 pub fn disconnected_runner_recovery_available(record: &AgentTaskRunRecord) -> bool {
     record.state() == AgentTaskRunState::Failed
-        && record
-            .metadata
-            .pointer("/pre_execution_failure/error_code")
-            .and_then(Value::as_str)
-            == Some("runner.controller_disconnected")
+        && matches!(
+            record
+                .metadata
+                .pointer("/pre_execution_failure/error_code")
+                .and_then(Value::as_str),
+            Some("runner.controller_disconnected" | "runner.job_lost")
+        )
         && is_authenticated_transport_recovery_record(record)
 }
 

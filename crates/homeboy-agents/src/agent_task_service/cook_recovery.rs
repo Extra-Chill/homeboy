@@ -843,7 +843,9 @@ fn recover_cook_once(
     if !preflight {
         if let Ok(run_id) = super::resolve_cook_continuation_run_id(id) {
             if let Ok(record) = agent_task_lifecycle::exact_record(&run_id) {
-                if agent_task_lifecycle::recorded_store_contention(&record) {
+                if agent_task_lifecycle::recorded_store_contention(&record)
+                    || record.state() == agent_task_lifecycle::AgentTaskRunState::Running
+                {
                     agent_task_lifecycle::reconcile_status(&run_id)?;
                 }
             }

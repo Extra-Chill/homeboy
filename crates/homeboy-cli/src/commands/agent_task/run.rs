@@ -4607,6 +4607,23 @@ where
         })?;
     let run_id = agent_task_service::resolve_cook_continuation_run_id(&args.cook_or_attempt_id)?;
     let record = agent_task_service::reconcile_recipe_attempt_for_continuation(&recipe, &run_id)?;
+    if record
+        .metadata
+        .pointer("/pre_execution_failure/error_code")
+        .and_then(Value::as_str)
+        == Some("runner.job_lost")
+    {
+        let (_, retry) = reserve_retry_through_action(
+            &run_id,
+            None,
+            false,
+            &Default::default(),
+            None,
+            uuid::Uuid::new_v4().to_string(),
+        )?;
+        let recipe = agent_task_service::load_recipe(&recipe.cook_id)?;
+        return Ok((cook_continuation_status(&recipe.cook_id, &retry.record), 0));
+    }
     let record =
         if homeboy::agents::agent_task_lifecycle::disconnected_runner_recovery_available(&record) {
             let store = agent_task_lifecycle::AgentTaskLifecycleStore::from_environment()?;

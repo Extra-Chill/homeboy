@@ -289,6 +289,7 @@ pub(super) fn compact_terminal_jobs(
     event_retention_limit: usize,
     terminal_job_retention_limit: usize,
     terminal_job_retention_bytes: usize,
+    collection_window_ms: u64,
 ) -> Option<JobStoreCompactionEvidence> {
     let now = timestamp_ms();
     let workflow_retention_ms = crate::defaults::load_config()
@@ -368,6 +369,15 @@ pub(super) fn compact_terminal_jobs(
                 && retained_terminal_bytes <= terminal_job_retention_bytes)
         {
             break;
+        }
+        if now.saturating_sub(
+            stored
+                .job
+                .finished_at_ms
+                .unwrap_or(stored.job.updated_at_ms),
+        ) < collection_window_ms
+        {
+            continue;
         }
         removed_job_ids.insert(stored.job.id);
         retained_terminal_jobs -= 1;

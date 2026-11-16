@@ -1544,6 +1544,12 @@ fn accepted_handoff_fails_after_confirmed_absence_across_generations() {
         assert_eq!(terminal.state(), AgentTaskRunState::Failed);
         assert_eq!(terminal.metadata["phase"], "accepted_lab_runner_job_lost");
         assert_eq!(
+            terminal.metadata["pre_execution_failure"]["error_code"],
+            "runner.job_lost"
+        );
+        assert!(disconnected_runner_recovery_available(&terminal));
+        assert_eq!(status(run_id).expect("pure status"), terminal);
+        assert_eq!(
             terminal.metadata["lost_accepted_runner_job"]["checked_generations"],
             2
         );

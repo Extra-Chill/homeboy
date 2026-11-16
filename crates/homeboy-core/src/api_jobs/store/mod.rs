@@ -198,6 +198,7 @@ pub(super) struct JobStorePersistence {
     pub(super) event_retention_limit: usize,
     pub(super) terminal_job_retention_limit: usize,
     pub(super) terminal_job_retention_bytes: usize,
+    pub(super) terminal_job_collection_window_ms: u64,
     /// What this process last read from or wrote to the SQL store, kept under
     /// the transaction lock. While the database still reports the recorded
     /// generation the in-memory snapshot is authoritative and the reload is
@@ -218,6 +219,7 @@ impl JobStorePersistence {
             event_retention_limit,
             terminal_job_retention_limit,
             terminal_job_retention_bytes,
+            terminal_job_collection_window_ms: 86_400_000,
             synced: Mutex::new(SqlSyncState::default()),
             connection: Mutex::new(None),
         }
@@ -706,6 +708,7 @@ impl JobStore {
             &persistence.path,
             persistence.terminal_job_retention_limit,
             persistence.terminal_job_retention_bytes,
+            persistence.terminal_job_collection_window_ms,
             inner,
         )?;
         if retention_due {
@@ -760,6 +763,7 @@ impl JobStore {
             persistence.event_retention_limit,
             persistence.terminal_job_retention_limit,
             persistence.terminal_job_retention_bytes,
+            persistence.terminal_job_collection_window_ms,
         );
         let committed = sql_store::commit_sql_store(
             persistence
@@ -992,6 +996,10 @@ impl JobStore {
             health_revision: Arc::default(),
         };
 
+        let mut store = store;
+        Arc::get_mut(store.persistence.as_mut().expect("persistent store"))
+            .expect("unshared store")
+            .terminal_job_collection_window_ms = 0;
         store.durable_transaction(|inner| {
             let mut durable = DurableJobStore {
                 jobs: inner.jobs.values().cloned().collect(),
@@ -1023,11 +1031,12 @@ impl JobStore {
     /// Open durable jobs without treating active records as an implicit daemon
     /// restart. Daemon lifecycle recovery must select ownership explicitly.
     pub fn open_without_reconciliation(path: impl Into<PathBuf>) -> Result<Self> {
-        Self::open_without_reconciliation_with_retention_and_terminal_byte_limit(
+        Self::open_with_collection_window(
             path,
             DEFAULT_EVENT_RETENTION_LIMIT,
             DEFAULT_TERMINAL_JOB_RETENTION_LIMIT,
             DEFAULT_TERMINAL_JOB_RETENTION_BYTES,
+            86_400_000,
         )
     }
 
@@ -1045,11 +1054,28 @@ impl JobStore {
         )
     }
 
+    #[cfg(test)]
     pub(crate) fn open_without_reconciliation_with_retention_and_terminal_byte_limit(
         path: impl Into<PathBuf>,
         event_retention_limit: usize,
         terminal_job_retention_limit: usize,
         terminal_job_retention_bytes: usize,
+    ) -> Result<Self> {
+        Self::open_with_collection_window(
+            path,
+            event_retention_limit,
+            terminal_job_retention_limit,
+            terminal_job_retention_bytes,
+            0,
+        )
+    }
+
+    fn open_with_collection_window(
+        path: impl Into<PathBuf>,
+        event_retention_limit: usize,
+        terminal_job_retention_limit: usize,
+        terminal_job_retention_bytes: usize,
+        collection_window_ms: u64,
     ) -> Result<Self> {
         let path = path.into();
         let event_retention_limit = event_retention_limit.max(1);
@@ -1073,6 +1099,10 @@ impl JobStore {
             daemon_freshness_snapshot: Arc::default(),
             health_revision: Arc::default(),
         };
+        let mut store = store;
+        Arc::get_mut(store.persistence.as_mut().expect("persistent store"))
+            .expect("unshared store")
+            .terminal_job_collection_window_ms = collection_window_ms;
         // Load without the writer slot: readers (status, diagnose, action
         // admission) must not queue behind writers or commit, and a reader
         // inside another connection's write transaction must not deadlock

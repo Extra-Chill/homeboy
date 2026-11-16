@@ -315,17 +315,17 @@ fn terminalize_lost_accepted_lab_job_in_store(
     record: &mut AgentTaskRunRecord,
     checked_generations: usize,
 ) -> Result<()> {
-    if !record.has_accepted_lab_handoff() || !record.provider_handles.is_empty() {
+    if !record.has_accepted_lab_handoff() {
         return Ok(());
     }
     let plan = lifecycle_store.read_controller_plan(&record.run_id)?;
     let run_id = record.run_id.clone();
     let runner_id = record.runner_id().unwrap_or_default().to_string();
     let runner_job_id = record.runner_job_id().unwrap_or_default().to_string();
-    let mut error = Error::internal_unexpected(format!(
+    let mut error = Error::new(homeboy_core::error::ErrorCode::RunnerJobLost, format!(
         "accepted Lab runner job '{runner_job_id}' was not found in any of {checked_generations} authoritative known daemon generation(s)"
-    ))
-    .with_hint(format!("Retry safely: homeboy agent-task retry {run_id} --run"));
+    ), Value::Null)
+    .with_hint(format!("Recover safely: homeboy agent-task recover {run_id}"));
     error.retryable = Some(true);
     // The daemon no longer owns this accepted job, but its runner may still own
     // a service supervisor. Resolve that owner before replacing the run record

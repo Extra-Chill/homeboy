@@ -491,6 +491,7 @@ fn exit_code_for_error(code: ErrorCode) -> i32 {
         | ErrorCode::RunnerCapacityBusy
         | ErrorCode::RunnerLabTransportFailure
         | ErrorCode::RunnerControllerDisconnected
+        | ErrorCode::RunnerJobLost
         | ErrorCode::RunnerLabUnavailable
         | ErrorCode::RunnerVersionSkew
         | ErrorCode::RuntimePromotionContended
