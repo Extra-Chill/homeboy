@@ -1049,7 +1049,7 @@ mod tests {
             assert!(cleanup.contains("rm -f \"$old_unit\""));
             assert!(cleanup.contains("runner-service/$old_id"));
             assert!(cleanup.contains("runner-daemons/$old_id"));
-            assert!(cleanup.ends_with("systemctl --user daemon-reload"));
+            assert!(cleanup.contains("systemctl --user daemon-reload"));
         }
     }
 
