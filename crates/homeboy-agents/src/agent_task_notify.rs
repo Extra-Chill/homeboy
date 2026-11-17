@@ -594,6 +594,38 @@ fn cook_terminal_with(
     else {
         return;
     };
+    cook_terminal_in_store_with(
+        &lifecycle_store,
+        report,
+        component,
+        exit_code,
+        resolved_tracker,
+    );
+}
+
+pub(crate) fn cook_terminal_in_store(
+    store: &crate::agent_task_lifecycle::AgentTaskLifecycleStore,
+    report: &AgentTaskCookReport,
+    component: Option<&str>,
+    exit_code: i32,
+) {
+    tracker_note::post(&report.cook_id);
+    cook_terminal_in_store_with(
+        store,
+        report,
+        component,
+        exit_code,
+        tracker::resolved_tracker,
+    );
+}
+
+fn cook_terminal_in_store_with(
+    lifecycle_store: &crate::agent_task_lifecycle::AgentTaskLifecycleStore,
+    report: &AgentTaskCookReport,
+    component: Option<&str>,
+    exit_code: i32,
+    resolved_tracker: impl FnOnce(&str) -> Option<String>,
+) {
     // Claim before building the payload, and treat a failed claim the same as a
     // lost one: the runner-direct and daemon-backstop paths also decline to
     // dispatch when their marker cannot be established, because a duplicated
@@ -688,13 +720,12 @@ fn cook_terminal_with(
     }
 }
 
-pub(crate) fn cook_terminal_for_attempt(
+pub(crate) fn terminal_attempt_report(
     cook_id: &str,
     attempt_run_id: &str,
     status: &str,
-    exit_code: i32,
-) {
-    let report = AgentTaskCookReport {
+) -> AgentTaskCookReport {
+    AgentTaskCookReport {
         schema: "homeboy/agent-task-cook/v1",
         cook_id: cook_id.to_string(),
         latest_run_id: Some(attempt_run_id.to_string()),
@@ -713,8 +744,7 @@ pub(crate) fn cook_terminal_for_attempt(
         provider_route_notes: Vec::new(),
         failure_context: None,
         report_stores: None,
-    };
-    cook_terminal(&report, None, exit_code);
+    }
 }
 
 /// Build the continuation-failed payload. Separated from delivery so its

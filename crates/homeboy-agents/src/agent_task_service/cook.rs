@@ -4734,10 +4734,15 @@ fn run_cook_with_runtime(
             )?;
         }
         if result.value.disposition.is_terminal() {
-            if let Err(error) = settle_cook_observations(
+            if let Err(error) = finish_cook_terminal_with_report(
                 lifecycle_store,
-                &result.value,
-                &notification_options.identity.initial_run_id,
+                &result.value.cook_id,
+                Some((
+                    &result.value,
+                    cook_component(&notification_options).as_deref(),
+                    result.exit_code,
+                )),
+                &[notification_options.identity.initial_run_id.clone()],
             ) {
                 homeboy_core::log_status!(
                     "agent-task",
@@ -4745,32 +4750,79 @@ fn run_cook_with_runtime(
                     error
                 );
             }
-            crate::agent_task_notify::cook_terminal(
-                &result.value,
-                cook_component(&notification_options).as_deref(),
-                result.exit_code,
-            );
         }
     }
     result
 }
 
-/// One terminal write boundary for every Cook report. Each run settles to its
-/// own Cook-observed outcome; invocation sources without a lifecycle record
-/// take the Cook's outcome.
-fn settle_cook_observations(
+/// Settle and announce a Cook only once its end-to-end outcome is terminal.
+/// Safe for repeated delivery, including attempts that outlive their driver.
+pub fn finish_cook_terminal(lifecycle: &AgentTaskLifecycleStore, cook_id: &str) -> Result<()> {
+    finish_cook_terminal_with_report(lifecycle, cook_id, None, &[])
+}
+
+fn finish_cook_terminal_with_report(
     lifecycle: &AgentTaskLifecycleStore,
-    report: &AgentTaskCookReport,
-    source_run_id: &str,
+    cook_id: &str,
+    reported: Option<(&AgentTaskCookReport, Option<&str>, i32)>,
+    source_ids: &[String],
 ) -> Result<()> {
-    let mut ids = report.history_run_ids.clone();
+    // A live driver's terminal report is the Cook's verdict. Without one,
+    // the settled Cook observation decides whether the Cook has ended.
+    let fallback;
+    let (report, component, exit_code) = match reported {
+        Some(reported) => reported,
+        None => {
+            let record = cook_observation_in_store(lifecycle, cook_id)?;
+            if !driverless_cook_settled(lifecycle, cook_id, &record)? {
+                return Ok(());
+            }
+            fallback = crate::agent_task_notify::terminal_attempt_report(
+                cook_id,
+                &record.run_id,
+                super::cook_step::attempt_status_label(record.state()),
+            );
+            let failed = record.state() != homeboy_lifecycle_contract::RunExecutionState::Succeeded;
+            (&fallback, None, i32::from(failed))
+        }
+    };
+    let mut ids = source_ids.to_vec();
+    ids.extend(report.history_run_ids.iter().cloned());
     ids.extend(report.invocation_run_ids.iter().cloned());
     ids.extend(report.latest_run_id.iter().cloned());
-    ids.push(source_run_id.to_string());
-    agent_task_lifecycle::settle_cook_terminal_observations_in_store(
-        lifecycle,
-        &report.cook_id,
-        &ids,
+    agent_task_lifecycle::settle_cook_terminal_observations_in_store(lifecycle, cook_id, &ids)?;
+    crate::agent_task_notify::cook_terminal_in_store(lifecycle, report, component, exit_code);
+    Ok(())
+}
+
+/// Whether a Cook has ended without a driver: no live driver will report it,
+/// and it is terminal with no pending continuation or runner-result
+/// continuation left to admit.
+fn driverless_cook_settled(
+    lifecycle: &AgentTaskLifecycleStore,
+    cook_id: &str,
+    record: &agent_task_lifecycle::AgentTaskRunRecord,
+) -> Result<bool> {
+    use homeboy_lifecycle_contract::RunExecutionState;
+    if !record.state().is_terminal() {
+        return Ok(false);
+    }
+    let recipes = CookRecipeStore::new(lifecycle.roots().clone());
+    if recipes.cook_driver_held(cook_id)? {
+        return Ok(false);
+    }
+    Ok(
+        match super::continuation_state_in_store(&recipes, cook_id, &record.run_id)? {
+            super::CookContinuationState::Pending | super::CookContinuationState::Claimed => false,
+            super::CookContinuationState::Absent => {
+                record.runner_id().is_none()
+                    || !matches!(
+                        record.state(),
+                        RunExecutionState::Succeeded | RunExecutionState::CandidateRecoverable
+                    )
+            }
+            _ => true,
+        },
     )
 }
 

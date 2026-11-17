@@ -241,6 +241,19 @@ impl CookRecipeStore {
         Ok(Some(CookDriverGuard { key }))
     }
 
+    /// Whether any controller, including the calling thread, drives `cook_id`.
+    pub(crate) fn cook_driver_held(&self, cook_id: &str) -> Result<bool> {
+        let key = self.driver_lock_path(cook_id);
+        if held_cook_drivers()
+            .lock()
+            .expect("cook driver registry")
+            .contains_key(&key)
+        {
+            return Ok(true);
+        }
+        Ok(self.foreign_cook_driver(cook_id)?.is_some())
+    }
+
     /// The PID of another controller currently driving `cook_id` (another
     /// process, or another thread of this one), or `None` when nobody else
     /// drives it. Never takes ownership.
