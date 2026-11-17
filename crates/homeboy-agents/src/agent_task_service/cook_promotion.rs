@@ -2231,6 +2231,7 @@ fn draft_publication_gap(
     run_id: &str,
     promotion: &AgentTaskPromotionReport,
     supplied_form: bool,
+    title_policy: crate::agent_task_review_dossier::PrTitlePolicy,
 ) -> Result<Option<String>> {
     if promotion.status == crate::agent_task_promotion::AgentTaskPromotionStatus::GateFailed {
         let failed = promotion
@@ -2266,7 +2267,10 @@ fn draft_publication_gap(
     } else {
         let aggregate = lifecycle_store.read_aggregate(run_id)?;
         match super::cook::review_form_from_aggregate(&aggregate) {
-            Ok(Some(form)) => form.validate().err().map(|error| error.to_string()),
+            Ok(Some(form)) => form
+                .validate(title_policy)
+                .err()
+                .map(|error| error.to_string()),
             Ok(None) => Some(
                 aggregate
                     .outcomes
@@ -2484,11 +2488,14 @@ pub(crate) fn cook_finalization_options_with_stores(
         .as_deref()
         .or(recorded_component_id.as_deref());
     let review_profile = resolve_review_profile(selected_component_id, &path)?;
+    let title_policy =
+        crate::agent_task_review_dossier::PrTitlePolicy::from_plan(&options.identity.initial_plan);
     let gap = draft_publication_gap(
         lifecycle_store,
         successful_run_id,
         promotion,
         review_form.is_some(),
+        title_policy,
     )?;
     let draft_pr = options.finalization.draft_pr || gap.is_some();
     review_dossier.validate_for_publication(&review_profile, draft_pr)?;
@@ -2502,12 +2509,14 @@ pub(crate) fn cook_finalization_options_with_stores(
         Some(super::cook::draft_title(
             form.as_ref().and_then(|form| form.specific_title()),
             promotion,
+            title_policy,
         ))
     } else if options.finalization.title.is_empty() {
         Some(terminal_form_title(
             lifecycle_store,
             successful_run_id,
             review_form,
+            title_policy,
         )?)
     } else {
         None
@@ -2515,10 +2524,10 @@ pub(crate) fn cook_finalization_options_with_stores(
     let pr_title = form_title
         .clone()
         .unwrap_or_else(|| options.finalization.title.clone());
-    if !homeboy_core::git::is_conventional_subject(&pr_title) {
+    if !title_policy.accepts(&pr_title) {
         return Err(Error::validation_invalid_argument(
             "title",
-            "Cook PR title must be a conventional subject: type(scope)?!?: subject",
+            title_policy.violation(),
             Some(pr_title),
             None,
         ));
@@ -2631,12 +2640,13 @@ fn terminal_form_title(
     lifecycle_store: &agent_task_lifecycle::AgentTaskLifecycleStore,
     run_id: &str,
     supplied: Option<&AgentTaskSuppliedReviewForm>,
+    title_policy: crate::agent_task_review_dossier::PrTitlePolicy,
 ) -> Result<String> {
     let form = match supplied {
         Some(supplied) => supplied.form.clone(),
-        None => review_form_for_finalization_in_store(lifecycle_store, run_id)?,
+        None => review_form_for_finalization_in_store(lifecycle_store, run_id, title_policy)?,
     };
-    form.validate()?;
+    form.validate(title_policy)?;
     Ok(form.pr_title)
 }
 
@@ -2661,8 +2671,11 @@ pub struct AgentTaskSuppliedReviewForm {
 }
 
 impl AgentTaskSuppliedReviewForm {
-    fn validate(&self) -> Result<()> {
-        self.form.validate()?;
+    fn validate(
+        &self,
+        title_policy: crate::agent_task_review_dossier::PrTitlePolicy,
+    ) -> Result<()> {
+        self.form.validate(title_policy)?;
         self.form.ensure_publishable()?;
         for (field, value) in [
             ("review_form.tool", &self.tool),
@@ -2738,9 +2751,6 @@ pub(crate) fn recover_cook_pr_with_backend_and_review_form<B: AgentTaskPrFinaliz
     preflight: bool,
     backend: &mut B,
 ) -> Result<Value> {
-    if let Some(form) = &review_form {
-        form.validate()?;
-    }
     let (recipe, recovered_retry) = if super::cook_recipe::recipe_exists(run_or_cook_id)? {
         (super::cook_recipe::load_recipe(run_or_cook_id)?, false)
     } else if let Some(recipe) = super::cook_recipe::load_recipe_for_attempt(run_or_cook_id)? {
@@ -2755,6 +2765,9 @@ pub(crate) fn recover_cook_pr_with_backend_and_review_form<B: AgentTaskPrFinaliz
             None,
         ));
     };
+    if let Some(form) = &review_form {
+        form.validate(title_policy_for_recipe(&recipe, run_or_cook_id))?;
+    }
     let completed = if recovered_retry {
         completed_finalization_receipt_for_run(run_or_cook_id)?
     } else {
@@ -3298,6 +3311,8 @@ fn cook_review_dossier_with_stores_and_review_form(
     // The terminal record is therefore the durable reviewer-proof boundary.
     let verification_promotion = terminal_promotion;
     let gate_count = verification_promotion.gate_results.len();
+    let title_policy =
+        crate::agent_task_review_dossier::PrTitlePolicy::from_plan(&options.identity.initial_plan);
     // Every reviewer-visible verification line derives from a passed, visible
     // gate bound to the promoted candidate; without one there is nothing to show.
     let gap = draft_publication_gap(
@@ -3305,6 +3320,7 @@ fn cook_review_dossier_with_stores_and_review_form(
         successful_run_id,
         promotion,
         review_form.is_some(),
+        title_policy,
     )?;
 
     // A form-only follow-up owns reviewer metadata, not the candidate it carries
@@ -3319,7 +3335,9 @@ fn cook_review_dossier_with_stores_and_review_form(
                 .flatten()
                 .unwrap_or(serde_json::from_value(json!({"summary": ""}))?)
         }
-        None => review_form_for_finalization_in_store(lifecycle_store, successful_run_id)?,
+        None => {
+            review_form_for_finalization_in_store(lifecycle_store, successful_run_id, title_policy)?
+        }
     };
     let verified_commands = if gap.is_some() {
         crate::agent_task_review_dossier::verified_commands_from_promotion(verification_promotion)
@@ -4006,7 +4024,11 @@ pub fn candidate_publication_title(
     store: &agent_task_lifecycle::AgentTaskLifecycleStore,
     run_id: &str,
 ) -> Result<String> {
-    if let Ok(form) = review_form_for_finalization_in_store(store, run_id) {
+    // The attempt's own plan declares its review-form title rule.
+    let title_policy = agent_task_lifecycle::load_plan_in_store(store, run_id)
+        .map(|plan| crate::agent_task_review_dossier::PrTitlePolicy::from_plan(&plan))
+        .unwrap_or(crate::agent_task_review_dossier::PrTitlePolicy::ConventionalCommit);
+    if let Ok(form) = review_form_for_finalization_in_store(store, run_id, title_policy) {
         return Ok(form.pr_title);
     }
     super::load_recipe_for_attempt(run_id)?
@@ -4022,10 +4044,26 @@ pub fn candidate_publication_title(
         })
 }
 
+/// The PR-title rule a durable Cook declared on the attempt's review form
+/// (falling back to its initial attempt).
+fn title_policy_for_recipe(
+    recipe: &super::cook_recipe::AgentTaskCookRecipe,
+    run_id: &str,
+) -> crate::agent_task_review_dossier::PrTitlePolicy {
+    recipe
+        .attempts
+        .iter()
+        .find(|attempt| attempt.run_id == run_id)
+        .or_else(|| recipe.attempts.first())
+        .map(|attempt| crate::agent_task_review_dossier::PrTitlePolicy::from_plan(&attempt.plan))
+        .unwrap_or(crate::agent_task_review_dossier::PrTitlePolicy::ConventionalCommit)
+}
+
 /// Ready publication requires a valid, publishable recorded form.
 fn review_form_for_finalization_in_store(
     lifecycle_store: &agent_task_lifecycle::AgentTaskLifecycleStore,
     run_id: &str,
+    title_policy: crate::agent_task_review_dossier::PrTitlePolicy,
 ) -> Result<crate::agent_task_review_dossier::AiFilledReviewForm> {
     let outcome = selected_outcome_for_attempt_in_store(lifecycle_store, run_id)?;
     crate::agent_task_review_dossier::AiFilledReviewForm::from_outcome_outputs(&outcome.outputs)
@@ -4041,7 +4079,7 @@ fn review_form_for_finalization_in_store(
                     None,
                 )
             })?;
-            form.validate()?;
+            form.validate(title_policy)?;
             form.ensure_publishable()?;
             Ok(form)
         })

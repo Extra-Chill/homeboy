@@ -261,7 +261,24 @@ pub const AI_REVIEW_FORM_OUTPUT_SCHEMA: &str = "homeboy/agent-task-review-form/v
 /// The provider-facing declaration for the reviewer-facing portion of a PR
 /// dossier. Homeboy owns the surrounding dossier and uses this form for the
 /// prose only an agent can author.
-pub fn review_form_output_declaration() -> crate::agent_task::AgentTaskOutputDeclaration {
+pub fn review_form_output_declaration(
+    title_policy: PrTitlePolicy,
+) -> crate::agent_task::AgentTaskOutputDeclaration {
+    let pr_title = match title_policy {
+        PrTitlePolicy::ConventionalCommit => serde_json::json!({
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 256,
+            "pattern": conventional_title_pattern(),
+            "description": CONVENTIONAL_TITLE_DESCRIPTION,
+        }),
+        PrTitlePolicy::Plain => serde_json::json!({
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 256,
+            "description": PLAIN_TITLE_DESCRIPTION,
+        }),
+    };
     crate::agent_task::AgentTaskOutputDeclaration {
         name: AI_REVIEW_FORM_OUTPUT_KEY.to_string(),
         required: true,
@@ -270,12 +287,7 @@ pub fn review_form_output_declaration() -> crate::agent_task::AgentTaskOutputDec
             "type": "object",
             "required": ["pr_title", "summary", "what_changed", "completion"],
             "properties": {
-                "pr_title": {
-                    "type": "string",
-                    "minLength": 1,
-                    "maxLength": 256,
-                    "pattern": conventional_title_pattern(),
-                },
+                "pr_title": pr_title,
                 "completion": { "type": "string", "enum": ["complete", "incomplete"] },
                 "incomplete_reason": { "type": "string" },
                 "used_for": { "type": "string" },
@@ -295,6 +307,87 @@ pub fn review_form_output_declaration() -> crate::agent_task::AgentTaskOutputDec
         }),
         max_bytes: None,
         evidence_relationship: None,
+    }
+}
+
+const CONVENTIONAL_TITLE_DESCRIPTION: &str = "Conventional commit subject: feat/fix/refactor/docs/chore/test/perf/ci/build, optional (scope) and !, then `: ` and a specific subject. The type drives the release bump (feat = minor, ! = major, otherwise patch).";
+const PLAIN_TITLE_DESCRIPTION: &str = "A plain, specific sentence naming the change, in this repository's own commit-title style (no conventional-commit type prefix).";
+
+/// How the review form's `pr_title` must be shaped. The rule comes from the
+/// target component's release policy: only components whose releases derive
+/// version bumps from commit subjects require conventional-commit titles.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PrTitlePolicy {
+    /// `type(scope)?!?: subject`; the title becomes a release-driving commit.
+    ConventionalCommit,
+    /// A non-empty, specific, single-line subject in the repository's style.
+    Plain,
+}
+
+impl PrTitlePolicy {
+    /// A configured `changelog_target` declares Homeboy's release-generated
+    /// changelog policy: entries come from conventional-commit subjects.
+    /// Without that policy, titles follow the repository's own style.
+    pub fn for_component(component: Option<&homeboy_core::component::Component>) -> Self {
+        if component.is_some_and(|component| component.changelog_target.is_some()) {
+            Self::ConventionalCommit
+        } else {
+            Self::Plain
+        }
+    }
+
+    /// The policy a declared review form carries: its `pr_title` schema
+    /// declares the conventional pattern exactly when the rule applies.
+    pub fn from_declaration(declaration: &crate::agent_task::AgentTaskOutputDeclaration) -> Self {
+        if declaration
+            .structural_schema
+            .pointer("/properties/pr_title/pattern")
+            .is_some()
+        {
+            Self::ConventionalCommit
+        } else {
+            Self::Plain
+        }
+    }
+
+    /// The policy declared on a request's review form. Requests without a
+    /// review-form declaration predate component-derived titles and keep the
+    /// conventional rule they were admitted under.
+    pub fn from_declarations(
+        declarations: &[crate::agent_task::AgentTaskOutputDeclaration],
+    ) -> Self {
+        declarations
+            .iter()
+            .find(|declaration| {
+                declaration.name == AI_REVIEW_FORM_OUTPUT_KEY
+                    && declaration.schema == AI_REVIEW_FORM_OUTPUT_SCHEMA
+            })
+            .map(Self::from_declaration)
+            .unwrap_or(Self::ConventionalCommit)
+    }
+
+    /// The policy declared on a Cook plan's first finalizing task.
+    pub fn from_plan(plan: &crate::agent_task_schedule::AgentTaskPlan) -> Self {
+        plan.tasks
+            .first()
+            .map(|request| Self::from_declarations(&request.output_declarations))
+            .unwrap_or(Self::ConventionalCommit)
+    }
+
+    /// Whether `title` (already known specific and single-line) satisfies the rule.
+    pub fn accepts(self, title: &str) -> bool {
+        match self {
+            Self::ConventionalCommit => is_conventional_subject(title),
+            Self::Plain => !title.trim().is_empty(),
+        }
+    }
+
+    /// Why a title failed this rule, for agent and operator feedback.
+    pub fn violation(self) -> &'static str {
+        match self {
+            Self::ConventionalCommit => "pr_title must be a conventional commit subject using feat/fix/refactor/docs/chore/test/perf/ci/build, optional scope and !, then : and a non-empty title; its type drives the release bump (feat → minor, `!` → major, otherwise patch)",
+            Self::Plain => "pr_title must be a non-empty, specific subject",
+        }
     }
 }
 
@@ -494,7 +587,7 @@ impl AiFilledReviewForm {
         // instructions: Homeboy authors no agent-facing prose (#15818).
         "A valid `review_form` has non-empty `pr_title` (single line, at most 256 characters, specific to the change), \
 `summary`, `what_changed` (a non-empty list), and `completion` \
-(`complete` or `incomplete`; `incomplete` requires a non-empty `incomplete_reason`). `pr_title` must use feat/fix/refactor/docs/chore/test/perf/ci/build, optional scope and `!`, then a non-empty subject; its type drives release bump (feat → minor, `!` → major, otherwise patch)."
+(`complete` or `incomplete`; `incomplete` requires a non-empty `incomplete_reason`). `pr_title` follows the declared `review_form` schema for the repository."
     }
 
     /// The agent's title when it is a specific, bounded, single line, whether
@@ -518,12 +611,15 @@ impl AiFilledReviewForm {
 
     /// Validate that the agent filled every required slot with real content.
     /// `Err` carries actionable, agent-facing feedback for the nudge loop.
-    pub fn validate(&self) -> Result<()> {
+    pub fn validate(&self, title_policy: PrTitlePolicy) -> Result<()> {
         let Some(title) = self.specific_title() else {
             return Err(review_form_gap("review_form.pr_title", "pr_title must be a specific, bounded, single-line title for the actual change (not a placeholder or generic Cook title)"));
         };
-        if !is_conventional_subject(title) {
-            return Err(review_form_gap("review_form.pr_title", "pr_title must be a conventional commit subject using feat/fix/refactor/docs/chore/test/perf/ci/build, optional scope and !, then : and a non-empty title"));
+        if !title_policy.accepts(title) {
+            return Err(review_form_gap(
+                "review_form.pr_title",
+                title_policy.violation(),
+            ));
         }
         if self.summary.trim().is_empty() {
             return Err(review_form_gap("review_form.summary", "summary is empty"));
@@ -2330,7 +2426,8 @@ mod tests {
             form.what_changed,
             vec!["one".to_string(), "two".to_string()]
         );
-        form.validate().expect("a coerced form is still valid");
+        form.validate(PrTitlePolicy::ConventionalCommit)
+            .expect("a coerced form is still valid");
     }
 
     /// Regression for #15397 / #15051 / #16523: a model that writes
@@ -2365,7 +2462,8 @@ mod tests {
             form.evidence[0].summary,
             "before: FAIL x after: PASS &lt;/p>"
         );
-        form.validate().expect("flattened form is valid");
+        form.validate(PrTitlePolicy::ConventionalCommit)
+            .expect("flattened form is valid");
         scalar("summary", &form.summary).expect("flattened prose passes dossier validation");
         for entry in &form.what_changed {
             scalar("what_changed", entry).expect("flattened bullets pass dossier validation");
@@ -2469,7 +2567,7 @@ mod tests {
         assert_eq!(form.summary, "Guard the reload path.");
         assert_eq!(form.what_changed, vec!["Guard reloads".to_string()]);
         let gap = form
-            .validate()
+            .validate(PrTitlePolicy::ConventionalCommit)
             .expect_err("an absent verdict is incomplete");
         assert!(
             gap.message.contains("completion is missing"),
@@ -2585,20 +2683,22 @@ mod tests {
     #[test]
     fn completion_is_a_required_structured_verdict() {
         // #16051: completion is declared in the schema, not in prose.
-        let declaration = review_form_output_declaration();
+        let declaration = review_form_output_declaration(PrTitlePolicy::ConventionalCommit);
         assert!(declaration.structural_schema["required"]
             .as_array()
             .is_some_and(|required| required.iter().any(|field| field == "completion")));
 
         let mut missing = valid_form();
         missing.completion = None;
-        let error = missing.validate().expect_err("completion is required");
+        let error = missing
+            .validate(PrTitlePolicy::ConventionalCommit)
+            .expect_err("completion is required");
         assert!(error.message.contains("completion"), "{}", error.message);
 
         let mut unexplained = valid_form();
         unexplained.completion = Some(AiReviewCompletion::Incomplete);
         let error = unexplained
-            .validate()
+            .validate(PrTitlePolicy::ConventionalCommit)
             .expect_err("an incomplete form must say why");
         assert!(
             error.message.contains("incomplete_reason"),
@@ -2623,7 +2723,7 @@ mod tests {
         let form = AiFilledReviewForm::from_outcome_outputs(&value)
             .expect("parses")
             .expect("present");
-        form.validate()
+        form.validate(PrTitlePolicy::ConventionalCommit)
             .expect("an honest incomplete form is a valid form");
         assert_eq!(
             form.incomplete_reason(),
@@ -2637,12 +2737,66 @@ mod tests {
 
     #[test]
     fn valid_review_form_passes_validation() {
-        assert!(valid_form().validate().is_ok());
+        assert!(valid_form()
+            .validate(PrTitlePolicy::ConventionalCommit)
+            .is_ok());
+    }
+
+    #[test]
+    fn pr_title_rule_follows_component_release_policy() {
+        let conventional = homeboy_core::component::Component {
+            id: "homeboy".into(),
+            changelog_target: Some("docs/changelog.md".into()),
+            ..Default::default()
+        };
+        let plain = homeboy_core::component::Component {
+            id: "studio".into(),
+            ..Default::default()
+        };
+        let sentence = "Record what PHP was doing when a site start times out";
+        for (component, title, accepted) in [
+            (&conventional, sentence, false),
+            (
+                &conventional,
+                "fix(site): record PHP state on timeout",
+                true,
+            ),
+            (&conventional, "", false),
+            (&plain, sentence, true),
+            (&plain, "", false),
+            (&plain, "   ", false),
+        ] {
+            let policy = PrTitlePolicy::for_component(Some(component));
+            let declaration = review_form_output_declaration(policy);
+            let schema = &declaration.structural_schema["properties"]["pr_title"];
+            assert_eq!(
+                schema.get("pattern").is_some(),
+                policy == PrTitlePolicy::ConventionalCommit,
+                "{}",
+                component.id
+            );
+            assert_eq!(PrTitlePolicy::from_declaration(&declaration), policy);
+            let mut form = valid_form();
+            form.pr_title = title.to_string();
+            assert_eq!(
+                form.validate(policy).is_ok(),
+                accepted,
+                "{} / {title:?}",
+                component.id
+            );
+        }
+        assert!(
+            review_form_output_declaration(PrTitlePolicy::Plain).structural_schema["properties"]
+                ["pr_title"]["description"]
+                .as_str()
+                .is_some_and(|description| description.contains("plain"))
+        );
+        assert_eq!(PrTitlePolicy::for_component(None), PrTitlePolicy::Plain);
     }
 
     #[test]
     fn title_contract_and_actionable_validation() {
-        let declaration = review_form_output_declaration();
+        let declaration = review_form_output_declaration(PrTitlePolicy::ConventionalCommit);
         assert!(declaration.structural_schema["required"]
             .as_array()
             .unwrap()
@@ -2662,7 +2816,9 @@ mod tests {
         ] {
             let mut form = valid_form();
             form.pr_title = title.to_string();
-            let error = form.validate().expect_err("title must be actionable");
+            let error = form
+                .validate(PrTitlePolicy::ConventionalCommit)
+                .expect_err("title must be actionable");
             assert!(error.to_string().contains("review_form.pr_title"));
             assert!(error.to_string().contains("`pr_title`"));
         }
@@ -2686,7 +2842,11 @@ mod tests {
         ] {
             let mut form = valid_form();
             form.pr_title = title.to_string();
-            assert_eq!(pattern.is_match(title), form.validate().is_ok(), "{title}");
+            assert_eq!(
+                pattern.is_match(title),
+                form.validate(PrTitlePolicy::ConventionalCommit).is_ok(),
+                "{title}"
+            );
         }
         let mut missing = serde_json::to_value(valid_form()).unwrap();
         missing.as_object_mut().unwrap().remove("pr_title");
@@ -2695,7 +2855,7 @@ mod tests {
                 .unwrap()
                 .unwrap();
         assert!(parsed
-            .validate()
+            .validate(PrTitlePolicy::ConventionalCommit)
             .unwrap_err()
             .to_string()
             .contains("review_form.pr_title"));
@@ -2813,7 +2973,7 @@ mod tests {
             let mut form = valid_form();
             mutate(&mut form);
             assert!(
-                form.validate().is_err(),
+                form.validate(PrTitlePolicy::ConventionalCommit).is_err(),
                 "expected validation failure for cleared required field"
             );
         }
@@ -3041,7 +3201,7 @@ mod tests {
             "evidence": [{"summary": "Before: 50 ms; after: 10 ms."}]
         }))
         .unwrap();
-        form.validate().unwrap();
+        form.validate(PrTitlePolicy::ConventionalCommit).unwrap();
         let mut value = dossier();
         value.evidence = form.evidence;
         let body = render_review_dossier(&value, &default_profile());
@@ -3253,7 +3413,8 @@ mod tests {
         let form = AiFilledReviewForm::from_outcome_outputs(&outputs)
             .expect("retired keys still parse")
             .expect("form present");
-        form.validate().expect("retired keys are not validated");
+        form.validate(PrTitlePolicy::ConventionalCommit)
+            .expect("retired keys are not validated");
     }
 
     #[test]
@@ -3265,8 +3426,8 @@ mod tests {
             "completion": "complete"
         }))
         .unwrap();
-        form.validate().unwrap();
-        let declaration = review_form_output_declaration();
+        form.validate(PrTitlePolicy::ConventionalCommit).unwrap();
+        let declaration = review_form_output_declaration(PrTitlePolicy::ConventionalCommit);
         assert!(declaration.structural_schema["properties"]
             .get("used_for")
             .is_some());

@@ -649,9 +649,11 @@ fn incomplete_nested_outputs_executor_result_fails_when_retries_are_unavailable(
 #[test]
 fn missing_only_review_form_is_deferred_to_the_cook_loop() {
     let mut form_request = request("form-task");
-    form_request
-        .output_declarations
-        .push(crate::agent_task_review_dossier::review_form_output_declaration());
+    form_request.output_declarations.push(
+        crate::agent_task_review_dossier::review_form_output_declaration(
+            crate::agent_task_review_dossier::PrTitlePolicy::ConventionalCommit,
+        ),
+    );
     let mut outcome = outcome("form-task".to_string(), AgentTaskOutcomeStatus::Failed);
     outcome.candidate = Some(crate::agent_task::AgentTaskCandidate {
         base_sha: "base".into(),
@@ -680,9 +682,11 @@ fn missing_only_review_form_is_deferred_to_the_cook_loop() {
 #[test]
 fn other_missing_outputs_stay_provider_failures() {
     let mut form_request = request("form-task");
-    form_request
-        .output_declarations
-        .push(crate::agent_task_review_dossier::review_form_output_declaration());
+    form_request.output_declarations.push(
+        crate::agent_task_review_dossier::review_form_output_declaration(
+            crate::agent_task_review_dossier::PrTitlePolicy::ConventionalCommit,
+        ),
+    );
     for summary in [
         "Pi completed without required structured output(s): review_form, plan.",
         "Pi completed without required structured output(s): plan.",
@@ -714,9 +718,11 @@ fn other_missing_outputs_stay_provider_failures() {
 #[test]
 fn non_empty_candidate_missing_only_review_form_is_still_deferred() {
     let mut form_request = request("form-task");
-    form_request
-        .output_declarations
-        .push(crate::agent_task_review_dossier::review_form_output_declaration());
+    form_request.output_declarations.push(
+        crate::agent_task_review_dossier::review_form_output_declaration(
+            crate::agent_task_review_dossier::PrTitlePolicy::ConventionalCommit,
+        ),
+    );
     let mut outcome = outcome("form-task".to_string(), AgentTaskOutcomeStatus::Failed);
     outcome.failure_classification = Some(AgentTaskFailureClassification::Provider);
     outcome.summary =

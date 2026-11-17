@@ -352,11 +352,13 @@ pub fn evaluate_cook_loop(options: AgentTaskCookLoopOptions) -> AgentTaskCookLoo
     // A valid form that declares the task incomplete is the agent's verdict
     // on its own candidate. Gates prove only that the repository still
     // passes, so a green gate cannot overrule it (#16051).
+    let title_policy = crate::agent_task_review_dossier::PrTitlePolicy::from_declarations(
+        &options.source_request.output_declarations,
+    );
     let agent_reported_incomplete = gates_green_with_changes
-        && options
-            .review_form
-            .as_ref()
-            .is_some_and(|form| form.validate().is_ok() && form.incomplete_reason().is_some());
+        && options.review_form.as_ref().is_some_and(|form| {
+            form.validate(title_policy).is_ok() && form.incomplete_reason().is_some()
+        });
 
     // Operator feedback recorded against a green candidate is new work for the
     // same Cook (#17611): a provider attempt on the same workspace receives it

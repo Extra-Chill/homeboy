@@ -16,6 +16,7 @@ use homeboy::agents::agent_task_timeout::effective_provider_timeout_ms;
 use homeboy::agents::agent_tasks::dispatch_service;
 use homeboy::agents::agent_tasks::lifecycle as agent_task_lifecycle;
 use homeboy::agents::agent_tasks::provider::ExtensionProviderAgentTaskExecutor;
+use homeboy::agents::agent_tasks::review_dossier::PrTitlePolicy;
 use homeboy::agents::agent_tasks::scheduler::{
     AgentTaskAggregate, AgentTaskPlan, SharedAgentTaskExecutor,
 };
@@ -7781,10 +7782,23 @@ pub(crate) fn prepare_cook_request(
     repository
 }
 
+/// The PR-title rule for the Cook's target component, resolved only when the
+/// operator supplied a subject to check.
+fn cook_title_policy(args: &AgentTaskCookArgs) -> PrTitlePolicy {
+    if args.title.is_none() && args.commit_message.is_none() {
+        return PrTitlePolicy::Plain;
+    }
+    let repository = resolve_cook_repository(&mut args.clone()).ok().flatten();
+    PrTitlePolicy::for_component(repository.as_ref().map(|repo| &repo.component))
+}
+
 /// Validate operator-supplied publication subjects before Cook has side effects.
+/// Components whose releases version from commit subjects require conventional
+/// subjects; all others accept any non-empty subject.
 fn validate_cook_subjects(
     title: Option<&str>,
     commit_message: Option<&str>,
+    title_policy: PrTitlePolicy,
 ) -> homeboy::core::Result<()> {
     for (argument, subject) in [
         ("title", title),
@@ -7793,19 +7807,25 @@ fn validate_cook_subjects(
             commit_message.map(|message| message.lines().next().unwrap_or("")),
         ),
     ] {
-        if let Some(subject) = subject {
-            if !homeboy::core::git::is_conventional_subject(subject) {
-                return Err(homeboy::core::Error::validation_invalid_argument(
-                    argument,
-                    format!(
-                        "Cook requires a conventional subject: type(scope)?!?: subject; types: {}. Bumps: feat = minor, fix and other types = patch, ! = major",
-                        homeboy::core::git::CONVENTIONAL_COMMIT_TYPES.join(", ")
-                    ),
-                    Some(subject.to_string()),
-                    None,
-                ));
+        let Some(subject) = subject else {
+            continue;
+        };
+        let message = match title_policy {
+            PrTitlePolicy::ConventionalCommit if !homeboy::core::git::is_conventional_subject(subject) => format!(
+                "Cook requires a conventional subject for this component: type(scope)?!?: subject; types: {}. Bumps: feat = minor, fix and other types = patch, ! = major",
+                homeboy::core::git::CONVENTIONAL_COMMIT_TYPES.join(", ")
+            ),
+            PrTitlePolicy::Plain if subject.trim().is_empty() => {
+                "Cook requires a non-empty, specific subject".to_string()
             }
-        }
+            _ => continue,
+        };
+        return Err(homeboy::core::Error::validation_invalid_argument(
+            argument,
+            message,
+            Some(subject.to_string()),
+            None,
+        ));
     }
     Ok(())
 }
@@ -7815,7 +7835,11 @@ pub(crate) fn validate_cook_request_with_provenance(
     provenance: Option<&crate::cli_surface::CommandArgumentProvenance>,
 ) -> homeboy::core::Result<()> {
     validate_cook_source_authority(args, provenance)?;
-    validate_cook_subjects(args.title.as_deref(), args.commit_message.as_deref())?;
+    validate_cook_subjects(
+        args.title.as_deref(),
+        args.commit_message.as_deref(),
+        cook_title_policy(args),
+    )?;
     if args.dispatch.cwd.is_none() {
         if let (Some(handle), Some(repository), Some(head)) = (
             args.to_worktree.as_deref(),
@@ -12605,30 +12629,64 @@ mod tests {
     }
 
     #[test]
-    fn cook_admission_requires_conventional_subjects() {
-        for (title, message, accepted) in [
-            (None, None, true),
-            (Some("feat(x): add thing"), None, true),
-            (Some("fix!: change contract"), None, true),
-            (Some("Add thing"), None, false),
-            (Some(""), None, false),
-            (None, Some("fix(cook): repair thing\n\nDetails"), true),
+    fn cook_admission_subjects_follow_component_release_policy() {
+        use super::PrTitlePolicy::{ConventionalCommit, Plain};
+        for (policy, title, message, accepted) in [
+            (ConventionalCommit, None, None, true),
+            (ConventionalCommit, Some("feat(x): add thing"), None, true),
             (
+                ConventionalCommit,
+                Some("fix!: change contract"),
+                None,
+                true,
+            ),
+            (ConventionalCommit, Some("Add thing"), None, false),
+            (ConventionalCommit, Some(""), None, false),
+            (
+                ConventionalCommit,
+                None,
+                Some("fix(cook): repair thing\n\nDetails"),
+                true,
+            ),
+            (
+                ConventionalCommit,
                 None,
                 Some("Add thing\n\nfix: body is not the subject"),
                 false,
             ),
-            (None, Some("\nfix: later line"), false),
-            (None, Some(""), false),
-            (Some("feat: add thing"), Some("Invalid subject"), false),
+            (ConventionalCommit, None, Some("\nfix: later line"), false),
+            (ConventionalCommit, None, Some(""), false),
+            (
+                ConventionalCommit,
+                Some("feat: add thing"),
+                Some("Invalid subject"),
+                false,
+            ),
+            (
+                Plain,
+                Some("Record what PHP was doing when a site start times out"),
+                None,
+                true,
+            ),
+            (Plain, None, Some("Add thing\n\nDetails"), true),
+            (Plain, Some(""), None, false),
+            (Plain, None, Some("\nlater line"), false),
         ] {
-            let result = super::validate_cook_subjects(title, message);
-            assert_eq!(result.is_ok(), accepted, "{title:?} / {message:?}");
+            let result = super::validate_cook_subjects(title, message, policy);
+            assert_eq!(
+                result.is_ok(),
+                accepted,
+                "{policy:?} {title:?} / {message:?}"
+            );
             if let Err(error) = result {
                 let error = error.to_string();
-                assert!(error.contains("type(scope)?!?: subject"), "{error}");
-                assert!(error.contains("minor"), "{error}");
-                assert!(error.contains("major"), "{error}");
+                if policy == ConventionalCommit {
+                    assert!(error.contains("type(scope)?!?: subject"), "{error}");
+                    assert!(error.contains("minor"), "{error}");
+                    assert!(error.contains("major"), "{error}");
+                } else {
+                    assert!(error.contains("non-empty"), "{error}");
+                }
             }
         }
     }
