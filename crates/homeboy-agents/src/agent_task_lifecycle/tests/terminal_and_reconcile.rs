@@ -1772,14 +1772,21 @@ fn typed_pre_provider_failure_outranks_stale_runner_status_and_terminalizes_once
     let lifecycle_store = AgentTaskLifecycleStore::new(context.path_roots());
     let command = vec!["homeboy".to_string(), "agent-task".to_string()];
 
-    for (run_id, stale_status) in [
+    for (run_id, stale_status, reservation_expired) in [
         (
             "cook-13965-attempt-queued",
             homeboy_core::api_jobs::JobStatus::Queued,
+            false,
         ),
         (
             "cook-13965-attempt-running",
             homeboy_core::api_jobs::JobStatus::Running,
+            false,
+        ),
+        (
+            "cook-18353-reservation-expired",
+            homeboy_core::api_jobs::JobStatus::Failed,
+            true,
         ),
     ] {
         let mut record = record_detached_lab_run_in_store(
@@ -1793,7 +1800,17 @@ fn typed_pre_provider_failure_outranks_stale_runner_status_and_terminalizes_once
             },
         )
         .expect("accepted detached handoff");
-        let snapshot = typed_pre_provider_runner_failure_snapshot(stale_status);
+        let mut snapshot = typed_pre_provider_runner_failure_snapshot(stale_status);
+        if reservation_expired {
+            snapshot.events[0].kind = homeboy_core::api_jobs::JobEventKind::Status;
+            snapshot.events[0].data = Some(json!({
+                "status": "failed",
+                "reason": "local_child_reservation_expired",
+                "retryable": true,
+                "reservation_id": "expired-reservation",
+                "reservation_expires_at_ms": 1,
+            }));
+        }
 
         reconcile_runner_job_snapshot_in_store(&lifecycle_store, &mut record, &snapshot)
             .expect("typed terminal failure outranks stale status");
@@ -1806,7 +1823,15 @@ fn typed_pre_provider_failure_outranks_stale_runner_status_and_terminalizes_once
         assert_eq!(record.metadata["phase"], "lab_runner_job_pre_provider");
         assert_eq!(
             record.metadata["pre_execution_failure"]["error_code"],
-            "internal.io_error"
+            if reservation_expired {
+                "internal.unexpected"
+            } else {
+                "internal.io_error"
+            }
+        );
+        assert_eq!(
+            crate::agent_task_service::cook_recovery_status(&record),
+            "pre_execution_failure"
         );
         assert_eq!(record.metadata["provider_executions_consumed"], 0);
         assert_eq!(record.metadata["runner_job_status"], "failed");

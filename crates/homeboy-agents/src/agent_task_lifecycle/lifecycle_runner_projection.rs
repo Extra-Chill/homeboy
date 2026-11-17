@@ -806,13 +806,20 @@ fn project_terminal_runner_pre_provider_failure_in_store(
         return Ok(false);
     }
     let Some(event) = events.iter().rev().find(|event| {
-        event.kind == homeboy_core::api_jobs::JobEventKind::Error
-            && event
-                .data
-                .as_ref()
-                .and_then(|data| data.get("phase"))
-                .and_then(Value::as_str)
-                == Some("local_child_worker_failed_before_child_identity")
+        let Some(data) = event.data.as_ref() else {
+            return false;
+        };
+        let typed_child_failure = event.kind == homeboy_core::api_jobs::JobEventKind::Error
+            && data["phase"] == "local_child_worker_failed_before_child_identity";
+        let retryable_pre_spawn_failure = event.kind
+            == homeboy_core::api_jobs::JobEventKind::Status
+            && data["status"] == "failed"
+            && serde_json::from_value::<homeboy_core::api_jobs::RemoteRunnerPreSpawnFailure>(
+                data.clone(),
+            )
+            .is_ok_and(|failure| failure.retryable())
+            && record.provider_handles.is_empty();
+        (typed_child_failure || retryable_pre_spawn_failure)
             && event.job_id.to_string() == record.runner_job_id().unwrap_or_default()
     }) else {
         return Ok(false);

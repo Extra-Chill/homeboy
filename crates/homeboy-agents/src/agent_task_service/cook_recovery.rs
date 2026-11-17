@@ -175,6 +175,8 @@ pub(crate) struct CookRecoveryInputs<'a> {
     /// Why continuation's candidate admission refuses this attempt; recovery
     /// then has no continuation to perform.
     pub continuation_refusal: Option<&'a str>,
+    /// Authoritative observation has no provider outcome to continue.
+    pub provider_outcome_missing: bool,
     /// The attempt whose recorded review form is consulted below.
     pub run_id: &'a str,
     /// `incomplete_reason` of a recorded review form that declares the task
@@ -389,6 +391,17 @@ fn continuation_step(inputs: &CookRecoveryInputs<'_>) -> CookRecoveryStep {
         return step;
     }
     if let Some(refusal) = inputs.continuation_refusal {
+        if inputs.provider_outcome_missing {
+            return if inputs.retry_admitted {
+                CookRecoveryStep::Retry
+            } else {
+                CookRecoveryStep::none(format!(
+                    "No provider candidate exists; retry admission refused this attempt: {}. Inspect it with `homeboy agent-task diagnose {}`.",
+                    inputs.retry_refusal.unwrap_or("retry is not admitted"),
+                    inputs.run_id
+                ))
+            };
+        }
         return CookRecoveryStep::none(format!(
             "Continuation cannot admit this attempt's candidate: {refusal}. Inspect it with `homeboy agent-task diagnose {}`.",
             inputs.run_id
@@ -1797,6 +1810,27 @@ mod tests {
                 }),
                 CookRecoveryStep::Rearm
             );
+        }
+    }
+
+    #[test]
+    fn refused_continuation_retries_only_without_a_provider_outcome() {
+        for (missing, admitted, expected) in [
+            (true, true, CookRecoveryStep::Retry),
+            (true, false, CookRecoveryStep::none(
+                "No provider candidate exists; retry admission refused this attempt: retry budget exhausted. Inspect it with `homeboy agent-task diagnose attempt`.",
+            )),
+            (false, true, CookRecoveryStep::none(
+                "Continuation cannot admit this attempt's candidate: candidate admission refused. Inspect it with `homeboy agent-task diagnose attempt`.",
+            )),
+        ] {
+            assert_eq!(step("failed", |inputs| {
+                inputs.run_id = "attempt";
+                inputs.provider_outcome_missing = missing;
+                inputs.retry_admitted = admitted;
+                inputs.retry_refusal = (!admitted).then_some("retry budget exhausted");
+                inputs.continuation_refusal = Some("candidate admission refused");
+            }), expected);
         }
     }
 
