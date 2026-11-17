@@ -971,6 +971,17 @@ fn remote_probe_capability_error(
     .with_hint(capability.hint())
 }
 
+/// Builds the shell probe that describes a deployed tree as compact records.
+///
+/// Regular files are hashed and stat'ed in batches: `find -exec ... {} +` hands
+/// each batch of paths to one inner shell, which runs a single `stat` and a
+/// single `sha256sum`/`shasum` over the whole batch and then pairs the outputs
+/// with the batch's positional arguments in lockstep using shell builtins.
+/// File names are never parsed back out of tool output, so names containing
+/// spaces or backslashes survive intact, and names containing tabs or
+/// newlines still produce records that the parser rejects, exactly like the
+/// former one-file-at-a-time loop. Symlinks stay on a per-link `readlink`
+/// loop; they are rare and `readlink` has no portable multi-operand form.
 fn remote_manifest_probe_command(root: &str) -> String {
     let root = shell::quote_path(root);
     let sha_exit = RemoteProbeCapability::Sha256.exit_code();
@@ -980,39 +991,50 @@ fn remote_manifest_probe_command(root: &str) -> String {
     format!(
         concat!(
             "root={root}; test -e \"$root\" || exit 44; ",
-            "if ! command -v sha256sum >/dev/null 2>&1 && ! command -v shasum >/dev/null 2>&1; then printf '%s\\n' sha256sum >&2; exit {sha_exit}; fi; ",
-            "if ! stat -c %a \"$root\" >/dev/null 2>&1 && ! stat -f %Lp \"$root\" >/dev/null 2>&1; then printf '%s\\n' stat >&2; exit {stat_exit}; fi; ",
-            "emit_entry() {{ ",
-            "rel=$1; path=$2; ",
-            "if [ -L \"$path\" ]; then ",
-            "command -v readlink >/dev/null 2>&1 || {{ printf '%s\\n' readlink >&2; exit {readlink_exit}; }}; ",
-            "mode=$(stat -c %a \"$path\" 2>/dev/null || stat -f %Lp \"$path\" 2>/dev/null || exit {stat_exit}); ",
-            "printf 'l\\t%s\\t%s\\t%s\\n' \"$rel\" \"$mode\" \"$(readlink \"$path\")\"; ",
-            "else ",
-            "mode=$(stat -c %a \"$path\" 2>/dev/null || stat -f %Lp \"$path\" 2>/dev/null || exit {stat_exit}); ",
-            "if command -v sha256sum >/dev/null 2>&1; then hash_output=$(sha256sum \"$path\") || exit $?; ",
-            "elif command -v shasum >/dev/null 2>&1; then hash_output=$(shasum -a 256 \"$path\") || exit $?; ",
+            // Pick the hash and stat flavours once so every batch uses the same tools.
+            "if command -v sha256sum >/dev/null 2>&1; then hb_sha=sha256sum; ",
+            "elif command -v shasum >/dev/null 2>&1; then hb_sha=shasum; ",
             "else printf '%s\\n' sha256sum >&2; exit {sha_exit}; fi; ",
-            "set -- $hash_output; printf 'f\\t%s\\t%s\\t%s\\n' \"$rel\" \"$mode\" \"$1\"; ",
-            "fi; }}; ",
+            "if stat -c %a \"$root\" >/dev/null 2>&1; then hb_stat=gnu; ",
+            "elif stat -f %Lp \"$root\" >/dev/null 2>&1; then hb_stat=bsd; ",
+            "else printf '%s\\n' stat >&2; exit {stat_exit}; fi; ",
             "if [ -d \"$root\" ]; then ",
             "command -v find >/dev/null 2>&1 || {{ printf '%s\\n' find >&2; exit {find_exit}; }}; ",
             "if [ -n \"$(find \"$root\" -type l -print -quit)\" ]; then command -v readlink >/dev/null 2>&1 || {{ printf '%s\\n' readlink >&2; exit {readlink_exit}; }}; fi; ",
-            "find \"$root\" -mindepth 1 \\( -path '*/.git/*' -o -name .git -o -name '.homeboy-*' \\) -prune -o \\( -type f -o -type l \\) ",
-            "-exec sh -c 'root=$1; shift; ",
+            "find \"$root\" -mindepth 1 \\( -path '*/.git/*' -o -name .git -o -name '.homeboy-*' \\) -prune -o ",
+            // Regular files: one stat + one hash process per batch.
+            "\\( -type f -exec sh -c '",
+            "root=$1; hb_stat=$2; hb_sha=$3; shift 3; ",
+            "if [ \"$hb_stat\" = gnu ]; then modes=$(stat -c %a \"$@\") || exit {stat_exit}; ",
+            "else modes=$(stat -f %Lp \"$@\") || exit {stat_exit}; fi; ",
+            "if [ \"$hb_sha\" = sha256sum ]; then hashes=$(sha256sum \"$@\") || exit $?; ",
+            "else hashes=$(shasum -a 256 \"$@\") || exit $?; fi; ",
+            "printf \"%s\\n\" \"$modes\" | {{ exec 3<&0; printf \"%s\\n\" \"$hashes\" | {{ ",
+            "for f do IFS= read -r mode <&3 || exit 1; IFS= read -r hash || exit 1; ",
+            // Hash tools prefix a backslash when they escape an unusual file name.
+            "hash=${{hash#\\\\}}; hash=${{hash%% *}}; ",
+            "printf \"f\\t%s\\t%s\\t%s\\n\" \"${{f#\"$root\"/}}\" \"$mode\" \"$hash\"; ",
+            "done; }}; }}' sh \"$root\" \"$hb_stat\" \"$hb_sha\" {{}} + \\) -o ",
+            // Symlinks: per-link readlink, matching the previous behaviour.
+            "\\( -type l -exec sh -c '",
+            "root=$1; hb_stat=$2; shift 2; ",
             "for f do rel=${{f#\"$root\"/}}; ",
-            "if [ -L \"$f\" ]; then ",
-            "command -v readlink >/dev/null 2>&1 || {{ printf \"%s\\n\" readlink >&2; exit {readlink_exit}; }}; ",
-            "mode=$(stat -c %a \"$f\" 2>/dev/null || stat -f %Lp \"$f\" 2>/dev/null || exit {stat_exit}); ",
+            "if [ \"$hb_stat\" = gnu ]; then mode=$(stat -c %a \"$f\") || exit {stat_exit}; ",
+            "else mode=$(stat -f %Lp \"$f\") || exit {stat_exit}; fi; ",
             "printf \"l\\t%s\\t%s\\t%s\\n\" \"$rel\" \"$mode\" \"$(readlink \"$f\")\"; ",
+            "done' sh \"$root\" \"$hb_stat\" {{}} + \\); ",
+            "else rel=${{root##*/}}; ",
+            "if [ \"$hb_stat\" = gnu ]; then mode=$(stat -c %a \"$root\") || exit {stat_exit}; ",
+            "else mode=$(stat -f %Lp \"$root\") || exit {stat_exit}; fi; ",
+            "if [ -L \"$root\" ]; then ",
+            "command -v readlink >/dev/null 2>&1 || {{ printf '%s\\n' readlink >&2; exit {readlink_exit}; }}; ",
+            "printf 'l\\t%s\\t%s\\t%s\\n' \"$rel\" \"$mode\" \"$(readlink \"$root\")\"; ",
             "else ",
-            "mode=$(stat -c %a \"$f\" 2>/dev/null || stat -f %Lp \"$f\" 2>/dev/null || exit {stat_exit}); ",
-            "if command -v sha256sum >/dev/null 2>&1; then hash_output=$(sha256sum \"$f\") || exit $?; ",
-            "elif command -v shasum >/dev/null 2>&1; then hash_output=$(shasum -a 256 \"$f\") || exit $?; ",
-            "else printf \"%s\\n\" sha256sum >&2; exit {sha_exit}; fi; ",
-            "set -- $hash_output; printf \"f\\t%s\\t%s\\t%s\\n\" \"$rel\" \"$mode\" \"$1\"; ",
-            "fi; done' sh \"$root\" {{}} +; ",
-            "else if [ -L \"$root\" ]; then command -v readlink >/dev/null 2>&1 || {{ printf '%s\\n' readlink >&2; exit {readlink_exit}; }}; fi; rel=${{root##*/}}; emit_entry \"$rel\" \"$root\"; fi"
+            "if [ \"$hb_sha\" = sha256sum ]; then hash=$(sha256sum \"$root\") || exit $?; ",
+            "else hash=$(shasum -a 256 \"$root\") || exit $?; fi; ",
+            "hash=${{hash#\\\\}}; hash=${{hash%% *}}; ",
+            "printf 'f\\t%s\\t%s\\t%s\\n' \"$rel\" \"$mode\" \"$hash\"; ",
+            "fi; fi"
         ),
         root = root,
         sha_exit = sha_exit,
@@ -1640,6 +1662,125 @@ mod tests {
             local_manifest(&root).expect("local manifest"),
             "single-file deliverables should use the same canonical entry identity locally and remotely"
         );
+    }
+
+    fn probe_fixture_tree(root: &Path) {
+        use std::os::unix::fs::PermissionsExt;
+
+        fs::create_dir_all(root.join("assets/js/vendor")).expect("nested");
+        fs::create_dir_all(root.join(".git/objects")).expect(".git");
+        fs::write(root.join("plugin.php"), "<?php // release").expect("plugin");
+        fs::write(root.join("assets/app.js"), "bundle").expect("asset");
+        fs::write(root.join("assets/js/vendor/lib.min.js"), "vendor").expect("vendor");
+        fs::write(root.join("file with space.txt"), "spaced").expect("space");
+        fs::write(root.join("back\\slash.txt"), "backslash").expect("backslash");
+        fs::write(root.join("empty.txt"), "").expect("empty");
+        fs::write(root.join(".git/HEAD"), "ref: refs/heads/main").expect("git head");
+        fs::write(root.join(".git/objects/blob"), "object").expect("git object");
+        fs::write(root.join(".homeboy-receipt.json"), "{}").expect("receipt");
+        let script = root.join("bin.sh");
+        fs::write(&script, "#!/bin/sh\n").expect("script");
+        fs::set_permissions(&script, fs::Permissions::from_mode(0o755)).expect("chmod");
+        std::os::unix::fs::symlink("assets/app.js", root.join("link.js")).expect("link");
+        std::os::unix::fs::symlink("../app.js", root.join("assets/js/up.js")).expect("nested link");
+    }
+
+    fn assert_probe_matches_local_manifest(root: &Path, prefix: Option<&str>) {
+        let output = run_probe_command(root, prefix);
+        assert!(
+            output.status.success(),
+            "stderr={}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        assert!(
+            !stdout.contains(".git/") && !stdout.contains(".homeboy-"),
+            "excluded paths must be pruned on the target: {stdout}"
+        );
+        let remote = parse_remote_manifest(&stdout, &[]).expect("remote manifest");
+        let local = local_manifest_with_exclusions(root, &[]).expect("local manifest");
+        assert_eq!(remote, local, "probe output:\n{stdout}");
+        assert!(remote.entries.contains_key("file with space.txt"));
+        assert!(remote.entries.contains_key("assets/js/vendor/lib.min.js"));
+        assert_eq!(
+            remote.entries.get("link.js").map(|entry| entry.kind),
+            Some(TreeEntryKind::Symlink)
+        );
+    }
+
+    #[test]
+    fn batched_probe_command_matches_local_manifest_for_mixed_tree() {
+        let temp = tempfile::tempdir().expect("temp");
+        let root = temp.path().join("extrachill-plugin");
+        probe_fixture_tree(&root);
+        assert_probe_matches_local_manifest(&root, None);
+    }
+
+    #[test]
+    fn batched_probe_command_matches_local_manifest_with_shasum_fallback() {
+        if Command::new("shasum").arg("--version").output().is_err() {
+            return;
+        }
+        let temp = tempfile::tempdir().expect("temp");
+        let root = temp.path().join("extrachill-plugin");
+        probe_fixture_tree(&root);
+        // Hide sha256sum so the probe takes the `shasum -a 256` path.
+        let bin = temp.path().join("bin");
+        fs::create_dir_all(&bin).expect("bin");
+        for tool in ["sh", "find", "stat", "readlink", "shasum", "perl"] {
+            if let Ok(found) = Command::new("sh")
+                .arg("-c")
+                .arg(format!("command -v {tool}"))
+                .output()
+            {
+                let found = String::from_utf8_lossy(&found.stdout).trim().to_string();
+                if !found.is_empty() {
+                    std::os::unix::fs::symlink(&found, bin.join(tool)).expect("tool link");
+                }
+            }
+        }
+        let prefix = format!("PATH={}", bin.display());
+        let output = run_probe_command(&root, Some(&prefix));
+        if !output.status.success() {
+            // shasum's interpreter may need more of the host PATH than we expose.
+            return;
+        }
+        assert_probe_matches_local_manifest(&root, Some(&prefix));
+    }
+
+    #[test]
+    fn batched_probe_command_spans_multiple_exec_batches() {
+        let temp = tempfile::tempdir().expect("temp");
+        let root = temp.path().join("many");
+        fs::create_dir_all(&root).expect("root");
+        // Long names push `find -exec {} +` past a single argument batch.
+        let stem = "n".repeat(200);
+        for index in 0..1500 {
+            fs::write(root.join(format!("{stem}-{index}.txt")), index.to_string()).expect("file");
+        }
+        let output = run_probe_command(&root, None);
+        assert!(output.status.success());
+        let remote = parse_remote_manifest(&String::from_utf8_lossy(&output.stdout), &[])
+            .expect("remote manifest");
+        assert_eq!(remote.entries.len(), 1500);
+        assert_eq!(remote, local_manifest(&root).expect("local manifest"));
+    }
+
+    #[test]
+    fn batched_probe_command_rejects_newline_and_tab_names_like_before() {
+        for name in ["line\nbreak.txt", "tab\tname.txt"] {
+            let temp = tempfile::tempdir().expect("temp");
+            let root = temp.path().join("plugin");
+            fs::create_dir_all(&root).expect("root");
+            fs::write(root.join("plugin.php"), "release").expect("plugin");
+            fs::write(root.join(name), "odd").expect("odd");
+            let output = run_probe_command(&root, None);
+            assert!(output.status.success());
+            assert!(
+                parse_remote_manifest(&String::from_utf8_lossy(&output.stdout), &[]).is_err(),
+                "record-breaking name {name:?} must fail closed"
+            );
+        }
     }
 
     #[test]
