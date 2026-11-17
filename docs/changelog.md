@@ -4,6 +4,14 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.470.3] - 2026-11-17
+
+### Changed
+- run state is described by two types, stored and projected
+
+### Fixed
+- judge each check by its latest run, not a run a later run superseded
+
 ## [0.470.2] - 2026-11-17
 
 ### Fixed
