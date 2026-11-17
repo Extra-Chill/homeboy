@@ -15,6 +15,9 @@ const STEP_MARKER: &str = "@@homeboy-step ";
 const FAIL_MARKER: &str = "@@homeboy-fail ";
 /// Lines a step prints with this prefix are relayed as deploy status lines.
 pub(super) const LOG_MARKER: &str = "@@homeboy-log ";
+/// Lines a step prints with this prefix are relayed as status lines and also
+/// recorded as deploy warnings, so a non-fatal fallback is never silent.
+pub(super) const WARN_MARKER: &str = "@@homeboy-warn ";
 
 /// Strip characters that would end or expand a double-quoted `echo` argument.
 pub(super) fn shown(text: &str) -> String {
@@ -84,7 +87,18 @@ impl Step {
 
 /// Run every step in one remote invocation. Returns `Ok(None)` when every
 /// aborting step succeeded, or the failing step's mapped result.
+#[cfg(test)]
 pub(super) fn run(ssh_client: &SshClient, steps: &[Step]) -> Result<Option<DeployResult>> {
+    run_collecting_warnings(ssh_client, steps, &mut Vec::new())
+}
+
+/// [`run`], also appending every `WARN_MARKER` line any step printed to
+/// `warnings`, whether or not the script succeeded.
+pub(super) fn run_collecting_warnings(
+    ssh_client: &SshClient,
+    steps: &[Step],
+    warnings: &mut Vec<String>,
+) -> Result<Option<DeployResult>> {
     if steps.is_empty() {
         return Ok(None);
     }
@@ -106,6 +120,9 @@ pub(super) fn run(ssh_client: &SshClient, steps: &[Step]) -> Result<Option<Deplo
     for line in output.stdout.lines() {
         if let Some(message) = line.strip_prefix(LOG_MARKER) {
             homeboy_core::log_status!("deploy", "{}", message);
+        } else if let Some(message) = line.strip_prefix(WARN_MARKER) {
+            homeboy_core::log_status!("deploy", "Warning: {}", message);
+            warnings.push(message.trim().to_string());
         }
     }
     if output.success {
@@ -131,7 +148,7 @@ pub(super) fn run(ssh_client: &SshClient, steps: &[Step]) -> Result<Option<Deplo
         exit_code,
         stdout: step_segment(&output.stdout, index)
             .split_inclusive('\n')
-            .filter(|line| !line.starts_with(LOG_MARKER))
+            .filter(|line| !line.starts_with(LOG_MARKER) && !line.starts_with(WARN_MARKER))
             .collect(),
         stderr: step_segment(&output.stderr, index),
     };
@@ -181,6 +198,32 @@ mod tests {
 
         assert_eq!(result.exit_code, 4);
         assert_eq!(result.error.as_deref(), Some("[partial][boom\n]"));
+    }
+
+    #[test]
+    fn warning_lines_are_collected_on_success_and_failure() {
+        let mut warnings = Vec::new();
+        let steps = vec![Step::best_effort(format!(
+            "printf 'partial'; printf '\\n{WARN_MARKER}fell back\\n'; echo done"
+        ))];
+        let outcome = run_collecting_warnings(&local_client(), &steps, &mut warnings);
+        assert!(outcome.expect("run").is_none());
+        assert_eq!(warnings, vec!["fell back".to_string()]);
+
+        let steps = vec![Step::new(
+            format!("echo '{WARN_MARKER}before failure'; echo boom; exit 3"),
+            |output| {
+                Ok(DeployResult::failure(
+                    output.exit_code,
+                    output.stdout.clone(),
+                ))
+            },
+        )];
+        let failure = run_collecting_warnings(&local_client(), &steps, &mut warnings)
+            .expect("run")
+            .expect("failure");
+        assert_eq!(failure.error.as_deref(), Some("boom\n"));
+        assert_eq!(warnings.len(), 2);
     }
 
     #[test]

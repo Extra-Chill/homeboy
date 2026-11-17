@@ -453,9 +453,9 @@ pub(super) fn find_deploy_override(
 /// paths in one syscall; every other outcome (python3 missing, pre-2.28 glibc
 /// without the `renameat2` symbol, filesystem without RENAME_EXCHANGE support)
 /// exits non-zero so the generated script falls back to the two-rename flow.
-const RENAMEAT2_EXCHANGE_PY: &str = "import ctypes, sys; libc = ctypes.CDLL(None, use_errno=True); f = libc.renameat2; f.argtypes = [ctypes.c_int, ctypes.c_char_p, ctypes.c_int, ctypes.c_char_p, ctypes.c_uint]; f.restype = ctypes.c_int; sys.exit(0 if f(-100, sys.argv[1].encode(), -100, sys.argv[2].encode(), 2) == 0 else 1)";
+pub(crate) const RENAMEAT2_EXCHANGE_PY: &str = "import ctypes, sys; libc = ctypes.CDLL(None, use_errno=True); f = libc.renameat2; f.argtypes = [ctypes.c_int, ctypes.c_char_p, ctypes.c_int, ctypes.c_char_p, ctypes.c_uint]; f.restype = ctypes.c_int; sys.exit(0 if f(-100, sys.argv[1].encode(), -100, sys.argv[2].encode(), 2) == 0 else 1)";
 
-fn archive_install_override(policy: &DeployArchiveInstallPolicy) -> DeployOverride {
+pub(crate) fn archive_install_override(policy: &DeployArchiveInstallPolicy) -> DeployOverride {
     let root_check = if policy.root_must_match_target_basename {
         " && target_slug=$(basename \"$target\") && if [ \"$zip_root\" != \"$target_slug\" ]; then echo \"ERROR: archive root $zip_root does not match target basename $target_slug\" && exit 1; fi"
     } else {
@@ -492,7 +492,8 @@ fn archive_install_override(policy: &DeployArchiveInstallPolicy) -> DeployOverri
     // and mix releases (#18365). Capability is probed at install
     // time, in the generated script, because the deploy host's toolchain —
     // not homeboy's build host — decides what is available:
-    //   1. `mv --exchange` (GNU coreutils >= 9.5)
+    //   1. `mv -T --exchange` (GNU coreutils >= 9.5; `-T` keeps mv from
+    //      treating the directory destination as a parent to move into)
     //   2. python3 ctypes call to `renameat2` (glibc >= 2.28 / musl)
     //   3. Fallback: the two-rename flow (target -> backup, staged -> target).
     //      The backup renames stay same-filesystem, O(1), and restorable, but
@@ -512,11 +513,15 @@ fn archive_install_override(policy: &DeployArchiveInstallPolicy) -> DeployOverri
     //   6. On success, refresh runtime caches inline, then remove the backup /
     //      exchanged-out old tree. This narrows stale-bytecode exposure but
     //      does not isolate in-flight requests from the new tree.
-    DeployOverride {
-        path_pattern: policy.path_pattern.clone(),
-        staging_path: policy.staging_path.clone(),
-        install_command: format!(
-            "target=\"{{{{targetDir}}}}\" \
+    //
+    // With an opt-in `release_layout` (#18365), steps 4-6 are replaced when
+    // the extension precondition passes: the staged tree becomes a new
+    // versioned release directory and the target becomes a symlink flipped
+    // by one rename(2) (first deploy over a real directory migrates it with
+    // the same atomic exchange). See `release_layout.rs`. Any reason the
+    // layout cannot be used falls back to the in-place flow with a warning.
+    let prelude = format!(
+        "target=\"{{{{targetDir}}}}\" \
 && parent=\"{{{{targetParentDir}}}}\" \
 && backup=\"$target.homeboy-bak.$$\" \
 && zip_root=$(unzip -Z1 \"{{{{stagingArtifact}}}}\" | awk -F/ 'NF && $1 != \"\" {{ print $1; exit }}') \
@@ -527,10 +532,12 @@ fn archive_install_override(policy: &DeployArchiveInstallPolicy) -> DeployOverri
 && if ! unzip -oq \"{{{{stagingArtifact}}}}\" -d \"$staged\"; then echo 'ERROR: archive extraction failed' && exit 1; fi \
 && extracted=\"$staged/$zip_root\" \
 && if [ ! -d \"$extracted\" ]; then echo \"ERROR: expected directory $zip_root not found in archive\" && exit 1; fi \
-&& rm -rf \"$backup\" \
-&& if [ -e \"$target\" ]; then \
+&& rm -rf \"$backup\""
+    );
+    let in_place = format!(
+        "if [ -e \"$target\" ]; then \
 echo \"Target exists; installing replacement (atomic exchange with backup-rename fallback)\" \
-&& if mv --exchange \"$extracted\" \"$target\" 2>/dev/null; then \
+&& if mv -T --exchange \"$extracted\" \"$target\" 2>/dev/null; then \
 echo 'Installed via atomic mv --exchange'; \
 elif python3 -c {exchange_py} \"$extracted\" \"$target\" 2>/dev/null; then \
 echo 'Installed via atomic renameat2 RENAME_EXCHANGE'; \
@@ -550,11 +557,32 @@ fi; \
 else \
 if ! mv \"$extracted\" \"$target\"; then echo 'ERROR: archive install failed' && exit 1; fi; \
 fi \
-&& test -d \"$target\" || {{ echo 'ERROR: target missing after install' && exit 1; }}
-( {after_switch}
-) || true
-rm -rf \"$backup\" \"$extracted\""
+&& test -d \"$target\" || {{ echo 'ERROR: target missing after install' && exit 1; }}"
+    );
+    let after_switch_block = format!("( {after_switch}\n) || true\n");
+    let install_command = match policy.release_layout.as_ref() {
+        // In-place exchange only: the default for every policy that does
+        // not opt in to the release layout.
+        None => format!(
+            "{prelude} && {in_place}\n{after_switch_block}rm -rf \"$backup\" \"$extracted\""
         ),
+        // Release layout (#18365): choose the layout (precondition), publish
+        // a new release by symlink flip or migration, or fall back to the
+        // in-place flow above. GC runs only after a successful flip.
+        Some(layout) => format!(
+            "{prelude} || {{ echo 'ERROR: archive staging failed' && exit 1; }}\n\
+{decide}if [ \"$use_release\" != 1 ]; then\n{in_place}\nfi\n\
+{after_switch_block}\
+if [ \"$use_release\" = 1 ]; then\n{gc}else\nrm -rf \"$backup\" \"$extracted\"\n{discard}fi",
+            decide = super::release_layout::decide_and_install(layout, &exchange_py),
+            gc = super::release_layout::garbage_collect(layout),
+            discard = super::release_layout::discard_unused_release(layout),
+        ),
+    };
+    DeployOverride {
+        path_pattern: policy.path_pattern.clone(),
+        staging_path: policy.staging_path.clone(),
+        install_command,
         cleanup_command: Some(
             "rm -f \"{{stagingArtifact}}\" && rm -rf \"{{targetDir}}.homeboy-bak.\"*".to_string(),
         ),
@@ -562,7 +590,9 @@ rm -rf \"$backup\" \"$extracted\""
     }
 }
 
-fn archive_install_verification(policy: &DeployArchiveInstallPolicy) -> Option<DeployVerification> {
+pub(crate) fn archive_install_verification(
+    policy: &DeployArchiveInstallPolicy,
+) -> Option<DeployVerification> {
     let header = policy.required_header.as_ref()?;
     let selector = if let Some(file) = header.file.as_deref() {
         format!(
@@ -806,6 +836,7 @@ mod tests {
                 file_glob: None,
             }),
             after_switch_command: None,
+            release_layout: None,
             skip_permissions_fix: true,
         }
     }
@@ -821,6 +852,7 @@ mod tests {
                 contains: "Bundle Name:".to_string(),
             }),
             after_switch_command: None,
+            release_layout: None,
             skip_permissions_fix: true,
         }
     }
@@ -1306,6 +1338,7 @@ mod tests {
             root_must_match_target_basename: false,
             required_header: None,
             after_switch_command: None,
+            release_layout: None,
             skip_permissions_fix: true,
         }
     }
@@ -1529,7 +1562,7 @@ mod tests {
             "install must unpack into the adjacent temp dir, not over the target: {cmd}"
         );
         assert!(
-            cmd.contains("mv --exchange \"$extracted\" \"$target\""),
+            cmd.contains("mv -T --exchange \"$extracted\" \"$target\""),
             "install must attempt an atomic exchange when the target exists: {cmd}"
         );
         assert!(
@@ -1562,7 +1595,7 @@ mod tests {
         let exists_guard = cmd
             .find("if [ -e \"$target\" ]; then")
             .expect("target-existence guard");
-        let exchange = cmd.find("mv --exchange").expect("exchange branch");
+        let exchange = cmd.find("mv -T --exchange").expect("exchange branch");
         let fallback_backup = cmd
             .find("mv \"$target\" \"$backup\"")
             .expect("fallback backup rename");
@@ -1701,9 +1734,9 @@ mod tests {
         }
 
         let mv_stub = if fail_install_rename {
-            "#!/bin/sh\ncase $1 in --exchange*) exit 64;; esac\ncase $1 in *.homeboy-install.*) exit 1;; esac\nexec /bin/mv \"$@\"\n"
+            "#!/bin/sh\ncase \"$*\" in *--exchange*) exit 64;; esac\ncase $1 in *.homeboy-install.*) exit 1;; esac\nexec /bin/mv \"$@\"\n"
         } else {
-            "#!/bin/sh\ncase $1 in --exchange*) exit 64;; esac\nexec /bin/mv \"$@\"\n"
+            "#!/bin/sh\ncase \"$*\" in *--exchange*) exit 64;; esac\nexec /bin/mv \"$@\"\n"
         };
         homeboy_test_support::write_executable(bin.join("mv"), mv_stub, 0o755).expect("mv stub");
 

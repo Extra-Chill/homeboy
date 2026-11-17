@@ -23,6 +23,7 @@ pub(crate) mod provenance;
 mod provider;
 pub mod provider_impl;
 mod receipt;
+mod release_layout;
 mod route;
 mod safety_and_artifact;
 mod smoke;

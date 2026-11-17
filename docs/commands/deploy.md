@@ -294,6 +294,57 @@ Dependencies come from two sources, merged:
 
 A dependency that is not part of the current deploy is ignored. A dependency cycle fails the deploy before the first remote write.
 
+## Archive installs and release isolation
+
+Extensions can declare `deploy.archive_install` policies. These install a
+packaged archive by atomically exchanging the live directory and then
+running an optional inline `after_switch_command`, such as the WordPress
+PHP-FPM opcache refresh.
+
+A policy can opt in to a `release_layout`. Each deploy then lands in its
+own versioned directory under `<parent>/.homeboy-releases/<slug>/`, and the
+target becomes a relative symlink flipped by a single `rename(2)`:
+
+- A request that already resolved the old release finishes on the old
+  release, so a request never mixes old and new files.
+- The first layout deploy over a real directory migrates it with an atomic
+  exchange and keeps the old tree as the previous release.
+- Garbage collection keeps the active release, the 2 most recent previous
+  releases, and anything deactivated in the last 15 minutes (all
+  configurable). It is best-effort and never fails a deploy.
+
+An extension `precondition_command` decides whether the layout is safe on
+the target. When the precondition fails, or the layout cannot be used, the
+deploy uses the in-place exchange and records why in `warnings`:
+
+```json
+"warnings": [
+  "Release layout precondition failed (exit 1); installing with the in-place exchange flow instead: release precondition: /run/php/php8.4-fpm.sock: revalidate_path=off …"
+]
+```
+
+The bundled WordPress extension enables the layout for plugins.
+Themes keep the in-place flow: WordPress core and themes include theme files
+through the unresolved `get_template_directory()` path, and PHP caches realpaths
+per path with independent expiry, so different theme files could resolve to
+different releases for up to `realpath_cache_ttl` after a flip. Plugins are
+included once through `WP_PLUGIN_DIR` and then through their resolved `__DIR__`,
+so a request stays on one release.
+
+Its precondition asks every PHP-FPM socket over FastCGI whether opcache is
+disabled or `opcache.revalidate_path` is on, and fails closed otherwise. To
+enable release isolation on a WordPress server, set this in every FPM pool
+and reload FPM:
+
+```ini
+opcache.revalidate_path=1
+```
+
+Version probes, header verification, content manifests, permission and
+ownership fixes, and post:deploy hooks all operate through the symlink on
+the active release. See [release isolation](../development/deploy-inline-cache-refresh.md)
+for the full design and residual limits.
+
 ## Post-Deploy Hooks
 
 After a successful deploy, Homeboy runs `post:deploy` hooks remotely via SSH on the deployment target. Hooks are resolved from extensions and components (see [hooks](../architecture/hooks.md)).

@@ -47,6 +47,9 @@ pub(crate) struct DeployResult {
     pub(crate) effect: Option<DeployEffect>,
     /// Remote steps (transfer, install, permissions, verify) timed by the strategy.
     pub(crate) phase_timings: PhaseTimer,
+    /// Non-fatal conditions the remote install reported (for example a
+    /// release-layout fallback). Surfaced as component deploy warnings.
+    pub(crate) warnings: Vec<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -64,6 +67,7 @@ impl DeployResult {
             error: None,
             effect: None,
             phase_timings: PhaseTimer::new(),
+            warnings: Vec::new(),
         }
     }
 
@@ -74,6 +78,7 @@ impl DeployResult {
             error: Some(error),
             effect: None,
             phase_timings: PhaseTimer::new(),
+            warnings: Vec::new(),
         }
     }
 
@@ -84,6 +89,11 @@ impl DeployResult {
 
     pub(super) fn with_phase_timings(mut self, timer: PhaseTimer) -> Self {
         self.phase_timings = timer;
+        self
+    }
+
+    pub(super) fn with_warnings(mut self, warnings: Vec<String>) -> Self {
+        self.warnings.extend(warnings);
         self
     }
 }
@@ -817,6 +827,12 @@ impl ComponentDeployResult {
 
     pub(super) fn with_phase_timings(mut self, report: PhaseTimingReport) -> Self {
         self.phase_timings = (!report.is_empty()).then_some(report);
+        self
+    }
+
+    /// Append install-reported warnings (for example a release-layout fallback).
+    pub(super) fn with_warnings(mut self, warnings: Vec<String>) -> Self {
+        self.warnings.extend(warnings);
         self
     }
 

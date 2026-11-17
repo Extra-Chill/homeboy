@@ -15,6 +15,84 @@ pub struct DeployArchiveInstallPolicy {
     /// Best-effort runtime cache refresh, inline immediately after publication.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub after_switch_command: Option<String>,
+    /// Opt-in versioned release directories with an atomic symlink flip.
+    /// Absent means the in-place exchange flow (the default for every
+    /// extension that does not declare it).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub release_layout: Option<DeployReleaseLayoutPolicy>,
+}
+
+/// Versioned release layout for an archive install (#18365).
+///
+/// Each deploy extracts into
+/// `{{targetParentDir}}/<release_root_dir>/{{targetBasename}}/<release-id>/{{targetBasename}}`
+/// and the live target path becomes a relative symlink to it, flipped with a
+/// single `rename(2)`. Every release keeps a distinct real path, so a request
+/// that resolved the old release keeps reading the old tree. Generic: runtime
+/// knowledge (for example whether a runtime cache keys files by real path)
+/// belongs to the extension's `precondition_command`.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct DeployReleaseLayoutPolicy {
+    /// Directory created under the target's parent that holds every release.
+    /// Must be a single dot-prefixed path segment, so it shares the target's
+    /// filesystem (renames stay O(1)) and directory scanners skip it.
+    #[serde(default = "default_release_root_dir")]
+    pub release_root_dir: String,
+    /// Previous releases to retain, newest first, beyond the active one.
+    #[serde(default = "default_keep_previous")]
+    pub keep_previous: u32,
+    /// Retain any release deactivated less than this many minutes ago.
+    #[serde(default = "default_keep_recent_minutes")]
+    pub keep_recent_minutes: u32,
+    /// Remote command run before the layout is chosen. Exit 0 selects the
+    /// release layout; any other exit falls back to the in-place exchange
+    /// flow with a deploy warning carrying the command's output.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub precondition_command: Option<String>,
+}
+
+impl DeployReleaseLayoutPolicy {
+    /// Reject release roots that could escape the target's parent directory
+    /// or become visible to directory scanners.
+    pub fn validate(&self) -> Result<(), String> {
+        let root = self.release_root_dir.as_str();
+        let safe = root.len() > 1
+            && root.starts_with('.')
+            && root != ".."
+            && root
+                .chars()
+                .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '-' | '_'));
+        if !safe {
+            return Err(format!(
+                "deploy.archive_install.release_layout.release_root_dir must be one dot-prefixed path segment of [A-Za-z0-9._-], got {root:?}"
+            ));
+        }
+        Ok(())
+    }
+}
+
+impl Default for DeployReleaseLayoutPolicy {
+    fn default() -> Self {
+        Self {
+            release_root_dir: default_release_root_dir(),
+            keep_previous: default_keep_previous(),
+            keep_recent_minutes: default_keep_recent_minutes(),
+            precondition_command: None,
+        }
+    }
+}
+
+fn default_release_root_dir() -> String {
+    ".homeboy-releases".to_string()
+}
+
+fn default_keep_previous() -> u32 {
+    2
+}
+
+fn default_keep_recent_minutes() -> u32 {
+    15
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -114,6 +192,47 @@ mod tests {
                 .expect("layered input")
                 .schema,
             DEPLOYMENT_PROVIDER_PAYLOAD_SCHEMA
+        );
+    }
+
+    #[test]
+    fn release_layout_defaults_and_validation() {
+        let policy: DeployArchiveInstallPolicy = serde_json::from_value(serde_json::json!({
+            "path_pattern": "/plugins/",
+            "release_layout": { "precondition_command": "check-runtime" }
+        }))
+        .expect("policy");
+        let layout = policy.release_layout.expect("release layout");
+        assert_eq!(layout.release_root_dir, ".homeboy-releases");
+        assert_eq!(layout.keep_previous, 2);
+        assert_eq!(layout.keep_recent_minutes, 15);
+        assert_eq!(
+            layout.precondition_command.as_deref(),
+            Some("check-runtime")
+        );
+        assert!(layout.validate().is_ok());
+
+        let absent: DeployArchiveInstallPolicy =
+            serde_json::from_value(serde_json::json!({ "path_pattern": "/plugins/" }))
+                .expect("policy");
+        assert!(absent.release_layout.is_none(), "release layout is opt-in");
+
+        for bad in ["releases", ".", "..", ".a/b", "../.x", ".a b", ""] {
+            let layout = DeployReleaseLayoutPolicy {
+                release_root_dir: bad.to_string(),
+                ..Default::default()
+            };
+            assert!(layout.validate().is_err(), "{bad:?} must be rejected");
+        }
+
+        let unknown: Result<DeployArchiveInstallPolicy, _> =
+            serde_json::from_value(serde_json::json!({
+                "path_pattern": "/plugins/",
+                "release_layout": { "keep": 3 }
+            }));
+        assert!(
+            unknown.is_err(),
+            "unknown release layout fields are rejected"
         );
     }
 
