@@ -7810,42 +7810,112 @@ fn publish_latest_incomplete_draft(
     Ok(())
 }
 
-/// A held draft's title names the change: the agent's own title (made a
-/// conventional subject when the component's policy requires one and it is
-/// not one), or else the candidate's changed files. A Cook id is not a title
-/// a reviewer can act on (#17919).
+/// A held draft's title, in precedence order: the operator's `--title`, the
+/// agent's specific review-form title, the tracker issue title, then the goal's
+/// headline. The title is made conventional when the component's policy needs it.
+/// A Cook id or file list is not a title a reviewer can act on (#17919, #18356).
 pub(super) fn draft_title(
+    operator_title: Option<&str>,
     agent_title: Option<&str>,
-    promotion: &AgentTaskPromotionReport,
+    tracker_title: Option<&str>,
+    goal: Option<&str>,
     title_policy: crate::agent_task_review_dossier::PrTitlePolicy,
 ) -> String {
-    let prefix = match title_policy {
-        crate::agent_task_review_dossier::PrTitlePolicy::ConventionalCommit => "fix: ",
-        crate::agent_task_review_dossier::PrTitlePolicy::Plain => "",
-    };
-    if let Some(title) = agent_title {
-        if title_policy.accepts(title) {
-            return title.to_string();
+    let title = [operator_title, agent_title, tracker_title]
+        .into_iter()
+        .flatten()
+        .map(str::trim)
+        .find(|title| !title.is_empty())
+        .or_else(|| goal.and_then(goal_headline))
+        .unwrap_or("Deliver candidate changes");
+    match title_policy {
+        crate::agent_task_review_dossier::PrTitlePolicy::ConventionalCommit
+            if !title_policy.accepts(title) =>
+        {
+            format!("fix: {title}")
         }
-        return format!("{prefix}{title}");
+        _ => title.to_string(),
     }
-    let subject = match promotion.changed_files.as_slice() {
-        [] => "candidate with no changed files".to_string(),
-        [file] => format!("update {file}"),
-        [file, rest @ ..] => format!(
-            "update {file} and {} more file{}",
-            rest.len(),
-            if rest.len() == 1 { "" } else { "s" }
-        ),
-    };
-    if prefix.is_empty() {
-        let mut chars = subject.chars();
-        chars
-            .next()
-            .map(|first| first.to_uppercase().chain(chars).collect())
-            .unwrap_or_default()
-    } else {
-        format!("{prefix}{subject}")
+}
+
+/// The goal's first non-empty line, stripped of Markdown heading marks, when it
+/// is short enough to read as a title. A `--goal` is often a full prompt.
+pub(super) fn goal_headline(goal: &str) -> Option<&str> {
+    const MAX_TITLE_CHARS: usize = 100;
+    goal.lines()
+        .map(|line| line.trim().trim_start_matches('#').trim())
+        .find(|line| !line.is_empty())
+        .filter(|line| line.chars().count() <= MAX_TITLE_CHARS)
+}
+
+#[cfg(test)]
+mod publication_title_tests {
+    use super::draft_title;
+    use crate::agent_task_review_dossier::PrTitlePolicy;
+
+    #[test]
+    fn title_fallback_order_and_policy() {
+        let prompt = "# Fix adopted titles\n\nLong prompt body...";
+        let long = "x".repeat(101);
+        // (operator, agent, tracker, goal, plain, conventional)
+        let cases = [
+            (
+                Some("Operator"),
+                Some("feat: agent"),
+                Some("Issue"),
+                Some("Goal"),
+                "Operator",
+                "fix: Operator",
+            ),
+            (
+                Some(" "),
+                Some("feat: agent"),
+                Some("Issue"),
+                Some("Goal"),
+                "feat: agent",
+                "feat: agent",
+            ),
+            (
+                None,
+                None,
+                Some("Issue"),
+                Some("Goal"),
+                "Issue",
+                "fix: Issue",
+            ),
+            (
+                None,
+                None,
+                None,
+                Some(prompt),
+                "Fix adopted titles",
+                "fix: Fix adopted titles",
+            ),
+            (
+                None,
+                None,
+                None,
+                Some(long.as_str()),
+                "Deliver candidate changes",
+                "fix: Deliver candidate changes",
+            ),
+        ];
+        for (operator, agent, tracker, goal, plain, conventional) in cases {
+            assert_eq!(
+                draft_title(operator, agent, tracker, goal, PrTitlePolicy::Plain),
+                plain
+            );
+            assert_eq!(
+                draft_title(
+                    operator,
+                    agent,
+                    tracker,
+                    goal,
+                    PrTitlePolicy::ConventionalCommit
+                ),
+                conventional
+            );
+        }
     }
 }
 

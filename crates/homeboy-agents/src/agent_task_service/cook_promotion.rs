@@ -2499,7 +2499,9 @@ pub(crate) fn cook_finalization_options_with_stores(
     )?;
     let draft_pr = options.finalization.draft_pr || gap.is_some();
     review_dossier.validate_for_publication(&review_profile, draft_pr)?;
-    let form_title = if options.finalization.title.is_empty() && gap.is_some() {
+    let form_title = if !options.finalization.title.is_empty() {
+        None
+    } else if gap.is_some() {
         let aggregate = lifecycle_store.read_aggregate(successful_run_id)?;
         let form = review_form.map(|form| form.form.clone()).or_else(|| {
             super::cook::review_form_from_aggregate(&aggregate)
@@ -2507,19 +2509,19 @@ pub(crate) fn cook_finalization_options_with_stores(
                 .flatten()
         });
         Some(super::cook::draft_title(
+            None,
             form.as_ref().and_then(|form| form.specific_title()),
-            promotion,
+            tracker_publication_title(&options.identity.initial_plan).as_deref(),
+            options.identity.initial_plan.metadata["cook_goal"].as_str(),
             title_policy,
         ))
-    } else if options.finalization.title.is_empty() {
+    } else {
         Some(terminal_form_title(
             lifecycle_store,
             successful_run_id,
             review_form,
             title_policy,
         )?)
-    } else {
-        None
     };
     let pr_title = form_title
         .clone()
@@ -3435,11 +3437,11 @@ fn cook_review_dossier_with_stores_and_review_form(
             summary.push_str(&format!(" {gap}"));
         }
         if what_changed.iter().all(|line| line.trim().is_empty()) {
-            what_changed = promotion
-                .changed_files
-                .iter()
-                .map(|file| format!("Changed {file}"))
-                .collect();
+            let framing = publication_framing(&options.identity.initial_plan);
+            what_changed = vec![framing.clone()];
+            if terminal_form.summary.trim().is_empty() {
+                summary = format!("{framing}. {summary}");
+            }
         }
     }
     // Use durable timestamps so re-rendering preserves the Cook wall time.
@@ -4021,17 +4023,54 @@ pub fn candidate_publication_title(
     if let Ok(form) = review_form_for_finalization_in_store(store, run_id, title_policy) {
         return Ok(form.pr_title);
     }
-    super::load_recipe_for_attempt(run_id)?
-        .and_then(|recipe| recipe.finalization["title"].as_str().map(str::to_owned))
-        .filter(|title| !title.trim().is_empty())
-        .ok_or_else(|| {
-            Error::validation_invalid_argument(
-                "candidate",
-                "Cook has no publication title",
-                None,
-                None,
-            )
+    let recipe = super::load_recipe_for_attempt(run_id)?;
+    let plan = agent_task_lifecycle::load_plan_in_store(store, run_id).ok();
+    let recorded_form = store.read_aggregate(run_id).ok().and_then(|aggregate| {
+        super::cook::review_form_from_aggregate(&aggregate)
+            .ok()
+            .flatten()
+    });
+    Ok(super::cook::draft_title(
+        recipe
+            .as_ref()
+            .and_then(|recipe| recipe.finalization["title"].as_str()),
+        recorded_form
+            .as_ref()
+            .and_then(|form| form.specific_title()),
+        plan.as_ref().and_then(tracker_publication_title).as_deref(),
+        plan.as_ref()
+            .and_then(|plan| plan.metadata["cook_goal"].as_str()),
+        title_policy,
+    ))
+}
+
+/// Resolve tracker framing only when a task URL is available. Tracker outages
+/// must not prevent publishing an otherwise authenticated candidate.
+fn tracker_publication_title(plan: &crate::agent_task_scheduler::AgentTaskPlan) -> Option<String> {
+    let url = plan
+        .tasks
+        .iter()
+        .find_map(|task| task.workspace.task_url.as_deref())?;
+    let output = std::process::Command::new("gh")
+        .args(["issue", "view", url, "--json", "title"])
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let value: Value = serde_json::from_slice(&output.stdout).ok()?;
+    value["title"].as_str().map(str::to_owned)
+}
+
+fn publication_framing(plan: &crate::agent_task_scheduler::AgentTaskPlan) -> String {
+    tracker_publication_title(plan)
+        .or_else(|| {
+            plan.metadata["cook_goal"]
+                .as_str()
+                .and_then(super::cook::goal_headline)
+                .map(str::to_owned)
         })
+        .unwrap_or_else(|| "Deliver candidate changes".to_string())
 }
 
 /// The PR-title rule a durable Cook declared on the attempt's review form
@@ -4782,9 +4821,21 @@ pub(crate) fn cook_failure_context_with_stores(
                 delivered_candidate_facts(lifecycle_store, record.as_ref(), delivery.as_ref());
             // The adopt observation only matters for a terminal `no_changes`
             // attempt; skip the worktree inspection for every other state.
-            let adoptable_candidate_ref = (status == "no_changes")
-                .then(|| no_changes_adoption_candidate(&recipe))
-                .flatten();
+            let adoptable_candidate_ref = delivery
+                .as_ref()
+                .filter(|delivery| {
+                    delivered_candidate.verified_unpublished
+                        && delivery.blocker.as_ref().is_some_and(|blocker| {
+                            blocker.code == super::CookDeliveryBlockerCode::PublishRefused
+                        })
+                })
+                .and_then(|delivery| delivery.candidate.as_ref()?.candidate.as_ref())
+                .map(|candidate| candidate.candidate_sha.clone())
+                .or_else(|| {
+                    (status == "no_changes")
+                        .then(|| no_changes_adoption_candidate(&recipe))
+                        .flatten()
+                });
             // The kernel driver lock is the one liveness fact: a live driver
             // owns every transition, so recovery has no step to take, which
             // is what diagnose reports for the same Cook (#17494).
