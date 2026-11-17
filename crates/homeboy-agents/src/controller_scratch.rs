@@ -31,6 +31,9 @@ pub struct ControllerScratchResource {
     #[serde(default)]
     pub lease_id: String,
     pub reconstructable: bool,
+    /// Previously recorded size estimate; reporting never inventories retained leases.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub size_bytes: Option<u64>,
     /// Controller-created temporary state that can be removed even when it is a
     /// detached Git checkout with no upstream.
     #[serde(default)]
@@ -184,6 +187,7 @@ fn allocate_attempt_at_roots(
             owner_pid: std::process::id(),
             lifecycle_state: "active".to_string(),
             lease_id: lease_id.clone(),
+            size_bytes: None,
             reconstructable: true,
             ephemeral: false,
             source_ref: None,
@@ -582,7 +586,11 @@ pub struct ControllerScratchCleanupOutput {
     pub skipped: Vec<ControllerScratchSkipped>,
     pub skipped_detail: OutputTruncation,
     pub retention_reasons: Vec<ControllerScratchRetentionReason>,
+    /// Sum of recorded size estimates only; excludes leases with unknown size.
     pub retained_bytes_by_reason: BTreeMap<String, u64>,
+    /// Retained leases without a recorded size, grouped by reason. Unknown is
+    /// not zero bytes and never triggers a filesystem walk.
+    pub retained_unknown_bytes_count_by_reason: BTreeMap<String, usize>,
     pub has_more: bool,
     /// Counts and byte estimates describe this inspected page, not the whole store.
     pub inspected_count: usize,
@@ -1003,6 +1011,7 @@ fn register_outcome_resources_unlocked(
                 // Provider resources arrive after their materialization, so
                 // assign their lease while adopting them into our index.
                 lease_id: uuid::Uuid::new_v4().to_string(),
+                size_bytes: value.get("size_bytes").and_then(serde_json::Value::as_u64),
                 reconstructable: value
                     .get("reconstructable")
                     .and_then(serde_json::Value::as_bool)
@@ -1257,6 +1266,7 @@ fn cleanup_unlocked(
     // block reason is decided before any size walk), and the deadline bounds
     // the walk so a pass returns what it found instead of being killed.
     let mut retained_bytes_by_reason = BTreeMap::new();
+    let mut retained_unknown_bytes_count_by_reason = BTreeMap::new();
     let mut preserved_workspaces = Vec::new();
     let mut preserved_workspace_bytes = 0;
     let mut inspected_count = 0;
@@ -1326,7 +1336,13 @@ fn cleanup_unlocked(
             )?
         };
         if let Some(reason) = reason {
-            *retained_bytes_by_reason.entry(reason.clone()).or_default() += path_size(&path)?;
+            if let Some(bytes) = resource.size_bytes {
+                *retained_bytes_by_reason.entry(reason.clone()).or_default() += bytes;
+            } else {
+                *retained_unknown_bytes_count_by_reason
+                    .entry(reason.clone())
+                    .or_default() += 1;
+            }
             // Keep every row for an explicit `--full` inspection. The default
             // response admits rows directly to its item/byte budget so a large
             // retained index is not materialized before it is truncated.
@@ -1551,6 +1567,7 @@ fn cleanup_unlocked(
         recovery_candidate_detail,
         recovery_retained_count,
         retained_bytes_by_reason,
+        retained_unknown_bytes_count_by_reason,
         preserved_workspace_bytes,
         preserved_workspaces,
         retention_reasons: summarize_retention(&all_skips),
@@ -2580,6 +2597,8 @@ fn is_git_checkout(path: &Path) -> bool {
 }
 
 fn path_size(path: &Path) -> Result<u64> {
+    #[cfg(test)]
+    tests::SIZE_WALK_CALLS.with(|calls| calls.set(calls.get() + 1));
     let metadata = fs::symlink_metadata(path).map_err(|error| {
         Error::internal_io(error.to_string(), Some(format!("stat {}", path.display())))
     })?;
@@ -2938,6 +2957,7 @@ mod tests {
             owner_pid: u32::MAX,
             lifecycle_state: "active".to_string(),
             lease_id: "test-lease".to_string(),
+            size_bytes: None,
             reconstructable: true,
             ephemeral: false,
             source_ref: None,
@@ -2948,6 +2968,71 @@ mod tests {
             interrupted_at: None,
             git_worktree: None,
             base_sha: None,
+        }
+    }
+
+    thread_local! {
+        pub(super) static SIZE_WALK_CALLS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+    }
+
+    #[test]
+    fn cleanup_retained_sizes_use_metadata_without_walking() {
+        let data_root = tempfile::tempdir().unwrap();
+        let (_observation_root, observation) = observation_store();
+        let mut resources = Vec::new();
+        for (position, size_bytes) in [Some(37), Some(0), None].into_iter().enumerate() {
+            let allocation = allocate_attempt_at(
+                data_root.path(),
+                "retained-size",
+                "plan",
+                "task",
+                position as u32,
+            )
+            .unwrap();
+            fs::write(allocation.path.join("data"), "not the recorded size").unwrap();
+            let mut retained = resource(&allocation.path, &allocation.path);
+            retained.owner_pid = std::process::id();
+            retained.size_bytes = size_bytes;
+            resources.push(retained);
+        }
+        // Old rows must remain readable, with an explicitly unknown size.
+        let mut legacy = serde_json::to_value(&resources[0]).unwrap();
+        legacy.as_object_mut().unwrap().remove("size_bytes");
+        assert_eq!(
+            serde_json::from_value::<ControllerScratchResource>(legacy)
+                .unwrap()
+                .size_bytes,
+            None
+        );
+        write_index_at(
+            data_root.path(),
+            &ControllerScratchIndex {
+                resources,
+                ..Default::default()
+            },
+        );
+        for apply in [false, true] {
+            SIZE_WALK_CALLS.with(|calls| calls.set(0));
+            let output = cleanup_at(
+                data_root.path(),
+                &observation,
+                ControllerScratchCleanupOptions {
+                    apply,
+                    limit: 10,
+                    full: true,
+                    retention_override_seconds: None,
+                },
+            );
+            let reason = "owner process is still running";
+            assert_eq!(output.retained_bytes_by_reason.get(reason), Some(&37));
+            assert_eq!(
+                output.retained_unknown_bytes_count_by_reason.get(reason),
+                Some(&1)
+            );
+            assert_eq!(output.skipped_count, 3);
+            assert_eq!(output.applied_count, 0);
+            SIZE_WALK_CALLS
+                .with(|calls| assert_eq!(calls.get(), 0, "retained trees must not be inventoried"));
         }
     }
 
@@ -3876,7 +3961,14 @@ mod tests {
             .as_ref()
             .unwrap()
             .contains("--apply"));
-        assert!(output.retained_bytes_by_reason.values().sum::<u64>() > 0);
+        assert!(output.retained_bytes_by_reason.is_empty());
+        assert_eq!(
+            output
+                .retained_unknown_bytes_count_by_reason
+                .values()
+                .sum::<usize>(),
+            1
+        );
     }
 
     fn finalize_and_read(
