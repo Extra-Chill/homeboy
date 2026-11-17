@@ -473,27 +473,6 @@ pub(super) fn prepare_committed_harvest(
 /// Revalidate a Cook admission pin immediately before the scheduler creates its
 /// lease-backed detached worktree. The source remains provider-owned and
 /// untouched; the pin only selects the immutable commit given to the provider.
-#[cfg(test)]
-#[test]
-fn unavailable_workspace_base_is_pre_provider_failure() {
-    let outcome = super::harvest::committed_harvest_failure(
-        super::harvest::committed_harvest_preflight_outcome("missing-base".into()),
-        HarvestError::WorkspaceBaseUnavailable {
-            base: "a".repeat(40),
-            cwd: PathBuf::from("/workspace"),
-            message: "missing commit".into(),
-        },
-    );
-    assert_eq!(
-        outcome.diagnostics[0].class,
-        "agent_task.workspace_base_unavailable"
-    );
-    assert_eq!(outcome.diagnostics[0].data["pre_provider"], true);
-    let summary = outcome.summary.unwrap();
-    assert!(summary.contains("provider did not run"));
-    assert!(summary.contains("no work was produced"));
-}
-
 fn pinned_cook_workspace_base_snapshot(
     request: &AgentTaskRequest,
     root: &Path,
@@ -1477,6 +1456,28 @@ mod tests {
             status.contains("provider-output.txt"),
             "untracked source drift must still fail closed: {status}"
         );
+    }
+
+    #[test]
+    fn unavailable_workspace_base_is_pre_provider_failure() {
+        let outcome = crate::agent_task_scheduler::harvest::committed_harvest_failure(
+            crate::agent_task_scheduler::harvest::committed_harvest_preflight_outcome(
+                "missing-base".into(),
+            ),
+            HarvestError::WorkspaceBaseUnavailable {
+                base: "a".repeat(40),
+                cwd: PathBuf::from("/workspace"),
+                message: "missing commit".into(),
+            },
+        );
+        assert_eq!(
+            outcome.diagnostics[0].class,
+            "agent_task.workspace_base_unavailable"
+        );
+        assert_eq!(outcome.diagnostics[0].data["pre_provider"], true);
+        let summary = outcome.summary.unwrap();
+        assert!(summary.contains("provider did not run"));
+        assert!(summary.contains("no work was produced"));
     }
 
     use homeboy_core::test_support::run_git_command as git;
