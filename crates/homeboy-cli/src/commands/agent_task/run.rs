@@ -2698,8 +2698,10 @@ mod preview_tests {
             let (preview, exit_code) = preview_cook(args.clone(), None).expect("compile preview");
             assert_eq!(exit_code, 0, "{preview}");
 
+            // A queued admission replays the raw argv: preparation alone
+            // derives the same prompt the preview ran.
             let mut live = args;
-            snapshot_cook_prompt(&mut live).expect("derive prompt");
+            prepare_cook_request(&mut live, None).expect("prepare replayed Cook");
             assert_eq!(
                 live.dispatch.prompt.as_deref(),
                 Some(super::super::cook_batch::default_task_prompt(task_url).as_str())
@@ -7765,6 +7767,9 @@ pub(crate) fn prepare_cook_request(
     args: &mut AgentTaskCookArgs,
     provenance: Option<&crate::cli_surface::CommandArgumentProvenance>,
 ) -> homeboy::core::Result<Option<ResolvedCookRepository>> {
+    // Every Cook path prepares here, including a queued admission's replay of
+    // its raw argv, so the `--task-url` prompt is derived here too.
+    default_cook_prompt_from_task_url(args);
     let repository = resolve_cook_repository(args);
     let component = repository
         .as_ref()
