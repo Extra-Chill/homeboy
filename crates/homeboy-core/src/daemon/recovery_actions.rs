@@ -359,6 +359,9 @@ fn plan_recovery_steps(status: &DaemonStatus) -> DaemonRecoveryPlan {
         if !attestation.is_empty() {
             return attestation_plan(status, attestation);
         }
+        if let Some(plan) = replaced_executable_plan(status) {
+            return plan;
+        }
         return DaemonRecoveryPlan::nothing(
             "daemon lease is fresh; there is nothing to recover".to_string(),
             |_| Plan::Converged,
@@ -434,6 +437,48 @@ fn plan_recovery_steps(status: &DaemonStatus) -> DaemonRecoveryPlan {
             }
         }
     })
+}
+
+/// A fresh lease whose daemon still runs an executable an upgrade has since
+/// replaced on disk.
+///
+/// Build drift is not a compatibility failure, so the lease stays fresh and
+/// work is still admitted. But the daemon serves the previous build until it
+/// is idle long enough to stop itself, and reporting "nothing to recover"
+/// hides that: after `homeboy upgrade`, `daemon status`, `plan` and `recover`
+/// all claimed convergence while `active_version` was the old release
+/// (#18290). Name the wait and the jobs holding it instead. Nothing is
+/// signaled: the replaced-binary self-stop owns the replacement.
+fn replaced_executable_plan(status: &DaemonStatus) -> Option<DaemonRecoveryPlan> {
+    let state = status.state.as_ref().filter(|_| status.running)?;
+    if !state.executable.replaced() {
+        return None;
+    }
+    let started = &state.build_identity.display;
+    let path = state.executable.path.display();
+    let holders = super::lifecycle_plan::drain_holders(status, crate::api_jobs::timestamp_ms());
+    let reason = if status.freshness.active_jobs == 0 {
+        format!(
+            "daemon pid {} still runs {started}, but {path} was replaced on disk; it stops itself once idle and its replacement runs the installed binary",
+            state.pid
+        )
+    } else if holders.is_empty() {
+        format!(
+            "daemon pid {} still runs {started}, but {path} was replaced on disk; it restarts onto the installed binary after its {} active job(s) finish",
+            state.pid, status.freshness.active_jobs
+        )
+    } else {
+        format!(
+            "daemon pid {} still runs {started}, but {path} was replaced on disk; it restarts onto the installed binary after {} protected job(s) finish: {}",
+            state.pid,
+            holders.len(),
+            super::lifecycle_plan::describe_drain_holders(&holders)
+        )
+    };
+    Some(DaemonRecoveryPlan::diagnose(reason, |reason| Plan::Wait {
+        cause: WaitCause::ReplacedExecutable,
+        reason,
+    }))
 }
 
 /// Whether an admission preflight may apply this daemon's canonical idle
@@ -553,6 +598,104 @@ mod tests {
         };
         status.summary = status.render_summary();
         status
+    }
+
+    fn with_executable(
+        mut status: DaemonStatus,
+        executable: super::super::ExecutableIdentity,
+    ) -> DaemonStatus {
+        status.state = Some(super::super::DaemonState {
+            schema: super::super::DAEMON_LEASE_SCHEMA.to_string(),
+            lease_id: LEASE_ID.to_string(),
+            startup_token: String::new(),
+            address: "127.0.0.1:0".to_string(),
+            pid: 3_572_046,
+            state_path: status.state_path.clone(),
+            started_at: String::new(),
+            last_seen_at: String::new(),
+            build_identity: crate::build_identity::current(),
+            lab_contract_version: homeboy_lab_contract::LAB_CONTRACT_VERSION,
+            service_manager: None,
+            executable,
+            runtime_paths: super::super::DaemonRuntimeSnapshot {
+                pressure: None,
+                pressure_thresholds: Default::default(),
+                loaded_at: String::new(),
+                paths: Vec::new(),
+            },
+        });
+        status
+    }
+
+    /// An upgrade renamed a new binary over the daemon's executable path.
+    fn replaced_executable(dir: &std::path::Path) -> super::super::ExecutableIdentity {
+        let path = dir.join("homeboy");
+        std::fs::write(&path, "old").expect("old binary");
+        let recorded = super::super::ExecutableIdentity::of(&path).expect("identity");
+        let replacement = dir.join("homeboy.new");
+        std::fs::write(&replacement, "new").expect("new binary");
+        std::fs::rename(&replacement, &path).expect("swap");
+        assert!(recorded.replaced(), "fixture must model an on-disk swap");
+        recorded
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn fresh_daemon_on_a_replaced_executable_waits_instead_of_reporting_converged() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let executable = replaced_executable(dir.path());
+
+        for active_jobs in [0, 2] {
+            let plan = plan_recovery(&with_executable(
+                status(None, Vec::new(), active_jobs),
+                executable.clone(),
+            ));
+            assert!(
+                matches!(
+                    plan.lifecycle,
+                    Plan::Wait {
+                        cause: WaitCause::ReplacedExecutable,
+                        ..
+                    }
+                ),
+                "{active_jobs} active job(s): {:?}",
+                plan.lifecycle
+            );
+            assert!(!plan.executable, "nothing is signaled");
+            assert_eq!(plan.steps.len(), 1);
+            assert_eq!(plan.steps[0].code, DAEMON_DIAGNOSE);
+            assert!(
+                plan.reason.contains("was replaced on disk"),
+                "{}",
+                plan.reason
+            );
+            assert!(
+                !plan.reason.contains("nothing to recover"),
+                "{}",
+                plan.reason
+            );
+        }
+        let busy = plan_recovery(&with_executable(status(None, Vec::new(), 2), executable));
+        assert!(busy.reason.contains("2 active job(s)"), "{}", busy.reason);
+        // A wait never refuses mutation: work is still admitted meanwhile.
+        assert!(super::super::lifecycle_plan::mutation_refusal(&busy.lifecycle).is_none());
+    }
+
+    #[test]
+    fn fresh_daemon_on_its_installed_executable_is_converged() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let path = dir.path().join("homeboy");
+        std::fs::write(&path, "current").expect("binary");
+        let executable = super::super::ExecutableIdentity::of(&path).expect("identity");
+
+        let plan = plan_recovery(&with_executable(status(None, Vec::new(), 0), executable));
+        assert_eq!(plan.lifecycle, Plan::Converged);
+        // A v1 lease records no executable; that is never read as replaced.
+        let legacy = plan_recovery(&with_executable(
+            status(None, Vec::new(), 0),
+            Default::default(),
+        ));
+        assert_eq!(legacy.lifecycle, Plan::Converged);
     }
 
     #[test]
