@@ -131,14 +131,104 @@ pub fn discover_extensions() -> Vec<DiscoveredExtension> {
         return Vec::new();
     };
 
-    let Ok(entries) = std::fs::read_dir(extensions_dir) else {
-        return Vec::new();
-    };
+    discover_extensions_at(&extensions_dir).unwrap_or_default()
+}
 
+/// The installed extensions notification admission and delivery match against.
+/// Manifests that fail to load are kept as diagnostics rather than failing the
+/// whole catalog, so one broken extension cannot block every transport.
+pub(crate) struct NotificationCatalog {
+    pub root: PathBuf,
+    pub manifests: Vec<ExtensionManifest>,
+    pub invalid: Vec<String>,
+}
+
+impl NotificationCatalog {
+    /// The unique installed transport for `id`. When none matches, the error
+    /// names the catalog state that explains why: manifests that failed to
+    /// load, an empty catalog, or a catalog with no transports.
+    pub(crate) fn declared_transport(
+        &self,
+        id: &str,
+    ) -> Result<(
+        &ExtensionManifest,
+        &homeboy_extension_contract::NotificationTransportConfig,
+    )> {
+        crate::notify::declared_transport(&self.manifests, id).map_err(|error| {
+            let diagnostic = if !self.invalid.is_empty() {
+                format!(
+                    "notification transport `{id}` was not found; extension manifests failed to load: {}",
+                    self.invalid.join("; ")
+                )
+            } else if self.manifests.is_empty() {
+                "catalog is empty; no installed extension manifests were found".to_string()
+            } else if self
+                .manifests
+                .iter()
+                .all(|manifest| manifest.notification_transports.is_empty())
+            {
+                "catalog loaded successfully but declares no notification transports".to_string()
+            } else {
+                return error;
+            };
+            notification_catalog_error(Some(&self.root), &diagnostic)
+        })
+    }
+}
+
+/// Load the notification catalog. An unresolvable or unreadable catalog root
+/// is an error; individual broken manifests are recorded in `invalid`.
+pub(crate) fn load_notification_catalog() -> Result<NotificationCatalog> {
+    let root = paths::extensions().map_err(|error| {
+        notification_catalog_error(
+            None,
+            &format!("cannot resolve catalog root: {}", error.message),
+        )
+    })?;
+    let discovered = discover_extensions_at(&root)
+        .map_err(|error| notification_catalog_error(Some(&root), &error.to_string()))?;
+    let mut manifests = Vec::new();
+    let mut invalid = Vec::new();
+    for extension in discovered {
+        match extension {
+            DiscoveredExtension::Valid(manifest) => manifests.push(*manifest),
+            DiscoveredExtension::Invalid(failure) => invalid.push(format!(
+                "{}: {} ({})",
+                failure.manifest_path.display(),
+                failure.diagnostic,
+                failure.category
+            )),
+        }
+    }
+    Ok(NotificationCatalog {
+        root,
+        manifests,
+        invalid,
+    })
+}
+
+pub(crate) fn notification_catalog_error(root: Option<&Path>, diagnostic: &str) -> Error {
+    let root = root.map(|path| path.display().to_string());
+    Error::new(
+        ErrorCode::ConfigInvalidValue,
+        format!(
+            "Notification extension catalog at {}: {diagnostic}",
+            root.as_deref().unwrap_or("<unresolved>")
+        ),
+        serde_json::json!({"catalog_root": root, "load_error": diagnostic}),
+    )
+}
+
+fn discover_extensions_at(extensions_dir: &Path) -> std::io::Result<Vec<DiscoveredExtension>> {
+    let entries = match std::fs::read_dir(extensions_dir) {
+        Ok(entries) => entries,
+        // A fresh home has no installed extensions yet.
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+        Err(error) => return Err(error),
+    };
     let entries = entries
-        .flatten()
-        .map(|entry| entry.path())
-        .collect::<Vec<_>>();
+        .map(|entry| entry.map(|entry| entry.path()))
+        .collect::<std::io::Result<Vec<_>>>()?;
     let shared_asset_roots = declared_shared_asset_roots(&entries);
     let mut extensions = entries
         .into_iter()
@@ -151,7 +241,7 @@ pub fn discover_extensions() -> Vec<DiscoveredExtension> {
         .collect::<Vec<_>>();
     extensions
         .sort_by(|left, right| discovered_extension_id(left).cmp(discovered_extension_id(right)));
-    extensions
+    Ok(extensions)
 }
 
 /// Shared assets live beside installed extensions but are declared by a source

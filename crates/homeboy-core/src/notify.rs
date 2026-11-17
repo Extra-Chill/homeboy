@@ -454,11 +454,11 @@ pub fn dispatch(event: &NotifyEvent) -> NotifyOutcome {
         };
     };
 
-    let extensions = match crate::extension::catalog::load_all_extensions() {
-        Ok(extensions) => extensions,
+    let catalog = match crate::extension::catalog::load_notification_catalog() {
+        Ok(catalog) => catalog,
         Err(err) => return missing_transport(event.kind, &transport_id, err.message),
     };
-    let (extension, transport) = match declared_transport(&extensions, &transport_id) {
+    let (extension, transport) = match catalog.declared_transport(&transport_id) {
         Ok(declared) => declared,
         Err(err) => return missing_transport(event.kind, &transport_id, err.message),
     };

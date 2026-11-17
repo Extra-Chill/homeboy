@@ -18,7 +18,7 @@ use homeboy_extension_contract::{
 };
 
 use crate::{
-    extension::catalog::load_all_extensions,
+    extension::catalog::load_notification_catalog,
     notification_route::{NotificationRoute, NotificationRouteResolution},
 };
 
@@ -47,7 +47,7 @@ pub struct ResolvedNotificationRoute {
 }
 
 fn resolve_installed_with_timeout(timeout: Duration) -> Result<ResolvedNotificationRoute> {
-    let extensions = load_all_extensions()?;
+    let extensions = load_notification_catalog()?.manifests;
     let mut matches = Vec::new();
     let mut missing_context = Vec::new();
     let mut resolver_transports = Vec::new();
@@ -133,10 +133,11 @@ pub fn resolve_from_cli_or_env_with_evidence(
             // validated by the ancestor that bound it, and a child such as a
             // gate may run in a home without that transport installed.
             if cli_transport.is_some() {
-                let extensions = load_all_extensions()?;
-                let (_, declared) =
-                    crate::notify::declared_transport(&extensions, &route.transport)
-                        .map_err(with_invalid_resolution_evidence)?;
+                let catalog =
+                    load_notification_catalog().map_err(with_invalid_resolution_evidence)?;
+                let (_, declared) = catalog
+                    .declared_transport(&route.transport)
+                    .map_err(with_invalid_resolution_evidence)?;
                 route.transport = declared.id.clone();
             }
             let mut evidence = NotificationRouteResolution::new(if cli_transport.is_some() {
@@ -172,8 +173,8 @@ pub fn resolve_from_cli_or_env_with_evidence(
 /// Resolve only the uniquely declared caller-selected transport. No resolver
 /// or no match preserves its identity for default delivery; failures are fatal.
 fn resolve_declared_transport_route(transport: &str) -> Result<ResolvedNotificationRoute> {
-    let extensions = load_all_extensions()?;
-    let (extension, declared) = crate::notify::declared_transport(&extensions, transport)?;
+    let catalog = load_notification_catalog()?;
+    let (extension, declared) = catalog.declared_transport(transport)?;
     let transport = declared.id.as_str();
     let Some(resolver) = &declared.route_resolver else {
         let mut evidence = NotificationRouteResolution::new("route_less");
@@ -640,6 +641,61 @@ mod tests {
                     .unwrap_err();
             assert!(error.message.contains("exactly one"));
             assert!(error.message.contains("synthetic.completed"));
+        });
+    }
+
+    #[test]
+    fn explicit_resolution_reports_manifest_load_failure_instead_of_unknown_transport() {
+        crate::test_support::with_isolated_home(|_| {
+            let root = crate::paths::extensions().unwrap();
+            let discord = root.join("discord");
+            std::fs::create_dir_all(&discord).unwrap();
+            let manifest = discord.join("discord.json");
+            std::fs::write(&manifest, "{not json").unwrap();
+            for route in [None, Some("opaque")] {
+                let error =
+                    resolve_from_cli_or_env_with_evidence(Some("discord"), route).unwrap_err();
+                assert_eq!(error.details["catalog_root"], root.to_str().unwrap());
+                assert!(error.message.contains("manifest_json_malformed"));
+                assert!(error.message.contains(manifest.to_str().unwrap()));
+                assert!(!error.message.contains("installed transport ids:"));
+                assert_eq!(
+                    error.details["notification_resolution"]["classification"],
+                    "invalid"
+                );
+            }
+            std::fs::write(&manifest, r#"{"name":"Discord","version":"1.0.0","notification_transports":[{"id":"discord.run-completion","command":["true"]}]}"#).unwrap();
+            let resolved = resolve_from_cli_or_env_with_evidence(Some("discord"), Some("opaque"))
+                .expect("repairing the same catalog restores admission");
+            assert_eq!(resolved.route.unwrap().transport, "discord.run-completion");
+            // A broken unrelated extension does not block an installed transport.
+            std::fs::create_dir_all(root.join("other")).unwrap();
+            std::fs::write(root.join("other/other.json"), "{not json").unwrap();
+            let resolved = resolve_from_cli_or_env_with_evidence(Some("discord"), Some("opaque"))
+                .expect("an unrelated broken manifest leaves discord admissible");
+            assert_eq!(resolved.route.unwrap().transport, "discord.run-completion");
+        });
+    }
+
+    #[test]
+    fn explicit_resolution_reports_empty_and_unreadable_catalogs() {
+        crate::test_support::with_isolated_home(|_| {
+            let root = crate::paths::extensions().unwrap();
+            for route in [None, Some("opaque")] {
+                let error =
+                    resolve_from_cli_or_env_with_evidence(Some("discord"), route).unwrap_err();
+                assert!(error.message.contains("catalog is empty"));
+                assert_eq!(error.details["catalog_root"], root.to_str().unwrap());
+            }
+            std::fs::create_dir_all(root.parent().unwrap()).unwrap();
+            std::fs::write(&root, "not a directory").unwrap();
+            let error =
+                resolve_from_cli_or_env_with_evidence(Some("discord"), Some("opaque")).unwrap_err();
+            assert_eq!(error.details["catalog_root"], root.to_str().unwrap());
+            assert!(error.details["load_error"]
+                .as_str()
+                .is_some_and(|s| !s.is_empty()));
+            assert!(!error.message.contains("installed transport ids:"));
         });
     }
 
