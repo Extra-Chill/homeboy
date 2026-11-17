@@ -348,6 +348,26 @@ fn project_provider(report: &mut PhaseTimingReport, metadata: &serde_json::Value
     if let Some(tools) = measured["tool_ms_by_name"].as_object() {
         for (name, ms) in tools {
             if let Some(ms) = ms.as_f64() {
+                if name == "bash" {
+                    if let Some(classes) = measured["bash_ms_by_command_class"].as_object() {
+                        let classified: Option<Vec<_>> = classes
+                            .iter()
+                            .map(|(class, value)| {
+                                value
+                                    .as_f64()
+                                    .filter(|v| v.is_finite() && *v >= 0.0)
+                                    .map(|ms| (format!("provider.tool.bash.{class}"), ms))
+                            })
+                            .collect();
+                        if let Some(classified) = classified.filter(|parts| {
+                            !parts.is_empty()
+                                && (parts.iter().map(|(_, v)| v).sum::<f64>() - ms).abs() < 0.001
+                        }) {
+                            parts.extend(classified);
+                            continue;
+                        }
+                    }
+                }
                 parts.push((format!("provider.tool.{name}"), ms));
             }
         }
@@ -406,6 +426,46 @@ mod tests {
             project_provider(&mut report, &metadata);
             assert_eq!(report.span("provider.model").is_some(), expected);
             assert_eq!(report.span("provider.tool.bash").is_some(), expected);
+        }
+    }
+
+    #[test]
+    fn bash_command_classes_surface_in_hotspots_without_double_counting() {
+        use crate::performance_hotspots::{phase_hotspots, PhaseHotspotQuery};
+        use homeboy_engine_primitives::phase_timing::PhaseTimer;
+        let dir = tempfile::tempdir().unwrap();
+        let store = ObservationStore::open_initialized_at(dir.path().join("classes.db")).unwrap();
+        let run = store.start_run(super::super::NewRunRecord::builder("agent-task")
+            .metadata(serde_json::json!({"agent_task_aggregate":{"outcomes":[{"metadata":{
+                "tool_ms_by_name":{"bash":60},
+                "bash_ms_by_command_class":{"declared_gate":30,"build_test":20,"other":10}
+            }}]}})).build()).unwrap();
+        let mut timer = PhaseTimer::new();
+        timer.record_ok("provider.command", std::time::Duration::from_millis(100));
+        store
+            .record_phase_spans(&run.id, "provider", &timer.into_report())
+            .unwrap();
+        let report = store.phase_spans(&run.id).unwrap();
+        assert!(report.span("provider.tool.bash").is_none());
+        let hotspots = phase_hotspots(
+            &store,
+            &PhaseHotspotQuery {
+                kind: Some("agent-task".into()),
+                last: 10,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        for (class, expected) in [
+            ("declared_gate", 30.0),
+            ("build_test", 20.0),
+            ("other", 10.0),
+        ] {
+            assert!(hotspots
+                .phases
+                .iter()
+                .any(|row| row.phase == format!("provider.tool.bash.{class}")
+                    && row.self_ms_total == expected));
         }
     }
 

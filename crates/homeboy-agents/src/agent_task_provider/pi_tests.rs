@@ -11,6 +11,35 @@ fn stream(message: serde_json::Value) -> String {
 }
 
 #[test]
+fn bash_timing_classifies_correlated_commands_once() {
+    let request = json!({"inputs":{"homeboy":{"gates":{"verify":["custom-gate --verify"]}}}});
+    let mut events = Vec::new();
+    for (id, command) in [
+        ("gate", "cd repo && custom-gate --verify"),
+        ("build", "cargo test -p narrow"),
+        ("other", "echo cargo test"),
+        ("missing", "ls"),
+    ] {
+        if id != "missing" {
+            events.push(json!({"type":"tool_execution_start", "toolName":"bash", "toolCallId":id, "args":{"command":command}}));
+        }
+        events.push(json!({"type":"tool_execution_end", "toolName":"bash", "toolCallId":id}));
+        events.push(json!({"type":"message_end", "message":{"role":"toolResult", "toolName":"bash", "toolCallId":id, "durationMs":10}}));
+    }
+    let stdout = events
+        .iter()
+        .map(ToString::to_string)
+        .collect::<Vec<_>>()
+        .join("\n");
+    let result = outcome(&request, &stdout, "", Some(0), "pi", None);
+    assert_eq!(result.metadata["tool_ms_by_name"]["bash"], 40.0);
+    assert_eq!(
+        result.metadata["bash_ms_by_command_class"],
+        json!({"declared_gate":10.0,"build_test":10.0,"other":10.0,"unknown":10.0})
+    );
+}
+
+#[test]
 fn recorded_stream_outcomes() {
     let request = json!({"task_id":"pi-recording", "output_declarations":[{"name":"review_form","required":true}]});
     let success = include_str!("fixtures/pi-success.jsonl");

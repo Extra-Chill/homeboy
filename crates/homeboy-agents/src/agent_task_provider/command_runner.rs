@@ -145,6 +145,7 @@ pub(super) fn run_materialized_provider_command(
             ..Default::default()
         };
     }
+    super::verification::describe(&mut delivered.request);
     let request = &delivered;
     let mut retry_attempt = 1;
     let mut served_models = Vec::new();
