@@ -38,9 +38,10 @@ mod gate_reserve_tests;
 mod reconciliation;
 pub(super) mod terminal_delivery;
 
-/// A reservation bounds the interval between durable admission and persisting a
-/// child identity. The child is normally spawned immediately after admission;
-/// a longer-lived record means no child was durably confirmed.
+/// A reservation bounds the silence between durable admission and persisting a
+/// child identity. Each pre-spawn progress event the worker records renews it,
+/// so a slow store under load cannot expire a worker that is still advancing;
+/// a worker that stops reporting for this long never spawned a child.
 const LOCAL_CHILD_RESERVATION_LEASE_MS: u64 = 60_000;
 /// Admissions protect the controller-to-daemon handoff window. A stopped
 /// controller must eventually stop consuming daemon replacement capacity.
@@ -3919,6 +3920,19 @@ impl JobStore {
             message,
             data,
         };
+        if kind == JobEventKind::Progress && stored.job.status == JobStatus::Queued {
+            if let Some(child) = stored
+                .local_child
+                .as_mut()
+                .filter(|child| child.process.is_none())
+            {
+                child.reservation_expires_at_ms = child.reservation_expires_at_ms.max(
+                    event
+                        .timestamp_ms
+                        .saturating_add(LOCAL_CHILD_RESERVATION_LEASE_MS),
+                );
+            }
+        }
         stored.events.push(event.clone());
         apply_event_retention(&mut stored.events, self.event_retention_limit());
         stored.job.event_count = stored.events.len();
@@ -4518,6 +4532,45 @@ mod local_child_tests {
                 .is_none(),
             "records serialized before process-group identity remain readable"
         );
+    }
+
+    #[test]
+    fn pre_spawn_progress_renews_the_reservation_until_the_worker_goes_silent() {
+        // Lab, 2026-11-17: under load each durable progress write took 15-50s,
+        // so a live worker crossed the fixed 60s lease before spawning and the
+        // reaper failed its gate as `local child reservation lease expired`.
+        let store = JobStore::default();
+        let job = store.create("runner.exec");
+        let reserved_at = timestamp_ms() - 50_000;
+        store
+            .reserve_local_child_at_with_runner_capacity(job.id, reserved_at, None)
+            .map(|_| ())
+            .expect("reserve child");
+        let progress = store
+            .append_event(
+                job.id,
+                JobEventKind::Progress,
+                None,
+                Some(serde_json::json!({ "phase": "local_child_worker_started" })),
+            )
+            .expect("record pre-spawn progress");
+        let renewed_until = progress.timestamp_ms + LOCAL_CHILD_RESERVATION_LEASE_MS;
+
+        assert!(store
+            .reconcile_expired_local_child_reservations_at(
+                reserved_at + LOCAL_CHILD_RESERVATION_LEASE_MS + 1
+            )
+            .expect("reconcile advancing worker")
+            .is_empty());
+        assert_eq!(store.get(job.id).expect("job").status, JobStatus::Queued);
+
+        assert_eq!(
+            store
+                .reconcile_expired_local_child_reservations_at(renewed_until)
+                .expect("reconcile silent worker"),
+            vec![job.id]
+        );
+        assert_eq!(store.get(job.id).expect("job").status, JobStatus::Failed);
     }
 
     #[test]
