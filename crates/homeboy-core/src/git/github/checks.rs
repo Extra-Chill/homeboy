@@ -84,6 +84,57 @@ pub(in crate::git) fn classify_check(check: &Value) -> CheckClass {
     }
 }
 
+/// The rollup lists every run of a check on the head, including runs a later
+/// run of the same check superseded (a workflow concurrency group cancels the
+/// older one). A check's result is its latest run, so keep one entry per
+/// check: per `(workflowName, name)` for check runs, per `context` for legacy
+/// status contexts. A run that has not started yet is newer than any started
+/// run; otherwise the later `startedAt` wins, then the later rollup position.
+pub(in crate::git) fn latest_checks(checks: &[Value]) -> Vec<Value> {
+    let key = |check: &Value| {
+        let field = |name: &str| check.get(name).and_then(Value::as_str).unwrap_or_default();
+        (
+            field("workflowName").to_string(),
+            check
+                .get("name")
+                .or_else(|| check.get("context"))
+                .and_then(Value::as_str)
+                .unwrap_or_default()
+                .to_string(),
+        )
+    };
+    // GitHub reports an unstarted run as the zero time.
+    let started = |check: &Value| {
+        check
+            .get("startedAt")
+            .and_then(Value::as_str)
+            .filter(|at| !at.is_empty() && !at.starts_with("0001-"))
+            .map(str::to_string)
+    };
+    let mut latest: Vec<Value> = Vec::new();
+    for check in checks {
+        // An unnamed entry cannot be matched to another run of itself.
+        let named = !key(check).1.is_empty();
+        match latest
+            .iter_mut()
+            .find(|kept| named && key(kept) == key(check))
+        {
+            Some(kept) => {
+                let newer = match (started(kept), started(check)) {
+                    (_, None) => true,
+                    (None, Some(_)) => false,
+                    (Some(kept_at), Some(at)) => at >= kept_at,
+                };
+                if newer {
+                    *kept = check.clone();
+                }
+            }
+            None => latest.push(check.clone()),
+        }
+    }
+    latest
+}
+
 fn upper_field(check: &Value, key: &str) -> Option<String> {
     check
         .get(key)
@@ -99,6 +150,57 @@ mod tests {
 
     fn check(status: &str, conclusion: &str) -> Value {
         serde_json::json!({ "status": status, "conclusion": conclusion })
+    }
+
+    /// A run that a later run of the same check superseded is not the
+    /// check's result; a cancelled latest run still is (#18359 report).
+    #[test]
+    fn a_check_is_judged_by_its_latest_run() {
+        let run = |workflow: &str, conclusion: &str, started: &str| serde_json::json!({ "workflowName": workflow, "name": "PHP tests", "status": "COMPLETED", "conclusion": conclusion, "startedAt": started });
+        for (runs, kept) in [
+            (
+                vec![
+                    run("CI", "CANCELLED", "2026-11-17T09:45:00Z"),
+                    run("CI", "SUCCESS", "2026-11-17T09:51:00Z"),
+                ],
+                vec!["SUCCESS"],
+            ),
+            (
+                vec![
+                    run("CI", "SUCCESS", "2026-11-17T09:51:00Z"),
+                    run("CI", "CANCELLED", "2026-11-17T09:45:00Z"),
+                ],
+                vec!["SUCCESS"],
+            ),
+            (
+                vec![
+                    run("CI", "SUCCESS", "2026-11-17T09:45:00Z"),
+                    run("CI", "CANCELLED", "2026-11-17T09:51:00Z"),
+                ],
+                vec!["CANCELLED"],
+            ),
+            (
+                vec![
+                    run("CI", "CANCELLED", "2026-11-17T09:45:00Z"),
+                    run("CI", "", "0001-01-01T00:00:00Z"),
+                ],
+                vec![""],
+            ),
+            (
+                vec![
+                    run("CI", "SUCCESS", "2026-11-17T09:51:00Z"),
+                    run("Nightly", "FAILURE", "2026-11-17T09:45:00Z"),
+                ],
+                vec!["SUCCESS", "FAILURE"],
+            ),
+        ] {
+            let latest = latest_checks(&runs);
+            let conclusions: Vec<_> = latest
+                .iter()
+                .map(|check| check["conclusion"].as_str().unwrap())
+                .collect();
+            assert_eq!(conclusions, kept, "{runs:?}");
+        }
     }
 
     #[test]

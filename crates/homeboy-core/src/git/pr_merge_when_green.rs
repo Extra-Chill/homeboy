@@ -86,9 +86,10 @@ pub fn pr_merge_when_green(
         let Some(checks) = checks.filter(|checks| !checks.is_empty()) else {
             break MergeHold::ChecksMissing;
         };
+        let checks = super::github::latest_checks(checks);
         let mut pending = false;
         let mut failed = Vec::new();
-        for check in checks {
+        for check in &checks {
             // CheckRun and legacy StatusContext have different shapes.
             let status = check["status"].as_str();
             let outcome = if check.get("state").is_some() {
@@ -192,4 +193,47 @@ pub fn pr_merge_when_green(
     };
     result.hold = Some(hold);
     Ok(result)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A concurrency group cancelled the first run of a check and a later run
+    /// passed: the head is green and merges. The fake `gh` serves the PR view,
+    /// the repository merge policy, and the merge.
+    #[test]
+    fn a_check_superseded_by_a_passing_rerun_does_not_hold_the_merge() {
+        crate::test_support::with_isolated_home(|home| {
+            let sha = "cdd29ba7e2f8ffd0d96486b22f0d5583752dbd6a";
+            let view = serde_json::json!({
+                "headRefOid": sha, "mergeable": "MERGEABLE", "isDraft": false, "state": "OPEN",
+                "statusCheckRollup": [
+                    {"workflowName": "CI", "name": "PHP tests", "status": "COMPLETED", "conclusion": "CANCELLED", "startedAt": "2026-11-17T09:45:00Z"},
+                    {"workflowName": "CI", "name": "PHP tests", "status": "COMPLETED", "conclusion": "SUCCESS", "startedAt": "2026-11-17T09:51:00Z"},
+                ],
+            });
+            let bin = home.path().join("bin");
+            std::fs::create_dir_all(&bin).unwrap();
+            homeboy_test_support::write_executable(
+                &bin.join("gh"),
+                &format!(
+                    "#!/bin/sh\ncase \"$*\" in\n  'pr view'*) echo '{view}' ;;\n  *PUT*) echo '{{\"merged\":true}}' ;;\n  *) echo '{{\"allow_squash_merge\":true}}' ;;\nesac\n"
+                ),
+                0o755,
+            )
+            .unwrap();
+            let path = format!(
+                "{}:{}",
+                bin.display(),
+                std::env::var("PATH").unwrap_or_default()
+            );
+            let _path = crate::test_support::EnvVarGuard::set("PATH", &path);
+
+            let output =
+                pr_merge_when_green("example/widgets", 6370, sha, Duration::from_secs(5)).unwrap();
+
+            assert!(output.merged, "{:?}", output.hold);
+        });
+    }
 }

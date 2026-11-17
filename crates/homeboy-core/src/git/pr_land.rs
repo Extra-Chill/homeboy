@@ -645,8 +645,7 @@ fn check_wait_report(
     terminal: bool,
     timed_out: bool,
 ) -> PrCheckWaitReport {
-    let checks = pr
-        .status_check_rollup
+    let checks = super::github::latest_checks(&pr.status_check_rollup)
         .iter()
         .map(|check| check_result(check, head_sha, &options.check_waivers))
         .collect::<Vec<_>>();
@@ -875,6 +874,7 @@ fn non_empty(value: Option<String>) -> Option<String> {
 /// `ACTION_REQUIRED`/`STARTUP_FAILURE`, which the previous land-only classifier
 /// silently let through.
 fn summarize_checks(items: &[Value]) -> Option<String> {
+    let items = &super::github::latest_checks(items);
     if items.is_empty() {
         return None;
     }

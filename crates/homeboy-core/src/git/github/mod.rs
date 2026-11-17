@@ -63,7 +63,7 @@ pub use super::github_types::{
 pub use body_file::{push_api_markdown_body_file_arg, push_markdown_body_file_arg};
 // Shared status-check classifier consumed by the readiness summary, the fleet
 // rollup, and the sibling PR-land merge gate (`crate::git::pr_land`).
-pub(in crate::git) use checks::{classify_check, CheckClass};
+pub(in crate::git) use checks::{classify_check, latest_checks, CheckClass};
 pub(in crate::git) use client::resolve_component_github;
 // The single `gh pr view` request/parse contract shared by `pulls::pr_view`
 // and the sibling consumers `crate::git::pr_land` / `crate::git::pr_refresh`.

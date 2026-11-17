@@ -164,6 +164,7 @@ fn pr_fleet_check_rollup(
 }
 
 fn summarize_check_rollup(checks: &[serde_json::Value]) -> GithubPrCheckRollup {
+    let checks = &super::latest_checks(checks);
     let mut rollup = GithubPrCheckRollup {
         total: checks.len(),
         ..Default::default()
