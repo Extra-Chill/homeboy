@@ -238,6 +238,97 @@ def test_evidence_defect(command: str, directory: str) -> str | None:
     return None
 
 
+def failure_detail_names(command: str, directory: str) -> tuple[set[str] | None, str | None]:
+    """Failed test names from the command's own failure details, when complete.
+
+    This is the presentation fallback for naming new failures when per-test
+    outcome evidence is unusable. It never decides a verdict. The names count
+    only when they account for every reported failure: a capped or partial list
+    would make a pre-existing failure look new. Returns the name set, or None
+    plus the reason the details cannot be used. See Extra-Chill/homeboy#18363.
+    """
+    payload = read_json(os.path.join(directory, f"{output_stem(command)}.json"))
+    if payload is None:
+        return None, "structured output is missing"
+    count = test_count(payload)
+    if count is None:
+        return None, "structured output has no failure count"
+    summary = unwrap(payload).get("summary")
+    failures = summary.get("failures") if isinstance(summary, dict) else None
+    if not isinstance(failures, list):
+        failures = []
+    names = [item.get("test_name") if isinstance(item, dict) else None for item in failures]
+    if any(not isinstance(name, str) or not name.strip() or name.strip() == "unknown test" for name in names):
+        return None, "failure details include an unnamed test"
+    unique = {name.strip() for name in names}
+    if len(unique) != count:
+        return None, f"failure details name {len(unique)} of {count} failed test(s)"
+    return unique, None
+
+
+def new_failed_tests_unavailable_reason(command: str, current_dir: str, base_dir: str) -> str:
+    """Say why no failed test IDs could be compared, naming each unusable source."""
+    parts = []
+    for label, directory in (("candidate", current_dir), ("baseline", base_dir)):
+        evidence = test_outcomes(command, directory)[0]
+        if evidence != "complete":
+            defect = test_evidence_defect(command, directory)
+            parts.append(f"{label} per-test outcomes {evidence}" + (f" ({defect})" if defect else ""))
+    for label, directory in (("candidate", current_dir), ("baseline", base_dir)):
+        names, reason = failure_detail_names(command, directory)
+        if names is None:
+            parts.append(f"{label} {reason}")
+    detail = "; ".join(parts) if parts else "no comparable failed test evidence"
+    return f"New failing test IDs are unavailable: {detail}."
+
+
+def annotate_test_verdict(command: str, verdict: dict[str, Any], current_dir: str, base_dir: str) -> None:
+    """Name the new failing tests, or say why they cannot be named."""
+    if "new_failed_tests" in verdict:
+        verdict["new_failed_tests_basis"] = "per_test_outcomes"
+        return
+    current, _ = failure_detail_names(command, current_dir)
+    baseline, _ = failure_detail_names(command, base_dir)
+    if current is not None and baseline is not None:
+        verdict["new_failed_tests"] = sorted(current - baseline)
+        verdict["new_failed_tests_basis"] = "failure_details"
+        return
+    verdict["new_failed_tests_unavailable_reason"] = new_failed_tests_unavailable_reason(
+        command, current_dir, base_dir
+    )
+
+
+DIFFERENTIAL_GATE_KEYS = (
+    "status",
+    "new_findings",
+    "baseline_findings",
+    "new_failed_tests",
+    "new_failed_tests_basis",
+    "new_failed_tests_unavailable_reason",
+    "reason",
+)
+
+
+def record_differential_in_output(command: str, verdict: dict[str, Any], current_dir: str) -> None:
+    """Copy the test verdict into the command's own JSON as `differential_gate`.
+
+    Reviewers open `review-test.json` first. Without this the artifact held
+    only totals, so a differential "1 new finding" could not be traced to a
+    test without downloading raw runner output.
+    """
+    path = os.path.join(current_dir, f"{output_stem(command)}.json")
+    payload = read_json(path)
+    if payload is None:
+        return
+    target = payload["data"] if "success" in payload and isinstance(payload.get("data"), dict) else payload
+    target["differential_gate"] = {key: verdict[key] for key in DIFFERENTIAL_GATE_KEYS if key in verdict}
+    try:
+        with open(path, "w", encoding="utf-8") as handle:
+            json.dump(payload, handle, indent=2)
+    except OSError:
+        pass
+
+
 RETRY_SCHEMA = "homeboy/test-retry/v1"
 
 
@@ -414,6 +505,10 @@ def main() -> int:
                     shared_defect = shared_test_evidence_defect(command, current_dir, base_dir)
                 if shared_defect:
                     adjusted[command] = "inconclusive"
+                    comment_verdicts[command]["reason"] = (
+                        "Candidate and baseline declared the same test evidence producer defect: "
+                        f"{shared_defect}."
+                    )
                     run_id = os.environ.get("GITHUB_RUN_ID", "").strip()
                     retry = f" Retry after repairing the producer: gh run rerun {run_id} --failed." if run_id else ""
                     print(
@@ -670,8 +765,11 @@ def main() -> int:
                 verdict["new_findings"] = len(new_items)
                 if new_items and results[command] == "fail" and adjusted[command] in {"pass", "baseline_red"}:
                     verdict["status"] = "fail"
-        if adjusted[command] == "inconclusive":
+        if adjusted[command] == "inconclusive" and "reason" not in verdict:
             verdict["reason"] = "Differential evidence is missing or insufficient; inspect the gate log for the producer diagnostic."
+        if quality_base_command(command) == "test" and results[command] != "pass":
+            annotate_test_verdict(command, verdict, current_dir, base_dir)
+            record_differential_in_output(command, verdict, current_dir)
     # Retain the gate's verdict for downstream presentation. Consumers must not
     # infer success from raw candidate totals or run the gate a second time.
     with open(os.path.join(current_dir, "differential-comment.json"), "w", encoding="utf-8") as handle:
