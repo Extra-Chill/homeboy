@@ -18,22 +18,21 @@ use homeboy_control_plane_contract::{
     ControlPlaneReference, ControlPlaneReferencePage, ControlPlaneReferenceRegistration,
     ControlPlaneReferenceType, ControlPlaneResource, ControlPlaneResult, ControlPlaneRun,
     ControlPlaneRunListRequest, ControlPlaneRunPage, ControlPlaneRunReview,
-    ControlPlaneRunReviewRequest, ControlPlaneRunState, ControlPlaneState,
-    ControlPlaneSubmissionAcknowledgement, ControlPlaneSubmissionRequest, ControlPlaneTask,
-    ControlPlaneTaskListRequest, ControlPlaneTaskPage, EffectId, EventCursor, EventId, ExecutionId,
-    MissionCursor, MissionId, ReferenceId, RunCursor, RunId, TaskCursor, TaskId,
-    CONTROL_PLANE_ACTION_ACKNOWLEDGEMENT_SCHEMA, CONTROL_PLANE_ACTION_REQUEST_SCHEMA,
-    CONTROL_PLANE_ATTEMPT_PAGE_SCHEMA, CONTROL_PLANE_ATTEMPT_SCHEMA,
-    CONTROL_PLANE_CANCEL_PARAMETERS_SCHEMA, CONTROL_PLANE_EVENT_APPEND_REQUEST_SCHEMA,
-    CONTROL_PLANE_EVENT_PAGE_SCHEMA, CONTROL_PLANE_EVENT_RETENTION_SCHEMA,
-    CONTROL_PLANE_EVENT_SCHEMA, CONTROL_PLANE_EXECUTION_PAGE_SCHEMA,
-    CONTROL_PLANE_EXECUTION_SCHEMA, CONTROL_PLANE_MISSION_PAGE_SCHEMA,
-    CONTROL_PLANE_MISSION_SCHEMA, CONTROL_PLANE_REFERENCE_PAGE_SCHEMA,
-    CONTROL_PLANE_REFERENCE_REGISTRATION_SCHEMA, CONTROL_PLANE_REFERENCE_SCHEMA,
-    CONTROL_PLANE_RESULT_SCHEMA, CONTROL_PLANE_RUN_PAGE_SCHEMA, CONTROL_PLANE_RUN_REVIEW_SCHEMA,
-    CONTROL_PLANE_RUN_SCHEMA, CONTROL_PLANE_SUBMISSION_ACKNOWLEDGEMENT_SCHEMA,
-    CONTROL_PLANE_SUBMISSION_REQUEST_SCHEMA, CONTROL_PLANE_TASK_PAGE_SCHEMA,
-    CONTROL_PLANE_TASK_SCHEMA,
+    ControlPlaneRunReviewRequest, ControlPlaneState, ControlPlaneSubmissionAcknowledgement,
+    ControlPlaneSubmissionRequest, ControlPlaneTask, ControlPlaneTaskListRequest,
+    ControlPlaneTaskPage, EffectId, EventCursor, EventId, ExecutionId, MissionCursor, MissionId,
+    ReferenceId, RunCursor, RunId, TaskCursor, TaskId, CONTROL_PLANE_ACTION_ACKNOWLEDGEMENT_SCHEMA,
+    CONTROL_PLANE_ACTION_REQUEST_SCHEMA, CONTROL_PLANE_ATTEMPT_PAGE_SCHEMA,
+    CONTROL_PLANE_ATTEMPT_SCHEMA, CONTROL_PLANE_CANCEL_PARAMETERS_SCHEMA,
+    CONTROL_PLANE_EVENT_APPEND_REQUEST_SCHEMA, CONTROL_PLANE_EVENT_PAGE_SCHEMA,
+    CONTROL_PLANE_EVENT_RETENTION_SCHEMA, CONTROL_PLANE_EVENT_SCHEMA,
+    CONTROL_PLANE_EXECUTION_PAGE_SCHEMA, CONTROL_PLANE_EXECUTION_SCHEMA,
+    CONTROL_PLANE_MISSION_PAGE_SCHEMA, CONTROL_PLANE_MISSION_SCHEMA,
+    CONTROL_PLANE_REFERENCE_PAGE_SCHEMA, CONTROL_PLANE_REFERENCE_REGISTRATION_SCHEMA,
+    CONTROL_PLANE_REFERENCE_SCHEMA, CONTROL_PLANE_RESULT_SCHEMA, CONTROL_PLANE_RUN_PAGE_SCHEMA,
+    CONTROL_PLANE_RUN_REVIEW_SCHEMA, CONTROL_PLANE_RUN_SCHEMA,
+    CONTROL_PLANE_SUBMISSION_ACKNOWLEDGEMENT_SCHEMA, CONTROL_PLANE_SUBMISSION_REQUEST_SCHEMA,
+    CONTROL_PLANE_TASK_PAGE_SCHEMA, CONTROL_PLANE_TASK_SCHEMA,
 };
 
 use crate::test_support::with_isolated_home;
@@ -212,7 +211,7 @@ fn fixture_control_plane_run() -> ControlPlaneRun {
     let run = RunId::new(CONTROL_PLANE_FIXTURE_RUN).expect("run");
     let mut resource = ControlPlaneRun::new(run.clone());
     resource.mission = Some(MissionId::new(CONTROL_PLANE_FIXTURE_COOK).expect("mission"));
-    resource.state = ControlPlaneRunState::Succeeded;
+    resource.state = ControlPlaneState::Succeeded;
     resource.created_at = "2026-01-01T00:00:00Z".to_string();
     resource
 }

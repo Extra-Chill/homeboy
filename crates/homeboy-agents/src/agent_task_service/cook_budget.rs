@@ -7,7 +7,8 @@
 //! (`reserve_remediation_budget`). Pure functions over aggregate/budget data —
 //! no I/O — which is why they lift cleanly out of the cook orchestration file.
 
-use crate::agent_task_scheduler::{AgentTaskAggregate, AgentTaskExecutionBudget, AgentTaskState};
+use crate::agent_task_scheduler::{AgentTaskAggregate, AgentTaskExecutionBudget};
+use homeboy_control_plane_contract::ControlPlaneState;
 use homeboy_core::{Error, Result};
 
 use super::cook_pre_execution::provider_rotation_attempts;
@@ -177,7 +178,7 @@ pub(crate) fn execution_budget_usage(aggregate: &AgentTaskAggregate) -> Executio
     let executions = aggregate
         .events
         .iter()
-        .filter(|event| event.state == AgentTaskState::Running)
+        .filter(|event| event.state == ControlPlaneState::Running)
         .count()
         .try_into()
         .unwrap_or(u32::MAX);

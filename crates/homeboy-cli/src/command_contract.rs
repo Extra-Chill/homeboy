@@ -87,7 +87,7 @@ pub use crate::core::artifacts::{
     RUN_ARTIFACT_LOOP_RESULT_FILE, RUN_ARTIFACT_OUTCOME_FILE, RUN_ARTIFACT_RESULTS_FILE,
     RUN_ARTIFACT_STATUS_FILE,
 };
-pub use crate::core::run_lifecycle_status::{RunLifecycleStatus, RUN_LIFECYCLE_STATUS_SCHEMA};
+pub use crate::core::run_lifecycle_status::RUN_LIFECYCLE_STATUS_SCHEMA;
 pub use crate::core::run_outcome_envelope::{
     RunOutcomeEnvelope, RunOutcomeHandoffRef, RunOutcomeProjection, RUN_OUTCOME_ENVELOPE_FILE,
     RUN_OUTCOME_ENVELOPE_SCHEMA,

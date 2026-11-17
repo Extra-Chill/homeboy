@@ -1924,7 +1924,7 @@ pub struct AgentTaskRunTask {
     pub task_id: String,
     /// The task state. Private for the same reason as
     /// [`AgentTaskRunRecord::state`]; read it through [`Self::state`].
-    state: AgentTaskState,
+    state: ControlPlaneState,
     pub backend: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub selector: Option<String>,
@@ -1939,7 +1939,7 @@ impl AgentTaskRunTask {
     pub fn queued(task_id: impl Into<String>, backend: impl Into<String>) -> Self {
         Self {
             task_id: task_id.into(),
-            state: AgentTaskState::Queued,
+            state: ControlPlaneState::Queued,
             backend: backend.into(),
             selector: None,
             model: None,
@@ -1948,25 +1948,25 @@ impl AgentTaskRunTask {
     }
 
     /// The task state.
-    pub fn state(&self) -> AgentTaskState {
+    pub fn state(&self) -> ControlPlaneState {
         self.state
     }
 
     /// Assign the task state; gated like [`AgentTaskRunRecord::write_state`].
-    pub(crate) fn write_state(&mut self, state: AgentTaskState, _: StateWriteAuthority) {
+    pub(crate) fn write_state(&mut self, state: ControlPlaneState, _: StateWriteAuthority) {
         self.state = state;
     }
 
     /// Fixture-only state assignment; see
     /// [`AgentTaskRunRecord::set_state_for_test`].
     #[cfg(any(test, feature = "test-support"))]
-    pub fn set_state_for_test(&mut self, state: AgentTaskState) {
+    pub fn set_state_for_test(&mut self, state: ControlPlaneState) {
         self.state = state;
     }
 
     /// Builder form of [`Self::set_state_for_test`].
     #[cfg(any(test, feature = "test-support"))]
-    pub fn with_state_for_test(mut self, state: AgentTaskState) -> Self {
+    pub fn with_state_for_test(mut self, state: ControlPlaneState) -> Self {
         self.state = state;
         self
     }
@@ -2000,7 +2000,7 @@ pub struct AgentTaskRunProviderHandle {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub stream_uri: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub state: Option<AgentTaskState>,
+    pub state: Option<ControlPlaneState>,
     #[serde(default, skip_serializing_if = "Value::is_null")]
     pub metadata: Value,
 }

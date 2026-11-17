@@ -554,7 +554,7 @@ pub(crate) fn cancel_exact_run_in_store_with_provenance(
             }
             let cancelled_at = now_timestamp();
             record.updated_at = Some(cancelled_at.clone());
-            settle_run(record, RunExecutionState::Cancelled, AgentTaskState::Cancelled);
+            settle_run(record, RunExecutionState::Cancelled, ControlPlaneState::Cancelled);
             let runner_id = record.runner_id().map(str::to_string);
             let runner_job_id = record.runner_job_id().map(str::to_string);
             let record_run_id = record.run_id.clone();
@@ -1169,7 +1169,7 @@ fn cancel_resolved_run_in_store(
         let cancelled_at = now_timestamp();
         let was_stale_running = record.state() == RunExecutionState::Running;
         record.updated_at = Some(cancelled_at.clone());
-        settle_run(record, RunExecutionState::Cancelled, AgentTaskState::Cancelled);
+        settle_run(record, RunExecutionState::Cancelled, ControlPlaneState::Cancelled);
 
         let detached_handoff_parent =
             record.metadata["detached_cook_handoff"]["cook_id"] == record.run_id;
@@ -1389,7 +1389,7 @@ pub(super) fn reconcile_controller_job_cancellation_in_store(
     settle_run(
         record,
         RunExecutionState::Cancelled,
-        AgentTaskState::Cancelled,
+        ControlPlaneState::Cancelled,
     );
     let metadata = record.ensure_metadata_object();
     terminalize_running_provider_executions(metadata, &cancelled_at);
@@ -1611,14 +1611,18 @@ fn cancel_record_with_opaque_provider_handles(record: &mut AgentTaskRunRecord) {
     settle_run(
         record,
         RunExecutionState::Cancelled,
-        AgentTaskState::Cancelled,
+        ControlPlaneState::Cancelled,
     );
     for handle in &mut record.provider_handles {
         if !matches!(
             handle.state,
-            Some(AgentTaskState::Succeeded | AgentTaskState::Failed | AgentTaskState::Cancelled)
+            Some(
+                ControlPlaneState::Succeeded
+                    | ControlPlaneState::Failed
+                    | ControlPlaneState::Cancelled
+            )
         ) {
-            handle.state = Some(AgentTaskState::Cancelled);
+            handle.state = Some(ControlPlaneState::Cancelled);
         }
     }
     let metadata = record.ensure_metadata_object();
@@ -1734,7 +1738,7 @@ mod tests {
             assert_eq!(projection.recovery.unwrap().step, "none");
             assert_eq!(
                 projection.state,
-                homeboy_control_plane_contract::ControlPlaneRunState::Cancelled
+                homeboy_control_plane_contract::ControlPlaneState::Cancelled
             );
             let recovery = crate::agent_task_service::plan_cook_recovery(cook).unwrap();
             assert!(recovery.step.is_none());

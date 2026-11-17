@@ -1406,14 +1406,13 @@ fn status_is_terminal(status: &Value) -> bool {
 
 fn status_is_failure(status: &Value) -> bool {
     canonical_status_state(status).is_some_and(|state| {
-        state.is_terminal()
-            && state != homeboy_control_plane_contract::ControlPlaneRunState::Succeeded
+        state.is_terminal() && state != homeboy_control_plane_contract::ControlPlaneState::Succeeded
     })
 }
 
 fn canonical_status_state(
     status: &Value,
-) -> Option<homeboy_control_plane_contract::ControlPlaneRunState> {
+) -> Option<homeboy_control_plane_contract::ControlPlaneState> {
     serde_json::from_value(status_run_state(status)?.clone()).ok()
 }
 

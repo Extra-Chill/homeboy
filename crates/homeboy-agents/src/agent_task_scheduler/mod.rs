@@ -3,6 +3,7 @@
 //! The run loop, isolated attempt workspace, harvest, scheduling policy, and
 //! outcome construction modules remain independently focused siblings.
 
+use homeboy_control_plane_contract::ControlPlaneState;
 mod attempt_workspace;
 mod candidate_adoption;
 mod engine;
@@ -39,7 +40,7 @@ pub use crate::agent_task_schedule::{
     AgentTaskManagedServiceReadinessKind, AgentTaskPlan, AgentTaskProgressEvent,
     AgentTaskProviderRotationAttempt, AgentTaskProviderRotationEntry,
     AgentTaskProviderRotationPolicy, AgentTaskQueueStatus, AgentTaskResourceBudget,
-    AgentTaskResourceBudgetStatus, AgentTaskRetryPolicy, AgentTaskScheduleOptions, AgentTaskState,
+    AgentTaskResourceBudgetStatus, AgentTaskRetryPolicy, AgentTaskScheduleOptions,
     AGENT_TASK_AGGREGATE_SCHEMA, AGENT_TASK_PLAN_SCHEMA,
 };
 #[cfg(test)]

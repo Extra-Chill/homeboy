@@ -26,23 +26,23 @@ use homeboy_control_plane_contract::{
     ControlPlaneReferenceType, ControlPlaneResource, ControlPlaneRun, ControlPlaneRunListRequest,
     ControlPlaneRunPage, ControlPlaneRunPlacement, ControlPlaneRunPlacementEffective,
     ControlPlaneRunPlacementRequested, ControlPlaneRunPlacementSelected, ControlPlaneRunReview,
-    ControlPlaneRunReviewRequest, ControlPlaneRunState, ControlPlaneRuntime, ControlPlaneState,
-    ControlPlaneStateSummary, ControlPlaneSubmissionAcknowledgement, ControlPlaneSubmissionRequest,
-    ControlPlaneTask, ControlPlaneTaskListRequest, ControlPlaneTaskPage, EffectId, EventCursor,
-    ExecutionId, MissionCursor, MissionId, ProviderSessionId, ReferenceId, RunCursor, RunId,
-    TaskCursor, TaskId, CONTROL_PLANE_ACTION_ACKNOWLEDGEMENT_SCHEMA,
-    CONTROL_PLANE_ACTION_FENCE_SCHEMA, CONTROL_PLANE_ACTION_INTENT_SCHEMA,
-    CONTROL_PLANE_ATTEMPT_PAGE_SCHEMA, CONTROL_PLANE_ATTEMPT_SCHEMA,
-    CONTROL_PLANE_CANCEL_RESULT_SCHEMA, CONTROL_PLANE_EFFECT_AUDIT_SCHEMA,
-    CONTROL_PLANE_EFFECT_STATUS_SCHEMA, CONTROL_PLANE_EFFECT_TERMINAL_SCHEMA,
-    CONTROL_PLANE_EVENT_APPEND_REQUEST_SCHEMA, CONTROL_PLANE_EVENT_RETENTION_SCHEMA,
-    CONTROL_PLANE_EXECUTION_PAGE_SCHEMA, CONTROL_PLANE_EXECUTION_SCHEMA,
-    CONTROL_PLANE_MISSION_PAGE_SCHEMA, CONTROL_PLANE_MISSION_SCHEMA,
-    CONTROL_PLANE_PLACEMENT_UPDATE_RESULT_SCHEMA, CONTROL_PLANE_PROMOTE_RESULT_SCHEMA,
-    CONTROL_PLANE_QUARANTINE_RESULT_SCHEMA, CONTROL_PLANE_REARM_RESULT_SCHEMA,
-    CONTROL_PLANE_REFERENCE_PAGE_SCHEMA, CONTROL_PLANE_REFERENCE_SCHEMA,
-    CONTROL_PLANE_RESUME_RESULT_SCHEMA, CONTROL_PLANE_RETRY_RESULT_SCHEMA,
-    CONTROL_PLANE_RUN_PAGE_SCHEMA, CONTROL_PLANE_TASK_PAGE_SCHEMA, CONTROL_PLANE_TASK_SCHEMA,
+    ControlPlaneRunReviewRequest, ControlPlaneRuntime, ControlPlaneState, ControlPlaneStateSummary,
+    ControlPlaneSubmissionAcknowledgement, ControlPlaneSubmissionRequest, ControlPlaneTask,
+    ControlPlaneTaskListRequest, ControlPlaneTaskPage, EffectId, EventCursor, ExecutionId,
+    MissionCursor, MissionId, ProviderSessionId, ReferenceId, RunCursor, RunId, TaskCursor, TaskId,
+    CONTROL_PLANE_ACTION_ACKNOWLEDGEMENT_SCHEMA, CONTROL_PLANE_ACTION_FENCE_SCHEMA,
+    CONTROL_PLANE_ACTION_INTENT_SCHEMA, CONTROL_PLANE_ATTEMPT_PAGE_SCHEMA,
+    CONTROL_PLANE_ATTEMPT_SCHEMA, CONTROL_PLANE_CANCEL_RESULT_SCHEMA,
+    CONTROL_PLANE_EFFECT_AUDIT_SCHEMA, CONTROL_PLANE_EFFECT_STATUS_SCHEMA,
+    CONTROL_PLANE_EFFECT_TERMINAL_SCHEMA, CONTROL_PLANE_EVENT_APPEND_REQUEST_SCHEMA,
+    CONTROL_PLANE_EVENT_RETENTION_SCHEMA, CONTROL_PLANE_EXECUTION_PAGE_SCHEMA,
+    CONTROL_PLANE_EXECUTION_SCHEMA, CONTROL_PLANE_MISSION_PAGE_SCHEMA,
+    CONTROL_PLANE_MISSION_SCHEMA, CONTROL_PLANE_PLACEMENT_UPDATE_RESULT_SCHEMA,
+    CONTROL_PLANE_PROMOTE_RESULT_SCHEMA, CONTROL_PLANE_QUARANTINE_RESULT_SCHEMA,
+    CONTROL_PLANE_REARM_RESULT_SCHEMA, CONTROL_PLANE_REFERENCE_PAGE_SCHEMA,
+    CONTROL_PLANE_REFERENCE_SCHEMA, CONTROL_PLANE_RESUME_RESULT_SCHEMA,
+    CONTROL_PLANE_RETRY_RESULT_SCHEMA, CONTROL_PLANE_RUN_PAGE_SCHEMA,
+    CONTROL_PLANE_TASK_PAGE_SCHEMA, CONTROL_PLANE_TASK_SCHEMA,
 };
 use homeboy_control_plane_contract::{
     ControlPlanePlacementUpdateParameters, ControlPlaneQuarantineParameters,
@@ -1176,24 +1176,8 @@ fn project_task(
         mission,
         run,
         task: task_id,
-        state: task_state(task.state()),
+        state: task.state(),
     })
-}
-
-fn task_state(state: crate::agent_tasks::AgentTaskState) -> ControlPlaneState {
-    match state {
-        crate::agent_tasks::AgentTaskState::Queued => ControlPlaneState::Queued,
-        crate::agent_tasks::AgentTaskState::Blocked => ControlPlaneState::Blocked,
-        crate::agent_tasks::AgentTaskState::Skipped => ControlPlaneState::Skipped,
-        crate::agent_tasks::AgentTaskState::Running => ControlPlaneState::Running,
-        crate::agent_tasks::AgentTaskState::Succeeded => ControlPlaneState::Succeeded,
-        crate::agent_tasks::AgentTaskState::CandidateRecoverable => {
-            ControlPlaneState::CandidateRecoverable
-        }
-        crate::agent_tasks::AgentTaskState::Failed => ControlPlaneState::Failed,
-        crate::agent_tasks::AgentTaskState::Cancelled => ControlPlaneState::Cancelled,
-        crate::agent_tasks::AgentTaskState::TimedOut => ControlPlaneState::TimedOut,
-    }
 }
 
 fn encode_task_cursor(run: &RunId, task: &TaskId) -> Result<TaskCursor, ControlPlaneError> {
@@ -4204,7 +4188,7 @@ fn project_snapshot(
         && resource.state.is_terminal()
         && !matches!(
             resource.state,
-            ControlPlaneRunState::Succeeded | ControlPlaneRunState::Skipped
+            ControlPlaneState::Succeeded | ControlPlaneState::Skipped
         )
     {
         resource.blocker = snapshot
@@ -4212,7 +4196,7 @@ fn project_snapshot(
             .as_ref()
             .and_then(recorded_failure_blocker);
     }
-    if resource.state == ControlPlaneRunState::CandidateRecoverable {
+    if resource.state == ControlPlaneState::CandidateRecoverable {
         if let Some(reason) = snapshot.aggregate.as_ref().and_then(|aggregate| {
             crate::agent_task_service::review_form_from_aggregate(aggregate)
                 .ok()
@@ -4271,7 +4255,7 @@ fn project_summary_fields(
     resource.location = location(record);
     resource.placement = placement(record);
     resource.phase = phase(record);
-    resource.blocker = if resource.state == ControlPlaneRunState::Succeeded {
+    resource.blocker = if resource.state == ControlPlaneState::Succeeded {
         None
     } else {
         blocker(record, delivery.as_ref())
@@ -4298,7 +4282,7 @@ fn project_summary_fields(
     resource.publication = delivery.as_ref().and_then(publication);
     project_live_gate_verification(&mut resource, record);
     if let Some(continuation) = crate::agent_task_service::live_cook_continuation(record) {
-        resource.state = ControlPlaneRunState::Running;
+        resource.state = ControlPlaneState::Running;
         resource.phase = Some("publishing".to_string());
         resource.owner = Some(ControlPlaneOwner {
             kind: "cook_continuation".to_string(),
@@ -4311,7 +4295,7 @@ fn project_summary_fields(
         .get("cancellation_fence")
         .or_else(|| record.metadata.get("candidate_retirement"))
     {
-        resource.state = ControlPlaneRunState::Cancelled;
+        resource.state = ControlPlaneState::Cancelled;
         resource.phase = Some("cancelled".into());
         resource.blocker = Some(ControlPlaneBlocker {
             details: None,
@@ -4390,7 +4374,7 @@ fn project_live_gate_verification_in(
     if !latest || !matches!(store.foreign_cook_driver(&cook_id), Ok(Some(_))) {
         return;
     }
-    resource.state = ControlPlaneRunState::Running;
+    resource.state = ControlPlaneState::Running;
     resource.phase = Some(LIVE_GATE_VERIFYING_PHASE.to_string());
 }
 
@@ -4673,18 +4657,18 @@ fn fanout_mission(record: &AgentTaskRunRecord) -> Result<Option<MissionId>, Cont
         .map_err(|error| ControlPlaneError::invalid_argument(error.attributed_message()))
 }
 
-pub(crate) fn run_state(record: &AgentTaskRunRecord) -> ControlPlaneRunState {
+pub(crate) fn run_state(record: &AgentTaskRunRecord) -> ControlPlaneState {
     if CookDelivery::from_run_metadata(&record.metadata).is_some_and(|d| d.published()) {
-        return ControlPlaneRunState::Succeeded;
+        return ControlPlaneState::Succeeded;
     }
     if (record.state() == RunExecutionState::CandidateRecoverable
         && record.owner_process_is_running())
         || record.has_live_execution_step_owner()
     {
-        return ControlPlaneRunState::Running;
+        return ControlPlaneState::Running;
     }
     if record.is_stale_running() {
-        return ControlPlaneRunState::Stale;
+        return ControlPlaneState::Stale;
     }
     // A `verification_pending` promotion must not read as `Succeeded` before
     // verification actually confirms it (#14828) — but a record whose own
@@ -4700,17 +4684,13 @@ pub(crate) fn run_state(record: &AgentTaskRunRecord) -> ControlPlaneRunState {
             .and_then(|delivery| delivery.promotion())
             == Some(AgentTaskPromotionStatus::VerificationPending)
     {
-        return ControlPlaneRunState::CandidateRecoverable;
+        return ControlPlaneState::CandidateRecoverable;
     }
     match record.state() {
-        RunExecutionState::Queued => ControlPlaneRunState::Queued,
-        RunExecutionState::Running => ControlPlaneRunState::Running,
-        RunExecutionState::Succeeded => ControlPlaneRunState::Succeeded,
-        RunExecutionState::CandidateRecoverable => ControlPlaneRunState::CandidateRecoverable,
-        RunExecutionState::PartialFailure => ControlPlaneRunState::PartialFailure,
-        RunExecutionState::Failed => ControlPlaneRunState::Failed,
-        RunExecutionState::Unknown => ControlPlaneRunState::Failed,
-        RunExecutionState::Cancelled => ControlPlaneRunState::Cancelled,
+        // A run whose stored state this binary cannot read is reported as
+        // failed so it does not stay an open resource forever.
+        RunExecutionState::Unknown => ControlPlaneState::Failed,
+        state => state.into(),
     }
 }
 
@@ -5750,10 +5730,10 @@ fn generic_observation_run_summary(
     Ok(resource)
 }
 
-fn generic_observation_state(status: &str) -> ControlPlaneRunState {
+fn generic_observation_state(status: &str) -> ControlPlaneState {
     homeboy_core::observation::RunStatus::from_label(status)
         .map(homeboy_core::observation::RunStatus::control_plane_state)
-        .unwrap_or(ControlPlaneRunState::Unknown)
+        .unwrap_or(ControlPlaneState::Unknown)
 }
 
 fn generic_task_state(value: &str) -> ControlPlaneState {
@@ -6493,7 +6473,6 @@ mod tests {
         AgentTaskArtifactRef, AgentTaskLifecycleStore, AgentTaskRunRecord, AgentTaskRunTask,
     };
     use crate::agent_task_schedule::AgentTaskPlan;
-    use crate::agent_tasks::AgentTaskState;
     use base64::Engine;
     use homeboy_control_plane_contract::{
         ControlPlaneAction, ControlPlaneActionAvailability, ControlPlaneActionEligibilityReport,
@@ -6505,16 +6484,16 @@ mod tests {
         ControlPlaneEventSource, ControlPlaneEvidenceRef, ControlPlaneMissionListRequest,
         ControlPlaneOperation, ControlPlaneRef, ControlPlaneReferenceRegistration,
         ControlPlaneReferenceType, ControlPlaneRunListRequest, ControlPlaneRunReviewRequest,
-        ControlPlaneRunState, ControlPlaneState, ControlPlaneSubmissionRequest,
-        ControlPlaneTaskListRequest, EffectId, EventCursor, EventId, ExecutionId, MissionId,
-        ReferenceId, RunCursor, RunId, TaskId, CONTROL_PLANE_ACTION_ELIGIBILITY_SCHEMA,
-        CONTROL_PLANE_ACTION_INTENT_SCHEMA, CONTROL_PLANE_ACTION_REQUEST_SCHEMA,
-        CONTROL_PLANE_CANCEL_PARAMETERS_SCHEMA, CONTROL_PLANE_EVENT_APPEND_REQUEST_SCHEMA,
-        CONTROL_PLANE_EVENT_SCHEMA, CONTROL_PLANE_PROMOTE_PARAMETERS_SCHEMA,
-        CONTROL_PLANE_PROMOTE_RESULT_SCHEMA, CONTROL_PLANE_QUARANTINE_PARAMETERS_SCHEMA,
-        CONTROL_PLANE_REFERENCE_REGISTRATION_SCHEMA, CONTROL_PLANE_RESUME_RESULT_SCHEMA,
-        CONTROL_PLANE_RETRY_PARAMETERS_SCHEMA, CONTROL_PLANE_RETRY_RESULT_SCHEMA,
-        CONTROL_PLANE_RUN_SCHEMA, CONTROL_PLANE_SUBMISSION_REQUEST_SCHEMA,
+        ControlPlaneState, ControlPlaneSubmissionRequest, ControlPlaneTaskListRequest, EffectId,
+        EventCursor, EventId, ExecutionId, MissionId, ReferenceId, RunCursor, RunId, TaskId,
+        CONTROL_PLANE_ACTION_ELIGIBILITY_SCHEMA, CONTROL_PLANE_ACTION_INTENT_SCHEMA,
+        CONTROL_PLANE_ACTION_REQUEST_SCHEMA, CONTROL_PLANE_CANCEL_PARAMETERS_SCHEMA,
+        CONTROL_PLANE_EVENT_APPEND_REQUEST_SCHEMA, CONTROL_PLANE_EVENT_SCHEMA,
+        CONTROL_PLANE_PROMOTE_PARAMETERS_SCHEMA, CONTROL_PLANE_PROMOTE_RESULT_SCHEMA,
+        CONTROL_PLANE_QUARANTINE_PARAMETERS_SCHEMA, CONTROL_PLANE_REFERENCE_REGISTRATION_SCHEMA,
+        CONTROL_PLANE_RESUME_RESULT_SCHEMA, CONTROL_PLANE_RETRY_PARAMETERS_SCHEMA,
+        CONTROL_PLANE_RETRY_RESULT_SCHEMA, CONTROL_PLANE_RUN_SCHEMA,
+        CONTROL_PLANE_SUBMISSION_REQUEST_SCHEMA,
     };
     use homeboy_core::control_plane::ControlPlaneProvider;
     use homeboy_core::run_lifecycle_record::RunHeartbeat;
@@ -6852,13 +6831,10 @@ mod tests {
             json!("verification_pending"),
         );
 
-        assert_eq!(
-            run_state(&record),
-            ControlPlaneRunState::CandidateRecoverable
-        );
+        assert_eq!(run_state(&record), ControlPlaneState::CandidateRecoverable);
         let projected = project_record(&record, None).expect("project run");
-        assert_eq!(projected.state, ControlPlaneRunState::CandidateRecoverable);
-        assert_ne!(projected.state, ControlPlaneRunState::Succeeded);
+        assert_eq!(projected.state, ControlPlaneState::CandidateRecoverable);
+        assert_ne!(projected.state, ControlPlaneState::Succeeded);
     }
 
     fn live_gate_driver_candidate() -> AgentTaskRunRecord {
@@ -6890,14 +6866,14 @@ mod tests {
             scope
                 .spawn(|| {
                     let mut resource = super::project_summary_fields(&record, None).unwrap();
-                    assert_eq!(resource.state, ControlPlaneRunState::CandidateRecoverable);
+                    assert_eq!(resource.state, ControlPlaneState::CandidateRecoverable);
                     super::project_live_gate_verification_in(&mut resource, &record, &store);
                     resource
                 })
                 .join()
                 .unwrap()
         });
-        assert_eq!(projected.state, ControlPlaneRunState::Running);
+        assert_eq!(projected.state, ControlPlaneState::Running);
         assert_eq!(
             projected.phase.as_deref(),
             Some(super::LIVE_GATE_VERIFYING_PHASE)
@@ -6915,7 +6891,7 @@ mod tests {
         let record = live_gate_driver_candidate();
         let mut resource = super::project_summary_fields(&record, None).unwrap();
         super::project_live_gate_verification_in(&mut resource, &record, &store);
-        assert_eq!(resource.state, ControlPlaneRunState::CandidateRecoverable);
+        assert_eq!(resource.state, ControlPlaneState::CandidateRecoverable);
         assert_ne!(
             resource.phase.as_deref(),
             Some(super::LIVE_GATE_VERIFYING_PHASE)
@@ -7378,7 +7354,7 @@ mod tests {
         let mut record = record(AGENT_TASK_RUN);
         record.tasks.push({
             let mut task = AgentTaskRunTask::queued("review".to_string(), "claude".to_string());
-            task.set_state_for_test(AgentTaskState::Succeeded);
+            task.set_state_for_test(ControlPlaneState::Succeeded);
             task
         });
         let attempt = format!("{AGENT_TASK_RUN}:review:1");
@@ -7677,9 +7653,9 @@ mod tests {
     fn task_discovery_is_run_scoped_bounded_and_cursor_bound() {
         let mut run_snapshot = snapshot("run-with-tasks", None);
         run_snapshot.record.tasks = [
-            ("z-task", AgentTaskState::Succeeded),
-            ("a-task", AgentTaskState::Running),
-            ("m-task", AgentTaskState::Blocked),
+            ("z-task", ControlPlaneState::Succeeded),
+            ("a-task", ControlPlaneState::Running),
+            ("m-task", ControlPlaneState::Blocked),
         ]
         .into_iter()
         .map(|(task_id, state)| {
@@ -7794,13 +7770,13 @@ mod tests {
             {
                 let mut task =
                     AgentTaskRunTask::queued("same-task".to_string(), "fixture".to_string());
-                task.set_state_for_test(AgentTaskState::Running);
+                task.set_state_for_test(ControlPlaneState::Running);
                 task
             },
             {
                 let mut task =
                     AgentTaskRunTask::queued("same-task".to_string(), "fixture".to_string());
-                task.set_state_for_test(AgentTaskState::Succeeded);
+                task.set_state_for_test(ControlPlaneState::Succeeded);
                 task
             },
         ];
@@ -8185,7 +8161,7 @@ mod tests {
             assert_eq!(review.resource, detail);
             assert_eq!(
                 review.resource.state,
-                ControlPlaneRunState::CandidateRecoverable
+                ControlPlaneState::CandidateRecoverable
             );
             assert_eq!(review.evidence["record"]["state"], "succeeded");
 
@@ -8350,9 +8326,9 @@ mod tests {
                 assert_eq!(
                     detail.state,
                     if finalized {
-                        ControlPlaneRunState::Succeeded
+                        ControlPlaneState::Succeeded
                     } else {
-                        ControlPlaneRunState::CandidateRecoverable
+                        ControlPlaneState::CandidateRecoverable
                     }
                 );
                 assert_eq!(
@@ -8435,7 +8411,7 @@ mod tests {
             assert_eq!(review.resource.run.as_str(), candidate_id);
             assert_eq!(
                 review.resource.state,
-                ControlPlaneRunState::CandidateRecoverable
+                ControlPlaneState::CandidateRecoverable
             );
             assert_eq!(review.evidence["record"]["run_id"], candidate_id);
             assert_eq!(review.evidence["artifacts"]["run_id"], candidate_id);
@@ -8805,7 +8781,7 @@ mod tests {
                 serde_json::from_value(first.result.data.clone())
                     .expect("typed cancellation result");
             assert_eq!(first.outcome, ControlPlaneActionOutcome::Succeeded);
-            assert_eq!(first.resource.state, ControlPlaneRunState::Cancelled);
+            assert_eq!(first.resource.state, ControlPlaneState::Cancelled);
             assert_eq!(result.disposition, ControlPlaneCancelDisposition::Cancelled);
             assert!(result.terminal);
             assert_eq!(result.poll_count, 0);
@@ -8855,10 +8831,7 @@ mod tests {
                 acknowledgement.outcome,
                 ControlPlaneActionOutcome::AlreadySatisfied
             );
-            assert_eq!(
-                acknowledgement.resource.state,
-                ControlPlaneRunState::Succeeded
-            );
+            assert_eq!(acknowledgement.resource.state, ControlPlaneState::Succeeded);
         });
     }
 
@@ -9084,7 +9057,7 @@ mod tests {
                 assert!(cancelled.message.as_deref().unwrap().contains("retired"));
                 let projected =
                     project_record(&store.read_record(&attempt_id).unwrap(), None).unwrap();
-                assert_eq!(projected.state, ControlPlaneRunState::Cancelled);
+                assert_eq!(projected.state, ControlPlaneState::Cancelled);
                 assert_eq!(projected.recovery.as_ref().unwrap().step, "none");
                 assert!(projected.blocker.unwrap().message.contains("operator stop"));
                 let fence = store
@@ -9193,7 +9166,7 @@ mod tests {
                 )
                 .expect("recover interrupted cancel");
             assert_eq!(recovered.outcome, ControlPlaneActionOutcome::Succeeded);
-            assert_eq!(recovered.resource.state, ControlPlaneRunState::Cancelled);
+            assert_eq!(recovered.resource.state, ControlPlaneState::Cancelled);
             assert_eq!(
                 service
                     .effect_status(&run, &request.effect_id)
@@ -9907,7 +9880,7 @@ mod tests {
             resource.mission.as_ref().map(|id| id.as_str()),
             Some(AGENT_TASK_COOK)
         );
-        assert_eq!(resource.state, ControlPlaneRunState::Succeeded);
+        assert_eq!(resource.state, ControlPlaneState::Succeeded);
         assert_eq!(resource.phase.as_deref(), Some("terminal"));
         // Historical controller failures cannot block a successful verdict.
         assert!(resource.blocker.is_none());
@@ -10177,7 +10150,7 @@ mod tests {
 
         let resource = project_record(&record, None).expect("project gate failure");
 
-        assert_eq!(resource.state, ControlPlaneRunState::CandidateRecoverable);
+        assert_eq!(resource.state, ControlPlaneState::CandidateRecoverable);
         assert_eq!(
             resource
                 .candidate
@@ -10257,7 +10230,7 @@ mod tests {
         let resource = project_record(&record, None).expect("project moving-base blocker");
 
         assert_eq!(record, before);
-        assert_eq!(resource.state, ControlPlaneRunState::CandidateRecoverable);
+        assert_eq!(resource.state, ControlPlaneState::CandidateRecoverable);
         assert!(resource.publication.is_none());
         let blocker = resource.blocker.expect("delivery blocker");
         assert_eq!(blocker.code.as_deref(), Some("base_conflict"));
@@ -10385,7 +10358,7 @@ mod tests {
         assert!(!super::generic_observation_state("running").is_terminal());
         assert_eq!(
             super::generic_observation_state("not-a-status"),
-            homeboy_control_plane_contract::ControlPlaneRunState::Unknown
+            homeboy_control_plane_contract::ControlPlaneState::Unknown
         );
     }
 
@@ -10608,7 +10581,7 @@ mod tests {
         );
 
         let resource = project_record(&record, None).expect("project active supervisor");
-        assert_eq!(resource.state, ControlPlaneRunState::Running);
+        assert_eq!(resource.state, ControlPlaneState::Running);
         assert_eq!(resource.phase.as_deref(), Some("promotion_gates"));
         assert!(resource.finished_at.is_none());
     }
@@ -10619,7 +10592,7 @@ mod tests {
         record.metadata["runner_pid"] = json!(std::process::id());
 
         let resource = project_record(&record, None).expect("project completed run");
-        assert_eq!(resource.state, ControlPlaneRunState::Succeeded);
+        assert_eq!(resource.state, ControlPlaneState::Succeeded);
         assert_eq!(resource.finished_at, record.updated_at);
     }
 

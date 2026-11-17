@@ -91,7 +91,7 @@ fn status_current_delivery_blocker_outranks_provider_diagnostic_and_success_has_
     );
     let published = fixture("contradictory-publication");
     let resource = project_snapshot(&published, false).unwrap();
-    assert_eq!(resource.state, ControlPlaneRunState::Succeeded);
+    assert_eq!(resource.state, ControlPlaneState::Succeeded);
     assert!(resource.blocker.is_none());
     assert_eq!(resource.publication.unwrap().state, "review_ready");
 }

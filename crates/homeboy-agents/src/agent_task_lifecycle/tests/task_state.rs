@@ -6,7 +6,7 @@ fn record_task_state(
     store: &AgentTaskLifecycleStore,
     run_id: &str,
     task_id: &str,
-) -> AgentTaskState {
+) -> ControlPlaneState {
     store
         .read_record(run_id)
         .expect("read record")
@@ -33,8 +33,8 @@ fn stale_task_event_does_not_override_terminal_outcome() {
     // The last event for `task-a` contradicts its succeeded outcome; `task-b`
     // has no outcome yet, so its event is the only state it has.
     for (task_id, state) in [
-        ("task-a", AgentTaskState::Failed),
-        ("task-b", AgentTaskState::Running),
+        ("task-a", ControlPlaneState::Failed),
+        ("task-b", ControlPlaneState::Running),
     ] {
         aggregate.events.push(AgentTaskProgressEvent {
             task_id: task_id.to_string(),
@@ -47,10 +47,10 @@ fn stale_task_event_does_not_override_terminal_outcome() {
 
     assert_eq!(
         record_task_state(&store, run_id, "task-a"),
-        AgentTaskState::Succeeded
+        ControlPlaneState::Succeeded
     );
     assert_eq!(
         record_task_state(&store, run_id, "task-b"),
-        AgentTaskState::Running
+        ControlPlaneState::Running
     );
 }

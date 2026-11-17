@@ -593,15 +593,17 @@ fn project_terminal_runner_job_snapshot(
     let (run_state, task_state, phase) = match snapshot.job.status {
         homeboy_core::api_jobs::JobStatus::Succeeded => (
             RunExecutionState::Succeeded,
-            AgentTaskState::Succeeded,
+            ControlPlaneState::Succeeded,
             "completed",
         ),
-        homeboy_core::api_jobs::JobStatus::Failed => {
-            (RunExecutionState::Failed, AgentTaskState::Failed, "failed")
-        }
+        homeboy_core::api_jobs::JobStatus::Failed => (
+            RunExecutionState::Failed,
+            ControlPlaneState::Failed,
+            "failed",
+        ),
         homeboy_core::api_jobs::JobStatus::Cancelled => (
             RunExecutionState::Cancelled,
-            AgentTaskState::Cancelled,
+            ControlPlaneState::Cancelled,
             "cancelled",
         ),
         homeboy_core::api_jobs::JobStatus::Queued | homeboy_core::api_jobs::JobStatus::Running => {
@@ -1078,7 +1080,7 @@ fn merge_live_provider_handles(
             backend: handle.backend,
             provider_run_id: handle.run_id,
             stream_uri: handle.stream_uri,
-            state: Some(AgentTaskState::Running),
+            state: Some(ControlPlaneState::Running),
             metadata: handle.metadata,
         });
     }

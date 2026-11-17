@@ -220,7 +220,7 @@ pub(crate) fn tasks_for_aggregate(
             if let Some(outcome) = outcome {
                 project_task_state(
                     &mut task,
-                    AgentTaskState::from_outcome_status(outcome.status),
+                    crate::agent_task_schedule::from_outcome_status(outcome.status),
                 );
                 let (backend, selector, model) = terminal_executor_identity(outcome, request);
                 task.backend = backend;
@@ -250,7 +250,7 @@ pub(crate) fn tasks_for_aggregate(
         if let Some(outcome) = outcome {
             project_task_state(
                 &mut task,
-                AgentTaskState::from_outcome_status(outcome.status),
+                crate::agent_task_schedule::from_outcome_status(outcome.status),
             );
         }
         task
@@ -263,7 +263,7 @@ pub(crate) fn events_for_outcomes(outcomes: &[AgentTaskOutcome]) -> Vec<AgentTas
         .iter()
         .map(|outcome| AgentTaskProgressEvent {
             task_id: outcome.task_id.clone(),
-            state: AgentTaskState::from_outcome_status(outcome.status),
+            state: crate::agent_task_schedule::from_outcome_status(outcome.status),
             attempt: 1,
             message: outcome.summary.clone(),
         })
@@ -420,7 +420,9 @@ pub(crate) fn provider_handle_from_outcome_metadata(
             .get("stream_uri")
             .and_then(Value::as_str)
             .map(ToString::to_string),
-        state: Some(AgentTaskState::from_outcome_status(outcome.status)),
+        state: Some(crate::agent_task_schedule::from_outcome_status(
+            outcome.status,
+        )),
         metadata: outcome.metadata.clone(),
     })
 }
@@ -451,7 +453,9 @@ pub(crate) fn run_provider_handle(
         backend: handle.backend,
         provider_run_id: handle.run_id,
         stream_uri: handle.stream_uri,
-        state: Some(AgentTaskState::from_outcome_status(outcome.status)),
+        state: Some(crate::agent_task_schedule::from_outcome_status(
+            outcome.status,
+        )),
         metadata,
     }
 }

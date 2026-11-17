@@ -69,7 +69,7 @@ pub struct ControlPlaneSubmissionAcknowledgement {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::ControlPlaneRunState;
+    use crate::ControlPlaneState;
 
     #[test]
     fn submission_request_and_acknowledgement_round_trip() {
@@ -91,7 +91,7 @@ mod tests {
         );
 
         let mut resource = ControlPlaneRun::new(run.clone());
-        resource.state = ControlPlaneRunState::Queued;
+        resource.state = ControlPlaneState::Queued;
         let acknowledgement = ControlPlaneSubmissionAcknowledgement {
             schema: CONTROL_PLANE_SUBMISSION_ACKNOWLEDGEMENT_SCHEMA.to_string(),
             acknowledgement: "run-1:submission:request-1".to_string(),

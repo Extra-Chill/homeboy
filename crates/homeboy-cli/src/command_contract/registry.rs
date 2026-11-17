@@ -72,7 +72,7 @@ pub const CONTRACT_REGISTRY: &[ContractRegistryEntry] = &[
         title: "Run lifecycle status",
         owner: "homeboy-core",
         summary: "Canonical generic status vocabulary for persisted or runner-backed runs.",
-        rust_type: "homeboy::core::run_lifecycle_status::RunLifecycleStatus",
+        rust_type: "homeboy::core::run_lifecycle_status::ControlPlaneState",
     },
     ContractRegistryEntry {
         schema_id: crate::core::artifacts::ARTIFACT_MANIFEST_SCHEMA,

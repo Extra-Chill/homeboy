@@ -2,6 +2,7 @@
 //! → finalize attempt cycle plus its report/options types and promotion-source
 //! resolution. Pure move out of the former `agent_task_service.rs` god-file.
 
+use homeboy_control_plane_contract::ControlPlaneState;
 use serde_json::Value;
 use std::ops::ControlFlow;
 use std::path::{Path, PathBuf};
@@ -36,7 +37,6 @@ use crate::agent_task_timeout::{
 };
 use homeboy_core::command_invocation::CommandInvocation;
 use homeboy_core::cook_status::{CookDisposition, CookStatus};
-use homeboy_core::run_lifecycle_status::RunLifecycleStatus;
 use homeboy_core::{Error, Result};
 use homeboy_engine_primitives::shell::quote_arg;
 
@@ -1790,18 +1790,18 @@ pub struct AgentTaskCookCompletion {
 ///
 /// # Where each field's authority comes from
 ///
-/// - `lifecycle_status` is [`RunLifecycleStatus`], projected from
+/// - `lifecycle_status` is [`ControlPlaneState`], projected from
 ///   [`CookStatus`]. Closed, so it is always decidable.
 /// - `terminal` is the *declared* [`CookDisposition`], never re-derived from
 ///   the status string. The exit that produced the report already knew whether
 ///   it handed the work to a durable owner; that answer is authoritative and
 ///   this only forwards it.
-/// - `retryable` is [`RunLifecycleStatus::is_retryable`], gated on `terminal`.
+/// - `retryable` is [`ControlPlaneState::is_retryable`], gated on `terminal`.
 ///   A Cook a durable owner is still carrying must never be advertised as
 ///   retryable, whatever its status string reads.
 #[derive(Debug, Clone, Copy, serde::Serialize)]
 pub struct RunLifecycleProjection {
-    pub lifecycle_status: RunLifecycleStatus,
+    pub lifecycle_status: ControlPlaneState,
     pub terminal: bool,
     pub retryable: bool,
 }
@@ -1810,7 +1810,7 @@ impl RunLifecycleProjection {
     /// Classify a report whose exit declared a [`CookDisposition`].
     pub fn from_status_and_disposition(status: &str, disposition: CookDisposition) -> Self {
         Self::new(
-            RunLifecycleStatus::from(&CookStatus::from_status(status)),
+            homeboy_core::run_lifecycle_status::from_cook_status(&CookStatus::from_status(status)),
             disposition.is_terminal(),
         )
     }
@@ -1826,10 +1826,13 @@ impl RunLifecycleProjection {
     pub fn from_status(status: &str) -> Self {
         let status = CookStatus::from_status(status);
         let terminal = !status.is_in_flight();
-        Self::new(RunLifecycleStatus::from(&status), terminal)
+        Self::new(
+            homeboy_core::run_lifecycle_status::from_cook_status(&status),
+            terminal,
+        )
     }
 
-    fn new(lifecycle_status: RunLifecycleStatus, terminal: bool) -> Self {
+    fn new(lifecycle_status: ControlPlaneState, terminal: bool) -> Self {
         Self {
             lifecycle_status,
             terminal,
@@ -2664,7 +2667,7 @@ mod run_lifecycle_projection_tests {
         let value = serde_json::to_value(report).expect("serialize");
 
         assert_eq!(value["status"], "durable_failure");
-        assert_eq!(lifecycle.lifecycle_status, RunLifecycleStatus::Failed);
+        assert_eq!(lifecycle.lifecycle_status, ControlPlaneState::Failed);
         assert!(lifecycle.terminal);
         assert!(lifecycle.retryable);
         // Unchanged fields must still be present and still be skipped when
@@ -2684,7 +2687,7 @@ mod run_lifecycle_projection_tests {
         let report = report("durable_failure", CookDisposition::InFlight);
         let lifecycle = report.lifecycle();
 
-        assert_eq!(lifecycle.lifecycle_status, RunLifecycleStatus::Failed);
+        assert_eq!(lifecycle.lifecycle_status, ControlPlaneState::Failed);
         assert!(!lifecycle.terminal);
         assert_eq!(
             lifecycle.retryable, false,
@@ -2702,7 +2705,7 @@ mod run_lifecycle_projection_tests {
         let value = serde_json::to_value(report).expect("serialize");
 
         assert_eq!(value["status"], "moving_base");
-        assert_eq!(lifecycle.lifecycle_status, RunLifecycleStatus::Unknown);
+        assert_eq!(lifecycle.lifecycle_status, ControlPlaneState::Unknown);
         assert!(lifecycle.terminal);
         assert!(!lifecycle.retryable);
     }

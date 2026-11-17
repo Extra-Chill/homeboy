@@ -372,7 +372,7 @@ fn a_candidate_recoverable_run_reads_the_same_before_and_after_delivery() {
     aggregate.totals.succeeded = 0;
     aggregate.totals.candidate_recoverable = 1;
     aggregate.outcomes[0].status = crate::agent_task::AgentTaskOutcomeStatus::CandidateRecoverable;
-    aggregate.events[0].state = AgentTaskState::CandidateRecoverable;
+    aggregate.events[0].state = ControlPlaneState::CandidateRecoverable;
     let recover_eligibility = |record: &AgentTaskRunRecord| {
         lifecycle_action_eligibility(record, None)
             .actions

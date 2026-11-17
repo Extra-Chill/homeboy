@@ -3663,8 +3663,9 @@ mod tests {
         AgentTaskOutcomeStatus, AgentTaskPolicy, AgentTaskRequest, AgentTaskWorkspace,
     };
     use crate::agent_task_scheduler::{
-        AgentTaskAggregate, AgentTaskAggregateTotals, AgentTaskProgressEvent, AgentTaskState,
+        AgentTaskAggregate, AgentTaskAggregateTotals, AgentTaskProgressEvent,
     };
+    use homeboy_control_plane_contract::ControlPlaneState;
     use std::sync::atomic::{AtomicUsize, Ordering};
 
     /// A lifecycle store reached through a Cook recipe store must serialize on
@@ -4296,7 +4297,7 @@ mod tests {
             }],
             events: vec![AgentTaskProgressEvent {
                 task_id: "task".to_string(),
-                state: AgentTaskState::Succeeded,
+                state: ControlPlaneState::Succeeded,
                 attempt: 1,
                 message: Some("ok".to_string()),
             }],

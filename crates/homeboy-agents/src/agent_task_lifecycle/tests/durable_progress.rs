@@ -922,19 +922,19 @@ fn aggregate_repeated_same_state_messages_keep_distinct_receipts() {
         aggregate.events = vec![
             AgentTaskProgressEvent {
                 task_id: "task-a".to_string(),
-                state: AgentTaskState::Running,
+                state: ControlPlaneState::Running,
                 attempt: 1,
                 message: Some("first".to_string()),
             },
             AgentTaskProgressEvent {
                 task_id: "task-a".to_string(),
-                state: AgentTaskState::Running,
+                state: ControlPlaneState::Running,
                 attempt: 1,
                 message: Some("second".to_string()),
             },
             AgentTaskProgressEvent {
                 task_id: "task-a".to_string(),
-                state: AgentTaskState::Succeeded,
+                state: ControlPlaneState::Succeeded,
                 attempt: 1,
                 message: Some("ok".to_string()),
             },
@@ -965,7 +965,7 @@ fn imported_aggregate_does_not_invent_submit_for_foreign_tasks() {
     aggregate.outcomes[0].task_id = "task-b".to_string();
     aggregate.events = vec![AgentTaskProgressEvent {
         task_id: "task-b".to_string(),
-        state: AgentTaskState::Succeeded,
+        state: ControlPlaneState::Succeeded,
         attempt: 1,
         message: Some("imported".to_string()),
     }];
@@ -1090,13 +1090,13 @@ fn aggregate_replacement_replays_reordered_same_content() {
         first.events = vec![
             AgentTaskProgressEvent {
                 task_id: "task-a".to_string(),
-                state: AgentTaskState::Running,
+                state: ControlPlaneState::Running,
                 attempt: 1,
                 message: Some("alpha".to_string()),
             },
             AgentTaskProgressEvent {
                 task_id: "task-a".to_string(),
-                state: AgentTaskState::Running,
+                state: ControlPlaneState::Running,
                 attempt: 1,
                 message: Some("beta".to_string()),
             },

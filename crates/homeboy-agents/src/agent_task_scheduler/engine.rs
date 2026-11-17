@@ -488,7 +488,7 @@ impl AgentTaskScheduler {
         for task in &queued {
             events.push(event(
                 &task.request.task_id,
-                AgentTaskState::Queued,
+                ControlPlaneState::Queued,
                 1,
                 None,
             ));
@@ -507,7 +507,7 @@ impl AgentTaskScheduler {
             });
             events.push(event(
                 &request.task_id,
-                AgentTaskState::Blocked,
+                ControlPlaneState::Blocked,
                 1,
                 Some(message.clone()),
             ));
@@ -655,7 +655,7 @@ impl AgentTaskScheduler {
                 for skip in &usage_cap_skips {
                     events.push(event(
                         &scheduled.request.task_id,
-                        AgentTaskState::Queued,
+                        ControlPlaneState::Queued,
                         scheduled.attempt,
                         Some(format!(
                             "provider usage cap active: backend={} (selector={}) resets at {}; skipping without spending an attempt",
@@ -673,7 +673,7 @@ impl AgentTaskScheduler {
                     );
                     events.push(event(
                         &scheduled.request.task_id,
-                        AgentTaskState::Failed,
+                        ControlPlaneState::Failed,
                         scheduled.attempt,
                         outcome.summary.clone(),
                     ));
@@ -728,7 +728,7 @@ impl AgentTaskScheduler {
                     let skip = readiness.evidence(&scheduled.request);
                     events.push(event(
                         &scheduled.request.task_id,
-                        AgentTaskState::Queued,
+                        ControlPlaneState::Queued,
                         scheduled.attempt,
                         Some(format!(
                             "provider route unavailable: backend={}, model={}, state={}; skipping without spending an execution",
@@ -779,7 +779,7 @@ impl AgentTaskScheduler {
                     );
                     events.push(event(
                         &task_id,
-                        AgentTaskState::TimedOut,
+                        ControlPlaneState::TimedOut,
                         scheduled.attempt,
                         outcome.summary.clone(),
                     ));
@@ -810,7 +810,7 @@ impl AgentTaskScheduler {
                     );
                     events.push(event(
                         &task_id,
-                        AgentTaskState::Failed,
+                        ControlPlaneState::Failed,
                         scheduled.attempt,
                         outcome.summary.clone(),
                     ));
@@ -858,7 +858,7 @@ impl AgentTaskScheduler {
                             scratch_allocation_failure(task_id.clone(), error.to_string());
                         events.push(event(
                             &task_id,
-                            AgentTaskState::Failed,
+                            ControlPlaneState::Failed,
                             scheduled.attempt,
                             outcome.summary.clone(),
                         ));
@@ -883,7 +883,7 @@ impl AgentTaskScheduler {
                             release_scratch(&scratch, "attempt_workspace_setup_failed", &outcome);
                         events.push(event(
                             &task_id,
-                            AgentTaskState::Failed,
+                            ControlPlaneState::Failed,
                             scheduled.attempt,
                             outcome.summary.clone(),
                         ));
@@ -1014,7 +1014,7 @@ impl AgentTaskScheduler {
                                 "provider execution was already reserved by an interrupted controller; reconcile the durable run instead of redispatching".to_string(),
                             );
                             let _ = release_scratch(&scratch, "provider_execution_already_reserved", &outcome);
-                            events.push(event(&task_id, AgentTaskState::Failed, attempt, outcome.summary.clone()));
+                            events.push(event(&task_id, ControlPlaneState::Failed, attempt, outcome.summary.clone()));
                             record_completed_outcome(&mut completed_by_task, &mut outcomes, outcome);
                             continue;
                         }
@@ -1033,7 +1033,7 @@ impl AgentTaskScheduler {
                         );
                         events.push(event(
                             &task_id,
-                            AgentTaskState::Failed,
+                            ControlPlaneState::Failed,
                             attempt,
                             outcome.summary.clone(),
                         ));
@@ -1053,7 +1053,7 @@ impl AgentTaskScheduler {
                 });
                 events.push(event(
                     &task_id,
-                    AgentTaskState::Running,
+                    ControlPlaneState::Running,
                     attempt,
                     resource_wait_message,
                 ));
@@ -1435,7 +1435,7 @@ impl AgentTaskScheduler {
                             &mut outcome,
                         );
                     }
-                    let state = AgentTaskState::from_outcome_status(outcome.status);
+                    let state = crate::agent_task_schedule::from_outcome_status(outcome.status);
                     events.push(event(
                         &outcome.task_id,
                         state,
@@ -1493,7 +1493,7 @@ impl AgentTaskScheduler {
                         let next_attempt = result.attempt + 1;
                         events.push(event(
                             &request.task_id,
-                            AgentTaskState::Queued,
+                            ControlPlaneState::Queued,
                             next_attempt,
                             Some("retry queued".to_string()),
                         ));
@@ -1601,7 +1601,7 @@ impl AgentTaskScheduler {
                                 let next_attempt = result.attempt + 1;
                                 events.push(event(
                                 &request.task_id,
-                                AgentTaskState::Queued,
+                                ControlPlaneState::Queued,
                                 next_attempt,
                                 Some(format!(
                                     "provider rotation queued: entry {} of {}; backend={}, model={}",
@@ -2544,7 +2544,7 @@ fn record_harvest_setup_failure(
         committed_harvest_failure(committed_harvest_preflight_outcome(task_id.into()), error);
     events.push(event(
         task_id,
-        AgentTaskState::Failed,
+        ControlPlaneState::Failed,
         attempt,
         outcome.summary.clone(),
     ));
@@ -2559,7 +2559,7 @@ fn child_runs_for_outcomes(outcomes: &[AgentTaskOutcome]) -> Vec<AgentTaskChildR
             Some(AgentTaskChildRun {
                 task_id: outcome.task_id.clone(),
                 run_id,
-                state: AgentTaskState::from_outcome_status(outcome.status),
+                state: crate::agent_task_schedule::from_outcome_status(outcome.status),
                 provider: outcome
                     .metadata
                     .get("provider")

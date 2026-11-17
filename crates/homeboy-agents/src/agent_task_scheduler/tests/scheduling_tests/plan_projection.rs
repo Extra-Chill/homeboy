@@ -53,7 +53,7 @@ mod plan_projection_tests {
             schedule
                 .events
                 .iter()
-                .filter(|event| event.state == AgentTaskState::Running)
+                .filter(|event| event.state == ControlPlaneState::Running)
                 .count(),
             4
         );

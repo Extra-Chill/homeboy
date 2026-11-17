@@ -3345,7 +3345,7 @@ fn accepted_handoff_projects_a_remote_timeout_aggregate_even_when_daemon_transpo
         ..Default::default()
     };
     aggregate.outcomes[0].status = AgentTaskOutcomeStatus::Timeout;
-    aggregate.events[0].state = AgentTaskState::Failed;
+    aggregate.events[0].state = ControlPlaneState::Failed;
 
     let mut snapshot = terminal_child_snapshot(&aggregate);
     let identity = snapshot.events[0]
@@ -3401,7 +3401,7 @@ fn terminal_projection_is_reader_complete_when_interrupted_after_commit_and_retr
             metadata: json!({ "executor_artifact_finalized": true }),
             ..Default::default()
         });
-        aggregate.events[0].state = AgentTaskState::CandidateRecoverable;
+        aggregate.events[0].state = ControlPlaneState::CandidateRecoverable;
         let snapshot = terminal_child_snapshot(&aggregate);
         store::interrupt_after_terminal_commit_for_test();
 
@@ -4029,7 +4029,7 @@ fn pre_dispatch_failure_persists_failed_run_without_provider_handle() {
 
         assert_eq!(record.state(), RunExecutionState::Failed);
         assert_eq!(loaded.state(), RunExecutionState::Failed);
-        assert_eq!(loaded.tasks[0].state(), AgentTaskState::Failed);
+        assert_eq!(loaded.tasks[0].state(), ControlPlaneState::Failed);
         assert!(loaded.provider_handles.is_empty());
         assert!(
             log.events
@@ -4112,7 +4112,7 @@ fn record_completed_run_exposes_logs_and_artifacts() {
                 }],
                 events: vec![AgentTaskProgressEvent {
                     task_id: "task-a".to_string(),
-                    state: AgentTaskState::Succeeded,
+                    state: ControlPlaneState::Succeeded,
                     attempt: 1,
                     message: Some("ok".to_string()),
                 }],
@@ -4187,21 +4187,24 @@ fn submitted_run_can_be_loaded_marked_running_and_completed() {
 
         assert_eq!(loaded_plan.plan_id, "plan-a");
         assert_eq!(running.state(), RunExecutionState::Running);
-        assert_eq!(running.tasks[0].state(), AgentTaskState::Running);
+        assert_eq!(running.tasks[0].state(), ControlPlaneState::Running);
         assert_eq!(
             running.lifecycle.execution.state,
             RunExecutionState::Running
         );
         assert!(running.lifecycle.heartbeat.is_some());
         assert_eq!(completed.state(), RunExecutionState::Succeeded);
-        assert_eq!(completed.tasks[0].state(), AgentTaskState::Succeeded);
+        assert_eq!(completed.tasks[0].state(), ControlPlaneState::Succeeded);
         assert_eq!(
             completed.lifecycle.execution.state,
             RunExecutionState::Succeeded
         );
         assert_eq!(completed.totals, Some(aggregate.totals.clone()));
         assert_eq!(durable_status.state(), RunExecutionState::Succeeded);
-        assert_eq!(durable_status.tasks[0].state(), AgentTaskState::Succeeded);
+        assert_eq!(
+            durable_status.tasks[0].state(),
+            ControlPlaneState::Succeeded
+        );
         assert_eq!(durable_status.totals, Some(aggregate.totals.clone()));
         assert!(completed.aggregate_path.is_some());
     }
@@ -4241,7 +4244,7 @@ fn completed_run_persists_opaque_provider_handles_from_outcome_metadata() {
         );
         assert_eq!(
             record.provider_handles[0].state,
-            Some(AgentTaskState::Succeeded)
+            Some(ControlPlaneState::Succeeded)
         );
         assert_eq!(
             record.provider_handles[0].metadata["opaque"]["provider_owned"],
@@ -4297,10 +4300,10 @@ fn status_recovers_terminal_state_from_durable_aggregate() {
             .expect("record persisted");
 
         assert_eq!(recovered.state(), RunExecutionState::Succeeded);
-        assert_eq!(recovered.tasks[0].state(), AgentTaskState::Succeeded);
+        assert_eq!(recovered.tasks[0].state(), ControlPlaneState::Succeeded);
         assert_eq!(recovered.totals, Some(aggregate.totals.clone()));
         assert_eq!(persisted.state(), RunExecutionState::Succeeded);
-        assert_eq!(persisted.tasks[0].state(), AgentTaskState::Succeeded);
+        assert_eq!(persisted.tasks[0].state(), ControlPlaneState::Succeeded);
         assert_eq!(persisted.totals, Some(aggregate.totals.clone()));
     }
 }
@@ -4342,7 +4345,7 @@ fn cancel_run_emits_recovery_commands_for_runner_backed_run() {
         .read_record("run-cancel-runner")
         .expect("record");
     record.set_state_for_test(RunExecutionState::Running);
-    record.tasks[0].set_state_for_test(AgentTaskState::Running);
+    record.tasks[0].set_state_for_test(ControlPlaneState::Running);
     // Runner-backed: owner pid lives on the runner host (not running
     // here), so live cancellation must hand back recovery commands.
     record.metadata = json!({
@@ -4358,7 +4361,7 @@ fn cancel_run_emits_recovery_commands_for_runner_backed_run() {
         .expect("runner run cancelled");
 
     assert_eq!(cancelled.state(), RunExecutionState::Cancelled);
-    assert_eq!(cancelled.tasks[0].state(), AgentTaskState::Cancelled);
+    assert_eq!(cancelled.tasks[0].state(), ControlPlaneState::Cancelled);
     let unsupported = &cancelled.metadata["live_cancellation_unsupported"];
     assert!(unsupported.is_object());
     assert_eq!(unsupported["runner_id"], json!("lab-a"));

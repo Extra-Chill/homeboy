@@ -108,7 +108,7 @@ impl AgentTaskScheduleSupport {
         });
         events.push(event(
             &task.request.task_id,
-            AgentTaskState::Blocked,
+            ControlPlaneState::Blocked,
             task.attempt,
             Some(message.clone()),
         ));
@@ -316,7 +316,7 @@ impl AgentTaskScheduleSupport {
         while let Some(task) = queued.pop_front() {
             events.push(event(
                 &task.request.task_id,
-                AgentTaskState::Cancelled,
+                ControlPlaneState::Cancelled,
                 task.attempt,
                 Some("cancelled before execution".to_string()),
             ));
@@ -377,7 +377,7 @@ impl AgentTaskScheduleSupport {
             .unwrap_or_else(|| format!("active_units={active_units}/unbounded"));
         events.push(event(
             &task.request.task_id,
-            AgentTaskState::Blocked,
+            ControlPlaneState::Blocked,
             task.attempt,
             Some(format!(
                 "waiting for exclusive resource '{}' held by '{}' (queue_position={queue_position}; {budget}; {} ms elapsed)",
@@ -406,7 +406,7 @@ impl AgentTaskScheduleSupport {
             task.timeout_cancel_requested = true;
             events.push(event(
                 &task.task_id,
-                AgentTaskState::Running,
+                ControlPlaneState::Running,
                 task.attempt,
                 Some("deadline expired; provider cancellation requested".to_string()),
             ));
@@ -452,7 +452,7 @@ impl AgentTaskScheduleSupport {
             let _ = super::engine::release_scratch(&task.scratch, "cancelled", &outcome);
             events.push(event(
                 &task.task_id,
-                AgentTaskState::from_outcome_status(outcome.status),
+                crate::agent_task_schedule::from_outcome_status(outcome.status),
                 task.attempt,
                 outcome.summary.clone(),
             ));

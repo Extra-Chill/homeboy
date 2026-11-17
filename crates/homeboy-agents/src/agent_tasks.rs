@@ -62,7 +62,7 @@ pub use super::agent_task_schedule::{
     AgentTaskAdaptiveConcurrencyPolicy, AgentTaskAggregate, AgentTaskAggregateTotals,
     AgentTaskArtifactOutputDeclaration, AgentTaskArtifactPostprocessStep,
     AgentTaskExecutionContext, AgentTaskPlan, AgentTaskProgressEvent, AgentTaskResourceBudget,
-    AgentTaskResourcePressure, AgentTaskRetryPolicy, AgentTaskScheduleOptions, AgentTaskState,
+    AgentTaskResourcePressure, AgentTaskRetryPolicy, AgentTaskScheduleOptions,
 };
 
 pub use super::agent_task_scheduler::{
@@ -257,7 +257,7 @@ pub mod scheduler {
         AgentTaskAdaptiveConcurrencyPolicy, AgentTaskAggregate, AgentTaskAggregateTotals,
         AgentTaskArtifactOutputDeclaration, AgentTaskExecutionContext, AgentTaskPlan,
         AgentTaskResourceBudget, AgentTaskResourcePressure, AgentTaskRetryPolicy,
-        AgentTaskScheduleOptions, AgentTaskState,
+        AgentTaskScheduleOptions,
     };
     pub use super::super::agent_task_scheduler::{
         AgentTaskExecutorAdapter, AgentTaskScheduler, SharedAgentTaskExecutor,

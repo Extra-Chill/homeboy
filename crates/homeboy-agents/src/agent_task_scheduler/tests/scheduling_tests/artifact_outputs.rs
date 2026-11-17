@@ -74,7 +74,7 @@ fn binds_artifacts_to_generic_child_run_ids_for_durable_fanout() {
     assert_eq!(child_runs[0].task_id, "case-a");
     assert_eq!(child_runs[0].run_id, "child-case-a");
     assert_eq!(child_runs[0].provider.as_deref(), Some("generic-fuzz"));
-    assert_eq!(child_runs[0].state, AgentTaskState::Succeeded);
+    assert_eq!(child_runs[0].state, ControlPlaneState::Succeeded);
     assert_eq!(aggregate.artifact_bindings.len(), 2);
     let mut artifact_bindings = aggregate.artifact_bindings.clone();
     artifact_bindings.sort_by(|left, right| left.task_id.cmp(&right.task_id));

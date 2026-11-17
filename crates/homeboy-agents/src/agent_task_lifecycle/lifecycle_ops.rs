@@ -1398,7 +1398,7 @@ fn fail_detached_cook_handoff_transition(
     reason: &str,
 ) -> AgentTaskTransition {
     AgentTaskTransition::Terminate {
-        outcome: AgentTaskTerminalOutcome::Failed,
+        outcome: RunExecutionState::Failed,
         metadata: detached_cook_handoff_failure_metadata(record, reason),
     }
 }
@@ -1458,7 +1458,7 @@ fn complete_detached_cook_handoff_parent_in_store(
                 metadata.insert("unmaterialized_cook_admission".to_string(), admission);
             }
             Some(AgentTaskTransition::Terminate {
-                outcome: AgentTaskTerminalOutcome::Succeeded,
+                outcome: RunExecutionState::Succeeded,
                 metadata,
             })
         })?;
@@ -5129,7 +5129,7 @@ fn converge_resolved_run_in_store(
         if let Some(committed) = lifecycle_store.transition_when(&record.run_id, |stored| {
             candidate_adoption_terminal_state_is_known(lifecycle_store, stored).then(|| {
                 AgentTaskTransition::Terminate {
-                    outcome: AgentTaskTerminalOutcome::Failed,
+                    outcome: RunExecutionState::Failed,
                     metadata: serde_json::Map::new(),
                 }
             })

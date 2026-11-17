@@ -169,7 +169,7 @@ fn deterministic_failure(
     delivery: &step_job::StepTerminalDelivery,
 ) -> crate::agent_task_lifecycle::AgentTaskTransition {
     crate::agent_task_lifecycle::AgentTaskTransition::Terminate {
-        outcome: crate::agent_task_lifecycle::AgentTaskTerminalOutcome::Failed,
+        outcome: RunExecutionState::Failed,
         metadata: serde_json::Map::from_iter([(
             "execution_step_failure".into(),
             homeboy_core::redaction::redact_json(&json!({
@@ -539,9 +539,7 @@ pub(super) fn consume_execution_terminal_in_store(
     store: &AgentTaskLifecycleStore,
     delivery: &step_job::StepTerminalDelivery,
 ) -> Result<Value> {
-    use crate::agent_task_lifecycle::{
-        AgentTaskAdvance, AgentTaskTerminalOutcome, AgentTaskTransition,
-    };
+    use crate::agent_task_lifecycle::{AgentTaskAdvance, AgentTaskTransition};
     use step_job::StepTerminalOutcome;
     let Some(subject) = delivery.linked_durable_run_id.as_deref() else {
         return Ok(json!({"acknowledged": true, "diagnostic": "missing execution subject"}));
@@ -761,9 +759,9 @@ pub(super) fn consume_execution_terminal_in_store(
             }
             return Some(AgentTaskTransition::Terminate {
                 outcome: if delivery.cancelled {
-                    AgentTaskTerminalOutcome::Cancelled
+                    RunExecutionState::Cancelled
                 } else {
-                    AgentTaskTerminalOutcome::Failed
+                    RunExecutionState::Failed
                 },
                 metadata: serde_json::Map::from_iter([
                     ("execution_scheduling".into(), scheduling),

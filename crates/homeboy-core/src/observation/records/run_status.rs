@@ -123,8 +123,8 @@ impl RunStatus {
     /// so a handed-off run stayed an open resource nothing would ever close
     /// (#11107). A handoff proves the dispatch succeeded; its remote outcome
     /// is a separate run.
-    pub fn control_plane_state(self) -> homeboy_control_plane_contract::ControlPlaneRunState {
-        use homeboy_control_plane_contract::ControlPlaneRunState as State;
+    pub fn control_plane_state(self) -> homeboy_control_plane_contract::ControlPlaneState {
+        use homeboy_control_plane_contract::ControlPlaneState as State;
         match self {
             Self::Running => State::Running,
             Self::Pass | Self::HandedOff => State::Succeeded,
@@ -164,7 +164,7 @@ mod tests {
         }
         assert_eq!(
             RunStatus::HandedOff.control_plane_state(),
-            homeboy_control_plane_contract::ControlPlaneRunState::Succeeded
+            homeboy_control_plane_contract::ControlPlaneState::Succeeded
         );
     }
 

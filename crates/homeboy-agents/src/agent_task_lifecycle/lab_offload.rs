@@ -1142,7 +1142,7 @@ fn fail_missing_lab_attempt_plan_in_store(
     error: &Error,
 ) -> Result<()> {
     record.updated_at = Some(now_timestamp());
-    settle_run(record, RunExecutionState::Failed, AgentTaskState::Failed);
+    settle_run(record, RunExecutionState::Failed, ControlPlaneState::Failed);
     let metadata = record.ensure_metadata_object();
     metadata.insert(
         "pre_execution_failure".to_string(),

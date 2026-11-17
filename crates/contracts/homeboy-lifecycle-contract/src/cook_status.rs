@@ -46,9 +46,10 @@
 //! a persisted report, has no process exit code to branch on and cannot decide
 //! success, terminality, or retry from the string alone.
 //!
-//! `homeboy_core::run_lifecycle_status::RunLifecycleStatus` is the internal
-//! closed vocabulary that answers those questions, and `From<&CookStatus>` is
-//! the projection onto it. External consumers read canonical lifecycle and
+//! `homeboy_control_plane_contract::ControlPlaneState` is the closed
+//! vocabulary that answers those questions, and
+//! `homeboy_core::run_lifecycle_status::from_cook_status` is the projection
+//! onto it. External consumers read canonical lifecycle and
 //! retry eligibility from `homeboy/control-plane-run/v1`.
 //!
 //! That projection is deliberately *not* an authority on terminality. It is

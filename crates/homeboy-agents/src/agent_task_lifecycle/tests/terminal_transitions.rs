@@ -9,11 +9,10 @@ use super::{succeeded_aggregate, test_plan};
 use crate::agent_task_lifecycle::terminal_transition::TerminalRecordCommit;
 use crate::agent_task_lifecycle::{
     apply_aggregate_transition_in_store, set_run_state, AgentTaskAggregateTransition,
-    AgentTaskLifecycleStore, AgentTaskRunRecord, AgentTaskTerminalOutcome, AgentTaskTransition,
-    AgentTaskTransitionError,
+    AgentTaskLifecycleStore, AgentTaskRunRecord, AgentTaskTransition, AgentTaskTransitionError,
+    RunExecutionState,
 };
 use homeboy_core::run_lifecycle_record::RunLifecycleRecord;
-use homeboy_lifecycle_contract::RunExecutionState;
 use serde_json::json;
 
 const RUN_ID: &str = "stale-terminal-writer";
@@ -112,7 +111,7 @@ fn failed_with(reason: &str) -> AgentTaskTransition {
     let mut metadata = serde_json::Map::new();
     metadata.insert("terminal_reason".to_string(), json!(reason));
     AgentTaskTransition::Terminate {
-        outcome: AgentTaskTerminalOutcome::Failed,
+        outcome: RunExecutionState::Failed,
         metadata,
     }
 }
@@ -203,7 +202,7 @@ fn stale_transition_is_a_typed_conflict_and_writes_nothing() {
             RUN_ID,
             stale.revision,
             AgentTaskTransition::Terminate {
-                outcome: AgentTaskTerminalOutcome::Succeeded,
+                outcome: RunExecutionState::Succeeded,
                 metadata: serde_json::Map::new(),
             },
         )

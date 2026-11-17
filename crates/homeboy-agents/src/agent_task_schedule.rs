@@ -1,3 +1,4 @@
+use homeboy_control_plane_contract::ControlPlaneState;
 use std::collections::HashMap;
 use std::fmt;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -490,7 +491,7 @@ mod aggregate {
     pub struct AgentTaskChildRun {
         pub task_id: String,
         pub run_id: String,
-        pub state: AgentTaskState,
+        pub state: ControlPlaneState,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         pub provider: Option<String>,
         #[serde(default, skip_serializing_if = "Value::is_null")]
@@ -594,37 +595,23 @@ mod aggregate {
     #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
     pub struct AgentTaskProgressEvent {
         pub task_id: String,
-        pub state: AgentTaskState,
+        pub state: ControlPlaneState,
         #[serde(default)]
         pub attempt: u32,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         pub message: Option<String>,
     }
 
-    #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
-    #[serde(rename_all = "snake_case")]
-    pub enum AgentTaskState {
-        Queued,
-        Blocked,
-        Skipped,
-        Running,
-        Succeeded,
-        CandidateRecoverable,
-        Failed,
-        Cancelled,
-        TimedOut,
-    }
-
-    impl AgentTaskState {
-        /// The single definition of a task's state once it has an outcome.
-        pub fn from_outcome_status(status: AgentTaskOutcomeStatus) -> Self {
-            match status {
-                AgentTaskOutcomeStatus::Succeeded | AgentTaskOutcomeStatus::NoOp => Self::Succeeded,
-                AgentTaskOutcomeStatus::CandidateRecoverable => Self::CandidateRecoverable,
-                AgentTaskOutcomeStatus::Timeout => Self::TimedOut,
-                AgentTaskOutcomeStatus::Cancelled => Self::Cancelled,
-                _ => Self::Failed,
+    /// The single definition of a task's state once it has an outcome.
+    pub fn from_outcome_status(status: AgentTaskOutcomeStatus) -> ControlPlaneState {
+        match status {
+            AgentTaskOutcomeStatus::Succeeded | AgentTaskOutcomeStatus::NoOp => {
+                ControlPlaneState::Succeeded
             }
+            AgentTaskOutcomeStatus::CandidateRecoverable => ControlPlaneState::CandidateRecoverable,
+            AgentTaskOutcomeStatus::Timeout => ControlPlaneState::TimedOut,
+            AgentTaskOutcomeStatus::Cancelled => ControlPlaneState::Cancelled,
+            _ => ControlPlaneState::Failed,
         }
     }
 

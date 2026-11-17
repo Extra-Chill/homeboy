@@ -754,7 +754,7 @@ fn failed_lab_preacceptance_reconstructs_only_authenticated_zero_execution_recov
             backend: "test".to_string(),
             provider_run_id: "provider-actual-run".to_string(),
             stream_uri: None,
-            state: Some(AgentTaskState::Failed),
+            state: Some(ControlPlaneState::Failed),
             metadata: Value::Null,
         });
     assert!(candidate_adoption_recovery_outcome(&provider_handle, &plan.tasks[0]).is_none());
@@ -1304,14 +1304,14 @@ fn foreground_terminal_daemon_projection_finishes_success_and_failure_runs_once(
             "foreground-daemon-success",
             homeboy_core::api_jobs::JobStatus::Succeeded,
             RunExecutionState::Succeeded,
-            AgentTaskState::Succeeded,
+            ControlPlaneState::Succeeded,
             "succeeded",
         ),
         (
             "foreground-daemon-failure",
             homeboy_core::api_jobs::JobStatus::Failed,
             RunExecutionState::Failed,
-            AgentTaskState::Failed,
+            ControlPlaneState::Failed,
             "failed",
         ),
     ] {
@@ -1564,7 +1564,7 @@ fn verified_pre_provider_runner_cancellation_terminalizes_and_replays_idempotent
     let first = record.clone();
 
     assert_eq!(record.state(), RunExecutionState::Cancelled);
-    assert_eq!(record.tasks[0].state(), AgentTaskState::Cancelled);
+    assert_eq!(record.tasks[0].state(), ControlPlaneState::Cancelled);
     assert_eq!(record.metadata["runner_job_status"], "cancelled");
     assert_eq!(
         record.metadata["runner_result_synchronization"]["state"],
@@ -1802,7 +1802,7 @@ fn typed_pre_provider_failure_outranks_stale_runner_status_and_terminalizes_once
             .expect("failed aggregate is durable");
 
         assert_eq!(record.state(), RunExecutionState::Failed);
-        assert_eq!(record.tasks[0].state(), AgentTaskState::Failed);
+        assert_eq!(record.tasks[0].state(), ControlPlaneState::Failed);
         assert_eq!(record.metadata["phase"], "lab_runner_job_pre_provider");
         assert_eq!(
             record.metadata["pre_execution_failure"]["error_code"],
@@ -1860,7 +1860,7 @@ fn typed_runner_failure_preserves_existing_provider_progress() {
         backend: "test".to_string(),
         provider_run_id: "provider-already-started".to_string(),
         stream_uri: None,
-        state: Some(AgentTaskState::Running),
+        state: Some(ControlPlaneState::Running),
         metadata: Value::Null,
     });
     lifecycle_store
@@ -2046,7 +2046,7 @@ fn cancellation_race_projects_runner_success_instead_of_cancelling_controller_pr
     let terminal = cancel_run_in_store(&lifecycle_store, run_id, Some("operator cancellation"))
         .expect("daemon terminal result wins cancellation race");
     assert_eq!(terminal.state(), RunExecutionState::Succeeded);
-    assert_eq!(terminal.tasks[0].state(), AgentTaskState::Succeeded);
+    assert_eq!(terminal.tasks[0].state(), ControlPlaneState::Succeeded);
     assert!(terminal.metadata.get("cancel_reason").is_none());
     assert!(lifecycle_store.read_aggregate(run_id).is_ok());
 }
@@ -3394,7 +3394,7 @@ fn aggregate_only_remote_dispatch_failure_preserves_lab_outcome_details() {
         assert_eq!(record.run_id, "conductor-full-loop-proof-retry2-20260611");
         assert_eq!(loaded.state(), RunExecutionState::Failed);
         assert_eq!(loaded.tasks[0].task_id, "cook-conductor");
-        assert_eq!(loaded.tasks[0].state(), AgentTaskState::Failed);
+        assert_eq!(loaded.tasks[0].state(), ControlPlaneState::Failed);
         assert_eq!(loaded.tasks[0].backend, "fixture.agent-task-executor");
         assert_eq!(loaded.provider_handles.len(), 1);
         assert_eq!(loaded.provider_handles[0].provider_run_id, "provider-run-1");
@@ -3573,7 +3573,7 @@ fn cancel_marks_queued_run_and_tasks_cancelled() {
         let record = cancel("run-cancel").expect("cancelled");
 
         assert_eq!(record.state(), RunExecutionState::Cancelled);
-        assert_eq!(record.tasks[0].state(), AgentTaskState::Cancelled);
+        assert_eq!(record.tasks[0].state(), ControlPlaneState::Cancelled);
         assert!(record.metadata["cancel_requested_at"].is_string());
     });
 }
@@ -3640,7 +3640,7 @@ fn running_run(store: &AgentTaskLifecycleStore, run_id: &str) -> AgentTaskRunRec
         .expect("submit exact run");
     let mut record = store.read_record(run_id).expect("queued record");
     set_run_state(&mut record, RunExecutionState::Running);
-    record.tasks[0].set_state_for_test(AgentTaskState::Running);
+    record.tasks[0].set_state_for_test(ControlPlaneState::Running);
     store
         .advance_record(&mut record, AgentTaskAdvance::Start)
         .expect("start the run");
@@ -3661,9 +3661,9 @@ fn commit_runner_cancellation(
     for task in &mut prepared.tasks {
         if matches!(
             task.state(),
-            AgentTaskState::Queued | AgentTaskState::Running
+            ControlPlaneState::Queued | ControlPlaneState::Running
         ) {
-            task.set_state_for_test(AgentTaskState::Cancelled);
+            task.set_state_for_test(ControlPlaneState::Cancelled);
         }
     }
     prepared.metadata["cancellation_provenance"] = provenance.clone();
@@ -3728,7 +3728,7 @@ fn operator_cancellation_preserves_existing_runner_event_provenance() {
     let cancelled = cancel_run_in_store(&lifecycle_store, run_id, Some("operator requested stop"))
         .expect("operator cancellation converges");
     assert_eq!(cancelled.state(), RunExecutionState::Cancelled);
-    assert_eq!(cancelled.tasks[0].state(), AgentTaskState::Cancelled);
+    assert_eq!(cancelled.tasks[0].state(), ControlPlaneState::Cancelled);
     assert_eq!(cancelled.metadata["cancellation_provenance"], provenance);
     assert_eq!(
         lifecycle_store
@@ -3800,7 +3800,7 @@ fn runner_cancellation_is_stored_and_every_read_agrees_without_writing() {
     for _ in 0..2 {
         let cancelled = store.read_record(run_id).unwrap();
         assert_eq!(cancelled.state(), RunExecutionState::Cancelled);
-        assert_eq!(cancelled.tasks[0].state(), AgentTaskState::Cancelled);
+        assert_eq!(cancelled.tasks[0].state(), ControlPlaneState::Cancelled);
         assert_eq!(cancelled.metadata["cancellation_provenance"], provenance);
         assert_eq!(
             cancelled.lifecycle.execution.state,
@@ -3878,7 +3878,7 @@ fn cancellation_survives_150_runner_events_and_a_stale_running_write() {
     let read = store.read_record(run_id).unwrap();
     assert_eq!(read, settled, "the refused commit wrote nothing");
     assert_eq!(read.state(), RunExecutionState::Cancelled);
-    assert_eq!(read.tasks[0].state(), AgentTaskState::Cancelled);
+    assert_eq!(read.tasks[0].state(), ControlPlaneState::Cancelled);
     assert_eq!(status_state(&store, run_id), RunExecutionState::Cancelled);
 }
 
@@ -3928,7 +3928,7 @@ fn runner_cancellation_receipt_survives_payload_pruning_and_a_stale_write() {
     assert_eq!(status_state(&store, run_id), RunExecutionState::Cancelled);
     let read = store.read_record(run_id).unwrap();
     assert_eq!(read.state(), RunExecutionState::Cancelled);
-    assert_eq!(read.tasks[0].state(), AgentTaskState::Cancelled);
+    assert_eq!(read.tasks[0].state(), ControlPlaneState::Cancelled);
     assert_eq!(read.metadata["cancellation_provenance"], provenance);
     assert_eq!(
         read.metadata["cancellation_provenance"],
@@ -3955,7 +3955,7 @@ fn cancel_run_reclaims_stale_running_record() {
         .read_record("run-cancel-stale")
         .expect("record");
     record.set_state_for_test(RunExecutionState::Running);
-    record.tasks[0].set_state_for_test(AgentTaskState::Running);
+    record.tasks[0].set_state_for_test(ControlPlaneState::Running);
     record.metadata["runner_pid"] = json!(u32::MAX);
     // Reserving provider execution records the libtest process as its owner.
     // Leaving that live PID in this stale-owner fixture makes cancellation
@@ -3970,7 +3970,7 @@ fn cancel_run_reclaims_stale_running_record() {
         .expect("stale run cancelled");
 
     assert_eq!(cancelled.state(), RunExecutionState::Cancelled);
-    assert_eq!(cancelled.tasks[0].state(), AgentTaskState::Cancelled);
+    assert_eq!(cancelled.tasks[0].state(), ControlPlaneState::Cancelled);
     assert_eq!(cancelled.metadata["cancelled_stale_running"], json!(true));
     assert_eq!(
         cancelled.metadata["provider_executions"][0]["state"],
@@ -4011,7 +4011,7 @@ fn replaying_cancel_repairs_stale_provider_execution() {
         .read_record("run-cancel-replay")
         .expect("record");
     record.set_state_for_test(RunExecutionState::Cancelled);
-    record.tasks[0].set_state_for_test(AgentTaskState::Cancelled);
+    record.tasks[0].set_state_for_test(ControlPlaneState::Cancelled);
     lifecycle_store
         .write_record(&record)
         .expect("legacy cancelled record");
@@ -4070,7 +4070,7 @@ fn replaying_cancel_recovers_stale_released_and_orphaned_scratch_before_bounded_
 
         let mut record = store::read_record(run_id).expect("record");
         record.set_state_for_test(RunExecutionState::Cancelled);
-        record.tasks[0].set_state_for_test(AgentTaskState::Cancelled);
+        record.tasks[0].set_state_for_test(ControlPlaneState::Cancelled);
         store::write_record(&record).expect("legacy cancelled record");
 
         // A terminal cleanup pass made this dead allocation look orphaned before
@@ -4484,7 +4484,7 @@ fn observer_interruption_is_retryable_but_operator_cancellation_stays_terminal()
         let failed = record_interrupted_local_owner_in_store(&store, "observer-interrupted")
             .expect("record interrupted observer");
         assert_eq!(failed.state(), RunExecutionState::Failed);
-        assert_eq!(failed.tasks[0].state(), AgentTaskState::Failed);
+        assert_eq!(failed.tasks[0].state(), ControlPlaneState::Failed);
         assert_eq!(failed.metadata["retryable"], json!(true));
         assert!(failed.metadata.get("cancel_reason").is_none());
         let aggregate = store
@@ -4640,7 +4640,7 @@ fn terminal_provider_failure_without_owner_persists_interrupted_owner_aggregate(
         assert_eq!(replay.state(), RunExecutionState::Failed);
         assert!(replay.provider_handles.is_empty());
         assert!(replay.aggregate_path.is_some());
-        assert_eq!(replay.tasks[0].state(), AgentTaskState::Failed);
+        assert_eq!(replay.tasks[0].state(), ControlPlaneState::Failed);
         assert_eq!(
             replay.metadata["local_provider_ownership"]["state"],
             json!("provider_failed")
@@ -4699,7 +4699,7 @@ fn terminal_provider_cancellation_without_owner_converges_and_is_idempotent() {
 
         assert_eq!(terminal.state(), RunExecutionState::Cancelled);
         assert_eq!(replay.state(), RunExecutionState::Cancelled);
-        assert_eq!(replay.tasks[0].state(), AgentTaskState::Cancelled);
+        assert_eq!(replay.tasks[0].state(), ControlPlaneState::Cancelled);
         assert_eq!(
             replay.metadata["provider_executions"][0]["state"],
             json!("cancelled")

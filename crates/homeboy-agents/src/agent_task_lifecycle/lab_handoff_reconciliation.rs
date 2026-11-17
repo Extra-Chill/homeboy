@@ -381,13 +381,13 @@ pub(crate) fn apply_runner_job_terminal_state(
 ) {
     let (run_state, task_state) = match status {
         homeboy_core::api_jobs::JobStatus::Succeeded => {
-            (RunExecutionState::Succeeded, AgentTaskState::Succeeded)
+            (RunExecutionState::Succeeded, ControlPlaneState::Succeeded)
         }
         homeboy_core::api_jobs::JobStatus::Cancelled => {
-            (RunExecutionState::Cancelled, AgentTaskState::Cancelled)
+            (RunExecutionState::Cancelled, ControlPlaneState::Cancelled)
         }
         homeboy_core::api_jobs::JobStatus::Failed => {
-            (RunExecutionState::Failed, AgentTaskState::Failed)
+            (RunExecutionState::Failed, ControlPlaneState::Failed)
         }
         _ => return,
     };

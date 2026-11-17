@@ -429,7 +429,7 @@ pub struct ControlPlaneActionAcknowledgement {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::ControlPlaneRunState;
+    use crate::ControlPlaneState;
 
     #[test]
     fn action_request_and_acknowledgement_round_trip() {
@@ -456,7 +456,7 @@ mod tests {
         );
 
         let mut resource = ControlPlaneRun::new(run.clone());
-        resource.state = ControlPlaneRunState::Cancelled;
+        resource.state = ControlPlaneState::Cancelled;
         let acknowledgement = ControlPlaneActionAcknowledgement {
             schema: CONTROL_PLANE_ACTION_ACKNOWLEDGEMENT_SCHEMA.to_string(),
             acknowledgement: "run-1:action:cancel:request-1".to_string(),
