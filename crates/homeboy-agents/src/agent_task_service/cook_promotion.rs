@@ -3369,16 +3369,6 @@ fn cook_review_dossier_with_stores_and_review_form(
         .cloned()
         .map(AgentTaskReviewEvidence::for_reviewers)
         .collect();
-    if evidence.is_empty() {
-        evidence.push(AgentTaskReviewEvidence {
-            summary: if terminal_form.evidence_required {
-                "Required evidence is missing: the review form supplied no measurements or repro results."
-            } else {
-                "Measurement evidence is missing: the review form supplied no measurements, before/after observations or repro results."
-            }.into(),
-            url: None,
-        });
-    }
     if let Some(form) = review_form {
         evidence.push(AgentTaskReviewEvidence {
             summary: format!(
