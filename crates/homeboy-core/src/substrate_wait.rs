@@ -61,6 +61,7 @@ pub fn is_transient_refusal(code: &str, details: &serde_json::Value) -> bool {
         || details["daemon_transport_error"]["kind"] == "timeout"
         || details["substrate_wait"] == "runner_connect"
         || details["substrate_wait"] == "runner_restarting"
+        || details["kind"] == "runner_state_lock_timeout"
         || reasons_transient(&details["runner_availability"]["reasons"])
         || reasons_transient(&details["readiness_reasons"])
         // A Lab gate admission refusal states its own verdict: the
@@ -145,6 +146,13 @@ mod tests {
         .admission_refusal();
         let cases = [
             (pressure, true),
+            (
+                refusal(
+                    ErrorCode::InternalIoError,
+                    serde_json::json!({"kind": "runner_state_lock_timeout"}),
+                ),
+                true,
+            ),
             (
                 refusal(
                     ErrorCode::InternalUnexpected,

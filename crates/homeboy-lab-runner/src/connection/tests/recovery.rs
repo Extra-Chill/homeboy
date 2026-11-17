@@ -18,6 +18,7 @@ struct FakeRecoveryOperations {
     reconnects: AtomicUsize,
     closed: std::sync::Mutex<Vec<u32>>,
     fail_persist: bool,
+    check_remote_lock: bool,
     fail_open: Option<TransportFailure>,
 }
 
@@ -29,6 +30,7 @@ impl FakeRecoveryOperations {
             reconnects: AtomicUsize::new(0),
             closed: std::sync::Mutex::new(Vec::new()),
             fail_persist: false,
+            check_remote_lock: false,
             fail_open: None,
         })
     }
@@ -57,10 +59,16 @@ impl super::super::transport::TransportOperations for FakeRecoveryOperations {
     }
 
     fn is_live(&self, session: &RunnerSession) -> bool {
+        if self.check_remote_lock {
+            assert_restart_lock_available(&session.runner_id);
+        }
         session.local_url.as_deref() == Some("http://live")
     }
 
-    fn open(&self, _runner_id: &str, owner: &RunnerSession) -> Result<RunnerSession> {
+    fn open(&self, runner_id: &str, owner: &RunnerSession) -> Result<RunnerSession> {
+        if self.check_remote_lock {
+            assert_restart_lock_available(runner_id);
+        }
         let sequence = self.reconnects.fetch_add(1, Ordering::SeqCst);
         if let Some(failure) = self.fail_open {
             return Err(super::super::transport::transport_error(
@@ -95,8 +103,30 @@ impl super::super::transport::TransportOperations for FakeRecoveryOperations {
 }
 
 #[cfg(unix)]
+fn assert_restart_lock_available(runner_id: &str) {
+    use std::os::fd::AsRawFd;
+    let path = crate::runner_state_lock::runner_state_dir_in_root(
+        &homeboy_core::paths::homeboy().expect("root"),
+        runner_id,
+    )
+    .join("restart-recovery.lock");
+    let lock = std::fs::OpenOptions::new()
+        .create(true)
+        .truncate(false)
+        .write(true)
+        .open(path)
+        .expect("restart lock");
+    assert_eq!(
+        unsafe { libc::flock(lock.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) },
+        0,
+        "remote I/O must not hold the restart lock"
+    );
+}
+
+#[cfg(unix)]
 fn stale_recovery_session(lease: &str, pid: u32) -> RunnerSession {
     let mut session = direct_ssh_session(lease);
+    session.runner_id = "runner-a".to_string();
     session.local_url = Some("http://stale".to_string());
     session.tunnel_pid = Some(pid);
     session
@@ -104,26 +134,19 @@ fn stale_recovery_session(lease: &str, pid: u32) -> RunnerSession {
 
 #[cfg(unix)]
 #[test]
-fn concurrent_pollers_of_one_runner_reattach_one_physical_tunnel() {
+fn persisted_transport_releases_restart_lock_during_probe_and_open() {
     crate::test_support::with_isolated_home(|_| {
-        let operations = FakeRecoveryOperations::new([(
+        let mut operations = FakeRecoveryOperations::new([(
             "runner-a".to_string(),
             stale_recovery_session("lease-a", 101),
         )]);
-        let barrier = Arc::new(std::sync::Barrier::new(3));
-        let workers = [0, 1].map(|_| {
-            let operations = Arc::clone(&operations);
-            let barrier = Arc::clone(&barrier);
-            std::thread::spawn(move || {
-                barrier.wait();
-                operations.recover("runner-a").expect("recover")
-            })
-        });
-        barrier.wait();
-        let recovered = workers.map(|worker| worker.join().expect("worker"));
+        Arc::get_mut(&mut operations)
+            .expect("unique fixture")
+            .check_remote_lock = true;
+        let recovered = operations.recover("runner-a").expect("recover");
 
         assert_eq!(operations.reconnects.load(Ordering::SeqCst), 1);
-        assert_eq!(recovered[0].tunnel_pid, recovered[1].tunnel_pid);
+        assert_eq!(recovered.tunnel_pid, Some(80_000));
         assert_eq!(
             operations.closed.lock().expect("closed").as_slice(),
             [101],
@@ -176,6 +199,7 @@ fn failed_recovery_persistence_closes_only_the_new_tunnel() {
             reconnects: AtomicUsize::new(0),
             closed: std::sync::Mutex::new(Vec::new()),
             fail_persist: true,
+            check_remote_lock: false,
             fail_open: None,
         });
 
@@ -246,6 +270,7 @@ fn a_failed_transport_never_restarts_or_replaces_the_daemon() {
                 reconnects: AtomicUsize::new(0),
                 closed: std::sync::Mutex::new(Vec::new()),
                 fail_persist: false,
+                check_remote_lock: false,
                 fail_open: Some(failure),
             });
 

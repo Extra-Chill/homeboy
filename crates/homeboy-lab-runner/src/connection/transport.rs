@@ -18,9 +18,9 @@ use super::*;
 pub enum TransportLifetime {
     /// Retained as the runner's current session. A live current session is
     /// reused; otherwise the fresh tunnel replaces it by compare-and-replace
-    /// on the lease and the replaced tunnel is closed. Taken under the restart
-    /// recovery lock, so a poller waits for an in-place restart to publish the
-    /// restarted session instead of reattaching the stopped lease.
+    /// on the lease and the replaced tunnel is closed. The restart recovery
+    /// barrier waits for an in-place restart before observing the session and
+    /// checks again before publication, never holding the lock over remote I/O.
     Persisted,
     /// A fresh tunnel for one log or cancel read. It is never persisted and
     /// never the current session's tunnel; the caller closes it with
@@ -171,22 +171,25 @@ pub(super) fn ensure_transport_with(
         // caller closes what it receives.
         TransportLifetime::Temporary => operations.open(runner_id, &owner()?),
         TransportLifetime::Persisted => {
-            restart_recovery::with_restart_recovery_lock(runner_id, || {
-                let owner = owner()?;
-                if operations.is_live(&owner) {
-                    return Ok(owner);
+            let owner = restart_recovery::with_restart_recovery_lock(runner_id, owner)?;
+            if operations.is_live(&owner) {
+                return Ok(owner);
+            }
+            let session = operations.open(runner_id, &owner)?;
+            // A restart may have stopped this lease during remote I/O, even
+            // without publishing a replacement. Recheck its barrier before
+            // compare-and-persist, with restart -> runner state lock order.
+            let replaced = match restart_recovery::with_restart_recovery_lock(runner_id, || {
+                operations.persist(runner_id, &session)
+            }) {
+                Ok(replaced) => replaced,
+                Err(error) => {
+                    operations.close(&session);
+                    return Err(error);
                 }
-                let session = operations.open(runner_id, &owner)?;
-                let replaced = match operations.persist(runner_id, &session) {
-                    Ok(replaced) => replaced,
-                    Err(error) => {
-                        operations.close(&session);
-                        return Err(error);
-                    }
-                };
-                operations.close(&replaced);
-                Ok(session)
-            })
+            };
+            operations.close(&replaced);
+            Ok(session)
         }
     }
 }

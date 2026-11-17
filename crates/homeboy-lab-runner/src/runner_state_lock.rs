@@ -178,8 +178,12 @@ fn lock_timeout_error(lock_path: &Path, runner_id: &str, lock_timeout: Duration)
         .get("phase")
         .and_then(serde_json::Value::as_str)
         .unwrap_or("unknown");
+    let lock_label = lock_path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or("unknown lock");
     let message = format!(
-        "timed out after {}ms waiting for runner state lock held by pid {} (phase {}, held {}ms)",
+        "timed out after {}ms waiting for {lock_label} held by pid {} (phase {}, held {}ms)",
         lock_timeout.as_millis(),
         lock_owner
             .get("owner_pid")
@@ -337,6 +341,18 @@ mod tests {
     }
 
     #[test]
+    fn restart_lock_timeout_names_the_lock_it_waited_on() {
+        let directory = tempfile::tempdir().expect("lock directory");
+        let error = lock_timeout_error(
+            &directory.path().join("restart-recovery.lock"),
+            "runner-a",
+            Duration::from_millis(75),
+        );
+        assert!(error.message.contains("waiting for restart-recovery.lock"));
+        assert!(homeboy_core::substrate_wait::is_transient_error(&error));
+    }
+
+    #[test]
     fn lock_timeout_reports_the_live_holder_phase_age_deadline_and_action() {
         crate::test_support::with_isolated_home(|_| {
             let lock_path =
@@ -365,6 +381,8 @@ mod tests {
                     assert_eq!(error.details["context"], "lock runner state");
                     assert_eq!(error.details["kind"], "runner_state_lock_timeout");
                     assert_eq!(error.retryable, Some(true));
+                    assert!(homeboy_core::substrate_wait::is_transient_error(&error));
+                    assert!(error.message.contains("waiting for runner-state.lock"));
                     assert_eq!(error.details["owner_pid"], std::process::id());
                     assert_eq!(error.details["phase"], "runner_state_mutation");
                     assert!(error.details["owner_age_ms"].as_i64().is_some());
