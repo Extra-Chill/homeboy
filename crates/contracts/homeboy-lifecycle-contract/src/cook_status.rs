@@ -66,7 +66,8 @@ impl CookStatus {
             "no_changes" => Self::NoChanges,
             "no_changes_gate_failed" => Self::NoChangesGateFailed,
             "gate_failed" => Self::GateFailed,
-            "gate_environment_unavailable" => Self::GateEnvironmentUnavailable,
+            // Stored by builds before the variant was renamed; 10 controller records carry it.
+            "gate_environment_unavailable" | "gates_deferred" => Self::GateEnvironmentUnavailable,
             "baseline_red" => Self::BaselineRed,
             "finalization_failed" => Self::FinalizationFailed,
             "gate_declaration_invalid" => Self::GateDeclarationInvalid,

@@ -140,13 +140,23 @@ mod tests {
     }
 
     #[test]
+    fn stored_gates_deferred_reads_as_gate_environment_unavailable() {
+        let status: CookStatus =
+            serde_json::from_value(serde_json::json!("gates_deferred")).unwrap();
+        assert_eq!(status, CookStatus::GateEnvironmentUnavailable);
+        assert_eq!(
+            serde_json::to_value(&status).unwrap(),
+            "gate_environment_unavailable"
+        );
+    }
+
+    #[test]
     fn retired_and_future_labels_remain_lossless_unknowns() {
         for label in [
             "running",
             "completed",
             "blocked_by_dependency",
             "review_form_timeout",
-            "gates_deferred",
             "moving_base_from_a_newer_binary",
         ] {
             let status: CookStatus = serde_json::from_value(serde_json::json!(label)).unwrap();
