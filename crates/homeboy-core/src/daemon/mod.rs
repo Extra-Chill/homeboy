@@ -212,6 +212,30 @@ fn controller_job_response(value: &serde_json::Value) -> Option<&serde_json::Val
     daemon_endpoint_payload(value)?.get("job")
 }
 
+/// A local-controller request that got no answer. `outcome` says whether the
+/// daemon may have applied it: `not_delivered` when every attempt was refused,
+/// otherwise `unknown`, and the caller must look before acting again.
+fn daemon_request_error(operation: &str, error: &reqwest::Error, delivered: bool) -> Error {
+    let (failure, message) = if error.is_timeout() {
+        (
+            "timeout",
+            format!("{operation}: the local controller did not respond in time: {error}"),
+        )
+    } else if error.is_connect() {
+        ("connect", format!("{operation}: {error}"))
+    } else {
+        ("request", format!("{operation}: {error}"))
+    };
+    let mut error = Error::internal_unexpected(message).with_retryable(true);
+    error.details["transport_failure"] = json!(failure);
+    error.details["outcome"] = json!(if delivered {
+        "unknown"
+    } else {
+        "not_delivered"
+    });
+    error
+}
+
 impl LocalControllerJobClient {
     /// Connect to the serving lease. Admission is checked per request so that
     /// draining leases can still accept continuations of runs they own.
@@ -363,6 +387,10 @@ impl LocalControllerJobClient {
     ) -> Result<reqwest::blocking::Response> {
         let deadline = std::time::Instant::now() + DAEMON_HANDOFF_WAIT;
         let mut endpoint = self.endpoint.clone();
+        // A refused connection was never delivered; any other failure may
+        // have reached the daemon, which keeps the outcome unknown for every
+        // later attempt too.
+        let mut delivered = false;
         loop {
             match send(&endpoint) {
                 Ok(response) => return Ok(response),
@@ -371,6 +399,7 @@ impl LocalControllerJobClient {
                         || (resend_timeouts && (error.is_timeout() || error.is_request())))
                         && std::time::Instant::now() < deadline =>
                 {
+                    delivered |= !error.is_connect();
                     std::thread::sleep(Duration::from_millis(250));
                     if let Ok(Some(state)) =
                         validate_lease_file(&self.state_path).map(|lease| lease.state)
@@ -379,7 +408,8 @@ impl LocalControllerJobClient {
                     }
                 }
                 Err(error) => {
-                    return Err(Error::internal_unexpected(format!("{operation}: {error}")))
+                    delivered |= !error.is_connect();
+                    return Err(daemon_request_error(operation, &error, delivered));
                 }
             }
         }
@@ -6536,8 +6566,12 @@ mod tests {
             if expect_ok {
                 assert!(sent.unwrap().status().is_success());
             } else {
-                let error = sent.unwrap_err().to_string();
-                assert!(error.contains("start"), "{error}");
+                let error = sent.unwrap_err();
+                assert!(error.message.contains("start"), "{error}");
+                // A decision the daemon may have applied is reported as
+                // such, not as a plain failure.
+                assert_eq!(error.details["transport_failure"], "timeout");
+                assert_eq!(error.details["outcome"], "unknown");
             }
             assert_eq!(server.join().unwrap(), expect_ok);
         }
