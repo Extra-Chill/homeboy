@@ -113,6 +113,8 @@ pub struct ManagedCargoTarget {
     /// the next worktree provisioned for the same repository identity seeds
     /// warmer.
     promote_to: Option<PathBuf>,
+    seed_ms: u128,
+    seed_bytes: u64,
     _lease: Option<SharedCargoTargetLease>,
 }
 
@@ -145,6 +147,14 @@ impl ManagedCargoTarget {
             resolution: self.resolution.to_string(),
             owner: self.owner.clone(),
         }
+    }
+
+    pub fn seed_ms(&self) -> u128 {
+        self.seed_ms
+    }
+
+    pub fn seed_bytes(&self) -> u64 {
+        self.seed_bytes
     }
 
     pub fn size_bytes(&self) -> Result<u64> {
@@ -255,6 +265,8 @@ pub fn acquire_isolated_cargo_target(
         resolution: "isolated",
         owner: owner.to_string(),
         promote_to: None,
+        seed_ms: 0,
+        seed_bytes: 0,
         _lease: Some(lease),
     })
 }
@@ -378,6 +390,7 @@ fn acquire_managed_cargo_target_for_compatibility_in_until(
         std::process::id()
     );
     let lease = acquire_shared_cargo_target_in(&root, &run_owner, SystemTime::now())?;
+    let seed_started = Instant::now();
     optional_cargo_cache_transfer("seed skipped; using cold private target", || {
         // Touch base liveness, then release it: nothing compiles there.
         drop(acquire_shared_cargo_target_in_until(
@@ -394,6 +407,8 @@ fn acquire_managed_cargo_target_for_compatibility_in_until(
         target_dir: lease.target_dir().to_path_buf(),
         resolution: "isolated",
         owner: owner.to_string(),
+        seed_ms: seed_started.elapsed().as_millis(),
+        seed_bytes: path_size(lease.target_dir()).unwrap_or(0),
         promote_to: Some(base_dir),
         _lease: Some(lease),
     })
@@ -770,6 +785,8 @@ fn acquire_explicit_cargo_target_in(
         resolution: "local",
         owner: owner.to_string(),
         promote_to: None,
+        seed_ms: 0,
+        seed_bytes: 0,
         _lease: Some(lease),
     })
 }

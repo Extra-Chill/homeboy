@@ -976,6 +976,9 @@ fn receipt_download_recovers_the_real_receipt_after_a_retryable_failure() {
         &[],
     )
     .unwrap();
+    assert!(report.environment.resources.is_some());
+    assert!(report.environment.host_pressure_start.is_some());
+    assert!(report.environment.host_pressure_end.is_some());
     let receipt = LabGateReceipt {
         schema: "homeboy/lab-gate-receipt/v1".into(),
         request_sha256: "request".into(),

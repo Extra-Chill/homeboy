@@ -2,6 +2,7 @@ pub mod data_inputs;
 pub mod execution_start;
 pub mod failure_excerpt;
 pub mod placement;
+pub mod telemetry;
 pub mod verdict;
 
 use std::collections::{BTreeMap, HashSet};
@@ -994,6 +995,14 @@ pub enum AgentTaskGateDifferentialResult {
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
 pub struct AgentTaskGateEnvironment {
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub resources: Option<telemetry::GateResources>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub phase_name: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub host_pressure_start: Option<serde_json::Value>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub host_pressure_end: Option<serde_json::Value>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub lab_runner: Option<String>,
     #[serde(default)]
     pub mode: AgentTaskGateEnvironmentMode,
@@ -1029,6 +1038,14 @@ pub struct AgentTaskGateEnvironment {
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct AgentTaskGateCargoTargetEvidence {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub acquire_ms: Option<u128>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub seed_ms: Option<u128>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub seed_bytes: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub growth_bytes: Option<u64>,
     pub path: String,
     pub resolution: String,
     pub owner: String,
@@ -1161,6 +1178,9 @@ impl AgentTaskGateEnvironment {
             && self.data_inputs.is_empty()
             && self.rust_cache.is_none()
             && self.cargo_target.is_none()
+            && self.resources.is_none()
+            && self.host_pressure_start.is_none()
+            && self.host_pressure_end.is_none()
     }
 
     pub fn replay_policy(&self) -> AgentTaskGateEnvironmentPolicy {
@@ -2750,6 +2770,9 @@ fn run_gate_argv_with_supervision(
                     package_artifacts,
                     declared_plan,
                 )
+                .inspect(|report| {
+                    telemetry::record(&report.environment);
+                })
             },
             |report| {
                 matches!(
@@ -3006,6 +3029,8 @@ fn run_gate_argv_local(
     {
         return Ok(report);
     }
+    selected_environment.report.phase_name = Some(gate_phase_name(None, command, index));
+    selected_environment.report.host_pressure_start = Some(telemetry::host_pressure());
     let verdict_started = Instant::now();
     selected_environment.configure_rust_cache(cwd)?;
     selected_environment.configure_cargo_target(cwd, gate_environment.shared_cargo_target)?;
@@ -3027,6 +3052,7 @@ fn run_gate_argv_local(
         )
     })?;
     execution_start::before_command_start()?;
+    let resources_before = telemetry::children();
     let child = process.spawn().map_err(|error| {
         Error::internal_io(
             error.to_string(),
@@ -3214,6 +3240,9 @@ fn run_gate_argv_local(
         })
     });
 
+    selected_environment.report.resources =
+        telemetry::delta(resources_before, telemetry::children());
+    selected_environment.report.host_pressure_end = Some(telemetry::host_pressure());
     homeboy_core::observation::phase_timing::time("publish.gate_cargo_target", || {
         selected_environment.finish_cargo_target()
     })?;
@@ -3885,6 +3914,7 @@ impl SelectedGateEnvironment {
         // it as a caller-owned explicit target would put two concurrent gates
         // in one Cargo directory, which is the contention this lease removes.
         // The value still reaches the child through `self.values`.
+        let acquire_started = Instant::now();
         let target = homeboy_core::cleanup::acquire_managed_cargo_target_for_environment(
             "agent-task-gate",
             cwd,
@@ -3892,6 +3922,7 @@ impl SelectedGateEnvironment {
             &self.values,
         )
         .map_err(|error| placement::with_local_reserve_recovery(error))?;
+        let acquire_ms = acquire_started.elapsed().as_millis();
         // Store sizing is evidence only. A concurrent gate may update the
         // shared target while this observation walks it.
         let bytes_before = target.size_bytes().ok();
@@ -3906,11 +3937,16 @@ impl SelectedGateEnvironment {
             target.target_dir().to_string_lossy().to_string(),
         );
         self.report.cargo_target = Some(AgentTaskGateCargoTargetEvidence {
+            acquire_ms: Some(acquire_ms),
+            seed_ms: Some(target.seed_ms()),
+            seed_bytes: Some(target.seed_bytes()),
+            growth_bytes: None,
             path: target.target_dir().to_string_lossy().to_string(),
             resolution: target.resolution().to_string(),
             owner: target.evidence().owner,
             identity,
-            state: bytes_before.map(|bytes| if bytes == 0 { "miss" } else { "hit" }.to_string()),
+            state: bytes_before
+                .map(|bytes| if bytes == 0 { "empty" } else { "seeded" }.to_string()),
             bytes_before,
             bytes_after: None,
         });
@@ -3925,6 +3961,10 @@ impl SelectedGateEnvironment {
             return Ok(());
         };
         evidence.bytes_after = target.size_bytes().ok();
+        evidence.growth_bytes = evidence
+            .bytes_after
+            .zip(evidence.bytes_before)
+            .map(|(after, before)| after.saturating_sub(before));
         target.publish()?;
         Ok(())
     }
@@ -8341,7 +8381,10 @@ mod tests {
                 .environment
                 .cargo_target
                 .expect("first target evidence");
-            assert_eq!(first.state.as_deref(), Some("miss"));
+            assert_eq!(first.state.as_deref(), Some("empty"));
+            assert!(first.acquire_ms.is_some());
+            assert!(first.seed_ms.is_some());
+            assert!(first.growth_bytes.is_some());
             assert_eq!(first.bytes_before, Some(0));
             assert!(first.bytes_after.expect("target bytes") > 0);
 
@@ -8360,7 +8403,8 @@ mod tests {
                 .environment
                 .cargo_target
                 .expect("second target evidence");
-            assert_eq!(second.state.as_deref(), Some("hit"));
+            assert_eq!(second.state.as_deref(), Some("seeded"));
+            assert!(second.seed_bytes.unwrap() > 0);
             assert_ne!(first.identity, second.identity);
             assert_ne!(first.path, second.path);
             let spans = store.phase_spans(&run_id).unwrap();
