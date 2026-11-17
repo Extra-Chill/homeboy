@@ -2177,12 +2177,8 @@ impl ObservationStore {
                 SET status = ?1,
                     finished_at = ?2,
                     metadata_json = CASE WHEN status = 'running' THEN metadata_json ELSE
-                        json_set(
-                            json_remove(COALESCE(metadata_json, '{}'), '$.notification_delivered', '$.notification_claimed'),
-                            '$.status_correction', json_object(
-                                'previous_status', status, 'status', ?1, 'at', ?2
-                            )
-                        ) END
+                        json_remove(COALESCE(metadata_json, '{}'), '$.notification_delivered', '$.notification_claimed')
+                        END
                 WHERE id = ?3 AND status IN ('running', 'pass', 'fail') AND status != ?1
                 "#,
                 params![status.as_str(), finished_at, run_id],
@@ -3130,11 +3126,8 @@ mod tests {
         }
     }
 
-    /// Extra-Chill/homeboy#15393: a detached Cook's handoff run settled `pass`
-    /// and announced it, then the Cook failed. The lifecycle record keeps
-    /// `Succeeded` (Cook failure is a read-time projection), so nothing ever
-    /// rewrote the observation. The correction flips it and re-arms the
-    /// completion notification so the real outcome is announced.
+    /// A changed terminal outcome re-arms the completion notification so the
+    /// real outcome is announced (Extra-Chill/homeboy#15393).
     #[test]
     fn settlement_follows_latest_outcome_and_renotifies() {
         with_isolated_home(|_| {
@@ -3149,10 +3142,6 @@ mod tests {
             assert!(store.settle_run("cook-attempt", RunStatus::Fail).unwrap());
             let run = store.get_run("cook-attempt").unwrap().unwrap();
             assert_eq!(run.status, "fail");
-            assert_eq!(
-                run.metadata_json["status_correction"]["previous_status"],
-                "pass"
-            );
             assert!(store.settle_run("cook-attempt", RunStatus::Pass).unwrap());
             let recovered = store.get_run("cook-attempt").unwrap().unwrap();
             assert_eq!(recovered.status, "pass");
