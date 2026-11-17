@@ -80,7 +80,6 @@ fn fixture(transport: &Path, destination: &Path) -> CommitRequest {
                 object_cache: String::new(),
                 manifest,
                 content_hash: hash,
-                file_mtimes: Default::default(),
             },
             metadata,
             install_git: None,
@@ -91,25 +90,16 @@ fn fixture(transport: &Path, destination: &Path) -> CommitRequest {
 }
 
 #[test]
-fn fresh_materializations_preserve_candidate_mtime_without_sharing_inodes() {
+fn fresh_materializations_do_not_share_mutable_inodes() {
     let root = tempfile::tempdir().unwrap();
-    let mtime = std::time::Duration::from_secs(1_700_000_000);
     let mut destinations = Vec::new();
     for name in ["first", "second"] {
         let incoming = tempfile::tempdir_in(root.path()).unwrap();
         let destination = root.path().join(name);
-        let mut request = fixture(incoming.path(), &destination);
-        request.roots[0]
-            .summary
-            .file_mtimes
-            .insert("file".into(), mtime);
+        let request = fixture(incoming.path(), &destination);
         write_json(&incoming.path().join("commit.json"), &request).unwrap();
         materialization_commit(incoming.path()).unwrap();
         let file = destination.join("file");
-        assert_eq!(
-            fs::metadata(&file).unwrap().modified().unwrap(),
-            std::time::UNIX_EPOCH + mtime
-        );
         destinations.push(file);
     }
     fs::write(&destinations[0], b"build mutation").unwrap();
