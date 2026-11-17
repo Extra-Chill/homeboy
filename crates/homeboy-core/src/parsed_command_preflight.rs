@@ -682,7 +682,8 @@ fn selected_runner_readiness_error(
 /// because local placement requires an explicit operator choice.
 fn lab_unavailable_error(readiness: &LabReadinessSnapshot) -> crate::Error {
     let reason = if readiness.reasons.is_empty() {
-        lab_readiness_fallback_reason(readiness).unwrap_or_else(|| readiness.state.clone())
+        lab_readiness_fallback_reason(readiness)
+            .unwrap_or_else(|| "no Lab runner has admitted readiness evidence".to_string())
     } else {
         readiness.reasons.join("; ")
     };
