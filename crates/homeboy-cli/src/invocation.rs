@@ -104,6 +104,25 @@ pub(crate) fn parse_exit(success: bool) {
     finish(std::process::ExitCode::from(if success { 0 } else { 2 }));
 }
 
+/// Who is asking, for durable records of operator actions such as a cancel:
+/// this process, its parent, and the caller session when one is declared.
+pub(crate) fn requester() -> String {
+    let parent = std::os::unix::process::parent_id();
+    let parent_name = std::fs::read_to_string(format!("/proc/{parent}/comm"))
+        .ok()
+        .and_then(|name| opaque(name.trim()));
+    let session =
+        CURRENT.with_borrow(|row| row.as_ref().and_then(|row| row.caller_session.clone()));
+    let mut requester = format!("pid {}, parent {parent}", std::process::id());
+    if let Some(name) = parent_name {
+        requester.push_str(&format!(" `{name}`"));
+    }
+    if let Some(session) = session {
+        requester.push_str(&format!(", caller session `{session}`"));
+    }
+    requester
+}
+
 pub(crate) fn run(f: impl FnOnce() -> std::process::ExitCode) -> std::process::ExitCode {
     START.with_borrow_mut(|start| *start = Some((chrono::Utc::now().to_rfc3339(), Instant::now())));
     let caller_session = [
