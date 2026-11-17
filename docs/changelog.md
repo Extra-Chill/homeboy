@@ -4,6 +4,16 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.469.3] - 2026-11-17
+
+### Changed
+- Keep the job store unlocked while daemon freshness hydrates linked runs
+
+### Fixed
+- probe the Playwright CLI instead of reporting it missing unprobed
+- carry recovered retry baselines to Lab and detach in-use candidate branches
+- a superseded Cook step follows its owner and settles with its outcome
+
 ## [0.469.2] - 2026-11-17
 
 ### Changed
