@@ -1962,20 +1962,26 @@ fn project_terminal_artifacts_in_store(
             "agent_task_terminal_state".to_string(),
             json!(record.state()),
         );
-    store.upsert_imported_run(&homeboy_core::observation::RunRecord {
-        id: record.run_id.clone(),
-        kind: "agent-task".to_string(),
-        component_id: None,
-        started_at: record.submitted_at.clone(),
-        finished_at: record.updated_at.clone(),
-        status: status.to_string(),
-        command: Some("homeboy agent-task".to_string()),
-        cwd: None,
-        homeboy_version,
-        git_sha: None,
-        rig_id: None,
-        metadata_json: existing_metadata,
-    })?;
+    // A Cook's runs settle once, from their Cook-observed outcome, when the
+    // Cook reaches its terminal report.
+    if super::lifecycle_store::cook_owns_observation(lifecycle_store, record) {
+        store.update_run_metadata(&record.run_id, existing_metadata)?;
+    } else {
+        store.upsert_imported_run_preserving_terminal(&homeboy_core::observation::RunRecord {
+            id: record.run_id.clone(),
+            kind: "agent-task".to_string(),
+            component_id: None,
+            started_at: record.submitted_at.clone(),
+            finished_at: record.updated_at.clone(),
+            status: status.to_string(),
+            command: Some("homeboy agent-task".to_string()),
+            cwd: None,
+            homeboy_version,
+            git_sha: None,
+            rig_id: None,
+            metadata_json: existing_metadata,
+        })?;
+    }
 
     validate_unique_terminal_artifact_ids(aggregate)?;
     let mut projection_error = None;

@@ -3658,7 +3658,7 @@ pub fn record_cook_terminal_result_in_store(
     let cook_id = record.metadata["cook_id"]
         .as_str()
         .unwrap_or(&record.run_id);
-    settle_cook_terminal_observations_in_store(lifecycle_store, cook_id)?;
+    settle_cook_terminal_observations_in_store(lifecycle_store, cook_id, &[record.run_id.clone()])?;
     Ok(record)
 }
 
@@ -3667,19 +3667,51 @@ pub fn record_cook_terminal_result_in_store(
 pub fn settle_cook_terminal_observations_in_store(
     lifecycle_store: &AgentTaskLifecycleStore,
     cook_id: &str,
+    run_ids: &[String],
 ) -> Result<()> {
-    let record = crate::agent_task_service::cook_observation_in_store(lifecycle_store, cook_id)?;
-    let Some(status) = super::failure_recording::terminal_observation_status(&record.state())
-    else {
+    let observed = |state: RunExecutionState| {
+        super::failure_recording::terminal_observation_status(&state).map(|status| {
+            if status == "pass" {
+                homeboy_core::observation::RunStatus::Pass
+            } else {
+                homeboy_core::observation::RunStatus::Fail
+            }
+        })
+    };
+    // Each run settles to its own Cook-observed outcome. Runs without a
+    // lifecycle record (invocation sources) take the Cook's outcome.
+    let cook_status = observed(
+        crate::agent_task_service::cook_observation_in_store(lifecycle_store, cook_id)?.state(),
+    );
+    let mut ids = run_ids.to_vec();
+    if let Ok(index) = lifecycle_store.read_cook_index(cook_id) {
+        ids.extend(index.attempts.into_iter().map(|attempt| attempt.run_id));
+    }
+    ids.sort();
+    ids.dedup();
+    ids.retain(|id| id != cook_id);
+    let observation = lifecycle_store.open_observation_initialized()?;
+    for id in ids {
+        let status = match lifecycle_store.read_record_bounded(&id) {
+            Ok(record) => observed(crate::agent_task_service::cook_observation_state(
+                lifecycle_store,
+                &record,
+            )),
+            Err(_) => cook_status,
+        };
+        if let Some(status) = status {
+            observation.settle_run(&id, status)?;
+        }
+    }
+    let Some(cook_status) = cook_status else {
         return Ok(());
     };
-    let observation = lifecycle_store.open_observation_initialized()?;
-    if let Some(mut cook) = observation.get_run(cook_id)? {
-        cook.status = status.to_string();
-        cook.finished_at = record.updated_at;
-        observation.upsert_imported_run(&cook)?;
-    }
-    observation.record_run_phase(cook_id, "cook", status != "pass")
+    observation.settle_run(cook_id, cook_status)?;
+    observation.record_run_phase(
+        cook_id,
+        "cook",
+        cook_status != homeboy_core::observation::RunStatus::Pass,
+    )
 }
 
 pub fn record_provider_execution_terminal_in_store(

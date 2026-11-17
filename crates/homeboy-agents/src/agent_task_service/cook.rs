@@ -4731,7 +4731,11 @@ fn run_cook_with_runtime(
             )?;
         }
         if result.value.disposition.is_terminal() {
-            if let Err(error) = settle_cook_observations(lifecycle_store, &result.value) {
+            if let Err(error) = settle_cook_observations(
+                lifecycle_store,
+                &result.value,
+                &notification_options.identity.initial_run_id,
+            ) {
                 homeboy_core::log_status!(
                     "agent-task",
                     "Cook terminal persistence failed: {}",
@@ -4748,12 +4752,23 @@ fn run_cook_with_runtime(
     result
 }
 
-/// Project the Cook's final lifecycle outcome without rewriting its attempts.
+/// One terminal write boundary for every Cook report. Each run settles to its
+/// own Cook-observed outcome; invocation sources without a lifecycle record
+/// take the Cook's outcome.
 fn settle_cook_observations(
     lifecycle: &AgentTaskLifecycleStore,
     report: &AgentTaskCookReport,
+    source_run_id: &str,
 ) -> Result<()> {
-    agent_task_lifecycle::settle_cook_terminal_observations_in_store(lifecycle, &report.cook_id)
+    let mut ids = report.history_run_ids.clone();
+    ids.extend(report.invocation_run_ids.iter().cloned());
+    ids.extend(report.latest_run_id.iter().cloned());
+    ids.push(source_run_id.to_string());
+    agent_task_lifecycle::settle_cook_terminal_observations_in_store(
+        lifecycle,
+        &report.cook_id,
+        &ids,
+    )
 }
 
 /// The component a cook is working on, for notification attribution.
