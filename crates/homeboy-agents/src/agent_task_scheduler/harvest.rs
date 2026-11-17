@@ -525,6 +525,10 @@ pub(crate) enum HarvestError {
     CandidateTreeMismatch {
         message: String,
     },
+    CandidateBaselineUnavailable {
+        message: String,
+        run_id: String,
+    },
     SnapshotInvalidated {
         message: String,
     },
@@ -557,6 +561,20 @@ pub(super) fn committed_harvest_failure(
     mut outcome: AgentTaskOutcome,
     error: HarvestError,
 ) -> AgentTaskOutcome {
+    if let HarvestError::CandidateBaselineUnavailable { message, run_id } = &error {
+        let next_action = format!("Restore the persisted candidate ref or bundle in the retry workspace, then run `homeboy agent-task recover {run_id}`");
+        outcome.status = AgentTaskOutcomeStatus::CandidateRecoverable;
+        outcome.failure_classification = None;
+        outcome.summary = Some(format!(
+            "Gate-feedback candidate baseline is unavailable: {message}. {next_action}"
+        ));
+        outcome.diagnostics.push(AgentTaskDiagnostic {
+            class: "agent_task.gate_feedback_candidate_baseline_unavailable".to_string(),
+            message: message.clone(),
+            data: serde_json::json!({"recoverable": true, "next_action": next_action, "source_run_id": run_id}),
+        });
+        return outcome;
+    }
     // Harvest is secondary evidence collection. If execution already failed and
     // there is no candidate to harvest, a Git/provenance inspection failure
     // must not replace the provider's actionable failure reason. Workspace
@@ -606,6 +624,7 @@ pub(super) fn committed_harvest_failure(
             format!("refusing gate-feedback retry candidate baseline: {message}"),
             serde_json::json!({ "error": message }),
         ),
+        HarvestError::CandidateBaselineUnavailable { .. } => unreachable!("handled above"),
         HarvestError::SnapshotInvalidated { message } => (
             "agent_task.workspace_snapshot_invalidated",
             format!("Cook workspace snapshot was invalidated before provider execution: {message}"),
@@ -992,6 +1011,83 @@ mod committed_harvest_tests {
             !patch.contains("-base"),
             "candidate is not replayed in remediation"
         );
+    }
+
+    #[test]
+    fn gate_feedback_retry_fetches_persisted_candidate_into_fresh_repository() {
+        let temp = tempfile::tempdir().unwrap();
+        let (controller, base) = candidate_attempt_repo(temp.path());
+        let fresh = temp.path().join("fresh");
+        git(
+            temp.path(),
+            &[
+                "clone",
+                "--quiet",
+                controller.to_str().unwrap(),
+                fresh.to_str().unwrap(),
+            ],
+        );
+        std::fs::write(controller.join("candidate.txt"), "candidate\n").unwrap();
+        git(&controller, &["add", "candidate.txt"]);
+        git(&controller, &["commit", "-m", "failed candidate"]);
+        let sha = git(&controller, &["rev-parse", "HEAD"]);
+        let tree = git(&controller, &["rev-parse", "HEAD^{tree}"]);
+        git(
+            &controller,
+            &["update-ref", "refs/homeboy/candidates/cook-1", &sha],
+        );
+        git(&controller, &["reset", "--hard", &base]);
+        assert!(git_output(&fresh, &["cat-file", "-e", &sha]).is_err());
+        let mut request = gate_feedback_request(&fresh, String::new());
+        request.inputs["cook_loop"]["candidate_commit"] = serde_json::json!({
+            "base_sha": base, "candidate_sha": sha, "tree_sha": tree
+        });
+        request.inputs["cook_loop"]["source_run_id"] = serde_json::json!("cook-1");
+        request.inputs["cook_loop"]["candidate_repository"] = serde_json::json!(controller);
+        let preflight =
+            prepare_committed_harvest(&request, None, &HarvestExecutionContext::default()).unwrap();
+        assert_eq!(
+            preflight.candidate_baseline.as_ref().unwrap().candidate_sha,
+            sha
+        );
+        assert_eq!(git(&fresh, &["rev-parse", "HEAD"]), base);
+        let scratch = tempfile::tempdir().unwrap();
+        let attempt = prepare_attempt_workspace(
+            &mut request,
+            preflight.base_sha.as_deref(),
+            preflight.candidate_baseline.as_ref(),
+            scratch.path(),
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(attempt.base_sha(), sha);
+        assert_eq!(
+            std::fs::read_to_string(attempt.root().join("candidate.txt")).unwrap(),
+            "candidate\n"
+        );
+    }
+
+    #[test]
+    fn gate_feedback_retry_missing_baseline_is_recoverable() {
+        let temp = tempfile::tempdir().unwrap();
+        let (workspace, base) = candidate_attempt_repo(temp.path());
+        let mut request = gate_feedback_request(&workspace, String::new());
+        request.inputs["cook_loop"]["candidate_commit"] = serde_json::json!({
+            "base_sha": base, "candidate_sha": "a".repeat(40), "tree_sha": "b".repeat(40)
+        });
+        let error = prepare_committed_harvest(&request, None, &HarvestExecutionContext::default())
+            .unwrap_err();
+        let outcome = committed_harvest_failure(
+            committed_harvest_preflight_outcome(request.task_id.clone()),
+            error,
+        );
+        assert_eq!(outcome.status, AgentTaskOutcomeStatus::CandidateRecoverable);
+        assert_eq!(outcome.failure_classification, None);
+        assert_eq!(outcome.diagnostics[0].data["recoverable"], true);
+        assert!(outcome.diagnostics[0].data["next_action"]
+            .as_str()
+            .unwrap()
+            .contains("homeboy agent-task recover"));
     }
 
     #[test]

@@ -550,6 +550,8 @@ fn build_follow_up_request(
             "retry_policy": retry_policy(failure_progression),
             "current_diff": options.current_diff,
             "candidate_commit": options.promotion_report.provenance.get("candidate_commit"),
+            "candidate_repository": options.promotion_report.target.path,
+            "candidate_ref": options.promotion_report.candidate_ref,
             "remediation_scope": remediation_scope(options, gate_failure_paths(failed_gates)),
         }
     });
