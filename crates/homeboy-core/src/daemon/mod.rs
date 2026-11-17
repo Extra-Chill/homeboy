@@ -343,9 +343,10 @@ impl LocalControllerJobClient {
     /// is resent to the replacement the serving lease names; submissions carry
     /// an idempotency key, so any replay reuses its job.
     ///
-    /// A request that times out on a daemon busy under load may have been
-    /// applied, so it is resent only when a second delivery leaves the result
-    /// unchanged: reads, keyed submissions, start, and cancel.
+    /// A request that times out on a daemon busy under load, or whose
+    /// connection drops before a response (a daemon restarting mid-request),
+    /// may have been applied, so it is resent only when a second delivery
+    /// leaves the result unchanged: reads, keyed submissions, start, and cancel.
     fn send_to_serving_daemon(
         &self,
         operation: &str,
@@ -366,7 +367,8 @@ impl LocalControllerJobClient {
             match send(&endpoint) {
                 Ok(response) => return Ok(response),
                 Err(error)
-                    if (error.is_connect() || (resend_timeouts && error.is_timeout()))
+                    if (error.is_connect()
+                        || (resend_timeouts && (error.is_timeout() || error.is_request())))
                         && std::time::Instant::now() < deadline =>
                 {
                     std::thread::sleep(Duration::from_millis(250));
@@ -6480,17 +6482,27 @@ mod tests {
         });
     }
 
-    /// A daemon busy under load times out one request; an idempotent request
-    /// is resent and lands, a decision that may have been applied is not.
+    /// A daemon busy under load times out one request, or a restarting daemon
+    /// drops its connection before replying; an idempotent request is resent
+    /// and lands, a decision that may have been applied is not.
     #[test]
-    fn a_timed_out_idempotent_request_is_resent() {
+    fn a_timed_out_or_dropped_idempotent_request_is_resent() {
         use std::io::{Read, Write};
-        for (resend_timeouts, expect_ok) in [(true, true), (false, false)] {
+        for (drop_first, resend_timeouts, expect_ok) in [
+            (false, true, true),
+            (false, false, false),
+            (true, true, true),
+        ] {
             let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
             let address = listener.local_addr().unwrap();
             let server = std::thread::spawn(move || {
-                // The first request stalls past the client timeout.
-                let (stalled, _) = listener.accept().unwrap();
+                // The first request stalls past the client timeout, or its
+                // connection closes after the request is read.
+                let (mut stalled, _) = listener.accept().unwrap();
+                if drop_first {
+                    let _ = stalled.read(&mut [0u8; 4096]);
+                    let _ = stalled.shutdown(std::net::Shutdown::Both);
+                }
                 listener.set_nonblocking(true).unwrap();
                 let deadline = std::time::Instant::now() + Duration::from_secs(3);
                 while std::time::Instant::now() < deadline {
