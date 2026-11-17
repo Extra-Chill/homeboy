@@ -28,7 +28,7 @@ const generator = require('../scripts/deploy/archive-runtime-commands.js');
 assert.equal(generator.render(fs.readFileSync(generator.MANIFEST, 'utf8')), fs.readFileSync(generator.MANIFEST, 'utf8'), 'wordpress.json commands match scripts/deploy/fpm-fastcgi.php (run archive-runtime-commands.js --write)');
 const precondition = policies[0].release_layout && policies[0].release_layout.precondition_command;
 assert.ok(precondition, 'plugins opt in to the release layout with a runtime precondition');
-assert.ok(policies.every((policy) => JSON.stringify(policy.release_layout) === JSON.stringify(policies[0].release_layout)), 'plugins and themes share the release layout');
+assert.equal(policies[1].release_layout, undefined, 'themes install in place (unresolved get_template_directory() includes)');
 assert.equal(policies[0].release_layout.release_root_dir, '.homeboy-releases', 'release root is dot-prefixed so WordPress skips it when scanning');
 assert.equal(policies[0].release_layout.keep_previous, 2);
 assert.equal(policies[0].release_layout.keep_recent_minutes, 15);

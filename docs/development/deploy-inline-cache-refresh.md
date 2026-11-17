@@ -16,7 +16,14 @@ ways:
 
 Both flows run the extension's `after_switch_command` inline right after the
 switch, before cleanup. The WordPress extension enables the release layout
-for plugins and themes, gated by a PHP-FPM precondition.
+for plugins, gated by a PHP-FPM precondition.
+
+Themes keep the in-place flow: WordPress core and themes include theme files
+through the unresolved `get_template_directory()` path, and PHP caches realpaths
+per path with independent expiry, so different theme files could resolve to
+different releases for up to `realpath_cache_ttl` after a flip. Plugins are
+included once through `WP_PLUGIN_DIR` and then through their resolved `__DIR__`,
+so a request stays on one release.
 
 ## Layout
 

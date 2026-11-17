@@ -49,11 +49,24 @@ function render(text) {
 	const layout = `"release_layout": ${JSON.stringify(releaseLayout(source))}`;
 	let next = text.replace(/"after_switch_command": "(?:[^"\\]|\\.)*"/g, afterSwitch);
 	next = next.replace(/"release_layout": \{"release_root_dir"(?:[^"}]|"(?:[^"\\]|\\.)*")*\}/g, layout);
-	// Insert release_layout after any after_switch_command that lacks one.
-	next = next.replace(
-		/^(\s*)("after_switch_command": "(?:[^"\\]|\\.)*",)\n(?!\s*"release_layout")/gm,
-		(_, indent, line) => `${indent}${line}\n${indent}${layout},\n`
-	);
+	// Insert release_layout after the plugins policy's after_switch_command
+	// when it lacks one. Themes stay in place: WordPress core and themes
+	// include theme files through the unresolved get_template_directory()
+	// path, so PHP's per-path realpath cache could resolve different theme
+	// files to different releases for up to realpath_cache_ttl after a flip.
+	// Plugins are included once through WP_PLUGIN_DIR and then via the
+	// resolved __DIR__, so a request stays on one release.
+	next = next
+		.split(/(?="path_pattern": )/)
+		.map((chunk) =>
+			chunk.startsWith('"path_pattern": "/wp-content/plugins/"')
+				? chunk.replace(
+					/^(\s*)("after_switch_command": "(?:[^"\\]|\\.)*",)\n(?!\s*"release_layout")/m,
+					(_, indent, line) => `${indent}${line}\n${indent}${layout},\n`
+				)
+				: chunk
+		)
+		.join('');
 	return next;
 }
 

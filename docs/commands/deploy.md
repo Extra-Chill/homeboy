@@ -323,7 +323,14 @@ deploy uses the in-place exchange and records why in `warnings`:
 ]
 ```
 
-The bundled WordPress extension enables the layout for plugins and themes.
+The bundled WordPress extension enables the layout for plugins.
+Themes keep the in-place flow: WordPress core and themes include theme files
+through the unresolved `get_template_directory()` path, and PHP caches realpaths
+per path with independent expiry, so different theme files could resolve to
+different releases for up to `realpath_cache_ttl` after a flip. Plugins are
+included once through `WP_PLUGIN_DIR` and then through their resolved `__DIR__`,
+so a request stays on one release.
+
 Its precondition asks every PHP-FPM socket over FastCGI whether opcache is
 disabled or `opcache.revalidate_path` is on, and fails closed otherwise. To
 enable release isolation on a WordPress server, set this in every FPM pool

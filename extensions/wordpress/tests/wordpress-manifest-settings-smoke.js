@@ -17,12 +17,16 @@ assert.ok(
 	'the ownership check follows a release-layout symlink to the release tree'
 );
 
-// Release layout (homeboy#18365): plugins and themes opt in, gated by the
+// Release layout (homeboy#18365): plugins opt in, gated by the
 // PHP-FPM opcache.revalidate_path precondition; the generic deploy layer stays
 // runtime-agnostic.
 const archivePolicies = manifest.deploy.archive_install;
 assert.deepEqual(archivePolicies.map((policy) => policy.path_pattern), ['/wp-content/plugins/', '/wp-content/themes/']);
-for (const policy of archivePolicies) {
+// Themes stay in place: theme files are included through the unresolved
+// get_template_directory() path, so per-path realpath caching could mix
+// releases after a flip.
+assert.equal(archivePolicies[1].release_layout, undefined, 'themes install in place');
+for (const policy of archivePolicies.slice(0, 1)) {
 	const layout = policy.release_layout;
 	assert.ok(layout, `${policy.path_pattern} opts in to the release layout`);
 	assert.equal(layout.release_root_dir, '.homeboy-releases');
@@ -32,6 +36,8 @@ for (const policy of archivePolicies) {
 	assert.ok(layout.precondition_command.includes('HOMEBOY_FPM_MODE=release-precondition'));
 	assert.ok(layout.precondition_command.includes("ini_get('opcache.revalidate_path')"));
 	assert.ok(layout.precondition_command.includes('failing closed'));
+}
+for (const policy of archivePolicies) {
 	assert.ok(policy.after_switch_command, `${policy.path_pattern} keeps the inline opcache refresh`);
 }
 assert.ok(
