@@ -9,7 +9,7 @@ const manifest = JSON.parse(
 );
 
 const deployHooks = manifest.hooks['post:deploy'];
-assert.equal(deployHooks.length, 2, 'component deploy runs the ownership warning and the opcache invalidation');
+assert.equal(deployHooks.length, 1, 'post:deploy retains ownership warning; archive install refreshes opcache inline');
 assert.ok(deployHooks[0].includes('DEPLOY_OWNER='), 'deploy preserves the ownership check');
 assert.ok(deployHooks[0].includes('root:root'), 'deploy preserves the root:root warning');
 assert.ok(

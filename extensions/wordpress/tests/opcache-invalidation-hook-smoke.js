@@ -1,6 +1,6 @@
 'use strict';
 
-// The WordPress post:deploy opcache hook (homeboy#17922) must reach PHP-FPM's
+// The WordPress inline archive opcache refresh (homeboy#18365) must reach PHP-FPM's
 // cache over FastCGI, run the invalidation inside FPM for the swapped
 // component, clean up after itself, and never fail a deploy. A fake FastCGI
 // server stands in for FPM so this runs without a PHP-FPM install.
@@ -15,9 +15,12 @@ const path = require('node:path');
 const manifest = JSON.parse(
 	fs.readFileSync(path.resolve(__dirname, '..', 'wordpress.json'), 'utf8')
 );
-const hook = manifest.hooks['post:deploy'].find((command) => command.includes('HOMEBOY_OPCACHE_TARGET'));
-assert.ok(hook, 'wordpress post:deploy declares the opcache invalidation hook');
-assert.ok(hook.includes('{{install_dir}}'), 'the hook targets the deployed component directory');
+const policies = manifest.deploy.archive_install;
+const hook = policies[0].after_switch_command;
+assert.ok(hook, 'archive install declares inline opcache invalidation');
+assert.ok(policies.every((policy) => policy.after_switch_command === hook), 'plugins and themes refresh inline');
+assert.ok(!manifest.hooks['post:deploy'].some((command) => command.includes('HOMEBOY_OPCACHE_TARGET')), 'no delayed duplicate refresh');
+assert.ok(hook.includes('{{targetDir}}'), 'the command targets the installed component directory');
 
 if (spawnSync('php', ['-v']).status !== 0) {
 	console.log('SKIP: php CLI not available');
@@ -32,7 +35,7 @@ fs.writeFileSync(path.join(component, 'inc', 'Provider.php'), '<?php\n');
 const socket = path.join(work, 'fpm.sock');
 
 function render(installDir) {
-	return hook.split('{{install_dir}}').join(installDir);
+	return hook.split('{{targetDir}}').join(installDir);
 }
 
 function runHook(installDir, env = {}) {
