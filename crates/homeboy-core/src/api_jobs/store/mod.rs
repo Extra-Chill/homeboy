@@ -192,6 +192,9 @@ fn terminal_controller_job_ids_in(
     Ok(ids)
 }
 
+/// How often a long-lived process (the daemon) runs terminal-job retention.
+const RETENTION_INTERVAL_MS: u64 = 10 * 60_000;
+
 #[derive(Debug)]
 pub(super) struct JobStorePersistence {
     pub(super) path: PathBuf,
@@ -199,6 +202,13 @@ pub(super) struct JobStorePersistence {
     pub(super) terminal_job_retention_limit: usize,
     pub(super) terminal_job_retention_bytes: usize,
     pub(super) terminal_job_collection_window_ms: u64,
+    /// Retention measures all retained history, so it is periodic maintenance
+    /// rather than part of every commit: a pass runs at most once per
+    /// interval, starting one interval after the store opens. A short-lived
+    /// process therefore never pays for it, and a deferred pass removes the
+    /// same jobs, since none are eligible before the collection window ends.
+    retention_interval_ms: u64,
+    retention_checked_at_ms: AtomicU64,
     /// What this process last read from or wrote to the SQL store, kept under
     /// the transaction lock. While the database still reports the recorded
     /// generation the in-memory snapshot is authoritative and the reload is
@@ -219,10 +229,30 @@ impl JobStorePersistence {
             event_retention_limit,
             terminal_job_retention_limit,
             terminal_job_retention_bytes,
-            terminal_job_collection_window_ms: 86_400_000,
+            terminal_job_collection_window_ms: 0,
+            retention_interval_ms: 0,
+            retention_checked_at_ms: AtomicU64::new(super::persistence::timestamp_ms()),
             synced: Mutex::new(SqlSyncState::default()),
             connection: Mutex::new(None),
         }
+    }
+
+    /// Collect terminal jobs once they are `window_ms` old, checking at most
+    /// once per [`RETENTION_INTERVAL_MS`] (never less often than the window).
+    fn set_collection_window(&mut self, window_ms: u64) {
+        self.terminal_job_collection_window_ms = window_ms;
+        self.retention_interval_ms = RETENTION_INTERVAL_MS.min(window_ms);
+    }
+
+    /// Whether a retention pass is due now, claiming it when it is.
+    fn claim_retention_pass(&self) -> bool {
+        let now = super::persistence::timestamp_ms();
+        let checked = self.retention_checked_at_ms.load(Ordering::Acquire);
+        now.saturating_sub(checked) >= self.retention_interval_ms
+            && self
+                .retention_checked_at_ms
+                .compare_exchange(checked, now, Ordering::AcqRel, Ordering::Acquire)
+                .is_ok()
     }
 
     fn connection(&self) -> Result<MutexGuard<'_, Option<rusqlite::Connection>>> {
@@ -702,17 +732,18 @@ impl JobStore {
                 None,
             ));
         }
-        let retention_due = sql_store::retention_due(
-            persistence
-                .connection()?
-                .as_ref()
-                .expect("initialized store connection"),
-            &persistence.path,
-            persistence.terminal_job_retention_limit,
-            persistence.terminal_job_retention_bytes,
-            persistence.terminal_job_collection_window_ms,
-            inner,
-        )?;
+        let retention_due = persistence.claim_retention_pass()
+            && sql_store::retention_due(
+                persistence
+                    .connection()?
+                    .as_ref()
+                    .expect("initialized store connection"),
+                &persistence.path,
+                persistence.terminal_job_retention_limit,
+                persistence.terminal_job_retention_bytes,
+                persistence.terminal_job_collection_window_ms,
+                inner,
+            )?;
         if retention_due {
             self.load_history_for_compaction(inner)?;
         }
@@ -792,6 +823,17 @@ impl JobStore {
             self.health_revision.fetch_add(1, Ordering::Release);
         }
         committed
+    }
+
+    /// Make the next commit run a retention pass, as the daemon does once per
+    /// retention interval.
+    #[cfg(test)]
+    pub(crate) fn run_retention_on_next_commit(&self) {
+        if let Some(persistence) = &self.persistence {
+            persistence
+                .retention_checked_at_ms
+                .store(0, Ordering::Release);
+        }
     }
 
     /// The durable file this store persists to, if any.
@@ -1001,7 +1043,7 @@ impl JobStore {
         let mut store = store;
         Arc::get_mut(store.persistence.as_mut().expect("persistent store"))
             .expect("unshared store")
-            .terminal_job_collection_window_ms = 0;
+            .set_collection_window(0);
         store.durable_transaction(|inner| {
             let mut durable = DurableJobStore {
                 jobs: inner.jobs.values().cloned().collect(),
@@ -1104,7 +1146,7 @@ impl JobStore {
         let mut store = store;
         Arc::get_mut(store.persistence.as_mut().expect("persistent store"))
             .expect("unshared store")
-            .terminal_job_collection_window_ms = collection_window_ms;
+            .set_collection_window(collection_window_ms);
         // Load without the writer slot: readers (status, diagnose, action
         // admission) must not queue behind writers or commit, and a reader
         // inside another connection's write transaction must not deadlock

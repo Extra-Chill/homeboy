@@ -381,6 +381,7 @@ fn workflow_expiry_reports_when_and_persists_a_small_marker() {
             error.contains(&terminal.finished_at_ms.unwrap().to_string()),
             "{error}"
         );
+        store.run_retention_on_next_commit();
         store.create("trigger-expiry-compaction");
         drop(store);
         let store = JobStore::open_without_reconciliation(&path).unwrap();

@@ -1137,6 +1137,13 @@ fn terminal_collection_window_preserves_recent_results_over_budget() {
     let store = JobStore::open_without_reconciliation(&path).expect("reopen");
     let newest = store.create("runner.exec");
     store.start(newest.id).expect("start newest");
+    // Retention is periodic: a freshly opened process commits without
+    // measuring history, so an over-budget store is not compacted yet.
+    assert!(
+        store.get(old.id).is_ok(),
+        "retention waits for its interval"
+    );
+    store.run_retention_on_next_commit();
     store
         .complete(
             newest.id,
