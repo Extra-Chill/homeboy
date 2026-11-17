@@ -4,6 +4,14 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.470.9] - 2026-11-17
+
+### Changed
+- faster --outdated selection on SSH targets (batched manifest probe + concurrent probes)
+
+### Fixed
+- keep a rebased Cook HEAD as a merge-shaped candidate instead of refusing it
+
 ## [0.470.8] - 2026-11-17
 
 ### Fixed
