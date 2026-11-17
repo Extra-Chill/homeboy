@@ -25,9 +25,8 @@ pub const RUNNER_JOB_EXECUTION_CONTEXT_ID_ENV: &str = "HOMEBOY_RUNNER_JOB_EXECUT
 pub const DAEMON_CHILD_BUILD_IDENTITY_ENV: &str = "HOMEBOY_DAEMON_CHILD_BUILD_IDENTITY";
 const MAX_EVIDENCE_BYTES: usize = 8 * 1024;
 /// The daemon spawns a local child before it durably records the child's
-/// process identity, so the child waits (bounded) for that commit instead of
-/// failing closed on a race it cannot lose by design.
-const DAEMON_CHILD_IDENTITY_WAIT: std::time::Duration = std::time::Duration::from_secs(15);
+/// process identity, so the child polls for that commit while its durable
+/// reservation remains unexpired.
 const DAEMON_CHILD_IDENTITY_POLL: std::time::Duration = std::time::Duration::from_millis(50);
 
 #[derive(Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -230,6 +229,18 @@ impl RunnerJobExecutionContext {
     /// running record, reservation, and verified context establish both the
     /// runner-job and controller-run identities.
     pub fn from_direct_daemon_child_environment(expected_runner_id: &str) -> Result<Option<Self>> {
+        Self::from_direct_daemon_child_environment_with_clock(
+            expected_runner_id,
+            crate::api_jobs::timestamp_ms,
+            || std::thread::sleep(DAEMON_CHILD_IDENTITY_POLL),
+        )
+    }
+
+    fn from_direct_daemon_child_environment_with_clock(
+        expected_runner_id: &str,
+        mut now_ms: impl FnMut() -> u64,
+        mut wait: impl FnMut(),
+    ) -> Result<Option<Self>> {
         let reservation_id = std::env::var(RUNNER_CHILD_RESERVATION_ENV).ok();
         let context_id = std::env::var(RUNNER_JOB_EXECUTION_CONTEXT_ID_ENV).ok();
         if reservation_id.is_none() && context_id.is_none() {
@@ -249,14 +260,11 @@ impl RunnerJobExecutionContext {
             &crate::build_identity::current().display,
         )?;
         let jobs_file = crate::paths::observation_db()?;
-        let deadline = std::time::Instant::now() + DAEMON_CHILD_IDENTITY_WAIT;
         let evidence = loop {
             let store = crate::api_jobs::JobStore::open_without_reconciliation(&jobs_file)?;
             let handle = store.handle(job_id);
-            if handle.local_child_identity_pending(&reservation_id, expected_runner_id)
-                && std::time::Instant::now() < deadline
-            {
-                std::thread::sleep(DAEMON_CHILD_IDENTITY_POLL);
+            if handle.local_child_identity_pending(&reservation_id, expected_runner_id, now_ms()) {
+                wait();
                 continue;
             }
             break handle.accepted_local_child_execution_context(
@@ -672,7 +680,7 @@ mod tests {
     }
 
     #[test]
-    fn daemon_child_waits_for_parent_to_record_its_identity() {
+    fn daemon_child_waits_beyond_fifteen_seconds_until_reservation_expiry() {
         with_isolated_home(|_| {
             let jobs_file = crate::paths::observation_db().expect("jobs path");
             let store = crate::api_jobs::JobStore::open_without_reconciliation(&jobs_file)
@@ -713,43 +721,76 @@ mod tests {
                 }))
                 .expect("record context");
 
+            let now = crate::api_jobs::timestamp_ms();
             // The child has been spawned but the parent has not yet recorded
             // its process identity: this is pending, not a mismatch.
             let child_view = crate::api_jobs::JobStore::open_without_reconciliation(&jobs_file)
                 .expect("child store view");
             assert!(child_view
                 .handle(job.id)
-                .local_child_identity_pending(&reservation_id, runner_id));
+                .local_child_identity_pending(&reservation_id, runner_id, now));
             assert!(!child_view
                 .handle(job.id)
-                .local_child_identity_pending("forged-reservation", runner_id));
+                .local_child_identity_pending("forged-reservation", runner_id, now));
             assert!(!child_view
                 .handle(job.id)
-                .local_child_identity_pending(&reservation_id, "other-runner"));
+                .local_child_identity_pending(&reservation_id, "other-runner", now));
+            assert!(!child_view
+                .handle(job.id)
+                .local_child_identity_pending(&reservation_id, runner_id, now + 60_000));
 
             let _job = EnvVarGuard::set(RUNNER_JOB_ID_ENV, job.id.to_string());
             let _reservation = EnvVarGuard::set(RUNNER_CHILD_RESERVATION_ENV, &reservation_id);
             let _context = EnvVarGuard::set(RUNNER_JOB_EXECUTION_CONTEXT_ID_ENV, context.id());
 
-            let parent = std::thread::spawn(move || {
-                std::thread::sleep(std::time::Duration::from_millis(300));
-                handle
-                    .start_with_reserved_child_identity(
-                        std::process::id(),
-                        None,
-                        LocalChildStartDiscriminator::Unsupported {
-                            evidence: "test process".to_string(),
-                        },
+            // Expiry ends the actual wait loop without another poll, even if
+            // the parent never commits. Mismatched authority never waits.
+            for (reservation, runner, time) in [
+                ("forged-reservation", runner_id, now),
+                (reservation_id.as_str(), "other-runner", now),
+                (reservation_id.as_str(), runner_id, now + 60_000),
+            ] {
+                let _reservation = EnvVarGuard::set(RUNNER_CHILD_RESERVATION_ENV, reservation);
+                assert!(
+                    RunnerJobExecutionContext::from_direct_daemon_child_environment_with_clock(
+                        runner,
+                        || time,
+                        || panic!("invalid or expired authority must not wait"),
                     )
-                    .expect("start child");
-            });
+                    .is_err()
+                );
+            }
+
+            let clock = std::cell::Cell::new(now);
             let resolved =
-                RunnerJobExecutionContext::from_direct_daemon_child_environment(runner_id)
-                    .expect("child resolves once the parent records its identity")
-                    .expect("direct daemon authority");
-            parent.join().expect("parent thread");
+                RunnerJobExecutionContext::from_direct_daemon_child_environment_with_clock(
+                    runner_id,
+                    || clock.get(),
+                    || {
+                        clock.set(clock.get() + 8_000);
+                        if clock.get() - now >= 16_000 {
+                            handle
+                                .start_with_reserved_child_identity(
+                                    std::process::id(),
+                                    None,
+                                    LocalChildStartDiscriminator::Unsupported {
+                                        evidence: "test process".to_string(),
+                                    },
+                                )
+                                .expect("start child");
+                        }
+                    },
+                )
+                .expect("child resolves once the parent records its identity")
+                .expect("direct daemon authority");
+            assert_eq!(clock.get() - now, 16_000);
             assert_eq!(resolved.id(), context.id());
             assert_eq!(resolved.runner_job_id(), job.id.to_string());
+
+            store.cancel(job.id, "test terminal job").expect("cancel");
+            assert!(!store
+                .handle(job.id)
+                .local_child_identity_pending(&reservation_id, runner_id, now));
         });
     }
 }

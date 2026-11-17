@@ -4298,11 +4298,13 @@ impl JobHandle {
     /// Whether the parent daemon has reserved this exact child but not yet
     /// durably recorded its process identity and running state. The child is
     /// spawned before that commit, so a fast child can read the store first.
-    /// Any mismatch or terminal state is not pending and must fail closed.
+    /// Any mismatch, expired reservation, or terminal state is not pending and
+    /// must fail closed.
     pub(crate) fn local_child_identity_pending(
         &self,
         reservation_id: &str,
         runner_id: &str,
+        now_ms: u64,
     ) -> bool {
         let inner = self.store.inner.lock().expect("job store mutex poisoned");
         let Some(stored) = inner.jobs.get(&self.job_id) else {
@@ -4314,6 +4316,7 @@ impl JobHandle {
             return false;
         };
         !stored.job.status.is_terminal()
+            && now_ms < local_child.reservation_expires_at_ms
             && local_child.reservation_id == reservation_id
             && local_runner.runner_id == runner_id
             && (stored.job.status != JobStatus::Running || local_child.process.is_none())
