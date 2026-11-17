@@ -607,21 +607,94 @@ homeboy_engine_primitives::provider_registry_arc! {
     active: pub(crate) fn active_transport,
 }
 
+/// How many times a gate whose runner job never spawned is re-admitted before
+/// the gate is reported unavailable. Each re-admission is a fresh runner job
+/// that waits in the daemon's capacity queue again (#18121).
+pub const LAB_GATE_PRE_SPAWN_READMISSION_BUDGET: u32 = 3;
+
+/// The stage a runner gate job reports when it terminated before its child
+/// process spawned, so it never judged the candidate.
+pub const LAB_GATE_PRE_SPAWN_STAGE: &str = "pre_spawn";
+
+/// A runner gate job that terminated before spawning its child. It never ran
+/// the gate; a retryable failure (an expired pre-spawn reservation) is
+/// re-admitted by [`dispatch`] within [`LAB_GATE_PRE_SPAWN_READMISSION_BUDGET`].
+pub fn gate_job_never_spawned(
+    job_id: &str,
+    failure: &homeboy_core::api_jobs::RemoteRunnerPreSpawnFailure,
+) -> Error {
+    Error::new(
+        homeboy_core::ErrorCode::RunnerLabTransportFailure,
+        format!(
+            "runner gate job `{job_id}` never spawned: {}",
+            failure.reason()
+        ),
+        serde_json::json!({
+            "job_id": job_id,
+            "stage": LAB_GATE_PRE_SPAWN_STAGE,
+            "gate_disposition": "unavailable",
+            "pre_spawn_failure": failure,
+        }),
+    )
+    .with_retryable(failure.retryable())
+}
+
+fn is_retryable_pre_spawn_failure(error: &Error) -> bool {
+    error
+        .details
+        .get("stage")
+        .and_then(serde_json::Value::as_str)
+        == Some(LAB_GATE_PRE_SPAWN_STAGE)
+        && error.retryable == Some(true)
+}
+
 /// Every Lab gate execution, readiness preflight included, waits through
 /// transient substrate refusals such as pressure instead of failing the Cook
-/// (#17776, #18058).
+/// (#17776, #18058), and re-admits a gate whose runner job never spawned
+/// within a bounded budget (#18121).
 fn execute_through_substrate_waits(
     cwd: &Path,
     request: &LabGateRequest,
     supervision: Option<&GateSupervision>,
 ) -> Result<LabGateReceipt> {
-    homeboy_core::substrate_wait::wait_through(
-        "Lab gate execution",
-        homeboy_core::substrate_wait::SUBSTRATE_WAIT_DEADLINE,
-        || supervision.is_some_and(|policy| (policy.is_cancelled)()),
-        |_, _| {},
-        || active_transport().execute(cwd, request, supervision),
-    )
+    let cancelled = || supervision.is_some_and(|policy| (policy.is_cancelled)());
+    let mut never_spawned = Vec::new();
+    loop {
+        let error = match homeboy_core::substrate_wait::wait_through(
+            "Lab gate execution",
+            homeboy_core::substrate_wait::SUBSTRATE_WAIT_DEADLINE,
+            cancelled,
+            |_, _| {},
+            || active_transport().execute(cwd, request, supervision),
+        ) {
+            Ok(receipt) => return Ok(receipt),
+            Err(error) => error,
+        };
+        if !is_retryable_pre_spawn_failure(&error) {
+            return Err(error);
+        }
+        never_spawned.push(error.details.get("job_id").cloned());
+        let readmissions = never_spawned.len() as u32 - 1;
+        if readmissions >= LAB_GATE_PRE_SPAWN_READMISSION_BUDGET || cancelled() {
+            let mut error = error;
+            error.message = format!(
+                "{}; re-admitted {readmissions} of {LAB_GATE_PRE_SPAWN_READMISSION_BUDGET} times, every runner job expired before spawn",
+                error.message
+            );
+            error.details["pre_spawn_readmissions"] = serde_json::json!(readmissions);
+            error.details["pre_spawn_readmission_budget"] =
+                serde_json::json!(LAB_GATE_PRE_SPAWN_READMISSION_BUDGET);
+            error.details["never_spawned_job_ids"] = serde_json::json!(never_spawned);
+            return Err(error);
+        }
+        homeboy_core::log_status!(
+            "wait",
+            "Lab gate execution: {} — re-admitting ({} of {})",
+            error.message,
+            readmissions + 1,
+            LAB_GATE_PRE_SPAWN_READMISSION_BUDGET
+        );
+    }
 }
 
 pub(super) fn dispatch(
@@ -1840,6 +1913,114 @@ mod tests {
             )
             .unwrap();
         });
+    }
+
+    /// A runner transport whose gate jobs expire before spawn `expiries` times.
+    struct ExpiringBeforeSpawn {
+        previous: Arc<dyn LabGateTransport>,
+        runner_id: &'static str,
+        expiries: usize,
+        submissions: std::sync::atomic::AtomicUsize,
+    }
+    impl LabGateTransport for ExpiringBeforeSpawn {
+        fn declared_runner(&self, command: &str) -> Result<Option<String>> {
+            self.previous.declared_runner(command)
+        }
+        fn execute(
+            &self,
+            cwd: &Path,
+            request: &LabGateRequest,
+            supervision: Option<&GateSupervision>,
+        ) -> Result<LabGateReceipt> {
+            if request.runner_id != self.runner_id {
+                return self.previous.execute(cwd, request, supervision);
+            }
+            let submission = self
+                .submissions
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            if submission < self.expiries {
+                let failure =
+                    homeboy_core::api_jobs::RemoteRunnerPreSpawnFailure::ReservationExpired {
+                        status: homeboy_core::api_jobs::JobStatus::Failed,
+                        retryable: true,
+                        reservation_id: format!("reservation-{submission}"),
+                        reservation_expires_at_ms: 60_000,
+                    };
+                return Err(gate_job_never_spawned(
+                    &format!("job-{submission}"),
+                    &failure,
+                ));
+            }
+            execute_with_context(request.clone(), cwd, &runner_context(self.runner_id))
+        }
+    }
+
+    fn dispatch_through_expiring_runner(
+        runner_id: &'static str,
+        expiries: usize,
+    ) -> (AgentTaskGateReport, usize) {
+        homeboy_core::test_support::with_isolated_home(|_| {
+            let transport = Arc::new(ExpiringBeforeSpawn {
+                previous: active_transport(),
+                runner_id,
+                expiries,
+                submissions: std::sync::atomic::AtomicUsize::new(0),
+            });
+            register_lab_gate_transport(transport.clone());
+            let root = tempfile::tempdir().unwrap();
+            repository(root.path());
+            let mut request = request(root.path());
+            request.runner_id = runner_id.to_string();
+            let report = dispatch(root.path(), &request, None).unwrap();
+            (
+                report,
+                transport
+                    .submissions
+                    .load(std::sync::atomic::Ordering::SeqCst),
+            )
+        })
+    }
+
+    /// #18121: a gate whose runner job expired before spawn never ran, so it
+    /// is re-admitted and the next spawned job's verdict is the gate's.
+    #[test]
+    fn gate_job_that_never_spawned_is_readmitted_and_runs() {
+        let (report, submissions) = dispatch_through_expiring_runner("expiring-once-runner", 2);
+
+        assert_eq!(report.status, AgentTaskGateStatus::Succeeded, "{report:?}");
+        assert_eq!(report.stdout, "executed");
+        assert_eq!(submissions, 3);
+    }
+
+    /// #18121: past the re-admission budget the gate is unavailable, and the
+    /// diagnostic says every runner job expired before spawn.
+    #[test]
+    fn gate_jobs_that_never_spawn_past_the_budget_are_unavailable_and_named() {
+        let (report, submissions) = dispatch_through_expiring_runner("expiring-always-runner", 99);
+
+        let budget = LAB_GATE_PRE_SPAWN_READMISSION_BUDGET as usize;
+        assert_eq!(submissions, budget + 1);
+        assert_eq!(report.status, AgentTaskGateStatus::Unavailable);
+        let receipt = report.lab_receipt.as_ref().unwrap();
+        assert_eq!(receipt["executed"], false);
+        assert_eq!(receipt["stage"], LAB_GATE_PRE_SPAWN_STAGE);
+        assert_eq!(receipt["retryable"], true);
+        let details = &receipt["diagnostic"]["details"];
+        assert_eq!(details["pre_spawn_readmissions"], budget);
+        assert_eq!(
+            details["never_spawned_job_ids"].as_array().unwrap().len(),
+            budget + 1
+        );
+        assert!(
+            report
+                .stderr
+                .contains("never spawned: local_child_reservation_expired"),
+            "{}",
+            report.stderr
+        );
+        assert!(report.stderr.contains(&format!(
+            "re-admitted {budget} of {budget} times, every runner job expired before spawn"
+        )));
     }
 
     #[test]

@@ -138,6 +138,7 @@ fn lab_gate_public_error(error: &Error, artifact_ref: String) -> Error {
         // substrate wait classifies a pressure refusal as permanent (#18058).
         "reasons": error.details.get("reasons"),
         "transient": error.details.get("transient"),
+        "pre_spawn_failure": error.details.get("pre_spawn_failure"),
         "artifact_ref": artifact_ref,
     });
     details["diagnostic"] = homeboy_core::redaction::redact_json(&serde_json::json!({
@@ -180,7 +181,17 @@ fn missing_terminal_receipt(job_id: &str, problem: &str) -> Error {
     .with_retryable(true)
 }
 
+/// A job that terminated before spawning its child (an expired pre-spawn
+/// reservation) has no receipt because it never ran the gate. Name that, so
+/// the placement layer re-admits it instead of reporting a lost receipt.
 fn terminal_receipt_stream<'a>(result: &'a serde_json::Value, job_id: &str) -> Result<&'a str> {
+    if let Ok(failure) = serde_json::from_value::<homeboy_core::api_jobs::RemoteRunnerPreSpawnFailure>(
+        result.clone(),
+    ) {
+        return Err(
+            homeboy_agents::agent_tasks::gate::placement::gate_job_never_spawned(job_id, &failure),
+        );
+    }
     result
         .get("stdout")
         .and_then(serde_json::Value::as_str)
@@ -1302,6 +1313,40 @@ mod public_error_tests {
         let public = lab_gate_public_error(&error, "homeboy://run/x/artifact/y".into());
         assert!(public.message.contains("tracked/cycle"));
         assert_eq!(public.details["entry_path"], "tracked/cycle");
+    }
+
+    /// #18121: a gate job whose reservation expired before spawn is a
+    /// retryable never-spawned failure, not a lost receipt stream.
+    #[test]
+    fn reservation_expired_gate_job_is_a_retryable_never_spawned_failure() {
+        let result = serde_json::json!({
+            "reason": "local_child_reservation_expired",
+            "status": "failed",
+            "retryable": true,
+            "reservation_id": "reservation-1",
+            "reservation_expires_at_ms": 60_000_u64,
+        });
+        let error = terminal_receipt_stream(&result, "job-expired").unwrap_err();
+        let public = lab_gate_public_error(&error, "homeboy://diagnostic".into());
+
+        assert_eq!(
+            public.code,
+            homeboy_core::ErrorCode::RunnerLabTransportFailure
+        );
+        assert_eq!(public.retryable, Some(true));
+        assert_eq!(public.details["job_id"], "job-expired");
+        assert_eq!(
+            public.details["stage"],
+            homeboy_agents::agent_tasks::gate::placement::LAB_GATE_PRE_SPAWN_STAGE
+        );
+        assert_eq!(
+            public.details["pre_spawn_failure"]["reason"],
+            "local_child_reservation_expired"
+        );
+        assert!(public
+            .message
+            .contains("never spawned: local_child_reservation_expired"));
+        assert!(!public.message.contains("no receipt stream"));
     }
 
     #[test]
