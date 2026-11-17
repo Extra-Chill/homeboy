@@ -4343,6 +4343,43 @@ fn pid_starttime_mismatch_reclaims_a_reused_provider_pid_without_signalling_it()
     });
 }
 
+/// An observer lost before any provider started produced no work; its
+/// interrupted owner says so instead of claiming provider execution.
+#[test]
+fn interrupted_owner_without_provider_execution_reports_before_provider_start() {
+    with_isolated_home(|_| {
+        let store = test_lifecycle_store();
+        let plan = test_plan();
+        let run_id = "observer-interrupted-before-provider";
+        submit_plan(&plan, Some(run_id)).expect("submitted");
+        mark_running(run_id).expect("running");
+        rewrite_record_for_test(run_id, |record| {
+            record.ensure_metadata_object().remove("runner_pid");
+            record
+                .ensure_metadata_object()
+                .remove("runner_process_start_identity");
+        })
+        .expect("unverifiable observer");
+
+        let failed = record_interrupted_local_owner_in_store(&store, run_id)
+            .expect("record interrupted observer");
+        assert_eq!(failed.state(), RunExecutionState::Failed);
+        assert_eq!(failed.metadata["provider_executions_consumed"], json!(0));
+        assert_eq!(
+            failed.metadata["stop_reason"],
+            json!("local Cook observer was interrupted before the provider started; no work was produced")
+        );
+        assert_eq!(
+            failed.metadata["interrupted_owner"]["cause"],
+            json!("observer_interrupted_before_provider_execution")
+        );
+        assert_eq!(
+            failed.metadata["interrupted_owner"]["provider_budget_consumed"],
+            json!(false)
+        );
+    });
+}
+
 /// Rooted in an explicit store rather than a mutated process environment
 /// (#7505). "Once" is the assertion: the second status must observe the
 /// terminal state the first one committed. Two reads of the same record in one

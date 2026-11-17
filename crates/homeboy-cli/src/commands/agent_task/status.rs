@@ -716,6 +716,40 @@ mod compact_status_tests {
     use super::{compact_control_plane_status, deduplicate_control_plane_evidence};
     use serde_json::json;
 
+    /// An interrupted owner without a recorded stop reason still reports
+    /// truthfully whether a provider ever started.
+    #[test]
+    fn interrupted_owner_fallback_reports_zero_execution_before_provider_start() {
+        crate::test_support::with_isolated_home(|_| {
+            use homeboy::agents::agent_task_lifecycle::{
+                exact_record, rewrite_record_for_test, seed_status_purity_fixtures_for_test,
+            };
+            seed_status_purity_fixtures_for_test().unwrap();
+            let run_id = "purity-queued";
+            for (consumed, expected) in [
+                (
+                    0,
+                    "local Cook observer was interrupted before the provider started; no work was produced",
+                ),
+                (
+                    1,
+                    "local Cook observer was interrupted during provider execution",
+                ),
+            ] {
+                rewrite_record_for_test(run_id, |record| {
+                    record.metadata["interrupted_owner"] =
+                        json!({ "provider_executions_consumed": consumed });
+                })
+                .unwrap();
+                let diagnostic =
+                    super::persisted_cook_failure_diagnostic(&exact_record(run_id).unwrap())
+                        .expect("interrupted owner diagnostic");
+                assert_eq!(diagnostic.class, "interrupted_owner");
+                assert_eq!(diagnostic.message, expected);
+            }
+        });
+    }
+
     #[test]
     fn terminal_cook_status_exposes_record_outcome_by_cook_and_run_id() {
         crate::test_support::with_isolated_home(|_| {
@@ -6020,7 +6054,13 @@ fn persisted_cook_failure_diagnostic(record: &AgentTaskRunRecord) -> Option<Coll
             message: failure
                 .get("stop_reason")
                 .and_then(Value::as_str)
-                .unwrap_or("local Cook observer was interrupted during provider execution")
+                .unwrap_or_else(|| {
+                    agent_task_lifecycle::interrupted_owner_stop_reason(
+                        failure["provider_executions_consumed"]
+                            .as_u64()
+                            .unwrap_or(1),
+                    )
+                })
                 .to_string(),
             source: "interrupted_owner".to_string(),
             data: failure.clone(),
