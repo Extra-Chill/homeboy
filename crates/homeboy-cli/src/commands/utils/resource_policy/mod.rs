@@ -2197,11 +2197,17 @@ mod tests {
                 &["daemon_freshness_unavailable", "daemon_unverified"][..],
             ),
             ("readiness_unobserved", &["status_probe_timeout"][..]),
+            ("connected_ready", &[][..]),
         ] {
             let decisions = [true, false].map(|preview| {
+                let mut readiness = configured_lab(state, reasons);
+                if state == "connected_ready" {
+                    readiness.available_runner_ids = vec!["homeboy-lab".into(), "lab-race".into()];
+                    readiness.remediation_commands.clear();
+                }
                 crate::cli_runtime::resolve_preflight_for_test(
                     &cook_cli("auto", preview),
-                    Some(configured_lab(state, reasons)),
+                    Some(readiness),
                 )
                 .unwrap_or_else(|error| panic!("{state} must queue: {error:?}"))
             });

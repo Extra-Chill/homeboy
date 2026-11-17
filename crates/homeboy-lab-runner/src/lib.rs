@@ -1298,8 +1298,6 @@ fn lab_runner_readiness_from_candidates(
     preferred: Option<&str>,
     candidates: Vec<DefaultLabRunnerCandidate>,
 ) -> LabRunnerReadiness {
-    let selected_runner_id =
-        resolve_default_lab_runner_from_candidates(preferred, candidates.clone());
     let availability: Vec<_> = candidates
         .iter()
         .map(DefaultLabRunnerCandidate::availability)
@@ -1309,6 +1307,21 @@ fn lab_runner_readiness_from_candidates(
         .filter(|runner| runner.accepts_jobs)
         .map(|runner| runner.runner_id.clone())
         .collect();
+    // A ready snapshot must select from the same observed availability it
+    // reports. Default discovery also permits disconnected SSH targets, but
+    // those must not displace an already admitted connected runner here.
+    let selected_runner_id = if available_runner_ids.is_empty() {
+        resolve_default_lab_runner_from_candidates(preferred, candidates.clone())
+    } else {
+        resolve_default_lab_runner_from_candidates(
+            preferred,
+            candidates
+                .iter()
+                .filter(|candidate| available_runner_ids.contains(&candidate.id))
+                .cloned(),
+        )
+        .or_else(|| available_runner_ids.iter().min().cloned())
+    };
     let reasons: Vec<_> = availability
         .iter()
         .flat_map(|runner| runner.reasons.iter().cloned())
@@ -2428,6 +2441,23 @@ mod tests {
             );
             assert_eq!(snapshot.summary.reasons, admission.reasons);
             assert_eq!(runner_admission_label(&snapshot), label);
+        }
+    }
+
+    #[test]
+    fn connected_ready_selects_only_from_available_runners() {
+        for preferred in [None, Some("lab-a"), Some("lab-b")] {
+            let disconnected = default_lab_candidate("lab-a", false);
+            let mut ready = default_lab_candidate("lab-b", true);
+            ready.unverified_daemon = true;
+            ready.active_jobs = 50;
+            ready.capacity = Some(100);
+            let readiness =
+                lab_runner_readiness_from_candidates(preferred, vec![disconnected, ready]);
+
+            assert_eq!(readiness.state, LabRunnerReadinessState::ConnectedReady);
+            assert_eq!(readiness.available_runner_ids, ["lab-b"]);
+            assert_eq!(readiness.selected_runner_id.as_deref(), Some("lab-b"));
         }
     }
 
