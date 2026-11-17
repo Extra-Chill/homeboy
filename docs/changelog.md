@@ -4,6 +4,14 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.470.10] - 2026-11-17
+
+### Changed
+- make checkout-less release-tag tests offline and deterministic
+
+### Fixed
+- admit terminal dirty workspaces for preservation only after their run's terminal state is projected
+
 ## [0.470.9] - 2026-11-17
 
 ### Changed
