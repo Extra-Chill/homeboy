@@ -417,6 +417,7 @@ pub(super) fn execute_artifact_deploy(
             exit_code,
             effect,
             mut phase_timings,
+            warnings: install_warnings,
             ..
         }) => {
             let subject = phase_clock::component_subject(&component.id);
@@ -445,6 +446,7 @@ pub(super) fn execute_artifact_deploy(
                     .with_artifact_inputs(artifact_input_metadata)
                     .with_build_exit_code(prepared.build_exit_code)
                     .with_deploy_exit_code(Some(exit_code))
+                    .with_warnings(install_warnings.clone())
                     .with_phase_timings(phase_timings.into_report());
                     return with_prepared_artifact_source(result, prepared);
                 }
@@ -460,6 +462,7 @@ pub(super) fn execute_artifact_deploy(
                     .with_artifact_inputs(artifact_input_metadata)
                     .with_build_exit_code(prepared.build_exit_code)
                     .with_deploy_exit_code(Some(exit_code))
+                    .with_warnings(install_warnings.clone())
                     .with_phase_timings(phase_timings.into_report());
                     return with_prepared_artifact_source(result, prepared);
                 }
@@ -495,6 +498,7 @@ pub(super) fn execute_artifact_deploy(
                 .with_artifact_inputs(artifact_input_metadata)
                 .with_build_exit_code(prepared.build_exit_code)
                 .with_deploy_exit_code(Some(exit_code))
+                .with_warnings(install_warnings)
                 .with_post_deploy_hooks(hooks)
                 .with_phase_timings(phase_timings.into_report());
             with_prepared_artifact_source(result, prepared)
@@ -503,6 +507,7 @@ pub(super) fn execute_artifact_deploy(
             success: false,
             exit_code,
             error,
+            warnings,
             ..
         }) => {
             let result = ComponentDeployResult::failed(
@@ -514,7 +519,8 @@ pub(super) fn execute_artifact_deploy(
             )
             .with_remote_path(install_dir.to_string())
             .with_build_exit_code(prepared.build_exit_code)
-            .with_deploy_exit_code(Some(exit_code));
+            .with_deploy_exit_code(Some(exit_code))
+            .with_warnings(warnings);
             with_prepared_artifact_source(result, prepared)
         }
         Err(err) => {

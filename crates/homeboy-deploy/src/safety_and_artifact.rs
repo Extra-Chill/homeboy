@@ -294,20 +294,22 @@ pub(super) fn deploy_artifact(
     }
     // Install, permissions, verification, and cleanup run as one remote
     // script, so they are timed as a single `install` phase.
+    let mut warnings = Vec::new();
     let failure = if steps.is_empty() {
         None
     } else {
         phase_clock::time(&mut timer, &subject, "install", || {
-            install_script::run(ssh_client, &steps)
+            install_script::run_collecting_warnings(ssh_client, &steps, &mut warnings)
         })?
     };
     if let (Some(observation), Some(_)) = (observation, verification) {
         observation.phase("verify", true)?;
     }
     if let Some(failure) = failure {
-        return Ok(failure);
+        return Ok(failure.with_warnings(warnings));
     }
     Ok(DeployResult::success(0)
+        .with_warnings(warnings)
         .with_effect(DeployEffect {
             remote_path: remote_path.to_string(),
             artifact_path: uploaded_artifact_path,
@@ -434,10 +436,14 @@ fn extract_steps(remote_path: &str, artifact_filename: String, cmd_template: &st
 /// symlink an external checkout into the deploy location, and an environment
 /// caching the old resolved path may need a refresh. Generic: no assumptions
 /// about the target runtime or its caching behavior.
+/// Warn when the target is a symlink Homeboy does not manage. A release-layout
+/// symlink (#18365) is relative and starts with a dot-prefixed release root
+/// directory (for example `.homeboy-releases/<slug>/<id>/<slug>`); that is the
+/// expected steady state and stays quiet.
 fn symlink_notice_step(remote_path: &str) -> Step {
+    let path = shell::quote_path(remote_path);
     Step::best_effort(format!(
-        "if [ -L {} ]; then echo \"{}⚠ Deploy target {} is currently a symlink; the install will replace it with a real directory. Any environment that caches the symlink's resolved path may need to be refreshed or recycled to pick up the new location.\"; fi",
-        shell::quote_path(remote_path),
+        "if [ -L {path} ]; then case \"$(readlink {path})\" in .[!.]*/*) ;; *) echo \"{}⚠ Deploy target {} is currently a symlink; the install will replace it (with a real directory, or a release-layout symlink when enabled). Any environment that caches the symlink's resolved path may need to be refreshed or recycled to pick up the new location.\" ;; esac; fi",
         install_script::LOG_MARKER,
         shown(remote_path),
     ))

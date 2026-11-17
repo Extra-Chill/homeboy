@@ -229,8 +229,9 @@ pub use core_compat::{
     CORE_COMPAT_REMEDIATION_COMMAND, CORE_INCOMPATIBLE_DIAGNOSTIC,
 };
 pub use manifest_deploy_config::{
-    DeployArchiveInstallPolicy, DeployRequiredHeader, DeploymentProviderLayeredInputManifest,
-    DeploymentProviderManifest, DEPLOYMENT_PROVIDER_PAYLOAD_SCHEMA,
+    DeployArchiveInstallPolicy, DeployReleaseLayoutPolicy, DeployRequiredHeader,
+    DeploymentProviderLayeredInputManifest, DeploymentProviderManifest,
+    DEPLOYMENT_PROVIDER_PAYLOAD_SCHEMA,
 };
 pub use manifest_test_config::{TestPassthroughFilter, TestPassthroughFilterStrategy};
 pub use runner_contract::{

@@ -13,6 +13,28 @@ assert.equal(deployHooks.length, 1, 'post:deploy retains ownership warning; arch
 assert.ok(deployHooks[0].includes('DEPLOY_OWNER='), 'deploy preserves the ownership check');
 assert.ok(deployHooks[0].includes('root:root'), 'deploy preserves the root:root warning');
 assert.ok(
+	deployHooks[0].includes("stat -L -c '%U:%G'") && deployHooks[0].includes("stat -L -f '%Su:%Sg'"),
+	'the ownership check follows a release-layout symlink to the release tree'
+);
+
+// Release layout (homeboy#18365): plugins and themes opt in, gated by the
+// PHP-FPM opcache.revalidate_path precondition; the generic deploy layer stays
+// runtime-agnostic.
+const archivePolicies = manifest.deploy.archive_install;
+assert.deepEqual(archivePolicies.map((policy) => policy.path_pattern), ['/wp-content/plugins/', '/wp-content/themes/']);
+for (const policy of archivePolicies) {
+	const layout = policy.release_layout;
+	assert.ok(layout, `${policy.path_pattern} opts in to the release layout`);
+	assert.equal(layout.release_root_dir, '.homeboy-releases');
+	assert.match(layout.release_root_dir, /^\./, 'WordPress skips dot-prefixed directories when scanning plugins and themes');
+	assert.equal(layout.keep_previous, 2);
+	assert.equal(layout.keep_recent_minutes, 15);
+	assert.ok(layout.precondition_command.includes('HOMEBOY_FPM_MODE=release-precondition'));
+	assert.ok(layout.precondition_command.includes("ini_get('opcache.revalidate_path')"));
+	assert.ok(layout.precondition_command.includes('failing closed'));
+	assert.ok(policy.after_switch_command, `${policy.path_pattern} keeps the inline opcache refresh`);
+}
+assert.ok(
 	deployHooks.every((hook) => !/\bwp\s+cache\s+flush\b/.test(hook)),
 	'component deploy must not flush the object cache'
 );

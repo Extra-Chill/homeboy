@@ -999,6 +999,11 @@ fn remote_manifest_probe_command(root: &str) -> String {
             "elif stat -f %Lp \"$root\" >/dev/null 2>&1; then hb_stat=bsd; ",
             "else printf '%s\\n' stat >&2; exit {stat_exit}; fi; ",
             "if [ -d \"$root\" ]; then ",
+            // A symlinked directory root (the versioned release layout,
+            // #18365) is walked through its `/.` entry: plain `find` never
+            // descends into a starting-point symlink. Entries keep their
+            // paths relative to the logical root.
+            "if [ -L \"$root\" ]; then root=\"$root/.\"; fi; ",
             "command -v find >/dev/null 2>&1 || {{ printf '%s\\n' find >&2; exit {find_exit}; }}; ",
             "if [ -n \"$(find \"$root\" -type l -print -quit)\" ]; then command -v readlink >/dev/null 2>&1 || {{ printf '%s\\n' readlink >&2; exit {readlink_exit}; }}; fi; ",
             "find \"$root\" -mindepth 1 \\( -path '*/.git/*' -o -name .git -o -name '.homeboy-*' \\) -prune -o ",
@@ -1714,6 +1719,46 @@ mod tests {
         let root = temp.path().join("extrachill-plugin");
         probe_fixture_tree(&root);
         assert_probe_matches_local_manifest(&root, None);
+    }
+
+    /// Release layout (#18365): the live target is a relative symlink into a
+    /// versioned release directory. Probing the symlink must describe the
+    /// release tree exactly as probing a real directory with the same
+    /// contents does, locally and on the target.
+    #[test]
+    fn symlinked_release_target_probes_like_a_real_directory() {
+        let temp = tempfile::tempdir().expect("temp");
+        let real = temp.path().join("real").join("extrachill-plugin");
+        probe_fixture_tree(&real);
+        let parent = temp.path().join("plugins");
+        let release =
+            parent.join(".homeboy-releases/extrachill-plugin/20261117T000000Z-1/extrachill-plugin");
+        probe_fixture_tree(&release);
+        let target = parent.join("extrachill-plugin");
+        std::os::unix::fs::symlink(
+            ".homeboy-releases/extrachill-plugin/20261117T000000Z-1/extrachill-plugin",
+            &target,
+        )
+        .expect("release symlink");
+
+        let probe = |root: &Path| {
+            let output = run_probe_command(root, None);
+            assert!(output.status.success(), "{output:?}");
+            parse_remote_manifest(&String::from_utf8_lossy(&output.stdout), &[])
+                .expect("remote manifest")
+        };
+        let symlinked = probe(&target);
+        assert!(
+            !symlinked.entries.is_empty(),
+            "the probe follows the symlinked root"
+        );
+        assert_eq!(symlinked, probe(&real), "same manifest as a real directory");
+        assert_eq!(
+            local_manifest(&target).expect("local manifest"),
+            local_manifest(&real).expect("local manifest"),
+            "the local walker follows the symlinked root too"
+        );
+        assert_probe_matches_local_manifest(&target, None);
     }
 
     #[test]
