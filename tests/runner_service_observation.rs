@@ -472,6 +472,16 @@ fn service_runner_exec_waits_for_the_published_lease_and_diagnostics_stay_read_o
 
         let fake_bin = root.join("fake-bin");
         std::fs::create_dir_all(&fake_bin).expect("fake system bin");
+        // This fixture emulates a Linux runner even when the controller test
+        // runs on macOS. Adapt GNU sed's in-place flag to the host's BSD sed;
+        // the product script still targets the runner, not the controller.
+        #[cfg(target_os = "macos")]
+        homeboy_test_support::write_executable(
+            fake_bin.join("sed"),
+            "#!/bin/sh\nif [ \"$1\" = -i ]; then shift; exec /usr/bin/sed -i '' \"$@\"; fi\nexec /usr/bin/sed \"$@\"\n",
+            0o755,
+        )
+        .expect("write Linux-runner sed adapter");
         let restart_waiting = root.join("service-restart-waiting");
         let publish_service = root.join("publish-service");
         let systemctl = fake_bin.join("systemctl");
@@ -480,9 +490,11 @@ fn service_runner_exec_waits_for_the_published_lease_and_diagnostics_stay_read_o
             format!(
                 r##"#!/bin/sh
 printf '%s\n' "$*" >> "$HOME/systemctl.log"
+# Match the systemctl operation and unit, not substrings of the command.
+# enable --now starts the unit too: block the first start until publication.
+[ "$1" = --user ] && shift
 case "$*" in
-  *daemon-reload*|*enable*) exit 0 ;;
-  *restart*|*" start "*)
+  "enable --now homeboy-runner.service"|"start homeboy-runner.service"|"restart homeboy-runner.service")
     : > "$HOME/{waiting}"
     while [ ! -e "$HOME/{release}" ]; do sleep 0.02; done
     ;;
@@ -555,6 +567,12 @@ esac
                 std::fs::read_to_string(root.join("systemctl.log")).unwrap_or_default()
             );
         }
+
+        assert_eq!(
+            std::fs::read_to_string(root.join("systemctl.log")).expect("service command log"),
+            "--user daemon-reload\n--user enable --now homeboy-runner.service\n",
+            "install must block at its first service start, before waiting for the lease"
+        );
 
         let unit_dir = root.join(".config/systemd/user");
         let unit_path = std::fs::read_dir(&unit_dir)
