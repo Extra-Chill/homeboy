@@ -146,7 +146,7 @@ pub mod gate {
         AgentTaskGateLiveStatus, AgentTaskGateReport, AgentTaskGateStatus,
         AgentTaskGateTermination, GateSupervision, NO_REPRO_GATE_WARNING,
     };
-    pub use super::super::agent_task_gate::{data_inputs, placement};
+    pub use super::super::agent_task_gate::{data_inputs, execution_start, placement};
     pub use super::super::agent_task_gate::{
         AgentTaskGateEnvironmentMode, AgentTaskGateEnvironmentPolicy, AgentTaskGateExecutionPolicy,
         AgentTaskGateExtensionInput, AgentTaskGateInputSource,

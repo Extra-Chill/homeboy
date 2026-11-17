@@ -174,7 +174,7 @@ pub fn cook_launch_step_request(
         env,
         COOK_STEP_TERMINAL_CONSUMER,
     )
-    .with_child_wait()
+    .without_capacity_slot()
     .with_linked_durable_run_id(cook_id)
 }
 
@@ -262,11 +262,31 @@ fn workflow_cook_record(
 /// The settled canonical state of a Cook. A terminal attempt whose terminal
 /// continuation (promotion and PR finalization) is still queued or running has
 /// not settled: the continuation decides its final state.
+///
+/// A Cook superseded by the live Cook that owns its destination never runs:
+/// its step follows the owner and settles with the owner's outcome, so a
+/// workflow waits on the real work instead of settling at once (#18301).
 pub(super) fn workflow_cook_outcome(cook_id: &str) -> WorkflowRunOutcome {
-    let record = match workflow_cook_record(cook_id) {
-        Ok(record) => record,
-        Err(outcome) => return outcome,
-    };
+    let mut followed = vec![cook_id.to_string()];
+    loop {
+        let current = followed.last().expect("followed Cook");
+        let record = match workflow_cook_record(current) {
+            Ok(record) => record,
+            Err(outcome) => return outcome,
+        };
+        match record.metadata["superseded_by_active_cook"]["cook_id"].as_str() {
+            Some(owner) if !followed.iter().any(|seen| seen == owner) => {
+                followed.push(owner.to_string());
+            }
+            _ => return settled_cook_outcome(current, record),
+        }
+    }
+}
+
+fn settled_cook_outcome(
+    cook_id: &str,
+    record: agent_task_lifecycle::AgentTaskRunRecord,
+) -> WorkflowRunOutcome {
     if !record.state().is_terminal() {
         return WorkflowRunOutcome::Pending;
     }

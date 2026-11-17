@@ -772,6 +772,14 @@ fn observe(
         events.push(Event::Start);
     }
     for key in state.awaited_keys() {
+        if !state.spawn_observed(&key) {
+            if let Some(at_ms) = store.step_spawned_at_ms(&key) {
+                events.push(Event::StepSpawned {
+                    key: key.clone(),
+                    at_ms,
+                });
+            }
+        }
         if let Some(result) = step_result(request, state, &key, store) {
             events.push(Event::StepFinished(result));
         }
@@ -1177,7 +1185,11 @@ pub fn step_request(
     let mut step = StepJobRequest::new(submission.key.clone(), program, args, cwd, env, consumer);
     step.root_durable_run_id = Some(request.instance.clone());
     if let Some(run_id) = linked_run {
-        step = step.with_child_wait().with_linked_durable_run_id(run_id);
+        step = step
+            .without_capacity_slot()
+            .with_linked_durable_run_id(run_id);
+    } else if submission.uncapped {
+        step = step.without_capacity_slot();
     }
     if let Some(not_before_ms) = submission.not_before_ms {
         let at = chrono::DateTime::<chrono::Utc>::from_timestamp_millis(not_before_ms as i64)

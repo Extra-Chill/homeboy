@@ -413,6 +413,30 @@ fn admitted_owner_fixture_job(store: &JobStore, linked_durable_run_id: &str) -> 
     job_id
 }
 
+/// Recovery evidence hydrates linked durable runs from other stores, which is
+/// slow under load. The job store stays unlocked while it does, so health,
+/// job reads and cancellation checks are not serialized behind it (#18197).
+#[test]
+fn recovery_evidence_resolves_linked_runs_without_holding_the_store() {
+    let fixtures = crate::test_support::AgentTaskTerminalRunFixtures::install();
+    let run_id = format!("run-probe-{}", Uuid::new_v4());
+    let store = JobStore::default().with_daemon_lease("lease-probe".to_string());
+    let unlocked = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+    let (probe_store, probe_unlocked) = (store.clone(), unlocked.clone());
+    fixtures.probe_run(&run_id, move || {
+        let free = probe_store.inner.try_lock().is_ok();
+        probe_unlocked.lock().unwrap().push(free);
+    });
+    admitted_owner_fixture_job(&store, &run_id);
+
+    store.active_daemon_job_recovery_evidence(Some("lease-probe"));
+    fixtures.remove(&run_id);
+
+    let unlocked = unlocked.lock().unwrap();
+    assert!(!unlocked.is_empty(), "the linked run was resolved");
+    assert!(unlocked.iter().all(|free| *free));
+}
+
 /// A driver-owned controller job that is still queued and never started has
 /// no execution: its linked run's terminal evidence retires it. Otherwise it
 /// stays `queued` on a draining daemon generation forever and blocks that

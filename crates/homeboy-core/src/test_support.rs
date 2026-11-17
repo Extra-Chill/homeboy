@@ -360,6 +360,9 @@ impl ControllerJobHarness {
 pub enum AgentTaskTerminalRunFixture {
     Terminal(crate::api_jobs::JobStatus),
     Active,
+    /// An active run whose lookup first runs `probe`, so a test can observe
+    /// what the caller holds while it resolves linked runs.
+    Probe(std::sync::Arc<dyn Fn() + Send + Sync>),
 }
 
 /// A deterministic agent-task terminal-recovery provider shared by every test
@@ -403,6 +406,17 @@ impl AgentTaskTerminalRunFixtures {
             .lock()
             .expect("terminal-run fixtures lock")
             .insert(run_id.to_string(), AgentTaskTerminalRunFixture::Active);
+    }
+
+    /// Program `run_id` as a live run that calls `probe` on every lookup.
+    pub fn probe_run(&self, run_id: &str, probe: impl Fn() + Send + Sync + 'static) {
+        self.runs
+            .lock()
+            .expect("terminal-run fixtures lock")
+            .insert(
+                run_id.to_string(),
+                AgentTaskTerminalRunFixture::Probe(std::sync::Arc::new(probe)),
+            );
     }
 
     /// Remove one programmed run.
@@ -459,6 +473,10 @@ impl crate::api_jobs::agent_task_terminal_recovery::AgentTaskTerminalRecoveryPro
                 Some(crate::api_jobs::DaemonLinkedDurableRunState::Terminal)
             }
             AgentTaskTerminalRunFixture::Active => {
+                Some(crate::api_jobs::DaemonLinkedDurableRunState::Active)
+            }
+            AgentTaskTerminalRunFixture::Probe(probe) => {
+                probe();
                 Some(crate::api_jobs::DaemonLinkedDurableRunState::Active)
             }
         }

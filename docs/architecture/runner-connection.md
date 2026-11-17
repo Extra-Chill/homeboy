@@ -115,7 +115,7 @@ controller then never starts, replaces, rotates, or retires the remote daemon.
 2. Writes and starts `~/.config/systemd/user/homeboy-runner.service`. The unit
    runs `homeboy daemon serve --addr 127.0.0.1:0` from the stable link
    `~/.local/share/homeboy/runner-service/host/homeboy`, in
-   `runner-daemons/host`, then retires the old per-runner host units.
+   `runner-daemons/host`.
 3. Waits for the unit's lease, then marks the runner `service_managed`.
 
 One host unit serves every controller. Controllers are clients: each keeps its
@@ -142,11 +142,8 @@ For a service-managed runner:
 The service needs systemd user lingering on the runner host
 (`loginctl enable-linger`) so the unit keeps running without a login session.
 
-Install, connect, and repoint start the machine unit before stopping,
-disabling, and deleting all per-runner host units (including aliases) and their
-unused binary-link and daemon-state directories. `KillMode=process` preserves
-running exec children; startup recovery adopts and settles them from the shared
-job store. There are no per-runner unit aliases or naming fallbacks.
+One host daemon runs per machine, shared by every controller and runner id.
+There are no per-runner units, aliases, or naming fallbacks.
 
 ## Unreachable recorded host
 

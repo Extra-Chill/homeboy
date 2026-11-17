@@ -310,12 +310,25 @@ impl ObservationStore {
 // Only unambiguous command/outcome pairs can share an aggregate clock. Promotion
 // gates already carry their own timestamps and must not be moved inside it.
 fn project_provider(report: &mut PhaseTimingReport, metadata: &serde_json::Value) {
-    let commands: Vec<_> = report
+    let mut commands: Vec<_> = report
         .spans
         .iter()
         .filter(|s| s.id == "provider.command")
         .cloned()
         .collect();
+    if commands.is_empty() {
+        for phase in ["stage.lab.observe.runner.execute", "stage.lab.observe"] {
+            commands = report
+                .spans
+                .iter()
+                .filter(|s| s.id == phase)
+                .cloned()
+                .collect();
+            if !commands.is_empty() {
+                break;
+            }
+        }
+    }
     let Some(outcomes) = metadata
         .pointer("/agent_task_aggregate/outcomes")
         .and_then(|v| v.as_array())
@@ -367,6 +380,34 @@ fn project_provider(report: &mut PhaseTimingReport, metadata: &serde_json::Value
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn lab_anchor_projection_preserves_guards() {
+        use homeboy_engine_primitives::phase_timing::PhaseTimer;
+        let execute = "stage.lab.observe.runner.execute";
+        let observe = "stage.lab.observe";
+        for (anchors, model_ms, outcome_count, expected) in [
+            (vec![execute, observe], 20.0, 1, true),
+            (vec![observe], 20.0, 1, true),
+            (vec![execute, execute, observe], 20.0, 1, false),
+            (vec![observe, observe], 20.0, 1, false),
+            (vec![], 20.0, 1, false),
+            (vec![execute], 20.0, 2, false),
+            (vec![execute], -1.0, 1, false),
+            (vec![execute], 100.0, 1, false),
+        ] {
+            let mut timer = PhaseTimer::new();
+            for anchor in anchors {
+                timer.record_ok(anchor, std::time::Duration::from_millis(100));
+            }
+            let mut report = timer.into_report();
+            let outcome = serde_json::json!({"metadata": {"model_ms": model_ms, "tool_ms_by_name": {"bash": 30}}});
+            let metadata = serde_json::json!({"agent_task_aggregate": {"outcomes": vec![outcome; outcome_count]}});
+            project_provider(&mut report, &metadata);
+            assert_eq!(report.span("provider.model").is_some(), expected);
+            assert_eq!(report.span("provider.tool.bash").is_some(), expected);
+        }
+    }
 
     #[test]
     fn recorded_cook_aggregate_splits_provider_through_public_hotspots() {

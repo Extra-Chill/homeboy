@@ -122,6 +122,8 @@ pub struct RunsHotspotsOutput {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub phase_hotspots: Option<homeboy::core::performance_hotspots::PhaseHotspots>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    pub cook_wall_time: Option<super::cook_timing::CookWallTimeSummary>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub cohort_comparison: Option<FuzzHotspotCohortComparison>,
 }
 
@@ -262,6 +264,7 @@ pub(crate) fn runs_hotspots(
                 skipped_artifacts: vec![],
                 hotspots: vec![],
                 phase_hotspots: None,
+                cook_wall_time: None,
                 cohort_comparison: None,
             }),
             0,
@@ -323,6 +326,7 @@ pub(crate) fn runs_hotspots(
                 homeboy::core::notification_route::NotificationRoute::new(transport, route)
             })
             .transpose()?;
+        let agent_task = args.kind.as_deref() == Some("agent-task");
         let mut phases = homeboy::core::performance_hotspots::compare_phase_hotspots(
             store,
             &homeboy::core::performance_hotspots::PhaseHotspotQuery {
@@ -335,6 +339,29 @@ pub(crate) fn runs_hotspots(
             },
             &thresholds,
         )?;
+        let cook_wall_time = if agent_task {
+            let mut samples = Vec::new();
+            let mut seen = BTreeSet::new();
+            for id in &phases.run_ids {
+                if let Some(run) = store.get_run(id)? {
+                    let cook_id = run
+                        .metadata_json
+                        .pointer("/agent_task_run/metadata/cook_id")
+                        .and_then(Value::as_str)
+                        .unwrap_or(&run.id);
+                    if seen.insert(cook_id.to_string()) {
+                        if let Some(ms) = super::cook_timing::submission_to_pr_ms(store, &run)? {
+                            samples.push(ms);
+                        }
+                    }
+                }
+            }
+            Some(super::cook_timing::CookWallTimeSummary::from_samples(
+                samples,
+            ))
+        } else {
+            None
+        };
         let regressed = phases
             .comparison
             .as_ref()
@@ -359,6 +386,7 @@ pub(crate) fn runs_hotspots(
                 hotspots: vec![],
                 cohort_comparison: None,
                 phase_hotspots: Some(phases),
+                cook_wall_time,
                 coverage: vec![],
             }),
             exit_code,
@@ -386,6 +414,7 @@ pub(crate) fn runs_hotspots(
             skipped_artifacts: loaded.skipped,
             hotspots,
             phase_hotspots: None,
+            cook_wall_time: None,
             coverage: vec![],
             cohort_comparison,
         }),
@@ -1056,6 +1085,42 @@ mod tests {
             artifact_kind: "fuzz_result_envelope".to_string(),
             json,
         }
+    }
+
+    #[test]
+    fn agent_task_hotspots_include_publication_distribution_and_stdout() {
+        use homeboy_engine_primitives::phase_timing::PhaseTimer;
+        let dir = tempfile::tempdir().unwrap();
+        let store = ObservationStore::open_initialized_at(dir.path().join("runs.sqlite")).unwrap();
+        let mut run = store.start_run(NewRunRecord::builder("agent-task")
+            .metadata(json!({"agent_task_run": {"metadata": {"cook_delivery": {"delivery": {"publication": {"published": true}}}}}}))
+            .build()).unwrap();
+        run.started_at = "2026-01-01T00:00:00Z".into();
+        store.upsert_imported_run(&run).unwrap();
+        let mut timer = PhaseTimer::new();
+        timer.record_ok("publish", std::time::Duration::from_millis(500));
+        let mut report = timer.into_report();
+        report.spans[0].started_at = "2026-01-01T00:00:01Z".into();
+        store
+            .record_phase_spans(&run.id, "publish", &report)
+            .unwrap();
+        let (output, _) = runs_hotspots(
+            &store,
+            RunsHotspotsArgs {
+                kind: Some("agent-task".into()),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        let payload = serde_json::to_value(output).unwrap();
+        assert_eq!(
+            payload["payload"]["cook_wall_time"],
+            json!({
+                "count": 1, "p50_ms": 1500.0, "p95_ms": 1500.0, "mean_ms": 1500.0
+            })
+        );
+        let stdout = crate::commands::runs_summary::render_runs_hotspots_summary(&payload).unwrap();
+        assert!(stdout.contains("count=1 p50=1500 p95=1500 mean=1500"));
     }
 
     #[test]
