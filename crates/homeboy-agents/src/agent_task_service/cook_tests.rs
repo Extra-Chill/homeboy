@@ -1270,6 +1270,83 @@ fn a_succeeded_runner_result_without_an_aggregate_does_not_rerun_the_provider() 
     });
 }
 
+/// #18418: a runner job its resource guard stopped before the provider wrote
+/// an aggregate fails the Cook attempt; the same attempt would hit the guard
+/// again, so it is never replaced by a `-transport-retry` run.
+#[test]
+fn a_resource_guard_stop_before_the_aggregate_fails_the_attempt_without_transport_retry() {
+    homeboy_core::test_support::with_isolated_home(|_| {
+        let mut options = batch_cook_options(
+            "cook-resource-guard-pre-artifact",
+            Arc::new(AcceptedDetachedAttemptDispatcher),
+        );
+        options.retry_policy.max_attempts = 2;
+        let run_id = options.identity.initial_run_id.clone();
+        persist_initial_recipe(&options).unwrap();
+        agent_task_lifecycle::submit_plan(&options.identity.initial_plan, Some(&run_id)).unwrap();
+        agent_task_lifecycle::cancel_run(&run_id, Some("runner job failed")).unwrap();
+        agent_task_lifecycle::rewrite_record_for_test(&run_id, |record| {
+            record.set_state_for_test(RunExecutionState::Failed);
+            if let Some(metadata) = record.metadata.as_object_mut() {
+                metadata.retain(|key, _| !key.starts_with("cancel"));
+            }
+            record.metadata["runner_job_status"] = serde_json::json!("failed");
+            record.metadata["runner_job_events"] = serde_json::json!([{
+                "kind": "result",
+                "data": {
+                    "exit_code": 137,
+                    "metrics": {
+                        "isolation": "cgroup",
+                        "guard_violation": {
+                            "reason": "memory_limit_exceeded",
+                            "message": "runner job cgroup hit its kernel limit",
+                            "rss_bytes": 17_179_869_184_u64,
+                            "rss_limit_bytes": 17_179_869_184_u64,
+                            "process_count": 41,
+                            "process_count_limit": 1024,
+                            "top_processes": [
+                                {"name": "rustc", "count": 30},
+                                {"name": "cc", "count": 9}
+                            ]
+                        }
+                    }
+                }
+            }]);
+        })
+        .unwrap();
+        let record = agent_task_lifecycle::reconcile_status(&run_id).unwrap();
+        assert!(record.aggregate_path.is_none());
+        assert_eq!(
+            pre_artifact_interruption_phase(&record),
+            PreArtifactInterruptionPhase::BeforeProviderStart
+        );
+
+        let result = run_cook(CookContext::new(options.clone(), Arc::new(UnusedExecutor)))
+            .expect("Cook reports the resource guard stop");
+
+        assert_eq!(result.exit_code, 1);
+        assert_eq!(
+            result.value.terminal_phase.as_deref(),
+            Some("resource_guard")
+        );
+        assert_eq!(
+            result.value.terminal_failure_classification.as_deref(),
+            Some("resource_guard.memory_limit_exceeded")
+        );
+        let stop_reason = result.value.stop_reason.as_deref().unwrap_or_default();
+        assert!(
+            stop_reason.contains("resource_guard.memory_limit_exceeded")
+                && stop_reason.contains("rustc\u{d7}30, cc\u{d7}9"),
+            "{stop_reason}"
+        );
+        assert_eq!(result.value.latest_run_id.as_deref(), Some(run_id.as_str()));
+        assert_eq!(result.value.history_run_ids, vec![run_id.as_str()]);
+        let recipe = super::super::load_recipe(&options.identity.cook_id).unwrap();
+        assert_eq!(recipe.attempts.len(), 1, "no transport-retry replacement");
+        assert!(agent_task_lifecycle::exact_record(&format!("{run_id}-transport-retry")).is_err());
+    });
+}
+
 #[test]
 fn pre_artifact_interruption_does_not_bypass_an_authoritative_aggregate_path() {
     homeboy_core::test_support::with_isolated_home(|_| {
