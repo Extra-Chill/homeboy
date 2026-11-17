@@ -25,10 +25,21 @@ pub const RUNNER_JOB_EXECUTION_CONTEXT_ID_ENV: &str = "HOMEBOY_RUNNER_JOB_EXECUT
 pub const DAEMON_CHILD_BUILD_IDENTITY_ENV: &str = "HOMEBOY_DAEMON_CHILD_BUILD_IDENTITY";
 const MAX_EVIDENCE_BYTES: usize = 8 * 1024;
 /// The daemon spawns a local child before it durably records the child's
-/// process identity, so the child waits (bounded) for that commit instead of
-/// failing closed on a race it cannot lose by design.
-const DAEMON_CHILD_IDENTITY_WAIT: std::time::Duration = std::time::Duration::from_secs(15);
+/// process identity, so the child waits for that commit while its reservation
+/// is pending and its parent daemon is alive.
 const DAEMON_CHILD_IDENTITY_POLL: std::time::Duration = std::time::Duration::from_millis(50);
+
+/// The spawning daemon. A child re-parented after its daemon died stops
+/// waiting for an identity commit that can no longer arrive.
+#[cfg(unix)]
+fn parent_pid() -> Option<u32> {
+    Some(std::os::unix::process::parent_id())
+}
+
+#[cfg(not(unix))]
+fn parent_pid() -> Option<u32> {
+    None
+}
 
 #[derive(Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct RunnerJobExecutionContext {
@@ -249,12 +260,12 @@ impl RunnerJobExecutionContext {
             &crate::build_identity::current().display,
         )?;
         let jobs_file = crate::paths::observation_db()?;
-        let deadline = std::time::Instant::now() + DAEMON_CHILD_IDENTITY_WAIT;
+        let daemon = parent_pid();
         let evidence = loop {
             let store = crate::api_jobs::JobStore::open_without_reconciliation(&jobs_file)?;
             let handle = store.handle(job_id);
             if handle.local_child_identity_pending(&reservation_id, expected_runner_id)
-                && std::time::Instant::now() < deadline
+                && parent_pid() == daemon
             {
                 std::thread::sleep(DAEMON_CHILD_IDENTITY_POLL);
                 continue;
