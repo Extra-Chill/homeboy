@@ -4,6 +4,12 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.470.1] - 2026-11-17
+
+### Fixed
+- a Cook that loses a destination claim follows the live owner
+- treat spellings of one repository as the same shared-asset owner
+
 ## [0.470.0] - 2026-11-17
 
 ### Added
