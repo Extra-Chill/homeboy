@@ -191,9 +191,9 @@ pub mod lifecycle {
         AgentTaskStatusOptions, ClaimOutcome, DetachedLabRunRecord, LabOffloadProxyPlan,
     };
     pub use super::super::agent_task_lifecycle::{
-        exact_record, load_controller_plan, record_detached_lab_run, record_lab_offload_phase,
-        record_lab_offload_planned, record_pre_dispatch_failure, record_pre_execution_failure,
-        record_remote_dispatch_failure, status,
+        exact_record, interrupted_owner_stop_reason, load_controller_plan, record_detached_lab_run,
+        record_lab_offload_phase, record_lab_offload_planned, record_pre_dispatch_failure,
+        record_pre_execution_failure, record_remote_dispatch_failure, status,
     };
     #[cfg(feature = "test-support")]
     pub use super::super::agent_task_lifecycle::{

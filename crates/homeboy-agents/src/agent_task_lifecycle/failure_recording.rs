@@ -83,7 +83,10 @@ pub fn record_interrupted_local_owner_in_store(
         let mut record = lifecycle_store.read_record(&run_id)?;
         // A remote owner settles its own attempt; losing a local observer
         // (a detached launcher or execution step) never interrupts it.
-        if record.state().is_terminal() || record.has_remote_execution_owner() {
+        if record.state().is_terminal()
+            || record.has_remote_execution_owner()
+            || is_queued_behind_runtime_admission(&record)
+        {
             return Ok((record, None));
         }
         let decision = annotate_local_provider_ownership(&mut record);
@@ -114,6 +117,34 @@ pub fn record_interrupted_local_owner_in_store(
         lifecycle_store.project_terminal_record_after_unlock(&record.run_id)?;
     }
     Ok(record)
+}
+
+/// A Cook deferred behind a runtime promotion is queued, not owned by an
+/// observer: its durable execution intent re-pins and resumes it once the
+/// promotion releases, so losing the launcher is not an owner death.
+fn is_queued_behind_runtime_admission(record: &AgentTaskRunRecord) -> bool {
+    record.state() == RunExecutionState::Queued
+        && record.metadata["cook_runtime_admission"]["state"] == "queued"
+        && record.metadata["execution_scheduling"]["current_intent_id"].is_string()
+}
+
+/// The stop reason an interrupted local owner records. An observer lost
+/// before any provider started produced no work, and says so.
+pub fn interrupted_owner_stop_reason(provider_executions_consumed: u64) -> &'static str {
+    if provider_executions_consumed == 0 {
+        "local Cook observer was interrupted before the provider started; no work was produced"
+    } else {
+        "local Cook observer was interrupted during provider execution"
+    }
+}
+
+/// The machine cause matching [`interrupted_owner_stop_reason`].
+pub fn interrupted_owner_cause(provider_executions_consumed: u64) -> &'static str {
+    if provider_executions_consumed == 0 {
+        "observer_interrupted_before_provider_execution"
+    } else {
+        "observer_interrupted_during_provider_execution"
+    }
 }
 
 fn record_interrupted_local_owner_locked(
@@ -174,7 +205,7 @@ fn record_interrupted_local_owner_locked(
             }
         }
     }
-    let stop_reason = "local Cook observer was interrupted during provider execution".to_string();
+    let stop_reason = interrupted_owner_stop_reason(consumed as u64).to_string();
     let outcomes = plan
         .tasks
         .iter()
@@ -258,7 +289,7 @@ fn record_interrupted_local_owner_locked(
         "interrupted_owner".to_string(),
         json!({
             "schema": "homeboy/agent-task-interrupted-owner/v1",
-            "cause": "observer_interrupted_during_provider_execution",
+            "cause": interrupted_owner_cause(consumed as u64),
             "stop_reason": stop_reason,
             "provider_executions_consumed": consumed,
             "provider_budget_consumed": consumed > 0,
@@ -405,9 +436,8 @@ fn harvest_interrupted_owner_candidate(
     );
     outcome.diagnostics.push(AgentTaskDiagnostic {
         class: "interrupted_owner.candidate_unavailable".to_string(),
-        message:
-            "no candidate could be harvested after the local Cook observer was interrupted during provider execution"
-                .to_string(),
+        message: "no candidate could be harvested after the local Cook observer was interrupted"
+            .to_string(),
         data: json!({ "status": "unavailable" }),
     });
     outcome.metadata["candidate_status"] = json!("unavailable");

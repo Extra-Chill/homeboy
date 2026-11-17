@@ -409,6 +409,13 @@ fn observe_launch_exit(cook_id: &str, exit: &StepTerminalDelivery) -> Result<()>
             return Ok(());
         }
     }
+    // A materialized attempt whose custody a durable execution intent holds
+    // (for example one deferred behind a runtime promotion) is owned by the
+    // execution-step scheduler. The launcher exiting is expected: it neither
+    // fails the handoff parent nor interrupts the queued attempt.
+    if latest_attempt_held_by_execution_intent(&store, cook_id)? {
+        return Ok(());
+    }
     // A handoff that never materialized an attempt has no other owner left.
     let parent = agent_task_lifecycle::fail_detached_cook_handoff_parent_in_store(
         &store,
@@ -434,6 +441,26 @@ fn observe_launch_exit(cook_id: &str, exit: &StepTerminalDelivery) -> Result<()>
         agent_task_lifecycle::record_interrupted_local_owner_in_store(&store, &attempt)?;
     }
     notify_cook_attempt(cook_id, &attempt)
+}
+
+/// Whether the Cook's latest non-terminal attempt is authorized by its current
+/// durable execution intent, i.e. custody moved from the launcher to the
+/// execution-step scheduler.
+fn latest_attempt_held_by_execution_intent(
+    store: &agent_task_lifecycle::AgentTaskLifecycleStore,
+    cook_id: &str,
+) -> Result<bool> {
+    let Ok(index) = store.read_cook_index(cook_id) else {
+        return Ok(false);
+    };
+    let Ok(record) = store.read_record(&index.latest_run_id) else {
+        return Ok(false);
+    };
+    if record.state().is_terminal() {
+        return Ok(false);
+    }
+    Ok(super::current_execution_intent(store, &record)?
+        .is_some_and(|intent| intent.authorizes(&record)))
 }
 
 /// Why a launch exited before its first attempt: the launcher's own failed

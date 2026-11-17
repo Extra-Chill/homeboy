@@ -12483,6 +12483,100 @@ fn materialized_cook_queues_same_attempt_then_dispatches_once_after_upgrade_rele
     });
 }
 
+/// The launcher of a Cook deferred behind a runtime promotion exits 75 once
+/// the deferral is durable. Its step terminal must leave the queued attempt
+/// to the execution intent that owns it; the attempt resumes after release.
+#[test]
+fn launch_exit_after_runtime_admission_deferral_keeps_attempt_queued_until_release() {
+    homeboy_core::test_support::with_isolated_home(|home| {
+        let cook_id = "launch-exit-runtime-admission-deferral";
+        let dispatcher_calls = Arc::new(AtomicUsize::new(0));
+        let lifecycle = test_lifecycle_store();
+        agent_task_lifecycle::record_detached_cook_handoff_parent_in_store(&lifecycle, cook_id)
+            .expect("detached handoff parent");
+        let options = batch_cook_options(
+            cook_id,
+            Arc::new(RecordingDetachedAttemptDispatcher {
+                dispatches: Arc::clone(&dispatcher_calls),
+            }),
+        );
+        let run_id = options.identity.initial_run_id.clone();
+        let mut promotion = runtime_admission_owner_process();
+
+        let deferred = run_cook(CookContext::new(options, Arc::new(UnusedExecutor)))
+            .expect("Cook defers behind the runtime promotion");
+        assert_eq!(deferred.value.status, "queued", "{deferred:?}");
+        assert_eq!(deferred.exit_code, 75);
+
+        // The detached launcher exits with the deferral: deliver its step
+        // terminal exactly as the daemon would.
+        let request = super::super::cook_step::cook_launch_step_request(
+            cook_id,
+            "launcher",
+            std::path::Path::new("/bin/sh"),
+            Vec::new(),
+            home.path(),
+            Default::default(),
+        );
+        super::super::cook_step::observe_cook_step_exit(
+            &homeboy_core::daemon::step_job::StepTerminalDelivery {
+                job_id: "deferred-launcher".to_string(),
+                key: request.key.clone(),
+                request,
+                checkpoint: None,
+                linked_durable_run_id: Some(cook_id.to_string()),
+                child: None,
+                outcome: homeboy_core::daemon::step_job::StepTerminalOutcome::Exited,
+                error: None,
+                exit_code: Some(75),
+                cancelled: false,
+                log_path: home.path().join("launcher.log"),
+                daemon_scope: None,
+            },
+        )
+        .expect("launcher exit is observed");
+
+        let queued = lifecycle.read_record(&run_id).expect("queued attempt");
+        assert_eq!(queued.state(), RunExecutionState::Queued, "{queued:?}");
+        assert_eq!(queued.metadata["cook_runtime_admission"]["state"], "queued");
+        assert!(queued.metadata.get("interrupted_owner").is_none());
+        assert!(queued.metadata.get("terminal_phase").is_none());
+        assert_eq!(queued.metadata["provider_executions_consumed"], 0);
+        let parent = lifecycle.read_record(cook_id).expect("handoff parent");
+        assert_ne!(parent.state(), RunExecutionState::Failed, "{parent:?}");
+        assert!(parent.metadata.get("cook_controller_failure").is_none());
+
+        // The owner itself refuses to interrupt a queued, intent-held attempt.
+        let untouched =
+            agent_task_lifecycle::record_interrupted_local_owner_in_store(&lifecycle, &run_id)
+                .expect("interrupt is a no-op");
+        assert_eq!(untouched.state(), RunExecutionState::Queued);
+        assert_eq!(untouched.revision, queued.revision);
+
+        let release = homeboy_core::paths::runtime_promotion_dir()
+            .expect("runtime promotion directory")
+            .join("runtime-admission-test-release");
+        std::fs::write(release, b"release").expect("release simulated upgrade");
+        promotion.wait().expect("upgrade owner exits");
+        let ready_id = current_intent(&lifecycle, &run_id).intent_id;
+        crate::agent_task_service::execute_execution_step(
+            &ready_id,
+            Arc::new(ImmediateSuccessExecutor),
+            |_| {
+                Ok(Some(Arc::new(RecordingDetachedAttemptDispatcher {
+                    dispatches: Arc::clone(&dispatcher_calls),
+                })))
+            },
+            &QueuedRunTransport,
+        )
+        .expect("scheduler resumes the deferred attempt");
+        assert_eq!(dispatcher_calls.load(Ordering::SeqCst), 1);
+        let resumed = lifecycle.read_record(&run_id).expect("resumed attempt");
+        assert_eq!(resumed.state(), RunExecutionState::Running);
+        assert!(resumed.metadata.get("interrupted_owner").is_none());
+    });
+}
+
 #[test]
 fn deferred_lab_cook_attempt_resumes_with_runner_placement_without_local_probe() {
     use homeboy_lab_contract::{
