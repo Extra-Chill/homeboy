@@ -4,6 +4,15 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.470.13] - 2026-11-17
+
+### Changed
+- fix runner service publication gate across controller platforms
+
+### Fixed
+- keep Lab handoff timeout test off real host load and report nextest timeouts
+- publish form-less candidates with goal titles and adopt recovery
+
 ## [0.470.12] - 2026-11-17
 
 ### Fixed
