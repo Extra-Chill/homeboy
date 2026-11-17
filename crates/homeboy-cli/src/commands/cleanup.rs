@@ -2933,9 +2933,9 @@ fn run_cleanup_category(
                                 .map(|days| days.saturating_mul(86_400)),
                         },
                         args.cursor.as_deref(),
-                        // Stop walking past retained leases while there is still
-                        // time to report, rather than being killed at the wall.
-                        runtime_tmp_scan_deadline(deadline),
+                        // Honor the child's category allowance as well as the
+                        // aggregate deadline, leaving time to report partial apply.
+                        runtime_tmp_scan_deadline(cleanup_category_action_deadline(deadline)),
                     )?;
                     category_from_output(
                         CONTROLLER_SCRATCH_METADATA,

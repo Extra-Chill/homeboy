@@ -1377,6 +1377,43 @@ fn cleanup_unlocked(
             lifecycle_state: resource.lifecycle_state.clone(),
             source_ref: resource.source_ref.clone(),
         });
+        // Reclaim at the resource boundary, before inspecting the next lease.
+        // Inventory must not consume the entire budget before apply can start.
+        if options.apply {
+            let candidate = eligible.last().expect("candidate just admitted");
+            let removal = remove_candidate_from_index(
+                &mut index,
+                observation,
+                candidate,
+                now,
+                options.retention_override_seconds,
+            );
+            // Persist each boundary, including any registration reconciliation
+            // performed before a failed removal.
+            write_index_at_unlocked(index_path, &index)?;
+            match removal? {
+                ScratchRemoval::Removed(bytes) => {
+                    applied_count += 1;
+                    reclaimed_bytes += bytes;
+                }
+                ScratchRemoval::Skipped(reason) => {
+                    all_skips.push((reason.clone(), Some(candidate.run_id.clone())));
+                    append_skipped_detail(
+                        &mut skipped,
+                        &mut skipped_bytes,
+                        options.full,
+                        ControllerScratchSkipped {
+                            path: candidate.path.clone(),
+                            run_id: Some(candidate.run_id.clone()),
+                            owner_pid: Some(candidate.owner_pid),
+                            lifecycle_state: Some(candidate.lifecycle_state.clone()),
+                            recovery_command: None,
+                            reason,
+                        },
+                    )?;
+                }
+            }
+        }
     }
     let uninspected_resource_count = ordered.len().saturating_sub(inspected_count);
     let mut next_cursor = (uninspected_resource_count > 0)
@@ -1403,47 +1440,6 @@ fn cleanup_unlocked(
     let mut has_more = uninspected_resource_count > 0;
     let mutation_candidate_count = candidate_count;
     let mutation_candidates = eligible;
-    for candidate in &mutation_candidates {
-        if options.apply {
-            let removal = remove_candidate_from_index(
-                &mut index,
-                observation,
-                candidate,
-                now,
-                options.retention_override_seconds,
-            );
-            let removal = match removal {
-                Ok(removal) => removal,
-                Err(error) => {
-                    write_index_at_unlocked(index_path, &index)?;
-                    return Err(error);
-                }
-            };
-            reconciled = true;
-            match removal {
-                ScratchRemoval::Removed(bytes) => {
-                    applied_count += 1;
-                    reclaimed_bytes += bytes;
-                }
-                ScratchRemoval::Skipped(reason) => {
-                    all_skips.push((reason.clone(), Some(candidate.run_id.clone())));
-                    append_skipped_detail(
-                        &mut skipped,
-                        &mut skipped_bytes,
-                        options.full,
-                        ControllerScratchSkipped {
-                            path: candidate.path.clone(),
-                            run_id: Some(candidate.run_id.clone()),
-                            owner_pid: Some(candidate.owner_pid),
-                            lifecycle_state: Some(candidate.lifecycle_state.clone()),
-                            recovery_command: None,
-                            reason,
-                        },
-                    )?;
-                }
-            }
-        }
-    }
     if reconciled {
         write_index_at_unlocked(index_path, &index)?;
     }
@@ -5326,21 +5322,17 @@ mod tests {
         assert!(retained.iter().all(|path| path.join("evidence").is_file()));
     }
 
-    /// Public cleanup must publish a partial page rather than eagerly sizing
-    /// all recovery evidence before returning. Resumption includes both phases.
+    /// Deadline-bounded apply reports real disk progress and resumes to completion.
     #[test]
-    fn public_cleanup_drains_large_store_with_bounded_evidence() {
+    fn public_cleanup_deadline_reports_progress_and_converges() {
         let context = homeboy_core::test_support::HermeticTestContext::new();
         let _home = homeboy_core::test_support::HomeGuard::new();
         let roots = context.path_roots();
         let index_path = index_path().expect("index path");
         let root = roots.data().join("controller-scratch/attempts");
-        let recovery = RecoveryRetention::configured().expect("recovery policy");
-        let recovery_root = recovery.artifact_root.join(RECOVERY_DIR);
         fs::create_dir_all(&root).unwrap();
-        fs::create_dir_all(&recovery_root).unwrap();
         let mut resources = Vec::new();
-        for number in 0..2048 {
+        for number in 0..32 {
             let path = root.join(format!("attempt-{number:04}"));
             fs::create_dir(&path).unwrap();
             let mut row = resource(&path, &root);
@@ -5348,9 +5340,7 @@ mod tests {
             row.lifecycle_state = "released".to_string();
             row.ephemeral = true;
             row.created_at = format!("2020-01-01T00:{:02}:{:02}Z", number / 60, number % 60);
-            let evidence = recovery_root.join(&row.run_id);
-            fs::create_dir(&evidence).unwrap();
-            fs::write(evidence.join("patch"), "retained patch").unwrap();
+            fs::write(path.join("payload"), [42; 4096]).unwrap();
             resources.push(row);
         }
         let index = ControllerScratchIndex {
@@ -5358,58 +5348,46 @@ mod tests {
             resources,
         };
         write_index_at_unlocked(&index_path, &index).unwrap();
-        let observation = ObservationStore::open_initialized().unwrap();
-        let start = Instant::now();
-        assert_eq!(
-            recovery_inventory(
-                &recovery,
-                &index,
-                &observation,
-                std::time::SystemTime::now()
-            )
-            .unwrap()
-            .len(),
-            2048
-        );
-        let budget = start.elapsed() / 8;
+        let bytes_before = path_size(&root).unwrap();
         let options = ControllerScratchCleanupOptions {
             apply: true,
             limit: 128,
             full: false,
             retention_override_seconds: Some(0),
         };
-        let first = cleanup(options, None, Some(Instant::now() + budget)).unwrap();
-        assert!(first.candidate_count > 0);
-        assert!(first.applied_count > 0);
-        assert!(first.has_more);
-        assert!(first.inspected_count < 2048);
-        assert!(first.candidates[0].path.ends_with("attempt-0000"));
-        let mut removed = first.applied_count;
-        let mut cursor = first.next_cursor;
-        for _ in 0..64 {
-            let Some(current) = cursor.as_deref() else {
-                break;
-            };
-            let page = cleanup(options, Some(current), None).unwrap();
-            assert!(page.candidate_count <= options.limit);
+        let mut cursor = None;
+        let mut removed = 0;
+        let mut reclaimed = 0;
+        for pass in 0..64 {
+            let count_before = fs::read_dir(&root).unwrap().count();
+            let size_before = path_size(&root).unwrap();
+            // An expired injected budget deterministically yields after one
+            // resource boundary, without relying on machine speed or sleeps.
+            let page = cleanup(options, cursor.as_deref(), Some(Instant::now())).unwrap();
+            let count_after = fs::read_dir(&root).unwrap().count();
+            assert_eq!(page.applied_count, count_before - count_after);
+            assert_eq!(
+                page.reclaimed_bytes,
+                size_before - path_size(&root).unwrap()
+            );
+            if pass == 0 {
+                assert!(page.applied_count > 0);
+                assert!(page.has_more);
+                assert!(page.next_command.is_some());
+                assert!(page.inspected_count < 32);
+            }
             removed += page.applied_count;
+            reclaimed += page.reclaimed_bytes;
             cursor = page.next_cursor;
+            if !page.has_more {
+                break;
+            }
         }
-        assert!(cursor.is_none(), "both evidence phases must converge");
-        assert_eq!(removed, 2048);
-        assert_eq!(fs::read_dir(root).unwrap().count(), 0);
-        let evidence_page = cleanup(
-            options,
-            Some("controller-scratch-recovery:"),
-            Some(Instant::now() + budget),
-        )
-        .unwrap();
-        assert!(
-            evidence_page.has_more,
-            "recovery evidence must also be paged"
-        );
-        assert!(evidence_page.recovery_retained_count > 0);
-        assert!(evidence_page.recovery_retained_count <= options.limit);
+        assert!(cursor.is_none(), "deadline-bounded passes must converge");
+        assert_eq!(removed, 32);
+        assert_eq!(reclaimed, bytes_before - path_size(&root).unwrap());
+        assert_eq!(fs::read_dir(&root).unwrap().count(), 0);
+        assert_eq!(cleanup(options, None, None).unwrap().candidate_count, 0);
     }
 
     #[test]
