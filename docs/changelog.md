@@ -4,6 +4,15 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.469.8] - 2026-11-17
+
+### Fixed
+- carry pinned Cook base to primary and replay runner workspaces
+- keep runtime-promotion-deferred Cooks queued when their launcher exits
+- follow repository PR templates in Cook bodies
+- take the PR-title rule from component release policy
+- retry the declared-base preflight only while the remote is unreachable
+
 ## [0.469.7] - 2026-11-17
 
 ### Fixed
