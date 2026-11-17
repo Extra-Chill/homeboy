@@ -1816,7 +1816,8 @@ mod tests {
                 "workflow exec spawned while capacity was held"
             );
             // Queued time is not execution: the workflow sees no spawn yet.
-            let spawned_at = || harness.store().step_spawned_at_ms(&request.key);
+            let job_id = harness.job().unwrap().id;
+            let spawned_at = || harness.store().step_job_spawned_at_ms(job_id);
             assert_eq!(spawned_at(), None);
             drop(permit);
             assert_eq!(

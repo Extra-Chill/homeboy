@@ -2227,8 +2227,11 @@ impl JobStore {
     /// When the step job for an exact key spawned its child: the first
     /// progress event that reports the supervised child running.
     pub(crate) fn step_spawned_at_ms(&self, key: &str) -> Option<u64> {
-        let job = self.controller_job_for_key(key)?;
-        self.events(job.id)
+        self.step_job_spawned_at_ms(self.controller_job_for_key(key)?.id)
+    }
+
+    pub(crate) fn step_job_spawned_at_ms(&self, job_id: Uuid) -> Option<u64> {
+        self.events(job_id)
             .ok()?
             .into_iter()
             .find(|event| {
