@@ -793,9 +793,16 @@ fn initialize_structured_sidecars(
     Ok(())
 }
 
-/// Preserve failure arrays and replace any other shape with an empty array.
-/// Counts and runner diagnoses belong to `test.results` and captured output;
-/// this sidecar contains only individual failure records.
+/// Preserve failure arrays, project the legacy `{failures, total, passed}`
+/// envelope onto its `failures` array, and replace any other shape with an
+/// empty array. Counts and runner diagnoses belong to `test.results` and
+/// captured output; this sidecar contains only individual failure records.
+///
+/// The envelope is still what several extension parsers write (the registry
+/// validator already accepts it, see `structured_sidecar`). Discarding it here
+/// erased every named failure before core read the sidecar, so a red run
+/// reached runtime evidence with zero failed test IDs and the differential
+/// verdict could never name a test. See Extra-Chill/homeboy#18363.
 fn normalize_declared_test_failures(
     run_dir_path: &Path,
     declared: &[homeboy_extension_contract::sidecar_config::StructuredSidecarDeclaration],
@@ -815,6 +822,10 @@ fn normalize_declared_test_failures(
         .and_then(|content| serde_json::from_str::<serde_json::Value>(&content).ok())
         .and_then(|payload| match payload {
             serde_json::Value::Array(items) => Some(items),
+            serde_json::Value::Object(mut envelope) => match envelope.remove("failures") {
+                Some(serde_json::Value::Array(items)) => Some(items),
+                _ => None,
+            },
             _ => None,
         })
         .unwrap_or_default();
@@ -1316,6 +1327,43 @@ mod tests {
         run_dir.cleanup();
     }
 
+    /// Regression for Extra-Chill/homeboy#18363: a red PHPUnit run whose
+    /// parser wrote the `{failures, total, passed, metadata}` envelope reached
+    /// core with zero named failures, so runtime evidence reported "failed test
+    /// command did not expose an observed failed test ID" for 17 real failures.
+    #[test]
+    fn envelope_failure_records_keep_their_test_ids() {
+        let run_dir = RunDir::create().expect("run dir");
+        let failures = run_dir.step_file(run_dir::files::TEST_FAILURES);
+        let records = json!([
+            {"test_name": "Suite::test_a", "message": "a"},
+            {"test_name": "Suite::test_b", "message": "b"},
+        ]);
+        std::fs::write(
+            &failures,
+            json!({
+                "failures": records,
+                "total": 5,
+                "passed": 3,
+                "metadata": {"source": "phpunit"},
+            })
+            .to_string(),
+        )
+        .expect("write envelope");
+
+        normalize_declared_test_failures(run_dir.path(), &[declaration("test.failures")])
+            .expect("normalize failures");
+
+        let payload: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&failures).expect("normalized"))
+                .expect("failure array");
+        assert_eq!(payload, records);
+        homeboy_core::structured_sidecar::validate_payload("test.failures", &payload)
+            .expect("schema-valid failure array");
+
+        run_dir.cleanup();
+    }
+
     #[test]
     fn normalizes_non_array_test_failures_without_losing_runner_diagnosis() {
         let run_dir = RunDir::create().expect("run dir");
@@ -1346,7 +1394,8 @@ mod tests {
         let payload: serde_json::Value =
             serde_json::from_str(&std::fs::read_to_string(&failures).expect("normalized failures"))
                 .expect("failure array");
-        assert_eq!(payload, json!([]));
+        // The envelope's failure records survive; only the counts are dropped.
+        assert_eq!(payload, json!([{"message": "legacy failure"}]));
         homeboy_core::structured_sidecar::validate_payload("test.failures", &payload)
             .expect("schema-valid failure array");
         assert!(output
@@ -1358,6 +1407,8 @@ mod tests {
             json!(null),
             json!(42),
             json!("bad"),
+            json!({"failures": "not-an-array", "total": 1}),
+            json!({"total": 1, "passed": 0}),
         ] {
             std::fs::write(&failures, input.to_string()).expect("write fixture");
             normalize_declared_test_failures(run_dir.path(), &[declaration("test.failures")])
