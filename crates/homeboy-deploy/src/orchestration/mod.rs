@@ -1759,9 +1759,11 @@ mod tests {
 
     // A check records unavailable canonical-package evidence without reverting
     // to unrelated source-tree bytes. Dry-run still resolves nothing. (#10253)
+    #[cfg(unix)]
     #[test]
     fn check_tolerates_missing_canonical_package_and_dry_run_skips_resolution() {
         with_isolated_home(|_| {
+            let _github = crate::test_support::OfflineGithub::not_found();
             // A component whose release plan is `Reuse` (github remote_url +
             // build_artifact + expected_version) but whose asset cannot resolve.
             let component = Component {
