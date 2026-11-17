@@ -2499,7 +2499,9 @@ pub(crate) fn cook_finalization_options_with_stores(
     )?;
     let draft_pr = options.finalization.draft_pr || gap.is_some();
     review_dossier.validate_for_publication(&review_profile, draft_pr)?;
-    let form_title = if gap.is_some() {
+    let form_title = if !options.finalization.title.is_empty() {
+        None
+    } else if gap.is_some() {
         let aggregate = lifecycle_store.read_aggregate(successful_run_id)?;
         let form = review_form.map(|form| form.form.clone()).or_else(|| {
             super::cook::review_form_from_aggregate(&aggregate)
@@ -2507,10 +2509,10 @@ pub(crate) fn cook_finalization_options_with_stores(
                 .flatten()
         });
         Some(super::cook::draft_title(
+            None,
             form.as_ref().and_then(|form| form.specific_title()),
-            Some(&options.finalization.title),
-            options.identity.initial_plan.metadata["cook_goal"].as_str(),
             tracker_publication_title(&options.identity.initial_plan).as_deref(),
+            options.identity.initial_plan.metadata["cook_goal"].as_str(),
             title_policy,
         ))
     } else {
@@ -4029,15 +4031,15 @@ pub fn candidate_publication_title(
             .flatten()
     });
     Ok(super::cook::draft_title(
-        recorded_form
-            .as_ref()
-            .and_then(|form| form.specific_title()),
         recipe
             .as_ref()
             .and_then(|recipe| recipe.finalization["title"].as_str()),
+        recorded_form
+            .as_ref()
+            .and_then(|form| form.specific_title()),
+        plan.as_ref().and_then(tracker_publication_title).as_deref(),
         plan.as_ref()
             .and_then(|plan| plan.metadata["cook_goal"].as_str()),
-        plan.as_ref().and_then(tracker_publication_title).as_deref(),
         title_policy,
     ))
 }
@@ -4061,11 +4063,13 @@ fn tracker_publication_title(plan: &crate::agent_task_scheduler::AgentTaskPlan) 
 }
 
 fn publication_framing(plan: &crate::agent_task_scheduler::AgentTaskPlan) -> String {
-    plan.metadata["cook_goal"]
-        .as_str()
-        .filter(|goal| !goal.trim().is_empty())
-        .map(str::to_owned)
-        .or_else(|| tracker_publication_title(plan))
+    tracker_publication_title(plan)
+        .or_else(|| {
+            plan.metadata["cook_goal"]
+                .as_str()
+                .and_then(super::cook::goal_headline)
+                .map(str::to_owned)
+        })
         .unwrap_or_else(|| "Deliver candidate changes".to_string())
 }
 
