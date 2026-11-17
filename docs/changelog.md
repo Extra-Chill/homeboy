@@ -4,6 +4,11 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.470.8] - 2026-11-17
+
+### Fixed
+- ship the gate-feedback candidate to the runner with the retry
+
 ## [0.470.7] - 2026-11-17
 
 ### Fixed
