@@ -4252,8 +4252,9 @@ fn run_declared_base_git(
     phase: &str,
     timeout: Duration,
 ) -> Result<Output> {
-    // A completed command whose stderr names a transport failure is retried
-    // too; when retries run out, callers still classify its final output.
+    // A completed command whose stderr shows an unreachable remote is retried
+    // too. Rejected credentials or agent refusals are not healed by waiting,
+    // so they reach the caller's classification at once.
     let mut transport_failure = None;
     homeboy_core::worktree::convergence::retry_fetch_within(timeout * 3, || {
         let output = run_declared_base_git_once(
@@ -4266,7 +4267,9 @@ fn run_declared_base_git(
             timeout,
         )?;
         if !output.status.success()
-            && is_git_transport_failure(&String::from_utf8_lossy(&output.stderr))
+            && homeboy_core::git::classify_git_push_failure(&String::from_utf8_lossy(
+                &output.stderr,
+            )) == GitPushTransportClass::TransportUnreachable
         {
             transport_failure = Some(output);
             return Err(
