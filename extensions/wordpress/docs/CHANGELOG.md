@@ -2,6 +2,11 @@
 
 All notable changes to the **wordpress** extension will be documented in this file.
 
+## [3.56.0] - 2026-11-17
+
+### Added
+- versioned release dirs with atomic symlink flip for archive installs
+
 ## [3.55.1] - 2026-11-17
 
 ### Fixed
