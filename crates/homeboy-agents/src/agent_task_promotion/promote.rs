@@ -1998,6 +1998,10 @@ fn run_promotion_gates(
                     gate_workspace,
                     observation_store,
                 )
+            })
+            .map(|mut gates| {
+                gates.apply_input_source_labels(&options.gates.input_sources);
+                gates
             });
         if result
             .as_ref()

@@ -1,5 +1,6 @@
 use crate::agent_task_gate::{
-    AgentTaskGateCandidateCheckout, AgentTaskGateReport, AgentTaskGateSetupEvidence,
+    AgentTaskGateCandidateCheckout, AgentTaskGateInputSource, AgentTaskGateReport,
+    AgentTaskGateSetupEvidence,
 };
 use crate::agent_task_promotion::AgentTaskPromotionStatus;
 use homeboy_core::gate::HomeboyGateResult;
@@ -15,6 +16,21 @@ pub(super) struct PromotionGateRun {
 }
 
 impl PromotionGateRun {
+    /// Label gates by their admitted `--verify-file` names and rebuild the
+    /// compatibility gate results so both views agree.
+    pub(super) fn apply_input_source_labels(&mut self, sources: &[AgentTaskGateInputSource]) {
+        crate::agent_task_gate::apply_gate_input_source_labels(
+            &mut self.deterministic_gates,
+            sources,
+        );
+        self.gate_results = self
+            .deterministic_gates
+            .iter()
+            .cloned()
+            .map(HomeboyGateResult::from)
+            .collect();
+    }
+
     pub(super) fn without_gates(dry_run: bool) -> Self {
         Self {
             status: if dry_run {
