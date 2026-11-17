@@ -4,6 +4,14 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.469.5] - 2026-11-17
+
+### Changed
+- unify Cook recovery command rendering
+
+### Fixed
+- name verify-file gates and link their output in PR bodies
+
 ## [0.469.4] - 2026-11-17
 
 ### Fixed
