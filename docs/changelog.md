@@ -4,6 +4,11 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.470.2] - 2026-11-17
+
+### Fixed
+- re-run a liveness stall once before it settles the task
+
 ## [0.470.1] - 2026-11-17
 
 ### Fixed
