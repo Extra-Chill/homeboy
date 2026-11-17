@@ -1941,7 +1941,7 @@ fn cook_delivery_review_timeout_publishes_gate_green_candidate_marked_review_una
             Arc::new(SupervisedReviewTimeoutExecutor),
             "",
         );
-        assert_eq!(fixture.backend.title, "fix: update lib.rs");
+        assert_eq!(fixture.backend.title, "fix: Deliver candidate changes");
         let result = fixture
             .result
             .expect("a review timeout must not end the Cook");
