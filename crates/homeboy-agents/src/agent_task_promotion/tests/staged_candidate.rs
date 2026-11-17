@@ -33,6 +33,32 @@ fn adoption_recovers_staged_and_unstaged_candidate_trees_before_gating() {
 }
 
 #[test]
+fn adoption_accepts_exact_candidate_tree_on_another_head() {
+    let (_temp, repo, _base, candidate) = adopted_commit_repo();
+    // HEAD need not be the recorded task base: only the selected tree is
+    // admitted, and both the live index and worktree must agree with it.
+    std::fs::write(repo.join("other.txt"), "another head").unwrap();
+    git(&repo, &["add", "."]);
+    git(&repo, &["commit", "-m", "another head"]);
+    let head = git_head(&repo, "HEAD");
+    git(&repo, &["read-tree", "--reset", "-u", &candidate]);
+    assert!(
+        super::super::committed_changes::recover_candidate_destination(
+            &repo, &candidate, None, true,
+        )
+        .unwrap()
+    );
+    assert_eq!(git_head(&repo, "HEAD"), head);
+    assert!(
+        super::super::committed_changes::recover_candidate_destination(
+            &repo, &candidate, None, false,
+        )
+        .unwrap()
+    );
+    assert_eq!(git_head(&repo, "HEAD"), candidate);
+}
+
+#[test]
 fn recovery_preserves_unrelated_dirty_bytes_and_dry_runs() {
     let (temp, repo, base, candidate) = adopted_commit_repo();
     git(&repo, &["reset", "--soft", &base]);

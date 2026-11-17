@@ -7810,34 +7810,30 @@ fn publish_latest_incomplete_draft(
     Ok(())
 }
 
-/// A held draft's title names the change: the agent's own title (made a
-/// conventional subject when the component's policy requires one and it is
-/// not one), or else the candidate's changed files. A Cook id is not a title
-/// a reviewer can act on (#17919).
+/// Choose a reviewer-facing subject, never a list of changed files.
 pub(super) fn draft_title(
     agent_title: Option<&str>,
-    promotion: &AgentTaskPromotionReport,
+    operator_title: Option<&str>,
+    goal: Option<&str>,
+    tracker_title: Option<&str>,
     title_policy: crate::agent_task_review_dossier::PrTitlePolicy,
 ) -> String {
     let prefix = match title_policy {
         crate::agent_task_review_dossier::PrTitlePolicy::ConventionalCommit => "fix: ",
         crate::agent_task_review_dossier::PrTitlePolicy::Plain => "",
     };
-    if let Some(title) = agent_title {
+    if let Some(title) = [agent_title, operator_title, goal, tracker_title]
+        .into_iter()
+        .flatten()
+        .map(str::trim)
+        .find(|title| !title.is_empty())
+    {
         if title_policy.accepts(title) {
             return title.to_string();
         }
         return format!("{prefix}{title}");
     }
-    let subject = match promotion.changed_files.as_slice() {
-        [] => "candidate with no changed files".to_string(),
-        [file] => format!("update {file}"),
-        [file, rest @ ..] => format!(
-            "update {file} and {} more file{}",
-            rest.len(),
-            if rest.len() == 1 { "" } else { "s" }
-        ),
-    };
+    let subject = "deliver candidate changes".to_string();
     if prefix.is_empty() {
         let mut chars = subject.chars();
         chars
@@ -7846,6 +7842,54 @@ pub(super) fn draft_title(
             .unwrap_or_default()
     } else {
         format!("{prefix}{subject}")
+    }
+}
+
+#[cfg(test)]
+mod publication_title_tests {
+    use super::draft_title;
+    use crate::agent_task_review_dossier::PrTitlePolicy;
+
+    #[test]
+    fn title_fallback_order_and_policy() {
+        let cases = [
+            (
+                Some("feat: reviewed change"),
+                Some("operator"),
+                Some("goal"),
+                Some("issue"),
+                "feat: reviewed change",
+            ),
+            (
+                None,
+                Some("operator"),
+                Some("goal"),
+                Some("issue"),
+                "operator",
+            ),
+            (Some(" "), Some(""), Some("goal"), Some("issue"), "goal"),
+            (None, None, None, Some("issue"), "issue"),
+            (None, None, None, None, "deliver candidate changes"),
+        ];
+        for (review, operator, goal, issue, expected) in cases {
+            for policy in [PrTitlePolicy::Plain, PrTitlePolicy::ConventionalCommit] {
+                let actual = draft_title(review, operator, goal, issue, policy);
+                let expected = if policy == PrTitlePolicy::ConventionalCommit
+                    && !expected.starts_with("feat:")
+                {
+                    format!("fix: {expected}")
+                } else if review.is_none()
+                    && operator.is_none()
+                    && goal.is_none()
+                    && issue.is_none()
+                {
+                    "Deliver candidate changes".to_string()
+                } else {
+                    expected.to_string()
+                };
+                assert_eq!(actual, expected);
+            }
+        }
     }
 }
 

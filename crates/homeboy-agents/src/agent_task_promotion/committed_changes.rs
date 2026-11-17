@@ -331,14 +331,14 @@ pub(crate) fn recover_candidate_destination(
 ) -> Result<bool> {
     let head = git_stdout(cwd, &["rev-parse", "HEAD"])?;
     let tree = git_stdout(cwd, &["rev-parse", &format!("{candidate}^{{tree}}")])?;
-    if head.trim() != candidate {
+    let index_tree = git_stdout(cwd, &["write-tree"])?;
+    if head.trim() != candidate && index_tree.trim() != tree.trim() {
         let Some(base) = base else { return Ok(false) };
         let base = git_stdout(cwd, &["rev-parse", &format!("{base}^{{commit}}")])?;
         if head.trim() != base.trim() || !is_ancestor(cwd, head.trim(), candidate)? {
             return Ok(false);
         }
     }
-    let index_tree = git_stdout(cwd, &["write-tree"])?;
     let head_tree = git_stdout(cwd, &["rev-parse", "HEAD^{tree}"])?;
     if index_tree.trim() != tree.trim() && index_tree.trim() != head_tree.trim() {
         return Ok(false);
