@@ -55,6 +55,7 @@ mod runtime_types;
 pub mod structured_error;
 mod types;
 mod usage_cap;
+mod verification;
 mod workspace_types;
 
 #[cfg(test)]

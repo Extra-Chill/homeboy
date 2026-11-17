@@ -412,6 +412,9 @@ pub(super) fn outcome(
     let mut model_ms = 0.0;
     let mut tool_ms = 0.0;
     let mut tool_ms_by_name = std::collections::BTreeMap::<String, f64>::new();
+    let mut bash_ms_by_command_class = std::collections::BTreeMap::<String, f64>::new();
+    let mut bash_commands = std::collections::BTreeMap::<String, String>::new();
+    let gates = super::verification::gates(request);
     for line in stdout.lines().filter(|s| !s.trim().is_empty()) {
         let event: Value = match serde_json::from_str(line) {
             Ok(value) => value,
@@ -426,6 +429,14 @@ pub(super) fn outcome(
         events += 1;
         match event["type"].as_str().unwrap_or_default() {
             "turn_end" => turns += 1,
+            "tool_execution_start" if event["toolName"] == "bash" => {
+                if let (Some(id), Some(command)) = (
+                    event["toolCallId"].as_str(),
+                    event["args"]["command"].as_str(),
+                ) {
+                    bash_commands.insert(id.into(), command.into());
+                }
+            }
             "tool_execution_end" => {
                 tools += 1;
                 if event["isError"] == true {
@@ -467,6 +478,13 @@ pub(super) fn outcome(
                 tool_ms += duration;
                 if let Some(name) = event["message"]["toolName"].as_str() {
                     *tool_ms_by_name.entry(name.into()).or_default() += duration;
+                    if name == "bash" {
+                        let command = event["message"]["toolCallId"]
+                            .as_str()
+                            .and_then(|id| bash_commands.remove(id));
+                        let class = super::verification::command_class(command.as_deref(), &gates);
+                        *bash_ms_by_command_class.entry(class.into()).or_default() += duration;
+                    }
                 }
             }
             _ => {}
@@ -474,6 +492,7 @@ pub(super) fn outcome(
     }
     let mut metadata = json!({"command": program, "cwd": cwd.map(|p| p.display().to_string()), "turns": turns, "model_ms": model_ms, "tool_ms": tool_ms, "tool_ms_by_name": tool_ms_by_name, "tool_calls": tools, "tool_errors": tool_errors,
         "exit_code": exit_code, "usage": {"input_tokens": usage[0], "output_tokens": usage[1], "cache_read_tokens": usage[2], "cache_write_tokens": usage[3], "total_tokens": usage[4], "cost_usd": (usage[5] * 1e6).round() / 1e6}});
+    metadata["bash_ms_by_command_class"] = json!(bash_ms_by_command_class);
     for (source, target) in [
         ("provider", "provider"),
         ("model", "model"),
