@@ -532,6 +532,11 @@ pub(crate) enum HarvestError {
     SnapshotInvalidated {
         message: String,
     },
+    WorkspaceBaseUnavailable {
+        base: String,
+        cwd: PathBuf,
+        message: String,
+    },
 }
 
 pub(super) fn committed_harvest_preflight_outcome(task_id: String) -> AgentTaskOutcome {
@@ -625,6 +630,11 @@ pub(super) fn committed_harvest_failure(
             serde_json::json!({ "error": message }),
         ),
         HarvestError::CandidateBaselineUnavailable { .. } => unreachable!("handled above"),
+        HarvestError::WorkspaceBaseUnavailable { base, cwd, message } => (
+            "agent_task.workspace_base_unavailable",
+            format!("Cook workspace base {base} is unavailable: {message}. The provider did not run and no work was produced; retry with a new attempt."),
+            serde_json::json!({ "base": base, "cwd": cwd, "error": message, "pre_provider": true }),
+        ),
         HarvestError::SnapshotInvalidated { message } => (
             "agent_task.workspace_snapshot_invalidated",
             format!("Cook workspace snapshot was invalidated before provider execution: {message}"),

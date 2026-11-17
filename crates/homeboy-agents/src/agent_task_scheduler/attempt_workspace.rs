@@ -507,7 +507,12 @@ fn pinned_cook_workspace_base_snapshot(
     git_output(
         root,
         &["rev-parse", "--verify", &format!("{base}^{{commit}}")],
-    )?;
+    )
+    .map_err(|error| HarvestError::WorkspaceBaseUnavailable {
+        base: base.to_string(),
+        cwd: root.to_path_buf(),
+        message: format!("{error:?}"),
+    })?;
     // Snapshot transports retain commits, but do not necessarily retain the
     // controller's remote-tracking names. Recreate the declared Cook base at
     // its admission SHA, never at today's (possibly advanced) origin tip.
@@ -1451,6 +1456,28 @@ mod tests {
             status.contains("provider-output.txt"),
             "untracked source drift must still fail closed: {status}"
         );
+    }
+
+    #[test]
+    fn unavailable_workspace_base_is_pre_provider_failure() {
+        let outcome = crate::agent_task_scheduler::harvest::committed_harvest_failure(
+            crate::agent_task_scheduler::harvest::committed_harvest_preflight_outcome(
+                "missing-base".into(),
+            ),
+            HarvestError::WorkspaceBaseUnavailable {
+                base: "a".repeat(40),
+                cwd: PathBuf::from("/workspace"),
+                message: "missing commit".into(),
+            },
+        );
+        assert_eq!(
+            outcome.diagnostics[0].class,
+            "agent_task.workspace_base_unavailable"
+        );
+        assert_eq!(outcome.diagnostics[0].data["pre_provider"], true);
+        let summary = outcome.summary.unwrap();
+        assert!(summary.contains("provider did not run"));
+        assert!(summary.contains("no work was produced"));
     }
 
     use homeboy_core::test_support::run_git_command as git;

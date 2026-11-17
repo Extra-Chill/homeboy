@@ -246,6 +246,12 @@ fn prepare_lab_offload_workspace_stage_inner(
             git_fetch_refs.push(git_ref);
         }
     }
+    let primary_pins = primary_workspace_base_pins(lifecycle_args, source_path);
+    for pin in &primary_pins {
+        if !git_fetch_refs.contains(pin) {
+            git_fetch_refs.push(pin.clone());
+        }
+    }
     if let Some(resolved_base) = &changed_since_preflight.resolved_base {
         eprintln!(
             "Lab offload: changed-since requested `{}` resolved to `{}`; runner fetch refs: {}.",
@@ -296,6 +302,12 @@ fn prepare_lab_offload_workspace_stage_inner(
     let transfer_source_path = replay_snapshot
         .as_ref()
         .map_or_else(|| source_path.to_path_buf(), |snapshot| snapshot.path());
+    if replay_snapshot.is_some() && !primary_pins.is_empty() {
+        // Sealed content need not contain .git (and a worktree's .git file
+        // points outside the artifact). Build an independent object store from
+        // the controller, not from the older destination HEAD's closure.
+        materialize_replay_base_pins(source_path, &transfer_source_path, &primary_pins, control)?;
+    }
     let sync_options = RunnerWorkspaceSyncOptions {
         path: transfer_source_path.display().to_string(),
         mode: sync_mode,
@@ -3996,6 +4008,81 @@ mod tests {
         String::from_utf8_lossy(&output.stdout).trim().to_string()
     }
 
+    #[test]
+    fn primary_pin_ahead_of_destination_survives_bundle_and_replay() {
+        let controller = tempfile::tempdir().unwrap();
+        let destination_parent = tempfile::tempdir().unwrap();
+        let destination = destination_parent.path().join("destination");
+        git(controller.path(), &["init", "-b", "trunk"]);
+        git(controller.path(), &["config", "user.name", "Test"]);
+        git(
+            controller.path(),
+            &["config", "user.email", "test@example.com"],
+        );
+        git(controller.path(), &["commit", "--allow-empty", "-m", "old"]);
+        git(
+            controller.path(),
+            &["worktree", "add", "--detach", destination.to_str().unwrap()],
+        );
+        for message in ["advance one", "advance two"] {
+            git(
+                controller.path(),
+                &["commit", "--allow-empty", "-m", message],
+            );
+        }
+        let pin = git_output(controller.path(), &["rev-parse", "HEAD"]);
+        let plan = serde_json::json!({"tasks": [{
+            "workspace": {"root": destination},
+            "metadata": {"cook_workspace_base_snapshot": {
+                "schema": "homeboy/cook-workspace-base-snapshot/v1",
+                "mode": "isolated_attempt_snapshot", "resolved_base": pin
+            }}
+        }]});
+        let args = vec![
+            "agent-task".into(),
+            "run-plan".into(),
+            "--plan".into(),
+            plan.to_string(),
+        ];
+        let refs = primary_workspace_base_pins(&args, &destination);
+        assert!(
+            refs.contains(&pin),
+            "primary stage must transport the admitted pin"
+        );
+        let replay = tempfile::tempdir().unwrap();
+        materialize_replay_base_pins(
+            &destination,
+            replay.path(),
+            &refs,
+            &crate::workspace::WorkspaceControl::default(),
+        )
+        .unwrap();
+        let bundle = destination_parent.path().join("primary.bundle");
+        let mut bundle_args = vec!["bundle", "create", bundle.to_str().unwrap(), "HEAD"];
+        bundle_args.extend(refs.iter().map(String::as_str));
+        git(replay.path(), &bundle_args);
+        let runner = tempfile::tempdir().unwrap();
+        git(runner.path(), &["init"]);
+        assert!(!Command::new("git")
+            .args(["rev-parse", "--verify", &format!("{pin}^{{commit}}")])
+            .current_dir(runner.path())
+            .output()
+            .unwrap()
+            .status
+            .success());
+        git(
+            runner.path(),
+            &["bundle", "unbundle", bundle.to_str().unwrap()],
+        );
+        assert_eq!(
+            git_output(
+                runner.path(),
+                &["rev-parse", "--verify", &format!("{pin}^{{commit}}")]
+            ),
+            pin
+        );
+    }
+
     fn test_synced_workspace(local_path: &str, remote_path: &str) -> RunnerWorkspaceSyncOutput {
         RunnerWorkspaceSyncOutput {
             variant: "workspace_sync",
@@ -4056,6 +4143,47 @@ mod tests {
         }
     }
 }
+fn primary_workspace_base_pins(args: &[String], source: &Path) -> Vec<String> {
+    let canonical = source
+        .canonicalize()
+        .unwrap_or_else(|_| source.to_path_buf());
+    crate::lab_workspaces::agent_task_plan_workspace_base_pins(args, source)
+        .into_iter()
+        .filter(|(root, _)| root == &canonical)
+        .map(|(_, pin)| pin)
+        .collect()
+}
+
+fn materialize_replay_base_pins(
+    source: &Path,
+    transfer: &Path,
+    pins: &[String],
+    control: &crate::workspace::WorkspaceControl,
+) -> Result<()> {
+    // Replay excludes Git internals. Never follow a copied worktree pointer
+    // and mutate the controller's repository.
+    let dot_git = transfer.join(".git");
+    if dot_git.is_file() {
+        std::fs::remove_file(&dot_git).map_err(|error| {
+            Error::internal_io(error.to_string(), Some("remove replay git pointer".into()))
+        })?;
+    }
+    control.git(transfer, &["init"])?;
+    let source = source.display().to_string();
+    let mut args = vec!["fetch", "--no-tags", &source, "HEAD"];
+    args.extend(pins.iter().map(String::as_str));
+    control.git(transfer, &args)?;
+    let head = control.git(Path::new(&source), &["rev-parse", "HEAD"])?;
+    control.git(transfer, &["update-ref", "HEAD", head.trim()])?;
+    for pin in pins {
+        control.git(
+            transfer,
+            &["rev-parse", "--verify", &format!("{pin}^{{commit}}")],
+        )?;
+    }
+    Ok(())
+}
+
 fn prepare_replay_snapshot(
     runner: &crate::Runner,
     source_path: &Path,
