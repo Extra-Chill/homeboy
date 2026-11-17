@@ -342,9 +342,22 @@ impl LocalControllerJobClient {
     /// refused connection proves the daemon never received the request, so it
     /// is resent to the replacement the serving lease names; submissions carry
     /// an idempotency key, so any replay reuses its job.
+    ///
+    /// A request that times out on a daemon busy under load may have been
+    /// applied, so it is resent only when a second delivery leaves the result
+    /// unchanged: reads, keyed submissions, start, and cancel.
     fn send_to_serving_daemon(
         &self,
         operation: &str,
+        send: impl Fn(&str) -> reqwest::Result<reqwest::blocking::Response>,
+    ) -> Result<reqwest::blocking::Response> {
+        self.send_with_resend(operation, true, send)
+    }
+
+    fn send_with_resend(
+        &self,
+        operation: &str,
+        resend_timeouts: bool,
         send: impl Fn(&str) -> reqwest::Result<reqwest::blocking::Response>,
     ) -> Result<reqwest::blocking::Response> {
         let deadline = std::time::Instant::now() + DAEMON_HANDOFF_WAIT;
@@ -352,7 +365,10 @@ impl LocalControllerJobClient {
         loop {
             match send(&endpoint) {
                 Ok(response) => return Ok(response),
-                Err(error) if error.is_connect() && std::time::Instant::now() < deadline => {
+                Err(error)
+                    if (error.is_connect() || (resend_timeouts && error.is_timeout()))
+                        && std::time::Instant::now() < deadline =>
+                {
                     std::thread::sleep(Duration::from_millis(250));
                     if let Ok(Some(state)) =
                         validate_lease_file(&self.state_path).map(|lease| lease.state)
@@ -465,7 +481,9 @@ impl LocalControllerJobClient {
     ) -> Result<serde_json::Value> {
         let path = format!("/workflows/{instance}/approvals");
         let actor = std::env::var("USER").unwrap_or_else(|_| "local-operator".to_string());
-        let response = self.send_to_serving_daemon(&format!("post {path}"), |endpoint| {
+        // A repeated decision is refused once the first lands: never resend
+        // one that may have been applied.
+        let response = self.send_with_resend(&format!("post {path}"), false, |endpoint| {
             self.client
                 .post(format!("{endpoint}{path}"))
                 .json(&json!({ "step": step, "decision": decision, "reason": reason, "actor": actor }))
@@ -6460,6 +6478,56 @@ mod tests {
                 DaemonOwnerLockProbe::Held { holder: None }
             );
         });
+    }
+
+    /// A daemon busy under load times out one request; an idempotent request
+    /// is resent and lands, a decision that may have been applied is not.
+    #[test]
+    fn a_timed_out_idempotent_request_is_resent() {
+        use std::io::{Read, Write};
+        for (resend_timeouts, expect_ok) in [(true, true), (false, false)] {
+            let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+            let address = listener.local_addr().unwrap();
+            let server = std::thread::spawn(move || {
+                // The first request stalls past the client timeout.
+                let (stalled, _) = listener.accept().unwrap();
+                listener.set_nonblocking(true).unwrap();
+                let deadline = std::time::Instant::now() + Duration::from_secs(3);
+                while std::time::Instant::now() < deadline {
+                    if let Ok((mut stream, _)) = listener.accept() {
+                        stream.set_nonblocking(false).unwrap();
+                        let _ = stream.read(&mut [0u8; 4096]);
+                        let _ = stream.write_all(
+                            b"HTTP/1.1 200 OK\r\ncontent-length: 0\r\nconnection: close\r\n\r\n",
+                        );
+                        return true;
+                    }
+                    std::thread::sleep(Duration::from_millis(20));
+                }
+                drop(stalled);
+                false
+            });
+            let mut client = LocalControllerJobClient::at(
+                &address.to_string(),
+                std::env::temp_dir().join("absent-daemon-state.json"),
+            )
+            .unwrap();
+            client.client = reqwest::blocking::Client::builder()
+                .no_proxy()
+                .timeout(Duration::from_millis(300))
+                .build()
+                .unwrap();
+            let sent = client.send_with_resend("start", resend_timeouts, |endpoint| {
+                client.client.post(format!("{endpoint}/start")).send()
+            });
+            if expect_ok {
+                assert!(sent.unwrap().status().is_success());
+            } else {
+                let error = sent.unwrap_err().to_string();
+                assert!(error.contains("start"), "{error}");
+            }
+            assert_eq!(server.join().unwrap(), expect_ok);
+        }
     }
 
     /// The lease's PID is live (it is this test process), but nothing holds
