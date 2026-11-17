@@ -135,6 +135,9 @@ pub struct DependencyHydrationOutcome {
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub download_auth: BTreeMap<String, String>,
     pub termination: DependencyHydrationTermination,
+    /// Number of install command tries; zero when installation was not attempted.
+    #[serde(default)]
+    pub install_attempts: u32,
     pub status: DependencyHydrationStatus,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub exit_code: Option<i32>,
@@ -486,15 +489,31 @@ fn hydrate_declared_dependencies_unlocked(
             current: None,
             last_progress_ms_ago: None,
         });
-        let execution = run_hydration_command(
-            &plan.install,
-            &provider_id,
-            "installing",
-            &environment,
-            &secrets,
-            policy,
-            deadline,
-        );
+        let mut install_attempts = 0;
+        let execution = loop {
+            install_attempts += 1;
+            let execution = run_hydration_command(
+                &plan.install,
+                &provider_id,
+                "installing",
+                &environment,
+                &secrets,
+                policy,
+                deadline,
+            );
+            // Retry only watchdog stops, sharing the original hydration deadline.
+            // Cancellation and an exhausted deadline must never start another try.
+            if install_attempts >= 3
+                || !matches!(
+                    execution.termination,
+                    DependencyHydrationTermination::NoProgress
+                        | DependencyHydrationTermination::TimedOut
+                )
+                || hydration_deadline_expired(policy, deadline)
+            {
+                break execution;
+            }
+        };
         if execution.termination != DependencyHydrationTermination::Completed {
             outcomes.push(hydration_outcome(
                 workspace,
@@ -513,6 +532,10 @@ fn hydrate_declared_dependencies_unlocked(
                 execution.stdout,
                 execution.stderr,
             ));
+            outcomes
+                .last_mut()
+                .expect("install outcome")
+                .install_attempts = install_attempts;
             break;
         }
         let exit_code = execution.exit_code;
@@ -534,6 +557,10 @@ fn hydrate_declared_dependencies_unlocked(
                 execution.stdout,
                 execution.stderr,
             ));
+            outcomes
+                .last_mut()
+                .expect("install outcome")
+                .install_attempts = install_attempts;
             break;
         }
         let missing_outputs = missing_declared_outputs(&plan.install.cwd, &plan.outputs);
@@ -551,6 +578,7 @@ fn hydrate_declared_dependencies_unlocked(
                 execution.stdout,
                 execution.stderr,
             );
+            outcome.install_attempts = install_attempts;
             outcome.missing_outputs = missing_outputs;
             outcomes.push(outcome);
             break;
@@ -568,6 +596,10 @@ fn hydrate_declared_dependencies_unlocked(
             String::new(),
             String::new(),
         ));
+        outcomes
+            .last_mut()
+            .expect("install outcome")
+            .install_attempts = install_attempts;
     }
 
     for outcome in &mut outcomes {
@@ -1086,6 +1118,7 @@ fn hydration_outcome(
         download_cache: BTreeMap::new(),
         download_auth: BTreeMap::new(),
         termination,
+        install_attempts: 0,
         status,
         exit_code,
         stdout,
@@ -2729,6 +2762,40 @@ esac
     }
 
     #[test]
+    fn stalled_declared_install_retries_and_succeeds() {
+        crate::test_support::with_isolated_home(|_| {
+            let root = tempfile::tempdir().expect("provider workspace");
+            std::fs::write(
+                root.path().join("homeboy.json"),
+                r#"{"id":"fixture-deps","deps":{"provider":"fixture-provider","commands":{"install":{"argv":["sh","-c","if [ ! -f attempted ]; then touch attempted; sleep 5; fi; touch prepared.state"]}},"outputs":[{"path":"prepared.state","kind":"file"}]}}"#,
+            )
+            .expect("provider manifest");
+            let outcomes = hydrate_declared_dependencies(
+                root.path(),
+                "fixture",
+                ".",
+                &DependencyHydrationPolicy {
+                    no_progress_timeout: Duration::from_millis(150),
+                    ..hydration_policy(
+                        Arc::new(AtomicBool::new(false)),
+                        Arc::new(Mutex::new(Vec::new())),
+                    )
+                },
+            )
+            .expect("retried hydration outcome");
+
+            assert_eq!(outcomes.len(), 1);
+            assert_eq!(outcomes[0].status, DependencyHydrationStatus::Succeeded);
+            assert_eq!(
+                outcomes[0].termination,
+                DependencyHydrationTermination::Completed
+            );
+            assert_eq!(outcomes[0].install_attempts, 2);
+            assert!(root.path().join("prepared.state").is_file());
+        });
+    }
+
+    #[test]
     fn stalled_declared_install_is_bounded_by_no_progress() {
         crate::test_support::with_isolated_home(|_| {
             let root = tempfile::tempdir().expect("provider workspace");
@@ -2743,6 +2810,7 @@ esac
                 "fixture",
                 ".",
                 &DependencyHydrationPolicy {
+                    timeout: Duration::from_secs(8),
                     no_progress_timeout: Duration::from_millis(150),
                     ..hydration_policy(
                         Arc::new(AtomicBool::new(false)),
@@ -2757,10 +2825,11 @@ esac
                 outcomes[0].termination,
                 DependencyHydrationTermination::NoProgress
             );
+            assert_eq!(outcomes[0].install_attempts, 3);
             // NoProgress (asserted above) proves which bound fired; the elapsed
-            // check only proves it fired before the 3s total timeout and the 5s
-            // stall, leaving room for process teardown under a loaded host.
-            assert!(started.elapsed() < Duration::from_secs(3));
+            // check leaves room for three process-group teardowns under load,
+            // while proving the retries share a bounded total budget.
+            assert!(started.elapsed() < Duration::from_secs(8));
         });
     }
 

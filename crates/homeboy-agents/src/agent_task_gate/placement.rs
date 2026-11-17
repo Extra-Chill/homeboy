@@ -1509,6 +1509,16 @@ fn failed_lab_gate_setup_receipt(
     };
     setup_error.details["gate_disposition"] = serde_json::json!("unavailable");
     setup_error.details["stage"] = serde_json::json!("dependency_setup");
+    if setup.iter().any(|outcome| {
+        outcome.status == homeboy_core::deps::DependencyHydrationStatus::Failed
+            && matches!(
+                outcome.termination,
+                homeboy_core::deps::DependencyHydrationTermination::NoProgress
+                    | homeboy_core::deps::DependencyHydrationTermination::TimedOut
+            )
+    }) {
+        setup_error.retryable = Some(true);
+    }
     let mut report = non_execution_report(request, &setup_error);
     report.environment.lab_runner = Some(request.runner_id.clone());
     report.lab_receipt.as_mut().expect("non-execution receipt")["diagnostic"] =
@@ -2600,6 +2610,32 @@ mod tests {
         );
     }
 
+    #[test]
+    fn stalled_dependency_setup_disposition_is_retryable() {
+        let root = tempfile::tempdir().unwrap();
+        let request = request(root.path());
+        let context = runner_context(&request.runner_id);
+        for termination in ["no_progress", "timed_out"] {
+            let setup = serde_json::from_value(serde_json::json!({
+                "schema": "homeboy/dependency-hydration-outcome/v1",
+                "workspace": "lab_gate_workspace",
+                "package_root": ".",
+                "provider_id": "fixture",
+                "command": ["composer", "install"],
+                "reason": "install stalled",
+                "termination": termination,
+                "status": "failed",
+                "install_attempts": 3
+            }))
+            .unwrap();
+            let receipt = failed_lab_gate_setup_receipt(&request, &context, vec![setup], None)
+                .expect("setup receipt");
+            let disposition = receipt.report.lab_receipt.as_ref().unwrap();
+            assert_eq!(disposition["schema"], LAB_GATE_DISPOSITION_SCHEMA);
+            assert_eq!(disposition["retryable"], true);
+        }
+    }
+
     /// Dependency setup gets one warm retry and never supplies a gate verdict.
     #[test]
     fn runner_dependency_setup_retries_then_reports_non_execution_or_runs() {
@@ -2655,6 +2691,7 @@ mod tests {
                         reason: "install_failed".to_string(),
                         download_cache: Default::default(),
                         download_auth: Default::default(),
+                        install_attempts: 1,
                         termination: if recovered { homeboy_core::deps::DependencyHydrationTermination::Completed } else { homeboy_core::deps::DependencyHydrationTermination::NoProgress },
                         status: if recovered { homeboy_core::deps::DependencyHydrationStatus::Succeeded } else { homeboy_core::deps::DependencyHydrationStatus::Failed },
                         exit_code: None,

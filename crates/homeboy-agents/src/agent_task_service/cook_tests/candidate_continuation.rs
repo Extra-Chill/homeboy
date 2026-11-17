@@ -1222,6 +1222,7 @@ fn cook_recovery_classifies_stalled_gate_setup_as_gate_environment_unavailable()
             reason: "no_progress".to_string(),
             download_cache: Default::default(),
             download_auth: Default::default(),
+            install_attempts: 1,
             termination: DependencyHydrationTermination::NoProgress,
             status: DependencyHydrationStatus::Failed,
             exit_code: None,

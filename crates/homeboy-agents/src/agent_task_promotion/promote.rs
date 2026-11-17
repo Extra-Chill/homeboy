@@ -4809,6 +4809,7 @@ mod gate_setup_message_tests {
             reason: "lockfile present".to_string(),
             download_cache: Default::default(),
             download_auth: Default::default(),
+            install_attempts: 1,
             termination,
             status: DependencyHydrationStatus::Failed,
             exit_code,
