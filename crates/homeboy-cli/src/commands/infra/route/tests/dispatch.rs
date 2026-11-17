@@ -1861,6 +1861,36 @@ fn lab_cook_attempt_preserves_authorized_dirty_baseline_in_the_run_plan() {
     );
 }
 
+/// A recovered gate-feedback retry must hand the Lab its task-bound derived
+/// baseline evidence; without it the runner cannot admit the synced checkout.
+#[test]
+fn recovered_retry_carries_its_task_bound_cook_baseline_to_lab() {
+    let plan = |bound: &str| {
+        homeboy::agents::agent_tasks::scheduler::AgentTaskPlan::new(
+            "retry",
+            vec![serde_json::from_value(serde_json::json!({
+                "task_id": "cook-gate-fix-2",
+                "executor": { "backend": "fixture" },
+                "instructions": "continue",
+                "workspace": { "root": "/runner/workspace" },
+                "metadata": { "verified_cook_baseline": {
+                    "bound_task_id": bound, "preexisting_candidate": false,
+                }},
+            }))
+            .expect("task")],
+        )
+    };
+    let bound = plan("cook-gate-fix-2");
+    assert_eq!(
+        super::retry_verified_cook_baseline(&bound),
+        bound.tasks[0].metadata.get("verified_cook_baseline")
+    );
+    assert_eq!(
+        super::retry_verified_cook_baseline(&plan("other-task")),
+        None
+    );
+}
+
 #[test]
 fn lab_run_retry_leaves_a_cook_child_for_controller_lifecycle() {
     crate::test_support::with_isolated_home(|_| {

@@ -93,6 +93,10 @@ pub struct AgentTaskReviewVerifiedCommand {
     pub candidate_commit: String,
     pub candidate_tree: String,
     pub evidence_ref: String,
+    /// Visible gate output published with the review body when no external
+    /// artifact service is configured. Private gates never enter this projection.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub output: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub total: Option<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -620,6 +624,7 @@ pub(crate) fn verified_commands_from_promotion(
                 candidate_commit: candidate.commit.clone(),
                 candidate_tree: candidate.tree.clone(),
                 evidence_ref: gate.id.clone(),
+                output: published_gate_output(&gate.stdout, &gate.stderr),
                 total,
                 passed,
                 failed,
@@ -1215,6 +1220,113 @@ fn render_ai_disclosure(ai: &AgentTaskReviewAiAssistance) -> String {
     )
 }
 
+/// Bound retained output so several gates fit in a GitHub PR body. Output
+/// containing operator-only references is omitted rather than leaking secrets.
+fn published_gate_output(stdout: &str, stderr: &str) -> String {
+    let output = [stdout.trim(), stderr.trim()]
+        .into_iter()
+        .filter(|part| !part.is_empty())
+        .collect::<Vec<_>>()
+        .join("\n");
+    let output = plain_text(&output);
+    // Homeboy cannot tell a public link from a private one, so output that
+    // carries links stays in run evidence (#17881).
+    if contains_operator_only_reference(&output) || output.contains("://") {
+        return String::new();
+    }
+    const MAX_CHARS: usize = 2000;
+    let count = output.chars().count();
+    if count > MAX_CHARS {
+        let tail: String = output.chars().skip(count - MAX_CHARS).collect();
+        format!("[output truncated; retained tail]\n{tail}")
+    } else {
+        output
+    }
+}
+
+/// Terminal output without ANSI escape sequences or other control characters.
+pub(crate) fn plain_text(output: &str) -> String {
+    let mut plain = String::with_capacity(output.len());
+    let mut chars = output.chars().peekable();
+    while let Some(ch) = chars.next() {
+        if ch == '\u{1b}' {
+            // CSI sequences end at a byte in `@`..=`~`; other escapes are two chars.
+            if chars.next_if_eq(&'[').is_some() {
+                for next in chars.by_ref() {
+                    if ('@'..='~').contains(&next) {
+                        break;
+                    }
+                }
+            } else {
+                chars.next();
+            }
+        } else if ch == '\n' || ch == '\t' || !ch.is_control() {
+            plain.push(ch);
+        }
+    }
+    plain
+}
+
+/// Upper bound on the reviewer-facing rendering of a gate program.
+const GATE_COMMAND_SUMMARY_MAX_CHARS: usize = 120;
+
+/// The script inside a `bash -c '…'` / `sh -c "…"` wrapper, or the program
+/// itself when it is not wrapped.
+fn unwrap_shell_wrapper(program: &str) -> &str {
+    let wrapper = Regex::new(
+        r#"^\s*(?:(?:/usr)?/bin/)?(?:env\s+)?(?:ba|da|z)?sh(?:\s+(?:-[A-Za-z]+|pipefail))*?\s+-[A-Za-z]*c\s+(['"])"#,
+    )
+    .expect("valid shell wrapper regex");
+    let Some(captures) = wrapper.captures(program) else {
+        return program;
+    };
+    let quote = &captures[1];
+    let inner = &program[captures.get(0).expect("whole match").end()..];
+    let trimmed = inner.trim_end();
+    trimmed.strip_suffix(quote).unwrap_or(trimmed)
+}
+
+/// Commands a reviewer cares about: the wrapper, blank lines, comments,
+/// shebangs and shell option lines (`set -e`) are dropped.
+fn meaningful_gate_commands(program: &str) -> Vec<&str> {
+    unwrap_shell_wrapper(program)
+        .lines()
+        .map(str::trim)
+        .filter(|line| {
+            !line.is_empty()
+                && !line.starts_with('#')
+                && *line != "set"
+                && !line.starts_with("set ")
+                && !matches!(*line, "'" | "\"")
+        })
+        .collect()
+}
+
+/// Label for a gate with no declared name: its first meaningful command.
+fn gate_fallback_label(program: &str) -> String {
+    meaningful_gate_commands(program)
+        .first()
+        .map(|line| line.chars().take(80).collect())
+        .unwrap_or_else(|| "Gate".to_string())
+}
+
+/// Single-line, bounded rendering of a gate program's meaningful commands.
+fn gate_command_summary(program: &str) -> Option<String> {
+    let commands = meaningful_gate_commands(program);
+    if commands.is_empty() {
+        return None;
+    }
+    let summary = commands.join("; ");
+    if summary.chars().count() <= GATE_COMMAND_SUMMARY_MAX_CHARS {
+        return Some(summary);
+    }
+    let truncated: String = summary
+        .chars()
+        .take(GATE_COMMAND_SUMMARY_MAX_CHARS - 1)
+        .collect();
+    Some(format!("{}…", truncated.trim_end()))
+}
+
 /// One visible entry per gate with its short label and result, followed
 /// by CI and one collapsed block for provenance identifiers.
 fn render_verification(dossier: &AgentTaskReviewDossier) -> Option<String> {
@@ -1248,10 +1360,12 @@ fn render_verification(dossier: &AgentTaskReviewDossier) -> Option<String> {
             )
         })
         .unwrap_or_default();
+    let mut output_blocks = Vec::new();
     let gate_lines = dossier
         .verified_commands
         .iter()
-        .map(|command| {
+        .enumerate()
+        .map(|(position, command)| {
             let status = match command.status.as_str() {
                 "succeeded" | "passed" => "passed".to_string(),
                 other => prose(other),
@@ -1265,28 +1379,41 @@ fn render_verification(dossier: &AgentTaskReviewDossier) -> Option<String> {
                 short_sha(&command.candidate_commit)
             );
             let label = if command.label.trim().is_empty() {
-                command
-                    .command
-                    .lines()
-                    .map(str::trim)
-                    .find(|line| !line.is_empty() && !line.starts_with("set "))
-                    .unwrap_or("Gate")
-                    .chars()
-                    .take(80)
-                    .collect::<String>()
+                gate_fallback_label(&command.command)
             } else {
                 command.label.clone()
             };
+            let label = prose(&label);
+            let rendered_command = gate_command_summary(&command.command)
+                .map(|summary| code(&summary))
+                .filter(|summary| !summary.is_empty() && *summary != label)
+                .map(|summary| format!(" (`{summary}`)"))
+                .unwrap_or_default();
             let duration = command
                 .elapsed_ms
                 .map(|ms| format!("{ms} ms"))
                 .unwrap_or_else(|| "duration not recorded".to_string());
+            // Cook has no external artifact publisher. Publish visible output
+            // in the PR body itself, so Lab and local gates have an openable
+            // evidence target rather than a controller-local gate id.
+            let output = published_gate_output(&command.output, "");
             let evidence = if is_reviewer_url(&command.evidence_ref) {
                 format!("[retained gate evidence]({})", command.evidence_ref)
+            } else if !output.is_empty() {
+                let anchor = format!("cook-gate-output-{}", position + 1);
+                let escaped = output
+                    .replace('&', "&amp;")
+                    .replace('<', "&lt;")
+                    .replace('>', "&gt;");
+                output_blocks.push(format!(
+                    "<a id=\"{anchor}\"></a>\n<details><summary>Gate {} output</summary>\n\n<pre>{escaped}</pre>\n\n</details>",
+                    position + 1
+                ));
+                format!("[retained gate evidence](#{anchor})")
             } else {
-                "[retained gate metadata](#cook-run); output evidence link unavailable".to_string()
+                "[retained gate metadata](#cook-run)".to_string()
             };
-            format!("- {}: {result} {duration}; {evidence}.", prose(&label))
+            format!("- {label}{rendered_command}: {result} {duration}; {evidence}.")
         })
         .collect::<Vec<_>>();
     let repro = dossier
@@ -1303,6 +1430,7 @@ fn render_verification(dossier: &AgentTaskReviewDossier) -> Option<String> {
         }
         visible.push(format!("{repro}- CI: pending"));
     }
+    visible.extend(output_blocks);
     if !dossier.verified_commands.is_empty() {
         // Reviewer-resolvable labels only: `gate.id` is an internal positional
         // id (`gate-1`) a reviewer cannot use, so each entry is labeled by its
@@ -2887,6 +3015,7 @@ mod tests {
             candidate_commit: "cf5ddd58adabe779d1c9d26b16d90d83be16805b".into(),
             candidate_tree: "645eaae2998d0612cd2f08c977a31b49c06fec7d".into(),
             evidence_ref: "https://github.com/Extra-Chill/homeboy/actions/runs/123".into(),
+            output: String::new(),
             total: Some(65),
             passed: Some(65),
             failed: Some(0),
@@ -3050,6 +3179,107 @@ mod tests {
         assert_eq!(prose("keep <!-- hidden --> this"), "keep  this");
         assert_eq!(prose("## Forged section"), "\\## Forged section");
         assert_eq!(prose("   # indented"), "\\# indented");
+    }
+
+    #[test]
+    fn verification_line_labels_verify_files_and_unwraps_shell_wrappers() {
+        use crate::agent_task_gate::{
+            apply_gate_input_source_labels, legacy_gate_argv, AgentTaskGateInputSource,
+            AgentTaskGateReport, AgentTaskGateRevealPolicy, AgentTaskGateVisibility,
+        };
+        use sha2::{Digest, Sha256};
+
+        let studio_gate = "bash -c '\nset -e\nnpm ci\nnpm run test:unit\n'\n";
+        // (verify-file path, program, expected label, expected rendered line)
+        let cases = [
+            (
+                Some("gates/studio-gate.sh"),
+                studio_gate,
+                "studio-gate.sh",
+                "- studio-gate.sh (`npm ci; npm run test:unit`): passed on `565192a`. 1200 ms; [retained gate evidence](#cook-gate-output-1).",
+            ),
+            (
+                None,
+                studio_gate,
+                "npm ci",
+                "- npm ci (`npm ci; npm run test:unit`): passed on `565192a`. 1200 ms; [retained gate evidence](#cook-gate-output-1)." ,
+            ),
+            (
+                None,
+                "sh -c \"cargo test -p widget\"",
+                "cargo test -p widget",
+                "- cargo test -p widget: passed on `565192a`. 1200 ms; [retained gate evidence](#cook-gate-output-1).",
+            ),
+        ];
+        for (path, program, expected_label, expected_line) in cases {
+            let sources: Vec<AgentTaskGateInputSource> = path
+                .map(|path| AgentTaskGateInputSource {
+                    visibility: AgentTaskGateVisibility::Visible,
+                    source_kind: "file".into(),
+                    path: Some(path.into()),
+                    sha256: format!("sha256:{:x}", Sha256::digest(program.as_bytes())),
+                    size_bytes: program.len() as u64,
+                    redaction_policy: AgentTaskGateRevealPolicy::FullEvidence,
+                })
+                .into_iter()
+                .collect();
+            let mut gates = vec![AgentTaskGateReport::skipped(
+                "gate-1",
+                legacy_gate_argv(program),
+                AgentTaskGateVisibility::Visible,
+                AgentTaskGateRevealPolicy::FullEvidence,
+                "none",
+            )];
+            apply_gate_input_source_labels(&mut gates, &sources);
+            let results: Vec<HomeboyGateResult> =
+                gates.into_iter().map(HomeboyGateResult::from).collect();
+
+            let mut proof = promotion(program, "candidate-tree");
+            proof.deterministic_gates[0].stdout = "unit tests passed\n".into();
+            let verified = verified_commands_from_promotion(&proof);
+            assert_eq!(verified.len(), 1);
+            assert_eq!(verified[0].output, "unit tests passed");
+
+            let mut value = dossier();
+            value.verified_base = None;
+            value.verified_commands = vec![AgentTaskReviewVerifiedCommand {
+                label: String::new(),
+                elapsed_ms: Some(1200),
+                command: program.into(),
+                status: "passed".into(),
+                candidate_commit: "565192a0000000000000000000000000000000000".into(),
+                candidate_tree: "645eaae2998d0612cd2f08c977a31b49c06fec7d".into(),
+                evidence_ref: "gate-1".into(),
+                output: verified[0].output.clone(),
+                total: None,
+                passed: None,
+                failed: None,
+                ignored: None,
+            }];
+            enrich_dossier(&mut value, &[], &results);
+            let label = if value.verified_commands[0].label.is_empty() {
+                gate_fallback_label(program)
+            } else {
+                value.verified_commands[0].label.clone()
+            };
+            assert_eq!(label, expected_label, "{program}");
+
+            let body = render_review_dossier(&value, &default_profile());
+            assert!(
+                body.lines().any(|line| line == expected_line),
+                "expected `{expected_line}` in:\n{body}"
+            );
+            assert!(!body.contains("evidence link unavailable"), "{body}");
+            assert!(!body.contains("- bash -c '"), "{body}");
+            assert!(body.contains("<a id=\"cook-gate-output-1\"></a>"), "{body}");
+            assert!(body.contains("<pre>unit tests passed</pre>"), "{body}");
+
+            value.verified_commands[0].output.clear();
+            let without_output = render_review_dossier(&value, &default_profile());
+            assert!(!without_output.contains("evidence link unavailable"));
+            assert!(!without_output.contains("#cook-gate-output-1"));
+            assert!(without_output.contains("[retained gate metadata](#cook-run)"));
+        }
     }
 
     #[test]

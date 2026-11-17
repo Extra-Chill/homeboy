@@ -195,6 +195,108 @@ pub(super) fn intercept_local_detached_cook(
     provider_placement: Option<&str>,
     provider_runner_id: Option<&str>,
 ) -> homeboy::core::Result<Option<i32>> {
+    let launch = || {
+        intercept_local_detached_cook_once(
+            cli,
+            normalized_args,
+            output_file,
+            runner_side,
+            provider_placement,
+            provider_runner_id,
+        )
+    };
+    let error = match launch() {
+        Err(error) if is_platform_trust_failure(&error) => error,
+        result => return result,
+    };
+    let requested_cook_id = match &cli.command {
+        Commands::AgentTask(crate::commands::agent_task::AgentTaskArgs {
+            command: crate::commands::agent_task::AgentTaskCommand::Cook(cook),
+        }) => cook.dispatch.run_id.is_some(),
+        _ => false,
+    };
+    match recover_daemon_platform_trust() {
+        // The replacement inherits this launcher's working session. A
+        // generated Cook ID is free to launch again; an operator-chosen one
+        // is already claimed by the failed handoff, so hand it back.
+        DaemonTrustRecovery::Restarted if !requested_cook_id => launch(),
+        recovery => Err(recovery.annotate(error)),
+    }
+}
+
+/// macOS trust evaluation failing inside daemon-spawned `gh`/`git` while the
+/// operator's own shell verifies the same hosts. The daemon's security session
+/// has gone stale; only a daemon started from a healthy session recovers.
+fn is_platform_trust_failure(error: &Error) -> bool {
+    let text = format!("{} {}", error.message, error.details);
+    text.contains("x509: OSStatus") || text.contains("errSecInternalComponent")
+}
+
+enum DaemonTrustRecovery {
+    Restarted,
+    /// This launcher fails the same verification, so the fault is not the
+    /// daemon's and restarting it would not help.
+    LauncherAlsoFails,
+    Busy,
+    Failed(String),
+}
+
+impl DaemonTrustRecovery {
+    fn annotate(self, mut error: Error) -> Error {
+        let (state, hint) = match self {
+            Self::Restarted => (
+                "daemon_restarted",
+                "The daemon was restarted from this shell; launch the Cook again.".to_string(),
+            ),
+            Self::LauncherAlsoFails => (
+                "launcher_also_fails",
+                "This shell also fails TLS verification; repair the system trust store or network before retrying.".to_string(),
+            ),
+            Self::Busy => (
+                "daemon_busy",
+                "The daemon owns running work, so it was not restarted. Once it is idle, run `homeboy daemon stop && homeboy daemon ensure-running` from a login shell.".to_string(),
+            ),
+            Self::Failed(reason) => (
+                "restart_failed",
+                format!("Restarting the daemon failed ({reason}); run `homeboy daemon stop && homeboy daemon ensure-running` from a login shell."),
+            ),
+        };
+        error.details["daemon_platform_trust"] = json!({ "recovery": state });
+        error.with_hint(hint)
+    }
+}
+
+fn recover_daemon_platform_trust() -> DaemonTrustRecovery {
+    let launcher_verifies = std::process::Command::new("gh")
+        .args(["api", "rate_limit", "--silent"])
+        .output()
+        .map(|output| {
+            output.status.success() || !String::from_utf8_lossy(&output.stderr).contains("x509")
+        })
+        .unwrap_or(true);
+    if !launcher_verifies {
+        return DaemonTrustRecovery::LauncherAlsoFails;
+    }
+    match homeboy::core::daemon::restart_idle_daemon() {
+        Ok(true) => {
+            eprintln!(
+                "homeboy: the daemon failed TLS trust verification that this shell passes; restarted it from this shell and relaunching the Cook"
+            );
+            DaemonTrustRecovery::Restarted
+        }
+        Ok(false) => DaemonTrustRecovery::Busy,
+        Err(error) => DaemonTrustRecovery::Failed(error.message),
+    }
+}
+
+fn intercept_local_detached_cook_once(
+    cli: &Cli,
+    normalized_args: &[String],
+    output_file: Option<&str>,
+    runner_side: bool,
+    provider_placement: Option<&str>,
+    provider_runner_id: Option<&str>,
+) -> homeboy::core::Result<Option<i32>> {
     let Commands::AgentTask(crate::commands::agent_task::AgentTaskArgs {
         command: crate::commands::agent_task::AgentTaskCommand::Cook(cook),
     }) = &cli.command
@@ -1184,6 +1286,29 @@ mod tests {
             .expect("parse status invocation");
 
         assert!(!is_unsupervised_local_cook(&cli));
+    }
+
+    /// The observed failure: a daemon-spawned `gh` could not verify GitHub
+    /// while the operator's shell could. Only that triggers a daemon restart;
+    /// an ordinary network failure is not the daemon's to fix.
+    #[test]
+    fn only_platform_trust_failures_trigger_daemon_trust_recovery() {
+        let mut trust = Error::validation_invalid_argument(
+            "handoff",
+            "detached Cook failed before durable admission: IO error",
+            None,
+            None,
+        );
+        trust.details["child_diagnostic"] = json!({
+            "error": "GitHub was unreachable while resolving the issue's linked PRs; retry the Cook: Post \"https://api.github.com/graphql\": tls: failed to verify certificate: x509: OSStatus -26276"
+        });
+        assert!(is_platform_trust_failure(&trust));
+
+        let dns = Error::internal_io(
+            "GitHub was unreachable while resolving the issue's linked PRs; retry the Cook: dial tcp: lookup api.github.com: no such host".to_string(),
+            None,
+        );
+        assert!(!is_platform_trust_failure(&dns));
     }
 
     #[test]

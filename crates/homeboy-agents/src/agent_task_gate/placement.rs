@@ -523,6 +523,10 @@ impl LabGateAdmission {
 }
 
 pub trait LabGateTransport: Send + Sync {
+    /// An admitted runner offered as an alternative to local disk pressure.
+    fn recovery_runner(&self) -> Option<String> {
+        None
+    }
     fn declared_runner(&self, _command: &str) -> Result<Option<String>> {
         Ok(None)
     }
@@ -542,6 +546,18 @@ pub trait LabGateTransport: Send + Sync {
         request: &LabGateRequest,
         supervision: Option<&GateSupervision>,
     ) -> Result<LabGateReceipt>;
+}
+
+pub(crate) fn with_local_reserve_recovery(mut error: Error) -> Error {
+    if error.details.get("reserve_bytes").is_some() {
+        if let Some(runner) = active_transport().recovery_runner() {
+            let hint = format!(
+                "Use `homeboy cleanup --include shared-cargo-targets --apply` or retry recovery with `--gate-runner {runner}`."
+            );
+            error = error.with_hint(hint);
+        }
+    }
+    error
 }
 
 pub(crate) fn declared_runner(command: &str) -> Result<Option<String>> {

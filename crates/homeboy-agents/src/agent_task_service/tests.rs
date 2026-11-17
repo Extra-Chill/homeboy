@@ -3082,6 +3082,42 @@ fn workflow_cook_outcome_uses_terminal_observation_after_failed_lifecycle_write(
 }
 
 #[test]
+fn superseded_workflow_cook_step_follows_its_owner_until_it_settles() {
+    with_isolated_home(|_| {
+        let (owner, superseded) = ("cook-owner-18301", "cook-superseded-18301");
+        for cook_id in [owner, superseded] {
+            agent_task_lifecycle::submit_plan(&test_plan(), Some(cook_id)).unwrap();
+        }
+        agent_task_lifecycle::rewrite_record_for_test(owner, |record| {
+            agent_task_lifecycle::set_run_state(record, RunExecutionState::Running);
+            record.metadata["cook_id"] = serde_json::json!(owner);
+        })
+        .unwrap();
+        agent_task_lifecycle::rewrite_record_for_test(superseded, |record| {
+            agent_task_lifecycle::set_run_state(record, RunExecutionState::Cancelled);
+            record.metadata["cook_id"] = serde_json::json!(superseded);
+            record.metadata["superseded_by_active_cook"] = serde_json::json!({"cook_id": owner});
+        })
+        .unwrap();
+        assert!(matches!(
+            super::cook_step::workflow_cook_outcome(superseded),
+            homeboy_core::daemon::workflow_job::WorkflowRunOutcome::Pending
+        ));
+
+        test_lifecycle_store()
+            .open_observation_initialized()
+            .unwrap()
+            .finish_run(owner, homeboy_core::observation::RunStatus::Fail, None)
+            .unwrap();
+        assert!(matches!(
+            super::cook_step::workflow_cook_outcome(superseded),
+            homeboy_core::daemon::workflow_job::WorkflowRunOutcome::Settled { outcome, .. }
+                if outcome == "failed"
+        ));
+    });
+}
+
+#[test]
 fn cancelled_workflow_cook_step_cancels_the_attempt_its_cook_redirected_to() {
     with_isolated_home(|_| {
         let cook_id = "cook-step-cancel-redirected";

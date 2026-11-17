@@ -1,4 +1,5 @@
 pub mod data_inputs;
+pub mod execution_start;
 pub mod failure_excerpt;
 pub mod placement;
 pub mod verdict;
@@ -176,6 +177,49 @@ pub struct AgentTaskGateInputSource {
     pub sha256: String,
     pub size_bytes: u64,
     pub redaction_policy: AgentTaskGateRevealPolicy,
+}
+
+impl AgentTaskGateInputSource {
+    /// Reviewer-facing label for a visible file-backed gate: the file name the
+    /// controller snapshotted at admission. Inline and private sources have none.
+    pub fn file_label(&self) -> Option<String> {
+        if self.source_kind != "file" || self.visibility != AgentTaskGateVisibility::Visible {
+            return None;
+        }
+        let path = self.path.as_deref()?;
+        Path::new(path)
+            .file_name()
+            .map(|name| name.to_string_lossy().trim().to_string())
+            .filter(|name| !name.is_empty())
+    }
+
+    fn describes_program(&self, program: &str) -> bool {
+        self.sha256 == format!("sha256:{:x}", Sha256::digest(program.as_bytes()))
+    }
+}
+
+/// Carry each visible `--verify-file` source's file name onto the gate report
+/// that executed its program, matched by the admission-time content digest.
+pub fn apply_gate_input_source_labels(
+    gates: &mut [AgentTaskGateReport],
+    sources: &[AgentTaskGateInputSource],
+) {
+    for gate in gates {
+        if gate.visibility != AgentTaskGateVisibility::Visible {
+            continue;
+        }
+        let Ok(invocation) = gate.invocation() else {
+            continue;
+        };
+        let program = invocation.reviewer_command();
+        if let Some(label) = sources
+            .iter()
+            .filter(|source| source.describes_program(&program))
+            .find_map(AgentTaskGateInputSource::file_label)
+        {
+            gate.label = Some(label);
+        }
+    }
 }
 
 fn default_hydrate_dependencies() -> bool {
@@ -879,6 +923,11 @@ pub struct AgentTaskGateReport {
     /// (#16920).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub workspace_mutation: Option<AgentTaskGateWorkspaceMutation>,
+    /// Reviewer-facing name of the gate's declared source, such as the file
+    /// name of a `--verify-file` program. Positional ids (`gate-1`) are
+    /// meaningless to reviewers, so this becomes the gate result's name.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub label: Option<String>,
 }
 
 /// Difference between the admitted candidate tree and the gate workspace
@@ -1686,6 +1735,7 @@ impl AgentTaskGateReport {
             environment,
             setup: Vec::new(),
             workspace_mutation: None,
+            label: None,
         }
     }
 
@@ -1748,6 +1798,7 @@ impl AgentTaskGateReport {
             environment: AgentTaskGateEnvironment::default(),
             setup: Vec::new(),
             workspace_mutation: None,
+            label: None,
         }
     }
 
@@ -2616,6 +2667,33 @@ pub fn run_declared_test_with_supervision(
     })
 }
 
+fn gate_phase_name(label: Option<&str>, command: &str, index: usize) -> String {
+    let source = label.unwrap_or_else(|| {
+        command
+            .lines()
+            .map(str::trim)
+            .find(|line| !line.is_empty() && !line.starts_with("set "))
+            .unwrap_or_default()
+    });
+    let mut slug = String::new();
+    for ch in source.chars() {
+        if ch.is_ascii_alphanumeric() {
+            slug.push(ch.to_ascii_lowercase());
+        } else if !slug.is_empty() && !slug.ends_with('-') {
+            slug.push('-');
+        }
+        if slug.len() == 40 {
+            break;
+        }
+    }
+    let slug = slug.trim_end_matches('-');
+    if slug.is_empty() {
+        format!("gate.gate-{index}")
+    } else {
+        format!("gate.{slug}")
+    }
+}
+
 #[expect(
     clippy::too_many_arguments,
     reason = "shell and declared gates share one process supervisor"
@@ -2634,7 +2712,7 @@ fn run_gate_argv_with_supervision(
     declared_plan: Option<&homeboy_engine_primitives::test_execution::TestExecutionPlan>,
 ) -> Result<AgentTaskGateReport> {
     homeboy_core::observation::phase_timing::time_with_outcome(
-        &format!("gate.gate-{index}"),
+        &gate_phase_name(None, command, index),
         || {
             run_gate_argv(
                 cwd,
@@ -2914,6 +2992,7 @@ fn run_gate_argv_local(
             Some(format!("contain deterministic gate {command}")),
         )
     })?;
+    execution_start::before_command_start()?;
     let child = process.spawn().map_err(|error| {
         Error::internal_io(
             error.to_string(),
@@ -3777,7 +3856,8 @@ impl SelectedGateEnvironment {
             cwd,
             None,
             &self.values,
-        )?;
+        )
+        .map_err(|error| placement::with_local_reserve_recovery(error))?;
         // Store sizing is evidence only. A concurrent gate may update the
         // shared target while this observation walks it.
         let bytes_before = target.size_bytes().ok();
@@ -6585,7 +6665,7 @@ impl From<AgentTaskGateReport> for HomeboyGateResult {
 
         HomeboyGateResult::new(
             report.id.clone(),
-            report.id.clone(),
+            report.label.clone().unwrap_or_else(|| report.id.clone()),
             HomeboyGateKind::Command,
             status,
         )
@@ -6889,6 +6969,22 @@ pub(crate) fn huge_review_test_failure_capture() -> (String, String) {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn gate_phase_slug_is_stable_and_bounded() {
+        for (label, command, expected) in [
+            (Some("Cargo TEST!"), "ignored", "gate.cargo-test"),
+            (None, "set -eu\n\ncargo fmt --check", "gate.cargo-fmt-check"),
+            (None, "set -e\n!!!", "gate.gate-7"),
+            (Some("!!!"), "cargo test", "gate.gate-7"),
+            (
+                None,
+                "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+                "gate.aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            ),
+        ] {
+            assert_eq!(super::gate_phase_name(label, command, 7), expected);
+        }
+    }
 
     #[test]
     fn review_test_gate_evidence_names_failing_test_despite_stdout_cap() {
@@ -8235,8 +8331,7 @@ mod tests {
             assert_ne!(first.path, second.path);
             let spans = store.phase_spans(&run_id).unwrap();
             for (phase, count) in [
-                ("gate.gate-1", 1),
-                ("gate.gate-2", 1),
+                ("gate.printf-artifact-cargo-target-dir-artifac", 2),
                 ("publish.gate_cargo_target", 2),
             ] {
                 assert_eq!(

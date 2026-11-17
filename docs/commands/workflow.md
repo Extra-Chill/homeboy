@@ -143,7 +143,8 @@ String substitution only: `{{inputs.x}}`, `{{steps.<id>.output<pointer>}}`, `{{s
 
 - **A failed step fails the instance.** `failed`, `timed_out`, `cancelled`, and `partial_failure` are failures. No new step starts after one unless it is `always`; when everything in flight has settled the instance is `failed`. It never parks.
 - **`retry`** re-submits the step as attempt `n+1` when its outcome is in `on` (default `failed` and `timed_out`), up to `max` retries. `backoff` delays the retry through the step job's `not_before` wait.
-- **`timeout`** cancels the step's job when it has run that long; the outcome is `timed_out`.
+- **`timeout`** cancels the step's job when its child has run that long; the outcome is `timed_out`. The clock starts when the child spawns, so time queued for a Lab capacity slot or a `retry.backoff` does not count.
+- **`capacity: "none"`** lets a light step (a scorer, a report) spawn at once instead of queueing for a Lab capacity slot behind heavy work. The default, `slot`, holds a slot while the child runs. A waiting step's job shows `waiting_for` and `queue_position` in `runs show`.
 - **`budget.max_step_runs`** counts every step job. Reaching it cancels whatever is running and ends the instance `budget_exhausted`. So does passing `budget.deadline`.
 
 ### Environment

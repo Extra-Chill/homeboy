@@ -4,6 +4,39 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.469.6] - 2026-11-17
+
+### Changed
+- Remove the one-time per-runner unit migration
+
+## [0.469.5] - 2026-11-17
+
+### Changed
+- unify Cook recovery command rendering
+
+### Fixed
+- name verify-file gates and link their output in PR bodies
+
+## [0.469.4] - 2026-11-17
+
+### Fixed
+- count step timeouts from spawn, let light steps skip Lab capacity
+- restart an idle daemon whose platform trust broke and relaunch the Cook
+- resume controller-scratch apply passes and bound removal by the pass deadline
+- defer replacement gate fences until command start
+- use resolved component identity for worktree handles
+- expose Lab provider phases and Cook wall-time hotspots
+
+## [0.469.3] - 2026-11-17
+
+### Changed
+- Keep the job store unlocked while daemon freshness hydrates linked runs
+
+### Fixed
+- probe the Playwright CLI instead of reporting it missing unprobed
+- carry recovered retry baselines to Lab and detach in-use candidate branches
+- a superseded Cook step follows its owner and settles with its outcome
+
 ## [0.469.2] - 2026-11-17
 
 ### Changed

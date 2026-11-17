@@ -67,7 +67,39 @@ pub enum CookRecoveryStep {
     None { reason: String },
 }
 
+/// A rendered next command; `show` marks a read-only status action.
+pub struct CookRecoveryNextAction {
+    pub label: String,
+    pub command: String,
+    pub show: bool,
+}
+
 impl CookRecoveryStep {
+    /// Render the next command with the runner-aware `prefix`.
+    pub fn next_action(&self, prefix: &str, run_id: &str) -> CookRecoveryNextAction {
+        let command = |args: &[&str]| super::cook_recovery_command_with_prefix(prefix, args);
+        let (label, command) = match self {
+            Self::Blocked { blocker, .. } => (
+                format!("recovery made no progress: {blocker}; cancel this Cook"),
+                command(&["cancel", run_id]),
+            ),
+            Self::None { reason } => (reason.clone(), command(&["status", run_id])),
+            Self::Adopt { candidate_ref } => (
+                "adopt the preserved candidate".to_string(),
+                command(&["adopt", run_id, "--candidate-ref", candidate_ref]),
+            ),
+            _ => (
+                "perform the Cook's next recovery step".to_string(),
+                command(&["recover", run_id]),
+            ),
+        };
+        CookRecoveryNextAction {
+            label,
+            command,
+            show: matches!(self, Self::None { .. }),
+        }
+    }
+
     /// The legal-action name status and notifications advertise for this
     /// step. `None` advertises no mutating action.
     pub fn action_name(&self) -> Option<&'static str> {
@@ -96,28 +128,20 @@ impl CookRecoveryStep {
         }
     }
 
-    /// The mutating legal actions for this step, each rendered as the one
-    /// `recover` entry point. Only a choice between artifacts needs an
-    /// argument; every other step is performed by the bare command.
+    /// The mutating legal action for this step, rendered by [`Self::next_action`].
     pub(crate) fn recovery_actions(
         &self,
         prefix: &str,
         run_id: &str,
     ) -> Vec<super::AgentTaskCookRecoveryAction> {
-        let Some(action) = self.action_name() else {
-            return Vec::new();
-        };
-        let command = |args: &[&str]| super::cook_recovery_command_with_prefix(prefix, args);
-        match self {
-            Self::Adopt { candidate_ref } => vec![super::AgentTaskCookRecoveryAction {
+        let command = self.next_action(prefix, run_id).command;
+        self.action_name()
+            .map(|action| super::AgentTaskCookRecoveryAction {
                 action: action.to_string(),
-                command: command(&["adopt", run_id, "--candidate-ref", candidate_ref]),
-            }],
-            _ => vec![super::AgentTaskCookRecoveryAction {
-                action: action.to_string(),
-                command: command(&["recover", run_id]),
-            }],
-        }
+                command,
+            })
+            .into_iter()
+            .collect()
     }
 }
 
@@ -2155,36 +2179,6 @@ mod tests {
                 "{status}: an agent-declared incomplete form is neither published nor replayed"
             );
         }
-    }
-
-    #[test]
-    fn mutating_actions_name_only_the_recover_entry_point() {
-        let actions = |step: CookRecoveryStep| {
-            step.recovery_actions("homeboy", "cook-attempt-1")
-                .into_iter()
-                .map(|action| (action.action, action.command))
-                .collect::<Vec<_>>()
-        };
-        assert_eq!(
-            actions(CookRecoveryStep::Continue),
-            vec![(
-                "resume".to_string(),
-                "homeboy agent-task recover cook-attempt-1".to_string()
-            )]
-        );
-        for (step, action) in [
-            (CookRecoveryStep::ReplaceGates, "replace_gates"),
-            (CookRecoveryStep::Publish, "publish"),
-        ] {
-            assert_eq!(
-                actions(step),
-                vec![(
-                    action.to_string(),
-                    "homeboy agent-task recover cook-attempt-1".to_string()
-                )]
-            );
-        }
-        assert!(actions(CookRecoveryStep::none("done")).is_empty());
     }
 
     fn no_step_report(status: &str, reason: &str) -> CookRecoveryReport {

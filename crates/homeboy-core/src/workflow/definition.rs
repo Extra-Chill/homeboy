@@ -177,6 +177,10 @@ pub struct StepDefinition {
     pub retry: Option<Retry>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub timeout: Option<String>,
+    /// `none`: a light step that spawns at once instead of queueing for a Lab
+    /// capacity slot behind heavy work (default: `slot`).
+    #[serde(default, skip_serializing_if = "StepCapacity::is_slot")]
+    pub capacity: StepCapacity,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cook: Option<Map<String, Value>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -185,6 +189,21 @@ pub struct StepDefinition {
     pub exec: Option<ExecStep>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub approval: Option<ApprovalStep>,
+}
+
+/// Whether a step's child holds a Lab capacity slot while it runs.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum StepCapacity {
+    #[default]
+    Slot,
+    None,
+}
+
+impl StepCapacity {
+    fn is_slot(&self) -> bool {
+        *self == Self::Slot
+    }
 }
 
 /// When a `foreach` step succeeds, decided once every item has settled.
