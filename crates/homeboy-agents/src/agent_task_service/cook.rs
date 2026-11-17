@@ -1937,26 +1937,7 @@ pub(crate) fn cook_observation_state(
     record: &agent_task_lifecycle::AgentTaskRunRecord,
 ) -> homeboy_lifecycle_contract::RunExecutionState {
     use homeboy_lifecycle_contract::RunExecutionState;
-    let mut stored = record.state();
-    // Cook settlement can survive a failed lifecycle write. Once its driver
-    // has left, the settled run verdict owns terminality, not that stale write.
-    if !stored.is_terminal() {
-        if let Some(cook_id) = record.metadata["cook_id"].as_str() {
-            let recipes = CookRecipeStore::new(store.roots().clone());
-            if matches!(recipes.foreign_cook_driver(cook_id), Ok(None)) {
-                if let Ok(Some(run)) = store
-                    .open_observation_readonly()
-                    .and_then(|s| s.get_run(&record.run_id))
-                {
-                    stored = match run.status.as_str() {
-                        "pass" => RunExecutionState::Succeeded,
-                        "fail" | "error" => RunExecutionState::Failed,
-                        _ => stored,
-                    };
-                }
-            }
-        }
-    }
+    let stored = record.state();
     // Publication is the end-to-end receipt, not a second verdict derived
     // from a possibly older promotion or terminal-progress snapshot.
     if super::CookDelivery::from_run_metadata(&record.metadata).is_some_and(|d| d.published()) {
@@ -4750,12 +4731,7 @@ fn run_cook_with_runtime(
             )?;
         }
         if result.value.disposition.is_terminal() {
-            if let Err(error) = settle_cook_observations(
-                lifecycle_store,
-                &result.value,
-                &notification_options.identity.initial_run_id,
-                result.exit_code,
-            ) {
+            if let Err(error) = settle_cook_observations(lifecycle_store, &result.value) {
                 homeboy_core::log_status!(
                     "agent-task",
                     "Cook terminal persistence failed: {}",
@@ -4772,25 +4748,12 @@ fn run_cook_with_runtime(
     result
 }
 
-/// One terminal write boundary for every Cook report, including publication,
-/// recoverable candidates and cancellation. Invocation sources may be absent
-/// from the recipe history (detached dispatch), but must settle as well.
+/// Project the Cook's final lifecycle outcome without rewriting its attempts.
 fn settle_cook_observations(
     lifecycle: &AgentTaskLifecycleStore,
     report: &AgentTaskCookReport,
-    source_run_id: &str,
-    exit_code: i32,
 ) -> Result<()> {
-    let mut ids = report.history_run_ids.clone();
-    ids.extend(report.invocation_run_ids.iter().cloned());
-    ids.extend(report.latest_run_id.iter().cloned());
-    ids.extend([report.cook_id.clone(), source_run_id.to_string()]);
-    agent_task_lifecycle::settle_cook_terminal_observations_in_store(
-        lifecycle,
-        &report.cook_id,
-        &ids,
-        exit_code == 0,
-    )
+    agent_task_lifecycle::settle_cook_terminal_observations_in_store(lifecycle, &report.cook_id)
 }
 
 /// The component a cook is working on, for notification attribution.

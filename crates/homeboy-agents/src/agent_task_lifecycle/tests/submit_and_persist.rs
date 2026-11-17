@@ -1249,6 +1249,62 @@ fn cook_progress_is_durable_across_active_and_terminal_lifecycle_states() {
     );
 }
 
+#[test]
+fn terminal_cook_report_preserves_each_attempts_lifecycle_status() {
+    let context = homeboy_core::test_support::HermeticTestContext::new();
+    let store = AgentTaskLifecycleStore::new(context.path_roots());
+    let cook_id = "terminal-report-cook";
+    let first = "terminal-report-attempt-1";
+    let second = "terminal-report-attempt-2";
+    for run_id in [cook_id, first, second] {
+        store
+            .submit_plan_with_runtime_admission(&test_plan(), run_id, |_| Ok(json!({})))
+            .unwrap();
+    }
+    for (attempt, run_id) in [(1, first), (2, second)] {
+        store
+            .mutate_record(run_id, |record| {
+                record.metadata["cook_id"] = json!(cook_id);
+                set_run_state(
+                    record,
+                    if attempt == 1 {
+                        RunExecutionState::Failed
+                    } else {
+                        RunExecutionState::Succeeded
+                    },
+                );
+                true
+            })
+            .unwrap();
+        store
+            .write_cook_index_attempt(cook_id, attempt, run_id, now_timestamp(), None)
+            .unwrap();
+    }
+    record_cook_finalization_in_store(
+        &store,
+        second,
+        json!({ "status": "review_ready", "pr_number": 42 }),
+    )
+    .unwrap();
+    record_cook_progress_in_store(&store, second, "terminal", 2, Some("published")).unwrap();
+    record_cook_terminal_result_in_store(&store, second, "review_ready", true, 1).unwrap();
+
+    let observations = store.open_observation_initialized().unwrap();
+    for (run_id, expected) in [(first, "fail"), (second, "pass"), (cook_id, "pass")] {
+        assert_eq!(
+            observations.get_run(run_id).unwrap().unwrap().status,
+            expected,
+            "{run_id}"
+        );
+    }
+    assert_eq!(
+        crate::agent_task_service::cook_observation_in_store(&store, cook_id)
+            .unwrap()
+            .state(),
+        RunExecutionState::Succeeded
+    );
+}
+
 /// Rooted in an explicit store rather than a mutated process environment
 /// (#7505). The retained sample is read back out of the record the first sample
 /// was written into, which is the whole point: a carry-forward read from

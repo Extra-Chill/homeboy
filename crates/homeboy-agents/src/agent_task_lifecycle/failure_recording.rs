@@ -1922,15 +1922,8 @@ fn terminal_artifact_projection_readiness_for_record_with(
     ))
 }
 
-/// Observation status for a terminal lifecycle state. A run whose observation
-/// was already corrected from `pass` to `fail` (a Cook that failed after its
-/// run settled, see `ObservationStore::settle_run`) stays
-/// `fail`: the lifecycle record still says `Succeeded` for those, and
-/// re-projecting it must not undo the correction (Extra-Chill/homeboy#15393).
-fn terminal_observation_status(
-    state: &RunExecutionState,
-    existing_metadata: Option<&Value>,
-) -> Option<&'static str> {
+/// Observation status comes only from the run's own terminal lifecycle state.
+pub(super) fn terminal_observation_status(state: &RunExecutionState) -> Option<&'static str> {
     let status = match state {
         RunExecutionState::Succeeded => "pass",
         RunExecutionState::CandidateRecoverable
@@ -1939,10 +1932,7 @@ fn terminal_observation_status(
         | RunExecutionState::Cancelled => "fail",
         _ => return None,
     };
-    let corrected = existing_metadata
-        .and_then(|metadata| metadata.get("status_correction"))
-        .is_some_and(|correction| correction["status"] == "fail");
-    Some(if corrected { "fail" } else { status })
+    Some(status)
 }
 
 fn project_terminal_artifacts_in_store(
@@ -1952,10 +1942,7 @@ fn project_terminal_artifacts_in_store(
     aggregate: &AgentTaskAggregate,
 ) -> Result<()> {
     let existing = store.get_run(&record.run_id)?;
-    let Some(status) = terminal_observation_status(
-        &record.state(),
-        existing.as_ref().map(|run| &run.metadata_json),
-    ) else {
+    let Some(status) = terminal_observation_status(&record.state()) else {
         return Ok(());
     };
     let homeboy_version = existing
@@ -1975,24 +1962,20 @@ fn project_terminal_artifacts_in_store(
             "agent_task_terminal_state".to_string(),
             json!(record.state()),
         );
-    if super::lifecycle_store::cook_owns_observation(lifecycle_store, record) {
-        store.update_run_metadata(&record.run_id, existing_metadata)?;
-    } else {
-        store.upsert_imported_run_preserving_terminal(&homeboy_core::observation::RunRecord {
-            id: record.run_id.clone(),
-            kind: "agent-task".to_string(),
-            component_id: None,
-            started_at: record.submitted_at.clone(),
-            finished_at: record.updated_at.clone(),
-            status: status.to_string(),
-            command: Some("homeboy agent-task".to_string()),
-            cwd: None,
-            homeboy_version,
-            git_sha: None,
-            rig_id: None,
-            metadata_json: existing_metadata,
-        })?;
-    }
+    store.upsert_imported_run(&homeboy_core::observation::RunRecord {
+        id: record.run_id.clone(),
+        kind: "agent-task".to_string(),
+        component_id: None,
+        started_at: record.submitted_at.clone(),
+        finished_at: record.updated_at.clone(),
+        status: status.to_string(),
+        command: Some("homeboy agent-task".to_string()),
+        cwd: None,
+        homeboy_version,
+        git_sha: None,
+        rig_id: None,
+        metadata_json: existing_metadata,
+    })?;
 
     validate_unique_terminal_artifact_ids(aggregate)?;
     let mut projection_error = None;
@@ -3433,36 +3416,5 @@ mod tests {
                 error.message
             );
         });
-    }
-}
-
-#[cfg(test)]
-mod terminal_observation_status_tests {
-    use super::*;
-
-    #[test]
-    fn a_corrected_run_is_not_reprojected_back_to_pass() {
-        let corrected =
-            json!({ "status_correction": { "previous_status": "pass", "status": "fail" } });
-        assert_eq!(
-            terminal_observation_status(&RunExecutionState::Succeeded, Some(&corrected)),
-            Some("fail")
-        );
-        assert_eq!(
-            terminal_observation_status(&RunExecutionState::Succeeded, Some(&json!({}))),
-            Some("pass")
-        );
-        assert_eq!(
-            terminal_observation_status(&RunExecutionState::Succeeded, None),
-            Some("pass")
-        );
-        assert_eq!(
-            terminal_observation_status(&RunExecutionState::Failed, None),
-            Some("fail")
-        );
-        assert_eq!(
-            terminal_observation_status(&RunExecutionState::Running, None),
-            None
-        );
     }
 }

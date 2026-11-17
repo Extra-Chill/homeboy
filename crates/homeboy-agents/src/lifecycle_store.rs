@@ -2403,16 +2403,7 @@ pub(super) fn write_record_guarded(
     if !preserve_terminal {
         metadata_json["agent_task_aggregate"] = Value::Null;
     }
-    let (status, finished_at) = if cook_owns_observation(lifecycle_store, &record) {
-        if preserve_terminal && record.state().is_terminal() {
-            store
-                .get_run(&record.run_id)?
-                .map(|run| (run.status, run.finished_at))
-                .unwrap_or_else(|| (RunStatus::Running.as_str().to_string(), None))
-        } else {
-            (RunStatus::Running.as_str().to_string(), None)
-        }
-    } else if is_redirected_cook(&record) {
+    let (status, finished_at) = if is_redirected_cook(&record) {
         redirected_cook_row_status(lifecycle_store, &store, &record.run_id)?
     } else {
         (
@@ -3210,21 +3201,6 @@ fn aggregate_from_run(run: &RunRecord) -> Result<Option<AgentTaskAggregate>> {
                 Some(format!("parse agent-task aggregate {}", run.id)),
             )
         })
-}
-
-pub(crate) fn cook_owns_observation(
-    store: &AgentTaskLifecycleStore,
-    record: &AgentTaskRunRecord,
-) -> bool {
-    let cook_id = record.metadata["cook_id"]
-        .as_str()
-        .unwrap_or(&record.run_id);
-    // A preparation refusal has no Cook driver left to settle the observation.
-    // Its durable pre-execution failure owns the terminal result instead.
-    store.cook_dir(cook_id).join("recipe.json").exists()
-        && !(record.state().is_terminal()
-            && record.metadata["pre_execution_failure"]["phase"] == "retry_preparation"
-            && !record.has_recorded_provider_progress())
 }
 
 fn run_status(state: RunExecutionState) -> &'static str {

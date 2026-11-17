@@ -3658,12 +3658,7 @@ pub fn record_cook_terminal_result_in_store(
     let cook_id = record.metadata["cook_id"]
         .as_str()
         .unwrap_or(&record.run_id);
-    settle_cook_terminal_observations_in_store(
-        lifecycle_store,
-        cook_id,
-        &[record.run_id.clone()],
-        terminal_success && exit_code == 0,
-    )?;
+    settle_cook_terminal_observations_in_store(lifecycle_store, cook_id)?;
     Ok(record)
 }
 
@@ -3672,26 +3667,19 @@ pub fn record_cook_terminal_result_in_store(
 pub fn settle_cook_terminal_observations_in_store(
     lifecycle_store: &AgentTaskLifecycleStore,
     cook_id: &str,
-    run_ids: &[String],
-    success: bool,
 ) -> Result<()> {
-    let observation = lifecycle_store.open_observation_initialized()?;
-    let status = if success {
-        homeboy_core::observation::RunStatus::Pass
-    } else {
-        homeboy_core::observation::RunStatus::Fail
+    let record = crate::agent_task_service::cook_observation_in_store(lifecycle_store, cook_id)?;
+    let Some(status) = super::failure_recording::terminal_observation_status(&record.state())
+    else {
+        return Ok(());
     };
-    let mut ids = run_ids.to_vec();
-    ids.push(cook_id.to_string());
-    if let Ok(index) = lifecycle_store.read_cook_index(cook_id) {
-        ids.extend(index.attempts.into_iter().map(|attempt| attempt.run_id));
+    let observation = lifecycle_store.open_observation_initialized()?;
+    if let Some(mut cook) = observation.get_run(cook_id)? {
+        cook.status = status.to_string();
+        cook.finished_at = record.updated_at;
+        observation.upsert_imported_run(&cook)?;
     }
-    ids.sort();
-    ids.dedup();
-    for id in ids {
-        observation.settle_run(&id, status)?;
-    }
-    observation.record_run_phase(cook_id, "cook", !success)
+    observation.record_run_phase(cook_id, "cook", status != "pass")
 }
 
 pub fn record_provider_execution_terminal_in_store(
