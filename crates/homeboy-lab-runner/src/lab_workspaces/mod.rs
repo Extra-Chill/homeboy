@@ -901,41 +901,100 @@ pub(super) fn provider_config_extra_workspaces(
 }
 
 /// Read validated Cook pins with their task roots using the same plan input
-/// contract as extra-workspace discovery. Invalid or unavailable plans remain
-/// the runner's validation responsibility.
+/// contract as extra-workspace discovery. Gate-feedback candidates are also
+/// required source objects: validate them before admitting any runner work.
 pub(crate) fn agent_task_plan_workspace_base_pins(
     args: &[String],
     source_path: &Path,
-) -> Vec<(PathBuf, String)> {
+) -> Result<Vec<(PathBuf, String)>> {
     let Some(spec) = agent_task_plan_spec(args) else {
-        return Vec::new();
+        return Ok(Vec::new());
     };
     let Some(value) = read_agent_task_plan_spec_to_string(&spec, source_path)
         .ok()
         .and_then(|raw| serde_json::from_str::<serde_json::Value>(&raw).ok())
     else {
-        return Vec::new();
+        return Ok(Vec::new());
     };
-    value["tasks"]
-        .as_array()
-        .into_iter()
-        .flatten()
-        .filter_map(|task| {
-            let root = task.pointer("/workspace/root")?.as_str()?;
-            let snapshot = task.pointer("/metadata/cook_workspace_base_snapshot")?;
-            if snapshot["schema"] != "homeboy/cook-workspace-base-snapshot/v1"
-                || snapshot["mode"] != "isolated_attempt_snapshot"
-            {
-                return None;
-            }
-            let base = snapshot["resolved_base"].as_str()?;
-            if base.len() != 40 || !base.bytes().all(|byte| byte.is_ascii_hexdigit()) {
-                return None;
-            }
-            let root = PathBuf::from(root);
-            Some((root.canonicalize().unwrap_or(root), base.to_string()))
-        })
-        .collect()
+    let mut pins = Vec::new();
+    for task in value["tasks"].as_array().into_iter().flatten() {
+        if task
+            .pointer("/metadata/cook_loop/kind")
+            .and_then(serde_json::Value::as_str)
+            != Some("deterministic-gate-feedback")
+        {
+            continue;
+        }
+        let Some(candidate) = task
+            .pointer("/inputs/cook_loop/candidate_commit")
+            .filter(|v| !v.is_null())
+        else {
+            continue;
+        };
+        let unavailable = |message: String| {
+            Error::validation_invalid_argument(
+                "agent_task.gate_feedback_candidate_unshippable",
+                message,
+                task.pointer("/inputs/cook_loop/source_run_id")
+                    .and_then(serde_json::Value::as_str)
+                    .map(str::to_string),
+                None,
+            )
+        };
+        let root = task
+            .pointer("/workspace/root")
+            .and_then(serde_json::Value::as_str)
+            .ok_or_else(|| {
+                unavailable("gate-feedback candidate has no source repository".into())
+            })?;
+        let root = PathBuf::from(root);
+        let root = root.canonicalize().unwrap_or(root);
+        let sha = candidate["candidate_sha"]
+            .as_str()
+            .filter(|sha| sha.len() == 40 && sha.bytes().all(|b| b.is_ascii_hexdigit()))
+            .ok_or_else(|| unavailable("gate-feedback candidate has no valid commit".into()))?;
+        let control = crate::workspace::WorkspaceControl::default();
+        control
+            .git(
+                &root,
+                &["rev-parse", "--verify", &format!("{sha}^{{commit}}")],
+            )
+            .and_then(|_| control.git(&root, &["rev-list", "--objects", "--missing=error", sha]))
+            .map_err(|error| {
+                unavailable(format!(
+                    "cannot ship gate-feedback candidate {sha}: {error}"
+                ))
+            })?;
+        // Git bundle ignores bare object IDs as advertised tips. Give the
+        // immutable candidate a transport ref in the same source bundle.
+        let reference = format!("refs/homeboy/source-pins/{sha}");
+        control
+            .git(&root, &["update-ref", &reference, sha])
+            .map_err(|error| unavailable(format!("cannot pin gate-feedback candidate: {error}")))?;
+        pins.push((root, reference));
+    }
+    pins.extend(
+        value["tasks"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter_map(|task| {
+                let root = task.pointer("/workspace/root")?.as_str()?;
+                let snapshot = task.pointer("/metadata/cook_workspace_base_snapshot")?;
+                if snapshot["schema"] != "homeboy/cook-workspace-base-snapshot/v1"
+                    || snapshot["mode"] != "isolated_attempt_snapshot"
+                {
+                    return None;
+                }
+                let base = snapshot["resolved_base"].as_str()?;
+                if base.len() != 40 || !base.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+                    return None;
+                }
+                let root = PathBuf::from(root);
+                Some((root.canonicalize().unwrap_or(root), base.to_string()))
+            }),
+    );
+    Ok(pins)
 }
 
 /// Discover a controller-local `agent-task run-plan --plan @file` checkout so
@@ -981,7 +1040,7 @@ pub(super) fn agent_task_plan_extra_workspaces(
         Ok(value) => value,
         Err(_) => return Ok(workspaces),
     };
-    let workspace_base_pins = agent_task_plan_workspace_base_pins(args, source_path);
+    let workspace_base_pins = agent_task_plan_workspace_base_pins(args, source_path)?;
     // A derived Cook baseline can be the primary Lab source while its plan
     // still targets the issue worktree it was derived from. Materialize that
     // target separately so committed harvest selects its own provenance.

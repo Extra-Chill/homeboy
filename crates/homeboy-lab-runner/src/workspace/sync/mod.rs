@@ -324,6 +324,7 @@ fn sync_workspace_in_roots_controlled(
                     Some("prepared_source_view".to_string());
                 Ok(None)
             } else if options.controller_routed_git
+                || !git.git_fetch_refs.is_empty()
                 || (git.branch.is_none() && !git.git_fetch_refs.contains(&git.head))
                 || source_materialization::requires_controller_routed_workspace_sync(
                     &git.remote_url,
@@ -748,6 +749,14 @@ fn materialize_git_fallback_filesystem_snapshot(
     _closure_error: &Error,
     control: &WorkspaceControl,
 ) -> Result<(RunnerWorkspaceSyncOutput, i32)> {
+    if !options.git_fetch_refs.is_empty() {
+        return Err(Error::validation_invalid_argument(
+            "agent_task.required_source_objects_unshippable",
+            format!("cannot ship required source objects: {_closure_error}"),
+            Some(local_path.display().to_string()),
+            None,
+        ));
+    }
     let (snapshot, stats, content_manifest, content_hash) =
         snapshot_content_controlled(local_path, excludes, includes, control)?;
     let remote_path = temp::unique_name(

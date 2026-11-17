@@ -246,7 +246,7 @@ fn prepare_lab_offload_workspace_stage_inner(
             git_fetch_refs.push(git_ref);
         }
     }
-    let primary_pins = primary_workspace_base_pins(lifecycle_args, source_path);
+    let primary_pins = primary_workspace_base_pins(lifecycle_args, source_path)?;
     for pin in &primary_pins {
         if !git_fetch_refs.contains(pin) {
             git_fetch_refs.push(pin.clone());
@@ -4044,7 +4044,7 @@ mod tests {
             "--plan".into(),
             plan.to_string(),
         ];
-        let refs = primary_workspace_base_pins(&args, &destination);
+        let refs = primary_workspace_base_pins(&args, &destination).unwrap();
         assert!(
             refs.contains(&pin),
             "primary stage must transport the admitted pin"
@@ -4143,15 +4143,17 @@ mod tests {
         }
     }
 }
-fn primary_workspace_base_pins(args: &[String], source: &Path) -> Vec<String> {
+fn primary_workspace_base_pins(args: &[String], source: &Path) -> Result<Vec<String>> {
     let canonical = source
         .canonicalize()
         .unwrap_or_else(|_| source.to_path_buf());
-    crate::lab_workspaces::agent_task_plan_workspace_base_pins(args, source)
-        .into_iter()
-        .filter(|(root, _)| root == &canonical)
-        .map(|(_, pin)| pin)
-        .collect()
+    Ok(
+        crate::lab_workspaces::agent_task_plan_workspace_base_pins(args, source)?
+            .into_iter()
+            .filter(|(root, _)| root == &canonical)
+            .map(|(_, pin)| pin)
+            .collect(),
+    )
 }
 
 fn materialize_replay_base_pins(
@@ -4176,10 +4178,14 @@ fn materialize_replay_base_pins(
     let head = control.git(Path::new(&source), &["rev-parse", "HEAD"])?;
     control.git(transfer, &["update-ref", "HEAD", head.trim()])?;
     for pin in pins {
-        control.git(
-            transfer,
+        let commit = control.git(
+            Path::new(&source),
             &["rev-parse", "--verify", &format!("{pin}^{{commit}}")],
         )?;
+        if pin.starts_with("refs/") {
+            control.git(transfer, &["update-ref", pin, commit.trim()])?;
+        }
+        control.git(transfer, &["cat-file", "-e", commit.trim()])?;
     }
     Ok(())
 }
