@@ -352,6 +352,46 @@ fn workflow_history_survives_unrelated_terminal_byte_budget_churn() {
     });
 }
 
+/// `/workflows` reads only each instance's summary fields from retained
+/// history; a finished instance read back from SQLite lists the same row its
+/// full status view reports.
+#[test]
+fn a_retained_instance_lists_its_status_view_summary() {
+    with_isolated_home(|home| {
+        let path = home.path().join(crate::paths::OBSERVATION_DB_FILENAME);
+        let store = JobStore::open_without_reconciliation(&path)
+            .unwrap()
+            .with_daemon_lease("workflow-list-test".to_string());
+        let original = request(
+            json!({
+                "schema": "homeboy/workflow/v1", "id": "listed",
+                "steps": [{"id": "a", "exec": sh("echo done")}]
+            }),
+            home.path(),
+        );
+        let job = admit(&store, &original);
+        crate::daemon::start_controller_job(job, &store).unwrap();
+        wait_terminal(&store, job, 30);
+        drop(store);
+        let store = JobStore::open_without_reconciliation(&path).unwrap();
+        let view = workflow_status(&store, &original.instance).unwrap();
+        let list = workflow_list(&store);
+        let rows = list["entities"].as_array().unwrap();
+        assert_eq!(rows.len(), 1, "{list}");
+        for field in [
+            "instance",
+            "workflow",
+            "status",
+            "iteration",
+            "step_runs",
+            "parent",
+        ] {
+            assert_eq!(rows[0][field], view[field], "{field}: {list}");
+        }
+        assert_eq!(rows[0]["status"], "succeeded");
+    });
+}
+
 #[test]
 fn workflow_expiry_reports_when_and_persists_a_small_marker() {
     with_isolated_home(|home| {

@@ -85,8 +85,13 @@ impl JobStore {
     pub fn terminal_controller_job_ids(&self, job_type: &str, version: u32) -> Result<Vec<Uuid>> {
         let inner = self.inner.lock().expect("job store mutex poisoned");
         let snapshot = JobStoreInner {
-            jobs: self
-                .jobs_with_history(&inner, sql_store::TerminalJobs::ControllerType(job_type))?,
+            jobs: self.jobs_with_history(
+                &inner,
+                sql_store::TerminalJobs::ControllerType {
+                    job_type,
+                    omit: &[],
+                },
+            )?,
             ..JobStoreInner::default()
         };
         terminal_controller_job_ids_in(&snapshot, job_type, version)
@@ -2331,19 +2336,42 @@ impl JobStore {
         children
     }
 
-    /// Controller jobs of one type, with their private typed state.
-    pub(crate) fn controller_jobs_of_type(&self, job_type: &str) -> Vec<(Job, ControllerJobState)> {
+    /// Controller jobs of one type, oldest first, with their private typed
+    /// state. A listing passes the bulky JSON paths it does not read as
+    /// `omit` (SQLite syntax, e.g. `$.controller_job.checkpoint.steps`):
+    /// SQLite drops them from terminal history before it is parsed, so a list
+    /// costs its summary, not every retained body. Live jobs are whole.
+    pub(crate) fn controller_jobs_of_type(
+        &self,
+        job_type: &str,
+        omit: &[&str],
+    ) -> Vec<(Job, ControllerJobState)> {
         let inner = self.inner.lock().expect("job store mutex poisoned");
-        let entries = self
-            .jobs_with_history(&inner, sql_store::TerminalJobs::ControllerType(job_type))
-            .unwrap_or_else(|_| inner.jobs.clone());
-        let mut jobs = entries
-            .values()
-            .filter_map(|stored| {
-                let controller = stored.controller_job.as_ref()?;
-                (controller.job_type == job_type).then(|| (stored.job.clone(), controller.clone()))
-            })
-            .collect::<Vec<_>>();
+        let mut entries = HashMap::new();
+        if let Some(persistence) = &self.persistence {
+            let terminal = persistence.connection().and_then(|connection| {
+                sql_store::read_terminal_jobs_readonly(
+                    connection.as_ref().expect("initialized store connection"),
+                    &persistence.path,
+                    sql_store::TerminalJobs::ControllerType { job_type, omit },
+                )
+            });
+            for stored in terminal.unwrap_or_default() {
+                if let Some(controller) = stored.controller_job {
+                    entries.insert(stored.job.id, (stored.job, controller));
+                }
+            }
+        }
+        for stored in inner.jobs.values() {
+            if let Some(controller) = stored
+                .controller_job
+                .as_ref()
+                .filter(|controller| controller.job_type == job_type)
+            {
+                entries.insert(stored.job.id, (stored.job.clone(), controller.clone()));
+            }
+        }
+        let mut jobs = entries.into_values().collect::<Vec<_>>();
         jobs.sort_by_key(|(job, _)| job.created_at_ms);
         jobs
     }
