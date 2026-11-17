@@ -647,7 +647,12 @@ fn cook_terminal_in_store_with(
     let event = NotifyEvent::lifecycle(payload.kind, &report.cook_id, status)
         .with_title(payload.title.clone().unwrap_or_default())
         .with_payload(payload);
-    let route = effective_route(&route_run_id);
+    let route = notification_route::current().or_else(|| {
+        crate::agent_task_lifecycle::durable_notification_route_in_store(
+            &lifecycle_store,
+            &route_run_id,
+        )
+    });
     let dispatch = notify_outbox::dispatch_with_outbox(
         &event.with_route(route.as_ref()),
         Some(NotifyOnceMarker::new(
