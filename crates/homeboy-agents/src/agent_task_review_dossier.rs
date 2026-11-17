@@ -1321,7 +1321,10 @@ fn published_gate_output(stdout: &str, stderr: &str) -> String {
         .filter(|part| !part.is_empty())
         .collect::<Vec<_>>()
         .join("\n");
-    if contains_operator_only_reference(&output) {
+    let output = plain_text(&output);
+    // Homeboy cannot tell a public link from a private one, so output that
+    // carries links stays in run evidence (#17881).
+    if contains_operator_only_reference(&output) || output.contains("://") {
         return String::new();
     }
     const MAX_CHARS: usize = 2000;
@@ -1332,6 +1335,29 @@ fn published_gate_output(stdout: &str, stderr: &str) -> String {
     } else {
         output
     }
+}
+
+/// Terminal output without ANSI escape sequences or other control characters.
+pub(crate) fn plain_text(output: &str) -> String {
+    let mut plain = String::with_capacity(output.len());
+    let mut chars = output.chars().peekable();
+    while let Some(ch) = chars.next() {
+        if ch == '\u{1b}' {
+            // CSI sequences end at a byte in `@`..=`~`; other escapes are two chars.
+            if chars.next_if_eq(&'[').is_some() {
+                for next in chars.by_ref() {
+                    if ('@'..='~').contains(&next) {
+                        break;
+                    }
+                }
+            } else {
+                chars.next();
+            }
+        } else if ch == '\n' || ch == '\t' || !ch.is_control() {
+            plain.push(ch);
+        }
+    }
+    plain
 }
 
 /// Upper bound on the reviewer-facing rendering of a gate program.
