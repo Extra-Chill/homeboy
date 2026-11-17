@@ -2224,6 +2224,22 @@ impl JobStore {
         .and_then(|tombstone| tombstone.terminal_job)
     }
 
+    /// When the step job for an exact key spawned its child: the first
+    /// progress event that reports the supervised child running.
+    pub(crate) fn step_spawned_at_ms(&self, key: &str) -> Option<u64> {
+        let job = self.controller_job_for_key(key)?;
+        self.events(job.id)
+            .ok()?
+            .into_iter()
+            .find(|event| {
+                event
+                    .data
+                    .as_ref()
+                    .is_some_and(|data| data["phase"] == "running")
+            })
+            .map(|event| event.timestamp_ms)
+    }
+
     /// Read the latest live runner-eligibility wait for an exact step key.
     pub fn step_runner_wait(&self, key: &str) -> Result<Option<Value>> {
         let Some(job) = self

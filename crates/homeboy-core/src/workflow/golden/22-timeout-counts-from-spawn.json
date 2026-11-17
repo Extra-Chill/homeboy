@@ -1,0 +1,64 @@
+{
+  "definition": {
+    "id": "queued",
+    "schema": "homeboy/workflow/v1",
+    "steps": [
+      {
+        "id": "score",
+        "exec": {
+          "program": "node",
+          "args": [
+            "score.mjs"
+          ]
+        },
+        "timeout": "10m",
+        "capacity": "none"
+      }
+    ]
+  },
+  "events": [
+    {
+      "event": {
+        "event": "start"
+      },
+      "now_ms": 0
+    },
+    {
+      "event": {
+        "event": "tick"
+      },
+      "now_ms": 900000
+    },
+    {
+      "event": {
+        "event": "step_spawned",
+        "key": "wf-golden/score/1/1",
+        "at_ms": 900000
+      },
+      "now_ms": 900000
+    },
+    {
+      "event": {
+        "event": "tick"
+      },
+      "now_ms": 1499000
+    },
+    {
+      "event": {
+        "event": "tick"
+      },
+      "now_ms": 1500000
+    },
+    {
+      "event": {
+        "event": "step_finished",
+        "key": "wf-golden/score/1/1",
+        "status": "cancelled"
+      },
+      "now_ms": 1501000
+    }
+  ],
+  "expect_status": "failed",
+  "inputs": {},
+  "transcript": []
+}

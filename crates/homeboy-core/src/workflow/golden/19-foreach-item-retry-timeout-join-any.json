@@ -107,6 +107,22 @@
     },
     {
       "event": {
+        "event": "step_spawned",
+        "key": "wf-golden/cook/1/item-2/1",
+        "at_ms": 1000
+      },
+      "now_ms": 3500
+    },
+    {
+      "event": {
+        "event": "step_spawned",
+        "key": "wf-golden/cook/1/item-1/2",
+        "at_ms": 3000
+      },
+      "now_ms": 3500
+    },
+    {
+      "event": {
         "event": "step_finished",
         "key": "wf-golden/cook/1/item-0/2",
         "outcome": "succeeded",

@@ -30,6 +30,14 @@
     },
     {
       "event": {
+        "event": "step_spawned",
+        "key": "wf-golden/a/1/1",
+        "at_ms": 0
+      },
+      "now_ms": 0
+    },
+    {
+      "event": {
         "event": "tick"
       },
       "now_ms": 60000
@@ -53,6 +61,14 @@
         "status": "cancelled"
       },
       "now_ms": 302000
+    },
+    {
+      "event": {
+        "event": "step_spawned",
+        "key": "wf-golden/a/1/2",
+        "at_ms": 302500
+      },
+      "now_ms": 302500
     },
     {
       "event": {
