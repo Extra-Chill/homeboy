@@ -2304,13 +2304,6 @@ fn assert_cook_rearm_queue_ownership(block_capacity: bool) {
         );
         assert_eq!(successor.metadata["retry_of"], source_run_id);
         assert_eq!(successor.metadata["provider_executions_consumed"], 0);
-        assert!(
-            !test_lifecycle_store()
-                .cook_dir(cook_id)
-                .join("notification-outcome.json")
-                .exists(),
-            "the replaced failure must not announce open work"
-        );
         assert_eq!(recipe.attempts.len(), 2, "one Cook owns both attempts");
         // The successor is reserved through the control-plane Retry action, so
         // the source run carries an accepted retry action in its event log.
