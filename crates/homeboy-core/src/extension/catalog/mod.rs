@@ -131,14 +131,59 @@ pub fn discover_extensions() -> Vec<DiscoveredExtension> {
         return Vec::new();
     };
 
-    let Ok(entries) = std::fs::read_dir(extensions_dir) else {
-        return Vec::new();
-    };
+    discover_extensions_at(&extensions_dir).unwrap_or_default()
+}
 
+/// Strict catalog loading for notification admission and delivery. Inventory
+/// discovery remains tolerant so broken installations can still be repaired.
+pub(crate) fn load_notification_extensions() -> Result<Vec<ExtensionManifest>> {
+    let root = paths::extensions().map_err(|error| {
+        notification_catalog_error(
+            None,
+            &format!("cannot resolve catalog root: {}", error.message),
+        )
+    })?;
+    let discovered = discover_extensions_at(&root)
+        .map_err(|error| notification_catalog_error(Some(&root), &error.to_string()))?;
+    discovered
+        .into_iter()
+        .map(|extension| match extension {
+            DiscoveredExtension::Valid(manifest) => Ok(*manifest),
+            DiscoveredExtension::Invalid(failure) => Err(notification_catalog_error(
+                Some(&root),
+                &format!(
+                    "{}: {} ({})",
+                    failure.manifest_path.display(),
+                    failure.diagnostic,
+                    failure.category
+                ),
+            )),
+        })
+        .collect()
+}
+
+pub(crate) fn notification_catalog_error(root: Option<&Path>, diagnostic: &str) -> Error {
+    let root = root.map(|path| path.display().to_string());
+    Error::new(
+        ErrorCode::ConfigInvalidValue,
+        format!(
+            "Notification extension catalog at {}: {diagnostic}",
+            root.as_deref().unwrap_or("<unresolved>")
+        ),
+        serde_json::json!({"catalog_root": root, "load_error": diagnostic}),
+    )
+}
+
+fn discover_extensions_at(extensions_dir: &Path) -> std::io::Result<Vec<DiscoveredExtension>> {
+    let entries = match std::fs::read_dir(extensions_dir) {
+        Ok(entries) => entries,
+        // A fresh home has no installed extensions yet.
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+        Err(error) => return Err(error),
+    };
     let entries = entries
-        .flatten()
-        .map(|entry| entry.path())
-        .collect::<Vec<_>>();
+        .map(|entry| entry.map(|entry| entry.path()))
+        .collect::<std::io::Result<Vec<_>>>()?;
     let shared_asset_roots = declared_shared_asset_roots(&entries);
     let mut extensions = entries
         .into_iter()
@@ -151,7 +196,7 @@ pub fn discover_extensions() -> Vec<DiscoveredExtension> {
         .collect::<Vec<_>>();
     extensions
         .sort_by(|left, right| discovered_extension_id(left).cmp(discovered_extension_id(right)));
-    extensions
+    Ok(extensions)
 }
 
 /// Shared assets live beside installed extensions but are declared by a source
