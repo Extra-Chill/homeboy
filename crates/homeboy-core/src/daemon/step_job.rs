@@ -141,6 +141,9 @@ pub struct StepJobRequest {
     /// Durable run this step executes for; recovery reads its record.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub linked_durable_run_id: Option<String>,
+    /// Intentionally targets a terminal linked run instead of treating it as stale.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub allows_terminal_linked_run: bool,
     /// Owning workflow instance, distinct from the child run this step starts.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub root_durable_run_id: Option<String>,
@@ -167,6 +170,7 @@ impl StepJobRequest {
             cwd: cwd.into(),
             env,
             linked_durable_run_id: None,
+            allows_terminal_linked_run: false,
             root_durable_run_id: None,
             wait: StepWait::default(),
         }
@@ -1077,10 +1081,11 @@ fn await_wait_with(
     let mut last_observation: Option<std::result::Result<(), String>> = None;
     loop {
         if job.is_cancelled()
-            || request
-                .linked_durable_run_id
-                .as_deref()
-                .is_some_and(&linked_terminal)
+            || (!request.allows_terminal_linked_run
+                && request
+                    .linked_durable_run_id
+                    .as_deref()
+                    .is_some_and(&linked_terminal))
         {
             return Ok(false);
         }
@@ -1348,6 +1353,7 @@ const STEP_JOB_REQUEST_FIELDS: &[&str] = &[
     "cwd",
     "env",
     "linked_durable_run_id",
+    "allows_terminal_linked_run",
     "root_durable_run_id",
     "wait",
 ];
@@ -1451,6 +1457,7 @@ mod forward_compat_tests {
         let mut full = request().with_linked_durable_run_id("linked");
         full.root_durable_run_id = Some("root".to_string());
         full.waits_for_children = true;
+        full.allows_terminal_linked_run = true;
         full.wait = StepWait {
             not_before: Some("2026-01-01T00:00:00Z".to_string()),
             runner_eligible: Some("lab".to_string()),
@@ -1563,29 +1570,44 @@ mod tests {
     }
 
     #[test]
-    fn terminal_linked_run_stops_before_probing() {
+    fn terminal_linked_run_only_allows_intentional_recovery() {
         with_isolated_home(|_| {
-            let mut request = request("true", Default::default());
-            request.wait.runner_eligible = Some("runner-a".into());
-            let run_id = uuid::Uuid::new_v4().to_string();
-            request.linked_durable_run_id = Some(run_id.clone());
-            let fixtures = crate::test_support::AgentTaskTerminalRunFixtures::install();
-            fixtures.terminal_run(&run_id, crate::api_jobs::JobStatus::Cancelled);
-            let harness =
-                ControllerJobHarness::new(Arc::new(StepJobDriver), to_value(&request).unwrap())
-                    .unwrap();
-            assert!(!await_wait_with(
-                &request,
-                &harness.handle(),
-                Some(Arc::new(|_| panic!("terminal run must not probe"))),
-                || Duration::ZERO,
-                |_| panic!("terminal run must not sleep"),
-                |run_id| crate::api_jobs::agent_task_terminal_recovery::linked_durable_run_state(
-                    run_id
-                ) == Some(crate::api_jobs::DaemonLinkedDurableRunState::Terminal),
-            )
-            .unwrap());
-            fixtures.remove(&run_id);
+            for (allows_terminal_linked_run, expected) in [(true, true), (false, false)] {
+                let mut request = request("true", Default::default());
+                request.wait.runner_eligible = Some("runner-a".into());
+                request.allows_terminal_linked_run = allows_terminal_linked_run;
+                let run_id = uuid::Uuid::new_v4().to_string();
+                request.linked_durable_run_id = Some(run_id.clone());
+                let fixtures = crate::test_support::AgentTaskTerminalRunFixtures::install();
+                fixtures.terminal_run(&run_id, crate::api_jobs::JobStatus::Cancelled);
+                let harness =
+                    ControllerJobHarness::new(Arc::new(StepJobDriver), to_value(&request).unwrap())
+                        .unwrap();
+                assert_eq!(
+                    await_wait_with(
+                        &request,
+                        &harness.handle(),
+                        Some(Arc::new(move |_| {
+                            assert!(
+                                allows_terminal_linked_run,
+                                "ordinary stale work must not probe"
+                            );
+                            Ok(())
+                        })),
+                        || Duration::ZERO,
+                        |_| panic!("terminal run must not sleep"),
+                        |run_id| {
+                            crate::api_jobs::agent_task_terminal_recovery::linked_durable_run_state(
+                                run_id,
+                            ) == Some(crate::api_jobs::DaemonLinkedDurableRunState::Terminal)
+                        },
+                    )
+                    .unwrap(),
+                    expected,
+                    "allows_terminal_linked_run={allows_terminal_linked_run}"
+                );
+                fixtures.remove(&run_id);
+            }
         });
     }
 
