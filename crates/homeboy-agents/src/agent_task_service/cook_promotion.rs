@@ -4806,6 +4806,11 @@ pub(crate) fn cook_failure_context_with_stores(
                 cook_id,
                 record.as_ref(),
             );
+            let provider_outcome_missing = lifecycle_store
+                .read_record_with_aggregate_bounded(record_run_id)
+                .is_ok_and(|(_, aggregate)| {
+                    aggregate.is_none_or(|aggregate| aggregate.outcomes.is_empty())
+                });
             let continuation_refusal = record
                 .as_ref()
                 .and_then(|record| continuation_candidate_refusal(lifecycle_store, record));
@@ -4822,13 +4827,18 @@ pub(crate) fn cook_failure_context_with_stores(
                 live_driver,
                 recovery_legal,
                 blocking_claim.is_some(),
-                continuation_admitted,
+                if provider_outcome_missing {
+                    retry_admitted
+                } else {
+                    continuation_admitted
+                },
                 retry_refusal.as_deref(),
                 involuntary_cancellation_retry_admitted,
                 exact_checkpoint_candidate_mismatch(&diagnostic),
                 continuation_state == Some(super::cook_recipe::CookContinuationState::Failed),
                 continuation_state == Some(super::cook_recipe::CookContinuationState::Completed),
                 continuation_refusal.as_deref(),
+                provider_outcome_missing,
                 agent_incomplete_reason(lifecycle_store, record_run_id).as_deref(),
                 adoptable_candidate_ref.as_deref(),
                 delivered_candidate,
@@ -5509,6 +5519,7 @@ fn cook_recovery_actions(
         false,
         false,
         None,
+        false,
         None,
         None,
         DeliveredCandidateFacts::default(),
@@ -5532,6 +5543,7 @@ fn cook_recovery_actions_with_prefix(
     continuation_rearm_required: bool,
     continuation_completed: bool,
     continuation_refusal: Option<&str>,
+    provider_outcome_missing: bool,
     agent_incomplete_reason: Option<&str>,
     adoptable_candidate_ref: Option<&str>,
     delivered_candidate: DeliveredCandidateFacts,
@@ -5555,6 +5567,7 @@ fn cook_recovery_actions_with_prefix(
             continuation_rearm_required,
             continuation_completed,
             continuation_refusal,
+            provider_outcome_missing,
             run_id,
             agent_incomplete_reason,
             adoptable_candidate_ref,
