@@ -13,7 +13,7 @@ use clap::{Args, CommandFactory, Subcommand};
 use homeboy::core::daemon::workflow_job::{
     WorkflowJobRequest, WORKFLOW_INSTANCE_ENV, WORKFLOW_JOB_REQUEST_SCHEMA,
 };
-use homeboy::core::daemon::LocalControllerJobClient;
+use homeboy::core::daemon::{ControllerJobSubmissionDisposition, LocalControllerJobClient};
 use homeboy::core::env_materialization_plan::{EnvMaterializationPlan, EnvSecretRef};
 use homeboy::core::workflow::definition::StepKind;
 use homeboy::core::workflow::WorkflowDefinition;
@@ -312,8 +312,13 @@ fn admit_with_resume(
                 );
             }
             request.resumed_from = resumed_from.map(str::to_string);
-            client.submit(request.submission()?)?;
-            "created"
+            let submission = client
+                .submit_with_disposition(request.submission()?)
+                .map_err(|error| submission_outcome_unknown(error, &instance))?;
+            match submission.disposition {
+                ControllerJobSubmissionDisposition::Created => "created",
+                ControllerJobSubmissionDisposition::Reused => "reused",
+            }
         }
     };
     let mut view = if wait {
@@ -326,6 +331,19 @@ fn admit_with_resume(
     view["cancel_command"] = json!(format!("homeboy workflow cancel {instance}"));
     let code = if wait { exit_code(&view) } else { 0 };
     Ok((view, code))
+}
+
+/// A submission the daemon may have applied without answering names the
+/// instance it would have created. The instance id is the submission's
+/// idempotency key, so re-running the same command reuses that instance.
+fn submission_outcome_unknown(mut error: Error, instance: &str) -> Error {
+    if error.details["outcome"] != "unknown" {
+        return error;
+    }
+    error.details["instance"] = json!(instance);
+    error.with_hint(format!(
+        "The workflow may have been admitted. Check `homeboy runs show {instance}`, or re-run the same command: it reuses instance `{instance}` instead of starting another."
+    ))
 }
 
 /// Whether re-admitting the same workflow retries this instance instead of
