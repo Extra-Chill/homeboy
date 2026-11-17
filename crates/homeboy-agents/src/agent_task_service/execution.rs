@@ -1343,22 +1343,31 @@ pub(crate) fn persisted_terminal_run_result(
     run_id: &str,
 ) -> Result<Option<AgentTaskRunResult<AgentTaskAggregate>>> {
     let lifecycle_store = agent_task_lifecycle::AgentTaskLifecycleStore::from_environment()?;
+    // Daemon health asks this of every active job on every refresh; only a
+    // run with a terminal result is worth the full record read.
+    if !has_terminal_result(lifecycle_store.read_run_state(run_id)?) {
+        return Ok(None);
+    }
     let record = lifecycle_store.read_record_bounded(run_id)?;
     terminal_run_result_for_record(record, false)
+}
+
+fn has_terminal_result(state: homeboy_lifecycle_contract::RunExecutionState) -> bool {
+    matches!(
+        state,
+        homeboy_lifecycle_contract::RunExecutionState::Succeeded
+            | homeboy_lifecycle_contract::RunExecutionState::CandidateRecoverable
+            | homeboy_lifecycle_contract::RunExecutionState::PartialFailure
+            | homeboy_lifecycle_contract::RunExecutionState::Failed
+            | homeboy_lifecycle_contract::RunExecutionState::Cancelled
+    )
 }
 
 fn terminal_run_result_for_record(
     record: agent_task_lifecycle::AgentTaskRunRecord,
     recover_missing_aggregate: bool,
 ) -> Result<Option<AgentTaskRunResult<AgentTaskAggregate>>> {
-    if !matches!(
-        record.state(),
-        homeboy_lifecycle_contract::RunExecutionState::Succeeded
-            | homeboy_lifecycle_contract::RunExecutionState::CandidateRecoverable
-            | homeboy_lifecycle_contract::RunExecutionState::PartialFailure
-            | homeboy_lifecycle_contract::RunExecutionState::Failed
-            | homeboy_lifecycle_contract::RunExecutionState::Cancelled
-    ) {
+    if !has_terminal_result(record.state()) {
         return Ok(None);
     }
 

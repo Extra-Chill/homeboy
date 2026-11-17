@@ -76,8 +76,11 @@ impl AgentTaskTerminalRecoveryProvider for AgentTaskTerminalRecoveryProviderImpl
             crate::agent_task_lifecycle::AgentTaskLifecycleStore::from_environment().ok()?;
         let resolved_run_id =
             crate::agent_task_lifecycle::resolve_run_id_in_store(&lifecycle_store, run_id).ok()?;
-        let record = lifecycle_store.read_record_bounded(&resolved_run_id).ok()?;
-        if record.state().is_terminal() {
+        if lifecycle_store
+            .read_run_state(&resolved_run_id)
+            .ok()?
+            .is_terminal()
+        {
             Some(DaemonLinkedDurableRunState::Terminal)
         } else {
             Some(DaemonLinkedDurableRunState::Active)
