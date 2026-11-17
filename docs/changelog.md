@@ -4,6 +4,16 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.470.6] - 2026-11-17
+
+### Fixed
+- derive the --task-url prompt on the Lab controller of a queued Cook
+- refresh WordPress FPM opcache inline after archive swap
+- retry Cook recovery when no provider candidate exists
+- retry stalled gate hydration within the shared deadline
+- release restart recovery lock before transport I/O
+- preserve terminal cook candidates before reclaiming scratch
+
 ## [0.470.5] - 2026-11-17
 
 ### Fixed
