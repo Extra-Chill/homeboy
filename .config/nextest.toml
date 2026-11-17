@@ -3,9 +3,6 @@
 # process trees and bounded recovery probes, so unbounded parallelism starves
 # them into timeouts. Cap them instead of loosening their deadlines.
 live-daemons = { max-threads = 4 }
-# Each runner-service observation test owns a live runner daemon and bounded
-# job/lease deadlines. Run them one at a time so neither starves the other.
-runner-service = { max-threads = 1 }
 
 [profile.default]
 slow-timeout = { period = "30s", terminate-after = 4 }
@@ -13,10 +10,6 @@ slow-timeout = { period = "30s", terminate-after = 4 }
 [[profile.default.overrides]]
 filter = 'binary(cook_lab_handoff_test) | binary(execution_step_chaos) | binary(daemon_ensure_running_cli) | test(repository_cleanliness_fixture_cook_leaves_only_the_provider_edit)'
 test-group = "live-daemons"
-
-[[profile.default.overrides]]
-filter = 'binary(runner_service_observation)'
-test-group = "runner-service"
 
 # The same-child recovery proof owns two local Cook daemons, a live provider,
 # and a real Cargo gate. Reserve the runner while it observes the lock/lease
