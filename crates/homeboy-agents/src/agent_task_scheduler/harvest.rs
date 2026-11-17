@@ -10,7 +10,8 @@ use super::*;
 pub(crate) const CANDIDATE_REF_PREFIX: &str = "refs/homeboy/candidates/";
 
 /// Turn the attempt's final working tree (tracked + untracked, honoring
-/// `.gitignore`) into one immutable commit on the attempt HEAD (#16303).
+/// `.gitignore`) into one immutable candidate (#16303). Related rewritten
+/// HEADs are retained as a second parent after the task's required parent.
 ///
 /// The tree is built in a temporary index so the provider's index is never
 /// written (#13448). Identity and dates are fixed (the date is the parent's
@@ -64,6 +65,8 @@ fn harvest_candidate_commit_with_bundle(
     outcome.candidate = None;
     if let Some(metadata) = outcome.metadata.as_object_mut() {
         metadata.remove("gate_feedback_baseline");
+        metadata.remove("candidate_harvest_shape");
+        metadata.remove("candidate_rebased_head_sha");
     }
     let Some(base) = running.task_base_sha.as_deref() else {
         return Ok(());
@@ -158,6 +161,11 @@ fn harvest_candidate_commit_with_bundle(
     if !outcome.metadata.is_object() {
         outcome.metadata = serde_json::json!({});
     }
+    let (head, rebased) = harvest_head(root, base)?;
+    if rebased {
+        outcome.metadata["candidate_harvest_shape"] = serde_json::json!("rebased_head_merged");
+        outcome.metadata["candidate_rebased_head_sha"] = serde_json::json!(head);
+    }
     outcome.metadata["source_provenance"] = serde_json::json!(running.source_provenance);
     if let Some(feedback) = feedback {
         outcome.metadata["gate_feedback_baseline"] = feedback;
@@ -220,18 +228,35 @@ fn reaped_attempt_source_root<'a>(
     Ok(git_is_repository(source_root)?.then_some(source_root))
 }
 
-/// Refuse a HEAD that no longer descends from the task base: its tree is not
-/// a change set against the base, and treating it as "no changes" would hide
-/// the rewrite.
-fn ensure_head_descends_from_base(root: &Path, base: &str) -> Result<String, HarvestError> {
+/// Accept rewritten history only when it still shares history with the base.
+fn harvest_head(root: &Path, base: &str) -> Result<(String, bool), HarvestError> {
     let head = git_output(root, &["rev-parse", "HEAD^{commit}"])?;
-    if !git_is_ancestor(root, base, &head)? {
-        return Err(HarvestError::UnrelatedHead {
-            base: base.to_string(),
-            head,
-        });
+    let rebased = !git_is_ancestor(root, base, &head)?;
+    if rebased {
+        let output = Command::new("git")
+            .args(["merge-base", base, &head])
+            .current_dir(root)
+            .output()
+            .map_err(|error| HarvestError::Git {
+                command: format!("git merge-base {base} {head}"),
+                cwd: root.to_path_buf(),
+                message: error.to_string(),
+            })?;
+        if output.status.code() == Some(1) {
+            return Err(HarvestError::UnrelatedHead {
+                base: base.to_string(),
+                head,
+            });
+        }
+        if !output.status.success() {
+            return Err(HarvestError::Git {
+                command: format!("git merge-base {base} {head}"),
+                cwd: root.to_path_buf(),
+                message: String::from_utf8_lossy(&output.stderr).into_owned(),
+            });
+        }
     }
-    Ok(head)
+    Ok((head, rebased))
 }
 
 fn pin_candidate_ref(root: &Path, run_id: &str, candidate_sha: &str) -> Result<(), HarvestError> {
@@ -245,21 +270,26 @@ fn pin_candidate_ref(root: &Path, run_id: &str, candidate_sha: &str) -> Result<(
 
 /// Harvest only the committed change set of a workspace whose uncommitted
 /// state Homeboy does not own (the source workspace standing in for a reaped
-/// attempt checkout). The candidate is the HEAD commit itself.
+/// attempt checkout). Descendant HEADs are reused; rewritten HEADs are merged.
 fn candidate_from_committed_head(
     root: &Path,
     base: &str,
     run_id: &str,
 ) -> Result<Option<crate::agent_task::AgentTaskCandidate>, HarvestError> {
-    let head = ensure_head_descends_from_base(root, base)?;
+    let (head, rebased) = harvest_head(root, base)?;
     let tree = git_output(root, &["rev-parse", &format!("{head}^{{tree}}")])?;
     if tree == git_output(root, &["rev-parse", &format!("{base}^{{tree}}")])? {
         return Ok(None);
     }
-    pin_candidate_ref(root, run_id, &head)?;
+    let candidate_sha = if rebased {
+        write_candidate_commit(root, &tree, &[base.to_string(), head.clone()], &head)?
+    } else {
+        head
+    };
+    pin_candidate_ref(root, run_id, &candidate_sha)?;
     Ok(Some(crate::agent_task::AgentTaskCandidate {
         base_sha: base.to_string(),
-        candidate_sha: head,
+        candidate_sha,
         tree_sha: tree,
     }))
 }
@@ -282,12 +312,18 @@ fn candidate_from_workspace_with_parent(
     if !git_is_repository(root)? {
         return Ok(None);
     }
-    let head = ensure_head_descends_from_base(root, base)?;
+    let (head, rebased) = harvest_head(root, base)?;
     // A flattened continuation keeps what the agent merged (trunk, an
     // upstream) as later parents, so the merge survives into promotion and
     // publication instead of conflicting again (#17346).
-    let mut parents = vec![parent.unwrap_or(&head).to_string()];
-    if let Some(parent) = parent {
+    let mut parents = vec![parent
+        .unwrap_or(if rebased { base } else { &head })
+        .to_string()];
+    if rebased {
+        // Preserve both fast-forward ancestry from the destination and the
+        // provider's rewritten history, including its newer upstream base.
+        parents.push(head.clone());
+    } else if let Some(parent) = parent {
         parents.extend(
             homeboy_core::git::merged_parents(root, parent, &head).map_err(|error| {
                 HarvestError::Git {
@@ -316,9 +352,24 @@ fn candidate_from_workspace_with_parent(
     if parent.is_none() && tree == git_output(root, &["rev-parse", "HEAD^{tree}"])? {
         return candidate_from_committed_head(root, base, run_id);
     }
+    let candidate_sha = write_candidate_commit(root, &tree, &parents, &head)?;
+    pin_candidate_ref(root, run_id, &candidate_sha)?;
+    Ok(Some(crate::agent_task::AgentTaskCandidate {
+        base_sha: base.to_string(),
+        candidate_sha,
+        tree_sha: tree,
+    }))
+}
+
+fn write_candidate_commit(
+    root: &Path,
+    tree: &str,
+    parents: &[String],
+    head: &str,
+) -> Result<String, HarvestError> {
     let date = format!(
         "@{} +0000",
-        git_output(root, &["log", "-1", "--format=%ct", &head])?
+        git_output(root, &["log", "-1", "--format=%ct", head])?
     );
     let identity_env: &[(&str, &str)] = &[
         ("GIT_AUTHOR_NAME", "Homeboy"),
@@ -328,18 +379,12 @@ fn candidate_from_workspace_with_parent(
         ("GIT_COMMITTER_EMAIL", "homeboy@localhost"),
         ("GIT_COMMITTER_DATE", date.as_str()),
     ];
-    let mut commit_args = vec!["-c", "commit.gpgSign=false", "commit-tree", tree.as_str()];
-    for parent in &parents {
+    let mut commit_args = vec!["-c", "commit.gpgSign=false", "commit-tree", tree];
+    for parent in parents {
         commit_args.extend(["-p", parent.as_str()]);
     }
     commit_args.extend(["-m", "homeboy: cook candidate"]);
-    let candidate_sha = git_output_with_env(root, &commit_args, identity_env)?;
-    pin_candidate_ref(root, run_id, &candidate_sha)?;
-    Ok(Some(crate::agent_task::AgentTaskCandidate {
-        base_sha: base.to_string(),
-        candidate_sha: candidate_sha.clone(),
-        tree_sha: tree,
-    }))
+    git_output_with_env(root, &commit_args, identity_env)
 }
 
 /// A deadline can interrupt an otherwise valid workspace diff before the
@@ -596,7 +641,7 @@ pub(super) fn committed_harvest_failure(
         ),
         HarvestError::UnrelatedHead { base, head } => (
             "agent_task.committed_harvest_unrelated_head",
-            "workspace HEAD is no longer descended from the task base; refusing to harvest unrelated commits"
+            "workspace HEAD shares no history with the task base; refusing to harvest unrelated commits"
                 .to_string(),
             serde_json::json!({ "base": base, "head": head }),
         ),
@@ -2029,6 +2074,85 @@ mod committed_harvest_tests {
     fn final_worktree_tree(workspace: &Path) -> String {
         git(workspace, &["add", "--all"]);
         git(workspace, &["write-tree"])
+    }
+
+    #[test]
+    fn related_rebased_heads_are_merged_but_orphan_heads_are_refused() {
+        for case in ["dirty_rebase", "clean_rebase", "feedback_rebase", "orphan"] {
+            let temp = tempfile::tempdir().expect("tempdir");
+            let (workspace, old_trunk) = candidate_attempt_repo(temp.path());
+            git(&workspace, &["checkout", "-b", "destination"]);
+            std::fs::write(workspace.join("branch.txt"), "branch change\n").unwrap();
+            git(&workspace, &["add", "."]);
+            git(&workspace, &["commit", "-m", "prior candidate"]);
+            let base = git(&workspace, &["rev-parse", "HEAD"]);
+            git(&workspace, &["checkout", "-b", "new-trunk", &old_trunk]);
+            std::fs::write(workspace.join("trunk.txt"), "new trunk\n").unwrap();
+            git(&workspace, &["add", "."]);
+            git(&workspace, &["commit", "-m", "advance trunk"]);
+            let new_trunk = git(&workspace, &["rev-parse", "HEAD"]);
+            git(&workspace, &["checkout", "destination"]);
+            if case == "orphan" {
+                git(&workspace, &["checkout", "--orphan", "unrelated"]);
+                git(&workspace, &["commit", "-m", "unrelated root"]);
+            } else {
+                git(&workspace, &["rebase", "new-trunk"]);
+            }
+            let head = git(&workspace, &["rev-parse", "HEAD"]);
+            assert!(!git_is_ancestor(&workspace, &base, &head).unwrap());
+            if case == "dirty_rebase" || case == "feedback_rebase" {
+                std::fs::write(workspace.join("uncommitted.txt"), "agent work\n").unwrap();
+            }
+            let result = if case == "clean_rebase" {
+                candidate_from_committed_head(&workspace, &base, "rebase-test")
+            } else {
+                candidate_from_workspace_with_parent(
+                    &workspace,
+                    &base,
+                    "rebase-test",
+                    (case == "feedback_rebase").then_some(base.as_str()),
+                )
+            };
+            if case == "orphan" {
+                assert!(matches!(result, Err(HarvestError::UnrelatedHead { .. })));
+                assert!(matches!(
+                    candidate_from_committed_head(&workspace, &base, "orphan-test"),
+                    Err(HarvestError::UnrelatedHead { .. })
+                ));
+                continue;
+            }
+            let candidate = result.expect(case).expect("candidate");
+            let sha = &candidate.candidate_sha;
+            assert_eq!(
+                git(&workspace, &["show", "-s", "--format=%P", sha]),
+                format!("{base} {head}")
+            );
+            assert!(git_is_ancestor(&workspace, &base, sha).unwrap());
+            assert!(git_is_ancestor(&workspace, &new_trunk, sha).unwrap());
+            assert_eq!(
+                git(&workspace, &["show", &format!("{sha}:trunk.txt")]),
+                "new trunk"
+            );
+            assert_eq!(
+                git(&workspace, &["show", &format!("{sha}:branch.txt")]),
+                "branch change"
+            );
+            if case != "clean_rebase" {
+                assert_eq!(
+                    git(&workspace, &["show", &format!("{sha}:uncommitted.txt")]),
+                    "agent work"
+                );
+            }
+            assert_eq!(candidate.tree_sha, final_worktree_tree(&workspace));
+            let running = committed_harvest_running_task(temp.path(), &workspace, None, base);
+            let mut outcome = committed_harvest_preflight_outcome(running.task_id.clone());
+            harvest_candidate_commit(&mut outcome, &running).expect("harvest outcome");
+            assert_eq!(
+                outcome.metadata["candidate_harvest_shape"],
+                "rebased_head_merged"
+            );
+            assert_eq!(outcome.metadata["candidate_rebased_head_sha"], head);
+        }
     }
 
     #[test]
