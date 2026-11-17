@@ -129,7 +129,6 @@ pub(crate) fn converge_runner_service_binaries(
     runner: &Runner,
     mut entry: RunnerUpgradeEntry,
     observe: &mut impl FnMut(&str) -> Result<Vec<ServiceUnitObservation>>,
-    host_unit_name: &str,
     refresh: &mut impl FnMut(&Runner, &str) -> ServiceRefreshOutcome,
 ) -> RunnerUpgradeEntry {
     let Some(target) = entry.new_version.clone() else {
@@ -145,7 +144,7 @@ pub(crate) fn converge_runner_service_binaries(
     let mut services = match observe_and_classify(&mut *observe) {
         Ok(services) => services,
         Err(error) if service_managed => vec![RunnerServiceBinaryEntry {
-            unit: host_unit_name.to_string(),
+            unit: crate::connection::runner_service_unit_name(),
             binary: String::new(),
             binary_version: None,
             running_version: None,
@@ -168,7 +167,7 @@ pub(crate) fn converge_runner_service_binaries(
     };
     if service_managed && host_unit(&mut services).is_none() {
         services.push(RunnerServiceBinaryEntry {
-            unit: host_unit_name.to_string(),
+            unit: crate::connection::runner_service_unit_name(),
             binary: String::new(),
             binary_version: None,
             running_version: None,
@@ -320,13 +319,7 @@ pub(crate) fn converge_service_binaries_for_entries_with(
             .iter()
             .find(|runner| runner.id == entry.runner_id && runner.kind == RunnerKind::Ssh)
         {
-            Some(runner) => converge_runner_service_binaries(
-                runner,
-                entry,
-                observe,
-                &crate::connection::runner_service_unit_name(&runner.id),
-                refresh,
-            ),
+            Some(runner) => converge_runner_service_binaries(runner, entry, observe, refresh),
             None => entry,
         };
         if entry.success {
@@ -418,7 +411,7 @@ pub(crate) fn check_runner_with(
 mod tests {
     use super::*;
 
-    const OWN: &str = "homeboy-runner-homeboy-lab-host.service";
+    const HOST_UNIT: &str = "homeboy-runner.service";
 
     fn unit(name: &str, version: &str) -> ServiceUnitObservation {
         ServiceUnitObservation {
@@ -461,12 +454,12 @@ mod tests {
     }
 
     fn never_refresh(_: &Runner, _: &str) -> ServiceRefreshOutcome {
-        panic!("a non-stale or unowned unit must not be refreshed")
+        panic!("this host unit must not be refreshed")
     }
 
     #[test]
     fn stale_running_process_with_current_link_is_still_stale() {
-        let mut observed = unit(OWN, "0.417.15");
+        let mut observed = unit(HOST_UNIT, "0.417.15");
         observed.running_version = Some("homeboy 0.395.1+5171701".to_string());
         let services = classify_service_binaries("homeboy-lab", "/b", &[observed], "0.417.15");
         assert_eq!(services[0].status, "stale");
@@ -475,9 +468,9 @@ mod tests {
 
     #[test]
     fn inactive_units_do_not_block_and_unversioned_active_units_do() {
-        let mut inactive = unit(OWN, "0.395.1");
+        let mut inactive = unit(HOST_UNIT, "0.395.1");
         inactive.active_state = Some("inactive".to_string());
-        let mut unversioned = unit(OWN, "0.417.15");
+        let mut unversioned = unit(HOST_UNIT, "0.417.15");
         unversioned.binary_version = None;
         unversioned.running_version = None;
         let services =
@@ -488,18 +481,20 @@ mod tests {
         assert!(services[1].blocks_convergence());
     }
 
-    /// The owned unit is refreshed through the idle-gated refresh handoff,
+    /// The host unit is refreshed through the idle-gated refresh handoff,
     /// re-observed, and only then counted converged.
     #[test]
-    fn stale_own_unit_is_refreshed_through_the_handoff_and_reobserved() {
-        let mut observations =
-            vec![vec![unit(OWN, "0.417.14")], vec![unit(OWN, "0.417.15")]].into_iter();
+    fn stale_host_unit_is_refreshed_through_the_handoff_and_reobserved() {
+        let mut observations = vec![
+            vec![unit(HOST_UNIT, "0.417.14")],
+            vec![unit(HOST_UNIT, "0.417.15")],
+        ]
+        .into_iter();
         let mut refreshed_paths = Vec::new();
         let entry = converge_runner_service_binaries(
             &runner(true),
             converged_entry("homeboy-lab", "0.417.15"),
             &mut |_| Ok(observations.next().expect("observed at most twice")),
-            OWN,
             &mut |runner, path| {
                 refreshed_paths.push((runner.id.clone(), path.to_string()));
                 ServiceRefreshOutcome::Refreshed
@@ -524,8 +519,7 @@ mod tests {
         let entry = converge_runner_service_binaries(
             &runner(true),
             converged_entry("homeboy-lab", "0.417.15"),
-            &mut |_| Ok(vec![unit(OWN, "0.417.14")]),
-            OWN,
+            &mut |_| Ok(vec![unit(HOST_UNIT, "0.417.14")]),
             &mut |_, _| ServiceRefreshOutcome::Refreshed,
         );
 
@@ -539,11 +533,10 @@ mod tests {
             &runner(true),
             converged_entry("homeboy-lab", "0.417.15"),
             &mut |_| Ok(Vec::new()),
-            OWN,
             &mut never_refresh,
         );
         assert!(!entry.success);
-        assert_eq!(entry.service_binaries[0].unit, OWN);
+        assert_eq!(entry.service_binaries[0].unit, HOST_UNIT);
         assert_eq!(entry.service_binaries[0].status, "unknown");
     }
 
@@ -553,7 +546,6 @@ mod tests {
             &runner(false),
             converged_entry("homeboy-lab", "0.417.15"),
             &mut |_| Err(homeboy_core::error::Error::internal_unexpected("ssh down")),
-            OWN,
             &mut never_refresh,
         );
         assert!(entry.success);
@@ -567,12 +559,7 @@ mod tests {
             &runners,
             vec![converged_entry("homeboy-lab", "0.417.15")],
             Vec::new(),
-            &mut |_| {
-                Ok(vec![unit(
-                    &crate::connection::runner_service_unit_name("homeboy-lab"),
-                    "0.395.1",
-                )])
-            },
+            &mut |_| Ok(vec![unit(HOST_UNIT, "0.395.1")]),
             &mut never_refresh,
         );
         assert!(updated.is_empty());
@@ -593,7 +580,7 @@ mod tests {
                 probed.push((runner.id.clone(), path.to_string()));
                 Ok(Some("homeboy 0.417.15+708e00a".to_string()))
             },
-            &mut |_| Ok(vec![unit(OWN, "0.417.14")]),
+            &mut |_| Ok(vec![unit(HOST_UNIT, "0.417.14")]),
         );
 
         assert_eq!(
@@ -606,10 +593,10 @@ mod tests {
         assert_eq!(check.selected_binary_version.as_deref(), Some("0.417.15"));
         assert_eq!(check.selected_binary_status, "current");
         assert!(!check.converged, "a stale host unit is not converged");
-        let own = &check.service_binaries[0];
-        assert_eq!(own.status, "stale");
-        assert_eq!(own.running_version.as_deref(), Some("0.417.14"));
-        assert!(own.blocks_convergence());
+        let host = &check.service_binaries[0];
+        assert_eq!(host.status, "stale");
+        assert_eq!(host.running_version.as_deref(), Some("0.417.14"));
+        assert!(host.blocks_convergence());
     }
 
     #[test]

@@ -1,5 +1,7 @@
 # Runner Connection Bootstrap
 
+One host daemon per machine, shared by every controller and runner id.
+
 `homeboy runner connect <runner-id>` uses the first-class runner registry added
 for issue #2526.
 
@@ -85,7 +87,7 @@ convergence `failed`.
 ## Daemon State Directory
 
 Each runner host has exactly one daemon state directory per runner, shared by
-every controller (#18063): `~/.config/homeboy/runner-daemons/<runner>/host`.
+every controller (#18063): `~/.config/homeboy/runner-daemons/host`.
 Direct SSH launches, every remote `daemon` command, and the service unit's
 `HOMEBOY_DAEMON_STATE_DIR` derive it from one function, so a restarted daemon
 reopens the job store its predecessor wrote, whichever controller restarted it.
@@ -109,11 +111,11 @@ controller then never starts, replaces, rotates, or retires the remote daemon.
 
 `homeboy runner service install <runner-id>` requires an idle runner. It:
 
-1. Writes `~/.config/systemd/user/homeboy-runner-<id>-host.service`. The unit
+1. Stops the idle controller-started daemon so the unit can take the daemon owner lock.
+2. Writes and starts `~/.config/systemd/user/homeboy-runner.service`. The unit
    runs `homeboy daemon serve --addr 127.0.0.1:0` from the stable link
-   `~/.local/share/homeboy/runner-service/<id>/host/homeboy`, in
-   `runner-daemons/<id>/host`.
-2. Stops the idle controller-started daemon so the unit takes the daemon owner lock.
+   `~/.local/share/homeboy/runner-service/host/homeboy`, in
+   `runner-daemons/host`, then retires the old per-runner host units.
 3. Waits for the unit's lease, then marks the runner `service_managed`.
 
 One host unit serves every controller. Controllers are clients: each keeps its
@@ -140,13 +142,11 @@ For a service-managed runner:
 The service needs systemd user lingering on the runner host
 (`loginctl enable-linger`) so the unit keeps running without a login session.
 
-Before #18063 each controller ran its own unit,
-`homeboy-runner-<id>-<controller-prefix>-<sha256>.service`, with its own link and
-state directory. On connect or install, a controller retires its own legacy unit
-(unit file, drop-ins, and binary link; the state directory stays) once that
-daemon has no active job. A busy legacy daemon keeps running until a later
-connect finds it idle. Other controllers' legacy units retire when those
-controllers upgrade.
+Install, connect, and repoint start the machine unit before stopping,
+disabling, and deleting all per-runner host units (including aliases) and their
+unused binary-link and daemon-state directories. `KillMode=process` preserves
+running exec children; startup recovery adopts and settles them from the shared
+job store. There are no per-runner unit aliases or naming fallbacks.
 
 ## Unreachable recorded host
 

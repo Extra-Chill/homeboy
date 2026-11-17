@@ -34,11 +34,8 @@ use super::{load, remote_runner_homeboy_path, Runner, RunnerKind};
 /// their `HOMEBOY_DAEMON_STATE_DIR` from it, so a restarted daemon always
 /// reopens the job store its predecessor wrote and re-adopts its jobs, whichever
 /// controller restarted it.
-pub(super) fn daemon_state_dir(runner_id: &str) -> String {
-    format!(
-        ".config/homeboy/runner-daemons/{}/host",
-        paths::sanitize_path_segment(runner_id),
-    )
+pub(super) fn daemon_state_dir() -> String {
+    ".config/homeboy/runner-daemons/host".to_string()
 }
 
 const REMOTE_REPLACEMENT_REPLAY_TIMEOUT: Duration = Duration::from_secs(30);
@@ -734,11 +731,8 @@ fn connect_with_live_lease(
                         error,
                     ));
                 }
-                let command = remote_daemon_ensure_running_command(
-                    homeboy,
-                    runner_id,
-                    Some(&replacement_operation_id),
-                );
+                let command =
+                    remote_daemon_ensure_running_command(homeboy, Some(&replacement_operation_id));
                 // Rebind the durable command to the verified selected binary
                 // before crossing the replay mutation boundary.
                 replacement_journal::record_replacement_operation_replay(
@@ -878,7 +872,6 @@ fn connect_with_live_lease(
             evidence.remote_start_command =
                 Some(remote_daemon::remote_daemon_ensure_running_command(
                     homeboy,
-                    runner_id,
                     Some(&replacement_operation_id),
                 ));
             evidence.tunnel_state = Some("not_established".to_string());

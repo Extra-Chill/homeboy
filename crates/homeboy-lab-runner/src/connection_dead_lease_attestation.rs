@@ -27,7 +27,7 @@ use crate::Runner;
 /// fake that records the executed command.
 pub(crate) trait RemoteDeadLeaseAttestationTransport {
     /// The runner daemon's own lifecycle plan (`daemon plan` in its frame).
-    fn lifecycle_plan(&self, runner_id: &str) -> std::result::Result<Plan, String>;
+    fn lifecycle_plan(&self) -> std::result::Result<Plan, String>;
 
     /// The remote homeboy executable the state-dir-bound commands run.
     fn homeboy(&self) -> &str;
@@ -64,8 +64,8 @@ impl SshRemoteDeadLeaseAttestationTransport {
 }
 
 impl RemoteDeadLeaseAttestationTransport for SshRemoteDeadLeaseAttestationTransport {
-    fn lifecycle_plan(&self, runner_id: &str) -> std::result::Result<Plan, String> {
-        remote_daemon_lifecycle_plan(&self.client, runner_id, &self.homeboy_path)
+    fn lifecycle_plan(&self) -> std::result::Result<Plan, String> {
+        remote_daemon_lifecycle_plan(&self.client, &self.homeboy_path)
     }
 
     fn homeboy(&self) -> &str {
@@ -96,7 +96,7 @@ fn run_attested_reconcile_with_transport(
     // the state directory and the exact jobs that need attestation, or
     // says why nothing may be attested.
     let planned = transport
-        .lifecycle_plan(runner_id)
+        .lifecycle_plan()
         .map_err(|error| resolution_refused(runner_id, &error))?;
     let attestation = match planned {
         Plan::NeedsAttestation(attestation) => attestation,
@@ -152,7 +152,7 @@ pub fn remote_lifecycle_plan(runner_id: &str) -> Result<Plan> {
     let runner = crate::load(runner_id)?;
     let transport = SshRemoteDeadLeaseAttestationTransport::for_runner(&runner)?;
     transport
-        .lifecycle_plan(runner_id)
+        .lifecycle_plan()
         .map_err(|error| resolution_refused(runner_id, &error))
 }
 
@@ -226,7 +226,7 @@ mod tests {
     }
 
     impl RemoteDeadLeaseAttestationTransport for FakeTransport {
-        fn lifecycle_plan(&self, _runner_id: &str) -> std::result::Result<Plan, String> {
+        fn lifecycle_plan(&self) -> std::result::Result<Plan, String> {
             self.lifecycle.clone()
         }
 

@@ -457,7 +457,7 @@ fn expected_state_dir() -> String {
     format!(
         "{}/{}",
         std::env::var("HOME").expect("HOME"),
-        crate::connection::daemon_state_dir(RUNNER)
+        crate::connection::daemon_state_dir()
     )
 }
 
@@ -675,7 +675,7 @@ fn service_refresh_repoints_and_restarts_the_unit_in_place_and_keeps_its_re_adop
         // `service::repoint_and_restart` rewrote the unit onto the promoted
         // binary. The unit kills only the daemon process and keeps the same
         // state dir.
-        let unit = crate::connection::runner_service_unit_name(RUNNER);
+        let unit = crate::connection::runner_service_unit_name();
         let rendered =
             std::fs::read_to_string(home.path().join(".config/systemd/user").join(&unit))
                 .expect("rendered unit");
@@ -683,7 +683,7 @@ fn service_refresh_repoints_and_restarts_the_unit_in_place_and_keeps_its_re_adop
         assert!(
             rendered.contains(&format!(
                 "Environment=HOMEBOY_DAEMON_STATE_DIR=%h/{}",
-                crate::connection::daemon_state_dir(RUNNER)
+                crate::connection::daemon_state_dir()
             )),
             "{rendered}"
         );
