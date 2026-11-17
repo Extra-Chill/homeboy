@@ -399,13 +399,6 @@ pub(crate) fn declared_transport<'a>(
     &'a homeboy_extension_contract::ExtensionManifest,
     &'a homeboy_extension_contract::NotificationTransportConfig,
 )> {
-    if extensions.is_empty() {
-        let root = crate::paths::extensions()?;
-        return Err(crate::extension::catalog::notification_catalog_error(
-            Some(&root),
-            "catalog is empty; no installed extension manifests were found",
-        ));
-    }
     let transports: Vec<_> = extensions
         .iter()
         .flat_map(|extension| {
@@ -415,13 +408,6 @@ pub(crate) fn declared_transport<'a>(
                 .map(move |transport| (extension, transport))
         })
         .collect();
-    if transports.is_empty() {
-        let root = crate::paths::extensions()?;
-        return Err(crate::extension::catalog::notification_catalog_error(
-            Some(&root),
-            "catalog loaded successfully but declares no notification transports",
-        ));
-    }
     // An exact id wins; otherwise accept the unambiguous short alias, the
     // id prefix before its first `.` (for example `discord`).
     let exact: Vec<_> = transports
@@ -468,11 +454,11 @@ pub fn dispatch(event: &NotifyEvent) -> NotifyOutcome {
         };
     };
 
-    let extensions = match crate::extension::catalog::load_notification_extensions() {
-        Ok(extensions) => extensions,
+    let catalog = match crate::extension::catalog::load_notification_catalog() {
+        Ok(catalog) => catalog,
         Err(err) => return missing_transport(event.kind, &transport_id, err.message),
     };
-    let (extension, transport) = match declared_transport(&extensions, &transport_id) {
+    let (extension, transport) = match catalog.declared_transport(&transport_id) {
         Ok(declared) => declared,
         Err(err) => return missing_transport(event.kind, &transport_id, err.message),
     };
