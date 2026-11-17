@@ -1433,3 +1433,33 @@ fn interrupted_canonical_accepted_does_not_synthesize_a_terminal() {
         .collect();
     assert_eq!(actions, ["action.accepted"]);
 }
+
+#[test]
+fn run_state_reads_without_resolving_externalized_payloads() {
+    let context = homeboy_core::test_support::HermeticTestContext::new();
+    let store = AgentTaskLifecycleStore::new(context.path_roots());
+    let run_id = "state-probe-with-externalized-promotion";
+    store
+        .submit_plan_with_runtime_admission(&test_plan(), run_id, |_| Ok(json!({})))
+        .expect("submitted");
+    // A promotion report content-addressed out of the row, as a large one is.
+    // Its payload file is absent, so only a read that resolves it can fail.
+    let reference = json!({"metadata_payload": {"sha256": "0".repeat(64), "bytes": 1}});
+    let db = rusqlite::Connection::open(paths::observation_db_in_root(context.path_roots().data()))
+        .expect("observation db");
+    db.execute(
+        "UPDATE runs SET metadata_json = json_set(metadata_json, \
+         '$.agent_task_run.metadata.cook_delivery', json(?2)) WHERE id = ?1",
+        rusqlite::params![
+            run_id,
+            json!({"artifacts": {"promotion": reference}}).to_string()
+        ],
+    )
+    .expect("externalize promotion");
+
+    assert!(store.read_record_bounded(run_id).is_err());
+    assert_eq!(
+        store.read_run_state(run_id).expect("state probe"),
+        RunExecutionState::Queued
+    );
+}

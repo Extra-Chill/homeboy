@@ -1269,6 +1269,27 @@ impl AgentTaskLifecycleStore {
         snapshot_from_run(&resolve_run_payloads(&store, run)?)
     }
 
+    /// Read only a run's execution state. The state lives in the record's typed
+    /// lifecycle fields, which content-addressing leaves inline, so this skips
+    /// resolving payloads (promotion reports, diffs) that state probes never
+    /// read. Polled on every daemon health refresh for each active job; a
+    /// record that only decodes once resolved still reads correctly.
+    pub fn read_run_state(&self, run_id: &str) -> Result<RunExecutionState> {
+        let store = self.open_observation_readonly()?;
+        let run = store.get_run(run_id)?.ok_or_else(|| {
+            Error::validation_invalid_argument(
+                "run_id",
+                format!("agent-task run record not found: {run_id}"),
+                Some(run_id.to_string()),
+                None,
+            )
+        })?;
+        match snapshot_from_run(&run) {
+            Ok(record) => Ok(record.state()),
+            Err(_) => Ok(snapshot_from_run(&resolve_run_payloads(&store, run)?)?.state()),
+        }
+    }
+
     /// Read one record and its mirrored aggregate from the same read-only
     /// SQLite observation. A missing mirror is returned as `None`; callers must
     /// not pair that record with the independently materialized aggregate cache.
