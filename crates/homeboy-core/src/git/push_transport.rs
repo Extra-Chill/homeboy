@@ -69,6 +69,11 @@ const COMMIT_SIGNATURE_NEEDLES: &[&str] = &[
     "ssh signing failed",
 ];
 
+/// The remote is not a repository at all (missing `origin`, bad path). Git
+/// follows this with the generic `Could not read from remote repository`, so
+/// it is checked first: retrying cannot heal a configuration error.
+const REMOTE_NOT_A_REPOSITORY_NEEDLES: &[&str] = &["does not appear to be a git repository"];
+
 const SSH_AGENT_REFUSED_NEEDLES: &[&str] = &["agent refused operation", "sign_and_send_pubkey"];
 
 const SSH_AGENT_UNAVAILABLE_NEEDLES: &[&str] = &[
@@ -118,7 +123,9 @@ pub fn classify_git_push_failure(stderr: &str) -> GitPushTransportClass {
     // Precedence matters: the Secure Enclave refusal is followed by a plain
     // `Permission denied (publickey)` line and a 401 also contains `unable to
     // access`, so the specific classes are checked before the generic ones.
-    if contains_any(&stderr, COMMIT_SIGNATURE_NEEDLES) {
+    if contains_any(&stderr, COMMIT_SIGNATURE_NEEDLES)
+        || contains_any(&stderr, REMOTE_NOT_A_REPOSITORY_NEEDLES)
+    {
         return GitPushTransportClass::Other;
     }
     if contains_any(&stderr, SSH_AGENT_REFUSED_NEEDLES) {
@@ -516,6 +523,7 @@ mod tests {
         for stderr in [
             "fatal: couldn't find remote ref refs/heads/nope on proxy.example.test",
             " ! [remote rejected] HEAD -> feature (pre-receive hook declined)",
+            "fatal: 'origin' does not appear to be a git repository\nfatal: Could not read from remote repository.",
         ] {
             assert_eq!(
                 classify_git_push_failure(stderr),
