@@ -4,6 +4,13 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.470.4] - 2026-11-17
+
+### Fixed
+- derive Cook run statuses from lifecycle outcomes
+- resend an idempotent request whose connection dropped before a response
+- preserve timestamps across isolated gate workspaces
+
 ## [0.470.3] - 2026-11-17
 
 ### Changed
