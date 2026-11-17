@@ -4769,7 +4769,7 @@ fn finish_cook_terminal_with_report(
 ) -> Result<()> {
     // A live driver's terminal report is the Cook's verdict. Without one,
     // the settled Cook observation decides whether the Cook has ended.
-    let fallback;
+    let mut fallback;
     let (report, component, exit_code) = match reported {
         Some(reported) => reported,
         None => {
@@ -4782,6 +4782,10 @@ fn finish_cook_terminal_with_report(
                 &record.run_id,
                 super::cook_step::attempt_status_label(record.state()),
             );
+            fallback.report_stores = Some((
+                CookRecipeStore::new(lifecycle.roots().clone()),
+                lifecycle.clone(),
+            ));
             let failed = record.state() != homeboy_lifecycle_contract::RunExecutionState::Succeeded;
             (&fallback, None, i32::from(failed))
         }
