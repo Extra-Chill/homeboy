@@ -1230,6 +1230,9 @@ fn terminal_job_retention_compacts_existing_store_without_losing_active_recovery
             .complete(job.id, None)
             .expect("new terminal job completes");
     }
+    restarted
+        .compact_retained_history()
+        .expect("compact history");
     assert_eq!(restarted.list().len(), 4, "terminal history stays bounded");
     assert!(restarted.get(queued.id).is_ok());
     assert_eq!(
