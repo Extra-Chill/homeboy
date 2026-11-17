@@ -1965,7 +1965,9 @@ pub(crate) fn observe_daemon_job_until_terminal(
 /// job, so the observer reattaches through `reload_endpoint` and keeps polling
 /// the same job id until the caller's budget runs out (#17376). The caller's
 /// budget bounds the wait, not a fixed reconnect window, because a gate job
-/// can run far longer than any reconnect gap. Authoritative answers, such as
+/// can run far longer than any reconnect gap. The budget pauses only while the
+/// daemon reports the job queued, never while the daemon is unreachable.
+/// Authoritative answers, such as
 /// an unknown job or a refused reattach, still end it at once.
 pub(crate) fn follow_daemon_job_to_terminal<Read, Reload>(
     mut endpoint: String,
@@ -2007,6 +2009,10 @@ where
                 interval
             }
             Err(error) if daemon_poll_transport_was_lost(&error) => {
+                // An unreachable daemon is not a queued job. The budget runs
+                // again, so a runner whose daemon is gone ends the wait
+                // instead of holding a queued job's place forever (#18197).
+                queued = false;
                 if Instant::now() >= deadline {
                     let mut surfaced = error;
                     surfaced.retryable = Some(true);

@@ -110,6 +110,29 @@ fn lost_transport_reattaches_and_reads_the_same_jobs_terminal_status() {
 }
 
 #[test]
+fn a_queued_job_whose_daemon_is_gone_ends_the_wait_at_the_budget() {
+    let reads = std::cell::Cell::new(0);
+    let error = follow_daemon_job_to_terminal(
+        "http://old".to_string(),
+        "x",
+        Duration::from_millis(600),
+        &|| false,
+        |_| {
+            reads.set(reads.get() + 1);
+            if reads.get() == 1 {
+                Ok(job(JobStatus::Queued))
+            } else {
+                Err(send_failed())
+            }
+        },
+        || Err(no_session()),
+    )
+    .expect_err("a gone daemon must not pause the budget forever");
+
+    assert!(daemon_observation_was_lost(&error));
+}
+
+#[test]
 fn transport_lost_past_the_budget_is_a_lost_observation_not_a_failure() {
     let error = follow_daemon_job_to_terminal(
         "http://old".to_string(),
