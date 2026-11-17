@@ -602,6 +602,24 @@ fn converge_idle_daemon(status: DaemonStatus) -> Result<bool> {
         return Err(error);
     }
 
+    replace_daemon(&status)?;
+
+    let converged = read_status()?;
+    if converged.fresh {
+        return Ok(true);
+    }
+
+    Err(Error::internal_unexpected(format!(
+        "controller upgrade restarted the resident daemon but it did not converge to the invoking build: {}",
+        converged
+            .stale_reason
+            .as_deref()
+            .unwrap_or("daemon status remains stale")
+    )))
+}
+
+/// Replace the resident daemon from this process, under its lease.
+fn replace_daemon(status: &DaemonStatus) -> Result<()> {
     match (
         status.freshness.lease_id.as_deref(),
         status.service_manager(),
@@ -619,19 +637,29 @@ fn converge_idle_daemon(status: DaemonStatus) -> Result<bool> {
             ensure_running(DEFAULT_ADDR)?;
         }
     }
+    Ok(())
+}
 
-    let converged = read_status()?;
-    if converged.fresh {
-        return Ok(true);
+/// Replace an idle daemon so its successor starts from the caller's process
+/// environment and session, for faults that live in the daemon process
+/// itself rather than in its build. Returns `false`, leaving the daemon alone,
+/// when it owns work or the lifecycle plan refuses mutation.
+pub fn restart_idle_daemon() -> Result<bool> {
+    let status = read_status()?;
+    let busy = status.freshness.active_jobs > 0
+        || status
+            .active_job_recovery_evidence
+            .iter()
+            .any(|evidence| evidence.disposition.blocks_daemon_replacement());
+    if !status.running
+        || status.draining()
+        || busy
+        || lifecycle_plan::mutation_refusal(&lifecycle_plan::plan_local()).is_some()
+    {
+        return Ok(false);
     }
-
-    Err(Error::internal_unexpected(format!(
-        "controller upgrade restarted the resident daemon but it did not converge to the invoking build: {}",
-        converged
-            .stale_reason
-            .as_deref()
-            .unwrap_or("daemon status remains stale")
-    )))
+    replace_daemon(&status)?;
+    Ok(true)
 }
 
 static DAEMON_JOB_STORE: OnceLock<JobStore> = OnceLock::new();
