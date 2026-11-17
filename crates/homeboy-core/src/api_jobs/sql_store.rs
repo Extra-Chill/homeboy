@@ -691,7 +691,13 @@ pub(super) fn read_active_jobs_readonly(path: &Path) -> Result<Option<Vec<Stored
 #[derive(Clone, Copy)]
 pub(super) enum TerminalJobs<'a> {
     All,
-    ControllerType(&'a str),
+    /// Controller jobs of one type, with the `omit` JSON paths (SQLite
+    /// syntax, e.g. `$.controller_job.checkpoint.steps`) removed from each
+    /// body before it leaves SQLite.
+    ControllerType {
+        job_type: &'a str,
+        omit: &'a [&'a str],
+    },
     /// Controller jobs of one type whose request has `field == value`.
     ControllerRequest {
         job_type: &'a str,
@@ -711,12 +717,22 @@ pub(super) fn read_terminal_jobs_readonly(
     const TERMINAL: &str = "SELECT body FROM daemon_jobs WHERE active = 0";
     match filter {
         TerminalJobs::All => read_job_bodies(&connection, path, TERMINAL, []),
-        TerminalJobs::ControllerType(job_type) => read_job_bodies(
-            &connection,
-            path,
-            "SELECT body FROM daemon_jobs WHERE active = 0 AND json_extract(body, '$.controller_job.job_type') = ?1",
-            [job_type],
-        ),
+        TerminalJobs::ControllerType { job_type, omit } => {
+            let body = if omit.is_empty() {
+                "body".to_string()
+            } else {
+                let paths = (2..omit.len() + 2)
+                    .map(|index| format!("?{index}"))
+                    .collect::<Vec<_>>();
+                format!("json_remove(body, {})", paths.join(", "))
+            };
+            read_job_bodies(
+                &connection,
+                path,
+                &format!("SELECT {body} FROM daemon_jobs WHERE active = 0 AND json_extract(body, '$.controller_job.job_type') = ?1"),
+                rusqlite::params_from_iter(std::iter::once(&job_type).chain(omit)),
+            )
+        }
         TerminalJobs::ControllerRequest {
             job_type,
             field,

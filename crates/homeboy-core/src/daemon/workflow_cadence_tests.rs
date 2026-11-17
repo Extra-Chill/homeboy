@@ -401,7 +401,7 @@ fn the_tick_fires_skips_overlap_and_never_fires_a_slot_twice() {
         assert_eq!(completed.pending, None);
         assert_eq!(completed.next_due_ms, base + 6 * MINUTE);
         assert_eq!(
-            store.controller_jobs_of_type("workflow").len(),
+            store.controller_jobs_of_type("workflow", &[]).len(),
             2,
             "two slots fired, one skipped, none twice"
         );

@@ -1332,23 +1332,10 @@ fn instance_view(
         .as_ref()
         .map(|state| projection(state, Some(store)))
         .unwrap_or_else(|| json!({}));
-    // The job row is the terminal authority: a cancelled job is a cancelled
-    // instance whatever its last checkpoint said.
-    let status = match job.status {
-        JobStatus::Cancelled => "cancelled".to_string(),
-        JobStatus::Failed
-            if state
-                .as_ref()
-                .is_some_and(|state| !state.status.is_terminal()) =>
-        {
-            "failed".to_string()
-        }
-        _ => state
-            .as_ref()
-            .map(|state| state.status.as_str().to_string())
-            .unwrap_or_else(|| "queued".to_string()),
-    };
-    view["status"] = json!(status);
+    view["status"] = json!(instance_status(
+        job.status,
+        state.as_ref().map(|state| state.status)
+    ));
     view["job"] = json!({
         "job_id": job.id,
         "status": job.status,
@@ -1366,6 +1353,17 @@ fn instance_view(
         view["children"] = json!(children(&request.instance));
     }
     view
+}
+
+/// The job row is the terminal authority: a cancelled job is a cancelled
+/// instance whatever its last checkpoint said.
+fn instance_status(job: JobStatus, state: Option<InstanceStatus>) -> &'static str {
+    match (job, state) {
+        (JobStatus::Cancelled, _) => "cancelled",
+        (JobStatus::Failed, Some(state)) if !state.is_terminal() => "failed",
+        (_, Some(state)) => state.as_str(),
+        (_, None) => "queued",
+    }
 }
 
 /// The instances `instance` admitted, oldest first: the child links of a
@@ -1412,30 +1410,46 @@ pub fn chain_successor(view: &Value) -> Option<String> {
 
 /// `GET /workflows`.
 pub(crate) fn workflow_list(store: &JobStore) -> Value {
-    let jobs = store.controller_jobs_of_type(WORKFLOW_JOB_TYPE);
-    // One read builds every chain link, rather than one store read per instance.
-    let mut children: std::collections::HashMap<String, Vec<String>> =
-        std::collections::HashMap::new();
-    for (_, controller) in &jobs {
-        if let Ok(request) = WorkflowJobRequest::parse(&controller.request) {
-            if let Some(parent) = request.parent {
-                children.entry(parent).or_default().push(request.instance);
-            }
-        }
-    }
+    // A row needs only names and counters, so the inputs and step states that
+    // make up nearly all of a retained body never leave SQLite.
+    let jobs = store.controller_jobs_of_type(
+        WORKFLOW_JOB_TYPE,
+        &[
+            "$.controller_job.request.inputs",
+            "$.controller_job.checkpoint.inputs",
+            "$.controller_job.checkpoint.steps",
+        ],
+    );
     let instances = jobs
         .iter()
         .map(|(job, controller)| {
-            let view = instance_view(job, controller, store, |instance| {
-                children.get(instance).cloned().unwrap_or_default()
-            });
+            let Some(checkpoint) = &controller.checkpoint else {
+                // Not started: its row derives from the whole request.
+                let (job, controller) = store
+                    .controller_job_state(job.id)
+                    .map(|controller| (job.clone(), controller))
+                    .unwrap_or_else(|_| (job.clone(), controller.clone()));
+                let view = instance_view(&job, &controller, store, |_| Vec::new());
+                return json!({
+                    "instance": view["instance"],
+                    "workflow": view["workflow"],
+                    "status": view["status"],
+                    "iteration": view["iteration"],
+                    "step_runs": view["step_runs"],
+                    "parent": view["parent"],
+                    "job_id": job.id,
+                    "created_at_ms": job.created_at_ms,
+                });
+            };
+            let request = &controller.request;
+            let state = serde_json::from_value(checkpoint["status"].clone()).ok();
             json!({
-                "instance": view["instance"],
-                "workflow": view["workflow"],
-                "status": view["status"],
-                "iteration": view["iteration"],
-                "step_runs": view["step_runs"],
-                "parent": view["parent"],
+                "instance": request["instance"],
+                "workflow": request["definition"]["id"],
+                "status": instance_status(job.status, state),
+                "iteration": checkpoint["iteration"],
+                "step_runs": checkpoint["step_runs"],
+                "parent": request["parent"],
                 "job_id": job.id,
                 "created_at_ms": job.created_at_ms,
             })
