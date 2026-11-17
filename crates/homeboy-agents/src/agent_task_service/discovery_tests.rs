@@ -17,6 +17,7 @@ fn record(id: &str, state: &str, submitted_at: &str, metadata: Value) -> AgentTa
         "queued" => homeboy_lifecycle_contract::RunExecutionState::Queued,
         "running" => homeboy_lifecycle_contract::RunExecutionState::Running,
         "succeeded" => homeboy_lifecycle_contract::RunExecutionState::Succeeded,
+        "cancelled" => homeboy_lifecycle_contract::RunExecutionState::Cancelled,
         _ => unreachable!(),
     };
     agent_task_lifecycle::set_run_state(&mut record, state);
@@ -79,19 +80,28 @@ fn mission_discovery_uses_status_attempt_outcome() {
 fn terminal_transition_settles_cook_observations_and_span() {
     with_isolated_home(|_| {
         let store = agent_task_lifecycle::AgentTaskLifecycleStore::from_environment().unwrap();
-        for (status, success) in [
-            ("intentional_no_change", true),
-            ("candidate_recoverable", false),
-            ("published", true),
-            ("cancelled", false),
+        // Runs settle to their own Cook-observed lifecycle outcome, never to
+        // the report's exit code (#18366). Each case seeds the lifecycle state
+        // its Cook actually ends in.
+        for (status, lifecycle, success) in [
+            // A verified intentional no-change keeps its provider success.
+            ("intentional_no_change", "succeeded", true),
+            // Provider success without a verified, finalized candidate.
+            ("candidate_recoverable", "succeeded", false),
+            // Publication is the end-to-end receipt.
+            ("published", "running", true),
+            ("cancelled", "cancelled", false),
         ] {
             let cook = format!("terminal-{status}");
             let attempt = format!("{cook}-attempt-1");
+            // A Cook-owned run: its driver, not record projection, settles it.
+            std::fs::create_dir_all(store.cook_dir(&cook)).unwrap();
+            std::fs::write(store.cook_dir(&cook).join("recipe.json"), "{}").unwrap();
             for id in [&cook, &attempt] {
                 store
                     .write_record(&record(
                         id,
-                        "running",
+                        lifecycle,
                         "2026-01-01T00:00:00Z",
                         json!({"cook_id":cook, "cook_progress":{"phase":"terminal"}}),
                     ))
@@ -100,6 +110,21 @@ fn terminal_transition_settles_cook_observations_and_span() {
             store
                 .write_cook_index_attempt(&cook, 1, &attempt, "2026-01-01T00:00:00Z".into(), None)
                 .unwrap();
+            if status == "published" {
+                for id in [&cook, &attempt] {
+                    agent_task_lifecycle::record_cook_finalization_in_store(
+                        &store,
+                        id,
+                        json!({"status":"review_ready", "pr_url":"https://github.com/example/repo/pull/1"}),
+                    )
+                    .unwrap();
+                }
+            }
+            let observation = store.open_observation_initialized().unwrap();
+            for id in [&cook, &attempt] {
+                // Cook-owned rows wait for the Cook terminal.
+                assert_eq!(observation.get_run(id).unwrap().unwrap().status, "running");
+            }
             agent_task_lifecycle::record_cook_terminal_result_in_store(
                 &store,
                 &attempt,
@@ -112,7 +137,8 @@ fn terminal_transition_settles_cook_observations_and_span() {
             for id in [&cook, &attempt] {
                 assert_eq!(
                     observation.get_run(id).unwrap().unwrap().status,
-                    if success { "pass" } else { "fail" }
+                    if success { "pass" } else { "fail" },
+                    "{id}"
                 );
             }
             let spans = observation.phase_spans(&cook).unwrap();

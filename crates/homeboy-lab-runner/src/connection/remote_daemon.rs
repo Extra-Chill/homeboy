@@ -655,8 +655,10 @@ fn temporary_tunnel_exits_when_owner_pipe_closes() {
         std::fs::write(
             &ssh,
             format!(
-                "#!/bin/sh\necho $$ > {}\nexec /bin/sleep 300\n",
-                pid_file.display()
+                // Publish the pid atomically: the test polls for the file, and
+                // `echo > file` creates it before the pid is written.
+                "#!/bin/sh\necho $$ > {pid}.tmp\nmv {pid}.tmp {pid}\nexec /bin/sleep 300\n",
+                pid = pid_file.display()
             ),
         )
         .unwrap();

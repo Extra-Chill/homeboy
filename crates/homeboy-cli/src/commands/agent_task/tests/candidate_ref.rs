@@ -71,7 +71,15 @@ fn agent_task_status_exposes_applied_candidate_ref_and_clean_git_tree() {
         let shown = serde_json::to_value(shown).unwrap();
         assert_eq!(shown["payload"]["run"]["candidate_ref"], reference);
         assert_eq!(shown["payload"]["run"]["candidate_sha"], sha);
-        assert_eq!(git(&["rev-parse", reference]), sha);
+        // The ref is the candidate re-authored as a publication commit (#18118):
+        // same tree and parent, but its own title and timestamp, so its SHA is
+        // not the staged candidate's SHA (#18393 titles form-less candidates).
+        assert_eq!(git(&["rev-parse", &format!("{reference}^{{tree}}")]), tree);
+        assert_eq!(git(&["rev-parse", &format!("{reference}^")]), base);
+        assert_eq!(
+            git(&["log", "-1", "--format=%an <%ae>|%cn <%ce>", reference]),
+            "Test <test@example.test>|Test <test@example.test>"
+        );
         assert_eq!(
             git(&["rev-parse", &format!("{reference}^{{tree}}")]),
             git(&["write-tree"])
