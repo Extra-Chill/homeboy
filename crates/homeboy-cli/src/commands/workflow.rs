@@ -172,8 +172,21 @@ pub fn run(args: WorkflowArgs) -> CmdResult<Value> {
             let job_id = view["job"]["job_id"]
                 .as_str()
                 .ok_or_else(|| Error::internal_unexpected("runs show has no job id"))?;
-            client.cancel(job_id, &format!("workflow `{instance}` cancelled"))?;
-            Ok((client.workflow(&instance)?, 0))
+            let job = client.cancel(
+                job_id,
+                &format!(
+                    "workflow `{instance}` cancelled by `homeboy workflow cancel` ({})",
+                    crate::invocation::requester()
+                ),
+            )?;
+            // The cancel is durable once acknowledged; a failed follow-up read
+            // must not report it as a failure.
+            Ok((
+                client
+                    .workflow(&instance)
+                    .unwrap_or_else(|_| json!({ "job": job })),
+                0,
+            ))
         }
         WorkflowCommand::Approve { instance, step } => {
             let client = LocalControllerJobClient::connect()?;

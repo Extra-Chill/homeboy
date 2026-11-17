@@ -1216,10 +1216,9 @@ fn cancelling_mid_wave_stops_every_running_item() {
             store.controller_job_for_key(&key(2)).is_none(),
             "a cancelled fan-out admitted another item"
         );
-        assert_eq!(
-            workflow_status(&store, &request.instance).unwrap()["status"],
-            "cancelled"
-        );
+        let view = workflow_status(&store, &request.instance).unwrap();
+        assert_eq!(view["status"], "cancelled");
+        assert_eq!(view["job"]["cancellation_reason"], "operator cancel");
     });
 }
 

@@ -1342,6 +1342,7 @@ fn instance_view(
         "created_at_ms": job.created_at_ms,
         "finished_at_ms": job.finished_at_ms,
         "cancellation_requested": controller.cancellation_requested,
+        "cancellation_reason": controller.cancellation_reason,
     });
     if let Some(request) = request {
         view["instance"] = json!(request.instance);
