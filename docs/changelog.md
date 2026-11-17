@@ -4,6 +4,14 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.471.0] - 2026-11-17
+
+### Added
+- versioned release dirs with atomic symlink flip for archive installs
+
+### Changed
+- settle a superseded Cook's owner through its lifecycle record
+
 ## [0.470.13] - 2026-11-17
 
 ### Changed
