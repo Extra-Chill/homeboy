@@ -179,6 +179,49 @@ pub struct AgentTaskGateInputSource {
     pub redaction_policy: AgentTaskGateRevealPolicy,
 }
 
+impl AgentTaskGateInputSource {
+    /// Reviewer-facing label for a visible file-backed gate: the file name the
+    /// controller snapshotted at admission. Inline and private sources have none.
+    pub fn file_label(&self) -> Option<String> {
+        if self.source_kind != "file" || self.visibility != AgentTaskGateVisibility::Visible {
+            return None;
+        }
+        let path = self.path.as_deref()?;
+        Path::new(path)
+            .file_name()
+            .map(|name| name.to_string_lossy().trim().to_string())
+            .filter(|name| !name.is_empty())
+    }
+
+    fn describes_program(&self, program: &str) -> bool {
+        self.sha256 == format!("sha256:{:x}", Sha256::digest(program.as_bytes()))
+    }
+}
+
+/// Carry each visible `--verify-file` source's file name onto the gate report
+/// that executed its program, matched by the admission-time content digest.
+pub fn apply_gate_input_source_labels(
+    gates: &mut [AgentTaskGateReport],
+    sources: &[AgentTaskGateInputSource],
+) {
+    for gate in gates {
+        if gate.visibility != AgentTaskGateVisibility::Visible {
+            continue;
+        }
+        let Ok(invocation) = gate.invocation() else {
+            continue;
+        };
+        let program = invocation.reviewer_command();
+        if let Some(label) = sources
+            .iter()
+            .filter(|source| source.describes_program(&program))
+            .find_map(AgentTaskGateInputSource::file_label)
+        {
+            gate.label = Some(label);
+        }
+    }
+}
+
 fn default_hydrate_dependencies() -> bool {
     true
 }
@@ -880,6 +923,11 @@ pub struct AgentTaskGateReport {
     /// (#16920).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub workspace_mutation: Option<AgentTaskGateWorkspaceMutation>,
+    /// Reviewer-facing name of the gate's declared source, such as the file
+    /// name of a `--verify-file` program. Positional ids (`gate-1`) are
+    /// meaningless to reviewers, so this becomes the gate result's name.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub label: Option<String>,
 }
 
 /// Difference between the admitted candidate tree and the gate workspace
@@ -1687,6 +1735,7 @@ impl AgentTaskGateReport {
             environment,
             setup: Vec::new(),
             workspace_mutation: None,
+            label: None,
         }
     }
 
@@ -1749,6 +1798,7 @@ impl AgentTaskGateReport {
             environment: AgentTaskGateEnvironment::default(),
             setup: Vec::new(),
             workspace_mutation: None,
+            label: None,
         }
     }
 
@@ -6615,7 +6665,7 @@ impl From<AgentTaskGateReport> for HomeboyGateResult {
 
         HomeboyGateResult::new(
             report.id.clone(),
-            report.id.clone(),
+            report.label.clone().unwrap_or_else(|| report.id.clone()),
             HomeboyGateKind::Command,
             status,
         )
