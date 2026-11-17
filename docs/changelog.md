@@ -4,6 +4,15 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.469.0] - 2026-11-17
+
+### Added
+- --human summary output; status names live gate waits
+
+### Fixed
+- share one host daemon per machine
+- allow admitted recovery steps to target terminal runs
+
 ## [0.468.8] - 2026-11-16
 
 ### Changed
