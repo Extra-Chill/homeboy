@@ -2,7 +2,7 @@ use homeboy_engine_primitives::content_hash;
 use std::collections::BTreeMap;
 use std::fs::{self, File, OpenOptions};
 use std::path::{Path, PathBuf};
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use serde::{Deserialize, Serialize};
 
@@ -1253,168 +1253,191 @@ fn cleanup_unlocked(
     // block reason is decided before any size walk), and the deadline bounds
     // the walk so a pass returns what it found instead of being killed.
     let mut inspected_count = 0;
-    for &(_, position) in &ordered {
-        if eligible.len() >= options.limit
-            || (inspected_count > 0 && deadline.is_some_and(|deadline| Instant::now() >= deadline))
-        {
-            break;
-        }
-        inspected_count += 1;
-        let resource = &index.resources[position];
-        let path = PathBuf::from(&resource.path);
-        if !path.exists() {
-            // Only a finalized lease is a converged one. An unfinalized row
-            // whose directory is missing may still belong to a dispatch that
-            // has not materialized its scratch yet.
-            if resource.finalized_at.is_some() && resource.git_worktree.is_some() {
-                stranded.push(position);
-            }
-            continue;
-        }
-        // A lease can outlive its worktree — an operator or a partial cleanup
-        // can remove `<lease>/workspace` on its own — so registration liveness
-        // is asked of the worktree path, not of the lease.
-        if let Some(registration) = resource.git_worktree.as_ref() {
-            if Path::new(&registration.path).exists() {
-                registered_worktree_count += 1;
-            } else if resource.finalized_at.is_some() {
-                stranded.push(position);
-            }
-        }
-        let retry_recovery = resource.lifecycle_state == "interrupted"
-            && resource
-                .terminal_evidence
-                .as_ref()
-                .and_then(|evidence| evidence.pointer("/workspace_recovery/state"))
-                .and_then(serde_json::Value::as_str)
-                != Some("recovered")
-            && cleanup_lifecycle_block_reason(
-                observation,
-                resource,
-                &path,
-                now,
-                options.retention_override_seconds,
-            )?
-            .is_none();
-        if retry_recovery && options.apply {
-            let resource = &mut index.resources[position];
-            let evidence = recover_authoritative_workspace(resource, &recovery.artifact_root);
-            resource
-                .terminal_evidence
-                .get_or_insert_with(|| serde_json::json!({}))["workspace_recovery"] = evidence;
-            // Persist recovery before any removal, under the cleanup index lock.
-            write_index_at_unlocked(index_path, &index)?;
-        }
-        let resource = &index.resources[position];
-        let recovery_pending = retry_recovery
-            && !options.apply
-            && git_safety_path(resource, &path).is_some_and(|workspace| {
-                git::run_git(&workspace, &["ls-files", "--stage"], "git ls-files --stage")
-                    .is_ok_and(|staged| !staged.lines().any(|line| line.starts_with("160000 ")))
-                    && !git_unpushed(&workspace)
-            });
-        let reason = if retry_recovery
-            && git_safety_path(resource, &path).is_some_and(|workspace| git_unpushed(&workspace))
-        {
-            Some("git checkout has dirty or unpushed state".to_string())
-        } else if recovery_pending {
-            None
-        } else {
-            cleanup_block_reason_with_observation(
-                observation,
-                resource,
-                &path,
-                now,
-                options.retention_override_seconds,
-            )?
-        };
-        if let Some(reason) = reason {
-            // Keep every row for an explicit `--full` inspection. The default
-            // response admits rows directly to its item/byte budget so a large
-            // retained index is not materialized before it is truncated.
-            all_skips.push((reason.clone(), Some(resource.run_id.clone())));
-            append_skipped_detail(
-                &mut skipped,
-                &mut skipped_bytes,
-                options.full,
-                ControllerScratchSkipped {
-                    path: resource.path.clone(),
-                    run_id: Some(resource.run_id.clone()),
-                    owner_pid: Some(resource.owner_pid),
-                    lifecycle_state: Some(resource.lifecycle_state.clone()),
-                    recovery_command: scratch_recovery_command(resource),
-                    reason,
-                },
-            )?;
-            continue;
-        }
-        let size_bytes = path_size(&path)?;
-        // Would this candidate also be eligible under the DEFAULT policy (no
-        // override)? The override only relaxes the retention time window, and
-        // every other guard has already passed, so default-eligibility reduces
-        // to the default retention window still being expired.
-        let owning_run = observation.get_run(&resource.run_id)?;
-        if resource_retention_window_expired(resource, owning_run.as_ref(), &path, now) {
-            default_policy_eligible_bytes += size_bytes;
-        }
-        eligible.push(ControllerScratchCandidate {
-            path: resource.path.clone(),
-            run_id: resource.run_id.clone(),
-            task_id: resource.task_id.clone(),
-            size_bytes,
-            owner_pid: resource.owner_pid,
-            lease_id: resource.lease_id.clone(),
-            reason: if recovery_pending {
-                "recovery will be re-evaluated on apply".to_string()
-            } else if resource.lifecycle_state == "interrupted"
-                && !homeboy_core::process::pid_is_running(resource.owner_pid)
-                && recovery_evidence_is_current(resource)
+    // Bound full-index rewrites without deferring durable progress until the
+    // entire inventory completes. Always flush the tail, including on errors
+    // from inspection of a later resource.
+    const REMOVALS_PER_INDEX_WRITE: usize = 16;
+    let mut pending_removals = 0;
+    let inventory_result: Result<()> = (|| {
+        for &(_, position) in &ordered {
+            if eligible.len() >= options.limit
+                || (inspected_count > 0
+                    && deadline.is_some_and(|deadline| Instant::now() >= deadline))
             {
-                "interrupted_owner_dead".to_string()
-            } else {
-                resource.terminal_reason.clone().unwrap_or_default()
-            },
-            lifecycle_state: resource.lifecycle_state.clone(),
-            source_ref: resource.source_ref.clone(),
-        });
-        // Reclaim at the resource boundary, before inspecting the next lease.
-        // Inventory must not consume the entire budget before apply can start.
-        if options.apply {
-            let candidate = eligible.last().expect("candidate just admitted");
-            let removal = remove_candidate_from_index(
-                &mut index,
-                observation,
-                candidate,
-                now,
-                options.retention_override_seconds,
-            );
-            // Persist each boundary, including any registration reconciliation
-            // performed before a failed removal.
-            write_index_at_unlocked(index_path, &index)?;
-            match removal? {
-                ScratchRemoval::Removed(bytes) => {
-                    applied_count += 1;
-                    reclaimed_bytes += bytes;
+                break;
+            }
+            inspected_count += 1;
+            let resource = &index.resources[position];
+            let path = PathBuf::from(&resource.path);
+            if !path.exists() {
+                // Only a finalized lease is a converged one. An unfinalized row
+                // whose directory is missing may still belong to a dispatch that
+                // has not materialized its scratch yet.
+                if resource.finalized_at.is_some() && resource.git_worktree.is_some() {
+                    stranded.push(position);
                 }
-                ScratchRemoval::Skipped(reason) => {
-                    all_skips.push((reason.clone(), Some(candidate.run_id.clone())));
-                    append_skipped_detail(
-                        &mut skipped,
-                        &mut skipped_bytes,
-                        options.full,
-                        ControllerScratchSkipped {
-                            path: candidate.path.clone(),
-                            run_id: Some(candidate.run_id.clone()),
-                            owner_pid: Some(candidate.owner_pid),
-                            lifecycle_state: Some(candidate.lifecycle_state.clone()),
-                            recovery_command: None,
-                            reason,
-                        },
-                    )?;
+                continue;
+            }
+            // A lease can outlive its worktree — an operator or a partial cleanup
+            // can remove `<lease>/workspace` on its own — so registration liveness
+            // is asked of the worktree path, not of the lease.
+            if let Some(registration) = resource.git_worktree.as_ref() {
+                if Path::new(&registration.path).exists() {
+                    registered_worktree_count += 1;
+                } else if resource.finalized_at.is_some() {
+                    stranded.push(position);
+                }
+            }
+            let retry_recovery = resource.lifecycle_state == "interrupted"
+                && resource
+                    .terminal_evidence
+                    .as_ref()
+                    .and_then(|evidence| evidence.pointer("/workspace_recovery/state"))
+                    .and_then(serde_json::Value::as_str)
+                    != Some("recovered")
+                && cleanup_lifecycle_block_reason(
+                    observation,
+                    resource,
+                    &path,
+                    now,
+                    options.retention_override_seconds,
+                )?
+                .is_none();
+            if retry_recovery && options.apply {
+                let resource = &mut index.resources[position];
+                let evidence = recover_authoritative_workspace(resource, &recovery.artifact_root);
+                resource
+                    .terminal_evidence
+                    .get_or_insert_with(|| serde_json::json!({}))["workspace_recovery"] = evidence;
+                // Persist recovery before any removal, under the cleanup index lock.
+                write_index_at_unlocked(index_path, &index)?;
+                pending_removals = 0;
+            }
+            let resource = &index.resources[position];
+            let recovery_pending = retry_recovery
+                && !options.apply
+                && git_safety_path(resource, &path).is_some_and(|workspace| {
+                    git::run_git(&workspace, &["ls-files", "--stage"], "git ls-files --stage")
+                        .is_ok_and(|staged| !staged.lines().any(|line| line.starts_with("160000 ")))
+                        && !git_unpushed(&workspace)
+                });
+            let reason = if retry_recovery
+                && git_safety_path(resource, &path)
+                    .is_some_and(|workspace| git_unpushed(&workspace))
+            {
+                Some("git checkout has dirty or unpushed state".to_string())
+            } else if recovery_pending {
+                None
+            } else {
+                cleanup_block_reason_with_observation(
+                    observation,
+                    resource,
+                    &path,
+                    now,
+                    options.retention_override_seconds,
+                )?
+            };
+            if let Some(reason) = reason {
+                // Keep every row for an explicit `--full` inspection. The default
+                // response admits rows directly to its item/byte budget so a large
+                // retained index is not materialized before it is truncated.
+                all_skips.push((reason.clone(), Some(resource.run_id.clone())));
+                append_skipped_detail(
+                    &mut skipped,
+                    &mut skipped_bytes,
+                    options.full,
+                    ControllerScratchSkipped {
+                        path: resource.path.clone(),
+                        run_id: Some(resource.run_id.clone()),
+                        owner_pid: Some(resource.owner_pid),
+                        lifecycle_state: Some(resource.lifecycle_state.clone()),
+                        recovery_command: scratch_recovery_command(resource),
+                        reason,
+                    },
+                )?;
+                continue;
+            }
+            let size_bytes = path_size(&path)?;
+            // Would this candidate also be eligible under the DEFAULT policy (no
+            // override)? The override only relaxes the retention time window, and
+            // every other guard has already passed, so default-eligibility reduces
+            // to the default retention window still being expired.
+            let owning_run = observation.get_run(&resource.run_id)?;
+            if resource_retention_window_expired(resource, owning_run.as_ref(), &path, now) {
+                default_policy_eligible_bytes += size_bytes;
+            }
+            eligible.push(ControllerScratchCandidate {
+                path: resource.path.clone(),
+                run_id: resource.run_id.clone(),
+                task_id: resource.task_id.clone(),
+                size_bytes,
+                owner_pid: resource.owner_pid,
+                lease_id: resource.lease_id.clone(),
+                reason: if recovery_pending {
+                    "recovery will be re-evaluated on apply".to_string()
+                } else if resource.lifecycle_state == "interrupted"
+                    && !homeboy_core::process::pid_is_running(resource.owner_pid)
+                    && recovery_evidence_is_current(resource)
+                {
+                    "interrupted_owner_dead".to_string()
+                } else {
+                    resource.terminal_reason.clone().unwrap_or_default()
+                },
+                lifecycle_state: resource.lifecycle_state.clone(),
+                source_ref: resource.source_ref.clone(),
+            });
+            // Reclaim at the resource boundary, before inspecting the next lease.
+            // Inventory must not consume the entire budget before apply can start.
+            if options.apply {
+                let candidate = eligible.last().expect("candidate just admitted");
+                // Mark dirty before calling: even a failed removal can reconcile
+                // a Git registration that must be recorded.
+                pending_removals += 1;
+                let removal = remove_candidate_from_index(
+                    &mut index,
+                    observation,
+                    candidate,
+                    now,
+                    options.retention_override_seconds,
+                );
+                if pending_removals >= REMOVALS_PER_INDEX_WRITE
+                    || deadline.is_some_and(|end| {
+                        end.saturating_duration_since(Instant::now()) <= Duration::from_millis(100)
+                    })
+                {
+                    write_index_at_unlocked(index_path, &index)?;
+                    pending_removals = 0;
+                }
+                match removal? {
+                    ScratchRemoval::Removed(bytes) => {
+                        applied_count += 1;
+                        reclaimed_bytes += bytes;
+                    }
+                    ScratchRemoval::Skipped(reason) => {
+                        all_skips.push((reason.clone(), Some(candidate.run_id.clone())));
+                        append_skipped_detail(
+                            &mut skipped,
+                            &mut skipped_bytes,
+                            options.full,
+                            ControllerScratchSkipped {
+                                path: candidate.path.clone(),
+                                run_id: Some(candidate.run_id.clone()),
+                                owner_pid: Some(candidate.owner_pid),
+                                lifecycle_state: Some(candidate.lifecycle_state.clone()),
+                                recovery_command: None,
+                                reason,
+                            },
+                        )?;
+                    }
                 }
             }
         }
+        Ok(())
+    })();
+    if pending_removals > 0 {
+        write_index_at_unlocked(index_path, &index)?;
     }
+    inventory_result?;
     let uninspected_resource_count = ordered.len().saturating_sub(inspected_count);
     let mut next_cursor = (uninspected_resource_count > 0)
         .then(|| format!("controller-scratch:{}", ordered[inspected_count - 1].0));
@@ -2713,7 +2736,14 @@ fn preserve_index_bytes(path: &Path, classification: &str) -> Result<PathBuf> {
     Ok(preserved_path)
 }
 
+#[cfg(test)]
+thread_local! {
+    static INDEX_WRITE_COUNT: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
 fn write_index_at_unlocked(path: &Path, index: &ControllerScratchIndex) -> Result<()> {
+    #[cfg(test)]
+    INDEX_WRITE_COUNT.with(|count| count.set(count.get() + 1));
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent).map_err(|error| {
             Error::internal_io(error.to_string(), Some(parent.display().to_string()))
@@ -5325,6 +5355,15 @@ mod tests {
     /// Deadline-bounded apply reports real disk progress and resumes to completion.
     #[test]
     fn public_cleanup_deadline_reports_progress_and_converges() {
+        assert_public_cleanup_progress(true);
+    }
+
+    #[test]
+    fn public_cleanup_batches_index_writes_and_flushes_tail() {
+        assert_public_cleanup_progress(false);
+    }
+
+    fn assert_public_cleanup_progress(expired_deadline: bool) {
         let context = homeboy_core::test_support::HermeticTestContext::new();
         let _home = homeboy_core::test_support::HomeGuard::new();
         let roots = context.path_roots();
@@ -5332,7 +5371,7 @@ mod tests {
         let root = roots.data().join("controller-scratch/attempts");
         fs::create_dir_all(&root).unwrap();
         let mut resources = Vec::new();
-        for number in 0..32 {
+        for number in 0..35 {
             let path = root.join(format!("attempt-{number:04}"));
             fs::create_dir(&path).unwrap();
             let mut row = resource(&path, &root);
@@ -5355,6 +5394,7 @@ mod tests {
             full: false,
             retention_override_seconds: Some(0),
         };
+        INDEX_WRITE_COUNT.with(|count| count.set(0));
         let mut cursor = None;
         let mut removed = 0;
         let mut reclaimed = 0;
@@ -5363,14 +5403,19 @@ mod tests {
             let size_before = path_size(&root).unwrap();
             // An expired injected budget deterministically yields after one
             // resource boundary, without relying on machine speed or sleeps.
-            let page = cleanup(options, cursor.as_deref(), Some(Instant::now())).unwrap();
+            let page = cleanup(
+                options,
+                cursor.as_deref(),
+                expired_deadline.then(Instant::now),
+            )
+            .unwrap();
             let count_after = fs::read_dir(&root).unwrap().count();
             assert_eq!(page.applied_count, count_before - count_after);
             assert_eq!(
                 page.reclaimed_bytes,
                 size_before - path_size(&root).unwrap()
             );
-            if pass == 0 {
+            if pass == 0 && expired_deadline {
                 assert!(page.applied_count > 0);
                 assert!(page.has_more);
                 assert!(page.next_command.is_some());
@@ -5384,10 +5429,56 @@ mod tests {
             }
         }
         assert!(cursor.is_none(), "deadline-bounded passes must converge");
-        assert_eq!(removed, 32);
+        assert_eq!(removed, 35);
+        INDEX_WRITE_COUNT.with(|count| {
+            assert_eq!(count.get(), if expired_deadline { 35 } else { 3 });
+        });
         assert_eq!(reclaimed, bytes_before - path_size(&root).unwrap());
         assert_eq!(fs::read_dir(&root).unwrap().count(), 0);
         assert_eq!(cleanup(options, None, None).unwrap().candidate_count, 0);
+    }
+
+    #[test]
+    fn public_cleanup_pages_recovery_evidence() {
+        let _context = homeboy_core::test_support::HermeticTestContext::new();
+        let _home = homeboy_core::test_support::HomeGuard::new();
+        let recovery = RecoveryRetention::configured().unwrap();
+        let root = recovery.artifact_root.join(RECOVERY_DIR);
+        fs::create_dir_all(&root).unwrap();
+        for number in 0..7 {
+            let evidence = root.join(format!("terminal-{number:04}"));
+            fs::create_dir(&evidence).unwrap();
+            fs::write(evidence.join("patch"), "retained patch").unwrap();
+        }
+        let options = ControllerScratchCleanupOptions {
+            apply: true,
+            limit: 2,
+            full: false,
+            retention_override_seconds: Some(0),
+        };
+        let mut cursor = Some("controller-scratch-recovery:".to_string());
+        let mut retained = 0;
+        for pass in 0..7 {
+            let page = cleanup(options, cursor.as_deref(), None).unwrap();
+            assert!(page.recovery_retained_count <= options.limit);
+            assert_eq!(page.applied_count, 0);
+            retained += page.recovery_retained_count;
+            if pass == 0 {
+                assert!(page.has_more, "recovery evidence must also be paged");
+                assert!(page.recovery_retained_count > 0);
+            }
+            cursor = page.next_cursor;
+            if !page.has_more {
+                break;
+            }
+            assert!(cursor
+                .as_deref()
+                .unwrap()
+                .starts_with("controller-scratch-recovery:"));
+        }
+        assert!(cursor.is_none(), "recovery evidence pages must converge");
+        assert_eq!(retained, 7);
+        assert_eq!(fs::read_dir(root).unwrap().count(), 7);
     }
 
     #[test]
