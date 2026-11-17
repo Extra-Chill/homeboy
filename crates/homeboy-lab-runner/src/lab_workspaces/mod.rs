@@ -900,6 +900,44 @@ pub(super) fn provider_config_extra_workspaces(
     Ok(workspaces)
 }
 
+/// Read validated Cook pins with their task roots using the same plan input
+/// contract as extra-workspace discovery. Invalid or unavailable plans remain
+/// the runner's validation responsibility.
+pub(crate) fn agent_task_plan_workspace_base_pins(
+    args: &[String],
+    source_path: &Path,
+) -> Vec<(PathBuf, String)> {
+    let Some(spec) = agent_task_plan_spec(args) else {
+        return Vec::new();
+    };
+    let Some(value) = read_agent_task_plan_spec_to_string(&spec, source_path)
+        .ok()
+        .and_then(|raw| serde_json::from_str::<serde_json::Value>(&raw).ok())
+    else {
+        return Vec::new();
+    };
+    value["tasks"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(|task| {
+            let root = task.pointer("/workspace/root")?.as_str()?;
+            let snapshot = task.pointer("/metadata/cook_workspace_base_snapshot")?;
+            if snapshot["schema"] != "homeboy/cook-workspace-base-snapshot/v1"
+                || snapshot["mode"] != "isolated_attempt_snapshot"
+            {
+                return None;
+            }
+            let base = snapshot["resolved_base"].as_str()?;
+            if base.len() != 40 || !base.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+                return None;
+            }
+            let root = PathBuf::from(root);
+            Some((root.canonicalize().unwrap_or(root), base.to_string()))
+        })
+        .collect()
+}
+
 /// Discover a controller-local `agent-task run-plan --plan @file` checkout so
 /// Lab offload can remap the plan path instead of asking the runner to read a
 /// controller-only filesystem path.
@@ -943,6 +981,7 @@ pub(super) fn agent_task_plan_extra_workspaces(
         Ok(value) => value,
         Err(_) => return Ok(workspaces),
     };
+    let workspace_base_pins = agent_task_plan_workspace_base_pins(args, source_path);
     // A derived Cook baseline can be the primary Lab source while its plan
     // still targets the issue worktree it was derived from. Materialize that
     // target separately so committed harvest selects its own provenance.
@@ -956,21 +995,13 @@ pub(super) fn agent_task_plan_extra_workspaces(
             .pointer("/workspace/root")
             .and_then(serde_json::Value::as_str)
         {
-            let git_fetch_refs = task
-                .pointer("/metadata/cook_workspace_base_snapshot")
-                .filter(|snapshot| {
-                    snapshot.get("schema").and_then(serde_json::Value::as_str)
-                        == Some("homeboy/cook-workspace-base-snapshot/v1")
-                        && snapshot.get("mode").and_then(serde_json::Value::as_str)
-                            == Some("isolated_attempt_snapshot")
-                })
-                .and_then(|snapshot| snapshot.get("resolved_base"))
-                .and_then(serde_json::Value::as_str)
-                .filter(|base| {
-                    base.len() == 40 && base.bytes().all(|byte| byte.is_ascii_hexdigit())
-                })
-                .map(|base| vec![base.to_string()])
-                .unwrap_or_default();
+            let root = PathBuf::from(path);
+            let root = root.canonicalize().unwrap_or(root);
+            let git_fetch_refs: Vec<String> = workspace_base_pins
+                .iter()
+                .filter(|(path, _)| path == &root)
+                .map(|(_, pin)| pin.clone())
+                .collect();
             add_candidate_extra_workspace_with_git_fetch_refs(
                 path,
                 "agent_task_plan_workspace",
