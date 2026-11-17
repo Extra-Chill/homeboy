@@ -1404,12 +1404,15 @@ impl AgentTaskScheduler {
                     AgentTaskScheduleSupport::classify_provider_timeout_without_progress(
                         &mut outcome,
                     );
+                    // A free stall re-run is not a funded execution: budgets
+                    // see only the attempts the plan paid for.
+                    let free_reruns = stall_reruns(&running_task.retry_attempts);
                     let retry_allowed = !AgentTaskScheduleSupport::rotation_preempts_retry(
                         &outcome,
                         rotation_takes_over,
                     ) && AgentTaskScheduleSupport::should_retry(
                         &outcome,
-                        result.attempt,
+                        result.attempt.saturating_sub(free_reruns),
                         execution_budget.max_same_provider_retries,
                         execution_budget.max_provider_executions,
                         retry_max_attempts,
@@ -1439,7 +1442,16 @@ impl AgentTaskScheduler {
                         result.attempt,
                         outcome.summary.clone(),
                     ));
-                    if retry_allowed
+                    // A liveness stall before any candidate exists is
+                    // transient: re-run it once on the same route, outside the
+                    // execution budget, before it can settle the task.
+                    let stall_rerun = !retry_allowed
+                        && !rotation_takes_over
+                        && free_reruns == 0
+                        && outcome.failure_classification
+                            == Some(AgentTaskFailureClassification::Stalled)
+                        && outcome.outcome_candidate().is_none();
+                    if (retry_allowed || stall_rerun)
                         && outcome.status != AgentTaskOutcomeStatus::CandidateRecoverable
                     {
                         let timeout_compaction = matches!(
@@ -1462,8 +1474,12 @@ impl AgentTaskScheduler {
                             &running_task,
                             authorization,
                         );
-                        retry_budget_used += 1;
-                        let retry_evidence = retry_attempt_evidence(&outcome, &running_task);
+                        let mut retry_evidence = retry_attempt_evidence(&outcome, &running_task);
+                        if stall_rerun {
+                            retry_evidence[STALL_RERUN] = true.into();
+                        } else {
+                            retry_budget_used += 1;
+                        }
                         let mut retry_attempts = running_task.retry_attempts;
                         retry_attempts.push(retry_evidence);
                         let (mut request, candidate_artifacts) = reset_attempt_request(
@@ -1638,7 +1654,8 @@ impl AgentTaskScheduler {
                     );
                     // Captured before the loop consumes the vector; this is the
                     // same-provider retry count the budget diagnostic needs.
-                    let same_provider_retries_used = running_task.retry_attempts.len();
+                    let same_provider_retries_used =
+                        running_task.retry_attempts.len() - free_reruns as usize;
                     for retry_attempt in running_task.retry_attempts {
                         outcome.diagnostics.push(AgentTaskDiagnostic {
                             class: "agent_task.retry_attempt".to_string(),
@@ -2015,6 +2032,16 @@ pub(super) fn artifact_root_for_running(running: &RunningTask) -> Result<PathBuf
             message: error.message,
         })
     }
+}
+
+/// Marks the retry evidence of the one free re-run a liveness stall gets.
+const STALL_RERUN: &str = "stall_rerun";
+
+fn stall_reruns(retry_attempts: &[serde_json::Value]) -> u32 {
+    retry_attempts
+        .iter()
+        .filter(|attempt| attempt[STALL_RERUN] == true)
+        .count() as u32
 }
 
 fn retry_attempt_evidence(outcome: &AgentTaskOutcome, running: &RunningTask) -> serde_json::Value {

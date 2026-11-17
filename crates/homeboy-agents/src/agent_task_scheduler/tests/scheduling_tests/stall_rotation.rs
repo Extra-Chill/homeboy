@@ -57,20 +57,23 @@ mod stall_rotation_tests {
         }
     }
 
-    /// A fake provider that always stalls: it never produces output, never
-    /// touches the workspace, and never succeeds. Models the #14914 incident
-    /// this issue was filed from ("20 min with zero output").
-    struct AlwaysStallsExecutor {
+    /// A fake provider that stalls on its first `stalls` calls, then succeeds.
+    /// A stall never produces output or touches the workspace, like the
+    /// #14914 incident ("20 min with zero output").
+    struct StallsExecutor {
         calls: Arc<AtomicUsize>,
+        stalls: usize,
     }
 
-    impl AgentTaskExecutorAdapter for AlwaysStallsExecutor {
+    impl AgentTaskExecutorAdapter for StallsExecutor {
         fn execute(
             &self,
             request: AgentTaskRequest,
             _context: AgentTaskExecutionContext,
         ) -> AgentTaskOutcome {
-            self.calls.fetch_add(1, Ordering::SeqCst);
+            if self.calls.fetch_add(1, Ordering::SeqCst) >= self.stalls {
+                return outcome(request.task_id, AgentTaskOutcomeStatus::Succeeded);
+            }
             let mut result = outcome(request.task_id, AgentTaskOutcomeStatus::ProviderError);
             result.failure_classification = Some(AgentTaskFailureClassification::Stalled);
             result.summary =
@@ -361,32 +364,37 @@ mod stall_rotation_tests {
         );
     }
 
-    /// A pure "zero output, no progress" stall — the #14914 incident shape —
-    /// with no rotation policy configured terminates as a plain provider
-    /// error rather than hanging, since there is no patch to recover.
+    /// A pure "zero output, no progress" stall (#14914) with no rotation
+    /// policy is re-run once on the same route, outside the execution budget
+    /// (#18349). A transient stall then completes; a second stall settles the
+    /// task as a stalled provider error instead of hanging.
     #[test]
-    fn a_stall_with_no_partial_work_and_no_rotation_policy_terminates_cleanly() {
-        let calls = Arc::new(AtomicUsize::new(0));
-        let scheduler = AgentTaskScheduler::new(Arc::new(AlwaysStallsExecutor {
-            calls: Arc::clone(&calls),
-        }));
-        let plan = plan_with_tasks(1);
+    fn a_stall_with_no_partial_work_and_no_rotation_policy_is_rerun_once() {
+        for (stalls, status) in [
+            (1, AgentTaskOutcomeStatus::Succeeded),
+            (usize::MAX, AgentTaskOutcomeStatus::ProviderError),
+        ] {
+            let calls = Arc::new(AtomicUsize::new(0));
+            let scheduler = AgentTaskScheduler::new(Arc::new(StallsExecutor {
+                calls: Arc::clone(&calls),
+                stalls,
+            }));
 
-        let aggregate = scheduler.run(plan);
+            let aggregate = scheduler.run(plan_with_tasks(1));
 
-        assert_eq!(calls.load(Ordering::SeqCst), 1);
-        assert_ne!(
-            aggregate.status(),
-            RunExecutionState::Succeeded,
-            "a stall must never silently look like success"
-        );
-        assert_eq!(
-            aggregate.outcomes[0].status,
-            AgentTaskOutcomeStatus::ProviderError
-        );
-        assert_eq!(
-            aggregate.outcomes[0].failure_classification,
-            Some(AgentTaskFailureClassification::Stalled)
-        );
+            assert_eq!(calls.load(Ordering::SeqCst), 2, "stalls={stalls}");
+            let outcome = &aggregate.outcomes[0];
+            assert_eq!(outcome.status, status, "{aggregate:#?}");
+            if status == AgentTaskOutcomeStatus::ProviderError {
+                assert_eq!(
+                    outcome.failure_classification,
+                    Some(AgentTaskFailureClassification::Stalled)
+                );
+                assert!(outcome.diagnostics.iter().any(|diagnostic| {
+                    diagnostic.class == "agent_task.retry_attempt"
+                        && diagnostic.data["stall_rerun"] == true
+                }));
+            }
+        }
     }
 }
