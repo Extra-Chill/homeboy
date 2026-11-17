@@ -1326,7 +1326,8 @@ fn cleanup_unlocked(
                 now,
                 options.retention_override_seconds,
             )?
-            .is_none();
+            .is_none()
+            && terminal_recovery_inputs_established(resource, &path);
         if retry_recovery && options.apply {
             let resource = &mut index.resources[position];
             let evidence = recover_authoritative_workspace(resource, &recovery.artifact_root);
@@ -2299,6 +2300,21 @@ fn git_safety_path(resource: &ControllerScratchResource, path: &Path) -> Option<
     }
 
     None
+}
+
+/// A dirty terminal workspace becomes a preservation candidate only once its
+/// owning run's terminal state and recovery inputs are established on the
+/// lease. Terminal replay projects them by marking the lease `interrupted`.
+/// Otherwise the owner must have finalized it (not left it `active`) and either
+/// recorded the base that bounds the candidate's commits or left no unpushed
+/// commits, so HEAD itself is a sound base. Anything else stays retained with
+/// the ordinary dirty/unpushed reason until terminal replay records recovery.
+fn terminal_recovery_inputs_established(resource: &ControllerScratchResource, path: &Path) -> bool {
+    resource.lifecycle_state == "interrupted"
+        || (resource.lifecycle_state != "active"
+            && (resource.base_sha.is_some()
+                || git_safety_path(resource, path)
+                    .is_some_and(|workspace| !git_unpushed(&workspace))))
 }
 
 fn recovery_evidence_is_current(resource: &ControllerScratchResource) -> bool {
@@ -3976,6 +3992,66 @@ mod tests {
             "uncommitted candidate\n"
         );
         assert_eq!(fs::read(restored.join("new.bin")).unwrap(), b"new\0source");
+    }
+
+    /// Until terminal replay projects a lease (or its owner recorded a base),
+    /// a dead dirty checkout with unpushed commits is not a preservation
+    /// candidate: it keeps its ordinary retention reason.
+    #[test]
+    fn unprojected_dirty_unpushed_lease_without_base_stays_retained() {
+        for lifecycle_state in ["active", "released"] {
+            let data_root = tempfile::tempdir().expect("data root");
+            let (_observation_root, observation) = observation_store();
+            let root = tempfile::tempdir().expect("root");
+            let scratch = root.path().join("scratch");
+            fs::create_dir(&scratch).expect("scratch");
+            run_git(&scratch, &["init", "-b", "main"]);
+            run_git(
+                &scratch,
+                &[
+                    "-c",
+                    "user.name=Test",
+                    "-c",
+                    "user.email=test@example.com",
+                    "commit",
+                    "--allow-empty",
+                    "-m",
+                    "unpushed",
+                ],
+            );
+            fs::write(scratch.join("untracked.txt"), "dirty").expect("dirty file");
+            let mut resource = resource(&scratch, root.path());
+            resource.lifecycle_state = lifecycle_state.to_string();
+            write_index_at(
+                data_root.path(),
+                &ControllerScratchIndex {
+                    schema: schema(),
+                    resources: vec![resource],
+                    walk_resume: None,
+                },
+            );
+            for apply in [false, true] {
+                let output = cleanup_at(
+                    data_root.path(),
+                    &observation,
+                    ControllerScratchCleanupOptions {
+                        apply,
+                        limit: 10,
+                        full: true,
+                        retention_override_seconds: Some(0),
+                    },
+                );
+                assert_eq!(output.candidate_count, 0, "{lifecycle_state} {apply}");
+                assert_eq!(
+                    output.skipped[0].reason, "git checkout has dirty or unpushed state",
+                    "{lifecycle_state} {apply}"
+                );
+            }
+            assert!(scratch.join("untracked.txt").exists());
+            assert!(read_index_at(data_root.path()).resources[0]
+                .terminal_evidence
+                .is_none());
+        }
     }
 
     #[test]
