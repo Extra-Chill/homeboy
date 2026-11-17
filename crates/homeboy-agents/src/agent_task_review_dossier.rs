@@ -5,6 +5,9 @@ use homeboy_core::error::{Error, Result};
 use homeboy_core::gate::HomeboyGateResult;
 use homeboy_core::git::is_conventional_subject;
 
+mod template;
+pub use template::render_review_dossier_for_worktree;
+
 pub const AGENT_TASK_REVIEW_DOSSIER_SCHEMA: &str = "homeboy/agent-task-review-dossier/v1";
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord)]
@@ -2380,6 +2383,79 @@ mod tests {
             out_of_scope_changes: Vec::new(),
             repro: None,
         }
+    }
+
+    #[test]
+    fn worktree_template_render_preserves_repository_contract() {
+        let worktree = tempfile::tempdir().unwrap();
+        let mut value = dossier();
+        value.ai_assistance.contribution = "Implemented the rendering change".into();
+        let profile = default_profile();
+        let original = render_review_dossier(&value, &profile);
+        assert_eq!(
+            render_review_dossier_for_worktree(&value, &profile, worktree.path()),
+            original
+        );
+        let fixture = include_str!("../tests/fixtures/studio-pr-template.md");
+        std::fs::create_dir(worktree.path().join(".github")).unwrap();
+        std::fs::write(
+            worktree.path().join(".github/PULL_REQUEST_TEMPLATE.md"),
+            fixture,
+        )
+        .unwrap();
+        // The higher-precedence GitHub directory wins over docs and root.
+        std::fs::create_dir(worktree.path().join("docs")).unwrap();
+        std::fs::write(
+            worktree.path().join("docs/pull_request_template.md"),
+            "wrong docs template",
+        )
+        .unwrap();
+        std::fs::write(
+            worktree.path().join("pull_request_template.md"),
+            "wrong root template",
+        )
+        .unwrap();
+        let body = render_review_dossier_for_worktree(&value, &profile, worktree.path());
+        let headings = |text: &str| {
+            text.lines()
+                .filter(|line| line.starts_with("## "))
+                .map(str::to_string)
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(headings(&body), headings(fixture));
+        for expected in [
+            "Closes #8058",
+            "Implemented the rendering change",
+            "Pi",
+            "openai/gpt-5.6-terra",
+            "Add dossier",
+            "Changes output",
+            "cargo test dossier",
+            "Keep this repository-specific prompt.",
+            "- [ ] Reviewed the change",
+            "- [ ] Updated documentation",
+        ] {
+            assert!(body.contains(expected), "missing {expected}: {body}");
+        }
+        for forbidden in [
+            "Publication identity:",
+            "Measurement evidence is missing:",
+            "- [x]",
+            "wrong docs template",
+            "wrong root template",
+        ] {
+            assert!(!body.contains(forbidden), "unexpected {forbidden}: {body}");
+            assert!(!original.contains(forbidden));
+        }
+        std::fs::rename(
+            worktree.path().join(".github/PULL_REQUEST_TEMPLATE.md"),
+            worktree.path().join(".github/PuLl_ReQuEsT_tEmPlAtE.Md"),
+        )
+        .unwrap();
+        assert_eq!(
+            body,
+            render_review_dossier_for_worktree(&value, &profile, worktree.path())
+        );
     }
 
     #[test]

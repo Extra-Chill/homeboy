@@ -2,7 +2,8 @@ use serde_json::json;
 
 use crate::agent_task_promotion::AgentTaskPromotionReport;
 use crate::agent_task_review_dossier::{
-    enrich_dossier, render_review_dossier, AgentTaskReviewDossier, AgentTaskReviewProfile,
+    enrich_dossier, render_review_dossier_for_worktree, AgentTaskReviewDossier,
+    AgentTaskReviewProfile,
 };
 use homeboy_core::error::{Error, Result};
 use homeboy_core::gate::{HomeboyGateKind, HomeboyGateResult, HomeboyGateStatus};
@@ -97,7 +98,11 @@ fn update_existing_pr<B: AgentTaskPrFinalizationBackend>(
         &existing.url,
         existing_body.as_deref().unwrap_or_default(),
     );
-    let body = render_review_dossier(&options.review_dossier, &options.review_profile);
+    let body = render_review_dossier_for_worktree(
+        &options.review_dossier,
+        &options.review_profile,
+        std::path::Path::new(&options.path),
+    );
     let updated = backend.update_pr(
         options.component_id.as_deref(),
         &options.path,
@@ -156,16 +161,8 @@ fn finalize_pr_with_backend_mode<B: AgentTaskPrFinalizationBackend>(
         }
         options.draft_pr = true;
     }
-    let (publication_identity, _requester) =
-        backend.publication_context(&options.run_id, lifecycle_store)?;
-    // Recorded before preflight so the validated intent and the published
-    // receipt carry the same dossier (manual receipts must match exactly).
-    options.review_dossier.evidence.push(
-        crate::agent_task_review_dossier::AgentTaskReviewEvidence {
-            summary: format!("Publication identity: {publication_identity}"),
-            url: None,
-        },
-    );
+    // Authorization context belongs to durable run evidence, not PR prose.
+    backend.publication_context(&options.run_id, lifecycle_store)?;
     let durable_acceptance;
     if options.manual_finalization {
         options.review_dossier.ai_assistance.model =
@@ -421,7 +418,11 @@ fn finalize_pr_with_backend_mode<B: AgentTaskPrFinalizationBackend>(
     if let Some(verified_base) = options.review_dossier.verified_base.as_mut() {
         verified_base.publication_sha = publication_base_sha;
     }
-    let body = render_review_dossier(&options.review_dossier, &options.review_profile);
+    let body = render_review_dossier_for_worktree(
+        &options.review_dossier,
+        &options.review_profile,
+        std::path::Path::new(&options.path),
+    );
     let mut newly_created = existing.is_none();
     let mut draft = existing.as_ref().map_or(options.draft_pr, |pr| pr.is_draft);
     let mut ready_transitioned = false;
