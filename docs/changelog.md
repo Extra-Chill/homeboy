@@ -4,6 +4,11 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.471.1] - 2026-11-17
+
+### Changed
+- list instances from their summary fields, not every retained body
+
 ## [0.471.0] - 2026-11-17
 
 ### Added
