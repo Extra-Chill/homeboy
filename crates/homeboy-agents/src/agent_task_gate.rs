@@ -1,4 +1,5 @@
 pub mod data_inputs;
+pub mod execution_start;
 pub mod failure_excerpt;
 pub mod placement;
 pub mod verdict;
@@ -2941,6 +2942,7 @@ fn run_gate_argv_local(
             Some(format!("contain deterministic gate {command}")),
         )
     })?;
+    execution_start::before_command_start()?;
     let child = process.spawn().map_err(|error| {
         Error::internal_io(
             error.to_string(),
@@ -3804,7 +3806,8 @@ impl SelectedGateEnvironment {
             cwd,
             None,
             &self.values,
-        )?;
+        )
+        .map_err(|error| placement::with_local_reserve_recovery(error))?;
         // Store sizing is evidence only. A concurrent gate may update the
         // shared target while this observation walks it.
         let bytes_before = target.size_bytes().ok();
