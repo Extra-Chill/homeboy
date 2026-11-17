@@ -40,6 +40,13 @@ def failure_context(event):
     """
     stdout = event.get("stdout") if isinstance(event.get("stdout"), str) else ""
     stderr = event.get("stderr") if isinstance(event.get("stderr"), str) else ""
+    # Timeouts can have no captured output (not even a panic). nextest's
+    # libtest-json-plus event still carries `reason: time limit exceeded`.
+    # Preserve that diagnostic even when the test also wrote output.
+    reason = event.get("reason")
+    if isinstance(reason, str) and reason:
+        diagnostic = f"[nextest: {reason}]"
+        stdout = f"{stdout}\n{diagnostic}" if stdout else diagnostic
     if not stdout and not stderr:
         stdout = MISSING_FAILURE_CONTEXT
     return stdout, stderr

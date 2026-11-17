@@ -249,6 +249,28 @@ assert record["stdout_excerpt"] == "[nextest did not emit captured per-test outp
 assert record["stderr_excerpt"] == "", record
 PY
 
+# slow-timeout termination is a failed event with a reason, not necessarily
+# captured output. Keep the reason alongside any output instead of claiming
+# nextest supplied no context.
+cat > "$WORK_DIR/timeout.jsonl" <<'EOF'
+{"type":"test","event":"failed","name":"alpha::alpha_lib$tests::silent_timeout","reason":"time limit exceeded","exec_time":120.0}
+{"type":"test","event":"failed","name":"alpha::alpha_lib$tests::noisy_timeout","reason":"time limit exceeded","stdout":"provider started","stderr":"still waiting"}
+EOF
+counts_case "timeout failure context" "$WORK_DIR/timeout.jsonl" '2\t0\t2\t0' 'alpha::alpha_lib$tests::noisy_timeout alpha::alpha_lib$tests::silent_timeout'
+python3 - "$WORK_DIR/failure-context.json" <<'PY'
+import json
+import sys
+
+records = json.load(open(sys.argv[1], encoding="utf-8"))
+assert len(records) == 2, records
+for record in records:
+    assert "[nextest: time limit exceeded]" in record["stdout_excerpt"], record
+    assert "did not emit" not in record["stdout_excerpt"], record
+noisy = next(record for record in records if "noisy_timeout" in record["name"])
+assert "provider started" in noisy["stdout_excerpt"], noisy
+assert noisy["stderr_excerpt"] == "still waiting", noisy
+PY
+
 # All skipped is a measured outcome, not an absent one.
 cat > "$WORK_DIR/skipped.jsonl" <<'EOF'
 {"type":"test","event":"ignored","name":"alpha::alpha_lib$tests::one"}

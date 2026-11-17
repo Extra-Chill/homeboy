@@ -5,6 +5,8 @@
 live-daemons = { max-threads = 4 }
 
 [profile.default]
+# Termination emits a failed JSON event with reason="time limit exceeded".
+# The review harness preserves that reason even when captured output is empty.
 slow-timeout = { period = "30s", terminate-after = 4 }
 
 [[profile.default.overrides]]

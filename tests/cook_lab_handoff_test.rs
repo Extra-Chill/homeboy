@@ -330,6 +330,11 @@ fn explicit_wait_and_runner_owned_cooks_return_terminal_failure() {
         let started_file = context.root().join("provider-started");
         let mut command = context.command(TestBinary::HomeboyFixture);
         command
+            // Local admission otherwise polls real host load until it cools;
+            // that wait dominates this foreground/terminal contract test.
+            // Use the existing CI load seam, not a shorter execution deadline.
+            .env("GITHUB_ACTIONS", "true")
+            .env("HOMEBOY_TEST_LOAD_AVERAGES", "0,0,0")
             .env("HOMEBOY_FIXTURE_PROVIDER_STARTED_FILE", &started_file)
             .env("HOMEBOY_FIXTURE_PROVIDER_DELAY_MS", "1000");
         if runner_owned {
