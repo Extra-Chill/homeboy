@@ -154,6 +154,7 @@ pub(super) fn classify_pr_ci(
     checks: &[serde_json::Value],
 ) -> (String, String, String) {
     let terminal_pr = pr_state.eq_ignore_ascii_case("MERGED") || merged_at.is_some();
+    let checks = &super::latest_checks(checks);
     if checks.is_empty() {
         let next_action = if terminal_pr { "none" } else { "merge_ready" };
         return (
