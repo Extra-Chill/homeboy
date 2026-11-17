@@ -4,6 +4,13 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.469.7] - 2026-11-17
+
+### Fixed
+- derive the --task-url prompt wherever a Cook is prepared
+- re-run a failed gate once and record a recovered failure as flaky
+- strip terminal escapes and links from published gate output
+
 ## [0.469.6] - 2026-11-17
 
 ### Changed
