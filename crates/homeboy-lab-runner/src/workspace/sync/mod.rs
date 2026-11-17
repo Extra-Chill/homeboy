@@ -324,6 +324,7 @@ fn sync_workspace_in_roots_controlled(
                     Some("prepared_source_view".to_string());
                 Ok(None)
             } else if options.controller_routed_git
+                || requires_controller_objects(&git.git_fetch_refs)
                 || (git.branch.is_none() && !git.git_fetch_refs.contains(&git.head))
                 || source_materialization::requires_controller_routed_workspace_sync(
                     &git.remote_url,
@@ -748,6 +749,14 @@ fn materialize_git_fallback_filesystem_snapshot(
     _closure_error: &Error,
     control: &WorkspaceControl,
 ) -> Result<(RunnerWorkspaceSyncOutput, i32)> {
+    if requires_controller_objects(&options.git_fetch_refs) {
+        return Err(Error::validation_invalid_argument(
+            "agent_task.required_source_objects_unshippable",
+            format!("cannot ship required source objects: {_closure_error}"),
+            Some(local_path.display().to_string()),
+            None,
+        ));
+    }
     let (snapshot, stats, content_manifest, content_hash) =
         snapshot_content_controlled(local_path, excludes, includes, control)?;
     let remote_path = temp::unique_name(
@@ -5011,4 +5020,14 @@ mod tests {
         .expect_err("tight filesystem must refuse");
         assert!(reservation_holders(data_root.path(), &roomy.identity).is_empty());
     }
+}
+
+/// `refs/homeboy/*` pins (gate-feedback candidates) exist only in the
+/// controller's object store, so only the controller bundle can ship them and a
+/// filesystem snapshot cannot stand in for them. Base-commit pins stay on the
+/// ordinary materialization path.
+fn requires_controller_objects(git_fetch_refs: &[String]) -> bool {
+    git_fetch_refs
+        .iter()
+        .any(|reference| reference.starts_with("refs/homeboy/"))
 }

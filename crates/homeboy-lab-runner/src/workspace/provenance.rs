@@ -1726,6 +1726,135 @@ mod tests {
     }
 
     #[test]
+    fn gate_feedback_public_dispatch_resolves_controller_only_candidate_on_runner() {
+        if crate::test_support::isolated_process() {
+            return;
+        }
+        let _home = homeboy_core::test_support::HomeGuard::new();
+        crate::register_lab_workspace_provenance_provider();
+        let controller = git_workspace();
+        let base = git(controller.path(), &["rev-parse", "HEAD"]).unwrap();
+        std::fs::write(controller.path().join("candidate.txt"), "candidate\n").unwrap();
+        git(controller.path(), &["add", "."]).unwrap();
+        git(
+            controller.path(),
+            &[
+                "-c",
+                "user.name=Test",
+                "-c",
+                "user.email=test@localhost",
+                "commit",
+                "-m",
+                "candidate",
+            ],
+        )
+        .unwrap();
+        let sha = git(controller.path(), &["rev-parse", "HEAD"]).unwrap();
+        let tree = git(controller.path(), &["rev-parse", "HEAD^{tree}"]).unwrap();
+        git(
+            controller.path(),
+            &["update-ref", "refs/homeboy/candidates/retry", &sha],
+        )
+        .unwrap();
+        git(controller.path(), &["reset", "--hard", &base]).unwrap();
+        let runner_root = tempfile::tempdir().unwrap();
+        crate::create(&serde_json::json!({"id":"candidate-runner", "kind":"local", "workspace_root":runner_root.path()}).to_string(), false).unwrap();
+        git(
+            controller.path(),
+            &[
+                "remote",
+                "add",
+                "origin",
+                "https://invalid.example/controller-only.git",
+            ],
+        )
+        .unwrap();
+        let mut task = filesystem_snapshot_request(controller.path());
+        task.metadata = serde_json::json!({"cook_loop":{"kind":"deterministic-gate-feedback"}});
+        task.inputs = serde_json::json!({"cook_loop":{
+            "source_run_id":"retry", "candidate_commit":{
+                "base_sha":base,"candidate_sha":sha,"tree_sha":tree
+            }
+        }});
+        let mut plan = AgentTaskPlan::new("candidate-retry", vec![task]);
+        let args = vec![
+            "homeboy".into(),
+            "agent-task".into(),
+            "run-plan".into(),
+            "--plan".into(),
+            serde_json::to_string(&plan).unwrap(),
+        ];
+        let mut missing = plan.clone();
+        missing.tasks[0].inputs["cook_loop"]["candidate_commit"]["candidate_sha"] =
+            serde_json::json!("a".repeat(40));
+        let mut missing_args = args.clone();
+        missing_args[4] = serde_json::to_string(&missing).unwrap();
+        let error = crate::lab_workspaces::agent_task_plan_workspace_base_pins(
+            &missing_args,
+            controller.path(),
+        )
+        .unwrap_err();
+        assert!(format!("{error:?}").contains("agent_task.gate_feedback_candidate_unshippable"));
+        let pins =
+            crate::lab_workspaces::agent_task_plan_workspace_base_pins(&args, controller.path())
+                .unwrap();
+        let synced = crate::sync_workspace(
+            "candidate-runner",
+            crate::RunnerWorkspaceSyncOptions {
+                path: controller.path().display().to_string(),
+                mode: crate::RunnerWorkspaceSyncMode::Git,
+                controller_routed_git: true,
+                git_fetch_refs: pins.into_iter().map(|(_, pin)| pin).collect(),
+                run_isolation_token: Some("candidate-retry".into()),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        let runner = Path::new(&synced.0.remote_path);
+        assert_ne!(runner, controller.path());
+        assert_eq!(git(runner, &["rev-parse", "HEAD"]).unwrap(), base);
+        assert_eq!(
+            git(runner, &["rev-parse", &format!("{sha}^{{tree}}")]).unwrap(),
+            tree
+        );
+        // Remove access to the controller object store before public dispatch.
+        let hidden = controller.path().with_extension("hidden");
+        std::fs::rename(controller.path(), &hidden).unwrap();
+        plan.tasks[0].workspace.root = Some(runner.display().to_string());
+        let dispatched = Arc::new(AtomicBool::new(false));
+        use homeboy_agents::agent_task_submission_service::{
+            prepared_submission_request, submit_prepared_plan, PreparedAgentTaskSubmission,
+        };
+        let outcome = submit_prepared_plan(
+            &prepared_submission_request(Some("candidate-retry"), false, "regression").unwrap(),
+            PreparedAgentTaskSubmission::new(plan),
+            Arc::new(FilesystemSnapshotProvider {
+                change_workspace: true,
+                dispatched: Arc::clone(&dispatched),
+            }),
+        )
+        .unwrap();
+        std::fs::rename(&hidden, controller.path()).unwrap();
+        assert!(dispatched.load(Ordering::SeqCst), "{outcome:#?}");
+        let aggregate = outcome.aggregate.unwrap();
+        let candidate = aggregate.outcomes[0]
+            .candidate
+            .as_ref()
+            .expect("remediated candidate");
+        assert_eq!(
+            git(
+                runner,
+                &[
+                    "show",
+                    &format!("{}:candidate.txt", candidate.candidate_sha)
+                ]
+            )
+            .unwrap(),
+            "candidate"
+        );
+    }
+
+    #[test]
     fn filesystem_snapshot_dispatches_providers_and_harvests_only_changed_candidates() {
         if crate::test_support::isolated_process() {
             return;

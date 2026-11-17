@@ -1024,7 +1024,7 @@ mod committed_harvest_tests {
     }
 
     #[test]
-    fn gate_feedback_retry_fetches_persisted_candidate_into_fresh_repository() {
+    fn gate_feedback_retry_resolves_materialized_candidate_in_fresh_repository() {
         let temp = tempfile::tempdir().unwrap();
         let (controller, base) = candidate_attempt_repo(temp.path());
         let fresh = temp.path().join("fresh");
@@ -1053,7 +1053,16 @@ mod committed_harvest_tests {
             "base_sha": base, "candidate_sha": sha, "tree_sha": tree
         });
         request.inputs["cook_loop"]["source_run_id"] = serde_json::json!("cook-1");
-        request.inputs["cook_loop"]["candidate_repository"] = serde_json::json!(controller);
+        // Source materialization imports the candidate before the scheduler runs.
+        git(
+            &fresh,
+            &[
+                "fetch",
+                "--no-tags",
+                controller.to_str().unwrap(),
+                "refs/homeboy/candidates/cook-1",
+            ],
+        );
         let preflight =
             prepare_committed_harvest(&request, None, &HarvestExecutionContext::default()).unwrap();
         assert_eq!(
