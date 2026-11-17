@@ -329,8 +329,7 @@ format!(
         return CookRecoveryStep::Retry;
     }
     let continuation_eligible = match &status {
-        CookStatus::Completed
-        | CookStatus::ReviewReady
+        CookStatus::ReviewReady
         | CookStatus::GreenNoFinalize
         | CookStatus::IntentionalNoChange
         | CookStatus::NoCandidate
@@ -340,7 +339,7 @@ format!(
         | CookStatus::PreExecutionFailure => false,
         // Infrastructure deferral consumes neither a provider retry nor budget:
         // continuation re-verifies the already materialized candidate.
-        CookStatus::GatesDeferred => true,
+        CookStatus::GateEnvironmentUnavailable => true,
         status if status.is_gate_failure() => inputs.retry_admitted,
         _ => true,
     };
@@ -434,8 +433,7 @@ pub(crate) fn baseline_red_refusal(cook_id: &str) -> String {
 fn status_is_settled(status: &CookStatus) -> bool {
     matches!(
         status,
-        CookStatus::Completed
-            | CookStatus::ReviewReady
+        CookStatus::ReviewReady
             | CookStatus::DraftPublished
             | CookStatus::GreenNoFinalize
             | CookStatus::IntentionalNoChange
@@ -2163,12 +2161,12 @@ mod tests {
             CookRecoveryStep::Reconcile
         );
         for status in [
-            "completed",
+            "review_ready",
             "cancelled",
             "execution_budget_exhausted",
             "pre_execution_failure",
             "gate_failed",
-            "running",
+            "in_flight",
         ] {
             assert!(step(status, |_| {}).is_none(), "{status}");
         }
@@ -2194,7 +2192,7 @@ mod tests {
             "an admitted retry still continues the Cook"
         );
         assert!(
-            step("completed", |inputs| inputs.applied_gate_failure = true).is_none(),
+            step("review_ready", |inputs| inputs.applied_gate_failure = true).is_none(),
             "only a gate failure takes replacement gates"
         );
         assert_eq!(
@@ -2224,12 +2222,7 @@ mod tests {
                 "{status}"
             );
         }
-        for status in [
-            "completed",
-            "review_ready",
-            "cancelled",
-            "green_no_finalize",
-        ] {
+        for status in ["review_ready", "cancelled", "green_no_finalize"] {
             assert_ne!(
                 step(status, |inputs| inputs.verified_unpublished = true),
                 CookRecoveryStep::Publish,

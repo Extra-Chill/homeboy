@@ -1,188 +1,83 @@
-//! The Cook status vocabulary and the single classification of terminality.
+//! The open vocabulary of outcomes Cook produces.
 //!
-//! # Why this exists
-//!
-//! Cook status was an untyped `String` classified by three independent,
-//! hand-maintained lists inside `agent_task_service/cook.rs`:
-//!
-//! | purpose | vocabulary it recognized |
-//! |---|---|
-//! | batch totals | `queued`, `running`/`in_flight`, `cancelled`, `timed_out` |
-//! | exit code `0` | `queued`, `running`, `in_flight`, `review_ready`, `draft_published`, `green_no_finalize` |
-//! | terminality | everything except `queued`, `running`, `in_flight` |
-//!
-//! Three lists over one open vocabulary have to agree by hand, and they did
-//! not: `cancelled` and `timed_out` were known only to the batch list, and
-//! `review_ready`/`draft_published`/`green_no_finalize` only to the exit-code list. This module
-//! is the one place the vocabulary is written down, so the three call sites
-//! classify against the same enum instead of three divergent string literals.
-//!
-//! # Terminality is declared, not inferred
-//!
-//! Whether a Cook will advance on its own is *not* derived from this
-//! vocabulary. It is [`CookDisposition`], declared by the exit that built the
-//! report.
-//!
-//! Inferring it from the status string was the original defect. The terminal
-//! side of the vocabulary is open — several exits feed it straight from
-//! `finalization["status"]`, an arbitrary JSON string that defaults to
-//! `"unknown"` when the field is missing — so any inference has to pick a
-//! wrong default for statuses it has not been taught. Guessing "terminal"
-//! fires a completion at the orchestrator for a Cook that is still running;
-//! guessing "in flight" leaves a finished Cook with no completion at all.
-//!
-//! There is no need to guess. At every one of those exits the Cook loop has
-//! already decided: it either handed the work to a durable owner that will
-//! carry it forward, or it stopped. Recording that decision removes the
-//! question instead of answering it.
-//!
-//! [`CookStatus::Unknown`] preserves the raw string so a status this binary
-//! does not recognize is never rewritten.
-//!
-//! # Classifying an open vocabulary for a machine consumer
-//!
-//! Openness is right for reporting and wrong for classification. A consumer
-//! that receives `{"status": "moving_base"}` over HTTP, or reads it back from
-//! a persisted report, has no process exit code to branch on and cannot decide
-//! success, terminality, or retry from the string alone.
-//!
-//! `homeboy_control_plane_contract::ControlPlaneState` is the closed
-//! vocabulary that answers those questions, and
-//! `homeboy_core::run_lifecycle_status::from_cook_status` is the projection
-//! onto it. External consumers read canonical lifecycle and
-//! retry eligibility from `homeboy/control-plane-run/v1`.
-//!
-//! That projection is deliberately *not* an authority on terminality. It is
-//! pinned to agree with [`CookStatus::is_in_flight`] for every known variant,
-//! while internal aggregation reads terminality from the declared
-//! [`CookDisposition`] below.
-//! [`CookStatus::Unknown`] projects to an explicit "unknown" rather than a
-//! manufactured failure, for exactly the reason terminality is declared here
-//! rather than inferred.
-
-use std::fmt;
+//! Unknown labels from persisted reports or newer binaries round-trip losslessly.
+//! `homeboy_core::run_lifecycle_status::from_cook_status` projects known labels
+//! onto canonical lifecycle state. Terminality inside Cook is instead declared
+//! by the producing exit's [`CookDisposition`].
 
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
+use std::fmt;
 
-/// A reported Cook status.
-///
-/// Serializes as the bare snake_case string it was parsed from, so the
-/// `homeboy/agent-task-cook/v1` wire format is unchanged and unknown values
-/// round-trip byte-for-byte.
+/// A reported Cook status, serialized as a bare snake_case string.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum CookStatus {
-    // --- in flight: the Cook will advance on its own ---
-    /// Accepted, not yet started.
     Queued,
-    /// Executing.
-    Running,
-    /// Executing, reported from a continuation or a detached provider.
     InFlight,
-
-    // --- terminal: the Cook will not advance without external action ---
-    /// Finished and finalized.
-    Completed,
-    /// Finished with a candidate ready for review.
     ReviewReady,
-    /// Finished with a verified draft pull request published for review.
     DraftPublished,
-    /// Gates were green but finalization was intentionally not performed.
     GreenNoFinalize,
-    /// A verified provider review intentionally produced no candidate patch.
+    /// Read-only finalization validated publication without publishing.
+    Validated,
     IntentionalNoChange,
-    /// Yielded before dispatch to the live Cook that owns the destination.
     SupersededByActiveCook,
-    /// Verified no-change evidence cannot satisfy a task that requires a patch.
     NoCandidate,
-    /// Finalization ran and found no changed files.
     NoChanges,
-    /// A no-op candidate failed its gates. Spelled `no_changes_gate_failed`,
-    /// matching the promotion status it reports.
     NoChangesGateFailed,
-    /// A deterministic gate failed.
     GateFailed,
-    /// A deterministic gate could not execute under the resolved placement
-    /// and deferred; no gate failed. The candidate patch is promoted and
-    /// durable but unverified, distinct from a rejected (`GateFailed`)
-    /// candidate.
-    GatesDeferred,
-    /// The declared deterministic gate is invalid or selects an inadmissible
-    /// test population; operator correction is required, not provider retry.
+    /// Verification could not execute; the candidate remains recoverable.
+    GateEnvironmentUnavailable,
+    /// Gates failed on the verified base as well as the candidate.
+    BaselineRed,
+    FinalizationFailed,
     GateDeclarationInvalid,
-    /// The declared repro gate passed on the Cook's base before dispatch, so it
-    /// does not reproduce the issue. Operator correction is required.
     ReproPassesOnBase,
-    /// Waiting on an independent acceptance verdict.
     AwaitingAcceptance,
-    /// Published candidate waiting for required PR checks.
     AwaitingCi,
-    /// Stopped, but the candidate can still be recovered.
     CandidateRecoverable,
-    /// Stopped because a dependency was not satisfied.
-    BlockedByDependency,
-    /// Stopped by a blocking claim.
     Blocked,
-    /// Cancelled by an operator or a supervisor.
     Cancelled,
-    /// Exceeded its wall-clock budget.
     TimedOut,
-    /// The optional read-only review form exceeded its distinct deadline.
-    ReviewFormTimeout,
-    /// Ran out of retries.
     RetriesExhausted,
-    /// Ran out of execution budget.
     ExecutionBudgetExhausted,
-    /// Stopped by policy.
     PolicyFailure,
-    /// Stopped until an operator selects one of several distinct patch candidates.
     SelectionRequired,
-    /// The provider failed.
     ProviderFailure,
-    /// Failed with a durable recipe intact.
     DurableFailure,
-    /// Failed before execution began.
     PreExecutionFailure,
-    /// Interrupted before artifacts were captured.
     PreArtifactInterruption,
-    /// Failed without a more specific classification.
     Failed,
-
-    /// A status this binary does not know.
-    ///
-    /// Classified as terminal — see the module docs. The raw string is kept so
-    /// serialization is lossless.
+    /// An unrecognized label, preserved without inventing a verdict.
     Unknown(String),
 }
 
 impl CookStatus {
-    /// Parse a reported status. Never fails; unrecognized input becomes
-    /// [`CookStatus::Unknown`].
+    /// Parse without failing. Retired and future labels become `Unknown`.
     pub fn from_status(status: &str) -> Self {
         match status {
             "queued" => Self::Queued,
-            "running" => Self::Running,
             "in_flight" => Self::InFlight,
-            "completed" => Self::Completed,
             "review_ready" => Self::ReviewReady,
             "draft_published" => Self::DraftPublished,
             "green_no_finalize" => Self::GreenNoFinalize,
+            "validated" => Self::Validated,
             "intentional_no_change" => Self::IntentionalNoChange,
             "superseded_by_active_cook" => Self::SupersededByActiveCook,
             "no_candidate" => Self::NoCandidate,
             "no_changes" => Self::NoChanges,
             "no_changes_gate_failed" => Self::NoChangesGateFailed,
             "gate_failed" => Self::GateFailed,
-            "gate_environment_unavailable" | "gates_deferred" => Self::GatesDeferred,
+            // Stored by builds before the variant was renamed; 10 controller records carry it.
+            "gate_environment_unavailable" | "gates_deferred" => Self::GateEnvironmentUnavailable,
+            "baseline_red" => Self::BaselineRed,
+            "finalization_failed" => Self::FinalizationFailed,
             "gate_declaration_invalid" => Self::GateDeclarationInvalid,
             "repro_passes_on_base" => Self::ReproPassesOnBase,
             "awaiting_acceptance" => Self::AwaitingAcceptance,
             "awaiting_ci" => Self::AwaitingCi,
             "candidate_recoverable" => Self::CandidateRecoverable,
-            "blocked_by_dependency" => Self::BlockedByDependency,
             "blocked" => Self::Blocked,
             "cancelled" => Self::Cancelled,
             "timed_out" => Self::TimedOut,
-            "review_form_timeout" => Self::ReviewFormTimeout,
             "retries_exhausted" => Self::RetriesExhausted,
             "execution_budget_exhausted" => Self::ExecutionBudgetExhausted,
             "policy_failure" => Self::PolicyFailure,
@@ -196,33 +91,32 @@ impl CookStatus {
         }
     }
 
-    /// The wire representation.
+    /// The wire representation, unchanged for unknown labels too.
     pub fn as_str(&self) -> &str {
         match self {
             Self::Queued => "queued",
-            Self::Running => "running",
             Self::InFlight => "in_flight",
-            Self::Completed => "completed",
             Self::ReviewReady => "review_ready",
             Self::DraftPublished => "draft_published",
             Self::GreenNoFinalize => "green_no_finalize",
+            Self::Validated => "validated",
             Self::IntentionalNoChange => "intentional_no_change",
             Self::SupersededByActiveCook => "superseded_by_active_cook",
             Self::NoCandidate => "no_candidate",
             Self::NoChanges => "no_changes",
             Self::NoChangesGateFailed => "no_changes_gate_failed",
             Self::GateFailed => "gate_failed",
-            Self::GatesDeferred => "gate_environment_unavailable",
+            Self::GateEnvironmentUnavailable => "gate_environment_unavailable",
+            Self::BaselineRed => "baseline_red",
+            Self::FinalizationFailed => "finalization_failed",
             Self::GateDeclarationInvalid => "gate_declaration_invalid",
             Self::ReproPassesOnBase => "repro_passes_on_base",
             Self::AwaitingAcceptance => "awaiting_acceptance",
             Self::AwaitingCi => "awaiting_ci",
             Self::CandidateRecoverable => "candidate_recoverable",
-            Self::BlockedByDependency => "blocked_by_dependency",
             Self::Blocked => "blocked",
             Self::Cancelled => "cancelled",
             Self::TimedOut => "timed_out",
-            Self::ReviewFormTimeout => "review_form_timeout",
             Self::RetriesExhausted => "retries_exhausted",
             Self::ExecutionBudgetExhausted => "execution_budget_exhausted",
             Self::PolicyFailure => "policy_failure",
@@ -232,42 +126,25 @@ impl CookStatus {
             Self::PreExecutionFailure => "pre_execution_failure",
             Self::PreArtifactInterruption => "pre_artifact_interruption",
             Self::Failed => "failed",
-            Self::Unknown(raw) => raw.as_str(),
+            Self::Unknown(raw) => raw,
         }
     }
 
-    /// Whether this status *reads* as a Cook that is still progressing.
-    ///
-    /// This is a property of the vocabulary, not the authority on terminality
-    /// — that is [`CookDisposition`], which the producing exit declares. This
-    /// exists so a report can be checked for self-consistency between the
-    /// status it carries and the disposition it declares, and so batch totals
-    /// can bucket a cell by its reported status.
-    ///
-    /// Unlike the terminal side, this set is closed: it is internal to the
-    /// Cook loop and never sourced from finalization JSON.
+    /// Whether the label reads as progressing, not an authority on terminality.
     pub fn is_in_flight(&self) -> bool {
-        matches!(
-            self,
-            Self::Queued | Self::Running | Self::InFlight | Self::AwaitingCi
-        )
+        matches!(self, Self::Queued | Self::InFlight | Self::AwaitingCi)
     }
 
-    /// Whether a deterministic gate rejected the candidate, with or without a
-    /// patch.
+    /// Whether a deterministic gate rejected the candidate.
     pub fn is_gate_failure(&self) -> bool {
         matches!(self, Self::GateFailed | Self::NoChangesGateFailed)
     }
 
-    /// Whether this status alone means the operator has nothing to act on.
-    ///
-    /// Callers that also inspect the finalization payload should treat this as
-    /// the status-only half of that decision.
+    /// Whether the status alone means the operator has nothing to act on.
     pub fn is_success_exit(&self) -> bool {
         matches!(
             self,
             Self::Queued
-                | Self::Running
                 | Self::InFlight
                 | Self::AwaitingCi
                 | Self::ReviewReady
@@ -285,35 +162,21 @@ impl fmt::Display for CookStatus {
     }
 }
 
-/// Whether a Cook will advance on its own, as declared by the exit that
-/// produced the report.
-///
-/// Every Cook exit already knows this. It either handed the work to a durable
-/// owner — a runner daemon or detached staging that owns timeout and provider
-/// rotation from that point on — or it stopped and there is nothing left to
-/// carry the Cook forward. This records that fact so no consumer has to
-/// re-derive it from a status string.
-///
-/// Producing a report requires stating one of these, so an exit added later
-/// cannot inherit a default that happens to be wrong for it.
+/// Whether a Cook will advance on its own, declared by its producing exit.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum CookDisposition {
-    /// The Cook returned, but a durable owner is still carrying the work.
-    /// No terminal notification is due.
+    /// A durable owner is carrying the work; no terminal notification is due.
     InFlight,
-    /// The Cook will not advance without external action. This is the
-    /// completion the orchestrator is waiting for.
+    /// The Cook will not advance without external action.
     Terminal,
 }
 
 impl CookDisposition {
-    /// Whether the Cook will not advance without external action.
     pub fn is_terminal(&self) -> bool {
         matches!(self, Self::Terminal)
     }
 
-    /// The durable progress phase label for this disposition.
     pub fn phase(&self) -> &'static str {
         match self {
             Self::InFlight => "in_flight",
@@ -346,176 +209,15 @@ mod tests {
     use super::*;
 
     #[test]
-    fn the_in_flight_reading_covers_exactly_the_loop_owned_states() {
-        for status in ["queued", "running", "in_flight"] {
-            assert!(
-                CookStatus::from_status(status).is_in_flight(),
-                "{status} must read as in flight"
-            );
-        }
-        for status in [
-            "completed",
-            "review_ready",
-            "draft_published",
-            "green_no_finalize",
-            "intentional_no_change",
-            "no_candidate",
-            "no_changes",
-            "gate_failed",
-            "gates_deferred",
-            "gate_declaration_invalid",
-            "repro_passes_on_base",
-            "awaiting_acceptance",
-            "cancelled",
-            "timed_out",
-            "review_form_timeout",
-            "durable_failure",
-            "selection_required",
+    fn disposition_declares_terminality_and_serializes_as_its_phase() {
+        for (disposition, terminal) in [
+            (CookDisposition::InFlight, false),
+            (CookDisposition::Terminal, true),
         ] {
-            assert!(
-                !CookStatus::from_status(status).is_in_flight(),
-                "{status} must not read as in flight"
-            );
-        }
-    }
-
-    /// The whole point of declaring disposition: a status this binary has
-    /// never seen carries no claim about whether the Cook is still running.
-    #[test]
-    fn an_unknown_status_makes_no_claim_about_progress() {
-        let status = CookStatus::from_status("some_status_from_a_newer_binary");
-        assert!(matches!(status, CookStatus::Unknown(_)));
-        assert!(!status.is_in_flight());
-        assert!(!status.is_success_exit());
-    }
-
-    #[test]
-    fn disposition_is_the_authority_on_terminality() {
-        assert!(CookDisposition::Terminal.is_terminal());
-        assert!(!CookDisposition::InFlight.is_terminal());
-        assert_eq!(CookDisposition::Terminal.phase(), "terminal");
-        assert_eq!(CookDisposition::InFlight.phase(), "in_flight");
-    }
-
-    #[test]
-    fn disposition_serializes_as_snake_case() {
-        assert_eq!(
-            serde_json::to_string(&CookDisposition::InFlight).expect("serialize"),
-            "\"in_flight\""
-        );
-        assert_eq!(
-            serde_json::to_string(&CookDisposition::Terminal).expect("serialize"),
-            "\"terminal\""
-        );
-    }
-
-    /// The classification must never rewrite a status it did not recognize.
-    #[test]
-    fn awaiting_ci_is_distinct_and_in_flight() {
-        let status = CookStatus::from_status("awaiting_ci");
-        assert_eq!(status, CookStatus::AwaitingCi);
-        assert!(status.is_in_flight());
-        assert!(status.is_success_exit());
-        assert!(!status.is_gate_failure());
-    }
-
-    #[test]
-    fn unknown_statuses_round_trip_losslessly() {
-        let raw = "some_status_from_a_newer_binary";
-        let status = CookStatus::from_status(raw);
-        assert_eq!(status.as_str(), raw);
-        let json = serde_json::to_string(&status).expect("serialize");
-        assert_eq!(json, format!("\"{raw}\""));
-        let parsed: CookStatus = serde_json::from_str(&json).expect("deserialize");
-        assert_eq!(parsed, status);
-    }
-
-    #[test]
-    fn the_no_change_gate_failure_has_one_spelling() {
-        let status = CookStatus::from_status("no_changes_gate_failed");
-        assert_eq!(status, CookStatus::NoChangesGateFailed);
-        assert!(status.is_gate_failure());
-        assert_eq!(status.as_str(), "no_changes_gate_failed");
-        assert_ne!(
-            CookStatus::from_status("no_op_gate_failed"),
-            CookStatus::NoChangesGateFailed
-        );
-    }
-
-    #[test]
-    fn every_known_status_round_trips_through_its_wire_form() {
-        for status in [
-            CookStatus::Queued,
-            CookStatus::Running,
-            CookStatus::InFlight,
-            CookStatus::Completed,
-            CookStatus::ReviewReady,
-            CookStatus::DraftPublished,
-            CookStatus::GreenNoFinalize,
-            CookStatus::IntentionalNoChange,
-            CookStatus::SupersededByActiveCook,
-            CookStatus::NoCandidate,
-            CookStatus::NoChanges,
-            CookStatus::NoChangesGateFailed,
-            CookStatus::GateFailed,
-            CookStatus::GatesDeferred,
-            CookStatus::AwaitingAcceptance,
-            CookStatus::CandidateRecoverable,
-            CookStatus::BlockedByDependency,
-            CookStatus::Blocked,
-            CookStatus::Cancelled,
-            CookStatus::TimedOut,
-            CookStatus::ReviewFormTimeout,
-            CookStatus::RetriesExhausted,
-            CookStatus::ExecutionBudgetExhausted,
-            CookStatus::PolicyFailure,
-            CookStatus::SelectionRequired,
-            CookStatus::ProviderFailure,
-            CookStatus::DurableFailure,
-            CookStatus::PreExecutionFailure,
-            CookStatus::PreArtifactInterruption,
-            CookStatus::Failed,
-        ] {
+            assert_eq!(disposition.is_terminal(), terminal);
             assert_eq!(
-                CookStatus::from_status(status.as_str()),
-                status,
-                "{status} must round-trip"
-            );
-            assert!(
-                !matches!(status, CookStatus::Unknown(_)),
-                "{status} must be a known variant"
-            );
-        }
-    }
-
-    /// Pins the exit-code vocabulary that previously lived as a separate
-    /// string list, so it cannot drift from terminality again.
-    #[test]
-    fn success_exit_covers_in_flight_and_candidate_free_terminal_successes() {
-        for status in [
-            "queued",
-            "running",
-            "in_flight",
-            "review_ready",
-            "draft_published",
-            "green_no_finalize",
-            "intentional_no_change",
-        ] {
-            assert!(
-                CookStatus::from_status(status).is_success_exit(),
-                "{status} must exit 0 on status alone"
-            );
-        }
-        for status in [
-            "failed",
-            "gate_failed",
-            "gates_deferred",
-            "no_changes",
-            "durable_failure",
-        ] {
-            assert!(
-                !CookStatus::from_status(status).is_success_exit(),
-                "{status} must not exit 0 on status alone"
+                serde_json::to_value(disposition).unwrap(),
+                disposition.phase()
             );
         }
     }

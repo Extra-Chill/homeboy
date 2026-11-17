@@ -142,7 +142,7 @@ fn retire_superseded_deferral(record: &mut AgentTaskRunRecord, delivery: Option<
         .get("terminal_status")
         .and_then(Value::as_str)
         .map(CookStatus::from_status)
-        == Some(CookStatus::GatesDeferred);
+        == Some(CookStatus::GateEnvironmentUnavailable);
     if !deferred {
         return;
     }

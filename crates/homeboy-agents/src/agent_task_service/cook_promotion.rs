@@ -5751,7 +5751,7 @@ mod recovery_action_tests {
                 false,
                 vec!["status", "diagnose", "resume"],
             ),
-            ("completed", false, false, vec!["status", "diagnose"]),
+            ("review_ready", false, false, vec!["status", "diagnose"]),
         ];
 
         for (status, retry_available, exact_checkpoint_candidate_mismatch, expected) in cases {

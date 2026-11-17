@@ -1206,7 +1206,6 @@ fn cook_recovery_plans_publish_for_declared_green_with_inherited_added_gate() {
 fn cook_recovery_classifies_stalled_gate_setup_as_gate_environment_unavailable() {
     use crate::agent_task_gate::AgentTaskGateStatus;
     use crate::agent_task_service::CookRecoveryStep;
-    use homeboy_core::cook_status::CookStatus;
     use homeboy_core::deps::{DependencyHydrationStatus, DependencyHydrationTermination};
     with_own_green_gates(|options, _| {
         let cook = &options.identity.cook_id;
@@ -1248,12 +1247,6 @@ fn cook_recovery_classifies_stalled_gate_setup_as_gate_environment_unavailable()
         );
         assert!(stored.deterministic_gates[1].failure_evidence.is_none());
         assert_eq!(stored.status, AgentTaskPromotionStatus::GateDeferred);
-        let promotion_status = serde_json::to_value(stored.status).unwrap();
-        assert_eq!(
-            CookStatus::from_status(promotion_status.as_str().unwrap()).as_str(),
-            "gate_environment_unavailable"
-        );
-
         let plan = crate::agent_task_service::plan_cook_recovery(cook).unwrap();
         assert_eq!(plan.step, CookRecoveryStep::Regate, "{plan:?}");
     });

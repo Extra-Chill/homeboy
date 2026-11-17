@@ -902,7 +902,7 @@ pub(crate) fn adopt_cook_candidate_with_dispatcher_and_backend_for_attempt_with_
         // must not be reported as failed verification (#9692).
         let (status, reason) = if feedback.status == AgentTaskCookLoopStatus::GatesDeferred {
             (
-                "gates_deferred".to_string(),
+                "gate_environment_unavailable".to_string(),
                 super::cook::gates_deferred_stop_reason(&promotion, cook_id),
             )
         } else if feedback.failed_gates.is_empty() {
