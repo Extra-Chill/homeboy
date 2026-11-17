@@ -253,13 +253,13 @@ pub(crate) fn resume_promoted_patch_in_observation_store(
 
 /// Re-run corrected gates against an already-applied candidate while preserving
 /// all candidate, base, target, source, and artifact resume validation.
-pub(crate) fn resume_promoted_patch_replacement_gates_in_observation_store<'a>(
+pub(crate) fn resume_promoted_patch_replacement_gates_in_observation_store(
     options: AgentTaskPromotionRequest,
     target_path: &Path,
     previous: &Value,
     gate_workspace: Option<&Path>,
     observation_store: &homeboy_core::observation::ObservationStore,
-    before_gates: impl FnOnce() -> Result<()> + 'a,
+    before_gates: impl FnOnce() -> Result<()> + 'static,
 ) -> Result<AgentTaskPromotionReport> {
     let _timing = options.source_run_id.as_deref().map(|run_id| {
         observation_store.run_phase_guard(run_id, "promote.recover.replacement_gates")
@@ -275,14 +275,14 @@ pub(crate) fn resume_promoted_patch_replacement_gates_in_observation_store<'a>(
     )
 }
 
-fn resume_promoted_patch_internal<'a>(
+fn resume_promoted_patch_internal(
     options: AgentTaskPromotionRequest,
     target_path: &Path,
     previous: &Value,
     observation_store: &homeboy_core::observation::ObservationStore,
     replacement_gates: bool,
     gate_workspace: Option<&Path>,
-    before_gates: Option<Box<dyn FnOnce() -> Result<()> + 'a>>,
+    before_gates: Option<Box<dyn FnOnce() -> Result<()>>>,
 ) -> Result<AgentTaskPromotionReport> {
     let ResumePromotedPatchAdmission {
         source_kind,
@@ -316,17 +316,20 @@ fn resume_promoted_patch_internal<'a>(
         None => capture_gate_verified_base(target_path, options.base_ref.as_deref())?,
     };
     let commit = outcome.candidate.as_ref().expect("admitted candidate");
-    if let Some(before_gates) = before_gates {
-        before_gates()?;
-    }
-    let gates = run_promotion_gates(
-        &options,
-        target_path,
-        None,
-        Some(commit),
-        gate_workspace,
-        observation_store,
-    )?;
+    let run = || {
+        run_promotion_gates(
+            &options,
+            target_path,
+            None,
+            Some(commit),
+            gate_workspace,
+            observation_store,
+        )
+    };
+    let gates = match before_gates {
+        Some(start) => crate::agent_task_gate::execution_start::with_command_start(start, run),
+        None => run(),
+    }?;
     let target =
         AgentTaskPromotionTarget::from_worktree(options.to_worktree.clone(), Some(target_path));
     let candidate = if gates.status.patch_promoted() {
