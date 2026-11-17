@@ -163,7 +163,10 @@ pub fn report(
         declared_tools.insert(source, source_tools);
     }
 
-    let playwright = probes::tool_available(&tools, "playwright");
+    // No intrinsic tool declares Playwright, so probe it here rather than
+    // report a CLI that was never looked for as missing.
+    let playwright = probes::tool_available(&tools, "playwright")
+        || probes::local_tool_probe("playwright", &[]).available;
     let browser_ready = probes::local_browser_ready();
     let display_ready = probes::local_display_ready();
     let xvfb_ready = probes::local_xvfb_ready();
