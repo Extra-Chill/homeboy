@@ -7836,29 +7836,6 @@ pub(super) fn draft_title(
     }
 }
 
-/// Terminal output without ANSI escape sequences or other control characters.
-pub(super) fn plain_text(output: &str) -> String {
-    let mut plain = String::with_capacity(output.len());
-    let mut chars = output.chars().peekable();
-    while let Some(ch) = chars.next() {
-        if ch == '\u{1b}' {
-            // CSI sequences end at a byte in `@`..=`~`; other escapes are two chars.
-            if chars.next_if_eq(&'[').is_some() {
-                for next in chars.by_ref() {
-                    if ('@'..='~').contains(&next) {
-                        break;
-                    }
-                }
-            } else {
-                chars.next();
-            }
-        } else if ch == '\n' || ch == '\t' || !ch.is_control() {
-            plain.push(ch);
-        }
-    }
-    plain
-}
-
 /// A deferred gate never executed, so the stop reason names each typed cause
 /// and the concrete next step instead of a candidate verdict (#16932).
 pub(super) fn gates_deferred_stop_reason(
