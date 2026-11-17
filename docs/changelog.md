@@ -4,6 +4,14 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.470.0] - 2026-11-17
+
+### Added
+- expose per-gate resource costs in agent-task hotspots
+
+### Fixed
+- publish in the same recovery once replacement gates make the Cook publishable
+
 ## [0.469.8] - 2026-11-17
 
 ### Fixed
