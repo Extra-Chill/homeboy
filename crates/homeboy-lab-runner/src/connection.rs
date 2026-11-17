@@ -493,6 +493,7 @@ fn restart_direct_daemon_in_place(
         daemon,
         ..
     } = match connect_remote_daemon(connection_daemon::RemoteDaemonConnectRequest {
+        owner_bound: false,
         server: &server,
         homeboy,
         daemon,
@@ -913,6 +914,7 @@ fn connect_with_live_lease(
         .clone()
         .unwrap_or(configured_build_identity.clone());
     let connection = connect_remote_daemon(connection_daemon::RemoteDaemonConnectRequest {
+        owner_bound: false,
         server: &server,
         homeboy,
         daemon,

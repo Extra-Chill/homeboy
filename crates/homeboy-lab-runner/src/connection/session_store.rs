@@ -244,14 +244,19 @@ fn retire_superseded_controller_sessions(
     current: &str,
 ) -> Result<()> {
     let directory = paths::runner_sessions_dir_in_root(config_root).join(runner_id);
+    // Only the local hostname/uid alias is provably ours. Other historical
+    // controller ids may belong to peers, even when their PIDs exist locally.
+    let local_legacy = format!(
+        "{}-uid-{}",
+        system_hostname().unwrap_or_default(),
+        effective_uid()
+    );
     for path in peer_session_paths(&directory)? {
         if let Some(session) = read_session_at(&path)? {
             if session.controller_id.as_deref() != Some(current)
-                && session
-                    .controller_id
-                    .as_deref()
-                    .is_some_and(is_hostname_uid_controller_id)
+                && session.controller_id.as_deref() == Some(local_legacy.as_str())
             {
+                terminate_tunnel_if_owned(&session);
                 std::fs::remove_file(&path).map_err(|error| {
                     Error::internal_io(
                         error.to_string(),
@@ -264,6 +269,7 @@ fn retire_superseded_controller_sessions(
     Ok(())
 }
 
+#[cfg(test)]
 fn is_hostname_uid_controller_id(value: &str) -> bool {
     value
         .rsplit_once("-uid-")
@@ -814,12 +820,33 @@ fn replace_session_at_if_matches(
 }
 
 fn write_session_at(path: &Path, session: &RunnerSession) -> Result<()> {
-    homeboy_core::engine::local_files::write_json_file(path, session)
+    let previous = read_session_at(path)?;
+    homeboy_core::engine::local_files::write_json_file(path, session)?;
+    if let Some(previous) = previous {
+        close_replaced_tunnels(&previous, session);
+    }
+    Ok(())
+}
+
+// Publication owns retirement, including rebinds and controller-id migrations.
+// Republishing metadata for the same forward must not close that forward.
+fn close_replaced_tunnels(previous: &RunnerSession, current: &RunnerSession) {
+    let mut retired = previous.clone();
+    if previous.tunnel_pid == current.tunnel_pid
+        && previous.tunnel_process_start_identity == current.tunnel_process_start_identity
+    {
+        retired.tunnel_pid = None;
+    }
+    if previous.proxy_forward == current.proxy_forward {
+        retired.proxy_forward = None;
+    }
+    terminate_tunnel_if_owned(&retired);
 }
 
 pub(super) fn remove_session(runner_id: &str) -> Result<()> {
     let path = session_path(runner_id)?;
-    if path.exists() {
+    if let Some(session) = read_session_at(&path)? {
+        terminate_tunnel_if_owned(&session);
         std::fs::remove_file(&path).map_err(|err| {
             Error::internal_io(err.to_string(), Some(format!("delete {}", path.display())))
         })?;
@@ -855,6 +882,11 @@ pub(super) fn remove_ownership_if_matches(
 fn remove_session_at_if_matches(path: &PathBuf, expected: &RunnerSession) -> Result<bool> {
     if read_session_at(path)? != Some(expected.clone()) {
         return Ok(false);
+    }
+    // Peer maintenance may discard another controller's dead record, but
+    // only this controller's recorded processes are ours to terminate.
+    if expected.controller_id.as_deref() == Some(controller_id().as_str()) {
+        terminate_tunnel_if_owned(expected);
     }
     std::fs::remove_file(path).map_err(|err| {
         Error::internal_io(err.to_string(), Some(format!("delete {}", path.display())))
@@ -1642,14 +1674,19 @@ mod tests {
         let root = TempDir::new().expect("config root");
         let runner = paths::runner_sessions_dir_in_root(root.path()).join("lab");
         std::fs::create_dir_all(&runner).expect("runner session dir");
-        let old = session("mac.lan-uid-501", "orphan");
+        let legacy = format!(
+            "{}-uid-{}",
+            system_hostname().unwrap_or_default(),
+            effective_uid()
+        );
+        let old = session(&legacy, "orphan");
         let current = session("stable-controller-a1b2c3d4", "current");
-        write_session_at(&runner.join("mac.lan-uid-501.json"), &old).expect("write old session");
+        write_session_at(&runner.join(format!("{legacy}.json")), &old).expect("write old session");
         write_session_at(&runner.join("stable-controller-a1b2c3d4.json"), &current)
             .expect("write current");
         retire_superseded_controller_sessions(root.path(), "lab", "stable-controller-a1b2c3d4")
             .expect("retire old session");
-        assert!(!runner.join("mac.lan-uid-501.json").exists());
+        assert!(!runner.join(format!("{legacy}.json")).exists());
         assert_eq!(
             read_session_at(&runner.join("stable-controller-a1b2c3d4.json")).expect("read current"),
             Some(current)

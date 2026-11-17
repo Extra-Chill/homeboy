@@ -566,6 +566,7 @@ pub(crate) fn connect_service_runner(runner_id: &str) -> Result<(RunnerConnectRe
             .unwrap_or_else(|| expected_identity.clone());
         let expected_version = daemon.version.clone().unwrap_or(identity.version.clone());
         match connect_remote_daemon(connection_daemon::RemoteDaemonConnectRequest {
+            owner_bound: false,
             server: &target.server,
             homeboy,
             daemon,
@@ -624,8 +625,12 @@ pub(crate) fn connect_service_runner(runner_id: &str) -> Result<(RunnerConnectRe
         worker_pid: None,
         last_seen_at: None,
     };
-    super::replacement_journal::promote_pending_replacement(runner_id, &session)?;
-    write_session(&session)?;
+    if let Err(error) = super::replacement_journal::promote_pending_replacement(runner_id, &session)
+        .and_then(|_| write_session(&session))
+    {
+        terminate_tunnel_if_owned(&session);
+        return Err(error);
+    }
 
     super::super::runner_probe_gate::invalidate_runner_probes(runner_id);
     Ok((
