@@ -567,6 +567,9 @@ pub struct ControllerScratchCleanupOutput {
     /// override is active.
     pub override_unlocked_bytes: u64,
     pub reclaimed_bytes: u64,
+    /// Workspaces reclaimed only after durable candidate preservation.
+    pub preserved_workspace_bytes: u64,
+    pub preserved_workspaces: Vec<serde_json::Value>,
     pub candidates: Vec<ControllerScratchCandidate>,
     pub candidate_detail: OutputTruncation,
     /// Reclaimable terminal-run recovery directories. They are inspected on
@@ -579,6 +582,7 @@ pub struct ControllerScratchCleanupOutput {
     pub skipped: Vec<ControllerScratchSkipped>,
     pub skipped_detail: OutputTruncation,
     pub retention_reasons: Vec<ControllerScratchRetentionReason>,
+    pub retained_bytes_by_reason: BTreeMap<String, u64>,
     pub has_more: bool,
     /// Counts and byte estimates describe this inspected page, not the whole store.
     pub inspected_count: usize,
@@ -1252,6 +1256,9 @@ fn cleanup_unlocked(
     // 393 GB root ever considered. Retained leases are walked past (their
     // block reason is decided before any size walk), and the deadline bounds
     // the walk so a pass returns what it found instead of being killed.
+    let mut retained_bytes_by_reason = BTreeMap::new();
+    let mut preserved_workspaces = Vec::new();
+    let mut preserved_workspace_bytes = 0;
     let mut inspected_count = 0;
     for &(_, position) in &ordered {
         if eligible.len() >= options.limit
@@ -1281,13 +1288,8 @@ fn cleanup_unlocked(
                 stranded.push(position);
             }
         }
-        let retry_recovery = resource.lifecycle_state == "interrupted"
-            && resource
-                .terminal_evidence
-                .as_ref()
-                .and_then(|evidence| evidence.pointer("/workspace_recovery/state"))
-                .and_then(serde_json::Value::as_str)
-                != Some("recovered")
+        let retry_recovery = !resource.ephemeral
+            && !recovery_evidence_is_current(resource)
             && cleanup_lifecycle_block_reason(
                 observation,
                 resource,
@@ -1311,13 +1313,8 @@ fn cleanup_unlocked(
             && git_safety_path(resource, &path).is_some_and(|workspace| {
                 git::run_git(&workspace, &["ls-files", "--stage"], "git ls-files --stage")
                     .is_ok_and(|staged| !staged.lines().any(|line| line.starts_with("160000 ")))
-                    && !git_unpushed(&workspace)
             });
-        let reason = if retry_recovery
-            && git_safety_path(resource, &path).is_some_and(|workspace| git_unpushed(&workspace))
-        {
-            Some("git checkout has dirty or unpushed state".to_string())
-        } else if recovery_pending {
+        let reason = if recovery_pending {
             None
         } else {
             cleanup_block_reason_with_observation(
@@ -1329,6 +1326,7 @@ fn cleanup_unlocked(
             )?
         };
         if let Some(reason) = reason {
+            *retained_bytes_by_reason.entry(reason.clone()).or_default() += path_size(&path)?;
             // Keep every row for an explicit `--full` inspection. The default
             // response admits rows directly to its item/byte budget so a large
             // retained index is not materialized before it is truncated.
@@ -1424,6 +1422,21 @@ fn cleanup_unlocked(
                 ScratchRemoval::Removed(bytes) => {
                     applied_count += 1;
                     reclaimed_bytes += bytes;
+                    if let Some(recovery) = index
+                        .resources
+                        .iter()
+                        .find(|resource| resource.lease_id == candidate.lease_id)
+                        .and_then(|resource| resource.terminal_evidence.as_ref())
+                        .and_then(|evidence| evidence.get("workspace_recovery"))
+                        .filter(|recovery| recovery["state"] == "recovered")
+                    {
+                        preserved_workspace_bytes += bytes;
+                        preserved_workspaces.push(serde_json::json!({
+                            "run_id": candidate.run_id,
+                            "reclaimed_bytes": bytes,
+                            "recovery": recovery,
+                        }));
+                    }
                 }
                 ScratchRemoval::Skipped(reason) => {
                     all_skips.push((reason.clone(), Some(candidate.run_id.clone())));
@@ -1537,6 +1550,9 @@ fn cleanup_unlocked(
         recovery_candidates,
         recovery_candidate_detail,
         recovery_retained_count,
+        retained_bytes_by_reason,
+        preserved_workspace_bytes,
+        preserved_workspaces,
         retention_reasons: summarize_retention(&all_skips),
         skipped,
         skipped_detail,
@@ -1880,7 +1896,20 @@ fn cleanup_block_reason_with_observation(
             Some(path) if terminal_evidence_attempt_workspace_matches(resource, &path) => {}
             Some(path) if promoted_attempt_workspace_matches(resource, &path) => {}
             Some(path) if git_dirty_or_unpushed(&path) => {
-                return Ok(Some("git checkout has dirty or unpushed state".to_string()));
+                let recovery = resource
+                    .terminal_evidence
+                    .as_ref()
+                    .and_then(|evidence| evidence.get("workspace_recovery"));
+                return Ok(Some(recovery.map_or_else(
+                    || "git checkout has dirty or unpushed state".to_string(),
+                    |value| {
+                        if value["state"] == "recovered" {
+                            "git checkout has dirty or unpushed state".to_string()
+                        } else {
+                            format!("workspace preservation required: {value}")
+                        }
+                    },
+                )));
             }
             Some(_) => {}
             None if resource.plan_id.is_empty() => {
@@ -2241,6 +2270,10 @@ fn recover_authoritative_workspace(
 /// Capture the full non-ignored worktree on top of HEAD without changing the
 /// real index (including any staged/unstaged split).
 fn recovery_patch(workspace: &Path) -> Result<Vec<u8>> {
+    recovery_patch_against(workspace, "HEAD")
+}
+
+fn recovery_patch_against(workspace: &Path, base: &str) -> Result<Vec<u8>> {
     let index = homeboy_core::git::private_index(workspace)?;
     let env = vec![(
         "GIT_INDEX_FILE".to_string(),
@@ -2285,7 +2318,7 @@ fn recovery_patch(workspace: &Path) -> Result<Vec<u8>> {
             "--binary",
             "--full-index",
             "--find-renames",
-            "HEAD",
+            base,
             "--",
             ".",
         ],
@@ -2339,7 +2372,41 @@ fn recover_authoritative_workspace_inner(
             Some(format!("write {}", patch_path.display())),
         )
     })?;
+    // A single binary patch restores the complete candidate onto its recorded
+    // base, including commits and non-ignored untracked files.
+    let base = resource.base_sha.as_deref().unwrap_or(head);
+    let candidate_patch = recovery_patch_against(&workspace, base)?;
+    let candidate_path = recovery_root.join("candidate.patch");
+    fs::write(&candidate_path, &candidate_patch).map_err(|error| {
+        Error::internal_io(error.to_string(), Some("write candidate patch".to_string()))
+    })?;
+    let commits = git::run_git_bytes_with_env(
+        &workspace,
+        &[
+            "format-patch",
+            "--stdout",
+            "--binary",
+            &format!("{base}..{head}"),
+        ],
+        "preserve candidate commits",
+        &[],
+    )?;
+    let commits_path = recovery_root.join("commits.patch");
+    fs::write(&commits_path, &commits).map_err(|error| {
+        Error::internal_io(error.to_string(), Some("write commit patches".to_string()))
+    })?;
+    // Flush artifacts before recording authority to delete the only checkout.
+    for path in [&patch_path, &candidate_path, &commits_path] {
+        fs::File::open(path)
+            .and_then(|file| file.sync_all())
+            .map_err(|error| {
+                Error::internal_io(error.to_string(), Some(format!("sync {}", path.display())))
+            })?;
+    }
     let mut recovery = serde_json::json!({
+        "candidate_patch": {"path": candidate_path, "sha256": sha256(&candidate_patch)},
+        "commits_patch": {"path": commits_path, "sha256": sha256(&commits)},
+        "candidate_base": base,
         "state": "recovered",
         "workspace": workspace,
         "head": head,
@@ -2380,8 +2447,26 @@ fn recover_authoritative_workspace_inner(
             "sha256": file_sha256(&bundle_path)?,
         });
     }
-    // Otherwise HEAD is the recorded base: the attempt committed nothing, so
-    // the patch alone restores it onto that base.
+    // Flush the bundle and directory entries as well as patch contents before
+    // the index can authorize removal of this checkout.
+    if let Some(path) = recovery
+        .pointer("/bundle/path")
+        .and_then(serde_json::Value::as_str)
+    {
+        fs::File::open(path)
+            .and_then(|file| file.sync_all())
+            .map_err(|error| {
+                Error::internal_io(error.to_string(), Some("sync recovery bundle".to_string()))
+            })?;
+    }
+    fs::File::open(&recovery_root)
+        .and_then(|directory| directory.sync_all())
+        .map_err(|error| {
+            Error::internal_io(
+                error.to_string(),
+                Some("sync recovery directory".to_string()),
+            )
+        })?;
     Ok(recovery)
 }
 
@@ -2420,6 +2505,19 @@ fn recovered_workspace_matches(resource: &ControllerScratchResource, workspace: 
     else {
         return false;
     };
+    for key in ["candidate_patch", "commits_patch"] {
+        if let Some(artifact) = recovery.get(key) {
+            let valid = artifact["path"]
+                .as_str()
+                .zip(artifact["sha256"].as_str())
+                .is_some_and(|(path, expected)| {
+                    file_sha256(Path::new(path)).ok().as_deref() == Some(expected)
+                });
+            if !valid {
+                return false;
+            }
+        }
+    }
     let commits_preserved = match recovery.get("bundle") {
         Some(_) => match (field("/bundle/path"), field("/bundle/sha256")) {
             (Some(path), Some(expected)) => {
@@ -2464,8 +2562,9 @@ fn cleanup_page_command(options: ControllerScratchCleanupOptions, cursor: Option
 }
 
 fn scratch_recovery_command(resource: &ControllerScratchResource) -> Option<String> {
-    (resource.lifecycle_state == "interrupted")
-        .then(|| format!("homeboy agent-task cancel {}", resource.run_id))
+    (resource.lifecycle_state != "active").then(|| {
+        "homeboy cleanup --include controller-scratch --apply --older-than-days 0".to_string()
+    })
 }
 
 fn is_git_checkout(path: &Path) -> bool {
@@ -3390,7 +3489,7 @@ mod tests {
             ("clean", None),
             ("active_run", Some("owning run is still active")),
             ("live_owner", Some("owner process is still running")),
-            ("dirty", Some("git checkout has dirty or unpushed state")),
+            ("dirty", None),
         ] {
             let data_root = tempfile::tempdir().expect("data root");
             let (_observation_root, observation) = observation_store();
@@ -3571,7 +3670,7 @@ mod tests {
     }
 
     #[test]
-    fn workspace_changed_after_recovery_remains_retained() {
+    fn workspace_changed_after_recovery_requires_fresh_preservation() {
         let data_root = tempfile::tempdir().expect("data root");
         let (_observation_root, observation) = observation_store();
         let allocation = allocate_at(data_root.path(), "changed-run", "scheduler-plan", "task", 1);
@@ -3612,11 +3711,12 @@ mod tests {
                 retention_override_seconds: Some(0),
             },
         );
-        assert_eq!(output.candidate_count, 0);
+        assert_eq!(output.candidate_count, 1);
         assert_eq!(
-            output.skipped[0].reason,
-            "git checkout has dirty or unpushed state"
+            output.candidates[0].reason,
+            "recovery will be re-evaluated on apply"
         );
+        assert!(workspace.exists(), "preview must not mutate the workspace");
     }
 
     fn git_output(path: &Path, args: &[&str]) -> String {
@@ -3658,6 +3758,125 @@ mod tests {
         let base = git_output(&workspace, &["rev-parse", "HEAD"]);
         record_attempt_workspace(&allocation, &workspace, &base).expect("record attempt");
         (allocation, workspace, base)
+    }
+
+    #[test]
+    fn public_cleanup_preserves_terminal_candidate_and_leaves_active_attempt() {
+        let context = homeboy_core::test_support::HermeticTestContext::new();
+        let _home = homeboy_core::test_support::HomeGuard::new();
+        let roots = context.path_roots();
+        let source = tempfile::tempdir().unwrap();
+        let observation = ObservationStore::open_initialized().unwrap();
+        let running = observation
+            .start_run(homeboy_core::observation::NewRunRecord::builder("test").build())
+            .unwrap();
+        let (allocation, workspace, base) =
+            recorded_attempt(roots.data(), source.path(), "terminal");
+        fs::write(workspace.join("history.txt"), "committed candidate\n").unwrap();
+        run_git(&workspace, &["add", "."]);
+        run_git(
+            &workspace,
+            &[
+                "-c",
+                "user.name=Test",
+                "-c",
+                "user.email=test@example.com",
+                "commit",
+                "-m",
+                "candidate",
+            ],
+        );
+        fs::write(workspace.join("history.txt"), "uncommitted candidate\n").unwrap();
+        fs::write(workspace.join("new.bin"), b"new\0source").unwrap();
+        let active = allocate_at(roots.data(), &running.id, "plan", "task", 1);
+        fs::write(active.path.join("live"), "active").unwrap();
+        let mut index = read_index_at(roots.data());
+        let row = index
+            .resources
+            .iter_mut()
+            .find(|row| row.lease_id == allocation.lease_id)
+            .unwrap();
+        row.lifecycle_state = "released".to_string();
+        row.finalized_at = Some("2020-01-01T00:00:00Z".to_string());
+        row.owner_pid = u32::MAX;
+        write_index_at_unlocked(&index_path().unwrap(), &index).unwrap();
+        let output = cleanup(
+            ControllerScratchCleanupOptions {
+                apply: true,
+                limit: 10,
+                full: true,
+                retention_override_seconds: None,
+            },
+            None,
+            None,
+        )
+        .unwrap();
+        assert_eq!(output.applied_count, 1, "{output:?}");
+        assert!(output.preserved_workspace_bytes > 0);
+        assert!(!allocation.path.exists());
+        assert!(active.path.join("live").exists());
+        let recovery = &output.preserved_workspaces[0]["recovery"];
+        let patch = recovery["candidate_patch"]["path"].as_str().unwrap();
+        assert!(Path::new(patch).is_file());
+        let restored = source.path().join("restored");
+        run_git(
+            source.path(),
+            &[
+                "clone",
+                source.path().join("source").to_str().unwrap(),
+                restored.to_str().unwrap(),
+            ],
+        );
+        run_git(&restored, &["checkout", "--detach", &base]);
+        run_git(&restored, &["apply", "--binary", patch]);
+        assert_eq!(
+            fs::read_to_string(restored.join("history.txt")).unwrap(),
+            "uncommitted candidate\n"
+        );
+        assert_eq!(fs::read(restored.join("new.bin")).unwrap(), b"new\0source");
+    }
+
+    #[test]
+    fn cleanup_retains_workspace_when_artifact_preservation_fails() {
+        let data_root = tempfile::tempdir().unwrap();
+        let source = tempfile::tempdir().unwrap();
+        let (_observation_root, observation) = observation_store();
+        let (allocation, workspace, _) =
+            recorded_attempt(data_root.path(), source.path(), "failed-preservation");
+        fs::write(workspace.join("untracked.txt"), "candidate").unwrap();
+        let mut index = read_index_at(data_root.path());
+        index.resources[0].owner_pid = u32::MAX;
+        index.resources[0].lifecycle_state = "released".to_string();
+        index.resources[0].finalized_at = Some("2020-01-01T00:00:00Z".to_string());
+        write_index_at(data_root.path(), &index);
+        // An artifact root that cannot contain directories forces preservation
+        // to fail before cleanup has authority to remove the only candidate.
+        let blocked = data_root
+            .path()
+            .join("artifacts")
+            .join(RECOVERY_DIR)
+            .join("failed-preservation");
+        fs::create_dir_all(&blocked).unwrap();
+        fs::write(blocked.join(&allocation.lease_id), "not a directory").unwrap();
+        let output = cleanup_at(
+            data_root.path(),
+            &observation,
+            ControllerScratchCleanupOptions {
+                apply: true,
+                limit: 10,
+                full: true,
+                retention_override_seconds: None,
+            },
+        );
+        assert_eq!(output.applied_count, 0);
+        assert!(allocation.path.exists());
+        assert!(output.skipped[0].reason.contains("recovery_failed"));
+        assert!(output.skipped[0]
+            .recovery_command
+            .as_ref()
+            .unwrap()
+            .contains("--apply"));
+        assert!(output.retained_bytes_by_reason.values().sum::<u64>() > 0);
     }
 
     fn finalize_and_read(
@@ -4136,7 +4355,7 @@ mod tests {
                 assert_eq!(fs::read(&index_file).unwrap(), before);
                 assert!(!data_root.path().join("artifacts").exists());
                 assert_eq!(fs::read(&index_path).unwrap(), original_index);
-                let reclaimable = case == "stale_tracked";
+                let reclaimable = matches!(case, "stale_tracked" | "stale_unpushed");
                 assert_eq!(preview.candidate_count, usize::from(reclaimable));
                 if reclaimable {
                     assert_eq!(
@@ -4162,7 +4381,11 @@ mod tests {
                     assert_eq!(recovery["state"], "recovered");
                     let patch = Path::new(recovery["patch"]["path"].as_str().unwrap());
                     let patch = fs::read_to_string(patch).unwrap();
-                    assert!(patch.contains("+worktree"));
+                    assert!(patch.contains(if case == "stale_unpushed" {
+                        "+later work"
+                    } else {
+                        "+worktree"
+                    }));
                     assert!(!patch.contains("generated"));
                 } else {
                     assert_eq!(
@@ -4269,7 +4492,7 @@ mod tests {
         );
         assert_eq!(
             output.skipped[0].recovery_command.as_deref(),
-            Some("homeboy agent-task cancel legacy-run")
+            Some("homeboy cleanup --include controller-scratch --apply --older-than-days 0")
         );
     }
 
@@ -4607,24 +4830,6 @@ mod tests {
     }
 
     #[test]
-    fn dirty_or_unpushed_checkout_is_preserved() {
-        let (_observation_root, observation) = observation_store();
-        let root = tempfile::tempdir().expect("root");
-        let scratch = root.path().join("scratch");
-        fs::create_dir(&scratch).expect("scratch");
-        run_git(&scratch, &["init", "-b", "main"]);
-        fs::write(scratch.join("untracked.txt"), "dirty").expect("dirty file");
-        let mut resource = resource(&scratch, root.path());
-        resource.lifecycle_state = "released".to_string();
-
-        assert_eq!(
-            cleanup_reason(&observation, &resource, &scratch, None),
-            Some("git checkout has dirty or unpushed state".to_string())
-        );
-        assert!(scratch.exists());
-    }
-
-    #[test]
     fn terminal_reconstructable_resource_is_inventoried_and_removed_with_byte_accounting() {
         let data_root = tempfile::tempdir().expect("data root");
         let (_observation_root, observation) = observation_store();
@@ -4680,7 +4885,10 @@ mod tests {
         assert_eq!(inventory.reclaimed_bytes, 0);
         assert_eq!(inventory.candidates[0].owner_pid, u32::MAX);
         assert_eq!(inventory.candidates[0].lifecycle_state, "released");
-        assert!(inventory.candidates[0].reason.is_empty());
+        assert_eq!(
+            inventory.candidates[0].reason,
+            "recovery will be re-evaluated on apply"
+        );
 
         let applied = cleanup_at(
             data_root.path(),
@@ -5445,50 +5653,6 @@ mod tests {
             None
         )
         .is_err());
-    }
-
-    /// Unpushed, unmerged work is sacred: it is reported, never reclaimed.
-    #[test]
-    fn an_attempt_worktree_holding_the_only_copy_of_a_commit_is_reported_not_removed() {
-        let data_root = tempfile::tempdir().expect("data root");
-        let (_observation_root, observation) = observation_store();
-        let root = tempfile::tempdir().expect("root");
-        let lease = root.path().join("lease");
-        let (_source, worktree) = attempt_worktree(root.path(), &lease);
-        fs::write(worktree.join("candidate.txt"), "candidate\n").expect("candidate");
-        run_git(&worktree, &["add", "."]);
-        run_git(&worktree, &["commit", "-m", "unique candidate"]);
-
-        let mut stored = resource(&lease, root.path());
-        stored.lifecycle_state = "released".to_string();
-        stored.git_worktree = linked_worktree_registration(&worktree);
-        write_index_at(
-            data_root.path(),
-            &ControllerScratchIndex {
-                schema: schema(),
-                resources: vec![stored],
-            },
-        );
-
-        let applied = cleanup_at(
-            data_root.path(),
-            &observation,
-            ControllerScratchCleanupOptions {
-                apply: true,
-                limit: 10,
-                full: true,
-                // Even the most aggressive retention override must not reach it.
-                retention_override_seconds: Some(0),
-            },
-        );
-
-        assert_eq!(applied.applied_count, 0);
-        assert_eq!(applied.candidate_count, 0);
-        assert_eq!(
-            applied.skipped[0].reason,
-            "git checkout has dirty or unpushed state"
-        );
-        assert!(worktree.join("candidate.txt").exists());
     }
 
     /// A registration whose worktree directory is already gone is pruned by
