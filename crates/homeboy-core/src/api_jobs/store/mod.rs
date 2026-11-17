@@ -644,6 +644,34 @@ impl JobStore {
         Ok(output)
     }
 
+    /// Compact retained terminal history when it exceeds its budget.
+    ///
+    /// Measuring retention reads the whole terminal history, so it runs from
+    /// the daemon's maintenance tick, never inside a job write: every write
+    /// holds the store lock, and a per-write history scan serializes them all.
+    pub(crate) fn compact_retained_history(&self) -> Result<()> {
+        self.durable_transaction(|inner| {
+            let Some(persistence) = &self.persistence else {
+                return Ok(());
+            };
+            let due = sql_store::retention_due(
+                persistence
+                    .connection()?
+                    .as_ref()
+                    .expect("initialized store connection"),
+                &persistence.path,
+                persistence.terminal_job_retention_limit,
+                persistence.terminal_job_retention_bytes,
+                persistence.terminal_job_collection_window_ms,
+                inner,
+            )?;
+            if due {
+                self.load_history_for_compaction(inner)?;
+            }
+            Ok(())
+        })
+    }
+
     /// Retention is an explicit full-history operation, not part of live reload.
     fn load_history_for_compaction(&self, inner: &mut JobStoreInner) -> Result<()> {
         if let Some(persistence) = &self.persistence {
@@ -701,20 +729,6 @@ impl JobStore {
                 "injected durable store write failure",
                 None,
             ));
-        }
-        let retention_due = sql_store::retention_due(
-            persistence
-                .connection()?
-                .as_ref()
-                .expect("initialized store connection"),
-            &persistence.path,
-            persistence.terminal_job_retention_limit,
-            persistence.terminal_job_retention_bytes,
-            persistence.terminal_job_collection_window_ms,
-            inner,
-        )?;
-        if retention_due {
-            self.load_history_for_compaction(inner)?;
         }
         // Move the view out instead of cloning it: compaction and the commit
         // work on the owned snapshot, and it is moved back whatever happens.

@@ -2005,6 +2005,7 @@ fn spawn_local_child_reservation_reconciler(
             let _ = job_store.reconcile_expired_local_child_reservations();
             let _ = job_store.reconcile_expired_admissions();
             let _ = job_store.reconcile_direct_admissions();
+            let _ = job_store.compact_retained_history();
             for (id, state) in job_store.active_controller_jobs() {
                 if state.pending_admission_reason.is_some() {
                     let _ = start_controller_job(id, &job_store);

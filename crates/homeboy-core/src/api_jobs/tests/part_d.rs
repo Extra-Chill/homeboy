@@ -334,6 +334,7 @@ fn retention_deletes_rows_and_keeps_replay_tombstones() {
                 Ok(())
             })
             .expect("terminalize");
+        store.compact_retained_history().expect("compact history");
         keys.push((key, job.id));
     }
 

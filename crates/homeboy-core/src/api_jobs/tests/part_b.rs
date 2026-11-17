@@ -1143,6 +1143,7 @@ fn terminal_collection_window_preserves_recent_results_over_budget() {
             Some(serde_json::json!({"output": "x".repeat(1_100_000)})),
         )
         .expect("complete newest");
+    store.compact_retained_history().expect("compact history");
     assert!(store.get(old.id).is_err(), "25-hour result is evictable");
     assert!(
         store.get(recent.id).is_ok(),
@@ -1190,12 +1191,12 @@ fn terminal_job_retention_compacts_existing_store_without_losing_active_recovery
             .expect("seed store persists");
     }
 
-    // Opening is read-only (#17381); retention applies on the next write.
+    // Opening is read-only (#17381); retention applies on the maintenance pass.
     let compacted = JobStore::open_without_reconciliation_with_retention(&path, 3, 2)
         .expect("existing store opens");
     compacted
-        .durable_transaction(|_| Ok(()))
-        .expect("existing store compacts on write");
+        .compact_retained_history()
+        .expect("existing store compacts");
     assert!(compacted.get(queued.id).is_ok());
     assert_eq!(
         compacted.get(running.id).expect("running job").status,
@@ -1229,6 +1230,9 @@ fn terminal_job_retention_compacts_existing_store_without_losing_active_recovery
             .complete(job.id, None)
             .expect("new terminal job completes");
     }
+    restarted
+        .compact_retained_history()
+        .expect("compact history");
     assert_eq!(restarted.list().len(), 4, "terminal history stays bounded");
     assert!(restarted.get(queued.id).is_ok());
     assert_eq!(
@@ -1265,8 +1269,8 @@ fn terminal_payload_budget_bounds_high_event_history_before_child_reservation_pe
     )
     .expect("high-payload history opens");
     compacted
-        .durable_transaction(|_| Ok(()))
-        .expect("high-payload history compacts on write");
+        .compact_retained_history()
+        .expect("high-payload history compacts");
     assert!(
         compacted.get(queued.id).is_ok(),
         "queued work survives compaction"
@@ -1873,7 +1877,8 @@ fn compacted_submission_key_expires_without_creating_a_duplicate() {
                 inner.jobs.get_mut(&job.id).expect("job").job.status = JobStatus::Succeeded;
                 Ok(())
             })
-            .expect("terminalize and compact job");
+            .expect("terminalize job");
+        store.compact_retained_history().expect("compact history");
         requests.push((key.to_string(), request));
     }
     let expired_key = "agent-task:v1:compact-one".to_string();
@@ -1920,7 +1925,8 @@ fn replay_tombstones_keep_terminal_payload_memory_bounded_across_restart() {
                 inner.jobs.get_mut(&job.id).expect("job").job.status = JobStatus::Succeeded;
                 Ok(())
             })
-            .expect("terminalize and compact job");
+            .expect("terminalize job");
+        store.compact_retained_history().expect("compact history");
         if index == 0 {
             first = Some(request);
         }
