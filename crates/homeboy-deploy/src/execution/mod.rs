@@ -533,8 +533,11 @@ mod tests {
         }
     }
 
+    #[cfg(unix)]
     #[test]
     fn artifact_inputs_still_try_release_artifact_download() {
+        let _lock = homeboy_core::test_support::env_lock();
+        let _github = crate::test_support::OfflineGithub::not_found();
         let component = Component {
             id: "example".to_string(),
             remote_url: Some("https://github.com/example/example".to_string()),
@@ -555,6 +558,35 @@ mod tests {
         assert!(should_try_download_release_artifact(
             &component, &config, false, false
         ));
+    }
+
+    /// A transport failure while resolving a checkout-less component's release
+    /// tag must not invent a tag: the plan falls back to a local build.
+    #[cfg(unix)]
+    #[test]
+    fn failed_release_tag_lookup_plans_local_build() {
+        let _lock = homeboy_core::test_support::env_lock();
+        let _github = crate::test_support::OfflineGithub::unreachable();
+        let component = Component {
+            id: "example".to_string(),
+            remote_url: Some("https://github.com/example/example".to_string()),
+            build_artifact: Some("build/example.zip".to_string()),
+            ..Component::default()
+        };
+        assert!(!component.has_local_checkout());
+        let config = DeployConfig {
+            expected_version: Some("1.2.3".to_string()),
+            ..Default::default()
+        };
+
+        match release_artifact_plan(&component, &config, false, false) {
+            ReleaseArtifactPlan::LocalBuild { reason } => {
+                assert_eq!(reason, "no version tag found for release asset lookup");
+            }
+            ReleaseArtifactPlan::Reuse { tag, url } => {
+                panic!("failed tag lookup must plan a local build, got reuse of {tag} at {url}");
+            }
+        }
     }
 
     #[test]

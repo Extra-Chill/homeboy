@@ -1067,8 +1067,11 @@ mod tests {
         }
     }
 
+    #[cfg(unix)]
     #[test]
     fn immutable_release_asset_bypasses_local_source_guards() {
+        let _lock = homeboy_core::test_support::env_lock();
+        let _github = crate::test_support::OfflineGithub::not_found();
         let component = Component {
             id: "example".to_string(),
             local_path: "/not/a/checkout".to_string(),
