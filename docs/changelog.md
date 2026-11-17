@@ -4,6 +4,11 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.471.3] - 2026-11-17
+
+### Fixed
+- settle a Cook run whose terminal lifecycle write has not landed
+
 ## [0.471.2] - 2026-11-17
 
 ### Changed
