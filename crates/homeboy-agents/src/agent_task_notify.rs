@@ -569,38 +569,17 @@ fn gate_summary(gates: &[(&str, bool)]) -> String {
 /// terminal boundary — a `--continue` over an already-terminal cook, an adopted
 /// controller — would now re-announce an outcome the operator already has.
 pub(crate) fn cook_terminal(report: &AgentTaskCookReport, component: Option<&str>, exit_code: i32) {
-    tracker_note::post(&report.cook_id);
-    cook_terminal_with(report, component, exit_code, tracker::resolved_tracker);
-}
-
-fn cook_terminal_with(
-    report: &AgentTaskCookReport,
-    component: Option<&str>,
-    exit_code: i32,
-    resolved_tracker: impl FnOnce(&str) -> Option<String>,
-) {
     // Resolve one lifecycle store for the whole claim/record/confirm/release
     // protocol. These four steps are a single exactly-once transaction, and a
     // step that lands in a different home than the claim cannot fail while
-    // getting it wrong: a confirm against the wrong root consumes an
-    // eligibility nobody holds, and a release against the wrong root deletes
-    // nothing and returns `Ok(())`, leaving the real claim to expire and be
-    // re-delivered. Resolving once is what makes them agree (#7505).
-    //
-    // An unresolvable store is treated exactly as a lost claim, which is the
-    // rule this function already applied to a failed claim.
+    // getting it wrong (#7505). An unresolvable store is treated exactly as a
+    // lost claim.
     let Ok(lifecycle_store) =
         crate::agent_task_lifecycle::AgentTaskLifecycleStore::from_environment()
     else {
         return;
     };
-    cook_terminal_in_store_with(
-        &lifecycle_store,
-        report,
-        component,
-        exit_code,
-        resolved_tracker,
-    );
+    cook_terminal_in_store(&lifecycle_store, report, component, exit_code);
 }
 
 pub(crate) fn cook_terminal_in_store(
@@ -609,7 +588,7 @@ pub(crate) fn cook_terminal_in_store(
     component: Option<&str>,
     exit_code: i32,
 ) {
-    tracker_note::post(&report.cook_id);
+    tracker_note::post(store, &report.cook_id);
     cook_terminal_in_store_with(
         store,
         report,

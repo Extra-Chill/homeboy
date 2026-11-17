@@ -8,6 +8,16 @@
 use super::*;
 use crate::agent_task_service::{AgentTaskCookFailureContext, AgentTaskCookRecoveryAction};
 
+fn cook_terminal_with(
+    report: &AgentTaskCookReport,
+    component: Option<&str>,
+    exit_code: i32,
+    resolved_tracker: impl FnOnce(&str) -> Option<String>,
+) {
+    let store = crate::agent_task_lifecycle::AgentTaskLifecycleStore::from_environment().unwrap();
+    cook_terminal_in_store_with(&store, report, component, exit_code, resolved_tracker);
+}
+
 /// The tests below drive the store-rooted entry points. Resolving the store
 /// once here keeps the ambient lookup in one place and lets the ambient
 /// wrappers be deleted (#7505).
