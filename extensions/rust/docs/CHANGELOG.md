@@ -2,6 +2,11 @@
 
 All notable changes to the **rust** extension will be documented in this file.
 
+## [1.37.12] - 2026-11-17
+
+### Fixed
+- keep Lab handoff timeout test off real host load and report nextest timeouts
+
 ## [1.37.11] - 2026-11-01
 
 ### Fixed
