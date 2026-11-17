@@ -4,6 +4,12 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.470.11] - 2026-11-17
+
+### Fixed
+- renew a pre-spawn child reservation on worker progress so a slow store cannot expire a live gate
+- measure job retention on the maintenance tick, not every write
+
 ## [0.470.10] - 2026-11-17
 
 ### Changed
