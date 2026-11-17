@@ -12,6 +12,9 @@ pub struct DeployArchiveInstallPolicy {
     pub required_header: Option<DeployRequiredHeader>,
     #[serde(default)]
     pub skip_permissions_fix: bool,
+    /// Best-effort runtime cache refresh, inline immediately after publication.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub after_switch_command: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

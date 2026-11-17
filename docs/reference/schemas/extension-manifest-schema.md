@@ -140,6 +140,7 @@ Deploy configuration declares extension-owned deploy behavior. The `deploy` obje
 - **`required_header.file_glob`** (string): Header file basename glob relative to the archive root, for example `*.php`.
 - **`required_header.contains`** (string): Literal text that must exist in the installed header file.
 - **`skip_permissions_fix`** (boolean): Skip the normal post-install permissions fix for this target.
+- **`after_switch_command`** (optional string): Best-effort remote shell command executed inline immediately after publishing the target, before removing the old tree. Uses the archive install template variables (including `{{targetDir}}`), runs in a subshell, and preserves stdout/stderr as install evidence. A nonzero exit does not fail the install. Intended for runtime cache refresh, not verification or rollback.
 
 `deploy.overrides` remains the lower-level escape hatch for extensions that need a fully custom install command. Archive-shaped plugin or theme installs should prefer `deploy.archive_install` so target basename validation and header verification stay on the shared core path.
 

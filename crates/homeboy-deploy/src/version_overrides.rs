@@ -440,6 +440,9 @@ fn archive_install_override(policy: &DeployArchiveInstallPolicy) -> DeployOverri
         ""
     };
     let exchange_py = shell::quote_arg(RENAMEAT2_EXCHANGE_PY);
+    // Newline-delimited subshell supports heredocs and scopes `exit`.
+    // Cache refresh remains best-effort, like post:deploy.
+    let after_switch = policy.after_switch_command.as_deref().unwrap_or(":");
 
     // Robust, filesystem-portable install/replace flow.
     //
@@ -462,8 +465,9 @@ fn archive_install_override(policy: &DeployArchiveInstallPolicy) -> DeployOverri
     // When the target already exists, the swap itself is atomic where the
     // platform allows it (issue #13569): `renameat2(RENAME_EXCHANGE)` swaps
     // the staged tree and the live target in one syscall, so concurrent
-    // readers always observe either the complete old tree or the complete new
-    // tree — never an absent or mixed target. Capability is probed at install
+    // each individual path lookup sees an installed tree, never an absent
+    // target. Multiple lookups in one request can still straddle the exchange
+    // and mix releases (#18365). Capability is probed at install
     // time, in the generated script, because the deploy host's toolchain —
     // not homeboy's build host — decides what is available:
     //   1. `mv --exchange` (GNU coreutils >= 9.5)
@@ -483,7 +487,9 @@ fn archive_install_override(policy: &DeployArchiveInstallPolicy) -> DeployOverri
     //      If it does not (first install): plain same-filesystem rename.
     //   5. On fallback-install failure, restore the backup; always clean up
     //      the temp dir (EXIT trap).
-    //   6. On success, remove the backup / exchanged-out old tree.
+    //   6. On success, refresh runtime caches inline, then remove the backup /
+    //      exchanged-out old tree. This narrows stale-bytecode exposure but
+    //      does not isolate in-flight requests from the new tree.
     DeployOverride {
         path_pattern: policy.path_pattern.clone(),
         staging_path: policy.staging_path.clone(),
@@ -503,11 +509,9 @@ fn archive_install_override(policy: &DeployArchiveInstallPolicy) -> DeployOverri
 && if [ -e \"$target\" ]; then \
 echo \"Target exists; installing replacement (atomic exchange with backup-rename fallback)\" \
 && if mv --exchange \"$extracted\" \"$target\" 2>/dev/null; then \
-echo 'Installed via atomic mv --exchange' \
-&& rm -rf \"$extracted\"; \
+echo 'Installed via atomic mv --exchange'; \
 elif python3 -c {exchange_py} \"$extracted\" \"$target\" 2>/dev/null; then \
-echo 'Installed via atomic renameat2 RENAME_EXCHANGE' \
-&& rm -rf \"$extracted\"; \
+echo 'Installed via atomic renameat2 RENAME_EXCHANGE'; \
 else \
 echo 'Atomic exchange unavailable; installing via backup rename' \
 && if mv \"$target\" \"$backup\"; then \
@@ -516,8 +520,7 @@ echo 'ERROR: archive install failed — restoring backup' \
 && rm -rf \"$target\" \
 && if [ -e \"$backup\" ]; then mv \"$backup\" \"$target\" || true; fi \
 && exit 1; \
-fi \
-&& rm -rf \"$backup\"; \
+fi; \
 else \
 echo 'ERROR: could not back up existing target' && exit 1; \
 fi; \
@@ -525,7 +528,10 @@ fi; \
 else \
 if ! mv \"$extracted\" \"$target\"; then echo 'ERROR: archive install failed' && exit 1; fi; \
 fi \
-&& test -d \"$target\" || {{ echo 'ERROR: target missing after install' && exit 1; }}"
+&& test -d \"$target\" || {{ echo 'ERROR: target missing after install' && exit 1; }}
+( {after_switch}
+) || true
+rm -rf \"$backup\" \"$extracted\""
         ),
         cleanup_command: Some(
             "rm -f \"{{stagingArtifact}}\" && rm -rf \"{{targetDir}}.homeboy-bak.\"*".to_string(),
@@ -777,6 +783,7 @@ mod tests {
                 contains: "Package Name:".to_string(),
                 file_glob: None,
             }),
+            after_switch_command: None,
             skip_permissions_fix: true,
         }
     }
@@ -791,6 +798,7 @@ mod tests {
                 file_glob: None,
                 contains: "Bundle Name:".to_string(),
             }),
+            after_switch_command: None,
             skip_permissions_fix: true,
         }
     }
@@ -1229,6 +1237,7 @@ mod tests {
             staging_path,
             root_must_match_target_basename: false,
             required_header: None,
+            after_switch_command: None,
             skip_permissions_fix: true,
         }
     }
@@ -1657,6 +1666,76 @@ mod tests {
             None,
         );
         render_map(&archive_install_override(&policy).install_command, &vars)
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn archive_refresh_runs_after_publication_before_cleanup_and_is_best_effort() {
+        for existing in [false, true] {
+            let temp = tempfile::tempdir().unwrap();
+            let target = temp.path().join("component");
+            let staging = temp.path().join("staging");
+            fs::create_dir_all(&staging).unwrap();
+            if existing {
+                fs::create_dir_all(&target).unwrap();
+                fs::write(target.join("old.txt"), "old").unwrap();
+            }
+            write_zip(
+                &staging.join("component.zip"),
+                &[("component/manifest.txt", "fresh\n")],
+            );
+            let mut policy = nested_tree_archive_policy(staging.to_string_lossy().into_owned());
+            policy.after_switch_command = Some(format!(
+                "test -f \"$target/manifest.txt\" || exit 90\n\
+                 if [ {existing} = true ]; then test -f \"$extracted/old.txt\" || test -f \"$backup/old.txt\" || exit 91; fi\n\
+                 cat <<'REFRESH' > \"$target/refreshed\"\ninline refresh\nREFRESH\nexit 7"
+            ));
+            let vars = deploy_override_template_vars(
+                "component.zip",
+                &staging.join("component.zip").to_string_lossy(),
+                target.to_str().unwrap(),
+                None,
+                "wp",
+                None,
+            );
+            let command = render_map(&archive_install_override(&policy).install_command, &vars);
+            let output = std::process::Command::new("sh")
+                .args(["-c", &command])
+                .output()
+                .unwrap();
+            assert!(output.status.success(), "{output:?}");
+            assert_eq!(
+                fs::read_to_string(target.join("refreshed")).unwrap(),
+                "inline refresh\n"
+            );
+            assert!(list_adjacent_install_temp_dirs(temp.path(), "component").is_empty());
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn wordpress_inline_refresh_renders_as_valid_install_script() {
+        let manifest: serde_json::Value =
+            serde_json::from_str(include_str!("../../../extensions/wordpress/wordpress.json"))
+                .unwrap();
+        for value in manifest["deploy"]["archive_install"].as_array().unwrap() {
+            let policy: DeployArchiveInstallPolicy = serde_json::from_value(value.clone()).unwrap();
+            let vars = deploy_override_template_vars(
+                "plugin.zip",
+                "/tmp/plugin.zip",
+                "/var/www/wp-content/plugins/plugin",
+                None,
+                "wp",
+                None,
+            );
+            let script = render_map(&archive_install_override(&policy).install_command, &vars);
+            assert!(!script.contains("{{targetDir}}"));
+            let output = std::process::Command::new("sh")
+                .args(["-n", "-c", &script])
+                .output()
+                .unwrap();
+            assert!(output.status.success(), "{output:?}");
+        }
     }
 
     // Hosts with neither `mv --exchange` nor python3 must still install
