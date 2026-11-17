@@ -146,8 +146,18 @@ fn sync_workspace_batch_once(
             ),
             "",
         );
+        let mut file_mtimes = std::collections::BTreeMap::new();
         for entry in &manifest.entries {
             if entry.kind == "file" {
+                let path = local_path.join(&entry.path);
+                let modified = fs::metadata(&path)
+                    .materialization("metadata", &path, "controller")?
+                    .modified()
+                    .materialization("modified", &path, "controller")?;
+                file_mtimes.insert(
+                    entry.path.clone(),
+                    modified.duration_since(std::time::UNIX_EPOCH).map_err(io)?,
+                );
                 let digest = entry
                     .sha256
                     .clone()
@@ -176,12 +186,14 @@ fn sync_workspace_batch_once(
             object_cache: cache,
             manifest: manifest.clone(),
             content_hash: digest.clone(),
+            file_mtimes,
         };
         summaries.push(RootSummary {
             remote_path: remote_path.clone(),
             object_cache: summary.object_cache.clone(),
             manifest: manifest.clone(),
             content_hash: digest.clone(),
+            file_mtimes: summary.file_mtimes.clone(),
         });
         let cleanliness = if head.is_some() {
             "snapshot_synthetic_git_unique_workspace"

@@ -17,6 +17,10 @@ pub(super) struct RootSummary {
     pub(super) object_cache: String,
     pub(super) manifest: super::super::snapshot::WorkspaceContentManifest,
     pub(super) content_hash: String,
+    /// Source timestamps are transport metadata, not content identity. Keep
+    /// unchanged candidate files older than the Cargo dep-info they produced.
+    #[serde(default)]
+    pub(super) file_mtimes: std::collections::BTreeMap<String, std::time::Duration>,
 }
 
 #[derive(Serialize, Deserialize)]

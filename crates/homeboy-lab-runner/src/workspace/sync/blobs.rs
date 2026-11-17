@@ -127,6 +127,14 @@ pub(super) fn assemble(
             // Execution views are mutable: sharing an inode with the cache
             // would let a build corrupt later stages (including chmod).
             fs::copy(&blob, &target).materialization("copy", &target, "runner")?;
+            if let Some(duration) = root.file_mtimes.get(&entry.path) {
+                let modified = std::time::UNIX_EPOCH
+                    .checked_add(*duration)
+                    .ok_or_else(|| io("source mtime is out of range"))?;
+                fs::File::open(&target)
+                    .and_then(|file| file.set_modified(modified))
+                    .materialization("set_modified", &target, "runner")?;
+            }
             #[cfg(unix)]
             {
                 use std::os::unix::fs::PermissionsExt;

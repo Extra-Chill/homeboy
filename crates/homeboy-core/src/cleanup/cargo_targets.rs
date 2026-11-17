@@ -623,6 +623,14 @@ fn copy_cargo_cache(from: &Path, to: &Path, transfer: CacheTransfer) -> Result<(
         {
             fs::copy(&source, &dest)
                 .map_err(|error| io_error(error, "copy Cargo cache artifact"))?;
+            // Cargo compares dep-info and dependency artifact timestamps. A
+            // byte-identical copy with a fresh mtime invalidates that graph.
+            let modified = metadata
+                .modified()
+                .map_err(|error| io_error(error, "read Cargo artifact mtime"))?;
+            fs::File::open(&dest)
+                .and_then(|file| file.set_modified(modified))
+                .map_err(|error| io_error(error, "preserve Cargo artifact mtime"))?;
         }
     }
     Ok(())
@@ -1878,6 +1886,33 @@ mod tests {
             finished.metadata().unwrap().ino()
         );
         assert_eq!(fs::read(private.join("finished")).unwrap(), b"new");
+    }
+
+    #[test]
+    fn cargo_target_copy_preserves_fingerprint_timestamp_order() {
+        let root = TempDir::new().unwrap();
+        let source = root.path().join("source");
+        let target = root.path().join("target");
+        fs::create_dir_all(&source).unwrap();
+        fs::create_dir_all(&target).unwrap();
+        let old = UNIX_EPOCH + Duration::from_secs(1_700_000_000);
+        for (name, time) in [
+            ("dependency", old),
+            ("dep-info", old + Duration::from_secs(1)),
+        ] {
+            let path = source.join(name);
+            fs::write(&path, name).unwrap();
+            fs::File::open(path).unwrap().set_modified(time).unwrap();
+        }
+        copy_cargo_cache(&source, &target, CacheTransfer::Copy).unwrap();
+        for name in ["dependency", "dep-info"] {
+            assert_eq!(
+                fs::metadata(target.join(name)).unwrap().modified().unwrap(),
+                fs::metadata(source.join(name)).unwrap().modified().unwrap()
+            );
+        }
+        fs::write(target.join("dependency"), "private mutation").unwrap();
+        assert_eq!(fs::read(source.join("dependency")).unwrap(), b"dependency");
     }
 
     #[test]

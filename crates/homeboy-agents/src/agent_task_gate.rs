@@ -8421,6 +8421,74 @@ mod tests {
     }
 
     #[test]
+    fn agent_task_gate_second_workspace_reuses_compiled_candidate_without_incremental() {
+        homeboy_core::test_support::with_isolated_home(|_| {
+            configure_fixture_cargo_capacity();
+            let temp = tempfile::tempdir().unwrap();
+            let modified = std::time::UNIX_EPOCH + Duration::from_secs(1_700_000_000);
+            let mut reports = Vec::new();
+            for index in 1..=2 {
+                let cwd = temp.path().join(format!("gate-{index}"));
+                fs::create_dir_all(cwd.join("src")).unwrap();
+                for (name, content) in [
+                    ("Cargo.toml", "[package]\nname = \"candidate-fixture\"\nversion = \"0.1.0\"\nedition = \"2021\"\n"),
+                    ("src/lib.rs", "pub fn candidate() {}\n"),
+                ] {
+                    let path = cwd.join(name);
+                    fs::write(&path, content).unwrap();
+                    fs::File::open(path).unwrap().set_modified(modified).unwrap();
+                }
+                // Fresh Git roots retain the same repository cache identity.
+                std::process::Command::new("git")
+                    .arg("init")
+                    .arg(&cwd)
+                    .output()
+                    .unwrap();
+                std::process::Command::new("git")
+                    .args([
+                        "-C",
+                        cwd.to_str().unwrap(),
+                        "remote",
+                        "add",
+                        "origin",
+                        "https://example.invalid/candidate",
+                    ])
+                    .output()
+                    .unwrap();
+                let mut policy = AgentTaskGateEnvironmentPolicy::default();
+                policy.shared_cargo_target = Some(true);
+                let report = run_gate_command_with_policy_and_runtime_tmpdir_and_environment(
+                    &cwd,
+                    index,
+                    "cargo check --verbose",
+                    AgentTaskGateVisibility::Visible,
+                    AgentTaskGateRevealPolicy::FullEvidence,
+                    None,
+                    &policy,
+                    &[],
+                )
+                .unwrap();
+                assert_eq!(report.exit_code, 0);
+                reports.push(report);
+            }
+            assert!(reports[0].stderr.contains("Checking candidate-fixture"));
+            assert!(reports[1].stderr.contains("Fresh candidate-fixture"));
+            let first = reports[0].environment.cargo_target.as_ref().unwrap();
+            let second = reports[1].environment.cargo_target.as_ref().unwrap();
+            assert_ne!(first.path, second.path);
+            // Cargo recreates its excluded rustc probe, but not workspace
+            // artifacts or incremental sessions when the unit is fresh.
+            assert!(second.growth_bytes.unwrap() < 4096);
+            assert!(
+                fs::read_dir(Path::new(&second.path).join("debug/incremental"))
+                    .unwrap()
+                    .next()
+                    .is_none()
+            );
+        });
+    }
+
+    #[test]
     fn concurrent_cargo_build_gates_with_one_declared_target_get_isolated_stores() {
         homeboy_core::test_support::with_isolated_home(|_| {
             configure_fixture_cargo_capacity();
