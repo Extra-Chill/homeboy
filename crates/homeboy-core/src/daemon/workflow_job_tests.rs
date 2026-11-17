@@ -324,6 +324,7 @@ fn workflow_history_survives_unrelated_terminal_byte_budget_churn() {
                 )
                 .unwrap();
         }
+        store.compact_retained_history().unwrap();
         assert!(store.get(first.unwrap()).is_err());
         drop(store);
         let store = JobStore::open_without_reconciliation(&path)
@@ -381,7 +382,7 @@ fn workflow_expiry_reports_when_and_persists_a_small_marker() {
             error.contains(&terminal.finished_at_ms.unwrap().to_string()),
             "{error}"
         );
-        store.create("trigger-expiry-compaction");
+        store.compact_retained_history().unwrap();
         drop(store);
         let store = JobStore::open_without_reconciliation(&path).unwrap();
         let marker = store.controller_job_state(job).unwrap();
@@ -1121,6 +1122,7 @@ fn items_compacted_before_the_driver_observes_them_still_settle() {
             items.iter().all(|item| item["outcome"] == "succeeded"),
             "{status}"
         );
+        store.compact_retained_history().unwrap();
         let compacted = (0..3)
             .map(|index| format!("{}/work/1/item-{index}/1", request.instance))
             .filter(|key| {

@@ -144,6 +144,7 @@ fn controller_completion_soak_releases_workers_and_never_resumes_finished_side_e
         assert_eq!(store.get(id).unwrap().status, JobStatus::Succeeded);
         assert!(!store.controller_completion_pending(id).unwrap());
         assert!(!controller_job_runtimes().lock().unwrap().contains_key(&key));
+        store.compact_retained_history().unwrap();
         let before = JobStore::store_generation_at_path(&path).unwrap();
         for _ in 0..16 {
             assert!(persist_controller_success_or_uncertainty(
