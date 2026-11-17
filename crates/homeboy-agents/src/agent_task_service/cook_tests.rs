@@ -1510,7 +1510,7 @@ fn agent_task_cook_rows_wait_for_verification_and_terminal_disposition() {
                     Ok(applied.clone())
                 },
                 |_, _, _, _| {
-                    let receipt = serde_json::json!({"status":"review_ready", "run_id":run_id});
+                    let receipt = serde_json::json!({"status":"review_ready", "run_id":run_id, "pr_url":"https://github.com/example/repo/pull/1"});
                     agent_task_lifecycle::record_cook_finalization_in_store(
                         &agent_task_lifecycle::AgentTaskLifecycleStore::from_environment()?,
                         run_id,
