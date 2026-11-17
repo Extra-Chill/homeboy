@@ -2616,6 +2616,33 @@ pub fn run_declared_test_with_supervision(
     })
 }
 
+fn gate_phase_name(label: Option<&str>, command: &str, index: usize) -> String {
+    let source = label.unwrap_or_else(|| {
+        command
+            .lines()
+            .map(str::trim)
+            .find(|line| !line.is_empty() && !line.starts_with("set "))
+            .unwrap_or_default()
+    });
+    let mut slug = String::new();
+    for ch in source.chars() {
+        if ch.is_ascii_alphanumeric() {
+            slug.push(ch.to_ascii_lowercase());
+        } else if !slug.is_empty() && !slug.ends_with('-') {
+            slug.push('-');
+        }
+        if slug.len() == 40 {
+            break;
+        }
+    }
+    let slug = slug.trim_end_matches('-');
+    if slug.is_empty() {
+        format!("gate.gate-{index}")
+    } else {
+        format!("gate.{slug}")
+    }
+}
+
 #[expect(
     clippy::too_many_arguments,
     reason = "shell and declared gates share one process supervisor"
@@ -2634,7 +2661,7 @@ fn run_gate_argv_with_supervision(
     declared_plan: Option<&homeboy_engine_primitives::test_execution::TestExecutionPlan>,
 ) -> Result<AgentTaskGateReport> {
     homeboy_core::observation::phase_timing::time_with_outcome(
-        &format!("gate.gate-{index}"),
+        &gate_phase_name(None, command, index),
         || {
             run_gate_argv(
                 cwd,
@@ -6889,6 +6916,22 @@ pub(crate) fn huge_review_test_failure_capture() -> (String, String) {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn gate_phase_slug_is_stable_and_bounded() {
+        for (label, command, expected) in [
+            (Some("Cargo TEST!"), "ignored", "gate.cargo-test"),
+            (None, "set -eu\n\ncargo fmt --check", "gate.cargo-fmt-check"),
+            (None, "set -e\n!!!", "gate.gate-7"),
+            (Some("!!!"), "cargo test", "gate.gate-7"),
+            (
+                None,
+                "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+                "gate.aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            ),
+        ] {
+            assert_eq!(super::gate_phase_name(label, command, 7), expected);
+        }
+    }
 
     #[test]
     fn review_test_gate_evidence_names_failing_test_despite_stdout_cap() {
@@ -8235,8 +8278,7 @@ mod tests {
             assert_ne!(first.path, second.path);
             let spans = store.phase_spans(&run_id).unwrap();
             for (phase, count) in [
-                ("gate.gate-1", 1),
-                ("gate.gate-2", 1),
+                ("gate.printf-artifact-cargo-target-dir-artifac", 2),
                 ("publish.gate_cargo_target", 2),
             ] {
                 assert_eq!(
