@@ -94,24 +94,46 @@ pub(crate) fn fetch_remote_versions_for_project(
     base_path: &str,
     client: &SshClient,
 ) -> RemoteVersionProbeResult {
+    fetch_remote_versions_for_project_bounded(
+        components,
+        project,
+        base_path,
+        client,
+        crate::parallel::remote_probe_concurrency(),
+    )
+}
+
+/// Probe every component's installed version with bounded concurrency.
+///
+/// Each component's probe is independent and read-only, so the per-component
+/// SSH round trips overlap. Results are merged in component order, so the
+/// returned versions and failure list are identical to a serial probe.
+fn fetch_remote_versions_for_project_bounded(
+    components: &[Component],
+    project: Option<&Project>,
+    base_path: &str,
+    client: &SshClient,
+    max_concurrency: usize,
+) -> RemoteVersionProbeResult {
+    let per_component =
+        crate::parallel::map_bounded(components.iter().collect(), max_concurrency, |component| {
+            let mut result = RemoteVersionProbeResult::default();
+            // Try standard version-file approach first
+            let version =
+                fetch_version_from_file(component, project, base_path, client, &mut result)
+                    // Fallback: for CLI binaries (has build_artifact, no remote_path),
+                    // try running the binary with --version on the remote server.
+                    .or_else(|| fetch_version_from_binary(component, client, &mut result));
+            (component, version, result)
+        });
+
     let mut result = RemoteVersionProbeResult::default();
-
-    for component in components {
-        // Try standard version-file approach first
-        if let Some(ver) =
-            fetch_version_from_file(component, project, base_path, client, &mut result)
-        {
-            result.versions.insert(component.id.clone(), ver);
-            continue;
-        }
-
-        // Fallback: for CLI binaries (has build_artifact, no remote_path),
-        // try running the binary with --version on the remote server.
-        if let Some(ver) = fetch_version_from_binary(component, client, &mut result) {
-            result.versions.insert(component.id.clone(), ver);
+    for (component, version, partial) in per_component {
+        result.failures.extend(partial.failures);
+        if let Some(version) = version {
+            result.versions.insert(component.id.clone(), version);
         }
     }
-
     result
 }
 
@@ -839,6 +861,52 @@ mod tests {
             versions.versions.get("fixture").map(String::as_str),
             Some("2.3.4")
         );
+    }
+
+    #[test]
+    fn bounded_remote_version_probe_matches_serial_probe() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let mut components = Vec::new();
+        for index in 0..16 {
+            let remote_dir = temp.path().join(format!("plugin-{index}"));
+            fs::create_dir_all(&remote_dir).expect("remote dir");
+            // Leave every fourth component without a version file.
+            if index % 4 != 3 {
+                fs::write(
+                    remote_dir.join("fixture.php"),
+                    format!("Version: 1.{index}.0"),
+                )
+                .expect("version file");
+            }
+            components.push(Component {
+                id: format!("fixture-{index}"),
+                ..versioned_component(&format!("plugin-{index}"))
+            });
+        }
+        let base_path = temp.path().to_str().expect("base path");
+
+        let serial = fetch_remote_versions_for_project_bounded(
+            &components,
+            None,
+            base_path,
+            &local_client(),
+            1,
+        );
+        let concurrent = fetch_remote_versions_for_project_bounded(
+            &components,
+            None,
+            base_path,
+            &local_client(),
+            6,
+        );
+
+        assert_eq!(serial.versions.len(), 12);
+        assert_eq!(concurrent.versions, serial.versions);
+        assert_eq!(
+            concurrent.versions.get("fixture-5").map(String::as_str),
+            Some("1.5.0")
+        );
+        assert!(!concurrent.versions.contains_key("fixture-7"));
     }
 
     #[test]

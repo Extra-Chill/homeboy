@@ -1,6 +1,30 @@
 use std::collections::VecDeque;
 use std::sync::{Mutex, MutexGuard};
 
+/// Environment override for [`remote_probe_concurrency`].
+pub(crate) const REMOTE_PROBE_CONCURRENCY_ENV: &str = "HOMEBOY_DEPLOY_PROBE_CONCURRENCY";
+
+/// Default bound for concurrent read-only remote probes against one target.
+///
+/// Each probe is a separate short-lived `ssh` process; inside a multiplexed
+/// deploy scope they share one ControlMaster, so this stays below OpenSSH's
+/// default `MaxSessions` (10) on the target.
+pub(crate) const DEFAULT_REMOTE_PROBE_CONCURRENCY: usize = 6;
+
+/// Bound for concurrent read-only per-component remote probes (version files,
+/// content-manifest comparison). `HOMEBOY_DEPLOY_PROBE_CONCURRENCY=1` restores
+/// strictly serial probing.
+pub(crate) fn remote_probe_concurrency() -> usize {
+    parse_concurrency(std::env::var(REMOTE_PROBE_CONCURRENCY_ENV).ok().as_deref())
+}
+
+fn parse_concurrency(value: Option<&str>) -> usize {
+    value
+        .and_then(|value| value.trim().parse::<usize>().ok())
+        .filter(|value| *value >= 1)
+        .unwrap_or(DEFAULT_REMOTE_PROBE_CONCURRENCY)
+}
+
 /// Apply owned jobs with bounded concurrency and return results in input order.
 pub(crate) fn map_bounded<J, R, F>(jobs: Vec<J>, max_concurrency: usize, apply: F) -> Vec<R>
 where
@@ -111,6 +135,21 @@ mod tests {
         assert_eq!(completed.load(Ordering::SeqCst), 6);
         assert_eq!(results[2], Err(2));
         assert_eq!(results.len(), 6);
+    }
+
+    #[test]
+    fn remote_probe_concurrency_parses_override_and_falls_back_to_default() {
+        assert_eq!(parse_concurrency(None), DEFAULT_REMOTE_PROBE_CONCURRENCY);
+        assert_eq!(parse_concurrency(Some("1")), 1);
+        assert_eq!(parse_concurrency(Some(" 12 ")), 12);
+        assert_eq!(
+            parse_concurrency(Some("0")),
+            DEFAULT_REMOTE_PROBE_CONCURRENCY
+        );
+        assert_eq!(
+            parse_concurrency(Some("many")),
+            DEFAULT_REMOTE_PROBE_CONCURRENCY
+        );
     }
 
     #[test]

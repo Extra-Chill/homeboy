@@ -408,8 +408,17 @@ pub(super) fn prepare_components(
         || config.check
         || !local_build_components.is_empty()
     {
-        fetch_remote_versions_for_project(&components, Some(&project), base_path, &ctx.client)
-            .versions
+        let started = Instant::now();
+        let versions =
+            fetch_remote_versions_for_project(&components, Some(&project), base_path, &ctx.client)
+                .versions;
+        homeboy_core::log_status!(
+            "deploy",
+            "phase=selection.remote_versions components={} duration_ms={}",
+            components.len(),
+            started.elapsed().as_millis()
+        );
+        versions
     } else {
         HashMap::new()
     };
@@ -618,59 +627,45 @@ pub(super) fn prepare_components(
     if config.outdated && config.has_requested_refs() {
         let mut selected = Vec::new();
         let mut selection_reasons = HashMap::new();
-        for prepared in prepared_deployments.deployments.drain(..) {
-            let exclusions =
-                resolve_component_scope(&prepared.component, ScopeCommand::Deploy).exclude;
-            let mut reason = "remote version differs";
-            let mut changed = prepared.local_version != prepared.remote_version;
-            if !changed {
-                if let Some(receipt) = super::receipt::load(
-                    data_root,
-                    &project,
-                    &prepared.component.id,
-                    &prepared.install_dir,
-                    prepared.remote_version.as_deref().unwrap_or_default(),
-                    &exclusions,
-                )? {
-                    let current = super::content_manifest::compare_saved_package_manifest(
-                        &receipt.manifest,
-                        &prepared.install_dir,
-                        &ctx.client,
-                        &exclusions,
-                        receipt.provenance(),
-                    );
-                    let desired = prepared.package_manifest.as_ref();
-                    changed = current.status != "match"
-                        || desired
-                            .is_some_and(|manifest| manifest.digest() != receipt.manifest.digest());
-                    reason = "content digest differs";
-                } else {
-                    // A fresh controller or interrupted apply may have no receipt.
-                    // Compare the desired package directly rather than relying on
-                    // version text or a last-successful SHA marker.
-                    changed = match prepared.package_manifest.as_ref() {
-                        Some(manifest) => {
-                            super::content_manifest::compare_saved_package_manifest(
-                                manifest,
-                                &prepared.install_dir,
-                                &ctx.client,
-                                &exclusions,
-                                super::types::ContentManifestProvenance {
-                                    source: "requested-ref-package".to_string(),
-                                    artifact_name: None,
-                                    artifact_sha256: None,
-                                    artifact_tag: None,
-                                    artifact_commit: None,
-                                },
-                            )
-                            .status
-                                != "match"
-                        }
-                        None => true,
-                    };
-                    reason = "installed content differs from requested package";
-                }
-            }
+        // Each component's remote comparison is independent and read-only, so
+        // the SSH round trips run with bounded concurrency. Decisions are
+        // applied below in component order, so logs, errors, and the selected
+        // set match a serial pass.
+        let candidates: Vec<_> = prepared_deployments.deployments.drain(..).collect();
+        let selection_started = Instant::now();
+        let decisions = crate::parallel::map_bounded(
+            candidates.iter().collect(),
+            crate::parallel::remote_probe_concurrency(),
+            |prepared| {
+                let mut timer = PhaseTimer::new();
+                let decision = phase_clock::time(
+                    &mut timer,
+                    &phase_clock::component_subject(&prepared.component.id),
+                    "selection.remote_compare",
+                    || outdated_selection_decision(data_root, &project, prepared, &ctx.client),
+                );
+                (decision, timer)
+            },
+        );
+        homeboy_core::log_status!(
+            "deploy",
+            "phase=selection.remote_compare components={} duration_ms={}",
+            candidates.len(),
+            selection_started.elapsed().as_millis()
+        );
+        let mut selection_timings: HashMap<String, PhaseTimingReport> = HashMap::new();
+        for (prepared, (decision, selection_timer)) in candidates.into_iter().zip(decisions) {
+            let (changed, reason) = decision?;
+            let mut report = timers
+                .get(&prepared.component.id)
+                .cloned()
+                .unwrap_or_default()
+                .into_report();
+            report
+                .spans
+                .extend(prepared.phase_timings.spans.iter().cloned());
+            report.spans.extend(selection_timer.into_report().spans);
+            selection_timings.insert(prepared.component.id.clone(), report);
             homeboy_core::log_status!(
                 "deploy",
                 "{}: {}",
@@ -702,6 +697,11 @@ pub(super) fn prepare_components(
             for entry in &mut result.results {
                 if let Some(reason) = selection_reasons.get(&entry.id) {
                     entry.warnings.push(format!("outdated selection: {reason}"));
+                }
+                if let Some(report) = selection_timings.remove(&entry.id) {
+                    if !report.is_empty() {
+                        entry.phase_timings = Some(report);
+                    }
                 }
             }
             attach_version_sources(&mut result, &components);
@@ -859,6 +859,67 @@ pub(super) fn prepare_components(
             phase_timings,
         },
     )))
+}
+
+/// Decide whether an exact-ref `--outdated` candidate must be deployed.
+///
+/// Returns `(changed, reason)`. Read-only: it loads the local receipt and
+/// compares the installed tree on the target, so it is safe to run for
+/// several components concurrently.
+fn outdated_selection_decision(
+    data_root: &std::path::Path,
+    project: &Project,
+    prepared: &super::execution::PreparedComponentDeploy,
+    client: &homeboy_core::server::SshClient,
+) -> Result<(bool, &'static str)> {
+    let exclusions = resolve_component_scope(&prepared.component, ScopeCommand::Deploy).exclude;
+    if prepared.local_version != prepared.remote_version {
+        return Ok((true, "remote version differs"));
+    }
+    if let Some(receipt) = super::receipt::load(
+        data_root,
+        project,
+        &prepared.component.id,
+        &prepared.install_dir,
+        prepared.remote_version.as_deref().unwrap_or_default(),
+        &exclusions,
+    )? {
+        let current = super::content_manifest::compare_saved_package_manifest(
+            &receipt.manifest,
+            &prepared.install_dir,
+            client,
+            &exclusions,
+            receipt.provenance(),
+        );
+        let desired = prepared.package_manifest.as_ref();
+        let changed = current.status != "match"
+            || desired.is_some_and(|manifest| manifest.digest() != receipt.manifest.digest());
+        return Ok((changed, "content digest differs"));
+    }
+    // A fresh controller or interrupted apply may have no receipt.
+    // Compare the desired package directly rather than relying on
+    // version text or a last-successful SHA marker.
+    let changed = match prepared.package_manifest.as_ref() {
+        Some(manifest) => {
+            super::content_manifest::compare_saved_package_manifest(
+                manifest,
+                &prepared.install_dir,
+                client,
+                &exclusions,
+                super::types::ContentManifestProvenance {
+                    source: "requested-ref-package".to_string(),
+                    artifact_name: None,
+                    artifact_sha256: None,
+                    artifact_tag: None,
+                    artifact_commit: None,
+                },
+            )
+            .status
+                != "match"
+        }
+        None => true,
+    };
+    Ok((changed, "installed content differs from requested package"))
 }
 
 /// Verify a materialized detached source and prepare its build inputs, timing
@@ -1365,6 +1426,139 @@ mod tests {
         auto_pull_version_drift_message, check_uncommitted_changes, check_unreleased_commits,
         verify_expected_version,
     };
+
+    fn selection_candidate(
+        id: &str,
+        install_dir: &Path,
+        local_version: &str,
+        remote_version: &str,
+        package: Option<super::super::content_manifest::Manifest>,
+    ) -> super::super::execution::PreparedComponentDeploy {
+        super::super::execution::PreparedComponentDeploy {
+            component: make_component(id, "."),
+            config: super::super::types::DeployConfig::default(),
+            install_dir: install_dir.to_string_lossy().into_owned(),
+            local_version: Some(local_version.to_string()),
+            remote_version: Some(remote_version.to_string()),
+            build_exit_code: None,
+            artifact_path: None,
+            artifact_source: None,
+            canonical_release_artifact: None,
+            package_manifest: package,
+            payload_sha256: None,
+            build_provenance: super::super::types::BuildProvenance {
+                source: super::super::types::BuildSource::DownloadedRelease,
+                phase: super::super::types::BuildPhase::NotRun,
+                build_ran: false,
+                built_from_ref: None,
+                built_from_commit: None,
+                working_tree_dirty: None,
+                artifact_identity: None,
+            },
+            cleanup_local_artifact: false,
+            phase_timings: PhaseTimingReport::default(),
+        }
+    }
+
+    fn zipped_package_manifest(
+        dir: &Path,
+        name: &str,
+        files: &[(&str, &str)],
+    ) -> super::super::content_manifest::Manifest {
+        let path = dir.join(format!("{name}.zip"));
+        let mut zip = zip::ZipWriter::new(std::fs::File::create(&path).expect("zip"));
+        for (file, contents) in files {
+            zip.start_file(format!("{name}/{file}"), zip::write::FileOptions::default())
+                .expect("zip entry");
+            std::io::Write::write_all(&mut zip, contents.as_bytes()).expect("zip contents");
+        }
+        zip.finish().expect("finish zip");
+        super::super::content_manifest::package_manifest(&path, &[]).expect("package manifest")
+    }
+
+    /// Exact-ref `--outdated` selection probes components concurrently; the
+    /// decisions must be identical to a serial pass and stay in input order.
+    #[test]
+    fn concurrent_outdated_selection_matches_serial_decisions_in_order() {
+        let temp = TempDir::new().expect("temp");
+        let data_root = temp.path().join("data");
+        std::fs::create_dir_all(&data_root).expect("data root");
+        let packages = temp.path().join("packages");
+        std::fs::create_dir_all(&packages).expect("packages");
+        let project = Project {
+            id: "extrachill".to_string(),
+            ..Default::default()
+        };
+        let client = homeboy_core::server::SshClient {
+            host: "local".to_string(),
+            user: "test".to_string(),
+            port: 22,
+            identity_file: None,
+            auth: None,
+            is_local: true,
+            env: Default::default(),
+        };
+
+        let mut candidates = Vec::new();
+        let mut expected = Vec::new();
+        for index in 0..12 {
+            let name = format!("plugin-{index}");
+            let installed = temp.path().join("installed").join(&name);
+            std::fs::create_dir_all(&installed).expect("installed");
+            std::fs::write(installed.join("plugin.php"), format!("release {index}"))
+                .expect("installed file");
+            let (candidate, decision) = match index % 4 {
+                0 => (
+                    selection_candidate(&name, &installed, "2.0.0", "1.0.0", None),
+                    (true, "remote version differs"),
+                ),
+                1 => (
+                    selection_candidate(
+                        &name,
+                        &installed,
+                        "1.0.0",
+                        "1.0.0",
+                        Some(zipped_package_manifest(
+                            &packages,
+                            &name,
+                            &[("plugin.php", &format!("release {index}"))],
+                        )),
+                    ),
+                    (false, "installed content differs from requested package"),
+                ),
+                2 => (
+                    selection_candidate(
+                        &name,
+                        &installed,
+                        "1.0.0",
+                        "1.0.0",
+                        Some(zipped_package_manifest(
+                            &packages,
+                            &name,
+                            &[("plugin.php", "changed without a version bump")],
+                        )),
+                    ),
+                    (true, "installed content differs from requested package"),
+                ),
+                _ => (
+                    selection_candidate(&name, &installed, "1.0.0", "1.0.0", None),
+                    (true, "installed content differs from requested package"),
+                ),
+            };
+            candidates.push(candidate);
+            expected.push(decision);
+        }
+
+        let decide = |prepared: &super::super::execution::PreparedComponentDeploy| {
+            outdated_selection_decision(&data_root, &project, prepared, &client)
+                .expect("selection decision")
+        };
+        let serial = crate::parallel::map_bounded(candidates.iter().collect(), 1, decide);
+        let concurrent = crate::parallel::map_bounded(candidates.iter().collect(), 6, decide);
+
+        assert_eq!(serial, expected);
+        assert_eq!(concurrent, serial);
+    }
 
     fn make_component(id: &str, local_path: &str) -> Component {
         Component::new(id.to_string(), local_path.to_string(), String::new(), None)
