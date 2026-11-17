@@ -1262,8 +1262,12 @@ fn most_specific_checkout_candidates(
                 .then(|| (checkout_path.components().count(), candidate.clone()))
         })
         .collect();
+    // No registration contains `dir`: it is a monorepo root (or another
+    // directory above every registered package), not one of the packages.
+    // Report no component so callers fall back to repository-level handling
+    // instead of failing as ambiguous (#17190, #17509).
     let Some(depth) = containing.iter().map(|(depth, _)| *depth).max() else {
-        return candidates;
+        return Vec::new();
     };
     containing
         .into_iter()
@@ -3445,6 +3449,47 @@ mod tests {
                 );
                 assert!(!target.synthetic);
             });
+        });
+    }
+
+    #[test]
+    fn path_override_at_monorepo_root_without_root_registration_is_not_ambiguous() {
+        crate::test_support::with_isolated_home(|home| {
+            let dir = tempfile::tempdir().expect("temp dir");
+            let primary = dir.path().join("primary");
+            let checkout = dir.path().join("checkout");
+            for package in ["a", "b"] {
+                let package_dir = primary.join("plugins").join(package);
+                std::fs::create_dir_all(&package_dir).expect("package dir");
+                std::fs::write(package_dir.join("README.md"), "fixture\n").expect("readme");
+            }
+            git(&primary, &["init"]);
+            git(&primary, &["config", "user.email", "test@example.com"]);
+            git(&primary, &["config", "user.name", "Test User"]);
+            git(&primary, &["add", "."]);
+            git(&primary, &["commit", "-m", "Initial commit"]);
+            git(&primary, &["worktree", "add", checkout.to_str().unwrap()]);
+            write_standalone_registration(home.path(), "a", &primary.join("plugins").join("a"));
+            write_standalone_registration(home.path(), "b", &primary.join("plugins").join("b"));
+
+            // A Cook baseline/candidate checkout of the monorepo root matches
+            // every package registration through the shared git common dir,
+            // but contains none of them.
+            let root = checkout.to_string_lossy().to_string();
+            let target = resolve_target(TargetSpec::new(None, Some(&root)))
+                .expect("monorepo root must not be reported as ambiguous");
+            assert_ne!(target.component_id, "a");
+            assert_ne!(target.component_id, "b");
+
+            // A package directory inside the checkout still resolves to its package.
+            let package = checkout
+                .join("plugins")
+                .join("b")
+                .to_string_lossy()
+                .to_string();
+            let target =
+                resolve_target(TargetSpec::new(None, Some(&package))).expect("package target");
+            assert_eq!(target.component_id, "b");
         });
     }
 
