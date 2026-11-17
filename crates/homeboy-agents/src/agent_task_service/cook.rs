@@ -5485,35 +5485,8 @@ fn run_cook_spine(
         && !cook_workspace_lookup_pending(&options.identity.initial_plan)
         && !cook_has_provider_execution_in_store(lifecycle_store, &options.identity.cook_id)?
     {
-        if let Some(owner) = super::cook_prior_candidate::require_destination_free_of_live_cook(
-            lifecycle_store,
-            &options,
-        )? {
-            lifecycle_store.record_metadata_value(
-                &options.identity.initial_run_id,
-                "superseded_by_active_cook",
-                owner.clone(),
-            )?;
-            // The attempt never executes: settle it so no queued record is
-            // left for status, sweeps, or upgrade admission to wait on.
-            agent_task_lifecycle::cancel_run_in_store(
-                lifecycle_store,
-                &options.identity.initial_run_id,
-                Some("superseded_by_active_cook"),
-            )?;
-            return Ok(stores.report(CookReportInput {
-                cook_id: options.identity.cook_id.clone(),
-                status: "superseded_by_active_cook",
-                disposition: CookDisposition::Terminal,
-                attempts: Vec::new(),
-                finalization: None,
-                stop_reason: Some(format!(
-                    "destination owned by active Cook {}",
-                    owner["cook_id"].as_str().unwrap_or_default()
-                )),
-                exit_code: 0,
-                invocation_latest_run_id: Some(&options.identity.initial_run_id),
-            }));
+        if let Some(report) = supersede_by_live_destination_owner(stores, &options)? {
+            return Ok(report);
         }
     }
     // A re-cook of the same issue derives the same native worktree, which can
@@ -5774,6 +5747,20 @@ fn run_cook_spine(
             let _ = lookup_stop.send(());
             result
         });
+        // The pre-dispatch owner check above cannot see a destination that
+        // was still being looked up. A concurrent Cook on the same issue may
+        // have claimed it meanwhile, whether this lookup then found its
+        // worktree or lost the marker claim: follow that Cook (#18307).
+        let lost_claim = lookup_result.as_ref().err().is_none_or(|error| {
+            std::error::Error::source(error).is_some_and(|source| {
+                source.is::<crate::agent_task_promotion::destination::DestinationOwnerMismatch>()
+            })
+        });
+        if lost_claim {
+            if let Some(report) = supersede_by_live_destination_owner(stores, &options)? {
+                return Ok(report);
+            }
+        }
         if let Err(error) = lookup_result {
             if lifecycle_store
                 .read_record(&options.identity.initial_run_id)
@@ -9041,6 +9028,47 @@ fn cook_has_provider_execution_in_store(
         }
     }
     Ok(false)
+}
+
+/// A Cook whose destination is owned by another live Cook yields to it and
+/// follows its result (#18307).
+fn supersede_by_live_destination_owner(
+    stores: CookStores<'_>,
+    options: &CookRequest,
+) -> Result<Option<AgentTaskRunResult<AgentTaskCookReport>>> {
+    let lifecycle_store = stores.lifecycle;
+    let Some(owner) = super::cook_prior_candidate::require_destination_free_of_live_cook(
+        lifecycle_store,
+        options,
+    )?
+    else {
+        return Ok(None);
+    };
+    lifecycle_store.record_metadata_value(
+        &options.identity.initial_run_id,
+        "superseded_by_active_cook",
+        owner.clone(),
+    )?;
+    // The attempt never executes: settle it so no queued record is
+    // left for status, sweeps, or upgrade admission to wait on.
+    agent_task_lifecycle::cancel_run_in_store(
+        lifecycle_store,
+        &options.identity.initial_run_id,
+        Some("superseded_by_active_cook"),
+    )?;
+    Ok(Some(stores.report(CookReportInput {
+        cook_id: options.identity.cook_id.clone(),
+        status: "superseded_by_active_cook",
+        disposition: CookDisposition::Terminal,
+        attempts: Vec::new(),
+        finalization: None,
+        stop_reason: Some(format!(
+            "destination owned by active Cook {}",
+            owner["cook_id"].as_str().unwrap_or_default()
+        )),
+        exit_code: 0,
+        invocation_latest_run_id: Some(&options.identity.initial_run_id),
+    })))
 }
 
 fn cook_workspace_lookup_pending(plan: &AgentTaskPlan) -> bool {

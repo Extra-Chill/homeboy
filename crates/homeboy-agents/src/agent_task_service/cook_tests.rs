@@ -4630,6 +4630,104 @@ fn pending_cook_ensures_native_destination_after_durable_admission_idempotently(
     });
 }
 
+/// Two Cooks on one issue derive the same native destination. The one that
+/// starts second must follow the live owner, not fail its claim.
+#[test]
+fn a_second_cook_provisioning_a_destination_a_live_cook_claimed_follows_it() {
+    use fs4::fs_std::FileExt;
+    homeboy_core::test_support::with_isolated_home(|home| {
+        let remote = tempfile::tempdir().expect("bare origin");
+        let source = home.path().join("Developer/fixture");
+        std::fs::create_dir_all(&source).expect("source directory");
+        std::fs::write(source.join("homeboy.json"), r#"{"id":"fixture"}"#)
+            .expect("component manifest");
+        let origin = remote.path().to_str().expect("origin path");
+        for (dir, args) in [
+            (remote.path(), vec!["init", "--bare", "--quiet"]),
+            (source.as_path(), vec!["init", "--quiet", "-b", "main"]),
+            (
+                source.as_path(),
+                vec!["config", "user.email", "test@example.com"],
+            ),
+            (
+                source.as_path(),
+                vec!["config", "user.name", "Homeboy Test"],
+            ),
+            (source.as_path(), vec!["add", "."]),
+            (source.as_path(), vec!["commit", "--quiet", "-m", "base"]),
+            (source.as_path(), vec!["remote", "add", "origin", origin]),
+            (
+                source.as_path(),
+                vec!["push", "--quiet", "-u", "origin", "main"],
+            ),
+        ] {
+            assert!(Command::new("git")
+                .args(args)
+                .current_dir(dir)
+                .status()
+                .expect("git runs")
+                .success());
+        }
+        let handle = "fixture@fix-issue-6145-fixture";
+        let pending = |cook_id: &str, dispatcher: Arc<dyn AgentTaskCookAttemptDispatcher>| {
+            let mut options = batch_cook_options(cook_id, dispatcher);
+            options.workspace.to_worktree = handle.to_string();
+            options.identity.initial_plan.metadata["cook_provision"] = serde_json::json!({
+                "action": "lookup_pending",
+                "kind": "provider",
+                "handle": handle,
+                "provision_intent": {
+                    "repo": source,
+                    "base": "main",
+                    "head": "fix/issue-6145-fixture",
+                    "task_url": "https://example.test/issues/6145",
+                },
+                "lifecycle_intent": {
+                    "purpose": "agent_task_cook",
+                    "cleanup_policy": "remove_on_success",
+                },
+            });
+            options
+        };
+
+        // The first Cook claims the destination and is still driving.
+        let owner = "cook-6145-first";
+        let mut first = pending(owner, Arc::new(AcceptedDetachedAttemptDispatcher));
+        let recipes = super::super::cook_recipe::CookRecipeStore::from_environment().unwrap();
+        let lifecycle_store = test_lifecycle_store();
+        recipes.persist_initial_recipe(&first).unwrap();
+        materialize_initial_cook_attempt_with_stores(&recipes, &lifecycle_store, &first).unwrap();
+        materialize_pending_cook_workspace(&lifecycle_store, &mut first).unwrap();
+        let lock_path = homeboy_core::paths::homeboy_data()
+            .unwrap()
+            .join("agent-task-cooks")
+            .join(owner)
+            .join("driver.lock");
+        let driver = std::fs::OpenOptions::new()
+            .create(true)
+            .truncate(false)
+            .read(true)
+            .write(true)
+            .open(&lock_path)
+            .expect("driver lock");
+        assert!(driver.try_lock_exclusive().expect("hold driver lock"));
+
+        let dispatches = Arc::new(AtomicUsize::new(0));
+        let second = pending(
+            "cook-6145-second",
+            Arc::new(RecordingDetachedAttemptDispatcher {
+                dispatches: dispatches.clone(),
+            }),
+        );
+        let result = run_cook(CookContext::new(second, Arc::new(UnusedExecutor)))
+            .expect("the second Cook follows the live owner");
+        assert_eq!(result.value.status, "superseded_by_active_cook");
+        assert_eq!(result.exit_code, 0);
+        assert_eq!(dispatches.load(Ordering::SeqCst), 0);
+        assert!(result.value.stop_reason.as_deref().unwrap().contains(owner));
+    });
+}
+
 #[test]
 fn active_cooks_on_the_same_canonical_worktree_record_a_nonblocking_warning() {
     homeboy_core::test_support::with_isolated_home(|_| {
