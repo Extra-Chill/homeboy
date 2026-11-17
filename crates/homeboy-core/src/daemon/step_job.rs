@@ -653,6 +653,8 @@ impl ControllerJobDriver for StepJobDriver {
             "waiting_since": progress.get("waiting_since").cloned().unwrap_or(Value::Null),
             "builds": progress.get("builds").cloned().unwrap_or(Value::Null),
             "exit_code": progress.get("exit_code").cloned().unwrap_or(Value::Null),
+            "waiting_for": progress.get("waiting_for").cloned().unwrap_or(Value::Null),
+            "queue_position": progress.get("queue_position").cloned().unwrap_or(Value::Null),
         }))
     }
 
