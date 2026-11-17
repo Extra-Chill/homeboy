@@ -225,7 +225,10 @@ pub fn report(
         }
     }
 
-    let playwright = probes::tool_available(&tools, "playwright");
+    // No intrinsic tool declares Playwright, so probe it here rather than
+    // report a CLI that was never looked for as missing.
+    let playwright = probes::tool_available(&tools, "playwright")
+        || (!scoped && probes::remote_tool_probe(client, "playwright", &[]).available);
     let browser_ready = (!scoped)
         .then(|| probes::remote_browser_ready(client))
         .unwrap_or(false);
