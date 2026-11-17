@@ -463,15 +463,14 @@ impl CookDelivery {
                 ),
             ),
             (CookDeliveryState::Blocked, Some(Code::GatesDeferred)) => {
-                (recoverable, Some(CookStatus::GatesDeferred))
+                (recoverable, Some(CookStatus::GateEnvironmentUnavailable))
             }
             (CookDeliveryState::Blocked, Some(Code::ReviewFormIncomplete)) => {
                 (recoverable, Some(CookStatus::CandidateRecoverable))
             }
-            (CookDeliveryState::Blocked, Some(Code::PublishRefused)) => (
-                None,
-                Some(CookStatus::Unknown("finalization_failed".to_string())),
-            ),
+            (CookDeliveryState::Blocked, Some(Code::PublishRefused)) => {
+                (None, Some(CookStatus::FinalizationFailed))
+            }
             (CookDeliveryState::Blocked, _) => (None, None),
         };
         CookDeliveryLifecycle {

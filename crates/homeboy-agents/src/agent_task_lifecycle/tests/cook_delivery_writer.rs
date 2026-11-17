@@ -300,7 +300,7 @@ fn a_deferred_then_executed_gate_never_stays_gates_deferred() {
             .mutate_record(run_id, |record| {
                 record.ensure_metadata_object().insert(
                     "cook_progress".to_string(),
-                    json!({ "phase": "terminal", "terminal_status": "gates_deferred", "terminal_success": false, "exit_code": 1 }),
+                    json!({ "phase": "terminal", "terminal_status": "gate_environment_unavailable", "terminal_success": false, "exit_code": 1 }),
                 );
                 true
             })
@@ -318,7 +318,11 @@ fn a_deferred_then_executed_gate_never_stays_gates_deferred() {
         assert_eq!(verified.state(), run_state, "{executed}");
         assert_eq!(delivery.lifecycle().cook_status, cook_status, "{executed}");
         let terminal_status = verified.metadata["cook_progress"]["terminal_status"].as_str();
-        assert_ne!(terminal_status, Some("gates_deferred"), "{executed}");
+        assert_ne!(
+            terminal_status,
+            Some("gate_environment_unavailable"),
+            "{executed}"
+        );
         assert_eq!(
             terminal_status.map(CookStatus::from_status),
             cook_status,

@@ -475,7 +475,7 @@ fn terminal_payload(
         let status = homeboy_core::cook_status::CookStatus::from_status(&report.status);
         if status.is_gate_failure() && !payload.facts.iter().any(|fact| fact.label == "Gates") {
             payload = payload.with_fact("Gates", "failed");
-        } else if status == homeboy_core::cook_status::CookStatus::GatesDeferred {
+        } else if status == homeboy_core::cook_status::CookStatus::GateEnvironmentUnavailable {
             payload = payload.with_fact("Gates", "deferred");
         }
     }
