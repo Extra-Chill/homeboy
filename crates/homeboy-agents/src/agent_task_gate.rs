@@ -1,4 +1,5 @@
 pub mod data_inputs;
+pub mod execution_start;
 pub mod failure_excerpt;
 pub mod placement;
 pub mod verdict;
@@ -176,6 +177,49 @@ pub struct AgentTaskGateInputSource {
     pub sha256: String,
     pub size_bytes: u64,
     pub redaction_policy: AgentTaskGateRevealPolicy,
+}
+
+impl AgentTaskGateInputSource {
+    /// Reviewer-facing label for a visible file-backed gate: the file name the
+    /// controller snapshotted at admission. Inline and private sources have none.
+    pub fn file_label(&self) -> Option<String> {
+        if self.source_kind != "file" || self.visibility != AgentTaskGateVisibility::Visible {
+            return None;
+        }
+        let path = self.path.as_deref()?;
+        Path::new(path)
+            .file_name()
+            .map(|name| name.to_string_lossy().trim().to_string())
+            .filter(|name| !name.is_empty())
+    }
+
+    fn describes_program(&self, program: &str) -> bool {
+        self.sha256 == format!("sha256:{:x}", Sha256::digest(program.as_bytes()))
+    }
+}
+
+/// Carry each visible `--verify-file` source's file name onto the gate report
+/// that executed its program, matched by the admission-time content digest.
+pub fn apply_gate_input_source_labels(
+    gates: &mut [AgentTaskGateReport],
+    sources: &[AgentTaskGateInputSource],
+) {
+    for gate in gates {
+        if gate.visibility != AgentTaskGateVisibility::Visible {
+            continue;
+        }
+        let Ok(invocation) = gate.invocation() else {
+            continue;
+        };
+        let program = invocation.reviewer_command();
+        if let Some(label) = sources
+            .iter()
+            .filter(|source| source.describes_program(&program))
+            .find_map(AgentTaskGateInputSource::file_label)
+        {
+            gate.label = Some(label);
+        }
+    }
 }
 
 fn default_hydrate_dependencies() -> bool {
@@ -879,6 +923,15 @@ pub struct AgentTaskGateReport {
     /// (#16920).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub workspace_mutation: Option<AgentTaskGateWorkspaceMutation>,
+    /// Reviewer-facing name of the gate's declared source, such as the file
+    /// name of a `--verify-file` program. Positional ids (`gate-1`) are
+    /// meaningless to reviewers, so this becomes the gate result's name.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub label: Option<String>,
+    /// The first run's failure when this gate failed once and passed on its
+    /// one re-run: durable flake evidence, not a refusal (#18300).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub flaky: Option<AgentTaskGateFailureEvidence>,
 }
 
 /// Difference between the admitted candidate tree and the gate workspace
@@ -1686,6 +1739,8 @@ impl AgentTaskGateReport {
             environment,
             setup: Vec::new(),
             workspace_mutation: None,
+            label: None,
+            flaky: None,
         }
     }
 
@@ -1748,7 +1803,20 @@ impl AgentTaskGateReport {
             environment: AgentTaskGateEnvironment::default(),
             setup: Vec::new(),
             workspace_mutation: None,
+            label: None,
+            flaky: None,
         }
+    }
+
+    /// Whether a failure is the command's own verdict on the candidate, which
+    /// one re-run may overturn. Budget stops, declarations, empty selections,
+    /// and environment failures are not re-run.
+    fn reruns_on_failure(&self) -> bool {
+        self.status == AgentTaskGateStatus::Failed
+            && self.termination == AgentTaskGateTermination::Completed
+            && self.failure_evidence.as_ref().is_none_or(|evidence| {
+                evidence.classification == AgentTaskGateFailureClassification::CandidateCode
+            })
     }
 
     pub(crate) fn accept_inherited_failure(&mut self) {
@@ -2616,6 +2684,33 @@ pub fn run_declared_test_with_supervision(
     })
 }
 
+fn gate_phase_name(label: Option<&str>, command: &str, index: usize) -> String {
+    let source = label.unwrap_or_else(|| {
+        command
+            .lines()
+            .map(str::trim)
+            .find(|line| !line.is_empty() && !line.starts_with("set "))
+            .unwrap_or_default()
+    });
+    let mut slug = String::new();
+    for ch in source.chars() {
+        if ch.is_ascii_alphanumeric() {
+            slug.push(ch.to_ascii_lowercase());
+        } else if !slug.is_empty() && !slug.ends_with('-') {
+            slug.push('-');
+        }
+        if slug.len() == 40 {
+            break;
+        }
+    }
+    let slug = slug.trim_end_matches('-');
+    if slug.is_empty() {
+        format!("gate.gate-{index}")
+    } else {
+        format!("gate.{slug}")
+    }
+}
+
 #[expect(
     clippy::too_many_arguments,
     reason = "shell and declared gates share one process supervisor"
@@ -2633,37 +2728,54 @@ fn run_gate_argv_with_supervision(
     package_artifacts: &[AgentTaskGatePackageArtifactRequirement],
     declared_plan: Option<&homeboy_engine_primitives::test_execution::TestExecutionPlan>,
 ) -> Result<AgentTaskGateReport> {
-    homeboy_core::observation::phase_timing::time_with_outcome(
-        &format!("gate.gate-{index}"),
-        || {
-            run_gate_argv(
-                cwd,
-                index,
-                command_vec,
-                command,
-                visibility,
-                reveal_policy,
-                GateExecution {
-                    runtime_tmpdir,
-                    timeout: supervision.map(|supervision| supervision.timeout),
-                    supervision,
-                    baseline_timeout_diagnostic: false,
-                    deadline: None,
-                },
-                gate_environment,
-                package_artifacts,
-                declared_plan,
-            )
-        },
-        |report| {
-            matches!(
-                report.status,
-                AgentTaskGateStatus::Failed
-                    | AgentTaskGateStatus::Unavailable
-                    | AgentTaskGateStatus::Deferred
-            )
-        },
-    )
+    let run = || {
+        homeboy_core::observation::phase_timing::time_with_outcome(
+            &gate_phase_name(None, command, index),
+            || {
+                run_gate_argv(
+                    cwd,
+                    index,
+                    command_vec.clone(),
+                    command,
+                    visibility,
+                    reveal_policy,
+                    GateExecution {
+                        runtime_tmpdir,
+                        timeout: supervision.map(|supervision| supervision.timeout),
+                        supervision,
+                        baseline_timeout_diagnostic: false,
+                        deadline: None,
+                    },
+                    gate_environment,
+                    package_artifacts,
+                    declared_plan,
+                )
+            },
+            |report| {
+                matches!(
+                    report.status,
+                    AgentTaskGateStatus::Failed
+                        | AgentTaskGateStatus::Unavailable
+                        | AgentTaskGateStatus::Deferred
+                )
+            },
+        )
+    };
+    let report = run()?;
+    if !report.reruns_on_failure() {
+        return Ok(report);
+    }
+    // A command that ran and failed is re-run once in the same workspace: a
+    // single failure under host load (a test timeout, a race) is not proof
+    // against the candidate. Only a second failure refuses it.
+    let rerun = run()?;
+    if rerun.status != AgentTaskGateStatus::Succeeded {
+        return Ok(rerun);
+    }
+    Ok(AgentTaskGateReport {
+        flaky: report.failure_evidence,
+        ..rerun
+    })
 }
 
 /// Comparison base carried by generated component lint gates, also used by
@@ -2914,6 +3026,7 @@ fn run_gate_argv_local(
             Some(format!("contain deterministic gate {command}")),
         )
     })?;
+    execution_start::before_command_start()?;
     let child = process.spawn().map_err(|error| {
         Error::internal_io(
             error.to_string(),
@@ -3777,7 +3890,8 @@ impl SelectedGateEnvironment {
             cwd,
             None,
             &self.values,
-        )?;
+        )
+        .map_err(|error| placement::with_local_reserve_recovery(error))?;
         // Store sizing is evidence only. A concurrent gate may update the
         // shared target while this observation walks it.
         let bytes_before = target.size_bytes().ok();
@@ -6585,7 +6699,7 @@ impl From<AgentTaskGateReport> for HomeboyGateResult {
 
         HomeboyGateResult::new(
             report.id.clone(),
-            report.id.clone(),
+            report.label.clone().unwrap_or_else(|| report.id.clone()),
             HomeboyGateKind::Command,
             status,
         )
@@ -6889,6 +7003,22 @@ pub(crate) fn huge_review_test_failure_capture() -> (String, String) {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn gate_phase_slug_is_stable_and_bounded() {
+        for (label, command, expected) in [
+            (Some("Cargo TEST!"), "ignored", "gate.cargo-test"),
+            (None, "set -eu\n\ncargo fmt --check", "gate.cargo-fmt-check"),
+            (None, "set -e\n!!!", "gate.gate-7"),
+            (Some("!!!"), "cargo test", "gate.gate-7"),
+            (
+                None,
+                "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+                "gate.aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            ),
+        ] {
+            assert_eq!(super::gate_phase_name(label, command, 7), expected);
+        }
+    }
 
     #[test]
     fn review_test_gate_evidence_names_failing_test_despite_stdout_cap() {
@@ -8235,8 +8365,7 @@ mod tests {
             assert_ne!(first.path, second.path);
             let spans = store.phase_spans(&run_id).unwrap();
             for (phase, count) in [
-                ("gate.gate-1", 1),
-                ("gate.gate-2", 1),
+                ("gate.printf-artifact-cargo-target-dir-artifac", 2),
                 ("publish.gate_cargo_target", 2),
             ] {
                 assert_eq!(
@@ -8626,6 +8755,66 @@ mod tests {
             report.test_execution_outcome,
             Some(homeboy_engine_primitives::test_execution::TestExecutionOutcome::TimedOut)
         );
+    }
+
+    /// #18300: a gate that ran and failed is re-run once. Fail-then-pass
+    /// passes with the first failure kept as flake evidence; a second failure
+    /// refuses; a budget stop is not re-run.
+    #[test]
+    fn a_failed_gate_is_rerun_once_and_a_recovered_failure_is_recorded_as_flaky() {
+        let timeout = GateSupervision {
+            timeout: Duration::from_millis(200),
+            no_progress_timeout: Duration::from_secs(5),
+            heartbeat_interval: Duration::from_millis(10),
+            on_spawn: Arc::new(|_, _| Ok(())),
+            on_heartbeat: Arc::new(|_| Ok(())),
+            is_cancelled: Arc::new(|| false),
+        };
+        for (script, supervision, status, flaky, expected_runs) in [
+            (
+                "[ \"$(wc -l < \"$RUNS\")\" -ge 2 ] || { echo first run lost a race; exit 1; }",
+                None,
+                AgentTaskGateStatus::Succeeded,
+                true,
+                2,
+            ),
+            ("exit 1", None, AgentTaskGateStatus::Failed, false, 2),
+            ("true", None, AgentTaskGateStatus::Succeeded, false, 1),
+            (
+                "sleep 5",
+                Some(&timeout),
+                AgentTaskGateStatus::Failed,
+                false,
+                1,
+            ),
+        ] {
+            let workspace = tempfile::tempdir().expect("workspace");
+            let runs = workspace.path().join("runs");
+            let command = format!("RUNS='{}'; echo run >> \"$RUNS\"; {script}", runs.display());
+            let report = run_gate_command_with_supervision(
+                workspace.path(),
+                1,
+                &command,
+                AgentTaskGateVisibility::Visible,
+                AgentTaskGateRevealPolicy::FullEvidence,
+                None,
+                supervision,
+                &AgentTaskGateEnvironmentPolicy::default(),
+                &[],
+            )
+            .expect("gate report");
+            assert_eq!(report.status, status, "{script}");
+            assert_eq!(report.flaky.is_some(), flaky, "{script}");
+            if let Some(first) = &report.flaky {
+                assert_eq!(first.exit_code, 1);
+                assert!(
+                    first.stdout_tail.contains("first run lost a race"),
+                    "{first:?}"
+                );
+            }
+            let ran = std::fs::read_to_string(&runs).unwrap().lines().count();
+            assert_eq!(ran, expected_runs, "{script}");
+        }
     }
 
     #[test]

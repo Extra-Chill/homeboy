@@ -14,6 +14,13 @@ use homeboy_core::{Error, Result};
 struct NativeLabGateTransport;
 
 impl LabGateTransport for NativeLabGateTransport {
+    fn recovery_runner(&self) -> Option<String> {
+        crate::list().ok()?.into_iter().find_map(|runner| {
+            let admission = observe_gate_admission(&runner.id).ok()?.0;
+            (admission.accepts_jobs && admission.freshness == LabGateFreshness::Fresh)
+                .then_some(runner.id)
+        })
+    }
     fn declared_runner(&self, command: &str) -> Result<Option<String>> {
         crate::cli_resolver::resolve_gate_runner(command)
     }
@@ -581,6 +588,9 @@ fn execute_owned(
         .session
         .as_ref()
         .and_then(|session| session.remote_daemon_lease_id.clone());
+    if !request.preflight_only {
+        homeboy_agents::agent_tasks::gate::execution_start::before_command_start()?;
+    }
     let output = match crate::exec_request(execution) {
         Ok((output, _)) => output,
         Err(error) => {

@@ -471,22 +471,34 @@ fn handle_mismatch_error(record_handle: &str, requested_handle: &str) -> Error {
     )
 }
 
-/// Canonical native handle for a repository name or local repository path.
-pub fn native_handle_for_branch(repository: &str, head: &str) -> String {
-    let repo = Path::new(repository);
-    let repository = repo
-        .is_dir()
-        .then(|| repo.file_name())
-        .flatten()
-        .and_then(|name| name.to_str())
-        .filter(|name| !name.is_empty())
-        .unwrap_or(repository);
-    worktree::handle_for_branch(repository, head)
+/// Repository identity the native provider names worktrees after: the
+/// resolved component id. A local checkout path resolves exactly as worktree
+/// creation resolves it, so the checkout directory name never leaks into the
+/// handle when it differs from the component id.
+fn native_repository_id(repository: &str) -> Result<String> {
+    if !Path::new(repository).is_dir() {
+        return Ok(repository.to_string());
+    }
+    let target = crate::component::resolve_target(crate::component::TargetSpec {
+        component_id: Some(repository),
+        allow_synthetic: true,
+        accept_bare_directory: true,
+        ..Default::default()
+    })?;
+    Ok(target.component_id)
+}
+
+/// Canonical native handle for a component id or local repository path.
+pub fn native_handle_for_branch(repository: &str, head: &str) -> Result<String> {
+    Ok(worktree::handle_for_branch(
+        &native_repository_id(repository)?,
+        head,
+    ))
 }
 
 /// Validate destination identity without looking up or provisioning a worktree.
 pub fn validate_native_handle(handle: &str, repository: &str, head: &str) -> Result<()> {
-    let expected = native_handle_for_branch(repository, head);
+    let expected = native_handle_for_branch(repository, head)?;
     if handle != expected {
         return Err(Error::validation_invalid_argument(
             "to_worktree",
@@ -658,6 +670,84 @@ mod tests {
 
         assert_eq!(error.details["field"], "to_worktree");
         assert!(error.message.contains("expected `fixture@fix-13940`"));
+    }
+
+    #[test]
+    fn native_handle_uses_component_id_not_checkout_directory_name() {
+        crate::test_support::with_isolated_home(|home| {
+            let checkout = home.path().join("hb-s6i");
+            std::fs::create_dir(&checkout).expect("checkout");
+            std::fs::write(checkout.join("homeboy.json"), r#"{"id":"homeboy"}"#)
+                .expect("homeboy.json");
+            for args in [
+                &["init", "-q", "-b", "main"][..],
+                &["add", "homeboy.json"],
+                &[
+                    "-c",
+                    "user.name=fixture",
+                    "-c",
+                    "user.email=fixture@example.com",
+                    "commit",
+                    "-q",
+                    "-m",
+                    "init",
+                ],
+            ] {
+                let status = std::process::Command::new("git")
+                    .args(args)
+                    .current_dir(&checkout)
+                    .status()
+                    .expect("git");
+                assert!(status.success(), "git {args:?}");
+            }
+            let repo = checkout.display().to_string();
+            // The provider names the worktree after the resolved component id.
+            let target = crate::component::resolve_target(crate::component::TargetSpec {
+                component_id: Some(&repo),
+                allow_synthetic: true,
+                accept_bare_directory: true,
+                ..Default::default()
+            })
+            .expect("resolve checkout");
+            assert_eq!(target.component_id, "homeboy");
+
+            let intent = WorktreeProvisionIntent {
+                repo: repo.clone(),
+                base: "main".to_string(),
+                head: "fix/16731".to_string(),
+                handle: "homeboy@fix-16731".to_string(),
+                task_url: None,
+            };
+            validate_native_handle(&intent.handle, &repo, &intent.head)
+                .expect("component-id handle passes preview");
+            let plan = plan_worktree_provision(&intent, (&target.component_id, &checkout))
+                .expect("plan provision");
+            let WorktreeProvisionPlan::Planned(destination) = plan else {
+                panic!("expected a planned destination");
+            };
+            assert_eq!(destination.ownership.handle, intent.handle);
+            assert!(destination
+                .ownership
+                .path
+                .ends_with(&format!("/{}", intent.handle)));
+            let created = ensure_worktree_provision(
+                &intent,
+                &WorktreeProvisionLifecycle {
+                    purpose: "agent_task_cook".to_string(),
+                    owner_run_ref: "component-identity-test".to_string(),
+                    cleanup_policy: WorktreeCleanupPolicy::PreserveOnFailure,
+                },
+            )
+            .expect("provider creates the validated handle");
+            assert_eq!(created.destination.ownership, destination.ownership);
+            assert_eq!(
+                resolve_worktree_ownership(&intent.handle).expect("resolve created handle"),
+                created.destination.ownership
+            );
+            let error = validate_native_handle("hb-s6i@fix-16731", &repo, &intent.head)
+                .expect_err("directory-name handle is not an alias");
+            assert!(error.message.contains("expected `homeboy@fix-16731`"));
+        });
     }
 
     #[test]

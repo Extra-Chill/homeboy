@@ -1951,10 +1951,10 @@ fn verify_replacement_gates_owned(
             &original_value,
             replacement_gate_workspace.as_deref(),
             &observation_store,
-            || {
-                // A process that dies after this point, with gates possibly
-                // running, leaves the fence; a returned execution lifts it.
-                mark_replacement_gate_execution_started(lifecycle_store, run_id)
+            {
+                let lifecycle_store = lifecycle_store.clone();
+                let run_id = run_id.to_string();
+                move || mark_replacement_gate_execution_started(&lifecycle_store, &run_id)
             },
         )?;
         super::cook_baseline::compare_gate_failures_to_verified_base(
@@ -3480,7 +3480,10 @@ fn cook_review_dossier_with_stores_and_review_form(
             .iter()
             .filter(|gate| gate.status == crate::agent_task_gate::AgentTaskGateStatus::Failed)
             .map(|gate| {
-                let output = super::cook::plain_text(&format!("{}\n{}", gate.stdout, gate.stderr));
+                let output = crate::agent_task_review_dossier::plain_text(&format!(
+                    "{}\n{}",
+                    gate.stdout, gate.stderr
+                ));
                 let lines = output.lines().collect::<Vec<_>>();
                 (
                     gate.id.clone(),

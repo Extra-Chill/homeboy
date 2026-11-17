@@ -9576,6 +9576,62 @@ fn a_finished_failing_replacement_run_is_replaced_without_interrupted_rerun_auth
 }
 
 #[test]
+fn replacement_disk_preflight_refusal_is_unfenced_and_retryable() {
+    use crate::agent_task_gate::placement;
+    struct ReserveRecovery;
+    impl placement::LabGateTransport for ReserveRecovery {
+        fn recovery_runner(&self) -> Option<String> {
+            // Observe during refusal, before the public path's returned-error
+            // cleanup: preflight must never have written a fence at all.
+            assert!(replacement_gate_fence("run-corrected-gate").is_null());
+            Some("reserve-recovery-lab".to_string())
+        }
+        fn execute(
+            &self,
+            _: &std::path::Path,
+            _: &placement::LabGateRequest,
+            _: Option<&crate::agent_task_gate::GateSupervision>,
+        ) -> Result<placement::LabGateReceipt> {
+            unreachable!("local refusal must not dispatch")
+        }
+    }
+    struct Restore(Arc<dyn placement::LabGateTransport>);
+    impl Drop for Restore {
+        fn drop(&mut self) {
+            placement::register_lab_gate_transport(self.0.clone());
+        }
+    }
+    with_corrected_gate_failure(false, |options, _target| {
+        let _restore = Restore(placement::active_transport());
+        placement::register_lab_gate_transport(Arc::new(ReserveRecovery));
+        let mut config = homeboy_core::defaults::load_config();
+        config.retention.shared_store_reserve_bytes = u64::MAX;
+        homeboy_core::defaults::save_config(&config).unwrap();
+        let run_id = &options.identity.initial_run_id;
+        let refused = verify_replacement_gates(
+            run_id,
+            VerifyGateOptions {
+                verify: vec!["test \"$(cat tracked.txt)\" = promoted".to_string()],
+                gate_environment: crate::agent_task_gate::AgentTaskGateEnvironmentPolicy {
+                    shared_cargo_target: Some(true),
+                    ..Default::default()
+                },
+                ..Default::default()
+            },
+            "operator authorized corrected candidate-bound gates".to_string(),
+            None,
+        )
+        .expect_err("impossible reserve refuses before command start");
+        assert!(format!("{refused:?}").contains("--gate-runner reserve-recovery-lab"));
+        assert!(replacement_gate_fence(run_id).is_null());
+        let replacement =
+            corrected_replacement_gates(run_id, "test \"$(cat tracked.txt)\" = promoted")
+                .expect("refusal must not require interrupted-rerun authorization");
+        assert_eq!(replacement.status, AgentTaskPromotionStatus::Applied);
+    });
+}
+
+#[test]
 fn a_replacement_refused_before_its_gates_leaves_no_fence() {
     with_corrected_gate_failure(false, |options, target| {
         let run_id = &options.identity.initial_run_id;

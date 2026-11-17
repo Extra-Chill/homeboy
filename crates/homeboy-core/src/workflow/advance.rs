@@ -84,9 +84,13 @@ pub struct StepState {
     /// The current (or last) submitted step key.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub key: Option<String>,
-    /// When the current attempt may start; its timeout counts from here.
+    /// When the current attempt may start.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub started_at_ms: Option<u64>,
+    /// When the current attempt's child spawned; its timeout counts from here,
+    /// so time queued for capacity is not execution time.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub spawned_at_ms: Option<u64>,
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub timed_out: bool,
     /// The outcome of the step's run in this instance.
@@ -116,6 +120,8 @@ pub struct ItemState {
     pub key: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub started_at_ms: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub spawned_at_ms: Option<u64>,
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub timed_out: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -136,6 +142,7 @@ impl ItemState {
             attempt: 0,
             key: None,
             started_at_ms: None,
+            spawned_at_ms: None,
             timed_out: false,
             outcome: None,
             output: None,
@@ -153,6 +160,7 @@ impl StepState {
             attempt: 0,
             key: None,
             started_at_ms: None,
+            spawned_at_ms: None,
             timed_out: false,
             outcome: None,
             output: None,
@@ -247,6 +255,15 @@ impl InstanceState {
         keys
     }
 
+    /// Whether the awaited attempt with this key has a recorded spawn.
+    pub fn spawn_observed(&self, key: &str) -> bool {
+        match self.owner_of(key) {
+            Some((id, None)) => self.steps[id].spawned_at_ms.is_some(),
+            Some((id, Some(index))) => self.steps[id].items[index].spawned_at_ms.is_some(),
+            None => true,
+        }
+    }
+
     /// The step (and `foreach` item index) a submitted step job belongs to.
     pub fn owner_of(&self, key: &str) -> Option<(&str, Option<usize>)> {
         self.steps.iter().find_map(|(id, step)| {
@@ -303,6 +320,11 @@ pub enum Event {
     /// Time passed.
     Tick,
     StepFinished(StepResult),
+    /// An awaited step job spawned its child.
+    StepSpawned {
+        key: String,
+        at_ms: u64,
+    },
     Approved {
         step: String,
         iteration: u32,
@@ -348,6 +370,9 @@ pub struct StepSubmission {
     pub kind: SubmissionKind,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub not_before_ms: Option<u64>,
+    /// The step declared `capacity: none`: spawn without a Lab capacity slot.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub uncapped: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -387,6 +412,7 @@ pub fn advance(
         }
         Event::Tick => {}
         Event::StepFinished(result) => machine.finish(result),
+        Event::StepSpawned { key, at_ms } => machine.spawned(key, *at_ms),
         Event::Approved { step, iteration } => machine.decide_approval(
             step,
             *iteration,
@@ -534,6 +560,24 @@ impl Machine<'_> {
             }
         }
         self.settle(&id, outcome);
+    }
+
+    /// Record when an awaited attempt's child spawned (first observation wins).
+    fn spawned(&mut self, key: &str, at_ms: u64) {
+        for step in self.state.steps.values_mut() {
+            if step.phase == StepPhase::Running && step.key.as_deref() == Some(key) {
+                step.spawned_at_ms.get_or_insert(at_ms);
+                return;
+            }
+            if let Some(item) = step
+                .items
+                .iter_mut()
+                .find(|item| item.phase == StepPhase::Running && item.key.as_deref() == Some(key))
+            {
+                item.spawned_at_ms.get_or_insert(at_ms);
+                return;
+            }
+        }
     }
 
     fn decide_approval(&mut self, id: &str, iteration: u32, rejected: bool, output: Value) {
@@ -714,6 +758,7 @@ impl Machine<'_> {
     /// Submit the next attempt of one `foreach` item.
     fn launch_item(&mut self, id: &str, index: usize, not_before_ms: Option<u64>) {
         let definition = self.step_definition(id).clone();
+        let uncapped = definition.capacity == super::definition::StepCapacity::None;
         let scope = ItemScope {
             state: &self.state,
             item: &self.state.steps[id].items[index].item,
@@ -737,6 +782,7 @@ impl Machine<'_> {
         let item = &mut self.step(id).items[index];
         item.attempt += 1;
         item.timed_out = false;
+        item.spawned_at_ms = None;
         item.phase = StepPhase::Running;
         item.started_at_ms = Some(not_before_ms.unwrap_or(now_ms).max(now_ms));
         let attempt = item.attempt;
@@ -757,6 +803,7 @@ impl Machine<'_> {
             attempt,
             kind,
             not_before_ms,
+            uncapped,
         }));
     }
 
@@ -819,13 +866,14 @@ impl Machine<'_> {
                 continue;
             };
             let step = &self.state.steps[&step_definition.id];
-            let expired = |started: Option<u64>| {
-                self.now_ms >= started.unwrap_or(self.now_ms) + timeout.as_millis() as u64
+            // An attempt still queued for its child has not started executing.
+            let expired = |spawned: Option<u64>| {
+                spawned.is_some_and(|spawned| self.now_ms >= spawned + timeout.as_millis() as u64)
             };
             for (index, item) in step.items.iter().enumerate() {
                 if item.phase == StepPhase::Running
                     && !item.timed_out
-                    && expired(item.started_at_ms)
+                    && expired(item.spawned_at_ms)
                 {
                     cancels.push((step_definition.id.clone(), Some(index), item.key.clone()));
                 }
@@ -833,7 +881,7 @@ impl Machine<'_> {
             if step.phase != StepPhase::Running || step.timed_out || !step.items.is_empty() {
                 continue;
             }
-            if expired(step.started_at_ms) {
+            if expired(step.spawned_at_ms) {
                 cancels.push((step_definition.id.clone(), None, step.key.clone()));
             }
         }
@@ -918,6 +966,7 @@ impl Machine<'_> {
     /// Submit the next attempt of a step.
     fn launch(&mut self, id: &str, not_before_ms: Option<u64>) {
         let definition = self.step_definition(id).clone();
+        let uncapped = definition.capacity == super::definition::StepCapacity::None;
         if definition.foreach.is_some() {
             self.expand(id);
             return;
@@ -940,6 +989,7 @@ impl Machine<'_> {
         let step = self.step(id);
         step.attempt += 1;
         step.timed_out = false;
+        step.spawned_at_ms = None;
         step.phase = StepPhase::Running;
         step.started_at_ms = Some(not_before_ms.unwrap_or(now_ms).max(now_ms));
         let attempt = step.attempt;
@@ -960,6 +1010,7 @@ impl Machine<'_> {
             attempt,
             kind,
             not_before_ms,
+            uncapped,
         }));
     }
 

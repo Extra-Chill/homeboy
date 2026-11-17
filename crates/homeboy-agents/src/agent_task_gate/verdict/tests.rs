@@ -104,9 +104,10 @@ fn retry_executes_failed_gate_but_reuses_agent_pass() {
         fs::read_to_string(&passed_count).unwrap().lines().count(),
         1
     );
+    // A failed gate runs twice: once, then its one flake re-run.
     assert_eq!(
         fs::read_to_string(&failed_count).unwrap().lines().count(),
-        2
+        4
     );
     fs::write(repo.path().join("source"), "new tree").unwrap();
     assert!(!run(&pass, 1).verdict.unwrap().reused);
@@ -117,7 +118,7 @@ fn retry_executes_failed_gate_but_reuses_agent_pass() {
     );
     assert_eq!(
         fs::read_to_string(&failed_count).unwrap().lines().count(),
-        3
+        6
     );
     // Changed invocations and declared environments must execute, not borrow
     // the passing receipt for the current tree.

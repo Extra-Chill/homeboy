@@ -17,6 +17,7 @@ use homeboy::agents::agent_task_lifecycle::{
 };
 use homeboy::agents::agent_task_provider::structured_error::normalized_structured_error;
 use homeboy::agents::agent_task_service as agent_task_service_direct;
+use homeboy::agents::agent_task_service::CookRecoveryStep;
 use homeboy::agents::agent_task_service::{CookDelivery, CookDeliveryBlockerCode};
 use homeboy::agents::agent_tasks::lifecycle::{self as agent_task_lifecycle, AgentTaskRunRecord};
 use homeboy::agents::agent_tasks::scheduler::{AgentTaskAggregate, AgentTaskPlan};
@@ -2965,69 +2966,41 @@ pub(super) fn diagnose(args: DiagnoseArgs) -> CmdResult<Value> {
             ),
         );
     }
-    // The diagnosis is only useful if it leaves the caller with the exact next
-    // command for THIS failure. Everything above is already computed; this
-    // projects it into the shared actionable envelope instead of discarding it.
-    attach_diagnose_actionable(
-        &mut value,
-        &record,
-        aggregate.as_ref(),
-        &missing_artifacts,
-        record.runner_id(),
-        retry.action.as_ref(),
-        retry.continuation.as_ref(),
-        runner_cancellation.is_some(),
-        queued_runner_ownership.is_some(),
-        current_lifecycle_diagnostic.is_some(),
-    );
     // Cook recovery owns the next-step decision, including its durable
     // no-progress marker. Diagnostic classifications must not override it.
     let recovery_plan = agent_task_service::load_recipe_for_attempt(run_id)
         .ok()
         .flatten()
         .and_then(|_| agent_task_service_direct::plan_cook_recovery(run_id).ok());
+    let recovery_prefix =
+        agent_task_service_direct::cook_recovery_command_prefix_for_record(&record);
     if let Some(plan) = recovery_plan {
-        use homeboy::agents::agent_task_service::CookRecoveryStep;
-        let actions = match &plan.step {
-            CookRecoveryStep::Blocked { blocker, .. } => vec![CommandNextAction::new(
-                format!("recovery made no progress: {blocker}; cancel this Cook"),
-                format!("homeboy agent-task cancel {}", quote_arg(&plan.cook_id)),
-            )],
-            CookRecoveryStep::None { reason } => vec![CommandNextAction::new(
-                reason,
-                format!("homeboy agent-task status {}", quote_arg(&plan.cook_id)),
-            )
-            .with_kind(CommandNextActionKind::Show)],
-            CookRecoveryStep::Adopt { candidate_ref } => vec![CommandNextAction::new(
-                "adopt the preserved candidate",
-                format!(
-                    "homeboy agent-task adopt {} --candidate-ref {}",
-                    quote_arg(&plan.cook_id),
-                    quote_arg(candidate_ref)
-                ),
-            )],
-            _ => vec![CommandNextAction::new(
-                "perform the Cook's next recovery step",
-                format!("homeboy agent-task recover {}", quote_arg(&plan.cook_id)),
-            )],
-        };
-        value["next_commands"] = json!(actions
-            .iter()
-            .map(|action| &action.command)
-            .collect::<Vec<_>>());
+        let action = cook_diagnose_next_action(&plan.step, &recovery_prefix, &plan.cook_id);
+        value["next_commands"] = json!([action.command]);
         value["recovery_step"] = json!(plan.step);
         value["next_action_basis"] = json!(DIAGNOSE_ACTION_BASIS_DIAGNOSIS);
         attach_actionable_metadata(
             &mut value,
             CommandActionableMetadata {
                 run: Some(diagnose_run_ref(&record, record.runner_id())),
-                next_actions: actions,
+                next_actions: vec![action],
                 ..Default::default()
             },
         );
+    } else {
+        attach_diagnose_actionable(
+            &mut value,
+            &record,
+            aggregate.as_ref(),
+            &missing_artifacts,
+            record.runner_id(),
+            retry.action.as_ref(),
+            retry.continuation.as_ref(),
+            runner_cancellation.is_some(),
+            queued_runner_ownership.is_some(),
+            current_lifecycle_diagnostic.is_some(),
+        );
     }
-    let recovery_prefix =
-        agent_task_service_direct::cook_recovery_command_prefix_for_record(&record);
     preserve_controller_owner_placement_with_prefix(&mut value, run_id, &recovery_prefix);
     // Placement is an observation: an unreadable control-plane projection
     // reports `pending` rather than failing the diagnosis.
@@ -3045,6 +3018,16 @@ pub(super) fn diagnose(args: DiagnoseArgs) -> CmdResult<Value> {
         }
     }
     Ok((value, 0))
+}
+
+/// Diagnose's Cook next action is exactly the shared recovery renderer's.
+fn cook_diagnose_next_action(step: &CookRecoveryStep, prefix: &str, id: &str) -> CommandNextAction {
+    let next = step.next_action(prefix, id);
+    let action = CommandNextAction::new(next.label, next.command);
+    if next.show {
+        return action.with_kind(CommandNextActionKind::Show);
+    }
+    action
 }
 
 /// The bounded output excerpt of the failed deterministic gate that blocked
@@ -7547,6 +7530,21 @@ mod tests {
         assert!(commands
             .iter()
             .all(|command| !command.contains("agent-task retry")));
+    }
+
+    #[test]
+    fn cook_diagnose_uses_shared_runner_prefixed_command() {
+        let step = CookRecoveryStep::Adopt {
+            candidate_ref: "sha".to_string(),
+        };
+        let action = cook_diagnose_next_action(&step, "homeboy --runner lab-a", "cook-1");
+        assert_eq!(
+            action.command,
+            step.next_action("homeboy --runner lab-a", "cook-1").command
+        );
+        assert!(action
+            .command
+            .starts_with("homeboy --runner lab-a agent-task adopt "));
     }
 
     #[test]

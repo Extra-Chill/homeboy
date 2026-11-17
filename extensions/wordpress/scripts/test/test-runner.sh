@@ -233,6 +233,52 @@ if [ "${HOMEBOY_TEST_INVENTORY_ONLY:-}" = "1" ]; then
     exit 0
 fi
 
+# Keep a parent around all routing/exec paths so child PHP processes inherit
+# the same ini and every route is merged before returning the suite status.
+if [ "${HOMEBOY_COVERAGE:-}" = "1" ] && [ "${HOMEBOY_PHP_COVERAGE_ACTIVE:-}" != "1" ]; then
+    php_bin="${HOMEBOY_PHP_BIN:-php}"
+    # Probe override is intentionally probe-only (also supports missing-driver smokes).
+    pcov_probe="${HOMEBOY_PCOV_PROBE_BIN:-$php_bin}"
+    coverage_load=""
+    if ! "$pcov_probe" -r 'exit(extension_loaded("pcov") ? 0 : 1);' 2>/dev/null; then
+        coverage_load="extension=pcov"
+        if ! "$pcov_probe" -d extension=pcov -r 'exit(extension_loaded("pcov") ? 0 : 1);' 2>/dev/null; then
+            php_version="$("$php_bin" -r 'echo PHP_MAJOR_VERSION, ".", PHP_MINOR_VERSION;')"
+            echo "ERROR: Coverage requires pcov: install pcov for PHP ${php_version} on runner $(hostname), and ensure php -d extension=pcov can load it." >&2
+            exit 1
+        fi
+    fi
+    coverage_tmp="$(mktemp -d)"
+    trap 'rm -rf "$coverage_tmp"' EXIT
+    mkdir -p "$coverage_tmp/ini" "$coverage_tmp/maps"
+    coverage_source="${PLUGIN_PATH}/src"
+    [ -d "$coverage_source" ] || coverage_source="$PLUGIN_PATH"
+    coverage_summary="${HOMEBOY_COVERAGE_FILE:-${PLUGIN_PATH}/coverage.json}"
+    coverage_artifacts="$(dirname "$coverage_summary")"
+    mkdir -p "$coverage_artifacts"
+    printf '%s\npcov.enabled=1\npcov.directory="%s"\nauto_prepend_file="%s"\n' \
+        "$coverage_load" "$coverage_source" "${SCRIPT_DIR}/coverage-collector.php" > "$coverage_tmp/ini/coverage.ini"
+    coverage_status=0
+    PHP_INI_SCAN_DIR=":${coverage_tmp}/ini" \
+    HOMEBOY_PHP_COVERAGE_ACTIVE=1 HOMEBOY_PCOV_MAP_DIR="${coverage_tmp}/maps" \
+        bash "$0" "$@" || coverage_status=$?
+    "$php_bin" "${SCRIPT_DIR}/merge-coverage.php" "$coverage_tmp/maps" "$coverage_source" \
+        "$PLUGIN_PATH" "$coverage_artifacts" || exit 1
+    "$php_bin" "${SCRIPT_DIR}/parse-coverage.php" "$coverage_artifacts/coverage.xml" "$PLUGIN_PATH" > "$coverage_summary" || exit 1
+    if ! "$php_bin" -r '
+        $data = json_decode(file_get_contents($argv[1]), true);
+        $pct = $data["totals"]["lines"]["pct"];
+        echo "Coverage: {$pct}% lines\n";
+        if ($argv[2] !== "" && (!is_numeric($argv[2]) || $pct < (float) $argv[2])) {
+            fwrite(STDERR, "COVERAGE FAILED: {$pct}% is below minimum {$argv[2]}%\n");
+            exit(1);
+        }
+    ' "$coverage_summary" "${HOMEBOY_COVERAGE_MIN:-}"; then
+        exit 1
+    fi
+    exit "$coverage_status"
+fi
+
 # WordPress tests run through the selected runtime backend against real
 # WordPress. The default suite is PHPUnit plus the resolved standalone PHP and
 # wordpress_test_paths selections. Any smoke can also be selected explicitly

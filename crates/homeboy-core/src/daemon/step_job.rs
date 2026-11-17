@@ -127,8 +127,8 @@ pub struct StepJobRequest {
     pub key: String,
     /// Absolute path of the executable.
     pub program: String,
-    /// Orchestrates child steps and waits for them instead of doing heavy work.
-    /// Such steps must not hold capacity needed by their own children.
+    /// Spawns without a Lab capacity slot: an orchestrator waiting on its own
+    /// child steps (which need that capacity), or a declared light step.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub waits_for_children: bool,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -176,8 +176,8 @@ impl StepJobRequest {
         }
     }
 
-    /// Exempt an orchestration process that waits on its own child steps.
-    pub fn with_child_wait(mut self) -> Self {
+    /// Spawn without queueing for a Lab capacity slot.
+    pub fn without_capacity_slot(mut self) -> Self {
         self.waits_for_children = true;
         self
     }
@@ -653,6 +653,8 @@ impl ControllerJobDriver for StepJobDriver {
             "waiting_since": progress.get("waiting_since").cloned().unwrap_or(Value::Null),
             "builds": progress.get("builds").cloned().unwrap_or(Value::Null),
             "exit_code": progress.get("exit_code").cloned().unwrap_or(Value::Null),
+            "waiting_for": progress.get("waiting_for").cloned().unwrap_or(Value::Null),
+            "queue_position": progress.get("queue_position").cloned().unwrap_or(Value::Null),
         }))
     }
 
@@ -1748,7 +1750,13 @@ mod tests {
     }
 
     #[test]
-    fn workflow_exec_waits_for_lab_capacity_before_spawning() {
+    fn workflow_exec_waits_for_lab_capacity_unless_declared_uncapped() {
+        for uncapped in [false, true] {
+            workflow_exec_capacity_case(uncapped);
+        }
+    }
+
+    fn workflow_exec_capacity_case(uncapped: bool) {
         with_isolated_home(|home| {
             let workflow = serde_json::from_value(json!({
                 "schema": "homeboy/workflow-job-request/v1",
@@ -1778,6 +1786,7 @@ mod tests {
                     cwd: None,
                 },
                 not_before_ms: None,
+                uncapped,
             };
             let request = super::super::workflow_job::step_request(&workflow, &submission).unwrap();
             let permit =
@@ -1786,6 +1795,15 @@ mod tests {
                     .unwrap();
             let harness = step_harness(&request, home.path());
             harness.start_via_controller_boundary().unwrap();
+            if uncapped {
+                // A declared light step spawns while every slot is held.
+                assert_eq!(
+                    harness.wait_until_terminal().unwrap().status,
+                    crate::api_jobs::JobStatus::Succeeded
+                );
+                assert_eq!(std::fs::read_to_string(marker).unwrap(), "ran");
+                return;
+            }
             let deadline = Instant::now() + Duration::from_secs(10);
             while crate::lab_capacity::queued_steps() == 0 {
                 assert!(!marker.exists(), "workflow exec spawned without a permit");
@@ -1799,12 +1817,17 @@ mod tests {
                 !marker.exists(),
                 "workflow exec spawned while capacity was held"
             );
+            // Queued time is not execution: the workflow sees no spawn yet.
+            let job_id = harness.job().unwrap().id;
+            let spawned_at = || harness.store().step_job_spawned_at_ms(job_id);
+            assert_eq!(spawned_at(), None);
             drop(permit);
             assert_eq!(
                 harness.wait_until_terminal().unwrap().status,
                 crate::api_jobs::JobStatus::Succeeded
             );
             assert_eq!(std::fs::read_to_string(marker).unwrap(), "ran");
+            assert!(spawned_at().is_some(), "the spawn is observable");
         });
     }
 

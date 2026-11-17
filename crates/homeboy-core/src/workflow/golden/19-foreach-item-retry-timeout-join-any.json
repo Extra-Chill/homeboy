@@ -107,6 +107,22 @@
     },
     {
       "event": {
+        "at_ms": 1000,
+        "event": "step_spawned",
+        "key": "wf-golden/cook/1/item-2/1"
+      },
+      "now_ms": 3500
+    },
+    {
+      "event": {
+        "at_ms": 3000,
+        "event": "step_spawned",
+        "key": "wf-golden/cook/1/item-1/2"
+      },
+      "now_ms": 3500
+    },
+    {
+      "event": {
         "event": "step_finished",
         "key": "wf-golden/cook/1/item-0/2",
         "outcome": "succeeded",
@@ -439,6 +455,118 @@
         "status": "failed"
       },
       "now_ms": 3000,
+      "state": {
+        "failing": false,
+        "iteration": 1,
+        "reason": null,
+        "status": "running",
+        "step_runs": 6,
+        "steps": {
+          "cook": {
+            "attempt": 0,
+            "items": [
+              {
+                "attempt": 2,
+                "key": "wf-golden/cook/1/item-0/2",
+                "outcome": "failed",
+                "phase": "running"
+              },
+              {
+                "attempt": 2,
+                "key": "wf-golden/cook/1/item-1/2",
+                "outcome": "failed",
+                "phase": "running"
+              },
+              {
+                "attempt": 1,
+                "key": "wf-golden/cook/1/item-2/1",
+                "outcome": null,
+                "phase": "running"
+              }
+            ],
+            "key": null,
+            "outcome": null,
+            "phase": "running"
+          },
+          "prepare": {
+            "attempt": 1,
+            "key": "wf-golden/prepare/1/1",
+            "outcome": "succeeded",
+            "phase": "done"
+          },
+          "report": {
+            "attempt": 0,
+            "key": null,
+            "outcome": null,
+            "phase": "pending"
+          }
+        }
+      }
+    },
+    {
+      "commands": [],
+      "event": {
+        "at_ms": 1000,
+        "event": "step_spawned",
+        "key": "wf-golden/cook/1/item-2/1"
+      },
+      "now_ms": 3500,
+      "state": {
+        "failing": false,
+        "iteration": 1,
+        "reason": null,
+        "status": "running",
+        "step_runs": 6,
+        "steps": {
+          "cook": {
+            "attempt": 0,
+            "items": [
+              {
+                "attempt": 2,
+                "key": "wf-golden/cook/1/item-0/2",
+                "outcome": "failed",
+                "phase": "running"
+              },
+              {
+                "attempt": 2,
+                "key": "wf-golden/cook/1/item-1/2",
+                "outcome": "failed",
+                "phase": "running"
+              },
+              {
+                "attempt": 1,
+                "key": "wf-golden/cook/1/item-2/1",
+                "outcome": null,
+                "phase": "running"
+              }
+            ],
+            "key": null,
+            "outcome": null,
+            "phase": "running"
+          },
+          "prepare": {
+            "attempt": 1,
+            "key": "wf-golden/prepare/1/1",
+            "outcome": "succeeded",
+            "phase": "done"
+          },
+          "report": {
+            "attempt": 0,
+            "key": null,
+            "outcome": null,
+            "phase": "pending"
+          }
+        }
+      }
+    },
+    {
+      "commands": [],
+      "event": {
+        "at_ms": 3000,
+        "event": "step_spawned",
+        "key": "wf-golden/cook/1/item-1/2"
+      },
+      "now_ms": 3500,
       "state": {
         "failing": false,
         "iteration": 1,

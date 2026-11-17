@@ -540,6 +540,12 @@ struct ControllerScratchIndex {
     schema: String,
     #[serde(default)]
     resources: Vec<ControllerScratchResource>,
+    /// Where the last cursorless apply pass stopped its lease walk. The walk
+    /// is oldest-first and deadline-bounded, so without this every unattended
+    /// or bare `--apply` pass restarted at the head and never reached the
+    /// leases behind a long prefix of removed or retained rows.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    walk_resume: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -1209,6 +1215,11 @@ fn cleanup_unlocked(
         })
         .transpose()?;
     let mut index = read_index_at_unlocked(index_path)?;
+    // A cursorless apply pass resumes where the previous one stopped; an
+    // explicit cursor (or a read-only inventory) walks exactly as asked.
+    let resumes_walk = cursor.is_none() && options.apply;
+    let resume_key = resumes_walk.then(|| index.walk_resume.clone()).flatten();
+    let cursor_key = cursor_key.or(resume_key.as_deref());
     // Enumerate identity only before walking. Filesystem walks, Git probes and
     // lifecycle lookups happen only for resources the walk reaches. Oldest
     // creation time wins, with path as a deterministic tie-breaker. The cursor
@@ -1270,9 +1281,17 @@ fn cleanup_unlocked(
     let mut preserved_workspaces = Vec::new();
     let mut preserved_workspace_bytes = 0;
     let mut inspected_count = 0;
+    // Removal of admitted candidates shares the deadline. The walk takes at
+    // most half of it so an apply pass leaves time to remove what it admitted
+    // and to persist that, instead of being reaped by its supervisor first.
+    let walk_deadline = deadline.map(|end| {
+        let now = Instant::now();
+        now + end.saturating_duration_since(now) / 2
+    });
     for &(_, position) in &ordered {
         if eligible.len() >= options.limit
-            || (inspected_count > 0 && deadline.is_some_and(|deadline| Instant::now() >= deadline))
+            || (inspected_count > 0
+                && walk_deadline.is_some_and(|deadline| Instant::now() >= deadline))
         {
             break;
         }
@@ -1393,8 +1412,15 @@ fn cleanup_unlocked(
         });
     }
     let uninspected_resource_count = ordered.len().saturating_sub(inspected_count);
-    let mut next_cursor = (uninspected_resource_count > 0)
-        .then(|| format!("controller-scratch:{}", ordered[inspected_count - 1].0));
+    let resume_digest =
+        (uninspected_resource_count > 0).then(|| ordered[inspected_count - 1].0.clone());
+    let mut next_cursor = resume_digest
+        .as_ref()
+        .map(|digest| format!("controller-scratch:{digest}"));
+    if resumes_walk && index.walk_resume != resume_digest {
+        index.walk_resume = resume_digest;
+        reconciled = true;
+    }
     let stale_registration_count = stranded.len();
     let mut stale_registrations_pruned = 0;
     if options.apply {
@@ -1417,7 +1443,30 @@ fn cleanup_unlocked(
     let mut has_more = uninspected_resource_count > 0;
     let mutation_candidate_count = candidate_count;
     let mutation_candidates = eligible;
-    for candidate in &mutation_candidates {
+    for (attempted, candidate) in mutation_candidates.iter().enumerate() {
+        // Like the walk, always make progress: the first admitted candidate
+        // is removed even when the budget is already spent.
+        if options.apply && attempted > 0 && deadline.is_some_and(|end| Instant::now() >= end) {
+            // Resume just before the first unremoved candidate so the next
+            // pass revisits it rather than walking past it. The walk began
+            // after `cursor_key`, which is therefore the fallback.
+            let digest = sha256(candidate.path.as_bytes());
+            let resume = ordered
+                .iter()
+                .position(|(key, _)| *key == digest)
+                .and_then(|position| position.checked_sub(1))
+                .map(|position| ordered[position].0.clone())
+                .or_else(|| cursor_key.map(str::to_string));
+            next_cursor = resume
+                .as_ref()
+                .map(|key| format!("controller-scratch:{key}"));
+            if resumes_walk {
+                index.walk_resume = resume;
+            }
+            has_more = true;
+            reconciled = true;
+            break;
+        }
         if options.apply {
             let removal = remove_candidate_from_index(
                 &mut index,
@@ -2693,6 +2742,7 @@ fn read_index_at_unlocked(path: &Path) -> Result<ControllerScratchIndex> {
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(ControllerScratchIndex {
             schema: schema(),
             resources: Vec::new(),
+            walk_resume: None,
         }),
         Err(error) => Err(Error::internal_io(
             error.to_string(),
@@ -2728,6 +2778,7 @@ fn read_or_recover_index_at_unlocked(path: &Path) -> Result<ControllerScratchInd
             Ok(ControllerScratchIndex {
                 schema: schema(),
                 resources: Vec::new(),
+                walk_resume: None,
             })
         }
     }
@@ -2790,6 +2841,7 @@ fn salvage_compatible_resources(
             .map(str::to_string)
             .unwrap_or_else(schema),
         resources: compatible_resources,
+        walk_resume: None,
     })
 }
 
@@ -2809,6 +2861,7 @@ fn quarantine_incompatible_index(
     Ok(ControllerScratchIndex {
         schema: schema(),
         resources: Vec::new(),
+        walk_resume: None,
     })
 }
 
@@ -3124,6 +3177,7 @@ mod tests {
             &ControllerScratchIndex {
                 schema: schema(),
                 resources: vec![fixture],
+                walk_resume: None,
             },
         );
 
@@ -3194,6 +3248,7 @@ mod tests {
             &ControllerScratchIndex {
                 schema: schema(),
                 resources: vec![aged],
+                walk_resume: None,
             },
         );
         let output = cleanup_at(
@@ -3290,6 +3345,7 @@ mod tests {
             &ControllerScratchIndex {
                 schema: schema(),
                 resources: vec![orphan],
+                walk_resume: None,
             },
         );
 
@@ -3616,6 +3672,7 @@ mod tests {
             let mut index = serde_json::to_value(ControllerScratchIndex {
                 schema: schema(),
                 resources: vec![resource],
+                walk_resume: None,
             })
             .expect("index JSON");
             index["resources"][0]["retention"] = serde_json::json!("P7D");
@@ -4167,6 +4224,7 @@ mod tests {
             &ControllerScratchIndex {
                 schema: schema(),
                 resources: vec![live_lease],
+                walk_resume: None,
             },
         );
 
@@ -4563,6 +4621,7 @@ mod tests {
             &ControllerScratchIndex {
                 schema: schema(),
                 resources: vec![legacy],
+                walk_resume: None,
             },
         );
 
@@ -4714,6 +4773,7 @@ mod tests {
             &ControllerScratchIndex {
                 schema: schema(),
                 resources,
+                walk_resume: None,
             },
         );
 
@@ -4785,6 +4845,7 @@ mod tests {
             &ControllerScratchIndex {
                 schema: schema(),
                 resources,
+                walk_resume: None,
             },
         );
 
@@ -4863,6 +4924,64 @@ mod tests {
         assert!(!full_detail.truncated);
     }
 
+    /// A deadline-bounded apply pass resumes where the previous one stopped.
+    /// Restarting at the oldest row meant a retained lease at the head used up
+    /// every pass and reclaimable leases behind it were never reached.
+    #[test]
+    fn cursorless_apply_passes_resume_past_a_retained_head() {
+        let data_root = tempfile::tempdir().expect("data root");
+        let (_observation_root, observation) = observation_store();
+        let root = tempfile::tempdir().expect("root");
+        let created = chrono::Utc::now() - chrono::Duration::days(3);
+        let lease = |name: &str, minutes: i64| {
+            let path = root.path().join(name);
+            fs::create_dir(&path).expect("lease dir");
+            fs::write(path.join("bytes"), "generated").expect("lease bytes");
+            let mut resource = resource(&path, root.path());
+            resource.lifecycle_state = "interrupted".to_string();
+            resource.ephemeral = true;
+            resource.created_at = (created + chrono::Duration::minutes(minutes)).to_rfc3339();
+            resource
+        };
+        let mut retained = lease("retained", 0);
+        retained.reconstructable = false;
+        let reclaimable = lease("reclaimable", 1);
+        let reclaimable_path = PathBuf::from(&reclaimable.path);
+        write_index_at(
+            data_root.path(),
+            &ControllerScratchIndex {
+                schema: schema(),
+                resources: vec![retained, reclaimable],
+                walk_resume: None,
+            },
+        );
+        let pass = || {
+            cleanup_at_index(
+                &data_root.path().join("controller-scratch/resources.json"),
+                &observation,
+                &test_recovery_retention(data_root.path()),
+                ControllerScratchCleanupOptions {
+                    apply: true,
+                    limit: 10,
+                    full: false,
+                    retention_override_seconds: Some(0),
+                },
+                None,
+                // An exhausted budget admits one row per pass.
+                Some(Instant::now()),
+            )
+            .expect("cleanup pass")
+        };
+
+        assert_eq!(
+            pass().applied_count,
+            0,
+            "the first pass only reaches the retained head"
+        );
+        assert_eq!(pass().applied_count, 1);
+        assert!(!reclaimable_path.exists());
+    }
+
     #[test]
     fn override_unlocked_bytes_are_reported_separately_from_default_policy() {
         let data_root = tempfile::tempdir().expect("data root");
@@ -4881,6 +5000,7 @@ mod tests {
             &ControllerScratchIndex {
                 schema: schema(),
                 resources: vec![resource],
+                walk_resume: None,
             },
         );
 
@@ -4959,6 +5079,7 @@ mod tests {
             &ControllerScratchIndex {
                 schema: schema(),
                 resources: vec![resource],
+                walk_resume: None,
             },
         );
 
@@ -5031,6 +5152,7 @@ mod tests {
             &ControllerScratchIndex {
                 schema: schema(),
                 resources: vec![stored],
+                walk_resume: None,
             },
         );
 
@@ -5053,6 +5175,7 @@ mod tests {
             &ControllerScratchIndex {
                 schema: schema(),
                 resources: vec![resource.clone()],
+                walk_resume: None,
             },
         );
 
@@ -5102,6 +5225,7 @@ mod tests {
             &ControllerScratchIndex {
                 schema: schema(),
                 resources: vec![first_resource, second_resource],
+                walk_resume: None,
             },
         );
 
@@ -5402,6 +5526,7 @@ mod tests {
             &ControllerScratchIndex {
                 schema: schema(),
                 resources: vec![stored],
+                walk_resume: None,
             },
         );
 
@@ -5466,6 +5591,7 @@ mod tests {
             &ControllerScratchIndex {
                 schema: schema(),
                 resources,
+                walk_resume: None,
             },
         );
         let output = cleanup_at(
@@ -5515,6 +5641,7 @@ mod tests {
             &ControllerScratchIndex {
                 schema: schema(),
                 resources,
+                walk_resume: None,
             },
         );
         let options = ControllerScratchCleanupOptions {
@@ -5597,6 +5724,7 @@ mod tests {
             &ControllerScratchIndex {
                 schema: schema(),
                 resources,
+                walk_resume: None,
             },
         );
 
@@ -5656,6 +5784,7 @@ mod tests {
         let index = ControllerScratchIndex {
             schema: schema(),
             resources,
+            walk_resume: None,
         };
         write_index_at_unlocked(&index_path, &index).unwrap();
         let observation = ObservationStore::open_initialized().unwrap();

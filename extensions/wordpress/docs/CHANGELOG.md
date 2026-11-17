@@ -2,6 +2,11 @@
 
 All notable changes to the **wordpress** extension will be documented in this file.
 
+## [3.55.0] - 2026-11-17
+
+### Added
+- collect PHP coverage for standalone suites with pcov
+
 ## [3.54.5] - 2026-11-15
 
 ### Fixed
