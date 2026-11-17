@@ -6033,7 +6033,7 @@ pub(crate) fn resolve_cook_destination(
     let handle = homeboy::core::worktree_provider::native_handle_for_branch(
         requested.as_deref().unwrap_or(repo),
         &head,
-    );
+    )?;
     args.to_worktree = Some(handle.clone());
     let derived = args.head.is_none();
     if derived {
@@ -6314,7 +6314,7 @@ fn resolve_cook_pull_request(args: &mut AgentTaskCookArgs) -> homeboy::core::Res
     // Without a supplied checkout, the PR head determines the provider handle.
     if args.dispatch.workspace.is_none() && args.dispatch.cwd.is_none() {
         if let Some(repo) = cook_provision_repository(args) {
-            let handle = homeboy::core::worktree_provider::native_handle_for_branch(&repo, &head);
+            let handle = homeboy::core::worktree_provider::native_handle_for_branch(&repo, &head)?;
             if args
                 .to_worktree
                 .as_deref()
@@ -7626,7 +7626,7 @@ pub(super) fn fresh_derived_cook_branch(
             format!("{base}-{generation}")
         };
         let handle =
-            homeboy::core::worktree_provider::native_handle_for_branch(repository, &branch);
+            homeboy::core::worktree_provider::native_handle_for_branch(repository, &branch)?;
         let record = homeboy::core::worktree::resolve_workspace_ref_if_present(&handle)?;
         if record.is_some() {
             continue;
