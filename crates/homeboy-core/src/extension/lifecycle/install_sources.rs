@@ -343,6 +343,35 @@ fn install_shared_assets_from_root(
     Ok(())
 }
 
+/// Whether two recorded source URLs name the same repository. Controllers
+/// spell one GitHub repository differently (`…/repo`, `…/repo.git`, SSH), and
+/// a spelling difference must not read as a competing owner.
+fn same_extension_source(left: &str, right: &str) -> bool {
+    let (left, right) = (left.trim(), right.trim());
+    if left == right {
+        return true;
+    }
+    match (
+        crate::git::release_download::parse_github_url(left),
+        crate::git::release_download::parse_github_url(right),
+    ) {
+        (Some(left), Some(right)) => {
+            left.host.eq_ignore_ascii_case(&right.host)
+                && left.owner.eq_ignore_ascii_case(&right.owner)
+                && left.repo.eq_ignore_ascii_case(&right.repo)
+        }
+        _ => {
+            let bare = |value: &str| {
+                value
+                    .trim_end_matches('/')
+                    .trim_end_matches(".git")
+                    .to_string()
+            };
+            bare(left) == bare(right)
+        }
+    }
+}
+
 /// Refuse to displace a source still used by another installed consumer.
 fn validate_shared_asset_owner(
     target: &Path,
@@ -353,7 +382,7 @@ fn validate_shared_asset_owner(
     let Ok(recorded) = std::fs::read_to_string(target.join(".source-url")) else {
         return Ok(());
     };
-    if recorded == url {
+    if same_extension_source(&recorded, url) {
         return Ok(());
     }
 
@@ -375,7 +404,7 @@ fn validate_shared_asset_owner(
             .iter()
             .any(|(asset, _)| asset == shared_dir)
             && super::source_metadata::resolve_source_url_read_only(&id)
-                .is_ok_and(|source| source == recorded)
+                .is_ok_and(|source| same_extension_source(&source, &recorded))
         {
             conflicts.push(id);
         }
@@ -749,4 +778,25 @@ pub(super) fn install_from_path(
         manifest_path,
         source_revision,
     })
+}
+
+#[cfg(test)]
+mod source_identity_tests {
+    use super::same_extension_source;
+
+    #[test]
+    fn spellings_of_one_repository_share_ownership() {
+        let homeboy = "https://github.com/Extra-Chill/homeboy";
+        for (other, same) in [
+            ("https://github.com/Extra-Chill/homeboy.git", true),
+            ("https://github.com/extra-chill/homeboy/", true),
+            ("git@github.com:Extra-Chill/homeboy.git", true),
+            ("https://github.com/Extra-Chill/homeboy-extensions", false),
+            ("https://github.example.com/Extra-Chill/homeboy", false),
+            ("/srv/homeboy", false),
+        ] {
+            assert_eq!(same_extension_source(homeboy, other), same, "{other}");
+        }
+        assert!(same_extension_source("/srv/homeboy.git", "/srv/homeboy/"));
+    }
 }
