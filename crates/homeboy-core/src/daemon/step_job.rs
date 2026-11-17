@@ -1815,12 +1815,16 @@ mod tests {
                 !marker.exists(),
                 "workflow exec spawned while capacity was held"
             );
+            // Queued time is not execution: the workflow sees no spawn yet.
+            let spawned_at = || harness.store().step_spawned_at_ms(&request.key);
+            assert_eq!(spawned_at(), None);
             drop(permit);
             assert_eq!(
                 harness.wait_until_terminal().unwrap().status,
                 crate::api_jobs::JobStatus::Succeeded
             );
             assert_eq!(std::fs::read_to_string(marker).unwrap(), "ran");
+            assert!(spawned_at().is_some(), "the spawn is observable");
         });
     }
 
