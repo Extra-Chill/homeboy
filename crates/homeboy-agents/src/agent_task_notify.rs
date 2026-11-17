@@ -589,13 +589,9 @@ pub(crate) fn cook_terminal_in_store(
     exit_code: i32,
 ) {
     tracker_note::post(store, &report.cook_id);
-    cook_terminal_in_store_with(
-        store,
-        report,
-        component,
-        exit_code,
-        tracker::resolved_tracker,
-    );
+    cook_terminal_in_store_with(store, report, component, exit_code, |cook_id| {
+        tracker::resolved_tracker(store, cook_id)
+    });
 }
 
 fn cook_terminal_in_store_with(
@@ -752,7 +748,12 @@ fn continuation_failed_payload(cook_id: &str, run_id: &str, diagnostic: &str) ->
 /// happened to run `agent-task recover`. Delivered at most once per attempt through
 /// its own marker, so it never consumes the Cook's terminal announcement.
 pub fn cook_continuation_failed(cook_id: &str, run_id: &str, diagnostic: &str) {
-    cook_continuation_failed_with(cook_id, run_id, diagnostic, tracker::resolved_tracker);
+    let Ok(store) = crate::agent_task_lifecycle::AgentTaskLifecycleStore::from_environment() else {
+        return;
+    };
+    cook_continuation_failed_with(cook_id, run_id, diagnostic, |cook_id| {
+        tracker::resolved_tracker(&store, cook_id)
+    });
 }
 
 fn cook_continuation_failed_with(
