@@ -197,7 +197,7 @@ impl HomeboyProof {
         if !self.has_ci_equivalent_gate() {
             self.gaps.push(HomeboyProofGap {
                 kind: HomeboyProofGapKind::CiEquivalentNotRecorded,
-                summary: "CI-equivalent required gate was not recorded; targeted proof must not be treated as full CI coverage".to_string(),
+                summary: "Advisory (does not block publication): no CI-equivalent required gate was recorded, so this targeted proof is not full CI coverage".to_string(),
             });
         }
         self

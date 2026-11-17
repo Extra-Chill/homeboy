@@ -1233,6 +1233,18 @@ fn recover_cook_once(
                     return Err(replace_gates_inputs_required(run_id));
                 };
                 let (mut result, exit_code) = performer.replace_gates(run_id, replace_gates)?;
+                // Authorized proof that makes the candidate publishable completes
+                // the Cook here, as `regate` does, instead of handing the operator
+                // a second `recover` for the publish it already authorized (#17691).
+                // The planner's own verdict decides, so this never publishes
+                // what a fresh `recover` would not.
+                if exit_code == 0 && plan_cook_recovery(id)?.step == CookRecoveryStep::Publish {
+                    let (mut published, exit_code) = performer.publish(run_id, &publish, false)?;
+                    if let Some(object) = published.as_object_mut() {
+                        object.insert("replacement_gates".to_string(), result);
+                    }
+                    return Ok((published, exit_code));
+                }
                 if let Some(object) = result.as_object_mut() {
                     object.insert(
                     "handoff".to_string(),

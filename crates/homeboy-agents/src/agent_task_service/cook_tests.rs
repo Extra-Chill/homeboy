@@ -9124,6 +9124,21 @@ impl crate::agent_task_service::CookRecoveryPerformer for ReplacementOnlyRecover
     fn adopt(&self, run_id: &str, candidate_ref: &str) -> Result<(serde_json::Value, i32)> {
         panic!("replacement recovery must not adopt {candidate_ref} into {run_id}")
     }
+
+    /// Authorized replacement proof that passes publishes in the same
+    /// recovery; record that instead of reaching a real forge.
+    fn publish(
+        &self,
+        run_id: &str,
+        _request: &crate::agent_task_service::CookPublishRequest,
+        preflight: bool,
+    ) -> Result<(serde_json::Value, i32)> {
+        assert!(!preflight, "replacement recovery publishes for real");
+        Ok((
+            serde_json::json!({ "status": "review_ready", "published_run": run_id }),
+            0,
+        ))
+    }
 }
 
 #[path = "cook_tests/candidate_continuation.rs"]

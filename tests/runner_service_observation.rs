@@ -482,7 +482,7 @@ fn service_runner_exec_waits_for_the_published_lease_and_diagnostics_stay_read_o
 printf '%s\n' "$*" >> "$HOME/systemctl.log"
 case "$*" in
   *daemon-reload*|*enable*) exit 0 ;;
-  *restart*)
+  *restart*|*" start "*)
     : > "$HOME/{waiting}"
     while [ ! -e "$HOME/{release}" ]; do sleep 0.02; done
     ;;
@@ -512,8 +512,8 @@ esac
         server["runner"]["service_managed"] = Value::Bool(true);
         std::fs::write(&server_path, server.to_string()).expect("configure fake service PATH");
 
-        // This service is a pre-existing, runner-owned unit in the isolated
-        // fixture. The shim gates its restart; it never invokes host systemd.
+        // The shim gates the host unit's (re)start, which is where the daemon
+        // publishes its lease; it never invokes host systemd.
         let gate = ReleaseOnDrop {
             release: publish_service.clone(),
         };

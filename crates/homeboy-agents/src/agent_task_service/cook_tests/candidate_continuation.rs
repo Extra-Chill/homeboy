@@ -807,6 +807,10 @@ fn every_wedged_cook_state_has_one_progressing_recovery_step() {
                     assert_eq!(exit, 0, "{case:?}: {report:#?}");
                     let stored = persisted_promotion_for_attempt(run).unwrap().unwrap();
                     assert!(stored.finalization_eligible(), "{case:?}");
+                    // The authorized proof publishes in the same recovery (#17691).
+                    let result = report.result.unwrap();
+                    assert_eq!(result["status"], "review_ready", "{case:?}: {result:#}");
+                    assert_eq!(result["replacement_gates"]["status"], "applied", "{case:?}");
                 }
                 WedgedCook::ContinuationNotScheduled => {
                     assert_eq!(plan.step, CookRecoveryStep::Continue, "{case:?}: {plan:?}");
