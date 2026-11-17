@@ -172,9 +172,10 @@ esac"#,
     )
 }
 
-// KillMode=process leaves exec children alive for startup recovery in the
-// shared job store. Retire legacy aliases only after the machine unit starts.
-// Stale aliases can fail stop/disable after their target has already retired.
+// KillMode=process leaves exec children alive. Per-runner-id units are
+// retired before the machine unit starts, so its startup recovery finds their
+// jobs unowned and adopts them from the shared job store (#18140). Stale
+// aliases can fail stop/disable after their target has already retired.
 const RETIRE_LEGACY_UNITS: &str = r#"for old_unit in "$HOME/.config/systemd/user"/homeboy-runner-*-host.service; do
   [ -e "$old_unit" ] || [ -L "$old_unit" ] || continue
   old_name=$(basename "$old_unit")
@@ -193,8 +194,8 @@ fn install_script(binary: &str, startup_token: &str, daemon_env: &[(String, Stri
         r#"set -eu
 {point}
 {write_unit}
-systemctl --user enable --now {unit}
-{RETIRE_LEGACY_UNITS}"#,
+{RETIRE_LEGACY_UNITS}
+systemctl --user enable --now {unit}"#,
         unit = service_unit_name(),
         point = point_binary_script(binary),
         write_unit = write_unit_script(startup_token, daemon_env),
@@ -203,7 +204,7 @@ systemctl --user enable --now {unit}
 
 fn repoint_script(binary: &str, startup_token: &str, daemon_env: &[(String, String)]) -> String {
     format!(
-        "set -eu\n{point}\n{write_unit}\nsystemctl --user enable {unit}\nsystemctl --user restart {unit}\n{RETIRE_LEGACY_UNITS}",
+        "set -eu\n{point}\n{write_unit}\n{RETIRE_LEGACY_UNITS}\nsystemctl --user enable {unit}\nsystemctl --user restart {unit}",
         point = point_binary_script(binary),
         write_unit = write_unit_script(startup_token, daemon_env),
         unit = service_unit_name(),
@@ -223,8 +224,8 @@ fn ensure_host_unit_script(
 if [ ! -f "$HOME/.config/systemd/user/{unit}" ]; then
 {install}
 fi
-systemctl --user start {unit}
-{RETIRE_LEGACY_UNITS}"#,
+{RETIRE_LEGACY_UNITS}
+systemctl --user start {unit}"#,
         unit = service_unit_name(),
         install = install_script(binary, startup_token, daemon_env),
     )
@@ -1030,18 +1031,18 @@ mod tests {
     }
 
     #[test]
-    fn scripts_retire_legacy_units_only_after_starting_the_machine_unit() {
+    fn scripts_retire_legacy_units_before_starting_the_machine_unit() {
         for (script, start) in [
             (install_script("/opt/homeboy", "t", &[]), "enable --now"),
             (repoint_script("/opt/homeboy", "t", &[]), "restart"),
             (ensure_host_unit_script("/opt/homeboy", "t", &[]), "start"),
         ] {
             let started = script
-                .find(&format!("systemctl --user {start} homeboy-runner.service"))
+                .rfind(&format!("systemctl --user {start} homeboy-runner.service"))
                 .unwrap();
             let retired = script.rfind("for old_unit in").unwrap();
-            assert!(started < retired);
-            let cleanup = &script[retired..];
+            assert!(retired < started);
+            let cleanup = script[retired..started].trim_end();
             assert!(cleanup.contains("/homeboy-runner-*-host.service"));
             assert!(cleanup.contains("systemctl --user stop \"$old_name\""));
             assert!(cleanup.contains("systemctl --user disable \"$old_name\""));
