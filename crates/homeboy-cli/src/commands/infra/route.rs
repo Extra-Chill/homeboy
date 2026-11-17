@@ -532,7 +532,9 @@ fn dispatch_materialized_lab_command(
             expected_source_snapshot_identity: retry_handoff
                 .as_ref()
                 .and_then(|handoff| handoff.expected_source_snapshot_identity.as_deref()),
-            verified_cook_baseline: None,
+            verified_cook_baseline: retry_handoff
+                .as_ref()
+                .and_then(|handoff| retry_verified_cook_baseline(&handoff.plan)),
             require_controller_git_bundle: false,
             job_overrides,
         },
@@ -3666,6 +3668,18 @@ fn stage_retry_lab_handoff_before_preacceptance(
         )?;
     }
     Ok(())
+}
+
+/// A recovered retry replays a plan whose derived Cook baseline evidence is
+/// already bound to its task. Carry that evidence across the Lab boundary like
+/// the original Cook attempt does, so the runner admits the synced baseline.
+fn retry_verified_cook_baseline(
+    plan: &homeboy::agents::agent_tasks::scheduler::AgentTaskPlan,
+) -> Option<&serde_json::Value> {
+    plan.tasks.iter().find_map(|task| {
+        let baseline = task.metadata.get("verified_cook_baseline")?;
+        (baseline["bound_task_id"].as_str() == Some(task.task_id.as_str())).then_some(baseline)
+    })
 }
 
 fn attach_verified_cook_baseline(

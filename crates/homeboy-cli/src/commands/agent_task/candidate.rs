@@ -156,14 +156,33 @@ fn checkout_from(
     git(into, &["fetch", "--no-tags", "--", source, revision])?;
     let sha =
         homeboy::core::git::publication_candidate(&into.to_string_lossy(), "FETCH_HEAD", title)?;
-    git(into, &["checkout", "-B", branch, &sha, "--"])?;
     let path = into
         .canonicalize()
         .map_err(|e| Error::internal_io(e.to_string(), None))?;
+    // Git refuses to move a branch another worktree has checked out. That
+    // worktree keeps its branch; this one gets the candidate detached.
+    let branch_owner = other_worktree_on_branch(into, &path, branch)?;
+    if branch_owner.is_some() {
+        git(into, &["checkout", "--detach", &sha, "--"])?;
+    } else {
+        git(into, &["checkout", "-B", branch, &sha, "--"])?;
+    }
     Ok((
-        serde_json::json!({"command": "agent-task.candidate.checkout", "candidate_sha": sha, "branch": branch, "worktree": path}),
+        serde_json::json!({"command": "agent-task.candidate.checkout", "candidate_sha": sha, "branch": branch, "detached": branch_owner.is_some(), "branch_checked_out_in": branch_owner, "worktree": path}),
         0,
     ))
+}
+
+fn other_worktree_on_branch(into: &Path, own: &Path, branch: &str) -> Result<Option<String>> {
+    let listing = git(into, &["worktree", "list", "--porcelain"])?;
+    let wanted = format!("branch refs/heads/{branch}");
+    Ok(listing.split("\n\n").find_map(|entry| {
+        let path = entry
+            .lines()
+            .find_map(|line| line.strip_prefix("worktree "))?;
+        let same = Path::new(path).canonicalize().ok().as_deref() == Some(own);
+        (!same && entry.lines().any(|line| line == wanted)).then(|| path.to_string())
+    }))
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
@@ -465,11 +484,27 @@ mod tests {
                 )
                 .unwrap();
             }
+            // A stale worktree may still hold the Cook head branch (bundle case).
+            let stale = home.path().join("stale-head");
+            if bundle {
+                git(
+                    &destination,
+                    &[
+                        "worktree",
+                        "add",
+                        "-b",
+                        "cook/head",
+                        stale.to_str().unwrap(),
+                    ],
+                )
+                .unwrap();
+            }
             let (value, _) = run(CandidateCommand::Checkout {
                 cook_or_attempt: if bundle { run_id } else { "checkout-cook" }.into(),
                 into: destination.clone(),
             })
             .unwrap();
+            assert_eq!(value["detached"], bundle);
             let published_sha = git(&destination, &["rev-parse", "HEAD"]).unwrap();
             assert_eq!(value["candidate_sha"], published_sha);
             assert_eq!(git(&destination, &["show", "-s", "--format=%an <%ae>|%cn <%ce>|%s", "HEAD"]).unwrap(), "Operator <operator@example.test>|Operator <operator@example.test>|fix: publish useful candidates");
@@ -483,7 +518,7 @@ mod tests {
             );
             assert_eq!(
                 git(&destination, &["branch", "--show-current"]).unwrap(),
-                "cook/head"
+                if bundle { "" } else { "cook/head" }
             );
             assert_eq!(
                 std::fs::read_to_string(destination.join("file")).unwrap(),
