@@ -4,6 +4,15 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.471.2] - 2026-11-17
+
+### Changed
+- make main green (Cook settle fixture, candidate ref, tunnel pid race)
+
+### Fixed
+- re-admit a Lab gate whose runner job expired before spawn
+- report a daemon running a replaced executable instead of 'nothing to recover'
+
 ## [0.471.1] - 2026-11-17
 
 ### Changed
