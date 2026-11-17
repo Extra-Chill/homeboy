@@ -90,6 +90,23 @@ fn fixture(transport: &Path, destination: &Path) -> CommitRequest {
 }
 
 #[test]
+fn fresh_materializations_do_not_share_mutable_inodes() {
+    let root = tempfile::tempdir().unwrap();
+    let mut destinations = Vec::new();
+    for name in ["first", "second"] {
+        let incoming = tempfile::tempdir_in(root.path()).unwrap();
+        let destination = root.path().join(name);
+        let request = fixture(incoming.path(), &destination);
+        write_json(&incoming.path().join("commit.json"), &request).unwrap();
+        materialization_commit(incoming.path()).unwrap();
+        let file = destination.join("file");
+        destinations.push(file);
+    }
+    fs::write(&destinations[0], b"build mutation").unwrap();
+    assert_eq!(fs::read(&destinations[1]).unwrap(), b"exact\0bytes\xff");
+}
+
+#[test]
 fn commit_rejects_corrupt_bytes_before_publishing_anything() {
     let root = tempfile::tempdir().unwrap();
     let incoming = tempfile::tempdir_in(root.path()).unwrap();

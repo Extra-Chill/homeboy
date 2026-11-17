@@ -3915,13 +3915,26 @@ impl SelectedGateEnvironment {
         // in one Cargo directory, which is the contention this lease removes.
         // The value still reaches the child through `self.values`.
         let acquire_started = Instant::now();
-        let target = homeboy_core::cleanup::acquire_managed_cargo_target_for_environment(
-            "agent-task-gate",
-            cwd,
-            None,
-            &self.values,
-        )
+        let tree = verdict::tree(cwd);
+        let target = if let Some(tree) = tree {
+            homeboy_core::cleanup::acquire_candidate_cargo_target_for_environment(
+                "agent-task-gate",
+                cwd,
+                &self.values,
+                &tree,
+            )
+        } else {
+            homeboy_core::cleanup::acquire_managed_cargo_target_for_environment(
+                "agent-task-gate",
+                cwd,
+                None,
+                &self.values,
+            )
+        }
         .map_err(|error| placement::with_local_reserve_recovery(error))?;
+        if target.resolution() != "candidate" {
+            target.stamp_isolated_sources(cwd)?;
+        }
         let acquire_ms = acquire_started.elapsed().as_millis();
         // Store sizing is evidence only. A concurrent gate may update the
         // shared target while this observation walks it.
@@ -8417,6 +8430,150 @@ mod tests {
                     count
                 );
             }
+        });
+    }
+
+    #[test]
+    fn agent_task_gate_candidate_target_is_fresh_and_cross_candidate_rebuilds() {
+        homeboy_core::test_support::with_isolated_home(|_| {
+            configure_fixture_cargo_capacity();
+            let temp = tempfile::tempdir().unwrap();
+            let modified = std::time::UNIX_EPOCH + Duration::from_secs(1_700_000_000);
+            let mut reports = Vec::new();
+            for index in 1..=3 {
+                // B overwrites the same physical source path used by gate 2.
+                let cwd = temp.path().join(format!("gate-{}", index.min(2)));
+                fs::create_dir_all(cwd.join("src")).unwrap();
+                for (name, content) in [
+                    ("Cargo.toml", "[package]\nname = \"candidate-fixture\"\nversion = \"0.1.0\"\nedition = \"2021\"\n"),
+                    ("src/lib.rs", "pub fn candidate() {}\n"),
+                ] {
+                    let path = cwd.join(name);
+                    fs::write(&path, content).unwrap();
+                    fs::File::open(path).unwrap().set_modified(modified).unwrap();
+                }
+                // Fresh Git roots retain the same repository cache identity.
+                std::process::Command::new("git")
+                    .arg("init")
+                    .arg(&cwd)
+                    .output()
+                    .unwrap();
+                std::process::Command::new("git")
+                    .args([
+                        "-C",
+                        cwd.to_str().unwrap(),
+                        "remote",
+                        "add",
+                        "origin",
+                        "https://example.invalid/candidate",
+                    ])
+                    .output()
+                    .unwrap();
+                fs::write(cwd.join(".gitignore"), "target/\n").unwrap();
+                fs::write(cwd.join("Cargo.lock"), "# fixture lock\nversion = 4\n\n[[package]]\nname = \"candidate-fixture\"\nversion = \"0.1.0\"\n").unwrap();
+                for args in [
+                    vec!["add", "."],
+                    vec![
+                        "-c",
+                        "user.name=Fixture",
+                        "-c",
+                        "user.email=fixture@example.invalid",
+                        "commit",
+                        "-m",
+                        "fixture",
+                    ],
+                ] {
+                    if index == 3 {
+                        continue;
+                    }
+                    assert!(Command::new("git")
+                        .args(args)
+                        .current_dir(&cwd)
+                        .output()
+                        .unwrap()
+                        .status
+                        .success());
+                }
+                if index == 3 {
+                    let source = cwd.join("src/lib.rs");
+                    fs::write(&source, "compile_error!(\"candidate B must compile\");\n").unwrap();
+                    fs::File::open(source)
+                        .unwrap()
+                        .set_modified(modified - Duration::from_secs(86400))
+                        .unwrap();
+                }
+                if index == 2 {
+                    // The pre-reuse behavior: seed a fresh target and invalidate
+                    // workspace sources. Compare the exact same Cargo workload.
+                    let original_lock = fs::read(cwd.join("Cargo.lock")).unwrap();
+                    let baseline = homeboy_core::cleanup::acquire_managed_cargo_target(
+                        "agent-task-gate",
+                        &cwd,
+                        None,
+                    )
+                    .unwrap();
+                    baseline.stamp_isolated_sources(&cwd).unwrap();
+                    let before = baseline.size_bytes().unwrap();
+                    let mut policy = AgentTaskGateEnvironmentPolicy::default();
+                    policy.shared_cargo_target = Some(false);
+                    policy.variables.insert(
+                        "CARGO_TARGET_DIR".into(),
+                        baseline.target_dir().display().to_string(),
+                    );
+                    let report = run_gate_command_with_policy_and_runtime_tmpdir_and_environment(
+                        &cwd,
+                        20,
+                        "cargo check --verbose",
+                        AgentTaskGateVisibility::Visible,
+                        AgentTaskGateRevealPolicy::FullEvidence,
+                        None,
+                        &policy,
+                        &[],
+                    )
+                    .unwrap();
+                    assert_eq!(report.exit_code, 0);
+                    assert!(report.stderr.contains("Checking candidate-fixture"));
+                    fs::write(cwd.join("Cargo.lock"), original_lock).unwrap();
+                    eprintln!(
+                        "isolated second gate: growth_bytes={}, {:?}",
+                        baseline.size_bytes().unwrap().saturating_sub(before),
+                        report.environment.resources
+                    );
+                }
+                let mut policy = AgentTaskGateEnvironmentPolicy::default();
+                policy.shared_cargo_target = Some(true);
+                let report = run_gate_command_with_policy_and_runtime_tmpdir_and_environment(
+                    &cwd,
+                    index,
+                    "cargo check --verbose",
+                    AgentTaskGateVisibility::Visible,
+                    AgentTaskGateRevealPolicy::FullEvidence,
+                    None,
+                    &policy,
+                    &[],
+                )
+                .unwrap();
+                assert_eq!(
+                    report.exit_code,
+                    if index == 3 { 101 } else { 0 },
+                    "{}",
+                    report.stderr
+                );
+                eprintln!(
+                    "candidate gate {index}: {:?}, {:?}",
+                    report.environment.resources, report.environment.cargo_target
+                );
+                reports.push(report);
+            }
+            assert!(reports[0].stderr.contains("Checking candidate-fixture"));
+            assert!(reports[1].stderr.contains("Fresh candidate-fixture"));
+            let first = reports[0].environment.cargo_target.as_ref().unwrap();
+            let second = reports[1].environment.cargo_target.as_ref().unwrap();
+            assert_eq!(first.path, second.path);
+            assert!(second.growth_bytes.unwrap() < 4096);
+            let third = reports[2].environment.cargo_target.as_ref().unwrap();
+            assert_ne!(second.path, third.path);
+            assert!(reports[2].stderr.contains("candidate B must compile"));
         });
     }
 

@@ -149,6 +149,12 @@ impl ManagedCargoTarget {
         }
     }
 
+    /// Invalidate path-crate fingerprints in an isolated target, regardless of
+    /// controller mtimes. Candidate targets use their recorded time instead.
+    pub fn stamp_isolated_sources(&self, source: &Path) -> Result<()> {
+        stamp_candidate_sources(source, &self.target_dir, false)
+    }
+
     pub fn seed_ms(&self) -> u128 {
         self.seed_ms
     }
@@ -313,6 +319,154 @@ pub fn acquire_managed_cargo_target_for_environment(
     )
 }
 
+/// Acquire a candidate-private target. The caller must provide the content
+/// identity of the entire materialized workspace, not a commit or source mtime.
+/// An overlapping gate never waits on or mutates this candidate's target.
+pub fn acquire_candidate_cargo_target_for_environment(
+    owner: &str,
+    source_path: &Path,
+    environment: &BTreeMap<String, String>,
+    tree: &str,
+) -> Result<ManagedCargoTarget> {
+    let declared = environment
+        .iter()
+        .filter(|(name, _)| cargo_compatibility_environment_name(name))
+        .map(|(name, value)| (name.as_str(), value.as_str()))
+        .collect::<Vec<_>>();
+    let compatibility = cargo_target_compatibility(source_path, &declared);
+    let root = shared_cargo_target_root()?;
+    admit_shared_cargo_target(&root)?;
+    let target =
+        acquire_candidate_cargo_target_in(&root, owner, source_path, &compatibility, tree)?;
+    let mut current = vec![target.target_dir()];
+    current.extend(target.promote_to.as_deref());
+    retain_recent_shared_cargo_targets(&root, &current);
+    Ok(target)
+}
+
+const CANDIDATE_SOURCE_TIME: &str = ".homeboy-candidate-source-time";
+
+fn acquire_candidate_cargo_target_in(
+    root: &Path,
+    owner: &str,
+    source_path: &Path,
+    compatibility: &CargoTargetCompatibility,
+    tree: &str,
+) -> Result<ManagedCargoTarget> {
+    let base_owner = format!("{owner}:{}", compatibility.identity());
+    let candidate_owner = format!("{base_owner}:candidate:{tree}");
+    let target_dir = shared_store_dir(root, &candidate_owner);
+    fs::create_dir_all(&target_dir).map_err(|e| io_error(e, "create candidate target"))?;
+    let lock = OpenOptions::new()
+        .create(true)
+        .truncate(false)
+        .read(true)
+        .write(true)
+        .open(target_dir.join(LOCK_FILE))
+        .map_err(|e| io_error(e, "open candidate lease"))?;
+    if !lock
+        .try_lock_exclusive()
+        .map_err(|e| io_error(e, "lock candidate target"))?
+    {
+        let target = acquire_managed_cargo_target_for_compatibility_in(
+            root,
+            owner,
+            source_path,
+            compatibility,
+        )?;
+        stamp_candidate_sources(source_path, target.target_dir(), false)?;
+        return Ok(target);
+    }
+    let lease = SharedCargoTargetLease { target_dir, lock };
+    write_lifecycle(
+        lease.target_dir(),
+        Some(&candidate_owner),
+        SystemTime::now(),
+    )?;
+    let base_dir = shared_store_dir(root, &base_owner);
+    let started = Instant::now();
+    let initialized = lease.target_dir().join(CANDIDATE_SOURCE_TIME).is_file();
+    if !initialized {
+        seed_worktree_cargo_target_until(
+            &base_dir,
+            lease.target_dir(),
+            Some(Instant::now() + CARGO_TARGET_LEASE_WAIT),
+        )?;
+    }
+    stamp_candidate_sources(source_path, lease.target_dir(), initialized)?;
+    Ok(ManagedCargoTarget {
+        target_dir: lease.target_dir().to_path_buf(),
+        resolution: "candidate",
+        owner: owner.to_owned(),
+        promote_to: Some(base_dir),
+        seed_ms: started.elapsed().as_millis(),
+        seed_bytes: if initialized {
+            0
+        } else {
+            path_size(lease.target_dir()).unwrap_or(0)
+        },
+        _lease: Some(lease),
+    })
+}
+
+// Do not follow symlinks into external inputs or stamp Git/Cargo mutable state.
+fn visit_candidate_files(
+    root: &Path,
+    sources: bool,
+    visitor: &mut impl FnMut(&Path) -> Result<()>,
+) -> Result<()> {
+    for entry in fs::read_dir(root).map_err(|e| io_error(e, "read candidate files"))? {
+        let entry = entry.map_err(|e| io_error(e, "read candidate entry"))?;
+        if sources && (entry.file_name() == ".git" || entry.file_name() == "target") {
+            continue;
+        }
+        let kind = entry
+            .file_type()
+            .map_err(|e| io_error(e, "inspect candidate entry"))?;
+        if kind.is_dir() {
+            visit_candidate_files(&entry.path(), sources, visitor)?;
+        } else if kind.is_file() {
+            visitor(&entry.path())?;
+        }
+    }
+    Ok(())
+}
+
+fn stamp_candidate_sources(source: &Path, target: &Path, initialized: bool) -> Result<()> {
+    let marker = target.join(CANDIDATE_SOURCE_TIME);
+    let time: SystemTime = if initialized {
+        serde_json::from_slice(
+            &fs::read(&marker).map_err(|e| io_error(e, "read candidate source time"))?,
+        )
+        .map_err(|e| Error::internal_io(e.to_string(), None))?
+    } else {
+        let mut newest = SystemTime::now();
+        visit_candidate_files(target, false, &mut |path| {
+            let modified = fs::metadata(path)
+                .and_then(|m| m.modified())
+                .map_err(|e| io_error(e, "inspect seeded artifact time"))?;
+            newest = newest.max(modified);
+            Ok(())
+        })?;
+        let time = newest + Duration::from_millis(1);
+        // Cargo must start after the source timestamp, including on coarse clocks.
+        if let Ok(wait) = time.duration_since(SystemTime::now()) {
+            std::thread::sleep(wait);
+        }
+        fs::write(
+            &marker,
+            serde_json::to_vec(&time).map_err(|e| Error::internal_io(e.to_string(), None))?,
+        )
+        .map_err(|e| io_error(e, "record candidate source time"))?;
+        time
+    };
+    visit_candidate_files(source, true, &mut |path| {
+        File::open(path)
+            .and_then(|file| file.set_modified(time))
+            .map_err(|e| io_error(e, "stamp candidate source"))
+    })
+}
+
 /// Acquire a run-private Cargo target seeded from the shared,
 /// repository-identity-keyed base store.
 ///
@@ -473,6 +627,7 @@ fn shared_store_dir(root: &Path, owner: &str) -> PathBuf {
 /// Cargo's output, and must never be seeded or promoted between stores.
 fn is_lifecycle_sidecar(name: &std::ffi::OsStr) -> bool {
     name == LOCK_FILE
+        || name == CANDIDATE_SOURCE_TIME
         || name == LEASE_FILE
         || name == OWNER_FILE
         || name == LAST_USED_FILE
@@ -623,6 +778,14 @@ fn copy_cargo_cache(from: &Path, to: &Path, transfer: CacheTransfer) -> Result<(
         {
             fs::copy(&source, &dest)
                 .map_err(|error| io_error(error, "copy Cargo cache artifact"))?;
+            // Cargo compares dep-info and dependency artifact timestamps. A
+            // byte-identical copy with a fresh mtime invalidates that graph.
+            let modified = metadata
+                .modified()
+                .map_err(|error| io_error(error, "read Cargo artifact mtime"))?;
+            fs::File::open(&dest)
+                .and_then(|file| file.set_modified(modified))
+                .map_err(|error| io_error(error, "preserve Cargo artifact mtime"))?;
         }
     }
     Ok(())
@@ -1878,6 +2041,107 @@ mod tests {
             finished.metadata().unwrap().ino()
         );
         assert_eq!(fs::read(private.join("finished")).unwrap(), b"new");
+    }
+
+    #[test]
+    fn cargo_target_candidate_lease_reuses_sequentially_and_isolates_overlap() {
+        let root = TempDir::new().unwrap();
+        let workspace = TempDir::new().unwrap();
+        fs::write(workspace.path().join("source.rs"), "candidate").unwrap();
+        let compatibility = cargo_target_compatibility(workspace.path(), &[]);
+        let first = acquire_candidate_cargo_target_in(
+            root.path(),
+            "gate",
+            workspace.path(),
+            &compatibility,
+            "tree-a",
+        )
+        .unwrap();
+        let first_path = first.target_dir().to_path_buf();
+        let first_time = fs::metadata(workspace.path().join("source.rs"))
+            .unwrap()
+            .modified()
+            .unwrap();
+        fs::write(first.target_dir().join("artifact"), "built").unwrap();
+        let overlap = acquire_candidate_cargo_target_in(
+            root.path(),
+            "gate",
+            workspace.path(),
+            &compatibility,
+            "tree-a",
+        )
+        .unwrap();
+        assert_ne!(first.target_dir(), overlap.target_dir());
+        assert_eq!(overlap.resolution(), "isolated");
+        drop(overlap);
+        drop(first);
+        let next = acquire_candidate_cargo_target_in(
+            root.path(),
+            "gate",
+            workspace.path(),
+            &compatibility,
+            "tree-a",
+        )
+        .unwrap();
+        assert_eq!(first_path, next.target_dir());
+        assert_eq!(next.seed_bytes(), 0);
+        assert_eq!(
+            fs::metadata(workspace.path().join("source.rs"))
+                .unwrap()
+                .modified()
+                .unwrap(),
+            first_time
+        );
+        let other = acquire_candidate_cargo_target_in(
+            root.path(),
+            "gate",
+            workspace.path(),
+            &compatibility,
+            "tree-b",
+        )
+        .unwrap();
+        assert_ne!(next.target_dir(), other.target_dir());
+        let artifact_time = fs::metadata(other.target_dir().join("artifact"))
+            .unwrap()
+            .modified()
+            .unwrap();
+        assert!(
+            fs::metadata(workspace.path().join("source.rs"))
+                .unwrap()
+                .modified()
+                .unwrap()
+                > artifact_time
+        );
+        assert!(!cache_projection(other.promote_to.as_ref().unwrap())
+            .join(CANDIDATE_SOURCE_TIME)
+            .exists());
+    }
+
+    #[test]
+    fn cargo_target_copy_preserves_fingerprint_timestamp_order() {
+        let root = TempDir::new().unwrap();
+        let source = root.path().join("source");
+        let target = root.path().join("target");
+        fs::create_dir_all(&source).unwrap();
+        fs::create_dir_all(&target).unwrap();
+        let old = UNIX_EPOCH + Duration::from_secs(1_700_000_000);
+        for (name, time) in [
+            ("dependency", old),
+            ("dep-info", old + Duration::from_secs(1)),
+        ] {
+            let path = source.join(name);
+            fs::write(&path, name).unwrap();
+            fs::File::open(path).unwrap().set_modified(time).unwrap();
+        }
+        copy_cargo_cache(&source, &target, CacheTransfer::Copy).unwrap();
+        for name in ["dependency", "dep-info"] {
+            assert_eq!(
+                fs::metadata(target.join(name)).unwrap().modified().unwrap(),
+                fs::metadata(source.join(name)).unwrap().modified().unwrap()
+            );
+        }
+        fs::write(target.join("dependency"), "private mutation").unwrap();
+        assert_eq!(fs::read(source.join("dependency")).unwrap(), b"dependency");
     }
 
     #[test]

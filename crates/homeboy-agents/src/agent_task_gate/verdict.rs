@@ -36,7 +36,7 @@ pub(super) struct GateVerdict {
     root: PathBuf,
 }
 
-fn tree(cwd: &Path) -> Option<String> {
+pub(super) fn tree(cwd: &Path) -> Option<String> {
     match crate::agent_task_promotion::candidate_fingerprint(cwd.to_str()?).ok()? {
         crate::agent_task_promotion::AgentTaskPromotionCandidate::Git { fingerprint } => {
             Some(fingerprint.tree)
