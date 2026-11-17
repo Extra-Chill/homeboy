@@ -3678,11 +3678,37 @@ pub fn settle_cook_terminal_observations_in_store(
             }
         })
     };
+    // A run whose lifecycle write has not landed yet settles to its own Cook
+    // terminal report, never to another run's outcome.
+    let reported = |record: &AgentTaskRunRecord| {
+        let terminal = &record.metadata["cook_progress"];
+        (terminal["phase"] == "terminal" && terminal["terminal_success"].is_boolean()).then(|| {
+            if terminal["terminal_success"] == true && terminal["exit_code"] == 0 {
+                homeboy_core::observation::RunStatus::Pass
+            } else {
+                homeboy_core::observation::RunStatus::Fail
+            }
+        })
+    };
+    let settled = |record: &AgentTaskRunRecord| {
+        observed(crate::agent_task_service::cook_observation_state(
+            lifecycle_store,
+            record,
+        ))
+        .or_else(|| reported(record))
+    };
     // Each run settles to its own Cook-observed outcome. Runs without a
-    // lifecycle record (invocation sources) take the Cook's outcome.
+    // lifecycle record (invocation sources) take the Cook's outcome, and a
+    // Cook root without its own report takes the reporting run's.
     let cook_status = observed(
         crate::agent_task_service::cook_observation_in_store(lifecycle_store, cook_id)?.state(),
-    );
+    )
+    .or_else(|| {
+        run_ids
+            .iter()
+            .find_map(|id| lifecycle_store.read_record_bounded(id).ok())
+            .and_then(|record| settled(&record))
+    });
     let mut ids = run_ids.to_vec();
     if let Ok(index) = lifecycle_store.read_cook_index(cook_id) {
         ids.extend(index.attempts.into_iter().map(|attempt| attempt.run_id));
@@ -3693,10 +3719,7 @@ pub fn settle_cook_terminal_observations_in_store(
     let observation = lifecycle_store.open_observation_initialized()?;
     for id in ids {
         let status = match lifecycle_store.read_record_bounded(&id) {
-            Ok(record) => observed(crate::agent_task_service::cook_observation_state(
-                lifecycle_store,
-                &record,
-            )),
+            Ok(record) => settled(&record),
             Err(_) => cook_status,
         };
         if let Some(status) = status {
