@@ -2700,13 +2700,15 @@ mod preview_tests {
             assert_eq!(exit_code, 0, "{preview}");
 
             // A queued admission replays the raw argv: preparation alone
-            // derives the same prompt the preview ran.
-            let mut live = args;
-            prepare_cook_request(&mut live, None).expect("prepare replayed Cook");
-            assert_eq!(
-                live.dispatch.prompt.as_deref(),
-                Some(super::super::cook_batch::default_task_prompt(task_url).as_str())
-            );
+            // derives the same prompt the preview ran, including on the Lab
+            // controller, which carries the compiled attempt plan.
+            let expected = super::super::cook_batch::default_task_prompt(task_url);
+            for attempt_plan in [None, Some("{}".to_string())] {
+                let mut live = args.clone();
+                live.attempt_plan = attempt_plan;
+                prepare_cook_request(&mut live, None).expect("prepare replayed Cook");
+                assert_eq!(live.dispatch.prompt.as_deref(), Some(expected.as_str()));
+            }
         });
     }
 
@@ -8745,12 +8747,10 @@ pub(crate) fn snapshot_cook_prompt(args: &mut AgentTaskCookArgs) -> homeboy::cor
 }
 
 /// Without `--prompt`, Cook runs the `--task-url` task exactly as cook-batch
-/// children do.
+/// children do. The prompt is a pure function of the task URL, so it is derived
+/// on every path, including a controller that carries a compiled attempt plan.
 fn default_cook_prompt_from_task_url(args: &mut AgentTaskCookArgs) {
-    if args.dispatch.prompt.is_some()
-        || args.prompt_snapshot.is_some()
-        || args.attempt_plan.is_some()
-    {
+    if args.dispatch.prompt.is_some() || args.prompt_snapshot.is_some() {
         return;
     }
     if let Some(task_url) = args.dispatch.task_url.as_deref() {
