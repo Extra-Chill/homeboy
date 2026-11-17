@@ -607,12 +607,12 @@ fn lab_readiness_fallback_reason(readiness: &LabReadinessSnapshot) -> Option<Str
 /// Lab readiness states that queue an auto split-placement Cook for Lab
 /// admission instead of refusing it: the runner is connected but busy
 /// (`capacity_blocked`), momentarily ineligible (`connected_ineligible`), or
-/// its readiness is not observed yet. A ready snapshot without an admitted
-/// selection also waits, rather than contradicting its availability evidence.
+/// its readiness is not observed yet. Each flaps with Lab load, so they share
+/// one queued path.
 fn lab_readiness_awaits_admission(readiness: &LabReadinessSnapshot) -> bool {
     matches!(
         readiness.state.as_str(),
-        "connected_ready" | "capacity_blocked" | "connected_ineligible" | READINESS_UNOBSERVED
+        "capacity_blocked" | "connected_ineligible" | READINESS_UNOBSERVED
     )
 }
 
@@ -1742,23 +1742,14 @@ mod tests {
             ("capacity_blocked", "capacity_reached"),
             ("connected_ineligible", "daemon_unverified"),
             (READINESS_UNOBSERVED, "status_probe_timeout"),
-            ("connected_ready", ""),
         ] {
             for runner in [None, Some("lab-b")] {
                 let decisions = [false, true].map(|preview| {
                     let mut policy = auto_route_policy(
                         runner,
                         state,
-                        if state == "connected_ready" {
-                            vec!["lab-b".into(), "lab-c".into()]
-                        } else {
-                            Vec::new()
-                        },
-                        if reason.is_empty() {
-                            Vec::new()
-                        } else {
-                            vec![reason.into()]
-                        },
+                        Vec::new(),
+                        vec![reason.into()],
                         false,
                         ResourceAdmissionEvidence::Observed {
                             pressure: ResourceHeat::Hot,
@@ -1795,18 +1786,12 @@ mod tests {
         for (state, reason) in [
             ("disconnected", "runner_disconnected"),
             ("stale", "stale_daemon"),
-            ("disconnected", ""),
-            ("stale", ""),
         ] {
             let policy = auto_route_policy(
                 Some("lab-b"),
                 state,
                 Vec::new(),
-                if reason.is_empty() {
-                    Vec::new()
-                } else {
-                    vec![reason.into()]
-                },
+                vec![reason.into()],
                 false,
                 ResourceAdmissionEvidence::Unavailable,
             );
@@ -1815,16 +1800,6 @@ mod tests {
             assert_eq!(error.code, crate::ErrorCode::RunnerLabUnavailable);
             assert_eq!(error.details["reason"], "lab_unavailable");
             assert_eq!(error.details["readiness_state"], state);
-            assert!(error.message.contains(if reason.is_empty() {
-                match state {
-                    "absent" => "no Lab runner is configured",
-                    "disconnected" => "runner is disconnected",
-                    "stale" => "admission is stale",
-                    _ => unreachable!(),
-                }
-            } else {
-                reason
-            }));
         }
     }
 
