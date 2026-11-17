@@ -30,7 +30,7 @@
     "lint.producers": true,
     "test.results": true,
     "test.failures": true,
-    "test.coverage": false,
+    "test.coverage": true,
     "bench.results": true,
     "bench.responsiveness": true,
     "trace.results": true,

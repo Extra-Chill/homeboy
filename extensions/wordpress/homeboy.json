@@ -55,6 +55,7 @@
       "node tests/wp-codebox-phpunit-multi-suite-smoke.mjs tests/wp-codebox-phpunit-host-suite-smoke.mjs",
       "node tests/wp-codebox-phpunit-managed-default-suite-smoke.mjs",
       "bash scripts/test/test-runner-file-routing-smoke.sh",
+      "bash tests/php-coverage-smoke.sh",
       "bash scripts/test/wp-codebox-mount-translation-smoke.sh",
       "bash scripts/build/build-clean-vendor-smoke.sh",
       "bash scripts/build/build-composer-invocations-smoke.sh",
