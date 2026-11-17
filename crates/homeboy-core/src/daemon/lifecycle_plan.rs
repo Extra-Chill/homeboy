@@ -56,6 +56,10 @@ pub enum Plan {
 pub enum WaitCause {
     /// A stale daemon still owns jobs; it is replaced when they finish.
     BusyStaleDaemon,
+    /// The daemon's lease is compatible but an upgrade replaced the executable
+    /// it runs. It stops itself once idle and its replacement runs the
+    /// installed binary (#15403, #18290).
+    ReplacedExecutable,
 }
 
 /// Why the planner refuses to act.
