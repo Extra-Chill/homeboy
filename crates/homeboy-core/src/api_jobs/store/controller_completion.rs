@@ -232,6 +232,7 @@ mod tests {
                 _ => unreachable!(),
             }
             .unwrap();
+            store.compact_retained_history().unwrap();
             winners.push(job);
         }
         assert_eq!(store.list().len(), 1, "configured pruning actually ran");
