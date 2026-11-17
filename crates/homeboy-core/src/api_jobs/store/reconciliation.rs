@@ -122,25 +122,33 @@ impl JobStore {
         &self,
         current_lease_id: Option<&str>,
     ) -> Vec<DaemonActiveJobRecoveryEvidence> {
-        let inner = self.inner.lock().expect("job store mutex poisoned");
-        let mut evidence = inner
-            .jobs
-            .values()
-            .filter_map(|stored| {
-                let job = &stored.job;
-                if !matches!(job.status, JobStatus::Queued | JobStatus::Running) {
-                    return None;
-                }
+        // Copy the active in-scope jobs and release the store before hydrating
+        // linked durable runs: that hydration reads other stores and is slow,
+        // and holding the store across it stalls every request (#18197).
+        let active: Vec<StoredJob> = {
+            let inner = self.inner.lock().expect("job store mutex poisoned");
+            inner
+                .jobs
+                .values()
+                .filter(|stored| {
+                    matches!(stored.job.status, JobStatus::Queued | JobStatus::Running)
+                })
                 // A job stamped with another daemon scope is that daemon's
                 // work in the shared ledger (#16104), even when this scope has
                 // no lease yet. Scope-less records keep the lease rule.
-                if let (Some(own), Some(job_scope)) =
-                    (self.daemon_scope.as_ref(), stored.daemon_scope.as_ref())
-                {
-                    if own != job_scope {
-                        return None;
-                    }
-                }
+                .filter(
+                    |stored| match (self.daemon_scope.as_ref(), stored.daemon_scope.as_ref()) {
+                        (Some(own), Some(job_scope)) => own == job_scope,
+                        _ => true,
+                    },
+                )
+                .cloned()
+                .collect()
+        };
+        let mut evidence = active
+            .iter()
+            .filter_map(|stored| {
+                let job = &stored.job;
                 let terminal_evidence =
                     recovered_terminal_from_result(&stored.events).map(|(status, _)| status);
                 let linked_durable_run_id = stored_job_durable_run_id(stored);
