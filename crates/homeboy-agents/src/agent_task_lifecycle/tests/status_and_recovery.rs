@@ -25,7 +25,7 @@ fn test_lifecycle_store() -> AgentTaskLifecycleStore {
 #[test]
 fn candidate_recoverable_provider_projection_is_failed_not_timed_out() {
     assert_eq!(
-        provider_runtime_state_for_task_state(Some(AgentTaskState::CandidateRecoverable)),
+        provider_runtime_state_for_task_state(Some(ControlPlaneState::CandidateRecoverable)),
         ProviderRuntimeState::Failed
     );
 }
@@ -1060,7 +1060,7 @@ fn detached_lab_handoff_persists_inspectable_running_record() {
 
             assert_eq!(record.run_id, run_id);
             assert_eq!(loaded.state(), RunExecutionState::Running);
-            assert_eq!(loaded.tasks[0].state(), AgentTaskState::Running);
+            assert_eq!(loaded.tasks[0].state(), ControlPlaneState::Running);
             assert_eq!(loaded.metadata["runner_id"], "homeboy-lab");
             assert_eq!(loaded.metadata["runner_job_id"], "job-123");
             assert!(loaded.metadata.get("stale_running").is_none());
@@ -1605,7 +1605,7 @@ fn transport_proxy_snapshot_reconciliation_advances_queued_lifecycle() {
     .expect("transport proxy reconciliation");
 
     assert_eq!(record.state(), RunExecutionState::Succeeded);
-    assert_eq!(record.tasks[0].state(), AgentTaskState::Succeeded);
+    assert_eq!(record.tasks[0].state(), ControlPlaneState::Succeeded);
     assert_eq!(record.metadata["runner_job_status"], "succeeded");
     assert_eq!(
         record.metadata["runner_execution_record"]["status"],
@@ -2434,7 +2434,7 @@ fn cancel_run_signals_live_running_record() {
         cancel_run_in_store(&lifecycle_store, "run-cancel-live", None).expect("live run cancelled");
 
     assert_eq!(cancelled.state(), RunExecutionState::Cancelled);
-    assert_eq!(cancelled.tasks[0].state(), AgentTaskState::Cancelled);
+    assert_eq!(cancelled.tasks[0].state(), ControlPlaneState::Cancelled);
     assert_eq!(
         cancelled.metadata["live_cancellation"]["owner_pid"],
         json!(owner_pid)
@@ -2552,13 +2552,13 @@ fn logs_return_the_canonical_control_plane_event_page() {
         aggregate.events = vec![
             AgentTaskProgressEvent {
                 task_id: "task-a".to_string(),
-                state: AgentTaskState::Running,
+                state: ControlPlaneState::Running,
                 attempt: 1,
                 message: Some("started".to_string()),
             },
             AgentTaskProgressEvent {
                 task_id: "task-a".to_string(),
-                state: AgentTaskState::Succeeded,
+                state: ControlPlaneState::Succeeded,
                 attempt: 1,
                 message: Some("ok".to_string()),
             },
@@ -3019,7 +3019,7 @@ fn live_verification_pending_promotion_heartbeat_is_visible_to_logs_and_status()
         .expect("status");
         assert_eq!(
             status.state,
-            homeboy_control_plane_contract::ControlPlaneRunState::Running
+            homeboy_control_plane_contract::ControlPlaneState::Running
         );
         assert_eq!(status.phase.as_deref(), Some("gate"));
         assert_eq!(status.gates[0].id.as_deref(), Some("cargo test"));

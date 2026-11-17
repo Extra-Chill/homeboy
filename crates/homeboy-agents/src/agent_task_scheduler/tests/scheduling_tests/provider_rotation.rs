@@ -1343,7 +1343,7 @@ mod provider_rotation_tests {
         assert!(aggregate
             .events
             .iter()
-            .all(|event| event.state != AgentTaskState::Running));
+            .all(|event| event.state != ControlPlaneState::Running));
         let outcome = &aggregate.outcomes[0];
         assert_eq!(outcome.metadata["execution_budget"]["executions_used"], 0);
         assert_eq!(

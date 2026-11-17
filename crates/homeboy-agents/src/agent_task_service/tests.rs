@@ -12,8 +12,9 @@ use crate::agent_task_schedule::AgentTaskPlan;
 use crate::agent_task_scheduler::{
     AgentTaskAggregate, AgentTaskAggregateTotals, AgentTaskExecutionContext,
     AgentTaskExecutorAdapter, AgentTaskProviderRotationEntry, AgentTaskProviderRotationPolicy,
-    AgentTaskScheduler, AgentTaskState,
+    AgentTaskScheduler,
 };
+use homeboy_control_plane_contract::ControlPlaneState;
 use homeboy_lifecycle_contract::RunExecutionState;
 
 use homeboy_core::test_support::{with_isolated_home, write_component_registration};
@@ -1612,7 +1613,7 @@ fn service_run_loaded_plan_persists_durable_lifecycle() {
 
         assert_eq!(result.exit_code, 0);
         assert_eq!(record.state(), RunExecutionState::Succeeded);
-        assert_eq!(record.tasks[0].state(), AgentTaskState::Succeeded);
+        assert_eq!(record.tasks[0].state(), ControlPlaneState::Succeeded);
         assert!(record.aggregate_path.is_some());
         assert_eq!(record.metadata["provider_executions_consumed"], 1);
         assert_eq!(record.lifecycle.provider_runtime.len(), 1);
@@ -1867,7 +1868,7 @@ fn lab_runner_handoff_materializes_the_run_before_preparation_failure() {
 
         assert_eq!(error.code.as_str(), "validation.invalid_argument");
         assert_eq!(record.state(), RunExecutionState::Failed);
-        assert_eq!(record.tasks[0].state(), AgentTaskState::Failed);
+        assert_eq!(record.tasks[0].state(), ControlPlaneState::Failed);
         assert!(!log.events.is_empty());
         assert_eq!(recovery.exit_code, 1);
         assert_eq!(
@@ -2093,7 +2094,7 @@ fn service_persists_timed_out_run_record_and_evidence_refs() {
 
         assert_eq!(result.exit_code, 1);
         assert_eq!(record.state(), RunExecutionState::Failed);
-        assert_eq!(record.tasks[0].state(), AgentTaskState::TimedOut);
+        assert_eq!(record.tasks[0].state(), ControlPlaneState::TimedOut);
         assert_eq!(record.totals.as_ref().expect("totals").timed_out, 1);
         assert!(record.aggregate_path.is_some());
         assert_eq!(record.metadata["provider_executions_consumed"], 1);
@@ -2313,7 +2314,7 @@ fn run_next_quarantines_missing_required_secret_before_claiming_and_runs_later_w
             vec!["__HOMEBOY_TEST_MISSING_SECRET_ENV_RUN_NEXT__"]
         );
         assert_eq!(record.state(), RunExecutionState::Queued);
-        assert_eq!(record.tasks[0].state(), AgentTaskState::Queued);
+        assert_eq!(record.tasks[0].state(), ControlPlaneState::Queued);
         assert_eq!(record.lifecycle.execution.state, RunExecutionState::Queued);
         assert_eq!(
             record.metadata["queue_quarantine"]["error_code"],
@@ -2838,7 +2839,7 @@ fn discovery_active_reads_runner_backed_record_without_reconciliation() {
             .expect("submitted");
         agent_task_lifecycle::rewrite_record_for_test("run-runner-stale", |record| {
             agent_task_lifecycle::set_run_state(record, RunExecutionState::Running);
-            record.tasks[0].set_state_for_test(AgentTaskState::Running);
+            record.tasks[0].set_state_for_test(ControlPlaneState::Running);
             record.metadata = serde_json::json!({
                 "runner_id": "homeboy-lab",
                 "runner_job_id": "job-123",
@@ -2904,7 +2905,7 @@ fn discovery_active_classifies_liveness_and_source() {
             .expect("submitted");
         agent_task_lifecycle::rewrite_record_for_test("run-live-stale", |record| {
             agent_task_lifecycle::set_run_state(record, RunExecutionState::Running);
-            record.tasks[0].set_state_for_test(AgentTaskState::Running);
+            record.tasks[0].set_state_for_test(ControlPlaneState::Running);
             record.metadata = serde_json::json!({
                 "runner_id": "homeboy-lab",
                 "runner_job_id": "job-xyz",
@@ -2957,7 +2958,7 @@ fn reconcile_dry_run_reports_but_does_not_cancel_stale_runs() {
             .expect("submitted");
         agent_task_lifecycle::rewrite_record_for_test("run-reconcile-dry", |record| {
             agent_task_lifecycle::set_run_state(record, RunExecutionState::Running);
-            record.tasks[0].set_state_for_test(AgentTaskState::Running);
+            record.tasks[0].set_state_for_test(ControlPlaneState::Running);
             record.metadata = serde_json::json!({ "runner_pid": u32::MAX });
         })
         .expect("stale record stored");
@@ -2981,7 +2982,7 @@ fn reconcile_cancels_stale_running_record_without_manual_edit() {
             .expect("submitted");
         agent_task_lifecycle::rewrite_record_for_test("run-reconcile-live", |record| {
             agent_task_lifecycle::set_run_state(record, RunExecutionState::Running);
-            record.tasks[0].set_state_for_test(AgentTaskState::Running);
+            record.tasks[0].set_state_for_test(ControlPlaneState::Running);
             record.metadata = serde_json::json!({ "runner_pid": u32::MAX });
         })
         .expect("stale record stored");
@@ -3009,7 +3010,7 @@ fn scoped_reconcile_applies_only_the_inspected_run_and_preserves_other_stale_rec
             agent_task_lifecycle::submit_plan(&discovery_plan(), Some(run_id)).expect("submitted");
             agent_task_lifecycle::rewrite_record_for_test(run_id, |record| {
                 agent_task_lifecycle::set_run_state(record, RunExecutionState::Running);
-                record.tasks[0].set_state_for_test(AgentTaskState::Running);
+                record.tasks[0].set_state_for_test(ControlPlaneState::Running);
                 record.metadata = serde_json::json!({ "runner_pid": u32::MAX });
             })
             .expect("stale record stored");
@@ -3978,7 +3979,7 @@ fn reconciliation_postcondition_names_an_unresolved_runner_projection() {
         agent_task_lifecycle::submit_plan(&discovery_plan(), Some(run_id)).expect("submitted");
         agent_task_lifecycle::rewrite_record_for_test(run_id, |record| {
             agent_task_lifecycle::set_run_state(record, RunExecutionState::Cancelled);
-            record.tasks[0].set_state_for_test(AgentTaskState::Cancelled);
+            record.tasks[0].set_state_for_test(ControlPlaneState::Cancelled);
         })
         .expect("terminal controller projection");
         let record = agent_task_lifecycle::exact_record(run_id).expect("queued record");
@@ -4252,7 +4253,7 @@ fn scoped_reconcile_is_a_no_op_when_the_owner_becomes_live_after_preview() {
             .expect("submitted");
         agent_task_lifecycle::rewrite_record_for_test("run-owner-changed", |record| {
             agent_task_lifecycle::set_run_state(record, RunExecutionState::Running);
-            record.tasks[0].set_state_for_test(AgentTaskState::Running);
+            record.tasks[0].set_state_for_test(ControlPlaneState::Running);
             record.metadata = serde_json::json!({ "runner_pid": u32::MAX });
         })
         .expect("stale record stored");
@@ -4293,7 +4294,7 @@ fn dead_owner_process_run_is_classified_stale_and_reconciled() {
             .expect("submitted");
         agent_task_lifecycle::rewrite_record_for_test("run-dead-owner", |record| {
             agent_task_lifecycle::set_run_state(record, RunExecutionState::Running);
-            record.tasks[0].set_state_for_test(AgentTaskState::Running);
+            record.tasks[0].set_state_for_test(ControlPlaneState::Running);
             // Fresh update timestamp + a present-but-dead owner pid, and NO
             // runner job (local controller-owned run). A very large PID is not
             // a live process on this host.
@@ -4744,14 +4745,14 @@ fn discovery_filters_by_cook_identity_and_classifies_only_live_queued_records_as
         agent_task_lifecycle::submit_plan(&discovery_plan(), Some("run-queued-ghost"))
             .expect("ghost run");
         agent_task_lifecycle::rewrite_record_for_test("run-queued-ghost", |record| {
-            record.tasks[0].set_state_for_test(AgentTaskState::Succeeded);
+            record.tasks[0].set_state_for_test(ControlPlaneState::Succeeded);
             record.updated_at = Some("2000-01-01T00:00:00+00:00".to_string());
         })
         .expect("age ghost");
         agent_task_lifecycle::submit_plan(&discovery_plan(), Some("run-no-update-ghost"))
             .expect("no-update ghost run");
         agent_task_lifecycle::rewrite_record_for_test("run-no-update-ghost", |record| {
-            record.tasks[0].set_state_for_test(AgentTaskState::Succeeded);
+            record.tasks[0].set_state_for_test(ControlPlaneState::Succeeded);
             record.submitted_at = "2000-01-01T00:00:00+00:00".to_string();
             record.updated_at = None;
         })
@@ -5255,7 +5256,7 @@ fn discovery_runner_backed_run_emits_runner_scoped_commands() {
             .expect("submitted");
         agent_task_lifecycle::rewrite_record_for_test("run-runner-commands", |record| {
             agent_task_lifecycle::set_run_state(record, RunExecutionState::Running);
-            record.tasks[0].set_state_for_test(AgentTaskState::Running);
+            record.tasks[0].set_state_for_test(ControlPlaneState::Running);
             record.metadata = serde_json::json!({
                 "runner_id": "homeboy-lab",
             });

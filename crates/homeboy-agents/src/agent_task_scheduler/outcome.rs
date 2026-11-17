@@ -7,7 +7,7 @@ use super::*;
 
 pub(super) fn event(
     task_id: &str,
-    state: AgentTaskState,
+    state: ControlPlaneState,
     attempt: u32,
     message: Option<String>,
 ) -> AgentTaskProgressEvent {

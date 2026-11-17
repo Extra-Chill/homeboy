@@ -1,3 +1,4 @@
+use homeboy_control_plane_contract::ControlPlaneState;
 use homeboy_lifecycle_contract::RunExecutionState;
 use serde::Serialize;
 
@@ -18,7 +19,7 @@ use crate::agent_task_provider::{
     AGENT_TASK_PROVIDER_CAPABILITY_CONTRACT_SCHEMA,
     RESOLVED_AGENT_RUNTIME_EXECUTION_CONTRACT_SCHEMA,
 };
-use crate::agent_task_schedule::{AgentTaskManagedService, AgentTaskState, AGENT_TASK_PLAN_SCHEMA};
+use crate::agent_task_schedule::{AgentTaskManagedService, AGENT_TASK_PLAN_SCHEMA};
 use crate::agent_tool_control_plane::AGENT_TOOL_DISPATCH_EVIDENCE_SCHEMA;
 use homeboy_core::command_invocation::COMMAND_INVOCATION_SCHEMA;
 use homeboy_core::redaction::RedactionPolicy;
@@ -257,15 +258,15 @@ pub fn agent_task_core_contract() -> AgentTaskCoreContract {
                 "provider_run",
             ]),
             task_state: enum_values(&[
-                AgentTaskState::Queued,
-                AgentTaskState::Blocked,
-                AgentTaskState::Skipped,
-                AgentTaskState::Running,
-                AgentTaskState::Succeeded,
-                AgentTaskState::Failed,
-                AgentTaskState::Cancelled,
-                AgentTaskState::TimedOut,
-                AgentTaskState::CandidateRecoverable,
+                ControlPlaneState::Queued,
+                ControlPlaneState::Blocked,
+                ControlPlaneState::Skipped,
+                ControlPlaneState::Running,
+                ControlPlaneState::Succeeded,
+                ControlPlaneState::Failed,
+                ControlPlaneState::Cancelled,
+                ControlPlaneState::TimedOut,
+                ControlPlaneState::CandidateRecoverable,
             ]),
             run_state: enum_values(&RUN_STATES),
             // An aggregate's status is the terminal run state it derives

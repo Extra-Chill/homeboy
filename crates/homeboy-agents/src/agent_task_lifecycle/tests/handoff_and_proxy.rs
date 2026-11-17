@@ -2426,12 +2426,12 @@ fn detached_runner_failure_transitions_parent_and_task_terminal() {
         record.set_state_for_test(RunExecutionState::Running);
         record
     };
-    record.tasks[0].set_state_for_test(AgentTaskState::Running);
+    record.tasks[0].set_state_for_test(ControlPlaneState::Running);
 
     apply_runner_job_terminal_state(&mut record, homeboy_core::api_jobs::JobStatus::Failed, &[]);
 
     assert_eq!(record.state(), RunExecutionState::Failed);
-    assert_eq!(record.tasks[0].state(), AgentTaskState::Failed);
+    assert_eq!(record.tasks[0].state(), ControlPlaneState::Failed);
     assert_eq!(record.lifecycle.execution.state, RunExecutionState::Failed);
     assert_eq!(record.metadata["runner_job_status"], "failed");
     assert_eq!(record.metadata["retryable"], true);
@@ -2729,7 +2729,7 @@ fn remote_dispatch_failure_preserves_structured_outcome_details() {
             }],
             events: vec![AgentTaskProgressEvent {
                 task_id: "task-a".to_string(),
-                state: AgentTaskState::Failed,
+                state: ControlPlaneState::Failed,
                 attempt: 1,
                 message: Some("Remote provider agent task failed.".to_string()),
             }],
@@ -3005,7 +3005,7 @@ fn failed_provider_run_exposes_workflow_evidence_refs() {
         }],
         events: vec![AgentTaskProgressEvent {
             task_id: "task-a".to_string(),
-            state: AgentTaskState::Failed,
+            state: ControlPlaneState::Failed,
             attempt: 1,
             message: Some("provider task failed".to_string()),
         }],
@@ -3335,7 +3335,7 @@ fn cancel_run_marks_queued_record_cancelled() {
     .record;
 
     assert_eq!(cancelled.state(), RunExecutionState::Cancelled);
-    assert_eq!(cancelled.tasks[0].state(), AgentTaskState::Cancelled);
+    assert_eq!(cancelled.tasks[0].state(), ControlPlaneState::Cancelled);
     assert_eq!(cancelled.metadata["cancel_reason"], json!("loser cell"));
     assert_eq!(
         cancelled.metadata["live_cancellation"]["cancellation"],
@@ -3559,7 +3559,7 @@ fn status_filters_empty_uri_artifact_refs() {
         )],
         events: vec![AgentTaskProgressEvent {
             task_id: "task-a".to_string(),
-            state: AgentTaskState::Succeeded,
+            state: ControlPlaneState::Succeeded,
             attempt: 1,
             message: Some("ok".to_string()),
         }],

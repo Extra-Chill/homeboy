@@ -1,4 +1,5 @@
 use chrono::Utc;
+use homeboy_control_plane_contract::ControlPlaneState;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::path::PathBuf;
@@ -14,7 +15,7 @@ use crate::agent_task::{
 };
 use crate::agent_task_scheduler::{
     AgentTaskAggregate, AgentTaskAggregateTotals, AgentTaskPlan, AgentTaskProgressEvent,
-    AgentTaskQueueStatus, AgentTaskState, AGENT_TASK_AGGREGATE_SCHEMA,
+    AgentTaskQueueStatus, AGENT_TASK_AGGREGATE_SCHEMA,
 };
 use homeboy_core::run_lifecycle_record::{
     ArtifactRetentionLifecycle, ArtifactRetentionStatus, CleanupLifecycle, CleanupState,
@@ -116,8 +117,8 @@ pub(crate) use terminal_transition::{
     start_run, StateWriteAuthority,
 };
 pub use terminal_transition::{
-    AgentTaskAdvance, AgentTaskTerminalOutcome, AgentTaskTransition, AgentTaskTransitionConflict,
-    AgentTaskTransitionError, AGENT_TASK_ILLEGAL_TRANSITION, AGENT_TASK_TRANSITION_CONFLICT,
+    AgentTaskAdvance, AgentTaskTransition, AgentTaskTransitionConflict, AgentTaskTransitionError,
+    AGENT_TASK_ILLEGAL_TRANSITION, AGENT_TASK_TRANSITION_CONFLICT,
 };
 pub use workspace_authority::*;
 pub use workspace_claims::*;

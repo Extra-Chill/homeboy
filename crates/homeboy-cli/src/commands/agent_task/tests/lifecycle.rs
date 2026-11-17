@@ -1,6 +1,7 @@
 //! Agent-task command run submission, status, queue claims, cancel, retry, and resume tests.
 
 use super::support::*;
+use homeboy_lifecycle_contract::RunExecutionState;
 
 fn execute_retry_step_fixture(
     run_id: &str,
@@ -105,8 +106,7 @@ fn explicit_retry_of_an_unmaterialized_cook_is_not_refused_toward_itself() {
                 cook_id,
                 store.read_record(cook_id).unwrap().revision,
                 homeboy::agents::agent_task_lifecycle::AgentTaskTransition::Terminate {
-                    outcome:
-                        homeboy::agents::agent_task_lifecycle::AgentTaskTerminalOutcome::Failed,
+                    outcome: RunExecutionState::Failed,
                     metadata: serde_json::Map::new(),
                 },
             )
@@ -153,7 +153,7 @@ fn diagnose_recorded_pressure_refusal() {
         assert_eq!(error.code.as_str(), "runner.capacity_busy");
         store.transition(run_id, store.read_record(run_id).unwrap().revision,
             homeboy::agents::agent_task_lifecycle::AgentTaskTransition::Terminate {
-                outcome: homeboy::agents::agent_task_lifecycle::AgentTaskTerminalOutcome::Failed,
+                outcome: RunExecutionState::Failed,
                 metadata: serde_json::Map::from_iter([("execution_step_failure".into(), json!({
                     "message": error.message,
                     "diagnostic": {"code": error.code.as_str(), "message": error.message, "details": error.details},
@@ -198,7 +198,7 @@ fn admission_failure_is_visible_in_status_and_diagnose_without_provider_evidence
             run_id,
             store.read_record(run_id).unwrap().revision,
             homeboy::agents::agent_task_lifecycle::AgentTaskTransition::Terminate {
-                outcome: homeboy::agents::agent_task_lifecycle::AgentTaskTerminalOutcome::Failed,
+                outcome: RunExecutionState::Failed,
                 metadata: serde_json::Map::from_iter([("execution_step_failure".to_string(), json!({
                     "message": error.message,
                     "diagnostic": {"code": "validation.invalid_argument", "message": error.message, "details": error.details},
@@ -6174,13 +6174,13 @@ fn run_plan_record_run_id_persists_running_status_before_executor_runs() {
         assert!(value.get("tasks").is_some());
         assert!(value.get("outcomes").is_none());
         assert_eq!(observed.state(), RunExecutionState::Running);
-        assert_eq!(observed.tasks[0].state(), AgentTaskState::Running);
+        assert_eq!(observed.tasks[0].state(), ControlPlaneState::Running);
         assert_eq!(observed.metadata["runner_pid"], std::process::id());
         assert!(observed.aggregate_path.is_none());
 
         let completed = lifecycle_status(run_id).expect("completed status loaded");
         assert_eq!(completed.state(), RunExecutionState::Succeeded);
-        assert_eq!(completed.tasks[0].state(), AgentTaskState::Succeeded);
+        assert_eq!(completed.tasks[0].state(), ControlPlaneState::Succeeded);
         assert!(completed.aggregate_path.is_some());
     });
 }
@@ -6342,10 +6342,10 @@ fn cancel_command_marks_queued_run_cancelled() {
         assert_eq!(exit_code, 0);
         assert_eq!(
             acknowledgement.resource.state,
-            homeboy_control_plane_contract::ControlPlaneRunState::Cancelled
+            homeboy_control_plane_contract::ControlPlaneState::Cancelled
         );
         let record = agent_task_lifecycle::status("run-cli-cancel").expect("record");
-        assert_eq!(record.tasks[0].state(), AgentTaskState::Cancelled);
+        assert_eq!(record.tasks[0].state(), ControlPlaneState::Cancelled);
         assert_eq!(record.metadata["cancel_reason"], json!("not selected"));
     });
 }
@@ -6996,7 +6996,7 @@ fn resume_from_a_different_build_executes_in_process_and_returns_replayable_ackn
         assert_eq!(acknowledgement.idempotency_key, "resume-cli-1");
         assert_eq!(
             acknowledgement.resource.state,
-            homeboy_control_plane_contract::ControlPlaneRunState::Succeeded
+            homeboy_control_plane_contract::ControlPlaneState::Succeeded
         );
         assert!(observed.metadata["resume_requested_at"].is_string());
         assert_eq!(completed.state(), RunExecutionState::Succeeded);

@@ -78,7 +78,9 @@ mod timeout_tests {
         assert_eq!(calls.load(Ordering::SeqCst), 2);
         assert_eq!(max_running.load(Ordering::SeqCst), 1);
         assert!(aggregate.events.iter().any(|event| {
-            event.task_id == "task-1" && event.state == AgentTaskState::Queued && event.attempt == 2
+            event.task_id == "task-1"
+                && event.state == ControlPlaneState::Queued
+                && event.attempt == 2
         }));
         let retry = aggregate.outcomes[0]
             .diagnostics
@@ -108,7 +110,7 @@ mod timeout_tests {
             aggregate
                 .events
                 .iter()
-                .filter(|event| event.state == AgentTaskState::Running)
+                .filter(|event| event.state == ControlPlaneState::Running)
                 .map(|event| event.attempt)
                 .collect::<std::collections::BTreeSet<_>>()
                 .len(),
@@ -637,7 +639,7 @@ mod timeout_tests {
         assert!(aggregate
             .events
             .iter()
-            .any(|event| event.task_id == "task-1" && event.state == AgentTaskState::TimedOut));
+            .any(|event| event.task_id == "task-1" && event.state == ControlPlaneState::TimedOut));
         let outcome = &aggregate.outcomes[0];
         assert_eq!(outcome.status, AgentTaskOutcomeStatus::Timeout);
         assert_eq!(

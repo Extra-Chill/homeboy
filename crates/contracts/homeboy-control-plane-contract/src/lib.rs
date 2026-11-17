@@ -66,7 +66,7 @@ pub use resource::{
     ControlPlaneReferencePage, ControlPlaneReferenceRegistration, ControlPlaneReferenceType,
     ControlPlaneResult, ControlPlaneRun, ControlPlaneRunListRequest, ControlPlaneRunPage,
     ControlPlaneRunPlacement, ControlPlaneRunPlacementEffective, ControlPlaneRunPlacementRequested,
-    ControlPlaneRunPlacementSelected, ControlPlaneRunState, ControlPlaneRuntime, ControlPlaneState,
+    ControlPlaneRunPlacementSelected, ControlPlaneRuntime, ControlPlaneState,
     ControlPlaneStateSummary, ControlPlaneTask, ControlPlaneTaskListRequest, ControlPlaneTaskPage,
     CONTROL_PLANE_ACTION_ELIGIBILITY_SCHEMA, CONTROL_PLANE_ATTEMPT_PAGE_SCHEMA,
     CONTROL_PLANE_ATTEMPT_SCHEMA, CONTROL_PLANE_EXECUTION_PAGE_SCHEMA,

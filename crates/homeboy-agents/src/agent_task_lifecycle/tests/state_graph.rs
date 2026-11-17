@@ -8,18 +8,17 @@
 
 use super::test_plan;
 use crate::agent_task_lifecycle::{
-    set_run_state, AgentTaskLifecycleStore, AgentTaskRunRecord, AgentTaskTerminalOutcome,
-    AgentTaskTransition, AGENT_TASK_ILLEGAL_TRANSITION,
+    set_run_state, AgentTaskLifecycleStore, AgentTaskRunRecord, AgentTaskTransition,
+    RunExecutionState, AGENT_TASK_ILLEGAL_TRANSITION,
 };
 use homeboy_core::run_lifecycle_record::RunLifecycleRecord;
-use homeboy_lifecycle_contract::RunExecutionState;
 use serde_json::json;
 
 const RUN_ID: &str = "state-graph-run";
 
 fn finished(
     context: &homeboy_core::test_support::HermeticTestContext,
-    outcome: AgentTaskTerminalOutcome,
+    outcome: RunExecutionState,
 ) -> AgentTaskLifecycleStore {
     let store = AgentTaskLifecycleStore::new(context.path_roots());
     let plan = test_plan();
@@ -98,7 +97,7 @@ fn assert_refused(
 #[test]
 fn a_mutation_cannot_resume_a_finished_run_in_place() {
     let context = homeboy_core::test_support::HermeticTestContext::new();
-    let store = finished(&context, AgentTaskTerminalOutcome::Succeeded);
+    let store = finished(&context, RunExecutionState::Succeeded);
     let before = store.read_record(RUN_ID).unwrap();
     assert_eq!(before.state(), RunExecutionState::Succeeded);
 
@@ -116,7 +115,7 @@ fn a_mutation_cannot_resume_a_finished_run_in_place() {
 #[test]
 fn a_cancelled_run_cannot_be_reprojected_as_a_success() {
     let context = homeboy_core::test_support::HermeticTestContext::new();
-    let store = finished(&context, AgentTaskTerminalOutcome::Cancelled);
+    let store = finished(&context, RunExecutionState::Cancelled);
     let before = store.read_record(RUN_ID).unwrap();
     assert_eq!(before.state(), RunExecutionState::Cancelled);
 
@@ -136,7 +135,7 @@ fn a_cancelled_run_cannot_be_reprojected_as_a_success() {
 #[test]
 fn a_terminal_record_commit_cannot_leave_a_cancellation() {
     let context = homeboy_core::test_support::HermeticTestContext::new();
-    let store = finished(&context, AgentTaskTerminalOutcome::Cancelled);
+    let store = finished(&context, RunExecutionState::Cancelled);
     let before = store.read_record(RUN_ID).unwrap();
 
     let mut prepared = before.clone();
@@ -162,7 +161,7 @@ fn a_terminal_record_commit_cannot_leave_a_cancellation() {
 #[test]
 fn a_finished_run_is_still_reprojected_from_later_evidence() {
     let context = homeboy_core::test_support::HermeticTestContext::new();
-    let store = finished(&context, AgentTaskTerminalOutcome::Failed);
+    let store = finished(&context, RunExecutionState::Failed);
 
     let reprojected = store
         .mutate_record(RUN_ID, |record| {

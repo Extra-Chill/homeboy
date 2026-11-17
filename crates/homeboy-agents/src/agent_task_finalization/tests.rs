@@ -8,9 +8,10 @@ use crate::{
     },
     agent_task_scheduler::{
         AgentTaskAggregate, AgentTaskAggregateTotals, AgentTaskPlan, AgentTaskProgressEvent,
-        AgentTaskQueueStatus, AgentTaskState, AGENT_TASK_AGGREGATE_SCHEMA,
+        AgentTaskQueueStatus, AGENT_TASK_AGGREGATE_SCHEMA,
     },
 };
+use homeboy_control_plane_contract::ControlPlaneState;
 use homeboy_core::run_lifecycle_record::{
     ArtifactRetentionLifecycle, ArtifactRetentionStatus, CleanupLifecycle, CleanupState,
     ExternalRuntimeId, FinalizationLifecycle, FinalizationState, ProviderRuntimeLifecycle,
@@ -1954,7 +1955,7 @@ fn durable_finalization_accepts_native_and_generic_evidence_but_omits_skipped_wo
             ],
             events: vec![AgentTaskProgressEvent {
                 task_id: "skipped".to_string(),
-                state: AgentTaskState::Skipped,
+                state: ControlPlaneState::Skipped,
                 attempt: 1,
                 message: Some("not applicable".to_string()),
             }],

@@ -244,11 +244,11 @@ fn record_interrupted_local_owner_locked(
             .map(|task| AgentTaskProgressEvent {
                 task_id: task.task_id.clone(),
                 state: if harvested {
-                    AgentTaskState::CandidateRecoverable
+                    ControlPlaneState::CandidateRecoverable
                 } else if run_cancelled {
-                    AgentTaskState::Cancelled
+                    ControlPlaneState::Cancelled
                 } else {
-                    AgentTaskState::Failed
+                    ControlPlaneState::Failed
                 },
                 attempt: 1,
                 message: Some(stop_reason.clone()),
@@ -626,7 +626,7 @@ fn record_pre_execution_failure_locked(
             .iter()
             .map(|task| AgentTaskProgressEvent {
                 task_id: task.task_id.clone(),
-                state: AgentTaskState::Failed,
+                state: ControlPlaneState::Failed,
                 attempt: 1,
                 message: Some(format!(
                     "agent-task pre-execution {phase} failed: {}",
@@ -1149,13 +1149,13 @@ pub fn record_pre_dispatch_failure(
         events: vec![
             AgentTaskProgressEvent {
                 task_id: task_id.clone(),
-                state: AgentTaskState::Queued,
+                state: ControlPlaneState::Queued,
                 attempt: 1,
                 message: Some("Lab offload selected and remote command prepared".to_string()),
             },
             AgentTaskProgressEvent {
                 task_id,
-                state: AgentTaskState::Failed,
+                state: ControlPlaneState::Failed,
                 attempt: 1,
                 message: Some(failure.failure_message.to_string()),
             },

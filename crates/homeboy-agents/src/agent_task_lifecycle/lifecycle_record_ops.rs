@@ -50,7 +50,7 @@ pub(crate) fn update_lifecycle_from_record(record: &mut AgentTaskRunRecord, plan
             .any(|handle| handle.task_id == task.task_id)
             || matches!(
                 task.state(),
-                AgentTaskState::Queued | AgentTaskState::Blocked | AgentTaskState::Skipped
+                ControlPlaneState::Queued | ControlPlaneState::Blocked | ControlPlaneState::Skipped
             )
         {
             continue;
@@ -266,18 +266,26 @@ pub(crate) fn provider_runtime_for_handle(
 }
 
 pub(crate) fn provider_runtime_state_for_task_state(
-    state: Option<AgentTaskState>,
+    state: Option<ControlPlaneState>,
 ) -> ProviderRuntimeState {
     match state {
-        None | Some(AgentTaskState::Queued | AgentTaskState::Blocked | AgentTaskState::Skipped) => {
-            ProviderRuntimeState::NotStarted
-        }
-        Some(AgentTaskState::Running) => ProviderRuntimeState::Running,
-        Some(AgentTaskState::Succeeded) => ProviderRuntimeState::Succeeded,
-        Some(AgentTaskState::CandidateRecoverable) => ProviderRuntimeState::Failed,
-        Some(AgentTaskState::Failed) => ProviderRuntimeState::Failed,
-        Some(AgentTaskState::Cancelled) => ProviderRuntimeState::Cancelled,
-        Some(AgentTaskState::TimedOut) => ProviderRuntimeState::TimedOut,
+        None
+        | Some(
+            ControlPlaneState::Queued
+            | ControlPlaneState::Blocked
+            | ControlPlaneState::Skipped
+            | ControlPlaneState::Unknown,
+        ) => ProviderRuntimeState::NotStarted,
+        Some(ControlPlaneState::Running) => ProviderRuntimeState::Running,
+        Some(ControlPlaneState::Succeeded) => ProviderRuntimeState::Succeeded,
+        Some(ControlPlaneState::CandidateRecoverable) => ProviderRuntimeState::Failed,
+        Some(
+            ControlPlaneState::Failed
+            | ControlPlaneState::PartialFailure
+            | ControlPlaneState::Stale,
+        ) => ProviderRuntimeState::Failed,
+        Some(ControlPlaneState::Cancelled) => ProviderRuntimeState::Cancelled,
+        Some(ControlPlaneState::TimedOut) => ProviderRuntimeState::TimedOut,
     }
 }
 

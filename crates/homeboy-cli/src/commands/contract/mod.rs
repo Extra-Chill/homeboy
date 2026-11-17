@@ -1,3 +1,4 @@
+use homeboy_control_plane_contract::ControlPlaneState;
 // Loop lifecycle record contracts. Lived in homeboy-core until #11143; this
 // validator is their only consumer.
 pub mod loop_lifecycle;
@@ -40,7 +41,7 @@ use crate::core::resource_lifecycle_index::{
     ResourceCleanupPolicy, ResourceEvidenceRetention, ResourceLifecycleIndex,
     ResourceLifecycleResourceStatus, RESOURCE_LIFECYCLE_INDEX_SCHEMA,
 };
-use crate::core::run_lifecycle_status::{RunLifecycleStatus, RUN_LIFECYCLE_STATUS_SCHEMA};
+use crate::core::run_lifecycle_status::RUN_LIFECYCLE_STATUS_SCHEMA;
 use crate::core::run_outcome_envelope::{
     RunOutcomeEnvelope, RunOutcomeProjection, RUN_OUTCOME_ENVELOPE_SCHEMA,
 };
@@ -172,7 +173,7 @@ pub enum ContractMaterializeKind {
 pub enum ContractNormalizeKind {
     ArtifactRef,
     PathMaterializationPlan,
-    RunLifecycleStatus,
+    ControlPlaneState,
     RunnerExecutionRecord,
     RunOutcomeEnvelope,
 }
@@ -217,7 +218,7 @@ pub struct ContractValidateOutput {
 pub enum ContractNormalizeOutput {
     ArtifactRef(ArtifactRefNormalizeOutput),
     PathMaterializationPlan(PathMaterializationPlanProjection),
-    RunLifecycleStatus(RunLifecycleStatusNormalizeOutput),
+    ControlPlaneState(RunLifecycleStatusNormalizeOutput),
     RunnerExecutionRecord(RunnerExecutionProjection),
     RunOutcomeEnvelope(RunOutcomeProjection),
 }
@@ -241,7 +242,7 @@ pub struct ArtifactRefNormalizeOutput {
 #[derive(Debug, Serialize, PartialEq, Eq)]
 pub struct RunLifecycleStatusNormalizeOutput {
     pub schema: &'static str,
-    pub status: RunLifecycleStatus,
+    pub status: ControlPlaneState,
     pub is_terminal: bool,
     pub is_success: bool,
     pub is_retryable: bool,
@@ -484,8 +485,8 @@ fn normalize(args: ContractNormalizeArgs) -> Result<ContractNormalizeOutput> {
             normalize_path_materialization_plan(value)
                 .map(ContractNormalizeOutput::PathMaterializationPlan)
         }
-        ContractNormalizeKind::RunLifecycleStatus => {
-            normalize_run_lifecycle_status(value).map(ContractNormalizeOutput::RunLifecycleStatus)
+        ContractNormalizeKind::ControlPlaneState => {
+            normalize_run_lifecycle_status(value).map(ContractNormalizeOutput::ControlPlaneState)
         }
         ContractNormalizeKind::RunnerExecutionRecord => normalize_runner_execution_record(value)
             .map(ContractNormalizeOutput::RunnerExecutionRecord),
@@ -570,7 +571,7 @@ fn normalize_run_lifecycle_status(value: Value) -> Result<RunLifecycleStatusNorm
     } else {
         value
     };
-    let status: RunLifecycleStatus = serde_json::from_value(status_value).map_err(|err| {
+    let status: ControlPlaneState = serde_json::from_value(status_value).map_err(|err| {
         Error::validation_invalid_argument(
             "run-lifecycle-status",
             err.to_string(),
@@ -1849,7 +1850,7 @@ mod tests {
         let output = normalize_run_lifecycle_status(json!({ "status": "timed_out" }))
             .expect("status should normalize");
 
-        assert_eq!(output.status, RunLifecycleStatus::TimedOut);
+        assert_eq!(output.status, ControlPlaneState::TimedOut);
         assert!(output.is_terminal);
         assert!(!output.is_success);
         assert!(output.is_retryable);

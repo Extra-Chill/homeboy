@@ -138,7 +138,7 @@ pub(crate) fn prepared_progress_events(
                     Some(task.task_id.as_str()),
                     None,
                     json!({
-                        "state": AgentTaskState::Queued,
+                        "state": ControlPlaneState::Queued,
                         "message": "task submitted",
                         "progress": { "attempt": 1 },
                         "source_schema": AGENT_TASK_AGGREGATE_SCHEMA,
@@ -310,7 +310,7 @@ pub fn record_promotion_progress_in_store(
         record.tasks.first().map(|task| task.task_id.as_str()),
         None,
         json!({
-            "state": AgentTaskState::Running,
+            "state": ControlPlaneState::Running,
             "message": detail,
             "phase": phase,
             "gate": gate.or_else(|| {
@@ -423,7 +423,7 @@ fn gate_lifecycle_requests_for_promotion(
             Some(task_id),
             None,
             json!({
-                "state": AgentTaskState::Running,
+                "state": ControlPlaneState::Running,
                 "message": format!("running {} deterministic gate(s)", gates.len()),
                 "progress": { "attempt": promotion_index as u32 + 1 },
                 "promotion_index": promotion_index,
@@ -445,7 +445,7 @@ fn gate_lifecycle_requests_for_promotion(
             Some(task_id),
             None,
             json!({
-                "state": if gate_passed { AgentTaskState::Running } else { AgentTaskState::Failed },
+                "state": if gate_passed { ControlPlaneState::Running } else { ControlPlaneState::Failed },
                 "message": format!("gate `{gate_name}` {gate_status}"),
                 "progress": { "attempt": promotion_index as u32 + 1 },
                 "promotion_index": promotion_index,
@@ -473,7 +473,7 @@ fn gate_lifecycle_requests_for_promotion(
         Some(task_id),
         None,
         json!({
-            "state": if gate_phase_failed { AgentTaskState::Failed } else { AgentTaskState::Succeeded },
+            "state": if gate_phase_failed { ControlPlaneState::Failed } else { ControlPlaneState::Succeeded },
             "message": format!("deterministic gate phase {status}"),
             "progress": { "attempt": promotion_index as u32 + 1 },
             "promotion_index": promotion_index,
@@ -618,7 +618,7 @@ fn prepare_provenance_event(
             attempt: None,
             execution: None,
             data: json!({
-                "state": if kind == "run.cancelled" { AgentTaskState::Cancelled } else { AgentTaskState::Queued },
+                "state": if kind == "run.cancelled" { ControlPlaneState::Cancelled } else { ControlPlaneState::Queued },
                 "message": provenance.get("reason").and_then(Value::as_str).unwrap_or(kind),
                 "provenance": provenance,
             }),
@@ -633,11 +633,11 @@ fn provider_execution_request(
     execution: &Value,
 ) -> Result<Option<ControlPlaneEventAppendRequest>> {
     let state = match execution.get("state").and_then(Value::as_str) {
-        Some("running") => AgentTaskState::Running,
-        Some("cancelled") => AgentTaskState::Cancelled,
-        Some("timed_out") => AgentTaskState::TimedOut,
-        Some("failed") => AgentTaskState::Failed,
-        Some("succeeded") => AgentTaskState::Succeeded,
+        Some("running") => ControlPlaneState::Running,
+        Some("cancelled") => ControlPlaneState::Cancelled,
+        Some("timed_out") => ControlPlaneState::TimedOut,
+        Some("failed") => ControlPlaneState::Failed,
+        Some("succeeded") => ControlPlaneState::Succeeded,
         _ => return Ok(None),
     };
     let Some(task_id) = execution
@@ -702,7 +702,7 @@ fn runner_job_event_request(
         None,
         occurred_at,
         json!({
-            "state": AgentTaskState::Running,
+            "state": ControlPlaneState::Running,
             "message": raw
                 .get("message")
                 .and_then(Value::as_str)

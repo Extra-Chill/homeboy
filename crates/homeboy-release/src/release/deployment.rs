@@ -620,7 +620,7 @@ mod tests {
     use homeboy_control_plane_contract::{
         ControlPlaneAction, ControlPlaneActionAcknowledgement, ControlPlaneActionOutcome,
         ControlPlaneActionPayload, ControlPlaneActionRequest, ControlPlaneResult,
-        ControlPlaneRunState, RunId, CONTROL_PLANE_ACTION_REQUEST_SCHEMA,
+        ControlPlaneState, RunId, CONTROL_PLANE_ACTION_REQUEST_SCHEMA,
     };
     use homeboy_core::component::{Component, VersionTarget};
     use homeboy_core::defaults;
@@ -1293,10 +1293,7 @@ mod tests {
                 acknowledgement.outcome,
                 ControlPlaneActionOutcome::Succeeded
             );
-            assert_eq!(
-                acknowledgement.resource.state,
-                ControlPlaneRunState::Succeeded
-            );
+            assert_eq!(acknowledgement.resource.state, ControlPlaneState::Succeeded);
             assert_eq!(
                 execute(),
                 acknowledgement,

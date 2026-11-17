@@ -1,4 +1,5 @@
 use clap::ValueEnum;
+use homeboy_control_plane_contract::ControlPlaneState;
 use serde::Serialize;
 use serde_json::json;
 
@@ -7,7 +8,7 @@ use homeboy::core::resource_lifecycle_index::{
     ResourceCleanupPolicy, ResourceEvidenceRetention, ResourceLifecycle,
     ResourceLifecycleInspection, ResourceLifecycleRecord, ResourceLifecycleResourceStatus,
 };
-use homeboy::core::run_lifecycle_status::{RunLifecycleStatus, RUN_LIFECYCLE_STATUS_SCHEMA};
+use homeboy::core::run_lifecycle_status::RUN_LIFECYCLE_STATUS_SCHEMA;
 use homeboy::core::run_outcome_envelope::RunOutcomeEnvelope;
 
 use super::CmdResult;
@@ -53,7 +54,7 @@ pub struct RunnerLifecycleWorkspace {
 #[derive(Debug, Serialize)]
 pub struct RunnerLifecycleStatusOutput {
     pub schema: &'static str,
-    pub status: RunLifecycleStatus,
+    pub status: ControlPlaneState,
     pub terminal: bool,
     pub success: bool,
     pub retryable: bool,
@@ -86,7 +87,7 @@ pub(super) fn lifecycle(
     exit_code: Option<i32>,
 ) -> CmdResult<RunnerLifecycleOutput> {
     let status = status
-        .map(RunLifecycleStatus::from)
+        .map(ControlPlaneState::from)
         .unwrap_or_else(|| status_from_exit_code(exit_code));
     let lifecycle = RunnerLifecycleStatusOutput {
         schema: RUN_LIFECYCLE_STATUS_SCHEMA,
@@ -163,7 +164,7 @@ pub(super) fn lifecycle(
     ))
 }
 
-impl From<RunnerLifecycleStatusArg> for RunLifecycleStatus {
+impl From<RunnerLifecycleStatusArg> for ControlPlaneState {
     fn from(value: RunnerLifecycleStatusArg) -> Self {
         match value {
             RunnerLifecycleStatusArg::Unknown => Self::Unknown,
@@ -179,15 +180,15 @@ impl From<RunnerLifecycleStatusArg> for RunLifecycleStatus {
     }
 }
 
-fn status_from_exit_code(exit_code: Option<i32>) -> RunLifecycleStatus {
+fn status_from_exit_code(exit_code: Option<i32>) -> ControlPlaneState {
     match exit_code {
-        Some(0) => RunLifecycleStatus::Succeeded,
-        Some(_) => RunLifecycleStatus::Failed,
-        None => RunLifecycleStatus::Unknown,
+        Some(0) => ControlPlaneState::Succeeded,
+        Some(_) => ControlPlaneState::Failed,
+        None => ControlPlaneState::Unknown,
     }
 }
 
-fn cleanup_policy_for_status(status: RunLifecycleStatus) -> ResourceCleanupPolicy {
+fn cleanup_policy_for_status(status: ControlPlaneState) -> ResourceCleanupPolicy {
     if status.is_success() {
         ResourceCleanupPolicy::DeleteOnSuccess
     } else if status.is_terminal() {
@@ -197,7 +198,7 @@ fn cleanup_policy_for_status(status: RunLifecycleStatus) -> ResourceCleanupPolic
     }
 }
 
-fn resource_status_for_status(status: RunLifecycleStatus) -> ResourceLifecycleResourceStatus {
+fn resource_status_for_status(status: ControlPlaneState) -> ResourceLifecycleResourceStatus {
     if status.is_success() {
         ResourceLifecycleResourceStatus::CleanupPending
     } else if status.is_terminal() {
@@ -211,7 +212,7 @@ fn finalization_for_status(
     runner_id: &str,
     job_id: Option<&str>,
     run_id: Option<&str>,
-    status: RunLifecycleStatus,
+    status: ControlPlaneState,
 ) -> RunnerLifecycleFinalization {
     let (state, reason, controller_should_finalize) = if status.is_success() {
         (
@@ -270,18 +271,20 @@ fn finalization_for_status(
     }
 }
 
-fn status_label(status: RunLifecycleStatus) -> &'static str {
+fn status_label(status: ControlPlaneState) -> &'static str {
     match status {
-        RunLifecycleStatus::Unknown => "unknown",
-        RunLifecycleStatus::Queued => "queued",
-        RunLifecycleStatus::Running => "running",
-        RunLifecycleStatus::Succeeded => "succeeded",
-        RunLifecycleStatus::CandidateRecoverable => "candidate_recoverable",
-        RunLifecycleStatus::PartialFailure => "partial_failure",
-        RunLifecycleStatus::Failed => "failed",
-        RunLifecycleStatus::Cancelled => "cancelled",
-        RunLifecycleStatus::TimedOut => "timed_out",
-        RunLifecycleStatus::Stale => "stale",
+        ControlPlaneState::Unknown => "unknown",
+        ControlPlaneState::Queued => "queued",
+        ControlPlaneState::Blocked => "blocked",
+        ControlPlaneState::Skipped => "skipped",
+        ControlPlaneState::Running => "running",
+        ControlPlaneState::Succeeded => "succeeded",
+        ControlPlaneState::CandidateRecoverable => "candidate_recoverable",
+        ControlPlaneState::PartialFailure => "partial_failure",
+        ControlPlaneState::Failed => "failed",
+        ControlPlaneState::Cancelled => "cancelled",
+        ControlPlaneState::TimedOut => "timed_out",
+        ControlPlaneState::Stale => "stale",
     }
 }
 

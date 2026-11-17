@@ -3,8 +3,8 @@
 
 use crate::agent_task::{AgentTaskRequest, AgentTaskSourceRef};
 use crate::agent_task_lifecycle::{self, AgentTaskRecordHealthSummary, AgentTaskRunRecord};
-use crate::agent_task_scheduler::AgentTaskState;
 use base64::Engine;
+use homeboy_control_plane_contract::ControlPlaneState;
 use homeboy_core::api_jobs::{JobStatus, JobStore};
 use homeboy_core::observation::RunCursor;
 use homeboy_engine_primitives::content_hash;
@@ -1512,13 +1512,19 @@ fn discovery_counts(tasks: &[agent_task_lifecycle::AgentTaskRunTask]) -> AgentTa
     let mut counts = AgentTaskDiscoveryCounts::default();
     for task in tasks {
         match task.state() {
-            AgentTaskState::Queued | AgentTaskState::Blocked | AgentTaskState::Skipped => {
+            ControlPlaneState::Queued
+            | ControlPlaneState::Blocked
+            | ControlPlaneState::Skipped
+            | ControlPlaneState::Unknown => {
                 counts.queued += 1;
             }
-            AgentTaskState::Running => counts.running += 1,
-            AgentTaskState::Succeeded | AgentTaskState::Cancelled => counts.completed += 1,
-            AgentTaskState::CandidateRecoverable => counts.completed += 1,
-            AgentTaskState::Failed | AgentTaskState::TimedOut => counts.failed += 1,
+            ControlPlaneState::Running => counts.running += 1,
+            ControlPlaneState::Succeeded | ControlPlaneState::Cancelled => counts.completed += 1,
+            ControlPlaneState::CandidateRecoverable => counts.completed += 1,
+            ControlPlaneState::Failed
+            | ControlPlaneState::PartialFailure
+            | ControlPlaneState::TimedOut
+            | ControlPlaneState::Stale => counts.failed += 1,
         }
     }
     counts

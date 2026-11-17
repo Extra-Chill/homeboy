@@ -20,6 +20,7 @@ use super::super::cook_promotion::{
 use super::super::execution_step::execution_step_fixtures::{
     current_intent, kill_test_child_at_marker, step_harness, terminal_delivery, QueuedRunTransport,
 };
+use homeboy_control_plane_contract::ControlPlaneState;
 use homeboy_lifecycle_contract::RunExecutionState;
 
 #[test]
@@ -52,7 +53,7 @@ use crate::agent_task_lifecycle;
 use crate::agent_task_lifecycle::AgentTaskLifecycleStore;
 use crate::agent_task_scheduler::{
     AgentTaskExecutorAdapter, AgentTaskProviderRotationEntry, AgentTaskProviderRotationPolicy,
-    AgentTaskScheduler, AgentTaskState,
+    AgentTaskScheduler,
 };
 use homeboy_core::run_lifecycle_record::{
     ProviderRuntimeLifecycle, ProviderRuntimeState, RunExecutionLifecycle, RunLifecycleRecord,
@@ -1431,7 +1432,7 @@ fn seed_moving_base_attempt(
             }],
             events: vec![AgentTaskProgressEvent {
                 task_id: "provider".to_string(),
-                state: AgentTaskState::Succeeded,
+                state: ControlPlaneState::Succeeded,
                 attempt: 1,
                 message: None,
             }],
@@ -8986,15 +8987,14 @@ fn cook_observation_agrees_across_real_stores_without_mutation() {
                     "{name}"
                 );
                 assert_eq!(
-                    canonical.state
-                        == homeboy_control_plane_contract::ControlPlaneRunState::Succeeded,
+                    canonical.state == homeboy_control_plane_contract::ControlPlaneState::Succeeded,
                     success,
                     "{name}"
                 );
                 if live_owner {
                     assert_eq!(
                         canonical.state,
-                        homeboy_control_plane_contract::ControlPlaneRunState::Running
+                        homeboy_control_plane_contract::ControlPlaneState::Running
                     );
                 }
             }
@@ -12223,7 +12223,7 @@ echo https://github.com/example/fixture/pull/1
                     .unwrap();
                 let mut timed_out = aggregate.clone();
                 timed_out.outcomes[0].status = crate::agent_task::AgentTaskOutcomeStatus::Failed;
-                timed_out.events[0].state = AgentTaskState::TimedOut;
+                timed_out.events[0].state = ControlPlaneState::TimedOut;
                 agent_task_lifecycle::record_run_aggregate(
                     next_run,
                     &options.identity.initial_plan,

@@ -26,44 +26,8 @@
 //! the per-kind rules below only narrow it.
 
 use super::*;
+use homeboy_control_plane_contract::ControlPlaneState;
 use homeboy_lifecycle_contract::RunExecutionState;
-
-/// The terminal run states a typed transition may commit. Mirrors the
-/// terminal subset of [`RunExecutionState`] exactly.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum AgentTaskTerminalOutcome {
-    Succeeded,
-    CandidateRecoverable,
-    PartialFailure,
-    Failed,
-    Cancelled,
-}
-
-impl AgentTaskTerminalOutcome {
-    pub fn run_state(self) -> RunExecutionState {
-        match self {
-            Self::Succeeded => RunExecutionState::Succeeded,
-            Self::CandidateRecoverable => RunExecutionState::CandidateRecoverable,
-            Self::PartialFailure => RunExecutionState::PartialFailure,
-            Self::Failed => RunExecutionState::Failed,
-            Self::Cancelled => RunExecutionState::Cancelled,
-        }
-    }
-
-    pub fn from_run_state(state: RunExecutionState) -> Option<Self> {
-        match state {
-            RunExecutionState::Succeeded => Some(Self::Succeeded),
-            RunExecutionState::CandidateRecoverable => Some(Self::CandidateRecoverable),
-            RunExecutionState::PartialFailure => Some(Self::PartialFailure),
-            RunExecutionState::Failed => Some(Self::Failed),
-            RunExecutionState::Cancelled => Some(Self::Cancelled),
-            RunExecutionState::Unknown | RunExecutionState::Queued | RunExecutionState::Running => {
-                None
-            }
-        }
-    }
-}
 
 /// A typed terminal transition. The store applies it to the record stored at
 /// the expected revision, never to a caller-held snapshot of unknown age.
@@ -73,7 +37,7 @@ pub enum AgentTaskTransition {
     /// metadata keys (a `null` value removes the key); every other field of
     /// the stored record is preserved.
     Terminate {
-        outcome: AgentTaskTerminalOutcome,
+        outcome: RunExecutionState,
         metadata: serde_json::Map<String, Value>,
     },
     /// Commit a terminal aggregate projection the caller prepared from the
@@ -254,7 +218,7 @@ impl AgentTaskTransition {
     /// The state this transition commits.
     pub fn target_state(&self) -> RunExecutionState {
         match self {
-            Self::Terminate { outcome, .. } => outcome.run_state(),
+            Self::Terminate { outcome, .. } => *outcome,
             Self::ProjectAggregate { prepared, .. }
             | Self::CommitRecord { prepared }
             | Self::Annotate { prepared }
@@ -271,6 +235,14 @@ impl AgentTaskTransition {
     ) -> Result<(AgentTaskRunRecord, Option<AgentTaskAggregate>, bool)> {
         match self {
             Self::Terminate { outcome, metadata } => {
+                if !outcome.is_terminal() || outcome == RunExecutionState::Unknown {
+                    return Err(illegal_transition(
+                        &stored,
+                        outcome,
+                        "terminate",
+                        "a termination must commit a known terminal run state",
+                    ));
+                }
                 let mut record = stored;
                 let object = record.ensure_metadata_object();
                 for (key, value) in metadata {
@@ -281,7 +253,7 @@ impl AgentTaskTransition {
                     }
                 }
                 record.updated_at = Some(now_timestamp());
-                set_run_state(&mut record, outcome.run_state());
+                set_run_state(&mut record, outcome);
                 Ok((record, stored_aggregate, false))
             }
             Self::ProjectAggregate {
@@ -579,8 +551,8 @@ pub(crate) fn set_run_state(record: &mut AgentTaskRunRecord, state: RunExecution
 pub(crate) fn start_run(record: &mut AgentTaskRunRecord) {
     set_run_state(record, RunExecutionState::Running);
     for task in &mut record.tasks {
-        if task.state() == AgentTaskState::Queued {
-            task.write_state(AgentTaskState::Running, AUTHORITY);
+        if task.state() == ControlPlaneState::Queued {
+            task.write_state(ControlPlaneState::Running, AUTHORITY);
         }
     }
 }
@@ -591,13 +563,13 @@ pub(crate) fn start_run(record: &mut AgentTaskRunRecord) {
 pub(crate) fn settle_run(
     record: &mut AgentTaskRunRecord,
     run_state: RunExecutionState,
-    task_state: AgentTaskState,
+    task_state: ControlPlaneState,
 ) {
     set_run_state(record, run_state);
     for task in &mut record.tasks {
         if matches!(
             task.state(),
-            AgentTaskState::Queued | AgentTaskState::Running
+            ControlPlaneState::Queued | ControlPlaneState::Running
         ) {
             task.write_state(task_state, AUTHORITY);
         }
@@ -610,7 +582,7 @@ pub(crate) fn reset_for_requeue(record: &mut AgentTaskRunRecord) {
     record.lifecycle.execution.started_at = None;
     record.lifecycle.execution.finished_at = None;
     for task in &mut record.tasks {
-        task.write_state(AgentTaskState::Queued, AUTHORITY);
+        task.write_state(ControlPlaneState::Queued, AUTHORITY);
     }
     let metadata = record.ensure_metadata_object();
     for key in [
@@ -625,7 +597,7 @@ pub(crate) fn reset_for_requeue(record: &mut AgentTaskRunRecord) {
 
 /// Project a task's state from durable aggregate evidence (its latest event or
 /// its outcome) while the run's task list is rebuilt from that aggregate.
-pub(crate) fn project_task_state(task: &mut AgentTaskRunTask, state: AgentTaskState) {
+pub(crate) fn project_task_state(task: &mut AgentTaskRunTask, state: ControlPlaneState) {
     task.write_state(state, AUTHORITY);
 }
 

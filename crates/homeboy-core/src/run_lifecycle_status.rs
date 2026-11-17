@@ -1,94 +1,8 @@
-use homeboy_lifecycle_contract::RunExecutionState;
-use serde::{Deserialize, Serialize};
+use homeboy_control_plane_contract::ControlPlaneState;
 
-use crate::api_jobs::JobStatus;
 use crate::cook_status::CookStatus;
 
 pub const RUN_LIFECYCLE_STATUS_SCHEMA: &str = "homeboy/run-lifecycle-status/v1";
-
-/// Canonical run lifecycle status vocabulary for cross-runtime contracts.
-///
-/// # Recoverable is not retryable
-///
-/// `CandidateRecoverable` is terminal and unsuccessful, like
-/// `PartialFailure`, and like it is **not retryable** — re-running reproduces
-/// the same stop. It is separate because the *next action* differs: a
-/// candidate can be promoted or resumed, and a partial failure offers
-/// neither. Folding it into `PartialFailure` (which is what happened before)
-/// left a consumer holding a serialized run unable to tell the two apart.
-///
-/// # Unknown is the tolerance hatch
-///
-/// `Unknown` is `#[serde(other)]` so a payload from a newer binary degrades to
-/// "no verdict" instead of failing to parse. It deliberately claims nothing:
-/// not terminal, not successful, not retryable.
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Hash)]
-#[serde(rename_all = "snake_case")]
-pub enum RunLifecycleStatus {
-    Queued,
-    Running,
-    Succeeded,
-    /// Stopped, unsuccessful, but a promotable candidate survived.
-    CandidateRecoverable,
-    PartialFailure,
-    Failed,
-    Cancelled,
-    TimedOut,
-    Stale,
-    /// A status minted by a producer this binary does not know. Never guessed.
-    #[serde(other)]
-    Unknown,
-}
-
-impl RunLifecycleStatus {
-    pub fn is_terminal(self) -> bool {
-        matches!(
-            self,
-            Self::Succeeded
-                | Self::CandidateRecoverable
-                | Self::PartialFailure
-                | Self::Failed
-                | Self::Cancelled
-                | Self::TimedOut
-                | Self::Stale
-        )
-    }
-
-    pub fn is_success(self) -> bool {
-        matches!(self, Self::Succeeded)
-    }
-
-    pub fn is_retryable(self) -> bool {
-        matches!(self, Self::Failed | Self::TimedOut | Self::Stale)
-    }
-}
-
-impl From<RunExecutionState> for RunLifecycleStatus {
-    fn from(state: RunExecutionState) -> Self {
-        match state {
-            RunExecutionState::Unknown => Self::Unknown,
-            RunExecutionState::Queued => Self::Queued,
-            RunExecutionState::Running => Self::Running,
-            RunExecutionState::Succeeded => Self::Succeeded,
-            RunExecutionState::CandidateRecoverable => Self::CandidateRecoverable,
-            RunExecutionState::PartialFailure => Self::PartialFailure,
-            RunExecutionState::Failed => Self::Failed,
-            RunExecutionState::Cancelled => Self::Cancelled,
-        }
-    }
-}
-
-impl From<JobStatus> for RunLifecycleStatus {
-    fn from(status: JobStatus) -> Self {
-        match status {
-            JobStatus::Queued => Self::Queued,
-            JobStatus::Running => Self::Running,
-            JobStatus::Succeeded => Self::Succeeded,
-            JobStatus::Failed => Self::Failed,
-            JobStatus::Cancelled => Self::Cancelled,
-        }
-    }
-}
 
 /// Project the open Cook status vocabulary onto the closed lifecycle one.
 ///
@@ -109,17 +23,17 @@ impl From<JobStatus> for RunLifecycleStatus {
 /// authority on whether a Cook will advance on its own, because the exit that
 /// produced the report declares it. Reports therefore emit `terminal` from the
 /// declared disposition, not from
-/// [`RunLifecycleStatus::is_terminal`]. What this projection guarantees is that
+/// [`ControlPlaneState::is_terminal`]. What this projection guarantees is that
 /// it never *contradicts* the vocabulary's own reading: for every known
 /// variant,
-/// `RunLifecycleStatus::from(status).is_terminal() == !status.is_in_flight()`.
+/// `from_cook_status(status).is_terminal() == !status.is_in_flight()`.
 /// [`CookStatus::Unknown`] is the single deliberate exception — it maps to
-/// [`RunLifecycleStatus::Unknown`], which claims nothing, instead of
+/// [`ControlPlaneState::Unknown`], which claims nothing, instead of
 /// manufacturing a failure verdict for a status this binary cannot read.
 ///
 /// # Retryability
 ///
-/// [`RunLifecycleStatus::is_retryable`] is true for exactly `Failed`,
+/// [`ControlPlaneState::is_retryable`] is true for exactly `Failed`,
 /// `TimedOut`, and `Stale`. Mapping a Cook status to `Failed` therefore *tells
 /// an orchestrator to retry*. Statuses whose defining property is that
 /// re-running immediately reproduces them — retries exhausted, budget
@@ -132,93 +46,89 @@ impl From<JobStatus> for RunLifecycleStatus {
 /// Note that [`CookStatus::is_success_exit`] is a *different* question — it is
 /// the exit-code rule, and it is true for in-flight statuses (a Cook that is
 /// still running is not a failed command). It is intentionally not the same
-/// set as the statuses that project to [`RunLifecycleStatus::Succeeded`].
-impl From<&CookStatus> for RunLifecycleStatus {
-    fn from(status: &CookStatus) -> Self {
-        match status {
-            // --- in flight ---
-            CookStatus::Queued => Self::Queued,
-            CookStatus::Running | CookStatus::InFlight | CookStatus::AwaitingCi => Self::Running,
-
-            // --- terminal, successful ---
-            // The Cook did the job it was asked to do. `ReviewReady`,
-            // `DraftPublished`, and `GreenNoFinalize` all stop with green gates
-            // and a reviewable outcome; `IntentionalNoChange` is a verified
-            // review whose correct result was "no patch".
-            CookStatus::Completed
-            | CookStatus::ReviewReady
-            | CookStatus::DraftPublished
-            | CookStatus::GreenNoFinalize
-            | CookStatus::IntentionalNoChange
-            | CookStatus::SupersededByActiveCook => Self::Succeeded,
-
-            // --- terminal, unsuccessful, not an invitation to retry ---
-            // Finalization ran and produced nothing. Nothing failed, but the
-            // Cook did not succeed either, and re-running it changes nothing.
-            CookStatus::NoChanges | CookStatus::NoCandidate => Self::PartialFailure,
-            // A candidate exists and can still be recovered. This matches the
-            // execution state's CandidateRecoverable projection. Both used to
-            // say `PartialFailure`; they were changed together so the two
-            // routes still agree.
-            CookStatus::CandidateRecoverable => Self::CandidateRecoverable,
-            // A gate deferred rather than failed: the patch is promoted and
-            // durable, but verification did not complete. This is the same
-            // "stopped, unsuccessful, promotable candidate survived" shape as
-            // `CandidateRecoverable`, not a verdict against the candidate
-            // (#14731).
-            CookStatus::GatesDeferred => Self::CandidateRecoverable,
-            // Stopped waiting on a verdict that is not this run's to produce.
-            CookStatus::AwaitingAcceptance => Self::PartialFailure,
-            // Re-running reproduces the block identically until the dependency
-            // lands or the claim clears.
-            CookStatus::BlockedByDependency | CookStatus::Blocked => Self::PartialFailure,
-            // The budget is the thing that ran out. Reporting these as
-            // retryable is precisely how an orchestrator builds a retry loop
-            // around a Cook that has already exhausted its retries.
-            CookStatus::RetriesExhausted | CookStatus::ExecutionBudgetExhausted => {
-                Self::PartialFailure
-            }
-            // Policy refused. It refuses again on the same inputs.
-            CookStatus::PolicyFailure | CookStatus::GateDeclarationInvalid => Self::PartialFailure,
-            // The repro passes on base; it passes again until it is corrected.
-            CookStatus::ReproPassesOnBase => Self::PartialFailure,
-            // The candidate set needs an explicit operator decision before any
-            // promotion can run; automatic retry cannot resolve that choice.
-            CookStatus::SelectionRequired => Self::PartialFailure,
-
-            // --- terminal, unsuccessful, retry is a legal next action ---
-            // A gate verdict is against the candidate, not against running
-            // again: the Cook loop's own remedy for a failed gate is another
-            // attempt.
-            CookStatus::GateFailed | CookStatus::NoChangesGateFailed => Self::Failed,
-            // The provider failed. Another attempt is the standard remedy.
-            CookStatus::ProviderFailure => Self::Failed,
-            // The durable recipe is intact, which is exactly the precondition
-            // for a legal continuation.
-            CookStatus::DurableFailure => Self::Failed,
-            // Nothing was consumed, so retrying costs nothing and may succeed
-            // once the admission problem is fixed.
-            CookStatus::PreExecutionFailure => Self::Failed,
-            // An interruption, not a verdict. Closest sibling would be `Stale`;
-            // both are retryable, so the actionable classification is
-            // identical and `Failed` keeps the failure visible.
-            CookStatus::PreArtifactInterruption => Self::Failed,
-            CookStatus::Failed => Self::Failed,
-
-            // --- terminal, declared by an operator or a budget ---
-            CookStatus::Cancelled => Self::Cancelled,
-            CookStatus::TimedOut | CookStatus::ReviewFormTimeout => Self::TimedOut,
-
-            // A status this binary cannot read carries no verdict. Callers read
-            // terminality from the declared `CookDisposition` instead.
-            CookStatus::Unknown(_) => Self::Unknown,
+/// set as the statuses that project to [`ControlPlaneState::Succeeded`].
+pub fn from_cook_status(status: &CookStatus) -> ControlPlaneState {
+    match status {
+        // --- in flight ---
+        CookStatus::Queued => ControlPlaneState::Queued,
+        CookStatus::Running | CookStatus::InFlight | CookStatus::AwaitingCi => {
+            ControlPlaneState::Running
         }
-    }
-}
 
-impl From<CookStatus> for RunLifecycleStatus {
-    fn from(status: CookStatus) -> Self {
-        Self::from(&status)
+        // --- terminal, successful ---
+        // The Cook did the job it was asked to do. `ReviewReady`,
+        // `DraftPublished`, and `GreenNoFinalize` all stop with green gates
+        // and a reviewable outcome; `IntentionalNoChange` is a verified
+        // review whose correct result was "no patch".
+        CookStatus::Completed
+        | CookStatus::ReviewReady
+        | CookStatus::DraftPublished
+        | CookStatus::GreenNoFinalize
+        | CookStatus::IntentionalNoChange
+        | CookStatus::SupersededByActiveCook => ControlPlaneState::Succeeded,
+
+        // --- terminal, unsuccessful, not an invitation to retry ---
+        // Finalization ran and produced nothing. Nothing failed, but the
+        // Cook did not succeed either, and re-running it changes nothing.
+        CookStatus::NoChanges | CookStatus::NoCandidate => ControlPlaneState::PartialFailure,
+        // A candidate exists and can still be recovered. This matches the
+        // execution state's CandidateRecoverable projection. Both used to
+        // say `PartialFailure`; they were changed together so the two
+        // routes still agree.
+        CookStatus::CandidateRecoverable => ControlPlaneState::CandidateRecoverable,
+        // A gate deferred rather than failed: the patch is promoted and
+        // durable, but verification did not complete. This is the same
+        // "stopped, unsuccessful, promotable candidate survived" shape as
+        // `CandidateRecoverable`, not a verdict against the candidate
+        // (#14731).
+        CookStatus::GatesDeferred => ControlPlaneState::CandidateRecoverable,
+        // Stopped waiting on a verdict that is not this run's to produce.
+        CookStatus::AwaitingAcceptance => ControlPlaneState::PartialFailure,
+        // Re-running reproduces the block identically until the dependency
+        // lands or the claim clears.
+        CookStatus::BlockedByDependency | CookStatus::Blocked => ControlPlaneState::PartialFailure,
+        // The budget is the thing that ran out. Reporting these as
+        // retryable is precisely how an orchestrator builds a retry loop
+        // around a Cook that has already exhausted its retries.
+        CookStatus::RetriesExhausted | CookStatus::ExecutionBudgetExhausted => {
+            ControlPlaneState::PartialFailure
+        }
+        // Policy refused. It refuses again on the same inputs.
+        CookStatus::PolicyFailure | CookStatus::GateDeclarationInvalid => {
+            ControlPlaneState::PartialFailure
+        }
+        // The repro passes on base; it passes again until it is corrected.
+        CookStatus::ReproPassesOnBase => ControlPlaneState::PartialFailure,
+        // The candidate set needs an explicit operator decision before any
+        // promotion can run; automatic retry cannot resolve that choice.
+        CookStatus::SelectionRequired => ControlPlaneState::PartialFailure,
+
+        // --- terminal, unsuccessful, retry is a legal next action ---
+        // A gate verdict is against the candidate, not against running
+        // again: the Cook loop's own remedy for a failed gate is another
+        // attempt.
+        CookStatus::GateFailed | CookStatus::NoChangesGateFailed => ControlPlaneState::Failed,
+        // The provider failed. Another attempt is the standard remedy.
+        CookStatus::ProviderFailure => ControlPlaneState::Failed,
+        // The durable recipe is intact, which is exactly the precondition
+        // for a legal continuation.
+        CookStatus::DurableFailure => ControlPlaneState::Failed,
+        // Nothing was consumed, so retrying costs nothing and may succeed
+        // once the admission problem is fixed.
+        CookStatus::PreExecutionFailure => ControlPlaneState::Failed,
+        // An interruption, not a verdict. Closest sibling would be `Stale`;
+        // both are retryable, so the actionable classification is
+        // identical and `Failed` keeps the failure visible.
+        CookStatus::PreArtifactInterruption => ControlPlaneState::Failed,
+        CookStatus::Failed => ControlPlaneState::Failed,
+
+        // --- terminal, declared by an operator or a budget ---
+        CookStatus::Cancelled => ControlPlaneState::Cancelled,
+        CookStatus::TimedOut | CookStatus::ReviewFormTimeout => ControlPlaneState::TimedOut,
+
+        // A status this binary cannot read carries no verdict. Callers read
+        // terminality from the declared `CookDisposition` instead.
+        CookStatus::Unknown(_) => ControlPlaneState::Unknown,
     }
 }
 
@@ -226,59 +136,11 @@ impl From<CookStatus> for RunLifecycleStatus {
 mod tests {
     use super::*;
 
-    #[test]
-    fn status_classification_covers_terminal_success_and_retryable_sets() {
-        let expectations = [
-            (RunLifecycleStatus::Unknown, false, false, false),
-            (RunLifecycleStatus::Queued, false, false, false),
-            (RunLifecycleStatus::Running, false, false, false),
-            (RunLifecycleStatus::Succeeded, true, true, false),
-            // Terminal, unsuccessful, and NOT retryable: re-running reproduces
-            // the same stop. The next action is promotion or resumption, which
-            // is why this is a separate variant rather than `PartialFailure`.
-            (RunLifecycleStatus::CandidateRecoverable, true, false, false),
-            (RunLifecycleStatus::PartialFailure, true, false, false),
-            (RunLifecycleStatus::Failed, true, false, true),
-            (RunLifecycleStatus::Cancelled, true, false, false),
-            (RunLifecycleStatus::TimedOut, true, false, true),
-            (RunLifecycleStatus::Stale, true, false, true),
-        ];
-
-        for (status, terminal, success, retryable) in expectations {
-            assert_eq!(status.is_terminal(), terminal, "{status:?} terminal");
-            assert_eq!(status.is_success(), success, "{status:?} success");
-            assert_eq!(status.is_retryable(), retryable, "{status:?} retryable");
-        }
-    }
-
-    #[test]
-    fn status_serializes_as_snake_case_contract_value() {
-        let value = serde_json::to_value(RunLifecycleStatus::PartialFailure).expect("serialize");
-
-        assert_eq!(value, serde_json::json!("partial_failure"));
-    }
-
-    #[test]
-    fn source_states_project_to_canonical_status() {
-        for label in "unknown,queued,running,succeeded,candidate_recoverable,partial_failure,failed,cancelled"
-            .split(',')
-        {
-            let source: RunExecutionState = serde_json::from_value(label.into()).unwrap();
-            let expected: RunLifecycleStatus = serde_json::from_value(label.into()).unwrap();
-            assert_eq!(RunLifecycleStatus::from(source), expected, "{source:?}");
-        }
-        for label in "queued,running,succeeded,failed,cancelled".split(',') {
-            let source: JobStatus = serde_json::from_value(label.into()).unwrap();
-            let expected: RunLifecycleStatus = serde_json::from_value(label.into()).unwrap();
-            assert_eq!(RunLifecycleStatus::from(source), expected, "{source:?}");
-        }
-    }
-
     /// Every known Cook status, listed once, with the lifecycle status it
     /// projects to. The `match` below is exhaustive, so a variant added to
     /// `CookStatus` without a decision here is a compile error rather than a
     /// silent `Unknown`.
-    fn cook_status_projection_matrix() -> Vec<(CookStatus, RunLifecycleStatus)> {
+    fn cook_status_projection_matrix() -> Vec<(CookStatus, ControlPlaneState)> {
         [
             CookStatus::Queued,
             CookStatus::Running,
@@ -318,40 +180,40 @@ mod tests {
             // Written out independently of the `From` impl on purpose: this is
             // the reviewed table, not a restatement of the implementation.
             let expected = match &status {
-                CookStatus::Queued => RunLifecycleStatus::Queued,
-                CookStatus::Running => RunLifecycleStatus::Running,
-                CookStatus::InFlight | CookStatus::AwaitingCi => RunLifecycleStatus::Running,
-                CookStatus::Completed => RunLifecycleStatus::Succeeded,
-                CookStatus::ReviewReady => RunLifecycleStatus::Succeeded,
-                CookStatus::DraftPublished => RunLifecycleStatus::Succeeded,
-                CookStatus::GreenNoFinalize => RunLifecycleStatus::Succeeded,
+                CookStatus::Queued => ControlPlaneState::Queued,
+                CookStatus::Running => ControlPlaneState::Running,
+                CookStatus::InFlight | CookStatus::AwaitingCi => ControlPlaneState::Running,
+                CookStatus::Completed => ControlPlaneState::Succeeded,
+                CookStatus::ReviewReady => ControlPlaneState::Succeeded,
+                CookStatus::DraftPublished => ControlPlaneState::Succeeded,
+                CookStatus::GreenNoFinalize => ControlPlaneState::Succeeded,
                 CookStatus::IntentionalNoChange | CookStatus::SupersededByActiveCook => {
-                    RunLifecycleStatus::Succeeded
+                    ControlPlaneState::Succeeded
                 }
-                CookStatus::NoCandidate => RunLifecycleStatus::PartialFailure,
-                CookStatus::NoChanges => RunLifecycleStatus::PartialFailure,
-                CookStatus::NoChangesGateFailed => RunLifecycleStatus::Failed,
-                CookStatus::GateFailed => RunLifecycleStatus::Failed,
-                CookStatus::GatesDeferred => RunLifecycleStatus::CandidateRecoverable,
-                CookStatus::GateDeclarationInvalid => RunLifecycleStatus::PartialFailure,
-                CookStatus::ReproPassesOnBase => RunLifecycleStatus::PartialFailure,
-                CookStatus::AwaitingAcceptance => RunLifecycleStatus::PartialFailure,
-                CookStatus::CandidateRecoverable => RunLifecycleStatus::CandidateRecoverable,
-                CookStatus::BlockedByDependency => RunLifecycleStatus::PartialFailure,
-                CookStatus::Blocked => RunLifecycleStatus::PartialFailure,
-                CookStatus::Cancelled => RunLifecycleStatus::Cancelled,
-                CookStatus::TimedOut => RunLifecycleStatus::TimedOut,
-                CookStatus::ReviewFormTimeout => RunLifecycleStatus::TimedOut,
-                CookStatus::RetriesExhausted => RunLifecycleStatus::PartialFailure,
-                CookStatus::ExecutionBudgetExhausted => RunLifecycleStatus::PartialFailure,
-                CookStatus::PolicyFailure => RunLifecycleStatus::PartialFailure,
-                CookStatus::SelectionRequired => RunLifecycleStatus::PartialFailure,
-                CookStatus::ProviderFailure => RunLifecycleStatus::Failed,
-                CookStatus::DurableFailure => RunLifecycleStatus::Failed,
-                CookStatus::PreExecutionFailure => RunLifecycleStatus::Failed,
-                CookStatus::PreArtifactInterruption => RunLifecycleStatus::Failed,
-                CookStatus::Failed => RunLifecycleStatus::Failed,
-                CookStatus::Unknown(_) => RunLifecycleStatus::Unknown,
+                CookStatus::NoCandidate => ControlPlaneState::PartialFailure,
+                CookStatus::NoChanges => ControlPlaneState::PartialFailure,
+                CookStatus::NoChangesGateFailed => ControlPlaneState::Failed,
+                CookStatus::GateFailed => ControlPlaneState::Failed,
+                CookStatus::GatesDeferred => ControlPlaneState::CandidateRecoverable,
+                CookStatus::GateDeclarationInvalid => ControlPlaneState::PartialFailure,
+                CookStatus::ReproPassesOnBase => ControlPlaneState::PartialFailure,
+                CookStatus::AwaitingAcceptance => ControlPlaneState::PartialFailure,
+                CookStatus::CandidateRecoverable => ControlPlaneState::CandidateRecoverable,
+                CookStatus::BlockedByDependency => ControlPlaneState::PartialFailure,
+                CookStatus::Blocked => ControlPlaneState::PartialFailure,
+                CookStatus::Cancelled => ControlPlaneState::Cancelled,
+                CookStatus::TimedOut => ControlPlaneState::TimedOut,
+                CookStatus::ReviewFormTimeout => ControlPlaneState::TimedOut,
+                CookStatus::RetriesExhausted => ControlPlaneState::PartialFailure,
+                CookStatus::ExecutionBudgetExhausted => ControlPlaneState::PartialFailure,
+                CookStatus::PolicyFailure => ControlPlaneState::PartialFailure,
+                CookStatus::SelectionRequired => ControlPlaneState::PartialFailure,
+                CookStatus::ProviderFailure => ControlPlaneState::Failed,
+                CookStatus::DurableFailure => ControlPlaneState::Failed,
+                CookStatus::PreExecutionFailure => ControlPlaneState::Failed,
+                CookStatus::PreArtifactInterruption => ControlPlaneState::Failed,
+                CookStatus::Failed => ControlPlaneState::Failed,
+                CookStatus::Unknown(_) => ControlPlaneState::Unknown,
             };
             (status, expected)
         })
@@ -361,14 +223,10 @@ mod tests {
     #[test]
     fn every_cook_status_projects_to_the_reviewed_lifecycle_status() {
         for (status, expected) in cook_status_projection_matrix() {
-            assert_eq!(
-                RunLifecycleStatus::from(&status),
-                expected,
-                "{status} projection"
-            );
+            assert_eq!(from_cook_status(&status), expected, "{status} projection");
             // The owning and borrowing conversions must not diverge.
             assert_eq!(
-                RunLifecycleStatus::from(status.clone()),
+                from_cook_status(&status),
                 expected,
                 "{status} owned projection"
             );
@@ -382,7 +240,7 @@ mod tests {
     #[test]
     fn the_projection_agrees_with_the_cook_vocabularys_in_flight_reading() {
         for (status, _) in cook_status_projection_matrix() {
-            let projected = RunLifecycleStatus::from(&status);
+            let projected = from_cook_status(&status);
             assert_eq!(
                 projected.is_terminal(),
                 !status.is_in_flight(),
@@ -398,9 +256,9 @@ mod tests {
     #[test]
     fn an_unknown_cook_status_projects_to_unknown_rather_than_a_verdict() {
         let status = CookStatus::from_status("moving_base_from_a_newer_binary");
-        let projected = RunLifecycleStatus::from(&status);
+        let projected = from_cook_status(&status);
 
-        assert_eq!(projected, RunLifecycleStatus::Unknown);
+        assert_eq!(projected, ControlPlaneState::Unknown);
         assert!(!projected.is_success());
         assert!(!projected.is_retryable());
         assert!(!status.is_in_flight());
@@ -420,7 +278,7 @@ mod tests {
             CookStatus::NoChanges,
             CookStatus::NoCandidate,
         ] {
-            let projected = RunLifecycleStatus::from(&status);
+            let projected = from_cook_status(&status);
             assert!(projected.is_terminal(), "{status} must be terminal");
             assert!(
                 !projected.is_retryable(),

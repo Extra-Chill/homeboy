@@ -19,7 +19,7 @@
 use homeboy::agents::agent_task_service::CookDeliveryBlockerCode;
 use homeboy::core::engine::shell::quote_arg;
 use homeboy::core::observation::RunRecord;
-use homeboy_control_plane_contract::{ControlPlaneBlocker, ControlPlaneRun, ControlPlaneRunState};
+use homeboy_control_plane_contract::{ControlPlaneBlocker, ControlPlaneRun, ControlPlaneState};
 use serde::Serialize;
 use serde_json::Value;
 
@@ -58,7 +58,7 @@ pub struct CookVerdictGate {
 
 impl CookVerdict {
     pub(crate) fn is_stale(&self) -> bool {
-        self.state == state_label(ControlPlaneRunState::Stale)
+        self.state == state_label(ControlPlaneState::Stale)
     }
 
     pub(crate) fn has_failed_gate(&self) -> bool {
@@ -145,7 +145,7 @@ pub(crate) fn cook_verdict_for_observation_run(run: &RunRecord) -> Option<CookVe
         .map(|resource| cook_verdict(&resource))
 }
 
-fn state_label(state: ControlPlaneRunState) -> String {
+fn state_label(state: ControlPlaneState) -> String {
     serde_json::to_value(state)
         .ok()
         .and_then(|value| value.as_str().map(str::to_string))
@@ -166,7 +166,7 @@ fn candidate_gate_failed(state: &str) -> bool {
 }
 
 fn verdict_reason(run: &ControlPlaneRun, gates: &[CookVerdictGate]) -> Option<String> {
-    use ControlPlaneRunState as State;
+    use ControlPlaneState as State;
     if matches!(run.state, State::Succeeded | State::Skipped) {
         return None;
     }
@@ -268,7 +268,7 @@ mod tests {
     use super::*;
     use homeboy_control_plane_contract::{ControlPlaneStateSummary, RunId};
 
-    fn resource(state: ControlPlaneRunState) -> ControlPlaneRun {
+    fn resource(state: ControlPlaneState) -> ControlPlaneRun {
         let mut run = ControlPlaneRun::new(RunId::new("agent-task-verdict").expect("run id"));
         run.state = state;
         run
@@ -276,7 +276,7 @@ mod tests {
 
     #[test]
     fn incomplete_review_names_reason_and_full_override_for_read_surfaces() {
-        let mut run = resource(ControlPlaneRunState::CandidateRecoverable);
+        let mut run = resource(ControlPlaneState::CandidateRecoverable);
         let command = "homeboy agent-task recover cook-incomplete --review-form @FILE --review-form-tool <tool> --review-form-model <model> --review-form-author <author>";
         run.blocker = Some(ControlPlaneBlocker {
             code: Some("review_form.incomplete".into()),
@@ -308,7 +308,7 @@ mod tests {
 
     #[test]
     fn verification_pending_candidate_explains_why_it_was_not_published() {
-        let mut run = resource(ControlPlaneRunState::CandidateRecoverable);
+        let mut run = resource(ControlPlaneState::CandidateRecoverable);
         run.candidate = Some(ControlPlaneStateSummary {
             id: None,
             state: "verification_pending".to_string(),
@@ -322,7 +322,7 @@ mod tests {
             .is_some_and(|reason| reason.contains("not published")));
     }
 
-    fn live_gate_driver_run(state: ControlPlaneRunState, phase: Option<&str>) -> ControlPlaneRun {
+    fn live_gate_driver_run(state: ControlPlaneState, phase: Option<&str>) -> ControlPlaneRun {
         let mut run = resource(state);
         run.mission = Some(homeboy_control_plane_contract::MissionId::new("cook-16058").unwrap());
         run.phase = phase.map(str::to_string);
@@ -338,7 +338,7 @@ mod tests {
     #[test]
     fn live_gate_driver_verdict_reports_verifying_and_watch() {
         let verdict = cook_verdict(&live_gate_driver_run(
-            ControlPlaneRunState::Running,
+            ControlPlaneState::Running,
             Some(homeboy::agents::orchestration::LIVE_GATE_VERIFYING_PHASE),
         ));
         assert_eq!(verdict.state, "running");
@@ -358,7 +358,7 @@ mod tests {
     /// "publication: not attempted".
     #[test]
     fn blocked_finalization_names_the_step() {
-        let mut run = resource(ControlPlaneRunState::CandidateRecoverable);
+        let mut run = resource(ControlPlaneState::CandidateRecoverable);
         run.blocker = Some(homeboy_control_plane_contract::ControlPlaneBlocker {
             details: None,
             code: Some("finalization".to_string()),
@@ -378,7 +378,7 @@ mod tests {
 
     #[test]
     fn failed_gate_is_the_reason_and_the_category() {
-        let mut run = resource(ControlPlaneRunState::CandidateRecoverable);
+        let mut run = resource(ControlPlaneState::CandidateRecoverable);
         run.candidate = Some(ControlPlaneStateSummary {
             id: None,
             state: "gate_failed".to_string(),
@@ -397,7 +397,7 @@ mod tests {
 
     #[test]
     fn succeeded_cook_has_no_reason_and_no_category() {
-        let verdict = cook_verdict(&resource(ControlPlaneRunState::Succeeded));
+        let verdict = cook_verdict(&resource(ControlPlaneState::Succeeded));
         assert_eq!(verdict.state, "succeeded");
         assert_eq!(verdict.reason, None);
         assert_eq!(verdict.category(), None);
@@ -406,7 +406,7 @@ mod tests {
 
     #[test]
     fn agent_task_published_success_is_not_categorized_by_historical_gate_failure() {
-        let mut run = resource(ControlPlaneRunState::Succeeded);
+        let mut run = resource(ControlPlaneState::Succeeded);
         run.gates.push(ControlPlaneStateSummary {
             id: Some("old-check".to_string()),
             state: "failed".to_string(),
@@ -418,12 +418,12 @@ mod tests {
 
     #[test]
     fn agent_task_missing_diagnostics_is_explicit_and_applied_is_not_denied() {
-        let verdict = cook_verdict(&resource(ControlPlaneRunState::Failed));
+        let verdict = cook_verdict(&resource(ControlPlaneState::Failed));
         assert!(verdict
             .reason
             .unwrap()
             .contains("no failure diagnostic was recorded"));
-        let mut run = resource(ControlPlaneRunState::CandidateRecoverable);
+        let mut run = resource(ControlPlaneState::CandidateRecoverable);
         run.candidate = Some(ControlPlaneStateSummary {
             id: None,
             state: "applied".to_string(),
@@ -435,7 +435,7 @@ mod tests {
 
     #[test]
     fn stale_verdict_keeps_the_stale_running_record_category() {
-        let verdict = cook_verdict(&resource(ControlPlaneRunState::Stale));
+        let verdict = cook_verdict(&resource(ControlPlaneState::Stale));
         assert!(verdict.is_stale());
         assert_eq!(verdict.category().as_deref(), Some("stale_running_record"));
     }

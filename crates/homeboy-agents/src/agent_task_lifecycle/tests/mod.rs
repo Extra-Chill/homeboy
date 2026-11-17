@@ -312,7 +312,7 @@ pub(super) fn succeeded_aggregate(plan: &AgentTaskPlan) -> AgentTaskAggregate {
         }],
         events: vec![AgentTaskProgressEvent {
             task_id: "task-a".to_string(),
-            state: AgentTaskState::Succeeded,
+            state: ControlPlaneState::Succeeded,
             attempt: 1,
             message: Some("ok".to_string()),
         }],

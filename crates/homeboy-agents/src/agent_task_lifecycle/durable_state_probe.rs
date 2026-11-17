@@ -104,16 +104,16 @@ pub fn seed_status_purity_fixtures_for_test() -> super::Result<Vec<StatusPurityF
     push("succeeded", "purity-succeeded");
 
     for (label, run_id, outcome) in [
-        ("failed", "purity-failed", AgentTaskTerminalOutcome::Failed),
+        ("failed", "purity-failed", RunExecutionState::Failed),
         (
             "partial_failure",
             "purity-partial-failure",
-            AgentTaskTerminalOutcome::PartialFailure,
+            RunExecutionState::PartialFailure,
         ),
         (
             "candidate_recoverable",
             "purity-candidate-recoverable",
-            AgentTaskTerminalOutcome::CandidateRecoverable,
+            RunExecutionState::CandidateRecoverable,
         ),
     ] {
         submit_plan(&plan, Some(run_id))?;
@@ -162,7 +162,7 @@ pub fn seed_status_purity_fixtures_for_test() -> super::Result<Vec<StatusPurityF
             "candidate_recoverable_cook_pending_continuation",
             "purity-cook-recoverable",
             "purity-cook-recoverable-attempt",
-            Some(AgentTaskTerminalOutcome::CandidateRecoverable),
+            Some(RunExecutionState::CandidateRecoverable),
         ),
     ] {
         seed_terminal_cook_attempts(&store, &plan, cook_id, &[(run_id, outcome, true)])?;
@@ -180,12 +180,12 @@ pub fn seed_status_purity_fixtures_for_test() -> super::Result<Vec<StatusPurityF
         &[
             (
                 gate_refused,
-                Some(AgentTaskTerminalOutcome::CandidateRecoverable),
+                Some(RunExecutionState::CandidateRecoverable),
                 true,
             ),
             (
                 no_change_retry,
-                Some(AgentTaskTerminalOutcome::PartialFailure),
+                Some(RunExecutionState::PartialFailure),
                 false,
             ),
         ],
@@ -215,7 +215,7 @@ fn seed_terminal_cook_attempts(
     store: &AgentTaskLifecycleStore,
     plan: &crate::agent_task_scheduler::AgentTaskPlan,
     cook_id: &str,
-    attempts: &[(&str, Option<super::AgentTaskTerminalOutcome>, bool)],
+    attempts: &[(&str, Option<super::RunExecutionState>, bool)],
 ) -> super::Result<()> {
     use crate::agent_task_service::{
         AgentTaskCookRecipe, AgentTaskCookRecipeAttempt, CookRecipeStore, COOK_RECIPE_SCHEMA,
@@ -302,6 +302,7 @@ fn purity_aggregate(
     plan: &crate::agent_task_scheduler::AgentTaskPlan,
 ) -> crate::agent_task_scheduler::AgentTaskAggregate {
     use crate::agent_task_scheduler::*;
+    use homeboy_control_plane_contract::ControlPlaneState;
     let outcomes = vec![crate::agent_task::AgentTaskOutcome {
         task_id: "task-a".to_string(),
         status: crate::agent_task::AgentTaskOutcomeStatus::Succeeded,
@@ -315,7 +316,7 @@ fn purity_aggregate(
         outcomes,
         events: vec![AgentTaskProgressEvent {
             task_id: "task-a".to_string(),
-            state: AgentTaskState::Succeeded,
+            state: ControlPlaneState::Succeeded,
             attempt: 1,
             message: Some("ok".to_string()),
         }],

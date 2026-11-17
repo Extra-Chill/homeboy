@@ -70,7 +70,9 @@ mod retry_failure_tests {
         assert_eq!(aggregate.totals.succeeded, 1);
         assert_eq!(attempts.load(Ordering::SeqCst), 2);
         assert!(aggregate.events.iter().any(|event| {
-            event.task_id == "task-1" && event.state == AgentTaskState::Queued && event.attempt == 2
+            event.task_id == "task-1"
+                && event.state == ControlPlaneState::Queued
+                && event.attempt == 2
         }));
     }
 
@@ -91,7 +93,7 @@ mod retry_failure_tests {
         assert_eq!(attempts.load(Ordering::SeqCst), 2);
         assert!(aggregate.events.iter().any(|event| {
             event.task_id == "task-1"
-                && event.state == AgentTaskState::Queued
+                && event.state == ControlPlaneState::Queued
                 && event.attempt == 2
                 && event.message.as_deref() == Some("retry queued")
         }));

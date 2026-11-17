@@ -520,7 +520,7 @@ fn live_continuation_is_visible_and_recovery_leaves_its_claim_untouched() {
         let status = crate::orchestration::run_from_current_environment(cook).unwrap();
         assert_eq!(
             status.state,
-            homeboy_control_plane_contract::ControlPlaneRunState::Running
+            homeboy_control_plane_contract::ControlPlaneState::Running
         );
         assert_eq!(status.phase.as_deref(), Some("publishing"));
         assert_eq!(status.owner.unwrap().id, std::process::id().to_string());

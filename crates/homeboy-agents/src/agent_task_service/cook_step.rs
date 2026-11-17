@@ -518,7 +518,7 @@ fn settle_missing_launch_index(
         handoff["admission_state"] = json!("failed");
         handoff["reason"] = json!(diagnostic.message);
         Some(agent_task_lifecycle::AgentTaskTransition::Terminate {
-            outcome: agent_task_lifecycle::AgentTaskTerminalOutcome::Failed,
+            outcome: homeboy_lifecycle_contract::RunExecutionState::Failed,
             metadata: serde_json::Map::from_iter([
                 ("detached_cook_handoff".to_string(), handoff),
                 (

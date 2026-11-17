@@ -142,7 +142,7 @@ pub struct ControlPlaneRun {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub mission: Option<MissionId>,
     pub run: RunId,
-    pub state: ControlPlaneRunState,
+    pub state: ControlPlaneState,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub location: Option<ControlPlaneLocation>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -203,7 +203,7 @@ impl ControlPlaneRun {
             schema: CONTROL_PLANE_RUN_SCHEMA.to_string(),
             mission: None,
             run: run.clone(),
-            state: ControlPlaneRunState::Unknown,
+            state: ControlPlaneState::Unknown,
             location: None,
             placement: None,
             phase: None,
@@ -865,7 +865,7 @@ impl ControlPlaneActionEligibilityReport {
     }
 }
 
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Hash)]
 #[serde(rename_all = "snake_case")]
 pub enum ControlPlaneState {
     Queued,
@@ -884,6 +884,14 @@ pub enum ControlPlaneState {
 }
 
 impl ControlPlaneState {
+    pub fn is_success(self) -> bool {
+        matches!(self, Self::Succeeded)
+    }
+
+    pub fn is_retryable(self) -> bool {
+        matches!(self, Self::Failed | Self::TimedOut | Self::Stale)
+    }
+
     pub fn is_terminal(self) -> bool {
         !matches!(
             self,
@@ -892,7 +900,21 @@ impl ControlPlaneState {
     }
 }
 
-pub type ControlPlaneRunState = ControlPlaneState;
+impl From<homeboy_lifecycle_contract::RunExecutionState> for ControlPlaneState {
+    fn from(state: homeboy_lifecycle_contract::RunExecutionState) -> Self {
+        use homeboy_lifecycle_contract::RunExecutionState;
+        match state {
+            RunExecutionState::Unknown => Self::Unknown,
+            RunExecutionState::Queued => Self::Queued,
+            RunExecutionState::Running => Self::Running,
+            RunExecutionState::Succeeded => Self::Succeeded,
+            RunExecutionState::CandidateRecoverable => Self::CandidateRecoverable,
+            RunExecutionState::PartialFailure => Self::PartialFailure,
+            RunExecutionState::Failed => Self::Failed,
+            RunExecutionState::Cancelled => Self::Cancelled,
+        }
+    }
+}
 
 /// Where the run is executing. Ids and transport only — never cwd or secrets.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -928,8 +950,8 @@ mod tests {
         ControlPlaneReferenceRegistration, ControlPlaneReferenceType, ControlPlaneResult,
         ControlPlaneRun, ControlPlaneRunListRequest, ControlPlaneRunPage, ControlPlaneRunPlacement,
         ControlPlaneRunPlacementEffective, ControlPlaneRunPlacementRequested,
-        ControlPlaneRunPlacementSelected, ControlPlaneRunState, ControlPlaneRuntime,
-        ControlPlaneState, ControlPlaneStateSummary, ControlPlaneTask, ControlPlaneTaskListRequest,
+        ControlPlaneRunPlacementSelected, ControlPlaneRuntime, ControlPlaneState,
+        ControlPlaneStateSummary, ControlPlaneTask, ControlPlaneTaskListRequest,
         ControlPlaneTaskPage, CONTROL_PLANE_ACTION_ELIGIBILITY_SCHEMA,
         CONTROL_PLANE_ATTEMPT_PAGE_SCHEMA, CONTROL_PLANE_ATTEMPT_SCHEMA,
         CONTROL_PLANE_EXECUTION_PAGE_SCHEMA, CONTROL_PLANE_EXECUTION_SCHEMA,
@@ -951,7 +973,7 @@ mod tests {
         let run = RunId::new(AGENT_TASK_RUN).expect("run");
         let mut resource = ControlPlaneRun::new(run.clone());
         resource.mission = Some(MissionId::new(AGENT_TASK_COOK).expect("mission"));
-        resource.state = ControlPlaneRunState::Succeeded;
+        resource.state = ControlPlaneState::Succeeded;
         resource.location = Some(ControlPlaneLocation {
             runner_id: Some("homeboy-lab".to_string()),
             remote_run_id: Some("remote-run-1".to_string()),
@@ -1159,7 +1181,7 @@ mod tests {
         let page: ControlPlaneRunPage = serde_json::from_str(fixture).expect("v1 fixture");
         assert_eq!(page.schema, CONTROL_PLANE_RUN_PAGE_SCHEMA);
         assert_eq!(page.runs[0].run.as_str(), "run-fixture-1");
-        assert_eq!(page.runs[0].state, ControlPlaneRunState::Running);
+        assert_eq!(page.runs[0].state, ControlPlaneState::Running);
         assert!(page.next_cursor.is_none());
         assert!(!page.has_more);
         assert_eq!(
@@ -1242,6 +1264,45 @@ mod tests {
         }
         .validate()
         .is_err());
+    }
+
+    /// Every state label round-trips unchanged, carries its classification,
+    /// and every stored run state projects onto the same label.
+    #[test]
+    fn state_labels_round_trip_and_classify() {
+        use homeboy_lifecycle_contract::RunExecutionState;
+        // (label, terminal, success, retryable, stored run state label)
+        let table = [
+            ("queued", false, false, false, true),
+            ("blocked", false, false, false, false),
+            ("skipped", true, false, false, false),
+            ("running", false, false, false, true),
+            ("succeeded", true, true, false, true),
+            ("candidate_recoverable", true, false, false, true),
+            ("partial_failure", true, false, false, true),
+            ("failed", true, false, true, true),
+            ("cancelled", true, false, false, true),
+            ("timed_out", true, false, true, false),
+            ("stale", true, false, true, false),
+            ("unknown", false, false, false, true),
+        ];
+        for (label, terminal, success, retryable, stored) in table {
+            let state: ControlPlaneState = serde_json::from_value(label.into()).expect(label);
+            assert_eq!(serde_json::to_value(state).expect(label), label);
+            assert_eq!(state.is_terminal(), terminal, "{label} terminal");
+            assert_eq!(state.is_success(), success, "{label} success");
+            assert_eq!(state.is_retryable(), retryable, "{label} retryable");
+            let run_state = serde_json::from_value::<RunExecutionState>(label.into());
+            if stored {
+                let run_state = run_state.expect(label);
+                assert_eq!(serde_json::to_value(run_state).expect(label), label);
+                assert_eq!(ControlPlaneState::from(run_state), state, "{label}");
+            } else {
+                assert_eq!(run_state.ok(), Some(RunExecutionState::Unknown), "{label}");
+            }
+        }
+        let newer: ControlPlaneState = serde_json::from_value("from_newer_binary".into()).unwrap();
+        assert_eq!(newer, ControlPlaneState::Unknown);
     }
 
     #[test]

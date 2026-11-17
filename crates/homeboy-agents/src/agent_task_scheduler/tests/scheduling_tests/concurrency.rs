@@ -153,7 +153,7 @@ pub(super) mod concurrency_tests {
         assert!(aggregate
             .events
             .iter()
-            .any(|event| event.state == AgentTaskState::Running));
+            .any(|event| event.state == ControlPlaneState::Running));
     }
 
     #[derive(Clone)]
@@ -287,10 +287,9 @@ pub(super) mod concurrency_tests {
             .backpressure
             .iter()
             .any(|status| status.kind == "queue_depth"));
-        assert!(aggregate
-            .events
-            .iter()
-            .any(|event| { event.task_id == "task-3" && event.state == AgentTaskState::Blocked }));
+        assert!(aggregate.events.iter().any(|event| {
+            event.task_id == "task-3" && event.state == ControlPlaneState::Blocked
+        }));
     }
 
     #[test]
@@ -416,14 +415,14 @@ pub(super) mod concurrency_tests {
             aggregate
                 .events
                 .iter()
-                .filter(|event| event.state == AgentTaskState::Running)
+                .filter(|event| event.state == ControlPlaneState::Running)
                 .map(|event| event.task_id.as_str())
                 .collect::<Vec<_>>(),
             vec!["task-1", "task-2"]
         );
         assert!(aggregate.events.iter().any(|event| {
             event.task_id == "task-2"
-                && event.state == AgentTaskState::Blocked
+                && event.state == ControlPlaneState::Blocked
                 && event.message.as_deref().is_some_and(|message| {
                     message.contains("waiting for exclusive resource 'cache:shared'")
                         && message.contains("held by 'task-1'")
@@ -434,7 +433,7 @@ pub(super) mod concurrency_tests {
         }));
         assert!(aggregate.events.iter().any(|event| {
             event.task_id == "task-2"
-                && event.state == AgentTaskState::Running
+                && event.state == ControlPlaneState::Running
                 && event.message.as_deref().is_some_and(|message| {
                     message.contains("acquired exclusive resource 'cache:shared' after waiting")
                         && message.contains("previous holder 'task-1'")
@@ -461,7 +460,7 @@ pub(super) mod concurrency_tests {
         );
         assert_eq!(max_seen.load(Ordering::SeqCst), 2);
         assert!(!aggregate.events.iter().any(|event| {
-            event.state == AgentTaskState::Blocked
+            event.state == ControlPlaneState::Blocked
                 && event
                     .message
                     .as_deref()
@@ -509,7 +508,7 @@ pub(super) mod concurrency_tests {
         let resource_wait = aggregate
             .events
             .iter()
-            .find(|event| event.task_id == "task-2" && event.state == AgentTaskState::Running)
+            .find(|event| event.task_id == "task-2" && event.state == ControlPlaneState::Running)
             .and_then(|event| event.message.as_deref())
             .expect("task-2 resource acquisition event");
         assert!(resource_wait.contains("cache:timeout-test"));
@@ -550,7 +549,7 @@ pub(super) mod concurrency_tests {
         let serialized = aggregate
             .events
             .iter()
-            .filter(|event| event.state == AgentTaskState::Running)
+            .filter(|event| event.state == ControlPlaneState::Running)
             .map(|event| event.task_id.as_str())
             .collect::<Vec<_>>();
         assert_eq!(
