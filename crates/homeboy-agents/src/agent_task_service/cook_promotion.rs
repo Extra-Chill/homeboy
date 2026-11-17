@@ -4021,15 +4021,14 @@ pub fn candidate_publication_title(
     store: &agent_task_lifecycle::AgentTaskLifecycleStore,
     run_id: &str,
 ) -> Result<String> {
-    let recipe = super::load_recipe_for_attempt(run_id)?;
-    let title_policy = recipe
-        .as_ref()
-        .map(|recipe| title_policy_for_recipe(recipe, run_id))
+    // The attempt's own plan declares its review-form title rule.
+    let title_policy = agent_task_lifecycle::load_plan_in_store(store, run_id)
+        .map(|plan| crate::agent_task_review_dossier::PrTitlePolicy::from_plan(&plan))
         .unwrap_or(crate::agent_task_review_dossier::PrTitlePolicy::ConventionalCommit);
     if let Ok(form) = review_form_for_finalization_in_store(store, run_id, title_policy) {
         return Ok(form.pr_title);
     }
-    recipe
+    super::load_recipe_for_attempt(run_id)?
         .and_then(|recipe| recipe.finalization["title"].as_str().map(str::to_owned))
         .filter(|title| !title.trim().is_empty())
         .ok_or_else(|| {
