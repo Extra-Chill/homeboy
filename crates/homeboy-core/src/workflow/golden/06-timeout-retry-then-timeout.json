@@ -30,9 +30,9 @@
     },
     {
       "event": {
+        "at_ms": 0,
         "event": "step_spawned",
-        "key": "wf-golden/a/1/1",
-        "at_ms": 0
+        "key": "wf-golden/a/1/1"
       },
       "now_ms": 0
     },
@@ -64,9 +64,9 @@
     },
     {
       "event": {
+        "at_ms": 302500,
         "event": "step_spawned",
-        "key": "wf-golden/a/1/2",
-        "at_ms": 302500
+        "key": "wf-golden/a/1/2"
       },
       "now_ms": 302500
     },
@@ -105,6 +105,30 @@
       ],
       "event": {
         "event": "start"
+      },
+      "now_ms": 0,
+      "state": {
+        "failing": false,
+        "iteration": 1,
+        "reason": null,
+        "status": "running",
+        "step_runs": 1,
+        "steps": {
+          "a": {
+            "attempt": 1,
+            "key": "wf-golden/a/1/1",
+            "outcome": null,
+            "phase": "running"
+          }
+        }
+      }
+    },
+    {
+      "commands": [],
+      "event": {
+        "at_ms": 0,
+        "event": "step_spawned",
+        "key": "wf-golden/a/1/1"
       },
       "now_ms": 0,
       "state": {
@@ -216,6 +240,30 @@
         "status": "cancelled"
       },
       "now_ms": 302000,
+      "state": {
+        "failing": false,
+        "iteration": 1,
+        "reason": null,
+        "status": "running",
+        "step_runs": 2,
+        "steps": {
+          "a": {
+            "attempt": 2,
+            "key": "wf-golden/a/1/2",
+            "outcome": "timed_out",
+            "phase": "running"
+          }
+        }
+      }
+    },
+    {
+      "commands": [],
+      "event": {
+        "at_ms": 302500,
+        "event": "step_spawned",
+        "key": "wf-golden/a/1/2"
+      },
+      "now_ms": 302500,
       "state": {
         "failing": false,
         "iteration": 1,

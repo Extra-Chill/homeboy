@@ -4,15 +4,15 @@
     "schema": "homeboy/workflow/v1",
     "steps": [
       {
-        "id": "score",
+        "capacity": "none",
         "exec": {
-          "program": "node",
           "args": [
             "score.mjs"
-          ]
+          ],
+          "program": "node"
         },
-        "timeout": "10m",
-        "capacity": "none"
+        "id": "score",
+        "timeout": "10m"
       }
     ]
   },
@@ -31,9 +31,9 @@
     },
     {
       "event": {
+        "at_ms": 900000,
         "event": "step_spawned",
-        "key": "wf-golden/score/1/1",
-        "at_ms": 900000
+        "key": "wf-golden/score/1/1"
       },
       "now_ms": 900000
     },
@@ -60,5 +60,168 @@
   ],
   "expect_status": "failed",
   "inputs": {},
-  "transcript": []
+  "transcript": [
+    {
+      "commands": [
+        {
+          "args": [
+            "score.mjs"
+          ],
+          "attempt": 1,
+          "command": "submit_step",
+          "iteration": 1,
+          "key": "wf-golden/score/1/1",
+          "kind": "exec",
+          "program": "node",
+          "step": "score",
+          "uncapped": true
+        }
+      ],
+      "event": {
+        "event": "start"
+      },
+      "now_ms": 0,
+      "state": {
+        "failing": false,
+        "iteration": 1,
+        "reason": null,
+        "status": "running",
+        "step_runs": 1,
+        "steps": {
+          "score": {
+            "attempt": 1,
+            "key": "wf-golden/score/1/1",
+            "outcome": null,
+            "phase": "running"
+          }
+        }
+      }
+    },
+    {
+      "commands": [],
+      "event": {
+        "event": "tick"
+      },
+      "now_ms": 900000,
+      "state": {
+        "failing": false,
+        "iteration": 1,
+        "reason": null,
+        "status": "running",
+        "step_runs": 1,
+        "steps": {
+          "score": {
+            "attempt": 1,
+            "key": "wf-golden/score/1/1",
+            "outcome": null,
+            "phase": "running"
+          }
+        }
+      }
+    },
+    {
+      "commands": [],
+      "event": {
+        "at_ms": 900000,
+        "event": "step_spawned",
+        "key": "wf-golden/score/1/1"
+      },
+      "now_ms": 900000,
+      "state": {
+        "failing": false,
+        "iteration": 1,
+        "reason": null,
+        "status": "running",
+        "step_runs": 1,
+        "steps": {
+          "score": {
+            "attempt": 1,
+            "key": "wf-golden/score/1/1",
+            "outcome": null,
+            "phase": "running"
+          }
+        }
+      }
+    },
+    {
+      "commands": [],
+      "event": {
+        "event": "tick"
+      },
+      "now_ms": 1499000,
+      "state": {
+        "failing": false,
+        "iteration": 1,
+        "reason": null,
+        "status": "running",
+        "step_runs": 1,
+        "steps": {
+          "score": {
+            "attempt": 1,
+            "key": "wf-golden/score/1/1",
+            "outcome": null,
+            "phase": "running"
+          }
+        }
+      }
+    },
+    {
+      "commands": [
+        {
+          "command": "cancel_step",
+          "key": "wf-golden/score/1/1",
+          "reason": "step `score` timed out"
+        }
+      ],
+      "event": {
+        "event": "tick"
+      },
+      "now_ms": 1500000,
+      "state": {
+        "failing": false,
+        "iteration": 1,
+        "reason": null,
+        "status": "running",
+        "step_runs": 1,
+        "steps": {
+          "score": {
+            "attempt": 1,
+            "key": "wf-golden/score/1/1",
+            "outcome": null,
+            "phase": "running"
+          }
+        }
+      }
+    },
+    {
+      "commands": [
+        {
+          "command": "complete",
+          "reason": "step `score` did not succeed",
+          "status": "failed"
+        }
+      ],
+      "event": {
+        "event": "step_finished",
+        "key": "wf-golden/score/1/1",
+        "status": "cancelled"
+      },
+      "now_ms": 1501000,
+      "state": {
+        "failing": true,
+        "iteration": 1,
+        "reason": "step `score` did not succeed",
+        "status": "failed",
+        "step_runs": 1,
+        "steps": {
+          "score": {
+            "attempt": 1,
+            "key": "wf-golden/score/1/1",
+            "outcome": "timed_out",
+            "phase": "done"
+          }
+        }
+      }
+    }
+  ]
 }
