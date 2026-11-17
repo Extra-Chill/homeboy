@@ -123,6 +123,7 @@ pub struct RunsHotspotsOutput {
     pub phase_hotspots: Option<homeboy::core::performance_hotspots::PhaseHotspots>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub cook_wall_time: Option<super::cook_timing::CookWallTimeSummary>,
+    pub gate_resources: Vec<super::gate_resources::GateCost>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub cohort_comparison: Option<FuzzHotspotCohortComparison>,
 }
@@ -265,6 +266,7 @@ pub(crate) fn runs_hotspots(
                 hotspots: vec![],
                 phase_hotspots: None,
                 cook_wall_time: None,
+                gate_resources: vec![],
                 cohort_comparison: None,
             }),
             0,
@@ -362,6 +364,11 @@ pub(crate) fn runs_hotspots(
         } else {
             None
         };
+        let gate_resources = if agent_task {
+            super::gate_resources::load(store, &phases.run_ids)?
+        } else {
+            vec![]
+        };
         let regressed = phases
             .comparison
             .as_ref()
@@ -387,6 +394,7 @@ pub(crate) fn runs_hotspots(
                 cohort_comparison: None,
                 phase_hotspots: Some(phases),
                 cook_wall_time,
+                gate_resources,
                 coverage: vec![],
             }),
             exit_code,
@@ -415,6 +423,7 @@ pub(crate) fn runs_hotspots(
             hotspots,
             phase_hotspots: None,
             cook_wall_time: None,
+            gate_resources: vec![],
             coverage: vec![],
             cohort_comparison,
         }),
@@ -1121,6 +1130,28 @@ mod tests {
         );
         let stdout = crate::commands::runs_summary::render_runs_hotspots_summary(&payload).unwrap();
         assert!(stdout.contains("count=1 p50=1500 p95=1500 mean=1500"));
+
+        let evidence = tempfile::NamedTempFile::new().unwrap();
+        store.record_artifact_with_metadata(&run.id, "agent_task_gate_resources", evidence.path(), json!({
+            "phase":"gate.cargo-test", "resources":{"cpu_user_ms":40,"cpu_system_ms":8,"peak_rss_bytes":4096},
+            "cargo_target":{"growth_bytes":50}
+        })).unwrap();
+        let (output, _) = runs_hotspots(
+            &store,
+            RunsHotspotsArgs {
+                kind: Some("agent-task".into()),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        let payload = serde_json::to_value(output).unwrap();
+        assert_eq!(payload["payload"]["gate_resources"][0]["total_cpu_ms"], 48);
+        assert_eq!(
+            payload["payload"]["gate_resources"][0]["total_growth_bytes"],
+            50
+        );
+        let stdout = crate::commands::runs_summary::render_runs_hotspots_summary(&payload).unwrap();
+        assert!(stdout.contains("gate.cargo-test: samples=1 CPU total=48ms p50=48.0ms peak RSS=4096B growth=50B (samples=1)"));
     }
 
     #[test]

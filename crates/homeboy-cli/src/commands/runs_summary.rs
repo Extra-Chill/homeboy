@@ -68,6 +68,20 @@ pub(crate) fn render_runs_hotspots_summary(payload: &Value) -> Option<String> {
             ));
         }
     }
+    if let Some(gates) = output["gate_resources"].as_array() {
+        for gate in gates {
+            lines.push(format!(
+                "  {}: samples={} CPU total={}ms p50={}ms peak RSS={}B growth={}B (samples={})",
+                gate["phase"].as_str().unwrap_or_default(),
+                gate["count"],
+                gate["total_cpu_ms"],
+                gate["p50_cpu_ms"],
+                gate["peak_rss_bytes"],
+                gate["total_growth_bytes"],
+                gate["growth_sample_count"]
+            ));
+        }
+    }
     if let Some(comparison) = output
         .pointer("/phase_hotspots/comparison")
         .filter(|v| !v.is_null())
