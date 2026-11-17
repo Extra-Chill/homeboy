@@ -138,7 +138,7 @@ pub(crate) fn with_restart_recovery_lock<T>(
         directory.join("restart-recovery.lock"),
         runner_id,
         "restart_recovery",
-        crate::runner_state_lock::LOCK_TIMEOUT,
+        RESTART_BUDGET,
         || {
             let state = crate::runner_state_lock::read_durable_json::<RestartState>(&state_path)?;
             if let Some(state) = state.filter(RestartState::in_progress) {
@@ -259,6 +259,61 @@ mod tests {
         session.runner_id = "runner-a".to_string();
         session.tunnel_pid = tunnel_pid;
         session
+    }
+
+    #[test]
+    fn rebind_closes_replaced_real_ssh_forward() {
+        use std::os::unix::fs::PermissionsExt;
+        crate::test_support::with_isolated_home(|root| {
+            let bin = root.path().join("bin");
+            std::fs::create_dir_all(&bin).unwrap();
+            let ssh = bin.join("ssh");
+            std::fs::write(&ssh, "#!/bin/sh\nexec /bin/sleep 300\n").unwrap();
+            std::fs::set_permissions(&ssh, std::fs::Permissions::from_mode(0o755)).unwrap();
+            let old_path = std::env::var_os("PATH").unwrap();
+            let path =
+                std::env::join_paths(std::iter::once(bin).chain(std::env::split_paths(&old_path)))
+                    .unwrap();
+            // Command-local PATH avoids affecting concurrently running tests.
+            let spawn = || {
+                let mut command = std::process::Command::new("ssh");
+                command
+                    .env("PATH", &path)
+                    .args(["-N", "-L", "127.0.0.1:1234:127.0.0.1:5678"]);
+                let mut child =
+                    super::super::remote_daemon::spawn_tunnel_process(&mut command).unwrap();
+                let identity =
+                    super::super::remote_daemon::capture_tunnel_identity(&mut child).unwrap();
+                (child, identity)
+            };
+            let (mut old, old_identity) = spawn();
+            let (mut new, new_identity) = spawn();
+            let mut previous = session("lease-old", Some(old.id()));
+            previous.tunnel_process_start_identity = Some(old_identity);
+            let mut current = session("lease-new", Some(new.id()));
+            current.tunnel_process_start_identity = Some(new_identity);
+            write_session(&previous).unwrap();
+            rebind_restarted_lease("runner-a", "lease-old", &current).unwrap();
+            let deadline = std::time::Instant::now() + Duration::from_secs(3);
+            let exited = loop {
+                if old.try_wait().unwrap().is_some() {
+                    break true;
+                }
+                if std::time::Instant::now() >= deadline {
+                    break false;
+                }
+                std::thread::sleep(Duration::from_millis(20));
+            };
+            let current_running = new.try_wait().unwrap().is_none();
+            let published = read_session("runner-a").unwrap();
+            let _ = old.kill();
+            let _ = old.wait();
+            let _ = new.kill();
+            let _ = new.wait();
+            assert!(exited, "rebind leaked the replaced session's SSH forward");
+            assert!(current_running, "rebind closed the current forward");
+            assert_eq!(published, Some(current));
+        });
     }
 
     /// Lab admission during `runner refresh-homeboy` observes the restarted

@@ -298,8 +298,12 @@ pub(super) struct SshTunnelOutput {
 impl SshTunnelOutput {
     pub(super) fn release_child(&mut self) {
         if let Some(mut child) = self.child.take() {
+            // Child::wait closes stdin before waiting. Retain the owner pipe
+            // until exit (or explicit close), not merely until this reaper starts.
+            let owner_pipe = child.stdin.take();
             std::thread::spawn(move || {
                 let _ = child.wait();
+                drop(owner_pipe);
             });
         }
     }
@@ -336,7 +340,7 @@ fn into_process_start_identity(
     }
 }
 
-fn capture_tunnel_identity(
+pub(super) fn capture_tunnel_identity(
     child: &mut std::process::Child,
 ) -> std::result::Result<RunnerTunnelProcessStartIdentity, String> {
     let pid = child.id();
@@ -373,6 +377,24 @@ pub(super) fn open_loopback_tunnel(
     remote_port: u16,
     loopback_transport: bool,
 ) -> SshTunnelOutput {
+    open_loopback_tunnel_with_lifetime(
+        server,
+        local_port,
+        remote_host,
+        remote_port,
+        loopback_transport,
+        false,
+    )
+}
+
+pub(super) fn open_loopback_tunnel_with_lifetime(
+    server: &Server,
+    local_port: u16,
+    remote_host: &str,
+    remote_port: u16,
+    loopback_transport: bool,
+    owner_bound: bool,
+) -> SshTunnelOutput {
     if loopback_transport {
         return SshTunnelOutput {
             pid: None,
@@ -407,7 +429,26 @@ pub(super) fn open_loopback_tunnel(
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null());
-    let child = spawn_tunnel_process(&mut command);
+    let child = if owner_bound {
+        // The sole writer is Child::stdin in the controller. EOF also arrives
+        // on SIGKILL/exec/exit, unlike a destructor or an inherited process group.
+        // Keep the shell as the recorded identity; it owns and reaps only its
+        // exact SSH child. No process discovery or command-line matching.
+        let mut guard = std::process::Command::new("sh");
+        guard
+            .args([
+                "-c",
+                "ssh \"$@\" & child=$!; trap 'kill \"$child\" 2>/dev/null; wait \"$child\"; exit' TERM INT HUP; read ignored; kill \"$child\" 2>/dev/null; wait \"$child\"",
+                "homeboy-tunnel",
+            ])
+            .args(&args)
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null());
+        spawn_tunnel_process(&mut guard)
+    } else {
+        spawn_tunnel_process(&mut command)
+    };
     match child {
         Ok(mut child) => match capture_tunnel_identity(&mut child) {
             Ok(identity) => SshTunnelOutput {
@@ -600,6 +641,62 @@ mod proxy_forward_tests {
         assert!(!homeboy_core::process::pid_is_running(pid));
         assert!(!homeboy_core::process::pid_is_running(descendant_pid));
     }
+}
+
+#[cfg(all(test, unix))]
+#[test]
+fn temporary_tunnel_exits_when_owner_pipe_closes() {
+    use std::os::unix::fs::PermissionsExt;
+    crate::test_support::with_isolated_home(|root| {
+        let bin = root.path().join("bin");
+        std::fs::create_dir_all(&bin).unwrap();
+        let ssh = bin.join("ssh");
+        let pid_file = root.path().join("ssh.pid");
+        std::fs::write(
+            &ssh,
+            format!(
+                "#!/bin/sh\necho $$ > {}\nexec /bin/sleep 300\n",
+                pid_file.display()
+            ),
+        )
+        .unwrap();
+        std::fs::set_permissions(&ssh, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let original = std::env::var_os("PATH").unwrap();
+        std::env::set_var(
+            "PATH",
+            std::env::join_paths(std::iter::once(bin).chain(std::env::split_paths(&original)))
+                .unwrap(),
+        );
+        let server: Server =
+            serde_json::from_value(serde_json::json!({"host": "lab", "user": "test"})).unwrap();
+        let mut tunnel =
+            open_loopback_tunnel_with_lifetime(&server, 1234, "127.0.0.1", 5678, false, true);
+        std::env::set_var("PATH", original);
+        assert!(tunnel.success);
+        let deadline = Instant::now() + Duration::from_secs(3);
+        while !pid_file.exists() && Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        let pid: u32 = std::fs::read_to_string(pid_file)
+            .unwrap()
+            .trim()
+            .parse()
+            .unwrap();
+        let mut child = tunnel.child.take().unwrap();
+        let pipe = child.stdin.take();
+        assert!(child.try_wait().unwrap().is_none());
+        assert!(homeboy_core::process::pid_is_running(pid));
+        drop(pipe); // Same EOF the kernel delivers when the controller dies.
+        let deadline = Instant::now() + Duration::from_secs(3);
+        while child.try_wait().unwrap().is_none() && Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        let exited = child.try_wait().unwrap().is_some();
+        let _ = child.kill();
+        let _ = child.wait();
+        assert!(exited, "owner-bound tunnel survived EOF");
+        assert!(!homeboy_core::process::pid_is_running(pid));
+    });
 }
 
 pub(super) fn spawn_tunnel_process(

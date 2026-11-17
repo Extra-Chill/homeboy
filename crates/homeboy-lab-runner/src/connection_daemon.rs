@@ -12,9 +12,8 @@ use homeboy_core::server::{Server, SshClient};
 
 use super::super::session::{RunnerStaleRuntimePath, RunnerTunnelProcessStartIdentity};
 use super::{
-    failed_connect, open_loopback_tunnel, parse_loopback_daemon_addr, remote_daemon_status,
-    replace_owned_remote_daemon, reserve_loopback_port, wait_for_tcp, OwnedDaemonReplacement,
-    RemoteDaemon,
+    failed_connect, parse_loopback_daemon_addr, remote_daemon_status, replace_owned_remote_daemon,
+    reserve_loopback_port, wait_for_tcp, OwnedDaemonReplacement, RemoteDaemon,
 };
 use crate::connection::remote_daemon::parse_json_from_mixed_stdout;
 use crate::daemon_repair;
@@ -36,6 +35,7 @@ pub(crate) struct DaemonHealthReport {
 }
 
 pub(super) struct RemoteDaemonConnectRequest<'a> {
+    pub(super) owner_bound: bool,
     pub(super) server: &'a Server,
     pub(super) homeboy: &'a str,
     pub(super) daemon: RemoteDaemon,
@@ -346,7 +346,7 @@ fn attach_remote_daemon(
             Box::new((report, exit_code))
         };
     let (local_port, tunnel_pid, tunnel_process_start_identity, local_url) =
-        open_daemon_tunnel(server, daemon, runner_id, session_path)
+        open_daemon_tunnel(server, daemon, runner_id, session_path, request.owner_bound)
             .map_err(AttachFailure::Other)?;
     match probe_daemon_health_until_durable(
         &local_url,
@@ -610,6 +610,7 @@ fn open_daemon_tunnel(
     daemon: &RemoteDaemon,
     runner_id: &str,
     session_path: &Path,
+    owner_bound: bool,
 ) -> TunnelOpenResult {
     let Ok(remote_addr) = parse_loopback_daemon_addr(&daemon.address) else {
         return Err(Box::new(failed_connect(
@@ -646,12 +647,13 @@ fn open_daemon_tunnel(
             ))
         })?
     };
-    let mut tunnel = open_loopback_tunnel(
+    let mut tunnel = super::remote_daemon::open_loopback_tunnel_with_lifetime(
         server,
         local_port,
         &remote_addr.ip().to_string(),
         remote_addr.port(),
         loopback_transport,
+        owner_bound,
     );
     if !tunnel.success {
         return Err(Box::new(failed_connect(

@@ -100,7 +100,7 @@ pub fn ensure_transport(runner_id: &str, lifetime: TransportLifetime) -> Result<
 /// Reattach an admitted job to its captured owner, never the newest session.
 /// The caller owns the returned temporary tunnel and must close it.
 pub(crate) fn reattach_job_owner(runner_id: &str, owner: &RunnerSession) -> Result<RunnerSession> {
-    open_transport(runner_id, owner).map_err(|mut error| {
+    open_transport(runner_id, owner, true).map_err(|mut error| {
         if TransportFailure::of(&error) == Some(TransportFailure::IdentityMismatch) {
             // A refusal to publish an endpoint is not evidence that the job
             // terminated. Do not follow the replacement generation either.
@@ -138,6 +138,9 @@ pub(super) trait TransportOperations {
     fn is_live(&self, session: &RunnerSession) -> bool;
     /// Open a fresh tunnel to the daemon `owner` names and prove its identity.
     fn open(&self, runner_id: &str, owner: &RunnerSession) -> Result<RunnerSession>;
+    fn open_temporary(&self, runner_id: &str, owner: &RunnerSession) -> Result<RunnerSession> {
+        self.open(runner_id, owner)
+    }
     /// Compare-and-replace the current session on its lease; returns the
     /// replaced session.
     fn persist(&self, runner_id: &str, session: &RunnerSession) -> Result<RunnerSession>;
@@ -169,7 +172,7 @@ pub(super) fn ensure_transport_with(
     match lifetime {
         // A temporary tunnel never reuses the current session's tunnel: the
         // caller closes what it receives.
-        TransportLifetime::Temporary => operations.open(runner_id, &owner()?),
+        TransportLifetime::Temporary => operations.open_temporary(runner_id, &owner()?),
         TransportLifetime::Persisted => {
             let owner = restart_recovery::with_restart_recovery_lock(runner_id, owner)?;
             if operations.is_live(&owner) {
@@ -216,7 +219,11 @@ impl TransportOperations for LiveTransport {
     }
 
     fn open(&self, runner_id: &str, owner: &RunnerSession) -> Result<RunnerSession> {
-        open_transport(runner_id, owner)
+        open_transport(runner_id, owner, false)
+    }
+
+    fn open_temporary(&self, runner_id: &str, owner: &RunnerSession) -> Result<RunnerSession> {
+        open_transport(runner_id, owner, true)
     }
 
     fn persist(&self, runner_id: &str, session: &RunnerSession) -> Result<RunnerSession> {
@@ -235,7 +242,11 @@ impl TransportOperations for LiveTransport {
 /// is accepted only when `/health` proves the exact lease and PID `owner`
 /// records. `connect_remote_daemon` only opens the tunnel and probes it; it
 /// never starts the daemon.
-fn open_transport(runner_id: &str, owner: &RunnerSession) -> Result<RunnerSession> {
+fn open_transport(
+    runner_id: &str,
+    owner: &RunnerSession,
+    owner_bound: bool,
+) -> Result<RunnerSession> {
     let runner = load(runner_id)?;
     let Some((_server_id, server, _client)) = resolve_ssh_runner(&runner)? else {
         return Err(transport_error(
@@ -263,6 +274,7 @@ fn open_transport(runner_id: &str, owner: &RunnerSession) -> Result<RunnerSessio
         daemon,
         ..
     } = connect_remote_daemon(connection_daemon::RemoteDaemonConnectRequest {
+        owner_bound,
         server: &server,
         homeboy: "",
         daemon,
@@ -274,6 +286,9 @@ fn open_transport(runner_id: &str, owner: &RunnerSession) -> Result<RunnerSessio
     })
     .map_err(|report| report_error(runner_id, report.0))?;
     Ok(RunnerSession {
+        // The daemon identity can come from a peer; this fresh local forward
+        // always belongs to the controller that opened it.
+        controller_id: Some(controller_id()),
         local_port: Some(local_port),
         local_url: Some(local_url),
         tunnel_pid,
