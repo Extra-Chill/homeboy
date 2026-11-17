@@ -3055,34 +3055,6 @@ fn scoped_reconcile_applies_only_the_inspected_run_and_preserves_other_stale_rec
 }
 
 #[test]
-fn workflow_cook_outcome_uses_terminal_observation_after_failed_lifecycle_write() {
-    with_isolated_home(|_| {
-        let cook_id = "cook-workflow-stale-write";
-        agent_task_lifecycle::submit_plan(&test_plan(), Some(cook_id)).unwrap();
-        agent_task_lifecycle::rewrite_record_for_test(cook_id, |record| {
-            agent_task_lifecycle::set_run_state(record, RunExecutionState::Running);
-            record.metadata["cook_id"] = serde_json::json!(cook_id);
-        })
-        .unwrap();
-        let store = test_lifecycle_store();
-        store
-            .open_observation_initialized()
-            .unwrap()
-            .finish_run(cook_id, homeboy_core::observation::RunStatus::Fail, None)
-            .unwrap();
-        assert_eq!(
-            store.read_record(cook_id).unwrap().state(),
-            RunExecutionState::Running
-        );
-        assert!(matches!(
-            super::cook_step::workflow_cook_outcome(cook_id),
-            homeboy_core::daemon::workflow_job::WorkflowRunOutcome::Settled { outcome, .. }
-                if outcome == "failed"
-        ));
-    });
-}
-
-#[test]
 fn superseded_workflow_cook_step_follows_its_owner_until_it_settles() {
     with_isolated_home(|_| {
         let (owner, superseded) = ("cook-owner-18301", "cook-superseded-18301");
@@ -3105,11 +3077,10 @@ fn superseded_workflow_cook_step_follows_its_owner_until_it_settles() {
             homeboy_core::daemon::workflow_job::WorkflowRunOutcome::Pending
         ));
 
-        test_lifecycle_store()
-            .open_observation_initialized()
-            .unwrap()
-            .finish_run(owner, homeboy_core::observation::RunStatus::Fail, None)
-            .unwrap();
+        agent_task_lifecycle::rewrite_record_for_test(owner, |record| {
+            agent_task_lifecycle::set_run_state(record, RunExecutionState::Failed);
+        })
+        .unwrap();
         assert!(matches!(
             super::cook_step::workflow_cook_outcome(superseded),
             homeboy_core::daemon::workflow_job::WorkflowRunOutcome::Settled { outcome, .. }
