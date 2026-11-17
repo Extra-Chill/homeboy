@@ -747,8 +747,11 @@ mod provider_rotation_tests {
         let calls = Arc::new(AtomicUsize::new(0));
         let mut plan = plan_with_tasks(1);
         plan.tasks[0].workspace.root = Some(workspace.display().to_string());
-        plan.tasks[0].output_declarations =
-            vec![crate::agent_task_review_dossier::review_form_output_declaration()];
+        plan.tasks[0].output_declarations = vec![
+            crate::agent_task_review_dossier::review_form_output_declaration(
+                crate::agent_task_review_dossier::PrTitlePolicy::ConventionalCommit,
+            ),
+        ];
         plan.options.rotation = Some(rotation_policy(vec![entry("fallback-backend-a")]));
         enable_rotation(&mut plan);
 

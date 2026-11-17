@@ -101,7 +101,10 @@ impl AgentTaskOutputDeclaration {
         }
         let outputs = serde_json::json!({ (self.name.as_str()): value });
         match crate::agent_task_review_dossier::AiFilledReviewForm::from_outcome_outputs(&outputs) {
-            Ok(Some(form)) => form.validate().err().map(|error| error.message),
+            Ok(Some(form)) => form
+                .validate(crate::agent_task_review_dossier::PrTitlePolicy::from_declaration(self))
+                .err()
+                .map(|error| error.message),
             Ok(None) => None,
             Err(error) => Some(error.message),
         }

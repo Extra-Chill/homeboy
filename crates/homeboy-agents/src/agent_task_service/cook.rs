@@ -1507,11 +1507,12 @@ pub fn agent_incomplete_reason(outputs: &Value) -> Option<String> {
 /// declaration carries the schema and the publication metadata records that
 /// the controller owns publication. Presenting either to the model is the
 /// operator's `agent_task.prompt_templates` concern.
-fn project_initial_finalizing_review_form_contract(options: &mut CookRequest) {
+fn project_initial_finalizing_review_form_contract(options: &mut CookRequest) -> Result<()> {
     if options.finalization.no_finalize {
-        return;
+        return Ok(());
     }
 
+    let title_policy = cook_pr_title_policy(options)?;
     for request in &mut options.identity.initial_plan.tasks {
         request.controller_owns_publication();
         request.output_declarations.retain(|declaration| {
@@ -1519,12 +1520,31 @@ fn project_initial_finalizing_review_form_contract(options: &mut CookRequest) {
         });
         request
             .output_declarations
-            .push(crate::agent_task_review_dossier::review_form_output_declaration());
+            .push(crate::agent_task_review_dossier::review_form_output_declaration(title_policy));
         crate::agent_task_prompt_template::merge_homeboy_facts(
             request,
             serde_json::json!({ "publication": { "owner": "controller" } }),
         );
     }
+    Ok(())
+}
+
+/// The Cook's PR-title rule, from the admitted component's release policy.
+fn cook_pr_title_policy(
+    options: &CookRequest,
+) -> Result<crate::agent_task_review_dossier::PrTitlePolicy> {
+    let component_id = options
+        .gates
+        .gate_environment
+        .admitted_component_id
+        .clone()
+        .or_else(|| cook_repository_identity_component_id(&options.identity.initial_plan));
+    let component = component_id
+        .as_deref()
+        .map(cook_registered_component_by_id)
+        .transpose()?
+        .flatten();
+    Ok(crate::agent_task_review_dossier::PrTitlePolicy::for_component(component.as_ref()))
 }
 
 /// Record the controller-owned gate population as structured request data
@@ -2160,6 +2180,16 @@ fn canonical_finalization_recovery_run_id_with_stores(
         .flatten()?;
     let recovery_run_id =
         super::cook_promotion::canonical_cook_recovery_run_id_with_stores(stores, cook_id)?;
+    let title_policy = stores
+        .map(|(recipes, _)| recipes.load_recipe(cook_id))
+        .unwrap_or_else(|| super::cook_recipe::load_recipe(cook_id))
+        .ok()
+        .and_then(|recipe| {
+            recipe.attempts.first().map(|attempt| {
+                crate::agent_task_review_dossier::PrTitlePolicy::from_plan(&attempt.plan)
+            })
+        })
+        .unwrap_or(crate::agent_task_review_dossier::PrTitlePolicy::ConventionalCommit);
     if !canonical_finalization_eligible(
         &promotion,
         review_form_from_aggregate(
@@ -2170,7 +2200,7 @@ fn canonical_finalization_recovery_run_id_with_stores(
         )
         .ok()
         .flatten()
-        .is_some_and(|form| form.validate().is_ok()),
+        .is_some_and(|form| form.validate(title_policy).is_ok()),
     ) || promotion.source.run_id.as_deref() != Some(run_id)
         || promotion.source.task_id != task_id
         || promotion
@@ -5224,7 +5254,7 @@ fn run_cook_spine(
         )?;
     }
     project_controller_owned_gate_contract(&mut options);
-    project_initial_finalizing_review_form_contract(&mut options);
+    project_initial_finalizing_review_form_contract(&mut options)?;
     project_attempt_prompt_template(&mut options);
     validate_reviewer_visible_gates(&options.gates.verify, Some(&options.identity.cook_id))?;
     // A configured provider is controller authority. Resolve it before an
@@ -7129,7 +7159,7 @@ fn run_cook_spine(
         let review_form_unavailable = !verification_pending
             && persisted_promotion_for_attempt_in_store(lifecycle_store, &run_id)?
                 .is_some_and(|promotion| promotion.applied_with_passing_verdict())
-            && !matches!(review_form_from_aggregate(&aggregate), Ok(Some(form)) if form.validate().is_ok());
+            && !matches!(review_form_from_aggregate(&aggregate), Ok(Some(form)) if form.validate(crate::agent_task_review_dossier::PrTitlePolicy::from_plan(&options.identity.initial_plan)).is_ok());
         let persisted_terminal_status = record.metadata["cook_progress"]["terminal_status"]
             .as_str()
             .map(str::to_string);
@@ -7812,27 +7842,42 @@ fn publish_latest_incomplete_draft(
     Ok(())
 }
 
-/// A held draft's title names the change: the agent's own title, made a
-/// conventional subject when it is not one, or else the candidate's changed
-/// files. A Cook id is not a title a reviewer can act on (#17919).
+/// A held draft's title names the change: the agent's own title (made a
+/// conventional subject when the component's policy requires one and it is
+/// not one), or else the candidate's changed files. A Cook id is not a title
+/// a reviewer can act on (#17919).
 pub(super) fn draft_title(
     agent_title: Option<&str>,
     promotion: &AgentTaskPromotionReport,
+    title_policy: crate::agent_task_review_dossier::PrTitlePolicy,
 ) -> String {
+    let prefix = match title_policy {
+        crate::agent_task_review_dossier::PrTitlePolicy::ConventionalCommit => "fix: ",
+        crate::agent_task_review_dossier::PrTitlePolicy::Plain => "",
+    };
     if let Some(title) = agent_title {
-        if homeboy_core::git::is_conventional_subject(title) {
+        if title_policy.accepts(title) {
             return title.to_string();
         }
-        return format!("fix: {title}");
+        return format!("{prefix}{title}");
     }
-    match promotion.changed_files.as_slice() {
-        [] => "fix: candidate with no changed files".to_string(),
-        [file] => format!("fix: update {file}"),
+    let subject = match promotion.changed_files.as_slice() {
+        [] => "candidate with no changed files".to_string(),
+        [file] => format!("update {file}"),
         [file, rest @ ..] => format!(
-            "fix: update {file} and {} more file{}",
+            "update {file} and {} more file{}",
             rest.len(),
             if rest.len() == 1 { "" } else { "s" }
         ),
+    };
+    if prefix.is_empty() {
+        let mut chars = subject.chars();
+        chars
+            .next()
+            .map(|first| first.to_uppercase().chain(chars).collect())
+            .unwrap_or_default()
+    } else {
+        format!("{prefix}{subject}")
     }
 }
 

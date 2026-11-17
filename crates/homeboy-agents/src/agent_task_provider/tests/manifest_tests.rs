@@ -253,8 +253,11 @@ fn provider_validates_declared_outputs() {
         .to_string()
     };
     let mut form_request = request.clone();
-    form_request.output_declarations =
-        vec![crate::agent_task_review_dossier::review_form_output_declaration()];
+    form_request.output_declarations = vec![
+        crate::agent_task_review_dossier::review_form_output_declaration(
+            crate::agent_task_review_dossier::PrTitlePolicy::ConventionalCommit,
+        ),
+    ];
     for (resumed_title, expected_title, corrected) in [
         (
             "fix(sync): restore categories after pull",

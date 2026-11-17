@@ -540,9 +540,11 @@ fn review_form_only_failure_without_edits_records_the_verified_empty_patch() {
         if requires_patch {
             request.expected_artifacts = vec!["patch".to_string()];
         }
-        request
-            .output_declarations
-            .push(crate::agent_task_review_dossier::review_form_output_declaration());
+        request.output_declarations.push(
+            crate::agent_task_review_dossier::review_form_output_declaration(
+                crate::agent_task_review_dossier::PrTitlePolicy::ConventionalCommit,
+            ),
+        );
         request
     };
     let normalize = |request: &AgentTaskRequest| {
