@@ -3480,7 +3480,10 @@ fn cook_review_dossier_with_stores_and_review_form(
             .iter()
             .filter(|gate| gate.status == crate::agent_task_gate::AgentTaskGateStatus::Failed)
             .map(|gate| {
-                let output = super::cook::plain_text(&format!("{}\n{}", gate.stdout, gate.stderr));
+                let output = crate::agent_task_review_dossier::plain_text(&format!(
+                    "{}\n{}",
+                    gate.stdout, gate.stderr
+                ));
                 let lines = output.lines().collect::<Vec<_>>();
                 (
                     gate.id.clone(),
