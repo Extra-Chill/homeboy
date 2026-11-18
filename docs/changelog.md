@@ -4,6 +4,12 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.473.8] - 2026-11-18
+
+### Fixed
+- start CLI-launched daemons in a delegated systemd scope so their jobs get cgroups
+- chain SIGTERM/SIGINT handlers so process cleanup no longer steals daemon shutdown
+
 ## [0.473.7] - 2026-11-18
 
 ### Fixed
