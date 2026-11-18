@@ -447,10 +447,14 @@ runs:
       if: steps.provisioning.outputs.reuse != 'true' && inputs.binary-path == '' && (inputs.source == '' || steps.source-build.outputs.built != 'true')
       uses: actions/cache@v5
       with:
+        # With config-dir, HOMEBOY_CONFIG_ROOT moves the extension store to
+        # <config-root>/extensions, so cache that too (homeboy#18462). The key
+        # differs per store layout so an older entry without it is not a hit.
         path: |
           /usr/local/bin/homeboy
           ~/.config/homeboy/extensions/
-        key: homeboy-${{ steps.resolve-version.outputs.resolved-version }}-${{ steps.read-config.outputs.portable-extension }}-${{ runner.os }}-${{ runner.arch }}
+          ${{ steps.read-config.outputs.homeboy-config-root != '' && format('{0}/extensions/', steps.read-config.outputs.homeboy-config-root) || '' }}
+        key: homeboy-${{ steps.resolve-version.outputs.resolved-version }}-${{ steps.read-config.outputs.portable-extension }}-${{ runner.os }}-${{ runner.arch }}${{ steps.read-config.outputs.homeboy-config-root != '' && '-config-root' || '' }}
 
     - name: Install Homeboy
       if: steps.provisioning.outputs.reuse != 'true' && inputs.binary-path == '' && (inputs.source == '' || steps.source-build.outputs.built != 'true') && steps.cache-homeboy.outputs.cache-hit != 'true'
