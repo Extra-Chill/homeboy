@@ -1612,11 +1612,14 @@ fn claim_family_siblings_skip_expire_and_notify() {
         ErrorCode::ValidationInvalidArgument.as_str()
     );
 
-    // A skip writes nothing and claims nothing: the next scan of that same
-    // store still leaves the record unclaimed.
+    // A skip writes nothing, so the record stays queued: the next scan of that
+    // same store, with the default preflight, claims it.
     let rescan =
         claim_next_eligible_queued_run_in_store(&seeded).expect("rescan the injected store");
-    assert!(rescan.record.is_none());
+    assert_eq!(
+        rescan.record.expect("the skipped record is claimable again").run_id,
+        queued_run_id
+    );
     assert!(claim_next_queued_run_in_store(&seeded)
         .expect("the thin claim delegate shares the injected store")
         .is_none());
@@ -1657,10 +1660,10 @@ fn claim_family_siblings_skip_expire_and_notify() {
     }
 
     // The positive: every coordinating write is durable in the store handed in.
-    let skipped = seeded
+    let claimed = seeded
         .read_record(queued_run_id)
         .expect("read the scanned queue's record back");
-    assert_eq!(skipped.state(), RunExecutionState::Queued);
+    assert_ne!(claimed.state(), RunExecutionState::Queued);
     let expired = seeded
         .read_record(handoff_cook_id)
         .expect("read the detached parent back");

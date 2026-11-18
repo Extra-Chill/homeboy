@@ -4807,16 +4807,6 @@ fn diagnostic_collection_projection(truncations: &[Value]) -> Value {
     })
 }
 
-pub(crate) fn completed_run_aggregate(
-    run_id: &str,
-) -> Option<homeboy::core::Result<AgentTaskAggregate>> {
-    match agent_task_lifecycle::durable_local_read(run_id) {
-        Ok(snapshot) => snapshot.aggregate.map(Ok),
-        Err(error) if error.code == homeboy::core::ErrorCode::ValidationInvalidArgument => None,
-        Err(error) => Some(Err(error)),
-    }
-}
-
 /// Cap the number of surfaced failure reasons so a pathological run with
 /// hundreds of nested diagnostics cannot flood the failure summary. Overflow is
 /// still available in the full nested payload (`--full` / aggregate file).
