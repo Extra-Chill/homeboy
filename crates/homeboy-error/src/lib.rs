@@ -137,6 +137,9 @@ pub enum ErrorCode {
     RunnerLabUnavailable,
     /// Controller and runner run different Homeboy builds.
     RunnerVersionSkew,
+    /// The serving local daemon runs a different build than the submitter and
+    /// cannot read a request shape the submitter's build produces.
+    DaemonStaleCapability,
     RunnerMachineAlreadyRegistered,
     RuntimePromotionContended,
     RuntimePromotionWaitTimeout,
@@ -234,6 +237,7 @@ impl ErrorCode {
             ErrorCode::RunnerJobLost => "runner.job_lost",
             ErrorCode::RunnerLabUnavailable => "runner.lab_unavailable",
             ErrorCode::RunnerVersionSkew => "runner.version_skew",
+            ErrorCode::DaemonStaleCapability => "daemon.stale_capability",
             ErrorCode::RunnerMachineAlreadyRegistered => "runner.machine_already_registered",
             ErrorCode::RuntimePromotionContended => "runtime_promotion.contended",
             ErrorCode::RuntimePromotionWaitTimeout => "runtime_promotion.wait_timeout",
@@ -308,6 +312,7 @@ impl ErrorCode {
             "runner.job_lost" => Self::RunnerJobLost,
             "runner.lab_unavailable" => Self::RunnerLabUnavailable,
             "runner.version_skew" => Self::RunnerVersionSkew,
+            "daemon.stale_capability" => Self::DaemonStaleCapability,
             "runner.machine_already_registered" => Self::RunnerMachineAlreadyRegistered,
             "runtime_promotion.contended" => Self::RuntimePromotionContended,
             "runtime_promotion.wait_timeout" => Self::RuntimePromotionWaitTimeout,

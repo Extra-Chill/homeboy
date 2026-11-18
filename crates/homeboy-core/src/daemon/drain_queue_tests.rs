@@ -143,6 +143,7 @@ fn reservation_holds_admission_without_failing_and_release_resumes() {
             idempotency_key: "reserved-job".into(),
             active_idempotency_key: None,
             request: json!({}),
+            submitter_build: None,
         };
         let admitted = admit_controller_job(request, &store).unwrap();
         let id = admitted.job.id;
@@ -179,6 +180,7 @@ fn daemon_plan_during_a_drain_lists_the_holder_jobs() {
             idempotency_key: "continuation".to_string(),
             active_idempotency_key: None,
             request: json!({ "run_id": "run-17707" }),
+            submitter_build: None,
         };
         let crate::api_jobs::ControllerJobSubmissionOutcome::Submitted(job_id) = store
             .admit_controller_job(
