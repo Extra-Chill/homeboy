@@ -6,6 +6,11 @@ The desktop app currently shells out to the standalone Rust CLI (`homeboy`) for 
 
 For current behavior, prefer the code and other documentation (for example `docs/CLI.md`).
 
+## [0.13.5] - 2026-11-18
+
+### Changed
+- delete replay-provider-boundary, quarantine, and rearm verbs
+
 ## [0.13.4] - 2026-11-10
 
 ### Changed
