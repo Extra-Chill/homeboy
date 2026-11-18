@@ -440,7 +440,7 @@ fn observe_launch_exit(cook_id: &str, exit: &StepTerminalDelivery) -> Result<()>
     if !record.state().is_terminal() {
         agent_task_lifecycle::record_interrupted_local_owner_in_store(&store, &attempt)?;
     }
-    notify_cook_attempt(cook_id, &attempt)
+    super::finish_cook_terminal(&store, cook_id)
 }
 
 /// Whether the Cook's latest non-terminal attempt is authorized by its current
@@ -542,29 +542,15 @@ fn settle_missing_launch_index(
     }
 }
 
-fn notify_cook_attempt(cook_id: &str, attempt_run_id: &str) -> Result<()> {
-    let store = agent_task_lifecycle::AgentTaskLifecycleStore::from_environment()?;
-    let record = store.read_record(attempt_run_id)?;
-    if !record.state().is_terminal() {
-        return Ok(());
-    }
-    let exit_code =
-        i32::from(record.state() != homeboy_lifecycle_contract::RunExecutionState::Succeeded);
-    crate::agent_task_notify::cook_terminal_for_attempt(
-        cook_id,
-        attempt_run_id,
-        attempt_status_label(record.state()),
-        exit_code,
-    );
-    Ok(())
-}
-
 #[cfg(test)]
-pub(crate) fn finalize_detached_cook_attempt(cook_id: &str, attempt_run_id: &str) -> Result<()> {
-    notify_cook_attempt(cook_id, attempt_run_id)
+pub(crate) fn finalize_detached_cook_attempt(cook_id: &str, _attempt_run_id: &str) -> Result<()> {
+    let store = agent_task_lifecycle::AgentTaskLifecycleStore::from_environment()?;
+    super::finish_cook_terminal(&store, cook_id)
 }
 
-fn attempt_status_label(state: homeboy_lifecycle_contract::RunExecutionState) -> &'static str {
+pub(super) fn attempt_status_label(
+    state: homeboy_lifecycle_contract::RunExecutionState,
+) -> &'static str {
     use homeboy_lifecycle_contract::RunExecutionState;
     match state {
         RunExecutionState::Queued => "queued",

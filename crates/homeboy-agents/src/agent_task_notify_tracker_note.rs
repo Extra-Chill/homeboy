@@ -78,19 +78,23 @@ pub(super) fn note(
 
 /// Post or update the note for `cook_id` from its durable records. Best
 /// effort: a tracker the Cook cannot reach never changes its outcome.
-pub(super) fn post(cook_id: &str) {
-    let Some((issue, body)) = durable_note(cook_id) else {
+pub(super) fn post(store: &crate::agent_task_lifecycle::AgentTaskLifecycleStore, cook_id: &str) {
+    let Some((issue, body)) = durable_note(store, cook_id) else {
         return;
     };
     deliver(cook_id, &issue, body);
 }
 
-fn durable_note(cook_id: &str) -> Option<(GithubIssueRef, String)> {
-    let recipe = crate::agent_task_service::load_recipe(cook_id).ok()?;
+fn durable_note(
+    store: &crate::agent_task_lifecycle::AgentTaskLifecycleStore,
+    cook_id: &str,
+) -> Option<(GithubIssueRef, String)> {
+    let recipe = crate::agent_task_service::CookRecipeStore::new(store.roots().clone())
+        .load_recipe(cook_id)
+        .ok()?;
     if recipe.finalization["tracker_note"] == false {
         return None;
     }
-    let store = crate::agent_task_lifecycle::AgentTaskLifecycleStore::from_environment().ok()?;
     let run_id = store
         .read_cook_index(cook_id)
         .ok()?
@@ -102,7 +106,7 @@ fn durable_note(cook_id: &str) -> Option<(GithubIssueRef, String)> {
     if record.state() == homeboy_lifecycle_contract::RunExecutionState::Cancelled {
         return None;
     }
-    let aggregate = crate::agent_task_lifecycle::read_attempt_aggregate(&run_id).ok()?;
+    let aggregate = store.read_aggregate(&run_id).ok()?;
     let form = crate::agent_task_service::review_form_from_aggregate(&aggregate).ok()??;
     let delivery = CookDelivery::from_run_metadata(&record.metadata);
     let provenance = crate::execution_provenance::execution_provenance(&record);

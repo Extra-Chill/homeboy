@@ -569,31 +569,38 @@ fn gate_summary(gates: &[(&str, bool)]) -> String {
 /// terminal boundary — a `--continue` over an already-terminal cook, an adopted
 /// controller — would now re-announce an outcome the operator already has.
 pub(crate) fn cook_terminal(report: &AgentTaskCookReport, component: Option<&str>, exit_code: i32) {
-    tracker_note::post(&report.cook_id);
-    cook_terminal_with(report, component, exit_code, tracker::resolved_tracker);
-}
-
-fn cook_terminal_with(
-    report: &AgentTaskCookReport,
-    component: Option<&str>,
-    exit_code: i32,
-    resolved_tracker: impl FnOnce(&str) -> Option<String>,
-) {
     // Resolve one lifecycle store for the whole claim/record/confirm/release
     // protocol. These four steps are a single exactly-once transaction, and a
     // step that lands in a different home than the claim cannot fail while
-    // getting it wrong: a confirm against the wrong root consumes an
-    // eligibility nobody holds, and a release against the wrong root deletes
-    // nothing and returns `Ok(())`, leaving the real claim to expire and be
-    // re-delivered. Resolving once is what makes them agree (#7505).
-    //
-    // An unresolvable store is treated exactly as a lost claim, which is the
-    // rule this function already applied to a failed claim.
+    // getting it wrong (#7505). An unresolvable store is treated exactly as a
+    // lost claim.
     let Ok(lifecycle_store) =
         crate::agent_task_lifecycle::AgentTaskLifecycleStore::from_environment()
     else {
         return;
     };
+    cook_terminal_in_store(&lifecycle_store, report, component, exit_code);
+}
+
+pub(crate) fn cook_terminal_in_store(
+    store: &crate::agent_task_lifecycle::AgentTaskLifecycleStore,
+    report: &AgentTaskCookReport,
+    component: Option<&str>,
+    exit_code: i32,
+) {
+    tracker_note::post(store, &report.cook_id);
+    cook_terminal_in_store_with(store, report, component, exit_code, |cook_id| {
+        tracker::resolved_tracker(store, cook_id)
+    });
+}
+
+fn cook_terminal_in_store_with(
+    lifecycle_store: &crate::agent_task_lifecycle::AgentTaskLifecycleStore,
+    report: &AgentTaskCookReport,
+    component: Option<&str>,
+    exit_code: i32,
+    resolved_tracker: impl FnOnce(&str) -> Option<String>,
+) {
     // Claim before building the payload, and treat a failed claim the same as a
     // lost one: the runner-direct and daemon-backstop paths also decline to
     // dispatch when their marker cannot be established, because a duplicated
@@ -640,7 +647,12 @@ fn cook_terminal_with(
     let event = NotifyEvent::lifecycle(payload.kind, &report.cook_id, status)
         .with_title(payload.title.clone().unwrap_or_default())
         .with_payload(payload);
-    let route = effective_route(&route_run_id);
+    let route = notification_route::current().or_else(|| {
+        crate::agent_task_lifecycle::durable_notification_route_in_store(
+            &lifecycle_store,
+            &route_run_id,
+        )
+    });
     let dispatch = notify_outbox::dispatch_with_outbox(
         &event.with_route(route.as_ref()),
         Some(NotifyOnceMarker::new(
@@ -688,13 +700,12 @@ fn cook_terminal_with(
     }
 }
 
-pub(crate) fn cook_terminal_for_attempt(
+pub(crate) fn terminal_attempt_report(
     cook_id: &str,
     attempt_run_id: &str,
     status: &str,
-    exit_code: i32,
-) {
-    let report = AgentTaskCookReport {
+) -> AgentTaskCookReport {
+    AgentTaskCookReport {
         schema: "homeboy/agent-task-cook/v1",
         cook_id: cook_id.to_string(),
         latest_run_id: Some(attempt_run_id.to_string()),
@@ -713,8 +724,7 @@ pub(crate) fn cook_terminal_for_attempt(
         provider_route_notes: Vec::new(),
         failure_context: None,
         report_stores: None,
-    };
-    cook_terminal(&report, None, exit_code);
+    }
 }
 
 /// Build the continuation-failed payload. Separated from delivery so its
@@ -743,7 +753,12 @@ fn continuation_failed_payload(cook_id: &str, run_id: &str, diagnostic: &str) ->
 /// happened to run `agent-task recover`. Delivered at most once per attempt through
 /// its own marker, so it never consumes the Cook's terminal announcement.
 pub fn cook_continuation_failed(cook_id: &str, run_id: &str, diagnostic: &str) {
-    cook_continuation_failed_with(cook_id, run_id, diagnostic, tracker::resolved_tracker);
+    let Ok(store) = crate::agent_task_lifecycle::AgentTaskLifecycleStore::from_environment() else {
+        return;
+    };
+    cook_continuation_failed_with(cook_id, run_id, diagnostic, |cook_id| {
+        tracker::resolved_tracker(&store, cook_id)
+    });
 }
 
 fn cook_continuation_failed_with(

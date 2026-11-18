@@ -2,6 +2,78 @@
 //! cook god file via #[path]; logically remains `cook::tests` so `super::`
 //! paths are unchanged.
 
+#[test]
+fn detached_cook_lab_staging_failure_finishes_after_driver_exit() {
+    homeboy_core::test_support::with_isolated_home(|_| {
+        let mut config = homeboy_core::defaults::load_config();
+        let mut manifest: homeboy_extension_contract::ExtensionManifest = serde_json::from_value(
+            serde_json::json!({
+                "name": "Test transport", "version": "1.0.0",
+                "notification_transports": [{
+                    "schema": homeboy_extension_contract::notification_transport_config::NOTIFICATION_TRANSPORT_SCHEMA,
+                    "id": "test.cook", "command": ["true"]
+                }]
+            }),
+        ).unwrap();
+        manifest.id = "cook-terminal-test".into();
+        homeboy_core::extension::catalog::save_manifest(&manifest).unwrap();
+        config.notifications.default_transport = Some("test.cook".into());
+        homeboy_core::defaults::save_config(&config).unwrap();
+        let store = test_lifecycle_store();
+        let cook_id = "cook-detached-staging-failure";
+        let attempt_id = "cook-detached-staging-attempt-1";
+        let plan = crate::agent_task_scheduler::AgentTaskPlan::new("staging-failure", Vec::new());
+        agent_task_lifecycle::record_detached_cook_handoff_parent_in_store(&store, cook_id)
+            .unwrap();
+        agent_task_lifecycle::submit_plan(&plan, Some(attempt_id)).unwrap();
+        agent_task_lifecycle::record_cook_attempt_in_store(&store, cook_id, 1, attempt_id).unwrap();
+        let observations = store.open_observation_initialized().unwrap();
+        assert_eq!(
+            serde_json::to_value(observations.get_run(cook_id).unwrap().unwrap().status).unwrap(),
+            "running"
+        );
+        // No Cook driver remains to consume the staging controller's failure.
+        let error = homeboy_core::Error::internal_io("staging failed", None);
+        let fail = || {
+            agent_task_lifecycle::record_pre_execution_failure_in_store(
+                &store,
+                attempt_id,
+                &plan,
+                "lab_staging_controller",
+                &error,
+            )
+            .unwrap()
+        };
+        fail();
+        let outcome = agent_task_lifecycle::cook_terminal_notification_outcome(cook_id)
+            .unwrap()
+            .unwrap();
+        assert_eq!(outcome["status"], "delivered");
+        fail();
+        assert_eq!(
+            agent_task_lifecycle::cook_terminal_notification_outcome(cook_id)
+                .unwrap()
+                .unwrap(),
+            outcome
+        );
+        assert!(
+            !agent_task_lifecycle::claim_cook_terminal_notification_in_store(
+                &store,
+                cook_id,
+                "duplicate"
+            )
+            .unwrap()
+        );
+        for id in [cook_id, attempt_id] {
+            assert_eq!(
+                serde_json::to_value(observations.get_run(id).unwrap().unwrap().status).unwrap(),
+                "fail",
+                "{id}"
+            );
+        }
+    });
+}
+
 use super::super::cook_adoption::{
     adopt_cook_candidate_with_dispatcher_and_backend, candidate_adoption_source_in_store,
     resolve_adoption_target, resolve_adoption_target_with_attempt_in_stores,

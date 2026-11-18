@@ -67,6 +67,20 @@ pub fn record_pre_execution_failure_in_store(
     } else if record.state().is_terminal() {
         lifecycle_store.project_terminal_record_after_unlock(&record.run_id)?;
     }
+    // The failure is recorded; finishing the Cook is its consequence and
+    // must not turn that recording into an error.
+    if let Some(cook_id) = record.metadata["cook_id"].as_str() {
+        if let Err(error) =
+            crate::agent_task_service::finish_cook_terminal(lifecycle_store, cook_id)
+        {
+            homeboy_core::log_status!(
+                "agent-task",
+                "Cook {} terminal settle failed: {}",
+                cook_id,
+                error
+            );
+        }
+    }
     Ok(record)
 }
 

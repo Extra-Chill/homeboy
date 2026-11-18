@@ -82,8 +82,13 @@ pub(super) fn resolved_tracker_in(
 
 /// Production probe: the Cook's durable recipe names its trackers, and `gh`
 /// answers their state.
-pub(super) fn resolved_tracker(cook_id: &str) -> Option<String> {
-    let recipe = crate::agent_task_service::load_recipe(cook_id).ok()?;
+pub(super) fn resolved_tracker(
+    store: &crate::agent_task_lifecycle::AgentTaskLifecycleStore,
+    cook_id: &str,
+) -> Option<String> {
+    let recipe = crate::agent_task_service::CookRecipeStore::new(store.roots().clone())
+        .load_recipe(cook_id)
+        .ok()?;
     resolved_tracker_in(&recipe.source_refs, gh_issue_closed_as_completed)
 }
 
