@@ -2,6 +2,11 @@
 
 All notable changes to Homeboy Action will be documented in this file.
 
+## [2.27.3] - 2026-11-18
+
+### Changed
+- rolling npm/composer download cache and audit-free hydration installs
+
 ## [2.27.2] - 2026-11-18
 
 ### Fixed
