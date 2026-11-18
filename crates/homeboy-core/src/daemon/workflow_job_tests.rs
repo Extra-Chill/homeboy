@@ -572,7 +572,7 @@ fn stale_daemon_hands_a_running_workflow_step_to_its_replacement() {
                 "schema": "homeboy/workflow/v1", "id": "stale-handoff",
                 "steps": [
                     {"id": "a", "exec": sh(&format!(
-                        "touch {}; while [ ! -f {} ]; do sleep 0.05; done",
+                        "touch {}; n=0; while [ ! -f {} ] && [ $n -lt 2400 ]; do sleep 0.05; n=$((n+1)); done",
                         started.display(), release.display()))},
                     {"id": "b", "needs": ["a"], "exec": sh(&format!("touch {}", next.display()))}
                 ]

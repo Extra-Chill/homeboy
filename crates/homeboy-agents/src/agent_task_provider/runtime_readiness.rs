@@ -1018,7 +1018,7 @@ mod tests {
         let release = root.path().join("release");
         // Release explicitly rather than racing a fixed probe delay.
         let (_fake, provider, mut config, count) = pi_fixture(
-            "printf 'probe\\n' >> \"$COUNT\"; while [ ! -f \"$RELEASE\" ]; do sleep 0.01; done; printf 'test model\\n'",
+            "printf 'probe\\n' >> \"$COUNT\"; n=0; while [ ! -f \"$RELEASE\" ] && [ $n -lt 12000 ]; do sleep 0.01; n=$((n+1)); done; printf 'test model\\n'",
         );
         config["runtime_env"]["RELEASE"] = json!(release);
         let cache = test_cache();
@@ -1099,7 +1099,7 @@ mod tests {
         let root = tempfile::tempdir().expect("tempdir");
         let release = root.path().join("release");
         let (_fake, provider, mut config, count) = pi_fixture(
-            "printf 'probe\\n' >> \"$COUNT\"; while [ ! -f \"$RELEASE\" ]; do sleep 0.01; done; printf 'test model\\n'",
+            "printf 'probe\\n' >> \"$COUNT\"; n=0; while [ ! -f \"$RELEASE\" ] && [ $n -lt 12000 ]; do sleep 0.01; n=$((n+1)); done; printf 'test model\\n'",
         );
         config["runtime_env"]["RELEASE"] = json!(release);
         let mut cache = test_cache();
@@ -1159,7 +1159,7 @@ mod tests {
     fn distinct_readiness_keys_probe_concurrently() {
         let root = tempfile::tempdir().expect("tempdir");
         let (_fake, provider, config, _) = pi_fixture(
-            "touch \"$ROOT/started-$KEY\"; while [ ! -f \"$ROOT/started-$OTHER\" ]; do sleep 0.01; done; printf 'test model\\n'",
+            "touch \"$ROOT/started-$KEY\"; n=0; while [ ! -f \"$ROOT/started-$OTHER\" ] && [ $n -lt 12000 ]; do sleep 0.01; n=$((n+1)); done; printf 'test model\\n'",
         );
         let cache = test_cache();
         std::thread::scope(|scope| {
@@ -1188,7 +1188,7 @@ mod tests {
         let release = root.path().join("release");
         let probes = root.path().join("probes");
         let (_fake, provider, mut config, _) = pi_fixture(
-            "printf '%s\\n' \"$KEY\" >> \"$PROBES\"; while [ ! -f \"$RELEASE\" ]; do sleep 0.01; done; printf 'test model\\n'",
+            "printf '%s\\n' \"$KEY\" >> \"$PROBES\"; n=0; while [ ! -f \"$RELEASE\" ] && [ $n -lt 12000 ]; do sleep 0.01; n=$((n+1)); done; printf 'test model\\n'",
         );
         config["runtime_env"] = json!({"RELEASE": release, "PROBES": probes});
         let cache = test_cache();

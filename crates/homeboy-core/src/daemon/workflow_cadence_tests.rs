@@ -346,7 +346,7 @@ fn the_tick_fires_skips_overlap_and_never_fires_a_slot_twice() {
         let gate = home.path().join("release");
         let runs = home.path().join("runs.log");
         let script = format!(
-            "echo run >> {runs}; while [ ! -f {gate} ]; do sleep 0.05; done",
+            "echo run >> {runs}; n=0; while [ ! -f {gate} ] && [ $n -lt 2400 ]; do sleep 0.05; n=$((n+1)); done",
             runs = runs.display(),
             gate = gate.display()
         );

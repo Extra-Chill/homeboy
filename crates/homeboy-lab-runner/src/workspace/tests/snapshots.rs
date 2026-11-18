@@ -614,7 +614,7 @@ fn prepared_source_cache_uses_one_lock_for_views_and_pruning() {
     let started = root.path().join("copy-started");
     let release = root.path().join("copy-release");
     let cp = tools.path().join("cp");
-    homeboy_test_support::write_executable(&cp, "#!/bin/sh\n: > \"$HOMEBOY_COPY_STARTED\"\nwhile [ ! -f \"$HOMEBOY_COPY_RELEASE\" ]; do sleep 0.01; done\nexec /bin/cp \"$@\"\n", 0o755).expect("cp shim");
+    homeboy_test_support::write_executable(&cp, "#!/bin/sh\n: > \"$HOMEBOY_COPY_STARTED\"\nn=0; while [ ! -f \"$HOMEBOY_COPY_RELEASE\" ] && [ $n -lt 12000 ]; do sleep 0.01; n=$((n+1)); done\nexec /bin/cp \"$@\"\n", 0o755).expect("cp shim");
 
     let destination = root.path().join("view");
     let mut view = Command::new("sh")

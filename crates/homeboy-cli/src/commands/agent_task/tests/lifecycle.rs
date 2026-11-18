@@ -2661,7 +2661,7 @@ fn recover_public_entry_returns_before_blocking_gate_and_records_daemon_result()
                         request.args = vec![
                             "-c".into(),
                             format!(
-                                "touch '{}'; while [ ! -f '{}' ]; do sleep 0.05; done; printf '{{\\n  \"success\": false,\\n  \"summary\": \"promotion resume refused\"\\n}}\\n'; exit 7",
+                                "touch '{}'; n=0; while [ ! -f '{}' ] && [ $n -lt 2400 ]; do sleep 0.05; n=$((n+1)); done; printf '{{\\n  \"success\": false,\\n  \"summary\": \"promotion resume refused\"\\n}}\\n'; exit 7",
                                 gate_started.display(),
                                 gate_release.display()
                             ),

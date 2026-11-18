@@ -198,7 +198,7 @@ fn typed_daemon_exec_uses_canonical_submission_without_scalar_execution_fields()
     let gate = tempfile::tempdir().expect("gate root");
     let gate_path = gate.path().join("release");
     let script = format!(
-        "while [ ! -e '{}' ]; do sleep 0.05; done; printf typed",
+        "n=0; while [ ! -e '{}' ] && [ $n -lt 2400 ]; do sleep 0.05; n=$((n+1)); done; printf typed",
         gate_path.display()
     );
     let payload = direct_submission(vec!["sh", "-c", &script], "typed-daemon-run");
