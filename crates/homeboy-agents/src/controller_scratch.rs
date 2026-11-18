@@ -154,28 +154,31 @@ fn allocate_attempt_at_roots(
         .join(paths::sanitize_path_segment(task_id))
         .join(format!("attempt-{attempt}"))
         .join(&lease_id);
-    fs::create_dir_all(&path).map_err(|error| {
-        Error::internal_io(
-            error.to_string(),
-            Some(format!("create {}", path.display())),
-        )
-    })?;
-    let path = path.canonicalize().map_err(|error| {
-        Error::internal_io(
-            error.to_string(),
-            Some(format!("canonicalize {}", path.display())),
-        )
-    })?;
-    if path == root || !path.starts_with(&root) {
-        return Err(Error::validation_invalid_argument(
-            "controller_scratch.path",
-            "allocated scratch path must be contained by its root",
-            Some(path.display().to_string()),
-            None,
-        ));
-    }
 
-    with_index_lock(&index_path, || {
+    // Directories are created under the index lock so cleanup, which prunes
+    // empty attempt directories under the same lock, cannot remove a parent
+    // of a lease that is not registered yet.
+    let path = with_index_lock(&index_path, || {
+        fs::create_dir_all(&path).map_err(|error| {
+            Error::internal_io(
+                error.to_string(),
+                Some(format!("create {}", path.display())),
+            )
+        })?;
+        let path = path.canonicalize().map_err(|error| {
+            Error::internal_io(
+                error.to_string(),
+                Some(format!("canonicalize {}", path.display())),
+            )
+        })?;
+        if path == root || !path.starts_with(&root) {
+            return Err(Error::validation_invalid_argument(
+                "controller_scratch.path",
+                "allocated scratch path must be contained by its root",
+                Some(path.display().to_string()),
+                None,
+            ));
+        }
         let mut index = read_or_recover_index_at_unlocked(&index_path)?;
         index.resources.push(ControllerScratchResource {
             path: path.display().to_string(),
@@ -199,7 +202,8 @@ fn allocate_attempt_at_roots(
             git_worktree: None,
             base_sha: None,
         });
-        write_index_at_unlocked(&index_path, &index)
+        write_index_at_unlocked(&index_path, &index)?;
+        Ok(path)
     })?;
 
     Ok(ControllerScratchAllocation {
@@ -579,6 +583,9 @@ pub struct ControllerScratchCleanupOutput {
     pub reclaimed_bytes: u64,
     /// Workspaces reclaimed only after durable candidate preservation.
     pub preserved_workspace_bytes: u64,
+    /// Preserved workspaces whose recovery omitted untracked files over the
+    /// preservation bound; each such entry lists what was left out.
+    pub partially_preserved_workspace_count: usize,
     pub preserved_workspaces: Vec<serde_json::Value>,
     pub candidates: Vec<ControllerScratchCandidate>,
     pub candidate_detail: OutputTruncation,
@@ -1280,6 +1287,7 @@ fn cleanup_unlocked(
     let mut retained_unknown_bytes_count_by_reason = BTreeMap::new();
     let mut preserved_workspaces = Vec::new();
     let mut preserved_workspace_bytes = 0;
+    let mut partially_preserved_workspace_count = 0;
     let mut inspected_count = 0;
     // Removal of admitted candidates shares the deadline. The walk takes at
     // most half of it so an apply pass leaves time to remove what it admitted
@@ -1497,9 +1505,18 @@ fn cleanup_unlocked(
                         .filter(|recovery| recovery["state"] == "recovered")
                     {
                         preserved_workspace_bytes += bytes;
+                        let partial = recovery["partial"] == true;
+                        if partial {
+                            partially_preserved_workspace_count += 1;
+                        }
                         preserved_workspaces.push(serde_json::json!({
                             "run_id": candidate.run_id,
                             "reclaimed_bytes": bytes,
+                            "partial": partial,
+                            "omitted_untracked_bytes": recovery
+                                .pointer("/omitted_untracked/bytes")
+                                .and_then(serde_json::Value::as_u64)
+                                .unwrap_or(0),
                             "recovery": recovery,
                         }));
                     }
@@ -1619,6 +1636,7 @@ fn cleanup_unlocked(
         retained_bytes_by_reason,
         retained_unknown_bytes_count_by_reason,
         preserved_workspace_bytes,
+        partially_preserved_workspace_count,
         preserved_workspaces,
         retention_reasons: summarize_retention(&all_skips),
         skipped,
@@ -2116,7 +2134,65 @@ fn remove_candidate_from_index(
     // leaving the record behind would keep re-reporting a stranded registration
     // that has already converged.
     index.resources[position].git_worktree = None;
+    prune_reclaimed_attempt_dirs(index, position);
     Ok(ScratchRemoval::Removed(bytes))
+}
+
+/// Directory levels below `attempts/<run>` down to a lease:
+/// `<plan>/<task>/attempt-<n>/<lease>`.
+const ATTEMPT_LEASE_DEPTH: usize = 4;
+
+/// Once a run's last lease is reclaimed, remove its `attempts/<run>` shell.
+/// Only empty directories go: a subtree holding any file, or the existing
+/// directory of any registered lease (an allocated lease may still be empty),
+/// is kept. Allocation creates its directories under the same index lock, so
+/// this cannot race a new lease into a removed parent. Best effort: a
+/// directory that cannot be removed simply stays.
+fn prune_reclaimed_attempt_dirs(index: &ControllerScratchIndex, position: usize) {
+    let resource = &index.resources[position];
+    let run_dir =
+        Path::new(&resource.root_bound).join(paths::sanitize_path_segment(&resource.run_id));
+    if !Path::new(&resource.path).starts_with(&run_dir) {
+        return;
+    }
+    let registered: std::collections::HashSet<&Path> = index
+        .resources
+        .iter()
+        .map(|resource| Path::new(&resource.path))
+        .filter(|path| path.exists())
+        .collect();
+    prune_empty_dirs(&run_dir, &registered, ATTEMPT_LEASE_DEPTH);
+}
+
+/// Remove `dir` when it holds nothing but prunable empty directories. Returns
+/// whether it was removed.
+fn prune_empty_dirs(
+    dir: &Path,
+    registered: &std::collections::HashSet<&Path>,
+    depth: usize,
+) -> bool {
+    if registered.contains(dir) {
+        return false;
+    }
+    let Ok(metadata) = fs::symlink_metadata(dir) else {
+        return false;
+    };
+    if !metadata.is_dir() {
+        return false;
+    }
+    let Ok(entries) = fs::read_dir(dir) else {
+        return false;
+    };
+    let mut empty = true;
+    for entry in entries {
+        let Ok(entry) = entry else {
+            return false;
+        };
+        if depth == 0 || !prune_empty_dirs(&entry.path(), registered, depth - 1) {
+            empty = false;
+        }
+    }
+    empty && fs::remove_dir(dir).is_ok()
 }
 
 fn cleanup_command(options: ControllerScratchCleanupOptions) -> String {
@@ -2349,13 +2425,46 @@ fn recover_authoritative_workspace(
     })
 }
 
-/// Capture the full non-ignored worktree on top of HEAD without changing the
-/// real index (including any staged/unstaged split).
-fn recovery_patch(workspace: &Path) -> Result<Vec<u8>> {
-    recovery_patch_against(workspace, "HEAD")
+/// Total size of the untracked files a recovery patch may carry. Tracked
+/// changes and commits are always preserved; untracked files beyond this bound
+/// (typically build output and vendored trees) are listed in the recovery
+/// evidence instead of being archived at near-workspace size (#18395).
+const RECOVERY_UNTRACKED_BYTE_LIMIT: u64 = 4 * 1024 * 1024;
+
+/// Omitted untracked paths named inline in the recovery record; the complete
+/// list is written beside the patches.
+const RECOVERY_OMITTED_INLINE_LIMIT: usize = 50;
+
+/// Untracked files a recovery patch left out because they exceeded
+/// [`RECOVERY_UNTRACKED_BYTE_LIMIT`], sorted by path.
+#[derive(Debug, Default, PartialEq, Eq)]
+struct OmittedUntracked {
+    paths: Vec<String>,
+    bytes: u64,
 }
 
-fn recovery_patch_against(workspace: &Path, base: &str) -> Result<Vec<u8>> {
+impl OmittedUntracked {
+    fn listing(&self) -> Vec<u8> {
+        let mut listing = Vec::new();
+        for path in &self.paths {
+            listing.extend_from_slice(path.as_bytes());
+            listing.push(b'\n');
+        }
+        listing
+    }
+}
+
+/// Capture the worktree on top of HEAD without changing the real index
+/// (including any staged/unstaged split). Untracked files are bounded by
+/// [`RECOVERY_UNTRACKED_BYTE_LIMIT`].
+fn recovery_patch(workspace: &Path) -> Result<(Vec<u8>, OmittedUntracked)> {
+    let (mut patches, omitted) = recovery_patches(workspace, &["HEAD"])?;
+    Ok((patches.remove(0), omitted))
+}
+
+/// Stage tracked changes plus the untracked files that fit the bound in a
+/// private index, and diff it against each of `bases`.
+fn recovery_patches(workspace: &Path, bases: &[&str]) -> Result<(Vec<Vec<u8>>, OmittedUntracked)> {
     let index = homeboy_core::git::private_index(workspace)?;
     let env = vec![(
         "GIT_INDEX_FILE".to_string(),
@@ -2388,25 +2497,96 @@ fn recovery_patch_against(workspace: &Path, base: &str) -> Result<Vec<u8>> {
     }
     git::run_git_with_env(
         workspace,
-        &["add", "-A", "--", "."],
-        "stage recovery worktree",
+        &["add", "-u", "--", "."],
+        "stage recovery tracked changes",
         &env,
     )?;
-    git::run_git_bytes_with_env(
+    let omitted = stage_bounded_untracked(workspace, &env)?;
+    let patches = bases
+        .iter()
+        .map(|base| {
+            git::run_git_bytes_with_env(
+                workspace,
+                &[
+                    "diff",
+                    "--cached",
+                    "--binary",
+                    "--full-index",
+                    "--find-renames",
+                    base,
+                    "--",
+                    ".",
+                ],
+                "capture recovery patch",
+                &env,
+            )
+        })
+        .collect::<Result<Vec<_>>>()?;
+    Ok((patches, omitted))
+}
+
+/// Stage the smallest non-ignored untracked files first until the next one
+/// would exceed the bound, so source files beside a large build tree are kept.
+/// Everything left out is returned so it can be reported, never dropped
+/// silently.
+fn stage_bounded_untracked(workspace: &Path, env: &[(String, String)]) -> Result<OmittedUntracked> {
+    let listing = git::run_git_with_env(
         workspace,
         &[
-            "diff",
-            "--cached",
-            "--binary",
-            "--full-index",
-            "--find-renames",
-            base,
+            "ls-files",
+            "-z",
+            "--others",
+            "--exclude-standard",
             "--",
             ".",
         ],
-        "capture recovery patch",
-        &env,
-    )
+        "list recovery untracked files",
+        env,
+    )?;
+    let mut untracked: Vec<(u64, String)> = listing
+        .split('\0')
+        .filter(|path| !path.is_empty())
+        .map(|path| {
+            // An embedded repository is listed as `dir/` and staged as a
+            // gitlink, which carries no file bytes.
+            let bytes = if path.ends_with('/') {
+                0
+            } else {
+                fs::symlink_metadata(workspace.join(path)).map_or(0, |metadata| metadata.len())
+            };
+            (bytes, path.to_string())
+        })
+        .collect();
+    untracked.sort();
+    let mut included = Vec::new();
+    let mut included_bytes = 0u64;
+    let mut omitted = OmittedUntracked::default();
+    for (bytes, path) in untracked {
+        if included_bytes.saturating_add(bytes) <= RECOVERY_UNTRACKED_BYTE_LIMIT {
+            included_bytes += bytes;
+            included.push(format!(":(literal){path}"));
+        } else {
+            omitted.bytes += bytes;
+            omitted.paths.push(path);
+        }
+    }
+    omitted.paths.sort();
+    for chunk in included.chunks(512) {
+        let mut args = vec!["add", "--"];
+        args.extend(chunk.iter().map(String::as_str));
+        git::run_git_with_env(workspace, &args, "stage recovery untracked files", env)?;
+    }
+    Ok(omitted)
+}
+
+fn omitted_untracked_evidence(omitted: &OmittedUntracked) -> serde_json::Value {
+    serde_json::json!({
+        "count": omitted.paths.len(),
+        "bytes": omitted.bytes,
+        "byte_limit": RECOVERY_UNTRACKED_BYTE_LIMIT,
+        "paths": omitted.paths.iter().take(RECOVERY_OMITTED_INLINE_LIMIT).collect::<Vec<_>>(),
+        "paths_truncated": omitted.paths.len() > RECOVERY_OMITTED_INLINE_LIMIT,
+    })
 }
 
 fn recover_authoritative_workspace_inner(
@@ -2436,7 +2616,12 @@ fn recover_authoritative_workspace_inner(
     }
     let head = git::run_git(&workspace, &["rev-parse", "HEAD"], "git rev-parse HEAD")?;
     let head = head.trim();
-    let patch = recovery_patch(&workspace)?;
+    let base = resource.base_sha.as_deref().unwrap_or(head);
+    // Both patches restore onto their base the commits, tracked changes, and
+    // the untracked files within the bound. Anything omitted is listed.
+    let (mut patches, omitted) = recovery_patches(&workspace, &["HEAD", base])?;
+    let candidate_patch = patches.pop().unwrap_or_default();
+    let patch = patches.pop().unwrap_or_default();
     let recovery_root = artifact_root
         .join(RECOVERY_DIR)
         .join(paths::sanitize_path_segment(&resource.run_id))
@@ -2454,10 +2639,6 @@ fn recover_authoritative_workspace_inner(
             Some(format!("write {}", patch_path.display())),
         )
     })?;
-    // A single binary patch restores the complete candidate onto its recorded
-    // base, including commits and non-ignored untracked files.
-    let base = resource.base_sha.as_deref().unwrap_or(head);
-    let candidate_patch = recovery_patch_against(&workspace, base)?;
     let candidate_path = recovery_root.join("candidate.patch");
     fs::write(&candidate_path, &candidate_patch).map_err(|error| {
         Error::internal_io(error.to_string(), Some("write candidate patch".to_string()))
@@ -2477,8 +2658,22 @@ fn recover_authoritative_workspace_inner(
     fs::write(&commits_path, &commits).map_err(|error| {
         Error::internal_io(error.to_string(), Some("write commit patches".to_string()))
     })?;
+    let omitted_listing = omitted.listing();
+    let omitted_path = recovery_root.join("omitted-untracked.txt");
+    if !omitted.paths.is_empty() {
+        fs::write(&omitted_path, &omitted_listing).map_err(|error| {
+            Error::internal_io(
+                error.to_string(),
+                Some("write omitted untracked listing".to_string()),
+            )
+        })?;
+    }
     // Flush artifacts before recording authority to delete the only checkout.
-    for path in [&patch_path, &candidate_path, &commits_path] {
+    let mut artifacts = vec![&patch_path, &candidate_path, &commits_path];
+    if !omitted.paths.is_empty() {
+        artifacts.push(&omitted_path);
+    }
+    for path in artifacts {
         fs::File::open(path)
             .and_then(|file| file.sync_all())
             .map_err(|error| {
@@ -2500,6 +2695,16 @@ fn recover_authoritative_workspace_inner(
     });
     if let Some(base) = resource.base_sha.as_deref() {
         recovery["base"] = serde_json::json!(base);
+    }
+    // Partial preservation is explicit: the record names what was left out.
+    recovery["partial"] = serde_json::json!(!omitted.paths.is_empty());
+    if !omitted.paths.is_empty() {
+        let mut evidence = omitted_untracked_evidence(&omitted);
+        evidence["list"] = serde_json::json!({
+            "path": omitted_path,
+            "sha256": sha256(&omitted_listing),
+        });
+        recovery["omitted_untracked"] = evidence;
     }
     // Committed work is preserved in exactly one of three ways, and the
     // bundle carries only what nothing else already holds (#15052).
@@ -2618,13 +2823,36 @@ fn recovered_workspace_matches(resource: &ControllerScratchResource, workspace: 
     let current_head = git::run_git(workspace, &["rev-parse", "HEAD"], "git rev-parse HEAD").ok();
     let current_status = git::run_git(workspace, &["status", "--porcelain=v1"], "git status").ok();
     let current_patch = recovery_patch(workspace).ok();
+    // The omitted set is part of what the record describes: a file that
+    // crosses the bound in either direction requires fresh preservation.
+    let omitted_matches = |omitted: &OmittedUntracked| match recovery.get("omitted_untracked") {
+        None => omitted.paths.is_empty(),
+        Some(recorded) => {
+            recorded["bytes"].as_u64() == Some(omitted.bytes)
+                && recorded
+                    .pointer("/list/sha256")
+                    .and_then(serde_json::Value::as_str)
+                    == Some(sha256(&omitted.listing()).as_str())
+                && recorded
+                    .pointer("/list/path")
+                    .and_then(serde_json::Value::as_str)
+                    .zip(
+                        recorded
+                            .pointer("/list/sha256")
+                            .and_then(serde_json::Value::as_str),
+                    )
+                    .is_some_and(|(path, expected)| {
+                        file_sha256(Path::new(path)).ok().as_deref() == Some(expected)
+                    })
+        }
+    };
 
     commits_preserved
         && Some(expected_head) == current_head.as_deref().map(str::trim)
         && expected_status == current_status.as_deref()
-        && current_patch
-            .as_deref()
-            .is_some_and(|patch| sha256(patch) == patch_sha256)
+        && current_patch.as_ref().is_some_and(|(patch, omitted)| {
+            sha256(patch) == patch_sha256 && omitted_matches(omitted)
+        })
         && file_sha256(Path::new(patch_path)).ok().as_deref() == Some(patch_sha256)
 }
 
@@ -4013,8 +4241,12 @@ mod tests {
         assert_eq!(path_size(&released.path).unwrap(), 0);
     }
 
+    /// #18395: a terminal attempt with commits, a tracked edit and a large
+    /// untracked build tree is reclaimed with a bounded patch that restores the
+    /// committed and tracked candidate, reports what it left out, and leaves no
+    /// empty attempt directory behind, while live leases are untouched.
     #[test]
-    fn public_cleanup_preserves_terminal_candidate_and_leaves_active_attempt() {
+    fn public_cleanup_preserves_bounded_candidate_and_removes_reclaimed_attempt_dir() {
         let context = homeboy_core::test_support::HermeticTestContext::new();
         let _home = homeboy_core::test_support::HomeGuard::new();
         let roots = context.path_roots();
@@ -4025,7 +4257,7 @@ mod tests {
             .unwrap();
         let (allocation, workspace, base) =
             recorded_attempt(roots.data(), source.path(), "terminal");
-        fs::write(workspace.join("history.txt"), "committed candidate\n").unwrap();
+        fs::write(workspace.join("committed.txt"), "committed candidate\n").unwrap();
         run_git(&workspace, &["add", "."]);
         run_git(
             &workspace,
@@ -4041,6 +4273,22 @@ mod tests {
         );
         fs::write(workspace.join("history.txt"), "uncommitted candidate\n").unwrap();
         fs::write(workspace.join("new.bin"), b"new\0source").unwrap();
+        // A build tree whose files each exceed the bound, and in total dwarf
+        // the candidate itself.
+        let build = workspace.join("build/out");
+        fs::create_dir_all(&build).unwrap();
+        let artifact_bytes = RECOVERY_UNTRACKED_BYTE_LIMIT as usize + 1024;
+        let mut omitted_expected = Vec::new();
+        for number in 0..3 {
+            let bytes: Vec<u8> = (0..artifact_bytes)
+                .map(|offset| (offset.wrapping_mul(2654435761) >> 13) as u8 ^ number)
+                .collect();
+            fs::write(build.join(format!("bundle-{number}.js")), bytes).unwrap();
+            omitted_expected.push(format!("build/out/bundle-{number}.js"));
+        }
+        // A sibling lease of the same run that is still live, and an active
+        // attempt of another run: neither may be touched.
+        let sibling = allocate_at(roots.data(), "terminal", "scheduler-plan", "task", 2);
         let active = allocate_at(roots.data(), &running.id, "plan", "task", 1);
         fs::write(active.path.join("live"), "active").unwrap();
         let mut index = read_index_at(roots.data());
@@ -4053,24 +4301,54 @@ mod tests {
         row.finalized_at = Some("2020-01-01T00:00:00Z".to_string());
         row.owner_pid = u32::MAX;
         write_index_at_unlocked(&index_path().unwrap(), &index).unwrap();
-        let output = cleanup(
-            ControllerScratchCleanupOptions {
-                apply: true,
-                limit: 10,
-                full: true,
-                retention_override_seconds: None,
-            },
-            None,
-            None,
-        )
-        .unwrap();
+        let options = ControllerScratchCleanupOptions {
+            apply: true,
+            limit: 10,
+            full: true,
+            retention_override_seconds: None,
+        };
+        let output = cleanup(options, None, None).unwrap();
         assert_eq!(output.applied_count, 1, "{output:?}");
-        assert!(output.preserved_workspace_bytes > 0);
         assert!(!allocation.path.exists());
         assert!(active.path.join("live").exists());
-        let recovery = &output.preserved_workspaces[0]["recovery"];
+        // The live sibling keeps the run directory; only the reclaimed
+        // attempt's own empty shell is gone.
+        assert!(sibling.path.is_dir(), "live sibling lease was removed");
+        let attempt_shell = allocation.path.parent().unwrap();
+        assert!(!attempt_shell.exists(), "reclaimed attempt shell remains");
+        let run_dir = attempt_shell.ancestors().nth(3).unwrap().to_path_buf();
+        assert!(run_dir.ends_with("terminal"), "{}", run_dir.display());
+        assert!(run_dir.is_dir());
+
+        assert_eq!(output.partially_preserved_workspace_count, 1);
+        let preserved = &output.preserved_workspaces[0];
+        assert_eq!(preserved["partial"], true);
+        let reclaimed = preserved["reclaimed_bytes"].as_u64().unwrap();
+        assert!(reclaimed >= 3 * artifact_bytes as u64);
+        let recovery = &preserved["recovery"];
+        assert_eq!(recovery["partial"], true);
+        let omitted = &recovery["omitted_untracked"];
+        assert_eq!(omitted["count"], 3);
+        assert_eq!(omitted["bytes"], 3 * artifact_bytes as u64);
+        assert_eq!(
+            omitted["paths"],
+            serde_json::json!(omitted_expected),
+            "{omitted}"
+        );
+        assert_eq!(
+            preserved["omitted_untracked_bytes"],
+            3 * artifact_bytes as u64
+        );
+        let listing = fs::read_to_string(omitted["list"]["path"].as_str().unwrap()).unwrap();
+        assert_eq!(listing, format!("{}\n", omitted_expected.join("\n")));
+
         let patch = recovery["candidate_patch"]["path"].as_str().unwrap();
-        assert!(Path::new(patch).is_file());
+        let patch_bytes = fs::metadata(patch).unwrap().len();
+        assert!(
+            patch_bytes * 100 < reclaimed,
+            "patch {patch_bytes} bytes for {reclaimed} reclaimed"
+        );
+        assert!(Path::new(recovery["commits_patch"]["path"].as_str().unwrap()).is_file());
         let restored = source.path().join("restored");
         run_git(
             source.path(),
@@ -4083,10 +4361,31 @@ mod tests {
         run_git(&restored, &["checkout", "--detach", &base]);
         run_git(&restored, &["apply", "--binary", patch]);
         assert_eq!(
+            fs::read_to_string(restored.join("committed.txt")).unwrap(),
+            "committed candidate\n"
+        );
+        assert_eq!(
             fs::read_to_string(restored.join("history.txt")).unwrap(),
             "uncommitted candidate\n"
         );
         assert_eq!(fs::read(restored.join("new.bin")).unwrap(), b"new\0source");
+        assert!(!restored.join("build").exists());
+
+        // Once the run's last lease is reclaimed, its directory goes too.
+        let mut index = read_index_at(roots.data());
+        let row = index
+            .resources
+            .iter_mut()
+            .find(|row| row.lease_id == sibling.lease_id)
+            .unwrap();
+        row.lifecycle_state = "released".to_string();
+        row.finalized_at = Some("2020-01-01T00:00:00Z".to_string());
+        row.owner_pid = u32::MAX;
+        write_index_at_unlocked(&index_path().unwrap(), &index).unwrap();
+        let output = cleanup(options, None, None).unwrap();
+        assert_eq!(output.applied_count, 1, "{output:?}");
+        assert!(!run_dir.exists(), "empty attempt directory remains");
+        assert!(active.path.join("live").exists());
     }
 
     /// Until terminal replay projects a lease (or its owner recorded a base),
