@@ -3345,6 +3345,7 @@ fn describe_runner(job_store: &JobStore) -> Result<serde_json::Value> {
         "build_identity": build_identity::current(),
         "lab_contract_version": homeboy_lab_contract::LAB_CONTRACT_VERSION,
         "lab_handoff_capabilities": homeboy_lab_contract::required_lab_handoff_capabilities(),
+        "runner_optional_capabilities": homeboy_lab_contract::runner_optional_capabilities(),
         "freshness": freshness,
         "active_runner_job_count": active.len(),
         "active_runner_jobs": active,

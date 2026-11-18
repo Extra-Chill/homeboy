@@ -102,6 +102,7 @@ where
                 "build_identity": build_identity::current(),
                 "lab_contract_version": homeboy_lab_contract::LAB_CONTRACT_VERSION,
                 "lab_handoff_capabilities": homeboy_lab_contract::required_lab_handoff_capabilities(),
+                "runner_optional_capabilities": homeboy_lab_contract::runner_optional_capabilities(),
                 "runtime_paths": daemon_runtime_paths_body(),
                 "lease": heartbeat_lease().ok(),
             }),

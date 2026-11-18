@@ -3216,6 +3216,7 @@ fn cook_through_failing_lab_preflight(
         options.gates.gate_environment.lab_runner = Some(runner_id.to_string());
         options.gates.gate_toolchains =
             vec![crate::agent_task_gate::AgentTaskGateToolchainRequirement {
+                resolve_only: false,
                 command: "php".to_string(),
                 probe_arguments: vec!["-v".to_string()],
             }];

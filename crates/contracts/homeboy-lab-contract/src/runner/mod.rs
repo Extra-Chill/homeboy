@@ -142,6 +142,17 @@ pub fn required_lab_handoff_capabilities() -> Vec<LabCapabilityVersion> {
     .collect()
 }
 
+/// Optional readiness contract: resolve an executable without invoking a probe.
+pub const GATE_READINESS_RESOLVE_ONLY_CAPABILITY: &str = "gate-readiness-resolve-only";
+
+/// Conditionally negotiated runner contracts, not universal handoff requirements.
+pub fn runner_optional_capabilities() -> Vec<LabCapabilityVersion> {
+    vec![LabCapabilityVersion {
+        id: GATE_READINESS_RESOLVE_ONLY_CAPABILITY.to_string(),
+        version: 1,
+    }]
+}
+
 /// Capability id for `daemon ensure-running --replacement-operation-id`.
 pub const DAEMON_ENSURE_RUNNING_OPERATION_ID_CAPABILITY: &str =
     "daemon-ensure-running-operation-id";

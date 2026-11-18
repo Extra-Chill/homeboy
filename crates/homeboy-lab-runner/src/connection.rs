@@ -1683,6 +1683,14 @@ pub(crate) fn daemon_lab_handoff_capabilities(
     connection_daemon::daemon_http_lab_handoff_capabilities(local_url)
 }
 
+/// One `/version` body from the daemon currently serving this session.
+pub(crate) fn daemon_version_body(local_url: &str) -> std::result::Result<Value, String> {
+    connection_daemon::daemon_http_version_body_with_timeout(
+        local_url,
+        crate::readonly_probe::DEFAULT_READONLY_PROBE_TIMEOUT,
+    )
+}
+
 fn status_for_admission_with<Status, Reconnect>(
     runner_id: &str,
     mut status_fn: Status,

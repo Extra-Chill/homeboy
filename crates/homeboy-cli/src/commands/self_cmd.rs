@@ -59,6 +59,7 @@ struct SelfIdentityReport {
     lab_contract_version: u32,
     lab_handoff_capabilities: Vec<homeboy_lab_contract::LabCapabilityVersion>,
     daemon_recovery_capabilities: Vec<homeboy_lab_contract::LabCapabilityVersion>,
+    runner_optional_capabilities: Vec<homeboy_lab_contract::LabCapabilityVersion>,
 }
 
 pub(crate) fn identity_report() -> Value {
@@ -71,6 +72,7 @@ pub(crate) fn identity_report() -> Value {
         lab_contract_version: homeboy_lab_contract::LAB_CONTRACT_VERSION,
         lab_handoff_capabilities: homeboy_lab_contract::required_lab_handoff_capabilities(),
         daemon_recovery_capabilities: homeboy_lab_contract::daemon_recovery_capabilities(),
+        runner_optional_capabilities: homeboy_lab_contract::runner_optional_capabilities(),
     })
     .expect("identity report serializes")
 }
@@ -398,6 +400,18 @@ mod tests {
     /// envelope instead of scraping `--help` text. The field name is a wire
     /// contract read by `homeboy_lab_runner::connection::remote_daemon`, so
     /// renaming or dropping it here must fail loudly.
+    #[test]
+    fn identity_report_advertises_gate_readiness_resolve_only() {
+        let report = super::identity_report();
+        let advertised = report["runner_optional_capabilities"]
+            .as_array()
+            .expect("self identity advertises runner_optional_capabilities");
+        assert!(advertised.contains(&serde_json::json!({
+            "id": homeboy_lab_contract::GATE_READINESS_RESOLVE_ONLY_CAPABILITY,
+            "version": 1,
+        })));
+    }
+
     #[test]
     fn identity_report_advertises_the_daemon_recovery_capabilities() {
         let report = super::identity_report();

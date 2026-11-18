@@ -479,6 +479,50 @@ pub(crate) fn materialize_gate_inputs(
     Ok(Some((root, evidence)))
 }
 
+/// Fail closed before staging or sending readiness contracts (#18051).
+fn require_resolve_only_capability(
+    runner_id: &str,
+    body: Option<&serde_json::Value>,
+) -> Result<()> {
+    let capabilities = body
+        .map(|body| body.get("data").unwrap_or(body))
+        .and_then(|data| data.get("runner_optional_capabilities"))
+        .and_then(|value| {
+            serde_json::from_value::<Vec<homeboy_lab_contract::LabCapabilityVersion>>(value.clone())
+                .ok()
+        })
+        .unwrap_or_default();
+    let id = homeboy_lab_contract::GATE_READINESS_RESOLVE_ONLY_CAPABILITY;
+    if capabilities
+        .iter()
+        .any(|capability| capability.id == id && capability.version >= 1)
+    {
+        return Ok(());
+    }
+    let command = format!("homeboy runner refresh-homeboy {runner_id}");
+    // `controller_version`/`runner_version` mark this as runner build skew,
+    // so the gate waits for convergence (#18477) instead of failing the Cook.
+    let runner_version = body
+        .map(|body| body.get("data").unwrap_or(body))
+        .and_then(|data| data.get("version"))
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or("unknown");
+    Err(Error::new(
+        homeboy_core::ErrorCode::RunnerVersionSkew,
+        format!("runner `{runner_id}` does not advertise `{id}` v1; run `{command}`"),
+        serde_json::json!({
+            "runner_id": runner_id,
+            "controller_version": crate::controller_identity::compatibility_controller_identity().version,
+            "runner_version": runner_version,
+            "required_capability": {"id": id, "version": 1},
+            "gate_disposition": "unavailable",
+            "stage": "readiness_capability",
+            "convergence_commands": [command],
+        }),
+    )
+    .with_retryable(true))
+}
+
 fn execute_owned(
     cwd: &Path,
     request: &LabGateRequest,
@@ -516,6 +560,20 @@ fn execute_owned(
         return Err(admission.refusal(&request.runner_id, None));
     }
     let status = &snapshot.status;
+    if request
+        .toolchains
+        .iter()
+        .any(|requirement| requirement.resolve_only)
+    {
+        // Observe the executing daemon, not the installed CLI or a cached
+        // compatible version: older daemons cannot interpret this contract.
+        let body = status
+            .session
+            .as_ref()
+            .and_then(|session| session.local_url.as_deref())
+            .and_then(|url| crate::connection::daemon_version_body(url).ok());
+        require_resolve_only_capability(&request.runner_id, body.as_ref())?;
+    }
     let input_store = materialize_gate_inputs(&runner, &request.environment.data_inputs)?;
     let resource_run = homeboy_core::engine::run_dir::RunDir::create()?;
     let resource_invocation = homeboy_core::engine::invocation::InvocationGuard::acquire(
@@ -1211,6 +1269,34 @@ mod secret_env_tests {
             dir.path()
         )
         .is_empty());
+    }
+}
+
+#[cfg(test)]
+mod resolve_only_capability_tests {
+    #[test]
+    fn refuses_resolve_only_for_runner_without_capability() {
+        for body in [
+            None,
+            Some(serde_json::json!({"data": {"version": "0.1.0"}})),
+        ] {
+            let error = super::require_resolve_only_capability("lab", body.as_ref())
+                .expect_err("old runner must not receive resolve_only");
+            assert_eq!(error.code, homeboy_core::ErrorCode::RunnerVersionSkew);
+            assert_eq!(error.details["gate_disposition"], "unavailable");
+            // Both versions mark this as runner build skew, which the gate
+            // waits through as convergence (#18477) rather than failing.
+            assert!(error.details["controller_version"].is_string());
+            assert!(error.details["runner_version"].is_string());
+            assert_eq!(
+                error.details["convergence_commands"][0],
+                "homeboy runner refresh-homeboy lab"
+            );
+        }
+        let current = serde_json::json!({"data": {
+            "runner_optional_capabilities": homeboy_lab_contract::runner_optional_capabilities(),
+        }});
+        super::require_resolve_only_capability("lab", Some(&current)).unwrap();
     }
 }
 

@@ -167,6 +167,7 @@ fn full_native_transport() {
         &candidate,
         &policy,
         &[AgentTaskGateToolchainRequirement {
+            resolve_only: false,
             command: "native-gate-tool".to_string(),
             probe_arguments: vec!["--version".to_string()],
         }],
@@ -213,6 +214,7 @@ fn full_native_transport() {
         &candidate,
         &policy,
         &[AgentTaskGateToolchainRequirement {
+            resolve_only: false,
             command: "no-15359-such-tool".to_string(),
             probe_arguments: vec!["--version".to_string()],
         }],
