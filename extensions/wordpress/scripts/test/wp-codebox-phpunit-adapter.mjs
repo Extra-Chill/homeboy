@@ -16,6 +16,7 @@ import { createRequire } from 'node:module';
 import { createTimeoutLineRedactor, recipeRunProjection, readBoundedText, wpCodeboxTimeoutDiagnostics } from '../lib/wp-codebox-timeout-diagnostics.mjs';
 import { configuredWpCodeboxPhpunitTimeoutSeconds } from '../lib/wp-codebox-phpunit-timeout.mjs';
 import { configuredWpCodeboxRuntimeCrashGraceSeconds, createWpCodeboxRuntimeCrashDetector } from '../lib/wp-codebox-runtime-crash.mjs';
+import { applyLocalWorkspaceDependenciesBeforePrepare } from '../lib/local-workspace-prepare.mjs';
 
 const require = createRequire(import.meta.url);
 const { preflightWpCodeboxCommand } = require('../../lib/wp-codebox-runtime-selection.js');
@@ -1132,6 +1133,9 @@ function runPrepareSteps(steps, sourceRoot) {
   if (!Array.isArray(steps)) {
     return;
   }
+  // Prepare steps (e.g. `npm run build`) must see built local workspace
+  // dependencies, not unbuilt `file:` links (homeboy#18302).
+  applyLocalWorkspaceDependenciesBeforePrepare({ settings, steps, consumerDirectory: sourceRoot, env: environmentWithoutDatabaseAdministration() });
   for (const step of steps) {
     if (!step || typeof step.command !== 'string' || step.command.trim() === '') {
       throw new Error('wp_codebox_prepare_steps entries require a non-empty command');

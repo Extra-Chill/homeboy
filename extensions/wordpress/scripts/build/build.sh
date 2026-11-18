@@ -514,18 +514,27 @@ install_frontend_dependencies() {
     fi
 
     if [ "$need_install" -eq 1 ]; then
+        # A declared local workspace override must be installed before the
+        # consumer's lifecycle scripts run: `npm ci` would otherwise run the
+        # consumer's `prepare` (often a build) against unbuilt `file:` links
+        # (homeboy#18302). Defer them until after the override is applied.
+        local install_args=()
+        if [ -z "$scope_label" ] && local_workspace_overrides_declared; then
+            install_args+=("--ignore-scripts")
+            LOCAL_WORKSPACE_LIFECYCLE_DEFERRED=1
+        fi
         # Only use `npm ci` when the lockfile is a committed, authoritative
         # artifact. A gitignored/untracked lockfile is a local leftover that
         # nothing keeps in sync with package.json — `npm ci` would fail on a
         # desync no committed change could fix. Fall back to `npm install`,
         # which refreshes the local lockfile to match package.json.
         if npm_lockfile_is_committed; then
-            run_npm_install ci 2>&1
+            run_npm_install ci ${install_args[@]+"${install_args[@]}"} 2>&1
         else
             if [ -f "package-lock.json" ]; then
                 print_warning "${scope_label}package-lock.json is not committed (gitignored or untracked); using 'npm install' to refresh it instead of 'npm ci'."
             fi
-            run_npm_install install 2>&1
+            run_npm_install install ${install_args[@]+"${install_args[@]}"} 2>&1
         fi
         print_success "${scope_label}npm dependencies ready"
     fi
@@ -538,21 +547,25 @@ install_frontend_dependencies() {
 # source, packs it, and installs the built tarball into this consumer so peer
 # deps (React) dedupe to the consumer's single copy — the fix for the
 # "Invalid hook call" blank-app failure caused by `file:` symlink dupes.
-apply_local_workspace_overrides() {
+# Settings include schema defaults; an empty default needs no sibling helper.
+# Nonempty or malformed declarations still go through helper validation.
+local_workspace_overrides_declared() {
     case "${HOMEBOY_SETTINGS_JSON:-}" in
-        ""|"{}") return 0 ;;
+        ""|"{}") return 1 ;;
     esac
-
-    # Settings include schema defaults; an empty default needs no sibling helper.
-    # Nonempty or malformed declarations still go through helper validation.
     if node -e '
         try {
             const entries = JSON.parse(process.argv[1]).local_workspace_dependencies;
             process.exit(entries === undefined || (Array.isArray(entries) && entries.length === 0) ? 0 : 1);
         } catch { process.exit(1); }
     ' "$HOMEBOY_SETTINGS_JSON"; then
-        return 0
+        return 1
     fi
+    return 0
+}
+
+apply_local_workspace_overrides() {
+    local_workspace_overrides_declared || return 0
 
     if [ ! -f "$LOCAL_WORKSPACE_DEPS_HELPER" ]; then
         print_error "local_workspace_dependencies declared but helper not found: $LOCAL_WORKSPACE_DEPS_HELPER"
@@ -633,6 +646,16 @@ build_frontend_assets() {
     if ! apply_local_workspace_overrides; then
         print_error "Local workspace dependency override failed"
         exit 1
+    fi
+    # Run the lifecycle scripts the install deferred, now that the override
+    # is resolvable: dependency + root install scripts, then root `prepare`.
+    if [ "${LOCAL_WORKSPACE_LIFECYCLE_DEFERRED:-0}" = "1" ]; then
+        LOCAL_WORKSPACE_LIFECYCLE_DEFERRED=0
+        print_status "Running deferred npm lifecycle scripts..."
+        if ! npm rebuild 2>&1 || ! npm run prepare --if-present 2>&1; then
+            print_error "Deferred npm lifecycle scripts failed after local workspace overrides"
+            exit 1
+        fi
     fi
 
     # Hand `wp-scripts` off to the extension's pinned copy when this
