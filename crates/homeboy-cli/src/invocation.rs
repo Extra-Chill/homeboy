@@ -105,22 +105,96 @@ pub(crate) fn parse_exit(success: bool) {
 }
 
 /// Who is asking, for durable records of operator actions such as a cancel:
-/// this process, its parent, and the caller session when one is declared.
+/// the process ancestry, the Cook attempt it runs inside (the first ancestor
+/// whose working directory is an attempt's controller scratch), the SSH
+/// client when there is one, and the caller session when one is declared.
 pub(crate) fn requester() -> String {
-    let parent = std::os::unix::process::parent_id();
-    let parent_name = std::fs::read_to_string(format!("/proc/{parent}/comm"))
-        .ok()
-        .and_then(|name| opaque(name.trim()));
-    let session =
-        CURRENT.with_borrow(|row| row.as_ref().and_then(|row| row.caller_session.clone()));
-    let mut requester = format!("pid {}, parent {parent}", std::process::id());
-    if let Some(name) = parent_name {
-        requester.push_str(&format!(" `{name}`"));
+    let ancestry = ancestry();
+    let mut requester = format!(
+        "pid {}, ancestry {}",
+        std::process::id(),
+        ancestry
+            .iter()
+            .map(|(pid, name, _)| format!("{name}[{pid}]"))
+            .collect::<Vec<_>>()
+            .join(" < ")
+    );
+    if let Some(attempt) = enclosing_cook_attempt(&ancestry) {
+        requester.push_str(&format!(", inside Cook attempt `{attempt}`"));
     }
-    if let Some(session) = session {
+    if let Some(client) = std::env::var("SSH_CONNECTION")
+        .ok()
+        .and_then(|value| value.split_whitespace().next().map(str::to_string))
+    {
+        requester.push_str(&format!(", ssh from {client}"));
+    }
+    if let Some(session) =
+        CURRENT.with_borrow(|row| row.as_ref().and_then(|row| row.caller_session.clone()))
+    {
         requester.push_str(&format!(", caller session `{session}`"));
     }
     requester
+}
+
+/// The Cook attempt this process runs inside: the first ancestor whose working
+/// directory is an attempt's controller scratch.
+fn enclosing_cook_attempt(
+    ancestry: &[(u32, String, Option<std::path::PathBuf>)],
+) -> Option<String> {
+    let root = homeboy::core::paths::controller_scratch_store()
+        .ok()?
+        .join("attempts");
+    ancestry.iter().find_map(|(_, _, cwd)| {
+        cwd.as_deref()?
+            .strip_prefix(&root)
+            .ok()?
+            .components()
+            .next()
+            .map(|attempt| attempt.as_os_str().to_string_lossy().into_owned())
+    })
+}
+
+/// Refuse a control-plane mutation issued from inside a Cook attempt: an
+/// attempt's agent owns its task, not the controller's other work.
+pub(crate) fn refuse_inside_cook_attempt(verb: &str, allowed: bool) -> homeboy::core::Result<()> {
+    if allowed {
+        return Ok(());
+    }
+    match enclosing_cook_attempt(&ancestry()) {
+        Some(attempt) => Err(homeboy::core::Error::validation_invalid_argument(
+            "allow_inside_cook",
+            format!(
+                "`{verb}` is a controller mutation and this process runs inside Cook attempt `{attempt}`; pass --allow-inside-cook to run it from a Cook"
+            ),
+            Some(attempt),
+            None,
+        )),
+        None => Ok(()),
+    }
+}
+
+/// This process and its parent chain up to init: pid, name, cwd.
+fn ancestry() -> Vec<(u32, String, Option<std::path::PathBuf>)> {
+    let mut chain = Vec::new();
+    let mut pid = std::process::id();
+    while pid > 1 && chain.len() < 16 {
+        let Ok(stat) = std::fs::read_to_string(format!("/proc/{pid}/stat")) else {
+            break;
+        };
+        // `pid (comm) state ppid ...`: comm may contain spaces and parens.
+        let (Some(open), Some(close)) = (stat.find('('), stat.rfind(')')) else {
+            break;
+        };
+        let name = stat[open + 1..close].to_string();
+        let cwd = std::fs::read_link(format!("/proc/{pid}/cwd")).ok();
+        chain.push((pid, name, cwd));
+        pid = stat[close + 1..]
+            .split_whitespace()
+            .nth(1)
+            .and_then(|ppid| ppid.parse().ok())
+            .unwrap_or(0);
+    }
+    chain
 }
 
 pub(crate) fn run(f: impl FnOnce() -> std::process::ExitCode) -> std::process::ExitCode {
