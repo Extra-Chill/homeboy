@@ -1150,16 +1150,35 @@ fn verify_live_lease_adoption(
     let mut status =
         remote_daemon_status(client, homeboy, runner_id).map_err(Error::internal_unexpected)?;
     probe_remote_daemon_endpoint(client, &mut status, None);
-    let daemon = status.daemon.ok_or_else(|| {
-        Error::validation_invalid_argument(
+    if let Some(message) = live_lease_adoption_mismatch(
+        &status,
+        expected_lease,
+        expected_pid,
+        connected_daemon,
+        expected_identity,
+    ) {
+        return Err(Error::validation_invalid_argument(
             "adopt_live_lease",
-            "live lease changed before adoption could be persisted",
+            message,
             None,
             None,
-        )
-    })?;
-    if !status.fresh
-        || !status.reachable
+        ));
+    }
+    Ok(())
+}
+
+fn live_lease_adoption_mismatch(
+    status: &RemoteDaemonStatus,
+    expected_lease: &str,
+    expected_pid: u32,
+    connected_daemon: &RemoteDaemon,
+    expected_identity: &str,
+) -> Option<String> {
+    let Some(daemon) = status.daemon.as_ref() else {
+        return Some("live lease changed before adoption could be persisted".to_string());
+    };
+    // Explicit adoption proves continuity by identity, not freshness.
+    if !status.reachable
         || status.endpoint_probe_error.is_some()
         || daemon.lease_id.as_deref() != Some(expected_lease)
         || daemon.pid != Some(expected_pid)
@@ -1167,19 +1186,14 @@ fn verify_live_lease_adoption(
         || daemon.pid != connected_daemon.pid
         || daemon.build_identity.as_deref().map(str::trim) != Some(expected_identity.trim())
     {
-        return Err(Error::validation_invalid_argument(
-            "adopt_live_lease",
-            format!(
-                "explicit live lease adoption snapshot no longer matches: expected lease `{expected_lease}` PID {expected_pid} build `{expected_identity}`; current lease `{}` PID `{}` build `{}`; no session state was changed",
-                daemon.lease_id.as_deref().unwrap_or("unavailable"),
-                daemon.pid.map(|pid| pid.to_string()).as_deref().unwrap_or("unavailable"),
-                daemon.build_identity.as_deref().unwrap_or("unavailable"),
-            ),
-            None,
-            None,
+        return Some(format!(
+            "explicit live lease adoption snapshot no longer matches: expected lease `{expected_lease}` PID {expected_pid} build `{expected_identity}`; current lease `{}` PID `{}` build `{}`; no session state was changed",
+            daemon.lease_id.as_deref().unwrap_or("unavailable"),
+            daemon.pid.map(|pid| pid.to_string()).as_deref().unwrap_or("unavailable"),
+            daemon.build_identity.as_deref().unwrap_or("unavailable"),
         ));
     }
-    Ok(())
+    None
 }
 
 fn should_replay_pending_replacement(kind: &str, adopt_live_lease: bool) -> bool {

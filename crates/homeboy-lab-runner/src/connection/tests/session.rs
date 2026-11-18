@@ -258,6 +258,77 @@ fn explicit_live_lease_adoption_accepts_an_exact_reachable_stale_daemon() {
 }
 
 #[test]
+fn live_lease_adoption_snapshot_accepts_stale_but_exact_daemon() {
+    let status = compact_daemon_status(false, 1, Some(" homeboy test+live "));
+    let connected = status.daemon.as_ref().expect("daemon");
+
+    assert_eq!(
+        live_lease_adoption_mismatch(&status, "lease-live", 4646, connected, "homeboy test+live",),
+        None,
+    );
+}
+
+#[test]
+fn live_lease_adoption_snapshot_rejects_continuity_mismatches() {
+    let baseline = compact_daemon_status(true, 0, Some("homeboy test+live"));
+    for case in [
+        "unreachable",
+        "endpoint probe error",
+        "lease mismatch",
+        "PID mismatch",
+        "connected lease mismatch",
+        "connected PID mismatch",
+        "build mismatch",
+        "missing build",
+        "missing daemon",
+    ] {
+        let mut status = baseline.clone();
+        let mut connected = baseline.daemon.clone().expect("daemon");
+        match case {
+            "unreachable" => status.reachable = false,
+            "endpoint probe error" => status.endpoint_probe_error = Some("timeout".to_string()),
+            "lease mismatch" => {
+                status.daemon.as_mut().unwrap().lease_id = Some("lease-other".to_string());
+                connected.lease_id = Some("lease-other".to_string());
+            }
+            "PID mismatch" => {
+                status.daemon.as_mut().unwrap().pid = Some(9999);
+                connected.pid = Some(9999);
+            }
+            "connected lease mismatch" => connected.lease_id = Some("lease-other".to_string()),
+            "connected PID mismatch" => connected.pid = Some(9999),
+            "build mismatch" => {
+                status.daemon.as_mut().unwrap().build_identity = Some("other build".to_string());
+            }
+            "missing build" => status.daemon.as_mut().unwrap().build_identity = None,
+            "missing daemon" => status.daemon = None,
+            _ => unreachable!(),
+        }
+
+        let message = live_lease_adoption_mismatch(
+            &status,
+            "lease-live",
+            4646,
+            &connected,
+            "homeboy test+live",
+        )
+        .unwrap_or_else(|| panic!("{case} must reject adoption"));
+        if case == "missing daemon" {
+            assert_eq!(
+                message,
+                "live lease changed before adoption could be persisted"
+            );
+        } else {
+            assert!(
+                message.contains("expected lease `lease-live` PID 4646 build `homeboy test+live`")
+            );
+            assert!(message.contains("current lease `"));
+            assert!(message.ends_with("no session state was changed"));
+        }
+    }
+}
+
+#[test]
 fn explicit_live_lease_adoption_with_endpoint_timeout_reports_the_probe_blocker() {
     let session = direct_ssh_session("lease-recorded");
     let mut status = remote_daemon_status_for_test(true, true, 0, "lease-live", 4646);
