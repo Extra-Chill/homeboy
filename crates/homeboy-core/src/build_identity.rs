@@ -9,6 +9,35 @@ pub fn current() -> BuildIdentity {
 /// Field name the runner reports for a provenance reference refusal.
 pub const PROVENANCE_TRANSPORT_FIELD: &str = "provenance_transport";
 
+/// First Homeboy release whose child process resolves
+/// `homeboy/provenance-reference/v1` references (`observation::resolve_json_value`).
+/// Any child at or after this release reads the references a runner stages,
+/// whatever build the runner itself is on (#18376).
+pub const PROVENANCE_REFERENCE_MIN_VERSION: (u64, u64, u64) = (0, 310, 0);
+
+/// Parse the semantic version out of a build identity such as
+/// `homeboy 0.470.0+c463cb25` or a bare `0.470.0`.
+pub fn build_version(build: &str) -> Option<(u64, u64, u64)> {
+    let build = build.trim();
+    let version = build.strip_prefix("homeboy ").unwrap_or(build).trim();
+    let core = version
+        .split(|c| c == '+' || c == '-' || c == ' ')
+        .next()?
+        .trim_start_matches('v');
+    let mut parts = core.split('.');
+    let major = parts.next()?.parse().ok()?;
+    let minor = parts.next()?.parse().ok()?;
+    let patch = parts.next()?.parse().ok()?;
+    parts.next().is_none().then_some((major, minor, patch))
+}
+
+/// Whether a child on `build` reads provenance references. An identity whose
+/// version cannot be read is treated as unsupported, so the runner never hands
+/// references to a child that might not resolve them.
+pub fn supports_provenance_references(build: &str) -> bool {
+    build_version(build).is_some_and(|version| version >= PROVENANCE_REFERENCE_MIN_VERSION)
+}
+
 const CHILD_BUILD_PREFIX: &str = "child build `";
 const RUNNER_BUILD_INFIX: &str = "` does not support provenance references from runner build `";
 
@@ -41,6 +70,18 @@ impl ProvenanceBuildSkew {
         let (child, runner) = (child_build.trim(), runner_build.trim());
         (!child.is_empty() && !runner.is_empty() && child != runner)
             .then(|| Self::new(child, runner))
+    }
+
+    /// The skew between `child_build` and `runner_build` only when the child
+    /// cannot read the provenance references the runner stages.
+    ///
+    /// Controller and runner upgrade independently and routinely sit a release
+    /// or two apart; the reference format is versioned by its schema, not by
+    /// the build, so ordinary release churn in either direction is compatible
+    /// and must not fail a Cook (#18376).
+    pub fn incompatible(child_build: &str, runner_build: &str) -> Option<Self> {
+        Self::between(child_build, runner_build)
+            .filter(|skew| !supports_provenance_references(&skew.child_build))
     }
 
     /// The refusal text. Kept stable so records written by older builds and by
@@ -144,6 +185,52 @@ mod tests {
         assert!(next.contains("homeboy runner refresh-homeboy homeboy-lab"));
         assert!(next.contains("homeboy runner doctor homeboy-lab --repair"));
         assert_eq!(error.hints.len(), 1);
+    }
+
+    #[test]
+    fn one_release_skew_in_either_direction_is_compatible() {
+        // #18376: the exact pair that failed agent-task-cdc726f5.
+        let older_child = ("homeboy 0.469.6+82c2f73e", "homeboy 0.470.0+c463cb25");
+        assert!(ProvenanceBuildSkew::between(older_child.0, older_child.1).is_some());
+        assert_eq!(
+            ProvenanceBuildSkew::incompatible(older_child.0, older_child.1),
+            None
+        );
+        // And the reverse: child newer than the runner daemon.
+        assert_eq!(
+            ProvenanceBuildSkew::incompatible("homeboy 0.470.4+b", "homeboy 0.470.3+a"),
+            None
+        );
+        assert_eq!(
+            ProvenanceBuildSkew::incompatible("homeboy 0.470.3-dirty", "homeboy 0.470.4"),
+            None
+        );
+    }
+
+    #[test]
+    fn child_without_reference_support_is_incompatible() {
+        let skew = ProvenanceBuildSkew::incompatible("homeboy 0.309.9+a", "homeboy 0.470.0+b")
+            .expect("pre-reference child is incompatible");
+        assert_eq!(skew.child_build, "homeboy 0.309.9+a");
+        assert!(
+            ProvenanceBuildSkew::incompatible("homeboy older-build", "homeboy 1.0.0").is_some()
+        );
+        assert_eq!(
+            ProvenanceBuildSkew::incompatible("homeboy 0.310.0+a", "homeboy 0.470.0+b"),
+            None
+        );
+    }
+
+    #[test]
+    fn build_version_reads_build_identities() {
+        assert_eq!(build_version("homeboy 0.470.0+c463cb25"), Some((0, 470, 0)));
+        assert_eq!(
+            build_version("homeboy 0.470.0+c463-dirty"),
+            Some((0, 470, 0))
+        );
+        assert_eq!(build_version("0.1.2"), Some((0, 1, 2)));
+        assert_eq!(build_version("homeboy older-build"), None);
+        assert_eq!(build_version("homeboy 1.2"), None);
     }
 
     #[test]
