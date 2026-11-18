@@ -63,6 +63,7 @@ mod service_manager;
 mod shutdown_deadline;
 pub mod step_job;
 mod stop;
+pub mod storage_maintenance;
 pub mod workflow_cadence;
 pub mod workflow_job;
 mod workflow_notify;
@@ -1930,6 +1931,8 @@ fn observed_daemon_pass(name: &str, body: impl FnOnce() -> Result<()>) {
     let _ = store.finish_run(&run.id, status, None);
 }
 
+const STORAGE_MAINTENANCE_BUDGET: std::time::Duration = std::time::Duration::from_secs(10);
+
 fn orchestration_tick_loop(
     job_store: JobStore,
     interval: std::time::Duration,
@@ -1971,6 +1974,15 @@ fn orchestration_tick_loop(
         isolated_tick(|| {
             observed_daemon_pass("controllers", || {
                 job_store.reconcile_controller_completions().map(|_| ())
+            });
+        });
+        // Finished Cook attempts release their scratch; reclaiming it is
+        // bounded so one pass never delays the next tick's reconciliation.
+        maintenance_tick(|| {
+            observed_daemon_pass("storage", || {
+                storage_maintenance::with_provider(|provider| {
+                    provider.reclaim(Instant::now() + STORAGE_MAINTENANCE_BUDGET)
+                })
             });
         });
         if shutdown.recv_timeout(interval) != Err(mpsc::RecvTimeoutError::Timeout) {
