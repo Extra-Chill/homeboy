@@ -1436,6 +1436,134 @@ fn promisor_bundle_hydration_is_a_no_op_when_the_closure_is_complete() {
     });
 }
 
+/// #18121: a promisor remote that refuses bare object-id wants (protocol v0
+/// without `allowAnySHA1InWant`) made the batched fetch fail, so the gate was
+/// abandoned with promisor objects unavailable. Hydration now repairs the
+/// closure with one unfiltered refetch of the requested refs before failing.
+#[test]
+fn promisor_bundle_hydration_repairs_a_refused_batched_fetch_with_an_unfiltered_refetch() {
+    crate::test_support::with_isolated_home(|_| {
+        let origin = tempfile::tempdir().expect("origin tempdir");
+        let author = tempfile::tempdir().expect("author tempdir");
+        let source = tempfile::tempdir().expect("source tempdir");
+        git(origin.path(), &["init", "--bare", "-b", "main"]);
+        git(origin.path(), &["config", "uploadpack.allowFilter", "true"]);
+        git(author.path(), &["init", "-b", "main"]);
+        git(author.path(), &["config", "user.email", "test@example.com"]);
+        git(author.path(), &["config", "user.name", "Test User"]);
+        for index in 0..3 {
+            fs::write(
+                author.path().join(format!("file-{index}.txt")),
+                format!("content {index}\n"),
+            )
+            .expect("write file");
+        }
+        git(author.path(), &["add", "."]);
+        git(author.path(), &["commit", "-m", "blobs"]);
+        git(
+            author.path(),
+            &[
+                "push",
+                &format!("file://{}", origin.path().display()),
+                "main",
+            ],
+        );
+        git(
+            source.path(),
+            &[
+                "clone",
+                "--no-checkout",
+                "--filter=blob:none",
+                &format!("file://{}", origin.path().display()),
+                ".",
+            ],
+        );
+        // Protocol v0 refuses wants for unadvertised objects, so the batched
+        // object-id fetch fails exactly like a remote that cannot serve it.
+        git(source.path(), &["config", "protocol.version", "0"]);
+        git(source.path(), &["config", "gc.auto", "0"]);
+        git(source.path(), &["config", "maintenance.auto", "false"]);
+        assert!(
+            ref_has_missing_objects(source.path(), "HEAD").expect("probe"),
+            "the fixture must start with promised blobs missing"
+        );
+
+        hydrate_controller_bundle_objects(source.path(), &["HEAD".to_string()])
+            .expect("the unfiltered repair completes the refused closure");
+
+        assert!(
+            !ref_has_missing_objects(source.path(), "HEAD").expect("probe"),
+            "every promised object must be present after the repair"
+        );
+    });
+}
+
+/// #18121: a closure the controller cannot hydrate names the failing
+/// operation and the controller checkout path, not only a repair command.
+#[test]
+fn unrepairable_promisor_closure_names_the_operation_and_checkout_path() {
+    crate::test_support::with_isolated_home(|_| {
+        let origin = tempfile::tempdir().expect("origin tempdir");
+        let author = tempfile::tempdir().expect("author tempdir");
+        let source = tempfile::tempdir().expect("source tempdir");
+        git(origin.path(), &["init", "--bare", "-b", "main"]);
+        git(origin.path(), &["config", "uploadpack.allowFilter", "true"]);
+        git(author.path(), &["init", "-b", "main"]);
+        git(author.path(), &["config", "user.email", "test@example.com"]);
+        git(author.path(), &["config", "user.name", "Test User"]);
+        fs::write(author.path().join("file.txt"), "content\n").expect("write file");
+        git(author.path(), &["add", "."]);
+        git(author.path(), &["commit", "-m", "blob"]);
+        git(
+            author.path(),
+            &[
+                "push",
+                &format!("file://{}", origin.path().display()),
+                "main",
+            ],
+        );
+        git(
+            source.path(),
+            &[
+                "clone",
+                "--no-checkout",
+                "--filter=blob:none",
+                &format!("file://{}", origin.path().display()),
+                ".",
+            ],
+        );
+        git(source.path(), &["config", "gc.auto", "0"]);
+        git(source.path(), &["config", "maintenance.auto", "false"]);
+        // The promisor remote disappears: neither the batched fetch nor the
+        // unfiltered repair can reach it.
+        fs::remove_dir_all(origin.path()).expect("remove origin");
+
+        let error = hydrate_controller_bundle_objects(source.path(), &["HEAD".to_string()])
+            .expect_err("an unreachable promisor remote cannot complete the closure");
+
+        assert_eq!(
+            error.details["reason"],
+            "controller_git_object_closure_unavailable"
+        );
+        let checkout = source.path().display().to_string();
+        assert_eq!(error.details["local_path"], checkout);
+        assert!(
+            error
+                .message
+                .contains(&format!("in controller checkout `{checkout}`")),
+            "{}",
+            error.message
+        );
+        assert!(
+            error
+                .message
+                .starts_with("refetch controller git bundle commits failed"),
+            "{}",
+            error.message
+        );
+    });
+}
+
 #[cfg(unix)]
 struct PromisorTransportFixture {
     origin: tempfile::TempDir,

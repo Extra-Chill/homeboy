@@ -639,6 +639,29 @@ pub fn gate_job_never_spawned(
     .with_retryable(failure.retryable())
 }
 
+/// Whether `error` is a Lab gate *transport* failure: the runner never judged
+/// the candidate (promisor hydration, a lost terminal receipt, a runner that
+/// stayed under pressure or disconnected). It is infrastructure, distinct from
+/// a gate that ran and failed, from a runner that answered "not ready" for a
+/// missing toolchain, and from a configuration error no retry can fix. A Cook
+/// never discards or blocks provider work on it: the gates re-observe the
+/// runner and `agent-task recover` re-gates the preserved candidate (#18121).
+pub fn is_lab_gate_transport_failure(error: &Error) -> bool {
+    let details = &error.details;
+    details
+        .get("gate_disposition")
+        .and_then(serde_json::Value::as_str)
+        == Some("unavailable")
+        && error.retryable != Some(false)
+        && details.get("pre_handoff_configuration_error") != Some(&serde_json::json!(true))
+        && details.get("stage").and_then(serde_json::Value::as_str) != Some("readiness")
+        && !matches!(
+            error.code,
+            homeboy_core::ErrorCode::RunnerVersionSkew
+                | homeboy_core::ErrorCode::GateRuntimeUnavailable
+        )
+}
+
 fn is_retryable_pre_spawn_failure(error: &Error) -> bool {
     error
         .details
@@ -1070,7 +1093,11 @@ pub(super) fn preflight(
         timeout_seconds: timeout.as_secs().max(1),
         no_progress_timeout_seconds: timeout.as_secs().max(1),
     };
-    let receipt = execute_through_substrate_waits(cwd, &request, None)?;
+    // Anything the transport returns before a receipt exists never judged
+    // readiness: type it as the transport's non-execution, exactly as a gate
+    // dispatch does, so Cook can tell it from a runner that is not ready.
+    let receipt = execute_through_substrate_waits(cwd, &request, None)
+        .map_err(|error| gate_execute_unavailable(error, "transport", None))?;
     request.verify_receipt(&receipt)?;
     if receipt
         .readiness
@@ -1913,6 +1940,130 @@ mod tests {
             )
             .unwrap();
         });
+    }
+
+    /// A runner transport whose every job fails with `fail()` before a receipt.
+    struct FailingBeforeReceipt {
+        previous: Arc<dyn LabGateTransport>,
+        runner_id: &'static str,
+        fail: fn() -> Error,
+    }
+    impl LabGateTransport for FailingBeforeReceipt {
+        fn declared_runner(&self, command: &str) -> Result<Option<String>> {
+            self.previous.declared_runner(command)
+        }
+        fn execute(
+            &self,
+            cwd: &Path,
+            request: &LabGateRequest,
+            supervision: Option<&GateSupervision>,
+        ) -> Result<LabGateReceipt> {
+            if request.runner_id != self.runner_id {
+                return self.previous.execute(cwd, request, supervision);
+            }
+            Err((self.fail)())
+        }
+    }
+
+    fn preflight_through_failing_runner(runner_id: &'static str, fail: fn() -> Error) -> Error {
+        homeboy_core::test_support::with_isolated_home(|_| {
+            register_lab_gate_transport(Arc::new(FailingBeforeReceipt {
+                previous: active_transport(),
+                runner_id,
+                fail,
+            }));
+            let root = tempfile::tempdir().unwrap();
+            repository(root.path());
+            let environment = request(root.path()).environment;
+            preflight(
+                root.path(),
+                runner_id,
+                &environment,
+                &[],
+                &[],
+                Duration::from_secs(30),
+            )
+            .expect_err("the transport never produced a receipt")
+        })
+    }
+
+    /// #18121: a readiness preflight the transport never ran (a lost terminal
+    /// receipt, a promisor hydration failure, a disconnected runner) is a
+    /// typed transport failure, so Cook does not mistake it for a runner that
+    /// is not ready or a broken gate declaration.
+    #[test]
+    fn preflight_transport_failures_are_typed_as_transport_not_readiness() {
+        let cases: [(&'static str, fn() -> Error); 3] = [
+            ("lost-receipt-runner", || {
+                Error::new(
+                    homeboy_core::ErrorCode::RunnerLabTransportFailure,
+                    "runner gate did not return terminal artifact evidence",
+                    serde_json::json!({"stage": "terminal_projection", "job_id": "job-1", "gate_disposition": "unavailable"}),
+                )
+                .with_retryable(true)
+            }),
+            ("promisor-runner", || {
+                let mut error = Error::internal_unexpected(
+                    "hydrate git bundle objects completed with required promisor objects still unavailable in controller checkout `/tmp/checkout`",
+                );
+                error.details = serde_json::json!({"reason": "controller_git_object_closure_unavailable", "local_path": "/tmp/checkout"});
+                error
+            }),
+            ("disconnected-runner", || {
+                LabGateAdmission {
+                    accepts_jobs: false,
+                    reasons: vec!["not_connected".to_string()],
+                    freshness: LabGateFreshness::Fresh,
+                    next_action: None,
+                }
+                .refusal("disconnected-runner", None)
+            }),
+        ];
+        for (runner_id, fail) in cases {
+            let error = preflight_through_failing_runner(runner_id, fail);
+            assert!(
+                is_lab_gate_transport_failure(&error),
+                "{runner_id}: {error:?}"
+            );
+            assert_eq!(error.details["gate_disposition"], "unavailable");
+            assert_ne!(error.details["stage"], "readiness", "{runner_id}");
+        }
+    }
+
+    /// #18121: only non-execution counts. A configuration error no retry can
+    /// fix, a runner that answered "not ready", version skew and a missing
+    /// gate runtime all stay verdicts the Cook must act on.
+    #[test]
+    fn configuration_readiness_and_skew_failures_are_not_transport_failures() {
+        let configuration = preflight_through_failing_runner("misconfigured-runner", || {
+            let mut error = Error::validation_invalid_argument(
+                "secret_env",
+                "missing runner secret env ref for WP_CODEBOX_DB_HOST",
+                None,
+                None,
+            );
+            error.retryable = Some(false);
+            error.details["pre_handoff_configuration_error"] = serde_json::json!(true);
+            error
+        });
+        assert!(!is_lab_gate_transport_failure(&configuration));
+
+        let not_ready = Error::new(
+            homeboy_core::ErrorCode::RunnerLabTransportFailure,
+            "runner did not return a ready non-execution readiness receipt: php missing",
+            serde_json::json!({"gate_disposition": "unavailable", "stage": "readiness"}),
+        );
+        assert!(!is_lab_gate_transport_failure(&not_ready));
+
+        let skew = RunnerBuildSkew {
+            controller: "0.1.0".to_string(),
+            runner: "0.0.9".to_string(),
+        }
+        .error("skew-runner");
+        assert!(!is_lab_gate_transport_failure(&skew));
+
+        let runtime = super::super::gate_runtime::unavailable("php -v", "php", "lab");
+        assert!(!is_lab_gate_transport_failure(&runtime));
     }
 
     /// A runner transport whose gate jobs expire before spawn `expiries` times.

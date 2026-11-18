@@ -3078,6 +3078,130 @@ fn behind_explicit_cwd_destination() -> (
     (remote, source, root, destination)
 }
 
+/// A Lab transport whose readiness preflight on `runner_id` fails with
+/// `fail()` before any receipt exists.
+struct PreflightTransportFailure {
+    previous: Arc<dyn crate::agent_task_gate::placement::LabGateTransport>,
+    runner_id: &'static str,
+    fail: fn() -> Error,
+}
+
+impl crate::agent_task_gate::placement::LabGateTransport for PreflightTransportFailure {
+    fn declared_runner(&self, command: &str) -> Result<Option<String>> {
+        self.previous.declared_runner(command)
+    }
+    fn execute(
+        &self,
+        cwd: &std::path::Path,
+        request: &crate::agent_task_gate::placement::LabGateRequest,
+        supervision: Option<&crate::agent_task_gate::GateSupervision>,
+    ) -> Result<crate::agent_task_gate::placement::LabGateReceipt> {
+        if request.runner_id != self.runner_id {
+            return self.previous.execute(cwd, request, supervision);
+        }
+        Err((self.fail)())
+    }
+}
+
+/// Run a Cook whose Lab readiness preflight on `runner_id` fails with
+/// `fail()`; returns its status and how many provider executions started.
+fn cook_through_failing_lab_preflight(
+    cook_id: &str,
+    runner_id: &'static str,
+    fail: fn() -> Error,
+) -> (String, usize) {
+    homeboy_core::test_support::with_isolated_home(|_| {
+        crate::agent_task_gate::placement::register_lab_gate_transport(Arc::new(
+            PreflightTransportFailure {
+                previous: crate::agent_task_gate::placement::active_transport(),
+                runner_id,
+                fail,
+            },
+        ));
+        let (_remote, _source, root, destination) = behind_explicit_cwd_destination();
+        let _capacity =
+            homeboy_core::observation::disk_budget::test_seam::ample_disk_capacity_for_test(
+                root.path(),
+            );
+        let mut options = batch_cook_options(
+            cook_id,
+            Arc::new(RecordingDetachedAttemptDispatcher {
+                dispatches: Arc::new(AtomicUsize::new(0)),
+            }),
+        );
+        options.workspace.to_worktree = destination.display().to_string();
+        options.workspace.source_worktree_path = Some(destination.clone());
+        options.identity.initial_plan.tasks[0].workspace.root =
+            Some(destination.display().to_string());
+        options.identity.initial_plan.tasks[0].metadata =
+            serde_json::json!({ "worktree_provision": { "kind": "explicit_cwd" } });
+        options.provider_transport.attempt_dispatcher = None;
+        options.gates.gate_environment.lab_runner = Some(runner_id.to_string());
+        options.gates.gate_toolchains =
+            vec![crate::agent_task_gate::AgentTaskGateToolchainRequirement {
+                command: "php".to_string(),
+                probe_arguments: vec!["-v".to_string()],
+            }];
+        let provider_starts = Arc::new(AtomicUsize::new(0));
+        let report = run_cook(CookContext::new(
+            options,
+            Arc::new(RecordingImmediateSuccessExecutor {
+                starts: Arc::clone(&provider_starts),
+            }),
+        ))
+        .expect("Cook reports");
+        (
+            report.value.status.clone(),
+            provider_starts.load(Ordering::SeqCst),
+        )
+    })
+}
+
+/// #18121: a Lab readiness preflight the transport never ran (here a lost
+/// terminal receipt) used to end the Cook as `pre_execution_failure` before
+/// the provider worked, with zero artifacts. It is infrastructure, not a
+/// verdict: the Cook proceeds, and the gates re-observe the runner.
+#[test]
+fn lab_preflight_transport_failure_does_not_fail_the_cook_before_the_provider() {
+    let (status, provider_starts) = cook_through_failing_lab_preflight(
+        "cook-preflight-transport",
+        "preflight-lost-receipt-lab",
+        || {
+            Error::new(
+                homeboy_core::ErrorCode::RunnerLabTransportFailure,
+                "Lab gate transport did not produce verified passing evidence: runner gate did not return terminal artifact evidence",
+                serde_json::json!({"stage": "terminal_projection", "job_id": "job-lost", "gate_disposition": "unavailable"}),
+            )
+            .with_retryable(true)
+        },
+    );
+    assert_ne!(status, "pre_execution_failure");
+    assert_eq!(provider_starts, 1, "status {status}");
+}
+
+/// A configuration error no retry can fix still stops the Cook before a
+/// provider is paid for.
+#[test]
+fn lab_preflight_configuration_error_still_fails_before_the_provider() {
+    let (status, provider_starts) = cook_through_failing_lab_preflight(
+        "cook-preflight-configuration",
+        "preflight-misconfigured-lab",
+        || {
+            let mut error = Error::validation_invalid_argument(
+                "secret_env",
+                "Lab gate transport did not produce verified passing evidence: missing runner secret env ref for WP_CODEBOX_DB_HOST",
+                None,
+                None,
+            );
+            error.retryable = Some(false);
+            error.details["pre_handoff_configuration_error"] = serde_json::json!(true);
+            error
+        },
+    );
+    assert_eq!(status, "pre_execution_failure");
+    assert_eq!(provider_starts, 0);
+}
+
 fn porcelain_status(path: &std::path::Path) -> String {
     let output = Command::new("git")
         .args(["status", "--porcelain=v1"])

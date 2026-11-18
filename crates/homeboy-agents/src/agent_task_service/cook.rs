@@ -1034,6 +1034,28 @@ fn is_gate_setup_failure(error: &Error) -> bool {
 /// setup fails, so an environmental setup failure no longer strands a finished
 /// candidate until an operator runs `agent-task recover`. Any other error, and the
 /// final setup failure, are returned unchanged.
+/// A gate readiness preflight the Lab transport never ran (promisor
+/// hydration, a lost terminal receipt, a runner that stayed under pressure or
+/// disconnected) proves nothing about the gates. Failing the Cook on it
+/// discarded the run before the provider worked, or a continuation's
+/// candidate after it did. Let the Cook continue instead: each gate
+/// re-observes the runner, and a gate the transport still cannot run defers
+/// with the candidate preserved for `agent-task recover` (#18121). A runner
+/// that answered "not ready" and every configuration error still fail here.
+pub(super) fn defer_gate_preflight_transport_failure(preflight: Result<()>) -> Result<()> {
+    match preflight {
+        Err(error) if crate::agent_task_gate::placement::is_lab_gate_transport_failure(&error) => {
+            homeboy_core::log_status!(
+                "warn",
+                "gate readiness preflight did not execute on the Lab runner ({}); continuing so the gates re-observe the runner and a non-executed gate defers with the candidate preserved",
+                error.message
+            );
+            Ok(())
+        }
+        result => result,
+    }
+}
+
 pub(super) fn promote_with_gate_setup_retries(
     side_effects: &mut CookSideEffects<'_>,
     lifecycle_store: &AgentTaskLifecycleStore,
@@ -5902,6 +5924,7 @@ fn run_cook_spine(
             })?;
         crate::agent_task_gate::preflight_verify_gate_options(&gate_workspace, &options.gates)
     };
+    let preflight = defer_gate_preflight_transport_failure(preflight);
     if let Err(error) = preflight {
         let error = with_pre_execution_phase(error, "gate_toolchain_preflight");
         record_pre_execution_failure(

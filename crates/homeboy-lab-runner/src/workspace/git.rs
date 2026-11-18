@@ -621,36 +621,128 @@ fn hydrate_promisor_bundle_objects(
     control: &WorkspaceControl,
 ) -> Result<()> {
     let missing = all_missing_promisor_objects(local_path, refs, control)?;
+    let mut batched_failure = None;
     if !missing.is_empty() {
         if let Err(error) = fetch_promisor_objects(local_path, remote, &missing, control) {
             if error.details["workspace_sync"].is_object() {
                 return Err(error);
             }
-            return Err(controller_object_closure_error(
-                "batched fetch of required promisor objects failed",
+            batched_failure = Some(
                 error.details["git_exit_status"]
                     .as_i64()
                     .map(|value| value as i32),
-                local_path,
-                remote,
-                refs,
-                &missing[..missing.len().min(MISSING_PROMISOR_OBJECT_DIAGNOSTIC_LIMIT)],
-            ));
+            );
         }
     }
 
-    let still_missing = missing_promisor_objects(local_path, refs, control)?;
-    if !still_missing.is_empty() {
-        return Err(controller_object_closure_error(
+    if batched_failure.is_none() && missing_promisor_objects(local_path, refs, control)?.is_empty()
+    {
+        return Ok(());
+    }
+
+    // The batched fetch failed or left required objects unavailable (a
+    // server that refuses bare object-id wants, a transient transport loss).
+    // Repair once with a full, unfiltered transfer of the requested refs'
+    // closure before failing the gate it would otherwise abandon (#18121).
+    let repair = repair_promisor_closure_unfiltered(local_path, remote, refs, control)?;
+    // A probe that cannot walk the closure (its commits are absent) is no
+    // evidence of completeness; report the originally missing objects.
+    let still_missing = match missing_promisor_objects(local_path, refs, control) {
+        Ok(still_missing) if still_missing.is_empty() => return Ok(()),
+        Ok(still_missing) => still_missing,
+        Err(error) if error.details["workspace_sync"].is_object() => return Err(error),
+        Err(_) => missing[..missing.len().min(MISSING_PROMISOR_OBJECT_DIAGNOSTIC_LIMIT)].to_vec(),
+    };
+    let (operation, exit_status) = match batched_failure {
+        Some(exit_status) => (
+            "batched fetch of required promisor objects failed",
+            exit_status,
+        ),
+        None => (
             "hydrate git bundle objects completed with required promisor objects still unavailable",
             None,
-            local_path,
+        ),
+    };
+    let mut error = controller_object_closure_error(
+        format!(
+            "{operation}, and the unfiltered repair fetch ({}) did not complete the closure",
+            if repair.fetched_refs.is_empty() {
+                "no requested ref was fetchable".to_string()
+            } else {
+                format!("fetched {}", repair.fetched_refs.join(", "))
+            }
+        ),
+        exit_status,
+        local_path,
+        remote,
+        refs,
+        &still_missing,
+    );
+    error.details["repair_attempt"] = serde_json::json!({
+        "operation": "unfiltered refetch of requested refs",
+        "fetched_refs": repair.fetched_refs,
+        "failed_refs": repair.failed_refs,
+    });
+    Err(error)
+}
+
+/// The outcome of [`repair_promisor_closure_unfiltered`].
+struct PromisorRepair {
+    fetched_refs: Vec<String>,
+    failed_refs: Vec<serde_json::Value>,
+}
+
+/// Refetch each requested ref without the partial-clone filter, so the remote
+/// sends the ref's whole closure even when it refuses explicit object-id
+/// wants. `--refetch` ignores local haves (the commits are present; their
+/// blobs are not). Refs the remote cannot serve, such as an unpushed local
+/// commit whose closure is already local, are skipped and recorded.
+fn repair_promisor_closure_unfiltered(
+    local_path: &Path,
+    remote: &str,
+    refs: &[String],
+    control: &WorkspaceControl,
+) -> Result<PromisorRepair> {
+    let mut repair = PromisorRepair {
+        fetched_refs: Vec::new(),
+        failed_refs: Vec::new(),
+    };
+    for git_ref in refs {
+        control.checkpoint()?;
+        // Skip only a ref whose closure is known complete; an unwalkable one
+        // is exactly what the repair is for.
+        if missing_promisor_objects(local_path, std::slice::from_ref(git_ref), control)
+            .is_ok_and(|missing| missing.is_empty())
+        {
+            continue;
+        }
+        let args = [
+            "fetch",
+            "--no-tags",
+            "--no-write-fetch-head",
+            "--recurse-submodules=no",
+            "--no-filter",
+            "--refetch",
             remote,
-            refs,
-            &still_missing,
-        ));
+            git_ref.as_str(),
+        ];
+        let mut process = Command::new("git");
+        process.args(args).current_dir(local_path);
+        homeboy_core::git::apply_configured_transport(&mut process, local_path, &args, &[]);
+        let output = control.output(
+            &mut process,
+            "repair promisor objects with unfiltered fetch",
+        )?;
+        if output.status.success() {
+            repair.fetched_refs.push(git_ref.clone());
+        } else {
+            repair.failed_refs.push(serde_json::json!({
+                "ref": git_ref,
+                "git_exit_status": output.status.code(),
+            }));
+        }
     }
-    Ok(())
+    Ok(repair)
 }
 
 /// Every object id in `refs`' closure that is absent locally, listed without
@@ -859,11 +951,14 @@ fn controller_object_closure_error(
             .join(" "),
     );
     let mut error = Error::internal_unexpected(format!(
-        "{}; repair the controller checkout with `{repair_command}`",
-        message.into()
+        "{} in controller checkout `{}`; repair the controller checkout with `{repair_command}`",
+        message.into(),
+        local_path.display()
     ));
     error.details = serde_json::json!({
         "reason": "controller_git_object_closure_unavailable",
+        "local_path": local_path.display().to_string(),
+        "promisor_remote": remote,
         "git_exit_status": exit_status,
         "missing_object_ids": missing,
         "repair_command": repair_command,
