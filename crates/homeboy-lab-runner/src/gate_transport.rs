@@ -181,6 +181,54 @@ fn missing_terminal_receipt(job_id: &str, problem: &str) -> Error {
     .with_retryable(true)
 }
 
+/// A gate job that printed nothing ended before gate-execute could report:
+/// name its exit code, the runner's resource-guard verdict that stopped it,
+/// and its stderr tail, instead of a receipt parse error.
+fn gate_printed_nothing(
+    job_id: &str,
+    result: &serde_json::Value,
+    stderr: &str,
+    private: bool,
+) -> Error {
+    let exit_code = result.get("exit_code").and_then(serde_json::Value::as_i64);
+    let violation = result
+        .pointer("/metrics/guard_violation")
+        .cloned()
+        .and_then(|value| {
+            serde_json::from_value::<homeboy_runner_contract::RunnerResourceGuardViolation>(value)
+                .ok()
+        });
+    let exit = exit_code.map_or("without an exit code".to_string(), |code| {
+        format!("with exit code {code}")
+    });
+    let cause = match (&violation, private) {
+        (Some(violation), _) => format!(": {}", violation.operator_message()),
+        (None, false) if !stderr.trim().is_empty() => {
+            let lines = stderr.lines().collect::<Vec<_>>();
+            format!(
+                "; stderr: {}",
+                homeboy_core::redaction::redact_string(
+                    &lines[lines.len().saturating_sub(20)..].join("\n")
+                )
+            )
+        }
+        _ => String::new(),
+    };
+    let message = format!("Lab gate job `{job_id}` ended {exit} before printing its result{cause}");
+    Error::new(
+        homeboy_core::ErrorCode::RunnerLabTransportFailure,
+        message,
+        serde_json::json!({
+            "stage": "terminal_projection",
+            "job_id": job_id,
+            "exit_code": exit_code,
+            "resource_guard": violation,
+            "gate_disposition": "unavailable",
+        }),
+    )
+    .with_retryable(true)
+}
+
 /// A terminal gate job whose stdout carried no receipt location never
 /// delivered the artifact the controller verifies, so the candidate was not
 /// judged. Name the job and the receipt path it should have written, and keep
@@ -855,6 +903,9 @@ fn execute_owned(
         .get("stderr")
         .and_then(serde_json::Value::as_str)
         .unwrap_or("");
+    if stdout.trim().is_empty() {
+        return Err(gate_printed_nothing(job_id, &result, stderr, private));
+    }
     // gate-execute that printed no envelope still names its stderr (#17649).
     let value: serde_json::Value = decode_gate_json("gate_stdout", stdout.as_bytes(), private)
         .map_err(|mut error| {
@@ -1543,6 +1594,52 @@ mod public_error_tests {
             );
             assert_eq!(public.message.contains("stderr line"), !private);
         }
+    }
+
+    /// A gate the runner stopped before it printed anything reports the
+    /// runner's verdict, not a receipt parse error.
+    #[test]
+    fn a_gate_that_printed_nothing_names_its_exit_and_resource_guard() {
+        let result = serde_json::json!({
+            "exit_code": 1, "stdout": "", "stderr": "",
+            "metrics": {"guard_violation": {
+                "reason": "process_count_limit_exceeded", "message": "stopped",
+                "rss_bytes": 8, "rss_limit_bytes": 16,
+                "process_count": 1024, "process_count_limit": 1024,
+                "top_processes": [{"name": "chrome-headless", "count": 79}]
+            }}
+        });
+        let error = gate_printed_nothing("job-1", &result, "", false);
+        let public = lab_gate_public_error(&error, "homeboy://run/x/artifact/y".into());
+        assert!(
+            public
+                .message
+                .contains("job `job-1` ended with exit code 1")
+                && public
+                    .message
+                    .contains("resource_guard.process_count_limit_exceeded")
+                && public.message.contains("chrome-headless"),
+            "{}",
+            public.message
+        );
+        assert_eq!(error.details["exit_code"], 1);
+        assert_eq!(
+            error.details["resource_guard"]["reason"],
+            "process_count_limit_exceeded"
+        );
+        assert_eq!(public.details["gate_disposition"], "unavailable");
+        assert!(
+            homeboy_agents::agent_tasks::gate::placement::is_lab_gate_transport_failure(&public),
+            "{public:?}"
+        );
+
+        let plain = gate_printed_nothing(
+            "job-2",
+            &serde_json::json!({"exit_code": 137, "stdout": ""}),
+            "line 1\nKilled",
+            false,
+        );
+        assert!(plain.message.contains("exit code 137") && plain.message.contains("Killed"));
     }
 
     #[test]
