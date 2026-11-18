@@ -1111,16 +1111,19 @@ fn validate_terminal_result(job: &Job, result: &Value, transport: &str) -> Resul
     // daemon lease) carries its cause on the job, not in the payload (#18109).
     if result.as_object().is_some_and(|result| result.is_empty()) {
         if let Some(reason) = job.stale_reason.as_deref() {
-            return Err(Error::validation_invalid_argument(
-                "runner",
+            // The daemon that owned the job went away; the caller's input was
+            // fine and the job may be resubmitted to its successor.
+            let mut error = Error::new(
+                homeboy_core::error::ErrorCode::RunnerJobLost,
                 format!(
                     "runner job `{}` {} on {transport} without a result: {reason}",
                     job.id,
                     job.status.as_str(),
                 ),
-                None,
-                None,
-            ));
+                serde_json::json!({ "job_id": job.id, "stale_reason": reason }),
+            );
+            error.retryable = Some(true);
+            return Err(error);
         }
     }
     serde_json::from_value::<homeboy_core::api_jobs::RemoteRunnerTerminalResult>(result.clone())
@@ -1201,6 +1204,8 @@ mod terminal_result_tests {
             .message
             .contains("daemon lease owner process was not running"));
         assert!(!settled.message.contains("malformed"));
+        assert_eq!(settled.code.as_str(), "runner.job_lost");
+        assert_eq!(settled.retryable, Some(true));
         job.status = JobStatus::Queued;
         assert!(validate_terminal_result(&job, &json!({}), "direct-daemon").is_ok());
     }

@@ -550,8 +550,19 @@ fn refresh_homeboy_binary_inner_in_roots(
     } else {
         "verify"
     });
-    let (exec_output, exit_code) =
-        exec_with_status_snapshot(&plan.runner_id, exec_options, connection_status.clone())?;
+    // Materialization runs before the promotion lease, so a concurrent refresh
+    // may replace the daemon running it. Materialization is content-addressed
+    // and idempotent: resubmit it once to the daemon that replaced it.
+    let (exec_output, exit_code) = match exec_with_status_snapshot(
+        &plan.runner_id,
+        exec_options.clone(),
+        connection_status.clone(),
+    ) {
+        Err(error) if error.code == homeboy_core::error::ErrorCode::RunnerJobLost => {
+            exec_with_status_snapshot(&plan.runner_id, exec_options, None)?
+        }
+        result => result?,
+    };
     set_refresh_live_sub_phase("verify");
     output.plan = plan.clone();
     output.build_transcript = Some(refresh_build_transcript(&exec_output));
