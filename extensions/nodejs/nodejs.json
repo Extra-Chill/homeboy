@@ -178,6 +178,13 @@
     }
   ],
   "ci": {
+    "cache": {
+      "namespace": "nodejs-deps",
+      "rolling": true,
+      "paths": [
+        { "root": "home", "path": ".npm/_cacache" }
+      ]
+    },
     "profiles": {
       "pr": {
         "label": "Pull request checks",

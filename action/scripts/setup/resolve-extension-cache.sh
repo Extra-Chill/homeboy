@@ -19,6 +19,10 @@ cache_json="$(jq -c '.data.extension.ci_cache // empty' <<< "${extension_json}" 
 [ -n "${cache_json}" ] || disable_cache
 
 namespace="$(jq -r '.namespace // empty' <<< "${cache_json}")"
+# Rolling caches are content-addressed download stores that stay valid across
+# key-file changes. They are restored from the newest entry and saved again
+# whenever their contents change, so they do not need key files at all.
+rolling="$(jq -r 'if .rolling == true then "true" else "false" end' <<< "${cache_json}")"
 if ! [[ "${namespace}" =~ ^[A-Za-z0-9._-]+$ ]]; then
   echo "::error::Extension '${extension_id}' declared an invalid CI cache namespace."
   exit 1
@@ -64,9 +68,13 @@ cache_path() {
 }
 
 paths=""
+populated=true
 while IFS=$'\t' read -r root relative env_name; do
   [ -n "${root}" ] || continue
   resolved="$(resolve_path "${root}" "${relative}")"
+  if [ ! -d "${resolved}" ] || [ -z "$(find "${resolved}" -type f -print -quit 2>/dev/null)" ]; then
+    populated=false
+  fi
   paths="${paths}${paths:+$'\n'}$(cache_path "${root}" "${relative}")"
   if [ -n "${env_name}" ]; then
     if ! [[ "${env_name}" =~ ^[A-Za-z_][A-Za-z0-9_]*$ ]]; then
@@ -91,11 +99,19 @@ while IFS= read -r relative; do
     key_material="${key_material}${relative}:${file_digest}"$'\n'
   fi
 done < <(jq -r '.key_files[]?' <<< "${cache_json}")
-[ -n "${key_material}" ] || disable_cache
+if [ -z "${key_material}" ]; then
+  [ "${rolling}" = "true" ] || disable_cache
+  key_material="rolling"
+fi
 
 fingerprint="$(printf '%s' "${key_material}" | sha256sum | cut -d' ' -f1)"
 {
   echo "enabled=true"
+  echo "rolling=${rolling}"
+  # Every cache path already holds files (a reused or persistent runner home,
+  # or an earlier action invocation in the same job). A rolling cache then
+  # skips the restore: the local content-addressed store is already usable.
+  echo "populated=${populated}"
   echo "namespace=${namespace}"
   echo "fingerprint=${fingerprint}"
   echo "paths<<HOMEBOY_CACHE_PATHS"

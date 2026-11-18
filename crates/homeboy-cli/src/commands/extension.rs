@@ -2597,6 +2597,45 @@ mod tests {
             );
             assert_eq!(cache.paths[1].path, "build-targets");
             assert_eq!(cache.paths[2].env.as_deref(), Some("BUILD_TARGET_DIR"));
+            assert!(!cache.rolling);
+        });
+    }
+
+    #[test]
+    fn extension_show_emits_rolling_ci_cache_contract() {
+        with_isolated_home(|home| {
+            let extension_id = "rolling-downloads";
+            let extension_dir = home
+                .path()
+                .join(".config/homeboy/extensions")
+                .join(extension_id);
+            fs::create_dir_all(&extension_dir).expect("extension dir");
+            fs::write(
+                extension_dir.join(format!("{extension_id}.json")),
+                r#"{
+  "name": "Rolling downloads",
+  "version": "1.0.0",
+  "ci": {
+    "cache": {
+      "namespace": "downloads",
+      "rolling": true,
+      "paths": [{"root": "home", "path": ".cache/store", "env": "STORE_DIR"}]
+    }
+  }
+}"#,
+            )
+            .expect("extension manifest");
+
+            let (output, _) = show_extension(extension_id, ExtensionReadinessMode::Cached)
+                .expect("show extension");
+            let ExtensionOutput::Show { extension } = output else {
+                panic!("expected extension show output");
+            };
+            let cache = extension.ci_cache.expect("CI cache contract");
+            assert!(cache.rolling);
+            assert!(cache.key_files.is_empty());
+            let json = serde_json::to_value(&cache).expect("serialize cache");
+            assert_eq!(json["rolling"], serde_json::Value::Bool(true));
         });
     }
 

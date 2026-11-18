@@ -527,12 +527,36 @@ runs:
       run: HOMEBOY_ACTION_SETUP_TIMEOUT_SECONDS="${{ inputs.setup-timeout-seconds }}" bash ${{ github.action_path }}/scripts/core/run-setup-with-timeout.sh 'resolve extension CI cache' -- bash ${{ github.action_path }}/scripts/setup/resolve-extension-cache.sh
 
     - name: Restore extension CI cache
-      if: steps.provisioning.outputs.reuse != 'true' && steps.extension-cache.outputs.enabled == 'true'
+      if: steps.provisioning.outputs.reuse != 'true' && steps.extension-cache.outputs.enabled == 'true' && steps.extension-cache.outputs.rolling != 'true'
       uses: actions/cache@v5
       with:
         path: ${{ steps.extension-cache.outputs.paths }}
         key: ${{ runner.os }}-${{ steps.extension-cache.outputs.namespace }}-quality-${{ steps.extension-cache.outputs.fingerprint }}
         restore-keys: ${{ runner.os }}-${{ steps.extension-cache.outputs.namespace }}-quality-
+
+    # A rolling cache is a content-addressed download store, valid across
+    # key-file changes, that may be filled by installs for components other
+    # than this one (e.g. a monorepo deploy hydrating changed components).
+    # Restore the newest entry; "Save rolling extension CI cache" below stores
+    # a new entry keyed by content whenever the commands added files. Skipped
+    # when the store is already populated (earlier invocation in this job).
+    - name: Restore rolling extension CI cache
+      if: steps.provisioning.outputs.reuse != 'true' && steps.extension-cache.outputs.rolling == 'true' && steps.extension-cache.outputs.populated != 'true'
+      uses: actions/cache/restore@v5
+      with:
+        path: ${{ steps.extension-cache.outputs.paths }}
+        # Saved keys are content digests, so this never matches exactly: the
+        # restore always takes the newest entry under the prefix.
+        key: ${{ runner.os }}-${{ steps.extension-cache.outputs.namespace }}-rolling-newest
+        restore-keys: ${{ runner.os }}-${{ steps.extension-cache.outputs.namespace }}-rolling-
+
+    - name: Snapshot rolling extension CI cache
+      id: rolling-cache-snapshot
+      if: steps.provisioning.outputs.reuse != 'true' && steps.extension-cache.outputs.rolling == 'true'
+      shell: bash
+      env:
+        CACHE_PATHS: ${{ steps.extension-cache.outputs.paths }}
+      run: bash ${{ github.action_path }}/scripts/setup/extension-cache-digest.sh snapshot
 
     - name: Setup PHP
       if: steps.provisioning.outputs.reuse != 'true' && steps.detect-env.outputs.portable-php != ''
@@ -892,6 +916,25 @@ runs:
         HOMEBOY_ACTION_CLEANUP_TIMEOUT_SECONDS: ${{ inputs.cleanup-timeout-seconds }}
         HOMEBOY_ACTION_REQUIRE_CONTAINMENT_PROOF: true
       run: bash ${{ github.action_path }}/scripts/operations/run-operations.sh
+
+    # Saved right after the commands, whatever their outcome (dry runs and red
+    # runs included), so later steps, jobs and runs reuse the downloads.
+    - name: Plan rolling extension CI cache save
+      id: rolling-cache-plan
+      if: ${{ !cancelled() && steps.rolling-cache-snapshot.outcome == 'success' }}
+      shell: bash
+      env:
+        CACHE_PATHS: ${{ steps.extension-cache.outputs.paths }}
+        RESTORED_DIGEST: ${{ steps.rolling-cache-snapshot.outputs.digest }}
+      run: bash ${{ github.action_path }}/scripts/setup/extension-cache-digest.sh plan-save
+
+    - name: Save rolling extension CI cache
+      if: ${{ !cancelled() && steps.rolling-cache-plan.outputs.save == 'true' }}
+      continue-on-error: true
+      uses: actions/cache/save@v5
+      with:
+        path: ${{ steps.extension-cache.outputs.paths }}
+        key: ${{ runner.os }}-${{ steps.extension-cache.outputs.namespace }}-rolling-${{ steps.rolling-cache-plan.outputs.digest }}
 
     # Re-check PR state just before enforcement/reporting. A PR can merge while
     # quality commands are still running, and merged/closed PR runs should not

@@ -49,7 +49,9 @@ dependency_command() {
             ;;
         npm|*)
             if [ -f "${HOMEBOY_PROJECT_DEPENDENCY_ROOT}/npm-shrinkwrap.json" ] || [ -f "${HOMEBOY_PROJECT_DEPENDENCY_ROOT}/package-lock.json" ]; then
-                printf '%s\n' "npm ci"
+                # Same as the fallback below: hydration skips the advisory
+                # audit, which roughly doubles a cold `npm ci`.
+                printf '%s\n' "npm ci --no-audit --no-fund"
             else
                 printf '%s\n' "npm install --no-audit --no-fund"
             fi
