@@ -38,13 +38,13 @@ pub(crate) static REMOVED_COMMANDS: &[RemovedCommand] = &[
         path: &["agent-task", "resume"],
         replacement: Some("homeboy agent-task recover <id>"),
         hint: "Recover resumes queued and stale-running durable runs, including non-Cook runs.",
-        removed_in: "0.418.9",
+        removed_in: "0.474.7",
     },
     RemovedCommand {
         path: &["agent-task", "adopt"],
         replacement: Some("homeboy agent-task recover <cook> --candidate-ref <sha>"),
         hint: "Use recover --candidate-ref; adoption's --model is now --adoption-model, distinct from the retry route override.",
-        removed_in: "0.418.9",
+        removed_in: "0.474.7",
     },
     RemovedCommand {
         path: &["rig", "sync"],
@@ -110,12 +110,30 @@ pub(crate) static REMOVED_COMMANDS: &[RemovedCommand] = &[
         path: &["agent-task", "promote"],
         replacement: Some("homeboy agent-task recover"),
         hint: "Cook promotes its own candidates; continue a stopped Cook with `agent-task recover <cook>`.",
-        removed_in: "0.474.2",
+        removed_in: "0.474.4",
     },
     RemovedCommand {
         path: &["agent-task", "gate-feedback"],
         replacement: Some("homeboy agent-task recover"),
         hint: "Cook runs deterministic gate feedback automatically; continue a stopped Cook with `agent-task recover <cook>`.",
+        removed_in: "0.474.4",
+    },
+    RemovedCommand {
+        path: &["agent-task", "quarantine"],
+        replacement: Some("homeboy agent-task recover"),
+        hint: "Recover performs the next step for a stopped run; queued runs that fail admission stay queued for the next scan.",
+        removed_in: "0.474.2",
+    },
+    RemovedCommand {
+        path: &["agent-task", "rearm"],
+        replacement: Some("homeboy agent-task recover"),
+        hint: "Recover rearms a failed continuation when the Cook's durable state names that step.",
+        removed_in: "0.474.2",
+    },
+    RemovedCommand {
+        path: &["agent-task", "replay-provider-boundary"],
+        replacement: Some("homeboy agent-task recover"),
+        hint: "Recover continues a Cook from its recorded provider boundary.",
         removed_in: "0.474.2",
     },
     RemovedCommand {
@@ -308,7 +326,13 @@ mod tests {
 
     #[test]
     fn removed_promote_and_gate_feedback_point_at_recover() {
-        for verb in ["promote", "gate-feedback"] {
+        for verb in [
+            "promote",
+            "gate-feedback",
+            "quarantine",
+            "rearm",
+            "replay-provider-boundary",
+        ] {
             let args = argv(&["homeboy", "agent-task", verb, "cook-1"]);
             let removed = find_removed_command(&parse_error(&args), &args)
                 .unwrap_or_else(|| panic!("agent-task {verb} must match the registry"));
