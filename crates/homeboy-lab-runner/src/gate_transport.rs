@@ -181,6 +181,44 @@ fn missing_terminal_receipt(job_id: &str, problem: &str) -> Error {
     .with_retryable(true)
 }
 
+/// A terminal gate job whose stdout carried no receipt location never
+/// delivered the artifact the controller verifies, so the candidate was not
+/// judged. Name the job and the receipt path it should have written, and keep
+/// it a retryable non-execution so Cook defers the gate with the candidate
+/// preserved instead of failing the run (#18121).
+fn missing_terminal_artifact_evidence(
+    job_id: &str,
+    receipt_file: &str,
+    envelope: &serde_json::Value,
+    stdout_bytes: usize,
+    stderr: &str,
+    private: bool,
+) -> Error {
+    let diagnostic = terminal_envelope_diagnostic(envelope, stdout_bytes);
+    let location = format!("runner job `{job_id}` wrote no receipt location for `{receipt_file}`");
+    let message = if private {
+        format!("private runner gate did not return terminal artifact evidence: {location}")
+    } else {
+        format!(
+            "runner gate did not return terminal artifact evidence: {location}; envelope {diagnostic}; stderr: {}",
+            homeboy_core::redaction::redact_string(stderr)
+        )
+    };
+    Error::new(
+        homeboy_core::ErrorCode::RunnerLabTransportFailure,
+        message,
+        serde_json::json!({
+            "stage": "terminal_projection",
+            "operation": "read terminal gate receipt location",
+            "job_id": job_id,
+            "receipt_path": receipt_file,
+            "gate_disposition": "unavailable",
+            "diagnostic": diagnostic,
+        }),
+    )
+    .with_retryable(true)
+}
+
 /// A job that terminated before spawning its child (an expired pre-spawn
 /// reservation) has no receipt because it never ran the gate. Name that, so
 /// the placement layer re-admits it instead of reporting a lost receipt.
@@ -776,21 +814,13 @@ fn execute_owned(
     if location.get("schema").and_then(serde_json::Value::as_str)
         != Some("homeboy/lab-gate-receipt-location/v1")
     {
-        return Err(Error::new(
-            homeboy_core::ErrorCode::RunnerLabTransportFailure,
-            if request.visibility
-                == homeboy_agents::agent_tasks::gate::AgentTaskGateVisibility::Private
-            {
-                "private runner gate did not return terminal artifact evidence".to_string()
-            } else {
-                format!(
-                    "runner gate did not return terminal artifact evidence: {}; stderr: {}",
-                    terminal_envelope_diagnostic(&value, stdout.len()),
-                    homeboy_core::redaction::redact_string(stderr)
-                )
-            },
-            serde_json::json!({"stage":"terminal_projection", "job_id":job_id,
-                "diagnostic": terminal_envelope_diagnostic(&value, stdout.len())}),
+        return Err(missing_terminal_artifact_evidence(
+            job_id,
+            &receipt_file,
+            &value,
+            stdout.len(),
+            stderr,
+            private,
         ));
     }
     let receipt_path = resource_invocation
@@ -801,8 +831,15 @@ fn execute_owned(
         crate::lab::offload::lab_runner_file_transfer(&request.runner_id)?
             .download_file(&receipt_file, &receipt_path.display().to_string())
     })?;
-    let bytes = std::fs::read(&receipt_path)
-        .map_err(|error| Error::internal_io(error.to_string(), None))?;
+    let bytes = std::fs::read(&receipt_path).map_err(|error| {
+        Error::internal_io(
+            error.to_string(),
+            Some(format!(
+                "read downloaded gate receipt {} (runner job {job_id})",
+                receipt_path.display()
+            )),
+        )
+    })?;
     if location.get("sha256").and_then(serde_json::Value::as_str)
         != Some(homeboy_engine_primitives::content_hash::sha256_hex(&bytes).as_str())
     {
@@ -1381,6 +1418,45 @@ mod public_error_tests {
             missing_terminal_receipt("job-no-result", "terminal runner gate has no result event");
         assert_eq!(absent_result.retryable, Some(true));
         assert!(!is_pre_handoff_configuration_error(&absent_result));
+    }
+
+    /// #18121: a terminal job without terminal artifact evidence never judged
+    /// the candidate. It names the job and the receipt path, and stays a
+    /// retryable non-execution through the public wrapper so Cook defers the
+    /// gate with the candidate preserved instead of failing the run.
+    #[test]
+    fn missing_terminal_artifact_evidence_is_a_named_retryable_transport_failure() {
+        let envelope = serde_json::json!({"success": false, "summary": "no receipt"});
+        for private in [false, true] {
+            let error = missing_terminal_artifact_evidence(
+                "job-artifact",
+                "/runner/workspace/.homeboy/gate-receipt.json",
+                &envelope,
+                12,
+                "stderr line",
+                private,
+            );
+            let public = lab_gate_public_error(&error, "homeboy://run/x/artifact/y".into());
+            assert_eq!(public.retryable, Some(true));
+            assert_eq!(public.details["gate_disposition"], "unavailable");
+            assert_eq!(public.details["stage"], "terminal_projection");
+            assert!(!is_pre_handoff_configuration_error(&public));
+            assert!(
+                homeboy_agents::agent_tasks::gate::placement::is_lab_gate_transport_failure(
+                    &public
+                ),
+                "{public:?}"
+            );
+            assert!(public.message.contains("runner job `job-artifact`"));
+            assert!(public
+                .message
+                .contains("/runner/workspace/.homeboy/gate-receipt.json"));
+            assert_eq!(
+                public.details["diagnostic"]["details"]["receipt_path"],
+                "/runner/workspace/.homeboy/gate-receipt.json"
+            );
+            assert_eq!(public.message.contains("stderr line"), !private);
+        }
     }
 
     #[test]

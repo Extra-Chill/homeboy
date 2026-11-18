@@ -5549,6 +5549,11 @@ fn gate_target_preflight_error(
     probe: &AgentTaskGateToolchainRequirement,
     cause: Error,
 ) -> Error {
+    // A probe the Lab transport never ran says nothing about the declaration;
+    // calling it a broken gate would terminalize the Cook (#18121).
+    if placement::is_lab_gate_transport_failure(&cause) {
+        return cause;
+    }
     let missing = cause
         .message
         .find(MISSING_GATE_EXTENSIONS)
@@ -11924,6 +11929,33 @@ mod tests {
             error.details["package_artifact_readiness"]["remediation"]["action"],
             "refresh_fixture_resource"
         );
+    }
+
+    /// #18121: a `homeboy review test` probe the Lab transport never ran is
+    /// not a broken gate declaration; only a probe that ran and failed is.
+    #[test]
+    fn gate_target_probe_transport_failure_is_not_a_declaration_error() {
+        let probe = AgentTaskGateToolchainRequirement {
+            command: "homeboy".to_string(),
+            probe_arguments: vec!["review".to_string(), "test".to_string()],
+        };
+        let transport = Error::new(
+            homeboy_core::ErrorCode::RunnerLabTransportFailure,
+            "Lab gate transport did not produce verified passing evidence: runner gate did not return terminal artifact evidence",
+            json!({"stage": "terminal_projection", "gate_disposition": "unavailable"}),
+        )
+        .with_retryable(true);
+        let error =
+            gate_target_preflight_error("homeboy review test fixture", &probe, transport.clone());
+        assert_eq!(error.code, transport.code);
+        assert!(placement::is_lab_gate_transport_failure(&error));
+        assert_ne!(error.details["failure_classification"], "gate_declaration");
+
+        let ran_and_failed = Error::internal_unexpected("component fixture has no test capability");
+        let error =
+            gate_target_preflight_error("homeboy review test fixture", &probe, ran_and_failed);
+        assert_eq!(error.details["failure_classification"], "gate_declaration");
+        assert_eq!(error.retryable, Some(false));
     }
 
     #[cfg(unix)]
