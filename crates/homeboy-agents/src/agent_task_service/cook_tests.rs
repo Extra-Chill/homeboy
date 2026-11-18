@@ -9260,9 +9260,13 @@ fn cook_observation_agrees_across_real_stores_without_mutation() {
                     "{name}"
                 );
                 if live_owner {
+                    // A leftover runner PID does not override a terminal
+                    // Cook phase. Only the classifier's continuation owner
+                    // can project a terminal attempt as still running.
+                    assert_eq!(canonical.state, crate::orchestration::run_state(&observed));
                     assert_eq!(
                         canonical.state,
-                        homeboy_control_plane_contract::ControlPlaneState::Running
+                        homeboy_control_plane_contract::ControlPlaneState::CandidateRecoverable
                     );
                 }
             }

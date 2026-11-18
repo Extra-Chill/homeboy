@@ -862,6 +862,25 @@ fn recovery_guidance_cannot_override_empty_eligibility() {
     );
 }
 
+#[test]
+fn recovery_step_wins_when_eligibility_reports_only_indeterminate_actions() {
+    // `recover` is not a control-plane action: a retained candidate's report
+    // lists promotion as indeterminate and nothing as available, yet the
+    // projected step is what `recover` performs.
+    let payload = serde_json::json!({
+        "state": "candidate_recoverable",
+        "recovery": { "step": "regate", "command": "homeboy agent-task recover run" },
+        "action_eligibility": { "actions": [
+            { "action": "promote", "availability": "indeterminate" },
+            { "action": "cancel", "availability": "unavailable" }
+        ] }
+    });
+    assert_eq!(
+        control_plane_next_action(&payload, "run"),
+        "homeboy agent-task recover run"
+    );
+}
+
 pub(crate) fn control_plane_next_action(payload: &Value, run_id: &str) -> String {
     // Render the canonical projection's live-owner phase, never infer it from artifacts.
     if live_gate_verifying(payload)
@@ -917,18 +936,19 @@ pub(crate) fn control_plane_next_action(payload: &Value, run_id: &str) -> String
         .filter(|recovery| !recovery.is_null())
     {
         let command = string_value(recovery, &["command"]).unwrap_or_default();
-        let available_actions = payload
+        // The projection empties the eligibility report exactly when the
+        // Cook's state makes no action legal, and then also projects step
+        // `none`. A report with entries (available or indeterminate) never
+        // overrides the planner's step: `recover` is not a control-plane
+        // action, so "no action is available" does not mean "recover refuses".
+        let legal_actions = payload
             .pointer("/action_eligibility/actions")
             .and_then(Value::as_array)
-            .is_none_or(|actions| {
-                actions
-                    .iter()
-                    .any(|action| string_value(action, &["availability"]) == Some("available"))
-            });
-        if string_value(recovery, &["step"]) != Some("none") && available_actions {
+            .is_none_or(|actions| !actions.is_empty());
+        if string_value(recovery, &["step"]) != Some("none") && legal_actions {
             return command.to_string();
         }
-        if !available_actions && command.contains("agent-task recover ") {
+        if !legal_actions && command.contains("agent-task recover ") {
             return format!("homeboy runs evidence {run_id}");
         }
         let watching = matches!(

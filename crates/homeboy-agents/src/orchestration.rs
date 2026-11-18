@@ -4032,24 +4032,13 @@ pub fn project_record(
     // interruption; the reconcile action remains the mutating path.
     let record = &project_dead_candidate_adoption(record);
     let mut resource = project_summary_fields(record, plan)?;
+    // Both the recovery step and the eligibility report project the one
+    // `CookRunState` and its `legal_actions()`: the step is the
+    // `CookRecoveryPlan` that `recover` executes, gated on `Recover` being
+    // legal, and the report is empty exactly when no action is legal. So a
+    // projected step other than `none` always comes with a non-empty report.
     resource.recovery = projected_cook_recovery(record);
     resource.action_eligibility = Some(lifecycle_action_eligibility(record, plan));
-    let has_actions = resource.action_eligibility.as_ref().is_some_and(|report| {
-        report.actions.iter().any(|action| {
-            action.availability
-                == homeboy_control_plane_contract::ControlPlaneActionAvailability::Available
-        })
-    });
-    if !has_actions {
-        if let Some(recovery) = resource.recovery.as_mut() {
-            recovery.step = "none".into();
-            recovery.candidate_ref = None;
-            recovery.command = format!(
-                "homeboy agent-task diagnose {}",
-                homeboy_core::engine::shell::quote_arg(&recovery.cook_id)
-            );
-        }
-    }
     Ok(resource)
 }
 
@@ -10391,6 +10380,58 @@ mod tests {
             resume.availability,
             ControlPlaneActionAvailability::Unavailable
         );
+    }
+
+    /// The case we hit: status reported `candidate_recoverable` with
+    /// `next_action: recover` while `action_eligibility.actions` was empty.
+    /// The recovery step and the report now project one `CookRunState`, so a
+    /// step other than `none` never coexists with an empty report.
+    #[test]
+    fn candidate_recoverable_status_never_names_recover_with_empty_actions() {
+        let live_continuation = json!({
+            "state": "claimed",
+            "owner_pid": std::process::id(),
+        });
+        for (label, extra) in [
+            ("plain", json!({})),
+            (
+                "fenced",
+                json!({"cancellation_fence": {"reason": "cancelled"}}),
+            ),
+            (
+                "retired",
+                json!({"candidate_retirement": {"reason": "retired"}}),
+            ),
+            (
+                "continuing",
+                json!({"cook_continuation": live_continuation}),
+            ),
+        ] {
+            let mut record = record(AGENT_TASK_RUN);
+            record.set_state_for_test(RunExecutionState::CandidateRecoverable);
+            record.metadata["cook_id"] = json!("candidate-cook");
+            for (key, value) in extra.as_object().unwrap() {
+                record.metadata[key] = value.clone();
+            }
+            let state = crate::agent_task_lifecycle::CookRunState::of(&record);
+            let legal = crate::agent_task_lifecycle::legal_actions(&state);
+            let projected = project_record(&record, None).expect("projection");
+            let actions = projected.action_eligibility.expect("report").actions;
+            let recovery = projected.recovery.expect("Cook recovery projection");
+            assert_eq!(actions.is_empty(), legal.is_empty(), "{label}");
+            if actions.is_empty()
+                || !state.allows(crate::agent_task_lifecycle::CookRunAction::Recover)
+            {
+                assert_eq!(recovery.step, "none", "{label}: {recovery:?}");
+                assert!(
+                    !recovery.command.contains("agent-task recover "),
+                    "{label}: {recovery:?}"
+                );
+            }
+            if recovery.step != "none" {
+                assert!(!actions.is_empty(), "{label}: {recovery:?}");
+            }
+        }
     }
 
     #[test]
