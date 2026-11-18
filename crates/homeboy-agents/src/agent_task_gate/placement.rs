@@ -1920,6 +1920,7 @@ mod tests {
             let mut request = request(root.path());
             request.preflight_only = true;
             request.toolchains = vec![AgentTaskGateToolchainRequirement {
+                resolve_only: false,
                 command: "php".into(),
                 probe_arguments: vec![
                     super::super::gate_runtime::RESOLVE_ONLY.into(),
@@ -1937,10 +1938,22 @@ mod tests {
             assert_eq!(diagnostic["details"]["gate"], "php -v");
             assert_eq!(diagnostic["details"]["executable"], "php");
             let php = bin.path().join("php");
-            fs::write(&php, "#!/bin/sh\nexit 0\n").unwrap();
+            // A readiness probe must never execute this program.
+            let marker = bin.path().join("executed");
+            fs::write(
+                &php,
+                format!("#!/bin/sh\ntouch '{}'\nexit 99\n", marker.display()),
+            )
+            .unwrap();
             fs::set_permissions(&php, fs::Permissions::from_mode(0o755)).unwrap();
+            let receipt = execute_with_context(request.clone(), root.path(), &context).unwrap();
+            assert_eq!(receipt.readiness.unwrap()["status"], "ready");
+            assert!(!marker.exists(), "legacy sentinel executed the command");
+            request.toolchains[0].resolve_only = true;
+            request.toolchains[0].probe_arguments = vec!["php -v".into()];
             let receipt = execute_with_context(request, root.path(), &context).unwrap();
             assert_eq!(receipt.readiness.unwrap()["status"], "ready");
+            assert!(!marker.exists(), "typed readiness executed the command");
         });
     }
 

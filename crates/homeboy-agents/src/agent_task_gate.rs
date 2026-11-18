@@ -344,6 +344,9 @@ pub struct AgentTaskGateToolchainRequirement {
     pub command: String,
     #[serde(default = "default_toolchain_probe_arguments")]
     pub probe_arguments: Vec<String>,
+    /// Resolve the executable on PATH without running it.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub resolve_only: bool,
 }
 
 /// A caller-declared resource selected by a package or extension.
@@ -580,6 +583,7 @@ fn homeboy_review_test_probe(command: &str) -> Option<AgentTaskGateToolchainRequ
         .collect();
     probe_arguments.push("--preflight-only".to_string());
     Some(AgentTaskGateToolchainRequirement {
+        resolve_only: false,
         command: tokens[0].to_string(),
         probe_arguments,
     })
@@ -2541,6 +2545,35 @@ mod baseline_tests {
             );
             std::thread::sleep(Duration::from_millis(25));
         }
+    }
+}
+
+#[cfg(test)]
+mod toolchain_requirement_serde_tests {
+    use super::AgentTaskGateToolchainRequirement;
+
+    #[test]
+    fn resolve_only_round_trips_and_defaults_false() {
+        let typed = AgentTaskGateToolchainRequirement {
+            command: "composer".into(),
+            probe_arguments: vec!["composer test".into()],
+            resolve_only: true,
+        };
+        let value = serde_json::to_value(&typed).unwrap();
+        assert_eq!(value["resolve_only"], true);
+        assert_eq!(
+            serde_json::from_value::<AgentTaskGateToolchainRequirement>(value).unwrap(),
+            typed
+        );
+        let old: AgentTaskGateToolchainRequirement = serde_json::from_value(
+            serde_json::json!({"command": "php", "probe_arguments": ["-v"]}),
+        )
+        .unwrap();
+        assert!(!old.resolve_only);
+        assert!(serde_json::to_value(&old)
+            .unwrap()
+            .get("resolve_only")
+            .is_none());
     }
 }
 
@@ -5477,7 +5510,8 @@ pub(crate) fn preflight_verify_gate_options(cwd: &Path, gates: &VerifyGateOption
             gate_runtime::executables(gate).into_iter().map(|command| {
                 AgentTaskGateToolchainRequirement {
                     command,
-                    probe_arguments: vec![gate_runtime::RESOLVE_ONLY.into(), gate.clone()],
+                    resolve_only: true,
+                    probe_arguments: vec![gate.clone()],
                 }
             })
         })
@@ -5601,9 +5635,11 @@ fn preflight_gate_toolchains_local(
     // the first child starts cannot make an otherwise successful probe fail.
     let mut started = None;
     for requirement in requirements {
-        if requirement.probe_arguments.first().map(String::as_str)
-            == Some(gate_runtime::RESOLVE_ONLY)
-        {
+        // #18051: accept older controllers' sentinel for one compatibility
+        // window; remove this legacy branch once those controllers converge.
+        let legacy_resolve_only = requirement.probe_arguments.first().map(String::as_str)
+            == Some(gate_runtime::RESOLVE_ONLY);
+        if requirement.resolve_only || legacy_resolve_only {
             let path = selected_environment
                 .values
                 .get("PATH")
@@ -5621,7 +5657,11 @@ fn preflight_gate_toolchains_local(
             );
             if resolved.is_none() {
                 return Err(gate_runtime::unavailable(
-                    &requirement.probe_arguments[1],
+                    requirement
+                        .probe_arguments
+                        .get(usize::from(legacy_resolve_only))
+                        .map(String::as_str)
+                        .unwrap_or(command),
                     command,
                     policy.lab_runner.as_deref().unwrap_or("local"),
                 ));
@@ -9159,6 +9199,7 @@ mod tests {
             workspace.path(),
             &policy,
             &[AgentTaskGateToolchainRequirement {
+                resolve_only: false,
                 command: "bash".to_string(),
                 probe_arguments: vec!["-c".to_string(), "test -n \"$BASHPID\"".to_string()],
             }],
@@ -9240,6 +9281,7 @@ mod tests {
             workspace.path(),
             &policy,
             &[AgentTaskGateToolchainRequirement {
+                resolve_only: false,
                 command: "bash".to_string(),
                 probe_arguments: vec!["readiness".to_string()],
             }],
@@ -9349,14 +9391,17 @@ mod tests {
                 &policy,
                 &[
                     AgentTaskGateToolchainRequirement {
+                        resolve_only: false,
                         command: "bash".to_string(),
                         probe_arguments: vec!["-c".to_string(), "test -n \"$BASHPID\"".to_string()],
                     },
                     AgentTaskGateToolchainRequirement {
+                        resolve_only: false,
                         command: "jq".to_string(),
                         probe_arguments: vec!["--version".to_string()],
                     },
                     AgentTaskGateToolchainRequirement {
+                        resolve_only: false,
                         command: "python3".to_string(),
                         probe_arguments: vec!["--version".to_string()],
                     },
@@ -11936,6 +11981,7 @@ mod tests {
     #[test]
     fn gate_target_probe_transport_failure_is_not_a_declaration_error() {
         let probe = AgentTaskGateToolchainRequirement {
+            resolve_only: false,
             command: "homeboy".to_string(),
             probe_arguments: vec!["review".to_string(), "test".to_string()],
         };
@@ -11993,6 +12039,7 @@ mod tests {
             ..AgentTaskGateEnvironmentPolicy::default()
         };
         let requirement = AgentTaskGateToolchainRequirement {
+            resolve_only: false,
             command: "sh".to_string(),
             probe_arguments: vec![
                 "-c".to_string(),
@@ -12071,6 +12118,7 @@ mod tests {
             verify: vec!["cargo test --lib".to_string()],
             private_verify: vec!["npm test".to_string()],
             gate_toolchains: vec![AgentTaskGateToolchainRequirement {
+                resolve_only: false,
                 command: "cargo".to_string(),
                 probe_arguments: vec!["metadata".to_string()],
             }],
@@ -12080,6 +12128,7 @@ mod tests {
         assert_eq!(
             options.required_toolchains(),
             vec![AgentTaskGateToolchainRequirement {
+                resolve_only: false,
                 command: "cargo".to_string(),
                 probe_arguments: vec!["metadata".to_string()],
             }]
@@ -12141,6 +12190,7 @@ mod tests {
             workspace.path(),
             &policy,
             &[AgentTaskGateToolchainRequirement {
+                resolve_only: false,
                 command: "cargo".to_string(),
                 probe_arguments: vec!["--version".to_string()],
             }],
@@ -12562,6 +12612,7 @@ mod tests {
             workspace.path(),
             &AgentTaskGateEnvironmentPolicy::default(),
             &[AgentTaskGateToolchainRequirement {
+                resolve_only: false,
                 command: "other-tool".to_string(),
                 probe_arguments: vec!["initialize".to_string()],
             }],
@@ -12952,6 +13003,7 @@ exit 2
             workspace.path(),
             &AgentTaskGateEnvironmentPolicy::default(),
             &[AgentTaskGateToolchainRequirement {
+                resolve_only: false,
                 command: tool.display().to_string(),
                 probe_arguments: vec!["initialize".to_string()],
             }],
@@ -12984,6 +13036,7 @@ exit 2
             workspace.path(),
             &AgentTaskGateEnvironmentPolicy::default(),
             &[AgentTaskGateToolchainRequirement {
+                resolve_only: false,
                 command: tool.display().to_string(),
                 probe_arguments: Vec::new(),
             }],
@@ -13034,6 +13087,7 @@ exit 2
             workspace.path(),
             &AgentTaskGateEnvironmentPolicy::default(),
             &[AgentTaskGateToolchainRequirement {
+                resolve_only: false,
                 command: tool.display().to_string(),
                 probe_arguments: Vec::new(),
             }],
@@ -13077,10 +13131,12 @@ exit 2
             &AgentTaskGateEnvironmentPolicy::default(),
             &[
                 AgentTaskGateToolchainRequirement {
+                    resolve_only: false,
                     command: first.display().to_string(),
                     probe_arguments: Vec::new(),
                 },
                 AgentTaskGateToolchainRequirement {
+                    resolve_only: false,
                     command: second.display().to_string(),
                     probe_arguments: Vec::new(),
                 },
@@ -13122,6 +13178,7 @@ exit 2
             workspace.path(),
             &AgentTaskGateEnvironmentPolicy::default(),
             &[AgentTaskGateToolchainRequirement {
+                resolve_only: false,
                 command: tool.display().to_string(),
                 probe_arguments: Vec::new(),
             }],

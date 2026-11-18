@@ -762,6 +762,7 @@ impl From<VerifyGateArgs> for VerifyGateOptions {
                 .gate_toolchains
                 .into_iter()
                 .map(|command| AgentTaskGateToolchainRequirement {
+                    resolve_only: false,
                     command,
                     probe_arguments: vec!["--version".to_string()],
                 })
@@ -1381,10 +1382,12 @@ mod tests {
             options.gate_toolchains,
             vec![
                 AgentTaskGateToolchainRequirement {
+                    resolve_only: false,
                     command: "legacy-tool".to_string(),
                     probe_arguments: vec!["--version".to_string()],
                 },
                 AgentTaskGateToolchainRequirement {
+                    resolve_only: false,
                     command: "custom-tool".to_string(),
                     probe_arguments: vec!["probe".to_string(), "--json".to_string()],
                 },

@@ -1927,6 +1927,7 @@ fn missing_destination_tool_is_a_typed_setup_failure_before_provider_verificatio
                 verify: vec!["homeboy-fixture-missing-tool".to_string()],
                 hydrate_dependencies: false,
                 gate_toolchains: vec![crate::agent_task_gate::AgentTaskGateToolchainRequirement {
+                    resolve_only: false,
                     command: "homeboy-fixture-missing-tool".to_string(),
                     probe_arguments: vec!["--version".to_string()],
                 }],
