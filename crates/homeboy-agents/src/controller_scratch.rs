@@ -3993,6 +3993,7 @@ mod tests {
         row.owner_pid = u32::MAX;
         write_index_at_unlocked(&index_path().unwrap(), &index).unwrap();
 
+        use homeboy_core::daemon::storage_maintenance::StorageMaintenanceProvider;
         ScratchStorageMaintenance {
             cursor: std::sync::Mutex::new(None),
         }
