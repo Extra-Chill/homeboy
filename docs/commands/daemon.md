@@ -13,6 +13,7 @@ homeboy daemon <COMMAND>
 - `ensure-running` — return the live, fresh daemon, or start or replace one in the background
 - `serve` — run the daemon in this process (what a service manager's unit runs)
 - `stop` — gracefully stop the background daemon recorded in the state file
+- `restart` — stop the daemon and start its replacement, failing unless the replacement re-adopted every job left in flight (listed as `readopted_job_ids`). Work in flight survives a plain `stop` too, but nothing drives it until a command starts a new daemon; read-only commands such as `status` and `runs list` do not.
 - `status` — show bounded daemon health, active jobs, blockers, and recovery actions; use `--full` for complete evidence
 - `recover` — resolve and run the right recovery from the current status report
 - `plan` — print the one next lifecycle action (read-only; schema `homeboy/daemon-lifecycle-plan/v1`)
