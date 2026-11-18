@@ -2091,8 +2091,7 @@ fn schedule_runner_exec_recovery() {
         .stdout(std::process::Stdio::null())
         // Child recovery emits only terminal or action-required diagnostics.
         .stderr(std::process::Stdio::inherit());
-    crate::core::process::detach_from_caller_session(&mut command);
-    if let Err(error) = command.spawn() {
+    if let Err(error) = crate::core::process::spawn_detached(&mut command) {
         let _ = crate::runner::record_scheduled_terminal_runner_exec_recovery_spawn_failure(
             &schedule.owner_id,
             &schedule.owner_token,
@@ -2125,8 +2124,7 @@ fn spawn_runner_exec_recovery_child(
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::inherit());
-    crate::core::process::detach_from_caller_session(&mut command);
-    command.spawn().map(|_| ())
+    crate::core::process::spawn_detached(&mut command).map(|_| ())
 }
 
 fn schedule_controller_fallback_reconciliation() {
@@ -2144,8 +2142,7 @@ fn schedule_controller_fallback_reconciliation() {
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null());
-    crate::core::process::detach_from_caller_session(&mut command);
-    let _ = command.spawn();
+    let _ = crate::core::process::spawn_detached(&mut command);
 }
 
 fn run_raw_agent_tool_dispatch(command: &Commands) -> Option<i32> {

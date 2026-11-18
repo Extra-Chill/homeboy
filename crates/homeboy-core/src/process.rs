@@ -329,6 +329,22 @@ pub fn detach_from_caller_session(command: &mut Command) {
 #[cfg(not(unix))]
 pub fn detach_from_caller_session(_command: &mut Command) {}
 
+/// Spawn a fire-and-forget child outside the caller's session and reap it.
+///
+/// The caller keeps no handle, so the child is waited on in the background.
+/// Dropping an unwaited [`std::process::Child`] would leave it as a zombie for
+/// the rest of the caller's lifetime, which for daemons and `--wait` workflows
+/// is hours.
+pub fn spawn_detached(command: &mut Command) -> std::io::Result<u32> {
+    detach_from_caller_session(command);
+    let mut child = command.spawn()?;
+    let pid = child.id();
+    std::thread::spawn(move || {
+        let _ = child.wait();
+    });
+    Ok(pid)
+}
+
 pub fn pid_is_running(pid: u32) -> bool {
     homeboy_engine_primitives::command::process_is_running(pid)
 }
