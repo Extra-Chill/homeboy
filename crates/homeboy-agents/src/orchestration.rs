@@ -4033,16 +4033,22 @@ pub fn project_record(
     let record = &project_dead_candidate_adoption(record);
     let mut resource = project_summary_fields(record, plan)?;
     resource.recovery = projected_cook_recovery(record);
-    resource.action_eligibility =
-        if crate::agent_task_service::live_cook_continuation(record).is_some() {
-            None
-        } else {
-            Some(lifecycle_action_eligibility(record, plan))
-        };
-    if record.metadata.get("cancellation_fence").is_some()
-        || record.metadata.get("candidate_retirement").is_some()
-    {
-        resource.action_eligibility = None;
+    resource.action_eligibility = Some(lifecycle_action_eligibility(record, plan));
+    let has_actions = resource.action_eligibility.as_ref().is_some_and(|report| {
+        report.actions.iter().any(|action| {
+            action.availability
+                == homeboy_control_plane_contract::ControlPlaneActionAvailability::Available
+        })
+    });
+    if !has_actions {
+        if let Some(recovery) = resource.recovery.as_mut() {
+            recovery.step = "none".into();
+            recovery.candidate_ref = None;
+            recovery.command = format!(
+                "homeboy agent-task diagnose {}",
+                homeboy_core::engine::shell::quote_arg(&recovery.cook_id)
+            );
+        }
     }
     Ok(resource)
 }
@@ -4154,7 +4160,10 @@ fn project_summary_fields(
     resource.gates = gates(record, delivery.as_ref());
     resource.publication = delivery.as_ref().and_then(publication);
     project_live_gate_verification(&mut resource, record);
-    if let Some(continuation) = crate::agent_task_service::live_cook_continuation(record) {
+    if crate::agent_task_lifecycle::CookRunState::of(record).phase
+        == crate::agent_task_lifecycle::CookRunPhase::Continuing
+    {
+        let continuation = &record.metadata["cook_continuation"];
         resource.state = ControlPlaneState::Running;
         resource.phase = Some("publishing".to_string());
         resource.owner = Some(ControlPlaneOwner {
@@ -4168,6 +4177,8 @@ fn project_summary_fields(
         .get("cancellation_fence")
         .or_else(|| record.metadata.get("candidate_retirement"))
     {
+        // The classifier's `fenced` fact; the public projection keeps its
+        // historical `cancelled` label for a fenced mission.
         resource.state = ControlPlaneState::Cancelled;
         resource.phase = Some("cancelled".into());
         resource.blocker = Some(ControlPlaneBlocker {
@@ -4206,6 +4217,9 @@ pub const LIVE_GATE_VERIFYING_PHASE: &str = "verifying";
 /// as running in the `verifying` phase, with no recovery step. The durable
 /// run state is unchanged; this is a projection only.
 fn project_live_gate_verification(resource: &mut ControlPlaneRun, record: &AgentTaskRunRecord) {
+    if record.metadata.get("cook_id").is_some() {
+        return;
+    }
     if !awaits_gate_verification(record) {
         return;
     }
@@ -4279,8 +4293,19 @@ fn projected_cook_recovery(record: &AgentTaskRunRecord) -> Option<ControlPlaneRe
             cook_id,
         });
     };
-    let step = plan.step.action_name().unwrap_or("none").to_string();
+    let allowed = crate::agent_task_lifecycle::CookRunState::of(record)
+        .allows(crate::agent_task_lifecycle::CookRunAction::Recover);
+    let step = if allowed {
+        plan.step.action_name().unwrap_or("none")
+    } else {
+        "none"
+    }
+    .to_string();
     let (candidate_ref, command) = match &plan.step {
+        _ if !allowed => (
+            None,
+            format!("homeboy agent-task diagnose {}", quote(&plan.cook_id)),
+        ),
         crate::agent_task_service::CookRecoveryStep::Adopt { candidate_ref } => (
             Some(candidate_ref.clone()),
             format!(
@@ -4515,6 +4540,19 @@ fn fanout_mission(record: &AgentTaskRunRecord) -> Result<Option<MissionId>, Cont
 }
 
 pub(crate) fn run_state(record: &AgentTaskRunRecord) -> ControlPlaneState {
+    if record.metadata.get("cook_id").is_some() {
+        use crate::agent_task_lifecycle::{CookRunPhase, CookRunState};
+        return match CookRunState::of(record).phase {
+            CookRunPhase::Queued => ControlPlaneState::Queued,
+            CookRunPhase::Running | CookRunPhase::Continuing => ControlPlaneState::Running,
+            CookRunPhase::CandidateRecoverable => ControlPlaneState::CandidateRecoverable,
+            CookRunPhase::Succeeded => ControlPlaneState::Succeeded,
+            CookRunPhase::PartialFailure => ControlPlaneState::PartialFailure,
+            CookRunPhase::Failed => ControlPlaneState::Failed,
+            CookRunPhase::Cancelled => ControlPlaneState::Cancelled,
+            CookRunPhase::Unknown => ControlPlaneState::Failed,
+        };
+    }
     if CookDelivery::from_run_metadata(&record.metadata).is_some_and(|d| d.published()) {
         return ControlPlaneState::Succeeded;
     }
@@ -10356,6 +10394,20 @@ mod tests {
     }
 
     #[test]
+    fn fenced_candidate_status_never_advertises_recovery_without_actions() {
+        let mut record = record(AGENT_TASK_RUN);
+        record.set_state_for_test(RunExecutionState::CandidateRecoverable);
+        record.metadata["cook_id"] = json!("fenced-cook");
+        record.metadata["cancellation_fence"] = json!({"reason": "cancelled"});
+        let projected = project_record(&record, None).expect("projection");
+        assert_eq!(projected.state, ControlPlaneState::Cancelled);
+        assert!(projected.action_eligibility.unwrap().actions.is_empty());
+        let recovery = projected.recovery.expect("Cook recovery projection");
+        assert_eq!(recovery.step, "none");
+        assert!(!recovery.command.contains("agent-task recover "));
+    }
+
+    #[test]
     fn project_record_matches_service_run() {
         let seeded = record(AGENT_TASK_RUN);
         let requested = RunId::new(AGENT_TASK_RUN).expect("run id");
@@ -10365,7 +10417,7 @@ mod tests {
     }
 
     #[test]
-    fn active_execution_step_owner_projects_running_promotion_gate_state() {
+    fn execution_step_owner_does_not_override_the_cook_classifier() {
         let mut record = record(AGENT_TASK_RUN);
         record.set_state_for_test(RunExecutionState::Succeeded);
         record.metadata.as_object_mut().unwrap().extend(
@@ -10373,9 +10425,10 @@ mod tests {
         );
 
         let resource = project_record(&record, None).expect("project active supervisor");
-        assert_eq!(resource.state, ControlPlaneState::Running);
+        assert_eq!(resource.state, run_state(&record));
+        assert_eq!(resource.state, ControlPlaneState::Succeeded);
         assert_eq!(resource.phase.as_deref(), Some("promotion_gates"));
-        assert!(resource.finished_at.is_none());
+        assert_eq!(resource.finished_at, record.updated_at);
     }
 
     #[test]

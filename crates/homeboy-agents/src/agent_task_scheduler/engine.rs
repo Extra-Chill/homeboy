@@ -277,7 +277,8 @@ impl AgentTaskScheduler {
             stop,
             thread::spawn(move || loop {
                 if store.read_record(&run_id).is_ok_and(|record| {
-                    record.state() == homeboy_lifecycle_contract::RunExecutionState::Cancelled
+                    crate::agent_task_lifecycle::CookRunState::of(&record).phase
+                        == crate::agent_task_lifecycle::CookRunPhase::Cancelled
                 }) {
                     watcher_cancellation.cancel();
                     return;

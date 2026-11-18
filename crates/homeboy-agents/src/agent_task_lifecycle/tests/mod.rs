@@ -331,6 +331,7 @@ mod handoff_and_proxy;
 mod lifecycle_store;
 mod non_terminal_transitions;
 mod private_attachment;
+mod read_projection_guard;
 mod runner_exec;
 mod state_graph;
 mod status_and_recovery;
