@@ -48,6 +48,10 @@ enum WorkflowCommand {
     Cancel {
         /// Instance id, or the workflow id of a registered cadence
         instance: String,
+        /// Run even from inside a Cook attempt, where controller mutations
+        /// are refused by default
+        #[arg(long)]
+        allow_inside_cook: bool,
     },
     /// Approve a step that is awaiting approval in the current iteration
     Approve {
@@ -144,7 +148,11 @@ pub fn run(args: WorkflowArgs) -> CmdResult<Value> {
         WorkflowCommand::Run(run) => run_workflow(run),
         WorkflowCommand::Ab(args) => ab::run(args),
         WorkflowCommand::AbStep(args) => ab::step(args),
-        WorkflowCommand::Cancel { instance } => {
+        WorkflowCommand::Cancel {
+            instance,
+            allow_inside_cook,
+        } => {
+            crate::invocation::refuse_inside_cook_attempt("workflow cancel", allow_inside_cook)?;
             let client = LocalControllerJobClient::connect()?;
             let view = match client.workflow(&instance) {
                 Ok(view) => view,

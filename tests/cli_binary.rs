@@ -4,6 +4,8 @@ mod agent_task_provider_flag_diagnostic;
 mod agent_tool_dispatch;
 #[path = "cli_binary/build_cache.rs"]
 mod build_cache;
+#[path = "cli_binary/control_inside_cook.rs"]
+mod control_inside_cook;
 #[path = "cli_binary/cook_model_routes.rs"]
 mod cook_model_routes;
 #[path = "cli_binary/cook_preview_lifecycle.rs"]
