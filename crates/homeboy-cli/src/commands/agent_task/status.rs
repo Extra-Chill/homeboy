@@ -493,6 +493,15 @@ fn compact_control_plane_status(value: Value) -> Value {
             action["availability"] == "available" && action["action"].as_str() == next_action_name
         })
     });
+    // Cook recovery is a planner command, not a ControlPlaneAction variant.
+    // Keep the report's existing action vocabulary when showing recovery,
+    // rather than filtering it to an empty list by a nonexistent enum value.
+    let recovery_selected = next_action_name == Some("recover")
+        && value
+            .pointer("/recovery/step")
+            .and_then(Value::as_str)
+            .is_some_and(|step| step != "none")
+        && actions.is_some_and(|actions| !actions.is_empty());
     let selected_action = selected_eligibility_action
         .map(|action| {
             json!([{
@@ -500,7 +509,20 @@ fn compact_control_plane_status(value: Value) -> Value {
                 "availability": "available"
             }])
         })
-        .unwrap_or_else(|| json!([]));
+        .unwrap_or_else(|| {
+            if recovery_selected {
+                json!(actions
+                    .unwrap()
+                    .iter()
+                    .map(|action| json!({
+                        "action": action.get("action"),
+                        "availability": action.get("availability")
+                    }))
+                    .collect::<Vec<_>>())
+            } else {
+                json!([])
+            }
+        });
     let blocker = bounded_control_plane_value(value.get("blocker").unwrap_or(&Value::Null));
     let blocker = if let Some(message) = value.pointer("/blocker/message").and_then(Value::as_str) {
         let mut blocker = blocker;
@@ -1037,12 +1059,10 @@ fn attach_promotion_replay(value: &mut Value, run_id: &str, requested_id: &str) 
     let Ok(record) = bounded_exact_record(run_id) else {
         return;
     };
-    let recoverable = matches!(
-        record.state(),
-        homeboy_lifecycle_contract::RunExecutionState::CandidateRecoverable
-    ) || CookDelivery::from_run_metadata(&record.metadata).is_some_and(
-        |delivery| delivery.blocker_code() == Some(CookDeliveryBlockerCode::GateFailed),
-    );
+    let recoverable = homeboy::agents::agent_task_lifecycle::CookRunState::of(&record).recoverable
+        || CookDelivery::from_run_metadata(&record.metadata).is_some_and(|delivery| {
+            delivery.blocker_code() == Some(CookDeliveryBlockerCode::GateFailed)
+        });
     if !recoverable
         || record
             .metadata
@@ -1054,6 +1074,29 @@ fn attach_promotion_replay(value: &mut Value, run_id: &str, requested_id: &str) 
     }
     let guidance = agent_task_service_direct::promotion_replay_guidance(requested_id);
     value["promotion_replay"] = guidance;
+}
+
+#[test]
+fn compact_recovery_preserves_selected_planner_eligibility() {
+    let value = json!({
+        "run": "run", "state": "candidate_recoverable",
+        "recovery": { "step": "regate", "command": "homeboy agent-task recover run" },
+        "action_eligibility": { "actions": [
+            { "action": "promote", "availability": "indeterminate" }
+        ] }
+    });
+    let compact = compact_control_plane_status(value);
+    assert_eq!(
+        compact["next_action"]["command"],
+        "homeboy agent-task recover run"
+    );
+    assert_eq!(
+        compact["action_eligibility"]["actions"],
+        json!([
+            { "action": "promote", "availability": "indeterminate" }
+        ])
+    );
+    assert_eq!(compact["action_eligibility"]["available_action_count"], 0);
 }
 
 fn control_plane_run_requires_action(
