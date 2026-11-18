@@ -4030,16 +4030,39 @@ pub fn candidate_publication_title(
             .ok()
             .flatten()
     });
+    let operator = recipe
+        .as_ref()
+        .and_then(|recipe| recipe.finalization["title"].as_str())
+        .filter(|title| !title.trim().is_empty());
+    let agent = recorded_form
+        .as_ref()
+        .and_then(|form| form.specific_title());
+    // Read the tracker only when the Cook recorded no title of its own.
+    let tracker = (operator.is_none() && agent.is_none())
+        .then(|| plan.as_ref().and_then(tracker_publication_title))
+        .flatten();
+    let goal = plan
+        .as_ref()
+        .and_then(|plan| plan.metadata["cook_goal"].as_str());
+    // No placeholder: without a real title the candidate keeps its own
+    // subject (#18129).
+    if operator.is_none()
+        && agent.is_none()
+        && tracker.is_none()
+        && goal.and_then(super::cook::goal_headline).is_none()
+    {
+        return Err(Error::validation_invalid_argument(
+            "candidate",
+            "Cook has no publication title",
+            None,
+            None,
+        ));
+    }
     Ok(super::cook::draft_title(
-        recipe
-            .as_ref()
-            .and_then(|recipe| recipe.finalization["title"].as_str()),
-        recorded_form
-            .as_ref()
-            .and_then(|form| form.specific_title()),
-        plan.as_ref().and_then(tracker_publication_title).as_deref(),
-        plan.as_ref()
-            .and_then(|plan| plan.metadata["cook_goal"].as_str()),
+        operator,
+        agent,
+        tracker.as_deref(),
+        goal,
         title_policy,
     ))
 }
