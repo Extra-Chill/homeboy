@@ -391,8 +391,6 @@ struct MissionsView: View {
             return .cancel(reason: inputs["reason"])
         case "retry":
             return .retry(force: inputs["force"] == "true")
-        case "quarantine":
-            return .quarantine(reason: inputs["reason"] ?? "")
         case "placement_update":
             return .placementUpdate(placement: inputs["placement"] ?? "")
         default:

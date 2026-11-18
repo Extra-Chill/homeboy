@@ -38,15 +38,13 @@ use homeboy_control_plane_contract::{
     CONTROL_PLANE_EVENT_RETENTION_SCHEMA, CONTROL_PLANE_EXECUTION_PAGE_SCHEMA,
     CONTROL_PLANE_EXECUTION_SCHEMA, CONTROL_PLANE_MISSION_PAGE_SCHEMA,
     CONTROL_PLANE_MISSION_SCHEMA, CONTROL_PLANE_PLACEMENT_UPDATE_RESULT_SCHEMA,
-    CONTROL_PLANE_PROMOTE_RESULT_SCHEMA, CONTROL_PLANE_QUARANTINE_RESULT_SCHEMA,
-    CONTROL_PLANE_REARM_RESULT_SCHEMA, CONTROL_PLANE_REFERENCE_PAGE_SCHEMA,
+    CONTROL_PLANE_PROMOTE_RESULT_SCHEMA, CONTROL_PLANE_REFERENCE_PAGE_SCHEMA,
     CONTROL_PLANE_REFERENCE_SCHEMA, CONTROL_PLANE_RESUME_RESULT_SCHEMA,
     CONTROL_PLANE_RETRY_RESULT_SCHEMA, CONTROL_PLANE_RUN_PAGE_SCHEMA,
     CONTROL_PLANE_TASK_PAGE_SCHEMA, CONTROL_PLANE_TASK_SCHEMA,
 };
 use homeboy_control_plane_contract::{
-    ControlPlanePlacementUpdateParameters, ControlPlaneQuarantineParameters,
-    ControlPlaneRetryParameters,
+    ControlPlanePlacementUpdateParameters, ControlPlaneRetryParameters,
 };
 use homeboy_core::control_plane::{register_control_plane_provider, ControlPlaneProvider};
 use homeboy_lifecycle_contract::RunExecutionState;
@@ -1770,27 +1768,6 @@ impl OrchestrationService<LifecycleStoreLookup> {
             -> homeboy_core::Result<crate::agent_task_promotion::AgentTaskPromotionReport>,
     {
         validate_action_request(request)?;
-        // Quarantine and Rearm mutate one exact queued record, so an alias that
-        // moves between attempts cannot name their target. Reconcile is scope
-        // aware by contract and expands a Cook alias to its members, so it
-        // keeps accepting one.
-        let exact_mutation = matches!(
-            request.action,
-            ControlPlaneAction::Quarantine | ControlPlaneAction::Rearm
-        );
-        if matches!(
-            request.action,
-            ControlPlaneAction::Quarantine | ControlPlaneAction::Rearm
-        ) && self
-            .lookup
-            .store
-            .read_cook_index(requested_id.as_str())
-            .is_ok()
-        {
-            return Err(ControlPlaneError::invalid_argument(
-                "this mutation requires an exact durable run id; Cook aliases are not accepted",
-            ));
-        }
         let observation = self
             .lookup
             .store
@@ -1803,13 +1780,6 @@ impl OrchestrationService<LifecycleStoreLookup> {
             .control_plane_resource_projection("agent_task_run", requested_id.as_str())
             .map_err(map_lifecycle_error)?;
         let resolved = match projected {
-            Some(projection)
-                if exact_mutation && projection.resource_id != requested_id.as_str() =>
-            {
-                return Err(ControlPlaneError::invalid_argument(
-                    "this mutation requires an exact durable run id; Cook aliases are not accepted",
-                ));
-            }
             // Reconcile is scope aware and its callers expand a Cook group into
             // exact members before acting. Retargeting an exact member onto the
             // alias owner would give one attempt every member's claim and leave
@@ -2287,61 +2257,6 @@ impl OrchestrationService<LifecycleStoreLookup> {
                         ),
                     }
                 }
-                ControlPlaneAction::Quarantine => {
-                    let parameters: ControlPlaneQuarantineParameters = serde_json::from_value(
-                        request.parameters.data.clone(),
-                    )
-                    .map_err(|error| {
-                        ControlPlaneError::invalid_argument(format!(
-                            "quarantine parameters: {error}"
-                        ))
-                    })?;
-                    match crate::agent_task_lifecycle::quarantine_queued_run_exact_in_store(
-                        &self.lookup.store,
-                        &resolved,
-                        &parameters.reason,
-                    ) {
-                        Ok(current) => (
-                            ControlPlaneActionOutcome::Succeeded,
-                            project_record(&current, None)?,
-                            ControlPlaneActionPayload {
-                                schema: CONTROL_PLANE_QUARANTINE_RESULT_SCHEMA.to_string(),
-                                data: serde_json::json!({ "record": current }),
-                            },
-                            None,
-                        ),
-                        Err(error) => (
-                            ControlPlaneActionOutcome::Failed,
-                            project_record(&record, None)?,
-                            ControlPlaneActionPayload::empty(),
-                            Some(redacted_bounded(&error.attributed_message(), MESSAGE_BOUND)),
-                        ),
-                    }
-                }
-                ControlPlaneAction::Rearm => {
-                    match crate::agent_task_lifecycle::rearm_quarantined_run_in_store(
-                        &self.lookup.store,
-                        &resolved,
-                    ) {
-                        Ok(current) => (
-                            ControlPlaneActionOutcome::Succeeded,
-                            project_record(&current, None)?,
-                            ControlPlaneActionPayload {
-                                schema: CONTROL_PLANE_REARM_RESULT_SCHEMA.to_string(),
-                                data: with_scheduling_blocker(
-                                    serde_json::json!({ "record": current }),
-                                ),
-                            },
-                            None,
-                        ),
-                        Err(error) => (
-                            ControlPlaneActionOutcome::Failed,
-                            project_record(&record, None)?,
-                            ControlPlaneActionPayload::empty(),
-                            Some(redacted_bounded(&error.attributed_message(), MESSAGE_BOUND)),
-                        ),
-                    }
-                }
                 ControlPlaneAction::Promote => {
                     let parameters: crate::agent_task_service::AgentTaskPromotionRequest =
                         serde_json::from_value(request.parameters.data.clone()).map_err(
@@ -2781,30 +2696,6 @@ fn recover_interrupted_action_acknowledgement(
                 )?
             }
         }
-        ControlPlaneAction::Quarantine if current.metadata.get("queue_quarantine").is_some() => (
-            ControlPlaneActionOutcome::Succeeded,
-            project_record(&current, None)?,
-            ControlPlaneActionPayload {
-                schema: CONTROL_PLANE_QUARANTINE_RESULT_SCHEMA.to_string(),
-                data: serde_json::json!({ "record": current, "recovered": true }),
-            },
-            Some("recovered from the durable quarantine marker".to_string()),
-        ),
-        ControlPlaneAction::Quarantine => failed(
-            "quarantine was interrupted after acceptance without a durable quarantine marker; no second mutation was attempted",
-        )?,
-        ControlPlaneAction::Rearm if current.metadata.get("queue_quarantine").is_none() => (
-            ControlPlaneActionOutcome::Succeeded,
-            project_record(&current, None)?,
-            ControlPlaneActionPayload {
-                schema: CONTROL_PLANE_REARM_RESULT_SCHEMA.to_string(),
-                data: serde_json::json!({ "record": current, "recovered": true }),
-            },
-            Some("recovered from the durable rearm state".to_string()),
-        ),
-        ControlPlaneAction::Rearm => failed(
-            "rearm was interrupted after acceptance without authoritative completion evidence; no second mutation was attempted",
-        )?,
         ControlPlaneAction::Resume
             if current
                 .metadata
@@ -3786,8 +3677,6 @@ const fn action_name(action: ControlPlaneAction) -> &'static str {
         ControlPlaneAction::Resume => "resume",
         ControlPlaneAction::PlacementUpdate => "placement_update",
         ControlPlaneAction::Retry => "retry",
-        ControlPlaneAction::Quarantine => "quarantine",
-        ControlPlaneAction::Rearm => "rearm",
         ControlPlaneAction::Promote => "promote",
         ControlPlaneAction::Reconcile => "reconcile",
     }
@@ -4942,23 +4831,6 @@ fn blocker(
             retry: None,
             daemon: None,
             output: Some(wait.to_string()),
-        });
-    }
-    if let Some(quarantine) = record.metadata.get("queue_quarantine") {
-        let message = quarantine
-            .get("reason")
-            .and_then(|value| value.as_str())
-            .or_else(|| quarantine.get("summary").and_then(|value| value.as_str()))
-            .unwrap_or("run is quarantined");
-        return Some(ControlPlaneBlocker {
-            details: None,
-            code: Some("quarantine".to_string()),
-            message: homeboy_core::redaction::redact_string(message),
-            state: None,
-            reason: Some(redacted_bounded(message, MESSAGE_BOUND)),
-            retry: None,
-            daemon: None,
-            output: None,
         });
     }
     if let Some(reason) = record.stale_running_reason() {
@@ -6474,10 +6346,9 @@ mod tests {
         CONTROL_PLANE_ACTION_REQUEST_SCHEMA, CONTROL_PLANE_CANCEL_PARAMETERS_SCHEMA,
         CONTROL_PLANE_EVENT_APPEND_REQUEST_SCHEMA, CONTROL_PLANE_EVENT_SCHEMA,
         CONTROL_PLANE_PROMOTE_PARAMETERS_SCHEMA, CONTROL_PLANE_PROMOTE_RESULT_SCHEMA,
-        CONTROL_PLANE_QUARANTINE_PARAMETERS_SCHEMA, CONTROL_PLANE_REFERENCE_REGISTRATION_SCHEMA,
-        CONTROL_PLANE_RESUME_RESULT_SCHEMA, CONTROL_PLANE_RETRY_PARAMETERS_SCHEMA,
-        CONTROL_PLANE_RETRY_RESULT_SCHEMA, CONTROL_PLANE_RUN_SCHEMA,
-        CONTROL_PLANE_SUBMISSION_REQUEST_SCHEMA,
+        CONTROL_PLANE_REFERENCE_REGISTRATION_SCHEMA, CONTROL_PLANE_RESUME_RESULT_SCHEMA,
+        CONTROL_PLANE_RETRY_PARAMETERS_SCHEMA, CONTROL_PLANE_RETRY_RESULT_SCHEMA,
+        CONTROL_PLANE_RUN_SCHEMA, CONTROL_PLANE_SUBMISSION_REQUEST_SCHEMA,
     };
     use homeboy_core::control_plane::ControlPlaneProvider;
     use homeboy_core::run_lifecycle_record::RunHeartbeat;
@@ -9057,53 +8928,6 @@ mod tests {
                 );
             });
         }
-    }
-
-    #[test]
-    fn live_ineligible_record_rejects_quarantine_without_an_effect() {
-        with_isolated_home(|_| {
-            let store = AgentTaskLifecycleStore::from_environment().expect("store");
-            crate::agent_task_lifecycle::submit_plan_in_store(
-                &store,
-                &AgentTaskPlan::new("quarantine-ineligible", Vec::new()),
-                Some(AGENT_TASK_RUN),
-            )
-            .expect("queued record");
-            store
-                .mutate_record(AGENT_TASK_RUN, |record| {
-                    record.set_state_for_test(RunExecutionState::Running);
-                    true
-                })
-                .expect("advance to ineligible quarantine state");
-            let service = OrchestrationService::new(LifecycleStoreLookup::new(store));
-            let run = RunId::new(AGENT_TASK_RUN).expect("run");
-            let request = ControlPlaneActionRequest {
-                schema: CONTROL_PLANE_ACTION_REQUEST_SCHEMA.to_string(),
-                effect_id: EffectId("test:quarantine-live-ineligible".to_string()),
-                action: ControlPlaneAction::Quarantine,
-                idempotency_key: "quarantine-live-ineligible".to_string(),
-                actor: "test".to_string(),
-                expected_updated_at: None,
-                parameters: ControlPlaneActionPayload {
-                    schema: CONTROL_PLANE_QUARANTINE_PARAMETERS_SCHEMA.to_string(),
-                    data: json!({ "reason": "hold" }),
-                },
-                confirmed: true,
-            };
-
-            let error = service
-                .execute_action(&run, &request)
-                .expect_err("live ineligible");
-            assert_eq!(error.class, ControlPlaneErrorClass::InvalidArgument);
-            assert!(error.message.contains("queued run"));
-            assert_eq!(
-                service
-                    .effect_status(&run, &request.effect_id)
-                    .expect("status")
-                    .state,
-                ControlPlaneEffectExecutionState::NotStarted
-            );
-        });
     }
 
     #[test]

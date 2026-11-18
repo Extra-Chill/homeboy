@@ -229,7 +229,6 @@ enum ControlPlaneActionParameters {
     case empty
     case cancel(reason: String?)
     case retry(force: Bool)
-    case quarantine(reason: String)
     case placementUpdate(placement: String)
     /// Generic fallback for actions whose full payload shape (e.g. `promote`)
     /// is not yet modeled client-side. Callers supply the `required_inputs`
@@ -251,11 +250,6 @@ enum ControlPlaneActionParameters {
             return [
                 "schema": "homeboy/control-plane-retry-parameters/v1",
                 "data": ["force": force],
-            ]
-        case .quarantine(let reason):
-            return [
-                "schema": "homeboy/control-plane-quarantine-parameters/v1",
-                "data": ["reason": reason],
             ]
         case .placementUpdate(let placement):
             return [

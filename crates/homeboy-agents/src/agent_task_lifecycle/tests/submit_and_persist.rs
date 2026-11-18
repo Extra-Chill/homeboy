@@ -1497,7 +1497,7 @@ fn cook_write_siblings_persist_progress_and_delivery_evidence() {
 }
 
 #[test]
-fn claim_family_siblings_quarantine_expire_and_notify() {
+fn claim_family_siblings_skip_expire_and_notify() {
     let seeded_context = homeboy_core::test_support::HermeticTestContext::new();
     let seeded =
         crate::agent_task_lifecycle::AgentTaskLifecycleStore::new(seeded_context.path_roots());
@@ -1561,8 +1561,7 @@ fn claim_family_siblings_quarantine_expire_and_notify() {
     );
 
     // A budget of zero is refused before anything is inspected, and a scope
-    // that matches nothing inspects nothing. Neither writes, so both are safe
-    // to run before the one call that quarantines.
+    // that matches nothing inspects nothing.
     let budgeted = claim_next_eligible_queued_run_with_preflight_and_filter_and_limit_in_store(
         &seeded,
         |_| true,
@@ -1585,8 +1584,7 @@ fn claim_family_siblings_quarantine_expire_and_notify() {
     assert!(scoped.record.is_none());
     assert!(scoped.skipped.is_empty());
 
-    // The one coordinating write: a failing preflight is the branch that
-    // quarantines and skips.
+    // A failing preflight is the branch that skips.
     let claim = claim_next_eligible_queued_run_with_preflight_in_store(&seeded, |_, _| {
         Err(homeboy_core::Error::validation_invalid_argument(
             "preflight",
@@ -1614,12 +1612,17 @@ fn claim_family_siblings_quarantine_expire_and_notify() {
         ErrorCode::ValidationInvalidArgument.as_str()
     );
 
-    // The quarantine landed in the scanned store, so the next scan of that same
-    // store has nothing left to inspect.
+    // A skip writes nothing, so the record stays queued: the next scan of that
+    // same store, with the default preflight, claims it.
     let rescan =
         claim_next_eligible_queued_run_in_store(&seeded).expect("rescan the injected store");
-    assert_eq!(rescan.inspected, 0);
-    assert!(rescan.skipped.is_empty());
+    assert_eq!(
+        rescan
+            .record
+            .expect("the skipped record is claimable again")
+            .run_id,
+        queued_run_id
+    );
     assert!(claim_next_queued_run_in_store(&seeded)
         .expect("the thin claim delegate shares the injected store")
         .is_none());
@@ -1660,14 +1663,10 @@ fn claim_family_siblings_quarantine_expire_and_notify() {
     }
 
     // The positive: every coordinating write is durable in the store handed in.
-    let quarantined = seeded
+    let claimed = seeded
         .read_record(queued_run_id)
         .expect("read the scanned queue's record back");
-    assert_eq!(quarantined.state(), RunExecutionState::Queued);
-    assert_eq!(
-        quarantined.metadata["queue_quarantine"]["category"],
-        "queue_admission_preflight_failed"
-    );
+    assert_ne!(claimed.state(), RunExecutionState::Queued);
     let expired = seeded
         .read_record(handoff_cook_id)
         .expect("read the detached parent back");
@@ -2172,7 +2171,7 @@ fn run_outcome_siblings_record_placement_acceptance_and_dependency_invalidation(
 }
 
 #[test]
-fn run_reentry_siblings_retry_resume_quarantine_and_rearm() {
+fn run_reentry_siblings_retry_and_resume() {
     let seeded_context = homeboy_core::test_support::HermeticTestContext::new();
     let seeded =
         crate::agent_task_lifecycle::AgentTaskLifecycleStore::new(seeded_context.path_roots());
@@ -2182,8 +2181,6 @@ fn run_reentry_siblings_retry_resume_quarantine_and_rearm() {
     let first_successor = "rooted-reentry-cook-attempt-1-successor";
     let second_successor = "rooted-reentry-retry-second";
     let resume_target = "rooted-reentry-resume";
-    let quarantine_target = "rooted-reentry-quarantine";
-    let rearm_target = "rooted-reentry-rearm";
     let plan = test_plan();
 
     // A run submitted with a stub admission carries `controller_runtime: {}` — a
@@ -2213,24 +2210,13 @@ fn run_reentry_siblings_retry_resume_quarantine_and_rearm() {
 
     {
         let lifecycle_store = &seeded;
-        for run_id in [retry_source, resume_target, quarantine_target, rearm_target] {
+        for run_id in [retry_source, resume_target] {
             seed_queued(lifecycle_store, run_id);
         }
-        // Seed a quarantined run for re-arming.
-        quarantine_queued_run_exact_in_store(lifecycle_store, rearm_target, "seeded quarantine")
-            .expect("seed an operator quarantine");
-        assert_eq!(
-            lifecycle_store
-                .read_record(rearm_target)
-                .expect("read the seeded quarantine back")
-                .metadata["queue_quarantine"]["operator_reason"],
-            "seeded quarantine",
-            "the run starts quarantined"
-        );
     }
 
-    // Reserve one retry successor, resume one run, quarantine one clean run and
-    // re-arm the quarantined one — all through siblings handed `seeded`.
+    // Reserve one retry successor and resume one run, both through siblings
+    // handed `seeded`.
     let reserved = retry_with_runtime_admission_in_store(
         &seeded,
         retry_source,
@@ -2246,30 +2232,6 @@ fn run_reentry_siblings_retry_resume_quarantine_and_rearm() {
     let resumed = mark_resuming_in_store(&seeded, resume_target)
         .expect("resume the queued run in the injected store");
     assert_eq!(resumed.state(), RunExecutionState::Running);
-
-    let never_quarantined = rearm_quarantined_run_in_store(&seeded, quarantine_target)
-        .expect_err("a clean queued run cannot be re-armed");
-    assert_eq!(never_quarantined.details["field"], "run_id");
-    assert_eq!(
-        never_quarantined.details["problem"],
-        "only an exact queued quarantined run can be re-armed"
-    );
-    let still_quarantined = mark_resuming_in_store(&seeded, rearm_target)
-        .expect_err("a quarantined run must refuse to resume");
-    assert_eq!(
-        still_quarantined.code.as_str(),
-        ErrorCode::ValidationInvalidArgument.as_str()
-    );
-    assert_eq!(still_quarantined.details["field"], "run_id");
-    assert_eq!(
-        still_quarantined.details["problem"],
-        "agent-task run is quarantined; re-arm its exact run id after repairing durable provenance"
-    );
-
-    quarantine_queued_run_exact_in_store(&seeded, quarantine_target, "operator halted this run")
-        .expect("quarantine the clean queued run in the injected store");
-    rearm_quarantined_run_in_store(&seeded, rearm_target)
-        .expect("re-arm the quarantined run in the injected store");
 
     // The positive: every re-entry decision is durable in the store handed in.
     let reserved_record = seeded
@@ -2288,35 +2250,6 @@ fn run_reentry_siblings_retry_resume_quarantine_and_rearm() {
         .expect("read the injected store's resumed run back");
     assert_eq!(seeded_resume.state(), RunExecutionState::Running);
     assert!(seeded_resume.metadata.get("resume_requested_at").is_some());
-    assert_eq!(
-        seeded
-            .read_record(quarantine_target)
-            .expect("read the injected store's quarantined run back")
-            .metadata["queue_quarantine"]["operator_reason"],
-        "operator halted this run"
-    );
-    assert!(
-        seeded
-            .read_record(rearm_target)
-            .expect("read the injected store's re-armed run back")
-            .metadata
-            .get("queue_quarantine")
-            .is_none(),
-        "the re-arm must clear the marker in the store that was handed in"
-    );
-
-    // A re-armed run can resume.
-    assert_eq!(
-        mark_resuming_in_store(&seeded, rearm_target)
-            .expect("the injected store re-armed this run, so it may resume")
-            .state(),
-        RunExecutionState::Running
-    );
-    assert!(rearm_quarantined_run_in_store(&seeded, quarantine_target)
-        .expect("the injected store holds this quarantine and can clear it")
-        .metadata
-        .get("queue_quarantine")
-        .is_none());
     // Retry lookup finds the reserved successor.
     assert_eq!(
         find_unbound_cook_retry_successor_in_store(&seeded, retry_source, cook_id, 1, &plan)

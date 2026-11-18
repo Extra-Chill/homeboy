@@ -3080,60 +3080,62 @@ pub fn mark_running_in_store(
 ) -> Result<AgentTaskRunRecord> {
     let run_id = sanitize_run_id(run_id);
     let mut error = None;
-    lifecycle_store.transition_when(&run_id, |stored| {
-        let mut prepared = stored.clone();
-        let record = &mut prepared;
-        if record.state() == RunExecutionState::Queued && record.metadata["execution_scheduling"].is_object() {
-            error = Some(Error::validation_invalid_argument(
-                "run_id", "queued execution is owned by its exact durable step", Some(run_id.clone()), None,
-            ));
-            return None;
-        }
-        if record.metadata.get("queue_quarantine").is_some() {
-            error = Some(Error::validation_invalid_argument(
-                "run_id",
-                "agent-task run is quarantined; re-arm its exact run id after repairing durable provenance",
-                Some(record.run_id.clone()),
-                None,
-            ));
-            return None;
-        }
-        if record.state() == RunExecutionState::Running && record.owner_process_is_running() {
-            error = Some(Error::validation_invalid_argument(
-                "run_id",
-                format!(
-                    "agent-task run '{}' is already running under pid {}",
-                    record.run_id,
-                    record.owner_pid().unwrap_or_default()
-                ),
-                Some(record.run_id.clone()),
-                None,
-            ));
-            return None;
-        }
-        if record.state().is_terminal() {
-            error = Some(Error::validation_invalid_argument(
-                "run_id",
-                format!(
-                    "agent-task run '{}' is already terminal with state {:?}",
-                    record.run_id, record.state()
-                ),
-                Some(record.run_id.clone()),
-                None,
-            ));
-            return None;
-        }
-        let reclaimed_stale = record.state() == RunExecutionState::Running;
-        record.updated_at = Some(now_timestamp());
-        start_run(record);
-        update_lifecycle_heartbeat(record);
-        record.record_runner_metadata(reclaimed_stale);
-        Some(AgentTaskTransition::Advance {
-            kind: AgentTaskAdvance::Start,
-            prepared: Box::new(prepared),
+    lifecycle_store
+        .transition_when(&run_id, |stored| {
+            let mut prepared = stored.clone();
+            let record = &mut prepared;
+            if record.state() == RunExecutionState::Queued
+                && record.metadata["execution_scheduling"].is_object()
+            {
+                error = Some(Error::validation_invalid_argument(
+                    "run_id",
+                    "queued execution is owned by its exact durable step",
+                    Some(run_id.clone()),
+                    None,
+                ));
+                return None;
+            }
+            if record.state() == RunExecutionState::Running && record.owner_process_is_running() {
+                error = Some(Error::validation_invalid_argument(
+                    "run_id",
+                    format!(
+                        "agent-task run '{}' is already running under pid {}",
+                        record.run_id,
+                        record.owner_pid().unwrap_or_default()
+                    ),
+                    Some(record.run_id.clone()),
+                    None,
+                ));
+                return None;
+            }
+            if record.state().is_terminal() {
+                error = Some(Error::validation_invalid_argument(
+                    "run_id",
+                    format!(
+                        "agent-task run '{}' is already terminal with state {:?}",
+                        record.run_id,
+                        record.state()
+                    ),
+                    Some(record.run_id.clone()),
+                    None,
+                ));
+                return None;
+            }
+            let reclaimed_stale = record.state() == RunExecutionState::Running;
+            record.updated_at = Some(now_timestamp());
+            start_run(record);
+            update_lifecycle_heartbeat(record);
+            record.record_runner_metadata(reclaimed_stale);
+            Some(AgentTaskTransition::Advance {
+                kind: AgentTaskAdvance::Start,
+                prepared: Box::new(prepared),
+            })
+        })?
+        .ok_or_else(|| {
+            error.unwrap_or_else(|| {
+                Error::internal_unexpected("agent-task run transition was not applied")
+            })
         })
-    })?
-    .ok_or_else(|| error.unwrap_or_else(|| Error::internal_unexpected("agent-task run transition was not applied")))
 }
 
 /// `mutate_record` whose accepted mutation also commits a fresh execution
@@ -4216,8 +4218,8 @@ pub struct AgentTaskQueuedRunClaim {
 }
 
 /// A claim call makes bounded, observable admission progress even when old
-/// durable records are malformed. The next invocation resumes after the
-/// quarantined records rather than letting stale history monopolize a worker.
+/// durable records are malformed: it inspects at most this many queued records
+/// and reports each one it skipped.
 pub const MAX_QUEUE_ADMISSION_RECORDS: usize = 64;
 
 /// Claim the oldest executable queued record from an explicitly rooted store.
@@ -4265,7 +4267,6 @@ pub fn claim_next_eligible_queued_run_with_preflight_and_filter_in_store(
 ///   never inspects one queue and then wins a run in another,
 /// * the controller-runtime and durable-plan preflight read that store's own
 ///   record and run directory,
-/// * quarantine of invalid provenance mutates that store's own record, and
 /// * the atomic Running transition takes that store's own lifecycle lock through
 ///   [`mark_running_in_store`].
 ///
@@ -4284,7 +4285,6 @@ pub fn claim_next_eligible_queued_run_with_preflight_and_filter_and_limit_in_sto
             record.state() == RunExecutionState::Queued
                 && !is_transport_proxy(record)
                 && !is_unmaterialized_cook_admission(record)
-                && record.metadata.get("queue_quarantine").is_none()
                 && include(record)
         })
         .collect();
@@ -4309,13 +4309,11 @@ pub fn claim_next_eligible_queued_run_with_preflight_and_filter_and_limit_in_sto
         let mut plan = match load_controller_plan_in_store(lifecycle_store, &record.run_id) {
             Ok(plan) => plan,
             Err(error) => {
-                quarantine_queued_run_in_store(lifecycle_store, &record, None, &error)?;
                 skipped.push(queue_skip(&record, None, &error));
                 continue;
             }
         };
         if let Err(error) = preflight(&record, &mut plan) {
-            quarantine_queued_run_in_store(lifecycle_store, &record, Some(&plan), &error)?;
             skipped.push(queue_skip(&record, Some(&plan), &error));
             continue;
         }
@@ -4332,7 +4330,7 @@ pub fn claim_next_eligible_queued_run_with_preflight_and_filter_and_limit_in_sto
                 })
             }
             // A concurrent consumer or operator changed the record after
-            // preflight. Do not turn that normal CAS loss into a quarantine.
+            // preflight. That normal CAS loss is not a skip.
             None => continue,
         }
     }
@@ -4399,7 +4397,7 @@ fn queue_skip(
         provider_id: diagnostic.provider_id.clone(),
         required_environment_variables: diagnostic.required_environment_variables.clone(),
         reason: diagnostic.summary,
-        remediation: queue_quarantine_remediation().to_string(),
+        remediation: QUEUE_SKIP_REMEDIATION.to_string(),
     }
 }
 
@@ -4407,49 +4405,8 @@ pub(crate) fn trusted_dispatcher_kind(kind: &str) -> Option<String> {
     matches!(kind, "local" | "lab" | "test-detached").then(|| kind.to_string())
 }
 
-fn queue_quarantine_remediation() -> &'static str {
-    "inspect retained diagnostics with: homeboy agent-task diagnose <run-id> --full"
-}
-
-/// Retain the redacted admission diagnostic on the record inside the store the
-/// claim is scanning. A quarantine written into another root would leave the
-/// scanned queue permanently re-inspecting the same bad record.
-fn quarantine_queued_run_in_store(
-    lifecycle_store: &AgentTaskLifecycleStore,
-    record: &AgentTaskRunRecord,
-    plan: Option<&AgentTaskPlan>,
-    error: &Error,
-) -> Result<()> {
-    let diagnostic = redacted_queue_diagnostic(plan, error);
-    let _ = lifecycle_store.mutate_record(&record.run_id, |quarantined| {
-        if quarantined.state() != RunExecutionState::Queued
-            || quarantined.metadata.get("queue_quarantine").is_some()
-        {
-            return false;
-        }
-        let now = now_timestamp();
-        let remediation = queue_quarantine_remediation();
-        quarantined.ensure_metadata_object().insert(
-            "queue_quarantine".to_string(),
-            json!({
-                "category": diagnostic.category,
-                "error_code": diagnostic.error_code,
-                "summary": diagnostic.summary,
-                "reason": diagnostic.summary,
-                "actor": "fleet-reconciler",
-                "cause": "admission_preflight_failed",
-                "provider_id": diagnostic.provider_id,
-                "required_environment_variables": diagnostic.required_environment_variables,
-                "quarantined_at": now,
-                "timestamp": now,
-                "remediation": remediation,
-                "recovery_action": remediation,
-            }),
-        );
-        true
-    })?;
-    Ok(())
-}
+const QUEUE_SKIP_REMEDIATION: &str =
+    "inspect retained diagnostics with: homeboy agent-task diagnose <run-id> --full";
 
 struct RedactedQueueDiagnostic {
     category: &'static str,
@@ -4530,114 +4487,6 @@ fn trusted_plan_environment_variables(plan: &AgentTaskPlan) -> Vec<String> {
     names.into_iter().take(16).collect()
 }
 
-/// Re-arm a quarantined record inside an explicitly rooted store.
-///
-/// This is the clearing half of the quarantine pair, and it has to read and
-/// write the same root the quarantine marker was written into. The eligibility
-/// guard — queued, and carrying a `queue_quarantine` marker — is evaluated
-/// inside the mutation closure, so an ambient read decides re-armability from
-/// another home's copy of the identity: a run quarantined here would be reported
-/// as "not quarantined" and refuse to re-arm, while a run quarantined only in
-/// the ambient home would report success and leave this store's queue still
-/// skipping the record on every claim.
-pub fn rearm_quarantined_run_in_store(
-    lifecycle_store: &AgentTaskLifecycleStore,
-    run_id: &str,
-) -> Result<AgentTaskRunRecord> {
-    let run_id = require_literal_run_id(run_id)?;
-    let _subject_lock =
-        crate::agent_task_service::try_execution_subject_lock_in_store(lifecycle_store, &run_id)?
-            .ok_or_else(|| {
-            Error::validation_invalid_argument(
-                "run_id",
-                "an execution child owns this queued run",
-                Some(run_id.clone()),
-                None,
-            )
-        })?;
-    let mut failure = None;
-    let updated = lifecycle_store.mutate_record(&run_id, |record| {
-        if record.state() != RunExecutionState::Queued
-            || record.metadata.get("queue_quarantine").is_none()
-        {
-            return false;
-        }
-        record.ensure_metadata_object().remove("queue_quarantine");
-        if record.metadata["execution_scheduling"].is_object() {
-            if let Err(error) =
-                crate::agent_task_service::prepare_execution_intent(lifecycle_store, record, None)
-            {
-                failure = Some(error);
-                return false;
-            }
-        }
-        record.updated_at = Some(now_timestamp());
-        true
-    })?;
-    failure.map_or(Ok(()), Err)?;
-    updated.ok_or_else(|| {
-        Error::validation_invalid_argument(
-            "run_id",
-            "only an exact queued quarantined run can be re-armed",
-            Some(run_id),
-            None,
-        )
-    })
-}
-
-/// Quarantine one exact queued run inside an explicitly rooted store.
-///
-/// The operator quarantine and the automatic one that `quarantine_queued_run_in_store`
-/// writes during a claim are the same durable marker, and a claim scanning this
-/// store must see it. Written ambiently, the operator would be told the run is
-/// quarantined while this store's queue kept handing it out, and
-/// `rearm_quarantined_run_in_store` would then find nothing to clear.
-pub fn quarantine_queued_run_exact_in_store(
-    lifecycle_store: &AgentTaskLifecycleStore,
-    run_id: &str,
-    reason: &str,
-) -> Result<AgentTaskRunRecord> {
-    let run_id = require_literal_run_id(run_id)?;
-    let operator_reason = normalized_operator_quarantine_reason(reason);
-    lifecycle_store
-        .mutate_record(&run_id, |record| {
-            if record.state() != RunExecutionState::Queued
-                || record.metadata.get("queue_quarantine").is_some()
-            {
-                return false;
-            }
-            let quarantined_at = now_timestamp();
-            let remediation =
-                "repair provenance, then re-arm with: homeboy agent-task rearm <run-id>";
-            record.updated_at = Some(quarantined_at.clone());
-            record.ensure_metadata_object().insert(
-                "queue_quarantine".to_string(),
-                json!({
-                    "category": "operator_quarantine",
-                    "error_code": "operator_quarantine",
-                    "summary": "operator quarantined this queued run",
-                    "reason": operator_reason,
-                    "actor": "operator",
-                    "cause": "operator_requested",
-                    "operator_reason": operator_reason,
-                    "quarantined_at": quarantined_at,
-                    "timestamp": quarantined_at,
-                    "remediation": remediation,
-                    "recovery_action": remediation,
-                }),
-            );
-            true
-        })?
-        .ok_or_else(|| {
-            Error::validation_invalid_argument(
-                "run_id",
-                "only an exact queued non-quarantined run can be quarantined",
-                Some(run_id),
-                None,
-            )
-        })
-}
-
 /// Return the immutable receiver acceptance receipt for one dispatch intent.
 pub fn dispatch_acceptance_receipt_in_store(
     lifecycle_store: &AgentTaskLifecycleStore,
@@ -4658,29 +4507,12 @@ pub fn dispatch_acceptance_receipt_in_store(
         .cloned())
 }
 
-fn normalized_operator_quarantine_reason(reason: &str) -> String {
-    const MAX_BYTES: usize = 240;
-    let mut normalized = String::new();
-    for character in reason.chars().filter(|character| !character.is_control()) {
-        if normalized.len() + character.len_utf8() > MAX_BYTES {
-            break;
-        }
-        normalized.push(character);
-    }
-    let normalized = normalized.trim();
-    if normalized.is_empty() {
-        "operator requested quarantine".to_string()
-    } else {
-        normalized.to_string()
-    }
-}
-
 fn require_literal_run_id(run_id: &str) -> Result<String> {
     let sanitized = sanitize_run_id(run_id);
     if sanitized != run_id {
         return Err(Error::validation_invalid_argument(
             "run_id",
-            "quarantine and re-arm require a literal exact durable run id",
+            "a literal exact durable run id is required",
             Some(run_id.to_string()),
             None,
         ));
@@ -5585,10 +5417,9 @@ pub fn run_record_exists_resolved_in_store(
 ///
 /// The transition itself goes through `mark_running_in_store` rather than the
 /// ambient `mark_running`, and that is the half that matters most: `mark_running`
-/// carries the quarantine, live-owner and terminal guards. Evaluated ambiently,
-/// a run this store has quarantined would be re-armed to Running anyway — the
-/// exact inverse of the quarantine/re-arm pair below — while the state it wrote
-/// landed somewhere the resuming controller never reads.
+/// carries the live-owner and terminal guards. Evaluated ambiently, those
+/// guards would read another home's record while the state it wrote landed
+/// somewhere the resuming controller never reads.
 pub(crate) fn mark_resuming_in_store(
     lifecycle_store: &AgentTaskLifecycleStore,
     run_id: &str,

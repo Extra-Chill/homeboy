@@ -126,46 +126,6 @@ mod tests {
     }
 
     #[test]
-    fn quarantine_and_rearm_expose_explicit_confirmation() {
-        assert!(Cli::try_parse_from([
-            "homeboy",
-            "agent-task",
-            "quarantine",
-            "run-a",
-            "--reason",
-            "hold"
-        ])
-        .is_ok());
-        let cli = Cli::try_parse_from([
-            "homeboy",
-            "agent-task",
-            "quarantine",
-            "run-a",
-            "--reason",
-            "hold",
-            "--confirm",
-        ])
-        .expect("confirmed quarantine parses");
-        let Commands::AgentTask(agent_task) = cli.command else {
-            panic!("expected agent-task command");
-        };
-        let AgentTaskCommand::Quarantine(args) = agent_task.command else {
-            panic!("expected quarantine command");
-        };
-        assert!(args.confirm);
-
-        let cli = Cli::try_parse_from(["homeboy", "agent-task", "rearm", "run-a", "--confirm"])
-            .expect("confirmed rearm parses");
-        let Commands::AgentTask(agent_task) = cli.command else {
-            panic!("expected agent-task command");
-        };
-        let AgentTaskCommand::Rearm(args) = agent_task.command else {
-            panic!("expected rearm command");
-        };
-        assert!(args.confirm);
-    }
-
-    #[test]
     fn model_parses_canonically_for_adoption() {
         let adopt = |flag: &str| {
             Cli::try_parse_from([
@@ -446,14 +406,6 @@ mod tests {
         assert!(args.full);
     }
 }
-#[derive(Args, Debug)]
-pub struct ReplayProviderBoundaryArgs {
-    /// Durable run whose provider boundary to replay.
-    pub run_id: String,
-    /// Restrict the replay to this task ID.
-    #[arg(long = "task", value_name = "TASK_ID")]
-    pub task: Option<String>,
-}
 #[derive(Args, Debug, Default)]
 pub struct RecoverArgs {
     /// Follow the admitted daemon step through status/watch.
@@ -623,31 +575,6 @@ pub struct CancelArgs {
     #[arg(long, value_name = "TEXT")]
     pub reason: Option<String>,
     /// Stable caller key for safely replaying this cancellation request.
-    #[arg(long, value_name = "KEY")]
-    pub idempotency_key: Option<String>,
-}
-#[derive(Args, Debug)]
-pub struct QuarantineArgs {
-    /// Exact durable run id. Cook aliases are not accepted for mutations.
-    pub run_id: String,
-    /// Explanation recorded with the quarantine action.
-    #[arg(long, value_name = "TEXT")]
-    pub reason: String,
-    /// Record the operator's confirmation before quarantining this queued run.
-    #[arg(long)]
-    pub confirm: bool,
-    /// Stable caller key for safely replaying this quarantine request.
-    #[arg(long, value_name = "KEY")]
-    pub idempotency_key: Option<String>,
-}
-#[derive(Args, Debug)]
-pub struct RearmArgs {
-    /// Exact durable run id. Cook aliases are not accepted for mutations.
-    pub run_id: String,
-    /// Record the operator's confirmation before re-arming this queued run.
-    #[arg(long)]
-    pub confirm: bool,
-    /// Stable caller key for safely replaying this rearm request.
     #[arg(long, value_name = "KEY")]
     pub idempotency_key: Option<String>,
 }

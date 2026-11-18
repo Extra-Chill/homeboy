@@ -121,7 +121,6 @@ impl ExecutionStepIntent {
             && record.metadata["execution_scheduling"]["epoch"].as_u64() == Some(self.epoch)
             && record.metadata["execution_scheduling"]["current_intent_id"].as_str()
                 == Some(self.intent_id.as_str())
-            && record.metadata.get("queue_quarantine").is_none()
             && record.metadata["detached_cook_handoff"]["cancellation_fence"]["state"]
                 != "cancelled"
             && record.metadata["detached_cook_handoff"]["cancellation_fence"]["state"]
@@ -682,10 +681,6 @@ pub(super) fn consume_execution_terminal_in_store(
             || (stored.state().is_terminal()
                 && stored.metadata["detached_cook_handoff"]["state"] != "redirected")
         {
-            return None;
-        }
-        if !delivery.cancelled && stored.metadata.get("queue_quarantine").is_some() {
-            disposition = "quarantined";
             return None;
         }
         // Published admissions have transferred ownership to the reserved

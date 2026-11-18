@@ -37,9 +37,8 @@ pub use args::{
     AgentTaskDoctorArgs, AgentTaskFanoutArgs, AgentTaskFanoutCommand, AgentTaskFanoutCookBatchArgs,
     CancelArgs, ContractArgs, ContractFormat, CookFeedbackArgs, DiagnoseArgs, FinalizePrArgs,
     GateFeedbackArgs, PlacementUpdateArgs, PromoteArgs, PromotionProviderArgs, ProvidersArgs,
-    QuarantineArgs, RearmArgs, RecoverArgs, ReplayProviderBoundaryArgs, RetainedArtifactsArgs,
-    RetainedArtifactsCommand, RetryArgs, ReviewArgs, RunPlanArgs, StatusArgs, ValidatePlanArgs,
-    VerifyGateArgs,
+    RecoverArgs, RetainedArtifactsArgs, RetainedArtifactsCommand, RetryArgs, ReviewArgs,
+    RunPlanArgs, StatusArgs, ValidatePlanArgs, VerifyGateArgs,
 };
 
 /// Shallow-merge rotation route overrides over the materialized base config,
@@ -367,12 +366,7 @@ pub(crate) fn run_with_cook_progress_and_provenance(
         AgentTaskCommand::Reconcile(args) => status::reconcile_run(args),
         AgentTaskCommand::RetainedArtifacts(args) => retained_artifacts::run(args),
         AgentTaskCommand::Diagnose(diagnose_args) => status::diagnose(diagnose_args),
-        AgentTaskCommand::ReplayProviderBoundary(replay_args) => {
-            status::replay_provider_boundary(replay_args)
-        }
         AgentTaskCommand::Cancel(cancel_args) => status::cancel(cancel_args),
-        AgentTaskCommand::Quarantine(args) => status::quarantine(args),
-        AgentTaskCommand::Rearm(args) => status::rearm(args),
         AgentTaskCommand::Resume(status_args) => run::resume(status_args),
         AgentTaskCommand::Retry(retry_args) => run::retry(retry_args),
         AgentTaskCommand::Recover(args) => recover::recover(args),

@@ -119,10 +119,7 @@ publication.
 | `status <run-id> [--exact] [--watch]` | Read durable run status; `--exact` bypasses Cook alias resolution to inspect that concrete lifecycle record. `--watch` emits changed snapshots and exits when terminal or timed out. |
 | `reconcile <run-id>\|--all [--dry-run\|--apply]` | Preview one durable run/group or the active fleet; mutate only with `--apply`. |
 | `artifacts <run-id>` | List artifacts and evidence refs recorded for a completed run. |
-| `replay-provider-boundary <run-id> [--task <task-id>]` | Hydrate the latest raw executor input and print provider-boundary fields without relaunching a provider. |
 | `cancel <run-id>` | Mark a queued or stale-running durable run as cancelled. Retains the writing process's PID and redacted argv in `metadata.cancellation_actor`, visible through status and independent of daemon job retention. |
-| `quarantine <run-id> --reason <text>` | Exclude one exact queued run while retaining its nonterminal lifecycle evidence. |
-| `rearm <run-id>` | Return one exact quarantined queued run to eligibility after repair. |
 | `resume <run-id>` | Resume a queued or stale-running durable run. Given a Cook ID whose durable state names a recovery step, it performs that step through `recover <cook-id>`. |
 | `retry <run-id>` | Submit a fresh durable run from an existing run's plan. A stopped Cook is recovered with `recover <cook-or-attempt-id>`, which owns the Cook's next-attempt provider-route overrides; `retry <cook-id> --run` performs the Cook's recovery step through `recover`. Any other retry of a Cook ID, or of a superseded attempt ID, resolves to the Cook's latest durable attempt and names it; a non-retryable latest attempt is refused with its state. |
 | `prompts save\|list\|show\|remove` | Manage markdown prompts in Homeboy-owned storage. |
@@ -171,19 +168,12 @@ default and produce no hot-machine or Lab-routing guidance. This keeps recovery
 inspection available when a runner is disconnected, stale, or reports conflicting
 readiness. An explicit `--runner` retains runner-resident polling for status,
 `runs logs`, `runs artifacts`, `runs list --kind agent-task`, and other state reads when the durable
-state lives there. Provider execution, deterministic gates, explicit evidence or
-provider-boundary hydration, and review remain subject to their admission and
+state lives there. Provider execution, deterministic gates, explicit evidence
+hydration, and review remain subject to their admission and
 routing contracts. Reconciliation is an explicit workload even when it begins
 with an inspection.
 
 Machine-readable `cook`, `resume`, `adopt`, and `status` responses default to bounded summaries: stable ids, states, totals, timestamps when present, artifact/evidence references, and actionable failure reasons are retained while nested provider evidence is projected away. Use `cook --full`, `resume --full`, `adopt --full`, or the emitted `full_command`; use the emitted `evidence_command` (with `--task` or `--kind`) to retrieve selected durable evidence.
-
-`agent-task replay-provider-boundary <run-id>` is a focused inspect/replay path for
-provider-boundary debugging. It loads saved `executor-input` evidence, projects the
-normalized `runtime_task`, provider config, `runtime_component_paths`,
-`runtime_env`, artifact declarations, and package descriptor, then persists the
-inspection as `provider-boundary-replay` evidence. Use `--task <task-id>` for
-multi-task runs.
 
 ### Cook/Review
 
@@ -1528,13 +1518,12 @@ classification or a concrete missing-artifact set mapped to specific commands,
 | `rate_limited` | failure evidence (retry-after hint), `agent-task providers` to rotate to, then retry |
 | `policy_denied` | failure evidence and the full run record. No retry: an identical request is denied identically |
 | `capability_missing` | failure evidence, `agent-task providers --full`, and `agent-task doctor --runner <id>` with its `--repair` form |
-| `invalid_input` | failure evidence and `agent-task replay-provider-boundary` for the rejected input. No retry: the same input fails the same way |
+| `invalid_input` | failure evidence, which records the rejected input. No retry: the same input fails the same way |
 | `execution_failed` | failure evidence for the failing step (gate/verify, harvest, required typed artifacts), `agent-task review`, `runs artifacts --full`, then retry |
 | `unknown` | no specific step is substantiable; the generic fallback set is emitted |
 
 Declared-but-missing artifacts add their own actions regardless of
-classification: `runs artifacts --full`, plus a task-scoped
-`agent-task replay-provider-boundary` and failure-evidence command naming the
-artifacts that were not produced. Repair-class actions carry
+classification: `runs artifacts --full`, plus a task-scoped failure-evidence
+command naming the artifacts that were not produced. Repair-class actions carry
 `kind: "repair"`; runner-scoped actions are emitted only when the run records a
 runner id.

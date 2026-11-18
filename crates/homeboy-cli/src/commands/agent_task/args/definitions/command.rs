@@ -4,8 +4,8 @@ use super::cook::{AgentTaskCookArgs, PromotionProviderArgs};
 use super::fanout::{AgentTaskBatchPrepareArgs, AgentTaskFanoutArgs};
 use super::lifecycle::{
     AdoptArgs, CancelArgs, DiagnoseArgs, FinalizePrArgs, GateFeedbackArgs, PlacementUpdateArgs,
-    PromoteArgs, QuarantineArgs, RearmArgs, RecoverArgs, ReplayProviderBoundaryArgs, ResumeArgs,
-    RetryArgs, ReviewArgs, RunArgs, RunPlanArgs, StatusArgs, ValidatePlanArgs,
+    PromoteArgs, RecoverArgs, ResumeArgs, RetryArgs, ReviewArgs, RunArgs, RunPlanArgs, StatusArgs,
+    ValidatePlanArgs,
 };
 use clap::{Args, Subcommand, ValueEnum};
 
@@ -108,20 +108,9 @@ pub enum AgentTaskCommand {
     ///
     /// Next actions are derived from the failure classification, not from prose.
     Diagnose(DiagnoseArgs),
-    /// Validate controller runtime eligibility without executing provider work.
-    /// Hydrate the latest raw executor input and print provider-boundary fields
-    /// without relaunching a provider.
-    ///
-    /// Persists the inspection as `provider-boundary-replay` evidence. Use
-    /// `--task <task-id>` for multi-task runs.
-    ReplayProviderBoundary(ReplayProviderBoundaryArgs),
     /// Mark a queued or stale-running durable run as cancelled.
     /// The durable run metadata retains cancellation_actor (PID and redacted argv).
     Cancel(CancelArgs),
-    /// Exclude one exact queued record while preserving its lifecycle and evidence.
-    Quarantine(QuarantineArgs),
-    /// Return one exact quarantined queued record to normal queue eligibility.
-    Rearm(RearmArgs),
     /// Resume a queued or stale-running durable run.
     ///
     /// Given a Cook ID whose durable state names a recovery step, `resume`

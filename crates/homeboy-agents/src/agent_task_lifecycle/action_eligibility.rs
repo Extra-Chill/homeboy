@@ -29,16 +29,6 @@ pub(crate) fn lifecycle_action_eligibility_with_roots(
     let resume = resume_availability(record);
     let placement_update = placement_update_availability(record);
     let retry = retry_availability(record, plan, roots);
-    let quarantine = if record.state() == RunExecutionState::Queued {
-        available("queued run can be quarantined before admission")
-    } else {
-        unavailable("quarantine requires an exact queued run")
-    };
-    let rearm = if record.metadata.get("queue_quarantine").is_some() {
-        available("durable quarantine marker can be removed")
-    } else {
-        unavailable("run is not quarantined")
-    };
     let promotion = if matches!(
         record.state(),
         RunExecutionState::Succeeded | RunExecutionState::CandidateRecoverable
@@ -80,22 +70,6 @@ pub(crate) fn lifecycle_action_eligibility_with_roots(
             action(
                 ControlPlaneAction::Retry,
                 retry,
-                ControlPlaneActionConfirmation::Required,
-                Vec::new(),
-                true,
-                "agent_task_run",
-            ),
-            action(
-                ControlPlaneAction::Quarantine,
-                quarantine,
-                ControlPlaneActionConfirmation::Required,
-                vec!["reason"],
-                true,
-                "agent_task_run",
-            ),
-            action(
-                ControlPlaneAction::Rearm,
-                rearm,
                 ControlPlaneActionConfirmation::Required,
                 Vec::new(),
                 true,
@@ -236,9 +210,6 @@ fn resume_availability(record: &AgentTaskRunRecord) -> (ControlPlaneActionAvaila
         return unavailable(format!(
             "candidate_recoverable holds an unpromoted candidate; resume only re-reads terminal evidence and cannot verify it: recover the cook with `homeboy agent-task recover {cook_id}`"
         ));
-    }
-    if record.metadata.get("queue_quarantine").is_some() {
-        return unavailable("run is quarantined and must be re-armed before resume");
     }
     if resource_guard_blocks_replay(record) {
         return unavailable(
@@ -428,8 +399,6 @@ mod tests {
                     ControlPlaneAction::Resume,
                     ControlPlaneAction::PlacementUpdate,
                     ControlPlaneAction::Retry,
-                    ControlPlaneAction::Quarantine,
-                    ControlPlaneAction::Rearm,
                     ControlPlaneAction::Promote,
                     ControlPlaneAction::Reconcile,
                 ]
@@ -507,18 +476,6 @@ mod tests {
                 "{label}: eligibility and the reconciler must agree"
             );
         }
-    }
-
-    #[test]
-    fn stale_metadata_does_not_override_a_quarantine_guard() {
-        let mut record = record(RunExecutionState::Running, true);
-        record.metadata["queue_quarantine"] = serde_json::json!({"reason": "fixture"});
-        let report = lifecycle_action_eligibility(&record, None);
-
-        assert_eq!(
-            decision(&report, ControlPlaneAction::Resume),
-            ControlPlaneActionAvailability::Unavailable
-        );
     }
 
     #[test]
@@ -615,19 +572,6 @@ mod tests {
         assert_eq!(
             decision(
                 &lifecycle_action_eligibility(&running, None),
-                ControlPlaneAction::Resume
-            ),
-            ControlPlaneActionAvailability::Unavailable
-        );
-
-        let mut quarantined = record(RunExecutionState::Queued, false);
-        quarantined.metadata["unmaterialized_cook_admission"] = serde_json::json!({
-            "state": "blocked_runner_stale",
-        });
-        quarantined.metadata["queue_quarantine"] = serde_json::json!({"reason": "fixture"});
-        assert_eq!(
-            decision(
-                &lifecycle_action_eligibility(&quarantined, None),
                 ControlPlaneAction::Resume
             ),
             ControlPlaneActionAvailability::Unavailable

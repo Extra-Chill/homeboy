@@ -274,7 +274,7 @@ impl AgentTaskLifecycleStore {
 
     /// Bind a preflighted controller plan only while this consumer atomically
     /// claims the exact queued record. A losing consumer must not overwrite the
-    /// winner's route or quarantine its now-running record.
+    /// winner's route or its now-running record.
     pub(crate) fn bind_controller_plan_and_claim_queued_run(
         &self,
         run_id: &str,
@@ -293,10 +293,7 @@ impl AgentTaskLifecycleStore {
     ) -> Result<Option<AgentTaskRunRecord>> {
         self.with_store_lock(|| {
             let mut record = self.read_record(run_id)?;
-            if record.state() != super::RunExecutionState::Queued
-                || record.metadata.get("queue_quarantine").is_some()
-                || !authorize(&record)
-            {
+            if record.state() != super::RunExecutionState::Queued || !authorize(&record) {
                 return Ok(None);
             }
             validate_execution_budget(plan)?;

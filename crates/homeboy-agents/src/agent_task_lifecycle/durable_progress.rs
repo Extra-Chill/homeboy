@@ -197,19 +197,6 @@ pub(crate) fn prepared_progress_events(
     for request in gate_lifecycle_requests(record)? {
         events.push(prepare_request(&run, record, request)?);
     }
-    if let Some(provenance) = record
-        .metadata
-        .get("queue_quarantine")
-        .and_then(Value::as_object)
-    {
-        events.push(prepare_provenance_event(
-            &run,
-            record,
-            "run.quarantined",
-            "quarantine",
-            provenance,
-        )?);
-    }
     // The receipt is minted only by the commit that cancels the run; the
     // single write path refuses provenance on any other state (#15718).
     if let Some(provenance) = record
@@ -618,7 +605,7 @@ fn prepare_provenance_event(
             attempt: None,
             execution: None,
             data: json!({
-                "state": if kind == "run.cancelled" { ControlPlaneState::Cancelled } else { ControlPlaneState::Queued },
+                "state": ControlPlaneState::Cancelled,
                 "message": provenance.get("reason").and_then(Value::as_str).unwrap_or(kind),
                 "provenance": provenance,
             }),
