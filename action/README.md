@@ -595,6 +595,7 @@ Use these outputs to gate downstream jobs:
 | `source` | No | | Path to build homeboy from source (e.g. `.`). Falls back to release binary. |
 | `extension` | No | | Extension ID (e.g. `wordpress`, `rust`, `node`) |
 | `extension-source` | No | `Extra-Chill/homeboy` | Git URL to install the extension from. Extensions live in `extensions/` of the Homeboy repository. If an install from the default fails (an `extension-ref` naming a commit from the frozen `Extra-Chill/homeboy-extensions`, or a Homeboy release without nested extension roots), it is retried from `Extra-Chill/homeboy-extensions` with a warning. |
+| `extension-ref` | No | | Git revision to install the extension at. When it is immutable (a commit SHA, or a tag that `git ls-remote` still resolves to the installed commit) and the restored `Cache Homeboy` tree was installed from the same source at the same ref, the cached install is reused instead of reinstalled. Branches and an empty ref always reinstall. |
 | `commands` | No | `review lint,review test` | Comma-separated commands to run |
 | `component` | No | *(repo name)* | Component name (auto-detected from repo) |
 | `args` | No | | Extra arguments passed to each command |
