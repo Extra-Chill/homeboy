@@ -2030,6 +2030,25 @@ mod tests {
         }
     }
 
+    /// #18121: pressure is waited out first (#18058); a refusal that outlasts
+    /// the wait is still the runner's capacity, not a verdict, so it never
+    /// terminalizes a Cook.
+    #[test]
+    fn pressure_refusal_after_the_wait_is_a_transport_failure() {
+        let refusal = LabGateAdmission {
+            accepts_jobs: false,
+            reasons: vec!["pressure".to_string()],
+            freshness: LabGateFreshness::Fresh,
+            next_action: None,
+        }
+        .refusal("pressured-runner", Some(Duration::from_secs(1800)));
+        assert!(homeboy_core::substrate_wait::is_transient_error(&refusal));
+        assert!(is_lab_gate_transport_failure(&refusal));
+        let wrapped = gate_execute_unavailable(refusal, "transport", None);
+        assert_eq!(wrapped.details["stage"], "admission");
+        assert!(is_lab_gate_transport_failure(&wrapped));
+    }
+
     /// #18121: only non-execution counts. A configuration error no retry can
     /// fix, a runner that answered "not ready", version skew and a missing
     /// gate runtime all stay verdicts the Cook must act on.
