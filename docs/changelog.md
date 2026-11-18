@@ -4,6 +4,17 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.473.5] - 2026-11-18
+
+### Changed
+- bound shell release-wait loops so a dead test cannot orphan them
+
+### Fixed
+- reap detached self-spawned helpers instead of leaving zombies
+- address the installed pathname after the running binary is replaced
+- run every Lab job in its own kernel-enforced cgroup
+- admit Homeboy refresh jobs outside bulk pressure admission
+
 ## [0.473.4] - 2026-11-18
 
 ### Fixed
