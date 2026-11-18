@@ -149,7 +149,102 @@ fn largest_inline_payload(value: &mut Value) -> Option<&mut Value> {
     }
 }
 
+/// Total payload bytes held by the process-wide parsed payload cache.
+const PAYLOAD_CACHE_BUDGET: usize = 64 * 1024 * 1024;
+
+/// Parsed payloads keyed by digest. Payload files are immutable (named by
+/// their sha256), so a verified parse stays valid for the process lifetime.
+#[derive(Default)]
+struct PayloadCache {
+    entries: std::collections::HashMap<String, CachedPayload>,
+    total_bytes: usize,
+    tick: u64,
+}
+
+struct CachedPayload {
+    value: std::sync::Arc<Value>,
+    bytes: usize,
+    last_used: u64,
+}
+
+impl PayloadCache {
+    fn get(&mut self, sha: &str) -> Option<(std::sync::Arc<Value>, usize)> {
+        self.tick += 1;
+        let tick = self.tick;
+        self.entries.get_mut(sha).map(|entry| {
+            entry.last_used = tick;
+            (entry.value.clone(), entry.bytes)
+        })
+    }
+
+    fn insert(&mut self, sha: String, value: std::sync::Arc<Value>, bytes: usize) {
+        if bytes > PAYLOAD_CACHE_BUDGET || self.entries.contains_key(&sha) {
+            return;
+        }
+        while self.total_bytes + bytes > PAYLOAD_CACHE_BUDGET {
+            let Some(oldest) = self
+                .entries
+                .iter()
+                .min_by_key(|(_, entry)| entry.last_used)
+                .map(|(key, _)| key.clone())
+            else {
+                break;
+            };
+            if let Some(evicted) = self.entries.remove(&oldest) {
+                self.total_bytes -= evicted.bytes;
+            }
+        }
+        self.tick += 1;
+        self.total_bytes += bytes;
+        self.entries.insert(
+            sha,
+            CachedPayload {
+                value,
+                bytes,
+                last_used: self.tick,
+            },
+        );
+    }
+}
+
+fn payload_cache() -> std::sync::MutexGuard<'static, PayloadCache> {
+    static CACHE: std::sync::OnceLock<std::sync::Mutex<PayloadCache>> = std::sync::OnceLock::new();
+    CACHE
+        .get_or_init(Default::default)
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+}
+
+fn integrity_mismatch() -> Error {
+    Error::internal_unexpected("Metadata payload integrity mismatch")
+}
+
+/// Load one payload, verifying digest and length only when it is read from disk.
+fn load_payload(
+    sha: &str,
+    expected_bytes: Option<u64>,
+    root: &Path,
+) -> Result<std::sync::Arc<Value>> {
+    if let Some((value, bytes)) = payload_cache().get(sha) {
+        if expected_bytes != Some(bytes as u64) {
+            return Err(integrity_mismatch());
+        }
+        return Ok(value);
+    }
+    let bytes = fs::read(root.join("metadata-payloads").join(sha)).map_err(io)?;
+    if digest(&bytes) != sha || expected_bytes != Some(bytes.len() as u64) {
+        return Err(integrity_mismatch());
+    }
+    let value: Value =
+        serde_json::from_slice(&bytes).map_err(|e| Error::internal_json(e.to_string(), None))?;
+    let value = std::sync::Arc::new(value);
+    payload_cache().insert(sha.to_string(), value.clone(), bytes.len());
+    Ok(value)
+}
+
 /// Resolve only at a content-consuming boundary, using the caller's roots.
+/// Parsed payloads are cached process-wide by digest, so repeated resolution
+/// of the same immutable payload skips the file read, digest and parse.
 pub fn resolve_metadata_payload(value: &Value, root: &Path) -> Result<Value> {
     if let Some(reference) = value.get(REFERENCE) {
         let sha = reference
@@ -161,17 +256,8 @@ pub fn resolve_metadata_payload(value: &Value, root: &Path) -> Result<Value> {
                 "Invalid metadata payload digest",
             ));
         }
-        let bytes = fs::read(root.join("metadata-payloads").join(sha)).map_err(io)?;
-        if digest(&bytes) != sha
-            || reference.get("bytes").and_then(Value::as_u64) != Some(bytes.len() as u64)
-        {
-            return Err(Error::internal_unexpected(
-                "Metadata payload integrity mismatch",
-            ));
-        }
-        let value = serde_json::from_slice(&bytes)
-            .map_err(|e| Error::internal_json(e.to_string(), None))?;
-        return resolve_metadata_payload(&value, root);
+        let payload = load_payload(sha, reference.get("bytes").and_then(Value::as_u64), root)?;
+        return resolve_metadata_payload(&payload, root);
     }
     let mut result = value.clone();
     match &mut result {
@@ -342,6 +428,35 @@ impl ObservationStore {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn resolved_payloads_are_cached_and_tampered_files_fail_first_load() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        // Unique content so no other test can have warmed the cache.
+        let mut value = serde_json::json!({
+            "payload": format!("cache-{}-{}", std::process::id(), "c".repeat(32 * 1024))
+        });
+        let original = value.clone();
+        externalize(&mut value, &|| Ok(root.to_path_buf())).unwrap();
+        let sha = value[REFERENCE]["sha256"].as_str().unwrap().to_string();
+        let path = root.join("metadata-payloads").join(&sha);
+        assert_eq!(resolve_metadata_payload(&value, root).unwrap(), original);
+        fs::remove_file(&path).unwrap();
+        assert_eq!(resolve_metadata_payload(&value, root).unwrap(), original);
+
+        let mut tampered = serde_json::json!({
+            "payload": format!("tamper-{}-{}", std::process::id(), "t".repeat(32 * 1024))
+        });
+        externalize(&mut tampered, &|| Ok(root.to_path_buf())).unwrap();
+        let tampered_sha = tampered[REFERENCE]["sha256"].as_str().unwrap();
+        let tampered_path = root.join("metadata-payloads").join(tampered_sha);
+        let mut bytes = fs::read(&tampered_path).unwrap();
+        bytes[20] ^= 1;
+        fs::write(&tampered_path, bytes).unwrap();
+        let error = resolve_metadata_payload(&tampered, root).unwrap_err();
+        assert!(error.message.contains("integrity mismatch"));
+    }
 
     #[test]
     fn retention_compacts_legacy_terminal_rows_in_bounded_passes() {
