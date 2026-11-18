@@ -29,7 +29,7 @@ use super::super::agent_task_dispatch::DispatchArgs;
 use super::super::CmdResult;
 use super::args::{
     AgentTaskCookArgs, AgentTaskProviderEvidenceInput, PlacementUpdateArgs, PromotionProviderArgs,
-    ResumeArgs, RetryArgs, RunArgs, RunPlanArgs, ValidatePlanArgs,
+    RetryArgs, RunArgs, RunPlanArgs, ValidatePlanArgs,
 };
 use super::default_branch::DefaultBranchRequest;
 use super::gate_contract::{
@@ -11634,9 +11634,9 @@ pub(super) fn run_submitted_with_executor(
             "run_id",
             "unmaterialized Cook admission must continue through its fenced resume path",
             Some(run_id.clone()),
-            Some(vec![format!("homeboy agent-task resume {run_id}")]),
+            Some(vec![format!("homeboy agent-task recover {run_id}")]),
         )
-        .with_hint(format!("Run `homeboy agent-task resume {run_id}`.")));
+        .with_hint(format!("Run `homeboy agent-task recover {run_id}`.")));
     }
     let result =
         agent_task_service::run_submitted_with_timeout(run_id.clone(), timeout_ms, executor)?;
@@ -11653,25 +11653,6 @@ pub(super) fn validate_plan(args: ValidatePlanArgs) -> CmdResult<Value> {
         serde_json::to_value(report).unwrap_or(Value::Null),
         i32::from(!valid),
     ))
-}
-
-/// `resume` re-enters queued and stale-running runs of every kind. Given a
-/// Cook ID whose durable state names a recovery step, it performs that step
-/// through `agent-task recover` instead of re-deciding it (#15925).
-pub(super) fn resume(args: ResumeArgs) -> CmdResult<Value> {
-    if agent_task_service_direct::cook_recovery_delegation(&args.run_id).is_some() {
-        return super::recover::recover(super::RecoverArgs {
-            id: args.run_id,
-            full: args.full,
-            ..Default::default()
-        });
-    }
-    run_resume_with_executor(
-        args.run_id,
-        args.full,
-        args.idempotency_key,
-        Arc::new(ExtensionProviderAgentTaskExecutor::discover()),
-    )
 }
 
 pub(super) fn placement_update(
@@ -11758,29 +11739,19 @@ pub(super) fn run_resume_with_executor(
             ..
         } => i32::from(*terminal) * 2,
     };
-    Ok((
-        // Historical terminal transport recovery has always returned the
-        // aggregate-shaped status cursor. Keep that compatibility projection
-        // while the mutation itself remains a durable action acknowledgement.
-        serde_json::to_value(match (&resume_result, acknowledgement.outcome) {
-            (
-                homeboy::agents::agent_task_action_result::ResumeActionResult::Resumed {
-                    aggregate,
-                    ..
-                },
-                homeboy_control_plane_contract::ControlPlaneActionOutcome::AlreadySatisfied,
-            ) => aggregate,
-            _ => {
-                return Ok((
-                    serde_json::to_value(acknowledgement)
-                        .map_err(|error| Error::internal_json(error.to_string(), None))?,
-                    exit_code,
-                ))
-            }
-        })
-        .map_err(|error| Error::internal_json(error.to_string(), None))?,
-        exit_code,
-    ))
+    // Preserve the historical aggregate cursor for already-satisfied recovery.
+    let value = match (&resume_result, &acknowledgement.outcome) {
+        (
+            homeboy::agents::agent_task_action_result::ResumeActionResult::Resumed {
+                aggregate,
+                ..
+            },
+            homeboy_control_plane_contract::ControlPlaneActionOutcome::AlreadySatisfied,
+        ) => serde_json::to_value(aggregate),
+        _ => serde_json::to_value(acknowledgement),
+    }
+    .map_err(|error| Error::internal_json(error.to_string(), None))?;
+    Ok((value, exit_code))
 }
 
 /// `retry` submits a fresh run from any run's plan. A Cook ID whose durable

@@ -947,7 +947,8 @@ pub(crate) fn control_plane_next_action(payload: &Value, run_id: &str) -> String
                     .and_then(Value::as_array)
                     .is_some_and(|inputs| !inputs.is_empty())
         }) {
-            return format!("homeboy agent-task {name} {run_id}");
+            let command = if name == "resume" { "recover" } else { name };
+            return format!("homeboy agent-task {command} {run_id}");
         }
     }
     format!("homeboy runs evidence {run_id}")
@@ -1355,13 +1356,14 @@ mod tests {
                 "run": "agent-task-1-attempt-3",
                 "step": "adopt",
                 "candidate_ref": "abc123",
-                "command": "homeboy agent-task adopt agent-task-1 --candidate-ref abc123"
+                "command": "homeboy agent-task recover agent-task-1 --candidate-ref abc123"
             }
         });
         let summary = render_agent_task_summary(AgentTaskSummaryKind::Status, &payload)
             .expect("status summary");
         assert!(
-            summary.contains("Next: homeboy agent-task adopt agent-task-1 --candidate-ref abc123"),
+            summary
+                .contains("Next: homeboy agent-task recover agent-task-1 --candidate-ref abc123"),
             "{summary}"
         );
     }
@@ -2484,7 +2486,7 @@ mod tests {
         });
 
         let summary = render_agent_task_summary(AgentTaskSummaryKind::Status, &payload).unwrap();
-        assert!(summary.contains("Next: homeboy agent-task resume unmaterialized-cook\n"));
+        assert!(summary.contains("Next: homeboy agent-task recover unmaterialized-cook\n"));
         assert!(!summary.contains("homeboy agent-task run unmaterialized-cook"));
     }
 
@@ -2550,7 +2552,7 @@ mod tests {
 
         assert!(summary.contains("Retry: automatic reconciliation scheduled"));
         assert!(summary.contains("Next: homeboy agent-task status unmaterialized-cook --watch\n"));
-        assert!(!summary.contains("Next: homeboy agent-task resume unmaterialized-cook\n"));
+        assert!(!summary.contains("Next: homeboy agent-task recover unmaterialized-cook\n"));
     }
 
     #[test]
@@ -2592,7 +2594,7 @@ mod tests {
         );
         assert!(!summary.contains("--runner-env"), "{summary}");
         assert!(
-            !summary.contains("Next: homeboy agent-task resume"),
+            !summary.contains("Next: homeboy agent-task recover"),
             "{summary}"
         );
     }

@@ -4268,9 +4268,9 @@ fn materialize_agent_task_run_handoff(
             "run_id",
             "unmaterialized Cook admission must continue through its fenced resume path",
             Some(run.run_id.clone()),
-            Some(vec![format!("homeboy agent-task resume {}", run.run_id)]),
+            Some(vec![format!("homeboy agent-task recover {}", run.run_id)]),
         )
-        .with_hint(format!("Run `homeboy agent-task resume {}`.", run.run_id)));
+        .with_hint(format!("Run `homeboy agent-task recover {}`.", run.run_id)));
     }
 
     let plan = agent_task_lifecycle::load_plan(&run.run_id)?;

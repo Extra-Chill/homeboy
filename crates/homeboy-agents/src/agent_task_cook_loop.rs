@@ -305,7 +305,7 @@ pub fn evaluate_cook_loop(options: AgentTaskCookLoopOptions) -> AgentTaskCookLoo
         .find(|gate| gate.classification == AgentTaskGateFailureClassification::Environment);
     if let Some(gate) = environment_failure {
         quality.summary = format!(
-            "stop: environment; gate `{}`: {}. Candidate preserved. After fixing the environment run `homeboy agent-task recover {}` to re-gate, or `homeboy agent-task adopt {} --candidate-ref HEAD` from the local candidate worktree.",
+            "stop: environment; gate `{}`: {}. Candidate preserved. After fixing the environment run `homeboy agent-task recover {}` to re-gate, or `homeboy agent-task recover {} --candidate-ref HEAD` from the local candidate worktree.",
             gate.gate_id, gate.summary, options.source_request.task_id, options.source_request.task_id
         );
     }
@@ -1439,7 +1439,10 @@ mod tests {
                         .quality
                         .summary
                         .contains("homeboy agent-task recover"));
-                    assert!(report.quality.summary.contains("homeboy agent-task adopt"));
+                    assert!(report
+                        .quality
+                        .summary
+                        .contains("homeboy agent-task recover"));
                 } else {
                     assert_eq!(
                         report.status,

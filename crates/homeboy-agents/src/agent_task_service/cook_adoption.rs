@@ -1427,7 +1427,7 @@ fn resolve_cook_adoption_attempt_in_store<'a>(
     Err(Error::validation_invalid_argument(
         "cook_recipe.attempts",
         format!(
-            "candidate adoption by cook id is ambiguous because durable attempt plans differ ({attempts}); select the candidate's owning policy explicitly, for example `homeboy agent-task adopt {} --attempt {}`",
+            "candidate adoption by cook id is ambiguous because durable attempt plans differ ({attempts}); select the candidate's owning policy explicitly, for example `homeboy agent-task recover {} --candidate-ref <sha> --attempt {}`",
             recipe.cook_id, first.attempt
         ),
         Some(recipe.cook_id.clone()),

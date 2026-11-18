@@ -2632,7 +2632,7 @@ fn unmaterialized_cook_run_stays_controller_local_before_lab_workspace_selection
         assert!(error
             .hints
             .iter()
-            .any(|hint| { hint.message == format!("Run `homeboy agent-task resume {run_id}`.") }));
+            .any(|hint| { hint.message == format!("Run `homeboy agent-task recover {run_id}`.") }));
     });
 }
 

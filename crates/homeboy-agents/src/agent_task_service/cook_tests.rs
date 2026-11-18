@@ -3523,7 +3523,7 @@ fn dirty_explicit_cwd_blocks_detached_provider_dispatch() {
             );
             assert_eq!(
             context.next_actions[2].command,
-            "homeboy agent-task adopt cwd-detached-dirty --candidate-ref HEAD --model operator-finalized"
+            "homeboy agent-task recover cwd-detached-dirty --candidate-ref HEAD --adoption-model operator-finalized"
         );
         });
     }

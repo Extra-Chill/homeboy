@@ -2590,11 +2590,11 @@ mod run_lifecycle_projection_tests {
             recovery_reason: "resume".to_string(),
             legal_actions: vec![AgentTaskCookRecoveryAction {
                 action: "resume".to_string(),
-                command: "homeboy agent-task resume run".to_string(),
+                command: "homeboy agent-task recover run".to_string(),
             }],
             next_actions: vec![AgentTaskCookRecoveryAction {
                 action: "resume".to_string(),
-                command: "homeboy agent-task resume run".to_string(),
+                command: "homeboy agent-task recover run".to_string(),
             }],
         });
         let record: agent_task_lifecycle::AgentTaskRunRecord =
@@ -2652,7 +2652,7 @@ mod run_lifecycle_projection_tests {
             .contains("HOMEBOY_RUNNER_RESOURCE_GUARD_PROCESS_COUNT"));
         assert!(!context.next_actions[0]
             .command
-            .contains("agent-task resume"));
+            .contains("agent-task recover"));
         assert_eq!(
             value["primary_failure"]["operation"],
             "resource_guard.process_count_limit_exceeded"
@@ -7740,7 +7740,7 @@ fn run_cook_spine(
                     })
                     .expect("environment stop carries a failed gate");
                 let stop_reason = format!(
-                    "stop: environment; gate `{}`: {}. Candidate preserved. After fixing the environment run `homeboy agent-task recover {cook_id}` to re-gate, or `homeboy agent-task adopt {cook_id} --candidate-ref HEAD` from the local candidate worktree.",
+                    "stop: environment; gate `{}`: {}. Candidate preserved. After fixing the environment run `homeboy agent-task recover {cook_id}` to re-gate, or `homeboy agent-task recover {cook_id} --candidate-ref HEAD` from the local candidate worktree.",
                     failure.gate_id, failure.summary
                 );
                 return Ok(stores.report(CookReportInput {

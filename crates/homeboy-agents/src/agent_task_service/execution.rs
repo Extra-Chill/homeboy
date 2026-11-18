@@ -1406,7 +1406,7 @@ fn terminal_run_result_for_record(
 /// unsuccessful by contract (see `RunExecutionState`), including the
 /// recoverable ones that still hold a candidate or resumable work, even when
 /// the stored aggregate tallies no failed outcome. Without this,
-/// `agent-task resume` on a CandidateRecoverable run exited 0 and reported
+/// `agent-task recover` on a CandidateRecoverable run exited 0 and reported
 /// success while nothing had been promoted (Extra-Chill/homeboy#15393).
 fn terminal_record_exit_code(
     state: &homeboy_lifecycle_contract::RunExecutionState,

@@ -7154,7 +7154,7 @@ mod tests {
         );
         assert!(action
             .command
-            .starts_with("homeboy --runner lab-a agent-task adopt "));
+            .starts_with("homeboy --runner lab-a agent-task recover "));
     }
 
     #[test]

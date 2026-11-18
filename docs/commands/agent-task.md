@@ -9,8 +9,8 @@ see [`docs/architecture/provider-fanout-boundary.md`](../architecture/provider-f
 ## Runner-eligibility waits
 
 Queued Cook execution steps report the controller daemon's live runner wait in
-`status`, `diagnose`, and `resume`: runner, refusal reason, waiting-since time,
-and next action. `resume` probes eligibility again; it does not bypass the step's
+`status`, `diagnose`, and `recover`: runner, refusal reason, waiting-since time,
+and next action. `recover` probes eligibility again; it does not bypass the step's
 spawn gate. Build/freshness refusals recommend
 `homeboy runner refresh-homeboy <runner> --reconnect` and include recorded builds
 when available. Stale jobs recommend runner reconciliation.
@@ -120,7 +120,6 @@ publication.
 | `reconcile <run-id>\|--all [--dry-run\|--apply]` | Preview one durable run/group or the active fleet; mutate only with `--apply`. |
 | `artifacts <run-id>` | List artifacts and evidence refs recorded for a completed run. |
 | `cancel <run-id>` | Mark a queued or stale-running durable run as cancelled. Retains the writing process's PID and redacted argv in `metadata.cancellation_actor`, visible through status and independent of daemon job retention. |
-| `resume <run-id>` | Resume a queued or stale-running durable run. Given a Cook ID whose durable state names a recovery step, it performs that step through `recover <cook-id>`. |
 | `retry <run-id>` | Submit a fresh durable run from an existing run's plan. A stopped Cook is recovered with `recover <cook-or-attempt-id>`, which owns the Cook's next-attempt provider-route overrides; `retry <cook-id> --run` performs the Cook's recovery step through `recover`. Any other retry of a Cook ID, or of a superseded attempt ID, resolves to the Cook's latest durable attempt and names it; a non-retryable latest attempt is refused with its state. |
 | `prompts save\|list\|show\|remove` | Manage markdown prompts in Homeboy-owned storage. |
 
@@ -173,7 +172,7 @@ hydration, and review remain subject to their admission and
 routing contracts. Reconciliation is an explicit workload even when it begins
 with an inspection.
 
-Machine-readable `cook`, `resume`, `adopt`, and `status` responses default to bounded summaries: stable ids, states, totals, timestamps when present, artifact/evidence references, and actionable failure reasons are retained while nested provider evidence is projected away. Use `cook --full`, `resume --full`, `adopt --full`, or the emitted `full_command`; use the emitted `evidence_command` (with `--task` or `--kind`) to retrieve selected durable evidence.
+Machine-readable `cook`, `recover`, `recover --candidate-ref`, and `status` responses default to bounded summaries: stable ids, states, totals, timestamps when present, artifact/evidence references, and actionable failure reasons are retained while nested provider evidence is projected away. Use `cook --full`, `recover --full`, `recover --candidate-ref <sha> --full`, or the emitted `full_command`; use the emitted `evidence_command` (with `--task` or `--kind`) to retrieve selected durable evidence.
 
 ### Cook/Review
 
@@ -436,21 +435,21 @@ explains a stop. `agent-task status` projects both under
 | `cook` | Run one workspace task through the patch-artifact handoff workflow. |
 | `fanout cook-batch <issue-url>... --repo <repo>` | Cook independent issues as one workflow instance: one child Cook per issue, a bounded wave, and a join gate. |
 | `batch-prepare <issue-url>... --repo <repo>` | The `prepare` step of a cook-batch: resolve the base once, name each child, and prepare the shared Lab workspace bundle. |
-| `recover <cook-or-attempt-id> [--preflight] [--regate] [--wait --timeout <dur>]` | Plan and admit the one recovery step a Cook needs (continue, regate, retry, reconcile, fork a replacement, replace gates, publish, or relaunch). A Cook whose admission failed before materializing is relaunched from its recorded admission inputs under a fresh run id; the source records `recovered_by`, the relaunch records `recovered_from`, and a repeated `recover` of the source returns that relaunch. Without recorded admission inputs it is refused with guidance to re-run the original `cook` command. Continuation, rearm, and regate are admitted through the durable daemon execution outbox; the command promptly returns the run, selected step, owning job, and `homeboy agent-task status <id> --watch`. A repeated recovery reports `step_in_flight` rather than waiting for the owner. `--wait` follows status/watch progress on stderr; `--timeout <dur>` bounds only that wait and exits nonzero without cancelling daemon-owned work. A complete candidate blocked only by gates that did not execute selects `regate`: run the recorded gates and publish on green without provider work. `--regate` explicitly selects the newest candidate-bearing attempt, even when a later attempt was cancelled; an exact attempt ID selects that candidate. `--preflight` reports the step and its read-only admission without mutation; `--timeout-ms`, `--backend`, `--selector`, and `--model` re-dispatch a continuation with an explicit provider override. `--authorize-external-proof <TEXT>` with corrected gates (`--verify`/`--verify-file`, optionally `--authorize-interrupted-rerun <TEXT>`) or candidate-bound proof (`--promotion <SPEC>`) replaces the gates of an applied candidate that failed them; `--review-form <SPEC>` with `--review-form-tool`, `--review-form-model`, and `--review-form-author`, plus `--review-override` and `--component`, feed publication. |
+| `recover <id> [--preflight] [--regate] [--wait --timeout <dur>]` | Resume a queued or stale-running non-Cook durable run, or plan and admit the one recovery step a Cook needs (continue, regate, retry, reconcile, fork a replacement, replace gates, publish, or relaunch). A Cook whose admission failed before materializing is relaunched from its recorded admission inputs under a fresh run id; the source records `recovered_by`, the relaunch records `recovered_from`, and a repeated `recover` of the source returns that relaunch. Without recorded admission inputs it is refused with guidance to re-run the original `cook` command. Continuation, rearm, and regate are admitted through the durable daemon execution outbox; the command promptly returns the run, selected step, owning job, and `homeboy agent-task status <id> --watch`. A repeated recovery reports `step_in_flight` rather than waiting for the owner. `--wait` follows status/watch progress on stderr; `--timeout <dur>` bounds only that wait and exits nonzero without cancelling daemon-owned work. A complete candidate blocked only by gates that did not execute selects `regate`: run the recorded gates and publish on green without provider work. `--regate` explicitly selects the newest candidate-bearing attempt, even when a later attempt was cancelled; an exact attempt ID selects that candidate. `--preflight` reports the step and its read-only admission without mutation; `--timeout-ms`, `--backend`, `--selector`, and `--model` re-dispatch a continuation with an explicit provider override. `--authorize-external-proof <TEXT>` with corrected gates (`--verify`/`--verify-file`, optionally `--authorize-interrupted-rerun <TEXT>`) or candidate-bound proof (`--promotion <SPEC>`) replaces the gates of an applied candidate that failed them; `--review-form <SPEC>` with `--review-form-tool`, `--review-form-model`, and `--review-form-author`, plus `--review-override` and `--component`, feed publication. |
 | `review <run-id>` | Build a durable aggregate review envelope from run state, logs, artifacts, and promotion hints. |
-| `adopt <run-or-cook-id> --candidate-ref <sha>` | Adopt an immutable commit candidate through the recorded cook gates and finalization policy. |
+| `recover <run-or-cook-id> --candidate-ref <sha>` | Adopt an immutable commit candidate through the recorded cook gates and finalization policy. |
 | `finalize-pr` | Finalize a green manual-finalization candidate. A stopped Cook publishes through `recover`. |
 | `accept <run-id> --verdict accepted\|rejected --token <token> --evidence-ref <ref>` | Record an independently verified acceptance decision for an applied candidate. |
 
-`adopt` accepts only immutable commits from the recorded cook source workspace.
+`recover <id> --candidate-ref <sha>` accepts `--attempt <N>`, `--replace-interrupted`, and `--adoption-model <MODEL>` (candidate authorship, distinct from the retry-route `--model`). Candidate adoption conflicts with `--preflight`, `--regate`, and route overrides. It accepts only immutable commits from the recorded cook source workspace.
 Cook promotes patch-artifact candidates itself through the controller-owned
 ingestion and gate path; continue a stopped Cook with `recover <cook>`.
 
 If a first Cook admission finds an already-implemented dirty candidate, it
 fails before provider execution and returns the durable Cook/run plus this
 recovery sequence: commit the candidate in the named worktree, run `agent-task
-review <run-id>`, then run the emitted `agent-task adopt <cook-id>
---candidate-ref HEAD --model <model>` command. Adoption verifies the immutable
+review <run-id>`, then run the emitted `agent-task recover <cook-id>
+--candidate-ref HEAD --adoption-model <model>` command. Adoption verifies the immutable
 commit through the recorded gates and finalization policy; it does not create or
 apply provider patch content.
 
@@ -545,7 +544,7 @@ detached checkout. Homeboy hydrates declared dependencies there, retains structu
 setup provenance, and derives one gate result and reviewer test step per command.
 Manual finalization writes no lifecycle intent or receipt. To retry, rerun the
 same command: the same tree and dates produce the same head SHA, and publication
-finds or creates one PR. `recover` handles Cook runs only. Gate setup, here and before promotion gates, hydrates the checkout
+finds or creates one PR. `recover` also resumes queued or stale-running non-Cook runs. Gate setup, here and before promotion gates, hydrates the checkout
 root plus only the descendant dependency roots whose checkout-relative path a
 gate command names (for example `cd php-transformer && composer run lint`).
 Existing `--gate-result`, `--targeted-check-run`, and `--test-step` remain
@@ -1281,7 +1280,7 @@ homeboy agent-task cancel "$run_id" --reason "not selected by controller"
 
 For a Cook, `cancel <attempt-run-id>` cancels only that attempt and reports
 `attempt cancelled; mission continues`. Earlier candidates remain available to
-`status`, `recover`, and `adopt`. Use `cancel <cook-id>` to fence the whole
+`status` and `recover`. Use `cancel <cook-id>` to fence the whole
 mission and retire all retained candidates; its output reports `mission fenced`.
 
 `cancel` marks queued runs and stale-running records as `cancelled` in the

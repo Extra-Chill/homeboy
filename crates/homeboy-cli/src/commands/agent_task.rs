@@ -32,10 +32,10 @@ pub mod status;
 pub mod tool;
 
 pub use args::{
-    AcceptArgs, AdoptArgs, AgentTaskArgs, AgentTaskAuthArgs, AgentTaskAuthCommand,
-    AgentTaskBatchPrepareArgs, AgentTaskCapacityArgs, AgentTaskCommand, AgentTaskCookArgs,
-    AgentTaskDoctorArgs, AgentTaskFanoutArgs, AgentTaskFanoutCommand, AgentTaskFanoutCookBatchArgs,
-    CancelArgs, ContractArgs, ContractFormat, CookFeedbackArgs, DiagnoseArgs, FinalizePrArgs,
+    AcceptArgs, AgentTaskArgs, AgentTaskAuthArgs, AgentTaskAuthCommand, AgentTaskBatchPrepareArgs,
+    AgentTaskCapacityArgs, AgentTaskCommand, AgentTaskCookArgs, AgentTaskDoctorArgs,
+    AgentTaskFanoutArgs, AgentTaskFanoutCommand, AgentTaskFanoutCookBatchArgs, CancelArgs,
+    ContractArgs, ContractFormat, CookFeedbackArgs, DiagnoseArgs, FinalizePrArgs,
     PlacementUpdateArgs, PromotionProviderArgs, ProvidersArgs, RecoverArgs, RetainedArtifactsArgs,
     RetainedArtifactsCommand, RetryArgs, ReviewArgs, RunPlanArgs, StatusArgs, ValidatePlanArgs,
     VerifyGateArgs,
@@ -367,13 +367,11 @@ pub(crate) fn run_with_cook_progress_and_provenance(
         AgentTaskCommand::RetainedArtifacts(args) => retained_artifacts::run(args),
         AgentTaskCommand::Diagnose(diagnose_args) => status::diagnose(diagnose_args),
         AgentTaskCommand::Cancel(cancel_args) => status::cancel(cancel_args),
-        AgentTaskCommand::Resume(status_args) => run::resume(status_args),
         AgentTaskCommand::Retry(retry_args) => run::retry(retry_args),
         AgentTaskCommand::Recover(args) => recover::recover(args),
         AgentTaskCommand::Fanout(fanout_args) => cook_batch::fanout(fanout_args),
         AgentTaskCommand::BatchPrepare(args) => cook_batch::batch_prepare(args),
         AgentTaskCommand::Review(review_args) => review::review(review_args),
-        AgentTaskCommand::Adopt(adopt_args) => review::adopt_candidate(adopt_args),
         AgentTaskCommand::PromotionProvider(provider_args) => {
             run::promotion_provider(provider_args)
         }

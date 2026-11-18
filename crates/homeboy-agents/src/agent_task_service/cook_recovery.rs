@@ -56,7 +56,7 @@ pub enum CookRecoveryStep {
     /// The Cook produced no candidate patch, but the destination worktree's
     /// branch holds commits ahead of its recorded base: the operator's verified
     /// work is the candidate. Adopt that exact revision into the Cook
-    /// (`agent-task adopt <cook> --candidate-ref <head-sha>`) instead of
+    /// (`agent-task recover <cook> --candidate-ref <head-sha>`) instead of
     /// replaying provider work that would end `no_changes` again (#16181).
     Adopt { candidate_ref: String },
     /// The Cook failed before materializing, so it has no recipe or attempt
@@ -90,7 +90,7 @@ impl CookRecoveryStep {
             Self::None { reason } => (reason.clone(), command(&["status", run_id])),
             Self::Adopt { candidate_ref } => (
                 "adopt the preserved candidate".to_string(),
-                command(&["adopt", run_id, "--candidate-ref", candidate_ref]),
+                command(&["recover", run_id, "--candidate-ref", candidate_ref]),
             ),
             _ => (
                 "perform the Cook's next recovery step".to_string(),
