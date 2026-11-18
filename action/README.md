@@ -1144,6 +1144,26 @@ invocation's provisioning and is checked against the installed binary and
 extension before reuse; any changed input or replaced install provisions
 again.
 
+### Extension CI caches
+
+An extension can declare reconstructable CI state under `ci.cache` in its
+manifest (`namespace`, `paths[]` with a `root` of `component`, `home` or
+`homeboy-data`, an optional `env` exported with the resolved path, and
+`key_files[]`). The action resolves it with `homeboy extension show`:
+
+- **Lockfile-keyed** (default): restored and saved by `actions/cache` under
+  `<os>-<namespace>-quality-<hash of key_files>`, with key files read from the
+  configured component.
+- **Rolling** (`"rolling": true`): for content-addressed download stores, which
+  stay valid across lockfile changes and may be filled by installs for
+  components other than the configured one (for example `deploy --ref
+  <sha> --outdated` hydrating changed monorepo components). The newest
+  `<os>-<namespace>-rolling-*` entry is restored (skipped when the store
+  already holds files), and right after the commands run (whatever their
+  outcome, dry runs included) the store is saved under a key derived from its
+  file listing, only when the commands added files. `key_files` are optional.
+  Cache download stores only, never installed trees.
+
 ## Process Containment
 
 Every command runs under a supervisor that bounds it with `execution-timeout-seconds`

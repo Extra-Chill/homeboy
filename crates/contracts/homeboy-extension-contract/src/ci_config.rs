@@ -25,6 +25,14 @@ pub struct CiCacheSpec {
     pub key_files: Vec<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub paths: Vec<CiCachePath>,
+    /// The cached paths are content-addressed download caches (package-manager
+    /// stores) that stay valid across key-file changes. CI restores the newest
+    /// entry and saves a new one whenever the cached contents change, so the
+    /// cache keeps rolling forward even when the installs that fill it run for
+    /// components whose key files CI never sees (for example, deploys that
+    /// hydrate other components of a monorepo). `key_files` become optional.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub rolling: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -91,4 +99,33 @@ pub struct CiLocalContext {
     pub fidelity: CiJobFidelity,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub limitations: Vec<String>,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn rolling_cache_defaults_off_and_is_omitted_when_off() {
+        let spec: CiCacheSpec = serde_json::from_str(
+            r#"{"namespace":"cargo","key_files":["Cargo.lock"],"paths":[{"root":"home","path":".cargo/registry"}]}"#,
+        )
+        .expect("parse lockfile-keyed cache");
+        assert!(!spec.rolling);
+        let value = serde_json::to_value(&spec).expect("serialize");
+        assert!(value.get("rolling").is_none());
+    }
+
+    #[test]
+    fn rolling_cache_round_trips_without_key_files() {
+        let spec: CiCacheSpec = serde_json::from_str(
+            r#"{"namespace":"downloads","rolling":true,"paths":[{"root":"home","path":".cache/store","env":"STORE_DIR"}]}"#,
+        )
+        .expect("parse rolling cache");
+        assert!(spec.rolling);
+        assert!(spec.key_files.is_empty());
+        assert_eq!(spec.paths[0].root, CiCachePathRoot::Home);
+        let value = serde_json::to_value(&spec).expect("serialize");
+        assert_eq!(value["rolling"], serde_json::Value::Bool(true));
+    }
 }
