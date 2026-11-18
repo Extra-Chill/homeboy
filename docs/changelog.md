@@ -4,6 +4,13 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.474.12] - 2026-11-18
+
+### Fixed
+- name --regate when a failed gate decides replace_gates
+- report a gate that printed nothing by its exit code and resource-guard verdict
+- bound a job's pids.max in tasks, and enforce the process limit by sampled process count
+
 ## [0.474.11] - 2026-11-18
 
 ### Fixed
