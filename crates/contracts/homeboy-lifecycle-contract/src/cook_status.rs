@@ -1,8 +1,8 @@
 //! The open vocabulary of outcomes Cook produces.
 //!
 //! Unknown labels from persisted reports or newer binaries round-trip losslessly.
-//! `homeboy_core::run_lifecycle_status::from_cook_status` projects known labels
-//! onto canonical lifecycle state. Terminality inside Cook is instead declared
+//! Known labels convert into canonical lifecycle state through `From`
+//! (`homeboy_core::run_lifecycle_status::RunLifecycleStatus::from`). Terminality inside Cook is instead declared
 //! by the producing exit's [`CookDisposition`].
 
 use serde::{Deserialize, Deserializer, Serialize, Serializer};

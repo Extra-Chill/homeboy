@@ -1,14 +1,15 @@
-use super::{AgentTaskRunRecord, LocalOwnerLiveness};
+use super::{AgentTaskRunRecord, CookRunAction, CookRunPhase, CookRunState, LocalOwnerLiveness};
 use crate::agent_task_schedule::AgentTaskPlan;
 use homeboy_control_plane_contract::{
     ControlPlaneAction, ControlPlaneActionAvailability, ControlPlaneActionConfirmation,
     ControlPlaneActionEligibility, ControlPlaneActionEligibilityReport, RunId,
     CONTROL_PLANE_ACTION_ELIGIBILITY_SCHEMA,
 };
-use homeboy_lifecycle_contract::RunExecutionState;
 
 /// Canonical non-mutating lifecycle action policy for CLI, daemon, and API projections.
-/// Mutation commands revalidate these snapshot decisions under their own locks.
+/// Every decision projects the one [`CookRunState`] and its legal actions; this
+/// report adds only transport and input preconditions. Mutation commands
+/// revalidate these snapshot decisions under their own locks.
 pub fn lifecycle_action_eligibility(
     record: &AgentTaskRunRecord,
     plan: Option<&AgentTaskPlan>,
@@ -21,23 +22,28 @@ pub(crate) fn lifecycle_action_eligibility_with_roots(
     plan: Option<&AgentTaskPlan>,
     roots: Option<&homeboy_core::paths::PathRoots>,
 ) -> ControlPlaneActionEligibilityReport {
-    let cancellation = match super::cancellation::ensure_rooted_exact_cancellation_supported(record)
-    {
-        Ok(()) => available("run is non-terminal and its ownership transport is supported"),
-        Err(error) => unavailable(error.message),
+    let state = CookRunState::of(record);
+    let cancellation = if !state.allows(CookRunAction::Cancel) {
+        unavailable(format!(
+            "agent-task run '{}' is already terminal with state {} and no live owner",
+            record.run_id,
+            state.phase.as_str()
+        ))
+    } else {
+        match super::cancellation::ensure_rooted_exact_cancellation_supported(record) {
+            Ok(()) => available("run is non-terminal and its ownership transport is supported"),
+            Err(error) => unavailable(error.message),
+        }
     };
-    let resume = resume_availability(record);
-    let placement_update = placement_update_availability(record);
-    let retry = retry_availability(record, plan, roots);
-    let promotion = if matches!(
-        record.state(),
-        RunExecutionState::Succeeded | RunExecutionState::CandidateRecoverable
-    ) {
+    let resume = resume_availability(record, &state);
+    let placement_update = placement_update_availability(record, &state);
+    let retry = retry_availability(record, &state, plan, roots);
+    let promotion = if state.allows(CookRunAction::Promote) {
         indeterminate("promotion requires a target worktree and candidate preflight")
     } else {
         unavailable("run does not retain a potentially promotable candidate")
     };
-    let reconcile = reconcile_availability(record, roots);
+    let reconcile = reconcile_availability(record, &state, roots);
 
     ControlPlaneActionEligibilityReport {
         schema: CONTROL_PLANE_ACTION_ELIGIBILITY_SCHEMA.to_string(),
@@ -105,12 +111,13 @@ pub(crate) fn lifecycle_action_eligibility_with_roots(
 /// that the reconciler cancels.
 fn reconcile_availability(
     record: &AgentTaskRunRecord,
+    state: &CookRunState,
     roots: Option<&homeboy_core::paths::PathRoots>,
 ) -> (ControlPlaneActionAvailability, String) {
     if dead_candidate_adoption_owner(record) {
         return available("candidate adoption owner is gone");
     }
-    if record.state().is_terminal() {
+    if state.terminal {
         return unavailable("terminal runs have no ownership to reconcile");
     }
     let liveness = match roots {
@@ -144,9 +151,10 @@ fn dead_candidate_adoption_owner(record: &AgentTaskRunRecord) -> bool {
 
 fn placement_update_availability(
     record: &AgentTaskRunRecord,
+    state: &CookRunState,
 ) -> (ControlPlaneActionAvailability, String) {
     let admission = &record.metadata["unmaterialized_cook_admission"];
-    if record.state() != RunExecutionState::Queued || !admission.is_object() {
+    if state.phase != CookRunPhase::Queued || !admission.is_object() {
         return unavailable("placement updates require a queued unmaterialized Cook admission");
     }
     if record.metadata["provider_executions"]
@@ -191,15 +199,18 @@ fn indeterminate(reason: impl Into<String>) -> (ControlPlaneActionAvailability, 
     (ControlPlaneActionAvailability::Indeterminate, reason.into())
 }
 
-fn resource_guard_blocks_replay(record: &AgentTaskRunRecord) -> bool {
+fn resource_guard_blocks_replay(record: &AgentTaskRunRecord, state: &CookRunState) -> bool {
     matches!(
-        record.state(),
-        RunExecutionState::Failed | RunExecutionState::PartialFailure
+        state.phase,
+        CookRunPhase::Failed | CookRunPhase::PartialFailure
     ) && homeboy_runner_contract::find_resource_guard_stop(&record.metadata).is_some()
 }
 
-fn resume_availability(record: &AgentTaskRunRecord) -> (ControlPlaneActionAvailability, String) {
-    if record.state() == RunExecutionState::CandidateRecoverable
+fn resume_availability(
+    record: &AgentTaskRunRecord,
+    state: &CookRunState,
+) -> (ControlPlaneActionAvailability, String) {
+    if state.recoverable
         && record.runner_id().is_some()
         && record.runner_job_id().is_some()
         && record.metadata["cook_id"].as_str().is_some()
@@ -211,7 +222,7 @@ fn resume_availability(record: &AgentTaskRunRecord) -> (ControlPlaneActionAvaila
             "candidate_recoverable holds an unpromoted candidate; resume only re-reads terminal evidence and cannot verify it: recover the cook with `homeboy agent-task recover {cook_id}`"
         ));
     }
-    if resource_guard_blocks_replay(record) {
+    if resource_guard_blocks_replay(record, state) {
         return unavailable(
             "runner resource guard stopped this attempt; resume would hit the same guard",
         );
@@ -226,16 +237,13 @@ fn resume_availability(record: &AgentTaskRunRecord) -> (ControlPlaneActionAvaila
             "pre-supervisor Cook admission has no replayable request; rerun the original Cook invocation to reclaim a dead or expired launcher",
         );
     }
-    if record.state().is_terminal()
-        && record.runner_id().is_some()
-        && record.runner_job_id().is_some()
-    {
+    if state.terminal && record.runner_id().is_some() && record.runner_job_id().is_some() {
         return available(
             "terminal runner evidence may be reprojected idempotently without reopening execution",
         );
     }
-    match record.state() {
-        RunExecutionState::Queued => {
+    match state.phase {
+        CookRunPhase::Queued => {
             if record.is_controller_pre_provider_phase()
                 && record.metadata["phase"] == "source_materialization"
             {
@@ -268,7 +276,7 @@ fn resume_availability(record: &AgentTaskRunRecord) -> (ControlPlaneActionAvaila
             }
             available("queued run can re-enter execution")
         }
-        RunExecutionState::Running => match record.local_owner_liveness() {
+        CookRunPhase::Running => match record.local_owner_liveness() {
             LocalOwnerLiveness::Live => unavailable("run has an authoritative live local owner"),
             LocalOwnerLiveness::Unverifiable => {
                 indeterminate("local owner identity cannot be verified without reconciliation")
@@ -283,20 +291,16 @@ fn resume_availability(record: &AgentTaskRunRecord) -> (ControlPlaneActionAvaila
 
 fn retry_availability(
     record: &AgentTaskRunRecord,
+    state: &CookRunState,
     plan: Option<&AgentTaskPlan>,
     roots: Option<&homeboy_core::paths::PathRoots>,
 ) -> (ControlPlaneActionAvailability, String) {
-    if resource_guard_blocks_replay(record) {
+    if resource_guard_blocks_replay(record, state) {
         return unavailable(
             "runner resource guard stopped this attempt; retry would hit the same guard",
         );
     }
-    if !matches!(
-        record.state(),
-        RunExecutionState::Failed
-            | RunExecutionState::Cancelled
-            | RunExecutionState::PartialFailure
-    ) {
+    if !state.retryable {
         return unavailable("retry requires a failed, cancelled, or partial-failure run");
     }
     if record.acceptance.as_ref().is_some_and(|acceptance| {
@@ -349,6 +353,7 @@ fn retry_availability(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use homeboy_lifecycle_contract::RunExecutionState;
 
     fn record(state: RunExecutionState, stale: bool) -> AgentTaskRunRecord {
         let mut record: AgentTaskRunRecord = serde_json::from_value(serde_json::json!({

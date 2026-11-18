@@ -4819,8 +4819,12 @@ pub(crate) fn cook_failure_context_with_stores(
             let continuation_refusal = record
                 .as_ref()
                 .and_then(|record| continuation_candidate_refusal(lifecycle_store, record));
+            // Whether recovery may act is the record's run state, whatever
+            // label the caller rendered: `status` and `recover` therefore
+            // project one classification (#17976, #17384).
             cook_recovery_actions_with_prefix(
                 status,
+                record.as_ref().map(agent_task_lifecycle::CookRunState::of),
                 &chronological_latest_run_id,
                 lifecycle_store
                     .read_record(&chronological_latest_run_id)
@@ -5508,12 +5512,14 @@ fn cook_recovery_actions(
     exact_checkpoint_candidate_mismatch: bool,
     lab_runtime_recovery: Option<agent_task_lifecycle::AgentTaskLabRuntimeRecovery>,
 ) -> CookRecoveryActions {
+    let record = agent_task_lifecycle::exact_record(run_id).ok();
     cook_recovery_actions_with_prefix(
         status,
+        record.as_ref().map(agent_task_lifecycle::CookRunState::of),
         run_id,
-        agent_task_lifecycle::exact_record(run_id).is_ok_and(|record| {
-            agent_task_lifecycle::disconnected_runner_recovery_available(&record)
-        }),
+        record
+            .as_ref()
+            .is_some_and(agent_task_lifecycle::disconnected_runner_recovery_available),
         false,
         recovery_legal,
         blocking_claim,
@@ -5536,6 +5542,7 @@ fn cook_recovery_actions(
 
 fn cook_recovery_actions_with_prefix(
     status: &str,
+    run_state: Option<agent_task_lifecycle::CookRunState>,
     run_id: &str,
     disconnected_runner: bool,
     live_driver: bool,
@@ -5561,6 +5568,7 @@ fn cook_recovery_actions_with_prefix(
     let step =
         super::cook_recovery::cook_recovery_step(&super::cook_recovery::CookRecoveryInputs {
             status,
+            run_state,
             recovery_legal,
             disconnected_runner,
             live_driver,

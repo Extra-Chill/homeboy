@@ -914,6 +914,55 @@ impl From<homeboy_lifecycle_contract::RunExecutionState> for ControlPlaneState {
     }
 }
 
+/// The one projection of the open Cook report vocabulary onto canonical run
+/// lifecycle state (`homeboy_core::run_lifecycle_status::RunLifecycleStatus`).
+/// Unknown labels carry no verdict; terminality inside Cook remains the
+/// producing exit's declared `CookDisposition`.
+impl From<&homeboy_lifecycle_contract::CookStatus> for ControlPlaneState {
+    fn from(status: &homeboy_lifecycle_contract::CookStatus) -> Self {
+        use homeboy_lifecycle_contract::CookStatus::*;
+        match status {
+            Queued => Self::Queued,
+            InFlight | AwaitingCi => Self::Running,
+            ReviewReady
+            | DraftPublished
+            | GreenNoFinalize
+            | IntentionalNoChange
+            | SupersededByActiveCook => Self::Succeeded,
+            CandidateRecoverable | GateEnvironmentUnavailable => Self::CandidateRecoverable,
+            NoChanges
+            | NoCandidate
+            | AwaitingAcceptance
+            | Blocked
+            | RetriesExhausted
+            | ExecutionBudgetExhausted
+            | PolicyFailure
+            | GateDeclarationInvalid
+            | ReproPassesOnBase
+            | SelectionRequired
+            | BaselineRed
+            | Validated => Self::PartialFailure,
+            GateFailed
+            | NoChangesGateFailed
+            | ProviderFailure
+            | DurableFailure
+            | PreExecutionFailure
+            | PreArtifactInterruption
+            | Failed
+            | FinalizationFailed => Self::Failed,
+            Cancelled => Self::Cancelled,
+            TimedOut => Self::TimedOut,
+            Unknown(_) => Self::Unknown,
+        }
+    }
+}
+
+impl From<homeboy_lifecycle_contract::CookStatus> for ControlPlaneState {
+    fn from(status: homeboy_lifecycle_contract::CookStatus) -> Self {
+        Self::from(&status)
+    }
+}
+
 /// Where the run is executing. Ids and transport only — never cwd or secrets.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
