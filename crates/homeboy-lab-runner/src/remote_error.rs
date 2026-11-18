@@ -68,6 +68,26 @@ mod tests {
     use super::*;
 
     #[test]
+    fn projection_cancel_absence_keeps_code_and_details() {
+        let details = serde_json::json!({
+            "field": "job_id",
+            "runner_job_absence": "ledger_absent",
+        });
+        let error = from_wire(
+            serde_json::json!({
+                "error": "validation.invalid_argument",
+                "message": "job not found",
+                "details": details,
+            }),
+            "daemon projection cancel failed",
+            Some(400),
+            "/jobs/missing/cancel-projection",
+        );
+        assert_eq!(error.code.as_str(), "validation.invalid_argument");
+        assert_eq!(error.details, details);
+    }
+
+    #[test]
     fn daemon_error_keeps_nested_json_error_typed() {
         let error = from_wire(
             serde_json::json!({

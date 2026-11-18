@@ -5364,6 +5364,67 @@ fn status_leaves_terminal_record_untouched_when_aggregate_has_no_model() {
 }
 
 #[test]
+fn accepted_runner_cancel_only_settles_proven_ledger_absence() {
+    let context = homeboy_core::test_support::HermeticTestContext::new();
+    let lifecycle_store = AgentTaskLifecycleStore::new(context.path_roots());
+    let run_id = "accepted-runner-ledger-absence";
+    let command = vec!["homeboy".to_string(), "agent-task".to_string()];
+    record_lab_offload_planned_in_store(
+        &lifecycle_store,
+        LabOffloadProxyPlan {
+            run_id,
+            runner_id: "homeboy-lab",
+            remote_workspace: "runner/workspace/homeboy",
+            remote_command: &command,
+            durable_plan: None,
+        },
+    )
+    .unwrap();
+    record_detached_lab_run_in_store(
+        &lifecycle_store,
+        DetachedLabRunRecord {
+            run_id,
+            runner_id: "homeboy-lab",
+            runner_job_id: "missing-job",
+            remote_workspace: "runner/workspace/homeboy",
+            remote_command: &command,
+        },
+    )
+    .unwrap();
+    for mut error in [
+        Error::internal_unexpected("transport failed"),
+        Error::validation_invalid_argument("job_id", "job not found", None, None),
+        Error::validation_invalid_argument("job_id", "other scope", None, None),
+    ] {
+        error.details["runner_job_ownership"] = json!("owned_by_other_scope");
+        let expected = error.code;
+        let _hook = super::cancellation::test_cancel_hook::install(Box::new(move |_, _, _| {
+            Err(error.clone())
+        }));
+        let failure = cancel_exact_run_in_store(&lifecycle_store, run_id, None)
+            .expect_err("accepted handoff must propagate unproven absence");
+        assert_eq!(failure.code, expected);
+        assert!(!lifecycle_store
+            .read_record(run_id)
+            .unwrap()
+            .state()
+            .is_terminal());
+    }
+    let _hook = super::cancellation::test_cancel_hook::install(Box::new(move |_, _, _| {
+        let mut error = Error::validation_invalid_argument("job_id", "job not found", None, None);
+        error.details["runner_job_absence"] = json!("ledger_absent");
+        Err(error)
+    }));
+    let cancelled = cancel_exact_run_in_store(&lifecycle_store, run_id, None)
+        .expect("proven absence settles locally");
+    assert_eq!(cancelled.state(), RunExecutionState::Cancelled);
+    assert_eq!(
+        cancelled.metadata["live_cancellation"]["runner_job_absence"],
+        "ledger_absent"
+    );
+}
+
+#[test]
 fn accepted_runner_cancel_stays_nonterminal_until_runner_confirms_cancellation() {
     let context = homeboy_core::test_support::HermeticTestContext::new();
     let lifecycle_store = AgentTaskLifecycleStore::new(context.path_roots());

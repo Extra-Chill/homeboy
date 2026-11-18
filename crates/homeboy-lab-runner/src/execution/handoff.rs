@@ -283,10 +283,12 @@ pub fn runner_job_cancel_projection(
             "parse daemon projection cancel response",
         )?;
         if !envelope.success {
-            return Err(Error::internal_unexpected(format!(
-                "daemon projection cancel failed: {}",
-                envelope.error.unwrap_or(Value::Null)
-            )));
+            return Err(crate::remote_error::from_wire(
+                envelope.error.unwrap_or(Value::Null),
+                "daemon projection cancel failed",
+                Some(response.status_code),
+                &path,
+            ));
         }
         envelope.data.ok_or_else(|| {
             Error::internal_unexpected("daemon projection cancel response missing data")

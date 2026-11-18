@@ -1920,8 +1920,19 @@ impl JobStore {
         job_id: Uuid,
         with_events: bool,
     ) -> Result<std::borrow::Cow<'a, StoredJob>> {
+        self.find_stored_job(inner, job_id, with_events)?
+            .ok_or_else(|| job_not_found(job_id))
+    }
+
+    /// Unlike a scoped mirror miss, `None` proves absence from the shared ledger.
+    pub(super) fn find_stored_job<'a>(
+        &self,
+        inner: &'a JobStoreInner,
+        job_id: Uuid,
+        with_events: bool,
+    ) -> Result<Option<std::borrow::Cow<'a, StoredJob>>> {
         if let Some(stored) = inner.jobs.get(&job_id) {
-            return Ok(std::borrow::Cow::Borrowed(stored));
+            return Ok(Some(std::borrow::Cow::Borrowed(stored)));
         }
         if let Some(persistence) = &self.persistence {
             if let Some(stored) = sql_store::read_job_readonly(
@@ -1933,10 +1944,10 @@ impl JobStore {
                 job_id,
                 with_events,
             )? {
-                return Ok(std::borrow::Cow::Owned(stored));
+                return Ok(Some(std::borrow::Cow::Owned(stored)));
             }
         }
-        Err(job_not_found(job_id))
+        Ok(None)
     }
 
     /// The live mirror plus the terminal history `filter` selects, read as job
