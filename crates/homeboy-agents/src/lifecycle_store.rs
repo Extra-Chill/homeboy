@@ -704,7 +704,7 @@ impl AgentTaskLifecycleStore {
                 None,
             )
         })?;
-        let run = resolve_run_payloads(&observations, run)?;
+        let run = resolve_aggregate_payloads(&observations, run)?;
         let value = run
             .metadata_json
             .get("agent_task_aggregate")
@@ -3201,7 +3201,7 @@ fn read_mirrored_aggregate_in_store(
     let Some(run) = store.get_run(run_id)? else {
         return Ok(None);
     };
-    aggregate_from_run(&resolve_run_payloads(&store, run)?)
+    aggregate_from_run(&resolve_aggregate_payloads(&store, run)?)
 }
 
 /// Large authoritative values may be content-addressed to keep SQLite rows
@@ -3212,6 +3212,23 @@ fn resolve_run_payloads(store: &ObservationStore, mut run: RunRecord) -> Result<
             &run.metadata_json,
             &store.artifact_root()?,
         )?;
+    Ok(run)
+}
+
+/// Aggregate-only readers consume just `agent_task_aggregate`; resolving the
+/// rest of the row (for example externalized promotion reports) is wasted IO
+/// on hot polling paths.
+fn resolve_aggregate_payloads(store: &ObservationStore, mut run: RunRecord) -> Result<RunRecord> {
+    if let Some(aggregate) = run
+        .metadata_json
+        .get_mut("agent_task_aggregate")
+        .filter(|value| !value.is_null())
+    {
+        *aggregate = homeboy_core::observation::store::metadata_payloads::resolve_metadata_payload(
+            aggregate,
+            &store.artifact_root()?,
+        )?;
+    }
     Ok(run)
 }
 
