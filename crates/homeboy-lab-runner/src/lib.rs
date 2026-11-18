@@ -515,8 +515,8 @@ pub use offload_metadata::{
     lab_offload_metadata_with_workspace_mapping_and_lab_runner_workload,
 };
 pub use resource_metrics::{
-    RunnerCgroupMemoryEvidence, RunnerResourceGuardLimits, RunnerResourceGuardViolation,
-    RunnerResourceMetrics,
+    initialize_job_cgroups, RunnerCgroupMemoryEvidence, RunnerResourceGuardLimits,
+    RunnerResourceGuardViolation, RunnerResourceMetrics,
 };
 pub use runner_staging_store::{
     register_runner_staging_provider, resolve_runner_staging_transport,

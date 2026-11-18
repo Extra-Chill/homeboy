@@ -112,6 +112,8 @@ Restart=on-failure
 RestartSec=2s
 TimeoutStopSec=30s
 KillMode=process
+Delegate=yes
+DelegateSubgroup=daemon
 
 [Install]
 WantedBy=default.target
@@ -722,6 +724,10 @@ mod tests {
         // A restart stops only the daemon; re-adoptable job children lead
         // their own sessions and must outlive it.
         assert!(unit.contains("KillMode=process"));
+        // The daemon owns its cgroup subtree: it runs in the `daemon/` leaf
+        // and places every runner job in its own `jobs/<job-id>/` cgroup.
+        assert!(unit.contains("\nDelegate=yes\n"));
+        assert!(unit.contains("\nDelegateSubgroup=daemon\n"));
         assert!(unit.contains("WantedBy=default.target"));
         assert_eq!(service_unit_name(), "homeboy-runner.service");
     }

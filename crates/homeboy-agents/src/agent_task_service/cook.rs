@@ -7022,6 +7022,40 @@ fn run_cook_spine(
                     }));
                 }
                 let phase = pre_artifact_interruption_phase(&record);
+                if let Some(stop) =
+                    homeboy_runner_contract::find_resource_guard_stop(&record.metadata)
+                {
+                    // The runner stopped the job at its resource guard: the
+                    // same attempt would hit it again, so it is never a
+                    // transport retry (#18418).
+                    attempts.push(AgentTaskCookAttemptReport {
+                        attempt,
+                        run_id: run_id.clone(),
+                        run_state: format!("{:?}", record.state()),
+                        aggregate_path: None,
+                        promotion: None,
+                        feedback: None,
+                    });
+                    let mut report = pre_artifact_interruption_report(
+                        stores,
+                        cook_id,
+                        attempts,
+                        &run_id,
+                        phase,
+                        format!(
+                            "attempt {attempt}'s runner job was stopped by its resource guard ({}); the Cook stopped instead of retrying it",
+                            stop.violation.operator_message()
+                        ),
+                        1,
+                    );
+                    apply_resource_guard_stop(
+                        &mut report,
+                        &record.metadata,
+                        &record.run_id,
+                        record.runner_id(),
+                    );
+                    return Ok(report);
+                }
                 if phase == PreArtifactInterruptionPhase::RunnerResultNotProjected {
                     attempts.push(AgentTaskCookAttemptReport {
                         attempt,

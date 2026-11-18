@@ -41,6 +41,82 @@ const PROCESS_COUNT_CEILING_PER_CORE: u64 = 32;
 #[cfg(any(target_os = "linux", test))]
 const PROCESS_COUNT_CEILING_FLOOR: u64 = 256;
 
+#[cfg(target_os = "linux")]
+mod job_cgroup;
+
+/// Without Linux cgroup v2 a runner job never has its own cgroup.
+#[cfg(not(target_os = "linux"))]
+mod job_cgroup {
+    pub(crate) struct JobCgroup;
+
+    impl JobCgroup {
+        pub(crate) fn create(
+            _job_id: Option<&str>,
+            _process_count_limit: u64,
+            _concurrency: u64,
+        ) -> std::io::Result<Option<Self>> {
+            Ok(None)
+        }
+
+        pub(crate) fn join_before_exec(&self, _command: &mut std::process::Command) {}
+
+        pub(crate) fn kill(&self) {}
+
+        pub(crate) fn stop(&self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+}
+
+use job_cgroup::JobCgroup;
+
+/// Daemon startup: move into the `daemon/` leaf of the delegated service
+/// cgroup and prepare `jobs/`, so every runner job runs in its own
+/// kernel-enforced cgroup (#18418). Returns the `jobs/` directory, or why
+/// runner jobs fall back to the sampled process-tree guard.
+pub fn initialize_job_cgroups() -> std::result::Result<PathBuf, String> {
+    #[cfg(target_os = "linux")]
+    {
+        let budget = resolved_rss_limit(
+            homeboy_core::resources::memory::probe_system_memory().map(|memory| memory.total_bytes),
+            daemon_policy_env(homeboy_runner_contract::RSS_LIMIT_ENV),
+        );
+        job_cgroup::initialize(budget.rss_limit_bytes).map(Path::to_path_buf)
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        Err("runner job cgroups require Linux cgroup v2".to_string())
+    }
+}
+
+/// The job's own cgroup when this daemon owns a delegated subtree. A durable
+/// job's cgroup is named for its job id, the artifact directory's name.
+fn create_job_cgroup(
+    output_dir: Option<&Path>,
+    limits: Option<&RunnerResourceGuardLimits>,
+) -> Result<Option<Arc<JobCgroup>>> {
+    let job_id = output_dir.and_then(Path::file_name).and_then(OsStr::to_str);
+    let (process_count_limit, concurrency) = limits.map_or((0, 1), |limits| {
+        (limits.process_count_limit, limits.concurrency)
+    });
+    JobCgroup::create(job_id, process_count_limit, concurrency)
+        .map(|job| job.map(Arc::new))
+        .map_err(|error| {
+            Error::internal_io(
+                error.to_string(),
+                Some("create runner job cgroup".to_string()),
+            )
+        })
+}
+
+/// Stop the job at once: `cgroup.kill` reaches every member, including
+/// descendants that left the root's session or process group.
+fn kill_job(job_cgroup: Option<&Arc<JobCgroup>>) {
+    if let Some(job) = job_cgroup {
+        job.kill();
+    }
+}
+
 fn require_process_tree_isolation() -> Result<()> {
     if supports_process_tree_isolation() {
         return Ok(());
@@ -81,6 +157,7 @@ struct MetricsState {
     host_available_bytes_min: Option<u64>,
     effective_rss_limit_bytes_min: Option<u64>,
     guard_violation: Option<RunnerResourceGuardViolation>,
+    last_top_processes: Vec<RunnerProcessNameCount>,
 }
 
 pub(crate) fn measured_command_output(
@@ -93,7 +170,14 @@ pub(crate) fn measured_command_output(
         .spawn()
         .map_err(|error| runner_command_spawn_error(command, &error))?;
     let pid = child.id();
-    let collector = ResourceMetricsCollector::start(pid, started, None, None, concurrency_limit);
+    let collector = ResourceMetricsCollector::start(
+        pid,
+        started,
+        None,
+        None,
+        resolved_resource_guard_limits(concurrency_limit),
+        None,
+    );
     let bounded_output =
         wait_with_bounded_output(child, DEFAULT_CAPTURE_LIMIT_BYTES).map_err(|err| {
             Error::internal_io(err.to_string(), Some("wait for runner command".to_string()))
@@ -145,10 +229,21 @@ pub(crate) fn measured_command_output_until_cancelled_with_progress(
             concurrency_limit,
         );
     }
+    let guard_limits = resolved_resource_guard_limits(concurrency_limit);
+    let job_cgroup = create_job_cgroup(None, guard_limits.as_ref())?;
     command.stdout(Stdio::piped()).stderr(Stdio::piped());
     let started = Instant::now();
-    let mut owner = ExecutionOwner::spawn(command)
-        .map_err(|error| runner_command_spawn_error(command, &error))?;
+    let mut owner = (|| {
+        let prepared = ExecutionOwner::prepare(command)?;
+        // Registered after the owner's own pre-exec step, which forks the
+        // workload root from its supervisor: only the root joins the job
+        // cgroup, so stopping the job never kills its supervisor.
+        if let Some(job) = &job_cgroup {
+            job.join_before_exec(command);
+        }
+        prepared.attach(command.spawn()?)
+    })()
+    .map_err(|error| runner_command_spawn_error(command, &error))?;
     let identity = owner.identity();
     let pid = identity.root_pid;
     if let Err(error) = acknowledge_child(
@@ -158,6 +253,7 @@ pub(crate) fn measured_command_output_until_cancelled_with_progress(
         require_child_identity_acknowledgement,
         child_started,
     ) {
+        kill_job(job_cgroup.as_ref());
         let cleanup = owner
             .drain_and_reap()
             .and_then(homeboy_core::engine::command::ExecutionOutcome::into_root_status)
@@ -170,17 +266,22 @@ pub(crate) fn measured_command_output_until_cancelled_with_progress(
         started,
         progress_sink,
         Some(Arc::clone(&guard_violation)),
-        concurrency_limit,
+        guard_limits,
+        job_cgroup.clone(),
     );
     let bounded_output = wait_with_bounded_output_until_cancelled_with_stdout_observer_owned(
         &mut owner,
         DEFAULT_CAPTURE_LIMIT_BYTES,
         || {
-            is_cancelled()
+            let stop = is_cancelled()
                 || guard_violation
                     .lock()
                     .expect("resource guard mutex poisoned")
-                    .is_some()
+                    .is_some();
+            if stop {
+                kill_job(job_cgroup.as_ref());
+            }
+            stop
         },
         stdout_line_observer,
     )
@@ -219,6 +320,11 @@ fn durable_command_output_until_cancelled(
             Some("wait for runner command".to_string()),
         )
     };
+    let guard_limits = resolved_resource_guard_limits(concurrency_limit);
+    let job_cgroup = create_job_cgroup(Some(dir), guard_limits.as_ref())?;
+    if let Some(job) = &job_cgroup {
+        job.join_before_exec(command);
+    }
     let started = Instant::now();
     let (child, identity) = runner_exec_job::spawn(command)
         .map_err(|error| runner_command_spawn_error(command, &error))?;
@@ -231,6 +337,7 @@ fn durable_command_output_until_cancelled(
         require_child_identity_acknowledgement,
         child_started,
     ) {
+        kill_job(job_cgroup.as_ref());
         let cleanup = terminate_process_tree_and_reap(&mut child).map(|_| ());
         return Err(child_identity_error(error, cleanup));
     }
@@ -240,7 +347,8 @@ fn durable_command_output_until_cancelled(
         started,
         progress_sink,
         Some(Arc::clone(&guard_violation)),
-        concurrency_limit,
+        guard_limits,
+        job_cgroup.clone(),
     );
     let mut follower = LineFollower::new(runner_exec_job::stdout_path(dir));
     let status = loop {
@@ -255,11 +363,15 @@ fn durable_command_output_until_cancelled(
             .expect("resource guard mutex poisoned")
             .is_some();
         if is_cancelled() || violated {
+            kill_job(job_cgroup.as_ref());
             break terminate_process_tree_and_reap(&mut child).map_err(wait_error)?;
         }
         thread::sleep(DURABLE_POLL_INTERVAL);
     };
-    let _ = terminate_remaining_process_group(pid);
+    // A job cgroup is stopped as a whole when the collector finishes.
+    if job_cgroup.is_none() {
+        let _ = terminate_remaining_process_group(pid);
+    }
     if let Some(observer) = &stdout_line_observer {
         follower.poll(observer.as_ref());
     }
@@ -336,7 +448,7 @@ fn acknowledge_child(
         progress(runner_command_heartbeat_data(
             started.elapsed(),
             identity.pid,
-            process_tree_resource_summary(identity.pid),
+            process_tree_resource_summary(identity.pid, None),
         ))?;
     }
     Ok(())
@@ -652,13 +764,18 @@ fn read_cgroup_file(file: Option<&mut std::fs::File>) -> Option<String> {
     Some(value)
 }
 
+type SharedGuardViolation = Arc<Mutex<Option<RunnerResourceGuardViolation>>>;
+
 struct ResourceMetricsCollector {
     supported: bool,
     stop: Option<mpsc::Sender<()>>,
     state: Arc<Mutex<MetricsState>>,
     handle: Option<thread::JoinHandle<()>>,
     guard_limits: Option<RunnerResourceGuardLimits>,
-    cgroup_memory: CgroupMemoryCollector,
+    guard_violation: Option<SharedGuardViolation>,
+    /// Sampled launch-cgroup evidence, used only without a job cgroup.
+    cgroup_memory: Option<CgroupMemoryCollector>,
+    job_cgroup: Option<Arc<JobCgroup>>,
 }
 
 impl ResourceMetricsCollector {
@@ -666,13 +783,15 @@ impl ResourceMetricsCollector {
         root_pid: u32,
         started: Instant,
         progress_sink: Option<RunnerCommandProgressSink>,
-        guard_violation: Option<Arc<Mutex<Option<RunnerResourceGuardViolation>>>>,
-        concurrency_limit: Option<usize>,
+        guard_violation: Option<SharedGuardViolation>,
+        guard_limits: Option<RunnerResourceGuardLimits>,
+        job_cgroup: Option<Arc<JobCgroup>>,
     ) -> Self {
         let supported = cfg!(target_os = "linux") && std::path::Path::new("/proc").exists();
-        let guard_limits = resolved_resource_guard_limits(concurrency_limit);
         let state = Arc::new(Mutex::new(MetricsState::default()));
-        let cgroup_memory = CgroupMemoryCollector::start(root_pid);
+        let cgroup_memory = job_cgroup
+            .is_none()
+            .then(|| CgroupMemoryCollector::start(root_pid));
         if !supported && progress_sink.is_none() {
             return Self {
                 supported,
@@ -680,19 +799,24 @@ impl ResourceMetricsCollector {
                 state,
                 handle: None,
                 guard_limits,
+                guard_violation,
                 cgroup_memory,
+                job_cgroup,
             };
         }
 
         let (stop, stop_rx) = mpsc::channel();
         sample(
             root_pid,
+            job_cgroup.as_deref(),
             &state,
             guard_violation.as_ref(),
             guard_limits.as_ref(),
         );
         let thread_state = Arc::clone(&state);
         let thread_guard_limits = guard_limits.clone();
+        let thread_guard_violation = guard_violation.clone();
+        let thread_job_cgroup = job_cgroup.clone();
         let mut last_heartbeat = Instant::now();
         // The sampler stops on an explicit stop or when the collector is
         // dropped (sender disconnected), so it never outlives its collector.
@@ -700,8 +824,9 @@ impl ResourceMetricsCollector {
             sampler_loop(&stop_rx, || {
                 sample(
                     root_pid,
+                    thread_job_cgroup.as_deref(),
                     &thread_state,
-                    guard_violation.as_ref(),
+                    thread_guard_violation.as_ref(),
                     thread_guard_limits.as_ref(),
                 );
                 if let Some(progress) = progress_sink.as_ref() {
@@ -709,7 +834,7 @@ impl ResourceMetricsCollector {
                         let _ = progress(runner_command_heartbeat_data(
                             started.elapsed(),
                             root_pid,
-                            process_tree_resource_summary(root_pid),
+                            process_tree_resource_summary(root_pid, thread_job_cgroup.as_deref()),
                         ));
                         last_heartbeat = Instant::now();
                     }
@@ -723,7 +848,9 @@ impl ResourceMetricsCollector {
             state,
             handle: Some(handle),
             guard_limits,
+            guard_violation,
             cgroup_memory,
+            job_cgroup,
         }
     }
 
@@ -734,10 +861,20 @@ impl ResourceMetricsCollector {
         if let Some(handle) = self.handle.take() {
             let _ = handle.join();
         }
+        let cgroup_memory = match (self.job_cgroup.take(), self.cgroup_memory.take()) {
+            (Some(job), _) => finish_job_cgroup(
+                &job,
+                &self.state,
+                self.guard_violation.as_ref(),
+                self.guard_limits.as_ref(),
+            ),
+            (None, Some(collector)) => collector.finish(),
+            (None, None) => RunnerCgroupMemoryEvidence::default(),
+        };
+        let isolated = cgroup_memory.scope == JOB_CGROUP_SCOPE;
         let state = self.state.lock().expect("resource metrics mutex poisoned");
-        let cgroup_memory = self.cgroup_memory.finish();
-        let mut guard_limits = self.guard_limits;
-        if let Some(limits) = guard_limits.as_mut() {
+        let mut guard_limits = self.guard_limits.take();
+        if let Some(limits) = guard_limits.as_mut().filter(|_| !isolated) {
             if limits.aggregate_rss_budget_bytes.is_some() {
                 limits.host_available_bytes_min = state.host_available_bytes_min;
                 if let Some(effective_limit) = state.effective_rss_limit_bytes_min {
@@ -756,12 +893,70 @@ impl ResourceMetricsCollector {
             resource_guard: guard_limits,
             guard_violation: state.guard_violation.clone(),
             cgroup_memory,
-            source: if self.supported {
+            isolation: Some(if isolated { "cgroup" } else { "process_tree" }.to_string()),
+            source: if isolated {
+                "linux_cgroup_v2".to_string()
+            } else if self.supported {
                 "linux_procfs_process_tree".to_string()
             } else {
                 "duration_only".to_string()
             },
         }
+    }
+}
+
+/// The scope of evidence read from the job's own cgroup.
+const JOB_CGROUP_SCOPE: &str = "job_cgroup";
+
+/// Take the job cgroup's final verdict and evidence, then stop it: nothing in
+/// the cgroup outlives the job.
+#[cfg(target_os = "linux")]
+fn finish_job_cgroup(
+    job: &JobCgroup,
+    state: &Arc<Mutex<MetricsState>>,
+    guard_violation: Option<&SharedGuardViolation>,
+    guard_limits: Option<&RunnerResourceGuardLimits>,
+) -> RunnerCgroupMemoryEvidence {
+    sample(0, Some(job), state, guard_violation, guard_limits);
+    let evidence = job_cgroup_memory_evidence(&job.counters());
+    if let Err(error) = job.stop() {
+        homeboy_core::log_status!("runner", "runner job cgroup stop failed: {}", error);
+    }
+    evidence
+}
+
+#[cfg(not(target_os = "linux"))]
+fn finish_job_cgroup(
+    job: &JobCgroup,
+    _state: &Arc<Mutex<MetricsState>>,
+    _guard_violation: Option<&SharedGuardViolation>,
+    _guard_limits: Option<&RunnerResourceGuardLimits>,
+) -> RunnerCgroupMemoryEvidence {
+    let _ = job.stop();
+    RunnerCgroupMemoryEvidence::default()
+}
+
+/// A job cgroup holds exactly this job's processes, so its `oom_kill` count
+/// is attributable to the job.
+#[cfg(target_os = "linux")]
+fn job_cgroup_memory_evidence(
+    counters: &job_cgroup::JobCgroupCounters,
+) -> RunnerCgroupMemoryEvidence {
+    let observed = counters.memory_current.is_some()
+        && counters.memory_peak.is_some()
+        && counters.oom_kill.is_some();
+    RunnerCgroupMemoryEvidence {
+        status: if observed { "observed" } else { "partial" }.to_string(),
+        source: "linux_cgroup_v2".to_string(),
+        scope: JOB_CGROUP_SCOPE.to_string(),
+        oom_kill_attribution: "job".to_string(),
+        memory_limit_bytes: counters.memory_limit,
+        memory_current_bytes: counters.memory_current,
+        memory_peak_bytes: counters.memory_peak,
+        // A job cgroup is created empty for the job.
+        oom_kill_count_before: Some(0),
+        oom_kill_count_after: counters.oom_kill,
+        oom_kill_delta: counters.oom_kill,
     }
 }
 
@@ -794,11 +989,19 @@ pub(crate) fn runner_command_heartbeat_data(
     })
 }
 
+/// The job's processes: its cgroup's members when it has one, otherwise the
+/// root's ppid tree.
 #[cfg(target_os = "linux")]
-fn process_tree_resource_summary(root_pid: u32) -> Option<Value> {
-    let snapshot = process_tree_snapshot(root_pid)?;
+fn process_tree_resource_summary(root_pid: u32, job: Option<&JobCgroup>) -> Option<Value> {
+    let (snapshot, source) = match job {
+        Some(job) => (cgroup_process_snapshot(&job.members()), "linux_cgroup_v2"),
+        None => (
+            process_tree_snapshot(root_pid)?,
+            "linux_procfs_process_tree",
+        ),
+    };
     Some(json!({
-        "source": "linux_procfs_process_tree",
+        "source": source,
         "process_count": snapshot.process_count,
         "child_process_count": snapshot.process_count.saturating_sub(1),
         "rss_bytes": snapshot.rss_bytes,
@@ -808,18 +1011,21 @@ fn process_tree_resource_summary(root_pid: u32) -> Option<Value> {
 }
 
 #[cfg(not(target_os = "linux"))]
-fn process_tree_resource_summary(_root_pid: u32) -> Option<Value> {
+fn process_tree_resource_summary(_root_pid: u32, _job: Option<&JobCgroup>) -> Option<Value> {
     None
 }
 
 #[cfg(target_os = "linux")]
 fn sample(
     root_pid: u32,
+    job: Option<&JobCgroup>,
     state: &Arc<Mutex<MetricsState>>,
-    guard_violation: Option<&Arc<Mutex<Option<RunnerResourceGuardViolation>>>>,
+    guard_violation: Option<&SharedGuardViolation>,
     guard_limits: Option<&RunnerResourceGuardLimits>,
 ) {
-    if let Some(snapshot) = process_tree_snapshot(root_pid) {
+    if let Some(job) = job {
+        sample_job_cgroup(job, state, guard_violation, guard_limits);
+    } else if let Some(snapshot) = process_tree_snapshot(root_pid) {
         let host_available_bytes = homeboy_core::resources::memory::probe_system_memory()
             .map(|memory| memory.available_bytes);
         let mut state = state.lock().expect("resource metrics mutex poisoned");
@@ -864,10 +1070,88 @@ fn sample(
 #[cfg(not(target_os = "linux"))]
 fn sample(
     _root_pid: u32,
+    _job: Option<&JobCgroup>,
     _state: &Arc<Mutex<MetricsState>>,
-    _guard_violation: Option<&Arc<Mutex<Option<RunnerResourceGuardViolation>>>>,
+    _guard_violation: Option<&SharedGuardViolation>,
     _guard_limits: Option<&RunnerResourceGuardLimits>,
 ) {
+}
+
+/// The kernel enforces a job cgroup's limits; the verdict is whichever limit
+/// its counters show it hit.
+#[cfg(target_os = "linux")]
+fn sample_job_cgroup(
+    job: &JobCgroup,
+    state: &Arc<Mutex<MetricsState>>,
+    guard_violation: Option<&SharedGuardViolation>,
+    guard_limits: Option<&RunnerResourceGuardLimits>,
+) {
+    let snapshot = cgroup_process_snapshot(&job.members());
+    let counters = job.counters();
+    let mut state = state.lock().expect("resource metrics mutex poisoned");
+    state.sample_count += 1;
+    state.peak_rss_bytes = state.peak_rss_bytes.max(snapshot.rss_bytes);
+    let process_count_peak = counters.pids_peak.unwrap_or(0).max(snapshot.process_count);
+    state.child_process_count_peak = state
+        .child_process_count_peak
+        .max(process_count_peak.saturating_sub(1));
+    state.cpu_user_ms = state.cpu_user_ms.max(snapshot.cpu_user_ms);
+    state.cpu_system_ms = state.cpu_system_ms.max(snapshot.cpu_system_ms);
+    if !snapshot.top_processes.is_empty() {
+        state.last_top_processes = snapshot.top_processes;
+    }
+    if state.guard_violation.is_some() {
+        return;
+    }
+    let Some(violation) =
+        job_cgroup_guard_violation(&counters, guard_limits, &state.last_top_processes)
+    else {
+        return;
+    };
+    if let Some(shared_violation) = guard_violation {
+        *shared_violation
+            .lock()
+            .expect("resource guard mutex poisoned") = Some(violation.clone());
+    }
+    state.guard_violation = Some(violation);
+}
+
+#[cfg(target_os = "linux")]
+fn job_cgroup_guard_violation(
+    counters: &job_cgroup::JobCgroupCounters,
+    limits: Option<&RunnerResourceGuardLimits>,
+    top_processes: &[RunnerProcessNameCount],
+) -> Option<RunnerResourceGuardViolation> {
+    let limits = limits?;
+    let oom_kill = counters.oom_kill.unwrap_or(0);
+    let pids_max_events = counters.pids_max_events.unwrap_or(0);
+    let reason = if oom_kill > 0 {
+        "memory_limit_exceeded"
+    } else if pids_max_events > 0 {
+        "process_count_limit_exceeded"
+    } else {
+        return None;
+    };
+    let rss_bytes = counters
+        .memory_peak
+        .or(counters.memory_current)
+        .unwrap_or(0);
+    let rss_limit_bytes = counters.memory_limit.unwrap_or(limits.rss_limit_bytes);
+    let process_count = counters.pids_peak.or(counters.pids_current).unwrap_or(0);
+    let process_count_limit = counters.pids_limit.unwrap_or(limits.process_count_limit);
+    Some(RunnerResourceGuardViolation {
+        reason: reason.to_string(),
+        message: format!(
+            "runner job cgroup hit its kernel limit (memory.events oom_kill={oom_kill}, pids.events max={pids_max_events}) at rss_bytes={rss_bytes}, process_count={process_count}; limits rss_bytes={rss_limit_bytes}, process_count={process_count_limit}"
+        ),
+        rss_bytes,
+        rss_limit_bytes,
+        process_count,
+        process_count_limit,
+        process_count_limit_source: limits.process_count_limit_source.clone(),
+        process_count_limit_ceiling: limits.process_count_limit_ceiling,
+        top_processes: top_processes.to_vec(),
+    })
 }
 
 #[cfg(target_os = "linux")]
@@ -921,6 +1205,23 @@ fn process_tree_snapshot(root_pid: u32) -> Option<ProcessSnapshot> {
         cpu_user_ms: user_ticks.saturating_mul(1000) / clock_ticks,
         cpu_system_ms: system_ticks.saturating_mul(1000) / clock_ticks,
     })
+}
+
+/// Every member of a job cgroup, whatever its session or process group.
+#[cfg(target_os = "linux")]
+fn cgroup_process_snapshot(members: &[i32]) -> ProcessSnapshot {
+    let stats: Vec<ProcessStat> = members
+        .iter()
+        .filter_map(|pid| read_process_stat(*pid))
+        .collect();
+    let clock_ticks = clock_ticks_per_second().max(1);
+    ProcessSnapshot {
+        process_count: stats.len().try_into().unwrap_or(u64::MAX),
+        top_processes: top_process_names(stats.iter().map(|stat| stat.name.as_str())),
+        rss_bytes: stats.iter().map(|stat| stat.rss_bytes).sum(),
+        cpu_user_ms: stats.iter().map(|stat| stat.user_ticks).sum::<u64>() * 1000 / clock_ticks,
+        cpu_system_ms: stats.iter().map(|stat| stat.system_ticks).sum::<u64>() * 1000 / clock_ticks,
+    }
 }
 
 #[cfg(target_os = "linux")]
@@ -1623,59 +1924,6 @@ mod tests {
             Some(0),
             "an already-reaped child uses the inherited parent cgroup"
         );
-    }
-
-    /// This test uses the production measurement boundary but only runs when a
-    /// disposable cgroup-limited container explicitly opts in. Running an OOM
-    /// allocator in an unconstrained developer cgroup would be unsafe.
-    #[cfg(target_os = "linux")]
-    #[test]
-    #[ignore = "requires explicit opt-in in a disposable cgroup-limited container"]
-    fn actual_runner_controlled_oom_is_authoritative_when_enabled() {
-        require_controlled_oom_test();
-        let test_binary = std::env::current_exe().expect("test binary path");
-        let mut command = Command::new(test_binary);
-        command.args([
-            "resource_metrics::tests::synthetic_memory_hog",
-            "--exact",
-            "--ignored",
-            "--nocapture",
-        ]);
-
-        let output = measured_command_output(&mut command, None)
-            .expect("runner retains metrics after child OOM kill");
-
-        assert_eq!(output.output.status.signal(), Some(libc::SIGKILL));
-        assert_eq!(output.metrics.cgroup_memory.status, "observed");
-        assert_eq!(output.metrics.cgroup_memory.oom_kill_delta, Some(1));
-        assert_eq!(output.metrics.cgroup_memory.scope, "child_cgroup");
-        assert_eq!(output.metrics.cgroup_memory.oom_kill_attribution, "unknown");
-        assert!(output.metrics.cgroup_memory.memory_peak_bytes.is_some());
-    }
-
-    #[cfg(target_os = "linux")]
-    #[test]
-    #[ignore = "OOM allocator subprocess invoked only by the controlled OOM test"]
-    fn synthetic_memory_hog() {
-        require_controlled_oom_test();
-        let mut chunks = Vec::new();
-        loop {
-            chunks.push(vec![1_u8; 1024 * 1024]);
-        }
-    }
-
-    #[cfg(target_os = "linux")]
-    fn require_controlled_oom_test() {
-        assert!(
-            std::env::var_os("HOMEBOY_RUN_CONTROLLED_CGROUP_OOM_TEST").is_some(),
-            "controlled OOM execution requires explicit container opt-in"
-        );
-        let directory = cgroup_v2_directory_for_pid(std::process::id())
-            .expect("controlled OOM execution requires a readable cgroup v2 directory");
-        let mut files = open_cgroup_memory_files(directory);
-        let limit = read_cgroup_memory_snapshot(&mut files).memory_limit_bytes;
-        assert!(limit.is_some_and(|bytes| bytes > 0 && bytes <= 256 * 1024 * 1024),
-            "controlled OOM execution requires a disposable cgroup capped at 256 MiB or less; observed {limit:?}");
     }
 
     #[cfg(target_os = "linux")]

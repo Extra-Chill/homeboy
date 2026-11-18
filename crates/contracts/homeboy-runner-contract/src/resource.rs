@@ -24,6 +24,11 @@ pub struct RunnerResourceMetrics {
     /// runtime's memory controller recorded an OOM kill during the command.
     #[serde(default)]
     pub cgroup_memory: RunnerCgroupMemoryEvidence,
+    /// How the job's processes were contained: `cgroup` when the runner owns
+    /// a kernel-enforced per-job cgroup, `process_tree` when it falls back to
+    /// sampling the job's ppid tree. Absent on records written before it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub isolation: Option<String>,
     pub source: String,
 }
 
@@ -160,17 +165,25 @@ impl RunnerResourceGuardViolation {
         format!("resource_guard.{}", self.reason)
     }
 
+    fn limits_memory(&self) -> bool {
+        matches!(
+            self.reason.as_str(),
+            "rss_limit_exceeded" | "memory_limit_exceeded"
+        )
+    }
+
     pub fn observed_summary(&self) -> String {
-        if self.reason == "rss_limit_exceeded" {
-            return format!(
+        let summary = if self.limits_memory() {
+            format!(
                 "rss_bytes={} exceeds limit {}",
                 self.rss_bytes, self.rss_limit_bytes
-            );
-        }
-        let summary = format!(
-            "process_count={} exceeds limit {}",
-            self.process_count, self.process_count_limit
-        );
+            )
+        } else {
+            format!(
+                "process_count={} exceeds limit {}",
+                self.process_count, self.process_count_limit
+            )
+        };
         if self.top_processes.is_empty() {
             return summary;
         }
@@ -191,7 +204,7 @@ impl RunnerResourceGuardViolation {
     /// is runner-owned: it is set in the runner's `env` and reaches the
     /// daemon only through its service unit, never through a job.
     pub fn remedy(&self) -> String {
-        if self.reason == "rss_limit_exceeded" {
+        if self.limits_memory() {
             let target = (self.rss_bytes / GIB + 2) * GIB;
             return format!(
                 "RSS limit {} is runner-owned; {}",
@@ -338,6 +351,7 @@ mod tests {
                 oom_kill_attribution: "unknown".to_string(),
                 ..RunnerCgroupMemoryEvidence::default()
             },
+            isolation: None,
             source: "process-tree".to_string(),
         };
 
@@ -391,6 +405,7 @@ mod tests {
                 "oom_kill_count_after": 4,
                 "oom_kill_delta": 1,
             },
+            "isolation": "cgroup",
             "source": "process-tree",
         });
 

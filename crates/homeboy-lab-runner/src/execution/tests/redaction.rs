@@ -201,6 +201,7 @@ fn runner_exec_failure_error_surfaces_resource_guard_message() {
             top_processes: Vec::new(),
         }),
         cgroup_memory: Default::default(),
+        isolation: Some("process_tree".to_string()),
         source: "linux_procfs_process_tree".to_string(),
     });
 
