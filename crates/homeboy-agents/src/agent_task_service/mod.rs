@@ -109,15 +109,44 @@ pub fn scheduling_daemon_evidence(
 /// durable submission, or the start error when unavailable. Status is read-only.
 pub fn ensure_scheduling_daemon() -> Option<serde_json::Value> {
     let result = start_scheduling_daemon();
-    if let Ok(status) = homeboy_core::daemon::read_status() {
-        let report = status.admission_report();
+    let status = homeboy_core::daemon::read_status().ok();
+    scheduling_daemon_blocker(
+        result,
+        status.as_ref().map(|status| status.admission_report()),
+        status.as_ref().map(
+            |status| homeboy_control_plane_contract::ControlPlaneBlockerDaemon {
+                admits_work: status.admits_work(),
+                summary: status.render_summary(),
+            },
+        ),
+    )
+}
+
+/// The one cause that blocks scheduling, decided from the start attempt and
+/// the daemon status read after it.
+///
+/// A live daemon that admits work owns the durable submission and will drain
+/// it, even when a build replacement it was asked for did not happen (a
+/// service manager that did not restart it, or an older daemon that ignored
+/// SIGTERM). Reporting that replacement error next to `admits_work: true`
+/// contradicts itself (#18377), so it is not a scheduling blocker; the
+/// replacement is surfaced by `homeboy daemon status`/`plan` instead.
+fn scheduling_daemon_blocker(
+    start: homeboy_core::Result<()>,
+    admission_report: Option<serde_json::Value>,
+    daemon: Option<homeboy_control_plane_contract::ControlPlaneBlockerDaemon>,
+) -> Option<serde_json::Value> {
+    if let Some(report) = admission_report {
         if report["waiting_for"] == "daemon_replacement" {
             return Some(report);
         }
     }
-    let error = result.err()?;
+    if daemon.as_ref().is_some_and(|daemon| daemon.admits_work) {
+        return None;
+    }
+    let error = start.err()?;
     Some(serde_json::json!({
-        "daemon": scheduling_daemon_evidence(),
+        "daemon": daemon,
         "error": error.attributed_message(),
         "next_action": "homeboy daemon recover",
     }))

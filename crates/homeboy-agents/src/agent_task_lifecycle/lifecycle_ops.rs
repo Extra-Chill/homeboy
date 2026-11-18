@@ -1526,7 +1526,88 @@ pub fn has_expired_detached_cook_admission(
     record: &AgentTaskRunRecord,
     now: chrono::DateTime<chrono::Utc>,
 ) -> bool {
-    has_pending_detached_cook_handoff(record) && !detached_cook_admission_is_live(record, now)
+    has_pending_detached_cook_handoff(record)
+        && !detached_cook_admission_is_live(record, now)
+        && !has_orphaned_unmaterialized_cook_admission(record)
+}
+
+/// An unmaterialized Cook admission an exact execution step claimed, whose
+/// step process has since exited before any attempt materialized (#18377).
+///
+/// The admission is durable daemon work, not the step's (or the submitting
+/// CLI's) property: the claim records the step pid only so a live step is not
+/// superseded. Once that process is gone, nothing has executed on the Cook's
+/// behalf, so the admission goes back to the daemon's queue instead of
+/// expiring as an ownerless detached handoff.
+pub fn has_orphaned_unmaterialized_cook_admission(record: &AgentTaskRunRecord) -> bool {
+    has_pending_detached_cook_handoff(record)
+        && record.metadata["detached_cook_handoff"]["admission_state"] == "unmaterialized"
+        && is_unmaterialized_cook_admission(record)
+        && record.state() == RunExecutionState::Running
+        && record.metadata["execution_scheduling"]["current_intent_id"].is_string()
+        && record.metadata["detached_cook_handoff"]["materializing_attempt_run_id"].is_null()
+        && record.metadata["detached_cook_handoff"]["attempt_run_id"].is_null()
+        && !record.has_live_execution_step_owner()
+        && !record.owner_process_is_running()
+}
+
+/// Return an orphaned unmaterialized Cook admission to the daemon-drained
+/// admission queue under a fresh execution intent. Returns whether it was
+/// requeued; a live step owner, a materializing attempt, or a published Cook
+/// index leaves the record untouched.
+pub fn requeue_orphaned_unmaterialized_cook_admission_in_store(
+    lifecycle_store: &AgentTaskLifecycleStore,
+    cook_id: &str,
+) -> Result<bool> {
+    let cook_id = sanitize_run_id(cook_id);
+    if !has_orphaned_unmaterialized_cook_admission(&lifecycle_store.read_record(&cook_id)?) {
+        return Ok(false);
+    }
+    // The crash-released subject lock is the exact step's side-effect
+    // boundary: while anything still holds it, the admission is owned.
+    let Some(_subject_lock) =
+        crate::agent_task_service::try_execution_subject_lock_in_store(lifecycle_store, &cook_id)?
+    else {
+        return Ok(false);
+    };
+    let mut intent_error = None;
+    let requeued = lifecycle_store.transition_when(&cook_id, |stored| {
+        if !has_orphaned_unmaterialized_cook_admission(stored)
+            || lifecycle_store.read_cook_index(&cook_id).is_ok()
+        {
+            return None;
+        }
+        let mut prepared = stored.clone();
+        reset_for_requeue(&mut prepared);
+        let reason =
+            "execution step exited before the Cook materialized; requeued for daemon admission";
+        prepared.metadata["unmaterialized_cook_admission"]["state"] = json!("queued");
+        prepared.metadata["unmaterialized_cook_admission"]["reason"] = json!(reason);
+        prepared.metadata["unmaterialized_cook_admission"]["owner_requeue"] = json!({
+            "reason": reason,
+            "previous_intent_id": stored.metadata["execution_scheduling"]["current_intent_id"],
+            "previous_owner_pid": stored.owner_pid(),
+            "requeued_at": now_timestamp(),
+        });
+        prepared.updated_at = Some(now_timestamp());
+        let not_before = Some((chrono::Utc::now() + chrono::Duration::seconds(2)).to_rfc3339());
+        if let Err(error) = crate::agent_task_service::prepare_execution_intent(
+            lifecycle_store,
+            &mut prepared,
+            not_before,
+        ) {
+            intent_error = Some(error);
+            return None;
+        }
+        Some(AgentTaskTransition::Advance {
+            kind: AgentTaskAdvance::Requeue,
+            prepared: Box::new(prepared),
+        })
+    })?;
+    if let Some(error) = intent_error {
+        return Err(error);
+    }
+    Ok(requeued.is_some())
 }
 
 // The ambient `expire_detached_cook_admission()` shim that used to sit here is
@@ -5077,6 +5158,16 @@ fn converge_resolved_run_in_store(
     }
     if has_expired_pending_runner_submission_intent(&record, chrono::Utc::now()) {
         let _ = expire_unaccepted_lab_handoff_in_store(lifecycle_store, resolved_run_id)?;
+        record = lifecycle_store.read_record(resolved_run_id)?;
+    }
+    // A queued Cook admission whose claiming step exited before anything
+    // materialized is daemon work, not a stale owner (#18377).
+    if has_orphaned_unmaterialized_cook_admission(&record)
+        && requeue_orphaned_unmaterialized_cook_admission_in_store(
+            lifecycle_store,
+            resolved_run_id,
+        )?
+    {
         record = lifecycle_store.read_record(resolved_run_id)?;
     }
     // A daemon can evict a completed job from its active store before a restarted

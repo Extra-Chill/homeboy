@@ -3593,6 +3593,30 @@ fn unmaterialized_cook_admission_maps_runner_readiness_to_honest_states() {
             "lab-a is at capacity; waiting for a free slot".to_string()
         )
     );
+    // Host pressure with free slots is not "at capacity" (#18377).
+    assert_eq!(
+        unmaterialized_admission_state(Some(&readiness("capacity_blocked", &["pressure"]))),
+        (
+            "queued",
+            "lab-a is under host resource pressure; waiting for it to clear".to_string()
+        )
+    );
+    assert_eq!(
+        cook_runner_readiness_label(Some(&readiness("capacity_blocked", &["pressure"]))),
+        "pressure_blocked"
+    );
+    assert_eq!(
+        cook_runner_readiness_label(Some(&readiness(
+            "capacity_blocked",
+            &["capacity_reached", "pressure"]
+        ))),
+        "capacity_blocked"
+    );
+    assert_eq!(
+        cook_runner_readiness_label(Some(&readiness("connected_ready", &[]))),
+        "connected_ready"
+    );
+    assert_eq!(cook_runner_readiness_label(None), "absent");
     assert_eq!(
         unmaterialized_admission_state(Some(&readiness("stale", &["lab-a admission is stale"]))),
         (

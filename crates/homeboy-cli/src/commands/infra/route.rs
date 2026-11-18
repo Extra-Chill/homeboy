@@ -1010,11 +1010,7 @@ fn admit_unmaterialized_cook(
         .run_id
         .clone()
         .unwrap_or_else(|| format!("agent-task-{}", uuid::Uuid::new_v4()));
-    let readiness_state = preflight
-        .lab_readiness
-        .as_ref()
-        .map(|value| value.state.as_str())
-        .unwrap_or("absent");
+    let readiness_state = cook_runner_readiness_label(preflight.lab_readiness.as_ref());
     let (state, reason) = unmaterialized_admission_state(preflight.lab_readiness.as_ref());
     let digest_json =
         |value: serde_json::Value| admission_digest(serde_json::to_vec(&value).unwrap_or_default());
@@ -2717,12 +2713,43 @@ fn unmaterialized_admission_state(
             "queued",
             format!("admitted to {runner}; waiting for execution scheduling"),
         ),
+        Some("capacity_blocked") if readiness.is_some_and(is_pressure_only) => (
+            "queued",
+            format!("{runner} is under host resource pressure; waiting for it to clear"),
+        ),
         Some("capacity_blocked") => (
             "queued",
             reported(format!("{runner} is at capacity; waiting for a free slot")),
         ),
         Some("stale") => ("blocked_runner_stale", reported(unavailable())),
         _ => ("blocked_runner_unavailable", reported(unavailable())),
+    }
+}
+
+/// A `capacity_blocked` readiness whose only cause is host pressure: the
+/// runner still publishes free slots, so it is not at capacity (#18377).
+fn is_pressure_only(
+    readiness: &homeboy::core::parsed_command_preflight::LabReadinessSnapshot,
+) -> bool {
+    readiness.state == "capacity_blocked"
+        && readiness.reasons.iter().any(|reason| reason == "pressure")
+        && !readiness
+            .reasons
+            .iter()
+            .any(|reason| reason == "capacity_reached")
+}
+
+/// The `runner_readiness` a queued Cook admission reports. Readiness labels
+/// pressure and exhausted slots alike `capacity_blocked`; the Cook result names
+/// the one it observed, so it never claims capacity is exhausted while the
+/// runner publishes free slots (#18377).
+fn cook_runner_readiness_label(
+    readiness: Option<&homeboy::core::parsed_command_preflight::LabReadinessSnapshot>,
+) -> &str {
+    match readiness {
+        Some(readiness) if is_pressure_only(readiness) => "pressure_blocked",
+        Some(readiness) => readiness.state.as_str(),
+        None => "absent",
     }
 }
 

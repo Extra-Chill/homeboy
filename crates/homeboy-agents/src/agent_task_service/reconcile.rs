@@ -625,6 +625,49 @@ pub(crate) fn reconcile_run_in_store(
                             continue;
                         }
                     }
+                    // A queued Cook admission is durable daemon work. If the
+                    // exact step that claimed it exited before materializing
+                    // anything, return it to the daemon's admission queue
+                    // rather than failing it as an ownerless handoff (#18377).
+                    if agent_task_lifecycle::has_orphaned_unmaterialized_cook_admission(&refreshed)
+                    {
+                        match agent_task_lifecycle::requeue_orphaned_unmaterialized_cook_admission_in_store(
+                            lifecycle_store,
+                            resolved_run_id,
+                        ) {
+                            Ok(requeued) => {
+                                if requeued {
+                                    reconciled += 1;
+                                }
+                                runs.push(AgentTaskReconcileRun {
+                                    run_id: resolved_run_id.clone(),
+                                    liveness,
+                                    source: run.source,
+                                    authoritative_state: rooted_status(
+                                        lifecycle_store,
+                                        resolved_run_id,
+                                    )?
+                                    .state(),
+                                    stale_reason: run.stale_reason,
+                                    action: if requeued { "requeued" } else { "no-op" },
+                                    error: None,
+                                });
+                            }
+                            Err(error) => {
+                                failed += 1;
+                                runs.push(AgentTaskReconcileRun {
+                                    run_id: resolved_run_id.clone(),
+                                    liveness,
+                                    source: run.source,
+                                    authoritative_state: refreshed.state(),
+                                    stale_reason: run.stale_reason,
+                                    action: "failed",
+                                    error: Some(error.message),
+                                });
+                            }
+                        }
+                        continue;
+                    }
                     let expired_detached_admission =
                         agent_task_lifecycle::has_expired_detached_cook_admission(
                             &refreshed,
