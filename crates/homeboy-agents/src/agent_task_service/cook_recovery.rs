@@ -1439,9 +1439,10 @@ fn blocked_phase_failure(value: &Value) -> Option<Value> {
 fn replace_gates_inputs_required(run_id: &str) -> Error {
     Error::validation_invalid_argument(
         "replace-gates",
-        "replacement gates need explicit operator inputs: --authorize-external-proof <TEXT> with corrected gates (--verify/--verify-file) or candidate-bound proof (--promotion @FILE)",
+        "the candidate failed its recorded gates: re-run the same gates with --regate (for example after a flaky test), or replace them with explicit operator inputs: --authorize-external-proof <TEXT> with corrected gates (--verify/--verify-file) or candidate-bound proof (--promotion @FILE)",
         Some(run_id.to_string()),
         Some(vec![
+            format!("homeboy agent-task recover {run_id} --regate"),
             format!(
                 "homeboy agent-task recover {run_id} --authorize-external-proof <AUTHORIZATION> --verify '<CANDIDATE-BOUND COMMAND>'"
             ),
