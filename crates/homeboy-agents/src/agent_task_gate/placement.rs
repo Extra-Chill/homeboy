@@ -406,6 +406,10 @@ impl RunnerBuildSkew {
     /// command that converges them.
     pub fn error(&self, runner_id: &str) -> Error {
         let refresh = format!("homeboy runner refresh-homeboy {runner_id}");
+        let next_action = format!(
+            "converge controller Homeboy {} and runner `{runner_id}` Homeboy {} with `{refresh}` (runner behind) or `homeboy upgrade` (controller behind), then `homeboy agent-task recover` re-gates the preserved candidate",
+            self.controller, self.runner
+        );
         Error::new(
             homeboy_core::ErrorCode::RunnerVersionSkew,
             format!(
@@ -418,9 +422,29 @@ impl RunnerBuildSkew {
                 "controller_version": self.controller,
                 "runner_version": self.runner,
                 "convergence_commands": [refresh, "homeboy upgrade"],
+                "next_action": next_action,
             }),
         )
     }
+}
+
+/// Whether `error` is the controller/runner [`RunnerBuildSkew`] a Lab gate
+/// placement observed, as opposed to a provenance build skew inside the
+/// runner, which keeps its own semantics.
+fn is_runner_build_skew(error: &Error) -> bool {
+    error.code == homeboy_core::ErrorCode::RunnerVersionSkew
+        && error.details.get("controller_version").is_some()
+        && error.details.get("runner_version").is_some()
+}
+
+/// A skewed runner converges on its own soon after a refresh (#18434,
+/// #18448), so the gate waits for it like it waits through pressure instead
+/// of failing the Cook (#18376).
+fn awaiting_runner_convergence(mut error: Error) -> Error {
+    error.details["stage"] = serde_json::json!("runner_convergence");
+    error.details["transient"] = serde_json::json!(true);
+    error.retryable = Some(true);
+    error
 }
 
 /// Explain a receipt the runner could not bind with `runner.version_skew`
@@ -641,7 +665,8 @@ pub fn gate_job_never_spawned(
 
 /// Whether `error` is a Lab gate *transport* failure: the runner never judged
 /// the candidate (promisor hydration, a lost terminal receipt, a runner that
-/// stayed under pressure or disconnected). It is infrastructure, distinct from
+/// stayed under pressure or disconnected, a runner on another Homeboy build
+/// that has not converged yet). It is infrastructure, distinct from
 /// a gate that ran and failed, from a runner that answered "not ready" for a
 /// missing toolchain, and from a configuration error no retry can fix. A Cook
 /// never discards or blocks provider work on it: the gates re-observe the
@@ -655,11 +680,8 @@ pub fn is_lab_gate_transport_failure(error: &Error) -> bool {
         && error.retryable != Some(false)
         && details.get("pre_handoff_configuration_error") != Some(&serde_json::json!(true))
         && details.get("stage").and_then(serde_json::Value::as_str) != Some("readiness")
-        && !matches!(
-            error.code,
-            homeboy_core::ErrorCode::RunnerVersionSkew
-                | homeboy_core::ErrorCode::GateRuntimeUnavailable
-        )
+        && error.code != homeboy_core::ErrorCode::GateRuntimeUnavailable
+        && (error.code != homeboy_core::ErrorCode::RunnerVersionSkew || is_runner_build_skew(error))
 }
 
 fn is_retryable_pre_spawn_failure(error: &Error) -> bool {
@@ -674,21 +696,56 @@ fn is_retryable_pre_spawn_failure(error: &Error) -> bool {
 /// Every Lab gate execution, readiness preflight included, waits through
 /// transient substrate refusals such as pressure instead of failing the Cook
 /// (#17776, #18058), and re-admits a gate whose runner job never spawned
-/// within a bounded budget (#18121).
+/// within a bounded budget (#18121). A receipt the runner could not bind
+/// because it runs another Homeboy build waits, within the same budget, for
+/// the runner to converge and then re-gates; past the budget it is the same
+/// candidate-preserving transport non-execution (#18376).
 fn execute_through_substrate_waits(
     cwd: &Path,
     request: &LabGateRequest,
     supervision: Option<&GateSupervision>,
 ) -> Result<LabGateReceipt> {
+    execute_through_substrate_waits_within(
+        cwd,
+        request,
+        supervision,
+        homeboy_core::substrate_wait::SUBSTRATE_WAIT_DEADLINE,
+    )
+}
+
+fn execute_through_substrate_waits_within(
+    cwd: &Path,
+    request: &LabGateRequest,
+    supervision: Option<&GateSupervision>,
+    deadline: Duration,
+) -> Result<LabGateReceipt> {
     let cancelled = || supervision.is_some_and(|policy| (policy.is_cancelled)());
     let mut never_spawned = Vec::new();
+    let mut skewed = false;
     loop {
         let error = match homeboy_core::substrate_wait::wait_through(
             "Lab gate execution",
-            homeboy_core::substrate_wait::SUBSTRATE_WAIT_DEADLINE,
+            deadline,
             cancelled,
             |_, _| {},
-            || active_transport().execute(cwd, request, supervision),
+            || {
+                // While skewed, re-observe the runner build before spending
+                // another gate run on a receipt it cannot bind.
+                if skewed {
+                    verify_runner_build(&request.runner_id).map_err(awaiting_runner_convergence)?;
+                }
+                let receipt = active_transport().execute(cwd, request, supervision)?;
+                match request.verify_receipt(&receipt) {
+                    Err(error) if is_runner_build_skew(&error) => {
+                        skewed = true;
+                        Err(awaiting_runner_convergence(error))
+                    }
+                    _ => {
+                        skewed = false;
+                        Ok(receipt)
+                    }
+                }
+            },
         ) {
             Ok(receipt) => return Ok(receipt),
             Err(error) => error,
@@ -2050,10 +2107,14 @@ mod tests {
     }
 
     /// #18121: only non-execution counts. A configuration error no retry can
-    /// fix, a runner that answered "not ready", version skew and a missing
-    /// gate runtime all stay verdicts the Cook must act on.
+    /// fix, a runner that answered "not ready", a provenance build skew inside
+    /// the runner and a missing gate runtime all stay verdicts the Cook must
+    /// act on. Controller/runner version skew is not among them any more: the
+    /// runner never judged the candidate and converges on its own after a
+    /// refresh (#18434, #18448), so it is a transport failure that preserves
+    /// the candidate (#18376).
     #[test]
-    fn configuration_readiness_and_skew_failures_are_not_transport_failures() {
+    fn configuration_readiness_and_runtime_failures_are_not_transport_failures() {
         let configuration = preflight_through_failing_runner("misconfigured-runner", || {
             let mut error = Error::validation_invalid_argument(
                 "secret_env",
@@ -2074,15 +2135,166 @@ mod tests {
         );
         assert!(!is_lab_gate_transport_failure(&not_ready));
 
+        let provenance =
+            homeboy_core::build_identity::ProvenanceBuildSkew::new("homeboy a", "homeboy b")
+                .error(Some("skew-runner"));
+        let provenance = gate_execute_unavailable(provenance, "transport", None);
+        assert!(!is_lab_gate_transport_failure(&provenance));
+
+        let runtime = super::super::gate_runtime::unavailable("php -v", "php", "lab");
+        assert!(!is_lab_gate_transport_failure(&runtime));
+    }
+
+    /// #18376: controller/runner version skew from Lab gate placement is a
+    /// transport failure: the runner never judged the candidate.
+    #[test]
+    fn runner_version_skew_is_a_transport_failure() {
         let skew = RunnerBuildSkew {
             controller: "0.1.0".to_string(),
             runner: "0.0.9".to_string(),
         }
         .error("skew-runner");
-        assert!(!is_lab_gate_transport_failure(&skew));
+        assert!(is_lab_gate_transport_failure(&skew));
+        let wrapped = gate_execute_unavailable(skew, "receipt_verification", None);
+        assert!(is_lab_gate_transport_failure(&wrapped));
+    }
 
-        let runtime = super::super::gate_runtime::unavailable("php -v", "php", "lab");
-        assert!(!is_lab_gate_transport_failure(&runtime));
+    /// A runner on another Homeboy build whose receipts do not bind until its
+    /// build has been observed skewed `skewed_observations` times.
+    struct ConvergingRunner {
+        previous: Arc<dyn LabGateTransport>,
+        skewed_observations: usize,
+        observations: std::sync::atomic::AtomicUsize,
+        executions: std::sync::atomic::AtomicUsize,
+    }
+    impl ConvergingRunner {
+        fn converged(&self) -> bool {
+            self.observations.load(std::sync::atomic::Ordering::SeqCst) > self.skewed_observations
+        }
+    }
+    impl LabGateTransport for ConvergingRunner {
+        fn declared_runner(&self, command: &str) -> Result<Option<String>> {
+            self.previous.declared_runner(command)
+        }
+        fn build_skew(&self, runner_id: &str) -> Result<Option<RunnerBuildSkew>> {
+            if runner_id != "converging-runner" {
+                return self.previous.build_skew(runner_id);
+            }
+            let observation = self
+                .observations
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            Ok(
+                (observation < self.skewed_observations).then(|| RunnerBuildSkew {
+                    controller: "0.458.0".to_string(),
+                    runner: "0.457.2".to_string(),
+                }),
+            )
+        }
+        fn execute(
+            &self,
+            cwd: &Path,
+            request: &LabGateRequest,
+            supervision: Option<&GateSupervision>,
+        ) -> Result<LabGateReceipt> {
+            if request.runner_id != "converging-runner" {
+                return self.previous.execute(cwd, request, supervision);
+            }
+            self.executions
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            let mut receipt =
+                execute_with_context(request.clone(), cwd, &runner_context("converging-runner"))?;
+            if !self.converged() {
+                receipt.request_sha256 = "another-release-request".to_string();
+            }
+            Ok(receipt)
+        }
+    }
+
+    fn converging_runner(skewed_observations: usize) -> Arc<ConvergingRunner> {
+        let transport = Arc::new(ConvergingRunner {
+            previous: active_transport(),
+            skewed_observations,
+            observations: std::sync::atomic::AtomicUsize::new(0),
+            executions: std::sync::atomic::AtomicUsize::new(0),
+        });
+        register_lab_gate_transport(transport.clone());
+        transport
+    }
+
+    fn converging_request(root: &Path) -> LabGateRequest {
+        repository(root);
+        let mut request = request(root);
+        request.runner_id = "converging-runner".to_string();
+        request.argv = vec!["true".to_string()];
+        request
+    }
+
+    /// #18376: a skewed runner is waited out like pressure; once the next
+    /// observation is aligned the gate re-runs and its verdict counts.
+    #[test]
+    fn version_skew_is_waited_out_then_the_gate_runs() {
+        homeboy_core::test_support::with_isolated_home(|_| {
+            let transport = converging_runner(1);
+            let root = tempfile::tempdir().unwrap();
+            let request = converging_request(root.path());
+
+            let report = dispatch(root.path(), &request, None).unwrap();
+
+            assert_eq!(report.status, AgentTaskGateStatus::Succeeded, "{report:?}");
+            assert_eq!(
+                transport
+                    .executions
+                    .load(std::sync::atomic::Ordering::SeqCst),
+                2
+            );
+        });
+    }
+
+    /// #18376: a skew that outlasts the wait is the recoverable transport
+    /// non-execution, naming both versions and the convergence commands.
+    #[test]
+    fn persistent_version_skew_ends_recoverable_with_convergence_commands() {
+        homeboy_core::test_support::with_isolated_home(|_| {
+            converging_runner(usize::MAX);
+            let root = tempfile::tempdir().unwrap();
+            let request = converging_request(root.path());
+
+            let error = execute_through_substrate_waits_within(
+                root.path(),
+                &request,
+                None,
+                Duration::from_millis(100),
+            )
+            .expect_err("the runner never converged");
+            let error = gate_execute_unavailable(error, "transport", None);
+
+            assert_eq!(error.code, homeboy_core::ErrorCode::RunnerVersionSkew);
+            assert!(is_lab_gate_transport_failure(&error), "{error:?}");
+            assert_eq!(error.retryable, Some(true));
+            assert_eq!(error.details["stage"], "runner_convergence");
+            assert_eq!(error.details["controller_version"], "0.458.0");
+            assert_eq!(error.details["runner_version"], "0.457.2");
+            assert_eq!(
+                error.details["convergence_commands"],
+                serde_json::json!([
+                    "homeboy runner refresh-homeboy converging-runner",
+                    "homeboy upgrade"
+                ])
+            );
+            let next_action = error.details["next_action"].as_str().unwrap();
+            assert!(next_action.contains("homeboy runner refresh-homeboy converging-runner"));
+            assert!(next_action.contains("agent-task recover"));
+
+            let report = non_execution_report(&request, &error);
+            assert_eq!(report.status, AgentTaskGateStatus::Unavailable);
+            let receipt = report.lab_receipt.as_ref().unwrap();
+            assert_eq!(receipt["executed"], false);
+            assert_eq!(receipt["retryable"], true);
+            assert_eq!(
+                receipt["diagnostic"]["details"]["convergence_commands"][0],
+                "homeboy runner refresh-homeboy converging-runner"
+            );
+        });
     }
 
     /// A runner transport whose gate jobs expire before spawn `expiries` times.
