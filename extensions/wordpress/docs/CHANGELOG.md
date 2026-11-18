@@ -2,6 +2,11 @@
 
 All notable changes to the **wordpress** extension will be documented in this file.
 
+## [3.56.1] - 2026-11-18
+
+### Fixed
+- apply local workspace dependencies before consumer lifecycle and prepare steps
+
 ## [3.56.0] - 2026-11-17
 
 ### Added
