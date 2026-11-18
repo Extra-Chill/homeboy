@@ -500,11 +500,20 @@ fn require_resolve_only_capability(
         return Ok(());
     }
     let command = format!("homeboy runner refresh-homeboy {runner_id}");
+    // `controller_version`/`runner_version` mark this as runner build skew,
+    // so the gate waits for convergence (#18477) instead of failing the Cook.
+    let runner_version = body
+        .map(|body| body.get("data").unwrap_or(body))
+        .and_then(|data| data.get("version"))
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or("unknown");
     Err(Error::new(
         homeboy_core::ErrorCode::RunnerVersionSkew,
         format!("runner `{runner_id}` does not advertise `{id}` v1; run `{command}`"),
         serde_json::json!({
             "runner_id": runner_id,
+            "controller_version": crate::controller_identity::compatibility_controller_identity().version,
+            "runner_version": runner_version,
             "required_capability": {"id": id, "version": 1},
             "gate_disposition": "unavailable",
             "stage": "readiness_capability",
@@ -1275,6 +1284,10 @@ mod resolve_only_capability_tests {
                 .expect_err("old runner must not receive resolve_only");
             assert_eq!(error.code, homeboy_core::ErrorCode::RunnerVersionSkew);
             assert_eq!(error.details["gate_disposition"], "unavailable");
+            // Both versions mark this as runner build skew, which the gate
+            // waits through as convergence (#18477) rather than failing.
+            assert!(error.details["controller_version"].is_string());
+            assert!(error.details["runner_version"].is_string());
             assert_eq!(
                 error.details["convergence_commands"][0],
                 "homeboy runner refresh-homeboy lab"
