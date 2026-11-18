@@ -1216,7 +1216,14 @@ impl CliRuntime {
         // The replay worker carries a one-use claim token. Background startup
         // reconcilers spawn sibling Homeboy processes, which would inherit and
         // race to consume that exact token before the supervised Cook runs.
-        if command_capability == CommandCapability::Mutation {
+        // `daemon serve` starts no child before it claims its delegated cgroup,
+        // so it schedules this pass itself once it has (#18449).
+        if command_capability == CommandCapability::Mutation
+            && matches
+                .subcommand()
+                .and_then(|(name, sub)| (name == "daemon").then(|| sub.subcommand_name())?)
+                != Some("serve")
+        {
             schedule_controller_fallback_reconciliation();
         }
 
@@ -2127,7 +2134,7 @@ fn spawn_runner_exec_recovery_child(
     crate::core::process::spawn_detached(&mut command).map(|_| ())
 }
 
-fn schedule_controller_fallback_reconciliation() {
+pub(crate) fn schedule_controller_fallback_reconciliation() {
     // The production binary can safely re-exec itself; the unit-test binary
     // would recursively launch the complete test harness and escape nextest.
     if cfg!(test) {

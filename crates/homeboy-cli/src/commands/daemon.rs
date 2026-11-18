@@ -1101,6 +1101,7 @@ fn serve(addr: &str) -> CmdResult<DaemonOutput> {
             reason
         ),
     }
+    crate::cli_runtime::schedule_controller_fallback_reconciliation();
     let parsed = daemon::parse_bind_addr(addr)?;
     if !is_runner_hosted_daemon() {
         if let Err(error) = std::thread::Builder::new()
