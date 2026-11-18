@@ -33,8 +33,7 @@ use homeboy_lab_contract::lab::transport_failure::LabTransportAttemptReceipt;
 
 use super::super::CmdResult;
 use super::args::{
-    CancelArgs, DiagnoseArgs, QuarantineArgs, RearmArgs, ReconcileArgs, ReplayProviderBoundaryArgs,
-    StatusArgs,
+    CancelArgs, DiagnoseArgs, ReconcileArgs, StatusArgs,
 };
 use super::candidate::classify_candidates;
 use crate::commands::utils::response::{
@@ -3137,7 +3136,6 @@ struct DiagnosedFailure {
     task_id: String,
     classification: AgentTaskFailureClassification,
     phase: Option<String>,
-    provider_boundary_exists: bool,
     provider_budget_consumed: bool,
 }
 
@@ -3170,10 +3168,6 @@ fn diagnosed_failures(aggregate: &AgentTaskAggregate) -> Vec<DiagnosedFailure> {
                 .get("phase")
                 .and_then(Value::as_str)
                 .map(str::to_string),
-            provider_boundary_exists: outcome
-                .evidence_refs
-                .iter()
-                .any(|evidence| evidence.kind == "executor-input"),
             provider_budget_consumed: outcome.metadata["provider_budget_consumed"] == true,
         });
     }
@@ -3533,21 +3527,9 @@ fn classification_next_actions(
         // Capacity admission records its scoped cleanup plan in the failure
         // evidence. Do not offer a retry until an operator has inspected it.
         AgentTaskFailureClassification::Capacity => vec![failure_evidence],
-        // The request the provider received was malformed. Replaying the
-        // boundary shows the exact rejected input; a retry would resend it.
-        AgentTaskFailureClassification::InvalidInput => {
-            let mut actions = vec![failure_evidence];
-            if failure.provider_boundary_exists {
-                actions.push(
-                    CommandNextAction::new(
-                        format!("replay the provider boundary for {}", failure.task_id),
-                        format!("homeboy agent-task replay-provider-boundary {run} --task {task}"),
-                    )
-                    .with_kind(CommandNextActionKind::Show),
-                );
-            }
-            actions
-        }
+        // The request the provider received was malformed. The failure
+        // evidence shows the rejected input; a retry would resend it.
+        AgentTaskFailureClassification::InvalidInput => vec![failure_evidence],
         // The work ran and failed (gate/verify failure, harvest failure,
         // required typed artifacts missing): show what the failing step
         // recorded and what it produced before deciding to retry.
@@ -3646,14 +3628,7 @@ fn missing_artifact_next_actions(
         let task = quote_arg(task_id);
         actions.push(
             CommandNextAction::new(
-                format!("show the declarations {task_id} was given for {names}"),
-                format!("homeboy agent-task replay-provider-boundary {run} --task {task}"),
-            )
-            .with_kind(CommandNextActionKind::Show),
-        );
-        actions.push(
-            CommandNextAction::new(
-                format!("show failure evidence for {task_id}"),
+                format!("show failure evidence for {task_id} (missing {names})"),
                 format!("homeboy runs evidence {run} --task {task} --failure-only"),
             )
             .with_kind(CommandNextActionKind::Show),
@@ -4218,7 +4193,6 @@ mod diagnose_actionable_tests {
             task_id: "task-a".to_string(),
             classification,
             phase: None,
-            provider_boundary_exists: true,
             provider_budget_consumed: false,
         }
     }
@@ -4385,27 +4359,12 @@ mod diagnose_actionable_tests {
     }
 
     #[test]
-    fn provider_malformed_input_with_a_boundary_replays_the_rejected_input() {
-        let actions = actions_for(AgentTaskFailureClassification::InvalidInput, None);
-
-        assert_eq!(
-            commands(&actions),
-            vec![
-                "homeboy runs evidence run-1 --task task-a --failure-only",
-                "homeboy agent-task replay-provider-boundary run-1 --task task-a",
-            ]
-        );
-        assert!(repair_commands(&actions).is_empty());
-    }
-
-    #[test]
-    fn invalid_input_without_a_provider_boundary_never_offers_replay() {
+    fn invalid_input_shows_failure_evidence_and_never_offers_retry() {
         let retry = owner_bound_retry_action("run-1", None, json!({ "placement": "local" }));
         let failure = DiagnosedFailure {
             task_id: "task-a".to_string(),
             classification: AgentTaskFailureClassification::InvalidInput,
             phase: None,
-            provider_boundary_exists: false,
             provider_budget_consumed: false,
         };
 
@@ -4480,7 +4439,6 @@ mod diagnose_actionable_tests {
             commands(&actions),
             vec![
                 "homeboy runs artifacts run-1 --full",
-                "homeboy agent-task replay-provider-boundary run-1 --task task-b",
                 "homeboy runs evidence run-1 --task task-b --failure-only",
             ]
         );
@@ -4527,7 +4485,6 @@ mod diagnose_actionable_tests {
                 task_id: "task with spaces".to_string(),
                 classification: AgentTaskFailureClassification::InvalidInput,
                 phase: None,
-                provider_boundary_exists: true,
                 provider_budget_consumed: false,
             }],
             &[],
@@ -4541,7 +4498,6 @@ mod diagnose_actionable_tests {
             commands(&actions),
             vec![
                 "homeboy runs evidence 'run with spaces' --task 'task with spaces' --failure-only",
-                "homeboy agent-task replay-provider-boundary 'run with spaces' --task 'task with spaces'",
             ]
         );
     }
@@ -4606,94 +4562,6 @@ fn attach_collection_budget(
         "output_budget".to_string(),
         serde_json::to_value(metadata).unwrap_or(Value::Null),
     );
-}
-
-pub(super) fn replay_provider_boundary(args: ReplayProviderBoundaryArgs) -> CmdResult<Value> {
-    let artifacts = agent_task_service::artifacts(&args.run_id)?;
-    let aggregate = completed_run_aggregate(&args.run_id).transpose()?;
-    let plan = agent_task_lifecycle::load_plan(&args.run_id).ok();
-    let evidence_entries = evidence_refs_with_tasks(&artifacts.evidence_refs, aggregate.as_ref());
-    let candidates = evidence_entries
-        .into_iter()
-        .filter(|(evidence_ref, task_id)| {
-            evidence_ref.kind == "executor-input"
-                && args
-                    .task
-                    .as_deref()
-                    .is_none_or(|requested| task_id.as_deref() == Some(requested))
-        })
-        .collect::<Vec<_>>();
-
-    let candidate_count = candidates.len();
-    let hydrate = |evidence_ref: &AgentTaskEvidenceRef, task_id: &Option<String>| {
-        agent_task_service::hydrate_evidence_ref(
-            &args.run_id,
-            evidence_ref,
-            task_id.as_deref(),
-            plan.as_ref(),
-            aggregate.as_ref(),
-        )
-    };
-    let Some((evidence_ref, task_id, hydrated)) = candidates
-        .iter()
-        .filter(|(evidence_ref, _)| !evidence_ref.uri.contains("/plan#"))
-        .find_map(|(evidence_ref, task_id)| {
-            let hydrated = hydrate(evidence_ref, task_id);
-            (hydrated.status == "ok"
-                && !hydrated.truncated
-                && hydrated.content.get("format").and_then(Value::as_str) == Some("json"))
-            .then(|| (evidence_ref.clone(), task_id.clone(), hydrated))
-        })
-        .or_else(|| {
-            candidates.first().map(|(evidence_ref, task_id)| {
-                let hydrated = hydrate(evidence_ref, task_id);
-                (evidence_ref.clone(), task_id.clone(), hydrated)
-            })
-        })
-    else {
-        return Err(homeboy::core::Error::validation_invalid_argument(
-            "agent-task replay-provider-boundary",
-            "no executor-input evidence was found for this run",
-            Some(args.run_id),
-            Some(vec![
-                "Run the task through an executor that records latest raw executor input evidence.".to_string(),
-                "Pass --task when inspecting a multi-task run and only one task should be selected.".to_string(),
-            ]),
-        ));
-    };
-
-    let input = hydrated_executor_input_value(&hydrated)?;
-    let boundary = provider_boundary_projection(&input);
-    let report = json!({
-        "schema": "homeboy/agent-task-provider-boundary-replay/v1",
-        "run_id": args.run_id,
-        "task_id": task_id,
-        "selected_evidence": {
-            "kind": evidence_ref.kind,
-            "label": evidence_ref.label,
-            "uri": evidence_ref.uri,
-        },
-        "selection": {
-            "matching_executor_input_count": candidate_count,
-            "rule": "prefer concrete executor-input evidence over plan-level input refs; otherwise first matching ref wins",
-        },
-        "normalized_provider_boundary": boundary,
-    });
-    let evidence_uri = agent_task_service::persist_provider_boundary_replay_evidence(&report);
-    let report = match evidence_uri {
-        Some(uri) => {
-            let mut report = report;
-            report["typed_evidence"] = json!({
-                "kind": "provider-boundary-replay",
-                "uri": uri,
-                "label": "provider boundary replay inspection",
-            });
-            report
-        }
-        None => report,
-    };
-
-    Ok((report, 0))
 }
 
 pub(super) fn cancel(args: CancelArgs) -> CmdResult<Value> {
@@ -4775,210 +4643,6 @@ mod cancel_exit_code_tests {
             .expect("exit code"),
             TIMEOUT_EXIT_CODE
         );
-    }
-}
-
-pub(super) fn quarantine(args: QuarantineArgs) -> CmdResult<Value> {
-    let idempotency_key = args
-        .idempotency_key
-        .unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
-    let acknowledgement = homeboy::agents::orchestration::execute_action_from_current_environment(
-        &args.run_id,
-        &homeboy_control_plane_contract::ControlPlaneActionRequest {
-            schema: homeboy_control_plane_contract::CONTROL_PLANE_ACTION_REQUEST_SCHEMA.to_string(),
-            action: homeboy_control_plane_contract::ControlPlaneAction::Quarantine,
-            effect_id: homeboy_control_plane_contract::action_effect_id(
-                "cli",
-                &args.run_id,
-                "quarantine",
-                &idempotency_key,
-            ),
-            idempotency_key,
-            actor: "homeboy-cli".to_string(),
-            expected_updated_at: None,
-            parameters: homeboy_control_plane_contract::ControlPlaneActionPayload {
-                schema: homeboy_control_plane_contract::CONTROL_PLANE_QUARANTINE_PARAMETERS_SCHEMA
-                    .to_string(),
-                data: json!({ "reason": args.reason }),
-            },
-            confirmed: args.confirm,
-        },
-    )?;
-    let exit = i32::from(
-        acknowledgement.outcome
-            == homeboy_control_plane_contract::ControlPlaneActionOutcome::Failed,
-    );
-    Ok((
-        serde_json::to_value(acknowledgement).unwrap_or(Value::Null),
-        exit,
-    ))
-}
-
-pub(super) fn rearm(args: RearmArgs) -> CmdResult<Value> {
-    let idempotency_key = args
-        .idempotency_key
-        .unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
-    let acknowledgement = homeboy::agents::orchestration::execute_action_from_current_environment(
-        &args.run_id,
-        &homeboy_control_plane_contract::ControlPlaneActionRequest {
-            schema: homeboy_control_plane_contract::CONTROL_PLANE_ACTION_REQUEST_SCHEMA.to_string(),
-            action: homeboy_control_plane_contract::ControlPlaneAction::Rearm,
-            effect_id: homeboy_control_plane_contract::action_effect_id(
-                "cli",
-                &args.run_id,
-                "rearm",
-                &idempotency_key,
-            ),
-            idempotency_key,
-            actor: "homeboy-cli".to_string(),
-            expected_updated_at: None,
-            parameters: homeboy_control_plane_contract::ControlPlaneActionPayload::empty(),
-            confirmed: args.confirm,
-        },
-    )?;
-    let exit = i32::from(
-        acknowledgement.outcome
-            == homeboy_control_plane_contract::ControlPlaneActionOutcome::Failed,
-    );
-    Ok((
-        serde_json::to_value(acknowledgement).unwrap_or(Value::Null),
-        exit,
-    ))
-}
-
-fn hydrated_executor_input_value(
-    result: &agent_task_service::AgentTaskHydratedEvidence,
-) -> homeboy::core::Result<Value> {
-    if result.status != "ok" {
-        return Err(homeboy::core::Error::validation_invalid_argument(
-            "executor-input evidence",
-            "selected executor-input evidence could not be hydrated",
-            result.error.clone(),
-            None,
-        ));
-    }
-    if result.truncated {
-        return Err(homeboy::core::Error::validation_invalid_argument(
-            "executor-input evidence",
-            "selected executor-input evidence is truncated and cannot be replayed deterministically",
-            Some(result.uri.clone()),
-            None,
-        ));
-    }
-    match result.content.get("format").and_then(Value::as_str) {
-        Some("json") => Ok(result.content.get("value").cloned().unwrap_or(Value::Null)),
-        _ => Err(homeboy::core::Error::validation_invalid_argument(
-            "executor-input evidence",
-            "selected executor-input evidence is not JSON",
-            Some(result.uri.clone()),
-            None,
-        )),
-    }
-}
-
-fn provider_boundary_projection(input: &Value) -> Value {
-    let mut executor_config = input
-        .get("executor")
-        .and_then(|executor| executor.get("config"))
-        .cloned()
-        .unwrap_or(Value::Null);
-    normalize_runtime_env_path_aliases_for_replay(&mut executor_config);
-    let runtime_task = input
-        .get("inputs")
-        .and_then(|inputs| inputs.get("runtime_task"))
-        .cloned()
-        .unwrap_or(Value::Null);
-    let package_descriptor = runtime_task
-        .pointer("/input/package")
-        .or_else(|| input.pointer("/inputs/package_descriptor"))
-        .or_else(|| input.pointer("/metadata/package_descriptor"))
-        .cloned()
-        .unwrap_or(Value::Null);
-
-    json!({
-        "runtime_task": runtime_task,
-        "provider_config": executor_config,
-        "runtime_component_paths": executor_config.get("runtime_component_paths").cloned().unwrap_or(Value::Null),
-        "runtime_env": executor_config.get("runtime_env").cloned().unwrap_or(Value::Null),
-        "artifact_declarations": input.get("artifact_declarations").cloned().unwrap_or(Value::Null),
-        "package_descriptor": package_descriptor,
-    })
-}
-
-fn normalize_runtime_env_path_aliases_for_replay(config: &mut Value) {
-    let aliases = runtime_env_path_aliases_for_replay(config);
-    if aliases.is_empty() {
-        return;
-    }
-
-    let Some(root) = config.as_object_mut() else {
-        return;
-    };
-    let component_paths = root
-        .get("runtime_component_paths")
-        .and_then(Value::as_object)
-        .cloned()
-        .unwrap_or_default();
-    if component_paths.is_empty() {
-        return;
-    }
-
-    if !root.get("runtime_env").is_some_and(Value::is_object) {
-        root.insert(
-            "runtime_env".to_string(),
-            Value::Object(serde_json::Map::new()),
-        );
-    }
-
-    let Some(runtime_env) = root.get_mut("runtime_env").and_then(Value::as_object_mut) else {
-        return;
-    };
-    for (component_key, env_name) in aliases {
-        if let Some(selected_path) = component_paths
-            .get(&component_key)
-            .and_then(Value::as_str)
-            .map(str::to_string)
-        {
-            runtime_env.insert(env_name, Value::String(selected_path));
-        }
-    }
-}
-
-fn runtime_env_path_aliases_for_replay(config: &Value) -> Vec<(String, String)> {
-    let mut aliases = Vec::new();
-    if let Some(map) = config
-        .get("runtime_env_path_aliases")
-        .and_then(Value::as_object)
-    {
-        for (component_key, env_names) in map {
-            collect_runtime_env_aliases_for_replay(component_key, env_names, &mut aliases);
-        }
-    }
-    if let Some(map) = config.get("runtime_env_aliases").and_then(Value::as_object) {
-        for (env_name, component_key) in map {
-            if let Some(component_key) = component_key.as_str() {
-                aliases.push((component_key.to_string(), env_name.to_string()));
-            }
-        }
-    }
-    aliases
-}
-
-fn collect_runtime_env_aliases_for_replay(
-    component_key: &str,
-    value: &Value,
-    aliases: &mut Vec<(String, String)>,
-) {
-    match value {
-        Value::String(env_name) => aliases.push((component_key.to_string(), env_name.to_string())),
-        Value::Array(items) => {
-            for item in items {
-                if let Some(env_name) = item.as_str() {
-                    aliases.push((component_key.to_string(), env_name.to_string()));
-                }
-            }
-        }
-        _ => {}
     }
 }
 

@@ -313,15 +313,7 @@ fn execution_step_ordinary_retry_is_atomic_and_exact_executor_is_once_and_stale_
                 retry_preparation: None
             }
         ));
-        agent_task_lifecycle::quarantine_queued_run_exact_in_store(
-            &store,
-            &retry.run_id,
-            "test quarantine",
-        )
-        .unwrap();
-        assert!(!initial.authorizes(&store.read_record(&retry.run_id).unwrap()));
-        agent_task_lifecycle::rearm_quarantined_run_in_store(&store, &retry.run_id).unwrap();
-        assert_eq!(current_intent(&store, &retry.run_id).epoch, 2);
+        assert_eq!(current_intent(&store, &retry.run_id).epoch, 1);
         assert!(agent_task_lifecycle::defer_cook_runtime_admission_in_store(
             &store,
             &retry.run_id,
@@ -2404,7 +2396,7 @@ fn run_plan_record_run_id_preparation_preserves_component_worktree_branch_for_di
 }
 
 #[test]
-fn run_next_quarantines_missing_required_secret_before_claiming_and_runs_later_work() {
+fn run_next_skips_missing_required_secret_before_claiming_and_runs_later_work() {
     with_isolated_home(|_| {
         let mut plan = test_plan();
         plan.metadata = serde_json::json!({
@@ -2422,7 +2414,7 @@ fn run_next_quarantines_missing_required_secret_before_claiming_and_runs_later_w
 
         let result = run_next(Arc::new(SucceedingExecutor)).expect("eligible work runs");
         let record =
-            lifecycle_status("run-next-a-missing-secret").expect("quarantined record persisted");
+            lifecycle_status("run-next-a-missing-secret").expect("skipped record persisted");
 
         assert_eq!(
             result.value.expect("eligible aggregate").plan_id,
@@ -2451,10 +2443,6 @@ fn run_next_quarantines_missing_required_secret_before_claiming_and_runs_later_w
         assert_eq!(record.state(), RunExecutionState::Queued);
         assert_eq!(record.tasks[0].state(), ControlPlaneState::Queued);
         assert_eq!(record.lifecycle.execution.state, RunExecutionState::Queued);
-        assert_eq!(
-            record.metadata["queue_quarantine"]["error_code"],
-            "validation.invalid_argument"
-        );
         assert!(record.aggregate_path.is_none());
         assert_eq!(
             lifecycle_status("run-next-b-eligible")
@@ -2466,7 +2454,7 @@ fn run_next_quarantines_missing_required_secret_before_claiming_and_runs_later_w
 }
 
 #[test]
-fn run_next_quarantines_an_older_ineligible_record_and_executes_the_next_record() {
+fn run_next_skips_an_older_ineligible_record_and_executes_the_next_record() {
     with_isolated_home(|_| {
         agent_task_lifecycle::submit_plan(&test_plan(), Some("run-next-test-detached"))
             .expect("older record submitted");
@@ -2491,16 +2479,16 @@ fn run_next_quarantines_an_older_ineligible_record_and_executes_the_next_record(
             calls: Arc::clone(&calls),
         }))
         .expect("next eligible record executes");
-        let quarantined = agent_task_lifecycle::exact_record("run-next-test-detached")
-            .expect("quarantined record");
+        let skipped = agent_task_lifecycle::exact_record("run-next-test-detached")
+            .expect("skipped record");
 
         assert_eq!(calls.load(Ordering::SeqCst), 1);
         assert_eq!(result.value.expect("aggregate").plan_id, "service-plan");
         assert_eq!(result.skipped.len(), 1);
         assert_eq!(result.skipped[0].run_id, "run-next-test-detached");
-        assert_eq!(quarantined.state(), RunExecutionState::Queued);
+        assert_eq!(skipped.state(), RunExecutionState::Queued);
         assert_eq!(
-            quarantined.metadata["queue_quarantine"]["category"],
+            result.skipped[0].category,
             "queue_admission_preflight_failed"
         );
         assert_eq!(
@@ -2513,7 +2501,7 @@ fn run_next_quarantines_an_older_ineligible_record_and_executes_the_next_record(
 }
 
 #[test]
-fn run_next_bounds_stale_global_admission_and_reports_progress() {
+fn run_next_bounds_stale_global_admission_and_reports_skips() {
     with_isolated_home(|_| {
         for index in 0..agent_task_lifecycle::MAX_QUEUE_ADMISSION_RECORDS {
             let run_id = format!("bounded-stale-{index:03}");
@@ -2545,25 +2533,18 @@ fn run_next_bounds_stale_global_admission_and_reports_progress() {
             agent_task_lifecycle::MAX_QUEUE_ADMISSION_RECORDS
         );
 
-        let second =
-            run_next(Arc::new(SucceedingExecutor)).expect("next claim progresses to ready work");
-        assert_eq!(
-            second.value.expect("ready aggregate").plan_id,
-            "service-plan"
-        );
-        assert_eq!(second.queue_admission.inspected, 1);
-        assert!(!second.queue_admission.limit_reached);
         assert_eq!(
             lifecycle_status("bounded-ready")
                 .expect("ready status")
                 .state(),
-            RunExecutionState::Succeeded
+            RunExecutionState::Queued,
+            "work past the admission budget is not claimed by this call"
         );
     });
 }
 
 #[test]
-fn run_next_quarantines_stale_cook_identity_and_runs_later_work() {
+fn run_next_skips_stale_cook_identity_and_runs_later_work() {
     with_isolated_home(|_| {
         agent_task_lifecycle::submit_plan(&test_plan(), Some("stale-identity"))
             .expect("stale Cook record submitted");
@@ -2583,7 +2564,7 @@ fn run_next_quarantines_stale_cook_identity_and_runs_later_work() {
         );
         assert_eq!(result.skipped.len(), 1);
         assert_eq!(result.skipped[0].run_id, "stale-identity");
-        assert!(stale.metadata.get("queue_quarantine").is_some());
+        assert_eq!(stale.state(), RunExecutionState::Queued);
         assert_eq!(
             lifecycle_status("identity-ready")
                 .expect("ready status")
@@ -2640,7 +2621,7 @@ fn run_next_redacts_adversarial_provider_readiness_diagnostics_everywhere() {
         )
         .expect("adversarial readiness skip does not block eligible work");
         let record =
-            lifecycle_status("run-next-a-adversarial-readiness").expect("quarantined record");
+            lifecycle_status("run-next-a-adversarial-readiness").expect("skipped record");
         let status = agent_task_lifecycle::reconcile_status("run-next-a-adversarial-readiness")
             .expect("status projection");
         let logs = agent_task_lifecycle::logs("run-next-a-adversarial-readiness")
@@ -2657,28 +2638,11 @@ fn run_next_redacts_adversarial_provider_readiness_diagnostics_everywhere() {
             result.value.expect("eligible aggregate").plan_id,
             "service-plan"
         );
+        assert_eq!(record.state(), RunExecutionState::Queued);
         assert_eq!(
-            record.metadata["queue_quarantine"]["category"],
+            result.skipped[0].category,
             "queue_admission_preflight_failed"
         );
-        assert_eq!(
-            record.metadata["queue_quarantine"]["error_code"],
-            "validation.invalid_argument"
-        );
-        assert_eq!(
-            record.metadata["queue_quarantine"]["actor"],
-            "fleet-reconciler"
-        );
-        assert_eq!(
-            record.metadata["queue_quarantine"]["reason"],
-            "queued run failed admission preflight"
-        );
-        assert!(record.metadata["queue_quarantine"]["timestamp"].is_string());
-        assert!(record.metadata["queue_quarantine"]["recovery_action"].is_string());
-        assert!(logs.events.iter().any(|event| {
-            event.kind == "run.quarantined"
-                && event.data["provenance"]["cause"] == "admission_preflight_failed"
-        }));
         for leak in LEAKS {
             assert!(
                 !rendered.contains(leak),
@@ -2718,126 +2682,6 @@ fn run_submitted_selects_an_exact_run_id_without_claiming_older_queued_work() {
                 .expect("target record")
                 .state(),
             RunExecutionState::Succeeded
-        );
-    });
-}
-
-#[test]
-fn quarantine_and_cancellation_race_keeps_cancellation_terminal() {
-    with_isolated_home(|_| {
-        agent_task_lifecycle::submit_plan(&test_plan(), Some("quarantine-cancel-race"))
-            .expect("run submitted");
-        let barrier = Arc::new(Barrier::new(2));
-        let cancel_barrier = Arc::clone(&barrier);
-        let cancel = std::thread::spawn(move || {
-            cancel_barrier.wait();
-            agent_task_lifecycle::cancel_run("quarantine-cancel-race", Some("operator cancel"))
-        });
-        barrier.wait();
-        let quarantine = agent_task_lifecycle::quarantine_queued_run_exact_in_store(
-            &test_lifecycle_store(),
-            "quarantine-cancel-race",
-            "operator quarantine",
-        );
-
-        let cancelled = cancel.join().expect("cancellation thread completes");
-        let record = lifecycle_status("quarantine-cancel-race").expect("durable record");
-
-        assert!(cancelled.is_ok());
-        if quarantine.is_ok() {
-            assert_eq!(
-                record.metadata["queue_quarantine"]["category"],
-                "operator_quarantine"
-            );
-        }
-        assert_eq!(record.state(), RunExecutionState::Cancelled);
-        assert_eq!(record.metadata["cancel_reason"], "operator cancel");
-    });
-}
-
-#[test]
-fn quarantined_run_requires_explicit_rearm_before_it_is_eligible() {
-    with_isolated_home(|_| {
-        agent_task_lifecycle::submit_plan(&test_plan(), Some("quarantine-rearm"))
-            .expect("run submitted");
-        let operator_reason = format!("maintenance\n{}", "x".repeat(300));
-        let quarantined = agent_task_lifecycle::quarantine_queued_run_exact_in_store(
-            &test_lifecycle_store(),
-            "quarantine-rearm",
-            &operator_reason,
-        )
-        .expect("exact queued run quarantined");
-
-        assert_eq!(quarantined.state(), RunExecutionState::Queued);
-        assert!(!quarantined.state().is_terminal());
-        assert_eq!(
-            quarantined.metadata["queue_quarantine"]["category"],
-            "operator_quarantine"
-        );
-        assert_eq!(
-            quarantined.metadata["queue_quarantine"]["operator_reason"]
-                .as_str()
-                .expect("normalized operator reason")
-                .len(),
-            240
-        );
-        assert!(!quarantined.metadata["queue_quarantine"]["operator_reason"]
-            .as_str()
-            .expect("normalized operator reason")
-            .contains('\n'));
-        assert!(agent_task_lifecycle::mark_running("quarantine-rearm").is_err());
-
-        let rearmed = agent_task_lifecycle::rearm_quarantined_run_in_store(
-            &test_lifecycle_store(),
-            "quarantine-rearm",
-        )
-        .expect("exact quarantined run rearmed");
-        assert_eq!(rearmed.state(), RunExecutionState::Queued);
-        assert!(rearmed.metadata.get("queue_quarantine").is_none());
-    });
-}
-
-#[test]
-fn quarantine_and_rearm_reject_sanitized_aliases_without_mutating_the_literal_record() {
-    with_isolated_home(|_| {
-        agent_task_lifecycle::submit_plan(&test_plan(), Some("foo_bar"))
-            .expect("literal record submitted");
-
-        let quarantine_error = agent_task_lifecycle::quarantine_queued_run_exact_in_store(
-            &test_lifecycle_store(),
-            "foo/bar",
-            "bad",
-        )
-        .expect_err("sanitized alias rejected");
-        let unchanged = lifecycle_status("foo_bar").expect("literal record remains queued");
-        assert_eq!(
-            quarantine_error.code.as_str(),
-            "validation.invalid_argument"
-        );
-        assert_eq!(unchanged.state(), RunExecutionState::Queued);
-        assert!(unchanged.metadata.get("queue_quarantine").is_none());
-
-        agent_task_lifecycle::quarantine_queued_run_exact_in_store(
-            &test_lifecycle_store(),
-            "foo_bar",
-            "explicit quarantine",
-        )
-        .expect("literal record quarantined");
-        let rearm_error = agent_task_lifecycle::rearm_quarantined_run_in_store(
-            &test_lifecycle_store(),
-            "foo/bar",
-        )
-        .expect_err("sanitized alias rejected");
-        let quarantined = lifecycle_status("foo_bar").expect("quarantine remains intact");
-        assert_eq!(rearm_error.code.as_str(), "validation.invalid_argument");
-        assert_eq!(quarantined.state(), RunExecutionState::Queued);
-        assert_eq!(
-            quarantined.metadata["queue_quarantine"]["category"],
-            "operator_quarantine"
-        );
-        assert_eq!(
-            quarantined.metadata["queue_quarantine"]["operator_reason"],
-            "explicit quarantine"
         );
     });
 }
@@ -3838,12 +3682,12 @@ fn control_plane_action_rejects_idempotency_key_intent_mismatch() {
         let mut request = homeboy_control_plane_contract::ControlPlaneActionRequest {
             schema: homeboy_control_plane_contract::CONTROL_PLANE_ACTION_REQUEST_SCHEMA.to_string(),
             effect_id: homeboy_control_plane_contract::EffectId("test:same-key".to_string()),
-            action: homeboy_control_plane_contract::ControlPlaneAction::Quarantine,
+            action: homeboy_control_plane_contract::ControlPlaneAction::Cancel,
             idempotency_key: "same-key".to_string(),
             actor: "test".to_string(),
             expected_updated_at: None,
             parameters: homeboy_control_plane_contract::ControlPlaneActionPayload {
-                schema: homeboy_control_plane_contract::CONTROL_PLANE_QUARANTINE_PARAMETERS_SCHEMA
+                schema: homeboy_control_plane_contract::CONTROL_PLANE_CANCEL_PARAMETERS_SCHEMA
                     .to_string(),
                 data: serde_json::json!({ "reason": "first hold" }),
             },
@@ -3855,36 +3699,6 @@ fn control_plane_action_rejects_idempotency_key_intent_mismatch() {
         let error = crate::orchestration::execute_action_from_current_environment(run_id, &request)
             .expect_err("key cannot be reused for another intent");
         assert!(error.message.contains("different action intent"));
-    });
-}
-
-#[test]
-fn exact_quarantine_action_rejects_a_cook_alias_without_mutating_its_attempt() {
-    with_isolated_home(|_| {
-        let cook_id = "cook-quarantine-alias";
-        let attempt_id = agent_task_lifecycle::cook_attempt_run_id(cook_id, 1);
-        agent_task_lifecycle::submit_plan(&test_plan(), Some(&attempt_id)).expect("queued attempt");
-        index_cook_attempt(cook_id, &attempt_id);
-        let request = homeboy_control_plane_contract::ControlPlaneActionRequest {
-            schema: homeboy_control_plane_contract::CONTROL_PLANE_ACTION_REQUEST_SCHEMA.to_string(),
-            effect_id: homeboy_control_plane_contract::EffectId("test:alias-rejected".to_string()),
-            action: homeboy_control_plane_contract::ControlPlaneAction::Quarantine,
-            idempotency_key: "alias-rejected".to_string(),
-            actor: "test".to_string(),
-            expected_updated_at: None,
-            parameters: homeboy_control_plane_contract::ControlPlaneActionPayload {
-                schema: homeboy_control_plane_contract::CONTROL_PLANE_QUARANTINE_PARAMETERS_SCHEMA
-                    .to_string(),
-                data: serde_json::json!({ "reason": "hold" }),
-            },
-            confirmed: true,
-        };
-        let error =
-            crate::orchestration::execute_action_from_current_environment(cook_id, &request)
-                .expect_err("Cook aliases are not exact quarantine targets");
-        assert!(error.message.contains("Cook aliases are not accepted"));
-        let attempt = agent_task_lifecycle::exact_record(&attempt_id).expect("unchanged attempt");
-        assert!(attempt.metadata.get("queue_quarantine").is_none());
     });
 }
 

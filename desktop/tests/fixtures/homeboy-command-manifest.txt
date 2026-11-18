@@ -38,11 +38,8 @@ agent-task prompts remove
 agent-task prompts save
 agent-task prompts show
 agent-task providers
-agent-task quarantine
-agent-task rearm
 agent-task reconcile
 agent-task record-replacement-gate-proof
-agent-task replay-provider-boundary
 agent-task resume
 agent-task retained-artifacts
 agent-task retained-artifacts attach

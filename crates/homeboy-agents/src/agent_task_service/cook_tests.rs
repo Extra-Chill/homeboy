@@ -12858,7 +12858,6 @@ fn materialized_cook_queues_same_attempt_then_dispatches_once_after_upgrade_rele
         assert_eq!(resumed.run_id, run_id);
         assert_eq!(resumed.metadata["provider_executions_consumed"], 0);
         assert_eq!(resumed.state(), RunExecutionState::Running);
-        assert!(resumed.metadata.get("queue_quarantine").is_none());
         let recipe = load_recipe(cook_id).expect("reconstructed durable Cook recipe");
         assert_eq!(recipe.attempts.len(), 1);
         assert_eq!(recipe.attempts[0].run_id, run_id);
@@ -13069,7 +13068,6 @@ fn deferred_lab_cook_attempt_resumes_with_runner_placement_without_local_probe()
         assert_eq!(dispatches.load(Ordering::SeqCst), 1);
         let resumed = agent_task_lifecycle::exact_record(&run_id).expect("resumed attempt");
         assert_eq!(resumed.state(), RunExecutionState::Running);
-        assert!(resumed.metadata.get("queue_quarantine").is_none());
         let placement = super::super::execution::queued_cook_placement(&resumed)
             .expect("resumed attempt matches its recipe")
             .expect("a Lab-pinned attempt resumes with its recorded placement");

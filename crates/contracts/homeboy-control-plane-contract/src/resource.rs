@@ -806,8 +806,6 @@ pub enum ControlPlaneAction {
     Resume,
     PlacementUpdate,
     Retry,
-    Quarantine,
-    Rearm,
     Promote,
     Reconcile,
 }

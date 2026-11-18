@@ -722,14 +722,6 @@ fn diagnose_preserves_controller_admission_hash_io_without_provider_replay() {
             diagnosis["root_cause"]["details"]["details"]["context"],
             "hash pinned controller executable"
         );
-        let commands = diagnosis["_homeboy_actionable"]["next_actions"]
-            .as_array()
-            .expect("next actions");
-        assert!(!commands.iter().any(|action| {
-            action["command"]
-                .as_str()
-                .is_some_and(|command| command.contains("replay-provider-boundary"))
-        }));
     });
 }
 
@@ -5635,7 +5627,7 @@ fn diagnose_next_actions_name_the_artifacts_that_were_not_produced() {
         assert!(actions.iter().any(|action| {
             action["command"]
                 == json!(format!(
-                    "homeboy agent-task replay-provider-boundary {run_id} --task task-a"
+                    "homeboy runs evidence {run_id} --task task-a --failure-only"
                 ))
                 && action["label"]
                     .as_str()
@@ -5646,146 +5638,6 @@ fn diagnose_next_actions_name_the_artifacts_that_were_not_produced() {
             action["command"] == json!(format!("homeboy runs artifacts {run_id} --full"))
                 && action["kind"] == "artifacts"
         }));
-    });
-}
-
-#[test]
-fn replay_provider_boundary_projects_latest_executor_input() {
-    with_temp_home(|| {
-        let evidence_dir = tempfile::tempdir().expect("evidence dir");
-        let stale_evidence_path = evidence_dir.path().join("stale-executor-input.txt");
-        let evidence_path = evidence_dir.path().join("executor-input.json");
-        std::fs::write(
-            &stale_evidence_path,
-            "permission denied before JSON capture",
-        )
-        .expect("write stale evidence");
-        std::fs::write(
-            &evidence_path,
-            serde_json::to_string(&json!({
-                "task_id": "task-a",
-                "executor": {
-                    "backend": "sample-runtime",
-                    "config": {
-                        "runtime_component_paths": {
-                            "agent_runtime": "/runner/data-machine-patched"
-                        },
-                        "runtime_env": {
-                            "SAMPLE_RUNTIME_DATA_MACHINE_PATH": "/runner/data-machine-patched"
-                        },
-                        "runtime_env_path_aliases": {
-                            "agent_runtime": "WP_CODEBOX_DATA_MACHINE_PATH"
-                        }
-                    }
-                },
-                "inputs": {
-                    "runtime_task": {
-                        "ability": "runtime-package/run",
-                        "input": {
-                            "package": {
-                                "source": "data-machine"
-                            }
-                        }
-                    }
-                },
-                "artifact_declarations": [
-                    { "name": "runtime-package", "required": true }
-                ]
-            }))
-            .expect("evidence json"),
-        )
-        .expect("write evidence");
-
-        run_loaded_plan(
-            test_plan(),
-            Some("run-cli-provider-boundary-replay"),
-            Arc::new(ExecutorInputEvidenceExecutor {
-                evidence_uris: vec![
-                    format!("file://{}", stale_evidence_path.display()),
-                    format!("file://{}", evidence_path.display()),
-                ],
-            }),
-        )
-        .expect("run completed");
-
-        let (value, exit_code) = replay_provider_boundary(ReplayProviderBoundaryArgs {
-            run_id: "run-cli-provider-boundary-replay".to_string(),
-            task: Some("task-a".to_string()),
-        })
-        .expect("replay report");
-
-        assert_eq!(exit_code, 0);
-        assert_eq!(
-            value["schema"],
-            "homeboy/agent-task-provider-boundary-replay/v1"
-        );
-        assert_eq!(
-            value["normalized_provider_boundary"]["runtime_task"]["ability"],
-            "runtime-package/run"
-        );
-        assert_eq!(
-            value["normalized_provider_boundary"]["runtime_component_paths"]["agent_runtime"],
-            "/runner/data-machine-patched"
-        );
-        assert_eq!(
-            value["normalized_provider_boundary"]["runtime_env"]["WP_CODEBOX_DATA_MACHINE_PATH"],
-            "/runner/data-machine-patched"
-        );
-        assert_eq!(
-            value["normalized_provider_boundary"]["package_descriptor"]["source"],
-            "data-machine"
-        );
-        assert_eq!(
-            value["normalized_provider_boundary"]["artifact_declarations"][0]["name"],
-            "runtime-package"
-        );
-        assert_eq!(value["typed_evidence"]["kind"], "provider-boundary-replay");
-        assert_eq!(
-            value["selected_evidence"]["uri"],
-            format!("file://{}", evidence_path.display())
-        );
-    });
-}
-
-#[test]
-fn replay_provider_boundary_hydrates_persisted_plan_executor_input() {
-    with_temp_home(|| {
-        let run_id = "run-cli-provider-boundary-plan-replay";
-        let mut plan = test_plan();
-        plan.tasks[0].executor.config = json!({
-            "workspace": { "root": "/candidate/workspace" },
-            "workspace_root": "/candidate/workspace"
-        });
-        run_loaded_plan(
-            plan,
-            Some(run_id),
-            Arc::new(ExecutorInputEvidenceExecutor {
-                evidence_uris: vec![format!(
-                    "homeboy://agent-task/run/{run_id}/plan#task=task-a"
-                )],
-            }),
-        )
-        .expect("run completed");
-
-        let (value, exit_code) = replay_provider_boundary(ReplayProviderBoundaryArgs {
-            run_id: run_id.to_string(),
-            task: Some("task-a".to_string()),
-        })
-        .expect("replay persisted plan input");
-
-        assert_eq!(exit_code, 0);
-        assert_eq!(
-            value["selected_evidence"]["uri"],
-            format!("homeboy://agent-task/run/{run_id}/plan#task=task-a")
-        );
-        assert_eq!(
-            value["normalized_provider_boundary"]["provider_config"]["workspace"]["root"],
-            "/candidate/workspace"
-        );
-        assert_eq!(
-            value["normalized_provider_boundary"]["provider_config"]["workspace_root"],
-            "/candidate/workspace"
-        );
     });
 }
 

@@ -197,7 +197,7 @@ pub struct AgentTaskDiscoveryReport {
     pub next_cursor: Option<usize>,
     pub runs: Vec<AgentTaskDiscoveryRun>,
     /// Bounded health evidence for malformed, legacy, conflicting, or
-    /// quarantined lifecycle rows in the returned page.
+    /// lifecycle-quarantined rows in the returned page.
     pub record_health: agent_task_lifecycle::AgentTaskRecordHealthSummary,
     /// Health for the records read: the indexed active set for active discovery,
     /// the pages walked for latest discovery, otherwise the bounded registry.
@@ -1613,12 +1613,6 @@ mod tests {
             .with_timezone(&chrono::Utc);
         let mut retry = queued_record(json!({}));
         retry.metadata["retry_of"] = json!("source-attempt");
-        assert_eq!(
-            classify_liveness(&retry, now, &BTreeSet::new()),
-            AgentTaskLiveness::Active
-        );
-
-        retry.metadata["queue_quarantine"] = json!({ "reason": "operator hold" });
         assert_eq!(
             classify_liveness(&retry, now, &BTreeSet::new()),
             AgentTaskLiveness::Active

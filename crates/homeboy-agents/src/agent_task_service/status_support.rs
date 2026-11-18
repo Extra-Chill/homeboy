@@ -18,48 +18,6 @@ use homeboy_core::Result;
 
 const EVIDENCE_TEXT_LIMIT: usize = 16 * 1024;
 
-pub fn persist_provider_boundary_replay_evidence(report: &Value) -> Option<String> {
-    let run_id = report.get("run_id")?.as_str().unwrap_or("unknown-run");
-    let task_id = report
-        .get("task_id")
-        .and_then(Value::as_str)
-        .unwrap_or("unknown-task");
-    let dir = homeboy_core::artifacts::root()
-        .unwrap_or_else(|_| {
-            std::env::current_dir()
-                .unwrap_or_else(|_| PathBuf::from("."))
-                .join(".homeboy-artifacts")
-        })
-        .join("agent-task")
-        .join("executor-evidence")
-        .join(sanitize_evidence_path_part(run_id));
-    fs::create_dir_all(&dir).ok()?;
-    let path = dir.join(format!(
-        "provider-boundary-replay-{}.json",
-        sanitize_evidence_path_part(task_id)
-    ));
-    fs::write(&path, serde_json::to_vec_pretty(report).ok()?).ok()?;
-    Some(format!("file://{}", path.display()))
-}
-
-fn sanitize_evidence_path_part(value: &str) -> String {
-    let sanitized: String = value
-        .chars()
-        .map(|character| {
-            if character.is_ascii_alphanumeric() || character == '-' || character == '_' {
-                character
-            } else {
-                '-'
-            }
-        })
-        .collect();
-    if sanitized.is_empty() {
-        "unknown".to_string()
-    } else {
-        sanitized
-    }
-}
-
 #[derive(Serialize)]
 pub struct AgentTaskHydratedEvidence {
     pub kind: String,

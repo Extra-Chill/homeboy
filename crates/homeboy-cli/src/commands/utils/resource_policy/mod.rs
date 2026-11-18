@@ -1648,23 +1648,6 @@ mod tests {
     }
 
     #[test]
-    fn agent_task_provider_replay_remains_resource_managed() {
-        // `review` is a bounded metadata read. Provider replay executes work
-        // against the selected runner and retains resource admission.
-        let args = [
-            "homeboy",
-            "agent-task",
-            "replay-provider-boundary",
-            "agent-task-123",
-        ];
-        let cli = Cli::parse_from(args);
-        assert!(
-            hot_command(&cli.command).is_some(),
-            "{args:?} must retain resource admission"
-        );
-    }
-
-    #[test]
     fn continuation_preflight_is_controller_only_and_resource_exempt() {
         use crate::core::parsed_command_preflight::{
             ControllerExecution, ResourceAdmissionRequirement,

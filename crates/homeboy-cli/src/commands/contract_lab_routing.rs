@@ -213,7 +213,6 @@ impl Commands {
                 command:
                     agent_task::AgentTaskCommand::Status(_)
                     | agent_task::AgentTaskCommand::Diagnose(_)
-                    | agent_task::AgentTaskCommand::ReplayProviderBoundary(_)
                     | agent_task::AgentTaskCommand::Review(_)
                     | agent_task::AgentTaskCommand::Reconcile(_),
             }) => LabCommandContract::runner_resident_read_polling(AGENT_TASK_STATUS_LAB_LABEL),

@@ -168,8 +168,6 @@ fn action_name(action: ControlPlaneAction) -> &'static str {
         ControlPlaneAction::Resume => "resume",
         ControlPlaneAction::PlacementUpdate => "placement_update",
         ControlPlaneAction::Retry => "retry",
-        ControlPlaneAction::Quarantine => "quarantine",
-        ControlPlaneAction::Rearm => "rearm",
     }
 }
 
