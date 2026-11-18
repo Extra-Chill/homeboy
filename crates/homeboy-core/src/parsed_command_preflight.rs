@@ -1803,6 +1803,62 @@ mod tests {
         }
     }
 
+    /// #18334: a connected-ready Lab is selected by an auto Cook even when its
+    /// readiness carries non-blocking warning reasons, and even when the
+    /// controller itself is hot.
+    #[test]
+    fn auto_cook_selects_ready_lab_despite_non_blocking_warnings() {
+        for reasons in [Vec::new(), vec!["daemon_unverified".to_string()]] {
+            let policy = auto_route_policy(
+                Some("homeboy-lab"),
+                "connected_ready",
+                vec!["homeboy-lab".into()],
+                reasons.clone(),
+                true,
+                ResourceAdmissionEvidence::Observed {
+                    pressure: ResourceHeat::Hot,
+                },
+            );
+            let result = resolve_parsed_command_preflight(Vec::new(), split_cook_input(), policy)
+                .unwrap_or_else(|error| panic!("{reasons:?}: ready Lab must admit: {error:?}"));
+            assert_eq!(result.placement.selected, EffectiveExecutionPlacement::Lab);
+            assert_eq!(result.selected_runner_id.as_deref(), Some("homeboy-lab"));
+            assert_eq!(
+                result.resource_admission,
+                ResourceAdmissionDecision::Admitted
+            );
+            assert!(!result.queued_for_lab_admission());
+        }
+    }
+
+    /// #18334: with no eligible Lab runner selected at all, an auto Cook
+    /// refuses with `lab_unavailable`; it never resolves to the controller,
+    /// whatever the controller pressure or the local-capacity signal says.
+    #[test]
+    fn auto_cook_without_an_eligible_lab_runner_refuses_instead_of_using_controller() {
+        for state in ["disconnected", "stale"] {
+            for pressure in [ResourceHeat::None, ResourceHeat::Hot] {
+                let mut policy = auto_route_policy(
+                    None,
+                    state,
+                    Vec::new(),
+                    vec!["lab_readiness_refresh_failed: probe failed".into()],
+                    false,
+                    ResourceAdmissionEvidence::Observed { pressure },
+                );
+                policy.auto_local_capacity_fallback = true;
+                let error =
+                    resolve_parsed_command_preflight(Vec::new(), split_cook_input(), policy)
+                        .expect_err("no eligible Lab runner must refuse");
+                assert_eq!(error.code, crate::ErrorCode::RunnerLabUnavailable);
+                assert_eq!(error.details["reason"], "lab_unavailable");
+                assert!(error
+                    .message
+                    .contains("`--placement auto` does not run this workload on the controller"));
+            }
+        }
+    }
+
     #[test]
     fn local_cook_ignores_lab_capacity_refusal() {
         let mut input = split_cook_input();
