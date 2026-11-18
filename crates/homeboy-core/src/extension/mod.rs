@@ -16,6 +16,7 @@ pub(crate) mod root_manifest;
 pub mod runtime_json;
 pub mod self_check;
 mod setup_env;
+pub(crate) mod shared_asset_integrity;
 pub mod test;
 pub mod trace;
 pub mod workload;
