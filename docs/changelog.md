@@ -4,6 +4,11 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.473.4] - 2026-11-18
+
+### Fixed
+- re-admit queued runner exec jobs with no child after daemon restart
+
 ## [0.473.3] - 2026-11-18
 
 ### Fixed
