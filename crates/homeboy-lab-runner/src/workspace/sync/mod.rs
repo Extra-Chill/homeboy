@@ -576,21 +576,63 @@ pub(crate) fn save_prepared_source_cache(
     };
     let cache = prepared_source_cache_path(workspace_root, &remote_url, &commit);
     let cache_root = prepared_source_cache_root(workspace_root);
-    let output = run_workspace_shell_command(
+    let output = run_workspace_shell_success(
         &runner,
         &prepared_source_cache_command(&cache, &cache_root, remote_path),
         "save prepared Lab source cache",
     )?;
-    Ok(prepared_source_cache_lifecycle(&output))
+    let mut lifecycle = prepared_source_cache_lifecycle(&output);
+    if !output.success {
+        // The job has already hydrated its own workspace; failing to publish
+        // that preparation for reuse is an observation, not a job failure
+        // (#16840).
+        let reason = output
+            .stderr
+            .split_whitespace()
+            .collect::<Vec<_>>()
+            .join(" ")
+            .chars()
+            .take(240)
+            .collect::<String>();
+        lifecycle.observations.push(format!(
+            "homeboy_prepared_source_cache event=skipped cache={cache} reason=publish_failed detail={reason}"
+        ));
+    }
+    Ok(lifecycle)
 }
 
 pub(super) fn prepared_source_cache_command(cache: &str, cache_root: &str, source: &str) -> String {
     // The readiness marker lives in the cache entry's sibling Homeboy state
     // directory, never inside the cached source tree, so a view copied from
     // the cache carries only source bytes.
+    //
+    // Publication is an optimization and must never fail the job (#16840):
+    // the per-key lock is held across check, copy and publish; the temp copy
+    // is renamed with no-target-directory semantics (`mv -T` where available,
+    // plus a nesting guard for `mv` implementations without it) so it can
+    // never land *inside* an entry another writer already published; and any
+    // conflict discards the temp copy and reuses the existing entry. A lock
+    // already removed by another writer is not an error.
     let candidate_marker = prepared_source_marker_shell("$candidate");
+    let publish = concat!(
+        "tmp=\"$cache.tmp.$$\"; discard_tmp; ",
+        // An unmarked entry is an abandoned publication; replace it.
+        "if test -e \"$cache\"; then chmod -R u+w \"$cache\" >/dev/null 2>&1; rm -rf \"$cache\" >/dev/null 2>&1; fi; ",
+        "if ! cp -a \"$source\" \"$tmp\" || ! chmod -R a-w \"$tmp\"; then discard_tmp; ",
+        "printf 'homeboy_prepared_source_cache event=skipped cache=%s reason=copy_failed\\n' \"$cache\"; ",
+        "elif test -e \"$cache\"; then publish_conflict; ",
+        "elif mv $mv_no_target \"$tmp\" \"$cache\" 2>/dev/null && test ! -e \"$nested\"; then ",
+        "if mkdir -p \"$marker_dir\" && : > \"$marker\"; then ",
+        "printf 'homeboy_prepared_source_cache event=created cache=%s\\n' \"$cache\"; ",
+        "else printf 'homeboy_prepared_source_cache event=skipped cache=%s reason=marker_failed\\n' \"$cache\"; fi; ",
+        "else ",
+        // A non-`-T` mv moved the copy into an entry that appeared after the
+        // existence check; take the nested copy back out.
+        "if test -e \"$nested\"; then chmod u+w \"$cache\" >/dev/null 2>&1; chmod -R u+w \"$nested\" >/dev/null 2>&1; rm -rf \"$nested\" >/dev/null 2>&1; chmod a-w \"$cache\" >/dev/null 2>&1; fi; ",
+        "publish_conflict; fi"
+    );
     format!(
-        "cache={cache}; cache_root={cache_root}; source={source}; marker={marker}; marker_dir={marker_dir}; lock=\"$cache.lock\"; {capture_owner}; mkdir -p \"$cache_root\"; if test -f \"$marker\"; then printf 'homeboy_prepared_source_cache event=hit cache=%s\n' \"$cache\"; elif mkdir \"$lock\" 2>/dev/null; then trap 'rmdir \"$lock\"' EXIT; if test -f \"$marker\"; then printf 'homeboy_prepared_source_cache event=hit cache=%s\n' \"$cache\"; else tmp=\"$cache.tmp.$$\"; rm -rf \"$tmp\"; if test -e \"$cache\"; then chmod -R u+w \"$cache\" >/dev/null 2>&1; rm -rf \"$cache\"; fi; cp -a \"$source\" \"$tmp\" && chmod -R a-w \"$tmp\" && mv \"$tmp\" \"$cache\" && mkdir -p \"$marker_dir\" && : > \"$marker\" && printf 'homeboy_prepared_source_cache event=created cache=%s\n' \"$cache\" || exit 1; fi; else printf 'homeboy_prepared_source_cache event=skipped cache=%s reason=busy\n' \"$cache\"; fi; {restore_owner}; kept=0; failures=0; ls -1dt \"$cache_root\"/* 2>/dev/null | while IFS= read -r candidate; do test -f {candidate_marker} || continue; if [ \"$kept\" -lt {max_entries} ]; then kept=$((kept + 1)); continue; fi; candidate_lock=\"$candidate.lock\"; mkdir \"$candidate_lock\" 2>/dev/null || continue; if test -f {candidate_marker}; then if ! chmod -R u+w \"$candidate\" >/dev/null 2>&1 || ! rm -rf \"$candidate\" >/dev/null 2>&1; then failures=$((failures + 1)); if [ \"$failures\" -le {max_failures} ]; then printf 'homeboy_prepared_source_cache event=prune_failed cache=%s reason=undeletable\n' \"$candidate\" >&2; elif [ \"$failures\" -eq $(({max_failures} + 1)) ]; then printf 'homeboy_prepared_source_cache event=prune_failed_summary reason=additional_failures_suppressed\n' >&2; fi; else rm -rf {candidate_state} >/dev/null 2>&1; printf 'homeboy_prepared_source_cache event=pruned cache=%s\n' \"$candidate\"; fi; fi; rmdir \"$candidate_lock\"; done",
+        "cache={cache}; cache_root={cache_root}; source={source}; marker={marker}; marker_dir={marker_dir}; lock=\"$cache.lock\"; tmp=\"$cache.tmp.$$\"; nested=\"$cache/${{tmp##*/}}\"; {capture_owner}; mkdir -p \"$cache_root\"; mv_no_target=''; if mv --help 2>&1 | grep -q -e '--no-target-directory'; then mv_no_target='-T'; fi; discard_tmp() {{ chmod -R u+w \"$tmp\" >/dev/null 2>&1; rm -rf \"$tmp\" >/dev/null 2>&1; }}; publish_conflict() {{ discard_tmp; if test -f \"$marker\"; then printf 'homeboy_prepared_source_cache event=hit cache=%s reason=concurrent_publisher\\n' \"$cache\"; else printf 'homeboy_prepared_source_cache event=skipped cache=%s reason=publish_conflict\\n' \"$cache\"; fi; }}; if test -f \"$marker\"; then printf 'homeboy_prepared_source_cache event=hit cache=%s\\n' \"$cache\"; elif mkdir \"$lock\" 2>/dev/null; then trap 'rmdir \"$lock\" 2>/dev/null || :' EXIT; if test -f \"$marker\"; then printf 'homeboy_prepared_source_cache event=hit cache=%s\\n' \"$cache\"; else {publish}; fi; else printf 'homeboy_prepared_source_cache event=skipped cache=%s reason=busy\\n' \"$cache\"; fi; {restore_owner}; kept=0; failures=0; ls -1dt \"$cache_root\"/* 2>/dev/null | while IFS= read -r candidate; do test -f {candidate_marker} || continue; if [ \"$kept\" -lt {max_entries} ]; then kept=$((kept + 1)); continue; fi; candidate_lock=\"$candidate.lock\"; mkdir \"$candidate_lock\" 2>/dev/null || continue; if test -f {candidate_marker}; then if ! chmod -R u+w \"$candidate\" >/dev/null 2>&1 || ! rm -rf \"$candidate\" >/dev/null 2>&1; then failures=$((failures + 1)); if [ \"$failures\" -le {max_failures} ]; then printf 'homeboy_prepared_source_cache event=prune_failed cache=%s reason=undeletable\\n' \"$candidate\" >&2; elif [ \"$failures\" -eq $(({max_failures} + 1)) ]; then printf 'homeboy_prepared_source_cache event=prune_failed_summary reason=additional_failures_suppressed\\n' >&2; fi; else rm -rf {candidate_state} >/dev/null 2>&1; printf 'homeboy_prepared_source_cache event=pruned cache=%s\\n' \"$candidate\"; fi; fi; rmdir \"$candidate_lock\" 2>/dev/null || :; done; exit 0",
         cache = shell::quote_arg(cache), cache_root = shell::quote_arg(cache_root), source = shell::quote_arg(source),
         marker = shell::quote_arg(&runner_workspace_prepared_source_marker_path(cache)),
         marker_dir = shell::quote_arg(&runner_workspace_state_dir(cache)),
@@ -664,7 +706,7 @@ fn materialize_prepared_source_view_controlled(
 
 pub(super) fn prepared_source_view_command(cache: &str, destination: &str) -> String {
     format!(
-        "cache={cache}; destination={destination}; cache_marker={cache_marker}; destination_state={destination_state}; destination_marker={destination_marker}; lock=\"$cache.lock\"; test -f \"$cache_marker\" && test ! -e \"$destination\" && mkdir \"$lock\" 2>/dev/null || exit 1; trap 'rmdir \"$lock\"' EXIT HUP INT TERM; test -f \"$cache_marker\" && mkdir -p \"$(dirname \"$destination\")\" && cp -a \"$cache\" \"$destination\" && chmod -R u+w \"$destination\" && mkdir -p \"$destination_state\" && : > \"$destination_marker\" || {{ rm -rf \"$destination\" \"$destination_marker\"; exit 1; }}",
+        "cache={cache}; destination={destination}; cache_marker={cache_marker}; destination_state={destination_state}; destination_marker={destination_marker}; lock=\"$cache.lock\"; test -f \"$cache_marker\" && test ! -e \"$destination\" && mkdir \"$lock\" 2>/dev/null || exit 1; trap 'rmdir \"$lock\" 2>/dev/null || :' EXIT; trap 'exit 1' HUP INT TERM; test -f \"$cache_marker\" && mkdir -p \"$(dirname \"$destination\")\" && cp -a \"$cache\" \"$destination\" && chmod -R u+w \"$destination\" && mkdir -p \"$destination_state\" && : > \"$destination_marker\" || {{ rm -rf \"$destination\" \"$destination_marker\"; exit 1; }}",
         cache = shell::quote_arg(cache), destination = shell::quote_arg(destination),
         cache_marker = shell::quote_arg(&runner_workspace_prepared_source_marker_path(cache)),
         destination_state = shell::quote_arg(&runner_workspace_state_dir(destination)),
@@ -716,22 +758,6 @@ fn run_workspace_shell_success(
                 stderr: output.stderr,
             })
         }
-    }
-}
-
-fn run_workspace_shell_command(
-    runner: &super::super::Runner,
-    command: &str,
-    action: &str,
-) -> Result<WorkspaceShellOutput> {
-    let output = run_workspace_shell_success(runner, command, action)?;
-    if output.success {
-        Ok(output)
-    } else {
-        Err(Error::internal_unexpected(format!(
-            "{action} failed: {}",
-            output.stderr.trim()
-        )))
     }
 }
 

@@ -720,6 +720,225 @@ fn prepared_source_cache_rechecks_for_a_concurrent_publisher_after_locking() {
     make_cache_fixture_writable(&cache_root);
 }
 
+/// Run one prepared-source publisher for `cache` with `tools` prepended to
+/// PATH. `HOMEBOY_RACE_CACHE`/`HOMEBOY_RACE_MARKER` let tool shims publish a
+/// competing entry at a precise point of the publication.
+#[cfg(unix)]
+fn run_prepared_source_publisher(
+    cache: &Path,
+    cache_root: &Path,
+    source: &Path,
+    tools: &Path,
+    extra_env: &[(&str, &str)],
+) -> std::process::Output {
+    let marker = runner_workspace_prepared_source_marker_path(cache.to_str().unwrap());
+    let mut command = Command::new("sh");
+    command
+        .args([
+            "-c",
+            &prepared_source_cache_command(
+                cache.to_str().unwrap(),
+                cache_root.to_str().unwrap(),
+                source.to_str().unwrap(),
+            ),
+        ])
+        .env(
+            "PATH",
+            format!(
+                "{}:{}",
+                tools.display(),
+                std::env::var("PATH").unwrap_or_default()
+            ),
+        )
+        .env("HOMEBOY_RACE_CACHE", cache)
+        .env("HOMEBOY_RACE_MARKER", &marker);
+    for (key, value) in extra_env {
+        command.env(key, value);
+    }
+    command.output().expect("run prepared-source publisher")
+}
+
+/// Shell snippet a tool shim runs to publish the winning entry. `$1` selects
+/// whether the winner is left read-only (like a real published entry).
+#[cfg(unix)]
+const PUBLISH_WINNER_SHELL: &str = "publish_winner() { /bin/mkdir -p \"$HOMEBOY_RACE_CACHE\" \"$(dirname \"$HOMEBOY_RACE_MARKER\")\"; printf 'winner\\n' > \"$HOMEBOY_RACE_CACHE/marker\"; if [ \"$1\" = readonly ]; then /bin/chmod -R a-w \"$HOMEBOY_RACE_CACHE\"; fi; : > \"$HOMEBOY_RACE_MARKER\"; }\n";
+
+#[cfg(unix)]
+fn assert_single_winner_entry(cache: &Path, cache_root: &Path) {
+    assert_eq!(
+        fs::read_to_string(cache.join("marker")).unwrap(),
+        "winner\n",
+        "the existing entry is reused, not replaced"
+    );
+    let entries: Vec<String> = fs::read_dir(cache)
+        .unwrap()
+        .map(|entry| entry.unwrap().file_name().to_string_lossy().to_string())
+        .collect();
+    assert_eq!(entries, vec!["marker".to_string()], "no temp copy nested");
+    let leftovers: Vec<String> = fs::read_dir(cache_root)
+        .unwrap()
+        .map(|entry| entry.unwrap().file_name().to_string_lossy().to_string())
+        .filter(|name| name.contains(".tmp.") || name.ends_with(".lock"))
+        .collect();
+    assert!(leftovers.is_empty(), "leftovers: {leftovers:?}");
+}
+
+#[test]
+#[cfg(unix)]
+fn prepared_source_cache_publish_onto_a_concurrently_published_key_reuses_it() {
+    // #16840: another writer published the key while this one copied; the
+    // old `mv tmp cache` moved the copy *into* the read-only entry and failed
+    // the cook with "Permission denied".
+    let _path_guard = PATH_LOCK
+        .get_or_init(|| Mutex::new(()))
+        .lock()
+        .expect("PATH lock");
+    let root = tempfile::tempdir().expect("cache root");
+    let cache_root = root.path().join("_lab_prepared_sources");
+    let cache = cache_root.join("shared-revision");
+    let source = root.path().join("source");
+    fs::create_dir_all(&source).expect("source");
+    fs::write(source.join("marker"), "contender\n").expect("source marker");
+    let tools = tempfile::tempdir().expect("tool shims");
+    homeboy_test_support::write_executable(
+        &tools.path().join("cp"),
+        &format!(
+            "#!/bin/sh\n{PUBLISH_WINNER_SHELL}/bin/cp \"$@\" || exit $?\npublish_winner readonly\n"
+        ),
+        0o755,
+    )
+    .expect("cp shim");
+
+    let output = run_prepared_source_publisher(&cache, &cache_root, &source, tools.path(), &[]);
+
+    assert!(output.status.success(), "{output:?}");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        stdout.contains("event=hit") && stdout.contains("reason=concurrent_publisher"),
+        "{stdout}"
+    );
+    assert!(
+        String::from_utf8_lossy(&output.stderr).trim().is_empty(),
+        "{output:?}"
+    );
+    assert_single_winner_entry(&cache, &cache_root);
+    make_cache_fixture_writable(&cache_root);
+}
+
+#[test]
+#[cfg(unix)]
+fn prepared_source_cache_rename_never_nests_into_an_entry_published_at_rename_time() {
+    // The key appears between the existence check and the rename. With
+    // no-target-directory semantics the rename refuses; with a plain `mv`
+    // (no `-T` support) the copy lands inside the entry and must be removed.
+    let _path_guard = PATH_LOCK
+        .get_or_init(|| Mutex::new(()))
+        .lock()
+        .expect("PATH lock");
+    for (mode, readonly) in [("gnu", "readonly"), ("plain", "writable")] {
+        let root = tempfile::tempdir().expect("cache root");
+        let cache_root = root.path().join("_lab_prepared_sources");
+        let cache = cache_root.join("shared-revision");
+        let source = root.path().join("source");
+        fs::create_dir_all(&source).expect("source");
+        fs::write(source.join("marker"), "contender\n").expect("source marker");
+        let tools = tempfile::tempdir().expect("tool shims");
+        homeboy_test_support::write_executable(
+            &tools.path().join("mv"),
+            &format!(
+                "#!/bin/sh\n{PUBLISH_WINNER_SHELL}if [ \"$1\" = --help ]; then [ \"$HOMEBOY_MV_MODE\" = gnu ] && exec /bin/mv --help; exit 1; fi\nif [ \"$1\" = -T ] && [ \"$HOMEBOY_MV_MODE\" != gnu ]; then shift; fi\npublish_winner {readonly}\nexec /bin/mv \"$@\"\n"
+            ),
+            0o755,
+        )
+        .expect("mv shim");
+
+        let output = run_prepared_source_publisher(
+            &cache,
+            &cache_root,
+            &source,
+            tools.path(),
+            &[("HOMEBOY_MV_MODE", mode)],
+        );
+
+        assert!(output.status.success(), "{mode}: {output:?}");
+        assert!(
+            String::from_utf8_lossy(&output.stdout).contains("reason=concurrent_publisher"),
+            "{mode}: {output:?}"
+        );
+        assert_single_winner_entry(&cache, &cache_root);
+        make_cache_fixture_writable(&cache_root);
+    }
+}
+
+#[test]
+#[cfg(unix)]
+fn concurrent_prepared_source_publishers_for_one_key_all_succeed_with_one_entry() {
+    let root = tempfile::tempdir().expect("cache root");
+    let cache_root = root.path().join("_lab_prepared_sources");
+    let cache = cache_root.join("shared-revision");
+    let tools = tempfile::tempdir().expect("tool shims");
+    // Widen the copy window so the publishers overlap.
+    homeboy_test_support::write_executable(
+        &tools.path().join("cp"),
+        "#!/bin/sh\nsleep 0.2\nexec /bin/cp \"$@\"\n",
+        0o755,
+    )
+    .expect("cp shim");
+    let sources: Vec<_> = (0..4)
+        .map(|index| {
+            let source = root.path().join(format!("source-{index}"));
+            fs::create_dir_all(&source).expect("source");
+            fs::write(source.join("marker"), "prepared\n").expect("source marker");
+            source
+        })
+        .collect();
+
+    let outputs: Vec<_> = std::thread::scope(|scope| {
+        let handles: Vec<_> = sources
+            .iter()
+            .map(|source| {
+                let (cache, cache_root, tools) = (&cache, &cache_root, tools.path());
+                scope.spawn(move || {
+                    run_prepared_source_publisher(cache, cache_root, source, tools, &[])
+                })
+            })
+            .collect();
+        handles
+            .into_iter()
+            .map(|handle| handle.join().unwrap())
+            .collect()
+    });
+
+    for output in &outputs {
+        assert!(output.status.success(), "{output:?}");
+    }
+    let created = outputs
+        .iter()
+        .filter(|output| String::from_utf8_lossy(&output.stdout).contains("event=created"))
+        .count();
+    assert_eq!(
+        created, 1,
+        "exactly one publisher creates the entry: {outputs:?}"
+    );
+    assert_eq!(
+        fs::read_to_string(cache.join("marker")).unwrap(),
+        "prepared\n"
+    );
+    let entries: Vec<_> = fs::read_dir(&cache).unwrap().collect();
+    assert_eq!(entries.len(), 1, "no temp copy nested in the entry");
+    assert!(Path::new(&runner_workspace_prepared_source_marker_path(
+        cache.to_str().unwrap()
+    ))
+    .is_file());
+    let leftovers: Vec<String> = fs::read_dir(&cache_root)
+        .unwrap()
+        .map(|entry| entry.unwrap().file_name().to_string_lossy().to_string())
+        .filter(|name| name.contains(".tmp.") || name.ends_with(".lock"))
+        .collect();
+    assert!(leftovers.is_empty(), "leftovers: {leftovers:?}");
+    make_cache_fixture_writable(&cache_root);
+}
+
 fn create_local_runner(id: &str, workspace_root: &std::path::Path) {
     crate::create(
         &format!(
