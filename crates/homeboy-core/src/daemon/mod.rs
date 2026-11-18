@@ -2115,7 +2115,7 @@ fn orchestration_tick_loop(
                 job_store.reconcile_controller_completions().map(|_| ())
             });
         });
-        // Finished Cook attempts release their scratch; reclaiming it is
+        // Finished attempts leave per-attempt paths behind; reclaiming them is
         // bounded so one pass never delays the next tick's reconciliation.
         maintenance_tick(|| {
             observed_daemon_pass("storage", || {

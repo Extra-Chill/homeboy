@@ -40,6 +40,9 @@ use super::runs::{runs_resources, RunsOutput, RunsResourcesArgs, RunsResourcesOu
 use super::utils::response::{CommandActionableMetadata, CommandNextAction, CommandNextActionKind};
 use super::CmdResult;
 
+mod storage_maintenance;
+pub(crate) use storage_maintenance::register_storage_maintenance;
+
 const CLEANUP_CATEGORY_CHILD_ENV: &str = "HOMEBOY_INTERNAL_CLEANUP_CATEGORY_CHILD";
 const CLEANUP_CATEGORY_CHILD_TIMEOUT_ENV: &str = "HOMEBOY_INTERNAL_CLEANUP_CATEGORY_TIMEOUT_MS";
 const CLEANUP_CHILD_TERMINATION_ALLOWANCE: Duration = Duration::from_secs(5);
@@ -2730,7 +2733,14 @@ fn run_cleanup_category(
                 &args,
                 deadline,
                 CleanupCategoryCommandOverrides::default(),
-                || remote_lab_workspace_categories(policy, apply, args.cursor.as_deref()),
+                || {
+                    remote_lab_workspace_categories(
+                        policy,
+                        apply,
+                        args.cursor.as_deref(),
+                        cleanup_category_action_deadline(deadline),
+                    )
+                },
             );
         }
 
@@ -3512,7 +3522,9 @@ fn is_cleanup_category_child(metadata: CleanupInventoryCategoryMetadata) -> bool
 /// Whether `metadata`'s category runs in this process rather than in an
 /// isolated, supervised child.
 fn cleanup_category_runs_in_process(metadata: CleanupInventoryCategoryMetadata) -> bool {
-    cfg!(test) || is_cleanup_category_child(metadata)
+    cfg!(test)
+        || is_cleanup_category_child(metadata)
+        || storage_maintenance::categories_run_in_process()
 }
 
 /// The least pass budget a category must have left to be started at all.
@@ -4607,9 +4619,15 @@ fn remote_lab_workspace_categories(
     policy: CleanupPolicy,
     apply: bool,
     cursor: Option<&str>,
+    deadline: Option<SystemTime>,
 ) -> homeboy::core::Result<Vec<CleanupInventoryCategory>> {
     let mut categories = Vec::new();
     for status in runner::statuses()? {
+        // A runner not started this pass keeps its saved cursor, so stopping
+        // here only defers it; starting it past the deadline would overrun.
+        if deadline.is_some_and(|deadline| SystemTime::now() >= deadline) {
+            break;
+        }
         if !remote_workspace_cleanup_connected(&status) {
             categories.push(CleanupInventoryCategory {
                 category: "remote_lab_workspaces".to_string(),
@@ -4819,7 +4837,14 @@ fn cleanup_actionable(
 ) -> CommandActionableMetadata {
     let mut actionable = CommandActionableMetadata::default();
     for category in categories {
+        // The daemon maintenance pass reclaims these on its cadence and
+        // resumes their cursors, so a reclaim or resume hint would only send
+        // the operator to do by hand what is already scheduled (#18420).
+        let reclaimed_by_daemon = storage_maintenance::reclaimed_by_daemon(&category.category);
         if is_bounded_continuation(category) {
+            if reclaimed_by_daemon {
+                continue;
+            }
             actionable.next_actions.push(
                 CommandNextAction::new(
                     format!("resume {} cleanup", category.category.replace('_', " ")),
@@ -4865,7 +4890,7 @@ fn cleanup_actionable(
                 .with_kind(CommandNextActionKind::Repair),
             );
         }
-        if category.skipped || category.candidate_count == 0 {
+        if category.skipped || category.candidate_count == 0 || reclaimed_by_daemon {
             continue;
         }
         actionable.next_actions.push(CommandNextAction::new(
@@ -7309,14 +7334,11 @@ mod tests {
         );
     }
 
+    /// Task worktrees are reclaimed on the daemon maintenance cadence, so a
+    /// candidate no longer earns a hint to reclaim it by hand (#18420).
     #[test]
-    fn task_worktree_cleanup_next_actions_preserve_mode_specific_commands() {
-        let cases = [
-            (false, "homeboy worktree cleanup --cleanup-branches --apply"),
-            (true, "homeboy worktree cleanup --cleanup-branches --apply"),
-        ];
-
-        for (apply, command) in cases {
+    fn task_worktree_candidates_name_no_manual_reclaim_action() {
+        for apply in [false, true] {
             let category = CleanupInventoryCategory {
                 category: TASK_WORKTREES_METADATA.category.to_string(),
                 canonical_cleanup_command: TASK_WORKTREES_METADATA.canonical_cleanup_command(apply),
@@ -7347,7 +7369,11 @@ mod tests {
             };
 
             let actionable = cleanup_actionable(&[category], apply);
-            assert_eq!(actionable.next_actions[0].command, command);
+            assert!(
+                actionable.next_actions.is_empty(),
+                "unexpected manual reclaim hint: {:?}",
+                actionable.next_actions
+            );
         }
     }
 
@@ -7379,13 +7405,12 @@ mod tests {
         let mut mixed = mixed;
         mixed.reconciliation_command = Some("homeboy worktree inventory --apply".to_string());
         let mixed_actions = cleanup_actionable(&[mixed], false);
+        // Reconciliation is a repair only an operator can authorize; the
+        // reclaimable candidate is left to the daemon maintenance pass.
+        assert_eq!(mixed_actions.next_actions.len(), 1);
         assert_eq!(
             mixed_actions.next_actions[0].command,
             "homeboy worktree inventory --apply"
-        );
-        assert_eq!(
-            mixed_actions.next_actions[1].command,
-            "homeboy worktree cleanup --cleanup-branches --apply"
         );
 
         let blocked = task_worktrees_category(

@@ -288,6 +288,30 @@ pub fn release_attempt_with_compaction_authorization(
     })
 }
 
+/// Release `allocation` as a terminal attempt whose owner process has exited,
+/// as a crashed or finished scheduler leaves it.
+///
+/// Retention fixtures outside this crate need a lease that cleanup may reclaim
+/// without forging the index layout this module owns.
+#[cfg(any(test, feature = "test-support"))]
+#[doc(hidden)]
+pub fn release_attempt_by_exited_owner_for_test(
+    allocation: &ControllerScratchAllocation,
+) -> Result<()> {
+    release_attempt(allocation, "test", serde_json::Value::Null)?;
+    with_index_lock(&allocation.index_path, || {
+        let mut index = read_index_at_unlocked(&allocation.index_path)?;
+        for resource in index
+            .resources
+            .iter_mut()
+            .filter(|resource| resource.lease_id == allocation.lease_id)
+        {
+            resource.owner_pid = u32::MAX;
+        }
+        write_index_at_unlocked(&allocation.index_path, &index)
+    })
+}
+
 /// Mark a controller-owned allocation as disposable temporary state. This is
 /// intentionally separate from ordinary attempt scratch: an interrupted
 /// detached checkout has no upstream by design, so the normal unpushed-Git
@@ -2925,44 +2949,6 @@ fn path_size(path: &Path) -> Result<u64> {
     })
 }
 
-/// Attempts one daemon maintenance pass may reclaim.
-const MAINTENANCE_RECLAIM_LIMIT: usize = 64;
-
-/// Applies the normal retention policy on the daemon's maintenance cadence, a
-/// page per pass, resuming the walk where the previous pass stopped.
-struct ScratchStorageMaintenance {
-    cursor: std::sync::Mutex<Option<String>>,
-}
-
-impl homeboy_core::daemon::storage_maintenance::StorageMaintenanceProvider
-    for ScratchStorageMaintenance
-{
-    fn reclaim(&self, deadline: Instant) -> Result<()> {
-        let mut cursor = self.cursor.lock().expect("scratch maintenance cursor");
-        let output = cleanup(
-            ControllerScratchCleanupOptions {
-                apply: true,
-                limit: MAINTENANCE_RECLAIM_LIMIT,
-                full: false,
-                retention_override_seconds: None,
-            },
-            cursor.as_deref(),
-            Some(deadline),
-        )?;
-        *cursor = output.next_cursor;
-        Ok(())
-    }
-}
-
-/// Register scratch reclamation with the daemon's maintenance pass.
-pub fn register_storage_maintenance() {
-    homeboy_core::daemon::storage_maintenance::register_storage_maintenance_provider(Box::new(
-        ScratchStorageMaintenance {
-            cursor: std::sync::Mutex::new(None),
-        },
-    ));
-}
-
 fn index_path() -> Result<PathBuf> {
     Ok(paths::controller_scratch_store()?.join("resources.json"))
 }
@@ -4163,6 +4149,14 @@ mod tests {
             .to_string()
     }
 
+    #[test]
+    fn a_vanished_path_measures_zero_bytes() {
+        // Concurrent removal is normal for this store: a vanished path is zero
+        // bytes, not an IO failure that aborts the whole pass.
+        let root = tempfile::tempdir().unwrap();
+        assert_eq!(path_size(&root.path().join("vanished")).unwrap(), 0);
+    }
+
     /// A scheduler attempt: a pushed source repository with some history and
     /// a linked worktree detached at `main`, recorded on its lease exactly as
     /// the scheduler records it. Returns the lease, worktree, and base.
@@ -4195,50 +4189,6 @@ mod tests {
         let base = git_output(&workspace, &["rev-parse", "HEAD"]);
         record_attempt_workspace(&allocation, &workspace, &base).expect("record attempt");
         (allocation, workspace, base)
-    }
-
-    #[test]
-    fn daemon_maintenance_reclaims_released_scratch_and_keeps_active_attempts() {
-        let context = homeboy_core::test_support::HermeticTestContext::new();
-        let _home = homeboy_core::test_support::HomeGuard::new();
-        let roots = context.path_roots();
-        let source = tempfile::tempdir().unwrap();
-        let observation = ObservationStore::open_initialized().unwrap();
-        let running = observation
-            .start_run(homeboy_core::observation::NewRunRecord::builder("test").build())
-            .unwrap();
-        let (released, _, _) = recorded_attempt(roots.data(), source.path(), "terminal");
-        let active = allocate_at(roots.data(), &running.id, "plan", "task", 1);
-        fs::write(active.path.join("live"), "active").unwrap();
-        let mut index = read_index_at(roots.data());
-        let row = index
-            .resources
-            .iter_mut()
-            .find(|row| row.lease_id == released.lease_id)
-            .unwrap();
-        row.lifecycle_state = "released".to_string();
-        row.finalized_at = Some("2020-01-01T00:00:00Z".to_string());
-        row.owner_pid = u32::MAX;
-        write_index_at_unlocked(&index_path().unwrap(), &index).unwrap();
-
-        use homeboy_core::daemon::storage_maintenance::StorageMaintenanceProvider;
-        ScratchStorageMaintenance {
-            cursor: std::sync::Mutex::new(None),
-        }
-        .reclaim(Instant::now() + std::time::Duration::from_secs(60))
-        .unwrap();
-
-        assert!(
-            !released.path.exists(),
-            "released scratch was not reclaimed"
-        );
-        assert!(
-            active.path.join("live").exists(),
-            "active attempt was reclaimed"
-        );
-        // Concurrent removal is normal for this store: a vanished path is zero
-        // bytes, not an IO failure that aborts the whole pass.
-        assert_eq!(path_size(&released.path).unwrap(), 0);
     }
 
     /// #18395: a terminal attempt with commits, a tracked edit and a large

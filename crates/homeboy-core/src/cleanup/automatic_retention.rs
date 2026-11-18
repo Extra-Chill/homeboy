@@ -44,6 +44,8 @@ pub enum AutomaticRetentionKind {
     RuntimeTemp,
     /// The `cleanup automatic-retention` controller pass.
     Controller,
+    /// The daemon's per-attempt storage maintenance pass.
+    DaemonStorage,
 }
 
 impl AutomaticRetentionKind {
@@ -53,6 +55,7 @@ impl AutomaticRetentionKind {
             Self::CargoTarget => "cargo-target",
             Self::RuntimeTemp => "runtime-temp",
             Self::Controller => "controller",
+            Self::DaemonStorage => "daemon-storage",
         }
     }
 
