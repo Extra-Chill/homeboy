@@ -333,9 +333,13 @@ fi
 #
 # These are facts this script already knows rather than new configuration.
 publish_toolchain_location() {
-    local extensions_root
-    # Honors HOMEBOY_CONFIG_ROOT (config-dir), where Homeboy installs extensions.
-    extensions_root="$(extensions_root)"
+    # Honors HOMEBOY_CONFIG_ROOT (config-dir), where Homeboy installs
+    # extensions. Kept inline: tests extract this function on its own.
+    local config_root="${HOMEBOY_CONFIG_ROOT:-}"
+    if [ -z "${config_root//[[:space:]]/}" ]; then
+        config_root="${HOME}/.config/homeboy"
+    fi
+    local extensions_root="${config_root%/}/extensions"
     local homeboy_bin
     local primary_extension="${EXTENSION_INPUT:-${EXTENSION_ID:-}}"
 
