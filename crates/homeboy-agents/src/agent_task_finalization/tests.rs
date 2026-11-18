@@ -1308,18 +1308,6 @@ fn durable_finalization_accepts_fingerprinted_candidate_from_successful_fallback
         ProviderRuntimeState::Failed
     );
 
-    let mut failed_only = lifecycle.clone();
-    failed_only.provider_runtime[2].state = ProviderRuntimeState::Failed;
-    let mut backend = MockBackend {
-        changed_files: vec!["src/lib.rs".to_string()],
-        lifecycle: Some(failed_only),
-        gate_proof: Some(successful_gate_proof()),
-        ..Default::default()
-    };
-    let mut finalization_options = options();
-    finalization_options.manual_finalization = false;
-    assert!(finalize_pr_with_backend(finalization_options, &mut backend).is_err());
-
     let mut unbound_candidate = successful_gate_proof();
     unbound_candidate.promotion.source.task_id = "other-task".to_string();
     let mut backend = MockBackend {
@@ -1680,26 +1668,6 @@ fn durable_finalization_accepts_succeeded_generic_executor_outcome_once() {
             .external_runtime_ids
             .is_empty()
     );
-
-    for rejected_state in [ProviderRuntimeState::Failed, ProviderRuntimeState::TimedOut] {
-        let mut gate_proof = successful_gate_proof();
-        gate_proof.promotion.changed_files = vec!["src/lib.rs".to_string()];
-        let mut rejected_backend = MockBackend {
-            changed_files: vec!["src/lib.rs".to_string()],
-            lifecycle: Some(generic_executor_lifecycle(
-                rejected_state,
-                "openai/gpt-5.6-terra",
-            )),
-            gate_proof: Some(gate_proof),
-            ..Default::default()
-        };
-        let mut rejected_options = options();
-        rejected_options.manual_finalization = false;
-        rejected_options.changed_files = vec!["src/lib.rs".to_string()];
-
-        assert!(finalize_pr_with_backend(rejected_options, &mut rejected_backend).is_err());
-        assert!(!rejected_backend.committed);
-    }
 }
 
 #[test]
@@ -1740,39 +1708,61 @@ fn durable_finalization_accepts_successful_retry_with_failed_attempt_history() {
 }
 
 #[test]
-fn durable_finalization_rejects_stale_success_when_latest_producer_failed_or_gates_are_red() {
-    for gates_green in [true, false] {
-        let mut gate_proof = successful_gate_proof();
-        gate_proof.promotion.changed_files = vec!["src/lib.rs".to_string()];
-        if !gates_green {
-            fail_gate(&mut gate_proof);
-        }
-        let mut lifecycle = successful_lifecycle("openai/gpt-5.6-terra");
-        lifecycle.provider_runtime.push(ProviderRuntimeLifecycle {
-            task_id: "task".to_string(),
-            backend: "lab".to_string(),
-            state: ProviderRuntimeState::Failed,
-            stream_uri: None,
-            external_runtime_ids: Vec::new(),
-            metadata: json!({
-                "evidence_source": "durable_provider_execution",
-                "attempt": 1,
-                "model": "openai/gpt-5.6-terra"
-            }),
-        });
-        let mut backend = MockBackend {
-            changed_files: vec!["src/lib.rs".to_string()],
-            lifecycle: Some(lifecycle),
-            gate_proof: Some(gate_proof),
-            ..Default::default()
-        };
-        let mut finalization_options = options();
-        finalization_options.manual_finalization = false;
-        finalization_options.changed_files = vec!["src/lib.rs".to_string()];
+fn durable_finalization_rejects_red_gates_when_latest_producer_failed() {
+    let mut gate_proof = successful_gate_proof();
+    gate_proof.promotion.changed_files = vec!["src/lib.rs".to_string()];
+    fail_gate(&mut gate_proof);
+    let mut lifecycle = successful_lifecycle("openai/gpt-5.6-terra");
+    lifecycle.provider_runtime.push(ProviderRuntimeLifecycle {
+        task_id: "task".to_string(),
+        backend: "lab".to_string(),
+        state: ProviderRuntimeState::Failed,
+        stream_uri: None,
+        external_runtime_ids: Vec::new(),
+        metadata: json!({
+            "evidence_source": "durable_provider_execution",
+            "attempt": 1,
+            "model": "openai/gpt-5.6-terra"
+        }),
+    });
+    let mut backend = MockBackend {
+        changed_files: vec!["src/lib.rs".to_string()],
+        lifecycle: Some(lifecycle),
+        gate_proof: Some(gate_proof),
+        ..Default::default()
+    };
+    let mut finalization_options = options();
+    finalization_options.manual_finalization = false;
+    finalization_options.changed_files = vec!["src/lib.rs".to_string()];
 
-        assert!(finalize_pr_with_backend(finalization_options, &mut backend).is_err());
-        assert!(!backend.created && !backend.committed && !backend.pushed);
-    }
+    assert!(finalize_pr_with_backend(finalization_options, &mut backend).is_err());
+    assert!(!backend.created && !backend.committed && !backend.pushed);
+}
+
+#[test]
+fn durable_finalization_publishes_recorded_green_candidate_after_producing_runtime_timed_out() {
+    // Recording green delivery advances execution to Succeeded while the
+    // runtime that produced the candidate stays Failed (it timed out after
+    // producing it). The candidate and its bound gate receipts authorize
+    // publication on their own.
+    let mut gate_proof = successful_gate_proof();
+    gate_proof.promotion.changed_files = vec!["src/lib.rs".to_string()];
+    let mut lifecycle = successful_lifecycle("roadie/cook-heavy");
+    lifecycle.provider_runtime[0].state = ProviderRuntimeState::Failed;
+    let mut backend = MockBackend {
+        changed_files: vec!["src/lib.rs".to_string()],
+        lifecycle: Some(lifecycle),
+        gate_proof: Some(gate_proof),
+        ..Default::default()
+    };
+    let mut finalization_options = options();
+    finalization_options.manual_finalization = false;
+    finalization_options.changed_files = vec!["src/lib.rs".to_string()];
+
+    finalize_pr_with_backend(finalization_options, &mut backend)
+        .expect("recorded green candidate publishes");
+
+    assert!(backend.pushed && backend.created);
 }
 
 #[test]

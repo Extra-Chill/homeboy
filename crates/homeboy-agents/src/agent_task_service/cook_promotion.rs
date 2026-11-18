@@ -4844,21 +4844,9 @@ pub(crate) fn cook_failure_context_with_stores(
                 delivered_candidate_facts(lifecycle_store, record.as_ref(), delivery.as_ref());
             // The adopt observation only matters for a terminal `no_changes`
             // attempt; skip the worktree inspection for every other state.
-            let adoptable_candidate_ref = delivery
-                .as_ref()
-                .filter(|delivery| {
-                    delivered_candidate.verified_unpublished
-                        && delivery.blocker.as_ref().is_some_and(|blocker| {
-                            blocker.code == super::CookDeliveryBlockerCode::PublishRefused
-                        })
-                })
-                .and_then(|delivery| delivery.candidate.as_ref()?.candidate.as_ref())
-                .map(|candidate| candidate.candidate_sha.clone())
-                .or_else(|| {
-                    (status == "no_changes")
-                        .then(|| no_changes_adoption_candidate(&recipe))
-                        .flatten()
-                });
+            let adoptable_candidate_ref = (status == "no_changes")
+                .then(|| no_changes_adoption_candidate(&recipe))
+                .flatten();
             // The kernel driver lock is the one liveness fact: a live driver
             // owns every transition, so recovery has no step to take, which
             // is what diagnose reports for the same Cook (#17494).

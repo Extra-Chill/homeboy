@@ -272,11 +272,6 @@ format!(
     // A gate-green candidate publishes; without a usable review form it
     // publishes as a draft (#17671).
     if publishable {
-        if let Some(candidate_ref) = inputs.adoptable_candidate_ref {
-            return CookRecoveryStep::Adopt {
-                candidate_ref: candidate_ref.to_string(),
-            };
-        }
         return CookRecoveryStep::Publish;
     }
     if inputs.regate_ready && !status_is_settled(&status) {
@@ -1839,26 +1834,6 @@ pub(crate) fn cook_recovery_status(record: &agent_task_lifecycle::AgentTaskRunRe
 
 #[cfg(test)]
 mod tests {
-    #[test]
-    fn refused_green_publication_points_to_adopt() {
-        let step = super::cook_recovery_step(&super::CookRecoveryInputs {
-            status: "candidate_recoverable",
-            recovery_legal: true,
-            verified_unpublished: true,
-            adoptable_candidate_ref: Some("candidate-sha"),
-            ..Default::default()
-        });
-        assert_eq!(
-            step,
-            super::CookRecoveryStep::Adopt {
-                candidate_ref: "candidate-sha".into()
-            }
-        );
-        assert!(step
-            .next_action("homeboy", "cook-id")
-            .command
-            .contains("adopt cook-id --candidate-ref candidate-sha"));
-    }
     use super::*;
 
     fn step<'a>(

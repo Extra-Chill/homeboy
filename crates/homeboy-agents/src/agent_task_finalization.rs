@@ -1218,8 +1218,6 @@ fn validate_durable_publication_eligibility(
         .iter()
         .rev()
         .find(|runtime| runtime.task_id == promotion.source.task_id);
-    let producing_runtime_succeeded =
-        producing_runtime.is_some_and(|runtime| runtime.state == ProviderRuntimeState::Succeeded);
     let fingerprinted_candidate = matches!(
         serde_json::from_value::<crate::agent_task_promotion::AgentTaskPromotionCandidate>(
             promotion.provenance["candidate"].clone(),
@@ -1236,37 +1234,35 @@ fn validate_durable_publication_eligibility(
         return Ok(());
     }
     let green_gates = promotion.finalization_eligible();
-    let green_fingerprinted_candidate =
-        fingerprinted_candidate && promotion.applied_with_passing_verdict();
     // Retry history is durable and intentionally retains failed attempts. It
-    // must not veto publication when the canonical receipt for the task that
-    // produced this promoted candidate records a successful attempt.
+    // must not veto publication when every recorded runtime succeeded.
     let all_provider_runtimes_succeeded = !lifecycle.provider_runtime.is_empty()
         && lifecycle
             .provider_runtime
             .iter()
             .all(|runtime| runtime.state == ProviderRuntimeState::Succeeded);
-    // A partial or candidate-recoverable run publishes the candidate its gates
-    // verified (#16441). Homeboy's own promotion binds its gates to the
+    // Publication rests on the recorded candidate and the gates bound to it
+    // (#16441, #16602, #17375). Homeboy's own promotion binds its gates to the
     // fingerprint it records with them; an operator replacement binds them
-    // through its authorized proof. Recording green delivery can already have
-    // advanced execution to Succeeded even when the producing runtime failed;
-    // retain the same fingerprint/model/proof checks after that transition.
-    let verified_candidate_recovery = (matches!(
-        lifecycle.execution.state,
-        RunExecutionState::PartialFailure | RunExecutionState::CandidateRecoverable
-    ) || (lifecycle.execution.state
-        == RunExecutionState::Succeeded
-        && authorized_replacement_gate_proof(promotion)))
-        && producing_runtime.is_some()
+    // through its authorized proof. The producing runtime's terminal state is
+    // not an extra requirement: a provider can time out or be cancelled after
+    // producing the candidate, and recording green delivery advances execution
+    // to Succeeded while that runtime stays Failed.
+    let verified_candidate = producing_runtime.is_some()
+        && fingerprinted_candidate
         && match promotion.provenance.get("replacement_gate_proof") {
-            None => green_fingerprinted_candidate,
-            Some(_) => fingerprinted_candidate && authorized_replacement_gate_proof(promotion),
+            None => promotion.applied_with_passing_verdict(),
+            Some(_) => authorized_replacement_gate_proof(promotion),
         };
+    let publishable_execution = matches!(
+        lifecycle.execution.state,
+        RunExecutionState::Succeeded
+            | RunExecutionState::PartialFailure
+            | RunExecutionState::CandidateRecoverable
+    );
     if (lifecycle.execution.state == RunExecutionState::Succeeded
-        && (all_provider_runtimes_succeeded
-            || (producing_runtime_succeeded && green_fingerprinted_candidate)))
-        || verified_candidate_recovery
+        && all_provider_runtimes_succeeded)
+        || (publishable_execution && verified_candidate)
     {
         return Ok(());
     }
@@ -1331,15 +1327,10 @@ fn validate_durable_publication_eligibility(
         "publication refused: candidate is not fingerprinted"
     } else if promotion.status != crate::agent_task_promotion::AgentTaskPromotionStatus::Applied {
         "publication refused: candidate is not applied"
-    } else if !matches!(
-        lifecycle.execution.state,
-        RunExecutionState::Succeeded
-            | RunExecutionState::PartialFailure
-            | RunExecutionState::CandidateRecoverable
-    ) {
+    } else if !publishable_execution {
         "publication refused: wrong execution state without authenticated candidate adoption"
     } else {
-        "publication refused: producing runtime has not succeeded or candidate-bound recovery/adoption proof is invalid"
+        "publication refused: no provider runtime is recorded for the candidate's task, or its candidate-bound replacement/adoption proof is invalid"
     };
     Err(
         crate::agent_task_service::CookDeliveryBlockerCode::PublishRefused.mark(
