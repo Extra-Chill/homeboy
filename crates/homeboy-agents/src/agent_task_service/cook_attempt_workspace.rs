@@ -200,6 +200,22 @@ pub(crate) fn recorded_cook_base(recipe: &super::AgentTaskCookRecipe) -> Option<
         .map(|base| base.trim().to_string())
 }
 
+/// The base a Cook's generated `__HOMEBOY_COOK_BASE_SHA__` gates diff
+/// against when re-run by hand: the recorded Cook base, else the base the Cook
+/// resolved at admission (#18388).
+pub fn gate_cook_base(recipe: &super::AgentTaskCookRecipe) -> Option<String> {
+    recorded_cook_base(recipe).or_else(|| {
+        recipe
+            .attempts
+            .first()
+            .and_then(|attempt| attempt.plan.metadata.pointer("/cook_base_resolution/sha"))
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|base| !base.is_empty())
+            .map(str::to_string)
+    })
+}
+
 /// The Homeboy-owned destination worktree of a Cook. Caller-owned `--cwd`
 /// checkouts are never reset, so they resolve to `None`.
 fn owned_attempt_workspace(recipe: &super::AgentTaskCookRecipe) -> Option<PathBuf> {
