@@ -1169,7 +1169,7 @@ fn spawn_and_wait_for_lease_attempt(
     })?;
     // Recheck at the actual spawn boundary, including startup retries.
     super::service_manager::refuse_managed_spawn()?;
-    let mut command = Command::new(exe);
+    let mut command = daemon_command(exe);
     configure_daemon_environment(&mut command, std::env::vars_os());
     // The spawned process is the daemon itself: its PID is the lease PID. The
     // startup token in argv is the portable, exact ownership proof used when a
@@ -1310,6 +1310,36 @@ impl DaemonLog {
 
 /// Keep the daemon and its workload children alive when a transient launcher
 /// connection, such as direct SSH, disconnects.
+/// The daemon's launch command. A daemon the CLI starts would otherwise stay
+/// in the caller's cgroup (an SSH session scope, a terminal), where it cannot
+/// give its jobs kernel-enforced cgroups. With a systemd user manager it starts
+/// in its own delegated scope instead; `--scope` execs the daemon in place, so
+/// the spawned PID stays the lease PID (#18449).
+fn daemon_command(exe: PathBuf) -> Command {
+    if keeps_test_process_group() || !systemd_user_manager_reachable() {
+        return Command::new(exe);
+    }
+    let mut command = Command::new("systemd-run");
+    command
+        .args(["--user", "--scope", "--quiet", "--collect"])
+        .args(["--property=Delegate=yes", "--"])
+        .arg(exe);
+    command
+}
+
+fn keeps_test_process_group() -> bool {
+    cfg!(debug_assertions) && std::env::var_os(TEST_KEEP_DAEMON_IN_PROCESS_GROUP_ENV).is_some()
+}
+
+fn systemd_user_manager_reachable() -> bool {
+    cfg!(target_os = "linux")
+        && std::env::var_os("XDG_RUNTIME_DIR")
+            .is_some_and(|dir| Path::new(&dir).join("systemd/private").exists())
+        && std::env::var_os("PATH").is_some_and(|path| {
+            std::env::split_paths(&path).any(|dir| dir.join("systemd-run").is_file())
+        })
+}
+
 fn detach_from_launcher_session(command: &mut Command) {
     // The hermetic Cargo runner owns the test binary's process group and reaps
     // it on cancellation. Test daemons must remain in that group; a `setsid`
