@@ -4,6 +4,11 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.474.6] - 2026-11-18
+
+### Changed
+- create running fixtures atomically to avoid reconciliation races
+
 ## [0.474.5] - 2026-11-18
 
 ### Fixed
