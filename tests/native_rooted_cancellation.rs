@@ -190,6 +190,7 @@ fn native_private_daemon_cancels_only_the_rooted_staging_owner() {
                     idempotency_key: format!("native-proof-work:{RUN_ID}"),
                     active_idempotency_key: None,
                     request: work_request,
+                    submitter_build: None,
                 })
                 .expect("serialize controlled job"),
             ),

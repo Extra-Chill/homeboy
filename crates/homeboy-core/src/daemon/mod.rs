@@ -61,6 +61,7 @@ pub(crate) mod runner_watch;
 mod serve;
 mod service_manager;
 mod shutdown_deadline;
+pub mod stale_capability;
 pub mod step_job;
 mod stop;
 pub mod storage_maintenance;
@@ -321,6 +322,15 @@ impl LocalControllerJobClient {
         response: reqwest::blocking::Response,
         operation: &str,
     ) -> Result<(crate::api_jobs::Job, serde_json::Value)> {
+        let (succeeded, value) = Self::response_value(response, operation)?;
+        Self::job_from_value(succeeded, value, operation)
+    }
+
+    /// Parse a daemon response and report whether it succeeded.
+    fn response_value(
+        response: reqwest::blocking::Response,
+        operation: &str,
+    ) -> Result<(bool, serde_json::Value)> {
         let status = response.status();
         let value: serde_json::Value = response.json().map_err(|error| {
             Error::internal_json(
@@ -328,9 +338,17 @@ impl LocalControllerJobClient {
                 Some(format!("parse {operation} response")),
             )
         })?;
-        if !status.is_success()
-            || value.get("success").and_then(serde_json::Value::as_bool) != Some(true)
-        {
+        let succeeded = status.is_success()
+            && value.get("success").and_then(serde_json::Value::as_bool) == Some(true);
+        Ok((succeeded, value))
+    }
+
+    fn job_from_value(
+        succeeded: bool,
+        value: serde_json::Value,
+        operation: &str,
+    ) -> Result<(crate::api_jobs::Job, serde_json::Value)> {
+        if !succeeded {
             return Err(Error::internal_unexpected(format!(
                 "{operation} failed: {value}"
             )));
@@ -427,13 +445,37 @@ impl LocalControllerJobClient {
         request: serde_json::Value,
     ) -> Result<ControllerJobSubmission> {
         let _admission_guard = self.admission_guard.lock().unwrap().take();
-        let response = self.send_to_serving_daemon("submit local controller job", |endpoint| {
+        let operation = "submit local controller job";
+        let mut request = request;
+        let cli_build = build_identity::current().display;
+        if let Some(envelope) = request.as_object_mut() {
+            envelope
+                .entry(stale_capability::SUBMITTER_BUILD_FIELD)
+                .or_insert_with(|| json!(cli_build));
+        }
+        let response = self.send_to_serving_daemon(operation, |endpoint| {
             self.client
                 .post(format!("{endpoint}/controller/jobs"))
                 .json(&request)
                 .send()
         })?;
-        let (job, value) = Self::job_response(response, "submit local controller job")?;
+        let (succeeded, value) = Self::response_value(response, operation)?;
+        if !succeeded {
+            // Failure path only: the serving lease names the daemon's build
+            // without another network round trip.
+            let daemon_build = validate_lease_file(&self.state_path)
+                .ok()
+                .and_then(|lease| lease.state)
+                .map(|state| state.build_identity.display);
+            if let Some(error) = stale_capability::rewrap_submission_failure(
+                &value,
+                daemon_build.as_deref(),
+                &cli_build,
+            ) {
+                return Err(error);
+            }
+        }
+        let (job, value) = Self::job_from_value(succeeded, value, operation)?;
         let payload = daemon_endpoint_payload(&value);
         let disposition = match payload
             .and_then(|payload| payload.pointer("/submission/disposition"))
@@ -1328,6 +1370,10 @@ pub struct ControllerJobRequest {
     #[serde(default)]
     pub active_idempotency_key: Option<String>,
     pub request: serde_json::Value,
+    /// Build identity display of the submitting Homeboy, so a daemon on a
+    /// different build can classify a request it cannot read (#17680).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub submitter_build: Option<String>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -4016,7 +4062,20 @@ pub(crate) fn admit_controller_job(
     request: ControllerJobRequest,
     job_store: &JobStore,
 ) -> Result<ControllerJobAdmission> {
-    let mut controller_job = controller_job_state(&request)?;
+    let mut controller_job = controller_job_state(&request).map_err(|error| {
+        stale_capability::classify_admission_error(
+            error,
+            request.submitter_build.as_deref(),
+            &build_identity::current().display,
+            || {
+                job_store
+                    .daemon_freshness_snapshot
+                    .lock()
+                    .ok()
+                    .and_then(|snapshot| snapshot.as_ref().map(|report| report.active_jobs))
+            },
+        )
+    })?;
     if !post_admits_owned_work("/controller/jobs", Some(&json!(request)), job_store) {
         controller_job.pending_admission_reason =
             Some(DAEMON_DRAINING_ADMISSION_REASON.to_string());
@@ -7966,6 +8025,7 @@ mod owned_admission_tests {
                 idempotency_key: "continuation".to_string(),
                 active_idempotency_key: None,
                 request: payload,
+                submitter_build: None,
             };
             assert_eq!(
                 continuation_run_id(&request).as_deref(),

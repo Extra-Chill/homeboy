@@ -523,6 +523,7 @@ fn exit_code_for_error(code: ErrorCode) -> i32 {
         | ErrorCode::RunnerJobLost
         | ErrorCode::RunnerLabUnavailable
         | ErrorCode::RunnerVersionSkew
+        | ErrorCode::DaemonStaleCapability
         | ErrorCode::RunnerMachineAlreadyRegistered
         | ErrorCode::RuntimePromotionContended
         | ErrorCode::RuntimePromotionWaitTimeout
