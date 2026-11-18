@@ -1879,6 +1879,25 @@ thread_local! {
     };
 }
 
+/// Coordination namespace holding one health record per daemon pass name.
+const DAEMON_PASS_HEALTH_NAMESPACE: &str = "daemon-pass-health";
+
+/// Longest failure message a pass health record retains.
+const DAEMON_PASS_MESSAGE_LIMIT: usize = 512;
+
+/// The constant-size health summary kept per daemon pass name.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+struct DaemonPassHealth {
+    pass: String,
+    slow_count: u64,
+    failure_count: u64,
+    last_duration_ms: u64,
+    max_duration_ms: u64,
+    last_failed: bool,
+    last_message: Option<String>,
+    updated_at: String,
+}
+
 /// One pass per remaining global mechanism, per interval.
 ///
 /// The mechanisms are isolated from each other and from the loop: a
@@ -1886,49 +1905,86 @@ thread_local! {
 /// Overlap is impossible by construction: the sleep happens after all
 /// passes return.
 /// Only failed, panicking, or slow (at least `SLOW_DAEMON_PASS`) passes open
-/// the observation store and write a durable run with the measured phase.
-/// Fast successful passes do not touch the store. Existing terminal-run
-/// retention owns cleanup of the recorded passes.
+/// the observation store, and they upsert one bounded health record per pass
+/// name. Fast successful passes do not touch the store.
 fn observed_daemon_pass(name: &str, body: impl FnOnce() -> Result<()>) {
     if !maintenance_allowed() {
         return;
     }
-    let started_at = chrono::Utc::now();
     let started = Instant::now();
     let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(body));
     let duration = started.elapsed();
-    let failed = !matches!(&result, Ok(Ok(())));
+    let failure = match result {
+        Ok(Ok(())) => None,
+        Ok(Err(error)) => Some(error.to_string()),
+        Err(panic) => Some(
+            panic
+                .downcast_ref::<&str>()
+                .map(|message| (*message).to_string())
+                .or_else(|| panic.downcast_ref::<String>().cloned())
+                .unwrap_or_else(|| "daemon pass panicked".to_string()),
+        ),
+    };
     #[cfg(test)]
     let threshold = SLOW_DAEMON_PASS_OVERRIDE.with(|value| value.get());
     #[cfg(not(test))]
     let threshold = SLOW_DAEMON_PASS;
-    if !failed && duration < threshold {
+    let slow = duration >= threshold;
+    if failure.is_none() && !slow {
         return;
     }
-    let Ok(store) = crate::observation::ObservationStore::open_initialized() else {
-        return;
-    };
-    let Ok(run) = store.start_run(
-        crate::observation::NewRunRecord::builder("daemon-pass")
-            .command(format!("daemon.{name}"))
-            .current_homeboy_version()
-            .build(),
-    ) else {
-        return;
-    };
-    let _ = store.record_measured_run_phase(
-        &run.id,
-        &format!("resolve.{name}"),
-        started_at,
-        duration,
-        failed,
-    );
-    let status = if failed {
-        crate::observation::RunStatus::Error
-    } else {
-        crate::observation::RunStatus::Pass
-    };
-    let _ = store.finish_run(&run.id, status, None);
+    let _ = record_daemon_pass_health(name, duration, slow, failure);
+}
+
+fn record_daemon_pass_health(
+    name: &str,
+    duration: Duration,
+    slow: bool,
+    failure: Option<String>,
+) -> Result<()> {
+    use crate::observation::coordination::{ExpectedRevision, RecordOutcome, RecordWrite};
+
+    let store = crate::observation::ObservationStore::open_initialized()?;
+    let duration_ms = u64::try_from(duration.as_millis()).unwrap_or(u64::MAX);
+    let mut current = store.coordination_record(DAEMON_PASS_HEALTH_NAMESPACE, name)?;
+    // A concurrent writer can only be another daemon pass; bound the retries.
+    for _ in 0..3 {
+        let (expected, mut health) = match &current {
+            Some(record) => (
+                ExpectedRevision::Revision(record.revision),
+                serde_json::from_value::<DaemonPassHealth>(record.payload.clone())
+                    .unwrap_or_default(),
+            ),
+            None => (ExpectedRevision::Absent, DaemonPassHealth::default()),
+        };
+        health.pass = name.to_string();
+        health.slow_count += u64::from(slow);
+        health.failure_count += u64::from(failure.is_some());
+        health.last_duration_ms = duration_ms;
+        health.max_duration_ms = health.max_duration_ms.max(duration_ms);
+        health.last_failed = failure.is_some();
+        health.last_message = failure
+            .as_deref()
+            .map(|message| message.chars().take(DAEMON_PASS_MESSAGE_LIMIT).collect());
+        health.updated_at = chrono::Utc::now().to_rfc3339();
+        let payload = serde_json::to_value(&health)
+            .map_err(|error| Error::internal_unexpected(error.to_string()))?;
+        let state = if health.last_failed { "failed" } else { "slow" };
+        match store.put_coordination_record(
+            DAEMON_PASS_HEALTH_NAMESPACE,
+            name,
+            expected,
+            RecordWrite {
+                state,
+                payload: &payload,
+                expires_at_ms: None,
+            },
+        )? {
+            RecordOutcome::Applied(_) => return Ok(()),
+            RecordOutcome::Conflict { current: latest } => current = latest,
+        }
+    }
+    Ok(())
 }
 
 const STORAGE_MAINTENANCE_BUDGET: std::time::Duration = std::time::Duration::from_secs(10);
@@ -2128,15 +2184,14 @@ fn maintenance_allowed() -> bool {
 
 #[cfg(test)]
 #[test]
-fn only_slow_or_failed_daemon_passes_are_recorded() {
+fn slow_or_failed_daemon_passes_upsert_one_health_record() {
     use crate::observation::{ObservationStore, RunListFilter};
-    use homeboy_engine_primitives::phase_timing::PhaseStatus;
 
-    for (name, threshold, expected_status) in [
-        ("fast", Duration::MAX, None),
-        ("error", Duration::MAX, Some("error")),
-        ("slow", Duration::ZERO, Some("pass")),
-        ("panic", Duration::MAX, Some("error")),
+    for (name, threshold, expect_slow, expect_failed) in [
+        ("fast", Duration::MAX, false, false),
+        ("error", Duration::MAX, false, true),
+        ("slow", Duration::ZERO, true, false),
+        ("panic", Duration::MAX, false, true),
     ] {
         crate::test_support::with_isolated_home(|_| {
             struct ResetThreshold;
@@ -2147,33 +2202,43 @@ fn only_slow_or_failed_daemon_passes_are_recorded() {
             }
             let _reset = ResetThreshold;
             SLOW_DAEMON_PASS_OVERRIDE.with(|value| value.set(threshold));
-            observed_daemon_pass(name, || match name {
-                "error" => Err(Error::internal_unexpected("test pass failure")),
-                "panic" => panic!("test pass panic"),
-                _ => Ok(()),
-            });
-            let store = ObservationStore::open_initialized().unwrap();
-            let runs: Vec<_> = store
-                .list_runs(RunListFilter::default())
-                .unwrap()
-                .into_iter()
-                .filter(|run| run.kind == "daemon-pass")
-                .collect();
-            assert_eq!(runs.len(), usize::from(expected_status.is_some()), "{name}");
-            if let Some(status) = expected_status {
-                let run = &runs[0];
-                assert_eq!(run.status, status);
-                assert_eq!(
-                    run.command.as_deref(),
-                    Some(format!("daemon.{name}").as_str())
-                );
-                let report = store.phase_spans(&run.id).unwrap();
-                assert_eq!(report.spans.len(), 1);
-                let phase = &report.spans[0];
-                assert_eq!(phase.id, format!("resolve.{name}"));
-                assert_eq!(phase.status == PhaseStatus::Failed, status == "error");
-                assert!(phase.duration_ms.is_some_and(|duration| duration >= 0.0));
+            for _ in 0..2 {
+                observed_daemon_pass(name, || match name {
+                    "error" => Err(Error::internal_unexpected("test pass failure")),
+                    "panic" => panic!("test pass panic"),
+                    _ => Ok(()),
+                });
             }
+            let store = ObservationStore::open_initialized().unwrap();
+            assert!(
+                store
+                    .list_runs(RunListFilter::default())
+                    .unwrap()
+                    .is_empty(),
+                "{name}"
+            );
+            let records = store
+                .coordination_records(DAEMON_PASS_HEALTH_NAMESPACE)
+                .unwrap();
+            if !expect_slow && !expect_failed {
+                assert!(records.is_empty(), "{name}");
+                return;
+            }
+            assert_eq!(records.len(), 1, "{name}");
+            assert_eq!(records[0].key, name);
+            let health: DaemonPassHealth =
+                serde_json::from_value(records[0].payload.clone()).unwrap();
+            assert_eq!(health.pass, name);
+            assert_eq!(health.slow_count, if expect_slow { 2 } else { 0 }, "{name}");
+            assert_eq!(
+                health.failure_count,
+                if expect_failed { 2 } else { 0 },
+                "{name}"
+            );
+            assert_eq!(health.last_failed, expect_failed, "{name}");
+            assert_eq!(health.last_message.is_some(), expect_failed, "{name}");
+            assert!(health.max_duration_ms >= health.last_duration_ms);
+            assert!(!health.updated_at.is_empty());
         });
     }
 }
