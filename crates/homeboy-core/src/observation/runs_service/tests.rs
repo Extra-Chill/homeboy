@@ -82,7 +82,7 @@ fn terminal_retention_is_dry_run_by_default_and_deletes_owned_lifecycle_on_apply
 
         let dry = retain_terminal_runs(TerminalRunRetentionOptions {
             apply: false,
-            older_than_days: 1,
+            age_policy: TerminalRunAgePolicy::resolve(30, Some(1)),
             limit: 10,
         })
         .expect("dry run");
@@ -95,7 +95,7 @@ fn terminal_retention_is_dry_run_by_default_and_deletes_owned_lifecycle_on_apply
 
         let applied = retain_terminal_runs(TerminalRunRetentionOptions {
             apply: true,
-            older_than_days: 1,
+            age_policy: TerminalRunAgePolicy::resolve(30, Some(1)),
             limit: 10,
         })
         .expect("apply");
@@ -165,7 +165,7 @@ fn terminal_retention_counts_only_the_runs_it_actually_deleted() {
 
         let applied = retain_terminal_runs(TerminalRunRetentionOptions {
             apply: true,
-            older_than_days: 1,
+            age_policy: TerminalRunAgePolicy::resolve(30, Some(1)),
             limit: 10,
         })
         .expect("apply");
@@ -224,7 +224,7 @@ fn terminal_retention_keeps_runs_that_own_an_active_task_worktree() {
 
         let applied = retain_terminal_runs(TerminalRunRetentionOptions {
             apply: true,
-            older_than_days: 1,
+            age_policy: TerminalRunAgePolicy::resolve(30, Some(1)),
             limit: 10,
         })
         .expect("apply");
@@ -237,6 +237,139 @@ fn terminal_retention_keeps_runs_that_own_an_active_task_worktree() {
             .get_run(&released.id)
             .expect("released read")
             .is_none());
+    });
+}
+
+/// Seed one row in every run-owned child table for `run_id`.
+fn seed_run_children(tx: &rusqlite::Transaction<'_>, run_id: &str) {
+    let digest = format!("{:0>64}", run_id.len());
+    let rows = [
+        "INSERT INTO artifacts(id, run_id, kind, path, created_at, artifact_type, url) VALUES (?1 || ':artifact', ?1, 'report', 'https://example.test/r', '2000-01-01T00:00:00Z', 'url', 'https://example.test/r')",
+        "INSERT INTO control_plane_action_claims(run_id, idempotency_digest, request_digest, state, owner_pid, accepted_at) VALUES (?1, ?2, ?2, 'completed', 1, '2000-01-01T00:00:00Z')",
+        "INSERT INTO control_plane_event_appends(run_id, idempotency_digest, request_digest, event_id, sequence, created_at) VALUES (?1, ?2, ?2, ?1 || ':event', 1, '2000-01-01T00:00:00Z')",
+        "INSERT INTO control_plane_work_intents(id, run_id, kind, version, payload_json, created_at) VALUES (?1 || ':intent', ?1, 'test', 1, '{}', '2000-01-01T00:00:00Z')",
+        "INSERT INTO findings(id, run_id, tool, message, created_at) VALUES (?1 || ':finding', ?1, 'lint', 'm', '2000-01-01T00:00:00Z')",
+        "INSERT INTO trace_spans(id, run_id, span_id, status) VALUES (?1 || ':span', ?1, 'span', 'pass')",
+        "INSERT INTO trace_runs(run_id, component_id, scenario_id, status) VALUES (?1, 'homeboy', 'scenario', 'pass')",
+    ];
+    assert_eq!(
+        rows.len(),
+        crate::observation::store::RUN_OWNED_CHILD_TABLES.len()
+    );
+    for sql in rows {
+        let uses_digest = sql.contains("?2");
+        if uses_digest {
+            tx.execute(sql, rusqlite::params![run_id, digest])
+        } else {
+            tx.execute(sql, rusqlite::params![run_id])
+        }
+        .expect("seed child row");
+    }
+}
+
+fn run_child_count(db: &rusqlite::Connection, run_ids: &[String]) -> i64 {
+    let mut total = 0;
+    for table in crate::observation::store::RUN_OWNED_CHILD_TABLES {
+        let mut statement = db
+            .prepare(&format!("SELECT COUNT(*) FROM {table} WHERE run_id = ?1"))
+            .expect("prepare child count");
+        for id in run_ids {
+            total += statement
+                .query_row([id], |row| row.get::<_, i64>(0))
+                .expect("child count");
+        }
+    }
+    total
+}
+
+#[test]
+fn terminal_retention_batches_deletes_and_applies_per_kind_age_floors() {
+    with_isolated_home(|_home| {
+        let _xdg = homeboy_core::test_support::EnvVarGuard::unset("XDG_DATA_HOME");
+        let store = ObservationStore::open_initialized().expect("store");
+        let path = store.status().expect("status").path;
+        drop(store);
+
+        let now = Utc::now();
+        let ago = |days: i64| (now - Duration::days(days)).to_rfc3339();
+        // (kind, finished days ago, status, expected removed)
+        let cohorts: [(&str, i64, &str, bool); 7] = [
+            ("cli-invocation", 5, "pass", true),
+            ("cleanup", 5, "fail", true),
+            ("cleanup.artifacts", 3, "error", true),
+            ("review", 60, "pass", true),
+            ("review", 10, "pass", false),
+            ("agent-task", 10, "stale", false),
+            ("cli-invocation", 1, "pass", false),
+        ];
+        let mut db = rusqlite::Connection::open(&path).expect("raw db");
+        let tx = db.transaction().expect("seed tx");
+        let mut removed = Vec::new();
+        let mut retained = Vec::new();
+        for (cohort, (kind, days, status, expect_removed)) in cohorts.iter().enumerate() {
+            let count = if *expect_removed { 700 } else { 50 };
+            for index in 0..count {
+                let id = format!("{kind}-{cohort}-{index}");
+                tx.execute(
+                    "INSERT INTO runs(id, kind, started_at, finished_at, status) VALUES (?1, ?2, ?3, ?3, ?4)",
+                    rusqlite::params![id, kind, ago(*days), status],
+                )
+                .expect("seed run");
+                seed_run_children(&tx, &id);
+                if *expect_removed {
+                    removed.push(id);
+                } else {
+                    retained.push(id);
+                }
+            }
+        }
+        // Running runs, even very old internal ones, are never touched.
+        for index in 0..5 {
+            let id = format!("running-{index}");
+            tx.execute(
+                "INSERT INTO runs(id, kind, started_at, status) VALUES (?1, 'cli-invocation', ?2, 'running')",
+                rusqlite::params![id, ago(90)],
+            )
+            .expect("seed running run");
+            seed_run_children(&tx, &id);
+            retained.push(id);
+        }
+        tx.commit().expect("commit seed");
+        assert_eq!(removed.len(), 2_800);
+
+        let mut total_removed = 0;
+        loop {
+            let pass = retain_terminal_runs(TerminalRunRetentionOptions {
+                apply: true,
+                age_policy: TerminalRunAgePolicy::configured(30),
+                limit: 1000,
+            })
+            .expect("apply retention");
+            assert!(pass.skipped_run_ids.is_empty());
+            if pass.removed_run_count == 0 {
+                break;
+            }
+            total_removed += pass.removed_run_count;
+        }
+        assert_eq!(total_removed, removed.len());
+
+        let remaining = |ids: &[String]| -> i64 {
+            ids.iter()
+                .map(|id| {
+                    db.query_row("SELECT COUNT(*) FROM runs WHERE id = ?1", [id], |row| {
+                        row.get::<_, i64>(0)
+                    })
+                    .expect("run count")
+                })
+                .sum()
+        };
+        assert_eq!(remaining(&removed), 0);
+        assert_eq!(run_child_count(&db, &removed), 0);
+        assert_eq!(remaining(&retained), retained.len() as i64);
+        assert_eq!(
+            run_child_count(&db, &retained),
+            (retained.len() * crate::observation::store::RUN_OWNED_CHILD_TABLES.len()) as i64
+        );
     });
 }
 

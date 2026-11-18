@@ -20,6 +20,7 @@ use homeboy::core::observation::runs_service::{
     self, OrphanedArtifactBytesCleanupOptions, PersistedArtifactCleanupOptions,
     RunnerDownloadCleanupOptions,
 };
+use homeboy::core::observation::TerminalRunAgePolicy;
 use homeboy::core::output::OutputBudget;
 use homeboy::core::worktree::{self, WorktreeCleanupOptions, WorktreeCleanupOutput};
 use homeboy::runner::runners::{
@@ -2559,7 +2560,12 @@ fn run_cleanup_category(
                     let output = runs_service::retain_terminal_runs(
                         runs_service::TerminalRunRetentionOptions {
                             apply,
-                            older_than_days: terminal_run_days,
+                            // `--older-than-days` overrides every kind; the
+                            // configured window keeps the per-kind floors.
+                            age_policy: TerminalRunAgePolicy::resolve(
+                                terminal_run_days,
+                                args.older_than_days,
+                            ),
                             limit,
                         },
                     )?;
