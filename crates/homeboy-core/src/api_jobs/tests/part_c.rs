@@ -449,3 +449,63 @@ fn remote_runner_job_enqueue_persists_run_ref_metadata() {
         })
     }));
 }
+
+#[test]
+fn live_worker_slower_than_the_reservation_lease_still_spawns() {
+    // #18318: under load, pre-spawn preparation outlived the fixed 60s lease
+    // and this daemon's own reconciler failed the live worker's job as
+    // `local child reservation lease expired before spawn`.
+    let store = JobStore::default();
+    let request = LocalRunnerJobRequest {
+        operation: "runner.exec".to_string(),
+        source_snapshot: None,
+        metadata: None,
+        path_materialization_plan: None,
+        local_runner: Some(direct_local_runner("homeboy-lab")),
+        admission_idempotency_key: None,
+    };
+    let (reserved_tx, reserved_rx) = std::sync::mpsc::channel();
+    let (release_tx, release_rx) = std::sync::mpsc::channel::<()>();
+    let (runner, created) = store
+        .try_run_capacity_queued_local_child_background_with_existing_job(
+            request,
+            1,
+            None,
+            move |handle| {
+                reserved_tx.send(()).expect("signal reserved");
+                // Pre-spawn preparation stalls here, past the lease.
+                release_rx.recv().expect("release worker");
+                handle.start_with_reserved_child_identity(
+                    std::process::id(),
+                    None,
+                    LocalChildStartDiscriminator::Unsupported {
+                        evidence: "slow pre-spawn fixture".to_string(),
+                    },
+                )?;
+                Ok(json!({ "spawned": true }))
+            },
+        )
+        .expect("admit worker");
+    assert!(created);
+    reserved_rx
+        .recv_timeout(std::time::Duration::from_secs(30))
+        .expect("worker reserved its child");
+
+    // Several lease periods pass with no progress while the worker is alive.
+    let far_future = crate::api_jobs::timestamp_ms() + 10 * 60_000;
+    assert!(store
+        .reconcile_expired_local_child_reservations_at(far_future)
+        .expect("reconcile live worker")
+        .is_empty());
+    assert_eq!(
+        store.get(runner.job_id).expect("job").status,
+        JobStatus::Queued
+    );
+
+    release_tx.send(()).expect("release worker");
+    runner.handle.join().expect("join worker");
+    assert_eq!(
+        store.get(runner.job_id).expect("job").status,
+        JobStatus::Succeeded
+    );
+}

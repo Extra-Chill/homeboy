@@ -40,8 +40,9 @@ pub(super) mod terminal_delivery;
 
 /// A reservation bounds the silence between durable admission and persisting a
 /// child identity. Each pre-spawn progress event the worker records renews it,
-/// so a slow store under load cannot expire a worker that is still advancing;
-/// a worker that stops reporting for this long never spawned a child.
+/// so a slow store under load cannot expire a worker that is still advancing.
+/// The deadline only reaps orphans: while this daemon's worker for the job is
+/// alive, reconciliation renews the lease instead of failing the job (#18318).
 const LOCAL_CHILD_RESERVATION_LEASE_MS: u64 = 60_000;
 /// Admissions protect the controller-to-daemon handoff window. A stopped
 /// controller must eventually stop consuming daemon replacement capacity.
@@ -73,6 +74,10 @@ pub struct JobStore {
     pub(crate) health_revision: Arc<AtomicU64>,
     /// The daemon scope this store acts for; see [`JobStore::owns`].
     pub(super) daemon_scope: Option<DaemonScope>,
+    /// Jobs whose capacity-queued local child worker thread is alive in this
+    /// process. Shared by every clone, so the reservation reconciler can tell
+    /// a slow, live worker from an orphaned reservation (#18318).
+    pub(super) live_local_child_workers: Arc<Mutex<HashSet<Uuid>>>,
     #[cfg(test)]
     terminal_write_failures: Arc<AtomicU64>,
     #[cfg(test)]
@@ -422,6 +427,34 @@ pub(crate) struct LocalRunnerJob {
         reason = "Reservation provenance asserted by cfg(test) admission paths; production branches on the reservation itself."
     )]
     pub(crate) workspace_owner_lease: Option<crate::workspace_claim::WorkspaceOwnerLease>,
+}
+
+/// Marks a local child worker live in this process until dropped.
+struct LocalChildWorkerLiveness {
+    workers: Arc<Mutex<HashSet<Uuid>>>,
+    job_id: Uuid,
+}
+
+impl LocalChildWorkerLiveness {
+    fn register(store: &JobStore, job_id: Uuid) -> Self {
+        store
+            .live_local_child_workers
+            .lock()
+            .expect("live local child workers mutex poisoned")
+            .insert(job_id);
+        Self {
+            workers: Arc::clone(&store.live_local_child_workers),
+            job_id,
+        }
+    }
+}
+
+impl Drop for LocalChildWorkerLiveness {
+    fn drop(&mut self) {
+        if let Ok(mut workers) = self.workers.lock() {
+            workers.remove(&self.job_id);
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -1010,6 +1043,7 @@ impl JobStore {
             ))),
             daemon_lease_id: None,
             daemon_scope: None,
+            live_local_child_workers: Arc::default(),
             #[cfg(test)]
             terminal_write_failures: Arc::new(AtomicU64::new(0)),
             #[cfg(test)]
@@ -1114,6 +1148,7 @@ impl JobStore {
             ))),
             daemon_lease_id: None,
             daemon_scope: None,
+            live_local_child_workers: Arc::default(),
             #[cfg(test)]
             terminal_write_failures: Arc::new(AtomicU64::new(0)),
             #[cfg(test)]
@@ -3007,7 +3042,11 @@ impl JobStore {
         }
         let handle_store = self.clone();
         let worker_store = self.clone();
+        let liveness = LocalChildWorkerLiveness::register(self, job_id);
         let handle = thread::spawn(move || {
+            // Held for the worker's whole life, including unwinding, so the
+            // reconciler expires this reservation only once the worker is gone.
+            let _liveness = liveness;
             let job_handle = JobHandle {
                 store: handle_store,
                 job_id,
@@ -3691,10 +3730,21 @@ impl JobStore {
             })
     }
 
-    /// Terminalize expired pre-spawn reservations. A PID-bound child has
-    /// atomically claimed the reservation and is intentionally left to normal
-    /// child liveness recovery, even when the original admission deadline has
-    /// passed.
+    /// Whether this process still runs the local child worker for `job_id`.
+    pub(super) fn local_child_worker_is_live(&self, job_id: Uuid) -> bool {
+        self.live_local_child_workers
+            .lock()
+            .expect("live local child workers mutex poisoned")
+            .contains(&job_id)
+    }
+
+    /// Terminalize orphaned expired pre-spawn reservations. A PID-bound child
+    /// has atomically claimed the reservation and is intentionally left to
+    /// normal child liveness recovery, even when the original admission
+    /// deadline has passed. A reservation whose worker is still alive in this
+    /// daemon is only slow (e.g. durable writes under load), so its lease is
+    /// renewed rather than failed; the deadline reaps only reservations whose
+    /// worker died or whose daemon generation is gone (#18318).
     pub(crate) fn reconcile_expired_local_child_reservations(&self) -> Result<Vec<Uuid>> {
         self.reconcile_expired_local_child_reservations_at(timestamp_ms())
     }
@@ -3724,7 +3774,19 @@ impl JobStore {
             return Ok(Vec::new());
         }
         self.durable_transaction(|inner| {
-            let expired = expired_in(inner);
+            let (live, expired): (Vec<_>, Vec<_>) = expired_in(inner)
+                .into_iter()
+                .partition(|job_id| self.local_child_worker_is_live(*job_id));
+            for job_id in &live {
+                let child = inner
+                    .jobs
+                    .get_mut(job_id)
+                    .and_then(|stored| stored.local_child.as_mut())
+                    .expect("live reservation exists");
+                child.reservation_expires_at_ms = child
+                    .reservation_expires_at_ms
+                    .max(now.saturating_add(LOCAL_CHILD_RESERVATION_LEASE_MS));
+            }
 
             for job_id in &expired {
                 let stored = inner.jobs.get_mut(job_id).expect("expired job exists");
@@ -4610,6 +4672,55 @@ mod local_child_tests {
             store
                 .reconcile_expired_local_child_reservations_at(renewed_until)
                 .expect("reconcile silent worker"),
+            vec![job.id]
+        );
+        assert_eq!(store.get(job.id).expect("job").status, JobStatus::Failed);
+    }
+
+    #[test]
+    fn live_worker_renews_its_reservation_and_a_dead_worker_expires() {
+        // #18318: expiry follows worker liveness. A live worker is renewed no
+        // matter how long it prepares; once it is gone the deadline reaps it.
+        let store = JobStore::default();
+        let job = store.create("runner.exec");
+        let reserved_at = timestamp_ms();
+        store
+            .reserve_local_child_at_with_runner_capacity(job.id, reserved_at, None)
+            .map(|_| ())
+            .expect("reserve child");
+        let worker = LocalChildWorkerLiveness::register(&store, job.id);
+        let reservation_expiry = |store: &JobStore| {
+            store
+                .inner
+                .lock()
+                .expect("store")
+                .jobs
+                .get(&job.id)
+                .and_then(|stored| stored.local_child.as_ref())
+                .expect("reservation")
+                .reservation_expires_at_ms
+        };
+
+        let late = reserved_at + 5 * LOCAL_CHILD_RESERVATION_LEASE_MS;
+        assert!(store
+            .reconcile_expired_local_child_reservations_at(late)
+            .expect("reconcile live worker")
+            .is_empty());
+        assert_eq!(store.get(job.id).expect("job").status, JobStatus::Queued);
+        assert_eq!(
+            reservation_expiry(&store),
+            late + LOCAL_CHILD_RESERVATION_LEASE_MS,
+            "the durable deadline is renewed for readers like the child identity wait"
+        );
+
+        drop(worker);
+        assert!(!store.local_child_worker_is_live(job.id));
+        assert_eq!(
+            store
+                .reconcile_expired_local_child_reservations_at(
+                    late + LOCAL_CHILD_RESERVATION_LEASE_MS
+                )
+                .expect("reconcile dead worker"),
             vec![job.id]
         );
         assert_eq!(store.get(job.id).expect("job").status, JobStatus::Failed);
