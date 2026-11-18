@@ -1209,6 +1209,48 @@ impl JobStore {
         self.create_with_source_snapshot(operation, None)
     }
 
+    /// Create an already-running fixture in one durable write, without exposing
+    /// a queued job to a live daemon's startup recovery.
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn create_running(&self, operation: impl Into<String>) -> Job {
+        self.durable_transaction(|inner| {
+            let (job, _) = self.create_or_reuse_active_local_runner_job_inner(
+                inner,
+                LocalRunnerJobRequest {
+                    operation: operation.into(),
+                    source_snapshot: None,
+                    metadata: None,
+                    path_materialization_plan: None,
+                    local_runner: None,
+                    admission_idempotency_key: None,
+                },
+            )?;
+            let stored = inner
+                .jobs
+                .get_mut(&job.id)
+                .expect("newly-created job exists");
+            let now = timestamp_ms();
+            stored.job.status = JobStatus::Running;
+            stored.job.updated_at_ms = now;
+            stored.job.started_at_ms = Some(now);
+            Self::append_event_already_locked(
+                self,
+                inner,
+                job.id,
+                JobEventKind::Status,
+                Some("job started".to_string()),
+                Some(serde_json::json!({ "status": JobStatus::Running })),
+            )?;
+            Ok(inner
+                .jobs
+                .get(&job.id)
+                .expect("newly-created job exists")
+                .job
+                .clone())
+        })
+        .expect("running fixture job creation must persist")
+    }
+
     #[cfg(any(test, feature = "test-support"))]
     pub(crate) fn create_with_source_snapshot(
         &self,
@@ -4614,6 +4656,61 @@ impl JobHandle {
     pub fn result(&self, data: Value) -> Result<JobEvent> {
         self.store
             .append_event(self.job_id, JobEventKind::Result, None, Some(data))
+    }
+}
+
+#[cfg(test)]
+mod fixture_creation_tests {
+    use super::*;
+
+    #[test]
+    fn running_fixture_is_durable_and_preserved_without_child_identity() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let path = temp.path().join(crate::paths::OBSERVATION_DB_FILENAME);
+        let scope = DaemonScope::from_state_dir(temp.path());
+        let store = JobStore::open_without_reconciliation(&path)
+            .expect("open store")
+            .with_daemon_scope(scope.clone());
+        let job = store.create_running("idle-lifetime-active-regression");
+        assert_eq!(job.status, JobStatus::Running);
+        assert!(job.started_at_ms.is_some());
+        assert_eq!(job.updated_at_ms, job.started_at_ms.unwrap());
+        assert!(job.finished_at_ms.is_none());
+        assert!(job.daemon_lease_id.is_none());
+
+        let daemon = JobStore::open_without_reconciliation(&path)
+            .expect("reopen store")
+            .with_daemon_scope(scope)
+            .with_daemon_lease("live-lease".to_string());
+        assert_eq!(
+            serde_json::to_value(daemon.get(job.id).expect("persisted job")).unwrap(),
+            serde_json::to_value(&job).unwrap(),
+        );
+        let events = daemon.events(job.id).expect("persisted events");
+        assert_eq!(events.len(), 2);
+        assert_eq!(events[0].message.as_deref(), Some("job queued"));
+        assert_eq!(events[1].kind, JobEventKind::Status);
+        assert_eq!(events[1].message.as_deref(), Some("job started"));
+        assert_eq!(
+            events[1].data,
+            Some(serde_json::json!({ "status": JobStatus::Running }))
+        );
+
+        daemon
+            .reconcile_direct_admissions()
+            .expect("direct admissions");
+        assert!(daemon
+            .reconcile_expired_local_child_reservations_at(u64::MAX)
+            .expect("child reservations")
+            .is_empty());
+        let diagnostics = daemon
+            .reconcile_dead_generation_jobs("live-lease")
+            .expect("dead generations");
+        assert_eq!(diagnostics.needs_attestation_job_ids, vec![job.id]);
+        assert_eq!(
+            daemon.get(job.id).expect("preserved job").status,
+            JobStatus::Running
+        );
     }
 }
 

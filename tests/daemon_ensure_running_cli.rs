@@ -75,8 +75,8 @@ fn idle_shutdown_preserves_active_durable_jobs_then_reaps_after_completion() {
     .unwrap()
     // Idle shutdown counts only its own scope's work (#16104).
     .with_daemon_scope(DaemonScope::from_state_dir(&context.daemon_dir()));
-    let job = jobs.create("idle-lifetime-active-regression");
-    jobs.start(job.id).unwrap();
+    // Never expose a queued, lease-less fixture to startup recovery.
+    let job = jobs.create_running("idle-lifetime-active-regression");
     thread::sleep(Duration::from_secs(5));
     let alive_with_active_work = homeboy_core::process::pid_is_running(pid);
     let active_status = jobs.get(job.id).unwrap().status;
@@ -266,8 +266,7 @@ fn ensure_running_in_second_controller_namespace_ignores_live_first_daemon() {
         .join(homeboy_core::paths::OBSERVATION_DB_FILENAME);
     let first_jobs = JobStore::open_without_reconciliation(&first_jobs_path)
         .expect("open controller A durable jobs store");
-    let active_job = first_jobs.create("controller-a-active-job");
-    let active_job = first_jobs.start(active_job.id).expect("start durable job");
+    let active_job = first_jobs.create_running("controller-a-active-job");
     assert_eq!(active_job.status, JobStatus::Running);
     let first_jobs_before = serde_json::to_value((
         first_jobs.list(),
