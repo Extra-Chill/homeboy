@@ -61,7 +61,7 @@ if (JSON.stringify(plan.command) !== JSON.stringify(['bash', process.env.RUNNER,
 NODE
 
 "$ROOT_DIR/nodejs/scripts/deps/deps-runner.sh" install >/dev/null
-if [ "$(cat "$HOMEBOY_FAKE_NPM_LOG")" != "ci" ]; then
+if [ "$(cat "$HOMEBOY_FAKE_NPM_LOG")" != "ci --no-audit --no-fund" ]; then
     echo "expected install to run npm ci" >&2
     exit 1
 fi
@@ -85,7 +85,7 @@ NODE
 
 : >"$HOMEBOY_FAKE_NPM_LOG"
 "$ROOT_DIR/nodejs/scripts/deps/deps-runner.sh" install >/dev/null
-if [ "$(cat "$HOMEBOY_FAKE_NPM_LOG")" != "ci" ]; then
+if [ "$(cat "$HOMEBOY_FAKE_NPM_LOG")" != "ci --no-audit --no-fund" ]; then
     echo "expected npm-shrinkwrap.json install to run npm ci" >&2
     exit 1
 fi
@@ -128,6 +128,20 @@ STATUS_JSON="$status_json" node <<'NODE'
 const status = JSON.parse(process.env.STATUS_JSON);
 if (!status.errors.some((error) => error.code === 'nodejs.lockfile_ambiguous')) {
   throw new Error(`expected ambiguous lockfile error, got ${JSON.stringify(status.errors)}`);
+}
+NODE
+
+ROOT_DIR="$ROOT_DIR" node <<'NODE'
+const fs = require('fs');
+const manifest = JSON.parse(fs.readFileSync(`${process.env.ROOT_DIR}/nodejs/nodejs.json`, 'utf8'));
+// CI keeps the npm download store (not node_modules) in a rolling cache.
+const cache = manifest.ci?.cache;
+if (!cache || cache.rolling !== true) throw new Error('nodejs manifest must declare a rolling ci.cache');
+if (!cache.paths?.some((entry) => entry.root === 'home' && entry.path === '.npm/_cacache')) {
+  throw new Error('npm download store missing from ci.cache');
+}
+if (cache.paths.some((entry) => /(^|\/)node_modules(\/|$)/.test(entry.path))) {
+  throw new Error('ci.cache must not cache installed trees');
 }
 NODE
 

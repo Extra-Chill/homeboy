@@ -517,6 +517,14 @@
     }
   },
   "ci": {
+    "cache": {
+      "namespace": "wordpress-deps",
+      "rolling": true,
+      "paths": [
+        { "root": "home", "path": ".npm/_cacache" },
+        { "root": "home", "path": ".cache/composer", "env": "COMPOSER_CACHE_DIR" }
+      ]
+    },
     "profiles": {
       "pr": {
         "label": "Pull request checks",

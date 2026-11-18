@@ -116,7 +116,7 @@ if [ "$(cat "$HOMEBOY_FAKE_COMPOSER_LOG")" != "install --no-interaction --prefer
     echo "expected composer install command" >&2
     exit 1
 fi
-if [ "$(cat "$HOMEBOY_FAKE_NPM_LOG")" != "ci" ]; then
+if [ "$(cat "$HOMEBOY_FAKE_NPM_LOG")" != "ci --no-audit --no-fund" ]; then
     echo "expected npm ci command" >&2
     exit 1
 fi
@@ -126,6 +126,20 @@ const fs = require('fs');
 const manifest = JSON.parse(fs.readFileSync('wordpress.json', 'utf8'));
 if (manifest.deps?.extension_script !== 'scripts/deps/deps-runner.sh') {
   throw new Error('wordpress manifest does not declare deps.extension_script');
+}
+// CI keeps the package-manager download stores (not node_modules/vendor) in a
+// rolling cache, so cold dependency hydration (e.g. deploy --ref) reuses
+// downloads across runs even for components outside the action's component.
+const cache = manifest.ci?.cache;
+if (!cache || cache.rolling !== true) throw new Error('wordpress manifest must declare a rolling ci.cache');
+if ((cache.key_files || []).length !== 0) throw new Error('rolling download cache must not depend on one component lockfile');
+const byPath = Object.fromEntries((cache.paths || []).map((entry) => [entry.path, entry]));
+if (byPath['.npm/_cacache']?.root !== 'home') throw new Error('npm download store missing from ci.cache');
+if (byPath['.cache/composer']?.root !== 'home' || byPath['.cache/composer']?.env !== 'COMPOSER_CACHE_DIR') {
+  throw new Error('composer download store must be cached and pinned through COMPOSER_CACHE_DIR');
+}
+if (cache.paths.some((entry) => /(^|\/)(node_modules|vendor)(\/|$)/.test(entry.path))) {
+  throw new Error('ci.cache must not cache installed trees');
 }
 NODE
 

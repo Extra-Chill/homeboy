@@ -15,9 +15,13 @@ has_package_json() {
     [ -f "${PROJECT_PATH}/package.json" ]
 }
 
+# Hydration installs skip npm's advisory audit and funding notices, like the
+# lockfile-less `npm install` path below. A cold audit fetches full packuments
+# for every flagged package and roughly doubles a cold `npm ci`; vulnerability
+# reporting belongs to dedicated audit commands, not dependency hydration.
 npm_install_command() {
     if [ -f "${PROJECT_PATH}/package-lock.json" ]; then
-        printf '%s\n' "npm ci"
+        printf '%s\n' "npm ci --no-audit --no-fund"
     else
         printf '%s\n' "npm install --no-audit --no-fund"
     fi
