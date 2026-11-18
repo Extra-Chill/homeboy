@@ -2,6 +2,11 @@
 
 All notable changes to the **wordpress** extension will be documented in this file.
 
+## [3.56.2] - 2026-11-18
+
+### Changed
+- rolling npm/composer download cache and audit-free hydration installs
+
 ## [3.56.1] - 2026-11-18
 
 ### Fixed
