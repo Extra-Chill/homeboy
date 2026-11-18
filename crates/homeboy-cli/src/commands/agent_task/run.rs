@@ -2712,6 +2712,62 @@ mod preview_tests {
         });
     }
 
+    /// #18467: `--goal` with `--task-url` dispatches the goal, not the URL,
+    /// in both the preview and the live (replayed) preparation paths.
+    #[test]
+    fn cook_with_task_url_and_goal_dispatches_the_goal() {
+        crate::test_support::with_isolated_home(|_| {
+            let (repository, workspace) = linked_preview_workspace();
+            let _capacity = declare_preview_fixture_capacity(repository.path());
+            let goal = "Fix only the second checklist item";
+            let args = cook(&[
+                "homeboy",
+                "agent-task",
+                "cook",
+                "--base",
+                "main",
+                "--preview",
+                "--backend",
+                "fixture",
+                "--repo",
+                "fixture-repository",
+                "--task-url",
+                "https://example.test/issues/18467",
+                "--goal",
+                goal,
+                "--to-worktree",
+                workspace.to_str().expect("UTF-8 workspace"),
+                "--no-finalize",
+                "--verify",
+                "true",
+            ]);
+            let mut preview_args = args.clone();
+            default_cook_prompt_from_task_url(&mut preview_args);
+            assert_eq!(
+                resolved_dispatch_args_for_cook(&preview_args)
+                    .expect("resolve preview dispatch")
+                    .prompt
+                    .as_deref(),
+                Some(goal)
+            );
+            let (preview, exit_code) = preview_cook(args.clone(), None).expect("compile preview");
+            assert_eq!(exit_code, 0, "{preview}");
+
+            for attempt_plan in [None, Some("{}".to_string())] {
+                let mut live = args.clone();
+                live.attempt_plan = attempt_plan;
+                prepare_cook_request(&mut live, None).expect("prepare replayed Cook");
+                assert_eq!(
+                    resolved_dispatch_args_for_cook(&live)
+                        .expect("resolve live dispatch")
+                        .prompt
+                        .as_deref(),
+                    Some(goal)
+                );
+            }
+        });
+    }
+
     /// #17653: a Cook without a repro warns in its preview that its gates do
     /// not prove the issue; a declared repro is shown instead of the warning.
     #[test]
@@ -8746,11 +8802,12 @@ pub(crate) fn snapshot_cook_prompt(args: &mut AgentTaskCookArgs) -> homeboy::cor
     Ok(())
 }
 
-/// Without `--prompt`, Cook runs the `--task-url` task exactly as cook-batch
-/// children do. The prompt is a pure function of the task URL, so it is derived
-/// on every path, including a controller that carries a compiled attempt plan.
+/// Without `--prompt` or `--goal`, Cook runs the `--task-url` task exactly as
+/// cook-batch children do. The prompt is a pure function of the task URL, so it
+/// is derived on every path, including a controller that carries a compiled
+/// attempt plan. An explicit `--goal` is the dispatched prompt instead (#18467).
 fn default_cook_prompt_from_task_url(args: &mut AgentTaskCookArgs) {
-    if args.dispatch.prompt.is_some() || args.prompt_snapshot.is_some() {
+    if args.dispatch.prompt.is_some() || args.prompt_snapshot.is_some() || args.goal.is_some() {
         return;
     }
     if let Some(task_url) = args.dispatch.task_url.as_deref() {
