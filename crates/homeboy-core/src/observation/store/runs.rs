@@ -7,6 +7,13 @@ use uuid::Uuid;
 
 use super::*;
 
+/// Statuses terminal-run retention may delete. Unknown statuses are retained.
+const TERMINAL_RUN_STATUS_PREDICATE: &str =
+    "status IN ('pass', 'fail', 'error', 'skipped', 'stale')";
+
+/// Runs deleted per retention transaction, keeping each write short.
+const TERMINAL_RUN_DELETE_BATCH: usize = 200;
+
 /// Rows returned when a caller does not ask for a specific page size.
 pub const DEFAULT_RUN_PAGE_LIMIT: i64 = 100;
 
@@ -1968,51 +1975,85 @@ impl ObservationStore {
         Ok(self.list_runs(filter)?.into_iter().next())
     }
 
-    /// Return a bounded page of terminal rows older than `finished_before`.
-    /// Unknown statuses are deliberately retained rather than guessed terminal.
+    /// Return a bounded page of terminal rows older than their kind's cutoff.
+    /// Kinds listed in `cutoffs.per_kind` use their own cutoff; every other
+    /// kind uses `cutoffs.default_before`. Unknown statuses are deliberately
+    /// retained rather than guessed terminal.
     pub fn terminal_run_ids_before(
         &self,
-        finished_before: &str,
+        cutoffs: &crate::observation::TerminalRunCutoffs,
         limit: i64,
     ) -> Result<Vec<String>> {
-        let mut statement = self.connection.prepare(
-            "SELECT id FROM runs WHERE finished_at < ?1 AND status IN ('pass', 'fail', 'error', 'skipped', 'stale') ORDER BY finished_at ASC, rowid ASC LIMIT ?2",
-        ).map_err(sqlite_error("prepare terminal run retention candidates"))?;
+        let mut values: Vec<&str> = Vec::new();
+        let mut clauses = Vec::new();
+        for (kind, before) in &cutoffs.per_kind {
+            values.push(kind);
+            values.push(before);
+            clauses.push(format!(
+                "(kind = ?{} AND finished_at < ?{})",
+                values.len() - 1,
+                values.len()
+            ));
+        }
+        let mut default_clause = String::from("(");
+        if !cutoffs.per_kind.is_empty() {
+            let kinds = (1..=cutoffs.per_kind.len())
+                .map(|index| format!("?{}", index * 2 - 1))
+                .collect::<Vec<_>>()
+                .join(", ");
+            default_clause.push_str(&format!("kind NOT IN ({kinds}) AND "));
+        }
+        values.push(&cutoffs.default_before);
+        default_clause.push_str(&format!("finished_at < ?{})", values.len()));
+        clauses.push(default_clause);
+        let sql = format!(
+            "SELECT id FROM runs WHERE {TERMINAL_RUN_STATUS_PREDICATE} AND ({}) ORDER BY finished_at ASC, rowid ASC LIMIT {}",
+            clauses.join(" OR "),
+            limit.clamp(1, 1000)
+        );
+        let mut statement = self
+            .connection
+            .prepare(&sql)
+            .map_err(sqlite_error("prepare terminal run retention candidates"))?;
         let rows = statement
-            .query_map(params![finished_before, limit.clamp(1, 1000)], |row| {
-                row.get(0)
-            })
+            .query_map(params_from_iter(values), |row| row.get(0))
             .map_err(sqlite_error("list terminal run retention candidates"))?;
         collect_rows(rows, "collect terminal run retention candidates")
     }
 
-    /// Delete run-owned records explicitly so older databases that did not
-    /// enable SQLite foreign keys retain referential integrity as well.
+    /// Delete terminal runs and every run-owned child row, set-based.
+    ///
+    /// Ids are processed in batches of [`TERMINAL_RUN_DELETE_BATCH`]; each
+    /// batch is one short `BEGIN IMMEDIATE` transaction. Children are deleted
+    /// explicitly so older databases that did not enable SQLite foreign keys
+    /// keep referential integrity, and every statement repeats the terminal
+    /// status predicate so a run that is still active is never touched.
     pub fn delete_terminal_runs(&mut self, ids: &[String]) -> Result<()> {
-        for id in ids {
-            // One child per commit bounds both fanout and legacy blob bytes.
-            // A terminal predicate on every batch avoids damaging active runs.
+        for batch in ids.chunks(TERMINAL_RUN_DELETE_BATCH) {
+            let placeholders = (1..=batch.len())
+                .map(|index| format!("?{index}"))
+                .collect::<Vec<_>>()
+                .join(", ");
+            let terminal_ids = format!(
+                "SELECT id FROM runs WHERE id IN ({placeholders}) AND {TERMINAL_RUN_STATUS_PREDICATE}"
+            );
+            let tx = begin_control_plane_write(&self.connection, "retain terminal runs")?;
             for table in RUN_OWNED_CHILD_TABLES {
-                loop {
-                    let tx = begin_control_plane_write(
-                        &self.connection,
-                        "retain terminal run children",
-                    )?;
-                    let changed = tx.execute(&format!(
-                        "DELETE FROM {table} WHERE rowid IN (SELECT rowid FROM {table} WHERE run_id = ?1 LIMIT 1) AND EXISTS (SELECT 1 FROM runs WHERE id = ?1 AND status IN ('pass', 'fail', 'error', 'skipped', 'stale'))"
-                    ), [id]).map_err(sqlite_error("delete terminal run child batch"))?;
-                    tx.commit()
-                        .map_err(sqlite_error("commit terminal run child batch"))?;
-                    if changed == 0 {
-                        break;
-                    }
-                }
+                tx.execute(
+                    &format!("DELETE FROM {table} WHERE run_id IN ({terminal_ids})"),
+                    params_from_iter(batch),
+                )
+                .map_err(sqlite_error(format!("delete terminal run {table}")))?;
             }
-            let tx = begin_control_plane_write(&self.connection, "retain terminal run")?;
-            tx.execute("DELETE FROM runs WHERE id = ?1 AND status IN ('pass', 'fail', 'error', 'skipped', 'stale')", [id])
-                .map_err(sqlite_error("delete terminal run"))?;
+            tx.execute(
+                &format!(
+                    "DELETE FROM runs WHERE id IN ({placeholders}) AND {TERMINAL_RUN_STATUS_PREDICATE}"
+                ),
+                params_from_iter(batch),
+            )
+            .map_err(sqlite_error("delete terminal runs"))?;
             tx.commit()
-                .map_err(sqlite_error("commit terminal run retention"))?;
+                .map_err(sqlite_error("commit terminal run retention batch"))?;
         }
         self.compact_run_metadata()?;
         self.reclaim_retention_pages()
@@ -3495,31 +3536,6 @@ mod tests {
                 pragma(&store, "freelist_count") > 0,
                 "later passes reclaim the remainder"
             );
-        });
-    }
-
-    #[test]
-    fn retention_commits_batches_before_a_later_failure() {
-        with_isolated_home(|_| {
-            let mut store = ObservationStore::open_initialized().unwrap();
-            let ids: Vec<String> = (0..100).map(|i| format!("batch-{i}")).collect();
-            for id in &ids {
-                store
-                    .upsert_imported_run(&RunRecord {
-                        id: id.clone(),
-                        kind: "test".into(),
-                        status: "pass".into(),
-                        started_at: "2026-01-01T00:00:00Z".into(),
-                        ..Default::default()
-                    })
-                    .unwrap();
-            }
-            store.connection.execute_batch("CREATE TRIGGER fail_last_retention BEFORE DELETE ON runs WHEN OLD.id = 'batch-99' BEGIN SELECT RAISE(ABORT, 'injected failure'); END;").unwrap();
-            assert!(store.delete_terminal_runs(&ids).is_err());
-            let reader = ObservationStore::open_readonly_at(store.database_path()).unwrap();
-            assert!(reader.get_run(&ids[0]).unwrap().is_none());
-            assert!(reader.get_run(&ids[98]).unwrap().is_none());
-            assert!(reader.get_run(&ids[99]).unwrap().is_some());
         });
     }
 

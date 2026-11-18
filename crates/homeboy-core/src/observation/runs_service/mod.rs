@@ -26,7 +26,7 @@ use serde_json::Value;
 
 use super::{
     ArtifactCleanupCandidateRecord, ArtifactCleanupFilter, ArtifactRecord, ObservationStore,
-    RunListFilter, RunRecord, RunStatus,
+    RunListFilter, RunRecord, RunStatus, TerminalRunAgePolicy,
 };
 use crate::artifact_links::{cached_validated_viewer_links, public_artifact_url};
 use crate::engine::temp::CleanupSizeTotals;
@@ -101,14 +101,17 @@ pub struct PersistedArtifactCleanupRow {
 #[derive(Debug, Clone)]
 pub struct TerminalRunRetentionOptions {
     pub apply: bool,
-    pub older_than_days: i64,
+    /// Per-kind age windows; see [`TerminalRunAgePolicy`].
+    pub age_policy: TerminalRunAgePolicy,
     pub limit: i64,
 }
 
 #[derive(Debug, Clone, Serialize)]
 pub struct TerminalRunRetentionOutcome {
     pub dry_run: bool,
+    /// Window applied to every kind without its own age floor.
     pub older_than_days: i64,
+    pub age_policy: TerminalRunAgePolicy,
     pub candidate_run_ids: Vec<String>,
     pub artifact_cleanup: Vec<PersistedArtifactCleanupOutcome>,
     pub lifecycle_directories: Vec<TerminalRunLifecycleDirectory>,
@@ -166,15 +169,16 @@ pub use runner_evidence::{
 pub fn retain_terminal_runs(
     options: TerminalRunRetentionOptions,
 ) -> Result<TerminalRunRetentionOutcome> {
-    if options.older_than_days < 0 {
+    let older_than_days = options.age_policy.default_days;
+    if older_than_days < 0 {
         return Err(Error::validation_invalid_argument(
             "older_than_days",
             "--older-than-days must be zero or greater",
-            Some(options.older_than_days.to_string()),
+            Some(older_than_days.to_string()),
             None,
         ));
     }
-    let finished_before = (Utc::now() - Duration::days(options.older_than_days)).to_rfc3339();
+    let cutoffs = options.age_policy.cutoffs(Utc::now());
     // The store and artifact root are resolved once for the whole sweep. Both
     // used to be re-derived inside each per-run plan call, which meant one
     // connection open plus a full migration ladder per candidate run.
@@ -186,7 +190,7 @@ pub fn retain_terminal_runs(
     // and correct if the store is ever opened rooted (#7505).
     let mut store = ObservationStore::open_initialized()?;
     let artifact_root = store.artifact_root()?;
-    let candidate_run_ids = store.terminal_run_ids_before(&finished_before, options.limit)?;
+    let candidate_run_ids = store.terminal_run_ids_before(&cutoffs, options.limit)?;
     // A run that still owns an active task worktree keeps its record: that
     // record is the terminal authority the worktree is reconciled against, and
     // pruning it would leave the worktree unreconcilable (#15844).
@@ -294,7 +298,8 @@ pub fn retain_terminal_runs(
     }
     Ok(TerminalRunRetentionOutcome {
         dry_run: !options.apply,
-        older_than_days: options.older_than_days,
+        older_than_days,
+        age_policy: options.age_policy,
         removed_run_count,
         candidate_run_ids,
         artifact_cleanup,

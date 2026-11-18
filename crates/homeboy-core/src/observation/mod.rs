@@ -19,6 +19,8 @@ pub use phase_coverage::{PhaseCoverage, PhaseCoverageGap};
 pub mod phase_timing;
 pub mod records;
 mod run_failure_causes;
+pub mod run_retention_policy;
+pub use run_retention_policy::{TerminalRunAgePolicy, TerminalRunCutoffs};
 
 pub mod runs_service;
 pub mod store;
