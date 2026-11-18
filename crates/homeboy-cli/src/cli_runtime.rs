@@ -1020,6 +1020,7 @@ fn register_startup_providers_after_reconcile(
     // Register the agent-task terminal-recovery provider so core's job store
     // can recover terminal jobs from durable agent-task runs.
     crate::agents::api_jobs_terminal_recovery::register();
+    crate::agents::controller_scratch::register_storage_maintenance();
     // Register the agent-task secret provider so core's trace secret
     // resolution can consult the agent-task secret store.
     crate::agents::agent_task_secrets::register();

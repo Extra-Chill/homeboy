@@ -570,7 +570,6 @@ fn reconstructable_admission_error(
     .with_hint(format!(
         "The {reserve_bytes}-byte reserve comes from `retention.reconstructable_artifact_reserve_bytes`; inspect it with `homeboy config show retention` and change it with `homeboy config set /retention/reconstructable_artifact_reserve_bytes <bytes>`."
     ))
-    .with_hint("Finished Cook attempts hold controller scratch; reclaim it with `homeboy cleanup --include controller-scratch --apply`.")
     .with_hint("Shared Cargo targets are not worktree artifacts; inspect them with `homeboy cleanup --include shared-cargo-targets`.")
 }
 
