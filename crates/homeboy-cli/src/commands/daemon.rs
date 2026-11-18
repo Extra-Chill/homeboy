@@ -85,6 +85,14 @@ enum DaemonCommand {
         #[arg(long, requires = "lease_id")]
         force: bool,
     },
+    /// Stop the daemon and start its replacement, which re-adopts the work in flight
+    ///
+    /// Fails unless every job the stopped daemon left running is held by the
+    /// replacement's lease or has finished.
+    Restart {
+        #[arg(long, default_value = daemon::DEFAULT_ADDR)]
+        addr: String,
+    },
     /// Show the daemon's one next lifecycle action and its recovery plan (read-only).
     ///
     /// The same planner `daemon recover` follows, over the one daemon store.
@@ -203,12 +211,21 @@ pub enum DaemonOutput {
     AttestAbsent(DaemonAttestAbsentResult),
     Serve(DaemonStartResult),
     Stop(DaemonStopResult),
+    Restart(DaemonRestartOutput),
     Status(Value),
     ArtifactGet(DaemonArtifactGetOutput),
     JobsList(DaemonJobsListOutput),
     JobsShow(DaemonJobsShowOutput),
     JobsWatch(DaemonJobsWatchOutput),
     JobsPrune(DaemonJobsPruneOutput),
+}
+
+#[derive(Debug, Serialize)]
+pub struct DaemonRestartOutput {
+    pub stopped: DaemonStopResult,
+    pub started: DaemonStartResult,
+    /// Jobs in flight under the stopped daemon, now held by the replacement.
+    pub readopted_job_ids: Vec<Uuid>,
 }
 
 #[derive(Debug, Serialize)]
@@ -368,6 +385,7 @@ pub fn run(args: DaemonArgs) -> CmdResult<DaemonOutput> {
             }
             Ok((DaemonOutput::Stop(result), 0))
         }
+        DaemonCommand::Restart { addr } => restart(&addr),
         DaemonCommand::Plan => {
             let status = daemon::read_status()?;
             let recovery = daemon::recovery_actions::plan_recovery(&status);
@@ -388,6 +406,58 @@ pub fn run(args: DaemonArgs) -> CmdResult<DaemonOutput> {
         DaemonCommand::ArtifactGet(args) => artifact_get(args),
         DaemonCommand::Jobs(args) => jobs(args),
     }
+}
+
+/// Stop, start, and prove the replacement re-adopted the work in flight:
+/// startup recovery moves each surviving job to the new lease before
+/// `ensure_running` returns.
+fn restart(addr: &str) -> CmdResult<DaemonOutput> {
+    let stopped = daemon::stop()?;
+    let old_lease = stopped
+        .termination_evidence
+        .as_ref()
+        .and_then(|evidence| evidence.lease_id.clone());
+    let in_flight = |store: &JobStore, lease: &str| {
+        store
+            .list()
+            .into_iter()
+            .filter(|job| {
+                !job.status.is_terminal() && job.daemon_lease_id.as_deref() == Some(lease)
+            })
+            .map(|job| job.id)
+            .collect::<Vec<_>>()
+    };
+    let left = match old_lease.as_deref() {
+        Some(lease) => in_flight(&job_store()?, lease),
+        None => Vec::new(),
+    };
+    let started = daemon::ensure_running(addr)?;
+    let store = job_store()?;
+    let unadopted = left
+        .iter()
+        .filter(|id| {
+            store.get(**id).is_ok_and(|job| {
+                !job.status.is_terminal()
+                    && job.daemon_lease_id.as_deref() != Some(started.lease_id.as_str())
+            })
+        })
+        .map(Uuid::to_string)
+        .collect::<Vec<_>>();
+    if !unadopted.is_empty() {
+        return Err(Error::internal_unexpected(format!(
+            "daemon restarted as lease {} but did not re-adopt in-flight jobs: {}",
+            started.lease_id,
+            unadopted.join(", ")
+        )));
+    }
+    Ok((
+        DaemonOutput::Restart(DaemonRestartOutput {
+            stopped,
+            started,
+            readopted_job_ids: left,
+        }),
+        0,
+    ))
 }
 
 fn jobs(args: DaemonJobsArgs) -> CmdResult<DaemonOutput> {

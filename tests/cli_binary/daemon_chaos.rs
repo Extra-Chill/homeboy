@@ -362,8 +362,24 @@ fn stop_and_restart_in_place_resumes_in_flight_work_every_time() {
         .to_string();
 
     // Stop mid step a, then mid step b: every stop interrupts, every restart
-    // resumes in the same store.
-    for pause in [Duration::from_millis(1500), Duration::from_secs(4)] {
+    // resumes in the same store. `daemon restart` is the same pair in one
+    // verb and reports the jobs its replacement re-adopted.
+    std::thread::sleep(Duration::from_millis(1500));
+    let restarted = json_output(&bin, home.path(), &["daemon", "restart"]);
+    assert_eq!(restarted["success"], true, "daemon restart: {restarted}");
+    assert!(
+        !restarted["data"]["readopted_job_ids"]
+            .as_array()
+            .expect("re-adopted jobs")
+            .is_empty(),
+        "restart mid step re-adopts the running workflow: {restarted}"
+    );
+    reaper.track(
+        restarted["data"]["started"]["pid"]
+            .as_i64()
+            .unwrap_or_default(),
+    );
+    for pause in [Duration::from_secs(4)] {
         std::thread::sleep(pause);
         // Upgrade uses this exact requested-stop primitive, even while busy.
         let resident = status(&bin, home.path());
