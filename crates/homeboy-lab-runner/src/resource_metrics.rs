@@ -1088,13 +1088,15 @@ fn sample_job_cgroup(
 ) {
     let snapshot = cgroup_process_snapshot(&job.members());
     let counters = job.counters();
+    // The kernel bounds memory and tasks; the process count is sampled here,
+    // in its own unit (#18441 conflated it with `pids.max`).
+    let sampled = resource_guard_violation(&snapshot, guard_limits, Some(u64::MAX));
     let mut state = state.lock().expect("resource metrics mutex poisoned");
     state.sample_count += 1;
     state.peak_rss_bytes = state.peak_rss_bytes.max(snapshot.rss_bytes);
-    let process_count_peak = counters.pids_peak.unwrap_or(0).max(snapshot.process_count);
     state.child_process_count_peak = state
         .child_process_count_peak
-        .max(process_count_peak.saturating_sub(1));
+        .max(snapshot.process_count.saturating_sub(1));
     state.cpu_user_ms = state.cpu_user_ms.max(snapshot.cpu_user_ms);
     state.cpu_system_ms = state.cpu_system_ms.max(snapshot.cpu_system_ms);
     if !snapshot.top_processes.is_empty() {
@@ -1103,9 +1105,13 @@ fn sample_job_cgroup(
     if state.guard_violation.is_some() {
         return;
     }
-    let Some(violation) =
-        job_cgroup_guard_violation(&counters, guard_limits, &state.last_top_processes)
-    else {
+    let Some(violation) = job_cgroup_guard_violation(
+        &counters,
+        guard_limits,
+        &state.last_top_processes,
+        snapshot.process_count,
+    )
+    .or(sampled) else {
         return;
     };
     if let Some(shared_violation) = guard_violation {
@@ -1121,6 +1127,7 @@ fn job_cgroup_guard_violation(
     counters: &job_cgroup::JobCgroupCounters,
     limits: Option<&RunnerResourceGuardLimits>,
     top_processes: &[RunnerProcessNameCount],
+    process_count: u64,
 ) -> Option<RunnerResourceGuardViolation> {
     let limits = limits?;
     let oom_kill = counters.oom_kill.unwrap_or(0);
@@ -1137,12 +1144,13 @@ fn job_cgroup_guard_violation(
         .or(counters.memory_current)
         .unwrap_or(0);
     let rss_limit_bytes = counters.memory_limit.unwrap_or(limits.rss_limit_bytes);
-    let process_count = counters.pids_peak.or(counters.pids_current).unwrap_or(0);
-    let process_count_limit = counters.pids_limit.unwrap_or(limits.process_count_limit);
+    let task_count = counters.pids_peak.or(counters.pids_current).unwrap_or(0);
+    let task_limit = counters.pids_limit.unwrap_or(0);
+    let process_count_limit = limits.process_count_limit;
     Some(RunnerResourceGuardViolation {
         reason: reason.to_string(),
         message: format!(
-            "runner job cgroup hit its kernel limit (memory.events oom_kill={oom_kill}, pids.events max={pids_max_events}) at rss_bytes={rss_bytes}, process_count={process_count}; limits rss_bytes={rss_limit_bytes}, process_count={process_count_limit}"
+            "runner job cgroup hit its kernel limit (memory.events oom_kill={oom_kill}, pids.events max={pids_max_events}) at rss_bytes={rss_bytes}, process_count={process_count}, tasks={task_count}; limits rss_bytes={rss_limit_bytes}, process_count={process_count_limit}, tasks={task_limit}"
         ),
         rss_bytes,
         rss_limit_bytes,

@@ -262,7 +262,7 @@ fn delegated_daemon_leaf_and_jobs_budget() {
         fs::read_to_string(job.dir().join("pids.max"))
             .unwrap()
             .trim(),
-        "48"
+        "1536"
     );
     assert_eq!(
         fs::read_to_string(job.dir().join("memory.oom.group"))
@@ -272,7 +272,7 @@ fn delegated_daemon_leaf_and_jobs_budget() {
     );
     assert_eq!(
         fs::read_to_string(jobs.join("pids.max")).unwrap().trim(),
-        "96"
+        "3072"
     );
     job.stop().expect("stop empty job cgroup");
     assert!(!job.dir().exists());
@@ -334,6 +334,44 @@ fn delegated_setsid_fork_bomb() {
     let marker = bomb.display().to_string();
     assert_eq!(survivors(&marker), Vec::<String>::new());
     assert_eq!(survivors(&sleep), Vec::<String>::new());
+    assert_job_cgroups_removed(jobs);
+}
+
+/// The process limit counts processes: one process with more threads than
+/// the limit runs to completion (`pids.max` counts threads).
+#[test]
+fn a_multithreaded_job_under_its_process_limit_runs() {
+    in_delegated_scope(
+        "delegated_multithreaded_job",
+        &[(homeboy_runner_contract::PROCESS_COUNT_LIMIT_ENV, "8")],
+    );
+}
+
+#[test]
+#[ignore = "inner half of a_multithreaded_job_under_its_process_limit_runs"]
+fn delegated_multithreaded_job() {
+    let Some(jobs) = enter_delegated_scope() else {
+        return;
+    };
+    let mut command = Command::new("python3");
+    command.args([
+        "-c",
+        "import threading, time\n\
+         threads = [threading.Thread(target=time.sleep, args=(2,)) for _ in range(64)]\n\
+         [t.start() for t in threads]; [t.join() for t in threads]",
+    ]);
+    let output = run_job(&mut command, || false);
+    assert!(
+        output.output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.output.stderr)
+    );
+    assert_eq!(output.metrics.isolation.as_deref(), Some("cgroup"));
+    assert!(
+        output.metrics.guard_violation.is_none(),
+        "{:?}",
+        output.metrics.guard_violation
+    );
     assert_job_cgroups_removed(jobs);
 }
 

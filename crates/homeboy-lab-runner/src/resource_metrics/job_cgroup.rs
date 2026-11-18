@@ -26,6 +26,11 @@ const DAEMON_LEAF: &str = "daemon";
 const JOBS_DIR: &str = "jobs";
 const DRAIN_TIMEOUT: Duration = Duration::from_secs(30);
 const DRAIN_POLL: Duration = Duration::from_millis(10);
+/// The `pids` controller counts tasks (threads), while the guard limit counts
+/// processes, and a headless browser or Node process holds 10 to 30 threads.
+/// `pids.max` is a fork-bomb backstop at this many tasks per allowed process;
+/// the sampler enforces the process count itself.
+pub(crate) const TASKS_PER_PROCESS: u64 = 32;
 
 static DELEGATION: OnceLock<Result<PathBuf, String>> = OnceLock::new();
 
@@ -170,7 +175,7 @@ impl JobCgroup {
         };
         fs::write(
             jobs.join("pids.max"),
-            limit_value(process_count_limit.saturating_mul(concurrency.max(1))),
+            limit_value(task_limit(process_count_limit).saturating_mul(concurrency.max(1))),
         )?;
         let name = job_id
             .filter(|id| {
@@ -190,7 +195,10 @@ impl JobCgroup {
             fs::create_dir(&dir)?;
         }
         let configured = (|| {
-            fs::write(dir.join("pids.max"), limit_value(process_count_limit))?;
+            fs::write(
+                dir.join("pids.max"),
+                limit_value(task_limit(process_count_limit)),
+            )?;
             fs::write(dir.join("memory.oom.group"), "1")?;
             // std opens with O_CLOEXEC, so the job never inherits it.
             fs::OpenOptions::new()
@@ -319,6 +327,10 @@ impl Drop for JobCgroup {
     fn drop(&mut self) {
         let _ = self.stop();
     }
+}
+
+fn task_limit(process_count_limit: u64) -> u64 {
+    process_count_limit.saturating_mul(TASKS_PER_PROCESS)
 }
 
 fn read_u64(path: &Path) -> Option<u64> {
