@@ -2,6 +2,11 @@
 
 All notable changes to Homeboy Action will be documented in this file.
 
+## [2.27.1] - 2026-11-18
+
+### Fixed
+- name new failing tests in differential review test summaries
+
 ## [2.27.0] - 2026-11-09
 
 ### Added
