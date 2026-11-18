@@ -5233,7 +5233,7 @@ fn dirty_candidate_adoption_recovery_actions(
         super::AgentTaskCookRecoveryAction {
             action: "adopt_candidate".to_string(),
             command: format!(
-                "{prefix} agent-task adopt {} --candidate-ref HEAD --model {}",
+                "{prefix} agent-task recover {} --candidate-ref HEAD --adoption-model {}",
                 quote_arg(cook_id),
                 quote_arg(model),
             ),
@@ -5241,7 +5241,7 @@ fn dirty_candidate_adoption_recovery_actions(
     ];
     Some(CookRecoveryActions {
         step: super::CookRecoveryStep::none(
-            "Commit the dirty candidate, review it, then adopt HEAD with `agent-task adopt`.",
+            "Commit the dirty candidate, review it, then adopt HEAD with `agent-task recover`.",
         ),
         reason: "The first provider admission refused a dirty checkout. Commit the immutable candidate, record its tracked review, then adopt HEAD through the durable Cook gates without provider patch replay.".to_string(),
         legal_actions: actions.clone(),

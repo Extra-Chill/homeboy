@@ -3,8 +3,8 @@ use super::super::super::tool::AgentTaskToolArgs;
 use super::cook::{AgentTaskCookArgs, PromotionProviderArgs};
 use super::fanout::{AgentTaskBatchPrepareArgs, AgentTaskFanoutArgs};
 use super::lifecycle::{
-    AdoptArgs, CancelArgs, DiagnoseArgs, FinalizePrArgs, PlacementUpdateArgs, RecoverArgs,
-    ResumeArgs, RetryArgs, ReviewArgs, RunArgs, RunPlanArgs, StatusArgs, ValidatePlanArgs,
+    CancelArgs, DiagnoseArgs, FinalizePrArgs, PlacementUpdateArgs, RecoverArgs, RetryArgs,
+    ReviewArgs, RunArgs, RunPlanArgs, StatusArgs, ValidatePlanArgs,
 };
 use clap::{Args, Subcommand, ValueEnum};
 
@@ -110,12 +110,6 @@ pub enum AgentTaskCommand {
     /// Mark a queued or stale-running durable run as cancelled.
     /// The durable run metadata retains cancellation_actor (PID and redacted argv).
     Cancel(CancelArgs),
-    /// Resume a queued or stale-running durable run.
-    ///
-    /// Given a Cook ID whose durable state names a recovery step, `resume`
-    /// performs that step through `agent-task recover` instead of deciding
-    /// one itself.
-    Resume(ResumeArgs),
     /// Change an unexecuted queued Cook's placement after explicit confirmation.
     PlacementUpdate(PlacementUpdateArgs),
     /// Submit a fresh durable run from an existing run's plan.
@@ -145,8 +139,6 @@ pub enum AgentTaskCommand {
     /// Build a durable aggregate review envelope from run state, logs, artifacts,
     /// and promotion hints.
     Review(ReviewArgs),
-    /// Adopt an immutable commit candidate through a tracked cook's normal gates and finalization.
-    Adopt(AdoptArgs),
     #[command(hide = true)]
     PromotionProvider(PromotionProviderArgs),
     /// Internal: one daemon-supervised terminal Cook continuation pass.

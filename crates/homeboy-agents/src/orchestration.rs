@@ -4284,7 +4284,7 @@ fn projected_cook_recovery(record: &AgentTaskRunRecord) -> Option<ControlPlaneRe
         crate::agent_task_service::CookRecoveryStep::Adopt { candidate_ref } => (
             Some(candidate_ref.clone()),
             format!(
-                "homeboy agent-task adopt {} --candidate-ref {candidate_ref}",
+                "homeboy agent-task recover {} --candidate-ref {candidate_ref}",
                 quote(&plan.cook_id)
             ),
         ),

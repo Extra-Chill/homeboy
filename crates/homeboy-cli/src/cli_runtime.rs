@@ -3341,12 +3341,12 @@ fn preflight_hot_command_with(
 
 fn controller_owned_unmaterialized_resume(cli: &Cli) -> bool {
     let Commands::AgentTask(crate::commands::agent_task::AgentTaskArgs {
-        command: crate::commands::agent_task::AgentTaskCommand::Resume(args),
+        command: crate::commands::agent_task::AgentTaskCommand::Recover(args),
     }) = &cli.command
     else {
         return false;
     };
-    crate::agents::agent_tasks::lifecycle::exact_record(&args.run_id).is_ok_and(|record| {
+    crate::agents::agent_tasks::lifecycle::exact_record(&args.id).is_ok_and(|record| {
         !record.state().is_terminal()
             && record.metadata["unmaterialized_cook_admission"].is_object()
     })
@@ -4574,13 +4574,13 @@ mod tests {
                 "waiting",
             )
             .expect("admitted");
-            let cli = Cli::parse_from(["homeboy", "agent-task", "resume", run_id]);
+            let cli = Cli::parse_from(["homeboy", "agent-task", "recover", run_id]);
 
             assert_eq!(
                 preflight_hot_command_with(
                     &cli,
                     None,
-                    &output::CommandIdentity::with_operation("agent-task", "resume"),
+                    &output::CommandIdentity::with_operation("agent-task", "recover"),
                     || -> crate::commands::CmdResult<crate::commands::resources::DoctorOutput> {
                         panic!("controller lifecycle resume must bypass resource preflight")
                     },

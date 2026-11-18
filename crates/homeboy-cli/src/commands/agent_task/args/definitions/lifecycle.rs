@@ -31,18 +31,6 @@ pub struct ValidatePlanArgs {
     pub plan: String,
 }
 #[derive(Args, Debug)]
-pub struct ResumeArgs {
-    /// Durable run or Cook ID to resume.
-    pub run_id: String,
-    /// Return complete lifecycle details instead of the bounded summary.
-    #[arg(long)]
-    pub full: bool,
-    /// Stable key used to replay this resume without executing it twice.
-    #[arg(long, value_name = "KEY")]
-    pub idempotency_key: Option<String>,
-}
-
-#[derive(Args, Debug)]
 pub struct PlacementUpdateArgs {
     /// Durable queued Cook ID whose unexecuted placement will be changed.
     pub run_id: String,
@@ -123,32 +111,6 @@ mod tests {
         ])
         .expect("local placement update parses");
         assert_eq!(cli.placement, crate::cli_surface::Placement::Local);
-    }
-
-    #[test]
-    fn model_parses_canonically_for_adoption() {
-        let adopt = |flag: &str| {
-            Cli::try_parse_from([
-                "homeboy",
-                "agent-task",
-                "adopt",
-                "cook-a",
-                "--candidate-ref",
-                "0123456789abcdef0123456789abcdef01234567",
-                flag,
-                "openai/gpt-5.6-sol",
-            ])
-        };
-        let cli = adopt("--model").expect("adoption model parses");
-        let Commands::AgentTask(agent_task) = cli.command else {
-            panic!("expected agent-task command");
-        };
-        let AgentTaskCommand::Adopt(args) = agent_task.command else {
-            panic!("expected adoption command");
-        };
-        assert_eq!(args.ai_model.as_deref(), Some("openai/gpt-5.6-sol"));
-        // The deprecated `--ai-model` alias was deleted for adoption (#15742).
-        assert!(adopt("--ai-model").is_err());
     }
 
     #[test]
@@ -301,7 +263,7 @@ mod tests {
         };
         assert!(args.strict_subject_exit);
 
-        for command in ["artifacts", "resume"] {
+        for command in ["artifacts", "recover"] {
             assert!(
                 Cli::try_parse_from([
                     "homeboy",
@@ -387,6 +349,26 @@ mod tests {
 }
 #[derive(Args, Debug, Default)]
 pub struct RecoverArgs {
+    /// Adopt this immutable commit through the recorded Cook recipe.
+    #[arg(long, value_name = "SHA", conflicts_with_all = ["preflight", "regate", "timeout_ms", "backend", "selector", "model", "acknowledge_model_override"])]
+    pub candidate_ref: Option<String>,
+    /// Select the candidate's owning durable attempt.
+    #[arg(long, value_name = "N", requires = "candidate_ref")]
+    pub attempt: Option<u32>,
+    /// Concrete model that prepared the supplied candidate (not a retry route override).
+    #[arg(
+        long = "adoption-model",
+        value_name = "MODEL",
+        requires = "candidate_ref",
+        conflicts_with = "model"
+    )]
+    pub adoption_model: Option<String>,
+    /// Replace a stale interrupted adoption, retaining its evidence.
+    #[arg(long, requires = "candidate_ref")]
+    pub replace_interrupted: bool,
+    /// Stable key for resuming a non-Cook run without executing it twice.
+    #[arg(long, value_name = "KEY")]
+    pub idempotency_key: Option<String>,
     /// Follow the admitted daemon step through status/watch.
     #[arg(long, conflicts_with = "preflight")]
     pub wait: bool,
@@ -396,7 +378,7 @@ pub struct RecoverArgs {
     /// Re-run recorded gates on the newest candidate, without a provider attempt.
     #[arg(long)]
     pub regate: bool,
-    /// Durable Cook ID, Cook attempt ID or batch-child run ID.
+    /// Durable run ID, Cook ID, Cook attempt ID or batch-child run ID.
     pub id: String,
     /// Report the step recovery would perform without performing it. A
     /// continuation step also validates continuation admission read-only.
@@ -575,28 +557,6 @@ pub struct ReviewArgs {
         long_help = "Promotion-only apply-provider invocation argument. Repeat once per exact argv element: the first is the executable and later values are its arguments; values are never shell-split. This cannot select an executor. The provider reads stdin request schema `homeboy/agent-task-promotion-apply-request/v1` and writes response schema `homeboy/agent-task-promotion-apply-response/v1` with required `workspace_path`."
     )]
     pub provider_argv: Vec<String>,
-}
-#[derive(Args, Debug)]
-pub struct AdoptArgs {
-    /// Existing durable Cook id or one of its declared attempt run ids whose recipe owns the candidate lifecycle.
-    #[arg(value_name = "RUN_OR_COOK_ID")]
-    pub run_or_cook_id: String,
-    /// Select an exact durable attempt from the resolved Cook recipe. Required when attempts use different policies.
-    #[arg(long, value_name = "N")]
-    pub attempt: Option<u32>,
-    /// Immutable commit revision in the recorded source worktree.
-    #[arg(long, value_name = "SHA")]
-    pub candidate_ref: String,
-    /// Concrete model that prepared the externally supplied candidate.
-    #[arg(long = "model", value_name = "MODEL")]
-    pub ai_model: Option<String>,
-    /// Replace a stale interrupted adoption while retaining its lifecycle evidence.
-    #[arg(long)]
-    pub replace_interrupted: bool,
-
-    /// Return the complete cook adoption report, including nested gate evidence.
-    #[arg(long)]
-    pub full: bool,
 }
 #[derive(Args, Debug)]
 pub struct FinalizePrArgs {

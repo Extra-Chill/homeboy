@@ -5,7 +5,7 @@ activity watch
 agent-task
 agent-task accept
 agent-task active-scope
-agent-task adopt
+agent-task recover
 agent-task auth
 agent-task auth map-env
 agent-task auth map-keychain-bundle
@@ -40,7 +40,6 @@ agent-task prompts show
 agent-task providers
 agent-task reconcile
 agent-task record-replacement-gate-proof
-agent-task resume
 agent-task retained-artifacts
 agent-task retained-artifacts attach
 agent-task retained-artifacts discover

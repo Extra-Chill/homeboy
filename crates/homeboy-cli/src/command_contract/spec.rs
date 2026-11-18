@@ -718,7 +718,7 @@ const AGENT_TASK_SUBCOMMAND_SAFETY: &[CommandPathSafetySpec] = &[
     paths_safety(
         &["recover"],
         with_dry_run(mutating_safety(), "--preflight"),
-        "performs the stopped Cook's one recovery step; with --authorize-external-proof and corrected gates it executes operator-supplied deterministic shell gates and records durable replacement proof; --preflight only reports the step",
+        "resumes a non-Cook durable run, adopts --candidate-ref through the recorded Cook policy, or performs the stopped Cook's one recovery step; with --authorize-external-proof and corrected gates it executes operator-supplied deterministic shell gates and records durable replacement proof; --preflight only reports the step",
     ),
     paths_safety(
         &["reconcile"],

@@ -32,7 +32,7 @@ use homeboy::core::Error;
 use homeboy_engine_primitives::shell::shell_arg;
 
 use super::super::CmdResult;
-use super::{merge_route_provider_config, AdoptArgs, FinalizePrArgs, ProvidersArgs, ReviewArgs};
+use super::{merge_route_provider_config, FinalizePrArgs, ProvidersArgs, RecoverArgs, ReviewArgs};
 
 #[derive(Args, Debug)]
 pub struct FinalizePrEvidenceArgs {
@@ -342,19 +342,19 @@ fn promotion_progress_line(message: &str) {
     let _ = stderr.flush();
 }
 
-pub(crate) fn adopt_candidate(args: AdoptArgs) -> CmdResult<Value> {
+pub(crate) fn recover_candidate(args: RecoverArgs) -> CmdResult<Value> {
     let reporter = AdoptionProgressReporter::new(
-        &args.run_or_cook_id,
-        &args.candidate_ref,
+        &args.id,
+        args.candidate_ref.as_deref().expect("candidate recovery"),
         std::time::Duration::from_secs(5),
     );
     let result =
         agent_task_service::adopt_cook_candidate_with_options_dispatcher_and_executor_for_attempt(
-            &args.run_or_cook_id,
+            &args.id,
             args.attempt,
-            &args.candidate_ref,
+            args.candidate_ref.as_deref().expect("candidate recovery"),
             agent_task_service::AgentTaskCandidateAdoptionOptions {
-                ai_model: args.ai_model.clone(),
+                ai_model: args.adoption_model.clone(),
                 replace_interrupted: args.replace_interrupted,
             },
             crate::commands::infra::route::reconstruct_cook_attempt_dispatcher,
@@ -381,19 +381,19 @@ pub(crate) fn adopt_candidate(args: AdoptArgs) -> CmdResult<Value> {
 }
 
 fn adoption_envelope(
-    args: &AdoptArgs,
+    args: &RecoverArgs,
     cook_id: &str,
     selected_attempt: u32,
     selected_run_id: &str,
 ) -> Value {
     serde_json::json!({
         "schema": "homeboy/agent-task-candidate-adoption/v1",
-        "source": args.run_or_cook_id,
+        "source": args.id,
         "cook_id": cook_id,
         "attempt": selected_attempt,
         "run_id": selected_run_id,
         "candidate_ref": args.candidate_ref,
-        "ai_model": args.ai_model,
+        "ai_model": args.adoption_model,
         "replace_interrupted": args.replace_interrupted,
         "controller_owned": true,
     })
@@ -2443,14 +2443,15 @@ mod tests {
 
     #[test]
     fn adoption_envelope_reports_canonical_selection_for_a_child_run_source() {
-        let args = AdoptArgs {
-            run_or_cook_id: "cook-42-attempt-2".to_string(),
+        let args = RecoverArgs {
+            id: "cook-42-attempt-2".to_string(),
             attempt: None,
-            candidate_ref: "deadbeef".to_string(),
-            ai_model: Some("openai/gpt-5.6-terra".to_string()),
+            candidate_ref: Some("deadbeef".to_string()),
+            adoption_model: Some("openai/gpt-5.6-terra".to_string()),
             replace_interrupted: false,
 
             full: false,
+            ..Default::default()
         };
 
         let envelope = adoption_envelope(&args, "cook-42", 2, "cook-42-attempt-2");

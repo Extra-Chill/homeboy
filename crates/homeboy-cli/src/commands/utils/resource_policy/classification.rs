@@ -80,8 +80,6 @@ pub(super) fn agent_task_resource_behavior(
         agent_task::AgentTaskCommand::Cook(_)
         | agent_task::AgentTaskCommand::RunPlan(_)
         | agent_task::AgentTaskCommand::Run(_)
-        | agent_task::AgentTaskCommand::Resume(_)
-        | agent_task::AgentTaskCommand::Adopt(_)
         | agent_task::AgentTaskCommand::PromotionProvider(_)
         | agent_task::AgentTaskCommand::Gate { .. }
         | agent_task::AgentTaskCommand::GateExecute { .. }

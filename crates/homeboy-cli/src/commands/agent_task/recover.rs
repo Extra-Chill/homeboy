@@ -1,4 +1,4 @@
-//! `agent-task recover`: perform the one correct next step for a stopped Cook
+//! `agent-task recover`: perform the one correct next step for a durable run
 //! (#16049 slice 4, #15925).
 //!
 //! The step is decided once in `homeboy-agents` from the Cook's durable state.
@@ -18,6 +18,51 @@ use super::run::CookContinueArgs;
 use super::RecoverArgs;
 
 pub(super) fn recover(args: RecoverArgs) -> CmdResult<Value> {
+    recover_using(args, resume_run, super::review::recover_candidate)
+}
+
+fn resume_run(args: RecoverArgs) -> CmdResult<Value> {
+    super::run::run_resume_with_executor(
+        args.id,
+        args.full,
+        args.idempotency_key,
+        std::sync::Arc::new(
+            homeboy::agents::agent_task_provider::ExtensionProviderAgentTaskExecutor::discover(),
+        ),
+    )
+}
+
+fn recover_using(
+    args: RecoverArgs,
+    resume: fn(RecoverArgs) -> CmdResult<Value>,
+    adopt: fn(RecoverArgs) -> CmdResult<Value>,
+) -> CmdResult<Value> {
+    if args.candidate_ref.is_some() {
+        return adopt(args);
+    }
+    let is_cook = agent_task_service::recipe_exists(&args.id)?
+        || agent_task_service::load_recipe_for_attempt(&args.id)?.is_some()
+        || homeboy::agents::agent_task_lifecycle::AgentTaskLifecycleStore::from_environment()?
+            .read_record(&args.id)
+            .is_ok_and(|record| {
+                record.state().is_terminal()
+                    && record.metadata["unmaterialized_cook_admission"].is_object()
+            });
+    if !is_cook && agent_task_service::cook_recovery_delegation(&args.id).is_none() {
+        if homeboy::agents::agent_task_lifecycle::AgentTaskLifecycleStore::from_environment()?
+            .read_record(&args.id)
+            .is_err()
+        {
+            return recover_with(args, &CliCookRecoveryPerformer);
+        }
+        if args.preflight {
+            return Ok((
+                serde_json::json!({"run_id": args.id, "step": {"kind": "resume"}, "preflight": true}),
+                0,
+            ));
+        }
+        return resume(args);
+    }
     let wait = args.wait;
     let full = args.full;
     let timeout = args.timeout.clone();
@@ -294,6 +339,87 @@ mod tests {
     use crate::cli_surface::{Cli, Commands};
     use crate::commands::agent_task::AgentTaskCommand;
 
+    #[test]
+    fn recover_dispatches_resume_and_candidate_adoption() {
+        crate::test_support::with_isolated_home(|_| {
+            homeboy::agents::agent_task_lifecycle::submit_plan(
+                &homeboy::agents::agent_tasks::scheduler::AgentTaskPlan::new(
+                    "resume-test",
+                    Vec::new(),
+                ),
+                Some("run-1"),
+            )
+            .unwrap();
+            for (flags, expected) in [
+                (vec![], "resume"),
+                (vec!["--preflight"], "resume"),
+                (
+                    vec![
+                        "--candidate-ref",
+                        "abc123",
+                        "--attempt",
+                        "2",
+                        "--adoption-model",
+                        "author-model",
+                        "--replace-interrupted",
+                    ],
+                    "adopt",
+                ),
+            ] {
+                let mut argv = vec!["homeboy", "agent-task", "recover", "run-1"];
+                argv.extend(flags);
+                let Commands::AgentTask(task) = Cli::try_parse_from(argv).unwrap().command else {
+                    panic!("agent-task")
+                };
+                let AgentTaskCommand::Recover(args) = task.command else {
+                    panic!("recover")
+                };
+                let preflight = args.preflight;
+                let (report, code) = super::recover_using(
+                    args,
+                    |args| {
+                        assert!(!args.preflight, "preflight must not resume");
+                        Ok((serde_json::json!({"performed": "resume"}), 0))
+                    },
+                    |args| {
+                        assert_eq!(args.candidate_ref.as_deref(), Some("abc123"));
+                        assert_eq!(args.attempt, Some(2));
+                        assert_eq!(args.adoption_model.as_deref(), Some("author-model"));
+                        assert!(args.replace_interrupted);
+                        Ok((serde_json::json!({"performed": "adopt"}), 0))
+                    },
+                )
+                .unwrap();
+                assert_eq!(code, 0);
+                if preflight {
+                    assert_eq!(report["step"]["kind"], expected);
+                    assert!(report.get("performed").is_none());
+                } else {
+                    assert_eq!(report["performed"], expected);
+                }
+            }
+            for flags in [
+                vec!["--preflight"],
+                vec!["--regate"],
+                vec!["--model", "route-model"],
+                vec!["--backend", "backend"],
+                vec!["--selector", "selector"],
+                vec!["--timeout-ms", "1000"],
+            ] {
+                let mut argv = vec![
+                    "homeboy",
+                    "agent-task",
+                    "recover",
+                    "run-1",
+                    "--candidate-ref",
+                    "abc123",
+                ];
+                argv.extend(flags);
+                assert!(Cli::try_parse_from(argv).is_err());
+            }
+        });
+    }
+
     /// A Cook whose admission failed before materializing is relaunched from
     /// its recorded admission inputs under a fresh run id, and replaying
     /// `recover` returns that same relaunch instead of admitting another.
@@ -532,6 +658,8 @@ mod tests {
     #[test]
     fn retired_cook_continuation_verb_is_not_a_command() {
         for retired in [
+            vec!["resume", "run-1"],
+            vec!["adopt", "cook-1", "--candidate-ref", "abc123"],
             vec!["cook-continue", "cook-1"],
             vec!["cook-continue", "cook-1", "--preflight"],
             vec!["cook-continue", "cook-1", "--rearm"],
@@ -543,17 +671,14 @@ mod tests {
         }
     }
 
-    /// The remaining recovery-adjacent verbs serve non-Cook runs (#15925), so
-    /// they stay commands. Replacement gates and Cook publication are `recover`
-    /// steps. `resume` and `retry` hand a Cook ID with a
-    /// recovery step to `recover` instead of deciding one.
+    /// Recover covers non-Cook runs too: #15925 no longer justifies separate
+    /// resume and adopt commands. Explicit retry, reconciliation and manual
+    /// finalization remain available independently of recovery.
     #[test]
     fn recovery_adjacent_verbs_recover_does_not_perform_remain_commands() {
         for kept in [
-            vec!["resume", "run-1"],
             vec!["retry", "run-1", "--run"],
             vec!["reconcile", "run-1", "--apply"],
-            vec!["adopt", "cook-1", "--candidate-ref", "abc123"],
             vec![
                 "finalize-pr",
                 "--run-id",

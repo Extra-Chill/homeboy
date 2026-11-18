@@ -35,6 +35,18 @@ const NO_REPLACEMENT_HINT: &str =
 /// Every removed command path. Add an entry when a release removes a command.
 pub(crate) static REMOVED_COMMANDS: &[RemovedCommand] = &[
     RemovedCommand {
+        path: &["agent-task", "resume"],
+        replacement: Some("homeboy agent-task recover <id>"),
+        hint: "Recover resumes queued and stale-running durable runs, including non-Cook runs.",
+        removed_in: "0.418.9",
+    },
+    RemovedCommand {
+        path: &["agent-task", "adopt"],
+        replacement: Some("homeboy agent-task recover <cook> --candidate-ref <sha>"),
+        hint: "Use recover --candidate-ref; adoption's --model is now --adoption-model, distinct from the retry route override.",
+        removed_in: "0.418.9",
+    },
+    RemovedCommand {
         path: &["rig", "sync"],
         replacement: None,
         hint: "Rig stack syncing was deleted with the stack capability; drop the `rig sync` step from scripts and fixtures.",

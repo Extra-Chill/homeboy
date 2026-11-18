@@ -238,7 +238,7 @@ fn admission_failure_is_visible_in_status_and_diagnose_without_provider_evidence
         let rendered = serde_json::to_string(&report).expect("status JSON");
         assert!(rendered.contains(message));
         assert!(!rendered.contains("fixture-private-key"));
-        assert!(!rendered.contains("agent-task resume"));
+        assert!(!rendered.contains("agent-task recover"));
     });
 }
 
@@ -4423,7 +4423,7 @@ fn unmaterialized_cook_run_requires_resume_without_execution_or_mutation() {
         assert!(error
             .hints
             .iter()
-            .any(|hint| hint.message == format!("Run `homeboy agent-task resume {run_id}`.")));
+            .any(|hint| hint.message == format!("Run `homeboy agent-task recover {run_id}`.")));
         assert!(executor
             .observed_request
             .lock()
@@ -4448,14 +4448,15 @@ fn unmaterialized_cook_resume_replays_the_canonical_action_result() {
             "runner disconnected",
         )
         .expect("record unmaterialized admission");
-        let args = || ResumeArgs {
-            run_id: run_id.to_string(),
+        let args = || RecoverArgs {
+            id: run_id.to_string(),
             full: false,
             idempotency_key: Some("resume-unmaterialized-1".to_string()),
+            ..Default::default()
         };
 
-        let first = resume(args()).expect("resume admission");
-        let replay = resume(args()).expect("replay admission resume");
+        let first = super::super::recover::recover(args()).expect("resume admission");
+        let replay = super::super::recover::recover(args()).expect("replay admission resume");
 
         assert_eq!(replay, first);
         assert_eq!(
@@ -6932,10 +6933,11 @@ fn bridge_resume_reprojects_historical_lab_artifacts_and_preserves_status_cursor
             .expect("artifacts before bridge")
             .is_empty());
 
-        let (value, exit_code) = resume(ResumeArgs {
-            run_id: run_id.to_string(),
+        let (value, exit_code) = super::super::recover::recover(RecoverArgs {
+            id: run_id.to_string(),
             full: true,
             idempotency_key: Some("terminal-recovery".to_string()),
+            ..Default::default()
         })
         .expect("resume reconciles terminal projection");
 
@@ -6955,10 +6957,11 @@ fn bridge_resume_reprojects_historical_lab_artifacts_and_preserves_status_cursor
             Some(std::path::PathBuf::from(&artifacts[0].path))
         );
 
-        resume(ResumeArgs {
-            run_id: run_id.to_string(),
+        super::super::recover::recover(RecoverArgs {
+            id: run_id.to_string(),
             full: true,
             idempotency_key: Some("terminal-recovery".to_string()),
+            ..Default::default()
         })
         .expect("automatic reconciliation is idempotent");
         assert_eq!(
@@ -7002,10 +7005,11 @@ fn ordinary_resume_keeps_aggregate_output_shape() {
         })
         .expect("attach runner evidence to the terminal record");
 
-        let (value, exit_code) = resume(ResumeArgs {
-            run_id: run_id.to_string(),
+        let (value, exit_code) = super::super::recover::recover(RecoverArgs {
+            id: run_id.to_string(),
             full: true,
             idempotency_key: Some("ordinary-terminal".to_string()),
+            ..Default::default()
         })
         .expect("ordinary resume returns terminal aggregate");
 

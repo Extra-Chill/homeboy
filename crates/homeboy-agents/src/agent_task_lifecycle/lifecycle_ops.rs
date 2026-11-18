@@ -517,7 +517,7 @@ fn unmaterialized_admission_value(
             "status": format!("homeboy agent-task status {cook_id}"),
             "watch": format!("homeboy agent-task status {cook_id} --watch"),
             "cancel": format!("homeboy agent-task cancel {cook_id}"),
-            "resume": format!("homeboy agent-task resume {cook_id}"),
+            "resume": format!("homeboy agent-task recover {cook_id}"),
         },
     })
 }
@@ -666,7 +666,7 @@ fn record_unmaterialized_cook_admission_locked(
                 "status": format!("homeboy agent-task status {cook_id}"),
                 "watch": format!("homeboy agent-task status {cook_id} --watch"),
                 "cancel": format!("homeboy agent-task cancel {cook_id}"),
-                "resume": format!("homeboy agent-task resume {cook_id}"),
+                "resume": format!("homeboy agent-task recover {cook_id}"),
             },
         });
         // Unlike the short pre-spawn lease, this admission is daemon-owned and
