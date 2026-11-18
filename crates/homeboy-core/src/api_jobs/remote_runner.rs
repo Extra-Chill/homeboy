@@ -1259,9 +1259,14 @@ impl JobStore {
         }
 
         let (job, child) = self.durable_transaction(|inner| {
-            // Daemons share a HOME-scoped ledger, but mirror only their own
-            // scope. A mirror miss alone says nothing about durable ownership.
-            if !inner.jobs.contains_key(&job_id) {
+            // Daemons share a HOME-scoped ledger, and a store may hold another
+            // scope's rows. Only this scope's own job is cancellable here; a
+            // miss or a foreign row is classified from the durable ledger.
+            let owned = inner
+                .jobs
+                .get(&job_id)
+                .is_some_and(|stored| self.owns(stored));
+            if !owned {
                 match self.find_stored_job(inner, job_id, false)? {
                     None => {
                         let mut error = job_not_found(job_id);
