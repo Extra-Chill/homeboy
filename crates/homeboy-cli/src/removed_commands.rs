@@ -325,7 +325,7 @@ mod tests {
     }
 
     #[test]
-    fn removed_promote_and_gate_feedback_point_at_recover() {
+    fn removed_agent_task_verbs_point_at_recover() {
         for verb in [
             "promote",
             "gate-feedback",
