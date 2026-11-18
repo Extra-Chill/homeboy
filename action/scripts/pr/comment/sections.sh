@@ -179,6 +179,34 @@ append_command_details() {
   esac
 }
 
+# Name the failing tests the differential gate found new relative to the
+# baseline, capped for the comment, or say why they cannot be named.
+# See Extra-Chill/homeboy#18363.
+append_differential_failed_tests() {
+  local verdict="$1" lines
+
+  lines="$(printf '%s' "${verdict}" | jq -r --argjson limit "${DIFFERENTIAL_FAILED_TEST_LIMIT:-10}" '
+    def safe: tostring | gsub("@"; "@\u200b") | gsub("[`\r\n]"; " ");
+    if (.new_failed_tests | type) == "array" then
+      (.new_failed_tests | length) as $total
+      | if $total == 0 then
+          "No failing test is new relative to the baseline by test ID."
+        else
+          (if .new_failed_tests_basis == "failure_details"
+            then "New failing tests (\($total), from failure details; per-test outcome evidence was not usable):"
+            else "New failing tests (\($total)):" end),
+          (.new_failed_tests[:$limit][] | "- `" + safe + "`"),
+          (if $total > $limit then "- …and \($total - $limit) more" else empty end)
+        end
+    elif (.new_failed_tests_unavailable_reason | type) == "string" then
+      "> " + (.new_failed_tests_unavailable_reason | safe)
+    else empty end
+  ' 2>/dev/null || true)"
+  if [ -n "${lines}" ]; then
+    SECTION_BODY+="${lines}"$'\n\n'
+  fi
+}
+
 append_split_command_section() {
   local command="$1"
   local status json_file scope_suffix icon label verdict count baseline
@@ -197,6 +225,9 @@ append_split_command_section() {
     fi
     if [ "${status}" = inconclusive ]; then
       SECTION_BODY+="$(printf '%s' "${verdict}" | jq -r '.reason // "Differential evidence is insufficient; inspect the gate log for the producer diagnostic."' | python3 -c 'import sys; print(sys.stdin.read().replace("@", "@\u200b"))')"$'\n\n'
+    fi
+    if [ "$(quality_base_command "${command}")" = test ]; then
+      append_differential_failed_tests "${verdict}"
     fi
     if [ "${baseline}" != unknown ] && [ "${baseline}" != 0 ]; then
       SECTION_BODY+="<details><summary>Baseline: ${baseline} pre-existing finding(s)</summary>"$'\n\n'
