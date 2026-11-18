@@ -123,6 +123,9 @@ pub mod http_api;
 pub mod http_probe;
 pub mod hygiene;
 pub mod io;
+// Kernel-enforced per-job cgroups shared by runner jobs and workflow steps.
+#[cfg_attr(not(target_os = "linux"), path = "job_cgroup/unsupported.rs")]
+pub mod job_cgroup;
 pub mod keychain;
 pub mod lab_offload;
 pub mod lab_routing;

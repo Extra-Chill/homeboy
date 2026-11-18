@@ -41,32 +41,7 @@ const PROCESS_COUNT_CEILING_PER_CORE: u64 = 32;
 #[cfg(any(target_os = "linux", test))]
 const PROCESS_COUNT_CEILING_FLOOR: u64 = 256;
 
-#[cfg(target_os = "linux")]
 mod job_cgroup;
-
-/// Without Linux cgroup v2 a runner job never has its own cgroup.
-#[cfg(not(target_os = "linux"))]
-mod job_cgroup {
-    pub(crate) struct JobCgroup;
-
-    impl JobCgroup {
-        pub(crate) fn create(
-            _job_id: Option<&str>,
-            _process_count_limit: u64,
-            _concurrency: u64,
-        ) -> std::io::Result<Option<Self>> {
-            Ok(None)
-        }
-
-        pub(crate) fn join_before_exec(&self, _command: &mut std::process::Command) {}
-
-        pub(crate) fn kill(&self) {}
-
-        pub(crate) fn stop(&self) -> std::io::Result<()> {
-            Ok(())
-        }
-    }
-}
 
 use job_cgroup::JobCgroup;
 
@@ -654,6 +629,11 @@ fn cgroup_memory_unavailable() -> RunnerCgroupMemoryEvidence {
 }
 
 #[cfg(target_os = "linux")]
+use homeboy_core::job_cgroup::{
+    cgroup_relative_to_mount, cgroup_v2_membership_path, cgroup_v2_mount,
+};
+
+#[cfg(target_os = "linux")]
 fn cgroup_v2_directory_for_pid(pid: u32) -> Option<std::fs::File> {
     let membership = std::fs::read_to_string(format!("/proc/{pid}/cgroup")).ok()?;
     let mountinfo = std::fs::read_to_string(format!("/proc/{pid}/mountinfo")).ok()?;
@@ -669,46 +649,6 @@ fn cgroup_v2_directory_for_pid(pid: u32) -> Option<std::fs::File> {
         .join(mount_point.strip_prefix('/')?)
         .join(relative);
     std::fs::File::open(directory).ok()
-}
-
-#[cfg(target_os = "linux")]
-fn cgroup_v2_membership_path(membership: &str) -> Option<String> {
-    membership.lines().find_map(|line| {
-        let mut fields = line.splitn(3, ':');
-        (fields.next() == Some("0") && fields.next() == Some(""))
-            .then(|| fields.next())
-            .flatten()
-            .map(str::to_string)
-    })
-}
-
-#[cfg(target_os = "linux")]
-fn cgroup_v2_mount(mountinfo: &str) -> Option<(String, String)> {
-    mountinfo.lines().find_map(|line| {
-        let fields = line.split_whitespace().collect::<Vec<_>>();
-        let separator = fields.iter().position(|field| *field == "-")?;
-        (fields.get(separator + 1) == Some(&"cgroup2"))
-            .then(|| Some((fields.get(3)?.to_string(), fields.get(4)?.to_string())))
-            .flatten()
-    })
-}
-
-#[cfg(target_os = "linux")]
-fn cgroup_relative_to_mount(membership: &str, mount_root: &str) -> Option<std::path::PathBuf> {
-    let mount_root = mount_root.trim_end_matches('/');
-    let relative = if mount_root.is_empty() {
-        membership.trim_start_matches('/')
-    } else {
-        membership
-            .strip_prefix(mount_root)?
-            .strip_prefix('/')
-            .unwrap_or("")
-    };
-    let relative = std::path::Path::new(relative);
-    relative
-        .components()
-        .all(|component| matches!(component, std::path::Component::Normal(_)))
-        .then(|| relative.to_path_buf())
 }
 
 #[cfg(target_os = "linux")]
