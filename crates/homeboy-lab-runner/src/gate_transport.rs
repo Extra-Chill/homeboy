@@ -1622,7 +1622,11 @@ mod public_error_tests {
             "{}",
             public.message
         );
-        assert_eq!(public.details["exit_code"], 1);
+        assert_eq!(error.details["exit_code"], 1);
+        assert_eq!(
+            error.details["resource_guard"]["reason"],
+            "process_count_limit_exceeded"
+        );
         assert_eq!(public.details["gate_disposition"], "unavailable");
         assert!(
             homeboy_agents::agent_tasks::gate::placement::is_lab_gate_transport_failure(&public),
