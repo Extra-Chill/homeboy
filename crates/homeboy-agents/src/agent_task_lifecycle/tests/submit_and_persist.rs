@@ -1612,12 +1612,11 @@ fn claim_family_siblings_skip_expire_and_notify() {
         ErrorCode::ValidationInvalidArgument.as_str()
     );
 
-    // A skip writes nothing, so the next scan of that same store inspects the
-    // record again and its admission preflight refuses it again.
+    // A skip writes nothing and claims nothing: the next scan of that same
+    // store still leaves the record unclaimed.
     let rescan =
         claim_next_eligible_queued_run_in_store(&seeded).expect("rescan the injected store");
-    assert_eq!(rescan.inspected, 1);
-    assert_eq!(rescan.skipped.len(), 1);
+    assert!(rescan.record.is_none());
     assert!(claim_next_queued_run_in_store(&seeded)
         .expect("the thin claim delegate shares the injected store")
         .is_none());
