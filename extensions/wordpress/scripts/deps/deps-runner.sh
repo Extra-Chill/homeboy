@@ -126,9 +126,11 @@ run_install() {
         local command
         command="$(npm_install_command)"
         echo "Installing WordPress JavaScript dependencies: ${command}" >&2
-        (cd "$PROJECT_PATH" && $command)
         source "${SCRIPT_DIR}/../../../scripts/lib/local-workspace-install.sh"
-        homeboy_apply_local_workspace_install "$PROJECT_PATH" "${SCRIPT_DIR}/../../.."
+        # Declared local workspace overrides are installed before the
+        # consumer's lifecycle (`prepare`) scripts run (homeboy#18302).
+        # shellcheck disable=SC2086
+        homeboy_npm_install_with_local_workspace "$PROJECT_PATH" "$PROJECT_PATH" "${SCRIPT_DIR}/../../.." $command
         ran=1
     fi
     if [ "$ran" -eq 0 ]; then

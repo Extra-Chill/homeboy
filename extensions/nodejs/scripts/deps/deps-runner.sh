@@ -131,11 +131,20 @@ run_install() {
     command="$(dependency_command)"
     echo "Installing Node.js dependencies with ${HOMEBOY_PROJECT_PACKAGE_MANAGER}: ${command}" >&2
     cd "$HOMEBOY_PROJECT_DEPENDENCY_ROOT"
+    source "${DEPS_RUNNER_DIR}/../../../scripts/lib/local-workspace-install.sh"
+    if [ "$HOMEBOY_PROJECT_PACKAGE_MANAGER" = npm ]; then
+        # npm defers lifecycle scripts until declared overrides are installed
+        # (homeboy#18302). Overrides resolve against the component, not a
+        # hoisted dependency root. Command strings are extension-owned argv
+        # from the fixed allowlist above.
+        # shellcheck disable=SC2086
+        homeboy_npm_install_with_local_workspace "$HOMEBOY_PROJECT_DEPENDENCY_ROOT" "$HOMEBOY_PROJECT_ROOT" "${DEPS_RUNNER_DIR}/../../.." $command
+        return
+    fi
     # Command strings are extension-owned package-manager argv selected from a
     # fixed allowlist above; run through the shell so flags stay readable.
     $command
     # Resolve overrides against the component, not a hoisted dependency root.
-    source "${DEPS_RUNNER_DIR}/../../../scripts/lib/local-workspace-install.sh"
     homeboy_apply_local_workspace_install "$HOMEBOY_PROJECT_ROOT" "${DEPS_RUNNER_DIR}/../../.."
 }
 

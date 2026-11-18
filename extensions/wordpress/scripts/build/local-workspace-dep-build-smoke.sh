@@ -85,12 +85,20 @@ fs.mkdirSync('build', { recursive: true });
 fs.writeFileSync('build/ok.txt', 'built+deduped\n');
 JS
 
+# The consumer's own `prepare` lifecycle also needs the BUILT dependency
+# (homeboy#18302): the install must defer it until the override is installed.
+cat > "${component_dir}/verify-prepare.js" <<'JS'
+const fs = require('fs');
+if (require('@scope/widget').widget !== 'built') process.exit(1);
+fs.writeFileSync('prepared.txt', 'prepared\n');
+JS
+
 cat > "${component_dir}/package.json" <<JSON
 {
   "name": "lwd-plugin",
   "version": "1.0.0",
   "private": true,
-  "scripts": { "build": "node verify-build.js" },
+  "scripts": { "build": "node verify-build.js", "prepare": "node verify-prepare.js" },
   "dependencies": { "react": "file:${react_dir}" }
 }
 JSON
@@ -125,6 +133,9 @@ zip_file="${component_dir}/build/lwd-plugin.zip"
 [ -f "$zip_file" ] || fail "build artifact missing: $zip_file"
 unzip -l "$zip_file" | grep -Fq 'lwd-plugin/build/ok.txt' \
     || { unzip -l "$zip_file" >&2; fail "consumer build output (proving resolved+deduped dependency) missing from zip"; }
+
+[ -f "${component_dir}/prepared.txt" ] \
+    || { sed 's/^/  /' "$build_out" >&2; fail "consumer prepare lifecycle did not run after the override"; }
 
 echo "ok: build.sh built, packed, installed and deduped the local workspace dependency"
 
