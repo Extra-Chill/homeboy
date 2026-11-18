@@ -95,10 +95,9 @@ pub struct RunnerResourceGuardLimits {
     pub host_headroom_bytes: Option<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub aggregate_rss_budget_bytes: Option<u64>,
+    /// Lowest kernel-reported available host memory observed while the guard ran.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub active_rss_bytes: Option<u64>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub aggregate_rss_bytes: Option<u64>,
+    pub host_available_bytes_min: Option<u64>,
     pub rss_limit_source: String,
 }
 
@@ -368,8 +367,7 @@ mod tests {
                 "memory_capacity_bytes": 4096,
                 "host_headroom_bytes": 512,
                 "aggregate_rss_budget_bytes": 2048,
-                "active_rss_bytes": 256,
-                "aggregate_rss_bytes": 768,
+                "host_available_bytes_min": 768,
                 "rss_limit_source": "host-capacity",
             },
             "guard_violation": {
