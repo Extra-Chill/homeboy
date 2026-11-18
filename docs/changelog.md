@@ -4,6 +4,11 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.474.0] - 2026-11-18
+
+### Added
+- add daemon restart, which stops, starts and verifies re-adoption of in-flight work
+
 ## [0.473.10] - 2026-11-18
 
 ### Fixed
