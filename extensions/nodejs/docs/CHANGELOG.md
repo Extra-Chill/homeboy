@@ -2,6 +2,11 @@
 
 All notable changes to the **nodejs** extension will be documented in this file.
 
+## [3.9.12] - 2026-11-18
+
+### Fixed
+- apply local workspace dependencies before consumer lifecycle and prepare steps
+
 ## [3.9.11] - 2026-11-15
 
 ### Fixed
