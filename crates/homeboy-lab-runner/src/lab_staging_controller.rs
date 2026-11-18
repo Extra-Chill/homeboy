@@ -4576,16 +4576,25 @@ impl LabStagingExecutionAdapter for StageExecutionAdapter {
                     checkpoint.phase = LabStagingPhase::ObserveRunner;
                     checkpoint.stage_intent = None;
                 }
-                None => {
+                None if checkpoint.phase == LabStagingPhase::DispatchRunner
+                    && checkpoint.stage_intent.is_some() =>
+                {
                     // An admission intent may have escaped before its receipt.
-                    // Use the existing cancellation/absence contract, never a
-                    // fresh dispatch, to settle that boundary safely.
-                    self.cancel(request, &checkpoint)
+                    // Only proven absence permits another dispatch; cancelling
+                    // a discovered job must not create a replacement admission.
+                    let absent = self
+                        .settle_cancellation(request, &checkpoint)
                         .map_err(|error| error.with_retryable(true))?;
-                    return Err(Error::internal_unexpected(
-                        "Lab staging dispatch has no runner job after daemon restart; retry the Cook",
-                    ).with_retryable(true));
+                    if !absent {
+                        return Err(Error::internal_unexpected(
+                            "Lab staging dispatch has no runner job after daemon restart; retry the Cook",
+                        ).with_retryable(true));
+                    }
+                    let mut settled = checkpoint.clone();
+                    settled.stage_intent = None;
+                    checkpoint = LabStagingCheckpoint::validated_transition(&checkpoint, settled)?;
                 }
+                None => {}
             }
         }
         self.execute(request, checkpoint, cancellation, job)
@@ -4614,6 +4623,17 @@ impl LabStagingExecutionAdapter for StageExecutionAdapter {
         request: &LabStagingExecutionRequest,
         checkpoint: &LabStagingCheckpoint,
     ) -> Result<()> {
+        self.settle_cancellation(request, checkpoint).map(|_| ())
+    }
+}
+
+impl StageExecutionAdapter {
+    /// Returns true only when no runner admission was found and absence is proven.
+    fn settle_cancellation(
+        &self,
+        request: &LabStagingExecutionRequest,
+        checkpoint: &LabStagingCheckpoint,
+    ) -> Result<bool> {
         self.operations
             .validate_recorded_identities(request, checkpoint)?;
         let runner_job_id = match checkpoint.final_runner_job_id.clone() {
@@ -4628,21 +4648,16 @@ impl LabStagingExecutionAdapter for StageExecutionAdapter {
                 Err(error)
                     if error.details.get("http_status").and_then(Value::as_u64) == Some(404) =>
                 {
-                    Ok(())
+                    Ok(false)
                 }
-                result => result,
+                result => result.map(|_| false),
             },
             None => {
                 if self.operations.cancel_active_staging_jobs(request)? > 0 {
-                    Ok(())
-                } else if checkpoint.phase == LabStagingPhase::DispatchRunner
-                    && checkpoint.stage_intent.is_some()
-                {
-                    Err(Error::internal_unexpected(
-                        "Lab staging cancellation cannot prove that an in-flight dispatch was not accepted; keep the lifecycle uncertain until its immutable run identity is reconciled",
-                    ))
+                    Ok(false)
                 } else {
-                    self.operations.prove_no_runner_admission(request)
+                    self.operations.prove_no_runner_admission(request)?;
+                    Ok(true)
                 }
             }
         }
@@ -5892,6 +5907,7 @@ mod tests {
         cancel_after_workspace: AtomicBool,
         recovered_runner_job_id: Mutex<Option<String>>,
         active_staging_jobs: AtomicUsize,
+        fail_absence_proof: AtomicBool,
         fail_observation: Mutex<bool>,
         /// Retryable observation failures still to emit before succeeding.
         /// `usize::MAX` never decrements, modelling a permanent failure.
@@ -6152,6 +6168,11 @@ mod tests {
 
         fn prove_no_runner_admission(&self, _request: &LabStagingExecutionRequest) -> Result<()> {
             self.record("prove-no-admission");
+            if self.fail_absence_proof.load(Ordering::SeqCst) {
+                return Err(Error::internal_unexpected(
+                    "cannot prove runner admission absent",
+                ));
+            }
             Ok(())
         }
 
@@ -7287,6 +7308,134 @@ mod tests {
     }
 
     #[test]
+    fn adapter_resume_continues_unadmitted_stages_without_cancellation() {
+        crate::test_support::with_isolated_home(|_| {
+            submit_recipe_run(&execution_request().recipe.run_id);
+            for phase in [
+                LabStagingPhase::AcceptedMaterializeWorkspace,
+                LabStagingPhase::MaterializeRuntime,
+                LabStagingPhase::HydrateDependencies,
+                LabStagingPhase::DispatchRunner,
+            ] {
+                for declared in [false, true] {
+                    if phase == LabStagingPhase::DispatchRunner && declared {
+                        continue;
+                    }
+                    let operations = Arc::new(RecordedStageOperations::default());
+                    let result = resume_staging_phase(operations.clone(), phase.clone(), declared)
+                        .expect("resume unadmitted stage");
+                    assert_eq!(result.phase, LabStagingPhase::Completed);
+                    let calls = operations.calls();
+                    assert!(!calls.contains(&"cancel-active-staging-jobs"));
+                    assert!(!calls.contains(&"cancel-runner-job"));
+                    assert!(!calls.contains(&"prove-no-admission"));
+                    assert_eq!(calls.iter().filter(|&&call| call == "dispatch").count(), 1);
+                }
+            }
+        });
+    }
+
+    fn resume_staging_phase(
+        operations: Arc<RecordedStageOperations>,
+        phase: LabStagingPhase,
+        declared: bool,
+    ) -> Result<LabStagingCheckpoint> {
+        let request = execution_request();
+        let mut checkpoint = LabStagingCheckpoint::initial(&envelope());
+        if phase != LabStagingPhase::AcceptedMaterializeWorkspace {
+            checkpoint.source_snapshot_id = Some("snapshot-1".to_string());
+            checkpoint.workspace_id = Some("workspace-1".to_string());
+        }
+        if matches!(
+            phase,
+            LabStagingPhase::HydrateDependencies | LabStagingPhase::DispatchRunner
+        ) {
+            checkpoint.runtime_id = Some("runtime-1".to_string());
+        }
+        if phase == LabStagingPhase::DispatchRunner {
+            checkpoint.hydration_id = Some("hydration-1".to_string());
+        }
+        checkpoint.phase = phase;
+        if declared {
+            checkpoint.stage_intent = Some(checkpoint.intent_for_current_action());
+        }
+        checkpoint.validate().expect("valid resume checkpoint");
+        let harness = ControllerJobHarness::new(
+            Arc::new(LabStagingDispatchDriver),
+            serde_json::to_value(envelope()).expect("envelope"),
+        )
+        .expect("controller harness");
+        StageExecutionAdapter::new(operations).resume(
+            &request,
+            checkpoint,
+            LabStagingCancellationToken::default(),
+            harness.handle(),
+        )
+    }
+
+    #[test]
+    fn adapter_resume_dispatch_intent_requires_proven_absence() {
+        crate::test_support::with_isolated_home(|_| {
+            submit_recipe_run(&execution_request().recipe.run_id);
+            for absence_fails in [false, true] {
+                let operations = Arc::new(RecordedStageOperations::default());
+                operations
+                    .fail_absence_proof
+                    .store(absence_fails, Ordering::SeqCst);
+                let result =
+                    resume_staging_phase(operations.clone(), LabStagingPhase::DispatchRunner, true);
+                if absence_fails {
+                    assert_eq!(
+                        result.expect_err("uncertain admission").retryable,
+                        Some(true)
+                    );
+                } else {
+                    assert_eq!(
+                        result.expect("safe redispatch").phase,
+                        LabStagingPhase::Completed
+                    );
+                }
+                let calls = operations.calls();
+                assert!(calls.contains(&"cancel-active-staging-jobs"));
+                assert!(calls.contains(&"prove-no-admission"));
+                assert_eq!(
+                    calls.iter().filter(|&&call| call == "dispatch").count(),
+                    usize::from(!absence_fails)
+                );
+            }
+        });
+    }
+
+    #[test]
+    fn adapter_resume_does_not_redispatch_discovered_jobs() {
+        crate::test_support::with_isolated_home(|_| {
+            submit_recipe_run(&execution_request().recipe.run_id);
+            for recorded in [false, true] {
+                let operations = Arc::new(RecordedStageOperations::default());
+                if recorded {
+                    operations.recover_runner_job("runner-job-1");
+                } else {
+                    operations.set_active_staging_jobs(1);
+                }
+                let result =
+                    resume_staging_phase(operations.clone(), LabStagingPhase::DispatchRunner, true);
+                if recorded {
+                    assert_eq!(
+                        result.expect("observe recovered job").phase,
+                        LabStagingPhase::Completed
+                    );
+                } else {
+                    assert_eq!(
+                        result.expect_err("cancelled discovered job").retryable,
+                        Some(true)
+                    );
+                }
+                assert!(!operations.calls().contains(&"dispatch"));
+            }
+        });
+    }
+
+    #[test]
     fn adapter_cancellation_proves_no_admission_before_dispatch_and_reconciles_after_acceptance() {
         let operations = Arc::new(RecordedStageOperations::default());
         let adapter = StageExecutionAdapter::new(operations.clone());
@@ -7346,6 +7495,7 @@ mod tests {
     #[test]
     fn adapter_cancellation_fails_uncertain_for_unreconciled_dispatch_intent() {
         let operations = Arc::new(RecordedStageOperations::default());
+        operations.fail_absence_proof.store(true, Ordering::SeqCst);
         let adapter = StageExecutionAdapter::new(operations.clone());
         let request = execution_request();
         let mut dispatching = LabStagingCheckpoint::initial(&envelope());
@@ -7366,7 +7516,8 @@ mod tests {
             [
                 "validate",
                 "recover-runner-job",
-                "cancel-active-staging-jobs"
+                "cancel-active-staging-jobs",
+                "prove-no-admission"
             ]
         );
     }

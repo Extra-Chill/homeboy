@@ -101,6 +101,12 @@ impl CookRunPhase {
         matches!(self, Self::Queued | Self::Running | Self::Continuing)
     }
 
+    /// Compatibility classification for recipe-only evidence without a run
+    /// record. Durable records always take precedence over status labels.
+    pub(crate) fn status_is_recoverable(status: &CookStatus) -> bool {
+        matches!(status, CookStatus::CandidateRecoverable)
+    }
+
     fn of_execution(state: RunExecutionState) -> Self {
         match state {
             RunExecutionState::Queued => Self::Queued,
@@ -586,6 +592,18 @@ mod tests {
                 .with_cook_index_fence(true)
                 .fenced
         );
+    }
+
+    #[test]
+    fn verbs_do_not_reclassify_candidate_or_in_flight_status() {
+        for source in [
+            include_str!("action_eligibility.rs"),
+            include_str!("../agent_task_service/cook_recovery.rs"),
+        ] {
+            let production = source.split("#[cfg(test)]").next().expect("source");
+            assert!(!production.contains("CookStatus::CandidateRecoverable"));
+            assert!(!production.contains(".is_in_flight()"));
+        }
     }
 
     #[test]

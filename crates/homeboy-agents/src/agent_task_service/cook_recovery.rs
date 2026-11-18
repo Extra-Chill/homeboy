@@ -271,7 +271,11 @@ format!(
     // here whatever the gate status: rearming would replay provider work only
     // to re-read the same verdict (#16772).
     let publishable = inputs.verified_unpublished && !status_is_settled(&status);
-    if status == CookStatus::CandidateRecoverable || publishable {
+    let recoverable = inputs.run_state.as_ref().map_or_else(
+        || agent_task_lifecycle::CookRunPhase::status_is_recoverable(&status),
+        |state| state.recoverable,
+    );
+    if recoverable || publishable {
         if let Some(step) = agent_incomplete_stop(inputs) {
             return step;
         }
@@ -289,7 +293,7 @@ format!(
     if inputs.exact_checkpoint_candidate_mismatch && inputs.retry_admitted {
         return CookRecoveryStep::ForkReplacement;
     }
-    if status == CookStatus::CandidateRecoverable && inputs.continuation_completed {
+    if recoverable && inputs.continuation_completed {
         return CookRecoveryStep::none(
 format!(
             "The candidate's terminal continuation is already completed; inspect it with `homeboy agent-task diagnose {run}`, then publish it with `homeboy agent-task recover {run} --review-form @FORM.json --review-form-tool <TOOL> --review-form-model <MODEL> --review-form-author <IDENTITY>`.",
@@ -1127,11 +1131,12 @@ fn recover_cook_once(
             })?;
         plan.run_id = candidate.run_id.clone();
         let record = agent_task_lifecycle::exact_record(&plan.run_id)?;
-        let candidate_state = agent_task_lifecycle::CookRunState::of(&record);
-        if candidate_state.fenced {
+        let candidate_state =
+            agent_task_lifecycle::CookRunState::of(&record).with_cook_index_fence(index_fenced);
+        if !candidate_state.allows(agent_task_lifecycle::CookRunAction::Regate) {
             return Err(Error::validation_invalid_argument(
                 "regate",
-                "candidate is retired",
+                "candidate is retired, in flight, or fenced",
                 Some(plan.run_id),
                 None,
             ));
@@ -2710,6 +2715,24 @@ mod tests {
         assert_eq!(recover_step, status_step);
         assert!(!agent_task_lifecycle::CookRunState::of(&live)
             .allows(agent_task_lifecycle::CookRunAction::Regate));
+    }
+
+    #[test]
+    fn recovery_uses_record_recoverability_not_a_conflicting_status_label() {
+        let record = lifecycle_record(
+            homeboy_lifecycle_contract::RunExecutionState::CandidateRecoverable,
+            serde_json::json!({}),
+        );
+        let inputs = CookRecoveryInputs {
+            status: "gate_failed",
+            run_state: Some(agent_task_lifecycle::CookRunState::of(&record)),
+            recovery_legal: true,
+            continuation_completed: true,
+            ..Default::default()
+        };
+        let step = cook_recovery_step(&inputs);
+        assert!(step.is_none(), "{step:?}");
+        assert!(format!("{step:?}").contains("already completed"));
     }
 
     /// #17384: after a transport retry, `diagnose` and `review` named
