@@ -931,7 +931,7 @@ pub(crate) fn control_plane_next_action(payload: &Value, run_id: &str) -> String
             }
         }
     }
-    const PREFERRED: [&str; 5] = ["reconcile", "resume", "retry", "review", "promote"];
+    const PREFERRED: [&str; 4] = ["reconcile", "resume", "retry", "review"];
     let Some(actions) = payload
         .pointer("/action_eligibility/actions")
         .and_then(Value::as_array)

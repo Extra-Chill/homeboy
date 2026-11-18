@@ -355,7 +355,6 @@ pub struct AgentTaskDiscoveryCommands {
     pub review: String,
     pub retry: String,
     pub run_plan: String,
-    pub promote: String,
     /// Safe per-run reconcile/cancel for a stale-running record. Uses the
     /// lifecycle cancel path (terminates a live owner tree only if present,
     /// otherwise just marks the orphaned record cancelled) — never a manual
@@ -1373,7 +1372,6 @@ fn discovery_run(
             .and_then(Value::as_str)
             .map(str::to_string)
     });
-    let aggregate_path = record.aggregate_path.clone();
     let run_id = record.run_id.clone();
 
     let last_update = record.updated_at.clone();
@@ -1449,9 +1447,6 @@ fn discovery_run(
                 "homeboy --runner <runner-id> agent-task run-plan --plan @{} --record-run-id <new-run-id>",
                 record.plan_path
             ),
-            promote: aggregate_path
-                .map(|path| format!("homeboy agent-task promote {path} --to-worktree <handle>"))
-                .unwrap_or_else(|| format!("{command_prefix} review {run_id}")),
             reconcile: format!("{command_prefix} reconcile {run_id} --dry-run"),
         },
     }

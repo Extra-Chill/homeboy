@@ -388,30 +388,6 @@ fn generic_lab_replay_legacy_identity_fails_closed_before_execution() {
 }
 
 #[test]
-fn explicit_local_promotion_defers_target_resolution_to_promotion() {
-    let args = [
-        "homeboy",
-        "--placement",
-        "local",
-        "agent-task",
-        "promote",
-        "/tmp/aggregate.json",
-        "--to-worktree",
-        "fixture@dirty-candidate",
-    ];
-    let cli = Cli::parse_from(args);
-    let normalized = args
-        .iter()
-        .map(|arg| (*arg).to_string())
-        .collect::<Vec<_>>();
-
-    assert_eq!(
-        route_after_parse_with_provenance(&cli, &normalized, None, None).unwrap(),
-        None
-    );
-}
-
-#[test]
 fn cook_preview_bypasses_every_placement_route_without_durable_state() {
     crate::test_support::with_isolated_home(|home| {
         for placement in [
@@ -1609,39 +1585,6 @@ fn nested_command_targeting_parent_runner_does_not_require_a_second_controller_s
             None
         );
     });
-}
-
-#[test]
-fn managed_promotion_handoff_does_not_require_runner_side_artifact_hydration() {
-    let _env = EnvGuard::set_many(&[
-        (homeboy::core::observation::LAB_OFFLOAD_METADATA_ENV, None),
-        (homeboy::runner::RUNNER_HOSTED_EXEC_ENV, Some("1")),
-        (homeboy::runner::RUNNER_PLACEMENT_RESOLVED_ENV, Some("1")),
-        (homeboy::runner::RUNNER_ID_ENV, Some("homeboy-lab")),
-    ]);
-    let normalized = vec![
-        "homeboy".to_string(),
-        // An explicit runner already selects Lab. `--placement` alongside it is
-        // rejected by clap since #11829, and this fixture is about the runner.
-        "--runner".to_string(),
-        "homeboy-lab".to_string(),
-        "agent-task".to_string(),
-        "promote".to_string(),
-        "agent-task-preserved-run".to_string(),
-        "--to-worktree".to_string(),
-        "homeboy@fix-preserved-candidate".to_string(),
-        "--task-id".to_string(),
-        "task-preserved-artifact".to_string(),
-        "--artifact-root".to_string(),
-        "/runner/artifacts/patch-preserved-artifact".to_string(),
-    ];
-    let cli = Cli::parse_from(&normalized);
-
-    assert_eq!(
-        route_after_parse_with_provenance(&cli, &normalized, None, None)
-            .expect("managed promotion must execute on its authorized runner"),
-        None
-    );
 }
 
 #[test]
