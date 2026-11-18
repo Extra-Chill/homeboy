@@ -3418,13 +3418,21 @@ fn recover_staged_direct_jobs_after_owner_death(
             && job.operation == "runner.exec"
             && dead_generation.contains(&job.id)
     }) {
-        let Some(runner_id) = job.target_runner_id.as_deref() else {
+        // Staged submissions carry a remote target. A direct submission still
+        // waiting for admission (no child reserved) is re-admitted from its
+        // durable envelope rather than failed with the dead lease (#18147).
+        let Some(runner_id) = job.target_runner_id.clone().map(Some).unwrap_or_else(|| {
+            job_store
+                .unreserved_direct_execution_runner_id(job.id)
+                .ok()
+                .flatten()
+        }) else {
             continue;
         };
         let Some(proven_dead_lease) = job.daemon_lease_id.clone() else {
             continue;
         };
-        let Some(envelope) = job_store.staged_direct_execution_envelope(job.id, runner_id)? else {
+        let Some(envelope) = job_store.staged_direct_execution_envelope(job.id, &runner_id)? else {
             continue;
         };
         let request = ExecRequest {
@@ -5015,6 +5023,69 @@ mod tests {
                 .iter()
                 .any(|event| event.kind == crate::api_jobs::JobEventKind::Result));
             assert_eq!(store.get(cancelled).unwrap().status, JobStatus::Cancelled);
+        });
+    }
+
+    /// A direct runner exec job still waiting for admission when its daemon
+    /// died never reserved a child, so the successor re-admits it under its
+    /// own lease instead of failing it with the dead lease (#18147).
+    #[test]
+    fn startup_recovery_re_admits_a_direct_exec_job_still_waiting_for_capacity() {
+        with_isolated_home(|_| {
+            register_enqueue_test_driver();
+            let ledger = tempfile::tempdir().unwrap();
+            let ledger_path = ledger.path().join("jobs.sqlite");
+            let old = JobStore::open_without_reconciliation(&ledger_path)
+                .unwrap()
+                .with_daemon_lease("dead-lease".to_string());
+            let pressure = crate::test_support::EnvVarGuard::set(
+                crate::runner_pressure::SAMPLE_ENV,
+                r#"{"memory":10000}"#,
+            );
+            let mut body = crate::test_support::direct_exec_body(
+                json!({"runner_id": "homeboy-lab", "cwd": "/tmp", "command": ["true"]}),
+                "queued-restart",
+            );
+            body["submission"]["envelope"]["mutation_policy"]["capture_patch"] = json!(false);
+            let response = route_with_body("POST", "/exec", Some(body), &old);
+            assert_eq!(response.status_code, 200, "{:?}", response.body);
+            let id: Uuid = response.body["body"]["job"]["id"]
+                .as_str()
+                .unwrap()
+                .parse()
+                .unwrap();
+            let deadline = Instant::now() + Duration::from_secs(5);
+            while old.pending_admission_report(id).unwrap().is_null() {
+                assert!(Instant::now() < deadline, "job never waited on capacity");
+                std::thread::sleep(Duration::from_millis(10));
+            }
+            drop(old);
+
+            let store = JobStore::open_without_reconciliation(&ledger_path)
+                .unwrap()
+                .with_daemon_lease("successor-lease".to_string());
+            recover_dead_generations(&store, "successor-lease").unwrap();
+            let job = store.get(id).unwrap();
+            assert_eq!(job.status, JobStatus::Queued);
+            assert_eq!(job.daemon_lease_id.as_deref(), Some("successor-lease"));
+            let events = store.events(id).unwrap();
+            assert!(!events.iter().any(|event| {
+                event
+                    .data
+                    .as_ref()
+                    .is_some_and(|data| data["reason"] == "dead_daemon_lease")
+            }));
+            assert!(events.iter().any(|event| {
+                event
+                    .data
+                    .as_ref()
+                    .is_some_and(|data| data["phase"] == "staged_direct_execution_recovered")
+            }));
+
+            drop(pressure);
+            let _quiet =
+                crate::test_support::EnvVarGuard::set(crate::runner_pressure::SAMPLE_ENV, "{}");
+            wait_for_daemon_job_status(&store, id, JobStatus::Succeeded);
         });
     }
 

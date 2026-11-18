@@ -644,7 +644,15 @@ impl JobStore {
     ) -> Result<Option<RunnerExecutionEnvelope>> {
         let inner = self.inner.lock().expect("job store mutex poisoned");
         let stored = self.read_stored_job(&inner, job_id, false)?;
-        if stored.job.target_runner_id.as_deref() != Some(runner_id) {
+        // A direct `runner.exec` job has no remote target; its local runner
+        // authority names the runner instead.
+        let owning_runner_id = stored.job.target_runner_id.as_deref().or_else(|| {
+            stored
+                .local_runner
+                .as_ref()
+                .map(|local| local.runner_id.as_str())
+        });
+        if owning_runner_id != Some(runner_id) {
             return Err(Error::validation_invalid_argument(
                 "runner_id",
                 "staged execution belongs to a different runner",
@@ -668,6 +676,30 @@ impl JobStore {
                 .cloned()
                 .and_then(|envelope| serde_json::from_value(envelope).ok())
         }))
+    }
+
+    /// The runner of a queued direct `runner.exec` job that never reserved a
+    /// child. Its durable envelope is the whole admission request, so a
+    /// successor daemon may re-admit it after its owner died (#18147).
+    pub(crate) fn unreserved_direct_execution_runner_id(
+        &self,
+        job_id: Uuid,
+    ) -> Result<Option<String>> {
+        let inner = self.inner.lock().expect("job store mutex poisoned");
+        let stored = self.read_stored_job(&inner, job_id, false)?;
+        if stored.job.status != JobStatus::Queued
+            || stored.job.operation != "runner.exec"
+            || stored.local_child.is_some()
+            || stored.remote_runner.is_some()
+            || stored.controller_job.is_some()
+            || stored.pending_execution_envelope.is_none()
+        {
+            return Ok(None);
+        }
+        Ok(stored
+            .local_runner
+            .as_ref()
+            .map(|local| local.runner_id.clone()))
     }
 
     /// Select direct execution before any runner-side source preparation. This

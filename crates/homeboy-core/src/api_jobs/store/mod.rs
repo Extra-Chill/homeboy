@@ -3075,7 +3075,11 @@ impl JobStore {
                         continue;
                     }
                     Err(error) => {
-                        let _ = worker_store.fail(job_id, format!("admission failed: {error}"));
+                        // A successor generation re-admitted this job (#18147);
+                        // it owns the job now, so this stale waiter stands down.
+                        if !worker_store.job_owned_by_other_generation(job_id) {
+                            let _ = worker_store.fail(job_id, format!("admission failed: {error}"));
+                        }
                         return;
                     }
                 }
@@ -3091,7 +3095,11 @@ impl JobStore {
                     Ok(true) => break,
                     Ok(false) => thread::sleep(std::time::Duration::from_millis(10)),
                     Err(error) => {
-                        let _ = worker_store.fail(job_id, format!("admission failed: {error}"));
+                        // A successor generation re-admitted this job (#18147);
+                        // it owns the job now, so this stale waiter stands down.
+                        if !worker_store.job_owned_by_other_generation(job_id) {
+                            let _ = worker_store.fail(job_id, format!("admission failed: {error}"));
+                        }
                         return;
                     }
                 }
@@ -3584,6 +3592,22 @@ impl JobStore {
             Some(message.into()),
             Some(data),
         )
+    }
+
+    /// Whether a different daemon generation now holds this job's lease. A
+    /// stale generation's admission waiter must not terminalize a job its
+    /// successor re-admitted after startup recovery.
+    fn job_owned_by_other_generation(&self, job_id: Uuid) -> bool {
+        let Some(current_lease_id) = self.daemon_lease_id.as_deref() else {
+            return false;
+        };
+        self.get(job_id).is_ok_and(|job| {
+            !job.status.is_terminal()
+                && job
+                    .daemon_lease_id
+                    .as_deref()
+                    .is_some_and(|lease| lease != current_lease_id)
+        })
     }
 
     pub(crate) fn reserve_local_child_with_runner_capacity(
