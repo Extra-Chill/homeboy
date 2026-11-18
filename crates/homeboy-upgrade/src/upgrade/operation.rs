@@ -1198,7 +1198,13 @@ pub(crate) fn freeze_prior_replacements(current_operation_id: &str) -> Result<()
         ..RunListFilter::default()
     })?;
     for run in runs {
-        if run.id == current_operation_id || run.metadata_json.get("replacement").is_none() {
+        // Only a crashed owner leaves its checkpoint for the next owner to
+        // freeze. A live owner is still finishing its own post-install work
+        // and records its own terminal state.
+        if run.id == current_operation_id
+            || run.metadata_json.get("replacement").is_none()
+            || run_owner_pid(&run).is_some_and(homeboy_core::process::pid_is_running)
+        {
             continue;
         }
         let expected_metadata = run.metadata_json;
@@ -1369,6 +1375,40 @@ mod tests {
                 let error = load_upgrade_operation_status(Some(&id)).unwrap_err();
                 assert!(error.message.contains("unsupported schema"));
             }
+        });
+    }
+
+    /// A successor freezes only a predecessor whose owner crashed; a live
+    /// predecessor finishing its post-install refresh keeps running.
+    #[test]
+    fn freeze_supersedes_only_predecessors_whose_owner_exited() {
+        homeboy_core::test_support::with_isolated_home(|_| {
+            let predecessor = UpgradeOperation::start("homeboy upgrade");
+            let id = predecessor.id().expect("persisted operation").to_string();
+            let store = ObservationStore::open_initialized().expect("observation store");
+            let with_owner = |pid: u32| {
+                let mut run = store.get_run(&id).unwrap().unwrap();
+                run.metadata_json["replacement"] = json!({ "destination": "/missing" });
+                run.metadata_json["homeboy_run_owner"]["pid"] = json!(pid);
+                store
+                    .update_running_run_metadata(&id, run.metadata_json)
+                    .unwrap();
+            };
+
+            with_owner(std::process::id());
+            freeze_prior_replacements("successor").unwrap();
+            let live = store.get_run(&id).unwrap().unwrap();
+            assert_eq!(live.status, RunStatus::Running.as_str());
+
+            with_owner(u32::MAX);
+            freeze_prior_replacements("successor").unwrap();
+            let crashed = store.get_run(&id).unwrap().unwrap();
+            assert_eq!(crashed.status, RunStatus::Error.as_str());
+            assert_eq!(
+                crashed.metadata_json["phase"],
+                "controller_replacement_superseded"
+            );
+            std::mem::forget(predecessor);
         });
     }
 
