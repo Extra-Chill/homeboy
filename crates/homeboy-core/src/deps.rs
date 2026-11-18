@@ -980,6 +980,11 @@ fn run_hydration_command(
     use homeboy_engine_primitives::command::SupervisedCommandTermination;
     let termination = match output.termination {
         SupervisedCommandTermination::Completed => DependencyHydrationTermination::Completed,
+        // The cancel predicate also fires at the deadline, so a deadline that
+        // wins the supervisor's race is still a timeout, not a cancellation.
+        SupervisedCommandTermination::Cancelled if !(policy.is_cancelled)() => {
+            DependencyHydrationTermination::TimedOut
+        }
         SupervisedCommandTermination::Cancelled => DependencyHydrationTermination::Cancelled,
         SupervisedCommandTermination::TimedOut => DependencyHydrationTermination::TimedOut,
         SupervisedCommandTermination::NoProgress => DependencyHydrationTermination::NoProgress,
