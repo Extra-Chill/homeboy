@@ -1085,6 +1085,22 @@ fn artifact_get(args: DaemonArtifactGetArgs) -> CmdResult<DaemonOutput> {
 
 fn serve(addr: &str) -> CmdResult<DaemonOutput> {
     register_daemon_controller_job_providers();
+    // First, before any job or child process (release prefetch spawns some):
+    // a daemon that owns a delegated cgroup (a runner service unit, or the
+    // scope a CLI-started daemon runs in) moves to its `daemon/` leaf so each
+    // job gets its own cgroup (#18418, #18449).
+    match homeboy_lab_runner::initialize_job_cgroups() {
+        Ok(jobs) => homeboy::core::log_status!(
+            "daemon",
+            "Jobs run in kernel-enforced cgroups under {}",
+            jobs.display()
+        ),
+        Err(reason) => homeboy::core::log_status!(
+            "daemon",
+            "Job cgroups unavailable ({}); using the sampled process-tree guard",
+            reason
+        ),
+    }
     let parsed = daemon::parse_bind_addr(addr)?;
     if !is_runner_hosted_daemon() {
         if let Err(error) = std::thread::Builder::new()
@@ -1100,21 +1116,6 @@ fn serve(addr: &str) -> CmdResult<DaemonOutput> {
         {
             homeboy::core::log_status!("update", "Could not start release prefetch: {}", error);
         }
-    }
-    // Before any job: a daemon that owns a delegated cgroup (a runner service
-    // unit, or the scope a CLI-started daemon runs in) moves to its `daemon/`
-    // leaf so each job gets its own cgroup (#18418, #18449).
-    match homeboy_lab_runner::initialize_job_cgroups() {
-        Ok(jobs) => homeboy::core::log_status!(
-            "daemon",
-            "Jobs run in kernel-enforced cgroups under {}",
-            jobs.display()
-        ),
-        Err(reason) => homeboy::core::log_status!(
-            "daemon",
-            "Job cgroups unavailable ({}); using the sampled process-tree guard",
-            reason
-        ),
     }
     let shutdown = install_drain_handlers()?;
     let state = daemon::serve_with_analysis_runner_and_shutdown(
