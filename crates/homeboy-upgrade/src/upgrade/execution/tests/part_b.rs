@@ -972,3 +972,15 @@ fn install_source_built_binary_cleans_up_temp_on_copy_failure() {
         stale
     );
 }
+
+#[test]
+fn a_replaced_running_executable_resolves_to_its_installed_pathname() {
+    let dir = tempfile::tempdir().unwrap();
+    let installed = dir.path().join("homeboy");
+    std::fs::write(&installed, b"new binary").unwrap();
+    let running = std::path::PathBuf::from(format!("{} (deleted)", installed.display()));
+    // Linux names the running image of a replaced binary `<path> (deleted)`.
+    assert_eq!(replaced_executable_pathname(running), installed);
+    // A live pathname is returned unchanged.
+    assert_eq!(replaced_executable_pathname(installed.clone()), installed);
+}

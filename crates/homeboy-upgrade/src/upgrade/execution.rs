@@ -1939,12 +1939,27 @@ pub(crate) fn active_binary_path() -> Result<PathBuf> {
         return Ok(path);
     }
 
-    std::env::current_exe().map_err(|e| {
-        Error::internal_io(
-            e.to_string(),
-            Some("get current executable path".to_string()),
-        )
-    })
+    std::env::current_exe()
+        .map(replaced_executable_pathname)
+        .map_err(|e| {
+            Error::internal_io(
+                e.to_string(),
+                Some("get current executable path".to_string()),
+            )
+        })
+}
+
+/// After an upgrade renames the new binary over the running one, Linux reports
+/// the running image as `<path> (deleted)`. The pathname itself now holds the
+/// installed binary, which is the one every post-install step must address.
+fn replaced_executable_pathname(path: PathBuf) -> PathBuf {
+    match path
+        .to_str()
+        .and_then(|path| path.strip_suffix(" (deleted)"))
+    {
+        Some(pathname) if !path.exists() => PathBuf::from(pathname),
+        _ => path,
+    }
 }
 
 /// Resolve the build identity of the *installed target* controller binary — the
