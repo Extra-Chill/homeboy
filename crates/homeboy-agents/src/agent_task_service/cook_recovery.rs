@@ -59,6 +59,10 @@ pub enum CookRecoveryStep {
     /// (`agent-task adopt <cook> --candidate-ref <head-sha>`) instead of
     /// replaying provider work that would end `no_changes` again (#16181).
     Adopt { candidate_ref: String },
+    /// The Cook failed before materializing, so it has no recipe or attempt
+    /// to continue. Admit the same Cook request again from its recorded
+    /// admission inputs under a fresh run id, linking the two runs.
+    Relaunch,
     /// The previous `recover` already performed `repeated` from this exact
     /// durable state and left it unchanged. Performing it again would loop, so
     /// recovery names the `blocker` instead (#17650).
@@ -113,6 +117,7 @@ impl CookRecoveryStep {
             Self::ReplaceGates => "replace_gates",
             Self::Publish => "publish",
             Self::Adopt { .. } => "adopt",
+            Self::Relaunch => "relaunch",
             Self::Blocked { .. } | Self::None { .. } => return None,
         })
     }
@@ -768,8 +773,10 @@ pub fn plan_cook_recovery(id: &str) -> Result<CookRecoveryPlan> {
 }
 
 /// A Cook that failed before materializing (its admission failed) has no
-/// durable recipe and no execution owner, so `recover` has no step for it: the
-/// plan names the `cook` command that re-launches it from its saved inputs.
+/// durable recipe and no execution owner. With recorded admission inputs its
+/// step relaunches it from them; once relaunched, the plan describes that
+/// relaunch, so replaying `recover` converges on it. Without inputs there is
+/// no step, only the guidance to re-run the original `cook` command.
 fn unmaterialized_cook_recovery_plan(
     record: &agent_task_lifecycle::AgentTaskRunRecord,
 ) -> Option<CookRecoveryPlan> {
@@ -779,14 +786,54 @@ fn unmaterialized_cook_recovery_plan(
     {
         return None;
     }
+    if agent_task_lifecycle::unmaterialized_cook_admission_inputs(record).is_none() {
+        return Some(CookRecoveryPlan {
+            cook_id: record.run_id.clone(),
+            run_id: record.run_id.clone(),
+            status: cook_recovery_status(record),
+            step: CookRecoveryStep::none(
+                agent_task_lifecycle::unmaterialized_cook_relaunch_guidance(record),
+            ),
+        });
+    }
+    let relaunch = record.metadata["recovered_by"]["run_id"]
+        .as_str()
+        .and_then(|run_id| agent_task_lifecycle::exact_record(run_id).ok());
+    let (run_id, status) = relaunch.map_or_else(
+        || (record.run_id.clone(), cook_recovery_status(record)),
+        |relaunch| (relaunch.run_id.clone(), cook_recovery_status(&relaunch)),
+    );
     Some(CookRecoveryPlan {
         cook_id: record.run_id.clone(),
-        run_id: record.run_id.clone(),
-        status: cook_recovery_status(record),
-        step: CookRecoveryStep::none(agent_task_lifecycle::unmaterialized_cook_relaunch_guidance(
-            record,
-        )),
+        run_id,
+        status,
+        step: CookRecoveryStep::Relaunch,
     })
+}
+
+/// Perform a [`CookRecoveryStep::Relaunch`] for the unmaterialized source Cook.
+fn relaunch_unmaterialized_cook(source_id: &str) -> Result<(Value, i32)> {
+    let store = agent_task_lifecycle::AgentTaskLifecycleStore::from_environment()?;
+    let (relaunch, replayed) =
+        agent_task_lifecycle::relaunch_unmaterialized_cook_in_store(&store, source_id)?;
+    let blocker = if replayed {
+        None
+    } else {
+        super::ensure_scheduling_daemon()
+    };
+    let mut value = serde_json::json!({
+        "schema": "homeboy/agent-task-cook-relaunch/v1",
+        "run_id": relaunch.run_id,
+        "cook_id": relaunch.run_id,
+        "status": cook_recovery_status(&relaunch),
+        "recovered_from": source_id,
+        "replayed": replayed,
+        "status_command": format!("homeboy agent-task status {} --watch", relaunch.run_id),
+    });
+    if let Some(blocker) = blocker {
+        value["blocker"] = blocker;
+    }
+    Ok((value, 0))
 }
 
 fn plan_cook_recovery_for_cook(id: &str) -> Result<CookRecoveryPlan> {
@@ -1244,6 +1291,7 @@ fn recover_cook_once(
             }
             CookRecoveryStep::Reconcile => performer.reconcile(run_id)?,
             CookRecoveryStep::Adopt { candidate_ref } => performer.adopt(run_id, candidate_ref)?,
+            CookRecoveryStep::Relaunch => relaunch_unmaterialized_cook(&report.cook_id)?,
             CookRecoveryStep::ReplaceGates => {
                 let Some(replace_gates) = replace_gates else {
                     return Err(replace_gates_inputs_required(run_id));
@@ -1504,6 +1552,9 @@ fn validate_overrides(plan: &CookRecoveryPlan, preflight: bool) -> Result<()> {
         ),
         CookRecoveryStep::ForkReplacement => refuse(
             "the recovery step forks a replacement attempt that preserves the checkpoint; it accepts no overrides",
+        ),
+        CookRecoveryStep::Relaunch => refuse(
+            "the recovery step relaunches the Cook from its recorded admission inputs; it accepts no overrides",
         ),
         _ => Ok(()),
     }
@@ -2389,7 +2440,7 @@ mod tests {
 
     /// Failed admissions have no recipe or execution owner for a retry.
     #[test]
-    fn cook_recover_refuses_an_unmaterialized_failed_cook() {
+    fn cook_recover_refuses_an_unmaterialized_cook_without_admission_inputs() {
         struct RetryPerformer(std::cell::RefCell<Vec<String>>);
         impl CookRecoveryPerformer for RetryPerformer {
             fn continue_cook(
@@ -2415,6 +2466,8 @@ mod tests {
                 unreachable!()
             }
         }
+        const GUIDANCE: &str =
+            "re-run the original homeboy agent-task cook command with a fresh --run-id";
         homeboy_core::test_support::with_isolated_home(|_| {
             let cook_id = "cook-admission-failed";
             let store = agent_task_lifecycle::AgentTaskLifecycleStore::from_environment().unwrap();
@@ -2425,7 +2478,6 @@ mod tests {
                     "schema": "homeboy/unmaterialized-cook-binding/v1",
                     "request_ref": "sha256:request",
                     "worktree_ref": "repo@branch",
-                    "admission_inputs": { "cook_id": cook_id, "argv": ["cook"] },
                 }),
                 "blocked_runner_unavailable",
                 "selected runner requires admitted connected readiness evidence",
@@ -2441,7 +2493,8 @@ mod tests {
                 })
                 .unwrap();
 
-            // Planning and applying agree: there is no step, only a relaunch.
+            // Planning and applying agree: without recorded admission inputs
+            // there is no step, only the guidance to re-run the original Cook.
             let plan = plan_cook_recovery(cook_id).expect("unmaterialized Cook is planned");
             assert!(plan.step.is_none(), "{:?}", plan.step);
             assert!(cook_recovery_delegation(cook_id).is_none());
@@ -2460,7 +2513,7 @@ mod tests {
             )
             .unwrap_err();
             assert_eq!(refused.details["field"], "regate", "{refused:?}");
-            assert!(refused.message.contains("re-launch with: homeboy cook"));
+            assert!(refused.message.contains(GUIDANCE), "{}", refused.message);
 
             for preflight in [true, false] {
                 let (report, exit_code) = recover_cook(
@@ -2476,9 +2529,121 @@ mod tests {
                 let CookRecoveryStep::None { reason } = &report.step else {
                     panic!("{report:?}")
                 };
-                assert!(reason.contains("re-launch with: homeboy cook"));
+                assert!(reason.contains(GUIDANCE), "{reason}");
             }
             assert!(performer.0.borrow().is_empty(), "no retry is attempted");
+            assert!(
+                store
+                    .read_records()
+                    .unwrap()
+                    .iter()
+                    .all(|record| record.run_id == cook_id),
+                "no relaunch is admitted"
+            );
+        });
+    }
+
+    /// An unmaterialized Cook with recorded admission inputs is relaunched
+    /// through the admission path under a fresh run id; replays converge.
+    #[test]
+    fn cook_recover_relaunches_an_unmaterialized_cook_from_its_admission_inputs() {
+        struct NoPerformer;
+        impl CookRecoveryPerformer for NoPerformer {
+            fn continue_cook(
+                &self,
+                _: &str,
+                _: bool,
+                _: &CookRecoveryOverrides,
+            ) -> Result<(Value, i32)> {
+                unreachable!("an unmaterialized Cook has no attempt to continue")
+            }
+            fn preflight_continue_cook(&self, _: &str, _: bool) -> Result<(Value, i32)> {
+                unreachable!()
+            }
+            fn retry(&self, _: &str) -> Result<(Value, i32)> {
+                unreachable!("relaunch is not a retry")
+            }
+            fn reconcile(&self, _: &str) -> Result<(Value, i32)> {
+                unreachable!()
+            }
+            fn adopt(&self, _: &str, _: &str) -> Result<(Value, i32)> {
+                unreachable!()
+            }
+        }
+        homeboy_core::test_support::with_isolated_home(|home| {
+            let cook_id = "cook-admission-relaunch";
+            let binding = super::super::execution_step::execution_step_fixtures::admission_binding(
+                &home.path().join("inputs"),
+                cook_id,
+                Some("frozen prompt"),
+            );
+            let store = agent_task_lifecycle::AgentTaskLifecycleStore::from_environment().unwrap();
+            agent_task_lifecycle::record_unmaterialized_cook_admission_in_store(
+                &store,
+                cook_id,
+                binding,
+                "blocked_runner_unavailable",
+                "runner transport lost before materialization",
+            )
+            .unwrap();
+            store
+                .mutate_record(cook_id, |record| {
+                    record
+                        .set_state_for_test(homeboy_lifecycle_contract::RunExecutionState::Failed);
+                    true
+                })
+                .unwrap();
+            assert_eq!(
+                plan_cook_recovery(cook_id).unwrap().step,
+                CookRecoveryStep::Relaunch
+            );
+
+            let (report, exit_code) =
+                recover_cook(cook_id, CookRecoveryRequest::default(), &NoPerformer).unwrap();
+            assert_eq!(exit_code, 0, "{report:?}");
+            assert_eq!(report.step, CookRecoveryStep::Relaunch);
+            let relaunch_id = report.run_id.clone();
+            assert_ne!(relaunch_id, cook_id);
+            assert_eq!(report.result.as_ref().unwrap()["replayed"], false);
+
+            let source = store.read_record(cook_id).unwrap();
+            let relaunch = store.read_record(&relaunch_id).unwrap();
+            assert_eq!(source.metadata["recovered_by"]["run_id"], relaunch_id);
+            assert_eq!(relaunch.metadata["recovered_from"]["run_id"], cook_id);
+            assert_eq!(
+                relaunch.state(),
+                homeboy_lifecycle_contract::RunExecutionState::Queued
+            );
+            let inputs = |record: &agent_task_lifecycle::AgentTaskRunRecord, id: &str| {
+                let mut inputs = record.metadata["unmaterialized_cook_admission"]["binding"]
+                    ["admission_inputs"]
+                    .clone();
+                inputs["cook_id"] = Value::Null;
+                for argument in inputs["argv"].as_array_mut().unwrap() {
+                    if argument == id {
+                        *argument = Value::Null;
+                    }
+                }
+                inputs
+            };
+            assert_eq!(inputs(&relaunch, &relaunch_id), inputs(&source, cook_id));
+            assert_eq!(
+                super::super::prepare_admission_arguments(
+                    &relaunch.metadata["unmaterialized_cook_admission"]["binding"],
+                    &relaunch_id,
+                )
+                .unwrap()
+                .last()
+                .unwrap(),
+                "--prompt=frozen prompt"
+            );
+
+            let (replay, exit_code) =
+                recover_cook(cook_id, CookRecoveryRequest::default(), &NoPerformer).unwrap();
+            assert_eq!(exit_code, 0, "{replay:?}");
+            assert_eq!(replay.run_id, relaunch_id);
+            assert_eq!(replay.result.as_ref().unwrap()["replayed"], true);
+            assert_eq!(store.read_records().unwrap().len(), 2, "one relaunch only");
         });
     }
 
