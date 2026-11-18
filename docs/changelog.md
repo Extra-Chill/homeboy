@@ -4,6 +4,11 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.473.10] - 2026-11-18
+
+### Fixed
+- wait through runner version skew in Lab gates and preserve the candidate
+
 ## [0.473.9] - 2026-11-18
 
 ### Fixed
