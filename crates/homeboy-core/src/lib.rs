@@ -197,6 +197,8 @@ pub mod lab_contract {
 }
 pub mod server;
 pub mod setup;
+#[cfg(unix)]
+pub(crate) mod signal_chain;
 pub mod source_snapshot;
 pub mod stream_capture;
 pub(crate) mod structured_sidecar;

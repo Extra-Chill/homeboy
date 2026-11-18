@@ -818,8 +818,22 @@ fn linux_process_state_from_stat(stat: &str) -> Option<char> {
 static TERMINATE_REQUESTED: AtomicBool = AtomicBool::new(false);
 
 #[cfg(unix)]
-extern "C" fn record_terminate(_signal: libc::c_int) {
+static PREVIOUS_SIGTERM: crate::signal_chain::ChainedSignal =
+    crate::signal_chain::ChainedSignal::new();
+
+#[cfg(unix)]
+extern "C" fn record_terminate(
+    signal: libc::c_int,
+    info: *mut libc::siginfo_t,
+    context: *mut libc::c_void,
+) {
     TERMINATE_REQUESTED.store(true, Ordering::SeqCst);
+    PREVIOUS_SIGTERM.forward(signal, info, context);
+}
+
+#[cfg(all(test, unix))]
+pub(crate) fn reset_terminate_request_for_test() {
+    TERMINATE_REQUESTED.store(false, Ordering::SeqCst);
 }
 
 /// Route SIGTERM to a graceful-stop flag instead of the default immediate
@@ -828,16 +842,19 @@ extern "C" fn record_terminate(_signal: libc::c_int) {
 /// and exit; the default disposition killed it mid-write instead. Scoped to
 /// callers that poll `stop` promptly; other `install_shutdown_handler` users
 /// keep the default SIGTERM behavior.
+///
+/// The handler is chained with `sigaction(2)`: any SIGTERM handler already
+/// installed (such as local-exec process-group cleanup) keeps running, and a
+/// cleanup handler installed later forwards to this one, so installation
+/// order does not matter (#18468).
 pub fn install_terminate_handler(stop: Arc<AtomicBool>) -> Result<()> {
     #[cfg(unix)]
     {
-        let handler = record_terminate as extern "C" fn(libc::c_int) as libc::sighandler_t;
-        // SAFETY: the handler only performs an atomic store.
-        if unsafe { libc::signal(libc::SIGTERM, handler) } == libc::SIG_ERR {
-            return Err(Error::internal_unexpected(
-                "install SIGTERM handler: signal(2) failed".to_string(),
-            ));
-        }
+        PREVIOUS_SIGTERM
+            .install(libc::SIGTERM, record_terminate)
+            .map_err(|error| {
+                Error::internal_unexpected(format!("install SIGTERM handler: {error}"))
+            })?;
         std::thread::Builder::new()
             .name("homeboy-sigterm".to_string())
             .spawn(move || loop {
@@ -858,6 +875,12 @@ pub fn install_terminate_handler(stop: Arc<AtomicBool>) -> Result<()> {
     Ok(())
 }
 
+/// Install the SIGINT (Ctrl-C) stop handler via `ctrlc`.
+///
+/// `ctrlc` replaces the SIGINT disposition, so call this before any local
+/// child is spawned: the process-group cleanup handler installed on first
+/// spawn chains to it, while installing this afterwards would drop the
+/// cleanup handler's SIGINT bookkeeping. `daemon serve` installs it first.
 pub fn install_shutdown_handler(stop: Arc<AtomicBool>, context: &str) -> Result<()> {
     let context = context.to_string();
     ctrlc::set_handler(move || {

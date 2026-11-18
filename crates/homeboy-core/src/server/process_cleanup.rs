@@ -128,22 +128,38 @@ impl Drop for ProcessGroupCleanupGuard {
 }
 
 #[cfg(unix)]
+static PREVIOUS_SIGINT: crate::signal_chain::ChainedSignal =
+    crate::signal_chain::ChainedSignal::new();
+
+#[cfg(unix)]
+static PREVIOUS_SIGTERM: crate::signal_chain::ChainedSignal =
+    crate::signal_chain::ChainedSignal::new();
+
+/// Record SIGINT/SIGTERM for child cleanup while chaining to any handler that
+/// was already installed (the daemon's drain handlers, #18468), so spawning a
+/// local child never steals the process's own shutdown signals.
+#[cfg(unix)]
 fn install_process_cleanup_signal_handlers() {
-    CLEANUP_SIGNALS_INSTALLED.call_once(|| unsafe {
-        libc::signal(
-            libc::SIGINT,
-            cleanup_signal_handler as *const () as libc::sighandler_t,
-        );
-        libc::signal(
-            libc::SIGTERM,
-            cleanup_signal_handler as *const () as libc::sighandler_t,
-        );
+    CLEANUP_SIGNALS_INSTALLED.call_once(|| {
+        // Best effort, as with the previous signal(2) install: failure only
+        // loses interruption evidence, never correctness of the child run.
+        let _ = PREVIOUS_SIGINT.install(libc::SIGINT, cleanup_signal_handler);
+        let _ = PREVIOUS_SIGTERM.install(libc::SIGTERM, cleanup_signal_handler);
     });
 }
 
 #[cfg(unix)]
-extern "C" fn cleanup_signal_handler(signal: libc::c_int) {
+extern "C" fn cleanup_signal_handler(
+    signal: libc::c_int,
+    info: *mut libc::siginfo_t,
+    context: *mut libc::c_void,
+) {
     ACTIVE_CLEANUP_SIGNAL.store(signal, Ordering::SeqCst);
+    match signal {
+        libc::SIGINT => PREVIOUS_SIGINT.forward(signal, info, context),
+        libc::SIGTERM => PREVIOUS_SIGTERM.forward(signal, info, context),
+        _ => {}
+    }
 }
 
 #[cfg(unix)]
@@ -288,6 +304,46 @@ mod tests {
         assert!(stderr.contains("runner output"));
         assert!(stderr.contains("Homeboy interrupted by signal 15"));
         assert!(stderr.contains("terminated child process group"));
+    }
+
+    /// Raise SIGTERM (only once handlers are installed, so it cannot kill
+    /// the test process) and wait for both observers to see it.
+    #[cfg(unix)]
+    fn raise_sigterm_and_assert_both_observers(stop: &std::sync::atomic::AtomicBool) {
+        assert_eq!(unsafe { libc::raise(libc::SIGTERM) }, 0);
+        let deadline = std::time::Instant::now() + Duration::from_secs(10);
+        while !stop.load(Ordering::SeqCst) && std::time::Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        assert!(
+            stop.load(Ordering::SeqCst),
+            "the daemon's terminate request was swallowed by the cleanup handler"
+        );
+        assert_eq!(active_cleanup_signal(), Some(libc::SIGTERM));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn cleanup_handler_installed_after_terminate_handler_chains_sigterm() {
+        crate::process::reset_terminate_request_for_test();
+        let stop = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        crate::process::install_terminate_handler(stop.clone()).expect("terminate handler");
+        // The daemon order: drain handlers first, then a local child spawn.
+        let mut command = Command::new("true");
+        configure_process_group_cleanup(&mut command);
+
+        raise_sigterm_and_assert_both_observers(&stop);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn terminate_handler_installed_after_cleanup_handler_chains_sigterm() {
+        crate::process::reset_terminate_request_for_test();
+        install_process_cleanup_signal_handlers();
+        let stop = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        crate::process::install_terminate_handler(stop.clone()).expect("terminate handler");
+
+        raise_sigterm_and_assert_both_observers(&stop);
     }
 
     #[cfg(target_os = "linux")]
