@@ -78,6 +78,7 @@ pub(crate) use cook_pre_execution::*;
 pub use cook_pre_execution::{recover_recipe_attempt, retryable_pre_execution_failure};
 pub use cook_promotion::*;
 pub use cook_recipe::*;
+pub(crate) use cook_recovery::incomplete_review_recovery_command;
 pub use cook_recovery::{
     cook_recovery_delegation, is_store_contention, is_store_contention_message, plan_cook_recovery,
     prepare_admitted_recovery_continuation, recover_cook, with_store_contention_backoff,
@@ -85,7 +86,6 @@ pub use cook_recovery::{
     CookRecoveryReport, CookRecoveryRequest, CookRecoveryStep, CookReplaceGatesRequest,
     CookReplacementProof, COOK_RECOVERY_SCHEMA, STORE_BUSY_CODE,
 };
-pub(crate) use cook_recovery::{cook_recovery_status, incomplete_review_recovery_command};
 
 /// Observe the local controller daemon with the one freshness report
 /// `homeboy daemon status` renders (#16181). Queued work is scheduled by that

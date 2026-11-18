@@ -1830,7 +1830,7 @@ fn typed_pre_provider_failure_outranks_stale_runner_status_and_terminalizes_once
             }
         );
         assert_eq!(
-            crate::agent_task_service::cook_recovery_status(&record),
+            crate::agent_task_lifecycle::CookRunState::of(&record).status,
             "pre_execution_failure"
         );
         assert_eq!(record.metadata["provider_executions_consumed"], 0);
