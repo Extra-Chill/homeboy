@@ -855,6 +855,7 @@ fn step_result(
         }
     });
     let output_path = output_path(&request.instance, key).ok();
+    let oversize = output_path.as_deref().and_then(oversize_output_bytes);
     // A settled Cook's own terminal reason, which outranks its waiter's exit.
     let mut cook_reason = None;
     let (outcome, output) = match kind {
@@ -884,7 +885,17 @@ fn step_result(
         Some(_) => (None, output_path.and_then(|path| read_output(&path))),
         None => (None, None),
     };
-    let error = if outcome.as_deref() == Some("succeeded") {
+    // Downstream steps would resolve a dropped output as empty and quietly
+    // skip, so an output over the limit fails its step.
+    let (status, outcome) = match oversize {
+        Some(_) => (FinishedStatus::Failed, Some("failed".to_string())),
+        None => (status, outcome),
+    };
+    let error = if let Some(bytes) = oversize {
+        Some(format!(
+            "output_too_large: step output is {bytes} bytes, over the {MAX_OUTPUT_BYTES}-byte workflow output limit"
+        ))
+    } else if outcome.as_deref() == Some("succeeded") {
         None
     } else if cook_reason.is_some() {
         cook_reason
@@ -960,12 +971,15 @@ fn cook_terminal_error(cook_id: &str, outcome: &str, reason: Option<&str>) -> St
     }
 }
 
+/// The size of a step output over the workflow output limit.
+fn oversize_output_bytes(path: &Path) -> Option<u64> {
+    let bytes = std::fs::metadata(path).ok()?.len();
+    (bytes > MAX_OUTPUT_BYTES).then_some(bytes)
+}
+
 fn read_output(path: &Path) -> Option<Value> {
-    let metadata = std::fs::metadata(path).ok()?;
-    if metadata.len() > MAX_OUTPUT_BYTES {
-        return Some(
-            json!({ "error": "output exceeds the workflow output limit", "bytes": metadata.len() }),
-        );
+    if oversize_output_bytes(path).is_some() {
+        return None;
     }
     let text = std::fs::read_to_string(path).ok()?;
     if text.trim().is_empty() {

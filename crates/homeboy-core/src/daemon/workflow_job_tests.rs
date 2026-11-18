@@ -487,6 +487,49 @@ fn failed_step_cause_reaches_the_workflow_status() {
     });
 }
 
+/// A step whose output is over the limit fails the workflow with the byte
+/// count instead of succeeding with an output downstream steps read as empty.
+#[test]
+fn an_output_over_the_limit_fails_its_step() {
+    with_isolated_home(|home| {
+        let runs = home.path().join("runs.log");
+        let definition = json!({
+            "schema": "homeboy/workflow/v1",
+            "id": "oversize",
+            "steps": [
+                {"id": "triage", "exec": sh(
+                    "head -c 300000 /dev/zero | tr '\\0' x > \"$HOMEBOY_STEP_OUTPUT\"")},
+                {"id": "cook", "needs": ["triage"],
+                 "exec": sh(&format!("echo cook >> {}", runs.display()))}
+            ]
+        });
+        let store = JobStore::open_without_reconciliation(
+            home.path().join(crate::paths::OBSERVATION_DB_FILENAME),
+        )
+        .unwrap()
+        .with_daemon_lease("workflow-test".to_string());
+        let request = request(definition, home.path());
+        let job_id = admit(&store, &request);
+        crate::daemon::start_controller_job(job_id, &store).unwrap();
+        assert_eq!(wait_terminal(&store, job_id, 30).status, JobStatus::Failed);
+        let status = workflow_status(&store, &request.instance).unwrap();
+        assert_eq!(status["steps"]["triage"]["outcome"], "failed");
+        let error = status["steps"]["triage"]["error"].as_str().unwrap();
+        assert!(
+            error.starts_with("output_too_large: step output is 300000 bytes"),
+            "{error}"
+        );
+        assert!(status["reason"]
+            .as_str()
+            .unwrap()
+            .contains("output_too_large"));
+        assert!(
+            !runs.exists(),
+            "a step depending on the failed step never runs"
+        );
+    });
+}
+
 /// An output gate on an upstream step decides whether the next step runs:
 /// `evaluate` reports findings, `fix` runs because of it, and a step whose
 /// gate is false is skipped. Every step job runs exactly once.
