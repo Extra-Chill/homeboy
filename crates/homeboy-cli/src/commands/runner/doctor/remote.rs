@@ -319,6 +319,19 @@ pub fn report(
         checks.extend(parity_checks);
     }
 
+    let pressure = (!scoped)
+        .then(|| {
+            remote_pressure(
+                persisted_status
+                    .as_ref()
+                    .and_then(|status| status.session.as_ref()),
+                &workspace_root,
+                client.remaining_probe_budget(),
+                &mut checks,
+            )
+        })
+        .flatten();
+
     let daemon_timeout = client
         .remaining_probe_budget()
         .unwrap_or(std::time::Duration::from_secs(5))
@@ -414,9 +427,49 @@ pub fn report(
         daemon_recovery: persisted_status.and_then(|status| status.daemon_freshness.clone()),
         admission_summary: admission_snapshot.map(|snapshot| snapshot.summary),
         provider_readiness: None,
+        pressure,
         repairs: Vec::new(),
     }
 }
+
+/// Runner pressure as the runner's own daemon observes it. The daemon bounds
+/// its walk; this bounds the request by the doctor's remaining budget.
+fn remote_pressure(
+    session: Option<&RunnerSession>,
+    workspace_root: &str,
+    remaining: Option<std::time::Duration>,
+    checks: &mut Vec<RunnerCheck>,
+) -> Option<homeboy::core::runner_inventory::PressureReport> {
+    let timeout = remaining.unwrap_or(PRESSURE_TIMEOUT).min(PRESSURE_TIMEOUT);
+    let observed = session
+        .and_then(|session| session.local_url.as_deref())
+        .ok_or_else(|| "runner daemon session is not connected".to_string())
+        .and_then(|url| {
+            runner::daemon_pressure(url, Some(workspace_root), timeout)
+                .map_err(|error| error.message)
+        })
+        .and_then(|value| {
+            serde_json::from_value::<homeboy::core::runner_inventory::PressureReport>(value)
+                .map_err(|_| {
+                    "runner daemon does not report pressure; refresh Homeboy on the runner"
+                        .to_string()
+                })
+        });
+    match observed {
+        Ok(report) => Some(report),
+        Err(reason) => {
+            checks.push(checks::warning(
+                "pressure",
+                format!("Runner pressure could not be observed: {reason}"),
+                None,
+            ));
+            None
+        }
+    }
+}
+
+/// The daemon walks for two seconds; leave headroom for the round trip.
+const PRESSURE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(4);
 
 pub(super) fn probe_limits(scope: RunnerDoctorScope) -> (std::time::Duration, std::time::Duration) {
     match scope {
@@ -470,6 +523,7 @@ pub(super) fn unreachable_report(
         daemon_recovery: None,
         admission_summary: None,
         provider_readiness: None,
+        pressure: None,
         repairs: Vec::new(),
     }
 }
@@ -549,6 +603,7 @@ pub(super) fn disconnected_report(
         daemon_recovery,
         admission_summary,
         provider_readiness: None,
+        pressure: None,
         repairs: Vec::new(),
     }
 }

@@ -220,10 +220,15 @@ fn reprobe_after_repair(
     Ok(report)
 }
 
+/// Deadline for a doctor's own walk of the Homeboy-owned roots.
+pub(super) const PRESSURE_BUDGET: std::time::Duration = std::time::Duration::from_secs(2);
+
 const COMPACT_CHECK_LIMIT: usize = 12;
 const COMPACT_PROVIDER_LIMIT: usize = 10;
 const COMPACT_TEXT_LIMIT: usize = 256;
-const COMPACT_PROJECTION_BYTES: usize = 8 * 1024;
+/// The 8 KiB doctor budget plus a fixed allowance for the pressure block,
+/// whose root list has a constant length.
+const COMPACT_PROJECTION_BYTES: usize = 8 * 1024 + 2 * 1024;
 
 /// Keep default doctor output to the facts needed to decide whether the runner
 /// is usable. `--full` remains a lossless, redacted evidence surface.
@@ -334,6 +339,7 @@ fn compact_projection(report: &RunnerDoctorOutput) -> serde_json::Value {
             "system": { "os": bounded_text(&report.resources.system.os), "arch": bounded_text(&report.resources.system.arch) },
             "cpu": { "count": report.resources.cpu.count },
         },
+        "pressure": report.pressure.as_ref().map(compact_pressure),
         "checks": checks,
         "repairs": failed_repairs,
         "provider_readiness": if provider_total == 0 { serde_json::Value::Null } else { serde_json::json!({ "ready_for": ready_for, "blocked_for": blocked_for, "unverified_for": unverified_for, "guidance": unverified_remediation }) },
@@ -344,6 +350,28 @@ fn compact_projection(report: &RunnerDoctorOutput) -> serde_json::Value {
         }
     });
     projection
+}
+
+/// Pressure without root paths or record provenance, which `--full` keeps.
+fn compact_pressure(
+    pressure: &homeboy::core::runner_inventory::PressureReport,
+) -> serde_json::Value {
+    serde_json::json!({
+        "schema": pressure.schema,
+        "disk": pressure.disk.as_ref().map(|disk| serde_json::json!({
+            "used_bytes": disk.used_bytes, "free_bytes": disk.free_bytes,
+        })),
+        "memory": pressure.memory,
+        "load_per_cpu": pressure.load.as_ref().map(|load| load.load_per_cpu),
+        "roots": pressure.roots.iter().map(|root| serde_json::json!({
+            "name": bounded_text(&root.name),
+            "bytes": root.bytes,
+            "entries": root.entries,
+            "measurement": root.measurement,
+        })).collect::<Vec<_>>(),
+        "deadline_ms": pressure.deadline_ms,
+        "elapsed_ms": pressure.elapsed_ms,
+    })
 }
 
 /// Every nonzero doctor result names one current failed check at the payload
@@ -533,6 +561,10 @@ fn bounded_projection_envelope(projection: serde_json::Value) -> serde_json::Val
         .get("failure")
         .cloned()
         .unwrap_or(serde_json::Value::Null);
+    let pressure = projection
+        .get("pressure")
+        .cloned()
+        .unwrap_or(serde_json::Value::Null);
     serde_json::json!({
         "schema": "homeboy/runner-doctor/v1",
         "command": "runner.doctor",
@@ -544,6 +576,7 @@ fn bounded_projection_envelope(projection: serde_json::Value) -> serde_json::Val
             "risk": ["doctor details exceed the default response budget"],
             "next_action": "homeboy runner doctor <runner-id> --full",
         },
+        "pressure": pressure,
         "checks": [],
         "repairs": repairs,
         "truncation": { "checks": { "shown": 0, "omitted": "see_full_output", "full_command": "homeboy runner doctor <runner-id> --full" } },

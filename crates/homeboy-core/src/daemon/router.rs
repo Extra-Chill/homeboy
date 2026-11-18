@@ -87,12 +87,8 @@ where
             endpoint(
                 "runner.inventory",
                 500,
-                crate::runner_inventory::owned_roots(workspace_root).map(|roots| {
-                    json!(crate::runner_inventory::cached_scan(
-                        roots,
-                        Duration::from_secs(2)
-                    ))
-                }),
+                crate::runner_inventory::pressure_report(workspace_root, Duration::from_secs(2))
+                    .map(|report| json!(report)),
             )
         }
         ("GET", "/version") => HttpResponse {

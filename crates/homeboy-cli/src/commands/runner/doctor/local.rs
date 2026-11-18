@@ -18,6 +18,9 @@ pub fn report(
         .and_then(|runner| runner.workspace_root.as_ref())
         .map(PathBuf::from)
         .unwrap_or_else(|| env::current_dir().unwrap_or_else(|_| PathBuf::from(".")));
+    let configured_workspace_root = runner
+        .and_then(|runner| runner.workspace_root.as_ref())
+        .map(PathBuf::from);
     let artifact_root = artifact_root
         .map(Path::to_path_buf)
         .unwrap_or_else(|| workspace_root.join(".homeboy-artifacts"));
@@ -210,6 +213,19 @@ pub fn report(
         workspace_writable,
         artifact_store_available,
     );
+    let pressure = homeboy::core::runner_inventory::pressure_report(
+        configured_workspace_root,
+        super::PRESSURE_BUDGET,
+    )
+    .map_err(|error| {
+        checks.push(checks::warning(
+            "pressure",
+            format!("Runner pressure could not be observed: {}", error.message),
+            None,
+        ))
+    })
+    .ok();
+
     let resources = RunnerResources {
         homeboy,
         system,
@@ -237,6 +253,7 @@ pub fn report(
         daemon_recovery: None,
         admission_summary: None,
         provider_readiness: None,
+        pressure,
         repairs: Vec::new(),
     }
 }

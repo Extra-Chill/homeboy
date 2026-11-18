@@ -207,6 +207,17 @@ and non-blocking `warn` reports exit `0`. The command has no report-only mode.
 Use `doctor` before `connect` when you need to know whether Homeboy, Git, SSH,
 and the configured workspace root are usable on the target machine.
 
+General-scope doctor also reports a `pressure` block (`homeboy/runner-pressure/v1`):
+disk total/used/free for the volume holding Homeboy data, memory available and
+swap used, load per CPU, and `bytes`/`entries` for each Homeboy-owned root
+(`controller-scratch`, `_lab_workspaces`, `task-worktrees`, `runtime/tmp`,
+`gate-inputs`, `daemon`, `artifacts`, plus cargo targets, gate Rust caches, and
+browser caches). Each root is `measurement: "measured"` only when a walk visited
+every entry; partial walks and recorded estimates are `"estimated"` lower bounds.
+For an SSH runner the connected daemon observes its own host. The default
+projection omits root paths; `--full` keeps them with their record provenance.
+`homeboy status` carries the same block for this machine.
+
 ### `preflight`
 
 ```sh
@@ -741,11 +752,12 @@ homeboy runner inventory <runner-id>
 Shows the persisted tunnel/session state for a runner. Use this to determine
 whether `runner exec` will use a connected daemon or needs an explicit fallback.
 `inventory` (`homeboy runner inventory <runner-id>`) inspects the connected daemon without occupying a
-job slot. It scans only managed workspaces, cargo targets, artifacts, runtime
-scratch (including isolated gate homes), managed Rust package caches, and
-Homeboy's browser cache. A shared two-second scan budget bounds filesystem work;
-results are reused for 60 seconds and concurrent scans are coalesced. `complete:
-false` marks a partial lower-bound total, not an empty root. Symlinks are not
+job slot. It returns the same `homeboy/runner-pressure/v1` block as `runner doctor`,
+scanning only the Homeboy-owned roots. A two-second scan budget, shared across
+roots, bounds filesystem work; every walk is recorded under
+`<data>/runtime/root-sizes.json` and reused as an `estimated` value for ten
+minutes, and concurrent scans are coalesced. `complete: false` marks a partial
+lower-bound total, not an empty root. Symlinks are not
 followed. A blocked filesystem syscall can exceed the cooperative scan deadline;
 the controller request also has a three-second transport timeout.
 
