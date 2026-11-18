@@ -31,6 +31,7 @@ mod runtime_helper;
 mod scenario_runner;
 mod scope;
 mod settings;
+mod shared_lib;
 mod tool;
 
 use crate::extension::catalog::load_extension;

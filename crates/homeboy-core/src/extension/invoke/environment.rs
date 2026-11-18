@@ -22,6 +22,13 @@ pub(crate) fn prepare_capability_run(
         )?;
     }
 
+    // Refuse to dispatch with an incomplete/stale shared runner library rather
+    // than failing halfway through the run (#18426).
+    super::shared_lib::ensure_shared_lib_ready(
+        &execution.extension_id,
+        Path::new(&execution.extension_path),
+    )?;
+
     let manifest =
         homeboy_core::extension::catalog::load_extension_from_dir(&execution.extension_path)?;
     homeboy_extension_contract::validate_core_compatibility(
@@ -360,11 +367,13 @@ pub(crate) fn build_exec_env(
 
     // Installed extensions can be immutable snapshots while their shared script
     // libraries and runner packages live at the active runtime root.
+    // The active copy is validated against the canonical shared script set; a
+    // stale or partly synced copy falls back to the extension's source tree
+    // when reachable (#18426).
     if let Ok(config_root) = homeboy_core::paths::homeboy() {
-        let shared_lib_dir = homeboy_core::paths::extensions_in_root(&config_root)
-            .join("scripts")
-            .join("lib");
-        if shared_lib_dir.is_dir() {
+        let resolution =
+            super::shared_lib::resolve_shared_lib_dir(&config_root, extension_path.map(Path::new));
+        if let Some(shared_lib_dir) = resolution.export_dir() {
             env.push((
                 exec_context::SHARED_LIB_DIR.to_string(),
                 shared_lib_dir.to_string_lossy().to_string(),

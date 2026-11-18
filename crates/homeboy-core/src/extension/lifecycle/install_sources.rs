@@ -10,6 +10,7 @@ use std::path::{Path, PathBuf};
 use homeboy_core::config::{self, from_str};
 use homeboy_core::error::{Error, Result};
 use homeboy_core::extension::root_manifest::{ExtensionRootManifest, SharedAssetDeclaration};
+use homeboy_core::extension::shared_asset_integrity;
 use homeboy_core::git;
 use homeboy_core::paths;
 use homeboy_engine_primitives::local_files;
@@ -321,22 +322,41 @@ fn install_shared_assets_from_root(
                 )
             })?;
         }
-        remove_existing_target(&target, &shared_dir)?;
-
         match mode {
             SharedAssetMode::Copy => {
-                copy_dir_recursive(&source, &target)?;
-                if let Some((_, url)) = owner {
-                    // Reuse generated provenance metadata, excluded from source content.
-                    std::fs::write(target.join(".source-url"), url).map_err(|error| {
-                        Error::internal_io(
-                            error.to_string(),
-                            Some("record shared asset owner".into()),
-                        )
-                    })?;
+                // Stage the complete tree (content, provenance, integrity
+                // manifest) beside the target, then swap it in. Runners never
+                // observe a half-copied tree, and the manifest lets resolution
+                // detect later drift (#18426).
+                let staging = staging_path_for(&target);
+                if std::fs::symlink_metadata(&staging).is_ok() {
+                    remove_existing_target(&staging, &shared_dir)?;
                 }
+                let staged = (|| {
+                    copy_dir_recursive(&source, &staging)?;
+                    if let Some((_, url)) = owner {
+                        // Reuse generated provenance metadata, excluded from source content.
+                        std::fs::write(staging.join(shared_asset_integrity::SOURCE_URL_FILE), url)
+                            .map_err(|error| {
+                                Error::internal_io(
+                                    error.to_string(),
+                                    Some("record shared asset owner".into()),
+                                )
+                            })?;
+                    }
+                    shared_asset_integrity::write_manifest(&staging)
+                })();
+                if let Err(error) = staged {
+                    let _ = remove_existing_target(&staging, &shared_dir);
+                    return Err(error);
+                }
+                remove_existing_target(&target, &shared_dir)?;
+                rename_dir(&staging, &target)?;
             }
-            SharedAssetMode::Symlink => symlink_shared_asset(&source, &target, &shared_dir)?,
+            SharedAssetMode::Symlink => {
+                remove_existing_target(&target, &shared_dir)?;
+                symlink_shared_asset(&source, &target, &shared_dir)?
+            }
         }
     }
 
@@ -472,6 +492,16 @@ pub(crate) fn isolated_shared_asset_target(
         &config_root.join("extensions"),
         asset_path,
     ))
+}
+
+/// Sibling staging directory used to materialize a copied shared tree before
+/// it replaces `target`.
+fn staging_path_for(target: &Path) -> PathBuf {
+    let name = target
+        .file_name()
+        .map(|name| name.to_string_lossy().into_owned())
+        .unwrap_or_default();
+    target.with_file_name(format!(".{name}.staging-{}", std::process::id()))
 }
 
 fn shared_asset_target(extensions_root: &Path, asset_path: &str) -> PathBuf {
