@@ -509,6 +509,9 @@ pub fn retryable_pre_execution_failure(record: &agent_task_lifecycle::AgentTaskR
 #[derive(Debug)]
 pub(crate) struct PreExecutionFailureDetails {
     pub(crate) retryable: bool,
+    /// The recorded failure's error code, else the live error's: the class
+    /// the transport-retry decision reads (#18454).
+    pub(crate) error_code: String,
     pub(crate) phase: Option<String>,
     pub(crate) classification: Option<String>,
     /// The underlying cause's own message when `phase`/`classification` were
@@ -552,6 +555,11 @@ pub(crate) fn pre_execution_failure_details(
         .and_then(|failure| failure.get("retryable"))
         .and_then(Value::as_bool)
         .unwrap_or(error.retryable == Some(true));
+    let error_code = failure
+        .and_then(|failure| failure.get("error_code"))
+        .and_then(Value::as_str)
+        .unwrap_or(error.code.as_str())
+        .to_string();
     let phase = failure
         .and_then(|failure| failure.get("phase"))
         .and_then(Value::as_str)
@@ -574,6 +582,7 @@ pub(crate) fn pre_execution_failure_details(
     if phase.is_some() && classification.is_some() {
         return PreExecutionFailureDetails {
             retryable,
+            error_code,
             phase,
             classification,
             detail: None,
@@ -591,6 +600,7 @@ pub(crate) fn pre_execution_failure_details(
     let derived = record.and_then(pre_provider_outcome_failure_cause);
     PreExecutionFailureDetails {
         retryable,
+        error_code,
         phase: phase.or_else(|| derived.as_ref().map(|cause| cause.0.clone())),
         classification: classification.or_else(|| derived.as_ref().map(|cause| cause.1.clone())),
         detail: derived.and_then(|cause| cause.2),
@@ -1004,6 +1014,7 @@ mod tests {
                 Vec::new(),
                 PreExecutionFailureDetails {
                     retryable: false,
+                    error_code: "internal.unexpected".into(),
                     phase: Some("pre_provider".into()),
                     classification: Some("provider".into()),
                     detail: None,

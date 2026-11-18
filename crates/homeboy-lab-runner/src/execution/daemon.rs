@@ -982,22 +982,22 @@ fn admission_recovery_timeout_error(
     expected_daemon_lease_id: &str,
     source: Error,
 ) -> Error {
-    let mut error = Error::validation_invalid_argument(
-        "reconnect",
+    // The provider never started and the staged workspace remains reusable.
+    // Keep the original child lifecycle eligible for bounded retry. A daemon
+    // that never came back is runner mechanics, not caller input (#18454).
+    Error::new(
+        ErrorCode::RunnerLabTransportFailure,
         format!(
             "runner `{runner_id}` did not become ready to admit Lab children against lease `{expected_daemon_lease_id}` within {}s: {}",
             ADMISSION_RECOVERY_WINDOW.as_secs(),
             source.message,
         ),
-        Some(runner_id.to_string()),
-        Some(vec![format!(
-            "Re-run `homeboy runner refresh-homeboy {runner_id}` once, then retry the batch."
-        )]),
-    );
-    // The provider never started and the staged workspace remains reusable.
-    // Keep the original child lifecycle eligible for bounded retry.
-    error.retryable = Some(true);
-    error
+        json!({ "field": "reconnect", "id": runner_id, "phase": "lab_handoff" }),
+    )
+    .with_retryable(true)
+    .with_hint(format!(
+        "Re-run `homeboy runner refresh-homeboy {runner_id}` once, then retry the batch."
+    ))
 }
 
 fn strict_admission_response_is_complete(
