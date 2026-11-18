@@ -1904,6 +1904,12 @@ pub struct AgentTaskCookArgs {
     /// guard. Repeatable; defaults to the standard protected set.
     #[arg(long = "protected-branch", default_values_t = review::default_protected_branches(), value_name = "BRANCH")]
     pub protected_branches: Vec<String>,
+    /// Idempotent admission key. While a Cook admitted with this key is in
+    /// flight, another submission with it returns that Cook's ids and status
+    /// instead of admitting a second Cook. The key is free once the Cook is
+    /// terminal.
+    #[arg(long, value_name = "KEY")]
+    pub admission_key: Option<String>,
     /// Require a separate durable acceptance verdict before PR finalization.
     #[arg(long)]
     pub require_acceptance: bool,

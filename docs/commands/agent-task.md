@@ -470,6 +470,15 @@ structured contracts:
 Extensions and lab runners should delegate PR creation/update and proof assembly
 to this command instead of recreating GitHub publication logic locally.
 
+#### Idempotent Admission
+
+`cook --admission-key <key>` (workflow/JSON field `admission-key`) makes
+admission idempotent. While a Cook admitted with that key is in flight, another
+submission with the same key admits nothing and returns that Cook's `cook_id`,
+`latest_run_id` and status. Once the Cook is terminal, the key is free again.
+The check and claim run under one durable per-key lock held through admission,
+so concurrent submitters admit exactly one Cook.
+
 #### Independent Acceptance
 
 `cook --require-acceptance --acceptance-authority <authority> --acceptance-policy <policy>`
