@@ -1148,20 +1148,20 @@ mod tests {
     }
 
     #[test]
-    fn dispatch_preflight_refuses_oversized_provenance_for_a_skewed_daemon() {
+    fn dispatch_preflight_refuses_oversized_provenance_for_a_pre_reference_child() {
         let error = preflight_provenance_build_skew(
             &oversized_dispatch_env(),
-            Some("homeboy 0.465.1+3bc87452"),
+            Some("homeboy 0.309.0+3bc87452"),
             Some("homeboy 0.465.6+4b7c87df"),
             "homeboy-lab",
         )
-        .expect_err("skewed daemon cannot accept provenance references");
+        .expect_err("a child predating provenance references cannot accept them");
 
         assert_eq!(error.code.as_str(), "runner.version_skew");
         assert_eq!(error.details["runner_id"], "homeboy-lab");
         assert_eq!(
             error.details["child_build_identity"],
-            "homeboy 0.465.1+3bc87452"
+            "homeboy 0.309.0+3bc87452"
         );
         assert_eq!(
             error.details["runner_build_identity"],
@@ -1191,6 +1191,81 @@ mod tests {
         .is_ok());
         assert!(preflight_provenance_build_skew(&oversized, skewed.0, None, "lab").is_ok());
         assert!(preflight_provenance_build_skew(&oversized, None, skewed.1, "lab").is_ok());
+    }
+
+    #[test]
+    fn dispatch_preflight_admits_oversized_provenance_across_one_release_skew() {
+        // #18376: controller and runner upgrade independently; a cook placed
+        // while they are a release apart must still run, in either direction.
+        let oversized = oversized_dispatch_env();
+        let older_child = (
+            Some("homeboy 0.469.6+82c2f73e"),
+            Some("homeboy 0.470.0+c463cb25"),
+        );
+        assert!(
+            preflight_provenance_build_skew(&oversized, older_child.0, older_child.1, "lab")
+                .is_ok()
+        );
+        assert!(preflight_provenance_build_skew(
+            &oversized,
+            Some("homeboy 0.470.4+b"),
+            Some("homeboy 0.470.3+a"),
+            "lab"
+        )
+        .is_ok());
+    }
+
+    /// A build identity one release away from this runner's build.
+    fn adjacent_build(older: bool) -> String {
+        let (major, minor, patch) = homeboy_core::build_identity::build_version(
+            &homeboy_core::build_identity::current().display,
+        )
+        .expect("runner build has a version");
+        let (minor, patch) = match (older, patch) {
+            (true, 0) => (minor.saturating_sub(1), 9),
+            (true, patch) => (minor, patch - 1),
+            (false, patch) => (minor, patch + 1),
+        };
+        format!("homeboy {major}.{minor}.{patch}+0123abcd")
+    }
+
+    fn stage_for_child_build(child_build: &str, root: &Path) -> Result<HashMap<String, String>> {
+        let payload = json_payload(GUTENBERG_LAB_OFFLOAD_BYTES);
+        let env = HashMap::from([
+            (
+                crate::execution_bundle::LAB_EXECUTION_BUNDLE_ENV.to_string(),
+                serde_json::json!({
+                    "schema": crate::execution_bundle::LAB_EXECUTION_BUNDLE_SCHEMA,
+                    "binary": { "path": "/runner/bin/homeboy", "build_identity": child_build },
+                    "provenance_dir": root.join("provenance"),
+                    "admission": { "daemon_lease_id": "lease", "reservation_job_id": "job" },
+                })
+                .to_string(),
+            ),
+            (
+                homeboy_core::observation::LAB_OFFLOAD_METADATA_ENV.to_string(),
+                payload,
+            ),
+        ]);
+        child_provenance_env(env, "{}".to_string())
+    }
+
+    #[test]
+    fn runner_stages_references_for_a_child_one_release_older_or_newer() {
+        for older in [true, false] {
+            let root = tempfile::tempdir().expect("run artifact root");
+            let child_build = adjacent_build(older);
+            let env = stage_for_child_build(&child_build, root.path()).unwrap_or_else(|error| {
+                panic!("child {child_build} (older={older}) must not fail on skew: {error:?}")
+            });
+            let reference = &env[homeboy_core::observation::LAB_OFFLOAD_METADATA_ENV];
+            assert!(reference.len() <= PROVENANCE_ENV_INLINE_MAX_BYTES);
+            assert_eq!(
+                homeboy_core::observation::resolve_json_value(reference),
+                serde_json::from_str(&json_payload(GUTENBERG_LAB_OFFLOAD_BYTES)).ok(),
+                "the child resolves the staged reference"
+            );
+        }
     }
 
     #[test]
@@ -1490,7 +1565,7 @@ const PROVENANCE_ENV_NAMES: [&str; 3] = [
 
 /// Whether any provenance value is too large to hand to the child inline, so
 /// the runner must stage it by reference. Only references require the child
-/// and the runner to share one Homeboy build.
+/// to read `homeboy/provenance-reference/v1`.
 fn requires_provenance_references(env: &HashMap<String, String>) -> bool {
     PROVENANCE_ENV_NAMES.iter().any(|name| {
         env.get(*name)
@@ -1502,7 +1577,9 @@ fn requires_provenance_references(env: &HashMap<String, String>) -> bool {
 /// provenance references after accepting it (#18206).
 ///
 /// The runner daemon stages oversized provenance by reference only for a child
-/// on its own build. A durable Lab dispatch that reaches the daemon anyway
+/// that reads provenance references. A build a release or two away from the
+/// daemon in either direction does (#18376); only a child that predates the
+/// reference format is refused. A durable Lab dispatch that reaches the daemon anyway
 /// fails mid-continuation and loses the Cook's work, so the controller checks
 /// the same condition with the daemon build it observed. An unobserved daemon
 /// build is not skew: the runner's own check still stands behind this one.
@@ -1518,7 +1595,7 @@ pub(crate) fn preflight_provenance_build_skew(
     let (Some(child), Some(runner)) = (child_build_identity, observed_runner_build_identity) else {
         return Ok(());
     };
-    match ProvenanceBuildSkew::between(child, runner) {
+    match ProvenanceBuildSkew::incompatible(child, runner) {
         Some(skew) => Err(skew.error(Some(runner_id))),
         None => Ok(()),
     }
@@ -1544,7 +1621,7 @@ pub(crate) fn child_provenance_env(
         .and_then(serde_json::Value::as_str)
         .filter(|identity| !identity.trim().is_empty())
         .ok_or_else(|| provenance_reference_error("child build identity is unavailable"))?;
-    if let Some(skew) = ProvenanceBuildSkew::between(
+    if let Some(skew) = ProvenanceBuildSkew::incompatible(
         child_identity,
         &homeboy_core::build_identity::current().display,
     ) {
