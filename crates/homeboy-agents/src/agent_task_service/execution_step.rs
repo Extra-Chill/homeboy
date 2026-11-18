@@ -458,6 +458,28 @@ pub fn with_recovery_step_submit_for_test<R>(
 }
 
 /// Terminal outcome of the admitted job, independent of the Cook's later steps.
+/// The declared failure of the current recovery step's child, so a nonzero
+/// `recover --wait` names the cause the step reported.
+pub fn recovery_step_failure(run_id: &str) -> Result<Option<Value>> {
+    let record = AgentTaskLifecycleStore::from_environment()?.read_record(run_id)?;
+    let terminal = &record.metadata["recovery_step_terminal"];
+    let job_id =
+        if terminal["intent_id"] == record.metadata["execution_scheduling"]["current_intent_id"] {
+            terminal["job_id"].as_str()
+        } else {
+            record.metadata["recovery_step_job"]["job_id"].as_str()
+        };
+    Ok(job_id.and_then(|job_id| {
+        step_job::recorded_step_failure_cause(job_id).map(|message| {
+            json!({
+                "code": "agent_task.recovery_step_failed",
+                "message": message,
+                "details": { "job_id": job_id },
+            })
+        })
+    }))
+}
+
 pub fn recovery_step_exit_code(run_id: &str) -> Result<Option<i32>> {
     let store = AgentTaskLifecycleStore::from_environment()?;
     let record = store.read_record(run_id)?;

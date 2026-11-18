@@ -2661,7 +2661,7 @@ fn recover_public_entry_returns_before_blocking_gate_and_records_daemon_result()
                         request.args = vec![
                             "-c".into(),
                             format!(
-                                "touch '{}'; while [ ! -f '{}' ]; do sleep 0.05; done; exit 7",
+                                "touch '{}'; while [ ! -f '{}' ]; do sleep 0.05; done; printf '{{\\n  \"success\": false,\\n  \"summary\": \"promotion resume refused\"\\n}}\\n'; exit 7",
                                 gate_started.display(),
                                 gate_release.display()
                             ),
@@ -2724,6 +2724,11 @@ fn recover_public_entry_returns_before_blocking_gate_and_records_daemon_result()
         owned.store().deliver_pending_step_terminals().unwrap();
         let record = test_lifecycle_store().read_record(run_id).unwrap();
         assert_eq!(record.metadata["recovery_step_terminal"]["exit_code"], 7);
+        // `recover --wait` names the step's own cause instead of a bare exit.
+        assert_eq!(
+            service::recovery_step_failure(run_id).unwrap().unwrap()["message"],
+            "promotion resume refused"
+        );
         assert_eq!(
             record.metadata["recovery_step_terminal"]["job_id"],
             owned.job().unwrap().id.to_string()
