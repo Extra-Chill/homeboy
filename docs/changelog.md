@@ -4,6 +4,15 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.473.3] - 2026-11-18
+
+### Fixed
+- keep Cook work on Lab gate transport failures and repair promisor hydration
+- pass the configured pressure sample to spawned daemons
+- renew a live worker's pre-spawn child reservation instead of reaping it
+- keep queued Cook admissions daemon-owned when their step owner exits
+- keep candidate subjects without a publication title
+
 ## [0.473.2] - 2026-11-18
 
 ### Fixed
