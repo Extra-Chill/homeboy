@@ -7,6 +7,7 @@ homeboy runs show <instance>
 homeboy runs watch <instance> [--interval 2s] [--timeout 5m | --forever]
 homeboy workflow cancel <instance|cadence-workflow-id>
 homeboy workflow approve <instance> <step>
+homeboy workflow upgrade <instance> | <workflow-id> --all
 homeboy workflow list
 homeboy runs list --kind workflow
 homeboy [--placement auto|lab|lab-or-local|local] workflow ab <component|path> --base <ref> --candidate <ref> --run <command> --compare <path-or-glob>... [--instance NAME] [--wait]
@@ -22,7 +23,7 @@ A workflow pre-defines multi-step and repeating agent work and runs it mechanica
 - **Every decision is a pure function.** `advance(definition, state, event)` returns the next state and its commands: submit a step, cancel a step, complete the instance. The daemon commits the new checkpoint, the new step jobs, and their submission keys in **one store transaction**, and only then starts the steps. A crash at any point either loses a whole decision or replays it against the same keys.
 - **Keys are deterministic.** A step job's key is `<instance>/<step>/<iteration>/<attempt>`; a `foreach` item's is `<instance>/<step>/<iteration>/item-<n>/<attempt>`. An instance runs iteration 1. A replayed submission converges on the existing job, so no step runs twice.
 - **The instance id is deterministic too.** It is `wf-<definition-id>-<sha256(definition digest, inputs, --instance)[..12]>`. Re-running the same definition with the same inputs returns the existing instance while it is running or succeeded. A failed, cancelled or budget-exhausted one is retried as a fresh instance resumed from it (its succeeded steps are reused), and that retry's id derives from the one it retries. New inputs (or a new `--instance` name) start a new one.
-- **The definition is pinned.** Its digest and body are stored in the instance at admission, so editing the file never changes a running instance.
+- **The definition is pinned.** Its digest and body are stored in the instance at admission, so editing the file never changes a running instance until `workflow upgrade` moves it to the edited definition.
 
 Statuses:
 
@@ -225,6 +226,7 @@ homeboy --wait workflow ab blocks-engine --base origin/main --candidate my-refac
 - **`runs show`** is a pure projection of the job ledger: the instance status, its `parent` and `children`, each step's phase, outcome, attempt, key, and step job, each `foreach` item with its step job, Cook run id, and the live state of a running Cook. `runs watch <instance>` polls until the instance — and any chain it admits — is terminal. It defaults to a five-minute timeout; use `--forever` for an unbounded watch.
 - **`workflow cancel`** cancels the instance; the daemon cancels every step job it is running. Once the cancellation is durable the instance admits no more steps. Given a workflow id that is not an instance, it stops that cadence.
 - **`workflow approve`** records an approval for a step that is awaiting one.
+- **`workflow upgrade <instance>`** continues a running instance on its definition file's current contents from its next step boundary. It keeps its id, inputs, iteration and completed-step outputs; steps not yet submitted run as the file now defines them, and running steps finish unchanged. It is refused with a `validation.*` error naming the steps when the edit removes or renames a step the instance has already run, and when the edit needs an environment or program the instance's admission does not cover. `--all` takes a workflow id and upgrades every running instance of it, reporting each instance's result. Stdin, inline and built-in instances have no file to upgrade to. `runs show` reports the running `definition_digest`.
 - **`workflow reject <instance> <step> [--reason <text>]`** records a rejection for an awaiting approval, with optional feedback for downstream steps.
 - **`workflow ab`** compiles and admits the built-in `homeboy.ab` A/B parity recipe (see [A/B parity](#ab-parity-workflow-ab)). Its hidden `ab-step` verb runs the recipe's steps.
 - **`workflow list`** lists the definitions in `~/.config/homeboy/workflows/`, the built-ins, and every registered cadence. `runs list --kind workflow` lists instances in the daemon without discovery filters.

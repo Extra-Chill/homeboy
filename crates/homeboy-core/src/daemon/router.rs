@@ -249,6 +249,16 @@ where
                 workflow_job::workflow_approve(job_store, instance, body),
             )
         }
+        ("POST", path) if path.starts_with("/workflows/") && path.ends_with("/upgrade") => {
+            let target = path
+                .trim_start_matches("/workflows/")
+                .trim_end_matches("/upgrade");
+            endpoint(
+                "workflows.upgrade",
+                400,
+                workflow_job::workflow_upgrade(job_store, target, body),
+            )
+        }
         ("GET", path) if path.starts_with("/workflows/") => endpoint(
             "workflows.status",
             404,
