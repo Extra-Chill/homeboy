@@ -788,6 +788,14 @@ fn connected_refresh_keeps_daemon_execution_options() {
     assert_eq!(options.diagnostic_ssh_timeout, None);
     assert!(options.mirror_evidence);
     assert!(options.print_handoff);
+    // #18376: the daemon admits the refresh outside bulk pressure admission.
+    assert_eq!(
+        options
+            .env
+            .get(homeboy_core::runner_pressure::ADMISSION_CLASS_ENV)
+            .map(String::as_str),
+        Some(homeboy_core::runner_pressure::CONVERGENCE_ADMISSION_CLASS)
+    );
 }
 
 #[test]

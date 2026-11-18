@@ -89,3 +89,48 @@ fn reserved_gate_ignores_bulk_pressure_but_waits_for_slots_and_memory() {
         std::env::remove_var(crate::runner_pressure::SAMPLE_ENV);
     });
 }
+
+#[test]
+fn convergence_job_is_admitted_through_bulk_pressure_but_not_memory_pressure() {
+    // #18376: a Homeboy refresh clears controller/runner skew, so a loaded Lab
+    // must not queue it behind the work that skew is blocking.
+    crate::test_support::with_isolated_home(|home| {
+        std::env::remove_var("HOMEBOY_LAB_GATE_RESERVE");
+        std::env::set_var(
+            crate::runner_pressure::SAMPLE_ENV,
+            r#"{"cpu":9000,"io":9000,"memory":0,"observed_load_per_cpu":138000}"#,
+        );
+        let store = JobStore::open_without_reconciliation(
+            &home.path().join(crate::paths::OBSERVATION_DB_FILENAME),
+        )
+        .unwrap();
+        let workload = store.create_with_source_snapshot_and_metadata(
+            "runner.exec",
+            None,
+            Some(serde_json::json!({ "admission_class": null })),
+        );
+        let refresh = store.create_with_source_snapshot_and_metadata(
+            "runner.exec",
+            None,
+            Some(serde_json::json!({
+                "admission_class": crate::runner_pressure::CONVERGENCE_ADMISSION_CLASS,
+            })),
+        );
+        assert!(!store.reconcile_direct_admission(workload.id).unwrap());
+        assert!(store.reconcile_direct_admission(refresh.id).unwrap());
+
+        std::env::set_var(
+            crate::runner_pressure::SAMPLE_ENV,
+            r#"{"cpu":9000,"memory":9000}"#,
+        );
+        let starved = store.create_with_source_snapshot_and_metadata(
+            "runner.exec",
+            None,
+            Some(serde_json::json!({
+                "admission_class": crate::runner_pressure::CONVERGENCE_ADMISSION_CLASS,
+            })),
+        );
+        assert!(!store.reconcile_direct_admission(starved.id).unwrap());
+        std::env::remove_var(crate::runner_pressure::SAMPLE_ENV);
+    });
+}
