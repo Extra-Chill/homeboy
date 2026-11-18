@@ -4,6 +4,14 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.472.0] - 2026-11-18
+
+### Added
+- record who cancelled a workflow and report a landed cancel as success
+
+### Changed
+- CookStatus names exactly the statuses Cook produces
+
 ## [0.471.4] - 2026-11-17
 
 ### Changed
