@@ -4,6 +4,19 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.473.2] - 2026-11-18
+
+### Fixed
+- validate shared runner lib before dispatch
+- accept provenance references across controller/runner release skew
+- never place an auto Cook on the controller when Lab readiness refresh fails
+- make prepared source cache publication atomic and non-fatal
+- derive the RSS guard limit from host available memory
+- bind __HOMEBOY_COOK_BASE_SHA__ when a Cook gate is re-run by hand
+- resubmit refresh materialization lost to a replaced daemon
+- reclaim finished attempt scratch on the daemon maintenance cadence
+- name the recovery step's own failure cause when recover --wait exits nonzero
+
 ## [0.473.1] - 2026-11-18
 
 ### Fixed
