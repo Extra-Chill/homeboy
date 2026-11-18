@@ -1085,8 +1085,20 @@ pub(super) fn pin_execution_generation_or_defer(
                 Ok(None)
             } else {
                 // Provider execution already happened, so the attempt cannot be
-                // requeued. Wait out the owner within the bounded Cook budget.
-                homeboy_core::runtime_promotion::pin_cook_generation(run_id).map(Some)
+                // requeued. A promotion (for example a controller upgrade) is
+                // never a reason to fail it: wait for as long as the owner is
+                // live, stopping only if the run itself is cancelled.
+                homeboy_core::runtime_promotion::pin_cook_generation_while_owner_live(
+                    run_id,
+                    || {
+                        store
+                            .read_record(run_id)
+                            .ok()
+                            .is_some_and(|record| record.state() == RunExecutionState::Cancelled)
+                    },
+                    |_| {},
+                )
+                .map(Some)
             }
         }
         Err(error) => Err(error),

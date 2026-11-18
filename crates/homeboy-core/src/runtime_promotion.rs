@@ -35,7 +35,6 @@ const COMPATIBLE_WAIT_HEARTBEAT: Duration = if cfg!(test) {
 } else {
     Duration::from_secs(5)
 };
-const COOK_ADMISSION_WAIT_TIMEOUT: Duration = Duration::from_secs(30);
 
 /// Observable state for a caller waiting on a compatible runtime mutation.
 ///
@@ -1069,8 +1068,30 @@ impl RuntimePromotionLease {
 
 /// Pin mutable/unverified execution for the complete Cook lifecycle. Its live
 /// pin blocks replacement until finalization.
+///
+/// Admission waits behind a live promotion owner for as long as that owner is
+/// alive (see [`pin_cook_generation_while_owner_live`]); a controller upgrade
+/// is never a reason to fail the Cook.
 pub fn pin_cook_generation(cook_id: &str) -> Result<RuntimeGenerationPinGuard> {
-    pin_cook_generation_waiting(cook_id, COOK_ADMISSION_WAIT_TIMEOUT, || false, |_| {})
+    pin_cook_generation_while_owner_live(cook_id, || false, |_| {})
+}
+
+/// Pin a Cook generation, waiting behind a promotion owner (for example a
+/// `controller upgrade` that rebuilds the binary for several minutes) until it
+/// releases admission.
+///
+/// The wait has no wall-clock deadline: it is bounded by the owner's liveness.
+/// Exclusive admission is an OS file lock, so the kernel releases it the
+/// moment the owning process exits, and dead admission-owner records are
+/// reclaimed while the wait observes them. A busy lock therefore always means a
+/// live owner, and the only ways this returns without a pin are cancellation
+/// or an I/O failure.
+pub fn pin_cook_generation_while_owner_live(
+    cook_id: &str,
+    is_cancelled: impl FnMut() -> bool,
+    progress: impl FnMut(RuntimePromotionWaitEvent),
+) -> Result<RuntimeGenerationPinGuard> {
+    pin_cook_generation_with_deadline(cook_id, None, is_cancelled, progress)
 }
 
 /// Acquire the Cook generation pin without waiting. A promotion owner is
@@ -1089,6 +1110,16 @@ pub fn try_pin_cook_generation(cook_id: &str) -> Result<RuntimeGenerationPinGuar
 pub fn pin_cook_generation_waiting(
     cook_id: &str,
     timeout: Duration,
+    is_cancelled: impl FnMut() -> bool,
+    progress: impl FnMut(RuntimePromotionWaitEvent),
+) -> Result<RuntimeGenerationPinGuard> {
+    pin_cook_generation_with_deadline(cook_id, Some(timeout), is_cancelled, progress)
+}
+
+/// `timeout: None` waits for as long as the admission owner is live.
+fn pin_cook_generation_with_deadline(
+    cook_id: &str,
+    timeout: Option<Duration>,
     mut is_cancelled: impl FnMut() -> bool,
     mut progress: impl FnMut(RuntimePromotionWaitEvent),
 ) -> Result<RuntimeGenerationPinGuard> {
@@ -1105,7 +1136,7 @@ pub fn pin_cook_generation_waiting(
     let _admission_lock = if transaction.is_none() {
         let admission_lock = open_admission_lock(&promotion_root)?;
         let started = Instant::now();
-        let deadline = started + timeout;
+        let deadline = timeout.map(|timeout| started + timeout);
         let mut last_progress: Option<Instant> = None;
         loop {
             if is_cancelled() {
@@ -1121,8 +1152,11 @@ pub fn pin_cook_generation_waiting(
                             schema: "homeboy/runtime-promotion-admission/v1",
                             state: "queued",
                             resource_class: "runtime_promotion",
-                            wait_timeout_ms: timeout.as_millis(),
-                            waited_ms: started.elapsed().min(timeout).as_millis(),
+                            // 0 means the wait is bounded by owner liveness.
+                            wait_timeout_ms: timeout.map_or(0, |timeout| timeout.as_millis()),
+                            waited_ms: timeout
+                                .map_or(started.elapsed(), |timeout| started.elapsed().min(timeout))
+                                .as_millis(),
                             wait_stage: "os_lock",
                             owner_pid: owner.pid,
                             owner_operation: owner.operation.clone(),
@@ -1133,6 +1167,10 @@ pub fn pin_cook_generation_waiting(
                         });
                         last_progress = Some(Instant::now());
                     }
+                    let Some((deadline, timeout)) = deadline.zip(timeout) else {
+                        std::thread::sleep(COMPATIBLE_WAIT_POLL);
+                        continue;
+                    };
                     let remaining = deadline.saturating_duration_since(Instant::now());
                     if remaining.is_zero() {
                         return Err(pin_admission_wait_timeout(
@@ -2584,6 +2622,37 @@ mod tests {
             );
             std::thread::sleep(Duration::from_millis(10));
         }
+    }
+
+    /// A controller upgrade can hold exclusive admission for minutes while it
+    /// rebuilds the binary. Cook admission must keep waiting while that owner
+    /// is alive (past the former fixed 30s deadline) and proceed as soon as the
+    /// owner dies, rather than failing the Cook.
+    #[test]
+    fn cook_admission_outlasts_a_live_upgrade_owner_and_reclaims_when_it_dies() {
+        crate::test_support::with_isolated_home(|_| {
+            let mut owner = duplicate_cook_admission_owner();
+            let (done_tx, done_rx) = std::sync::mpsc::channel();
+            let waiter = std::thread::spawn(move || {
+                let pin = pin_cook_generation("cook-behind-upgrade");
+                done_tx.send(()).expect("report admission outcome");
+                pin
+            });
+
+            let finished_while_owner_alive = done_rx.recv_timeout(Duration::from_secs(31)).is_ok();
+            owner.kill().expect("kill upgrade owner");
+            owner.wait().expect("reap upgrade owner");
+            assert!(
+                !finished_while_owner_alive,
+                "Cook admission must not give up while the upgrade owner is alive"
+            );
+
+            let pin = waiter
+                .join()
+                .expect("admission waiter joins")
+                .expect("Cook is admitted once the dead owner releases admission");
+            drop(pin);
+        });
     }
 
     #[test]
