@@ -294,16 +294,27 @@ mod tests {
     use crate::cli_surface::{Cli, Commands};
     use crate::commands::agent_task::AgentTaskCommand;
 
-    /// A pressure-refused admission must not produce an ownerless queued retry.
+    /// A Cook whose admission failed before materializing is relaunched from
+    /// its recorded admission inputs under a fresh run id, and replaying
+    /// `recover` returns that same relaunch instead of admitting another.
     #[test]
-    fn recover_refuses_pressure_failed_unmaterialized_admission_without_a_successor() {
+    fn recover_relaunches_an_unmaterialized_cook_from_its_admission_inputs() {
         use homeboy::agents::agent_task_lifecycle;
+        use sha2::{Digest, Sha256};
+        let digest = |bytes: &[u8]| format!("sha256:{:x}", Sha256::digest(bytes));
         crate::test_support::with_isolated_home(|home| {
             let cook_id = "cook-recover-admission";
             let prompt = home.path().join("prompt.txt");
             std::fs::write(&prompt, "Fix it.").unwrap();
             let route = home.path().join("route.txt");
             std::fs::write(&route, "discord:v1:thread:1").unwrap();
+            let input_refs = serde_json::json!([
+                { "kind": "prompt", "path": prompt, "sha256": digest(b"Fix it."), "argv_token": "homeboy-admission-ref:0:p" },
+                { "kind": "notification-route", "path": route, "sha256": digest(b"discord:v1:thread:1"), "argv_token": "homeboy-admission-ref:1:r" },
+            ]);
+            let manifest_path = home.path().join("manifest.json");
+            let manifest = serde_json::to_vec(&input_refs).unwrap();
+            std::fs::write(&manifest_path, &manifest).unwrap();
             let store = agent_task_lifecycle::AgentTaskLifecycleStore::from_environment().unwrap();
             agent_task_lifecycle::record_unmaterialized_cook_admission_in_store(
                 &store,
@@ -312,13 +323,13 @@ mod tests {
                     "schema": "homeboy/unmaterialized-cook-binding/v1",
                     "request_ref": "sha256:request",
                     "worktree_ref": "repo@branch",
+                    "placement": { "requested": "local" },
                     "admission_inputs": {
+                        "schema": "homeboy/cook-admission-inputs/v1",
                         "cook_id": cook_id,
                         "argv": ["agent-task", "cook", "--issue", "https://github.com/Extra-Chill/homeboy/issues/18096", "--prompt", "homeboy-admission-ref:0:p", "--notification-route=homeboy-admission-ref:1:r", "--run-id", cook_id],
-                        "input_refs": [
-                            { "kind": "prompt", "path": prompt, "sha256": "sha256:p", "argv_token": "homeboy-admission-ref:0:p" },
-                            { "kind": "notification-route", "path": route, "sha256": "sha256:r", "argv_token": "homeboy-admission-ref:1:r" },
-                        ],
+                        "input_refs": input_refs,
+                        "input_manifest": { "kind": "manifest", "path": manifest_path, "sha256": digest(&manifest) },
                     },
                 }),
                 "blocked_runner_unavailable",
@@ -335,42 +346,59 @@ mod tests {
                 })
                 .unwrap();
 
-            let cli = Cli::try_parse_from(["homeboy", "agent-task", "recover", cook_id]).unwrap();
-            let Commands::AgentTask(task) = cli.command else {
-                panic!("agent-task")
-            };
-            let AgentTaskCommand::Recover(args) = task.command else {
-                panic!("recover")
-            };
-            let (report, exit_code) =
+            let recover = || {
+                let cli =
+                    Cli::try_parse_from(["homeboy", "agent-task", "recover", cook_id]).unwrap();
+                let Commands::AgentTask(task) = cli.command else {
+                    panic!("agent-task")
+                };
+                let AgentTaskCommand::Recover(args) = task.command else {
+                    panic!("recover")
+                };
                 homeboy::agents::agent_task_service::with_scheduling_daemon_start(
                     || Ok(()),
                     || super::recover(args),
                 )
-                .expect("recover returns a terminal failure report");
+                .expect("recover relaunches the Cook")
+            };
+            let (report, exit_code) = recover();
+            assert_eq!(exit_code, 0, "{report}");
+            assert_eq!(report["step"]["kind"], "relaunch", "{report}");
+            let relaunch_id = report["run_id"].as_str().unwrap().to_string();
+            assert_ne!(relaunch_id, cook_id);
 
-            assert_eq!(exit_code, 1);
-            assert_eq!(report["status"], "failed");
-            assert_eq!(report["failure"]["code"], "agent_task.recover_no_step");
-            let message = report["failure"]["message"].as_str().unwrap();
-            assert!(message.contains("no replayable materialization identity"));
-            // The relaunch is runnable: admission tokens resolve to the stored
-            // prompt file and the recorded route, and the run identity is dropped.
-            assert!(message.contains(&format!(
-                "homeboy agent-task cook --issue https://github.com/Extra-Chill/homeboy/issues/18096 --prompt @{} --notification-route=discord:v1:thread:1",
-                prompt.display()
-            )), "{message}");
-            assert!(!message.contains("homeboy-admission-ref"));
-            assert!(!message.contains(&format!("--run-id {cook_id}")));
-            let records = store.read_records().unwrap();
-            assert!(
-                records.iter().all(|record| record.run_id == cook_id),
-                "no ownerless successor may be persisted"
-            );
+            let source = store.read_record(cook_id).unwrap();
+            let relaunch = store.read_record(&relaunch_id).unwrap();
             assert_eq!(
-                store.read_record(cook_id).unwrap().state(),
+                source.state(),
                 homeboy_lifecycle_contract::RunExecutionState::Failed
             );
+            assert_eq!(source.metadata["recovered_by"]["run_id"], relaunch_id);
+            assert_eq!(relaunch.metadata["recovered_from"]["run_id"], cook_id);
+            // The relaunch admits the same request: its admission inputs equal
+            // the source's except for the run identity.
+            let without_run_id = |record: &agent_task_lifecycle::AgentTaskRunRecord, id: &str| {
+                let mut inputs = record.metadata["unmaterialized_cook_admission"]["binding"]
+                    ["admission_inputs"]
+                    .clone();
+                inputs["cook_id"] = serde_json::Value::Null;
+                for argument in inputs["argv"].as_array_mut().unwrap() {
+                    if argument == id {
+                        *argument = serde_json::Value::Null;
+                    }
+                }
+                inputs
+            };
+            assert_eq!(
+                without_run_id(&relaunch, &relaunch_id),
+                without_run_id(&source, cook_id)
+            );
+
+            let (replay, exit_code) = recover();
+            assert_eq!(exit_code, 0, "{replay}");
+            assert_eq!(replay["run_id"], relaunch_id.as_str());
+            assert_eq!(replay["result"]["replayed"], true);
+            assert_eq!(store.read_records().unwrap().len(), 2, "one relaunch only");
         });
     }
 

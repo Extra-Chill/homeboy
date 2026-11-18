@@ -5650,15 +5650,114 @@ pub fn retry(run_id: &str, requested_run_id: Option<&str>) -> Result<AgentTaskRu
     retry_with_force_in_store(&lifecycle_store, run_id, requested_run_id, false)
 }
 
-/// Refuse retries that have no executable plan or admission owner. The saved
-/// command is operator guidance, not a queued replay promise.
+/// Refuse retries that have no executable plan or admission owner. A Cook
+/// with recorded admission inputs is relaunched by `recover`, not `retry`.
 pub fn unmaterialized_cook_retry_error(source: &AgentTaskRunRecord) -> Error {
-    Error::validation_invalid_argument(
-        "retry",
-        unmaterialized_cook_relaunch_guidance(source),
-        Some(source.run_id.clone()),
-        None,
-    )
+    let message = if unmaterialized_cook_admission_inputs(source).is_some() {
+        format!(
+            "Cook '{id}' has no replayable materialization identity; relaunch it from its recorded admission inputs with: homeboy agent-task recover {id}",
+            id = source.run_id
+        )
+    } else {
+        unmaterialized_cook_relaunch_guidance(source)
+    };
+    Error::validation_invalid_argument("retry", message, Some(source.run_id.clone()), None)
+}
+
+/// The recorded admission inputs of an unmaterialized Cook, when present.
+pub fn unmaterialized_cook_admission_inputs(source: &AgentTaskRunRecord) -> Option<&Value> {
+    source
+        .metadata
+        .pointer("/unmaterialized_cook_admission/binding/admission_inputs")
+        .filter(|inputs| inputs.is_object())
+}
+
+/// Admit a fresh Cook from the recorded admission inputs of an unmaterialized
+/// source Cook through the same unmaterialized admission path `cook` uses.
+///
+/// The relaunch gets a fresh run id; the source records it as `recovered_by`
+/// and the relaunch records `recovered_from`. A replay returns the existing
+/// relaunch (`true`). Missing or changed inputs are refused with the relaunch
+/// guidance.
+pub fn relaunch_unmaterialized_cook_in_store(
+    store: &AgentTaskLifecycleStore,
+    source_id: &str,
+) -> Result<(AgentTaskRunRecord, bool)> {
+    let source_id = sanitize_run_id(source_id);
+    store.with_store_lock(|| {
+        let source = store.read_record(&source_id)?;
+        if let Some(existing) = source.metadata["recovered_by"]["run_id"].as_str() {
+            if let Ok(existing) = store.read_record(existing) {
+                return Ok((existing, true));
+            }
+        }
+        let refuse = |message: String| {
+            Error::validation_invalid_argument(
+                "recover",
+                format!(
+                    "{message}. {}",
+                    unmaterialized_cook_relaunch_guidance(&source)
+                ),
+                Some(source.run_id.clone()),
+                None,
+            )
+        };
+        if !is_unmaterialized_cook_admission(&source)
+            || unmaterialized_cook_admission_inputs(&source).is_none()
+        {
+            return Err(refuse("the Cook has no recorded admission inputs".into()));
+        }
+        let binding = &source.metadata["unmaterialized_cook_admission"]["binding"];
+        crate::agent_task_service::prepare_admission_arguments(binding, &source.run_id)
+            .map_err(|error| refuse(error.message))?;
+        let relaunch_id = format!("agent-task-{}", uuid::Uuid::new_v4());
+        let mut relaunch_binding = binding.clone();
+        let inputs = &mut relaunch_binding["admission_inputs"];
+        inputs["cook_id"] = json!(relaunch_id);
+        if let Some(argv) = inputs["argv"].as_array_mut() {
+            let mut replace_next = false;
+            for argument in argv.iter_mut() {
+                if replace_next {
+                    *argument = json!(relaunch_id);
+                    replace_next = false;
+                } else if argument == "--run-id" {
+                    replace_next = true;
+                } else if argument
+                    .as_str()
+                    .is_some_and(|value| value.starts_with("--run-id="))
+                {
+                    *argument = json!(format!("--run-id={relaunch_id}"));
+                }
+            }
+        }
+        // The relaunch reads the source's published, hash-verified inputs; it
+        // has no staging directory of its own to publish.
+        if let Some(object) = relaunch_binding.as_object_mut() {
+            object.remove("input_publication");
+        }
+        crate::agent_task_service::prepare_admission_arguments(&relaunch_binding, &relaunch_id)
+            .map_err(|error| refuse(error.message))?;
+        let recovered_at = chrono::Utc::now().to_rfc3339();
+        let mut metadata = serde_json::Map::new();
+        metadata.insert(
+            "recovered_from".to_string(),
+            json!({ "run_id": source.run_id, "recovered_at": recovered_at }),
+        );
+        let relaunch = record_unmaterialized_cook_admission_locked(
+            store,
+            &relaunch_id,
+            relaunch_binding,
+            "queued",
+            &format!("relaunched from Cook {}", source.run_id),
+            metadata,
+        )?;
+        store.mutate_record_locked_without_terminal_projection(&source.run_id, |record| {
+            record.metadata["recovered_by"] =
+                json!({ "run_id": relaunch.run_id, "recovered_at": recovered_at });
+            true
+        })?;
+        Ok((relaunch, false))
+    })
 }
 
 /// Why an unmaterialized Cook cannot be retried, and the runnable `cook`
@@ -5677,7 +5776,7 @@ pub fn unmaterialized_cook_relaunch_guidance(source: &AgentTaskRunRecord) -> Str
 /// The recorded admission argv without its run identity, with each admission
 /// token resolved to a value `cook` accepts: the stored prompt file as
 /// `@<path>`, and other recorded values inline.
-pub fn unmaterialized_cook_relaunch_command(source: &AgentTaskRunRecord) -> Option<String> {
+fn unmaterialized_cook_relaunch_command(source: &AgentTaskRunRecord) -> Option<String> {
     let inputs = source
         .metadata
         .pointer("/unmaterialized_cook_admission/binding/admission_inputs")?;
