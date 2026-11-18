@@ -672,6 +672,8 @@ fn configure_daemon_environment(
         "XDG_RUNTIME_DIR",
         "HOMEBOY_SESSION_SEND_COMMAND",
         "HOMEBOY_NO_UPDATE_CHECK",
+        // A fixed pressure sample configures the daemon's admission source.
+        crate::runner_pressure::SAMPLE_ENV,
         "CARGO_HOME",
         "CARGO_TARGET_DIR",
         "CARGO_BUILD_TARGET",
