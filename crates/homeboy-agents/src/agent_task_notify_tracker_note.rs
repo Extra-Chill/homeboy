@@ -103,7 +103,9 @@ fn durable_note(
         .run_id
         .clone();
     let record = store.read_record(&run_id).ok()?;
-    if record.state() == homeboy_lifecycle_contract::RunExecutionState::Cancelled {
+    if crate::agent_task_lifecycle::CookRunState::of(&record).phase
+        == crate::agent_task_lifecycle::CookRunPhase::Cancelled
+    {
         return None;
     }
     let aggregate = store.read_aggregate(&run_id).ok()?;

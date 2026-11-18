@@ -397,7 +397,12 @@ fn terminal_payload(
     let cancelled = metadata.cancelled;
     let kind = if cancelled {
         NotifyEventKind::Cancelled
-    } else if exit_code == 0 && report.completed_successfully() {
+    } else if exit_code == 0
+        && metadata.state.as_ref().map_or_else(
+            || report.completed_successfully(),
+            |state| state.phase == crate::agent_task_lifecycle::CookRunPhase::Succeeded,
+        )
+    {
         NotifyEventKind::Completed
     } else {
         NotifyEventKind::NeedsAttention
@@ -472,7 +477,13 @@ fn terminal_payload(
                 .collect::<Vec<_>>();
             payload = payload.with_fact("Gates", gate_summary(&gates));
         }
-        let status = homeboy_core::cook_status::CookStatus::from_status(&report.status);
+        let status = homeboy_core::cook_status::CookStatus::from_status(
+            metadata
+                .state
+                .as_ref()
+                .map(|state| state.status.as_str())
+                .unwrap_or(&report.status),
+        );
         if status.is_gate_failure() && !payload.facts.iter().any(|fact| fact.label == "Gates") {
             payload = payload.with_fact("Gates", "failed");
         } else if status == homeboy_core::cook_status::CookStatus::GateEnvironmentUnavailable {

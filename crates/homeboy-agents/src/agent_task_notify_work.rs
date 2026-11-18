@@ -8,6 +8,7 @@ use super::*;
 pub(super) struct Work {
     pub component: Option<String>,
     pub cancelled: bool,
+    pub state: Option<crate::agent_task_lifecycle::CookRunState>,
     task: String,
     pub pr: Option<String>,
     pub links: Vec<homeboy_core::notification_payload::NotifyLink>,
@@ -60,9 +61,14 @@ pub(super) fn metadata(report: &AgentTaskCookReport, component: Option<&str>) ->
         Some((_, store)) => crate::agent_task_lifecycle::status_in_store(store, record_id).ok(),
         None => crate::agent_task_lifecycle::status(record_id).ok(),
     };
-    let cancelled = report.status == "cancelled"
-        || record.as_ref().is_some_and(|record| {
-            record.state() == homeboy_lifecycle_contract::RunExecutionState::Cancelled
+    let state = record
+        .as_ref()
+        .map(crate::agent_task_lifecycle::CookRunState::of);
+    let cancelled = record
+        .as_ref()
+        .map_or(report.status == "cancelled", |record| {
+            crate::agent_task_lifecycle::CookRunState::of(record).phase
+                == crate::agent_task_lifecycle::CookRunPhase::Cancelled
         });
 
     let mut facts = Vec::new();
@@ -125,6 +131,7 @@ pub(super) fn metadata(report: &AgentTaskCookReport, component: Option<&str>) ->
     Work {
         component,
         cancelled,
+        state,
         task: task_title,
         pr,
         links,

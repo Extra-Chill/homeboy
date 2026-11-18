@@ -472,7 +472,7 @@ fn render_cook_summary(payload: &Value) -> Option<String> {
     if let Some(artifact) = first_artifact {
         lines.push(format!("First artifact: {artifact}"));
     }
-    if raw_state == "candidate_recoverable" {
+    if string_value(payload, &["selected_candidate", "selected_task_id"]).is_some() {
         if let Some(task) = string_value(payload, &["selected_candidate", "selected_task_id"]) {
             let artifact = string_value(payload, &["selected_candidate", "selected_candidate_sha"])
                 .unwrap_or("unknown");
@@ -849,9 +849,21 @@ pub(crate) fn live_gate_verifying(payload: &Value) -> bool {
 #[cfg(test)]
 mod status_run_fixtures;
 
+#[test]
+fn recovery_guidance_cannot_override_empty_eligibility() {
+    let payload = serde_json::json!({
+        "state": "candidate_recoverable",
+        "recovery": { "step": "regate", "command": "homeboy agent-task recover run" },
+        "action_eligibility": { "actions": [] }
+    });
+    assert_eq!(
+        control_plane_next_action(&payload, "run"),
+        "homeboy runs evidence run"
+    );
+}
+
 pub(crate) fn control_plane_next_action(payload: &Value, run_id: &str) -> String {
-    // A live driver is still running this Cook's gates (#16058): the latched
-    // `candidate_recoverable` is not its verdict, so watch it, never recover.
+    // Render the canonical projection's live-owner phase, never infer it from artifacts.
     if live_gate_verifying(payload)
         || (string_value(payload, &["state"]) == Some("running")
             && string_value(payload, &["owner", "kind"]) == Some("cook_continuation"))
@@ -905,8 +917,19 @@ pub(crate) fn control_plane_next_action(payload: &Value, run_id: &str) -> String
         .filter(|recovery| !recovery.is_null())
     {
         let command = string_value(recovery, &["command"]).unwrap_or_default();
-        if string_value(recovery, &["step"]) != Some("none") {
+        let available_actions = payload
+            .pointer("/action_eligibility/actions")
+            .and_then(Value::as_array)
+            .is_none_or(|actions| {
+                actions
+                    .iter()
+                    .any(|action| string_value(action, &["availability"]) == Some("available"))
+            });
+        if string_value(recovery, &["step"]) != Some("none") && available_actions {
             return command.to_string();
+        }
+        if !available_actions && command.contains("agent-task recover ") {
+            return format!("homeboy runs evidence {run_id}");
         }
         let watching = matches!(
             string_value(payload, &["state"]),

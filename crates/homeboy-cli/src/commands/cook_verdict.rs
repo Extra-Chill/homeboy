@@ -76,7 +76,7 @@ impl CookVerdict {
         }
         let category = match self.state.as_str() {
             "stale" => "stale_running_record",
-            "candidate_recoverable" => "candidate_recoverable",
+            state if state == state_label(ControlPlaneState::CandidateRecoverable) => state,
             "failed" | "partial_failure" | "timed_out" => "execution_failure",
             "cancelled" => "cancelled",
             _ => return None,

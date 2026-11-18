@@ -358,7 +358,8 @@ fn status_without_feedback(args: StatusArgs) -> CmdResult<Value> {
         let outcome = cook_outcome_record(&args, &record);
         let outcome = outcome.as_ref().unwrap_or(&record);
         value["terminal_outcome"] = json!(outcome.terminal_outcome);
-        value["recoverable"] = json!(outcome.recoverable);
+        value["recoverable"] =
+            json!(homeboy::agents::agent_task_lifecycle::CookRunState::of(outcome).recoverable);
         if record
             .metadata
             .get("unmaterialized_cook_admission")
@@ -1009,7 +1010,8 @@ fn cook_outcome_record(
     args: &StatusArgs,
     continuation: &AgentTaskRunRecord,
 ) -> Option<AgentTaskRunRecord> {
-    if args.exact || !continuation.state().is_terminal() {
+    if args.exact || !homeboy::agents::agent_task_lifecycle::CookRunState::of(continuation).terminal
+    {
         return None;
     }
     let selected = resolve_cook_reader_target(&args.run_id, false).ok()?;
@@ -1018,7 +1020,7 @@ fn cook_outcome_record(
     }
     bounded_exact_record(&selected.run_id)
         .ok()
-        .filter(|record| record.state().is_terminal())
+        .filter(|record| homeboy::agents::agent_task_lifecycle::CookRunState::of(record).terminal)
 }
 
 fn bounded_exact_record(run_id: &str) -> homeboy::core::Result<AgentTaskRunRecord> {
@@ -3233,13 +3235,7 @@ fn attach_diagnose_actionable(
         );
         return;
     }
-    let candidate_payload = candidate_result_payload(
-        &serde_json::to_value(record).unwrap_or(Value::Null),
-        aggregate,
-    );
-    let candidate_recoverable = classify_candidates(&candidate_payload)
-        .state()
-        .is_available();
+    let recoverable = homeboy::agents::agent_task_lifecycle::CookRunState::of(record).recoverable;
     let failures = aggregate
         .map(|aggregate| diagnosed_failures(aggregate))
         .unwrap_or_default();
@@ -3250,7 +3246,7 @@ fn attach_diagnose_actionable(
         )
     } else if let Some(continuation) = continuation_action {
         (vec![continuation.clone()], DIAGNOSE_ACTION_BASIS_CANDIDATE)
-    } else if candidate_recoverable {
+    } else if recoverable {
         (
             vec![CommandNextAction::new(
                 "review the canonical candidate",
@@ -5426,9 +5422,7 @@ pub(crate) fn compact_cook_report(value: Value, full: bool) -> Value {
     let candidate_projection = candidate_run_id
         .as_deref()
         .map(compact_cook_candidate_projection)
-        .filter(|projection| {
-            projection["status"] == "available" || value["status"] == "candidate_recoverable"
-        });
+        .filter(|projection| projection["status"] == "available");
     if full {
         if let Some(candidate) = candidate_projection.as_ref() {
             value["durable_candidate"] = candidate.clone();
@@ -6039,30 +6033,6 @@ fn bounded_value(value: &Value) -> Value {
         Value::String(text) if text.len() > COMPACT_TEXT_LIMIT => Value::Null,
         _ => value.clone(),
     }
-}
-
-/// Terminality of an untyped durable record, delegating to the single
-/// definition in `RunExecutionState::is_terminal`.
-///
-/// `status` reads records as untyped JSON, so the state has to be parsed back
-/// into the lifecycle enum instead of compared against an inline string list.
-/// An inline list is exactly how `partial_failure` and
-/// `candidate_recoverable` runs came to be reported as `liveness.status:
-/// "active"` forever — the list named only `succeeded`/`failed`/`cancelled`, so
-/// an orchestrator polling liveness never saw those runs finish.
-///
-/// An absent or unparseable state is non-terminal: a record this build does not
-/// understand keeps its prior reading rather than being asserted as finished.
-fn candidate_result_payload(record: &Value, aggregate: Option<&AgentTaskAggregate>) -> Value {
-    let projection = serde_json::from_value::<AgentTaskRunRecord>(record.clone())
-        .ok()
-        .and_then(|record| {
-            homeboy::agents::orchestration::canonical_candidate_from_durable_record(
-                &record, aggregate,
-            )
-            .ok()
-        });
-    json!({ "canonical_candidate": projection })
 }
 
 fn collected_diagnostic_value(item: CollectedDiagnostic) -> Value {
