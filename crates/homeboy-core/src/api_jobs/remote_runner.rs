@@ -1259,6 +1259,34 @@ impl JobStore {
         }
 
         let (job, child) = self.durable_transaction(|inner| {
+            // Daemons share a HOME-scoped ledger, but mirror only their own
+            // scope. A mirror miss alone says nothing about durable ownership.
+            if !inner.jobs.contains_key(&job_id) {
+                match self.find_stored_job(inner, job_id, false)? {
+                    None => {
+                        let mut error = job_not_found(job_id);
+                        error.details["runner_job_absence"] = serde_json::json!("ledger_absent");
+                        return Err(error);
+                    }
+                    Some(stored) if stored.job.status.is_terminal() => {
+                        let mut error = job_not_found(job_id);
+                        error.details["runner_job_absence"] = serde_json::json!("ledger_terminal");
+                        error.details["runner_job_status"] = serde_json::json!(stored.job.status);
+                        return Err(error);
+                    }
+                    Some(_) => {
+                        let mut error = Error::validation_invalid_argument(
+                            "job_id",
+                            "active runner job is owned by another daemon scope",
+                            Some(job_id.to_string()),
+                            None,
+                        );
+                        error.details["runner_job_ownership"] =
+                            serde_json::json!("owned_by_other_scope");
+                        return Err(error);
+                    }
+                }
+            }
             let stored = inner
                 .jobs
                 .get_mut(&job_id)

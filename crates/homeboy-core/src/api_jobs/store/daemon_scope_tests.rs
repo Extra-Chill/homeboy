@@ -53,6 +53,45 @@ fn startup_admission_expiry_fails_only_its_own_scope() {
     });
 }
 
+#[test]
+fn projection_cancel_checks_shared_ledger_after_scoped_mirror_miss() {
+    with_isolated_home(|home| {
+        let path = ledger(home);
+        let owner = daemon(&path, "owner");
+        let active = owner.create("runner.exec").id;
+        let terminal = owner.create("runner.exec").id;
+        owner.cancel(terminal, "finished").expect("terminal job");
+        let requester = daemon(&path, "requester");
+        let request = crate::api_jobs::RunnerJobProjectionCancelRequest {
+            expected_runner_id: "runner".to_string(),
+            expected_durable_run_id: "run".to_string(),
+        };
+        let missing = requester
+            .cancel_local_runner_projection(Uuid::new_v4(), &request)
+            .expect_err("ledger absence");
+        assert_eq!(missing.code.as_str(), "validation.invalid_argument");
+        assert_eq!(missing.details["runner_job_absence"], "ledger_absent");
+        let settled = requester
+            .cancel_local_runner_projection(terminal, &request)
+            .expect_err("terminal ledger row is safe");
+        assert_eq!(settled.details["runner_job_absence"], "ledger_terminal");
+        assert_eq!(
+            settled.details["runner_job_status"],
+            serde_json::json!(JobStatus::Cancelled)
+        );
+        let foreign = requester
+            .cancel_local_runner_projection(active, &request)
+            .expect_err("active foreign scope must refuse");
+        assert_eq!(foreign.code.as_str(), "validation.invalid_argument");
+        assert_eq!(
+            foreign.details["runner_job_ownership"],
+            "owned_by_other_scope"
+        );
+        assert!(foreign.details.get("runner_job_absence").is_none());
+        assert_eq!(owner.get(active).unwrap().status, JobStatus::Queued);
+    });
+}
+
 fn controller_state() -> ControllerJobState {
     ControllerJobState {
         job_type: "test.daemon-scope".to_string(),

@@ -642,6 +642,9 @@ pub(crate) fn cancel_exact_run_in_store_with_provenance(
                         }),
                     );
                 }
+                LiveCancellationOutcome::RunnerJobNotRunning { evidence } => {
+                    metadata.insert("live_cancellation".to_string(), evidence.clone());
+                }
                 LiveCancellationOutcome::NotRunning => {}
             }
             true
@@ -1239,6 +1242,9 @@ fn cancel_resolved_run_in_store(
                     }),
                 );
             }
+            LiveCancellationOutcome::RunnerJobNotRunning { evidence } => {
+                metadata.insert("live_cancellation".to_string(), evidence.clone());
+            }
             LiveCancellationOutcome::NotRunning => {}
         }
         if was_stale_running {
@@ -1436,6 +1442,9 @@ enum LiveCancellationOutcome {
     },
     Unsupported(UnsupportedLiveCancellation),
     NotRunning,
+    RunnerJobNotRunning {
+        evidence: serde_json::Value,
+    },
 }
 
 /// Recovery payload surfaced when Homeboy cannot itself signal the provider
@@ -1478,6 +1487,20 @@ fn classify_live_cancellation(record: &AgentTaskRunRecord) -> Result<LiveCancell
                     return Ok(LiveCancellationOutcome::RunnerJobCancelled {
                         job: Box::new(job),
                         events,
+                    });
+                }
+                Err(error)
+                    if matches!(
+                        error.details["runner_job_absence"].as_str(),
+                        Some("ledger_absent" | "ledger_terminal")
+                    ) =>
+                {
+                    return Ok(LiveCancellationOutcome::RunnerJobNotRunning {
+                        evidence: json!({
+                            "reason": "runner job proven absent or terminal in durable ledger",
+                            "runner_job_absence": error.details["runner_job_absence"],
+                            "runner_job_status": error.details.get("runner_job_status"),
+                        }),
                     });
                 }
                 // An accepted Lab handoff has an authoritative remote owner.
