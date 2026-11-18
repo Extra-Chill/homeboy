@@ -918,7 +918,6 @@ fn agent_task_requests_full_output(args: &crate::commands::agent_task::AgentTask
         AgentTaskCommand::Resume(args) => args.full,
         AgentTaskCommand::Diagnose(args) => args.full,
         AgentTaskCommand::Review(args) => args.full,
-        AgentTaskCommand::Promote(args) => args.full,
         AgentTaskCommand::Adopt(args) => args.full,
         AgentTaskCommand::FinalizePr(args) => args.full,
         AgentTaskCommand::Cancel(args) => args.full,

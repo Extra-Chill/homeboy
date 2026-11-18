@@ -284,10 +284,9 @@ pub mod service {
         consume_claimed_with_dispatcher, continuation_state_in_store, control_plane_run,
         cook_continuation_owner_denial, cook_continuation_replays_provider,
         cook_continuation_requires_model_provenance, enqueue_terminal_continuation,
-        evidence_ref_task_id, execute_promotion_with_progress, gate_cook_base,
-        hydrate_evidence_ref, hydrate_evidence_summary, live_owner_continuation_denial,
-        liveness_for_record, load_recipe, load_recipe_for_attempt, preflight_continuation_claim,
-        preflight_cook_continuation_admission_for_observation,
+        evidence_ref_task_id, gate_cook_base, hydrate_evidence_ref, hydrate_evidence_summary,
+        live_owner_continuation_denial, liveness_for_record, load_recipe, load_recipe_for_attempt,
+        preflight_continuation_claim, preflight_cook_continuation_admission_for_observation,
         preflight_cook_promotion_for_observation_in_store,
         preflight_recipe_attempt_for_continuation_in_store, prepare_cook_workspace_base,
         promotion_is_resumable, read_plan, reconcile_recipe_attempt_for_continuation,
@@ -305,7 +304,7 @@ pub mod service {
         CookRecipeStore, CookRequest, CookRuntime, CookService,
     };
     pub use super::super::agent_task_service::{
-        artifacts, logs, persist_initial_recipe, promotion_source,
-        reconcile_terminal_artifact_projection, resolve_cook_continuation_run_id, retry,
+        artifacts, logs, persist_initial_recipe, reconcile_terminal_artifact_projection,
+        resolve_cook_continuation_run_id, retry,
     };
 }

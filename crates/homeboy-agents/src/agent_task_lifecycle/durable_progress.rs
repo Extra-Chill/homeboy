@@ -216,17 +216,6 @@ pub(crate) fn prepared_progress_events(
     Ok(events)
 }
 
-pub fn record_promotion_progress(
-    run_id: &str,
-    phase: &str,
-    gate: Option<&str>,
-    detail: Option<&str>,
-    output_tail: Option<&str>,
-) -> Result<()> {
-    let lifecycle_store = AgentTaskLifecycleStore::from_environment()?;
-    record_promotion_progress_in_store(&lifecycle_store, run_id, phase, gate, detail, output_tail)
-}
-
 pub fn record_promotion_progress_in_store(
     lifecycle_store: &AgentTaskLifecycleStore,
     run_id: &str,

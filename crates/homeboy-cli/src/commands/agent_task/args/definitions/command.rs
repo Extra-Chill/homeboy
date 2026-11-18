@@ -3,9 +3,8 @@ use super::super::super::tool::AgentTaskToolArgs;
 use super::cook::{AgentTaskCookArgs, PromotionProviderArgs};
 use super::fanout::{AgentTaskBatchPrepareArgs, AgentTaskFanoutArgs};
 use super::lifecycle::{
-    AdoptArgs, CancelArgs, DiagnoseArgs, FinalizePrArgs, GateFeedbackArgs, PlacementUpdateArgs,
-    PromoteArgs, RecoverArgs, ResumeArgs, RetryArgs, ReviewArgs, RunArgs, RunPlanArgs, StatusArgs,
-    ValidatePlanArgs,
+    AdoptArgs, CancelArgs, DiagnoseArgs, FinalizePrArgs, PlacementUpdateArgs, RecoverArgs,
+    ResumeArgs, RetryArgs, ReviewArgs, RunArgs, RunPlanArgs, StatusArgs, ValidatePlanArgs,
 };
 use clap::{Args, Subcommand, ValueEnum};
 
@@ -146,8 +145,6 @@ pub enum AgentTaskCommand {
     /// Build a durable aggregate review envelope from run state, logs, artifacts,
     /// and promotion hints.
     Review(ReviewArgs),
-    /// Promote a completed generic patch artifact into a managed worktree.
-    Promote(Box<PromoteArgs>),
     /// Adopt an immutable commit candidate through a tracked cook's normal gates and finalization.
     Adopt(AdoptArgs),
     #[command(hide = true)]
@@ -186,8 +183,6 @@ pub enum AgentTaskCommand {
     FinalizePr(Box<FinalizePrArgs>),
     /// Record an independent, durable acceptance verdict for a candidate.
     Accept(AcceptArgs),
-    /// Convert deterministic gate results into a cook retry or stop decision.
-    GateFeedback(GateFeedbackArgs),
     /// List Pi provider routes and optional secret/model readiness.
     ///
     /// `--backend X` filters the presentation to X so output stays within caller

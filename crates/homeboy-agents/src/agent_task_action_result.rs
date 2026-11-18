@@ -2,17 +2,14 @@
 
 use homeboy_control_plane_contract::{
     ControlPlaneAction, ControlPlaneActionAcknowledgement, ControlPlaneActionOutcome,
-    CONTROL_PLANE_ACTION_ACKNOWLEDGEMENT_SCHEMA, CONTROL_PLANE_PROMOTE_RESULT_SCHEMA,
-    CONTROL_PLANE_RESUME_RESULT_SCHEMA, CONTROL_PLANE_RETRY_RESULT_SCHEMA,
+    CONTROL_PLANE_ACTION_ACKNOWLEDGEMENT_SCHEMA, CONTROL_PLANE_RESUME_RESULT_SCHEMA,
+    CONTROL_PLANE_RETRY_RESULT_SCHEMA,
 };
 use homeboy_core::{Error, Result};
 use serde::Deserialize;
 use serde_json::Value;
 
-use crate::{
-    agent_task_lifecycle::AgentTaskRunRecord, agent_task_promotion::AgentTaskPromotionReport,
-    agent_tasks::AgentTaskAggregate,
-};
+use crate::{agent_task_lifecycle::AgentTaskRunRecord, agent_tasks::AgentTaskAggregate};
 
 pub const UNMATERIALIZED_COOK_RESUME_RESULT_SCHEMA: &str = "homeboy/unmaterialized-cook-resume/v1";
 
@@ -73,17 +70,6 @@ pub fn resume(acknowledgement: &ControlPlaneActionAcknowledgement) -> Result<Res
             schema,
         )),
     }
-}
-
-pub fn promote(
-    acknowledgement: &ControlPlaneActionAcknowledgement,
-) -> Result<AgentTaskPromotionReport> {
-    validate(
-        acknowledgement,
-        ControlPlaneAction::Promote,
-        CONTROL_PLANE_PROMOTE_RESULT_SCHEMA,
-    )?;
-    decode(acknowledgement, "promote")
 }
 
 fn validate(

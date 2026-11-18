@@ -300,14 +300,7 @@ impl AgentTaskPromotionRequest {}
 /// is the operation key: each post-apply checkpoint is persisted before gates,
 /// so a restart can only verify the same materialized candidate.
 pub fn execute_promotion(request: AgentTaskPromotionRequest) -> Result<AgentTaskPromotionReport> {
-    execute_promotion_with_progress(request, None)
-}
-
-pub fn execute_promotion_with_progress(
-    request: AgentTaskPromotionRequest,
-    progress: Option<PromotionProgressCallback>,
-) -> Result<AgentTaskPromotionReport> {
-    execute_promotion_with_progress_and_cancellation(request, progress, Arc::new(|| false))
+    execute_promotion_with_progress_and_cancellation(request, None, Arc::new(|| false))
 }
 
 pub fn execute_promotion_with_progress_and_cancellation(

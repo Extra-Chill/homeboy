@@ -95,6 +95,18 @@ pub(crate) static REMOVED_COMMANDS: &[RemovedCommand] = &[
         removed_in: "0.429.1",
     },
     RemovedCommand {
+        path: &["agent-task", "promote"],
+        replacement: Some("homeboy agent-task recover"),
+        hint: "Cook promotes its own candidates; continue a stopped Cook with `agent-task recover <cook>`.",
+        removed_in: "0.474.2",
+    },
+    RemovedCommand {
+        path: &["agent-task", "gate-feedback"],
+        replacement: Some("homeboy agent-task recover"),
+        hint: "Cook runs deterministic gate feedback automatically; continue a stopped Cook with `agent-task recover <cook>`.",
+        removed_in: "0.474.2",
+    },
+    RemovedCommand {
         path: &["agent-task", "latest"],
         replacement: Some("homeboy agent-task list --latest"),
         hint: "Walk recent Cooks with `agent-task list --latest`.",
@@ -280,6 +292,16 @@ mod tests {
         assert!(removed
             .human_message()
             .contains("replacement: homeboy agent-task recover"));
+    }
+
+    #[test]
+    fn removed_promote_and_gate_feedback_point_at_recover() {
+        for verb in ["promote", "gate-feedback"] {
+            let args = argv(&["homeboy", "agent-task", verb, "cook-1"]);
+            let removed = find_removed_command(&parse_error(&args), &args)
+                .unwrap_or_else(|| panic!("agent-task {verb} must match the registry"));
+            assert_eq!(removed.replacement, Some("homeboy agent-task recover"));
+        }
     }
 
     #[test]

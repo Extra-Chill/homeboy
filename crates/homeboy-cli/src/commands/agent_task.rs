@@ -36,9 +36,9 @@ pub use args::{
     AgentTaskBatchPrepareArgs, AgentTaskCapacityArgs, AgentTaskCommand, AgentTaskCookArgs,
     AgentTaskDoctorArgs, AgentTaskFanoutArgs, AgentTaskFanoutCommand, AgentTaskFanoutCookBatchArgs,
     CancelArgs, ContractArgs, ContractFormat, CookFeedbackArgs, DiagnoseArgs, FinalizePrArgs,
-    GateFeedbackArgs, PlacementUpdateArgs, PromoteArgs, PromotionProviderArgs, ProvidersArgs,
-    RecoverArgs, RetainedArtifactsArgs, RetainedArtifactsCommand, RetryArgs, ReviewArgs,
-    RunPlanArgs, StatusArgs, ValidatePlanArgs, VerifyGateArgs,
+    PlacementUpdateArgs, PromotionProviderArgs, ProvidersArgs, RecoverArgs, RetainedArtifactsArgs,
+    RetainedArtifactsCommand, RetryArgs, ReviewArgs, RunPlanArgs, StatusArgs, ValidatePlanArgs,
+    VerifyGateArgs,
 };
 
 /// Shallow-merge rotation route overrides over the materialized base config,
@@ -373,7 +373,6 @@ pub(crate) fn run_with_cook_progress_and_provenance(
         AgentTaskCommand::Fanout(fanout_args) => cook_batch::fanout(fanout_args),
         AgentTaskCommand::BatchPrepare(args) => cook_batch::batch_prepare(args),
         AgentTaskCommand::Review(review_args) => review::review(review_args),
-        AgentTaskCommand::Promote(promote_args) => review::promote_artifact(*promote_args),
         AgentTaskCommand::Adopt(adopt_args) => review::adopt_candidate(adopt_args),
         AgentTaskCommand::PromotionProvider(provider_args) => {
             run::promotion_provider(provider_args)
@@ -578,7 +577,6 @@ pub(crate) fn run_with_cook_progress_and_provenance(
             }
             Ok((value, exit_code))
         }
-        AgentTaskCommand::GateFeedback(feedback_args) => review::gate_feedback(feedback_args),
         AgentTaskCommand::Providers(providers_args) => review::providers(providers_args),
         AgentTaskCommand::Capacity(capacity_args) => capacity::capacity(capacity_args),
         AgentTaskCommand::Prompts(prompts_args) => prompts::prompts(prompts_args),

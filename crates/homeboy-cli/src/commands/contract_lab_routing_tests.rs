@@ -2,11 +2,8 @@
 
 use clap::Parser;
 
-use crate::agents::agent_tasks::{lifecycle as agent_task_lifecycle, AgentTaskPlan};
 use crate::cli_surface::{Cli, Commands};
 use crate::command_contract::{LabCommandPortability, LabSourcePathMode, LabWorkspaceModePolicy};
-
-use crate::test_support::with_isolated_home;
 
 fn parsed_command(args: &[&str]) -> Commands {
     Cli::try_parse_from(args)
@@ -218,133 +215,6 @@ fn fanout_and_child_cook_coordinators_stay_controller_local() {
             crate::commands::contract_lab_routing::AGENT_TASK_COOK_COORDINATOR_CONTROLLER_REASON
         )
     );
-}
-
-#[test]
-fn agent_task_promote_with_runner_only_source_remains_lab_portable() {
-    let command = parsed_command(&[
-        "homeboy",
-        "agent-task",
-        "promote",
-        "/runner/artifacts/aggregate.json",
-        "--to-worktree",
-        "homeboy@fix-7964",
-        "--runner",
-        "homeboy-lab",
-        "--dry-run",
-    ]);
-
-    let contract = command
-        .lab_contract()
-        .expect("promote contract should support Lab offload");
-
-    assert_eq!(
-        contract.hot_label,
-        crate::command_contract::AGENT_TASK_PROMOTE_LAB_LABEL
-    );
-    assert_eq!(contract.portability, LabCommandPortability::Portable);
-    assert_eq!(
-        contract.workspace_mode_policy,
-        LabWorkspaceModePolicy::GitCheckoutRequired
-    );
-    assert!(contract.capture_mutation_patch);
-    assert!(!command.lab_offload_captures_mutation_patch());
-}
-
-#[test]
-fn agent_task_promote_with_controller_run_id_stays_with_finalized_artifacts() {
-    with_isolated_home(|_| {
-        let run_id = "controller-finalized-run";
-        agent_task_lifecycle::submit_plan(&AgentTaskPlan::new("fixture", Vec::new()), Some(run_id))
-            .expect("persist controller-owned run");
-
-        let command = parsed_command(&[
-            "homeboy",
-            "agent-task",
-            "promote",
-            run_id,
-            "--to-worktree",
-            "homeboy@fix-8511",
-        ]);
-
-        let contract = command.lab_contract().expect("promote contract");
-
-        assert_eq!(
-            contract.portability,
-            LabCommandPortability::LocalOnly(
-                crate::commands::contract_lab_routing::AGENT_TASK_PROMOTION_RUN_CONTROLLER_REASON
-            )
-        );
-        assert!(!contract.routing_policy.default_lab_offload);
-    });
-}
-
-#[test]
-fn agent_task_promote_with_immutable_runner_artifact_uri_stays_controller_local() {
-    let command = parsed_command(&[
-        "homeboy",
-        "--placement",
-        "local",
-        "agent-task",
-        "promote",
-        "homeboy://agent-task/run/runner-owned-run/artifacts#task=cook&artifact=patch",
-        "--to-worktree",
-        "homeboy@fix-9764",
-    ]);
-
-    let contract = command.lab_contract().expect("promote contract");
-    assert_eq!(
-        contract.portability,
-        LabCommandPortability::LocalOnly(
-            crate::commands::contract_lab_routing::AGENT_TASK_PROMOTION_RUN_CONTROLLER_REASON
-        )
-    );
-    assert!(!contract.routing_policy.default_lab_offload);
-}
-
-#[test]
-fn agent_task_promote_with_readable_controller_aggregate_stays_local() {
-    let aggregate = tempfile::NamedTempFile::new().expect("controller aggregate");
-    let command = parsed_command(&[
-        "homeboy",
-        "agent-task",
-        "promote",
-        aggregate.path().to_str().expect("UTF-8 aggregate path"),
-        "--to-worktree",
-        "homeboy@fix-10588",
-    ]);
-
-    assert_eq!(
-        command
-            .lab_contract()
-            .expect("promote contract")
-            .portability,
-        LabCommandPortability::LocalOnly(
-            crate::commands::contract_lab_routing::AGENT_TASK_PROMOTION_RUN_CONTROLLER_REASON
-        )
-    );
-    assert!(
-        !command
-            .lab_contract()
-            .expect("promote contract")
-            .routing_policy
-            .default_lab_offload
-    );
-}
-
-#[test]
-fn agent_task_promote_apply_captures_remote_target_mutation_for_controller_handoff() {
-    let command = parsed_command(&[
-        "homeboy",
-        "agent-task",
-        "promote",
-        "/runner/artifacts/aggregate.json",
-        "--to-worktree",
-        "homeboy@fix-7986",
-    ]);
-
-    assert!(command.lab_offload_captures_mutation_patch());
-    assert_eq!(command.lab_offload_mutation_flag(), Some("--to-worktree"));
 }
 
 #[test]

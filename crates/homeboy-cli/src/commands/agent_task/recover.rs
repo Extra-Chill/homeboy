@@ -554,7 +554,6 @@ mod tests {
             vec!["retry", "run-1", "--run"],
             vec!["reconcile", "run-1", "--apply"],
             vec!["adopt", "cook-1", "--candidate-ref", "abc123"],
-            vec!["promote", "run-1", "--to-worktree", "wt"],
             vec![
                 "finalize-pr",
                 "--run-id",

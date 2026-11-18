@@ -95,13 +95,6 @@ pub fn classify(args: &[String]) -> CommandCapability {
         return CommandCapability::ReadOnly;
     }
 
-    if args
-        .windows(2)
-        .any(|args| args == ["agent-task", "gate-feedback"])
-    {
-        return CommandCapability::ReadOnly;
-    }
-
     match args {
         [flag] if flag == "--version" || flag == "-V" => CommandCapability::ReadOnly,
         [command, subcommand, ..]
@@ -182,15 +175,6 @@ mod tests {
                 "lab-offload",
             ]),
             args(&["homeboy", "agent-task", "retry", "--help"]),
-            args(&[
-                "homeboy",
-                "agent-task",
-                "gate-feedback",
-                "--promotion",
-                "{}",
-                "--source-task",
-                "{}",
-            ]),
         ] {
             assert_eq!(classify(&command), CommandCapability::ReadOnly);
         }

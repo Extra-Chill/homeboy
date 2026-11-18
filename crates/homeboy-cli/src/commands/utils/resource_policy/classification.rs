@@ -81,7 +81,6 @@ pub(super) fn agent_task_resource_behavior(
         | agent_task::AgentTaskCommand::RunPlan(_)
         | agent_task::AgentTaskCommand::Run(_)
         | agent_task::AgentTaskCommand::Resume(_)
-        | agent_task::AgentTaskCommand::Promote(_)
         | agent_task::AgentTaskCommand::Adopt(_)
         | agent_task::AgentTaskCommand::PromotionProvider(_)
         | agent_task::AgentTaskCommand::Gate { .. }
@@ -105,7 +104,6 @@ pub(super) fn agent_task_resource_behavior(
         | agent_task::AgentTaskCommand::ValidatePlan(_)
         | agent_task::AgentTaskCommand::ActiveScope(_)
         | agent_task::AgentTaskCommand::Diagnose(_)
-        | agent_task::AgentTaskCommand::GateFeedback(_)
         // Provider discovery reads controller-local extension and runtime
         // manifests under bounded probes. Classifying it as an admitted
         // workload put it behind resource admission, which captured a

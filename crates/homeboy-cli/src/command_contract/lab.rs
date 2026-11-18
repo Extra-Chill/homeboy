@@ -182,7 +182,6 @@ const LAB_VISIBLE_COMMAND_PATHS: &[&[&str]] = &[
     &["runs", "evidence"],
     &["agent-task", "review"],
     &["agent-task", "retry"],
-    &["agent-task", "promote"],
     &["agent-task", "providers"],
     // A cook-batch is a controller-local workflow, but `--placement` places
     // each child Cook, so the placement arguments must stay discoverable.

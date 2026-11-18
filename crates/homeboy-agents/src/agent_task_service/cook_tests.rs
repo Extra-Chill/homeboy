@@ -8018,19 +8018,6 @@ fn adoption_by_cook_id_selects_the_latest_substantive_candidate_not_a_newer_empt
         assert_eq!(selection.reason, "latest_substantive_candidate_pointer");
         assert!(selection.skipped_newer_run_ids.is_empty());
         assert_eq!(selection.latest_attempt_run_id, third_run_id);
-        let (_, source_path) = super::super::promotion_source(cook_id)
-            .expect("promotion reads the older readable candidate");
-        assert_eq!(
-            source_path,
-            Some(
-                agent_task_lifecycle::aggregate_source_in_store(
-                    &test_lifecycle_store(),
-                    second_run_id
-                )
-                .unwrap()
-                .1
-            )
-        );
 
         let (record, _) = resolve_adoption_target(cook_id).expect("adoption follows selection");
         assert_eq!(record.run_id, second_run_id);

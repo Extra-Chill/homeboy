@@ -12,45 +12,6 @@ use super::{
     RunnerExecOutput, RunnerWorkspaceApplyOutput,
 };
 
-pub(super) fn apply_lab_candidate(exec: &RunnerExecOutput) -> Result<()> {
-    let value: serde_json::Value = serde_json::from_str(&exec.stdout)
-        .map_err(|e| Error::internal_json(e.to_string(), None))?;
-    let report = value.get("data").unwrap_or(&value);
-    if !matches!(report["status"].as_str(), Some("applied" | "gate_failed")) {
-        return Ok(());
-    }
-    let candidate = serde_json::from_value(report["provenance"]["candidate_commit"].clone())
-        .map_err(|_| {
-            Error::validation_invalid_argument(
-                "source.candidate",
-                "non-recoverable: Lab promotion has no immutable candidate",
-                None,
-                None,
-            )
-            .with_retryable(false)
-        })?;
-    let run_id = report["source"]["run_id"]
-        .as_str()
-        .ok_or_else(|| Error::internal_unexpected("Lab candidate has no run id"))?;
-    // The run-plan handback already fetched and verified this candidate. Never
-    // resolve a runner-only SHA here; promotion is only materialization.
-    let root = exec
-        .source_snapshot
-        .as_ref()
-        .and_then(|s| s.local_path.as_deref())
-        .ok_or_else(|| Error::internal_unexpected("Lab candidate has no destination"))?;
-    homeboy_agents::agent_task_promotion::verify_candidate_ref(
-        std::path::Path::new(root),
-        run_id,
-        &candidate,
-    )?;
-    homeboy_agents::agent_task_promotion::materialize_candidate_tree(
-        std::path::Path::new(root),
-        &candidate,
-    )?;
-    Ok(())
-}
-
 pub(super) fn apply_lab_offload_patch(
     exec_output: &RunnerExecOutput,
 ) -> Result<Option<RunnerWorkspaceApplyOutput>> {
@@ -125,77 +86,6 @@ fn read_lab_patch_artifact(path: &str) -> Result<String> {
 mod tests {
 
     use super::*;
-
-    #[test]
-    fn candidate_handback_uses_verified_ref_not_runner_patch_or_changed_files() {
-        let repo = tempfile::tempdir().unwrap();
-        git(repo.path(), &["init"]);
-        git(repo.path(), &["config", "user.email", "t@t"]);
-        git(repo.path(), &["config", "user.name", "T"]);
-        std::fs::write(repo.path().join("file"), "base").unwrap();
-        git(repo.path(), &["add", "."]);
-        git(repo.path(), &["commit", "-m", "base"]);
-        let output = |args: &[&str]| {
-            homeboy_core::git::run_git(repo.path(), args, "test")
-                .unwrap()
-                .trim()
-                .to_string()
-        };
-        let base = output(&["rev-parse", "HEAD"]);
-        std::fs::write(repo.path().join("file"), "candidate").unwrap();
-        std::fs::write(repo.path().join("new"), "new").unwrap();
-        git(repo.path(), &["add", "."]);
-        let tree = output(&["write-tree"]);
-        let sha = output(&["commit-tree", &tree, "-p", &base, "-m", "candidate"]);
-        git(repo.path(), &["reset", "--hard", "HEAD"]);
-        git(
-            repo.path(),
-            &["update-ref", "refs/homeboy/candidates/run-1", &sha],
-        );
-        let mut exec = RunnerExecOutput {
-            variant: "exec",
-            command: "runner.exec",
-            runner_id: "lab".to_string(),
-            dry_run: false,
-            mode: super::super::RunnerExecMode::Daemon,
-            argv: vec!["homeboy".to_string(), "refactor".to_string()],
-            remote_cwd: "/srv/homeboy/_lab_workspaces/repo-abc".to_string(),
-            exit_code: 0,
-            stdout: String::new(),
-            stderr: String::new(),
-            source_snapshot: None,
-            job: None,
-            runner_job: None,
-            job_id: None,
-            job_events: None,
-            mirror_run_id: None,
-            patch: None,
-            mutation_artifacts: None,
-            artifacts: Vec::new(),
-            promoted_outputs: Vec::new(),
-            structured_summaries: Vec::new(),
-            metrics: None,
-            capture: None,
-            execution_record: None,
-            runner_result: None,
-            handoff: None,
-            diagnostics: None,
-        };
-        exec.source_snapshot = Some(homeboy_core::source_snapshot::collect_local(
-            "lab",
-            repo.path(),
-            Some("/runner"),
-            "lab_offload",
-        ));
-        exec.stdout = serde_json::json!({"status":"gate_failed", "source":{"run_id":"run-1"}, "provenance":{"candidate_commit":{"base_sha":base,"candidate_sha":sha,"tree_sha":tree}}, "changed_files":[]}).to_string();
-        apply_lab_candidate(&exec).unwrap();
-        assert_eq!(output(&["write-tree"]), tree);
-        assert_eq!(output(&["rev-parse", "HEAD"]), base);
-        assert_eq!(
-            std::fs::read_to_string(repo.path().join("new")).unwrap(),
-            "new"
-        );
-    }
 
     #[test]
     fn apply_lab_offload_patch_writes_runner_patch_to_local_source() {

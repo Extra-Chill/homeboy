@@ -74,7 +74,6 @@ impl CommandSafetySpec {
 pub const DEFAULT_LAB_UNSUPPORTED_NOTES: &str =
     "not declared as Lab-routable in the command registry";
 pub(crate) const AGENT_TASK_RUN_LAB_LABEL: &str = "agent-task cook/run-plan/retry --run";
-pub(crate) const AGENT_TASK_PROMOTE_LAB_LABEL: &str = "agent-task promote";
 // Lab workload family and secret categories are derived from this label's
 // `agent-task` prefix (`LabRunnerWorkloadCommandFamily::from_command_label`),
 // so the agent-task verbs must lead.
@@ -237,11 +236,6 @@ const AGENT_TASK_LAB_SUPPORT: &[CommandLabSupportSummary] = &[
         contract_labels: &[AGENT_TASK_RUN_LAB_LABEL],
         message_label: "agent-task cook/run-plan",
         hint_label: "agent-task cook/run-plan",
-    },
-    CommandLabSupportSummary {
-        contract_labels: &[AGENT_TASK_PROMOTE_LAB_LABEL],
-        message_label: AGENT_TASK_PROMOTE_LAB_LABEL,
-        hint_label: AGENT_TASK_PROMOTE_LAB_LABEL,
     },
     CommandLabSupportSummary {
         contract_labels: &[AGENT_TASK_RUN_LAB_LABEL],
@@ -725,11 +719,6 @@ const AGENT_TASK_SUBCOMMAND_SAFETY: &[CommandPathSafetySpec] = &[
         &["recover"],
         with_dry_run(mutating_safety(), "--preflight"),
         "performs the stopped Cook's one recovery step; with --authorize-external-proof and corrected gates it executes operator-supplied deterministic shell gates and records durable replacement proof; --preflight only reports the step",
-    ),
-    paths_safety(
-        &["promote"],
-        with_dry_run(mutating_safety(), "--dry-run"),
-        "applies a selected patch artifact into a managed worktree unless --dry-run is passed",
     ),
     paths_safety(
         &["reconcile"],

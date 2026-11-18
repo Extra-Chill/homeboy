@@ -438,15 +438,13 @@ explains a stop. `agent-task status` projects both under
 | `batch-prepare <issue-url>... --repo <repo>` | The `prepare` step of a cook-batch: resolve the base once, name each child, and prepare the shared Lab workspace bundle. |
 | `recover <cook-or-attempt-id> [--preflight] [--regate] [--wait --timeout <dur>]` | Plan and admit the one recovery step a Cook needs (continue, regate, retry, reconcile, fork a replacement, replace gates, publish, or relaunch). A Cook whose admission failed before materializing is relaunched from its recorded admission inputs under a fresh run id; the source records `recovered_by`, the relaunch records `recovered_from`, and a repeated `recover` of the source returns that relaunch. Without recorded admission inputs it is refused with guidance to re-run the original `cook` command. Continuation, rearm, and regate are admitted through the durable daemon execution outbox; the command promptly returns the run, selected step, owning job, and `homeboy agent-task status <id> --watch`. A repeated recovery reports `step_in_flight` rather than waiting for the owner. `--wait` follows status/watch progress on stderr; `--timeout <dur>` bounds only that wait and exits nonzero without cancelling daemon-owned work. A complete candidate blocked only by gates that did not execute selects `regate`: run the recorded gates and publish on green without provider work. `--regate` explicitly selects the newest candidate-bearing attempt, even when a later attempt was cancelled; an exact attempt ID selects that candidate. `--preflight` reports the step and its read-only admission without mutation; `--timeout-ms`, `--backend`, `--selector`, and `--model` re-dispatch a continuation with an explicit provider override. `--authorize-external-proof <TEXT>` with corrected gates (`--verify`/`--verify-file`, optionally `--authorize-interrupted-rerun <TEXT>`) or candidate-bound proof (`--promotion <SPEC>`) replaces the gates of an applied candidate that failed them; `--review-form <SPEC>` with `--review-form-tool`, `--review-form-model`, and `--review-form-author`, plus `--review-override` and `--component`, feed publication. |
 | `review <run-id>` | Build a durable aggregate review envelope from run state, logs, artifacts, and promotion hints. |
-| `promote <source>` | Promote a completed generic patch artifact into a managed worktree. |
 | `adopt <run-or-cook-id> --candidate-ref <sha>` | Adopt an immutable commit candidate through the recorded cook gates and finalization policy. |
 | `finalize-pr` | Finalize a green manual-finalization candidate. A stopped Cook publishes through `recover`. |
 | `accept <run-id> --verdict accepted\|rejected --token <token> --evidence-ref <ref>` | Record an independently verified acceptance decision for an applied candidate. |
-| `gate-feedback` | Convert deterministic gate results into a cook retry or stop decision. |
 
 `adopt` accepts only immutable commits from the recorded cook source workspace.
-Use `promote` for patch-artifact candidates; it remains the controller-owned
-patch-artifact ingestion and gate path.
+Cook promotes patch-artifact candidates itself through the controller-owned
+ingestion and gate path; continue a stopped Cook with `recover <cook>`.
 
 If a first Cook admission finds an already-implemented dirty candidate, it
 fails before provider execution and returns the durable Cook/run plus this
@@ -1201,9 +1199,6 @@ homeboy runs logs "$run_id"
 homeboy runs artifacts "$run_id"
 homeboy agent-task review "$run_id" \
   --to-worktree "$target_worktree"
-homeboy agent-task promote "$run_id" \
-  --to-worktree "$target_worktree" \
-  --dry-run
 ```
 
 The gate passes when:
@@ -1212,16 +1207,15 @@ The gate passes when:
 - `status` shows `state: "succeeded"` and `logs` show the fixture cell.
 - `artifacts` lists a patch artifact, an agent result artifact, and a transcript evidence ref.
 - `review` returns a `homeboy/agent-task-review/v1` envelope with `transport.chat_state_required: false`, aggregate reconciliation, and promotion candidates.
-- `promote <run-id> --dry-run` resolves the aggregate from the durable run id and reports the selected non-empty patch plus changed files without requiring the operator to look up `aggregate_path` manually.
 
-When `promote <run-id>` applies a patch, Homeboy records the promotion report in
+When Cook promotes a patch, Homeboy records the promotion report in
 the run's versioned `metadata.cook_delivery` record. That report includes the source run id, source task id,
 patch artifact id/path, target worktree, discovered target branch/head when
 available, changed files, and an operator notification. `agent-task status
 <run-id>` surfaces the latest promotion so callers can tell whether promotion
 completed or is blocked without spelunking Lab artifact paths.
 
-When promotion runs without `--dry-run`, each `--verify <command>` is treated as
+During promotion, each `--verify <command>` is treated as
 a visible deterministic gate in the promoted worktree. Gates run in declaration
 order and, by default, a failure records every remaining gate as `skipped` with
 its blocking gate ID without invoking its command; use
@@ -1257,26 +1251,16 @@ termination values.
 Use `--private-verify <command>` for orchestrator-only completion gates that
 should decide completion without exposing hidden evaluator details to the next
 agent attempt. Private gate reports still appear in the promotion report for
-human/orchestrator evidence, but `agent-task gate-feedback` applies
+human/orchestrator evidence, but the gate-feedback retry applies
 `--private-gate-reveal <policy>` before building the follow-up request. Supported
 policies are `summary-only` (default), `redacted`, `no-detail`, and
 `full-evidence`. Visible gate failures continue to provide full deterministic
 evidence to the agent.
 
-`agent-task gate-feedback` converts a promotion report and the original
-`AgentTaskRequest` into a provider-neutral cook feedback decision:
-
-```bash
-homeboy agent-task gate-feedback \
-  --promotion @promotion.json \
-  --source-task @source-task.json \
-  --source-run-id "$run_id" \
-  --attempt 1 \
-  --max-attempts 3 \
-  --current-diff @current.diff
-```
-
-The command returns `homeboy/agent-task-cook-feedback-report/v1`. Red gates with
+When a promotion's gates fail, Cook converts the promotion report and the
+original `AgentTaskRequest` into a provider-neutral feedback decision
+(`homeboy/agent-task-cook-feedback-report/v1`) and runs the retry itself. Continue
+a stopped Cook with `homeboy agent-task recover <cook>`. Red gates with
 remaining budget produce `status: "retry_requested"` and a complete
 `follow_up_request` containing the failed command, exit status, log tails,
 changed files, patch artifact ref, current diff context, and source run/task

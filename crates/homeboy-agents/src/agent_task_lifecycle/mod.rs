@@ -82,7 +82,7 @@ pub use control_plane_identities::{
     CanonicalControlPlaneIdentities,
 };
 pub use cook_effects::*;
-pub use durable_progress::{record_promotion_progress, record_promotion_progress_in_store};
+pub use durable_progress::record_promotion_progress_in_store;
 #[cfg(any(test, feature = "test-support"))]
 #[doc(hidden)]
 pub use durable_state_probe::{
