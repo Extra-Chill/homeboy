@@ -2,6 +2,11 @@
 
 All notable changes to the **nodejs** extension will be documented in this file.
 
+## [3.9.13] - 2026-11-18
+
+### Changed
+- rolling npm/composer download cache and audit-free hydration installs
+
 ## [3.9.12] - 2026-11-18
 
 ### Fixed
