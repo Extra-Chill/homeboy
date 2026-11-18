@@ -3129,13 +3129,62 @@ fn parsed_command_runner_evidence(
         });
         return (None, selected);
     }
-    let readiness = refresh(cli.runner.as_deref()).ok();
+    let readiness = match refresh(cli.runner.as_deref()) {
+        Ok(readiness) => Some(readiness),
+        // A split-placement Cook must never read a failed Lab observation as
+        // "no Lab configured": missing readiness resolves `--placement auto`
+        // to the controller, which queued Cooks locally behind controller
+        // pressure while a ready Lab runner sat idle (#18334). Keep the
+        // failure as typed, non-admitting readiness evidence instead so Auto
+        // refuses with `lab_unavailable` (or re-observes) rather than
+        // selecting the controller.
+        Err(error)
+            if input.controller_execution
+                == crate::core::parsed_command_preflight::ControllerExecution::SplitPlacementCoordinator =>
+        {
+            Some(lab_readiness_refresh_failure(&error))
+        }
+        Err(_) => None,
+    };
     let selected = cli.runner.clone().or_else(|| {
         readiness
             .as_ref()
             .and_then(|value| value.selected_runner_id.clone())
     });
     (readiness, selected)
+}
+
+/// Readiness evidence for a Lab admission refresh that failed outright. It
+/// admits no runner and is never `absent`, so the shared resolver treats the
+/// configured Lab as unavailable (stale admission evidence) instead of
+/// treating the host as Lab-less and placing the workload on the controller.
+fn lab_readiness_refresh_failure(
+    error: &crate::core::Error,
+) -> crate::runner::runners::LabRunnerReadiness {
+    let recovery = std::iter::once(&error.details)
+        .chain(
+            error
+                .details
+                .get("runner_failures")
+                .and_then(serde_json::Value::as_array)
+                .into_iter()
+                .flatten()
+                .filter_map(|failure| failure.get("details")),
+        )
+        .find_map(|details| {
+            details
+                .get("recovery_command")
+                .and_then(serde_json::Value::as_str)
+                .map(str::to_string)
+        })
+        .unwrap_or_else(|| "homeboy runner status --full".to_string());
+    crate::runner::runners::LabRunnerReadiness {
+        state: crate::runner::runners::LabRunnerReadinessState::Stale,
+        selected_runner_id: None,
+        available_runner_ids: Vec::new(),
+        reasons: vec![format!("lab_readiness_refresh_failed: {}", error.message)],
+        remediation_commands: vec![recovery],
+    }
 }
 
 fn parsed_lab_readiness_snapshot(
@@ -3951,6 +4000,121 @@ mod tests {
                 "controller owns polling"
             );
         }
+    }
+
+    /// #18334: Auto Cook resolves its placement from live Lab evidence. A ready
+    /// Lab (including one carrying non-blocking warning reasons) is selected;
+    /// a failed Lab observation refuses with `lab_unavailable` and never
+    /// selects the controller.
+    #[test]
+    fn auto_cook_never_selects_the_controller_when_lab_evidence_is_missing() {
+        use crate::core::parsed_command_preflight::{
+            resolve_parsed_command_preflight, ParsedCommandPolicySnapshot,
+            ResourceAdmissionEvidence, ResourceHeat,
+        };
+        use homeboy_lab_contract::EffectiveExecutionPlacement;
+
+        let _lock = env_lock().lock().unwrap_or_else(|err| err.into_inner());
+        let args = [
+            "homeboy",
+            "agent-task",
+            "cook",
+            "--prompt",
+            "inspect",
+            "--to-worktree",
+            "fixture@task",
+            "--verify",
+            "true",
+        ];
+        let cli = Cli::parse_from(args);
+        let normalized: Vec<String> = args.iter().map(|arg| arg.to_string()).collect();
+        let input = resource_policy::parsed_command_preflight_input(&cli, &normalized);
+        let resolve = |readiness: Option<crate::runner::runners::LabRunnerReadiness>,
+                       selected: Option<String>| {
+            resolve_parsed_command_preflight(
+                normalized.clone(),
+                input.clone(),
+                ParsedCommandPolicySnapshot {
+                    // Hot controller: a controller-local route would queue
+                    // behind pressure exactly as in the incident.
+                    resource_admission_evidence: ResourceAdmissionEvidence::Observed {
+                        pressure: ResourceHeat::Hot,
+                    },
+                    resource_policy: None,
+                    lab_readiness: readiness
+                        .as_ref()
+                        .map(|readiness| parsed_lab_readiness_snapshot(&cli, readiness)),
+                    selected_runner_id: selected.clone(),
+                    generic_route: generic_route_policy_snapshot(&cli, selected.clone()),
+                    deferred_pressure_refusal: false,
+                    runner_admitted: selected.as_ref().is_some_and(|runner_id| {
+                        readiness.as_ref().is_some_and(|readiness| {
+                            readiness.state
+                                == crate::runner::runners::LabRunnerReadinessState::ConnectedReady
+                                && readiness.available_runner_ids.contains(runner_id)
+                        })
+                    }),
+                    auto_local_capacity_fallback: false,
+                },
+            )
+        };
+
+        // Ready Lab, with and without a non-blocking warning reason.
+        for reasons in [Vec::new(), vec!["daemon_unverified".to_string()]] {
+            let (readiness, selected) = parsed_command_runner_evidence(
+                &cli,
+                &input,
+                |_| {
+                    let mut ready = lab_readiness(
+                        crate::runner::runners::LabRunnerReadinessState::ConnectedReady,
+                    );
+                    ready.reasons = reasons.clone();
+                    Ok(ready)
+                },
+                || panic!("cook requires live evidence"),
+            );
+            let result = resolve(readiness, selected).expect("a ready Lab admits the Cook");
+            assert_eq!(result.placement.selected, EffectiveExecutionPlacement::Lab);
+            assert_eq!(result.selected_runner_id.as_deref(), Some("lab-a"));
+        }
+
+        // The Lab admission refresh itself failed: this is not a Lab-less host.
+        let (readiness, selected) = parsed_command_runner_evidence(
+            &cli,
+            &input,
+            |_| {
+                let mut error = crate::core::Error::new(
+                    crate::core::ErrorCode::RunnerLabTransportFailure,
+                    "No Lab runner completed the bounded admission refresh",
+                    serde_json::json!({
+                        "runner_failures": [{
+                            "code": "validation.invalid_argument",
+                            "details": {"recovery_command": "homeboy runner connect homeboy-lab"},
+                        }],
+                    }),
+                );
+                error.retryable = Some(true);
+                Err(error)
+            },
+            || panic!("cook requires live evidence"),
+        );
+        let readiness = readiness.expect("a failed refresh stays typed Lab evidence");
+        assert_ne!(
+            readiness.state,
+            crate::runner::runners::LabRunnerReadinessState::Absent
+        );
+        assert!(selected.is_none());
+        let error = resolve(Some(readiness), selected)
+            .expect_err("auto Cook must refuse rather than select the controller");
+        assert_eq!(error.code, crate::core::ErrorCode::RunnerLabUnavailable);
+        assert_eq!(error.details["reason"], "lab_unavailable");
+        assert_eq!(
+            error.details["next_action"],
+            "homeboy runner connect homeboy-lab"
+        );
+        assert!(error
+            .message
+            .contains("`--placement auto` does not run this workload on the controller"));
     }
 
     #[test]
