@@ -418,6 +418,9 @@ pub(crate) fn run_with_cook_progress_and_provenance(
             } else {
                 homeboy::agents::agent_tasks::service::load_recipe(&cook_id)?
             };
+            // Bind the generated lint gate to the recorded base, as the Cook's
+            // own gate runs do (#18388).
+            let cook_base = homeboy::agents::agent_tasks::service::gate_cook_base(&recipe);
             let gates: gate::VerifyGateOptions = serde_json::from_value(recipe.gate_policy)
                 .map_err(|error| {
                     homeboy::core::Error::invalid_argument("gate_policy", error.to_string())
@@ -435,7 +438,11 @@ pub(crate) fn run_with_cook_progress_and_provenance(
             let offset = usize::from(gates.test_execution_plan.is_some());
             let command = index
                 .checked_sub(offset + 1)
-                .and_then(|index| gates.verify.get(index));
+                .and_then(|index| gates.verify.get(index))
+                .map(|command| match &cook_base {
+                    Some(base) => command.replace("__HOMEBOY_COOK_BASE_SHA__", base),
+                    None => command.clone(),
+                });
             if command.is_none() && !(index == 1 && offset == 1) {
                 return Err(homeboy::core::Error::invalid_argument(
                     "gate.id",
@@ -458,7 +465,7 @@ pub(crate) fn run_with_cook_progress_and_provenance(
                 gate::run_gate_command_with_supervision(
                     &cwd,
                     index,
-                    command,
+                    &command,
                     gate::AgentTaskGateVisibility::Visible,
                     gate::AgentTaskGateRevealPolicy::FullEvidence,
                     Some(runtime.path()),
