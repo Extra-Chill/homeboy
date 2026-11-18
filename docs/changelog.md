@@ -4,6 +4,14 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.473.0] - 2026-11-18
+
+### Added
+- refuse workflow cancel from inside a Cook attempt and record the caller's ancestry
+
+### Fixed
+- finish Cooks that end after their driver exits
+
 ## [0.472.0] - 2026-11-18
 
 ### Added
