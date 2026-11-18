@@ -4,6 +4,12 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.474.7] - 2026-11-18
+
+### Changed
+- fold resume and adopt into recover
+- rolling npm/composer download cache and audit-free hydration installs
+
 ## [0.474.6] - 2026-11-18
 
 ### Changed
