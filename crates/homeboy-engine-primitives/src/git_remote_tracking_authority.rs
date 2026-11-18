@@ -231,7 +231,7 @@ mod tests {
         let pid_file = dir.path().join("descendant.pid");
         let git = dir.path().join("git");
         let script = format!(
-            "#!/bin/sh\ntouch {}\nwhile [ ! -f {} ]; do sleep 0.01; done\nsleep 30 &\necho $! > {}\nwait\n",
+            "#!/bin/sh\ntouch {}\nn=0; while [ ! -f {} ] && [ $n -lt 12000 ]; do sleep 0.01; n=$((n+1)); done\nsleep 30 &\necho $! > {}\nwait\n",
             crate::shell::quote_path(&ready_file.display().to_string()),
             crate::shell::quote_path(&release_file.display().to_string()),
             crate::shell::quote_path(&pid_file.display().to_string()),

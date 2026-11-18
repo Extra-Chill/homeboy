@@ -2592,7 +2592,7 @@ mod tests {
             let ready = home.path().join("ready");
             let release = home.path().join("release");
             let command = format!(
-                "printf '%s' \"$TMPDIR\" > {} && mkdir -p \"$TMPDIR/compiler-target\" && printf target > \"$TMPDIR/compiler-target/object\" && while [ ! -f {} ]; do sleep 0.01; done",
+                "printf '%s' \"$TMPDIR\" > {} && mkdir -p \"$TMPDIR/compiler-target\" && printf target > \"$TMPDIR/compiler-target/object\" && n=0; while [ ! -f {} ] && [ $n -lt 12000 ]; do sleep 0.01; n=$((n+1)); done",
                 crate::engine::shell::quote_arg(&ready.display().to_string()),
                 crate::engine::shell::quote_arg(&release.display().to_string()),
             );

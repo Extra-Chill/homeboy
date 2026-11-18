@@ -503,7 +503,7 @@ fn installer_controller_death_fixture() {
         )
     } else {
         format!(
-            "echo $$ > {}; while [ ! -e {} ]; do sleep 0.02; done; printf stale > {}",
+            "echo $$ > {}; n=0; while [ ! -e {} ] && [ $n -lt 6000 ]; do sleep 0.02; n=$((n+1)); done; printf stale > {}",
             quote_path(&pid_file),
             quote_path(&release_file),
             quote_path(&target),
