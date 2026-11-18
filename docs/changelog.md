@@ -4,6 +4,13 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.473.7] - 2026-11-18
+
+### Fixed
+- dispatch --goal instead of the task URL prompt in cook
+- Cook admission waits out a live upgrade instead of timing out
+- publish a recorded green candidate whose producing runtime failed
+
 ## [0.473.6] - 2026-11-18
 
 ### Fixed
