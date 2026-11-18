@@ -4502,7 +4502,7 @@ fn promotion_notification(
             status: "blocked".to_string(),
             message: "patch promoted, but deterministic gates failed".to_string(),
             resumable_blocker: Some(
-                "run `homeboy agent-task gate-feedback` with the promotion report, then retry the follow-up request".to_string(),
+                "run `homeboy agent-task recover <cook-id>` to continue the Cook with the gate feedback".to_string(),
             ),
             next_command: None,
         },
@@ -4529,11 +4529,8 @@ fn promotion_notification(
         AgentTaskPromotionStatus::DryRun => AgentTaskPromotionNotification {
             status: "blocked".to_string(),
             message: "dry run validated a patch artifact but did not apply it".to_string(),
-            resumable_blocker: Some("rerun promote without `--dry-run` to apply the patch".to_string()),
-            next_command: Some(format!(
-                "homeboy agent-task promote <run-id> --to-worktree {}",
-                target.worktree
-            )),
+            resumable_blocker: Some("run `homeboy agent-task recover <cook-id>` to apply the patch".to_string()),
+            next_command: Some("homeboy agent-task recover <cook-id>".to_string()),
         },
         AgentTaskPromotionStatus::NoChanges => AgentTaskPromotionNotification {
             status: "completed".to_string(),

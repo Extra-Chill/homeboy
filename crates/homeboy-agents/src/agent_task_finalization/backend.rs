@@ -802,7 +802,7 @@ fn optional_gate_proof(
 fn missing_promotion() -> Error {
     Error::validation_invalid_argument(
         "run_id",
-        "normal finalization requires the run's persisted applied promotion; run agent-task promote first or use --manual-finalization",
+        "normal finalization requires the run's persisted applied promotion; run agent-task recover first or use --manual-finalization",
         None,
         None,
     )

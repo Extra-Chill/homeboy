@@ -3930,22 +3930,6 @@ pub fn execute_resume_action_from_current_environment(
     )
 }
 
-pub fn execute_promotion_action_from_current_environment(
-    run_id: &str,
-    request: &ControlPlaneActionRequest,
-    progress: Option<crate::agent_task_promotion::PromotionProgressCallback>,
-) -> homeboy_core::Result<ControlPlaneActionAcknowledgement> {
-    execute_action_from_current_environment_with_delegates(
-        run_id,
-        request,
-        |resolved, parameters, _intent| default_retry(resolved, parameters),
-        |resolved, _intent| default_resume(resolved),
-        |promotion, _intent| {
-            crate::agent_task_service::execute_promotion_with_progress(promotion.clone(), progress)
-        },
-    )
-}
-
 fn execute_action_from_current_environment_with_delegates<F, R, P>(
     run_id: &str,
     request: &ControlPlaneActionRequest,

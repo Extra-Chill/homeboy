@@ -857,13 +857,7 @@ pub(crate) fn exec_lab_context(
         });
     }
 
-    let cook_promotion = request
-        .normalized_args
-        .windows(2)
-        .any(|args| args == ["agent-task", "promote"]);
-    if cook_promotion {
-        apply_lab_candidate(&exec_output)?;
-    } else if request.capture_patch && exit_code == 0 {
+    if request.capture_patch && exit_code == 0 {
         let apply_output = apply_lab_offload_patch(&exec_output)?.ok_or_else(|| {
             missing_mutation_patch_error(
                 request.normalized_args,

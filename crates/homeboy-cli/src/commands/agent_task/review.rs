@@ -3,19 +3,16 @@ use serde_json::Value;
 use std::io::Write;
 use std::process::{Command, Stdio};
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 use std::time::Instant;
 
 use homeboy::agents::agent_task_builtin_backend::BUILTIN_DEFAULT_BACKEND;
-use homeboy::agents::agent_tasks::cook_loop::{evaluate_cook_loop, AgentTaskCookLoopOptions};
 use homeboy::agents::agent_tasks::dispatch_service as agent_task_dispatch_service;
 use homeboy::agents::agent_tasks::finalization::{
     finalize_pr, AgentTaskGateResult, AgentTaskPrEvidence, AgentTaskPrFinalizationOptions,
     AgentTaskPrRuntimeGuardrails, AgentTaskPrSourceRelationship, AgentTaskPrVerification,
 };
-use homeboy::agents::agent_tasks::gate::VerifyGateOptions;
-use homeboy::agents::agent_tasks::lifecycle as agent_task_lifecycle;
-use homeboy::agents::agent_tasks::promotion::{AgentTaskPromotionReport, AgentTaskPromotionStatus};
+use homeboy::agents::agent_tasks::promotion::AgentTaskPromotionReport;
 use homeboy::agents::agent_tasks::provider::{
     evaluate_provider_dispatchability, resolve_provider_for_backend, AgentTaskExecutorProvider,
     AgentTaskProviderCatalog, ExtensionProviderAgentTaskExecutor, ProviderResolution,
@@ -29,18 +26,13 @@ use homeboy::agents::agent_tasks::review_dossier::{
     AgentTaskReviewTestStep, AiFilledReviewForm, AGENT_TASK_REVIEW_DOSSIER_SCHEMA,
 };
 use homeboy::agents::agent_tasks::service as agent_task_service;
-use homeboy::agents::agent_tasks::AgentTaskRequest;
-use homeboy::core::command_invocation::CommandInvocation;
 use homeboy::core::config;
 use homeboy::core::gate::HomeboyGateResult;
 use homeboy::core::Error;
 use homeboy_engine_primitives::shell::shell_arg;
 
 use super::super::CmdResult;
-use super::{
-    merge_route_provider_config, AdoptArgs, FinalizePrArgs, GateFeedbackArgs, PromoteArgs,
-    ProvidersArgs, ReviewArgs, VerifyGateArgs,
-};
+use super::{merge_route_provider_config, AdoptArgs, FinalizePrArgs, ProvidersArgs, ReviewArgs};
 
 #[derive(Args, Debug)]
 pub struct FinalizePrEvidenceArgs {
@@ -282,432 +274,6 @@ fn compact_fields(value: &Value, fields: &[&str]) -> Value {
         }
     }
     Value::Object(object)
-}
-
-pub(crate) fn promote_artifact(mut args: PromoteArgs) -> CmdResult<Value> {
-    let to_worktree = args.to_worktree.clone();
-    let source_reference = parse_promotion_run_artifact_reference(&args.source)?;
-    let source_spec = source_reference
-        .as_ref()
-        .map(|reference| reference.run_id.as_str())
-        .unwrap_or(&args.source);
-    let task_id = resolve_promotion_selector(
-        "task_id",
-        args.task_id,
-        source_reference
-            .as_ref()
-            .and_then(|reference| reference.task_id.clone()),
-    )?;
-    let (raw, source_path) = read_promotion_source(source_spec)?;
-    let source_run_id = match source_path.as_deref() {
-        Some(path) => agent_task_lifecycle::run_id_for_aggregate_path(path)?,
-        None => None,
-    }
-    .or_else(|| {
-        // Only the resolved run id is needed; reconciling here wrote state as a
-        // side effect of identifying the source.
-        agent_task_lifecycle::status(source_spec)
-            .ok()
-            .map(|record| record.run_id)
-    });
-    if source_run_id.is_none() && args.idempotency_key.is_some() {
-        return Err(Error::validation_invalid_argument(
-            "idempotency_key",
-            "promotion idempotency requires a durable run source",
-            args.idempotency_key,
-            Some(vec![
-                "omit --idempotency-key when promoting a standalone aggregate file".to_string(),
-            ]),
-        ));
-    }
-    let gates = resolve_promotion_gates(
-        &mut args.gates,
-        args.gates_from_cook_recipe,
-        args.gates_from_resume_contract,
-        source_run_id.as_deref(),
-        &args.source,
-        task_id.as_deref(),
-        None,
-    )?;
-    let artifact_id = None;
-    let promotion_request = agent_task_service::AgentTaskPromotionRequest {
-        source: raw,
-        source_run_id: source_run_id.clone(),
-        source_path,
-        source_worktree_path: None,
-        repository_integrity_evidence: None,
-        base_ref: Some(args.base),
-        task_base_sha: None,
-        candidate_ref: None,
-        to_worktree: args.to_worktree,
-        task_id,
-        artifact_id,
-        dry_run: args.dry_run,
-        gates,
-        provider_invocation: (!args.provider_argv.is_empty()).then(|| CommandInvocation {
-            argv: args.provider_argv,
-            ..Default::default()
-        }),
-    };
-    let reporter = PromotionProgressReporter::new(
-        source_run_id.as_deref(),
-        &to_worktree,
-        promotion_request.gates.gate_heartbeat_interval(),
-    );
-    if let Some(run_id) = source_run_id.as_deref() {
-        let idempotency_key = args
-            .idempotency_key
-            .unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
-        let acknowledgement =
-            homeboy::agents::orchestration::execute_promotion_action_from_current_environment(
-                run_id,
-                &homeboy_control_plane_contract::ControlPlaneActionRequest {
-                    schema: homeboy_control_plane_contract::CONTROL_PLANE_ACTION_REQUEST_SCHEMA
-                        .to_string(),
-                    action: homeboy_control_plane_contract::ControlPlaneAction::Promote,
-                    effect_id: homeboy_control_plane_contract::action_effect_id(
-                        "cli",
-                        run_id,
-                        "promote",
-                        &idempotency_key,
-                    ),
-                    idempotency_key,
-                    actor: "homeboy-cli".to_string(),
-                    expected_updated_at: None,
-                    parameters: homeboy_control_plane_contract::ControlPlaneActionPayload {
-                        schema:
-                            homeboy_control_plane_contract::CONTROL_PLANE_PROMOTE_PARAMETERS_SCHEMA
-                                .to_string(),
-                        data: serde_json::to_value(&promotion_request).map_err(|error| {
-                            Error::internal_json(
-                                error.to_string(),
-                                Some("encode promotion action request".to_string()),
-                            )
-                        })?,
-                    },
-                    confirmed: true,
-                },
-                Some(reporter.callback()),
-            )?;
-        reporter.finish();
-        let report = homeboy::agents::agent_task_action_result::promote(&acknowledgement)?;
-        let exit_code = i32::from(report.status == AgentTaskPromotionStatus::GateFailed);
-        return Ok((
-            serde_json::to_value(acknowledgement).unwrap_or(Value::Null),
-            exit_code,
-        ));
-    }
-    let report = agent_task_service::execute_promotion_with_progress(
-        promotion_request,
-        Some(reporter.callback()),
-    );
-    reporter.finish();
-    let report = report?;
-    let exit_code = if report.status == AgentTaskPromotionStatus::GateFailed {
-        1
-    } else {
-        0
-    };
-    let mut value = serde_json::to_value(&report).unwrap_or(Value::Null);
-    value["handoff"] = promotion_handoff(&report, &to_worktree);
-    Ok((value, exit_code))
-}
-
-pub(crate) fn resolve_promotion_gates(
-    gates: &mut VerifyGateArgs,
-    from_cook_recipe: bool,
-    from_resume_contract: bool,
-    source_run_id: Option<&str>,
-    source: &str,
-    task_id: Option<&str>,
-    _artifact_id: Option<&str>,
-) -> homeboy::core::Result<VerifyGateOptions> {
-    if !from_cook_recipe && !from_resume_contract {
-        gates.snapshot_file_inputs()?;
-        return Ok(gates.clone().into());
-    }
-    let supplied_gates = VerifyGateOptions::from(gates.clone());
-    // A durable recipe owns the gate commands and their execution policy. It
-    // is still safe to permit caller-supplied environment mappings: these
-    // repair machine-local toolchain/resource locations without replacing the
-    // immutable gate definition. HOME/XDG isolation remains recipe-owned.
-    let has_environment_source_overrides = !supplied_gates.gate_environment.preserve.is_empty();
-    let mut non_source_overrides = supplied_gates.clone();
-    non_source_overrides.gate_environment.preserve.clear();
-    if gates.has_deterministic_gate()
-        || !gates.input_sources.is_empty()
-        || non_source_overrides != VerifyGateOptions::default()
-    {
-        return Err(homeboy::core::Error::validation_invalid_argument(
-            "durable_gate_reference",
-            "cannot combine a durable gate reference with explicit gate options",
-            None,
-            None,
-        ));
-    }
-    let run_id = source_run_id.ok_or_else(|| {
-        homeboy::core::Error::validation_invalid_argument(
-            "durable_gate_reference",
-            "requires a durable run source",
-            Some(source.to_string()),
-            None,
-        )
-    })?;
-    if from_resume_contract {
-        let task_id = task_id.ok_or_else(|| {
-            homeboy::core::Error::validation_invalid_argument(
-                "gates-from-resume-contract",
-                "requires an exact --task-id selector",
-                Some(run_id.to_string()),
-                None,
-            )
-        })?;
-        let durable = agent_task_lifecycle::durable_local_read(run_id)?;
-        let promotion = homeboy::agents::agent_task_service::recorded_promotion_report(
-            &durable.record.metadata,
-        )?
-        .ok_or_else(|| {
-            homeboy::core::Error::validation_invalid_argument(
-                "gates-from-resume-contract",
-                "source run has no durable promotion resume contract",
-                Some(run_id.to_string()),
-                None,
-            )
-        })?;
-        let matches_task =
-            promotion.pointer("/source/task_id").and_then(Value::as_str) == Some(task_id);
-        if !matches_task || promotion.get("candidate").is_none_or(Value::is_null) {
-            return Err(homeboy::core::Error::validation_invalid_argument(
-                "gates-from-resume-contract",
-                "durable promotion resume contract does not match the selected candidate",
-                Some(run_id.to_string()),
-                None,
-            ));
-        }
-        let gate_policy = promotion
-            .pointer("/provenance/resume_contract/gates")
-            .ok_or_else(|| {
-                homeboy::core::Error::validation_invalid_argument(
-                    "gates-from-resume-contract",
-                    "durable promotion resume contract has no gate policy",
-                    Some(run_id.to_string()),
-                    None,
-                )
-            })?;
-        return serde_json::from_value(gate_policy.clone()).map_err(|error| {
-            homeboy::core::Error::validation_invalid_argument(
-                "gates-from-resume-contract",
-                format!("durable promotion resume contract has an invalid gate policy: {error}"),
-                Some(run_id.to_string()),
-                None,
-            )
-        });
-    }
-    let recipe = agent_task_service::load_recipe_for_attempt(run_id)?.ok_or_else(|| {
-        homeboy::core::Error::validation_invalid_argument(
-            "gates-from-cook-recipe",
-            "source run has no durable Cook recipe",
-            Some(run_id.to_string()),
-            None,
-        )
-    })?;
-    let mut policy: VerifyGateOptions =
-        serde_json::from_value(recipe.gate_policy).map_err(|error| {
-            homeboy::core::Error::validation_invalid_argument(
-                "cook_recipe.gate_policy",
-                format!("durable Cook recipe has an invalid gate policy: {error}"),
-                Some(recipe.cook_id),
-                None,
-            )
-        })?;
-    if has_environment_source_overrides {
-        for (name, source) in supplied_gates.gate_environment.preserve {
-            policy.gate_environment.preserve.insert(name, source);
-        }
-    }
-    Ok(policy)
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-struct PromotionRunArtifactReference {
-    run_id: String,
-    task_id: Option<String>,
-}
-
-/// Parse the immutable artifact selector emitted in durable agent-task output.
-/// It is a controller-owned source, not a runner-local path.
-fn parse_promotion_run_artifact_reference(
-    source: &str,
-) -> homeboy::core::Result<Option<PromotionRunArtifactReference>> {
-    let Some(rest) = source.strip_prefix("homeboy://agent-task/run/") else {
-        return Ok(None);
-    };
-    let (path, fragment) = rest.split_once('#').unwrap_or((rest, ""));
-    let mut path = path.split('/');
-    let encoded_run_id = path.next().unwrap_or_default();
-    if encoded_run_id.is_empty() || path.next() != Some("artifacts") || path.next().is_some() {
-        return Err(homeboy::core::Error::validation_invalid_argument(
-            "source",
-            "agent-task promotion URI must select exactly one run artifact",
-            Some(source.to_string()),
-            None,
-        ));
-    }
-    let run_id = homeboy::core::execution_contract::decode_uri_component_strict(encoded_run_id)
-        .ok_or_else(|| {
-            homeboy::core::Error::validation_invalid_argument(
-                "source",
-                "agent-task promotion URI has malformed run id encoding",
-                Some(source.to_string()),
-                None,
-            )
-        })?;
-    let mut task_id = None;
-    for part in fragment.split('&') {
-        let Some((key, value)) = part.split_once('=') else {
-            continue;
-        };
-        let value = homeboy::core::execution_contract::decode_uri_component_strict(value)
-            .filter(|value| !value.is_empty())
-            .ok_or_else(|| {
-                homeboy::core::Error::validation_invalid_argument(
-                    "source",
-                    "agent-task promotion URI has malformed artifact selector encoding",
-                    Some(source.to_string()),
-                    None,
-                )
-            })?;
-        match key {
-            "task" => {
-                if task_id.replace(value).is_some() {
-                    return Err(homeboy::core::Error::validation_invalid_argument(
-                        "source",
-                        "agent-task promotion URI repeats its task selector",
-                        Some(source.to_string()),
-                        None,
-                    ));
-                }
-            }
-            _ => {}
-        }
-    }
-    Ok(Some(PromotionRunArtifactReference { run_id, task_id }))
-}
-
-fn resolve_promotion_selector(
-    name: &str,
-    requested: Option<String>,
-    immutable: Option<String>,
-) -> homeboy::core::Result<Option<String>> {
-    if requested.is_some() && immutable.is_some() && requested != immutable {
-        return Err(homeboy::core::Error::validation_invalid_argument(
-            name,
-            format!("{name} conflicts with the immutable agent-task promotion URI selector"),
-            requested,
-            None,
-        ));
-    }
-    Ok(immutable.or(requested))
-}
-
-#[derive(Clone)]
-struct PromotionProgressState {
-    phase: &'static str,
-    gate: Option<String>,
-    last_progress: String,
-}
-
-struct PromotionProgressReporter {
-    run_id: Option<String>,
-    state: Arc<Mutex<PromotionProgressState>>,
-    stopped: Arc<AtomicBool>,
-    worker: Option<std::thread::JoinHandle<()>>,
-}
-
-impl PromotionProgressReporter {
-    fn new(run_id: Option<&str>, to_worktree: &str, interval: std::time::Duration) -> Self {
-        let source = run_id.unwrap_or("unrecorded-promotion");
-        promotion_progress_line(&format!(
-            "promotion: durable source run `{source}`; status -> homeboy agent-task status {source}"
-        ));
-        promotion_progress_line(&format!(
-            "promotion: resume -> homeboy agent-task promote {source} --to-worktree {to_worktree}"
-        ));
-        let state = Arc::new(Mutex::new(PromotionProgressState {
-            phase: "apply",
-            gate: None,
-            last_progress: "promotion accepted".to_string(),
-        }));
-        let stopped = Arc::new(AtomicBool::new(false));
-        let worker_state = state.clone();
-        let worker_stopped = stopped.clone();
-        let started = Instant::now();
-        let worker = std::thread::spawn(move || {
-            while !worker_stopped.load(Ordering::SeqCst) {
-                let deadline = Instant::now() + interval;
-                while !worker_stopped.load(Ordering::SeqCst) && Instant::now() < deadline {
-                    std::thread::sleep(std::time::Duration::from_millis(50));
-                }
-                if worker_stopped.load(Ordering::SeqCst) {
-                    break;
-                }
-                let state = worker_state
-                    .lock()
-                    .expect("promotion progress state")
-                    .clone();
-                let gate = state.gate.as_deref().unwrap_or("none");
-                promotion_progress_line(&format!(
-                    "promotion heartbeat: phase={} gate={} elapsed={}s last-progress={}",
-                    state.phase,
-                    gate,
-                    started.elapsed().as_secs(),
-                    state.last_progress,
-                ));
-            }
-        });
-        Self {
-            run_id: run_id.map(str::to_string),
-            state,
-            stopped,
-            worker: Some(worker),
-        }
-    }
-
-    fn callback(&self) -> homeboy::agents::agent_tasks::promotion::PromotionProgressCallback {
-        let run_id = self.run_id.clone();
-        let state = self.state.clone();
-        Arc::new(move |progress| {
-            let mut state = state.lock().expect("promotion progress state");
-            state.phase = progress.phase;
-            state.gate = progress.gate.clone();
-            if let Some(last_progress) = &progress.last_progress {
-                state.last_progress = last_progress.clone();
-            }
-            promotion_progress_line(&format!(
-                "promotion progress: phase={} gate={} last-progress={}",
-                state.phase,
-                state.gate.as_deref().unwrap_or("none"),
-                state.last_progress,
-            ));
-            if let Some(run_id) = run_id.as_deref() {
-                homeboy::agents::agent_task_lifecycle::record_promotion_progress(
-                    run_id,
-                    progress.phase,
-                    progress.gate.as_deref(),
-                    progress.last_progress.as_deref(),
-                    progress.output_tail.as_deref(),
-                )?;
-            }
-            Ok(())
-        })
-    }
-
-    fn finish(mut self) {
-        self.stopped.store(true, Ordering::SeqCst);
-        if let Some(worker) = self.worker.take() {
-            let _ = worker.join();
-        }
-    }
 }
 
 struct AdoptionProgressReporter {
@@ -1624,84 +1190,6 @@ fn parse_override(raw: &str) -> homeboy::core::Result<AgentTaskReviewOverride> {
         value: value.trim().to_string(),
         provenance: provenance.trim().to_string(),
     })
-}
-
-const COMMAND_RESULT_ENVELOPE_SCHEMA: &str = "homeboy/command-result/v3";
-
-/// Deserialize a structured input that may be either the bare report/request or
-/// a `homeboy/command-result/v3` envelope wrapping it under `data`.
-///
-/// `agent-task promote --output` writes the command-result envelope, whose outer
-/// `status` (e.g. `failed`) is not a promotion status; deserializing it directly
-/// as a promotion report failed. Unwrap the envelope's `data` when present so the
-/// canonical producer (`promote --output`) composes directly with the consumer
-/// (`gate-feedback --promotion`) without a manual `jq '.data'` step (#9893).
-fn deserialize_maybe_enveloped<T: serde::de::DeserializeOwned>(
-    raw: &str,
-    context: &str,
-) -> homeboy::core::Result<T> {
-    let value: Value = serde_json::from_str(raw).map_err(|error| {
-        homeboy::core::Error::validation_invalid_json(
-            error,
-            Some(context.to_string()),
-            Some(raw.to_string()),
-        )
-    })?;
-
-    // A command-result envelope carries the real payload under `data`; a bare
-    // report is used as-is.
-    let payload =
-        if value.get("schema").and_then(Value::as_str) == Some(COMMAND_RESULT_ENVELOPE_SCHEMA) {
-            value.get("data").cloned().unwrap_or(value)
-        } else {
-            value
-        };
-
-    let payload = homeboy::core::observation::store::metadata_payloads::resolve_metadata_payload(
-        &payload,
-        &homeboy::core::paths::artifact_root()?,
-    )?;
-    serde_json::from_value(payload).map_err(|error| {
-        homeboy::core::Error::validation_invalid_json(
-            error,
-            Some(context.to_string()),
-            Some(raw.to_string()),
-        )
-    })
-}
-
-pub(crate) fn gate_feedback(args: GateFeedbackArgs) -> CmdResult<Value> {
-    let promotion_raw = config::read_json_spec_to_string(&args.promotion)?;
-    let source_task_raw = config::read_json_spec_to_string(&args.source_task)?;
-    let promotion_report: AgentTaskPromotionReport =
-        deserialize_maybe_enveloped(&promotion_raw, "agent-task promotion report")?;
-    let source_request: AgentTaskRequest =
-        deserialize_maybe_enveloped(&source_task_raw, "agent-task source request")?;
-    let current_diff = args
-        .current_diff
-        .as_deref()
-        .map(config::read_json_spec_to_string)
-        .transpose()?
-        .or_else(|| {
-            promotion_report
-                .provenance
-                .pointer("/gate_feedback_baseline/current_diff")
-                .and_then(Value::as_str)
-                .map(str::to_string)
-        })
-        .unwrap_or_default();
-    let report = evaluate_cook_loop(AgentTaskCookLoopOptions {
-        source_request,
-        promotion_report,
-        attempt: args.attempt,
-        max_attempts: args.max_attempts.max(1),
-        source_run_id: args.source_run_id,
-        current_diff,
-        review_form: None,
-        metadata: Value::Null,
-    });
-
-    Ok((serde_json::to_value(report).unwrap_or(Value::Null), 0))
 }
 
 /// The backend the providers presentation is scoped to, if any. `--catalog`
@@ -2811,48 +2299,6 @@ pub(crate) fn default_protected_branches() -> Vec<String> {
     ]
 }
 
-fn promotion_handoff(report: &AgentTaskPromotionReport, _to_worktree: &str) -> Value {
-    // Typed reports are only constructed after the target mutation. The status
-    // remains a compatibility field; expose verification independently.
-    let target_applied = report.status.patch_promoted();
-    let verified = matches!(report.status, AgentTaskPromotionStatus::Applied);
-    let mut next_actions = Vec::new();
-    if report.status.gate_failed() {
-        next_actions.push(
-            "patch promoted but deterministic gates failed; use gate feedback before finalizing"
-                .to_string(),
-        );
-    } else if target_applied && verified {
-        next_actions
-            .push("patch promoted and deterministic gates verified; finalize a PR".to_string());
-    } else if target_applied {
-        next_actions.push(
-            "patch promoted into the target worktree; verify, then finalize a PR".to_string(),
-        );
-    } else {
-        next_actions
-            .push("dry run only; rerun promote without `--dry-run` before finalizing".to_string());
-    }
-
-    serde_json::json!({
-        "schema": "homeboy/agent-task-promotion-handoff/v1",
-        "states": {
-            "patch_artifact_produced": true,
-            "candidate_retained": true,
-            "target_applied": target_applied,
-            "patch_promoted": target_applied,
-            "verified": verified,
-            "finalized": false,
-            "pr_opened": false
-        },
-        "boundary": report.status.handoff_boundary(),
-        "finalize_command": report.source.run_id.as_ref().map(|run_id| format!(
-            "homeboy agent-task recover {run_id}"
-        )),
-        "next_actions": next_actions
-    })
-}
-
 /// Render the finalization boundary.
 ///
 /// A successful `--preflight` deliberately suppresses publication, so it must
@@ -2938,12 +2384,6 @@ fn parse_gate_results(raw: &[String]) -> homeboy::core::Result<Vec<AgentTaskGate
         .collect()
 }
 
-pub(crate) fn read_promotion_source(
-    spec: &str,
-) -> homeboy::core::Result<(String, Option<std::path::PathBuf>)> {
-    agent_task_service::promotion_source(spec)
-}
-
 #[cfg(test)]
 mod tests {
     #[test]
@@ -2983,10 +2423,7 @@ mod tests {
 
     use crate::commands::agent_task_summary::{render_agent_task_summary, AgentTaskSummaryKind};
     use clap::Parser;
-    use homeboy::agents::agent_tasks::promotion::{
-        AgentTaskPromotionCommandReport, AgentTaskPromotionNotification, AgentTaskPromotionSource,
-        AgentTaskPromotionTarget,
-    };
+    use homeboy::agents::agent_tasks::lifecycle as agent_task_lifecycle;
     use std::process::Command;
 
     #[test]
@@ -3002,33 +2439,6 @@ mod tests {
         assert!(message.contains("gates=npm test | npm run build"));
         assert!(message.contains("homeboy agent-task status manual-run-15181"));
         assert!(message.contains("homeboy agent-task recover manual-run-15181"));
-    }
-
-    #[test]
-    fn immutable_promotion_uri_selects_its_controller_run_and_task() {
-        assert_eq!(
-            parse_promotion_run_artifact_reference(
-                "homeboy://agent-task/run/runner%2Fowned/artifacts#task=cook%20task&artifact=patch%2F1"
-            )
-            .expect("parse"),
-            Some(PromotionRunArtifactReference {
-                run_id: "runner/owned".to_string(),
-                task_id: Some("cook task".to_string()),
-            })
-        );
-    }
-
-    #[test]
-    fn immutable_promotion_uri_rejects_conflicting_cli_selector_before_materialization() {
-        let error = resolve_promotion_selector(
-            "task_id",
-            Some("different-task".to_string()),
-            Some("task".to_string()),
-        )
-        .expect_err("conflicting immutable selector must fail");
-        assert!(error
-            .message
-            .contains("immutable agent-task promotion URI selector"));
     }
 
     #[test]
@@ -3558,63 +2968,6 @@ mod tests {
         assert!(parse_override("summary=@operator").is_err());
         assert!(parse_override("summary=Reviewed summary@").is_err());
         assert!(parse_public_contract("cli.finalize-pr=>").is_err());
-    }
-
-    #[test]
-    fn promotion_handoff_marks_promoted_patch_without_pr_claim() {
-        let report = AgentTaskPromotionReport {
-            candidate_ref: None,
-            schema: "homeboy/agent-task-promotion-report/v1".to_string(),
-            status: AgentTaskPromotionStatus::Applied,
-            source: AgentTaskPromotionSource {
-                kind: "aggregate".to_string(),
-                task_id: "cook-homeboy".to_string(),
-                run_id: Some("agent-task-run-1".to_string()),
-                path: Some("/tmp/aggregate.json".to_string()),
-            },
-            to_worktree: "homeboy@fix-runtime".to_string(),
-            target: AgentTaskPromotionTarget {
-                worktree: "homeboy@fix-runtime".to_string(),
-                path: Some("/Users/user/Developer/homeboy@fix-runtime".to_string()),
-                branch: Some("fix/runtime".to_string()),
-                head: Some("abc123".to_string()),
-                dirty: Some(true),
-            },
-            candidate: Some(homeboy::agents::agent_task::AgentTaskCandidate {
-                base_sha: "base".to_string(),
-                candidate_sha: "patch-1".to_string(),
-                tree_sha: "tree".to_string(),
-            }),
-            changed_files: vec!["src/lib.rs".to_string()],
-            command_evidence: Vec::<AgentTaskPromotionCommandReport>::new(),
-            deterministic_gates: Vec::new(),
-            gate_results: Vec::new(),
-            verified_base: Some(
-                homeboy::agents::agent_tasks::promotion::AgentTaskPromotionVerifiedBase {
-                    base: "release".to_string(),
-                    sha: "0123456789012345678901234567890123456789".to_string(),
-                },
-            ),
-            provenance: serde_json::json!({ "worktree_path": "/Users/user/Developer/homeboy@fix-runtime" }),
-            repository_integrity_evidence: None,
-            operator_notification: AgentTaskPromotionNotification {
-                status: "completed".to_string(),
-                message: "patch promoted".to_string(),
-                resumable_blocker: None,
-                next_command: None,
-            },
-        };
-
-        let handoff = promotion_handoff(&report, "homeboy@fix-runtime");
-
-        assert_eq!(handoff["states"]["patch_artifact_produced"], true);
-        assert_eq!(handoff["states"]["patch_promoted"], true);
-        assert_eq!(handoff["states"]["pr_opened"], false);
-        assert_eq!(handoff["boundary"], "patch_promoted_no_pr");
-        assert_eq!(
-            handoff["finalize_command"],
-            "homeboy agent-task recover agent-task-run-1"
-        );
     }
 
     #[test]
@@ -4356,44 +3709,5 @@ esac
         let all = vec![provider_fixture("pi.executor", "pi")];
         let scoped = scope_providers(&all, scoped_provider_backend(Some("nope"), false));
         assert!(scoped.is_empty());
-    }
-
-    #[derive(serde::Deserialize, Debug, PartialEq)]
-    struct SamplePayload {
-        status: String,
-    }
-
-    #[test]
-    fn deserialize_maybe_enveloped_unwraps_command_result_envelope() {
-        // #9893: `promote --output` emits a command-result envelope whose outer
-        // status is not a promotion status; the payload under `data` is used.
-        let enveloped = r#"{
-            "schema": "homeboy/command-result/v3",
-            "success": false,
-            "status": "failed",
-            "data": { "status": "gate_failed" }
-        }"#;
-        let payload: SamplePayload =
-            deserialize_maybe_enveloped(enveloped, "sample").expect("unwrap envelope");
-        assert_eq!(payload.status, "gate_failed");
-    }
-
-    #[test]
-    fn deserialize_maybe_enveloped_accepts_bare_report() {
-        // A bare report (already `jq '.data'`-ed, or produced directly) still works.
-        let bare = r#"{ "status": "applied" }"#;
-        let payload: SamplePayload =
-            deserialize_maybe_enveloped(bare, "sample").expect("bare report");
-        assert_eq!(payload.status, "applied");
-    }
-
-    #[test]
-    fn deserialize_maybe_enveloped_surfaces_invalid_json() {
-        let err = deserialize_maybe_enveloped::<SamplePayload>("not json", "sample")
-            .expect_err("invalid json should error");
-        assert_eq!(
-            err.code,
-            homeboy::core::error::ErrorCode::ValidationInvalidJson
-        );
     }
 }

@@ -113,13 +113,6 @@ const REPRESENTATIVE_INVOCATIONS: &[&[&str]] = &[
     &["agent-task", "review", "run-1"],
     // Only `--run` executes; the bare form is local retry bookkeeping.
     &["agent-task", "retry", "run-1", "--run"],
-    &[
-        "agent-task",
-        "promote",
-        "--to-worktree",
-        "repo@slug",
-        "candidate.patch",
-    ],
     &["agent-task", "providers"],
     &[
         "agent-task",

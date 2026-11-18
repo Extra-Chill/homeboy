@@ -95,15 +95,6 @@ pub(crate) struct InspectingExecutor {
     pub(crate) observed_status: Arc<Mutex<Option<AgentTaskRunRecord>>>,
 }
 
-impl InspectingExecutor {
-    pub(crate) fn noop(run_id: &str) -> Self {
-        Self {
-            run_id: run_id.to_string(),
-            observed_status: Arc::new(Mutex::new(None)),
-        }
-    }
-}
-
 impl AgentTaskExecutorAdapter for InspectingExecutor {
     fn execute(
         &self,

@@ -1,7 +1,7 @@
 //! Agent-task cook promotion & finalization.
 //!
 //! Extracted from `cook.rs`: promotion-source resolution
-//! (`promotion_source`/`source_spec_path`/`source_worktree_path`), the durable
+//! (`promotion_source_in_store`/`source_worktree_path`), the durable
 //! promote-or-load boundary (`promote_attempt`/`promote_or_load_attempt_in_store`/
 //! `persisted_promotion_for_attempt`), PR finalization
 //! (`finalize_or_load_cook_pr*` and the shared `publish_cook_finalization`), the
@@ -38,7 +38,7 @@ use crate::agent_task_review_dossier::{
     AgentTaskReviewEvidence, AgentTaskReviewOverride,
 };
 use crate::agent_task_scheduler::AgentTaskAggregate;
-use homeboy_core::{config, Error, Result};
+use homeboy_core::{Error, Result};
 
 use super::cook::{
     canonical_candidate_finalization, canonical_cook_candidate, canonical_cook_candidate_in_store,
@@ -134,63 +134,6 @@ fn replacement_component_workspace(
         relative,
         "replacement_gate.cwd",
     )?))
-}
-
-pub fn promotion_source(spec: &str) -> Result<(String, Option<PathBuf>)> {
-    if spec != "-" {
-        let path = PathBuf::from(spec.strip_prefix('@').unwrap_or(spec));
-        if path.is_file() {
-            let raw = std::fs::read_to_string(&path).map_err(|error| {
-                Error::internal_io(
-                    error.to_string(),
-                    Some(format!(
-                        "read agent-task promotion source {}",
-                        path.display()
-                    )),
-                )
-            })?;
-            return Ok((raw, Some(path)));
-        }
-    }
-
-    let lifecycle_store = agent_task_lifecycle::AgentTaskLifecycleStore::from_environment()?;
-    if let Some(source) = promotion_source_for_reader(&lifecycle_store, spec)? {
-        return Ok(source);
-    }
-
-    Ok((
-        config::read_json_spec_to_string(spec)?,
-        source_spec_path(spec),
-    ))
-}
-
-fn promotion_source_for_reader(
-    lifecycle_store: &agent_task_lifecycle::AgentTaskLifecycleStore,
-    spec: &str,
-) -> Result<Option<(String, Option<PathBuf>)>> {
-    let resolved =
-        agent_task_lifecycle::resolve_cook_reader_run_id_in_store(lifecycle_store, spec)?;
-    let record = match lifecycle_store.read_record(&resolved) {
-        Ok(record) => record,
-        Err(_) if resolved == spec => return Ok(None),
-        Err(error) => return Err(error),
-    };
-    match agent_task_lifecycle::aggregate_source_in_store(lifecycle_store, &resolved) {
-        Ok((raw, path)) => Ok(Some((raw, Some(path)))),
-        Err(aggregate_error) => {
-            recover_executor_outcome_source(lifecycle_store, &record, &aggregate_error)
-                .map(|(raw, path)| Some((raw, Some(path))))
-                .map_err(|error| {
-                    promotion_reconstruction_error(
-                        lifecycle_store,
-                        spec,
-                        &record,
-                        &aggregate_error,
-                        &error,
-                    )
-                })
-        }
-    }
 }
 
 pub(crate) fn promotion_source_in_store(
@@ -6024,14 +5967,6 @@ fn lab_handoff_runtime_recovery(
     )
     .ok()?;
     recovery.is_valid().then_some(recovery)
-}
-
-pub(crate) fn source_spec_path(spec: &str) -> Option<PathBuf> {
-    if spec == "-" {
-        return None;
-    }
-
-    Some(PathBuf::from(spec.strip_prefix('@').unwrap_or(spec)))
 }
 
 #[cfg(test)]

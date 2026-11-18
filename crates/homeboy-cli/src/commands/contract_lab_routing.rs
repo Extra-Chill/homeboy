@@ -2,13 +2,11 @@
 
 use std::collections::BTreeSet;
 
-use crate::agents::agent_tasks::lifecycle as agent_task_lifecycle;
 use crate::agents::agent_tasks::provider::{default_backend, provider_requires_cwd_git_checkout};
 use crate::cli_surface::Commands;
 use crate::command_contract::{
     AGENT_TASK_AUTH_STATUS_LAB_LABEL, AGENT_TASK_FANOUT_COOK_BATCH_LAB_LABEL,
-    AGENT_TASK_PROMOTE_LAB_LABEL, AGENT_TASK_PROVIDERS_LAB_LABEL, AGENT_TASK_RUN_LAB_LABEL,
-    AGENT_TASK_STATUS_LAB_LABEL,
+    AGENT_TASK_PROVIDERS_LAB_LABEL, AGENT_TASK_RUN_LAB_LABEL, AGENT_TASK_STATUS_LAB_LABEL,
 };
 use crate::commands::agent_task;
 use crate::core::engine::execution_context::{self, ResolveOptions};
@@ -82,8 +80,6 @@ const AGENT_TASK_COOK_MISSING_VERIFY_GATE_REASON: &str =
     "agent-task cook requires at least one deterministic --verify or --private-verify gate";
 pub(crate) const AGENT_TASK_COOK_COORDINATOR_CONTROLLER_REASON: &str =
     "agent-task cook is a controller-owned coordinator: it resolves the managed target, ingests provider artifacts, promotes candidates, runs deterministic gates, and finalizes. Only its provider attempt is portable, and that attempt is dispatched to the selected Lab runner: `--placement lab` selects the runner for the attempt (never offloading the coordinator), and `--runner <runner-id>` pins a specific one. Deterministic gates follow that placement: a Lab-placed cook gates on its attempt runner unless `--gate-runner` (or the declared gate command's own `--placement lab`/`--runner`) pins a different one; local cooks keep local gates.";
-pub(crate) const AGENT_TASK_PROMOTION_RUN_CONTROLLER_REASON: &str =
-    "agent-task promote with a durable run reference or readable controller-local aggregate is controller-owned: it resolves authoritative lifecycle state and finalized artifact projections on the controller.";
 pub(crate) const AGENT_TASK_FANOUT_COORDINATOR_CONTROLLER_REASON: &str =
     "agent-task fanout cook-batch admits a controller-local workflow instance; `--placement lab` (or `--runner <runner-id>`) places each child Cook on the Lab runner, and never offloads the batch itself";
 
@@ -99,21 +95,11 @@ impl Commands {
         let mut route = LabCommandRoute::new(portability, Vec::new(), workload);
         if let Some(mut contract) = route.lab_contract() {
             if let Commands::AgentTask(args) = self {
-                if matches!(args.command, agent_task::AgentTaskCommand::Promote(_))
-                    || agent_task_provider_requires_cwd_git_checkout(&args.command)
-                {
+                if agent_task_provider_requires_cwd_git_checkout(&args.command) {
                     contract.workspace_mode_policy = LabWorkspaceModePolicy::GitCheckoutRequired;
                 }
             }
             route.command = Some(contract);
-        }
-        if matches!(
-            self,
-            Commands::AgentTask(agent_task::AgentTaskArgs {
-                command: agent_task::AgentTaskCommand::Promote(args),
-            }) if args.dry_run
-        ) {
-            route.capture_mutation_patch = false;
         }
         Ok(route)
     }
@@ -147,26 +133,6 @@ impl Commands {
                 LAB_NO_EXTRA_CAPABILITIES,
             )
             .with_secret_env_sources(LAB_AGENT_TASK_SECRET_ENV_SOURCES),
-            Commands::AgentTask(agent_task::AgentTaskArgs {
-                command: agent_task::AgentTaskCommand::Promote(args),
-            }) if agent_task_promotion_source_is_controller_owned(&args.source) => {
-                LabCommandContract::local_only(
-                    AGENT_TASK_PROMOTE_LAB_LABEL,
-                    AGENT_TASK_PROMOTION_RUN_CONTROLLER_REASON,
-                )
-            }
-            Commands::AgentTask(agent_task::AgentTaskArgs {
-                command: agent_task::AgentTaskCommand::Promote(_),
-            }) => LabCommandContract::portable(
-                AGENT_TASK_PROMOTE_LAB_LABEL,
-                Some("--to-worktree"),
-                false,
-                LAB_NO_EXTRA_CAPABILITIES,
-            )
-            // Promotion is a fast local-state git worktree projection, not a
-            // workload run: a merely `warm` controller should not pay the Lab
-            // round-trip for it. Only offload when the machine is genuinely hot.
-            .cheap(),
             // Provider discovery is scope-sensitive: controller and runner
             // carry different extensions, runtime defaults, secrets, and
             // provider readiness, so *where* the catalog is read changes what
@@ -305,19 +271,6 @@ fn agent_task_fanout_local_only_contract(
     reason: &'static str,
 ) -> LabCommandContract {
     LabCommandContract::local_only(label, reason)
-}
-
-/// A durable run id is resolved through the controller lifecycle store, whose
-/// aggregate and finalized artifact projections are not portable path inputs.
-/// Other promotion source forms retain their existing runner-local behavior.
-pub(crate) fn agent_task_promotion_source_is_controller_owned(source: &str) -> bool {
-    // A run artifact URI is an immutable selector over controller-owned durable
-    // state, even when its bytes must be fetched from the producing runner.
-    // Keep its resolution, integrity verification, and target application on
-    // the controller rather than splitting those phases across placements.
-    source.starts_with("homeboy://agent-task/run/")
-        || agent_task_lifecycle::status(source).is_ok()
-        || std::path::Path::new(source).is_file()
 }
 
 pub(crate) fn agent_task_provider_requires_cwd_git_checkout(

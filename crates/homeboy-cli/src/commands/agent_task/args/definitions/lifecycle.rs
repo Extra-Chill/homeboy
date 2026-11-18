@@ -360,28 +360,7 @@ mod tests {
     }
 
     #[test]
-    fn promote_and_finalize_pr_parse_full_output() {
-        let cli = Cli::try_parse_from([
-            "homeboy",
-            "agent-task",
-            "promote",
-            "run-a",
-            "--to-worktree",
-            "repo@task",
-            "--full",
-            "--idempotency-key",
-            "promote-1",
-        ])
-        .expect("promote full parses");
-        let Commands::AgentTask(agent_task) = cli.command else {
-            panic!("agent task")
-        };
-        let AgentTaskCommand::Promote(args) = agent_task.command else {
-            panic!("promote")
-        };
-        assert!(args.full);
-        assert_eq!(args.idempotency_key.as_deref(), Some("promote-1"));
-
+    fn finalize_pr_parses_full_output() {
         let cli = Cli::try_parse_from([
             "homeboy",
             "agent-task",
@@ -598,51 +577,6 @@ pub struct ReviewArgs {
     pub provider_argv: Vec<String>,
 }
 #[derive(Args, Debug)]
-pub struct PromoteArgs {
-    /// Durable run or Cook ID that supplies the promotion candidate.
-    pub source: String,
-    /// Target managed worktree handle for the promoted candidate.
-    #[arg(long, value_name = "HANDLE")]
-    pub to_worktree: String,
-    /// Declared base branch resolved immediately before promotion gates run.
-    #[arg(long, default_value = "main", value_name = "BRANCH")]
-    pub base: String,
-    /// Exact argv element for the promotion apply provider; repeat per element.
-    #[arg(
-        long = "provider-argv",
-        value_name = "ARG",
-        long_help = "Promotion-only apply-provider invocation argument. Repeat once per exact argv element: the first is the executable and later values are its arguments; values are never shell-split. This cannot select an executor. The provider reads stdin request schema `homeboy/agent-task-promotion-apply-request/v1` and writes response schema `homeboy/agent-task-promotion-apply-response/v1` with required `workspace_path`."
-    )]
-    pub provider_argv: Vec<String>,
-    /// Restrict promotion to this task ID.
-    #[arg(long, value_name = "TASK_ID")]
-    pub task_id: Option<String>,
-    /// Validate the promotion without applying it.
-    #[arg(long)]
-    pub dry_run: bool,
-    /// Include complete promotion and gate evidence.
-    #[arg(long)]
-    pub full: bool,
-    /// Stable key used to replay this promotion without applying it twice.
-    #[arg(long, value_name = "KEY")]
-    pub idempotency_key: Option<String>,
-    /// Replay the exact gate policy from the source run's durable Cook recipe.
-    /// Homeboy-generated review commands use this reference so private gate
-    /// programs remain outside reviewer-facing command output.
-    #[arg(
-        long = "gates-from-cook-recipe",
-        conflicts_with = "gates_from_resume_contract"
-    )]
-    pub gates_from_cook_recipe: bool,
-    /// Replay the exact gate policy from the source run's durable promotion
-    /// resume contract without exposing private gate programs in command output.
-    #[arg(long = "gates-from-resume-contract")]
-    pub gates_from_resume_contract: bool,
-    /// Verification gate configuration to run before promotion.
-    #[command(flatten)]
-    pub gates: VerifyGateArgs,
-}
-#[derive(Args, Debug)]
 pub struct AdoptArgs {
     /// Existing durable Cook id or one of its declared attempt run ids whose recipe owns the candidate lifecycle.
     #[arg(value_name = "RUN_OR_COOK_ID")]
@@ -737,28 +671,4 @@ pub struct FinalizePrArgs {
     /// Publish corrected, independently verified work without a promotion lineage. The ID must identify a failed attempt (a Cook ID resolves to its newest attempt, which must be failed), or be unused so Homeboy can reserve a durable manual-finalization record for its intent and receipt.
     #[arg(long)]
     pub manual_finalization: bool,
-}
-#[derive(Args, Debug)]
-pub struct GateFeedbackArgs {
-    /// Promotion report as a JSON spec: inline JSON, `@FILE` to read a file, or
-    /// `-` to read stdin. A bare path is NOT accepted — use
-    /// `@/path/promotion.json`.
-    #[arg(long, value_name = "JSON|@FILE|-")]
-    pub promotion: String,
-    /// Source task as a JSON spec: inline JSON, `@FILE` to read a file, or `-`
-    /// to read stdin. A bare path is NOT accepted — use `@/path/task.json`.
-    #[arg(long = "source-task", value_name = "JSON|@FILE|-")]
-    pub source_task: String,
-    /// Current feedback attempt number.
-    #[arg(long, default_value_t = 1, value_name = "N")]
-    pub attempt: u32,
-    /// Maximum feedback attempts before stopping.
-    #[arg(long = "max-attempts", default_value_t = 3, value_name = "N")]
-    pub max_attempts: u32,
-    /// Durable source run ID associated with the feedback.
-    #[arg(long = "source-run-id", value_name = "ID")]
-    pub source_run_id: Option<String>,
-    /// Current candidate diff as an inline or file-backed specification.
-    #[arg(long = "current-diff", value_name = "SPEC")]
-    pub current_diff: Option<String>,
 }

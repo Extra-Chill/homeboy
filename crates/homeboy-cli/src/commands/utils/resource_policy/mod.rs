@@ -506,25 +506,6 @@ pub(crate) fn hot_command(command: &Commands) -> Option<HotCommand> {
         });
     }
 
-    // Promotion of a durable controller candidate cannot transfer its mutation,
-    // artifact selection, or finalization authority to Lab. Its deterministic
-    // gate workload is nevertheless portable, so a ready runner admits the
-    // controller coordinator under CPU pressure just as it does for Cook.
-    if matches!(
-        command,
-        Commands::AgentTask(agent_task::AgentTaskArgs {
-            command: agent_task::AgentTaskCommand::Promote(args),
-        }) if crate::commands::contract_lab_routing::agent_task_promotion_source_is_controller_owned(&args.source)
-    ) {
-        return Some(HotCommand {
-            label: "agent-task promote",
-            lab_offload_supported: true,
-            lab_offload_unsupported_reason: None,
-            allows_warm_runner_coordination: true,
-            offload_only_when_hot: true,
-        });
-    }
-
     let route = command.lab_route().ok()?;
     if !route.portability_contract().is_resource_intensive() {
         return None;
@@ -936,7 +917,6 @@ mod tests {
     use super::*;
     use crate::cli_surface::Cli;
     use crate::commands::resources::{LoadSummary, MemorySummary, ProcessSummary, RigLeaseSummary};
-    use crate::test_support::with_isolated_home;
     use clap::Parser;
 
     #[test]
@@ -1330,11 +1310,11 @@ mod tests {
 
     #[test]
     fn cheap_command_is_not_warned_or_refused_on_a_warm_controller() {
-        // A `.cheap()` portable command (e.g. `agent-task promote --dry-run`)
+        // A `.cheap()` portable command
         // shares Lab routing's pressure threshold: it stays local without warning
         // or refusal on a merely `warm` controller (#9432).
         assert!(evaluate(
-            cheap_hot("agent-task promote"),
+            cheap_hot("cheap portable command"),
             &resources(ResourceRecommendation::Warm),
         )
         .is_none());
@@ -1345,31 +1325,10 @@ mod tests {
         // Cheap only defers the threshold to `hot`; genuine hot pressure still
         // warns/refuses (#9432).
         assert!(evaluate(
-            cheap_hot("agent-task promote"),
+            cheap_hot("cheap portable command"),
             &resources(ResourceRecommendation::Hot),
         )
         .is_some());
-    }
-
-    #[test]
-    fn portable_promotion_dry_run_carries_the_cheap_pressure_threshold() {
-        // The portable promotion contract calls `.cheap()`; `hot_command` must
-        // propagate that threshold so resource admission agrees with Lab routing.
-        with_isolated_home(|_| {
-            let cli = Cli::parse_from([
-                "homeboy",
-                "agent-task",
-                "promote",
-                "candidate-source",
-                "--to-worktree",
-                "homeboy@promote-9432",
-                "--dry-run",
-            ]);
-            let command = hot_command(&cli.command).expect("promotion is resource managed");
-            assert!(command.offload_only_when_hot, "portable promotion is cheap");
-            assert!(evaluate(command, &resources(ResourceRecommendation::Warm)).is_none());
-            assert!(evaluate(command, &resources(ResourceRecommendation::Hot)).is_some());
-        });
     }
 
     #[test]
@@ -1566,16 +1525,6 @@ mod tests {
                 "agent-task",
                 "--limit",
                 "1",
-            ]
-            .as_slice(),
-            [
-                "homeboy",
-                "agent-task",
-                "gate-feedback",
-                "--promotion",
-                "{}",
-                "--source-task",
-                "{}",
             ]
             .as_slice(),
         ] {
@@ -1826,90 +1775,6 @@ mod tests {
         assert_eq!(command.label, "agent-task cook/run-plan/retry --run");
     }
 
-    #[test]
-    fn controller_owned_promotion_admits_a_ready_runner_for_portable_gates_when_hot() {
-        with_isolated_home(|_| {
-            let run_id = "promotion-admission-run";
-            crate::agents::agent_tasks::lifecycle::submit_plan(
-                &crate::agents::agent_tasks::AgentTaskPlan::new("fixture", Vec::new()),
-                Some(run_id),
-            )
-            .expect("persist controller-owned promotion source");
-            let cli = Cli::parse_from([
-                "homeboy",
-                "--runner",
-                "homeboy-lab",
-                "agent-task",
-                "promote",
-                run_id,
-                "--to-worktree",
-                "homeboy@promotion-admission",
-                "--verify",
-                "cargo test --lib",
-            ]);
-            let command = hot_command(&cli.command).expect("promotion is resource managed");
-            let preflight = parsed_command_preflight_input(
-                &cli,
-                &[
-                    "homeboy".to_string(),
-                    "--runner".to_string(),
-                    "homeboy-lab".to_string(),
-                    "agent-task".to_string(),
-                    "promote".to_string(),
-                    run_id.to_string(),
-                ],
-            );
-            let ready = ready_lab();
-            let mut resources = coordination_resources();
-            resources.recommendation = ResourceRecommendation::Hot;
-            resources.load.recommendation = ResourceRecommendation::Hot;
-
-            assert_eq!(command.label, "agent-task promote");
-            assert!(command.lab_offload_supported);
-            assert!(command.allows_warm_runner_coordination);
-            assert_eq!(
-                preflight.controller_execution,
-                crate::core::parsed_command_preflight::ControllerExecution::SplitPlacementCoordinator,
-            );
-            // A controller-owned promotion source still carries a declared
-            // Lab contract (`LabCommandContract::local_only`); the contract
-            // exists so its reason and hot_label remain diagnosable, but its
-            // `portability` is `LocalOnly`, not `Portable`, which is what
-            // rules out automatic Lab placement. That is
-            // `LabRouteIntent::Supported { automatic: false }`, not
-            // `Unsupported` — `Unsupported` means no Lab contract exists at
-            // all.
-            assert!(matches!(
-                preflight.lab_route,
-                crate::core::parsed_command_preflight::LabRouteIntent::Supported {
-                    automatic: false
-                }
-            ));
-            assert!(admits_warm_runner_coordination(
-                command,
-                &resources,
-                cli.runner.as_deref(),
-                Some(&ready),
-            ));
-            assert!(
-                !admits_warm_runner_coordination(command, &resources, None, Some(&ready)),
-                "an unpinned controller-owned promotion must not treat a ready Lab as local capacity"
-            );
-        });
-    }
-
-    /// #13631/#13632: an operator who explicitly pins `--runner homeboy-lab`
-    /// (or forces `--placement lab`) to a genuinely `ConnectedReady` runner
-    /// has already made the routing decision; that admission must not
-    /// additionally require the *controller* to be under warm/hot pressure.
-    /// Before this fix, `runner_admits_offload` for a cook/fanout coordinator
-    /// was always `admits_warm_runner_coordination`'s pressure-gated result,
-    /// so an idle controller (`ResourceRecommendation::Ok`) refused an
-    /// explicitly requested, fully ready runner — exactly the dispatch
-    /// refusal the issue reported (`runner status` said ready, cook admission
-    /// refused), and exactly why `cook --preview` (which never evaluates
-    /// controller pressure) could report success for a placement the real,
-    /// pressure-gated dispatch would then refuse.
     #[test]
     fn required_lab_placement_admits_a_ready_runner_regardless_of_controller_pressure() {
         let command = HotCommand {
