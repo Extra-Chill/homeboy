@@ -1832,7 +1832,9 @@ impl RunLifecycleProjection {
     /// Classify a report whose exit declared a [`CookDisposition`].
     pub fn from_status_and_disposition(status: &str, disposition: CookDisposition) -> Self {
         Self::new(
-            homeboy_core::run_lifecycle_status::from_cook_status(&CookStatus::from_status(status)),
+            homeboy_core::run_lifecycle_status::RunLifecycleStatus::from(CookStatus::from_status(
+                status,
+            )),
             disposition.is_terminal(),
         )
     }
@@ -1849,7 +1851,7 @@ impl RunLifecycleProjection {
         let status = CookStatus::from_status(status);
         let terminal = !status.is_in_flight();
         Self::new(
-            homeboy_core::run_lifecycle_status::from_cook_status(&status),
+            homeboy_core::run_lifecycle_status::RunLifecycleStatus::from(&status),
             terminal,
         )
     }

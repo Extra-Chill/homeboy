@@ -1,56 +1,22 @@
-//! Projection of the open Cook report vocabulary onto canonical lifecycle state.
+//! Canonical run lifecycle status and the Cook report vocabulary's projection
+//! onto it.
 //!
 //! Unknown labels carry no verdict. Terminality inside Cook remains the
 //! producing exit's declared `CookDisposition`, not an inference from a label.
 
-use crate::cook_status::CookStatus;
-use homeboy_control_plane_contract::ControlPlaneState;
+pub use homeboy_control_plane_contract::ControlPlaneState;
 
 pub const RUN_LIFECYCLE_STATUS_SCHEMA: &str = "homeboy/run-lifecycle-status/v1";
 
-/// Classify a known Cook outcome without inventing a verdict for newer labels.
-pub fn from_cook_status(status: &CookStatus) -> ControlPlaneState {
-    use CookStatus::*;
-    match status {
-        Queued => ControlPlaneState::Queued,
-        InFlight | AwaitingCi => ControlPlaneState::Running,
-        ReviewReady
-        | DraftPublished
-        | GreenNoFinalize
-        | IntentionalNoChange
-        | SupersededByActiveCook => ControlPlaneState::Succeeded,
-        CandidateRecoverable | GateEnvironmentUnavailable => {
-            ControlPlaneState::CandidateRecoverable
-        }
-        NoChanges
-        | NoCandidate
-        | AwaitingAcceptance
-        | Blocked
-        | RetriesExhausted
-        | ExecutionBudgetExhausted
-        | PolicyFailure
-        | GateDeclarationInvalid
-        | ReproPassesOnBase
-        | SelectionRequired
-        | BaselineRed
-        | Validated => ControlPlaneState::PartialFailure,
-        GateFailed
-        | NoChangesGateFailed
-        | ProviderFailure
-        | DurableFailure
-        | PreExecutionFailure
-        | PreArtifactInterruption
-        | Failed
-        | FinalizationFailed => ControlPlaneState::Failed,
-        Cancelled => ControlPlaneState::Cancelled,
-        TimedOut => ControlPlaneState::TimedOut,
-        Unknown(_) => ControlPlaneState::Unknown,
-    }
-}
+/// Canonical run lifecycle status. Every Cook vocabulary converts into it
+/// through `From` (`RunLifecycleStatus::from(&cook_status)`), so no caller
+/// keeps its own copy of the Cook-to-lifecycle mapping.
+pub type RunLifecycleStatus = ControlPlaneState;
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::cook_status::CookStatus;
 
     #[test]
     fn every_cook_status_round_trips_and_projects_to_the_reviewed_lifecycle_status() {
@@ -134,7 +100,12 @@ mod tests {
             assert_eq!(CookStatus::from_status(label), status);
             let json = serde_json::to_string(&status).unwrap();
             assert_eq!(serde_json::from_str::<CookStatus>(&json).unwrap(), status);
-            assert_eq!(from_cook_status(&status), expected, "{label}");
+            assert_eq!(RunLifecycleStatus::from(&status), expected, "{label}");
+            assert_eq!(
+                RunLifecycleStatus::from(status.clone()),
+                expected,
+                "{label}"
+            );
             assert_eq!(expected.is_terminal(), !status.is_in_flight(), "{label}");
         }
     }
@@ -162,7 +133,10 @@ mod tests {
             let status: CookStatus = serde_json::from_value(serde_json::json!(label)).unwrap();
             assert_eq!(status, CookStatus::Unknown(label.to_string()));
             assert_eq!(serde_json::to_value(&status).unwrap(), label);
-            assert_eq!(from_cook_status(&status), ControlPlaneState::Unknown);
+            assert_eq!(
+                RunLifecycleStatus::from(&status),
+                ControlPlaneState::Unknown
+            );
             assert!(!status.is_in_flight());
             assert!(!status.is_success_exit());
         }
