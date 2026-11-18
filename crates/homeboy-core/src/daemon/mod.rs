@@ -3725,6 +3725,9 @@ fn enqueue_exec_request(
         .unwrap_or_else(|| json!(crate::runner_pressure::PressureThresholds::default()));
     run_ref_metadata["pending_execution_envelope"] = json!(request.envelope);
     run_ref_metadata["reservation"] = json!(dispatch.env.get("HOMEBOY_RUNNER_RESERVATION"));
+    run_ref_metadata["admission_class"] = json!(dispatch
+        .env
+        .get(crate::runner_pressure::ADMISSION_CLASS_ENV));
     run_ref_metadata["runner_job_projection"] = json!({
         "runner_id": plan.runner_id,
         "command": crate::redaction::redact_argv_display(&plan.command),

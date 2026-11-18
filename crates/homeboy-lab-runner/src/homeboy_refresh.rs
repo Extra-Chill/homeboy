@@ -1630,7 +1630,7 @@ fn refresh_execution_options(
             });
     }
 
-    RunnerExecOptions::raw_command(vec![
+    let mut options = RunnerExecOptions::raw_command(vec![
         "bash".to_string(),
         "-lc".to_string(),
         script.to_string(),
@@ -1640,7 +1640,15 @@ fn refresh_execution_options(
         required_commands,
         timeout: None,
         ..Default::default()
-    })
+    });
+    // The refresh is what clears controller/runner build skew. The daemon
+    // admits a convergence job outside bulk pressure admission so a loaded
+    // Lab cannot queue it behind the very work the skew blocks (#18376).
+    options.env.insert(
+        homeboy_core::runner_pressure::ADMISSION_CLASS_ENV.to_string(),
+        homeboy_core::runner_pressure::CONVERGENCE_ADMISSION_CLASS.to_string(),
+    );
+    options
 }
 
 fn fresh_ssh_bootstrap_eligible_in_roots(runner: &super::Runner) -> Result<bool> {

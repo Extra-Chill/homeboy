@@ -76,6 +76,16 @@ impl RunnerPressure {
         error
     }
 
+    /// Admission for a runner convergence job such as a Homeboy refresh. It is
+    /// a download plus a hash check and is what clears controller/runner build
+    /// skew, so bulk CPU/IO load never queues it behind the work that skew is
+    /// blocking (#18376). The memory guard still holds.
+    pub fn convergence_admission_reason(&self, thresholds: &PressureThresholds) -> Option<String> {
+        self.memory
+            .is_some_and(|value| value > thresholds.memory.saturating_mul(100))
+            .then(|| "pressure".to_string())
+    }
+
     pub fn apply_thresholds(&mut self, thresholds: &PressureThresholds) {
         self.admission_reason = self.above(thresholds).then(|| "pressure".to_string());
     }
@@ -113,6 +123,15 @@ fn parse_psi(text: &str, kind: &str) -> Option<u32> {
 /// Optional fixed JSON sample for controlled daemon environments. Unset or
 /// malformed values retain live host sampling; thresholds are always reapplied.
 pub const SAMPLE_ENV: &str = "HOMEBOY_RUNNER_PRESSURE_SAMPLE";
+
+/// Runner exec env naming the admission class of a dispatched job. The daemon
+/// records it with the job; [`CONVERGENCE_ADMISSION_CLASS`] is admitted
+/// outside bulk pressure admission.
+pub const ADMISSION_CLASS_ENV: &str = "HOMEBOY_RUNNER_ADMISSION_CLASS";
+
+/// Admission class of a job that converges the runner itself (a Homeboy
+/// refresh), rather than running workload on it.
+pub const CONVERGENCE_ADMISSION_CLASS: &str = "convergence";
 
 fn configured_sample(value: Option<&str>) -> Option<RunnerPressure> {
     serde_json::from_str(value?).ok()

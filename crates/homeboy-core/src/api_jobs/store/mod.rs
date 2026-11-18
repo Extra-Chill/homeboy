@@ -3144,7 +3144,7 @@ impl JobStore {
     /// maintenance pass. Accepted work has no admission deadline.
     pub(crate) fn reconcile_direct_admission(&self, job_id: Uuid) -> Result<bool> {
         let reserve = crate::lab_capacity::gate_reserve(&crate::lab_capacity::allowed_cpus());
-        let (thresholds, previous, gate, active) = {
+        let (thresholds, convergence, previous, gate, active) = {
             let inner = self.inner.lock().expect("job store mutex poisoned");
             let stored = self.read_stored_job(&inner, job_id, false)?;
             if stored.job.status != JobStatus::Queued {
@@ -3157,8 +3157,16 @@ impl JobStore {
                 .find_map(|data| data.get("pressure_thresholds"))
                 .and_then(|value| serde_json::from_value(value.clone()).ok())
                 .unwrap_or_default();
+            let convergence = stored
+                .events
+                .iter()
+                .filter_map(|event| event.data.as_ref())
+                .find_map(|data| data.get("admission_class"))
+                .and_then(Value::as_str)
+                == Some(crate::runner_pressure::CONVERGENCE_ADMISSION_CLASS);
             (
                 thresholds,
+                convergence,
                 stored.pending_admission_reason.clone(),
                 crate::lab_capacity::is_gate(&stored.job),
                 inner
@@ -3186,7 +3194,12 @@ impl JobStore {
                     crate::daemon::step_job::admission_reason(&controller.request);
             }
         }
-        if gate && !reserve.is_empty() {
+        if convergence {
+            // A runner refresh clears the build skew that pressured work is
+            // waiting on; queueing it behind that pressure never converges
+            // (#18376). Process capacity is still reserved by the caller.
+            pressure.admission_reason = pressure.convergence_admission_reason(&thresholds);
+        } else if gate && !reserve.is_empty() {
             pressure.admission_reason = crate::lab_capacity::gate_admission_reason(
                 &pressure,
                 &thresholds,
