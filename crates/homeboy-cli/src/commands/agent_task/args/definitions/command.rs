@@ -4,8 +4,8 @@ use super::cook::{AgentTaskCookArgs, PromotionProviderArgs};
 use super::fanout::{AgentTaskBatchPrepareArgs, AgentTaskFanoutArgs};
 use super::lifecycle::{
     AdoptArgs, CancelArgs, DiagnoseArgs, FinalizePrArgs, GateFeedbackArgs, PlacementUpdateArgs,
-    PromoteArgs, RecoverArgs, ResumeArgs,
-    RetryArgs, ReviewArgs, RunArgs, RunPlanArgs, StatusArgs, ValidatePlanArgs,
+    PromoteArgs, RecoverArgs, ResumeArgs, RetryArgs, ReviewArgs, RunArgs, RunPlanArgs, StatusArgs,
+    ValidatePlanArgs,
 };
 use clap::{Args, Subcommand, ValueEnum};
 

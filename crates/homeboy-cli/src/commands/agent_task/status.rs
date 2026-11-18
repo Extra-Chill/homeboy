@@ -32,9 +32,7 @@ use homeboy_core::cook_status::CookStatus;
 use homeboy_lab_contract::lab::transport_failure::LabTransportAttemptReceipt;
 
 use super::super::CmdResult;
-use super::args::{
-    CancelArgs, DiagnoseArgs, ReconcileArgs, StatusArgs,
-};
+use super::args::{CancelArgs, DiagnoseArgs, ReconcileArgs, StatusArgs};
 use super::candidate::classify_candidates;
 use crate::commands::utils::response::{
     CommandActionableMetadata, CommandAgentTaskRef, CommandArtifactRef, CommandNextAction,

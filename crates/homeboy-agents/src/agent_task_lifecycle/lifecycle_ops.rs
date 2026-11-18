@@ -3080,51 +3080,62 @@ pub fn mark_running_in_store(
 ) -> Result<AgentTaskRunRecord> {
     let run_id = sanitize_run_id(run_id);
     let mut error = None;
-    lifecycle_store.transition_when(&run_id, |stored| {
-        let mut prepared = stored.clone();
-        let record = &mut prepared;
-        if record.state() == RunExecutionState::Queued && record.metadata["execution_scheduling"].is_object() {
-            error = Some(Error::validation_invalid_argument(
-                "run_id", "queued execution is owned by its exact durable step", Some(run_id.clone()), None,
-            ));
-            return None;
-        }
-        if record.state() == RunExecutionState::Running && record.owner_process_is_running() {
-            error = Some(Error::validation_invalid_argument(
-                "run_id",
-                format!(
-                    "agent-task run '{}' is already running under pid {}",
-                    record.run_id,
-                    record.owner_pid().unwrap_or_default()
-                ),
-                Some(record.run_id.clone()),
-                None,
-            ));
-            return None;
-        }
-        if record.state().is_terminal() {
-            error = Some(Error::validation_invalid_argument(
-                "run_id",
-                format!(
-                    "agent-task run '{}' is already terminal with state {:?}",
-                    record.run_id, record.state()
-                ),
-                Some(record.run_id.clone()),
-                None,
-            ));
-            return None;
-        }
-        let reclaimed_stale = record.state() == RunExecutionState::Running;
-        record.updated_at = Some(now_timestamp());
-        start_run(record);
-        update_lifecycle_heartbeat(record);
-        record.record_runner_metadata(reclaimed_stale);
-        Some(AgentTaskTransition::Advance {
-            kind: AgentTaskAdvance::Start,
-            prepared: Box::new(prepared),
+    lifecycle_store
+        .transition_when(&run_id, |stored| {
+            let mut prepared = stored.clone();
+            let record = &mut prepared;
+            if record.state() == RunExecutionState::Queued
+                && record.metadata["execution_scheduling"].is_object()
+            {
+                error = Some(Error::validation_invalid_argument(
+                    "run_id",
+                    "queued execution is owned by its exact durable step",
+                    Some(run_id.clone()),
+                    None,
+                ));
+                return None;
+            }
+            if record.state() == RunExecutionState::Running && record.owner_process_is_running() {
+                error = Some(Error::validation_invalid_argument(
+                    "run_id",
+                    format!(
+                        "agent-task run '{}' is already running under pid {}",
+                        record.run_id,
+                        record.owner_pid().unwrap_or_default()
+                    ),
+                    Some(record.run_id.clone()),
+                    None,
+                ));
+                return None;
+            }
+            if record.state().is_terminal() {
+                error = Some(Error::validation_invalid_argument(
+                    "run_id",
+                    format!(
+                        "agent-task run '{}' is already terminal with state {:?}",
+                        record.run_id,
+                        record.state()
+                    ),
+                    Some(record.run_id.clone()),
+                    None,
+                ));
+                return None;
+            }
+            let reclaimed_stale = record.state() == RunExecutionState::Running;
+            record.updated_at = Some(now_timestamp());
+            start_run(record);
+            update_lifecycle_heartbeat(record);
+            record.record_runner_metadata(reclaimed_stale);
+            Some(AgentTaskTransition::Advance {
+                kind: AgentTaskAdvance::Start,
+                prepared: Box::new(prepared),
+            })
+        })?
+        .ok_or_else(|| {
+            error.unwrap_or_else(|| {
+                Error::internal_unexpected("agent-task run transition was not applied")
+            })
         })
-    })?
-    .ok_or_else(|| error.unwrap_or_else(|| Error::internal_unexpected("agent-task run transition was not applied")))
 }
 
 /// `mutate_record` whose accepted mutation also commits a fresh execution

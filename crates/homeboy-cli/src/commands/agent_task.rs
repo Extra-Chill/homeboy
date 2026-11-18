@@ -37,9 +37,8 @@ pub use args::{
     AgentTaskDoctorArgs, AgentTaskFanoutArgs, AgentTaskFanoutCommand, AgentTaskFanoutCookBatchArgs,
     CancelArgs, ContractArgs, ContractFormat, CookFeedbackArgs, DiagnoseArgs, FinalizePrArgs,
     GateFeedbackArgs, PlacementUpdateArgs, PromoteArgs, PromotionProviderArgs, ProvidersArgs,
-    RecoverArgs, RetainedArtifactsArgs,
-    RetainedArtifactsCommand, RetryArgs, ReviewArgs, RunPlanArgs, StatusArgs, ValidatePlanArgs,
-    VerifyGateArgs,
+    RecoverArgs, RetainedArtifactsArgs, RetainedArtifactsCommand, RetryArgs, ReviewArgs,
+    RunPlanArgs, StatusArgs, ValidatePlanArgs, VerifyGateArgs,
 };
 
 /// Shallow-merge rotation route overrides over the materialized base config,

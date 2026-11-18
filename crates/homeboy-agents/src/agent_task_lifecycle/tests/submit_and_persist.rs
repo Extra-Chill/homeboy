@@ -1617,7 +1617,10 @@ fn claim_family_siblings_skip_expire_and_notify() {
     let rescan =
         claim_next_eligible_queued_run_in_store(&seeded).expect("rescan the injected store");
     assert_eq!(
-        rescan.record.expect("the skipped record is claimable again").run_id,
+        rescan
+            .record
+            .expect("the skipped record is claimable again")
+            .run_id,
         queued_run_id
     );
     assert!(claim_next_queued_run_in_store(&seeded)

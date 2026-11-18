@@ -2479,8 +2479,8 @@ fn run_next_skips_an_older_ineligible_record_and_executes_the_next_record() {
             calls: Arc::clone(&calls),
         }))
         .expect("next eligible record executes");
-        let skipped = agent_task_lifecycle::exact_record("run-next-test-detached")
-            .expect("skipped record");
+        let skipped =
+            agent_task_lifecycle::exact_record("run-next-test-detached").expect("skipped record");
 
         assert_eq!(calls.load(Ordering::SeqCst), 1);
         assert_eq!(result.value.expect("aggregate").plan_id, "service-plan");
@@ -2620,8 +2620,7 @@ fn run_next_redacts_adversarial_provider_readiness_diagnostics_everywhere() {
             },
         )
         .expect("adversarial readiness skip does not block eligible work");
-        let record =
-            lifecycle_status("run-next-a-adversarial-readiness").expect("skipped record");
+        let record = lifecycle_status("run-next-a-adversarial-readiness").expect("skipped record");
         let status = agent_task_lifecycle::reconcile_status("run-next-a-adversarial-readiness")
             .expect("status projection");
         let logs = agent_task_lifecycle::logs("run-next-a-adversarial-readiness")

@@ -293,9 +293,7 @@ impl AgentTaskLifecycleStore {
     ) -> Result<Option<AgentTaskRunRecord>> {
         self.with_store_lock(|| {
             let mut record = self.read_record(run_id)?;
-            if record.state() != super::RunExecutionState::Queued
-                || !authorize(&record)
-            {
+            if record.state() != super::RunExecutionState::Queued || !authorize(&record) {
                 return Ok(None);
             }
             validate_execution_budget(plan)?;
