@@ -42,6 +42,12 @@ pub(super) fn recover(args: RecoverArgs) -> CmdResult<Value> {
             return Ok((report, 1));
         }
         let step_exit = agent_task_service::recovery_step_exit_code(&run_id)?.unwrap_or(exit_code);
+        let mut status = status;
+        if step_exit != 0 {
+            if let Some(failure) = agent_task_service::recovery_step_failure(&run_id)? {
+                status["failure"] = failure;
+            }
+        }
         return Ok((status, step_exit));
     }
     Ok((report, code))

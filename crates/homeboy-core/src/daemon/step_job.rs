@@ -531,6 +531,12 @@ pub fn recorded_step_exit_code(job_id: &str) -> Option<i32> {
         .and_then(|code| i32::try_from(code).ok())
 }
 
+/// The cause a step's child reported in its log, if it failed with one.
+pub fn recorded_step_failure_cause(job_id: &str) -> Option<String> {
+    let log = std::fs::read_to_string(step_job_dir(job_id).ok()?.join(STEP_LOG_FILE)).ok()?;
+    child_failure_cause(&log)
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum StepChildAuthorization {
     Waiting,
