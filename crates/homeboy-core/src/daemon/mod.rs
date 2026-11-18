@@ -1933,11 +1933,48 @@ fn observed_daemon_pass(name: &str, body: impl FnOnce() -> Result<()>) {
 
 const STORAGE_MAINTENANCE_BUDGET: std::time::Duration = std::time::Duration::from_secs(10);
 
+/// Files the pre-SQLite job store (#15752) and the removed leaseless-orphan
+/// recovery (#17438) left in the daemon state directory. No current code
+/// writes or reads them, so nothing else would ever remove them (#18460).
+fn is_pre_sqlite_job_store_file(name: &str) -> bool {
+    matches!(
+        name,
+        "jobs.json"
+            | "jobs.json.migrated"
+            | ".jobs.json.transaction.lock"
+            | "leaseless-recovery.json"
+    ) || name.starts_with("jobs.json.")
+        || (name.starts_with("leaseless-orphan-") && name.ends_with(".snapshot"))
+        || name.ends_with(".json.replay-tombstones.sqlite")
+}
+
+fn remove_pre_sqlite_job_store_files(state_dir: &Path) {
+    let Ok(entries) = std::fs::read_dir(state_dir) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let removable = entry.file_type().is_ok_and(|kind| kind.is_file())
+            && entry
+                .file_name()
+                .to_str()
+                .is_some_and(is_pre_sqlite_job_store_file);
+        if removable {
+            let _ = std::fs::remove_file(entry.path());
+        }
+    }
+}
+
 fn orchestration_tick_loop(
     job_store: JobStore,
     interval: std::time::Duration,
     shutdown: mpsc::Receiver<()>,
 ) {
+    if let Some(state_dir) = paths::daemon_state_file()
+        .ok()
+        .and_then(|state| state.parent().map(Path::to_path_buf))
+    {
+        isolated_tick(|| remove_pre_sqlite_job_store_files(&state_dir));
+    }
     loop {
         isolated_tick(|| {
             observed_daemon_pass("orchestration", || {
@@ -4724,6 +4761,48 @@ mod tests {
             )),
             "an unparseable value falls back to the default rather than disabling"
         );
+    }
+
+    #[test]
+    fn daemon_maintenance_removes_only_pre_sqlite_job_store_files() {
+        let dir = tempfile::tempdir().unwrap();
+        let legacy = [
+            "jobs.json",
+            "jobs.json.migrated",
+            "jobs.json.pre-df6d5193",
+            "jobs.json.corrupt-1731900000",
+            "jobs.json.replay-tombstones.sqlite",
+            "retained-controller-jobs.json.replay-tombstones.sqlite",
+            ".jobs.json.transaction.lock",
+            "leaseless-orphan-0a1b.snapshot",
+            "leaseless-recovery.json",
+        ];
+        let live = [
+            "state.json",
+            "owner.lock",
+            "admission.lock",
+            "operation.lock",
+            "termination.json",
+            "daemon.log",
+            "workflow-cadences.sqlite",
+            "state.pre-8879-nuke.json",
+        ];
+        for name in legacy.iter().chain(&live) {
+            std::fs::write(dir.path().join(name), b"x").unwrap();
+        }
+        std::fs::create_dir(dir.path().join("jobs.json.d")).unwrap();
+
+        super::remove_pre_sqlite_job_store_files(dir.path());
+
+        let mut left: Vec<String> = std::fs::read_dir(dir.path())
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name().into_string().unwrap())
+            .collect();
+        left.sort();
+        let mut expected: Vec<String> = live.iter().map(|name| name.to_string()).collect();
+        expected.push("jobs.json.d".to_string());
+        expected.sort();
+        assert_eq!(left, expected);
     }
 
     #[test]
