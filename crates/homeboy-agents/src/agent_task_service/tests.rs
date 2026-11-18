@@ -877,6 +877,141 @@ fn record_queued_admission(
     .unwrap();
 }
 
+/// Point a claimed admission's exact-step owner at a process that has exited,
+/// as when the step (or the CLI that ran it) is gone. The start identity is a
+/// real one, so liveness is decided (dead), never "unverifiable".
+fn orphan_claimed_admission(store: &agent_task_lifecycle::AgentTaskLifecycleStore, subject: &str) {
+    let mut child = std::process::Command::new("true").spawn().unwrap();
+    let dead_pid = child.id();
+    child.wait().unwrap();
+    let identity = homeboy_core::process::process_start_identity(std::process::id()).unwrap();
+    store
+        .mutate_record(subject, |record| {
+            record.metadata["execution_step_owner"]["pid"] = serde_json::json!(dead_pid);
+            record.metadata["execution_step_owner"]["process_start_identity"] =
+                serde_json::json!(identity);
+            record.metadata["runner_pid"] = serde_json::json!(dead_pid);
+            record.metadata["runner_process_start_identity"] = serde_json::json!(identity);
+            true
+        })
+        .unwrap();
+}
+
+/// #18377 acceptance: a queued, not-yet-materialized Cook is daemon work. Its
+/// claiming owner exiting before admission completes must not fail it as an
+/// expired handoff or leave it stale; it returns to the admission queue and
+/// dispatches once the blocker clears.
+#[test]
+fn queued_cook_admission_survives_its_owner_exiting_and_dispatches_when_unblocked() {
+    with_isolated_home(|home| {
+        let store = test_lifecycle_store();
+        let subject = "owner-exited-admission";
+        record_queued_admission(&store, home.path(), subject);
+        let claimed = current_intent(&store, subject);
+        assert!(store.claim_execution_admission(&claimed).unwrap());
+        orphan_claimed_admission(&store, subject);
+
+        let orphaned = store.read_record(subject).unwrap();
+        assert_eq!(orphaned.state(), RunExecutionState::Running);
+        assert!(agent_task_lifecycle::has_orphaned_unmaterialized_cook_admission(&orphaned));
+        assert!(
+            !agent_task_lifecycle::has_expired_detached_cook_admission(
+                &orphaned,
+                chrono::Utc::now()
+            ),
+            "an orphaned admission is requeued, not expired"
+        );
+
+        // The daemon's stale sweep reconciles the run: it is requeued, not failed.
+        reconcile_run_in_store(&store, subject, false).unwrap();
+        let requeued = store.read_record(subject).unwrap();
+        assert_eq!(
+            requeued.state(),
+            RunExecutionState::Queued,
+            "{:#}",
+            requeued.metadata
+        );
+        assert!(requeued.metadata.get("runner_pid").is_none());
+        assert!(requeued.metadata.get("execution_step_owner").is_none());
+        assert_eq!(
+            requeued.metadata["unmaterialized_cook_admission"]["state"],
+            "queued"
+        );
+        assert_eq!(
+            requeued.metadata["detached_cook_handoff"]["state"],
+            "pending"
+        );
+        assert!(requeued.metadata.get("stale_running").is_none());
+        let next = current_intent(&store, subject);
+        assert_eq!(next.epoch, claimed.epoch + 1);
+        assert!(agent_task_lifecycle::detached_cook_admission_is_live(
+            &requeued,
+            chrono::Utc::now()
+        ));
+        // The superseded step can no longer act on the admission.
+        assert!(!claimed.authorizes(&requeued));
+
+        // Blocker clears: the requeued intent dispatches the admission once.
+        struct Dispatch(Arc<AtomicUsize>);
+        impl ExecutionStepTransport for Dispatch {
+            fn admission(&self, _: Vec<String>, _: Option<String>) -> homeboy_core::Result<i32> {
+                self.0.fetch_add(1, Ordering::SeqCst);
+                Ok(0)
+            }
+        }
+        let dispatched = Arc::new(AtomicUsize::new(0));
+        assert_eq!(
+            execute_counted(
+                &claimed.intent_id,
+                &Arc::new(AtomicUsize::new(0)),
+                &Dispatch(dispatched.clone())
+            )
+            .unwrap(),
+            0
+        );
+        assert_eq!(
+            dispatched.load(Ordering::SeqCst),
+            0,
+            "stale intent is inert"
+        );
+        execute_counted(
+            &next.intent_id,
+            &Arc::new(AtomicUsize::new(0)),
+            &Dispatch(dispatched.clone()),
+        )
+        .unwrap();
+        assert_eq!(dispatched.load(Ordering::SeqCst), 1);
+        assert_eq!(
+            store.read_record(subject).unwrap().state(),
+            RunExecutionState::Running
+        );
+    });
+}
+
+/// A claimed admission whose step is still alive is owned; nothing requeues it.
+#[test]
+fn live_claimed_cook_admission_is_not_requeued() {
+    with_isolated_home(|home| {
+        let store = test_lifecycle_store();
+        let subject = "owner-live-admission";
+        record_queued_admission(&store, home.path(), subject);
+        let claimed = current_intent(&store, subject);
+        assert!(store.claim_execution_admission(&claimed).unwrap());
+        let record = store.read_record(subject).unwrap();
+        assert!(!agent_task_lifecycle::has_orphaned_unmaterialized_cook_admission(&record));
+        assert!(
+            !agent_task_lifecycle::requeue_orphaned_unmaterialized_cook_admission_in_store(
+                &store, subject
+            )
+            .unwrap()
+        );
+        assert_eq!(
+            store.read_record(subject).unwrap().state(),
+            RunExecutionState::Running
+        );
+    });
+}
+
 #[test]
 fn unobserved_readiness_requeues_queued_cook_admission_instead_of_failing() {
     with_isolated_home(|home| {
@@ -5690,4 +5825,62 @@ fn index_cook_attempts(cook_id: &str, first_run_id: &str, latest_run_id: &str) {
             .collect(),
     })
     .expect("index Cook attempt");
+}
+
+/// #18377: a live daemon that admits work owns the queued submission, so a
+/// refused build replacement is not reported as the scheduling blocker beside
+/// `admits_work: true`.
+#[test]
+fn scheduling_blocker_never_pairs_a_serving_daemon_with_a_replacement_error() {
+    use homeboy_control_plane_contract::ControlPlaneBlockerDaemon;
+    let replacement_refused = || {
+        Err(homeboy_core::Error::internal_unexpected(
+            "service manager systemd did not bring up a replacement daemon: pid 1 is still serving lease `l`",
+        ))
+    };
+    let serving = ControlPlaneBlockerDaemon {
+        admits_work: true,
+        summary: "daemon process is live and its API is reachable".into(),
+    };
+    let serving_report = serde_json::json!({"state": "serving", "waiting_for": null});
+    assert_eq!(
+        scheduling_daemon_blocker(
+            replacement_refused(),
+            Some(serving_report.clone()),
+            Some(serving.clone())
+        ),
+        None
+    );
+    assert_eq!(
+        scheduling_daemon_blocker(Ok(()), Some(serving_report), Some(serving)),
+        None
+    );
+
+    // A daemon that cannot admit work is the one cause, with its start error.
+    let unavailable = ControlPlaneBlockerDaemon {
+        admits_work: false,
+        summary: "no live daemon".into(),
+    };
+    let blocker = scheduling_daemon_blocker(
+        replacement_refused(),
+        Some(serde_json::json!({"state": "unavailable", "waiting_for": null})),
+        Some(unavailable),
+    )
+    .expect("an unavailable daemon blocks scheduling");
+    assert_eq!(blocker["daemon"]["admits_work"], false);
+    assert_eq!(blocker["next_action"], "homeboy daemon recover");
+    assert!(blocker["error"]
+        .as_str()
+        .unwrap()
+        .contains("replacement daemon"));
+    let blocker = scheduling_daemon_blocker(replacement_refused(), None, None)
+        .expect("no daemon status blocks scheduling");
+    assert!(blocker["daemon"].is_null());
+
+    // A draining daemon reports only its own replacement wait.
+    let draining = serde_json::json!({"state": "draining", "waiting_for": "daemon_replacement"});
+    assert_eq!(
+        scheduling_daemon_blocker(Ok(()), Some(draining.clone()), None),
+        Some(draining)
+    );
 }
