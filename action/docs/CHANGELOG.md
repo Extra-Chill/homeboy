@@ -2,6 +2,11 @@
 
 All notable changes to Homeboy Action will be documented in this file.
 
+## [2.27.2] - 2026-11-18
+
+### Fixed
+- reuse cached extension install for immutable extension-ref
+
 ## [2.27.1] - 2026-11-18
 
 ### Fixed
