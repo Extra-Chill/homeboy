@@ -4,6 +4,11 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.479.2] - 2026-11-19
+
+### Fixed
+- exact step usage, workflow overhead split, and runs show for workflow Cooks
+
 ## [0.479.1] - 2026-11-19
 
 ### Fixed
