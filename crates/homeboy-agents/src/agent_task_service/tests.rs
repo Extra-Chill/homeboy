@@ -3067,6 +3067,46 @@ fn superseded_workflow_cook_step_follows_its_owner_until_it_settles() {
     });
 }
 
+/// #18525: an owner whose mission was fenced before its declared retry
+/// materialized never settles on its own; its followers settle cancelled.
+#[test]
+fn superseded_workflow_cook_step_settles_when_its_owner_mission_is_fenced() {
+    with_isolated_home(|_| {
+        let (owner, superseded) = ("cook-owner-18525", "cook-superseded-18525");
+        for cook_id in [owner, superseded] {
+            agent_task_lifecycle::submit_plan(&test_plan(), Some(cook_id)).unwrap();
+        }
+        agent_task_lifecycle::rewrite_record_for_test(owner, |record| {
+            agent_task_lifecycle::set_run_state(record, RunExecutionState::Running);
+            record.metadata["cook_id"] = serde_json::json!(owner);
+        })
+        .unwrap();
+        agent_task_lifecycle::rewrite_record_for_test(superseded, |record| {
+            agent_task_lifecycle::set_run_state(record, RunExecutionState::Cancelled);
+            record.metadata["cook_id"] = serde_json::json!(superseded);
+            record.metadata["superseded_by_active_cook"] = serde_json::json!({"cook_id": owner});
+        })
+        .unwrap();
+        let store = agent_task_lifecycle::AgentTaskLifecycleStore::from_environment().unwrap();
+        agent_task_lifecycle::fence_cook_mission_in_store(
+            &store,
+            owner,
+            Some("workflow Cook step cancelled"),
+        )
+        .unwrap();
+
+        match super::cook_step::workflow_cook_outcome(superseded) {
+            homeboy_core::daemon::workflow_job::WorkflowRunOutcome::Settled { outcome, reason } => {
+                assert_eq!(outcome, "cancelled");
+                let reason = reason.unwrap_or_default();
+                assert!(reason.contains(owner), "{reason}");
+                assert!(reason.contains("workflow Cook step cancelled"), "{reason}");
+            }
+            other => panic!("follower of a fenced owner did not settle: {other:?}"),
+        }
+    });
+}
+
 #[test]
 fn cancelled_workflow_cook_step_cancels_the_attempt_its_cook_redirected_to() {
     with_isolated_home(|_| {
