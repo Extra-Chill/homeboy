@@ -519,6 +519,11 @@ fn a_branch_change_starts_exactly_one_instance_after_the_debounce() {
         }
 
         git(&repo, &["commit", "-q", "--allow-empty", "-m", "two"]);
+        // Refs are polled at most once a minute, not on every tick.
+        assert!(
+            admit_due(&store, base + 24 * HOUR + 1_000).is_empty(),
+            "polled within the poll interval"
+        );
         let changed_at = base + 25 * HOUR;
         let changed = admit_due(&store, changed_at);
         assert_eq!(changed[0]["changed"], json!(["branch:repo@main"]));

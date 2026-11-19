@@ -94,7 +94,18 @@ pub struct WatchState {
     /// When the change not yet handled by an instance was last observed.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub changed_at_ms: Option<u64>,
+    /// When the refs were last observed; they are polled at most every
+    /// [`WATCH_POLL_MS`], not on every orchestration tick.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub polled_at_ms: Option<u64>,
 }
+
+/// How often a watch re-observes its refs. Remote refs cost a network round
+/// trip, so the orchestration tick must not pay one every pass.
+pub const WATCH_POLL_MS: u64 = 60_000;
+/// Bound on one ref observation, so an unreachable remote cannot stall the
+/// orchestration tick.
+const WATCH_OBSERVE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
 
 /// The run of failed instances a cadence is currently in.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -228,23 +239,16 @@ fn observe_refs(template: &WorkflowJobRequest) -> (BTreeMap<String, String>, Opt
 /// An absent branch, tag, or file is the empty value.
 fn observe_ref(watched: &WatchRef, cwd: &Path) -> std::result::Result<String, String> {
     let ls_remote = |args: &[&str]| -> std::result::Result<String, String> {
-        let output = std::process::Command::new("git")
-            .arg("ls-remote")
-            .args(args)
-            .current_dir(cwd)
-            .env("GIT_TERMINAL_PROMPT", "0")
-            .stdin(std::process::Stdio::null())
-            .output()
-            .map_err(|error| error.to_string())?;
-        if !output.status.success() {
-            return Err(String::from_utf8_lossy(&output.stderr).trim().to_string());
-        }
-        Ok(String::from_utf8_lossy(&output.stdout)
-            .lines()
-            .next()
-            .unwrap_or_default()
-            .trim()
-            .to_string())
+        let args = [&["ls-remote"], args].concat();
+        let output = crate::git::run_git_with_env_timeout(
+            cwd,
+            &args,
+            "git ls-remote for workflow watch",
+            &[("GIT_TERMINAL_PROMPT".to_string(), "0".to_string())],
+            WATCH_OBSERVE_TIMEOUT,
+        )
+        .map_err(|error| error.message)?;
+        Ok(output.lines().next().unwrap_or_default().trim().to_string())
     };
     match watched {
         WatchRef::Branch(target) => {
@@ -374,6 +378,7 @@ pub fn register(
                 debounce_ms: watch.debounce()?.as_millis() as u64,
                 observed: observe_refs(&template).0,
                 changed_at_ms: None,
+                polled_at_ms: Some(now_ms),
             })
         })
         .transpose()?;
@@ -665,13 +670,16 @@ fn admit_watched(store: &JobStore, cadence: Cadence, now_ms: u64) -> Result<Valu
     let Some(watch) = &cadence.watch else {
         return Ok(Value::Null);
     };
-    let (observed, error) = observe_refs(&cadence.request);
-    let changed = observed
-        .iter()
-        .filter(|(key, value)| watch.observed.get(*key) != Some(*value))
-        .map(|(key, _)| key.clone())
-        .collect::<Vec<_>>();
-    if !changed.is_empty() || (error.is_some() && error != cadence.last_error) {
+    let poll_due = watch
+        .polled_at_ms
+        .is_none_or(|polled| now_ms >= polled + WATCH_POLL_MS);
+    if poll_due {
+        let (observed, error) = observe_refs(&cadence.request);
+        let changed = observed
+            .iter()
+            .filter(|(key, value)| watch.observed.get(*key) != Some(*value))
+            .map(|(key, _)| key.clone())
+            .collect::<Vec<_>>();
         let debounce_ms = watch.debounce_ms;
         advance(&cadence.workflow, cadence.next_due_ms, |cadence| {
             if let Some(error) = error {
@@ -684,14 +692,13 @@ fn admit_watched(store: &JobStore, cadence: Cadence, now_ms: u64) -> Result<Valu
                 if !changed.is_empty() {
                     watch.changed_at_ms = Some(now_ms);
                 }
+                watch.polled_at_ms = Some(now_ms);
                 watch.observed.extend(observed);
             }
         })?;
-        return Ok(if changed.is_empty() {
-            Value::Null
-        } else {
-            json!({ "workflow": cadence.workflow, "changed": changed })
-        });
+        if !changed.is_empty() {
+            return Ok(json!({ "workflow": cadence.workflow, "changed": changed }));
+        }
     }
     let Some(changed_at_ms) = watch.changed_at_ms else {
         return Ok(Value::Null);
