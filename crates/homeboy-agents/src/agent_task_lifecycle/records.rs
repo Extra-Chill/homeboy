@@ -913,36 +913,10 @@ impl AgentTaskRunRecord {
             return;
         }
 
-        // Worktree lookup and materialization run in the controller before a
-        // runner job can exist. Their fresh Cook heartbeat is therefore the
-        // ownership evidence; applying the runner-PID watchdog here would
-        // cancel a healthy provider command before its declared timeout.
-        if self.has_fresh_controller_pre_provider_heartbeat() {
+        if !super::cook_run_state::should_annotate_stale(self) {
             return;
         }
 
-        // A local Cook retry records its bounded supervisor admission in the
-        // same write that makes the queued successor visible. The daemon job id
-        // arrives later, so do not classify that intentional interval as an
-        // ownerless runner.
-        if self.has_live_execution_step_owner() {
-            return;
-        }
-
-        if self.owner_process_is_running() {
-            return;
-        }
-
-        if self.has_fresh_update()
-            && (self.runner_job_id().is_some() || self.has_planned_runner_execution())
-        {
-            return;
-        }
-
-        // The record names a runner job but its own heartbeat aged past the
-        // liveness window. That is all a projection can observe; whether the
-        // job itself is gone is decided only against the runner's job state
-        // (see `observe_runner_job_in_store`), never assumed here.
         let reason = if self.runner_job_id().is_some() {
             RunnerJobObservation::HeartbeatStale.reason()
         } else if self.owner_pid().is_some() {
@@ -1001,73 +975,13 @@ impl AgentTaskRunRecord {
 
     /// Durable step custody replaces the caller's expiring retry lease.
     pub(crate) fn has_live_execution_step_owner(&self) -> bool {
-        let scheduling = &self.metadata["execution_scheduling"];
-        if !scheduling["current_intent_id"].is_string()
-            || self.lifecycle.execution.state == RunExecutionState::Cancelled
-        {
-            return false;
-        }
-        if self.lifecycle.execution.state == RunExecutionState::Queued {
-            return true;
-        }
-        let owner = &self.metadata["execution_step_owner"];
-        // Provider completion can precede the same child's promotion/gates.
-        // Preserve that live exact owner until its kernel identity exits.
-        if owner["intent_id"] != scheduling["current_intent_id"] || !owner["job_id"].is_string() {
-            return false;
-        }
-        let Some(pid) = owner["pid"]
-            .as_u64()
-            .and_then(|pid| u32::try_from(pid).ok())
-        else {
-            return true;
-        };
-        let Ok(identity) = serde_json::from_value::<homeboy_core::process::ProcessStartIdentity>(
-            owner["process_start_identity"].clone(),
-        ) else {
-            return true;
-        };
-        matches!(
-            homeboy_core::process::process_identity_state_with_start_identity(
-                pid,
-                None,
-                Some(&identity)
-            ),
-            homeboy_core::process::ProcessIdentityState::Live
-                | homeboy_core::process::ProcessIdentityState::Unverifiable
-        )
+        super::cook_run_state::has_live_execution_step_owner(self)
     }
 
     /// Probe the current controller process, not its provider children.
     /// Provider completion does not release the controller's ownership.
     pub(crate) fn local_owner_liveness(&self) -> LocalOwnerLiveness {
-        let Some(pid) = self
-            .metadata
-            .get("runner_pid")
-            .and_then(Value::as_u64)
-            .and_then(|pid| u32::try_from(pid).ok())
-        else {
-            return LocalOwnerLiveness::Absent;
-        };
-        let start_identity = self
-            .metadata
-            .get("runner_process_start_identity")
-            .cloned()
-            .and_then(|value| serde_json::from_value(value).ok());
-        match homeboy_core::process::process_identity_state_with_start_identity(
-            pid,
-            None,
-            start_identity.as_ref(),
-        ) {
-            homeboy_core::process::ProcessIdentityState::Live => LocalOwnerLiveness::Live,
-            homeboy_core::process::ProcessIdentityState::Dead
-            | homeboy_core::process::ProcessIdentityState::IdentityMismatch => {
-                LocalOwnerLiveness::Dead
-            }
-            homeboy_core::process::ProcessIdentityState::Unverifiable => {
-                LocalOwnerLiveness::Unverifiable
-            }
-        }
+        super::cook_run_state::local_owner_liveness(self)
     }
 
     pub(crate) fn owner_pid(&self) -> Option<u32> {
@@ -1138,18 +1052,7 @@ impl AgentTaskRunRecord {
             .and_then(Value::as_str)
     }
 
-    /// Whether this record carries liveness evidence recent enough to count as
-    /// live: its `updated_at` heartbeat, or the running job's own progress
-    /// evidence (see [`Self::latest_job_progress`]).
-    ///
-    /// The job's progress is recorded where the job runs, so a job that keeps
-    /// producing output or workspace activity stays live even when nothing
-    /// else (such as a delayed controller poll) bumps `updated_at` (#17648).
-    ///
-    /// The exact inverse of the staleness rule discovery applies, against the
-    /// same shared threshold — this predicate carried its own bare `30` until
-    /// the threshold was unified, which is precisely the drift the shared
-    /// constant exists to prevent.
+    /// Whether recorded heartbeat or runner progress is within the shared window.
     pub(crate) fn has_fresh_update(&self) -> bool {
         let fresh = |observed_at: chrono::DateTime<chrono::Utc>| {
             chrono::Utc::now()

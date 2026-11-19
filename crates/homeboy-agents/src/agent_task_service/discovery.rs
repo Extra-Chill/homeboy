@@ -2,10 +2,12 @@
 //! reporting. Pure move out of the former `agent_task_service.rs` god-file.
 
 use crate::agent_task::{AgentTaskRequest, AgentTaskSourceRef};
+use crate::agent_task_lifecycle::cook_run_state::{
+    classify_liveness, live_supervisor_jobs, live_supervisor_jobs_at,
+};
 use crate::agent_task_lifecycle::{self, AgentTaskRecordHealthSummary, AgentTaskRunRecord};
 use base64::Engine;
 use homeboy_control_plane_contract::ControlPlaneState;
-use homeboy_core::api_jobs::{JobStatus, JobStore};
 use homeboy_core::observation::RunCursor;
 use homeboy_engine_primitives::content_hash;
 use std::collections::{BTreeMap, BTreeSet};
@@ -13,7 +15,6 @@ use uuid::Uuid;
 // `runs list --kind agent-task --active` treats a `Running` record that has gone this long without
 // an `updated_at` heartbeat as suspect even when its owner process/runner-job
 // liveness cannot be disproven (#5682).
-use homeboy_core::observation::RUNNING_HEARTBEAT_STALE_MINUTES;
 use homeboy_core::{Error, Result};
 use homeboy_upgrade::upgrade::{
     register_controller_upgrade_admission_provider as register_upgrade_admission_provider,
@@ -1180,183 +1181,6 @@ pub fn register_controller_upgrade_admission_provider() {
     register_upgrade_admission_provider(Box::new(AgentTaskControllerUpgradeAdmissionProvider));
 }
 
-fn classify_liveness(
-    record: &AgentTaskRunRecord,
-    now: chrono::DateTime<chrono::Utc>,
-    live: &BTreeSet<Uuid>,
-) -> AgentTaskLiveness {
-    // Current controller custody is authoritative even after provider exit,
-    // or when an older projection carries stale/invalid execution metadata.
-    if record.owner_process_is_running()
-        || record.has_live_execution_step_owner()
-        || live_local_cook_retry_supervisor(record, live)
-        || live_local_cook_retry_child(record)
-    {
-        return AgentTaskLiveness::Active;
-    }
-    // A detached Cook parent has no executable task or owner until its child
-    // and supervisor are durably attached. It is an active admission record,
-    // not stale queued work for the daemon reconciliation tick to cancel.
-    if agent_task_lifecycle::detached_cook_admission_is_live(record, now) {
-        return AgentTaskLiveness::Active;
-    }
-    if record.lab_handoff_validation_error().is_some() {
-        return AgentTaskLiveness::Unreconciled;
-    }
-    // A completed Retry action intentionally leaves its successor queued until
-    // the durable queue consumer claims it. That reservation survives the
-    // short-lived caller, so lack of a live PID is not stale ownership.
-    if durable_queued_retry_is_live(record) {
-        return AgentTaskLiveness::Active;
-    }
-    // Worktree lookup and materialization are controller-owned even when the
-    // eventual provider execution is destined for a runner. They precede the
-    // queued-to-running transition, so their fresh Cook heartbeat is the only
-    // possible owner during this phase.
-    if record.has_fresh_controller_pre_provider_heartbeat() {
-        return AgentTaskLiveness::Active;
-    }
-    if record.state() != homeboy_lifecycle_contract::RunExecutionState::Running {
-        if agent_task_lifecycle::has_expired_pending_runner_submission_intent(record, now) {
-            return AgentTaskLiveness::Unreconciled;
-        }
-        // A queued record has no executing work of its own. Fresh timestamps
-        // only prove that it was serialized recently, not that an owner still
-        // exists. Retain it as active solely with a live owner.
-        let has_live_owner = record.owner_process_is_running();
-        // The materializing proxy write is the state transition into a planned
-        // runner execution. It has no local PID by design, but its fresh
-        // heartbeat proves the controller is still advancing toward submission.
-        let has_fresh_planned_runner_execution =
-            record.has_planned_runner_execution() && record.has_fresh_update();
-        if !has_live_owner && !has_fresh_planned_runner_execution {
-            return AgentTaskLiveness::Stale;
-        }
-        return AgentTaskLiveness::Active;
-    }
-
-    if agent_task_lifecycle::has_expired_pending_runner_submission_intent(record, now) {
-        return AgentTaskLiveness::Unreconciled;
-    }
-    if record.has_planned_runner_execution() && record.has_fresh_update() {
-        return AgentTaskLiveness::Active;
-    }
-
-    match record.local_owner_liveness() {
-        // Heartbeats are a projection, while a verified owner is authoritative.
-        // Check this before honoring an older stale marker.
-        agent_task_lifecycle::LocalOwnerLiveness::Live => return AgentTaskLiveness::Active,
-        agent_task_lifecycle::LocalOwnerLiveness::Unverifiable => {
-            return AgentTaskLiveness::Unreconciled;
-        }
-        agent_task_lifecycle::LocalOwnerLiveness::Dead => return AgentTaskLiveness::Stale,
-        agent_task_lifecycle::LocalOwnerLiveness::Absent => {}
-    }
-
-    if record.is_stale_running() {
-        return AgentTaskLiveness::Stale;
-    }
-
-    let stale_by_age = age_minutes(record.updated_at.as_deref(), now)
-        .is_some_and(|age| age >= RUNNING_HEARTBEAT_STALE_MINUTES);
-
-    let has_owner_signal =
-        record.metadata.get("runner_pid").is_some() || record.runner_id().is_some();
-
-    match (stale_by_age, has_owner_signal) {
-        (true, _) => AgentTaskLiveness::Suspect,
-        (false, true) => AgentTaskLiveness::Active,
-        // No disproven liveness, no recent heartbeat, no owner signal at all:
-        // we genuinely cannot confirm this run either way.
-        (false, false) => AgentTaskLiveness::Unreconciled,
-    }
-}
-
-fn durable_queued_retry_is_live(record: &AgentTaskRunRecord) -> bool {
-    record.state() == homeboy_lifecycle_contract::RunExecutionState::Queued
-        && record.metadata["retry_of"]
-            .as_str()
-            .is_some_and(|run_id| !run_id.is_empty())
-}
-
-/// Queued or running controller step jobs of a fresh daemon's current lease.
-fn live_supervisor_jobs() -> BTreeSet<Uuid> {
-    live_supervisor_jobs_at(
-        homeboy_core::daemon::read_status(),
-        homeboy_core::paths::observation_db(),
-    )
-}
-
-fn live_supervisor_jobs_at(
-    status: homeboy_core::error::Result<homeboy_core::daemon::DaemonStatus>,
-    path: homeboy_core::error::Result<std::path::PathBuf>,
-) -> BTreeSet<Uuid> {
-    let lease = status
-        .ok()
-        .filter(|daemon| daemon.reachable && daemon.fresh)
-        .and_then(|daemon| daemon.state.map(|state| state.lease_id));
-    let store = path
-        .ok()
-        .and_then(|path| JobStore::open_without_reconciliation(path).ok());
-    let operation = ["controller.", homeboy_core::daemon::step_job::STEP_JOB_TYPE].concat();
-    lease
-        .zip(store)
-        .map_or_else(BTreeSet::new, |(lease, store)| {
-            store
-                .list()
-                .into_iter()
-                .filter(|job| {
-                    job.operation == operation
-                        && job.daemon_lease_id.as_deref() == Some(lease.as_str())
-                        && matches!(job.status, JobStatus::Queued | JobStatus::Running)
-                })
-                .map(|job| job.id)
-                .collect()
-        })
-}
-
-fn live_local_cook_retry_supervisor(record: &AgentTaskRunRecord, live: &BTreeSet<Uuid>) -> bool {
-    let supervisor = &record.metadata["local_cook_supervisor"];
-    if supervisor["job_type"].as_str() != Some(homeboy_core::daemon::step_job::STEP_JOB_TYPE) {
-        return false;
-    }
-    let Some(job_id) = supervisor["job_id"].as_str() else {
-        return false;
-    };
-    let Ok(job_id) = Uuid::parse_str(job_id) else {
-        return false;
-    };
-    live.contains(&job_id)
-}
-
-fn live_local_cook_retry_child(record: &AgentTaskRunRecord) -> bool {
-    let supervisor = &record.metadata["local_cook_supervisor"];
-    if supervisor["state"].as_str() != Some("supervising")
-        || supervisor["pinned_run_id"].as_str() != Some(record.run_id.as_str())
-    {
-        return false;
-    }
-    let Some(pid) = supervisor["child_pid"]
-        .as_u64()
-        .and_then(|pid| u32::try_from(pid).ok())
-    else {
-        return false;
-    };
-    let Ok(start_identity) = serde_json::from_value::<homeboy_core::process::ProcessStartIdentity>(
-        supervisor["child_start_identity"].clone(),
-    ) else {
-        return false;
-    };
-    matches!(
-        homeboy_core::process::process_identity_state_with_start_identity(
-            pid,
-            None,
-            Some(&start_identity),
-        ),
-        homeboy_core::process::ProcessIdentityState::Live
-    )
-}
-
 /// Label where a run executes so an operator can trace the runner process.
 fn run_source(record: &AgentTaskRunRecord) -> String {
     if let Some(runner_id) = record.runner_id() {
@@ -1489,12 +1313,7 @@ fn discovery_run(
     }
 }
 
-/// Whether this record is an attempt owned by a Cook that already reached a
-/// durable terminal state, which disproves the attempt's own live projection.
-///
-/// Only a parent that is present in the same durable record set counts: an
-/// absent parent proves nothing, so ownership stays fail-closed and the
-/// attempt continues to block replacement.
+/// Only a durable terminal parent disproves its attempt's live projection.
 fn owns_terminal_cook_parent(
     record: &AgentTaskRunRecord,
     terminal_run_ids: &BTreeSet<&str>,
