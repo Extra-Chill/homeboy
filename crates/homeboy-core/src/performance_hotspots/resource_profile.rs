@@ -134,6 +134,45 @@ fn add_overhead(overhead: &mut CpuOverhead, phase: &str, cpu: f64, homeboy: f64)
     }
 }
 
+/// Homeboy's own and staging CPU in the Cooks a workflow instance launched
+/// (`<instance>-<step>-i…`). Their step's usage counts the Cook process as
+/// workload; the Cook's own spans say which part of it was Homeboy (#18461).
+fn launched_cook_overhead(store: &ObservationStore, instance: &str) -> Result<CpuOverhead> {
+    let mut overhead = CpuOverhead::default();
+    for run_id in store.run_ids_with_prefix(&format!("{instance}-"), MAX_RUNS)? {
+        for span in store.phase_spans(&run_id)?.spans {
+            if let Some(usage) = measured(&span) {
+                add_overhead(
+                    &mut overhead,
+                    phase_name(&span.id),
+                    seconds(usage.cpu_usage_usec),
+                    seconds(usage.homeboy_cpu_usec),
+                );
+            }
+        }
+    }
+    Ok(overhead)
+}
+
+/// Move the launched Cooks' Homeboy and staging CPU out of the instance's
+/// workload, never past what the instance measured.
+fn attribute_launched(overhead: &mut CpuOverhead, launched: &CpuOverhead) {
+    for (share, total) in [
+        (
+            launched.homeboy_cpu_seconds,
+            &mut overhead.homeboy_cpu_seconds,
+        ),
+        (
+            launched.staging_cpu_seconds,
+            &mut overhead.staging_cpu_seconds,
+        ),
+    ] {
+        let moved = share.min(overhead.workload_cpu_seconds).max(0.0);
+        overhead.workload_cpu_seconds -= moved;
+        *total += moved;
+    }
+}
+
 fn by_cpu_then_name(a: (f64, &str), b: (f64, &str)) -> std::cmp::Ordering {
     b.0.total_cmp(&a.0).then(a.1.cmp(b.1))
 }
@@ -185,6 +224,9 @@ pub fn run_resources(store: &ObservationStore, run_id: &str) -> Result<Option<Ru
     }
     if rows.is_empty() {
         return Ok(None);
+    }
+    if workflow_of(run_id).is_some() {
+        attribute_launched(&mut overhead, &launched_cook_overhead(store, run_id)?);
     }
     let mut phases = rows.into_values().collect::<Vec<_>>();
     phases.sort_by(|a, b| by_cpu_then_name((a.cpu_seconds, &a.phase), (b.cpu_seconds, &b.phase)));
@@ -267,6 +309,7 @@ pub fn resource_profile(
             }
         };
         let mut has_usage = false;
+        let mut run_overhead = CpuOverhead::default();
         for span in &spans {
             let Some(usage) = measured(span) else {
                 continue;
@@ -274,12 +317,25 @@ pub fn resource_profile(
             has_usage = true;
             let phase = phase_name(&span.id);
             let cpu = seconds(usage.cpu_usage_usec);
-            add_overhead(&mut overhead, phase, cpu, seconds(usage.homeboy_cpu_usec));
+            add_overhead(
+                &mut run_overhead,
+                phase,
+                cpu,
+                seconds(usage.homeboy_cpu_usec),
+            );
             let group = groups.entry(phase.to_string()).or_default();
             group.cpu.push(cpu);
             group.wall.push(usage.wall_ms as f64);
             group.estimated += usize::from(usage.estimated);
         }
+        // With `--workflow`, only instances are listed, so their launched
+        // Cooks are counted once, here.
+        if has_usage && query.workflow.is_some() {
+            attribute_launched(&mut run_overhead, &launched_cook_overhead(store, &run.id)?);
+        }
+        overhead.homeboy_cpu_seconds += run_overhead.homeboy_cpu_seconds;
+        overhead.staging_cpu_seconds += run_overhead.staging_cpu_seconds;
+        overhead.workload_cpu_seconds += run_overhead.workload_cpu_seconds;
         runs_with_usage += usize::from(has_usage);
     }
     let mut phases = groups

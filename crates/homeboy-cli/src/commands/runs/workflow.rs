@@ -15,7 +15,9 @@ impl RunsArgs {
             RunsCommand::Watch(args) => &args.run_id,
             _ => return None,
         };
-        id.starts_with("wf-").then_some(id.as_str())
+        // A workflow-launched Cook or attempt (`wf-…-cook-i1-n1-a1…`) reads
+        // as its durable run record, like `agent-task status` (#17758).
+        crate::commands::agent_task::cook_batch::is_workflow_instance(id).then_some(id.as_str())
     }
 
     pub(crate) fn workflow_discovery(&self) -> bool {

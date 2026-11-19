@@ -199,6 +199,8 @@ pub(crate) fn project_runs_show_output(payload: &Value) -> Value {
         "status_note": run.get("status_note").map(super::operator_projection::value),
         "observation_status": run.get("observation_status").map(super::operator_projection::value),
         "cook": run.get("cook").map(super::operator_projection::value),
+        // Bounded phase rows: what the run consumed is part of its outcome.
+        "resources": run.get("resources"),
         "artifact_index": null,
         "homeboy_version": run.get("homeboy_version").map(super::operator_projection::value),
         "metadata": {
@@ -894,6 +896,11 @@ mod tests {
                     "status": "failed",
                     "started_at": "2026-08-31T00:00:00Z",
                     "finished_at": "2026-08-31T00:01:00Z",
+                    "resources": {
+                        "cpu_seconds": 2.5,
+                        "overhead": { "homeboy_cpu_seconds": 0.5 },
+                        "phases": [{ "phase": "cook", "cpu_seconds": 2.5 }],
+                    },
                     "metadata": {
                         "runner_handoff": { "remote_argv": vec!["x".repeat(4096); 100] },
                         "source_snapshot": { "files": vec!["source".repeat(1024); 100] },
@@ -931,6 +938,10 @@ mod tests {
         );
         assert!(serde_json::to_vec_pretty(&envelope).unwrap().len() <= 24 * 1024);
         assert_eq!(operator["phase"], "terminal_checkpointed");
+        assert_eq!(
+            projected["payload"]["run"]["resources"]["overhead"]["homeboy_cpu_seconds"],
+            0.5
+        );
         assert_eq!(
             operator["authoritative_runner_terminal_state"]["status"],
             "failed"

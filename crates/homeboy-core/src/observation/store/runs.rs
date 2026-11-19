@@ -1564,6 +1564,24 @@ impl ObservationStore {
             .map_err(|error| self.read_error("read run record", error))
     }
 
+    /// Ids of the runs whose id starts with `prefix`, at most `limit`: the
+    /// runs a workflow instance launched carry its id as their prefix.
+    pub fn run_ids_with_prefix(&self, prefix: &str, limit: i64) -> Result<Vec<String>> {
+        validate_required("prefix", prefix)?;
+        // A primary-key range: every id that starts with `prefix` sorts at or
+        // after it and before `prefix` followed by U+10FFFF.
+        let upper = format!("{prefix}\u{10FFFF}");
+        let mut statement = self
+            .connection
+            .prepare("SELECT id FROM runs WHERE id >= ?1 AND id < ?2 ORDER BY id LIMIT ?3")
+            .map_err(|error| self.read_error("list runs by id prefix", error))?;
+        let ids = statement
+            .query_map(rusqlite::params![prefix, upper, limit], |row| row.get(0))
+            .and_then(|rows| rows.collect::<std::result::Result<Vec<String>, _>>())
+            .map_err(|error| self.read_error("list runs by id prefix", error))?;
+        Ok(ids)
+    }
+
     pub(crate) fn read_error(&self, operation: &'static str, error: rusqlite::Error) -> Error {
         if self.readonly && is_transient_lock_error(&error) {
             Error::observation_store_busy(

@@ -43,6 +43,13 @@ impl JobCgroup {
 
     pub fn kill(&self) {}
 
+    pub fn usage(
+        &self,
+        _wall_ms: u64,
+    ) -> Option<homeboy_engine_primitives::resource_usage::ResourceUsage> {
+        None
+    }
+
     pub fn stop(&self) -> io::Result<()> {
         Ok(())
     }

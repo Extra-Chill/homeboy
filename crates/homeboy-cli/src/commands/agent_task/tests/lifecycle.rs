@@ -321,6 +321,30 @@ fn diagnose_reads_a_finished_workflow_cook_item_as_its_cook() {
     });
 }
 
+/// #18461: `runs show` reads a workflow-launched Cook attempt as its run
+/// record, not as a workflow instance, while a bare instance id stays one.
+#[test]
+fn runs_show_reads_a_workflow_cook_attempt_as_its_run() {
+    with_temp_home(|| {
+        let attempt = "wf-import-findings-loop-a5638435f0f1-cook-i2-n1-a1-attempt-2-277772d7";
+        agent_task_lifecycle::submit_plan(&test_plan(), Some(attempt)).expect("submit plan");
+        let reader = |id: &str| {
+            use clap::Parser;
+            let cli =
+                homeboy::cli_surface::Cli::try_parse_from(["homeboy", "runs", "show", id]).unwrap();
+            let homeboy::cli_surface::Commands::Runs(args) = cli.command else {
+                unreachable!()
+            };
+            args.workflow_reader_id().map(str::to_string)
+        };
+        assert_eq!(reader(attempt), None);
+        assert_eq!(
+            reader("wf-import-findings-loop-a5638435f0f1").as_deref(),
+            Some("wf-import-findings-loop-a5638435f0f1")
+        );
+    });
+}
+
 #[test]
 fn cancelled_lab_json_failure_is_compactly_visible_in_status_and_diagnose() {
     with_temp_home(|| {

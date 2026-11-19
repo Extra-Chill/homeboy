@@ -138,6 +138,27 @@ mod tests {
             assert!(state.status.is_terminal(), "{:?}", state.status);
             let store = ObservationStore::open_initialized().unwrap();
             store.record_workflow_timing(&state).unwrap();
+            // A Cook the instance launched records which part of its CPU was
+            // Homeboy's own and which was staging.
+            let cook = store
+                .start_run_with_id(
+                    homeboy::core::observation::NewRunRecord::builder("agent-task").build(),
+                    format!("{instance}-heavy-i1-a1-attempt-1-0123abcd"),
+                )
+                .unwrap();
+            let span = |id: &str, cpu: u64, homeboy: u64| {
+                json!({"id": id, "status": "ok", "started_at": "2026-11-19T00:00:00.000Z",
+                    "usage": {"cpu_usage_usec": cpu, "cpu_user_usec": cpu, "cpu_system_usec": 0, "homeboy_cpu_usec": homeboy, "wall_ms": 1,
+                        "source": "rusage", "estimated": true}})
+            };
+            let report = serde_json::from_value(json!({"spans": [
+                span("publish.aggregate", 20_000, 20_000),
+                span("stage.workspace", 10_000, 0),
+            ]}))
+            .unwrap();
+            store
+                .record_phase_spans(&cook.id, "attempt", &report)
+                .unwrap();
 
             let (RunsOutput::Show(show), _) =
                 super::super::handlers::show_run_in_store(&store, &instance).unwrap()
@@ -162,6 +183,21 @@ mod tests {
                 .iter()
                 .all(|row| row.estimated && row.instances == 1));
             assert!((resources.cpu_seconds - heavy - light).abs() < 1e-9);
+            let split = |overhead: &homeboy::core::performance_hotspots::CpuOverhead| {
+                assert!(
+                    (overhead.homeboy_cpu_seconds - 0.02).abs() < 1e-9,
+                    "{overhead:?}"
+                );
+                assert!(
+                    (overhead.staging_cpu_seconds - 0.01).abs() < 1e-9,
+                    "{overhead:?}"
+                );
+                assert!(
+                    (overhead.workload_cpu_seconds - (heavy + light - 0.03)).abs() < 1e-9,
+                    "{overhead:?}"
+                );
+            };
+            split(&resources.overhead);
 
             let (RunsOutput::Profile(profile), _) = runs_profile(
                 &store,
@@ -190,7 +226,7 @@ mod tests {
                 (heavy, heavy)
             );
             assert!(rows[0].wall_ms.p50 > 0.0);
-            assert!((profile.profile.overhead.workload_cpu_seconds - heavy - light).abs() < 1e-9);
+            split(&profile.profile.overhead);
         });
     }
 }

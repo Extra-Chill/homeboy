@@ -427,6 +427,14 @@ impl JobCgroup {
             .collect()
     }
 
+    /// The job's exact usage so far, from its kernel counters.
+    pub fn usage(
+        &self,
+        wall_ms: u64,
+    ) -> Option<homeboy_engine_primitives::resource_usage::ResourceUsage> {
+        self.counters().usage(wall_ms)
+    }
+
     pub fn counters(&self) -> JobCgroupCounters {
         let value = |name: &str| read_u64(&self.dir.join(name));
         let memory_events = fs::read_to_string(self.dir.join("memory.events")).ok();
