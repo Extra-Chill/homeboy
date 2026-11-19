@@ -346,7 +346,7 @@ fn wait_for_service_daemon(
         ),
         "starting the runner service",
     )
-    .map_err(|error| error.to_string())?;
+    .map_err(|error| with_unit_evidence(client, error.message))?;
     let deadline = Instant::now() + SERVICE_READY_TIMEOUT;
     let mut last: String;
     loop {
@@ -374,10 +374,7 @@ fn wait_for_service_daemon(
             Err(error) => last = error,
         }
         if Instant::now() >= deadline {
-            return Err(format!(
-                "{last}. Inspect `systemctl --user status {}` on the runner.",
-                service_unit_name()
-            ));
+            return Err(with_unit_evidence(client, format!("{last}.")));
         }
         std::thread::sleep(SERVICE_READY_POLL_INTERVAL);
     }
@@ -476,8 +473,31 @@ pub(crate) fn repoint_and_restart(runner_id: &str, binary: &str) -> Result<()> {
             &daemon_policy_env(&target.runner.env),
         ),
         "restarting the runner service",
-    )?;
+    )
+    .map_err(|mut error| {
+        error.message = with_unit_evidence(&target.client, error.message);
+        error
+    })?;
     Ok(())
+}
+
+/// Append the runner unit's own account of why it is not running: its systemd
+/// state and result, and the last journal lines, which carry the start error.
+/// A failed restart then explains itself instead of pointing the operator at
+/// the runner (#18539).
+fn with_unit_evidence(client: &SshClient, message: String) -> String {
+    let unit = shell::quote_arg(&service_unit_name());
+    let output = client.execute_with_timeout(
+        &format!(
+            "systemctl --user show -p ActiveState -p SubState -p Result -p ExecMainStatus {unit} | paste -sd ' '; journalctl --user -u {unit} -n 8 --no-pager -o cat 2>/dev/null"
+        ),
+        SERVICE_SSH_TIMEOUT,
+    );
+    let evidence = output.stdout.trim();
+    if evidence.is_empty() {
+        return message;
+    }
+    format!("{message}\nRunner unit {}: {evidence}", service_unit_name())
 }
 
 /// Repoint through the target binary, so the version that knows the unit
