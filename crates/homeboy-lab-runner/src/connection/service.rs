@@ -237,29 +237,37 @@ fn repoint_script(binary: &str, startup_token: &str, daemon_env: &[(String, Stri
 /// Move job cgroups a pre-#18493 daemon left inside the runner unit into the
 /// job tree unit, so the unit's start is not refused while they run. Each job
 /// is frozen while its processes move, so none forks behind the move; it
-/// keeps its job id, so the new daemon re-adopts it. A no-op once the runner
-/// unit holds no job tree.
+/// keeps its job id, so the new daemon re-adopts it. The stopped runner unit's
+/// leftover `daemon/` leaf and enabled controllers are cleared too: either
+/// alone refuses the unit's next start. A no-op on the new layout.
 fn adopt_in_unit_jobs_script() -> String {
     format!(
         r#"tree="/sys/fs/cgroup$(systemctl --user show --property=ControlGroup --value {job_tree})"
-legacy="$(dirname "$tree")/{unit}/{jobs}"
-if [ -d "$legacy" ]; then
+runner="$(dirname "$tree")/{unit}"
+if [ -d "$runner/{jobs}" ]; then
   mkdir -p "$tree/{jobs}"
-  for job in "$legacy"/*/; do
+  for job in "$runner/{jobs}"/*/; do
     [ -d "$job" ] || continue
     job=${{job%/}}
-    if [ -s "$job/cgroup.procs" ]; then
+    # cgroupfs files report size 0, so test content, not `-s`.
+    if grep -q . "$job/cgroup.procs"; then
       dest="$tree/{jobs}/$(basename "$job")"
       mkdir -p "$dest"
       echo 1 > "$job/cgroup.freeze"
       for _ in 1 2 3 4 5; do
-        [ -s "$job/cgroup.procs" ] || break
+        grep -q . "$job/cgroup.procs" || break
         while read -r pid; do echo "$pid" > "$dest/cgroup.procs" || true; done < "$job/cgroup.procs"
       done
     fi
     rmdir "$job" || true
   done
-  rmdir "$legacy" || true
+  rmdir "$runner/{jobs}" || true
+fi
+if [ -d "$runner" ]; then
+  rmdir "$runner/daemon" 2>/dev/null || true
+  for controller in io memory pids; do
+    echo "-$controller" > "$runner/cgroup.subtree_control" 2>/dev/null || true
+  done
 fi"#,
         job_tree = job_tree_unit_name(),
         unit = service_unit_name(),
