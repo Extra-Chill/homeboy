@@ -2529,11 +2529,10 @@ impl AgentTaskCookAttemptDispatcher for FlakyPreparationDispatcher {
 
     fn prepare_for_cook(&self) -> Result<()> {
         if self.failures_remaining.fetch_sub(1, Ordering::SeqCst) > 0 {
-            return Err(Error::validation_invalid_argument(
-                "runner",
+            return Err(Error::new(
+                homeboy_core::ErrorCode::RunnerControllerDisconnected,
                 "fixture runner is unavailable",
-                None,
-                None,
+                Value::Null,
             )
             .with_retryable(true));
         }
@@ -2584,6 +2583,8 @@ impl AgentTaskCookAttemptDispatcher for AdmissionFailingAttemptDispatcher {
                 serde_json::to_value(recovery).expect("runtime recovery serializes");
         }
         if self.retryable {
+            // Only runner-side mechanics earn a transport retry (#18454).
+            error.code = homeboy_core::ErrorCode::RunnerControllerDisconnected;
             error = error.with_retryable(true);
         }
         Err(error)
@@ -7293,8 +7294,12 @@ fn transient_pre_provider_failures_do_not_consume_the_retry_budget() {
         )
     };
     let hard = || {
-        Error::validation_invalid_argument("runner", "runner rejected the job", None, None)
-            .with_retryable(true)
+        Error::new(
+            homeboy_core::ErrorCode::RunnerLabTransportFailure,
+            "runner rejected the job",
+            Value::Null,
+        )
+        .with_retryable(true)
     };
     let cases: Vec<(&str, Vec<Error>, &str, usize)> = vec![
         (
@@ -7352,6 +7357,136 @@ fn transient_pre_provider_failures_do_not_consume_the_retry_budget() {
                 .attempts
                 .iter()
                 .all(|attempt| attempt.attempt == 1));
+        });
+    }
+}
+
+/// #18454: one table over the Cook transport-retry decision, with the error
+/// values each source really produces. Every row also drives a real Cook
+/// whose dispatcher fails once with that error: only lost runner mechanics
+/// and transport get a `-transport-retry` run; caller input and a resource
+/// guard stop end the attempt on its first dispatch.
+#[test]
+fn pre_provider_retry_replaces_only_runner_side_losses() {
+    let guard_violation = serde_json::json!({
+        "reason": "process_count_limit_exceeded",
+        "message": "runner job exceeded its process limit",
+        "rss_bytes": 1_073_741_824_u64,
+        "rss_limit_bytes": 17_179_869_184_u64,
+        "process_count": 4096,
+        "process_count_limit": 1024,
+    });
+    // homeboy-lab-runner `validate_terminal_result`: a settled job whose
+    // daemon lease died (#18432).
+    let dead_lease = Error::new(
+        homeboy_core::ErrorCode::RunnerJobLost,
+        "runner job `j` failed on direct-daemon without a result: daemon lease owner process was not running",
+        serde_json::json!({ "job_id": "j", "stale_reason": "dead_daemon_lease" }),
+    )
+    .with_retryable(true);
+    // homeboy-lab-runner `no_current_daemon_session_error`: a replaced daemon.
+    let replaced_daemon = Error::new(
+        homeboy_core::ErrorCode::RunnerControllerDisconnected,
+        "runner `lab` has no current daemon session; run `homeboy runner connect lab` first",
+        serde_json::json!({ "field": "runner", "id": "lab" }),
+    )
+    .with_retryable(true);
+    // homeboy-lab-runner `unavailable_daemon_admission_error`: tunnel loss.
+    let tunnel_loss = Error::new(
+        homeboy_core::ErrorCode::RunnerLabTransportFailure,
+        "runner `lab` has no healthy daemon admission session; reconnect it before retrying the Lab handoff",
+        serde_json::json!({ "runner_id": "lab", "phase": "lab_handoff" }),
+    )
+    .with_retryable(true);
+    // Controller-to-runner pipe broke mid-handoff.
+    let broken_pipe = Error::internal_io(
+        std::io::Error::new(std::io::ErrorKind::BrokenPipe, "broken pipe").to_string(),
+        Some("Lab handoff".to_string()),
+    )
+    .with_retryable(true);
+    // A deterministic refusal must stay stopped even if a source marks it
+    // retryable: a fresh connection cannot fix caller input.
+    let retryable_validation =
+        Error::validation_invalid_argument("runner", "runner rejected the job", None, None)
+            .with_retryable(true);
+    let validation = Error::validation_invalid_argument(
+        "workspace",
+        "Cook workspace path is not a git checkout",
+        None,
+        None,
+    );
+    // A runner-reported failure carrying its resource-guard verdict (#18441).
+    let mut guard_stop = Error::new(
+        homeboy_core::ErrorCode::RunnerLabTransportFailure,
+        "runner job exited 137",
+        serde_json::json!({ "exit_code": 137, "metrics": { "guard_violation": guard_violation } }),
+    )
+    .with_retryable(true);
+    guard_stop.details["runner_id"] = serde_json::json!("lab");
+    let store_busy = Error::new(
+        homeboy_core::ErrorCode::ObservationStoreBusy,
+        "busy",
+        Value::Null,
+    );
+    let cases = [
+        ("dead-lease", dead_lease, PreProviderRetry::Replace),
+        (
+            "replaced-daemon",
+            replaced_daemon,
+            PreProviderRetry::Replace,
+        ),
+        ("tunnel-loss", tunnel_loss, PreProviderRetry::Replace),
+        ("broken-pipe", broken_pipe, PreProviderRetry::Replace),
+        ("store-busy", store_busy, PreProviderRetry::Wait),
+        (
+            "retryable-validation",
+            retryable_validation,
+            PreProviderRetry::Stop,
+        ),
+        ("validation", validation, PreProviderRetry::Stop),
+        ("guard-stop", guard_stop, PreProviderRetry::Stop),
+    ];
+    for (name, error, expected) in cases {
+        assert_eq!(
+            pre_provider_retry(&error, &pre_execution_failure_details(None, &error)),
+            expected,
+            "{name}"
+        );
+        homeboy_core::test_support::with_isolated_home(|_| {
+            let cook_id = format!("cook-retry-class-{name}");
+            let dispatcher = Arc::new(TransientThenAcceptedDispatcher {
+                failures: Mutex::new(vec![error]),
+                dispatched_run_ids: Mutex::default(),
+            });
+            let mut options = batch_cook_options(&cook_id, dispatcher.clone());
+            options.provider_transport.provider_invocation =
+                Some(homeboy_core::command_invocation::CommandInvocation {
+                    argv: vec!["fixture-provider".to_string()],
+                    ..Default::default()
+                });
+            options.identity.initial_run_id = format!("{cook_id}-attempt-1");
+            options.retry_policy.max_attempts = 1;
+
+            let report = run_cook(CookContext::new(options, Arc::new(UnusedExecutor)))
+                .expect("cook reports");
+
+            let base = format!("{cook_id}-attempt-1");
+            let run_ids = dispatcher.dispatched_run_ids.lock().unwrap().clone();
+            if expected == PreProviderRetry::Stop {
+                assert_eq!(report.value.status, "pre_execution_failure", "{name}");
+                assert_eq!(run_ids, vec![base.clone()], "{name}");
+                assert!(
+                    agent_task_lifecycle::exact_record(&format!("{base}-transport-retry")).is_err(),
+                    "{name}: no transport-retry run"
+                );
+            } else {
+                assert_eq!(report.value.status, "in_flight", "{name}");
+                assert_eq!(
+                    run_ids,
+                    vec![base.clone(), format!("{base}-transport-retry")],
+                    "{name}"
+                );
+            }
         });
     }
 }

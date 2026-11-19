@@ -149,12 +149,14 @@ pub(super) trait TransportOperations {
 
 /// Retryable: a concurrent connect or recovery can be replacing the session,
 /// and an observer of an admitted job reattaches once it is back (#17376).
+/// A lost session is runner mechanics, not caller input (#18454).
 pub(crate) fn no_current_daemon_session_error(runner_id: &str) -> Error {
-    Error::validation_invalid_argument(
-        "runner",
-        "runner has no current daemon session; run `homeboy runner connect <runner-id>` first",
-        Some(runner_id.to_string()),
-        None,
+    Error::new(
+        homeboy_core::error::ErrorCode::RunnerControllerDisconnected,
+        format!(
+            "runner `{runner_id}` has no current daemon session; run `homeboy runner connect {runner_id}` first"
+        ),
+        serde_json::json!({ "field": "runner", "id": runner_id }),
     )
     .with_retryable(true)
 }

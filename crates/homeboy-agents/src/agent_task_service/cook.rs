@@ -58,7 +58,7 @@ use super::cook_pre_execution::{
     pre_execution_failure_details, pre_execution_failure_phase, pre_execution_failure_report,
     provider_rotation_attempts, record_pre_execution_failure, retryable_pre_execution_failure,
     terminal_executor_identity, terminal_executor_matches, with_pre_execution_phase,
-    CookExecutionPreparation,
+    CookExecutionPreparation, PreExecutionFailureDetails,
 };
 use super::cook_promotion::{
     attempt_needs_execution_with_store, finalize_or_load_cook_pr_with_stores,
@@ -287,6 +287,34 @@ fn transport_retry_available(
 /// of consuming the retry budget (#17801).
 fn transient_infrastructure_failure(error: &Error) -> bool {
     homeboy_core::substrate_wait::is_transient_error(error) || super::is_store_contention(error)
+}
+
+/// What the Cook does with a failure before provider start.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PreProviderRetry {
+    /// Transient substrate refusal: wait it out, off the retry budget.
+    Wait,
+    /// Lost runner mechanics or transport: one fresh `-transport-retry` run.
+    Replace,
+    /// Deterministic: the same attempt fails the same way, so stop.
+    Stop,
+}
+
+/// The one Cook transport-retry decision (#18454). A replacement only buys a
+/// fresh connection, so it is reserved for retryable runner-side and transport
+/// classes. A resource-guard stop and caller input (`validation.*`) fail the
+/// same way on any connection and are never replaced. The recorded failure's
+/// class decides, so resuming a durably failed attempt reads its real cause.
+fn pre_provider_retry(error: &Error, failure: &PreExecutionFailureDetails) -> PreProviderRetry {
+    if homeboy_runner_contract::find_resource_guard_stop(&error.details).is_some() {
+        PreProviderRetry::Stop
+    } else if transient_infrastructure_failure(error) {
+        PreProviderRetry::Wait
+    } else if failure.retryable && !failure.error_code.starts_with("validation.") {
+        PreProviderRetry::Replace
+    } else {
+        PreProviderRetry::Stop
+    }
 }
 
 /// `{base}-transport-retry`, then `{base}-transport-retry-2`, `-3`, ...: one
@@ -6779,8 +6807,9 @@ fn run_cook_spine(
                     promotion: None,
                     feedback: None,
                 });
-                let transient = transient_infrastructure_failure(&error);
-                if !pre_execution_failure.retryable && !transient {
+                let retry = pre_provider_retry(&error, &pre_execution_failure);
+                let transient = retry == PreProviderRetry::Wait;
+                if retry == PreProviderRetry::Stop {
                     return Ok(pre_execution_failure_report(
                         stores,
                         cook_id,
