@@ -3,13 +3,19 @@
 //! One primitive for every job the daemon runs: runner jobs and workflow step
 //! jobs each join their own cgroup through it.
 //!
-//! The runner unit renders `Delegate=yes`, so the daemon owns its service
-//! cgroup. At startup it moves itself into the `daemon/` leaf (cgroup v2 keeps
-//! processes out of inner nodes) and prepares `jobs/`, whose `memory.max` is
-//! the host budget: runner jobs together can never OOM the host, and an OOM
-//! stays inside `jobs/`. Each job joins its own `jobs/<job-id>/` cgroup before
-//! exec, so no descendant escapes it by changing session or process group, and
-//! stopping the job is `cgroup.kill`.
+//! The job tree lives in its own delegated unit, not the daemon's
+//! (#18493): `HOMEBOY_JOB_CGROUP_UNIT` names a sibling unit rendered with
+//! `Delegate=yes` and `DelegateSubgroup=holder`, whose only process sleeps in
+//! its `holder/` leaf. The daemon prepares `jobs/` there, whose `memory.max`
+//! is the host budget: runner jobs together can never OOM the host, and an
+//! OOM stays inside `jobs/`. Each job joins its own `jobs/<job-id>/` cgroup
+//! before exec, so no descendant escapes it by changing session or process
+//! group, and stopping the job is `cgroup.kill`.
+//!
+//! Jobs outlive a daemon restart, so their tree must not sit in the daemon's
+//! unit: systemd spawns a starting service into its unit's root cgroup, which
+//! cgroup v2 refuses while that root has controllers enabled for a populated
+//! subtree. The holder unit is never restarted by an upgrade.
 //!
 //! When delegation is unavailable runner jobs keep the sampled process-tree
 //! guard and step jobs keep their process-tree stop.
@@ -26,8 +32,10 @@ use std::time::{Duration, Instant};
 
 const CONTROLLERS: &str = "+memory +pids";
 const OPTIONAL_CONTROLLERS: &str = "+io";
-/// The leaf the daemon moves into inside its delegated service cgroup.
-pub const DAEMON_LEAF: &str = "daemon";
+/// Names the delegated sibling unit that holds the job tree.
+pub const JOB_TREE_UNIT_ENV: &str = "HOMEBOY_JOB_CGROUP_UNIT";
+/// The leaf the job tree unit's own process runs in (`DelegateSubgroup=`).
+pub const HOLDER_LEAF: &str = "holder";
 /// The parent of every job cgroup; its `memory.max` is the host budget.
 pub const JOBS_DIR: &str = "jobs";
 const DRAIN_TIMEOUT: Duration = Duration::from_secs(30);
@@ -40,8 +48,7 @@ pub const TASKS_PER_PROCESS: u64 = 32;
 
 static DELEGATION: OnceLock<Result<PathBuf, String>> = OnceLock::new();
 
-/// Move this daemon into its `daemon/` leaf and prepare `jobs/`, once per
-/// process. Returns the `jobs/` directory, or why jobs fall back to their
+/// Prepare `jobs/` in the job tree unit's cgroup, once per process. Returns the `jobs/` directory, or why jobs fall back to their
 /// process-tree stop.
 pub fn initialize(jobs_memory_max: u64) -> Result<&'static Path, String> {
     DELEGATION
@@ -56,13 +63,16 @@ pub fn jobs_dir() -> Option<&'static Path> {
 }
 
 fn delegate(jobs_memory_max: u64) -> Result<PathBuf, String> {
+    let unit = std::env::var(JOB_TREE_UNIT_ENV)
+        .ok()
+        .filter(|unit| unit.ends_with(".service") && !unit.contains('/'))
+        .ok_or_else(|| format!("{JOB_TREE_UNIT_ENV} does not name a job tree unit"))?;
     let own = own_cgroup_dir()
         .ok_or("cgroup v2 is not mounted or this process's cgroup is unreadable")?;
-    let service = if own.file_name() == Some(DAEMON_LEAF.as_ref()) {
-        own.parent().map(Path::to_path_buf).unwrap_or_default()
-    } else {
-        own.clone()
-    };
+    let service = own
+        .parent()
+        .ok_or("this process's cgroup has no parent")?
+        .join(&unit);
     let controllers = read(&service.join("cgroup.controllers"))?;
     for controller in ["memory", "pids"] {
         if !controllers
@@ -75,20 +85,11 @@ fn delegate(jobs_memory_max: u64) -> Result<PathBuf, String> {
             ));
         }
     }
-    let leaf = service.join(DAEMON_LEAF);
-    if own != leaf {
-        let me = std::process::id().to_string();
-        if read(&service.join("cgroup.procs"))?
-            .lines()
-            .any(|pid| pid.trim() != me)
-        {
-            return Err(format!(
-                "{} holds processes other than the daemon, so it is not a delegated service cgroup",
-                service.display()
-            ));
-        }
-        create_dir(&leaf)?;
-        write(&leaf.join("cgroup.procs"), &me)?;
+    if !read(&service.join("cgroup.procs"))?.trim().is_empty() {
+        return Err(format!(
+            "{} holds processes in its root; its unit must run them in `DelegateSubgroup={HOLDER_LEAF}`",
+            service.display()
+        ));
     }
     write(&service.join("cgroup.subtree_control"), CONTROLLERS)?;
     let jobs = service.join(JOBS_DIR);

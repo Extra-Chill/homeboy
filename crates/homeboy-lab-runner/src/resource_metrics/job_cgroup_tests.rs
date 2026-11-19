@@ -1,5 +1,5 @@
-//! End-to-end runner job cgroup tests (#18418). Each outer test re-runs one
-//! inner test in a transient `Delegate=yes` user scope through the shared
+//! End-to-end runner job cgroup tests (#18418, #18493). Each outer test
+//! re-runs one inner test beside a transient job tree unit through the shared
 //! harness in `homeboy_core::job_cgroup::test_support`.
 
 use super::*;
@@ -28,7 +28,7 @@ fn in_delegated_scope(inner: &str, env: &[(&str, &str)]) {
 }
 
 /// Inner tests run only inside the scope their outer test creates, where this
-/// process becomes the daemon in its `daemon/` leaf.
+/// process becomes the daemon of the job tree unit beside it.
 fn enter_delegated_scope() -> Option<&'static Path> {
     if !inside_delegated_scope() {
         return None;
@@ -54,9 +54,9 @@ fn run_job(command: &mut Command, is_cancelled: impl FnMut() -> bool) -> Measure
 }
 
 #[test]
-fn the_daemon_runs_in_a_leaf_and_jobs_carry_the_host_budget() {
+fn jobs_live_outside_the_daemon_unit_and_carry_the_host_budget() {
     in_delegated_scope(
-        "delegated_daemon_leaf_and_jobs_budget",
+        "delegated_job_tree_and_jobs_budget",
         &[
             (homeboy_runner_contract::RSS_LIMIT_ENV, "268435456"),
             (homeboy_runner_contract::PROCESS_COUNT_LIMIT_ENV, "48"),
@@ -65,25 +65,32 @@ fn the_daemon_runs_in_a_leaf_and_jobs_carry_the_host_budget() {
 }
 
 #[test]
-#[ignore = "inner half of the_daemon_runs_in_a_leaf_and_jobs_carry_the_host_budget"]
-fn delegated_daemon_leaf_and_jobs_budget() {
+#[ignore = "inner half of jobs_live_outside_the_daemon_unit_and_carry_the_host_budget"]
+fn delegated_job_tree_and_jobs_budget() {
     let Some(jobs) = enter_delegated_scope() else {
         return;
     };
+    // The job tree is the sibling job tree unit, never the daemon's own unit,
+    // so restarting the daemon never meets a cgroup with live jobs (#18493).
     let own = own_cgroup_dir().expect("own cgroup");
-    assert_eq!(own.file_name(), Some(DAEMON_LEAF.as_ref()), "{own:?}");
-    let service = own.parent().expect("service cgroup");
+    let service = jobs.parent().expect("job tree unit cgroup");
+    assert_eq!(service.parent(), own.parent(), "{service:?} beside {own:?}");
+    assert_ne!(service, own);
+    assert!(!jobs.starts_with(&own), "{jobs:?} inside {own:?}");
     assert_eq!(jobs, service.join(JOBS_DIR));
     assert_eq!(
         fs::read_to_string(service.join("cgroup.procs"))
             .unwrap()
             .trim(),
         "",
-        "the service cgroup is an inner node"
+        "the job tree unit's root is an inner node"
     );
-    assert_eq!(
-        fs::read_to_string(own.join("cgroup.procs")).unwrap().trim(),
-        std::process::id().to_string()
+    assert!(
+        !fs::read_to_string(service.join(HOLDER_LEAF).join("cgroup.procs"))
+            .unwrap()
+            .trim()
+            .is_empty(),
+        "the job tree unit's process runs in its holder leaf"
     );
     for cgroup in [service, jobs] {
         let enabled = fs::read_to_string(cgroup.join("cgroup.subtree_control")).unwrap();
@@ -269,11 +276,8 @@ fn delegated_memory_budget_oom() {
     assert_eq!(metrics.cgroup_memory.memory_limit_bytes, Some(128 * MIB));
     // memory.oom.group took the job's idle sibling down with the allocator.
     assert_eq!(survivors(&sleep), Vec::<String>::new());
-    // The daemon was outside the OOM domain and still runs in its leaf.
-    assert_eq!(
-        own_cgroup_dir().expect("own cgroup").file_name(),
-        Some(DAEMON_LEAF.as_ref())
-    );
+    // The daemon was outside the OOM domain: the job tree is another unit.
+    assert!(!jobs.starts_with(own_cgroup_dir().expect("own cgroup")));
     assert_job_cgroups_removed(jobs);
 }
 

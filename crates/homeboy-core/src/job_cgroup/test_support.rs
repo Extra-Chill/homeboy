@@ -1,10 +1,11 @@
 //! Shared harness for end-to-end job cgroup tests (#18418, #18449).
 //!
-//! An outer test re-runs one inner test of the same binary in a transient
-//! `Delegate=yes` user scope, where the inner test process plays the daemon: it
-//! moves into its `daemon/` leaf and runs real jobs in real cgroups. Outer
-//! tests skip, printing why, when the host cannot delegate cgroup v2 `memory`
-//! and `pids` to a user scope.
+//! An outer test starts a transient job tree unit (`Delegate=yes`,
+//! `DelegateSubgroup=holder`), then re-runs one inner test of the same binary
+//! in a sibling user scope, where the inner test process plays the daemon: it
+//! prepares `jobs/` in the job tree unit and runs real jobs in real cgroups.
+//! Outer tests skip, printing why, when the host cannot delegate cgroup v2
+//! `memory` and `pids` to a user unit.
 
 use std::fs;
 use std::path::Path;
@@ -29,22 +30,49 @@ fn user_manager_command(program: &str) -> Command {
 
 fn scope_command() -> Command {
     let mut command = user_manager_command("systemd-run");
+    command.args(["--user", "--scope", "--quiet", "--"]);
+    command
+}
+
+/// A transient job tree unit like the runner's `homeboy-runner-jobs.service`,
+/// with outer bounds so a defect cannot reach the host either.
+fn job_tree_unit_command(unit: &str) -> Command {
+    let mut command = user_manager_command("systemd-run");
     command.args([
         "--user",
-        "--scope",
         "--quiet",
+        "--collect",
+        &format!("--unit={unit}"),
         "-p",
         "Delegate=yes",
-        // Outer bounds, so a defect cannot reach the host either.
+        "-p",
+        &format!("DelegateSubgroup={}", super::HOLDER_LEAF),
         "-p",
         "TasksMax=2048",
         "-p",
         "MemoryMax=2G",
         "-p",
         "MemorySwapMax=0",
-        "--",
+        "sleep",
+        "infinity",
     ]);
     command
+}
+
+/// The cgroup directory of a running user unit.
+fn unit_cgroup_dir(unit: &str) -> Option<std::path::PathBuf> {
+    let mut show = user_manager_command("systemctl");
+    show.args(["--user", "show", "--property=ControlGroup", "--value", unit]);
+    let output = output_within(show, Duration::from_secs(30)).ok()?;
+    let relative = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    (!relative.is_empty())
+        .then(|| Path::new("/sys/fs/cgroup").join(relative.trim_start_matches('/')))
+}
+
+fn stop_unit(unit: &str) {
+    let mut stop = user_manager_command("systemctl");
+    stop.args(["--user", "stop", unit]);
+    let _ = output_within(stop, Duration::from_secs(30));
 }
 
 fn output_within(mut command: Command, timeout: Duration) -> Result<std::process::Output, String> {
@@ -70,42 +98,45 @@ fn output_within(mut command: Command, timeout: Duration) -> Result<std::process
     child.wait_with_output().map_err(|error| error.to_string())
 }
 
-/// Why this host cannot run the end-to-end tests, if it cannot.
-fn delegated_scope_unavailable() -> Option<String> {
-    let mut probe = scope_command();
-    probe.args([
-        "sh",
-        "-c",
-        "cat \"/sys/fs/cgroup$(cut -d: -f3 /proc/self/cgroup)/cgroup.controllers\"",
-    ]);
-    match output_within(probe, Duration::from_secs(30)) {
-        Err(error) => Some(format!(
-            "systemd-run --user --scope is unavailable: {error}"
-        )),
-        Ok(output) if !output.status.success() => Some(format!(
-            "systemd-run --user --scope -p Delegate=yes failed: {}",
-            String::from_utf8_lossy(&output.stderr).trim()
-        )),
-        Ok(output) => {
-            let controllers = String::from_utf8_lossy(&output.stdout);
-            ["memory", "pids"]
-                .iter()
-                .find(|controller| {
-                    !controllers
-                        .split_whitespace()
-                        .any(|name| name == **controller)
-                })
-                .map(|controller| {
-                    format!("the user manager does not delegate the {controller} controller")
-                })
+/// Start the job tree unit `unit`, or say why this host cannot run the
+/// end-to-end tests.
+fn start_job_tree_unit(unit: &str) -> Result<(), String> {
+    match output_within(job_tree_unit_command(unit), Duration::from_secs(30)) {
+        Err(error) => return Err(format!("systemd-run --user is unavailable: {error}")),
+        Ok(output) if !output.status.success() => {
+            return Err(format!(
+                "systemd-run --user -p Delegate=yes failed: {}",
+                String::from_utf8_lossy(&output.stderr).trim()
+            ))
         }
+        Ok(_) => {}
+    }
+    let controllers = unit_cgroup_dir(unit)
+        .and_then(|dir| fs::read_to_string(dir.join("cgroup.controllers")).ok())
+        .unwrap_or_default();
+    match ["memory", "pids"].iter().find(|controller| {
+        !controllers
+            .split_whitespace()
+            .any(|name| name == **controller)
+    }) {
+        Some(controller) => {
+            stop_unit(unit);
+            Err(format!(
+                "the user manager does not delegate the {controller} controller"
+            ))
+        }
+        None => Ok(()),
     }
 }
 
 /// Run the ignored inner test `test_path` (its full path in this test binary)
 /// as the only test inside a delegated scope, or skip with the reason.
 pub fn run_in_delegated_scope(test_path: &str, env: &[(&str, &str)]) {
-    if let Some(reason) = delegated_scope_unavailable() {
+    let unit = format!(
+        "homeboy-test-jobs-{}.service",
+        uuid::Uuid::new_v4().simple()
+    );
+    if let Err(reason) = start_job_tree_unit(&unit) {
         eprintln!("skipping job cgroup end-to-end test {test_path}: {reason}");
         return;
     }
@@ -120,8 +151,11 @@ pub fn run_in_delegated_scope(test_path: &str, env: &[(&str, &str)]) {
             "--test-threads=1",
         ])
         .env(INNER_ENV, "1")
+        .env(super::JOB_TREE_UNIT_ENV, &unit)
         .envs(env.iter().copied());
-    let output = output_within(command, INNER_TIMEOUT).expect("inner test completes");
+    let output = output_within(command, INNER_TIMEOUT);
+    stop_unit(&unit);
+    let output = output.expect("inner test completes");
     let stdout = String::from_utf8_lossy(&output.stdout);
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(
