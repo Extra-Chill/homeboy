@@ -2,6 +2,11 @@
 
 All notable changes to the **wordpress** extension will be documented in this file.
 
+## [3.56.4] - 2026-11-19
+
+### Fixed
+- keep full-suite failures when WP Codebox PHPUnit reports into the shared sidecar
+
 ## [3.56.3] - 2026-11-19
 
 ### Fixed
