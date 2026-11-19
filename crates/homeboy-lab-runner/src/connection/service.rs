@@ -259,10 +259,10 @@ adopt() {{
 }}
 if [ -d "$runner" ]; then
   for job in "$runner/{jobs}"/*/; do
-    [ -d "$job" ] && adopt "${{job%/}}" "$tree/{jobs}/$(basename "$job")"
+    if [ -d "$job" ]; then adopt "${{job%/}}" "$tree/{jobs}/$(basename "$job")"; fi
   done
-  [ -d "$runner/{jobs}" ] && { rmdir "$runner/{jobs}" || true; }
-  [ -d "$runner/daemon" ] && adopt "$runner/daemon" "$tree/{jobs}/legacy-daemon"
+  if [ -d "$runner/{jobs}" ]; then rmdir "$runner/{jobs}" || true; fi
+  if [ -d "$runner/daemon" ]; then adopt "$runner/daemon" "$tree/{jobs}/legacy-daemon"; fi
   for controller in io memory pids; do
     echo "-$controller" > "$runner/cgroup.subtree_control" 2>/dev/null || true
   done
@@ -1103,6 +1103,15 @@ mod tests {
         assert_eq!(run(""), SERVICE_PATH);
         assert_eq!(run("/home/u/my dir/bin:/usr/bin"), SERVICE_PATH);
         assert_eq!(run("/x|y:/usr/bin"), SERVICE_PATH);
+    }
+
+    #[test]
+    fn adopt_script_is_valid_sh() {
+        let status = std::process::Command::new("sh")
+            .args(["-n", "-c", &adopt_in_unit_jobs_script()])
+            .status()
+            .unwrap();
+        assert!(status.success());
     }
 
     #[test]
