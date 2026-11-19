@@ -570,21 +570,14 @@ esac
 
         assert_eq!(
             std::fs::read_to_string(root.join("systemctl.log")).expect("service command log"),
-            "--user daemon-reload\n--user enable --now homeboy-runner.service\n",
+            "--user daemon-reload\n--user enable --now homeboy-runner-jobs.service\n--user enable --now homeboy-runner.service\n",
             "install must block at its first service start, before waiting for the lease"
         );
 
         let unit_dir = root.join(".config/systemd/user");
-        let unit_path = std::fs::read_dir(&unit_dir)
-            .expect("service unit directory")
-            .filter_map(Result::ok)
-            .map(|entry| entry.path())
-            .find(|path| {
-                path.extension()
-                    .is_some_and(|extension| extension == "service")
-            })
-            .expect("scoped disposable service unit");
-        let unit = std::fs::read_to_string(unit_path).expect("read service unit");
+        // The runner unit, not its sibling job tree unit (#18543).
+        let unit = std::fs::read_to_string(unit_dir.join("homeboy-runner.service"))
+            .expect("read runner service unit");
         let state_suffix = unit
             .lines()
             .find_map(|line| line.strip_prefix("Environment=HOMEBOY_DAEMON_STATE_DIR=%h"))
