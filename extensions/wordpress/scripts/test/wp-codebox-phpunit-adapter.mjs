@@ -1248,10 +1248,13 @@ async function parsePublishedArtifacts(published) {
   }
   if (process.env.HOMEBOY_TEST_FAILURES_FILE || published.failuresPath) {
     const requestedFailuresPath = process.env.HOMEBOY_TEST_FAILURES_FILE;
-    const temporaryFailuresPath = published.failuresPath ? `${published.failuresPath}.${process.pid}.parse` : requestedFailuresPath;
-    if (published.failuresPath) {
-      process.env.HOMEBOY_TEST_FAILURES_FILE = temporaryFailuresPath;
-    }
+    // The parser always writes a scratch file. Core's failures sidecar is
+    // shared by the whole invocation: standalone PHP smokes and earlier suites
+    // have already recorded failures there, so this run's records are merged
+    // into it rather than written over it (Extra-Chill/homeboy#18516).
+    const parseTarget = published.failuresPath || requestedFailuresPath;
+    const temporaryFailuresPath = `${parseTarget}.${process.pid}.parse`;
+    process.env.HOMEBOY_TEST_FAILURES_FILE = temporaryFailuresPath;
     try {
       runScript('parse-test-failures.sh', [published.directory, componentPath]);
       if (published.failuresPath) {
@@ -1259,9 +1262,9 @@ async function parsePublishedArtifacts(published) {
           await assertDirectoryTree(process.env.HOMEBOY_INVOCATION_ARTIFACT_DIR, ['wp-codebox-phpunit', 'files']);
           await atomicCopy(temporaryFailuresPath, published.failuresPath);
         });
-        if (requestedFailuresPath && requestedFailuresPath !== published.failuresPath) {
-          await atomicCopy(published.failuresPath, requestedFailuresPath);
-        }
+      }
+      if (requestedFailuresPath) {
+        await mergeTestFailuresInto(requestedFailuresPath, published.failuresPath || temporaryFailuresPath);
       }
     } catch (error) {
       if (published.failuresPath) {
@@ -1271,12 +1274,12 @@ async function parsePublishedArtifacts(published) {
           await atomicWrite(published.failuresPath, fallback);
         });
         if (requestedFailuresPath && requestedFailuresPath !== published.failuresPath) {
-          await atomicCopy(published.failuresPath, requestedFailuresPath);
+          await mergeTestFailuresInto(requestedFailuresPath, published.failuresPath);
         }
       }
       throw error;
     } finally {
-      if (published.failuresPath) { await unlink(temporaryFailuresPath).catch(() => {}); }
+      await unlink(temporaryFailuresPath).catch(() => {});
       if (requestedFailuresPath) {
         process.env.HOMEBOY_TEST_FAILURES_FILE = requestedFailuresPath;
       } else {
@@ -1285,6 +1288,54 @@ async function parsePublishedArtifacts(published) {
     }
   }
   return published.status;
+}
+// Failure records already in a sidecar: core's seeded array, records appended
+// by the sidecar writer, or an earlier suite's parser envelope.
+function failureRecords(payload) {
+  if (Array.isArray(payload)) { return payload; }
+  if (isObject(payload) && Array.isArray(payload.failures)) { return payload.failures; }
+  return [];
+}
+function failureRecordKey(record) {
+  return isObject(record) && typeof record.fingerprint === 'string' && record.fingerprint !== ''
+    ? `fingerprint:${record.fingerprint}`
+    : `record:${JSON.stringify(record)}`;
+}
+// Merge one parser envelope into the invocation's failures sidecar, keeping
+// every record already there. Envelope counts accumulate across suites so the
+// sidecar still describes everything recorded into it.
+async function mergeTestFailuresInto(target, sourcePath) {
+  if (path.resolve(target) === path.resolve(sourcePath)) { return; }
+  const parsed = json(await readFile(sourcePath, 'utf8').catch(() => ''), null);
+  if (parsed === null) { return; }
+  await assertRegularOrMissing(target);
+  const existing = json(await readFile(target, 'utf8').catch(() => ''), null);
+  const seen = new Set();
+  const failures = [];
+  for (const record of [...failureRecords(existing), ...failureRecords(parsed)]) {
+    const key = failureRecordKey(record);
+    if (seen.has(key)) { continue; }
+    seen.add(key);
+    failures.push(record);
+  }
+  let merged = failures;
+  if (isObject(parsed)) {
+    merged = { ...parsed, failures };
+    if (isObject(existing)) {
+      for (const field of ['total', 'passed']) {
+        merged[field] = (Number(existing[field]) || 0) + (Number(parsed[field]) || 0);
+      }
+      if (isObject(existing.metadata) && isObject(parsed.metadata)) {
+        merged.metadata = { ...parsed.metadata };
+        for (const [field, value] of Object.entries(existing.metadata)) {
+          if (typeof value === 'number' && typeof parsed.metadata[field] === 'number') {
+            merged.metadata[field] = value + parsed.metadata[field];
+          }
+        }
+      }
+    }
+  }
+  await atomicWrite(target, `${JSON.stringify(merged, null, 2)}\n`);
 }
 async function fallbackTestFailures(publishedFilesDirectory, error = null) {
   let summary = {};

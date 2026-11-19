@@ -1,0 +1,226 @@
+[2026-11-17T10:20:03.967Z] wordpress.phpunit plugin-slug=extrachill-users cwd=/wordpress/wp-content/plugins/extrachill-users test-file= changed-tests-json=[] discovery-only= env-json={} wp-config-defines-json={} autoload-file=/tmp/wp-codebox-inputs/1-wp-codebox-vendor-73845ca47d2f/autoload.php autoload-file-role=harness project-autoload-file= tests-dir=/tmp/wp-codebox-inputs/1-wp-codebox-vendor-73845ca47d2f/wp-phpunit/wp-phpunit test-root=/wordpress/wp-content/plugins/extrachill-users/tests phpunit-xml=/wordpress/wp-content/plugins/extrachill-users/wp-codebox-managed-phpunit-default.xml phpunit-xml-default= dependency-mounts=/wordpress/wp-content/plugins/extrachill-network,/wordpress/wp-content/plugins/data-machine,/wordpress/wp-content/plugins/data-machine-events,/wordpress/wp-content/plugins/extrachill-analytics,/wordpress/wp-content/plugins/extrachill-api,/wordpress/wp-content/plugins/extrachill-users dependency-plugins-json=[{"path":"/wordpress/wp-content/plugins/extrachill-network","pluginFile":"extrachill-network/extrachill-network.php","activate":true,"loadAs":"plugin"},{"path":"/wordpress/wp-content/plugins/data-machine","pluginFile":"data-machine/data-machine.php","activate":true,"loadAs":"plugin"},{"path":"/wordpress/wp-content/plugins/data-machine-events","pluginFile":"data-machine-events/data-machine-events.php","activate":true,"loadAs":"plugin"},{"path":"/wordpress/wp-content/plugins/extrachill-analytics","pluginFile":"extrachill-analytics/extrachill-analytics.php","activate":true,"loadAs":"plugin"},{"path":"/wordpress/wp-content/plugins/extrachill-api","pluginFile":"extrachill-api/extrachill-api.php","activate":true,"loadAs":"plugin"},{"path":"/wordpress/wp-content/plugins/extrachill-users","pluginFile":"extrachill-users/extrachill-users.php","activate":true,"loadAs":"plugin"}] bootstrap-files-json=[] preload-files-json=["/tmp/wp-codebox-inputs/2-wp-codebox-wp-cli-bootstrap.php-49cd5bdd7a0e"] phpunit-args-json=[] bootstrap-mode=managed project-bootstrap= multisite=1 database-type=mysql
+exitCode=1
+wordpress.phpunit failed with exit code 2
+failureClassification=runtime-command-failure
+
+--- Playground response diagnostics ---
+exitCode=2
+cause=PHP.run() failed with exit code 2. 
+
+=== Stdout ===
+ PHPUnit 9.6.34 by Sebastian Bergmann and contributors.
+
+.......F...F..........F...F..................................S.  63 / 641 (  9%)
+.SS......................F.E................................... 126 / 641 ( 19%)
+......................................F......................F. 189 / 641 ( 29%)
+.....................FF.F.............S........................ 252 / 641 ( 39%)
+.............F................................................. 315 / 641 ( 49%)
+...............................SSS............................. 378 / 641 ( 58%)
+...................F...FF...................................... 441 / 641 ( 68%)
+.........F..................................................... 504 / 641 ( 78%)
+.............................................F................. 567 / 641 ( 88%)
+............................................................... 630 / 641 ( 98%)
+...........                                                     641 / 641 (100%)
+
+Time: 01:03.506, Memory: 125.00 MB
+
+There was 1 error:
+
+1) Test_Artist_Membership_Authorization::test_revoked_and_foreign_memberships_cannot_manage_artist
+Error: Call to undefined function ec_remove_artist_membership()
+
+/wordpress/wp-content/plugins/extrachill-users/tests/unit/ArtistMembershipAuthorizationTest.php:66
+/internal/eval.php:1588
+
+--
+
+There were 16 failures:
+
+1) Test_Attendance_Button_Design_System::test_template_uses_only_classes_that_actually_render
+inc/concert-tracking/buttons.php uses classes with no CSS rule in the theme, the plugin stylesheet, or the pinned CSS-free list; they will render unstyled: echo, esc_attr(, $marked_class, );, ?>, $button_class
+Failed asserting that two arrays are identical.
+--- Expected
++++ Actual
+@@ @@
+-Array &0 ()
++Array &0 (
++    0 => 'echo'
++    1 => 'esc_attr('
++    2 => '$marked_class'
++    3 => ');'
++    4 => '?>'
++    5 => '$button_class'
++)
+
+/wordpress/wp-content/plugins/extrachill-users/tests/integration/AttendanceButtonDesignSystemTest.php:110
+/internal/eval.php:1588
+
+2) Test_OAuth_Consent_Template::test_consent_form_renders_the_nonce_action_for_each_grant
+Failed to assert that Theme without header.php triggered a deprecation notice.
+Failed to assert that Theme without footer.php triggered a deprecation notice.
+Failed asserting that an array is empty.
+
+/tmp/wp-codebox-inputs/1-wp-codebox-vendor-73845ca47d2f/wp-phpunit/wp-phpunit/includes/abstract-testcase.php:660
+/tmp/wp-codebox-inputs/1-wp-codebox-vendor-73845ca47d2f/wp-phpunit/wp-phpunit/includes/abstract-testcase.php:672
+/tmp/wp-codebox-inputs/1-wp-codebox-vendor-73845ca47d2f/yoast/phpunit-polyfills/src/TestCases/TestCasePHPUnitGte8.php:96
+/internal/eval.php:1588
+
+3) Test_Users_Privacy_Erasure::test_core_workflow_drains_partial_batches_and_retries
+Failed asserting that 10 is identical to 9.
+
+/wordpress/wp-content/plugins/extrachill-users/tests/integration/PrivacyErasureTest.php:56
+/internal/eval.php:1588
+
+4) Test_Users_Privacy_Erasure::test_network_tables_are_erased_from_another_site
+Failed asserting that 7 is identical to 5.
+
+/wordpress/wp-content/plugins/extrachill-users/tests/integration/PrivacyErasureTest.php:137
+/internal/eval.php:1588
+
+5) Test_Artist_Invitation_Registration::test_old_invite_payload_is_silently_ignored
+Failed asserting that WP_Error Object &000000000000238c0000000000000000 (
+    'errors' => Array &0 (
+        'turnstile_missing' => Array &1 (
+            0 => 'Security verification unavailable.'
+        )
+    )
+    'error_data' => Array &2 (
+        'turnstile_missing' => Array &3 (
+            'status' => 500
+        )
+    )
+    'additional_data' => Array &4 ()
+) is of type "array".
+
+/wordpress/wp-content/plugins/extrachill-users/tests/unit/ArtistInvitationRegistrationTest.php:28
+/internal/eval.php:1588
+
+6) Test_Concert_Import_Attendance_Validation::test_unpublished_external_id_match_fails_run_truthfully
+Failed asserting that two strings are identical.
+--- Expected
++++ Actual
+@@ @@
+-'failed'
++'complete'
+
+/wordpress/wp-content/plugins/extrachill-users/tests/unit/ConcertImportAttendanceValidationTest.php:182
+/internal/eval.php:1588
+
+7) Test_Concert_Tracking_Abilities::test_attendee_service_clamps_defaults_boundaries_and_malformed_values
+Failed asserting that two arrays are identical.
+--- Expected
++++ Actual
+@@ @@
+ Array &0 (
+     0 => 167
+     1 => 168
+-    2 => 169
+-    3 => 170
++    2 => 170
++    3 => 169
+     4 => 171
+     5 => 172
+     6 => 173
+
+/wordpress/wp-content/plugins/extrachill-users/tests/unit/ConcertTrackingAbilitiesTest.php:316
+/internal/eval.php:1588
+
+8) Test_Core_Signup_Surface::test_main_site_get_redirects_to_branded_registration
+Failed asserting that two strings are identical.
+--- Expected
++++ Actual
+@@ @@
+-'https://example.org/login/#tab-register'
++'http://localhost/wp-admin/'
+
+/wordpress/wp-content/plugins/extrachill-users/tests/unit/CoreSignupSurfaceTest.php:96
+/wordpress/wp-content/plugins/extrachill-users/tests/unit/CoreSignupSurfaceTest.php:24
+/internal/eval.php:1588
+
+9) Test_Core_Signup_Surface::test_subsite_get_uses_network_branded_registration_after_core_canonicalization
+Failed asserting that two strings are identical.
+--- Expected
++++ Actual
+@@ @@
+-'http://example.org/wp-signup.php'
++'http://localhost/wp-signup.php'
+
+/wordpress/wp-content/plugins/extrachill-users/tests/unit/CoreSignupSurfaceTest.php:112
+/wordpress/wp-content/plugins/extrachill-users/tests/unit/CoreSignupSurfaceTest.php:28
+/internal/eval.php:1588
+
+10) Test_Core_Signup_Surface::test_subsite_post_is_rejected_after_core_canonicalization
+Failed asserting that two strings are identical.
+--- Expected
++++ Actual
+@@ @@
+-'http://example.org/wp-signup.php'
++'http://localhost/wp-signup.php'
+
+/wordpress/wp-content/plugins/extrachill-users/tests/unit/CoreSignupSurfaceTest.php:112
+/wordpress/wp-content/plugins/extrachill-users/tests/unit/CoreSignupSurfaceTest.php:37
+/internal/eval.php:1588
+
+11) Test_Event_Creator::test_create_writes_audit_meta_and_returns_post_id
+Failed asserting that null is of type "int".
+
+/wordpress/wp-content/plugins/extrachill-users/tests/unit/EventCreatorTest.php:115
+/internal/eval.php:1588
+
+12) Test_Notification_Unsubscribe_Token::test_new_url_round_trip
+Failed asserting that two arrays are identical.
+--- Expected
++++ Actual
+@@ @@
+ Array &0 (
+-    0 => 'token'
++    0 => 'rest_route'
++    1 => 'token'
+ )
+
+/wordpress/wp-content/plugins/extrachill-users/tests/unit/NotificationUnsubscribeTokenTest.php:18
+/internal/eval.php:1588
+
+13) Test_Notification_Unsubscribe_Token::test_route_schema_accepts_token_only
+Unexpected incorrect usage notice for register_rest_route.
+REST API routes must be registered on the <code>rest_api_init</code> action. Instead route '<code>/notifications/unsubscribe</code>' with namespace '<code>extrachill/v1</code>' was not registered on this action. (This message was added in version 5.1.0.)
+Failed asserting that an array is empty.
+
+/tmp/wp-codebox-inputs/1-wp-codebox-vendor-73845ca47d2f/wp-phpunit/wp-phpunit/includes/abstract-testcase.php:660
+/tmp/wp-codebox-inputs/1-wp-codebox-vendor-73845ca47d2f/wp-phpunit/wp-phpunit/includes/abstract-testcase.php:672
+/tmp/wp-codebox-inputs/1-wp-codebox-vendor-73845ca47d2f/yoast/phpunit-polyfills/src/TestCases/TestCasePHPUnitGte8.php:96
+/internal/eval.php:1588
+
+14) Test_OAuth_Service_Standalone::test_standalone_oauth_checks_pass
+Failed asserting that 1 is identical to 0.
+
+/wordpress/wp-content/plugins/extrachill-users/tests/unit/OAuthServiceStandaloneTest.php:23
+/internal/eval.php:1588
+
+15) Test_Authentication_Rate_Limits::test_authenticate_admits_fifth_failure_and_blocks_sixth
+Failed asserting that two strings are identical.
+--- Expected
++++ Actual
+@@ @@
+-'incorrect_password'
++'invalid_email'
+
+/wordpress/wp-content/plugins/extrachill-users/tests/unit/PasswordResetRateLimitTest.php:44
+/internal/eval.php:1588
+
+16) Test_Team_Membership_Repository::test_artist_corruption_errors_use_artist_codes_and_messages
+Failed asserting that two strings are identical.
+--- Expected
++++ Actual
+@@ @@
+-'artist_membership_corrupt_status'
++'artist_membership_corrupt_owner'
+
+/wordpress/wp-content/plugins/extrachill-users/tests/unit/TeamMembershipRepositoryTest.php:58
+/internal/eval.php:1588
+
+ERRORS!
+Tests: 641, Assertions: 3651, Errors: 1, Failures: 16, Skipped: 7.
+
+
+=== Stderr ===
