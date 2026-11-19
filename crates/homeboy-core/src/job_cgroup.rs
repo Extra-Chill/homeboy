@@ -25,6 +25,7 @@ use std::sync::OnceLock;
 use std::time::{Duration, Instant};
 
 const CONTROLLERS: &str = "+memory +pids";
+const OPTIONAL_CONTROLLERS: &str = "+io";
 /// The leaf the daemon moves into inside its delegated service cgroup.
 pub const DAEMON_LEAF: &str = "daemon";
 /// The parent of every job cgroup; its `memory.max` is the host budget.
@@ -93,6 +94,10 @@ fn delegate(jobs_memory_max: u64) -> Result<PathBuf, String> {
     let jobs = service.join(JOBS_DIR);
     create_dir(&jobs)?;
     write(&jobs.join("cgroup.subtree_control"), CONTROLLERS)?;
+    // `io.stat` is usage evidence, not a limit: enable it where delegated.
+    for cgroup in [&service, &jobs] {
+        let _ = fs::write(cgroup.join("cgroup.subtree_control"), OPTIONAL_CONTROLLERS);
+    }
     write(&jobs.join("memory.max"), &limit_value(jobs_memory_max))?;
     match fs::write(jobs.join("memory.swap.max"), "0") {
         Err(error) if error.kind() != io::ErrorKind::NotFound => {
@@ -206,6 +211,35 @@ pub struct JobCgroupCounters {
     pub pids_current: Option<u64>,
     pub pids_peak: Option<u64>,
     pub pids_max_events: Option<u64>,
+    /// `cpu.stat`: kept for every cgroup, whatever its enabled controllers.
+    pub cpu_usage_usec: Option<u64>,
+    pub cpu_user_usec: Option<u64>,
+    pub cpu_system_usec: Option<u64>,
+    /// `io.stat`, summed over devices; present when `io` is enabled.
+    pub io_read_bytes: Option<u64>,
+    pub io_write_bytes: Option<u64>,
+}
+
+impl JobCgroupCounters {
+    /// The job's usage block from its kernel counters, read before the
+    /// cgroup is removed.
+    pub fn usage(
+        &self,
+        wall_ms: u64,
+    ) -> Option<homeboy_engine_primitives::resource_usage::ResourceUsage> {
+        Some(homeboy_engine_primitives::resource_usage::ResourceUsage {
+            cpu_usage_usec: self.cpu_usage_usec?,
+            cpu_user_usec: self.cpu_user_usec.unwrap_or(0),
+            cpu_system_usec: self.cpu_system_usec.unwrap_or(0),
+            homeboy_cpu_usec: 0,
+            wall_ms,
+            memory_peak_bytes: self.memory_peak,
+            io_read_bytes: self.io_read_bytes,
+            io_write_bytes: self.io_write_bytes,
+            source: homeboy_engine_primitives::resource_usage::USAGE_SOURCE_JOB_CGROUP.to_string(),
+            estimated: false,
+        })
+    }
 }
 
 /// One job's own cgroup. Dropping it kills and removes the cgroup.
@@ -396,6 +430,11 @@ impl JobCgroup {
         let value = |name: &str| read_u64(&self.dir.join(name));
         let memory_events = fs::read_to_string(self.dir.join("memory.events")).ok();
         let pids_events = fs::read_to_string(self.dir.join("pids.events")).ok();
+        let cpu_stat = fs::read_to_string(self.dir.join("cpu.stat")).ok();
+        let cpu = |name: &str| cpu_stat.as_deref().and_then(|stat| event_count(stat, name));
+        let io = fs::read_to_string(self.dir.join("io.stat"))
+            .ok()
+            .map(|stat| io_bytes(&stat));
         JobCgroupCounters {
             // The budget is enforced on `jobs/`, the job's parent.
             memory_limit: self
@@ -413,6 +452,11 @@ impl JobCgroup {
             pids_max_events: pids_events
                 .as_deref()
                 .and_then(|events| event_count(events, "max")),
+            cpu_usage_usec: cpu("usage_usec"),
+            cpu_user_usec: cpu("user_usec"),
+            cpu_system_usec: cpu("system_usec"),
+            io_read_bytes: io.map(|(read, _)| read),
+            io_write_bytes: io.map(|(_, write)| write),
         }
     }
 }
@@ -438,6 +482,24 @@ fn event_count(events: &str, name: &str) -> Option<u64> {
             .then(|| fields.next()?.parse().ok())
             .flatten()
     })
+}
+
+/// `io.stat` read and write bytes, summed over its per-device lines
+/// (`8:0 rbytes=1 wbytes=2 ...`).
+pub fn io_bytes(stat: &str) -> (u64, u64) {
+    let mut totals = (0_u64, 0_u64);
+    for field in stat.split_whitespace() {
+        let Some((key, value)) = field.split_once('=') else {
+            continue;
+        };
+        let value = value.parse::<u64>().unwrap_or(0);
+        match key {
+            "rbytes" => totals.0 = totals.0.saturating_add(value),
+            "wbytes" => totals.1 = totals.1.saturating_add(value),
+            _ => {}
+        }
+    }
+    totals
 }
 
 /// Shared harness for end-to-end job cgroup tests in a delegated user scope.

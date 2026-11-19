@@ -37,6 +37,7 @@ mod latest;
 mod logs;
 pub(crate) mod workflow;
 pub(crate) use logs::{logs, RunsLogsArgs};
+mod profile;
 mod proof;
 pub(crate) mod reconcile;
 mod refs;

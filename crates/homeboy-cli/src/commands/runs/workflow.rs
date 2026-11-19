@@ -74,8 +74,22 @@ pub(crate) fn run(args: RunsArgs) -> CmdResult<RunsOutput> {
     let (view, code) = match args.command {
         RunsCommand::List(_) => (client.workflow_list()?, 0),
         RunsCommand::Show { run_id, .. } => {
-            let view = client.workflow(&run_id)?;
+            let mut view = client.workflow(&run_id)?;
             let code = exit_code(&view);
+            // Step usage lives on the instance's durable run (#18461).
+            if let Some(resources) =
+                homeboy::core::observation::ObservationStore::open_initialized()
+                    .and_then(|store| {
+                        homeboy::core::performance_hotspots::run_resources(&store, &run_id)
+                    })
+                    .ok()
+                    .flatten()
+                    .and_then(|resources| serde_json::to_value(resources).ok())
+            {
+                if let Some(object) = view.as_object_mut() {
+                    object.insert("resources".to_string(), resources);
+                }
+            }
             (view, code)
         }
         RunsCommand::Watch(args) => {

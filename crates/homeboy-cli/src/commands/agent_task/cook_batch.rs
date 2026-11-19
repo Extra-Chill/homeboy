@@ -1101,6 +1101,7 @@ mod tests {
                     outcome: None,
                     output: Some(json!({ "children": children })),
                     run_id: None,
+                    usage: None,
                 }),
                 1,
             );

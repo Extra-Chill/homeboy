@@ -540,6 +540,7 @@ fn render_run_detail(run: &Value) -> String {
         lines.push(format!("Finished: {finished}"));
     }
     lines.extend(execution_provenance_lines(run));
+    lines.extend(resource_lines(run));
 
     if kind == "bench" {
         lines.extend(super::bench_summary::bench_hotspot_lines(run));
@@ -554,6 +555,41 @@ fn render_run_detail(run: &Value) -> String {
     lines.extend(detail_reference_lines(run_id));
 
     finish(lines)
+}
+
+/// CPU per step or phase, already sorted by CPU (#18461).
+fn resource_lines(run: &Value) -> Vec<String> {
+    let Some(resources) = run.get("resources").filter(|value| !value.is_null()) else {
+        return Vec::new();
+    };
+    let overhead = &resources["overhead"];
+    let mut lines = vec![format!(
+        "CPU: {:.2}s (homeboy {:.2}s, staging {:.2}s, workload {:.2}s)",
+        resources["cpu_seconds"].as_f64().unwrap_or_default(),
+        overhead["homeboy_cpu_seconds"].as_f64().unwrap_or_default(),
+        overhead["staging_cpu_seconds"].as_f64().unwrap_or_default(),
+        overhead["workload_cpu_seconds"]
+            .as_f64()
+            .unwrap_or_default(),
+    )];
+    for phase in resources["phases"].as_array().into_iter().flatten() {
+        let memory = phase["memory_peak_bytes"]
+            .as_u64()
+            .map(|bytes| format!(" peak={:.1}MiB", bytes as f64 / (1024.0 * 1024.0)))
+            .unwrap_or_default();
+        lines.push(format!(
+            "  {}: cpu={:.2}s wall={:.1}s{memory}{}",
+            phase["phase"].as_str().unwrap_or_default(),
+            phase["cpu_seconds"].as_f64().unwrap_or_default(),
+            phase["wall_ms"].as_u64().unwrap_or_default() as f64 / 1000.0,
+            if phase["estimated"].as_bool() == Some(true) {
+                " (estimated)"
+            } else {
+                ""
+            },
+        ));
+    }
+    lines
 }
 
 fn execution_provenance_lines(run: &Value) -> Vec<String> {

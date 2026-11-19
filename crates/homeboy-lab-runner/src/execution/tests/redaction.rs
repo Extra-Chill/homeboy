@@ -203,6 +203,7 @@ fn runner_exec_failure_error_surfaces_resource_guard_message() {
         cgroup_memory: Default::default(),
         isolation: Some("process_tree".to_string()),
         source: "linux_procfs_process_tree".to_string(),
+        usage: None,
     });
 
     let err = runner_exec_failure_error(&output).expect("runner failure error");

@@ -44,6 +44,7 @@ fn foreach_per_item_pipelines_without_changing_join() {
                     error: None,
                     output: Some(json!(format!("result-{index}"))),
                     run_id: None,
+                    usage: None,
                 }),
                 now,
             )
@@ -99,6 +100,7 @@ fn foreach_failure_keeps_item_error_and_first_failure_reason() {
                 outcome: None,
                 output: None,
                 run_id: None,
+                usage: None,
             }),
             1,
         );
@@ -177,6 +179,7 @@ fn succeeded_steps_and_items_discard_process_errors() {
                 error: Some("process exited 1".into()),
                 output: None,
                 run_id: None,
+                usage: None,
             }),
             1,
         );
@@ -407,6 +410,7 @@ fn world(submission: &StepSubmission) -> StepResult {
         outcome,
         output,
         run_id,
+        usage: None,
     }
 }
 
@@ -484,6 +488,7 @@ fn fan_out_scenario() -> Scenario {
                 .map(|_| if failed { "failed" } else { "succeeded" }.to_string()),
             output,
             run_id,
+            usage: None,
         }
     }
     Scenario {
@@ -613,6 +618,7 @@ fn drive(scenario: &Scenario, crash: Option<(usize, Crash)>) -> Ledger {
                     outcome: None,
                     output: None,
                     run_id: None,
+                    usage: None,
                 });
                 continue;
             }
@@ -795,6 +801,7 @@ fn terminal_instances_ignore_every_event() {
             outcome: None,
             output: None,
             run_id: None,
+            usage: None,
         }),
         Event::Cancel { reason: None },
     ] {

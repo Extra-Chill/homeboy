@@ -536,6 +536,34 @@ pub fn recorded_step_exit_code(job_id: &str) -> Option<i32> {
         .and_then(|code| i32::try_from(code).ok())
 }
 
+/// The step's usage block: its process tree's CPU totals, reaped by the
+/// wrapper at finish (`times`), marked `estimated`.
+pub fn recorded_step_usage(
+    job_id: &str,
+    wall_ms: u64,
+) -> Option<homeboy_engine_primitives::resource_usage::ResourceUsage> {
+    let bytes = std::fs::read(step_job_dir(job_id).ok()?.join(STEP_EXIT_FILE)).ok()?;
+    let value: Value = serde_json::from_slice(&bytes).ok()?;
+    if value["schema"] != STEP_EXIT_SCHEMA {
+        return None;
+    }
+    let (user, system) = value["cpu"].as_str()?.split_once(' ')?;
+    Some(
+        homeboy_engine_primitives::resource_usage::ResourceUsage::from_process_tree(
+            shell_times_usec(user)?,
+            shell_times_usec(system)?,
+            wall_ms,
+        ),
+    )
+}
+
+/// A POSIX `times` duration (`1m2.345s`, `0m0.004000s`) in microseconds.
+fn shell_times_usec(raw: &str) -> Option<u64> {
+    let (minutes, seconds) = raw.trim().strip_suffix('s')?.split_once('m')?;
+    let seconds = minutes.parse::<f64>().ok()? * 60.0 + seconds.parse::<f64>().ok()?;
+    (seconds.is_finite() && seconds >= 0.0).then(|| (seconds * 1_000_000.0).round() as u64)
+}
+
 /// The cause a step's child reported in its log, if it failed with one.
 pub fn recorded_step_failure_cause(job_id: &str) -> Option<String> {
     let log = std::fs::read_to_string(step_job_dir(job_id).ok()?.join(STEP_LOG_FILE)).ok()?;
@@ -1321,12 +1349,16 @@ fn stop_child_tree(child: &StepChild) -> Result<()> {
 
 /// The wrapper survives the daemon and publishes the status before it exits.
 /// Pass paths and argv as arguments, never interpolate them into shell source.
-fn step_command(request: &StepJobRequest, dir: &Path) -> Command {
+/// The wrapper every step child runs in: it records the child's exit code and
+/// the CPU its process tree used in `dir`'s exit record.
+pub fn step_command(request: &StepJobRequest, dir: &Path) -> Command {
     let mut command = Command::new("/bin/sh");
     command
         .arg("-c")
         .arg(format!(
-            "record=$1; shift; \"$@\"; code=$?; printf '{{\"schema\":\"{STEP_EXIT_SCHEMA}\",\"exit_code\":%s}}\\n' \"$code\" > \"$record.tmp\" && /bin/mv -f \"$record.tmp\" \"$record\"; exit \"$code\""
+            // `times` reports the reaped process tree's CPU at finish; it must
+            // run in this shell, not a command-substitution subshell.
+            "record=$1; shift; \"$@\"; code=$?; times > \"$record.cpu\" 2>/dev/null; {{ read _ _; read cu cs; }} < \"$record.cpu\"; /bin/rm -f \"$record.cpu\"; printf '{{\"schema\":\"{STEP_EXIT_SCHEMA}\",\"exit_code\":%s,\"cpu\":\"%s %s\"}}\\n' \"$code\" \"$cu\" \"$cs\" > \"$record.tmp\" && /bin/mv -f \"$record.tmp\" \"$record\"; exit \"$code\""
         ))
         .arg("sh")
         .arg(dir.join(STEP_EXIT_FILE))
@@ -2055,7 +2087,18 @@ mod tests {
             let job = harness.wait_until_terminal().unwrap();
             assert_eq!(job.status, crate::api_jobs::JobStatus::Failed);
             assert_eq!(recorded_step_exit_code(&job.id.to_string()), Some(7));
+            // The wrapper records the reaped tree's CPU; it is estimated.
+            let usage = recorded_step_usage(&job.id.to_string(), 5).expect("step usage");
+            assert!(usage.estimated);
+            assert_eq!(usage.wall_ms, 5);
         });
+    }
+
+    #[test]
+    fn shell_times_durations_parse_to_microseconds() {
+        assert_eq!(shell_times_usec("0m0.004000s"), Some(4_000));
+        assert_eq!(shell_times_usec("1m2.5s"), Some(62_500_000));
+        assert_eq!(shell_times_usec(""), None);
     }
 
     #[test]

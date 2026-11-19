@@ -104,6 +104,9 @@ pub struct StepState {
     pub prompt: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub error: Option<String>,
+    /// What the step's last finished attempt consumed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub usage: Option<homeboy_engine_primitives::resource_usage::ResourceUsage>,
     /// A `foreach` step's items, once expanded.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub items: Vec<ItemState>,
@@ -132,6 +135,8 @@ pub struct ItemState {
     pub run_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub error: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub usage: Option<homeboy_engine_primitives::resource_usage::ResourceUsage>,
 }
 
 impl ItemState {
@@ -148,6 +153,7 @@ impl ItemState {
             output: None,
             run_id: None,
             error: None,
+            usage: None,
         }
     }
 }
@@ -167,6 +173,7 @@ impl StepState {
             run_id: None,
             prompt: None,
             error: None,
+            usage: None,
             items: Vec::new(),
         }
     }
@@ -310,6 +317,9 @@ pub struct StepResult {
     pub output: Option<Value>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub run_id: Option<String>,
+    /// What the step's job consumed, recorded when it finished.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub usage: Option<homeboy_engine_primitives::resource_usage::ResourceUsage>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -541,6 +551,7 @@ impl Machine<'_> {
             .flatten();
         step.output = result.output.clone();
         step.run_id = result.run_id.clone();
+        step.usage = result.usage.clone();
         let attempt = step.attempt;
         let retry = self.step_definition(&id).retry.clone();
         if let Some(retry) = retry {
@@ -614,6 +625,7 @@ impl Machine<'_> {
             .flatten();
         item.output = result.output.clone();
         item.run_id = result.run_id.clone();
+        item.usage = result.usage.clone();
         item.outcome = Some(outcome.clone());
         if let Some(retry) = retry {
             if item.attempt <= retry.max && retry.on.contains(&outcome) {

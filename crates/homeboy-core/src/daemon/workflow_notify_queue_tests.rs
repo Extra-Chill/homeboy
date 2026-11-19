@@ -48,6 +48,7 @@ fn queued_approval_is_owned_by_outbox_and_route_reaches_steps() {
                 outcome: None,
                 run_id: None,
                 error: None,
+                usage: None,
             }),
             1,
         );

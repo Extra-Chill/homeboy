@@ -133,6 +133,8 @@ struct MetricsState {
     effective_rss_limit_bytes_min: Option<u64>,
     guard_violation: Option<RunnerResourceGuardViolation>,
     last_top_processes: Vec<RunnerProcessNameCount>,
+    /// The job cgroup's latest exact usage; read before the cgroup goes.
+    job_usage: Option<homeboy_engine_primitives::resource_usage::ResourceUsage>,
 }
 
 pub(crate) fn measured_command_output(
@@ -822,8 +824,10 @@ impl ResourceMetricsCollector {
                 }
             }
         }
+        let duration_ms = duration.as_millis().try_into().unwrap_or(u64::MAX);
         RunnerResourceMetrics {
-            duration_ms: duration.as_millis().try_into().unwrap_or(u64::MAX),
+            usage: job_usage(&state, duration_ms),
+            duration_ms,
             cpu_user_ms: (state.sample_count > 0).then_some(state.cpu_user_ms),
             cpu_system_ms: (state.sample_count > 0).then_some(state.cpu_system_ms),
             peak_rss_bytes: (state.sample_count > 0).then_some(state.peak_rss_bytes),
@@ -843,6 +847,29 @@ impl ResourceMetricsCollector {
             },
         }
     }
+}
+
+/// The job's usage block at finish: its cgroup's exact counters, otherwise
+/// its sampled process tree's CPU totals, marked `estimated`.
+fn job_usage(
+    state: &MetricsState,
+    duration_ms: u64,
+) -> Option<homeboy_engine_primitives::resource_usage::ResourceUsage> {
+    if let Some(usage) = &state.job_usage {
+        return Some(homeboy_engine_primitives::resource_usage::ResourceUsage {
+            wall_ms: duration_ms,
+            ..usage.clone()
+        });
+    }
+    (state.sample_count > 0).then(|| {
+        let mut usage = homeboy_engine_primitives::resource_usage::ResourceUsage::from_process_tree(
+            state.cpu_user_ms.saturating_mul(1000),
+            state.cpu_system_ms.saturating_mul(1000),
+            duration_ms,
+        );
+        usage.memory_peak_bytes = Some(state.peak_rss_bytes);
+        usage
+    })
 }
 
 /// The scope of evidence read from the job's own cgroup.
@@ -1039,6 +1066,9 @@ fn sample_job_cgroup(
         .max(snapshot.process_count.saturating_sub(1));
     state.cpu_user_ms = state.cpu_user_ms.max(snapshot.cpu_user_ms);
     state.cpu_system_ms = state.cpu_system_ms.max(snapshot.cpu_system_ms);
+    if let Some(usage) = counters.usage(0) {
+        state.job_usage = Some(usage);
+    }
     if !snapshot.top_processes.is_empty() {
         state.last_top_processes = snapshot.top_processes;
     }
@@ -1826,6 +1856,44 @@ mod tests {
                 || output.metrics.cgroup_memory.status != "observed",
             "a fully observed normal exit must retain cgroup peak memory"
         );
+        // Without a job cgroup, usage is the process tree's totals, estimated.
+        #[cfg(target_os = "linux")]
+        {
+            let usage = output.metrics.usage.expect("usage block at finish");
+            assert!(usage.estimated);
+            assert_eq!(
+                usage.source,
+                homeboy_engine_primitives::resource_usage::USAGE_SOURCE_PROCESS_TREE
+            );
+            assert_eq!(usage.wall_ms, output.metrics.duration_ms);
+        }
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn job_cgroup_usage_reads_cpu_stat_and_sums_io_stat() {
+        assert_eq!(
+            job_cgroup::io_bytes(
+                "8:0 rbytes=4096 wbytes=100 rios=1 wios=1\n259:0 rbytes=1 wbytes=2 dbytes=0\n"
+            ),
+            (4097, 102)
+        );
+        let counters = job_cgroup::JobCgroupCounters {
+            cpu_usage_usec: Some(900),
+            cpu_user_usec: Some(600),
+            cpu_system_usec: Some(300),
+            memory_peak: Some(1 << 20),
+            io_read_bytes: Some(4097),
+            ..Default::default()
+        };
+        let usage = counters.usage(12).expect("cpu.stat present");
+        assert!(!usage.estimated);
+        assert_eq!(usage.source, "job_cgroup");
+        assert_eq!(
+            (usage.cpu_usage_usec, usage.memory_peak_bytes, usage.wall_ms),
+            (900, Some(1 << 20), 12)
+        );
+        assert!(job_cgroup::JobCgroupCounters::default().usage(0).is_none());
     }
 
     #[cfg(target_os = "linux")]

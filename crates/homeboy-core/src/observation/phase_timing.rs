@@ -50,28 +50,40 @@ where
 pub struct PhaseGuard {
     phase: String,
     started: std::time::Instant,
+    usage: Option<homeboy_engine_primitives::resource_usage::UsageScope>,
 }
 
 pub fn guard(phase: &str) -> PhaseGuard {
     PhaseGuard {
         phase: phase.into(),
         started: std::time::Instant::now(),
+        usage: Some(homeboy_engine_primitives::resource_usage::usage_scope()),
     }
 }
 
 impl Drop for PhaseGuard {
     fn drop(&mut self) {
-        finish(&self.phase, self.started, std::thread::panicking());
+        let usage = self.usage.take().and_then(|usage| usage.finish());
+        finish_with_usage(&self.phase, self.started, std::thread::panicking(), usage);
     }
 }
 
 /// Finish work whose lifetime cannot be enclosed in a closure.
 pub fn finish(phase: &str, started: std::time::Instant, failed: bool) {
+    finish_with_usage(phase, started, failed, None);
+}
+
+fn finish_with_usage(
+    phase: &str,
+    started: std::time::Instant,
+    failed: bool,
+    usage: Option<homeboy_engine_primitives::resource_usage::ResourceUsage>,
+) {
     if let Some((path, run_id)) = current() {
         let started_at = (chrono::Utc::now() - started.elapsed()).to_rfc3339();
-        if let Err(error) = ObservationStore::open_initialized_at(path)
-            .and_then(|store| store.finish_run_phase(&run_id, phase, &started_at, failed))
-        {
+        if let Err(error) = ObservationStore::open_initialized_at(path).and_then(|store| {
+            store.finish_run_phase_with_usage(&run_id, phase, &started_at, failed, usage)
+        }) {
             crate::log_status!("observe", "phase timing persistence failed: {}", error);
         }
     }
