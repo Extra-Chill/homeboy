@@ -148,6 +148,12 @@ assert_equals \
 
 # ── Cached install reuse (Extra-Chill/homeboy#18462) ──
 
+# Reinstall decisions are asserted on install/uninstall calls only. Reuse also
+# runs `extension setup` (homeboy#18488), asserted separately below.
+install_calls() {
+  grep -v '^extension setup ' "${HOMEBOY_CALL_LOG}" || true
+}
+
 EXT_DIR="${HOMEBOY_CONFIG_ROOT}/extensions"
 REV_A="$(printf 'a%.0s' {1..40})"
 REV_B="$(printf 'b%.0s' {1..40})"
@@ -167,7 +173,7 @@ INSTALL_BOTH_A=$'extension uninstall nodejs\nextension install /extensions --id 
 # Matching immutable SHA ref: the second run reuses every configured extension.
 reset_store
 HOMEBOY_STUB_REVISION="${REV_A}" EXTENSION_REF="aaaaaaa" run_install
-assert_equals "${INSTALL_BOTH_A}" "$(cat "${HOMEBOY_CALL_LOG}")" "first pinned run installs every configured extension"
+assert_equals "${INSTALL_BOTH_A}" "$(install_calls)" "first pinned run installs every configured extension"
 assert_equals "source=/extensions" "$(sed -n 1p "${EXT_DIR}/.wordpress.homeboy-action-install")" "marker records the normalized source"
 assert_equals "ref=aaaaaaa" "$(sed -n 2p "${EXT_DIR}/.wordpress.homeboy-action-install")" "marker records the requested ref"
 assert_equals "commit=${REV_A}" "$(sed -n 3p "${EXT_DIR}/.wordpress.homeboy-action-install")" "marker records the resolved commit"
@@ -175,21 +181,22 @@ assert_equals "commit=${REV_A}" "$(sed -n 3p "${EXT_DIR}/.wordpress.homeboy-acti
 : > "${HOMEBOY_CALL_LOG}"
 : > "${TMP_DIR}/github-env"
 HOMEBOY_STUB_REVISION="${REV_A}" EXTENSION_REF="aaaaaaa" GITHUB_ENV="${TMP_DIR}/github-env" run_install
-assert_equals "" "$(cat "${HOMEBOY_CALL_LOG}")" "matching immutable SHA ref skips uninstall and install"
+assert_equals "" "$(install_calls)" "matching immutable SHA ref skips uninstall and install"
 assert_equals "2" "$(grep -c "^Reusing cached extension '.*' from /extensions at aaaaaaa (commit ${REV_A}); skipping reinstall.$" "${TMP_DIR}/run.out")" "every reused extension logs the reuse"
 assert_equals "1" "$(grep -c '^HOMEBOY_EXTENSIONS_ROOT=' "${TMP_DIR}/github-env")" "toolchain location is still published after reuse"
+assert_equals $'extension setup nodejs\nextension setup wordpress' "$(grep '^extension setup ' "${HOMEBOY_CALL_LOG}")" "reuse still runs each extension's setup so runtime provisioning matches a fresh install (homeboy#18488)"
 
 # The full SHA and a trailing .git / slash on the source also match.
 : > "${HOMEBOY_CALL_LOG}"
 HOMEBOY_STUB_REVISION="${REV_A}" EXTENSION_SOURCE="/extensions.git/" EXTENSION_REF="aaaaaaa" run_install
-assert_equals "" "$(cat "${HOMEBOY_CALL_LOG}")" "source normalization strips a trailing slash and .git"
+assert_equals "" "$(install_calls)" "source normalization strips a trailing slash and .git"
 
 # A different ref reinstalls.
 : > "${HOMEBOY_CALL_LOG}"
 HOMEBOY_STUB_REVISION="${REV_B}" EXTENSION_REF="bbbbbbb" run_install
 assert_equals \
   $'extension uninstall nodejs\nextension install /extensions --id nodejs --ref bbbbbbb\nextension uninstall wordpress\nextension install /extensions --id wordpress --ref bbbbbbb' \
-  "$(cat "${HOMEBOY_CALL_LOG}")" "a changed ref reinstalls"
+  "$(install_calls)" "a changed ref reinstalls"
 
 # A different source reinstalls.
 : > "${HOMEBOY_CALL_LOG}"
@@ -204,7 +211,8 @@ rm -f "${EXT_DIR}/.wordpress.homeboy-action-install"
 HOMEBOY_STUB_REVISION="${REV_A}" EXTENSION_REF="aaaaaaa" run_install
 assert_equals \
   $'extension uninstall wordpress\nextension install /extensions --id wordpress --ref aaaaaaa' \
-  "$(cat "${HOMEBOY_CALL_LOG}")" "a missing marker reinstalls that extension only"
+  "$(install_calls)" "a missing marker reinstalls that extension only"
+assert_equals "extension setup nodejs" "$(grep '^extension setup ' "${HOMEBOY_CALL_LOG}")" "only the reused extension runs a separate setup; the reinstalled one sets up via install"
 
 # A missing manifest (partial tree) reinstalls.
 rm -f "${EXT_DIR}/nodejs/nodejs.json"
@@ -212,7 +220,7 @@ rm -f "${EXT_DIR}/nodejs/nodejs.json"
 HOMEBOY_STUB_REVISION="${REV_A}" EXTENSION_REF="aaaaaaa" run_install
 assert_equals \
   $'extension uninstall nodejs\nextension install /extensions --id nodejs --ref aaaaaaa' \
-  "$(cat "${HOMEBOY_CALL_LOG}")" "a missing manifest reinstalls"
+  "$(install_calls)" "a missing manifest reinstalls"
 
 # A tree whose recorded revision no longer matches the marker reinstalls.
 printf '%s' "${REV_B}" > "${EXT_DIR}/nodejs/.source-revision"
@@ -220,23 +228,23 @@ printf '%s' "${REV_B}" > "${EXT_DIR}/nodejs/.source-revision"
 HOMEBOY_STUB_REVISION="${REV_A}" EXTENSION_REF="aaaaaaa" run_install
 assert_equals \
   $'extension uninstall nodejs\nextension install /extensions --id nodejs --ref aaaaaaa' \
-  "$(cat "${HOMEBOY_CALL_LOG}")" "a revision that drifted from the marker reinstalls"
+  "$(install_calls)" "a revision that drifted from the marker reinstalls"
 
 # An explicit extension input with an immutable ref reuses too.
 : > "${HOMEBOY_CALL_LOG}"
 HOMEBOY_STUB_REVISION="${REV_A}" EXTENSION_REF="aaaaaaa" EXTENSION_INPUT="nodejs" run_install
-assert_equals "" "$(cat "${HOMEBOY_CALL_LOG}")" "explicit extension input with an immutable ref reuses"
+assert_equals "" "$(install_calls)" "explicit extension input with an immutable ref reuses"
 
 # Without a ref, the cached copy is always refreshed and its marker dropped.
 : > "${HOMEBOY_CALL_LOG}"
 HOMEBOY_STUB_REVISION="${REV_A}" EXTENSION_REF="" EXTENSION_INPUT="nodejs" run_install
 assert_equals $'extension uninstall nodejs\nextension install /extensions --id nodejs' \
-  "$(cat "${HOMEBOY_CALL_LOG}")" "explicit extension input without a ref refreshes"
+  "$(install_calls)" "explicit extension input without a ref refreshes"
 : > "${HOMEBOY_CALL_LOG}"
 HOMEBOY_STUB_REVISION="${REV_A}" EXTENSION_REF="" run_install
 assert_equals \
   $'extension uninstall nodejs\nextension uninstall wordpress\nextension install-for-component --path '"${COMPONENT_DIR}"$' --source /extensions' \
-  "$(cat "${HOMEBOY_CALL_LOG}")" "install-for-component keeps refreshing"
+  "$(install_calls)" "install-for-component keeps refreshing"
 if [ -e "${EXT_DIR}/.wordpress.homeboy-action-install" ]; then
   echo "FAIL: a refresh must remove the reuse marker"; exit 1
 fi
@@ -255,13 +263,13 @@ reset_store
 HOMEBOY_STUB_REVISION="${TAG_COMMIT}" EXTENSION_SOURCE="${SRC_REPO}" EXTENSION_REF="v1.0.0" run_install
 : > "${HOMEBOY_CALL_LOG}"
 HOMEBOY_STUB_REVISION="${TAG_COMMIT}" EXTENSION_SOURCE="${SRC_REPO}" EXTENSION_REF="v1.0.0" run_install
-assert_equals "" "$(cat "${HOMEBOY_CALL_LOG}")" "an annotated tag resolving to the recorded commit reuses"
+assert_equals "" "$(install_calls)" "an annotated tag resolving to the recorded commit reuses"
 
 reset_store
 HOMEBOY_STUB_REVISION="${TAG_COMMIT}" EXTENSION_SOURCE="${SRC_REPO}" EXTENSION_REF="light-1.0.0" run_install
 : > "${HOMEBOY_CALL_LOG}"
 HOMEBOY_STUB_REVISION="${TAG_COMMIT}" EXTENSION_SOURCE="${SRC_REPO}" EXTENSION_REF="light-1.0.0" run_install
-assert_equals "" "$(cat "${HOMEBOY_CALL_LOG}")" "a lightweight tag resolving to the recorded commit reuses"
+assert_equals "" "$(install_calls)" "a lightweight tag resolving to the recorded commit reuses"
 
 # Branch refs are mutable: always reinstall.
 reset_store
@@ -270,7 +278,7 @@ HOMEBOY_STUB_REVISION="${TAG_COMMIT}" EXTENSION_SOURCE="${SRC_REPO}" EXTENSION_R
 HOMEBOY_STUB_REVISION="${TAG_COMMIT}" EXTENSION_SOURCE="${SRC_REPO}" EXTENSION_REF="release" run_install
 assert_equals \
   $'extension uninstall nodejs\nextension install '"${SRC_REPO}"$' --id nodejs --ref release\nextension uninstall wordpress\nextension install '"${SRC_REPO}"$' --id wordpress --ref release' \
-  "$(cat "${HOMEBOY_CALL_LOG}")" "a branch ref reinstalls"
+  "$(install_calls)" "a branch ref reinstalls"
 
 # A moved tag reinstalls.
 reset_store
@@ -308,7 +316,7 @@ rm -f "${EXT_DIR}/.wordpress.homeboy-action-install"
 mkdir "${EXT_DIR}/.wordpress.homeboy-action-install"
 : > "${HOMEBOY_CALL_LOG}"
 HOMEBOY_STUB_REVISION="${REV_A}" EXTENSION_REF="aaaaaaa" run_install
-assert_equals "${INSTALL_BOTH_A}" "$(cat "${HOMEBOY_CALL_LOG}")" "a corrupt or unreadable marker falls back to a fresh install"
+assert_equals "${INSTALL_BOTH_A}" "$(install_calls)" "a corrupt or unreadable marker falls back to a fresh install"
 
 # The legacy-source fallback never reuses: every extension is reinstalled.
 reset_store
@@ -318,6 +326,6 @@ rm -f "${EXT_DIR}/.wordpress.homeboy-action-install"
 HOMEBOY_STUB_REVISION="${REV_A}" EXTENSION_SOURCE="${MONO}" EXTENSION_REF="aaaaaaa" HOMEBOY_FAIL_SOURCE="${MONO}" run_install
 assert_equals \
   $'extension uninstall wordpress\nextension install '"${MONO}"$' --id wordpress --ref aaaaaaa\nextension uninstall nodejs\nextension install '"${LEGACY}"$' --id nodejs --ref aaaaaaa\nextension uninstall wordpress\nextension install '"${LEGACY}"$' --id wordpress --ref aaaaaaa' \
-  "$(cat "${HOMEBOY_CALL_LOG}")" "the legacy-source fallback reinstalls every extension"
+  "$(install_calls)" "the legacy-source fallback reinstalls every extension"
 
 echo "All install-extension checks passed."
