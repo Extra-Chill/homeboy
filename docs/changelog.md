@@ -4,6 +4,16 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.479.3] - 2026-11-19
+
+### Changed
+- service repoint stops and starts around job adoption
+
+### Fixed
+- admission reconnects past an abandoned restart of the recorded lease
+- the target binary performs its own service repoint
+- persist Cook execution phase without overriding evidence verdicts
+
 ## [0.479.2] - 2026-11-19
 
 ### Fixed
