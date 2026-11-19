@@ -153,7 +153,7 @@ impl ItemState {
 }
 
 impl StepState {
-    fn pending() -> Self {
+    pub fn pending() -> Self {
         Self {
             reused: false,
             phase: StepPhase::Pending,

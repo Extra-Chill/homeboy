@@ -2,7 +2,7 @@
 //!
 //! A definition (`homeboy/workflow/v1`) is admitted as one daemon `workflow`
 //! job. The daemon submits `step` jobs and evaluates gates; these verbs only
-//! admit, observe, cancel, and approve. A definition with `every` is
+//! admit, observe, cancel, approve, and upgrade. A definition with `every` is
 //! registered as a cadence instead: the daemon admits one instance per due
 //! slot.
 
@@ -66,6 +66,15 @@ enum WorkflowCommand {
         step: String,
         #[arg(long)]
         reason: Option<String>,
+    },
+    /// Continue a running instance on its file's current definition from its
+    /// next step boundary, keeping inputs and completed steps
+    Upgrade {
+        /// Instance id, or with --all a workflow id
+        instance: String,
+        /// Upgrade every running instance of the workflow
+        #[arg(long)]
+        all: bool,
     },
     /// List registered definitions, built-ins, and daemon cadences
     List,
@@ -210,6 +219,10 @@ pub fn run(args: WorkflowArgs) -> CmdResult<Value> {
                 client.reject_workflow_step(&instance, &step, reason.as_deref())?,
                 0,
             ))
+        }
+        WorkflowCommand::Upgrade { instance, all } => {
+            let client = LocalControllerJobClient::connect()?;
+            Ok((client.upgrade_workflow(&instance, all)?, 0))
         }
         WorkflowCommand::List => {
             let mut listed = registered_workflows()?;
@@ -492,6 +505,7 @@ fn admission_request(
         definition_source: None,
         definition_digest: definition.digest(),
         definition: definition.clone(),
+        upgraded: None,
         inputs,
         homeboy_program: current_exe.display().to_string(),
         cwd: cwd.display().to_string(),

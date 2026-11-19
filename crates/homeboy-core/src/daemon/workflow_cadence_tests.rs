@@ -56,6 +56,7 @@ fn template(every: Value, script: &str, cwd: &Path) -> WorkflowJobRequest {
         definition_source: None,
         definition_digest: definition.digest(),
         definition,
+        upgraded: None,
         inputs,
         homeboy_program: "/bin/sh".to_string(),
         cwd: cwd.display().to_string(),

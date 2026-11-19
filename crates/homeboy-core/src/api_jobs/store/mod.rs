@@ -2525,6 +2525,31 @@ impl JobStore {
         })
     }
 
+    /// Amend a live controller job's private request (a workflow upgrade).
+    /// The submission fingerprint is unchanged, so its key still names the job.
+    pub(crate) fn replace_controller_request(&self, job_id: Uuid, request: Value) -> Result<()> {
+        self.durable_transaction(|inner| {
+            let stored = inner
+                .jobs
+                .get_mut(&job_id)
+                .ok_or_else(|| job_not_found(job_id))?;
+            let terminal = stored.job.status.is_terminal();
+            let controller = stored.controller_job.as_mut().ok_or_else(|| {
+                Error::internal_unexpected("controller worker lost its typed state")
+            })?;
+            if terminal || controller.cancellation_requested {
+                return Err(Error::validation_invalid_argument(
+                    "job_id",
+                    "controller job is cancelled or terminal; its request is final",
+                    Some(job_id.to_string()),
+                    None,
+                ));
+            }
+            controller.request = request;
+            Ok(())
+        })
+    }
+
     pub(crate) fn complete_controller_cancellation(&self, job_id: Uuid) -> Result<Job> {
         let state = self.controller_job_state(job_id)?;
         let current = self.get(job_id)?;

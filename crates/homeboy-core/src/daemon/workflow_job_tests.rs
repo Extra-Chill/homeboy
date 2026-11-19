@@ -63,6 +63,7 @@ fn request(definition: Value, cwd: &Path) -> WorkflowJobRequest {
         definition_source: None,
         definition_digest: definition.digest(),
         definition,
+        upgraded: None,
         inputs,
         homeboy_program: "/bin/sh".to_string(),
         cwd: cwd.display().to_string(),
@@ -1649,6 +1650,72 @@ fn next_pass_adopts_an_edited_definition_its_admission_covers() {
                 assert!(children.is_empty());
             }
         }
+    });
+}
+
+#[test]
+fn upgrade_runs_the_edited_step_without_rerunning_completed_steps() {
+    with_isolated_home(|home| {
+        let store = JobStore::open_without_reconciliation(
+            home.path().join(crate::paths::OBSERVATION_DB_FILENAME),
+        )
+        .unwrap()
+        .with_daemon_lease("workflow-upgrade-test".into());
+        let runs = home.path().join("runs.log");
+        let release = home.path().join("release");
+        let definition = |first: &str, second: &str| {
+            json!({
+                "schema": "homeboy/workflow/v1", "id": "upgradable",
+                "steps": [
+                    {"id": first, "exec": sh(&format!(
+                        "while [ ! -f {} ]; do sleep 0.05; done; echo one >> {}",
+                        release.display(), runs.display()
+                    ))},
+                    {"id": "two", "needs": [first], "exec": sh(&format!(
+                        "echo {second} >> {}", runs.display()
+                    ))}
+                ]
+            })
+        };
+        let source = home.path().join("upgradable.json");
+        let write = |value: Value| std::fs::write(&source, value.to_string()).unwrap();
+        write(definition("one", "old"));
+        let mut admitted = request(definition("one", "old"), home.path());
+        admitted.definition_source = Some(source.display().to_string());
+        let job = admit(&store, &admitted);
+        crate::daemon::start_controller_job(job, &store).unwrap();
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while workflow_status(&store, &admitted.instance).unwrap()["steps"]["one"]["phase"]
+            != "running"
+        {
+            assert!(Instant::now() < deadline, "step `one` never started");
+            std::thread::sleep(Duration::from_millis(50));
+        }
+
+        // Renaming a step the instance already ran is refused, naming it.
+        write(definition("renamed", "new"));
+        let refused = workflow_upgrade(&store, &admitted.instance, None).unwrap_err();
+        assert_eq!(
+            refused.code,
+            crate::error::ErrorCode::ValidationInvalidArgument
+        );
+        assert!(refused.message.contains("`one`"), "{}", refused.message);
+
+        write(definition("one", "new"));
+        let upgraded = workflow_upgrade(&store, &admitted.instance, None).unwrap();
+        assert_eq!(upgraded["upgraded"], true, "{upgraded}");
+        std::fs::write(&release, "").unwrap();
+        assert_eq!(wait_terminal(&store, job, 30).status, JobStatus::Succeeded);
+
+        assert_eq!(std::fs::read_to_string(&runs).unwrap(), "one\nnew\n");
+        let view = workflow_status(&store, &admitted.instance).unwrap();
+        assert_eq!(view["steps"]["one"]["attempt"], 1, "{view:#}");
+        assert_eq!(
+            view["definition_digest"],
+            WorkflowDefinition::from_value(definition("one", "new"))
+                .unwrap()
+                .digest()
+        );
     });
 }
 

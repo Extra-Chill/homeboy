@@ -70,8 +70,11 @@ pub struct WorkflowJobRequest {
     /// Explicit source of reusable succeeded steps.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub resumed_from: Option<String>,
-    /// The definition, pinned at admission.
+    /// The definition, pinned at admission. It keeps naming the instance.
     pub definition: WorkflowDefinition,
+    /// The definition `workflow upgrade` moved this running instance to.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub upgraded: Option<WorkflowDefinition>,
     pub definition_digest: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub definition_source: Option<String>,
@@ -117,6 +120,12 @@ impl WorkflowJobRequest {
         }
         // Cook flags were checked against the CLI's clap tree at admission.
         self.definition.validate(&|_| true)?;
+        if let Some(upgraded) = &self.upgraded {
+            upgraded.validate(&|_| true)?;
+            if upgraded.id != self.definition.id {
+                return Err(invalid("an upgraded definition keeps its workflow id"));
+            }
+        }
         if self.definition.digest() != self.definition_digest {
             return Err(invalid(
                 "workflow definition digest does not match its body",
@@ -164,6 +173,34 @@ impl WorkflowJobRequest {
     fn initial_state(&self) -> InstanceState {
         InstanceState::new(&self.definition, &self.instance, self.inputs.clone())
     }
+
+    /// The request as it runs: an upgraded instance runs its upgraded
+    /// definition under its admitted identity.
+    fn running(mut self) -> Self {
+        if let Some(definition) = self.upgraded.take() {
+            self.definition_digest = definition.digest();
+            self.definition = definition;
+        }
+        self
+    }
+}
+
+/// `state` continued on `definition`: kept steps keep their state, new steps
+/// start pending, and steps the definition no longer has are dropped.
+fn rebase(state: &InstanceState, definition: &WorkflowDefinition) -> InstanceState {
+    let mut next = state.clone();
+    next.steps = definition
+        .steps
+        .iter()
+        .map(|step| {
+            let kept = state.steps.get(&step.id).cloned();
+            (
+                step.id.clone(),
+                kept.unwrap_or_else(crate::workflow::advance::StepState::pending),
+            )
+        })
+        .collect();
+    next
 }
 
 /// What a Cook step's durable run says about its outcome.
@@ -315,10 +352,11 @@ impl ControllerJobDriver for WorkflowJobDriver {
     fn resume(&self, checkpoint: Value, job: ControllerJobHandle) -> Result<Value> {
         let store = job.job().store().clone();
         let state = store.controller_job_state(job.job().job_id())?;
-        let request = WorkflowJobRequest::parse(&state.request)?;
+        let request = WorkflowJobRequest::parse(&state.request)?.running();
         let instance: InstanceState = serde_json::from_value(checkpoint)
             .map_err(|error| invalid(format!("invalid workflow checkpoint: {error}")))?;
-        run_instance(&request, instance, &job, &store)
+        let instance = rebase(&instance, &request.definition);
+        run_instance(request, instance, &job, &store)
     }
 
     fn cancel(&self, _prepared: &Value) -> Result<()> {
@@ -426,7 +464,7 @@ fn reuse_steps(
 }
 
 fn run_instance(
-    request: &WorkflowJobRequest,
+    mut request: WorkflowJobRequest,
     mut state: InstanceState,
     job: &ControllerJobHandle,
     store: &JobStore,
@@ -438,14 +476,14 @@ fn run_instance(
             if !source_job.status.is_terminal() {
                 return Err(invalid("resume source must be terminal"));
             }
-            let old_request = WorkflowJobRequest::parse(&controller.request)?;
+            let old_request = WorkflowJobRequest::parse(&controller.request)?.running();
             let old_state: InstanceState = serde_json::from_value(
                 controller
                     .checkpoint
                     .ok_or_else(|| invalid("resume source has no checkpoint"))?,
             )
             .map_err(|error| invalid(format!("invalid resume checkpoint: {error}")))?;
-            reuse_steps(request, &old_request, &old_state, &mut state)?;
+            reuse_steps(&request, &old_request, &old_state, &mut state)?;
         }
     }
     // Repair a projection interrupted after the previous checkpoint commit.
@@ -455,10 +493,10 @@ fn run_instance(
     job.progress(progress_summary(&state))?;
     loop {
         if job.is_cancelled() {
-            return Ok(cancelled(request, &state, job_id, store));
+            return Ok(cancelled(&request, &state, job_id, store));
         }
         if state.status.is_terminal() {
-            return finish(request, &state, job_id, store);
+            return finish(&request, &state, job_id, store);
         }
         // Leave the checkpoint and child ledger untouched for driver recovery.
         // Protected children finish independently; advancing here would keep a
@@ -467,9 +505,16 @@ fn run_instance(
             job.yield_for_recovery(to_value(&state)?)?;
             return Ok(Value::Null);
         }
-        super::workflow_notify::awaiting_approvals(request, &state);
+        // A step boundary: steps not yet submitted run the upgraded definition.
+        if let Some(upgraded) = pending_upgrade(&request, job_id, store) {
+            state = rebase(&state, &upgraded.definition);
+            store.record_controller_prepared(job_id, to_value(&state)?)?;
+            request = upgraded;
+            job.progress(progress_summary(&state))?;
+        }
+        super::workflow_notify::awaiting_approvals(&request, &state);
         let now_ms = now_ms();
-        for event in observe(request, &state, job_id, store) {
+        for event in observe(&request, &state, job_id, store) {
             if super::intake_draining() {
                 job.yield_for_recovery(to_value(&state)?)?;
                 return Ok(Value::Null);
@@ -478,15 +523,15 @@ fn run_instance(
             if next == state && commands.is_empty() {
                 continue;
             }
-            match commit(request, job_id, &next, &commands, store) {
+            match commit(&request, job_id, &next, &commands, store) {
                 Ok(()) => {}
                 Err(_) if job.is_cancelled() => {
-                    return Ok(cancelled(request, &state, job_id, store));
+                    return Ok(cancelled(&request, &state, job_id, store));
                 }
                 Err(error) => return Err(error),
             }
             state = next;
-            super::workflow_notify::awaiting_approvals(request, &state);
+            super::workflow_notify::awaiting_approvals(&request, &state);
             job.progress(progress_summary(&state))?;
             if state.status.is_terminal() {
                 break;
@@ -509,6 +554,19 @@ fn run_instance(
             std::thread::sleep(POLL);
         }
     }
+}
+
+/// The request `workflow upgrade` recorded since this run read its own.
+fn pending_upgrade(
+    request: &WorkflowJobRequest,
+    job_id: Uuid,
+    store: &JobStore,
+) -> Option<WorkflowJobRequest> {
+    let controller = store.controller_job_state(job_id).ok()?;
+    let latest = WorkflowJobRequest::parse(&controller.request)
+        .ok()?
+        .running();
+    (latest.definition_digest != request.definition_digest).then_some(latest)
 }
 
 /// The instance was cancelled: stop every step job it still awaits (the
@@ -1336,7 +1394,9 @@ fn instance_view(
     store: &JobStore,
     children: impl FnOnce(&str) -> Vec<String>,
 ) -> Value {
-    let request = WorkflowJobRequest::parse(&controller.request).ok();
+    let request = WorkflowJobRequest::parse(&controller.request)
+        .ok()
+        .map(WorkflowJobRequest::running);
     let state = controller
         .checkpoint
         .as_ref()
@@ -1538,6 +1598,110 @@ pub(crate) fn workflow_approve(
         Some(json!({ "workflow_approval": approval })),
     )?;
     Ok(json!({ "instance": instance, "approval": approval }))
+}
+
+/// `POST /workflows/<instance>/upgrade`: continue a running instance on its
+/// source file's current definition from its next step boundary. With
+/// `{"all": true}` the target is a workflow id and every running instance of
+/// it is upgraded.
+pub(crate) fn workflow_upgrade(
+    store: &JobStore,
+    target: &str,
+    body: Option<Value>,
+) -> Result<Value> {
+    let all = body
+        .as_ref()
+        .and_then(|body| body.get("all"))
+        .and_then(Value::as_bool)
+        .unwrap_or(false);
+    if !all {
+        let (job, controller) = instance_job(store, target)?;
+        return upgrade_instance(store, &job, &controller);
+    }
+    let instances = store
+        .active_controller_jobs()
+        .into_iter()
+        .filter(|(_, controller)| {
+            controller.job_type == WORKFLOW_JOB_TYPE
+                && controller.request["definition"]["id"] == target
+        })
+        .map(|(job_id, controller)| {
+            let instance = controller.request["instance"].clone();
+            match store
+                .get(job_id)
+                .and_then(|job| upgrade_instance(store, &job, &controller))
+            {
+                Ok(upgraded) => upgraded,
+                Err(error) => json!({ "instance": instance, "error": error.message }),
+            }
+        })
+        .collect::<Vec<_>>();
+    Ok(json!({ "workflow": target, "instances": instances }))
+}
+
+fn upgrade_instance(
+    store: &JobStore,
+    job: &crate::api_jobs::Job,
+    controller: &crate::api_jobs::ControllerJobState,
+) -> Result<Value> {
+    let mut admitted = WorkflowJobRequest::parse(&controller.request)?;
+    let instance = admitted.instance.clone();
+    if job.status.is_terminal() {
+        return Err(invalid(
+            format!("workflow `{instance}` is already {:?}", job.status).to_lowercase(),
+        ));
+    }
+    let running = admitted.clone().running();
+    if running.definition_source.is_none() {
+        return Err(invalid(format!(
+            "workflow `{instance}` was not admitted from a file, so it has no current definition to upgrade to"
+        )));
+    }
+    let definition = next_definition(&running)?;
+    if definition.id != admitted.definition.id {
+        return Err(invalid(format!(
+            "the current definition is workflow `{}`, not `{}`",
+            definition.id, admitted.definition.id
+        )));
+    }
+    let from = running.definition_digest.clone();
+    let to = definition.digest();
+    if to != from {
+        let state = controller
+            .checkpoint
+            .as_ref()
+            .and_then(|checkpoint| serde_json::from_value::<InstanceState>(checkpoint.clone()).ok())
+            .unwrap_or_else(|| running.initial_state());
+        let removed = state
+            .steps
+            .iter()
+            .filter(|(id, step)| {
+                step.phase != StepPhase::Pending
+                    && !definition.steps.iter().any(|kept| &kept.id == *id)
+            })
+            .map(|(id, _)| format!("`{id}`"))
+            .collect::<Vec<_>>();
+        if !removed.is_empty() {
+            return Err(Error::validation_invalid_argument(
+                "steps",
+                format!(
+                    "workflow `{instance}` already ran step {}, which the current definition removes or renames",
+                    removed.join(", ")
+                ),
+                Some(instance),
+                None,
+            ));
+        }
+        admitted.upgraded =
+            (definition.digest() != admitted.definition_digest).then_some(definition);
+        store.replace_controller_request(job.id, to_value(&admitted)?)?;
+    }
+    Ok(json!({
+        "instance": instance,
+        "upgraded": to != from,
+        "from_digest": from,
+        "definition_digest": to,
+    }))
 }
 
 fn now_ms() -> u64 {

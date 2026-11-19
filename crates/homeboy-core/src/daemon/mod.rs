@@ -567,6 +567,20 @@ impl LocalControllerJobClient {
         self.workflow_payload(response, &path)
     }
 
+    /// `POST /workflows/<instance>/upgrade`, or with `all` every running
+    /// instance of the workflow `target`.
+    pub fn upgrade_workflow(&self, target: &str, all: bool) -> Result<serde_json::Value> {
+        let path = format!("/workflows/{target}/upgrade");
+        // Re-applying an upgrade is idempotent.
+        let response = self.send_with_resend(&format!("post {path}"), true, |endpoint| {
+            self.client
+                .post(format!("{endpoint}{path}"))
+                .json(&json!({ "all": all }))
+                .send()
+        })?;
+        self.workflow_payload(response, &path)
+    }
+
     /// `GET /workflows/cadences`: every registered workflow cadence.
     pub fn workflow_cadences(&self) -> Result<serde_json::Value> {
         let path = "/workflows/cadences";
