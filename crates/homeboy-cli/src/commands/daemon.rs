@@ -408,9 +408,13 @@ pub fn run(args: DaemonArgs) -> CmdResult<DaemonOutput> {
     }
 }
 
+/// Bound on the replacement's startup recovery. The daemon publishes its lease
+/// before it recovers the store, so `ensure_running` can return while
+/// recovery is still moving surviving jobs to the new lease.
+const RESTART_READOPTION_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
+
 /// Stop, start, and prove the replacement re-adopted the work in flight:
-/// startup recovery moves each surviving job to the new lease before
-/// `ensure_running` returns.
+/// its startup recovery moves each surviving job to the new lease.
 fn restart(addr: &str) -> CmdResult<DaemonOutput> {
     let stopped = daemon::stop()?;
     let old_lease = stopped
@@ -432,17 +436,24 @@ fn restart(addr: &str) -> CmdResult<DaemonOutput> {
         None => Vec::new(),
     };
     let started = daemon::ensure_running(addr)?;
-    let store = job_store()?;
-    let unadopted = left
-        .iter()
-        .filter(|id| {
-            store.get(**id).is_ok_and(|job| {
-                !job.status.is_terminal()
-                    && job.daemon_lease_id.as_deref() != Some(started.lease_id.as_str())
+    let deadline = std::time::Instant::now() + RESTART_READOPTION_TIMEOUT;
+    let unadopted = loop {
+        let store = job_store()?;
+        let unadopted = left
+            .iter()
+            .filter(|id| {
+                store.get(**id).is_ok_and(|job| {
+                    !job.status.is_terminal()
+                        && job.daemon_lease_id.as_deref() != Some(started.lease_id.as_str())
+                })
             })
-        })
-        .map(Uuid::to_string)
-        .collect::<Vec<_>>();
+            .map(Uuid::to_string)
+            .collect::<Vec<_>>();
+        if unadopted.is_empty() || std::time::Instant::now() >= deadline {
+            break unadopted;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(100));
+    };
     if !unadopted.is_empty() {
         return Err(Error::internal_unexpected(format!(
             "daemon restarted as lease {} but did not re-adopt in-flight jobs: {}",
