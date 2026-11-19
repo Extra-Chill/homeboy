@@ -4,6 +4,17 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.477.0] - 2026-11-19
+
+### Added
+- report runner pressure and Homeboy-owned root sizes in status and runner doctor
+
+### Changed
+- persisted CookRunState (#18510) conflicts with #18511 read projections
+
+### Fixed
+- a superseded Cook step settles when its owner's mission is fenced
+
 ## [0.476.1] - 2026-11-19
 
 ### Changed
