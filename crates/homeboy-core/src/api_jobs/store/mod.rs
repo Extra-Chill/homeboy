@@ -3800,6 +3800,11 @@ impl JobStore {
     ) -> Result<bool> {
         let reservation_id = Uuid::new_v4().to_string();
         let reservation_expires_at_ms = now.saturating_add(LOCAL_CHILD_RESERVATION_LEASE_MS);
+        // Gates of `--placement local` Cooks on this host draw from the same
+        // slots as runner children (#18555); read outside the store lock.
+        let local_gate_holders = runner_capacity
+            .map(|_| crate::local_gate_admission::counted_holders())
+            .unwrap_or(0);
         self.durable_transaction(|inner| {
             let job = inner
                 .jobs
@@ -3858,7 +3863,11 @@ impl JobStore {
                             .as_ref()
                             .is_some_and(|runner| runner.runner_id == runner_id)
                 });
-                if active.count() >= capacity {
+                // Charged holders never take the last slot: remote work progresses.
+                let ceiling = capacity
+                    .saturating_sub(local_gate_holders)
+                    .max(capacity.min(1));
+                if active.count() >= ceiling {
                     return Ok(false);
                 }
             }

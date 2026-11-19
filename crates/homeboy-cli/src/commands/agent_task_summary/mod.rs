@@ -199,6 +199,42 @@ fn capacity_reset_suffix(value: &Value) -> String {
         .unwrap_or_default()
 }
 
+/// Holders of the host-wide local gate queue, one indented line each.
+fn render_local_holders(lines: &mut Vec<String>, local: &Value) {
+    for holder in local["holders"].as_array().into_iter().flatten() {
+        lines.push(format!(
+            "  holder: {} {} ({}s elapsed)",
+            holder["cook_id"].as_str().unwrap_or("unknown"),
+            holder["gate"].as_str().unwrap_or("unknown"),
+            holder["elapsed_seconds"].as_u64().unwrap_or(0)
+        ));
+    }
+}
+
+/// Host-wide local gate queue (#18555): slots, pressure, holders, then
+/// waiters in admission order with the Lab step queue's line shape.
+fn render_local_capacity(lines: &mut Vec<String>, local: &Value) {
+    if local["available"].as_bool() != Some(true) {
+        return;
+    }
+    let pressure = &local["pressure"];
+    let load = pressure["load_average_1m"]
+        .as_f64()
+        .map(|load| format!("load {load:.2} of {}", pressure["max_load"]))
+        .unwrap_or_else(|| "load unknown".to_string());
+    let held = if pressure["blocked"].as_bool() == Some(true) {
+        ", holding new gates"
+    } else {
+        ""
+    };
+    lines.push(format!(
+        "Local: {} active slots, {} free slots (limit {}); pressure: {load}{held}",
+        local["active_slots"], local["free_slots"], local["slot_limit"]
+    ));
+    render_local_holders(lines, local);
+    render_queue_waiters(lines, "Local", local);
+}
+
 /// `agent-task capacity` summary (#15024): one block per route group, one
 /// indented line per pooled account, so an operator reads every connected
 /// plan's state and reset instant at a glance. Reuses the same capacity
@@ -209,6 +245,9 @@ fn render_capacity_summary(payload: &Value) -> Option<String> {
     }
     let routes = payload.get("routes").and_then(Value::as_array)?;
     let mut lines = Vec::new();
+    if let Some(local) = payload.get("local_capacity") {
+        render_local_capacity(&mut lines, local);
+    }
     for route in payload
         .get("lab_routes")
         .and_then(Value::as_array)
@@ -325,21 +364,30 @@ fn render_lab_step_queue(lines: &mut Vec<String>, payload: &Value) {
         .flatten()
     {
         let runner_id = runner["runner_id"].as_str().unwrap_or("unknown");
-        let queue = &runner["observation"]["step_queue"];
-        for waiter in queue["waiting"].as_array().into_iter().flatten() {
-            let position = waiter["queue_position"].as_u64().unwrap_or(0);
-            let eta = waiter["eta_seconds"]
-                .as_u64()
-                .map(|seconds| format!(", ETA <= {seconds}s (estimate from declared budgets)"))
-                .unwrap_or_else(|| ", ETA unknown".to_string());
-            lines.push(format!(
-                "  Lab/{runner_id} queued {position}: {} ({} lane, {} ahead, {} holders){eta}",
-                waiter["owner"].as_str().unwrap_or("unknown"),
-                waiter["priority"].as_str().unwrap_or("normal"),
-                position.saturating_sub(1),
-                queue["holders"].as_array().map_or(0, Vec::len),
-            ));
-        }
+        render_queue_waiters(
+            lines,
+            &format!("Lab/{runner_id}"),
+            &runner["observation"]["step_queue"],
+        );
+    }
+}
+
+/// One line per waiter of a ranked queue (Lab step queue or local gate
+/// queue), in admission order, with its upper-bound ETA.
+fn render_queue_waiters(lines: &mut Vec<String>, label: &str, queue: &Value) {
+    for waiter in queue["waiting"].as_array().into_iter().flatten() {
+        let position = waiter["queue_position"].as_u64().unwrap_or(0);
+        let eta = waiter["eta_seconds"]
+            .as_u64()
+            .map(|seconds| format!(", ETA <= {seconds}s (estimate from declared budgets)"))
+            .unwrap_or_else(|| ", ETA unknown".to_string());
+        lines.push(format!(
+            "  {label} queued {position}: {} ({} lane, {} ahead, {} holders){eta}",
+            waiter["owner"].as_str().unwrap_or("unknown"),
+            waiter["priority"].as_str().unwrap_or("normal"),
+            position.saturating_sub(1),
+            queue["holders"].as_array().map_or(0, Vec::len),
+        ));
     }
 }
 
@@ -801,6 +849,41 @@ fn agent_task_capacity_lists_lab_step_queue_with_eta() {
 }
 
 #[test]
+fn local_capacity_admission_summary_exposes_queue_and_holders() {
+    let local = serde_json::json!({
+        "available": true, "active_slots": 1, "free_slots": 0, "slot_limit": 1,
+        "pressure": {"load_average_1m": 2.5, "max_load": 8.0, "blocked": false},
+        "holders": [{"owner": "cook-a", "cook_id": "cook-a", "gate": "gate-1", "elapsed_seconds": 50}],
+        "waiting": [{"queue_position": 1, "owner": "wf-import", "cook_id": "cook-b", "gate": "gate-2",
+            "priority": "normal", "waited_seconds": 20, "eta_seconds": 40}]
+    });
+    let capacity = serde_json::json!({"schema": "homeboy/agent-task-capacity/v1", "routes": [], "local_capacity": local});
+    let summary = render_capacity_summary(&capacity).unwrap();
+    assert!(
+        summary
+            .contains("Local: 1 active slots, 0 free slots (limit 1); pressure: load 2.50 of 8.0"),
+        "{summary}"
+    );
+    assert!(
+        summary.contains("holder: cook-a gate-1 (50s elapsed)"),
+        "{summary}"
+    );
+    assert!(
+        summary.contains("Local queued 1: wf-import (normal lane, 0 ahead, 1 holders), ETA <= 40s"),
+        "{summary}"
+    );
+    let status = serde_json::json!({"schema": "homeboy/control-plane-run/v1", "run": "cook-b", "state": "running",
+        "local_admission": {"queue_position": 1, "waiters_ahead": 0, "priority": "normal",
+            "eta_seconds": 40, "holders": local["holders"]}});
+    let summary = render_status_summary(&status).unwrap();
+    assert!(
+        summary.contains("Local gate queue position 1 (normal lane, 0 ahead), ETA <= 40s"),
+        "{summary}"
+    );
+    assert!(summary.contains("holder: cook-a gate-1"), "{summary}");
+}
+
+#[test]
 fn agent_task_status_names_missing_arguments() {
     let payload = serde_json::json!({"schema": "homeboy/control-plane-run/v1", "run": "run", "state": "failed",
         "blocker": {"message": "Missing required argument", "code": "validation.missing_argument", "details": {"args": ["prompt", "component"]}}});
@@ -829,6 +912,19 @@ fn render_status_summary(payload: &Value) -> Option<String> {
     let mut lines = vec![format!("Agent task {state}"), format!("Run: {run_id}")];
     if let Some(phase) = string_value(payload, &["phase"]) {
         lines.push(format!("Phase: {phase}"));
+    }
+    if let Some(waiting) = payload.get("local_admission") {
+        let position = waiting["queue_position"].as_u64().unwrap_or(1);
+        let eta = waiting["eta_seconds"]
+            .as_u64()
+            .map(|seconds| format!(", ETA <= {seconds}s (estimate from declared budgets)"))
+            .unwrap_or_else(|| ", ETA unknown".to_string());
+        lines.push(format!(
+            "Local gate queue position {position} ({} lane, {} ahead){eta}",
+            waiting["priority"].as_str().unwrap_or("normal"),
+            position.saturating_sub(1),
+        ));
+        render_local_holders(&mut lines, waiting);
     }
     if let Some(mission) = string_value(payload, &["mission"]) {
         lines.push(format!("Mission: {mission}"));

@@ -1,5 +1,42 @@
 # Recorded gate verdicts
 
+## Local host admission
+
+Local gates on one host share an admission queue across every process using
+the same Homeboy data root. `HOMEBOY_LOCAL_GATE_SLOTS` sets a positive slot limit
+(default: half the available CPUs, rounded down, minimum one).
+`HOMEBOY_LOCAL_GATE_MAX_LOAD` sets a positive one-minute load threshold (default:
+available CPUs). A gate waits while every slot is held, or while host load is at
+the threshold and another local gate already runs (one gate always progresses).
+Hosts without `/proc/loadavg` still enforce slots; capacity reports the missing
+load. Waiters rank like the Lab step queue: `HOMEBOY_LAB_PRIORITY` lane, then the
+least-occupied owner (the `HOMEBOY_WORKFLOW_INSTANCE` when set, else the Cook),
+then arrival, with the `HOMEBOY_LAB_OWNER_MAX_SHARE` cap while another owner
+waits. `HOMEBOY_LAB_BUDGET_SECONDS` feeds the upper-bound ETA.
+
+Queue wait is recorded as `environment.admission_wait_ms` and excluded from gate
+execution and no-progress budgets. A Cook cancelled while queued records a
+`cancelled` non-execution gate, never candidate blame. Dead processes release
+their slots through OS file locks, reaped on the next admission or capacity read.
+
+On a Lab host, the daemon charges local gate holders against both of its
+admission pools: the step budget's slot ceiling (`HOMEBOY_LAB_CONCURRENCY_LIMIT`,
+or one per CPU) and the runner-child capacity that queues remote Cooks each drop
+by one per holder, never below one, so `--placement local` Cooks cannot take the
+last slot remote work waits on. Load is not charged twice; it already reflects
+those gates. A Cook the daemon already supervises (a workflow step or runner
+child) holds a daemon slot, so its gates queue for host slots but are not charged
+again. Runner-admitted Lab gates keep the daemon gate lane and never enter the
+local queue. Charging requires the daemon and the local Cooks to share one
+Homeboy data root.
+
+`agent-task capacity` reports `local_capacity` without daemon transport: slots,
+holders (Cook, gate index, elapsed), pressure, `lab_charged_holders`, and ranked
+`waiting` entries with `queue_position`, `priority`, `waited_seconds` and
+`eta_seconds`, the fields the Lab step queue publishes. `agent-task status`
+reports `local_admission` for a queued Cook. Private command text is never
+published in these views.
+
 ## Cook base admission
 
 Before provider dispatch, Cook observes declared verification gates on its pinned

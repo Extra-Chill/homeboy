@@ -42,10 +42,19 @@ const MAX_CAPACITY_ROUTES: usize = 64;
 
 pub fn capacity(args: AgentTaskCapacityArgs) -> CmdResult<Value> {
     let query = json!({"backend": args.backend, "selector": args.selector, "model": args.model});
-    Ok((
-        homeboy::core::control_plane::read_resource("capacity", &query)?,
-        0,
-    ))
+    let mut value = homeboy::core::control_plane::read_resource("capacity", &query)?;
+    // Provider snapshots may be cached; host leases and queue positions must be live.
+    if let Some(object) = value.as_object_mut() {
+        object.insert("local_capacity".into(), local_capacity_snapshot());
+    }
+    Ok((value, 0))
+}
+
+/// Live host-wide local gate queue (#18555); needs no daemon transport. A
+/// registry read failure is reported in place rather than failing the view.
+fn local_capacity_snapshot() -> Value {
+    homeboy::core::local_gate_admission::snapshot()
+        .unwrap_or_else(|error| json!({"available": false, "unavailable": error.to_string()}))
 }
 
 struct ProviderCapacitySnapshot;
@@ -199,6 +208,7 @@ pub(crate) fn capacity_with_catalog(
             "routes": route_values,
             "lab_routes": lab_routes,
             "lab_capacity": lab_capacity,
+            "local_capacity": local_capacity_snapshot(),
             "next_reset": next_reset,
         }),
         0,

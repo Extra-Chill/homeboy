@@ -1,3 +1,4 @@
+mod admission;
 pub mod data_inputs;
 pub mod execution_start;
 pub mod failure_excerpt;
@@ -827,6 +828,9 @@ pub enum AgentTaskGateDifferentialResult {
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
 pub struct AgentTaskGateEnvironment {
+    /// Time waiting for local host admission, excluded from execution budgets.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub admission_wait_ms: Option<u128>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub resources: Option<telemetry::GateResources>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -1012,6 +1016,7 @@ impl AgentTaskGateEnvironment {
             && self.rust_cache.is_none()
             && self.cargo_target.is_none()
             && self.resources.is_none()
+            && self.admission_wait_ms.is_none()
             && self.host_pressure_start.is_none()
             && self.host_pressure_end.is_none()
     }
