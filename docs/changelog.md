@@ -4,6 +4,14 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.476.1] - 2026-11-19
+
+### Changed
+- make exec script and synced-workload tests hermetic
+
+### Fixed
+- classify runner-side losses as runner.* and never transport-retry validation or guard stops
+
 ## [0.476.0] - 2026-11-19
 
 ### Added
