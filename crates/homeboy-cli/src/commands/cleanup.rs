@@ -7334,11 +7334,14 @@ mod tests {
         );
     }
 
-    /// Task worktrees are reclaimed on the daemon maintenance cadence, so a
-    /// candidate no longer earns a hint to reclaim it by hand (#18420).
     #[test]
-    fn task_worktree_candidates_name_no_manual_reclaim_action() {
-        for apply in [false, true] {
+    fn task_worktree_cleanup_next_actions_preserve_mode_specific_commands() {
+        let cases = [
+            (false, "homeboy worktree cleanup --cleanup-branches --apply"),
+            (true, "homeboy worktree cleanup --cleanup-branches --apply"),
+        ];
+
+        for (apply, command) in cases {
             let category = CleanupInventoryCategory {
                 category: TASK_WORKTREES_METADATA.category.to_string(),
                 canonical_cleanup_command: TASK_WORKTREES_METADATA.canonical_cleanup_command(apply),
@@ -7369,11 +7372,7 @@ mod tests {
             };
 
             let actionable = cleanup_actionable(&[category], apply);
-            assert!(
-                actionable.next_actions.is_empty(),
-                "unexpected manual reclaim hint: {:?}",
-                actionable.next_actions
-            );
+            assert_eq!(actionable.next_actions[0].command, command);
         }
     }
 
@@ -7405,12 +7404,13 @@ mod tests {
         let mut mixed = mixed;
         mixed.reconciliation_command = Some("homeboy worktree inventory --apply".to_string());
         let mixed_actions = cleanup_actionable(&[mixed], false);
-        // Reconciliation is a repair only an operator can authorize; the
-        // reclaimable candidate is left to the daemon maintenance pass.
-        assert_eq!(mixed_actions.next_actions.len(), 1);
         assert_eq!(
             mixed_actions.next_actions[0].command,
             "homeboy worktree inventory --apply"
+        );
+        assert_eq!(
+            mixed_actions.next_actions[1].command,
+            "homeboy worktree cleanup --cleanup-branches --apply"
         );
 
         let blocked = task_worktrees_category(
