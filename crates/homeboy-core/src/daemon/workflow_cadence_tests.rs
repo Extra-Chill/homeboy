@@ -89,6 +89,7 @@ fn cadence(anchor_ms: u64, interval_ms: u64, next_due_ms: u64) -> Cadence {
             last_skipped_at_ms: None,
             last_error: None,
             failing: None,
+            watch: None,
         }
     })
 }
@@ -462,5 +463,81 @@ fn a_skipped_slot_never_reads_the_job_store_while_holding_the_writer() {
             .expect("the job-store write commits after the registration write");
         let after = list().unwrap().remove(0);
         assert_eq!((after.skipped, after.next_due_ms), (1, base + 4 * MINUTE));
+    });
+}
+
+fn git(repo: &Path, args: &[&str]) {
+    let status = std::process::Command::new("git")
+        .args([
+            "-c",
+            "user.name=t",
+            "-c",
+            "user.email=t@t",
+            "-c",
+            "init.defaultBranch=main",
+        ])
+        .args(args)
+        .current_dir(repo)
+        .status()
+        .unwrap();
+    assert!(status.success(), "git {args:?}");
+}
+
+/// A watch registered through `POST /workflows/cadences` starts nothing while
+/// its branch is unchanged, and exactly one instance once a new commit has
+/// waited out the debounce (#18452).
+#[test]
+fn a_branch_change_starts_exactly_one_instance_after_the_debounce() {
+    with_isolated_home(|home| {
+        register_workflow_job_driver();
+        let repo = home.path().join("repo");
+        std::fs::create_dir(&repo).unwrap();
+        git(&repo, &["init", "-q"]);
+        git(&repo, &["commit", "-q", "--allow-empty", "-m", "one"]);
+        let runs = home.path().join("runs.log");
+        let mut request = template(
+            Value::Null,
+            &format!("echo run >> {}", runs.display()),
+            home.path(),
+        );
+        request.definition.every = None;
+        request.definition.watch = Some(
+            serde_json::from_value(json!({"refs": [{"branch": "repo@main"}], "debounce": "2m"}))
+                .unwrap(),
+        );
+        request.definition_digest = request.definition.digest();
+        request.instance = request.definition.instance_id(&request.inputs, None);
+        let registered = http_register(Some(serde_json::to_value(&request).unwrap())).unwrap();
+        assert_eq!(registered["disposition"], "registered", "{registered}");
+
+        let store = JobStore::open_without_reconciliation(crate::paths::observation_db().unwrap())
+            .unwrap()
+            .with_daemon_lease("watch-test".to_string());
+        let base = now_ms();
+        for tick in [base, base + HOUR, base + 24 * HOUR] {
+            assert!(admit_due(&store, tick).is_empty(), "unchanged ref fired");
+        }
+
+        git(&repo, &["commit", "-q", "--allow-empty", "-m", "two"]);
+        let changed_at = base + 25 * HOUR;
+        let changed = admit_due(&store, changed_at);
+        assert_eq!(changed[0]["changed"], json!(["branch:repo@main"]));
+        assert!(
+            admit_due(&store, changed_at + MINUTE).is_empty(),
+            "debouncing"
+        );
+
+        let fired = admit_due(&store, changed_at + 2 * MINUTE);
+        assert_eq!(fired.len(), 1, "{fired:?}");
+        let instance = fired[0]["instance"].as_str().unwrap().to_string();
+        assert!(admit_due(&store, changed_at + 3 * MINUTE).is_empty());
+        wait_terminal(&store, &instance);
+        assert!(admit_due(&store, changed_at + HOUR).is_empty());
+
+        assert_eq!(store.controller_jobs_of_type("workflow", &[]).len(), 1);
+        assert_eq!(std::fs::read_to_string(&runs).unwrap().lines().count(), 1);
+        let listed = http_list(&store).unwrap()["entities"][0].clone();
+        assert_eq!(listed["last_instance"], instance);
+        assert_eq!(listed["changed_at"], Value::Null);
     });
 }
