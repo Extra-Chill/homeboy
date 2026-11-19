@@ -50,6 +50,37 @@ pub(crate) fn service_unit_name() -> String {
     "homeboy-runner.service".to_string()
 }
 
+/// The delegated unit that holds every runner job's cgroup (#18493).
+///
+/// Jobs outlive a daemon restart, so their tree cannot sit in the daemon's
+/// unit: systemd spawns a starting service into its unit's root cgroup, and
+/// cgroup v2 refuses that while the root enables controllers for a populated
+/// subtree. This unit's only process sleeps in its `holder/` leaf, upgrades
+/// never restart it, and stopping it kills its whole tree, so nothing can
+/// block its own next start.
+pub(crate) fn job_tree_unit_name() -> String {
+    "homeboy-runner-jobs.service".to_string()
+}
+
+fn render_job_tree_unit() -> String {
+    format!(
+        r#"[Unit]
+Description=Homeboy runner job cgroups
+
+[Service]
+Type=exec
+ExecStart=/bin/sleep infinity
+Restart=always
+Delegate=yes
+DelegateSubgroup={holder}
+
+[Install]
+WantedBy=default.target
+"#,
+        holder = homeboy_core::job_cgroup::HOLDER_LEAF,
+    )
+}
+
 /// The stable binary link the unit executes, relative to `$HOME`.
 pub(crate) fn service_binary_link() -> String {
     ".local/share/homeboy/runner-service/host/homeboy".to_string()
@@ -99,7 +130,8 @@ fn render_service_unit_with_env(startup_token: &str, daemon_env: &[(String, Stri
     format!(
         r#"[Unit]
 Description=Homeboy runner daemon
-After=network-online.target
+After=network-online.target {job_tree}
+Wants={job_tree}
 
 [Service]
 Type=simple
@@ -107,13 +139,12 @@ Environment=HOMEBOY_DAEMON_STATE_DIR=%h/{state_dir}
 Environment={token_env}={startup_token}
 Environment=PATH={path}
 Environment=HOMEBOY_DAEMON_IDLE_TIMEOUT_SECS={idle_timeout}
+Environment={job_tree_env}={job_tree}
 {policy_env}ExecStart=%h/{link} daemon serve --addr 127.0.0.1:0
 Restart=on-failure
 RestartSec=2s
 TimeoutStopSec=30s
 KillMode=process
-Delegate=yes
-DelegateSubgroup=daemon
 
 [Install]
 WantedBy=default.target
@@ -122,6 +153,8 @@ WantedBy=default.target
         token_env = paths::DAEMON_STARTUP_TOKEN_ENV,
         path = SERVICE_PATH_PLACEHOLDER,
         link = service_binary_link(),
+        job_tree = job_tree_unit_name(),
+        job_tree_env = homeboy_core::job_cgroup::JOB_TREE_UNIT_ENV,
     )
 }
 
@@ -147,12 +180,17 @@ fn write_unit_script(startup_token: &str, daemon_env: &[(String, String)]) -> St
     format!(
         r#"unit_dir="$HOME/.config/systemd/user"
 mkdir -p "$unit_dir"
+cat > "$unit_dir/{job_tree}" <<'HOMEBOY_UNIT'
+{job_tree_text}HOMEBOY_UNIT
 cat > "$unit_dir/{unit}.tmp" <<'HOMEBOY_UNIT'
 {unit_text}HOMEBOY_UNIT
 {resolve_path}
 sed -i "s|{placeholder}|$service_path|" "$unit_dir/{unit}.tmp"
 mv -f "$unit_dir/{unit}.tmp" "$unit_dir/{unit}"
-systemctl --user daemon-reload"#,
+systemctl --user daemon-reload
+systemctl --user enable --now {job_tree}"#,
+        job_tree = job_tree_unit_name(),
+        job_tree_text = render_job_tree_unit(),
         unit_text = render_service_unit_with_env(startup_token, daemon_env),
         resolve_path = resolve_service_path_script(),
         placeholder = SERVICE_PATH_PLACEHOLDER,
@@ -188,10 +226,44 @@ systemctl --user enable --now {unit}"#,
 
 fn repoint_script(binary: &str, startup_token: &str, daemon_env: &[(String, String)]) -> String {
     format!(
-        "set -eu\n{point}\n{write_unit}\nsystemctl --user enable {unit}\nsystemctl --user restart {unit}",
+        "set -eu\n{point}\n{write_unit}\nsystemctl --user enable {unit}\nsystemctl --user stop {unit}\n{adopt}\nsystemctl --user start {unit}",
         point = point_binary_script(binary),
         write_unit = write_unit_script(startup_token, daemon_env),
         unit = service_unit_name(),
+        adopt = adopt_in_unit_jobs_script(),
+    )
+}
+
+/// Move job cgroups a pre-#18493 daemon left inside the runner unit into the
+/// job tree unit, so the unit's start is not refused while they run. Each job
+/// is frozen while its processes move, so none forks behind the move; it
+/// keeps its job id, so the new daemon re-adopts it. A no-op once the runner
+/// unit holds no job tree.
+fn adopt_in_unit_jobs_script() -> String {
+    format!(
+        r#"tree="/sys/fs/cgroup$(systemctl --user show --property=ControlGroup --value {job_tree})"
+legacy="$(dirname "$tree")/{unit}/{jobs}"
+if [ -d "$legacy" ]; then
+  mkdir -p "$tree/{jobs}"
+  for job in "$legacy"/*/; do
+    [ -d "$job" ] || continue
+    job=${{job%/}}
+    if [ -s "$job/cgroup.procs" ]; then
+      dest="$tree/{jobs}/$(basename "$job")"
+      mkdir -p "$dest"
+      echo 1 > "$job/cgroup.freeze"
+      for _ in 1 2 3 4 5; do
+        [ -s "$job/cgroup.procs" ] || break
+        while read -r pid; do echo "$pid" > "$dest/cgroup.procs" || true; done < "$job/cgroup.procs"
+      done
+    fi
+    rmdir "$job" || true
+  done
+  rmdir "$legacy" || true
+fi"#,
+        job_tree = job_tree_unit_name(),
+        unit = service_unit_name(),
+        jobs = homeboy_core::job_cgroup::JOBS_DIR,
     )
 }
 
@@ -724,10 +796,15 @@ mod tests {
         // A restart stops only the daemon; re-adoptable job children lead
         // their own sessions and must outlive it.
         assert!(unit.contains("KillMode=process"));
-        // The daemon owns its cgroup subtree: it runs in the `daemon/` leaf
-        // and places every runner job in its own `jobs/<job-id>/` cgroup.
-        assert!(unit.contains("\nDelegate=yes\n"));
-        assert!(unit.contains("\nDelegateSubgroup=daemon\n"));
+        // Jobs live in the job tree unit, so a restart of this unit never
+        // meets a cgroup with live jobs (#18493).
+        assert!(!unit.contains("Delegate"));
+        assert!(unit.contains("\nWants=homeboy-runner-jobs.service\n"));
+        assert!(
+            unit.contains("\nEnvironment=HOMEBOY_JOB_CGROUP_UNIT=homeboy-runner-jobs.service\n")
+        );
+        let job_tree = render_job_tree_unit();
+        assert!(job_tree.contains("\nDelegate=yes\nDelegateSubgroup=holder\n"));
         assert!(unit.contains("WantedBy=default.target"));
         assert_eq!(service_unit_name(), "homeboy-runner.service");
     }

@@ -2,6 +2,13 @@
 //! the sampled process-tree guard and step jobs keep their process-tree stop.
 
 use std::io;
+
+/// Names the delegated sibling unit that holds the job tree.
+pub const JOB_TREE_UNIT_ENV: &str = "HOMEBOY_JOB_CGROUP_UNIT";
+/// The leaf the job tree unit's own process runs in (`DelegateSubgroup=`).
+pub const HOLDER_LEAF: &str = "holder";
+/// The parent of every job cgroup in the job tree unit.
+pub const JOBS_DIR: &str = "jobs";
 use std::path::Path;
 use std::process::Command;
 

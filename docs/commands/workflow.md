@@ -160,7 +160,7 @@ A step runs with `env_clear()` plus its admitted environment:
 
 ### Process lifetime
 
-A step owns every process it starts, and they end when the step ends. Where the runner has a delegated cgroup subtree (the Lab runner unit has `Delegate=yes`), each step runs in its own `jobs/<job-id>/` cgroup from its first instruction. When the step finishes, is cancelled, or is replaced, Homeboy stops that cgroup with `cgroup.kill`, so a process that left the step's session or process group (`setsid`, `nohup`, `&`, a daemonizing server) is stopped too.
+A step owns every process it starts, and they end when the step ends. Where the runner has a delegated cgroup subtree (the Lab runner's `homeboy-runner-jobs.service`), each step runs in its own `jobs/<job-id>/` cgroup from its first instruction. When the step finishes, is cancelled, or is replaced, Homeboy stops that cgroup with `cgroup.kill`, so a process that left the step's session or process group (`setsid`, `nohup`, `&`, a daemonizing server) is stopped too.
 
 So a long-lived service a later step needs (a `php -S` site, a database, a browser) must be started by the step that uses it, and stopped by that step or left to end with it. Without cgroup delegation (macOS, or hosts without cgroup v2), cancellation stops the step's process tree and a detached process may outlive a finished step. That is a gap in enforcement, not a supported way to share processes across steps.
 

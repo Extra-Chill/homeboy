@@ -1167,9 +1167,8 @@ fn artifact_get(args: DaemonArtifactGetArgs) -> CmdResult<DaemonOutput> {
 fn serve(addr: &str) -> CmdResult<DaemonOutput> {
     register_daemon_controller_job_providers();
     // First, before any job or child process (release prefetch spawns some):
-    // a daemon that owns a delegated cgroup (a runner service unit, or the
-    // scope a CLI-started daemon runs in) moves to its `daemon/` leaf so each
-    // job gets its own cgroup (#18418, #18449).
+    // a daemon whose unit names a delegated job tree unit prepares `jobs/`
+    // there, so each job gets its own cgroup (#18418, #18449, #18493).
     match homeboy_lab_runner::initialize_job_cgroups() {
         Ok(jobs) => homeboy::core::log_status!(
             "daemon",

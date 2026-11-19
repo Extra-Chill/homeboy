@@ -45,9 +45,9 @@ mod job_cgroup;
 
 use job_cgroup::JobCgroup;
 
-/// Daemon startup: move into the `daemon/` leaf of the delegated service
-/// cgroup and prepare `jobs/`, so every runner job runs in its own
-/// kernel-enforced cgroup (#18418). Returns the `jobs/` directory, or why
+/// Daemon startup: prepare `jobs/` in the job tree unit the runner unit names
+/// (`HOMEBOY_JOB_CGROUP_UNIT`), so every runner job runs in its own
+/// kernel-enforced cgroup (#18418, #18493). Returns the `jobs/` directory, or why
 /// runner jobs fall back to the sampled process-tree guard.
 pub fn initialize_job_cgroups() -> std::result::Result<PathBuf, String> {
     #[cfg(target_os = "linux")]
