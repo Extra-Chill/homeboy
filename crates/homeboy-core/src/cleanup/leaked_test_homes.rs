@@ -443,7 +443,8 @@ fn owner_is_alive(pid: u32) -> bool {
 /// Recursive on-disk size, never following symlinks.
 fn entry_size_bytes(path: &Path) -> u64 {
     crate::cleanup::path_usage::measure_path(path, Default::default())
-        .map(|result| result.usage.logical_bytes).unwrap_or(0)
+        .map(|result| result.usage.logical_bytes)
+        .unwrap_or(0)
 }
 
 /// Assign every entry a verdict, then relax the age floor for as few abandoned

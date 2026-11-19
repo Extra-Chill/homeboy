@@ -933,7 +933,10 @@ fn artifact_exists(artifact: &ArtifactRecord) -> bool {
 }
 
 fn artifact_size_bytes(artifact: &ArtifactRecord) -> u64 {
-    if let Some(size) = artifact.size_bytes.and_then(|size| u64::try_from(size).ok()) {
+    if let Some(size) = artifact
+        .size_bytes
+        .and_then(|size| u64::try_from(size).ok())
+    {
         return size;
     }
     crate::cleanup::path_usage::measure_path(Path::new(&artifact.path), Default::default())

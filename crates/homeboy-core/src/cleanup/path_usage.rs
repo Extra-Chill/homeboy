@@ -67,7 +67,9 @@ pub(super) fn walk_paths(
         .unwrap_or(0);
     let mut seen: HashSet<(u64, u64)> = HashSet::new();
     while let Some(path) = pending.pop() {
-        if options.visit_budget.is_some_and(|limit| result.visited >= limit)
+        if options
+            .visit_budget
+            .is_some_and(|limit| result.visited >= limit)
             || ((!options.allow_first_step || result.visited > 0)
                 && options.deadline.is_some_and(|deadline| now() >= deadline))
         {
@@ -106,11 +108,7 @@ pub(super) fn walk_paths(
                     .map_or(modified, |old| old.max(modified)),
             );
         }
-        let logical = if metadata.is_dir() {
-            0
-        } else {
-            metadata.len()
-        };
+        let logical = if metadata.is_dir() { 0 } else { metadata.len() };
         usage.logical_bytes = usage.logical_bytes.saturating_add(logical);
         usage.allocated_bytes = usage
             .allocated_bytes
@@ -118,9 +116,10 @@ pub(super) fn walk_paths(
         if !metadata.is_dir() {
             continue;
         }
-        if options.max_depth.is_some_and(|limit| {
-            path.components().count().saturating_sub(base_depth) >= limit
-        }) {
+        if options
+            .max_depth
+            .is_some_and(|limit| path.components().count().saturating_sub(base_depth) >= limit)
+        {
             return Err(Error::internal_unexpected(
                 "filesystem measurement depth limit reached",
             ));
@@ -153,7 +152,10 @@ pub(super) fn walk_paths(
 }
 
 fn io_error(path: &Path, error: std::io::Error) -> Error {
-    Error::internal_io(error.to_string(), Some(format!("measure {}", path.display())))
+    Error::internal_io(
+        error.to_string(),
+        Some(format!("measure {}", path.display())),
+    )
 }
 
 fn allocated_bytes(metadata: &fs::Metadata, fallback: u64) -> u64 {
