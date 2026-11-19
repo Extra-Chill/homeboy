@@ -289,7 +289,10 @@ impl JobCgroup {
             fs::create_dir(&dir)?;
         }
         let configured = (|| {
-            fs::write(dir.join("pids.max"), limit_value(task_limit(process_count_limit)))?;
+            fs::write(
+                dir.join("pids.max"),
+                limit_value(task_limit(process_count_limit)),
+            )?;
             fs::write(dir.join("memory.oom.group"), "1")?;
             // std opens with O_CLOEXEC, so the job never inherits it.
             fs::OpenOptions::new()
