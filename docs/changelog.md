@@ -4,6 +4,11 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.474.14] - 2026-11-19
+
+### Fixed
+- restart waits for the replacement's startup recovery before judging re-adoption
+
 ## [0.474.13] - 2026-11-18
 
 ### Changed
