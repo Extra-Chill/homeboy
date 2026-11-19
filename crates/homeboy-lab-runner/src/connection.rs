@@ -2858,7 +2858,8 @@ pub(crate) use remote_daemon::parse_json_from_mixed_stdout;
 use remote_daemon::*;
 pub(crate) use service::repoint_and_restart as repoint_and_restart_runner_service;
 pub use service::{
-    install as install_runner_service, service_status as runner_service_status, RunnerServiceReport,
+    install as install_runner_service, repoint_local as repoint_local_runner_service,
+    service_status as runner_service_status, RunnerServiceReport,
 };
 pub(crate) use service::{
     observe_service_units, probe_runner_binary_version,

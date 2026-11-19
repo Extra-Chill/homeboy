@@ -470,7 +470,7 @@ pub(crate) fn repoint_and_restart(runner_id: &str, binary: &str) -> Result<()> {
     let startup_token = uuid::Uuid::new_v4().to_string();
     run_remote(
         &target.client,
-        &repoint_script(
+        &delegated_repoint_script(
             binary,
             &startup_token,
             &daemon_policy_env(&target.runner.env),
@@ -478,6 +478,60 @@ pub(crate) fn repoint_and_restart(runner_id: &str, binary: &str) -> Result<()> {
         "restarting the runner service",
     )?;
     Ok(())
+}
+
+/// Repoint through the target binary, so the version that knows the unit
+/// layout it runs under writes that layout and migrates to it (#18539). The
+/// controller's own rendering serves only a target that predates
+/// `runner service repoint`.
+fn delegated_repoint_script(
+    binary: &str,
+    startup_token: &str,
+    daemon_env: &[(String, String)],
+) -> String {
+    let env: String = daemon_env
+        .iter()
+        .map(|(key, value)| format!(" --env {}", shell::quote_arg(&format!("{key}={value}"))))
+        .collect();
+    format!(
+        r#"if {binary} runner service repoint --help >/dev/null 2>&1; then
+  exec {binary} runner service repoint --binary {binary} --startup-token {token}{env} >/dev/null
+fi
+{fallback}"#,
+        binary = shell::quote_arg(binary),
+        token = shell::quote_arg(startup_token),
+        fallback = repoint_script(binary, startup_token, daemon_env),
+    )
+}
+
+/// Run this binary's repoint on the runner host itself: point the unit at
+/// `binary`, write this version's units, migrate what an older layout left
+/// running, and restart. Policy env is filtered through the same allowlist
+/// as a controller-rendered unit.
+pub fn repoint_local(
+    binary: &str,
+    startup_token: &str,
+    env: &[String],
+) -> Result<RunnerServiceReport> {
+    let env = env
+        .iter()
+        .filter_map(|entry| entry.split_once('='))
+        .map(|(key, value)| (key.to_string(), value.to_string()))
+        .collect();
+    let script = repoint_script(binary, startup_token, &daemon_policy_env(&env));
+    let output = std::process::Command::new("sh")
+        .args(["-c", &script])
+        .output()
+        .map_err(|error| {
+            Error::internal_io(error.to_string(), Some("runner service repoint".into()))
+        })?;
+    if !output.status.success() {
+        return Err(Error::internal_unexpected(format!(
+            "runner service repoint failed: {}",
+            String::from_utf8_lossy(&output.stderr).trim()
+        )));
+    }
+    Ok(report_for("local", binary, None))
 }
 
 /// Marker that prefixes every inventory record, so unrelated stdout (login
@@ -987,6 +1041,50 @@ mod tests {
             String::from_utf8_lossy(&output.stderr)
         );
         String::from_utf8_lossy(&output.stdout).into_owned()
+    }
+
+    /// #18539: a repoint runs the target binary's own repoint, so a newer
+    /// target migrates to its layout even when an older controller drives the
+    /// upgrade; only a target without `runner service repoint` gets the
+    /// controller's rendering.
+    #[test]
+    fn repoint_is_performed_by_the_target_binary_when_it_can() {
+        let policy = vec![(
+            "HOMEBOY_DAEMON_IDLE_TIMEOUT_SECS".to_string(),
+            "60".to_string(),
+        )];
+        for (supports_repoint, delegated) in [(true, true), (false, false)] {
+            let home = tempfile::tempdir().unwrap();
+            let target = home.path().join("homeboy-target");
+            homeboy_test_support::write_executable(
+                &target,
+                &format!(
+                    "#!/bin/sh\ncase \"$*\" in *--help*) exit {};; esac\nprintf '%s\\n' \"$*\" >> \"$HOME/target.log\"\n",
+                    if supports_repoint { 0 } else { 2 }
+                ),
+                0o755,
+            )
+            .unwrap();
+            let target = target.display().to_string();
+            run_in_runner_home(
+                home.path(),
+                &delegated_repoint_script(&target, "tok", &policy),
+            );
+            let read =
+                |name: &str| std::fs::read_to_string(home.path().join(name)).unwrap_or_default();
+            if delegated {
+                assert_eq!(
+                    read("target.log"),
+                    format!(
+                        "runner service repoint --binary {target} --startup-token tok --env HOMEBOY_DAEMON_IDLE_TIMEOUT_SECS=60\n"
+                    )
+                );
+                assert_eq!(read("systemctl.log"), "");
+            } else {
+                assert_eq!(read("target.log"), "");
+                assert!(read("systemctl.log").contains("start homeboy-runner.service"));
+            }
+        }
     }
 
     /// A connect follows another controller's in-place restart of the host
