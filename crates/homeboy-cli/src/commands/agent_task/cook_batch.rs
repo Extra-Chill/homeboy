@@ -17,6 +17,7 @@
 //! up from those same records: its run and verdict, or `never_started` with
 //! the reason it never got a run record.
 
+use homeboy_engine_primitives::identifier::{slugify, SlugStyle};
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -411,9 +412,9 @@ pub(super) fn batch_prepare(args: AgentTaskBatchPrepareArgs) -> CmdResult<Value>
                 "{}/issue-{}-{}",
                 args.branch_prefix.trim_matches('/'),
                 issue.number,
-                slugify(&issue.repo)
+                slugify(&issue.repo, SlugStyle::CookBatch)
             );
-            let worktree = format!("{repository}@{}", slugify(&branch));
+            let worktree = format!("{repository}@{}", slugify(&branch, SlugStyle::CookBatch));
             let prompt = match &args.prompt_template {
                 _ if issue_prompts.contains_key(&issue.key) => issue_prompts[&issue.key].clone(),
                 Some(template) => template
@@ -720,20 +721,6 @@ fn child_run(cook_id: &str) -> Option<Vec<(&'static str, Value)>> {
 /// cook-batch children and a single `agent-task cook --task-url`.
 pub(crate) fn default_task_prompt(task_url: &str) -> String {
     task_url.to_string()
-}
-
-fn slugify(value: &str) -> String {
-    let slug = value
-        .chars()
-        .map(|ch| {
-            if ch.is_ascii_alphanumeric() || ch == '_' || ch == '-' {
-                ch.to_ascii_lowercase()
-            } else {
-                '-'
-            }
-        })
-        .collect::<String>();
-    slug.trim_matches('-').to_string()
 }
 
 #[cfg(test)]
@@ -1167,6 +1154,9 @@ mod tests {
         assert_eq!(issues[1].key, "chubes4/homeboy-cook-scratch#2");
         assert!(parse_issues(&[ISSUES[0].to_string(), ISSUES[0].to_string()]).is_err());
         assert!(parse_issues(&["https://example.test/pulls/1".to_string()]).is_err());
-        assert_eq!(slugify("fix/issue-2-homeboy"), "fix-issue-2-homeboy");
+        assert_eq!(
+            slugify("fix/issue-2-homeboy", SlugStyle::CookBatch),
+            "fix-issue-2-homeboy"
+        );
     }
 }

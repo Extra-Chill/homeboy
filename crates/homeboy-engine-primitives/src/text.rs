@@ -6,6 +6,51 @@ use std::cmp::Ordering;
 use std::collections::BTreeSet;
 use std::hash::Hash;
 
+/// Keep at most `max` Unicode scalar values, appending `suffix` only if cut.
+/// The suffix is not included in the character budget.
+pub fn truncate_chars(input: &str, max: usize, suffix: &str) -> String {
+    match input.char_indices().nth(max) {
+        Some((end, _)) => format!("{}{}", &input[..end], suffix),
+        None => input.to_string(),
+    }
+}
+
+/// Keep the end of a string, with the same budget contract as `truncate_chars`.
+pub fn truncate_tail_chars(input: &str, max: usize, prefix: &str) -> String {
+    let count = input.chars().count();
+    if count <= max {
+        return input.to_string();
+    }
+    let start = input
+        .char_indices()
+        .nth(count - max)
+        .map_or(input.len(), |(i, _)| i);
+    format!("{}{}", prefix, &input[start..])
+}
+
+/// Keep a head and a larger tail for diagnostics, reserving room for an omission
+/// marker. `max` counts Unicode scalar values, including the marker.
+pub fn truncate_middle(input: &str, max: usize) -> String {
+    let count = input.chars().count();
+    if count <= max {
+        return input.to_string();
+    }
+    let budget = max.saturating_sub(40);
+    let head = budget / 3;
+    let tail = budget - head;
+    let head_end = input
+        .char_indices()
+        .nth(head)
+        .map_or(input.len(), |(i, _)| i);
+    let tail_start = input
+        .char_indices()
+        .nth(count - tail)
+        .map_or(input.len(), |(i, _)| i);
+    let marker = format!("\n... [{} bytes omitted] ...\n", tail_start - head_end);
+    let marker = truncate_chars(&marker, max - budget, "");
+    format!("{}{}{}", &input[..head_end], marker, &input[tail_start..])
+}
+
 pub(crate) fn normalize_identifier(input: &str) -> String {
     input.trim().to_lowercase()
 }
@@ -197,6 +242,33 @@ pub fn json_path_str<'a>(json: &'a serde_json::Value, path: &[&str]) -> Option<&
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn truncation_handles_character_boundaries() {
+        for (input, max, suffix, expected) in [
+            ("", 0, "...", ""),
+            ("abc", 0, "…", "…"),
+            ("abc", 3, "...", "abc"),
+            ("éclair", 1, "...", "é..."),
+            ("a🦀中文z", 2, "…", "a🦀…"),
+            ("中文", 1, "", "中"),
+            ("é", 1, "...", "é"),
+        ] {
+            assert_eq!(truncate_chars(input, max, suffix), expected);
+        }
+        for max in [0, 1, 39, 40, 41, 80] {
+            let input = "é🦀中文".repeat(50);
+            let middle = truncate_middle(&input, max);
+            assert!(middle.chars().count() <= max);
+            if max >= 43 {
+                assert!(middle.starts_with('é'));
+                assert!(middle.ends_with('文'));
+            }
+        }
+        assert_eq!(truncate_tail_chars("aé🦀", 2, "…"), "…é🦀");
+        assert_eq!(truncate_tail_chars("é", 0, "…"), "…");
+        assert_eq!(truncate_middle("short", 80), "short");
+    }
 
     #[test]
     fn normalize_identifier_trims_and_lowercases() {

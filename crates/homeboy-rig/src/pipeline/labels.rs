@@ -1,5 +1,7 @@
 //! Step kind/label rendering plus op serialization helpers.
 
+use homeboy_engine_primitives::text::truncate_chars;
+
 use super::super::expand::expand_vars;
 use super::super::spec::{
     GitOp, HostMutationOp, LifecyclePhaseKind, PatchOp, PipelineStep, RigSpec, ServiceOp,
@@ -56,10 +58,10 @@ pub(super) fn step_label(rig: &RigSpec, step: &PipelineStep, idx: usize) -> Stri
         }),
         PipelineStep::Command { cmd, label, .. } => label
             .clone()
-            .unwrap_or_else(|| truncate(&expand_vars(rig, cmd), 80)),
+            .unwrap_or_else(|| truncate_chars(&expand_vars(rig, cmd), 80, "…")),
         PipelineStep::CommandIfMissing { cmd, label, .. } => label
             .clone()
-            .unwrap_or_else(|| truncate(&expand_vars(rig, cmd), 80)),
+            .unwrap_or_else(|| truncate_chars(&expand_vars(rig, cmd), 80, "…")),
         PipelineStep::Requirement {
             path,
             file,
@@ -71,11 +73,11 @@ pub(super) fn step_label(rig: &RigSpec, step: &PipelineStep, idx: usize) -> Stri
             ..
         } => label.clone().unwrap_or_else(|| {
             if let Some(path) = file {
-                format!("require file {}", truncate(path, 60))
+                format!("require file {}", truncate_chars(path, 60, "…"))
             } else if let Some(path) = dir {
-                format!("require dir {}", truncate(path, 60))
+                format!("require dir {}", truncate_chars(path, 60, "…"))
             } else if let Some(path) = path {
-                format!("require path {}", truncate(path, 60))
+                format!("require path {}", truncate_chars(path, 60, "…"))
             } else if let (Some(component), Some(required)) = (component, component_path_contains) {
                 format!("require {} path contains {}", component, required)
             } else if let Some(executable) = executable {
@@ -99,7 +101,7 @@ pub(super) fn step_label(rig: &RigSpec, step: &PipelineStep, idx: usize) -> Stri
                 "patch {} {} {}",
                 serialize_patch_op(*op),
                 component,
-                truncate(file, 60)
+                truncate_chars(file, 60, "…")
             )
         }),
         PipelineStep::HostMutation {
@@ -111,7 +113,7 @@ pub(super) fn step_label(rig: &RigSpec, step: &PipelineStep, idx: usize) -> Stri
             format!(
                 "host-mutation {} {}",
                 serialize_host_mutation_op(*op),
-                truncate(&lifecycle.run_id, 60)
+                truncate_chars(&lifecycle.run_id, 60, "…")
             )
         }),
         PipelineStep::Lifecycle {
@@ -192,13 +194,5 @@ pub(super) fn serialize_lifecycle_op(op: LifecyclePhaseKind) -> &'static str {
         LifecyclePhaseKind::Reset => "reset",
         LifecyclePhaseKind::Rollback => "rollback",
         LifecyclePhaseKind::Teardown => "teardown",
-    }
-}
-
-fn truncate(s: &str, max: usize) -> String {
-    if s.len() <= max {
-        s.to_string()
-    } else {
-        format!("{}…", &s[..max])
     }
 }

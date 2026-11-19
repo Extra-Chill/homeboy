@@ -2191,13 +2191,7 @@ fn readiness_validation_projection(
 }
 
 fn bounded_text(value: &str, limit: usize) -> String {
-    let mut chars = value.chars();
-    let bounded = chars.by_ref().take(limit).collect::<String>();
-    if chars.next().is_some() {
-        format!("{bounded}...")
-    } else {
-        bounded
-    }
+    homeboy_engine_primitives::text::truncate_chars(value, limit, "...")
 }
 
 fn provider_full_command(args: &ProvidersArgs) -> String {

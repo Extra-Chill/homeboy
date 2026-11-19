@@ -514,9 +514,8 @@ fn non_empty(value: &str, field: &str) -> Result<String> {
 }
 
 fn slug(value: &str) -> String {
-    let slug = paths::sanitize_path_segment(value)
-        .trim_matches('_')
-        .to_string();
+    use homeboy_engine_primitives::identifier::{slugify, SlugStyle};
+    let slug = slugify(value, SlugStyle::Path);
     if slug.is_empty() {
         "ref".to_string()
     } else {

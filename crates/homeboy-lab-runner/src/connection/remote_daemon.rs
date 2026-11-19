@@ -2414,14 +2414,10 @@ where
 }
 
 fn truncate_utf8(value: &str, max_bytes: usize) -> String {
-    if value.len() <= max_bytes {
+    if value.chars().count() <= max_bytes {
         return value.to_string();
     }
-    let mut end = max_bytes.saturating_sub(3);
-    while !value.is_char_boundary(end) {
-        end -= 1;
-    }
-    format!("{}...", &value[..end])
+    homeboy_engine_primitives::text::truncate_chars(value, max_bytes.saturating_sub(3), "...")
 }
 
 pub(super) fn remote_daemon_ensure_running_command(

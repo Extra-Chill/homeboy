@@ -5,6 +5,7 @@
 //! references, and a prominent risk-flag section (#4398). The full verbose
 //! payload is available behind `--full`.
 
+use crate::commands::operator_projection::serialized_len;
 use crate::commands::runs::cook::{EvidenceArgs, LifecycleReadArgs};
 use homeboy_engine_primitives::content_hash;
 use serde::Serialize;
@@ -5438,10 +5439,6 @@ fn compact_budget_value(
 
 fn compact_section_count(value: &Value) -> usize {
     value.as_array().map_or(1, Vec::len)
-}
-
-fn serialized_len(value: &Value) -> usize {
-    serde_json::to_vec(value).map_or(usize::MAX, |bytes| bytes.len())
 }
 
 /// The default view for `homeboy agent-task cook`. `--full` is opt-in, so this

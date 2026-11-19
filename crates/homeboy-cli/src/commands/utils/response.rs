@@ -1983,13 +1983,7 @@ fn release_gate_repro_action(
 }
 
 fn bounded_text(value: &str, max_chars: usize) -> String {
-    let mut chars = value.chars();
-    let bounded: String = chars.by_ref().take(max_chars).collect();
-    if chars.next().is_some() {
-        format!("{bounded}...")
-    } else {
-        bounded
-    }
+    homeboy_engine_primitives::text::truncate_chars(value, max_chars, "...")
 }
 
 fn formatting_failure_digest(data: &Value) -> Option<CommandFailureDigest> {
