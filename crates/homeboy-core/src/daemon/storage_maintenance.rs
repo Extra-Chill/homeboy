@@ -1,7 +1,8 @@
-//! Agent-owned storage the daemon reclaims on its maintenance cadence.
+//! Per-attempt storage the daemon reclaims on its maintenance cadence.
 //!
-//! Core cannot depend on the agent-task subsystem that owns Cook attempt
-//! scratch, so the subsystem registers one bounded reclamation pass here.
+//! Core cannot depend on the cleanup command that owns the per-attempt
+//! categories and their retention policy, so that owner registers one bounded
+//! reclamation pass here (#18420).
 
 use std::time::Instant;
 
@@ -24,5 +25,5 @@ homeboy_engine_primitives::provider_registry! {
     provider: dyn StorageMaintenanceProvider,
     noop: NoopProvider,
     register: pub fn register_storage_maintenance_provider,
-    with: pub(crate) fn with_provider,
+    with: pub fn with_provider,
 }

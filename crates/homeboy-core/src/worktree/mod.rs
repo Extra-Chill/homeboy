@@ -879,6 +879,25 @@ pub fn record_active_for_run_at_for_test(id: &str, worktree_path: &Path, run_id:
     record_for_test(id, worktree_path, TaskWorktreeState::Active, Some(run_id));
 }
 
+/// Register an active task worktree linked from `source_checkout`, optionally
+/// owned by `run_id`, as task-worktree provisioning records it.
+#[cfg(any(test, feature = "test-support"))]
+#[doc(hidden)]
+pub fn record_linked_active_for_test(
+    id: &str,
+    source_checkout: &Path,
+    worktree_path: &Path,
+    run_id: Option<&str>,
+) {
+    write_test_record(
+        id,
+        source_checkout,
+        worktree_path,
+        TaskWorktreeState::Active,
+        run_id,
+    );
+}
+
 #[cfg(test)]
 pub(crate) fn record_removed_for_test(id: &str, worktree_path: &Path) {
     record_for_test(id, worktree_path, TaskWorktreeState::Removed, None);
@@ -891,10 +910,21 @@ pub(crate) fn record_for_run_for_test(id: &str, run_id: &str, state: TaskWorktre
 
 #[cfg(any(test, feature = "test-support"))]
 fn record_for_test(id: &str, worktree_path: &Path, state: TaskWorktreeState, run_id: Option<&str>) {
+    write_test_record(id, worktree_path, worktree_path, state, run_id);
+}
+
+#[cfg(any(test, feature = "test-support"))]
+fn write_test_record(
+    id: &str,
+    source_checkout: &Path,
+    worktree_path: &Path,
+    state: TaskWorktreeState,
+    run_id: Option<&str>,
+) {
     let record = TaskWorktreeRecord {
         id: id.to_string(),
         component_id: "fixture".to_string(),
-        source_checkout: worktree_path.to_string_lossy().to_string(),
+        source_checkout: source_checkout.to_string_lossy().to_string(),
         worktree_path: worktree_path.to_string_lossy().to_string(),
         branch: format!("task/{id}"),
         base_ref: "main".to_string(),

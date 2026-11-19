@@ -40,6 +40,9 @@ use super::runs::{runs_resources, RunsOutput, RunsResourcesArgs, RunsResourcesOu
 use super::utils::response::{CommandActionableMetadata, CommandNextAction, CommandNextActionKind};
 use super::CmdResult;
 
+mod storage_maintenance;
+pub(crate) use storage_maintenance::register_storage_maintenance;
+
 const CLEANUP_CATEGORY_CHILD_ENV: &str = "HOMEBOY_INTERNAL_CLEANUP_CATEGORY_CHILD";
 const CLEANUP_CATEGORY_CHILD_TIMEOUT_ENV: &str = "HOMEBOY_INTERNAL_CLEANUP_CATEGORY_TIMEOUT_MS";
 const CLEANUP_CHILD_TERMINATION_ALLOWANCE: Duration = Duration::from_secs(5);
@@ -2730,7 +2733,14 @@ fn run_cleanup_category(
                 &args,
                 deadline,
                 CleanupCategoryCommandOverrides::default(),
-                || remote_lab_workspace_categories(policy, apply, args.cursor.as_deref()),
+                || {
+                    remote_lab_workspace_categories(
+                        policy,
+                        apply,
+                        args.cursor.as_deref(),
+                        cleanup_category_action_deadline(deadline),
+                    )
+                },
             );
         }
 
@@ -3512,7 +3522,9 @@ fn is_cleanup_category_child(metadata: CleanupInventoryCategoryMetadata) -> bool
 /// Whether `metadata`'s category runs in this process rather than in an
 /// isolated, supervised child.
 fn cleanup_category_runs_in_process(metadata: CleanupInventoryCategoryMetadata) -> bool {
-    cfg!(test) || is_cleanup_category_child(metadata)
+    cfg!(test)
+        || is_cleanup_category_child(metadata)
+        || storage_maintenance::categories_run_in_process()
 }
 
 /// The least pass budget a category must have left to be started at all.
@@ -4607,9 +4619,15 @@ fn remote_lab_workspace_categories(
     policy: CleanupPolicy,
     apply: bool,
     cursor: Option<&str>,
+    deadline: Option<SystemTime>,
 ) -> homeboy::core::Result<Vec<CleanupInventoryCategory>> {
     let mut categories = Vec::new();
     for status in runner::statuses()? {
+        // A runner not started this pass keeps its saved cursor, so stopping
+        // here only defers it; starting it past the deadline would overrun.
+        if deadline.is_some_and(|deadline| SystemTime::now() >= deadline) {
+            break;
+        }
         if !remote_workspace_cleanup_connected(&status) {
             categories.push(CleanupInventoryCategory {
                 category: "remote_lab_workspaces".to_string(),
@@ -4819,7 +4837,14 @@ fn cleanup_actionable(
 ) -> CommandActionableMetadata {
     let mut actionable = CommandActionableMetadata::default();
     for category in categories {
+        // The daemon maintenance pass reclaims these on its cadence and
+        // resumes their cursors, so a reclaim or resume hint would only send
+        // the operator to do by hand what is already scheduled (#18420).
+        let reclaimed_by_daemon = storage_maintenance::reclaimed_by_daemon(&category.category);
         if is_bounded_continuation(category) {
+            if reclaimed_by_daemon {
+                continue;
+            }
             actionable.next_actions.push(
                 CommandNextAction::new(
                     format!("resume {} cleanup", category.category.replace('_', " ")),
@@ -4865,7 +4890,7 @@ fn cleanup_actionable(
                 .with_kind(CommandNextActionKind::Repair),
             );
         }
-        if category.skipped || category.candidate_count == 0 {
+        if category.skipped || category.candidate_count == 0 || reclaimed_by_daemon {
             continue;
         }
         actionable.next_actions.push(CommandNextAction::new(
