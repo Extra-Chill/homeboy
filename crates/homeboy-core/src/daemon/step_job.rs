@@ -10,7 +10,11 @@
 //!
 //! Supervision is by PID plus kernel start identity. A restarted daemon
 //! re-adopts a still-running child from its checkpoint instead of spawning it
-//! again, and cancellation terminates the child's whole process tree. The
+//! again, and cancellation terminates the child's whole process tree. When the
+//! daemon owns a delegated cgroup subtree (`crate::job_cgroup`), the child runs
+//! in its own `jobs/<job-id>/` cgroup from its first instruction, and
+//! cancelling, replacing or finishing the step stops that whole cgroup:
+//! `cgroup.kill`, wait until it is empty, then remove it. The
 //! child's combined output is written below `artifacts/jobs/<job_id>/`.
 //!
 //! A step may wait before it spawns (`not_before`, `runner_eligible`). Exit is
@@ -33,6 +37,7 @@ use crate::daemon::controller_job_driver::{
 };
 use crate::env_materialization_plan::{EnvMaterializationPlan, EnvSecretRef};
 use crate::error::{Error, Result};
+use crate::job_cgroup::JobCgroup;
 use crate::process::{ProcessIdentityState, ProcessStartIdentity};
 
 pub const STEP_JOB_TYPE: &str = "step";
@@ -740,7 +745,9 @@ impl ControllerJobDriver for StepJobDriver {
         // that names a child no live loop is supervising.
         let checkpoint = StepJobCheckpoint::parse(prepared)?;
         match (checkpoint.phase, checkpoint.child) {
-            (StepPhase::Running, Some(child)) => stop_child_tree(&child),
+            (StepPhase::Running, Some(child)) => {
+                stop_child(&child, adopted_cgroup(&child).as_ref())
+            }
             _ => Ok(()),
         }
     }
@@ -778,7 +785,9 @@ fn run_step(mut checkpoint: StepJobCheckpoint, job: &ControllerJobHandle) -> Res
         StepPhase::Running => {
             let child = checkpoint.child.clone().expect("validated running child");
             job.progress(checkpoint.progress())?;
-            supervise_adopted(&child, job)?;
+            let cgroup = adopted_cgroup(&child);
+            supervise_adopted(&child, cgroup.as_ref(), job)?;
+            stop_finished_cgroup(cgroup.as_ref());
             checkpoint.exit_code = recorded_step_exit_code(&job_id);
             checkpoint.phase = StepPhase::Exited;
             job.checkpoint(to_value(&checkpoint)?)?;
@@ -851,6 +860,14 @@ fn run_step(mut checkpoint: StepJobCheckpoint, job: &ControllerJobHandle) -> Res
     let log_err = log.try_clone().map_err(|error| {
         Error::internal_io(error.to_string(), Some(log_path.display().to_string()))
     })?;
+    // With a delegated cgroup subtree the step runs in its own
+    // `jobs/<job-id>/` cgroup; dropping it kills and removes the cgroup.
+    let cgroup = JobCgroup::create_unlimited(&job_id).map_err(|error| {
+        Error::internal_io(
+            error.to_string(),
+            Some("create step job cgroup".to_string()),
+        )
+    })?;
 
     checkpoint.phase = StepPhase::Spawning;
     job.checkpoint(to_value(&checkpoint)?)?;
@@ -875,6 +892,9 @@ fn run_step(mut checkpoint: StepJobCheckpoint, job: &ControllerJobHandle) -> Res
     // The child leads its own session: a daemon restart must not take the
     // step down, and cancellation addresses the child's whole tree.
     crate::process::detach_from_caller_session(&mut command);
+    if let Some(cgroup) = &cgroup {
+        cgroup.join_before_exec(&mut command);
+    }
     if let Some(cpus) = capacity_permit.as_ref().and_then(|permit| {
         crate::lab_capacity::cpu_slice(&crate::lab_capacity::allowed_cpus(), limit, permit.slot())
     }) {
@@ -925,7 +945,7 @@ fn run_step(mut checkpoint: StepJobCheckpoint, job: &ControllerJobHandle) -> Res
 
     loop {
         if job.is_cancelled() {
-            let _ = stop_child_tree(&child);
+            let _ = stop_child(&child, cgroup.as_ref());
             let _ = process.wait();
             checkpoint.phase = StepPhase::Exited;
             let _ = job.checkpoint(to_value(&checkpoint)?);
@@ -945,6 +965,8 @@ fn run_step(mut checkpoint: StepJobCheckpoint, job: &ControllerJobHandle) -> Res
             }
         }
     }
+    // Descendants the child left behind end with their step.
+    stop_finished_cgroup(cgroup.as_ref());
     checkpoint.phase = StepPhase::Exited;
     job.checkpoint(to_value(&checkpoint)?)?;
     job.progress(checkpoint.progress())?;
@@ -1217,10 +1239,14 @@ fn resolve_secrets(secret_refs: &[EnvSecretRef]) -> Result<Vec<(String, String)>
 }
 
 /// Supervise a re-adopted child that this daemon did not spawn and cannot reap.
-fn supervise_adopted(child: &StepChild, job: &ControllerJobHandle) -> Result<()> {
+fn supervise_adopted(
+    child: &StepChild,
+    cgroup: Option<&JobCgroup>,
+    job: &ControllerJobHandle,
+) -> Result<()> {
     loop {
         if job.is_cancelled() {
-            return stop_child_tree(child);
+            return stop_child(child, cgroup);
         }
         match child_state(child) {
             ProcessIdentityState::Dead | ProcessIdentityState::IdentityMismatch => return Ok(()),
@@ -1237,6 +1263,39 @@ fn child_state(child: &StepChild) -> ProcessIdentityState {
         None,
         Some(&child.start_identity),
     )
+}
+
+/// The job cgroup a re-adopted child still runs in, when it is still the
+/// admitted child and this daemon owns a delegated cgroup subtree.
+fn adopted_cgroup(child: &StepChild) -> Option<JobCgroup> {
+    if child_state(child) != ProcessIdentityState::Live {
+        return None;
+    }
+    JobCgroup::of_process(child.pid).ok().flatten()
+}
+
+/// Stop the step: with its own cgroup, `cgroup.kill` reaches every member
+/// whatever its session or process group, then the emptied cgroup is removed.
+/// Without one, terminate the child's process tree.
+fn stop_child(child: &StepChild, cgroup: Option<&JobCgroup>) -> Result<()> {
+    match cgroup {
+        Some(cgroup) => cgroup.stop().map_err(|error| {
+            Error::internal_io(
+                error.to_string(),
+                Some(format!("stop step child {} cgroup", child.pid)),
+            )
+        }),
+        None => stop_child_tree(child),
+    }
+}
+
+/// A finished step's cgroup holds only descendants that outlived the child.
+fn stop_finished_cgroup(cgroup: Option<&JobCgroup>) {
+    if let Some(cgroup) = cgroup {
+        if let Err(error) = cgroup.stop() {
+            crate::log_status!("step", "Could not stop a finished step's cgroup: {}", error);
+        }
+    }
 }
 
 /// Terminate the child's process tree when it is still the admitted child,
@@ -2035,6 +2094,79 @@ mod tests {
                 );
                 std::thread::sleep(Duration::from_millis(20));
             }
+        });
+    }
+
+    /// #18449: a cancelled step stops its whole cgroup, so a `setsid`-detached
+    /// descendant that left the step's session and process tree dies too.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn cancelling_a_step_kills_its_whole_cgroup_with_zero_survivors() {
+        crate::job_cgroup::test_support::run_in_delegated_scope(
+            "daemon::step_job::tests::delegated_step_cancel_kills_detached_descendants",
+            &[],
+        );
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    #[ignore = "inner half of cancelling_a_step_kills_its_whole_cgroup_with_zero_survivors"]
+    fn delegated_step_cancel_kills_detached_descendants() {
+        use crate::job_cgroup::test_support::{
+            alive, assert_job_cgroups_removed, inside_delegated_scope, survivors, unique_sleep,
+        };
+        if !inside_delegated_scope() {
+            return;
+        }
+        let jobs =
+            crate::job_cgroup::initialize(0).expect("a delegated scope initializes job cgroups");
+        with_isolated_home(|home| {
+            let detached_pid = home.path().join("detached.pid");
+            let sleep = unique_sleep();
+            // The subshell exits at once, so the `setsid` child leaves the
+            // step's session, process group and process tree.
+            let script = format!(
+                "(setsid sh -c 'trap \"\" TERM; echo $$ > {pid}; exec sleep {sleep}' &); \
+                 exec sleep {sleep}",
+                pid = detached_pid.display(),
+            );
+            let request = request(&script, EnvMaterializationPlan::default());
+            let harness = step_harness(&request, home.path());
+            harness.start_via_controller_boundary().unwrap();
+            let job_id = harness.job().unwrap().id.to_string();
+            let detached = || {
+                std::fs::read_to_string(&detached_pid)
+                    .ok()
+                    .and_then(|pid| pid.trim().parse::<u32>().ok())
+            };
+            let deadline = Instant::now() + Duration::from_secs(30);
+            while detached().is_none() {
+                assert!(Instant::now() < deadline, "detached child never started");
+                std::thread::sleep(Duration::from_millis(20));
+            }
+            let detached = detached().unwrap();
+            let cgroup = jobs.join(&job_id);
+            assert!(cgroup.is_dir(), "the step's cgroup is named for its job id");
+            let members = std::fs::read_to_string(cgroup.join("cgroup.procs")).unwrap();
+            assert!(
+                members
+                    .lines()
+                    .any(|pid| pid.trim() == detached.to_string()),
+                "the detached child stays in the step's cgroup: {members}"
+            );
+
+            crate::daemon::cancel_controller_job(
+                harness.job().unwrap().id,
+                "test cancellation",
+                harness.store(),
+            )
+            .unwrap();
+            let job = harness.wait_until_terminal().unwrap();
+
+            assert_eq!(job.status, crate::api_jobs::JobStatus::Cancelled);
+            assert!(!alive(detached), "cancel left detached child {detached}");
+            assert_eq!(survivors(&sleep), Vec::<String>::new());
+            assert_job_cgroups_removed(jobs);
         });
     }
 
