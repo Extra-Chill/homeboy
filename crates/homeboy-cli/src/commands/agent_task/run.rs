@@ -11713,6 +11713,7 @@ pub(super) fn placement_update(
 }
 
 #[cfg(test)]
+#[cfg(test)]
 pub(super) fn run_resume_with_executor(
     run_id: String,
     _full: bool,
@@ -11741,30 +11742,9 @@ pub(super) fn run_resume_with_executor(
             },
             executor,
         )?;
-    let resume_result = homeboy::agents::agent_task_action_result::resume(&acknowledgement)?;
-    let exit_code = match &resume_result {
-        homeboy::agents::agent_task_action_result::ResumeActionResult::Resumed {
-            exit_code,
-            ..
-        } => *exit_code,
-        homeboy::agents::agent_task_action_result::ResumeActionResult::UnmaterializedCook {
-            terminal,
-            ..
-        } => i32::from(*terminal) * 2,
-    };
-    // Preserve the historical aggregate cursor for already-satisfied recovery.
-    let value = match (&resume_result, &acknowledgement.outcome) {
-        (
-            homeboy::agents::agent_task_action_result::ResumeActionResult::Resumed {
-                aggregate,
-                ..
-            },
-            homeboy_control_plane_contract::ControlPlaneActionOutcome::AlreadySatisfied,
-        ) => serde_json::to_value(aggregate),
-        _ => serde_json::to_value(acknowledgement),
-    }
-    .map_err(|error| Error::internal_json(error.to_string(), None))?;
-    Ok((value, exit_code))
+    Ok(homeboy::agents::agent_task_action_result::resume_report(
+        &acknowledgement,
+    )?)
 }
 
 /// `retry` submits a fresh run from any run's plan. A Cook ID whose durable

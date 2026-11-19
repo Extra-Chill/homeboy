@@ -931,30 +931,16 @@ pub(crate) fn control_plane_next_action(payload: &Value, run_id: &str) -> String
             return remedy.to_string();
         }
     }
-    if let Some(recover) = payload
-        .pointer("/action_eligibility/actions")
-        .and_then(Value::as_array)
-        .and_then(|actions| actions.iter().find(|action| action["action"] == "recover"))
-    {
-        if recover["availability"] == "available" {
-            return format!("homeboy agent-task recover {run_id}");
-        }
-        return if matches!(
-            string_value(payload, &["state"]),
-            Some("running" | "queued")
-        ) {
-            format!("homeboy agent-task status {run_id} --watch")
-        } else {
-            format!("homeboy runs evidence {run_id}")
-        };
-    }
-    // Compatibility with servers predating the Recover action.
     if let Some(recovery) = payload
         .get("recovery")
         .filter(|recovery| !recovery.is_null())
     {
         let command = string_value(recovery, &["command"]).unwrap_or_default();
-        // Older servers express recovery through a plan rather than eligibility.
+        // The projection empties the eligibility report exactly when the
+        // Cook's state makes no action legal, and then also projects step
+        // `none`. A report with entries (available or indeterminate) never
+        // overrides the planner's step: `recover` is not a control-plane
+        // action, so "no action is available" does not mean "recover refuses".
         let legal_actions = payload
             .pointer("/action_eligibility/actions")
             .and_then(Value::as_array)
@@ -988,7 +974,7 @@ pub(crate) fn control_plane_next_action(payload: &Value, run_id: &str) -> String
             }
         }
     }
-    const PREFERRED: [&str; 5] = ["recover", "reconcile", "resume", "retry", "review"];
+    const PREFERRED: [&str; 4] = ["reconcile", "resume", "retry", "review"];
     let Some(actions) = payload
         .pointer("/action_eligibility/actions")
         .and_then(Value::as_array)

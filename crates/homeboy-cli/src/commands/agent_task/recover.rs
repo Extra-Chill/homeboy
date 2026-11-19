@@ -72,27 +72,41 @@ fn recover_action(args: RecoverArgs) -> CmdResult<Value> {
         replace_gates: recovery.replace_gates,
         publish: Some(recovery.publish),
     };
-    let request = ControlPlaneActionRequest {
-        schema: CONTROL_PLANE_ACTION_REQUEST_SCHEMA.into(),
-        effect_id: action_effect_id("cli", &id, "recover", &key),
-        action: ControlPlaneAction::Recover,
-        idempotency_key: key,
-        actor: "cli".into(),
-        expected_updated_at: None,
-        confirmed: true,
-        parameters: ControlPlaneActionPayload {
-            schema: CONTROL_PLANE_RECOVER_PARAMETERS_SCHEMA.into(),
-            data: serde_json::to_value(parameters)
-                .map_err(|e| homeboy::core::Error::internal_json(e.to_string(), None))?,
-        },
-    };
-    let ack =
-        homeboy::agents::orchestration::execute_action_from_current_environment(&id, &request)?;
-    let code = i32::from(ack.outcome == ControlPlaneActionOutcome::Failed);
-    let mut report = ack.result.data;
-    if report.is_null() {
-        report = serde_json::json!({"run_id": id, "failure": {"message": ack.message}});
-    }
+
+    // A run with no lifecycle record (an unknown ID or a recipe-only Cook)
+    // has no control-plane resource, so the Cook planner answers directly.
+    let (mut report, code) =
+        if homeboy::agents::agent_task_lifecycle::AgentTaskLifecycleStore::from_environment()?
+            .read_record(&id)
+            .is_err()
+        {
+            homeboy::agents::recovery_action::execute(&id, parameters)?
+        } else {
+            let request = ControlPlaneActionRequest {
+                schema: CONTROL_PLANE_ACTION_REQUEST_SCHEMA.into(),
+                effect_id: action_effect_id("cli", &id, "recover", &key),
+                action: ControlPlaneAction::Recover,
+                idempotency_key: key,
+                actor: "cli".into(),
+                expected_updated_at: None,
+                confirmed: true,
+                parameters: ControlPlaneActionPayload {
+                    schema: CONTROL_PLANE_RECOVER_PARAMETERS_SCHEMA.into(),
+                    data: serde_json::to_value(parameters)
+                        .map_err(|e| homeboy::core::Error::internal_json(e.to_string(), None))?,
+                },
+            };
+            let mut ack = homeboy::agents::orchestration::execute_action_from_current_environment(
+                &id, &request,
+            )?;
+            match ack.result.data["exit_code"].as_i64() {
+                Some(code) => (ack.result.data["report"].take(), code as i32),
+                None => (
+                    serde_json::json!({"run_id": id, "failure": {"message": ack.message}}),
+                    1,
+                ),
+            }
+        };
     if wait && report["admission"].is_object() {
         let run_id = report["run_id"].as_str().unwrap().to_string();
         let (status, exit_code) = super::status::wait_for_recovery_status(&run_id, full, duration)?;

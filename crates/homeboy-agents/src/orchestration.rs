@@ -1842,7 +1842,7 @@ impl OrchestrationService<LifecycleStoreLookup> {
                 result: ControlPlaneActionPayload {
                     schema: homeboy_control_plane_contract::CONTROL_PLANE_RECOVER_RESULT_SCHEMA
                         .into(),
-                    data,
+                    data: serde_json::json!({"report": data, "exit_code": code}),
                 },
                 message: None,
             });
@@ -2061,13 +2061,15 @@ impl OrchestrationService<LifecycleStoreLookup> {
                                     &request.idempotency_key,
                                 );
                             resume_request.parameters = ControlPlaneActionPayload::empty();
-                            self.execute_action_with_delegates(requested_id, &resume_request, retry, resume, promote)
-                                .map(|ack| {
-                                    let code = ack.result.data["exit_code"].as_i64().map(|code| code as i32)
-                                        .unwrap_or_else(|| i32::from(ack.outcome == ControlPlaneActionOutcome::Failed));
-                                    (serde_json::json!({"resume": ack.result, "message": ack.message}), code)
-                                })
-                                .map_err(|error| run_boundary_error_to_homeboy(error, "recover", None))
+                            self.execute_action_with_delegates(
+                                requested_id,
+                                &resume_request,
+                                retry,
+                                resume,
+                                promote,
+                            )
+                            .map_err(|error| run_boundary_error_to_homeboy(error, "recover", None))
+                            .and_then(|ack| crate::agent_task_action_result::resume_report(&ack))
                         }
                     } else {
                         crate::recovery_action::execute(&resolved, parameters)
@@ -2078,7 +2080,7 @@ impl OrchestrationService<LifecycleStoreLookup> {
                         .read_record(&resolved)
                         .map_err(map_lifecycle_error)?;
                     match recovered {
-                        Ok((report, code)) => (if code == 0 { ControlPlaneActionOutcome::Succeeded } else { ControlPlaneActionOutcome::Failed }, project_record(&current, None)?, ControlPlaneActionPayload { schema: homeboy_control_plane_contract::CONTROL_PLANE_RECOVER_RESULT_SCHEMA.into(), data: report }, None),
+                        Ok((report, code)) => (if code == 0 { ControlPlaneActionOutcome::Succeeded } else { ControlPlaneActionOutcome::Failed }, project_record(&current, None)?, ControlPlaneActionPayload { schema: homeboy_control_plane_contract::CONTROL_PLANE_RECOVER_RESULT_SCHEMA.into(), data: serde_json::json!({"report": report, "exit_code": code}) }, None),
                         Err(error) => (ControlPlaneActionOutcome::Failed, project_record(&current, None)?, ControlPlaneActionPayload::empty(), Some(error.attributed_message())),
                     }
                 }
@@ -4138,9 +4140,13 @@ pub fn project_record(
     // projected step other than `none` always comes with a non-empty report.
     resource.recovery = projected_cook_recovery(record);
     let mut eligibility = lifecycle_action_eligibility(record, plan);
-    let recover =
-        crate::agent_task_lifecycle::recover_entry(resource.recovery.as_ref(), &eligibility);
-    eligibility.actions.insert(0, recover);
+    // An empty report means no action is legal for this state; `recover`
+    // joins a report only when the state admits some action.
+    if !eligibility.actions.is_empty() {
+        let recover =
+            crate::agent_task_lifecycle::recover_entry(resource.recovery.as_ref(), &eligibility);
+        eligibility.actions.insert(0, recover);
+    }
     resource.action_eligibility = Some(eligibility);
     Ok(resource)
 }

@@ -493,8 +493,9 @@ fn compact_control_plane_status(value: Value) -> Value {
             action["availability"] == "available" && action["action"].as_str() == next_action_name
         })
     });
-    // Older servers may supply a recovery plan without the Recover action.
-    // Prefer canonical eligibility and retain that compatibility fallback.
+    // Cook recovery is a planner command, not a ControlPlaneAction variant.
+    // Keep the report's existing action vocabulary when showing recovery,
+    // rather than filtering it to an empty list by a nonexistent enum value.
     let recovery_selected = next_action_name == Some("recover")
         && value
             .pointer("/recovery/step")

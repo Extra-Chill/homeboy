@@ -740,16 +740,20 @@ const RECIPE_ONLY_STATUS: &str = "recipe_only_recovery_required";
 
 /// Whether `recover <id>` resumes `id` as a plain durable run instead of
 /// planning a Cook step: a lifecycle record exists and nothing ties it to a
-/// Cook (no recipe, no owning attempt recipe, no unmaterialized Cook
-/// admission). An unknown ID stays on the Cook path so it reports there.
+/// Cook (no recipe, no owning attempt recipe, no terminal unmaterialized Cook
+/// admission, no delegated Cook plan). An unknown ID stays on the Cook path so
+/// the planner reports it.
 pub fn recovers_as_run(id: &str) -> Result<bool> {
     if super::recipe_exists(id)? || super::load_recipe_for_attempt(id)?.is_some() {
         return Ok(false);
     }
     let store = agent_task_lifecycle::AgentTaskLifecycleStore::from_environment()?;
-    Ok(store
-        .read_record(id)
-        .is_ok_and(|record| !record.metadata["unmaterialized_cook_admission"].is_object()))
+    let Ok(record) = store.read_record(id) else {
+        return Ok(false);
+    };
+    let terminal_admission = record.state().is_terminal()
+        && record.metadata["unmaterialized_cook_admission"].is_object();
+    Ok(!terminal_admission && cook_recovery_delegation(id).is_none())
 }
 
 pub fn plan_cook_recovery(id: &str) -> Result<CookRecoveryPlan> {
