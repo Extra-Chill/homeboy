@@ -1,5 +1,7 @@
 //! Top-level test result aggregate contract types.
 
+use std::collections::BTreeMap;
+
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
@@ -121,6 +123,12 @@ pub struct TestRunWorkflowResult {
 ///
 /// This intentionally carries only planned identities and observed failures.
 /// Absence is never expanded into passed or skipped outcomes.
+///
+/// A runner may plan coarser units than it reports failures at (for example a
+/// test file planned as one shard unit, whose failures are reported per test
+/// method). `failed_test_ids` always holds the precise observed failure IDs;
+/// `failed_test_units` binds each failure ID that is not itself a planned
+/// identity to the planned identity that contains it.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "status", rename_all = "snake_case")]
 pub enum TestRuntimeEvidence {
@@ -131,6 +139,8 @@ pub enum TestRuntimeEvidence {
         execution_fingerprint: String,
         tests: Vec<TestRuntimeIdentity>,
         failed_test_ids: Vec<String>,
+        #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+        failed_test_units: BTreeMap<String, String>,
     },
     InvalidEvidence {
         reason: String,
