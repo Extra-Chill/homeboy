@@ -754,9 +754,9 @@ whether `runner exec` will use a connected daemon or needs an explicit fallback.
 `inventory` (`homeboy runner inventory <runner-id>`) inspects the connected daemon without occupying a
 job slot. It returns the same `homeboy/runner-pressure/v1` block as `runner doctor`,
 scanning only the Homeboy-owned roots. A two-second scan budget, shared across
-roots, bounds filesystem work; every walk is recorded under
-`<data>/runtime/root-sizes.json` and reused as an `estimated` value for ten
-minutes, and concurrent scans are coalesced. `complete: false` marks a partial
+roots, bounds filesystem work; the daemon keeps every walk in memory and
+reuses it as an `estimated` value for ten minutes, and concurrent scans are
+coalesced. Reporting never writes to disk. `complete: false` marks a partial
 lower-bound total, not an empty root. Symlinks are not
 followed. A blocked filesystem syscall can exceed the cooperative scan deadline;
 the controller request also has a three-second transport timeout.

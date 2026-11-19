@@ -4,8 +4,9 @@
 //! Root sizes come from a recorded estimate when one is fresh, and otherwise
 //! from a bounded, non-following, deadline-limited walk. A walk that runs out
 //! of time reports a lower bound marked `estimated`; only a walk that visited
-//! every entry is `measured`. Every walk is recorded so the next report on a
-//! busy runner reuses it instead of walking again.
+//! every entry is `measured`. Every walk is recorded in process memory, so the
+//! daemon serving repeated reports on a busy runner reuses it instead of
+//! walking again. Reporting never writes to disk: `status` stays read-only.
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -130,42 +131,44 @@ pub fn pressure_report(
 ) -> crate::error::Result<PressureReport> {
     let started = Instant::now();
     let data = crate::paths::homeboy_data()?;
-    let record_path = data.join("runtime").join("root-sizes.json");
+    static RECORD: std::sync::Mutex<SizeRecord> = std::sync::Mutex::new(SizeRecord {
+        roots: BTreeMap::new(),
+    });
     let roots = owned_roots(workspace_root)?;
     Ok(PressureReport {
         schema: PRESSURE_SCHEMA.to_string(),
         disk: volume_usage(&data),
         memory: memory_usage(),
         load: load_usage(),
-        roots: root_sizes(roots, budget, &record_path),
+        roots: root_sizes(roots, budget, &RECORD),
         deadline_ms: budget.as_millis() as u64,
         elapsed_ms: started.elapsed().as_millis() as u64,
     })
 }
 
-#[derive(Debug, Default, Serialize, Deserialize)]
+#[derive(Debug, Default)]
 struct SizeRecord {
     roots: BTreeMap<String, RootUsage>,
 }
 
 /// Serve fresh recorded estimates, walk the rest, and record what was walked.
-/// Concurrent requests never wait on each other's walk.
+/// Concurrent requests never wait on each other's walk: a request that finds
+/// the record held reports its roots unwalked.
 fn root_sizes(
     roots: Vec<(String, PathBuf)>,
     budget: Duration,
-    record_path: &Path,
+    record: &std::sync::Mutex<SizeRecord>,
 ) -> Vec<RootUsage> {
-    static WALK: std::sync::Mutex<()> = std::sync::Mutex::new(());
-    let mut record: SizeRecord = std::fs::read(record_path)
-        .ok()
-        .and_then(|bytes| serde_json::from_slice(&bytes).ok())
-        .unwrap_or_default();
-    let walk_lock = WALK.try_lock();
+    let Ok(mut record) = record.try_lock() else {
+        return roots
+            .into_iter()
+            .map(|(name, root)| unwalked(name, root))
+            .collect();
+    };
     let now = chrono::Utc::now();
     let deadline = Instant::now() + budget;
-    let mut walked = false;
     let total = roots.len();
-    let usages = roots
+    roots
         .into_iter()
         .enumerate()
         .map(|(index, (name, root))| {
@@ -181,9 +184,6 @@ fn root_sizes(
                     ..recorded.clone()
                 };
             }
-            if walk_lock.is_err() {
-                return unwalked(name, root);
-            }
             // Share the remaining budget across the roots still to walk, so
             // one huge root cannot starve the others.
             let remaining = deadline.saturating_duration_since(Instant::now());
@@ -191,14 +191,9 @@ fn root_sizes(
             let mut usage = walk(name.clone(), root, Instant::now() + slice);
             usage.recorded_at = Some(now.to_rfc3339());
             record.roots.insert(name, usage.clone());
-            walked = true;
             usage
         })
-        .collect();
-    if walked {
-        let _ = crate::engine::local_files::write_json_file(record_path, &record);
-    }
-    usages
+        .collect()
 }
 
 fn record_is_fresh(recorded: &RootUsage, now: chrono::DateTime<chrono::Utc>) -> bool {
@@ -352,7 +347,7 @@ mod tests {
     fn walk_does_not_follow_links_and_records_totals() {
         let root = tempfile::tempdir().unwrap();
         let outside = tempfile::tempdir().unwrap();
-        let record = root.path().join("record.json");
+        let record = std::sync::Mutex::new(SizeRecord::default());
         std::fs::write(outside.path().join("large"), vec![0; 8192]).unwrap();
         std::fs::create_dir(root.path().join("tree")).unwrap();
         std::os::unix::fs::symlink(outside.path(), root.path().join("tree/link")).unwrap();
