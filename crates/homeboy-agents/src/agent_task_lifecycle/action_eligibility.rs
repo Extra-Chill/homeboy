@@ -27,7 +27,7 @@ pub(crate) fn lifecycle_action_eligibility_with_roots(
         return ControlPlaneActionEligibilityReport {
             schema: CONTROL_PLANE_ACTION_ELIGIBILITY_SCHEMA.to_string(),
             run: RunId::new(&record.run_id).expect("validated durable run ID"),
-            actions: vec![recovery_action(record)],
+            actions: Vec::new(),
         };
     }
     let cancellation = if !state.allows(CookRunAction::Cancel) {
@@ -56,7 +56,6 @@ pub(crate) fn lifecycle_action_eligibility_with_roots(
         schema: CONTROL_PLANE_ACTION_ELIGIBILITY_SCHEMA.to_string(),
         run: RunId::new(&record.run_id).expect("durable run IDs are validated before persistence"),
         actions: vec![
-            recovery_action(record),
             action(
                 ControlPlaneAction::Cancel,
                 cancellation,
@@ -109,22 +108,32 @@ pub(crate) fn lifecycle_action_eligibility_with_roots(
     }
 }
 
-fn recovery_action(record: &AgentTaskRunRecord) -> ControlPlaneActionEligibility {
-    use crate::agent_task_service::{plan_cook_recovery, CookRecoveryStep};
-    let decision = if record.metadata.get("cook_id").is_none()
-        && crate::agent_task_service::recovers_as_run(&record.run_id).unwrap_or(false)
-    {
-        available("resume")
-    } else {
-        match plan_cook_recovery(&record.run_id) {
-            Ok(plan) => match plan.step {
-                CookRecoveryStep::Blocked { blocker, .. } => unavailable(blocker),
-                CookRecoveryStep::None { reason } => unavailable(reason),
-                CookRecoveryStep::Continue => available("continue"),
-                step => available(step.action_name().unwrap_or("recover")),
-            },
-            Err(error) => unavailable(error.attributed_message()),
-        }
+/// The `recover` entry for a single-run read, derived from the recovery step
+/// that read already projected (`ControlPlaneRun::recovery`) so the API and
+/// `recover` name the same step. A run without a Cook recovery projection
+/// recovers by resuming, so it mirrors the `resume` entry. Record writes never
+/// compute it: it reads the recovery planner, which is read-time only.
+pub(crate) fn recover_entry(
+    recovery: Option<&homeboy_control_plane_contract::ControlPlaneRecovery>,
+    report: &ControlPlaneActionEligibilityReport,
+) -> ControlPlaneActionEligibility {
+    let decision = match recovery {
+        Some(recovery) if recovery.step != "none" => available(recovery.step.clone()),
+        Some(recovery) => unavailable(format!(
+            "no recovery step is available; inspect with `{}`",
+            recovery.command
+        )),
+        None => match report
+            .actions
+            .iter()
+            .find(|entry| entry.action == ControlPlaneAction::Resume)
+        {
+            Some(resume) if resume.availability == ControlPlaneActionAvailability::Available => {
+                available("resume")
+            }
+            Some(resume) => unavailable(resume.reason.clone()),
+            None => unavailable("run has no recovery step"),
+        },
     };
     action(
         ControlPlaneAction::Recover,
@@ -435,7 +444,6 @@ mod tests {
                     .map(|entry| entry.action)
                     .collect::<Vec<_>>(),
                 vec![
-                    ControlPlaneAction::Recover,
                     ControlPlaneAction::Cancel,
                     ControlPlaneAction::Resume,
                     ControlPlaneAction::PlacementUpdate,

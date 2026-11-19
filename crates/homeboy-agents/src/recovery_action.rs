@@ -22,15 +22,6 @@ pub fn register_dispatcher(dispatcher: Dispatcher) {
     let _ = DISPATCHER.set(dispatcher);
 }
 
-pub fn recovers_as_run(id: &str) -> Result<bool> {
-    Ok(!service::recipe_exists(id)?
-        && service::load_recipe_for_attempt(id)?.is_none()
-        && service::cook_recovery_delegation(id).is_none()
-        && !crate::agent_task_lifecycle::AgentTaskLifecycleStore::from_environment()?
-            .read_record(id)
-            .is_ok_and(|record| record.metadata["unmaterialized_cook_admission"].is_object()))
-}
-
 pub struct ControlPlaneRecoveryPerformer;
 impl CookRecoveryPerformer for ControlPlaneRecoveryPerformer {
     fn admit_step(

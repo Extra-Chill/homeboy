@@ -1812,7 +1812,7 @@ impl OrchestrationService<LifecycleStoreLookup> {
                 serde_json::from_value(request.parameters.data.clone()).map_err(|error| {
                     ControlPlaneError::invalid_argument(format!("recover parameters: {error}"))
                 })?;
-            let (data, code) = if crate::recovery_action::recovers_as_run(&resolved)
+            let (data, code) = if crate::agent_task_service::recovers_as_run(&resolved)
                 .map_err(map_lifecycle_error)?
             {
                 (
@@ -2037,7 +2037,7 @@ impl OrchestrationService<LifecycleStoreLookup> {
                             },
                         )?;
                     let recovered = if parameters.candidate_ref.is_none()
-                        && crate::recovery_action::recovers_as_run(&resolved)
+                        && crate::agent_task_service::recovers_as_run(&resolved)
                             .map_err(map_lifecycle_error)?
                     {
                         if parameters.preflight {
@@ -4137,7 +4137,11 @@ pub fn project_record(
     // legal, and the report is empty exactly when no action is legal. So a
     // projected step other than `none` always comes with a non-empty report.
     resource.recovery = projected_cook_recovery(record);
-    resource.action_eligibility = Some(lifecycle_action_eligibility(record, plan));
+    let mut eligibility = lifecycle_action_eligibility(record, plan);
+    let recover =
+        crate::agent_task_lifecycle::recover_entry(resource.recovery.as_ref(), &eligibility);
+    eligibility.actions.insert(0, recover);
+    resource.action_eligibility = Some(eligibility);
     Ok(resource)
 }
 

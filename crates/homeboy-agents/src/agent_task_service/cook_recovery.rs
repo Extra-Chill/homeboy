@@ -738,14 +738,18 @@ fn finish_without_step(mut report: CookRecoveryReport) -> (CookRecoveryReport, i
 /// was never written; the same name `agent-task status` reports.
 const RECIPE_ONLY_STATUS: &str = "recipe_only_recovery_required";
 
-/// Resolve a Cook ID, attempt ID, batch-child run ID or manual-finalization
-/// run ID to the attempt recovery operates on, then decide its recovery step.
-///
-/// A Cook ID resolves through the same latest-attempt selection continuation
-/// uses, so every step (including replacement gates and publication) acts on
-/// the attempt `agent-task status` reports.
+/// Whether `recover <id>` resumes `id` as a plain durable run instead of
+/// planning a Cook step: a lifecycle record exists and nothing ties it to a
+/// Cook (no recipe, no owning attempt recipe, no unmaterialized Cook
+/// admission). An unknown ID stays on the Cook path so it reports there.
 pub fn recovers_as_run(id: &str) -> Result<bool> {
-    crate::recovery_action::recovers_as_run(id)
+    if super::recipe_exists(id)? || super::load_recipe_for_attempt(id)?.is_some() {
+        return Ok(false);
+    }
+    let store = agent_task_lifecycle::AgentTaskLifecycleStore::from_environment()?;
+    Ok(store
+        .read_record(id)
+        .is_ok_and(|record| !record.metadata["unmaterialized_cook_admission"].is_object()))
 }
 
 pub fn plan_cook_recovery(id: &str) -> Result<CookRecoveryPlan> {

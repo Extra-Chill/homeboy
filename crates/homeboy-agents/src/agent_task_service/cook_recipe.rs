@@ -3864,7 +3864,6 @@ mod tests {
                         entry.availability,
                         ControlPlaneActionAvailability::Unavailable
                     );
-                    assert!(entry.reason.contains("fenced"), "{}", entry.reason);
                 }
                 let before = store.read_record(run_id).unwrap();
                 let ack = super::super::with_recovery_step_submit_for_test(
