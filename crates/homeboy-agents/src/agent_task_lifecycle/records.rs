@@ -152,9 +152,6 @@ pub enum CookTerminalOutcome {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(remote = "Self")]
 pub struct AgentTaskRunRecord {
-    /// Internal persisted Cook state. Only the transition module can authorize writes.
-    #[serde(default, skip_serializing)]
-    cook_run_state: Option<super::cook_run_state::CookRunState>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub terminal_outcome: Option<CookTerminalOutcome>,
     #[serde(default)]
@@ -240,18 +237,6 @@ impl PartialEq for RecordReadBase {
 }
 
 impl AgentTaskRunRecord {
-    pub(crate) fn persisted_cook_state(&self) -> Option<&super::cook_run_state::CookRunState> {
-        self.cook_run_state.as_ref()
-    }
-
-    pub(crate) fn write_cook_state(
-        &mut self,
-        state: super::cook_run_state::CookRunState,
-        _: super::cook_run_state::CookStateWriteAuthority,
-    ) {
-        self.cook_run_state = Some(state);
-    }
-
     /// This record, carrying itself as the base later commits rebase from.
     pub(crate) fn with_read_base(mut self) -> Self {
         let mut base = self.clone();
@@ -633,7 +618,6 @@ impl AgentTaskRunRecord {
         submitted_at: impl Into<String>,
     ) -> Self {
         Self {
-            cook_run_state: None,
             terminal_outcome: None,
             recoverable: false,
             schema: schemas::RUN.to_string(),

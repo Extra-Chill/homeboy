@@ -2349,17 +2349,6 @@ pub(super) fn write_record_guarded(
     // row is one past the stored one. SQL repeats the bump atomically.
     record.revision = stored_revision + 1;
     record.refresh_terminal_outcome();
-    let stored_record = existing_metadata
-        .get("agent_task_run")
-        .cloned()
-        .map(serde_json::from_value::<AgentTaskRunRecord>)
-        .transpose()
-        .map_err(|error| Error::internal_json(error.to_string(), None))?;
-    // Unfenced test fixtures seed a state, rather than taking an edge.
-    super::cook_run_state::transition_record(
-        &mut record,
-        stored_record.as_ref().filter(|_| guard.is_some()),
-    )?;
     if let Some(owner) =
         existing_metadata.pointer("/agent_task_run/metadata/client_context/caller_context")
     {
@@ -3090,13 +3079,12 @@ fn observation_metadata(
     record: &AgentTaskRunRecord,
     aggregate: Option<AgentTaskAggregate>,
 ) -> Result<Value> {
-    let mut record_json = serde_json::to_value(record).map_err(|error| {
+    let record_json = serde_json::to_value(record).map_err(|error| {
         Error::internal_json(
             error.to_string(),
             Some(format!("serialize agent-task run {}", record.run_id)),
         )
     })?;
-    super::cook_run_state::persist_state(record, &mut record_json)?;
     Ok(json!({
         "schema": "homeboy/agent-task-observation-record/v1",
         "agent_task_run": record_json,
