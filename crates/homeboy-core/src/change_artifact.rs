@@ -2,11 +2,9 @@
 //!
 //! This module owns the serializable `homeboy/change-artifact/v1` and
 //! `homeboy/change-apply-result/v1` schemas used at runner/Lab apply
-//! boundaries. `core::execution` owns the higher-level lifecycle envelopes for
-//! execute/artifact/approve/apply/publish flows. Use [`ApplyChangeArtifact`] and
-//! [`ApplyChangeResult`] when the payload is consumed by an apply adapter; use
-//! `core::execution::ChangeArtifact` when describing a lifecycle artifact in an
-//! execution run.
+//! boundaries. [`ChangeArtifact`] is the canonical change artifact payload;
+//! [`ApplyChangeArtifact`] is its apply-adapter alias. Use [`ApplyChangeResult`]
+//! to report the outcome of applying an artifact.
 
 use serde::{Deserialize, Serialize};
 
