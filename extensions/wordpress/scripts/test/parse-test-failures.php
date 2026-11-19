@@ -10,7 +10,8 @@
  * Output fields per failure preserve the legacy Homeboy analysis keys and add
  * normalized sidecar keys consumed by cross-runner tooling:
  * - test_name/test_id: fully qualified test method name
- * - test_file: test file path (from stack trace)
+ * - test_file: component-relative test file (the inventory unit; see
+ *   resolve_component_test_file())
  * - error_type/failure_type: exception/error class name
  * - message: error message
  * - source_file/source_line: deepest non-test frame source location
@@ -49,7 +50,7 @@ $lines = explode( "\n", $raw );
 $wp_codebox_payload = json_decode( $raw, true );
 if ( is_array( $wp_codebox_payload ) && ( $wp_codebox_payload['schema'] ?? '' ) === 'wp-codebox/test-results/v1' ) {
 	echo json_encode(
-		parse_wp_codebox_test_results( $wp_codebox_payload, $output_file, $component_path ),
+		normalize_failure_test_files( parse_wp_codebox_test_results( $wp_codebox_payload, $output_file, $component_path ), $component_path ),
 		JSON_PRETTY_PRINT | JSON_UNESCAPED_SLASHES
 	) . "\n";
 	exit( 0 );
@@ -57,7 +58,7 @@ if ( is_array( $wp_codebox_payload ) && ( $wp_codebox_payload['schema'] ?? '' ) 
 
 if ( preg_match( '/^HOST_SMOKE_FAIL:/m', $raw ) ) {
 	echo json_encode(
-		parse_host_smoke_test_results( $raw ),
+		normalize_failure_test_files( parse_host_smoke_test_results( $raw ), $component_path ),
 		JSON_PRETTY_PRINT | JSON_UNESCAPED_SLASHES
 	) . "\n";
 	exit( 0 );
@@ -354,7 +355,7 @@ $output = [
 	'metadata' => phpunit_failure_metadata( $failures, $raw ),
 ];
 
-echo json_encode( $output, JSON_PRETTY_PRINT | JSON_UNESCAPED_SLASHES ) . "\n";
+echo json_encode( normalize_failure_test_files( $output, $component_path ), JSON_PRETTY_PRINT | JSON_UNESCAPED_SLASHES ) . "\n";
 
 /**
  * Normalize WP Codebox test artifacts into Homeboy's WordPress failure sidecar.
@@ -701,4 +702,119 @@ function make_wp_codebox_raw_log_excerpt( array $payload, string $artifact_root 
 	}
 
 	return make_output_excerpt( explode( "\n", implode( "\n\n", $chunks ) ) );
+}
+
+/**
+ * Bind every failure to the component-relative test file that contains it.
+ *
+ * The WordPress test inventory plans component-relative test files
+ * (`tests/unit/FooTest.php`), while PHPUnit reports `Class::method`. Homeboy
+ * binds each method failure to its planned file through `test_file`, so that
+ * field must name the same component file the inventory lists
+ * (Extra-Chill/homeboy#18425).
+ *
+ * @param array  $output         Parser output with a `failures` list.
+ * @param string $component_path Host component root (with trailing slash).
+ * @return array
+ */
+function normalize_failure_test_files( array $output, string $component_path ): array {
+	if ( empty( $output['failures'] ) || ! is_array( $output['failures'] ) ) {
+		return $output;
+	}
+	$class_files = null;
+	foreach ( $output['failures'] as $index => $failure ) {
+		if ( ! is_array( $failure ) ) {
+			continue;
+		}
+		$output['failures'][ $index ]['test_file'] = resolve_component_test_file(
+			(string) ( $failure['test_file'] ?? '' ),
+			(string) ( $failure['test_name'] ?? '' ),
+			$component_path,
+			$class_files
+		);
+	}
+	return $output;
+}
+
+/**
+ * Resolve a reported test file to the component-relative file it names.
+ *
+ * Runtimes such as WP Codebox execute the component from a mount
+ * (`/wordpress/wp-content/plugins/<slug>/tests/...`), so trace paths carry the
+ * sandbox prefix rather than the host component path: keep the longest path
+ * suffix that exists in the component. When the trace held no test frame (an
+ * assertion raised inside the WordPress test library) the name was guessed
+ * from the class; resolve it from the file that declares the test class.
+ * Unresolvable paths are returned unchanged.
+ *
+ * @param string     $test_file      Reported test file.
+ * @param string     $test_name      `Class::method` test name.
+ * @param string     $component_path Host component root (with trailing slash).
+ * @param array|null $class_files    Lazily built class => [files] index.
+ */
+function resolve_component_test_file( string $test_file, string $test_name, string $component_path, ?array &$class_files ): string {
+	$root = rtrim( $component_path, '/' );
+	if ( $root === '' || ! is_dir( $root ) ) {
+		return $test_file;
+	}
+	$file = ltrim( str_replace( '\\', '/', $test_file ), '/' );
+	if ( $file !== '' && strpos( $test_file, $root . '/' ) === 0 ) {
+		$file = substr( $test_file, strlen( $root ) + 1 );
+	}
+	if ( $file !== '' && is_file( $root . '/' . $file ) ) {
+		return $file;
+	}
+	if ( $file !== '' && strpos( $test_file, '/' ) === 0 ) {
+		$segments = explode( '/', $file );
+		for ( $start = 1; $start < count( $segments ); $start++ ) {
+			$candidate = implode( '/', array_slice( $segments, $start ) );
+			if ( is_file( $root . '/' . $candidate ) ) {
+				return $candidate;
+			}
+		}
+	}
+
+	if ( ! preg_match( '/^(.+?)::/', $test_name, $match ) ) {
+		return $test_file;
+	}
+	$class_parts = explode( '\\', ltrim( $match[1], '\\' ) );
+	$short_class = strtolower( (string) end( $class_parts ) );
+	if ( $class_files === null ) {
+		$class_files = component_test_class_files( $root );
+	}
+	$declaring = $class_files[ $short_class ] ?? [];
+	return count( $declaring ) === 1 ? $declaring[0] : $test_file;
+}
+
+/**
+ * Index the test classes declared under the component's tests directory.
+ *
+ * @return array<string, string[]> Lower-cased short class name => relative files.
+ */
+function component_test_class_files( string $root ): array {
+	$index = [];
+	$tests = $root . '/tests';
+	if ( ! is_dir( $tests ) ) {
+		return $index;
+	}
+	$iterator = new RecursiveIteratorIterator(
+		new RecursiveDirectoryIterator( $tests, FilesystemIterator::SKIP_DOTS )
+	);
+	foreach ( $iterator as $entry ) {
+		if ( ! $entry->isFile() || strtolower( $entry->getExtension() ) !== 'php' ) {
+			continue;
+		}
+		$source = file_get_contents( $entry->getPathname() );
+		if ( $source === false || ! preg_match_all( '/^\s*(?:(?:abstract|final|readonly)\s+)*class\s+([A-Za-z_][A-Za-z0-9_]*)/mi', $source, $matches ) ) {
+			continue;
+		}
+		$relative = substr( $entry->getPathname(), strlen( $root ) + 1 );
+		foreach ( $matches[1] as $class ) {
+			$index[ strtolower( $class ) ][] = $relative;
+		}
+	}
+	foreach ( $index as $class => $files ) {
+		$index[ $class ] = array_values( array_unique( $files ) );
+	}
+	return $index;
 }

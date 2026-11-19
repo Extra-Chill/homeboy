@@ -109,6 +109,7 @@
       "bash scripts/lint/phpcs-config-selection-smoke.sh",
       "bash scripts/lint/phpcs-warnings-gate-smoke.sh",
       "bash scripts/test/parse-test-failures-sidecar-smoke.sh",
+      "bash scripts/test/parse-test-failures-component-file-smoke.sh",
       "bash scripts/test/parse-wp-codebox-artifacts-smoke.sh",
       "bash scripts/test/test-inventory-smoke.sh",
       "bash scripts/test/test-inventory-standalone-smoke.sh",
