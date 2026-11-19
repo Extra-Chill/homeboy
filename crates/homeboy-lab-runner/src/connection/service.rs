@@ -1102,9 +1102,13 @@ mod tests {
     #[test]
     fn install_script_writes_the_rendered_unit_verbatim() {
         let script = install_script("/opt/homeboy", "install-token", &[]);
-        let start = script.find("<<'HOMEBOY_UNIT'\n").unwrap() + "<<'HOMEBOY_UNIT'\n".len();
+        let marker = "<<'HOMEBOY_UNIT'\n";
+        let job_tree = script.find(marker).unwrap() + marker.len();
+        let start = script.rfind(marker).unwrap() + marker.len();
         let end = script.find("HOMEBOY_UNIT\nlogin_path=").unwrap();
+        assert!(script[job_tree..].starts_with(&render_job_tree_unit()));
         assert_eq!(&script[start..end], render_service_unit("install-token"));
+        assert!(script.contains("systemctl --user enable --now homeboy-runner-jobs.service"));
         assert!(script.contains(&format!(
             "systemctl --user enable --now {}",
             service_unit_name()
