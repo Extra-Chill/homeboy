@@ -4325,37 +4325,10 @@ pub fn preflight_cook_continuation_admission_for_observation(
 pub fn live_owner_continuation_denial(
     record: &agent_task_lifecycle::AgentTaskRunRecord,
 ) -> Option<Error> {
-    let child_provider_owner_pid = record
-        .metadata
-        .get("provider_executions")
-        .and_then(Value::as_array)
-        .into_iter()
-        .flatten()
-        .filter(|execution| execution["state"] == "running")
-        .find_map(|execution| {
-            execution["owner_pid"]
-                .as_u64()
-                .and_then(|pid| u32::try_from(pid).ok())
-                .filter(|pid| {
-                    homeboy_core::process::process_identity_state(
-                        *pid,
-                        execution["owner_linux_starttime_ticks"].as_u64(),
-                    ) == homeboy_core::process::ProcessIdentityState::Live
-                })
-        });
-    let child_gate_owner_pid = (record.metadata["promotion_progress"]["active"] == true)
-        .then(|| {
-            record.metadata["promotion_progress"]["owner_pid"]
-                .as_u64()
-                .and_then(|pid| u32::try_from(pid).ok())
-        })
-        .flatten()
-        .filter(|pid| homeboy_core::process::pid_is_running(*pid));
-    let child_owner_pid = child_provider_owner_pid.or(child_gate_owner_pid);
-    let generic_owner_is_running = record.owner_process_is_running();
+    let child_owner_pid = agent_task_lifecycle::cook_run_state::continuation_child_owner(record);
     if record.state().is_terminal() {
         child_owner_pid?;
-    } else if !generic_owner_is_running && child_owner_pid.is_none() {
+    } else if !record.owner_process_is_running() && child_owner_pid.is_none() {
         return None;
     }
     let phase = record

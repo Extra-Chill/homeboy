@@ -2239,9 +2239,7 @@ pub(crate) fn abandoned_cook_continuation(
 /// evidence: gates and recovery legitimately hold a claim for longer than any
 /// fixed window, and taking over a live claim would admit two drivers.
 fn continuation_owner_expired(value: &Value) -> bool {
-    value["owner_pid"].as_u64().is_some_and(|pid| {
-        u32::try_from(pid).map_or(true, |pid| !homeboy_core::process::pid_is_running(pid))
-    })
+    agent_task_lifecycle::cook_run_state::continuation_owner_expired(value)
 }
 
 fn lifecycle_continuation(record: &agent_task_lifecycle::AgentTaskRunRecord) -> Option<&Value> {

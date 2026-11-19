@@ -40,7 +40,7 @@ mod control_plane_identities;
 mod conversion;
 mod cook_delivery_writer;
 mod cook_effects;
-mod cook_run_state;
+pub(crate) mod cook_run_state;
 mod cook_workspace_restore;
 mod durable_progress;
 #[cfg(any(test, feature = "test-support"))]

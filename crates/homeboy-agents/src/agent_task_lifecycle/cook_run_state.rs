@@ -1,22 +1,8 @@
 //! The one Cook run state and the actions it makes legal (#18436 slices 1-2).
 //!
-//! A Cook run's state used to be re-derived by every verb from raw record
-//! fields: `status` read the lifecycle state, `recover` read a progress
-//! label, `regate` read the same label again, and action eligibility kept its
-//! own per-action state tests. When the label and the state disagreed (a
-//! terminal `candidate_recoverable` record whose last Cook exit reported
-//! `in_flight`), `status` named `recover` and `recover` refused the run as
-//! still in flight (#17976, #17384, #17489, #17295).
-//!
-//! [`CookRunState::of`] is now the single classifier over the authoritative
-//! lifecycle record, and [`legal_actions`] is the single eligibility table.
-//! Status, recover, regate and the action-eligibility report read both instead
-//! of classifying on their own. [`CookRunPhase::transition`] is the phase
-//! transition table the record's writers are held to.
-//!
-//! The state is derived on read, not persisted: it is a pure function of the
-//! record's execution state, its continuation claim and its fence, so it can
-//! never drift from the record it describes.
+//! Owns execution-owner observations and their shared liveness decision.
+//! Discovery, stale annotation and action eligibility project this decision;
+//! provider process candidates never substitute for an execution owner.
 
 use std::collections::BTreeSet;
 
@@ -26,6 +12,274 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 use super::AgentTaskRunRecord;
+use crate::agent_task_service::AgentTaskLiveness;
+use homeboy_core::api_jobs::{JobStatus, JobStore};
+use uuid::Uuid;
+
+pub(crate) fn continuation_child_owner(record: &AgentTaskRunRecord) -> Option<u32> {
+    let child_provider_owner_pid = record
+        .metadata
+        .get("provider_executions")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter(|execution| execution["state"] == "running")
+        .find_map(|execution| {
+            execution["owner_pid"]
+                .as_u64()
+                .and_then(|pid| u32::try_from(pid).ok())
+                .filter(|pid| {
+                    homeboy_core::process::process_identity_state(
+                        *pid,
+                        execution["owner_linux_starttime_ticks"].as_u64(),
+                    ) == homeboy_core::process::ProcessIdentityState::Live
+                })
+        });
+    let child_gate_owner_pid = (record.metadata["promotion_progress"]["active"] == true)
+        .then(|| {
+            record.metadata["promotion_progress"]["owner_pid"]
+                .as_u64()
+                .and_then(|pid| u32::try_from(pid).ok())
+        })
+        .flatten()
+        .filter(|pid| homeboy_core::process::pid_is_running(*pid));
+    child_provider_owner_pid.or(child_gate_owner_pid)
+}
+
+pub(crate) fn continuation_owner_expired(value: &Value) -> bool {
+    value["owner_pid"].as_u64().is_some_and(|pid| {
+        u32::try_from(pid).map_or(true, |pid| !homeboy_core::process::pid_is_running(pid))
+    })
+}
+
+pub(crate) fn has_live_execution_step_owner(record: &AgentTaskRunRecord) -> bool {
+    let scheduling = &record.metadata["execution_scheduling"];
+    if !scheduling["current_intent_id"].is_string()
+        || record.lifecycle.execution.state == RunExecutionState::Cancelled
+    {
+        return false;
+    }
+    if record.lifecycle.execution.state == RunExecutionState::Queued {
+        return true;
+    }
+    let owner = &record.metadata["execution_step_owner"];
+    if owner["intent_id"] != scheduling["current_intent_id"] || !owner["job_id"].is_string() {
+        return false;
+    }
+    let Some(pid) = owner["pid"]
+        .as_u64()
+        .and_then(|pid| u32::try_from(pid).ok())
+    else {
+        return true;
+    };
+    let Ok(identity) = serde_json::from_value::<homeboy_core::process::ProcessStartIdentity>(
+        owner["process_start_identity"].clone(),
+    ) else {
+        return true;
+    };
+    matches!(
+        homeboy_core::process::process_identity_state_with_start_identity(
+            pid,
+            None,
+            Some(&identity)
+        ),
+        homeboy_core::process::ProcessIdentityState::Live
+            | homeboy_core::process::ProcessIdentityState::Unverifiable
+    )
+}
+
+pub(crate) fn local_owner_liveness(record: &AgentTaskRunRecord) -> super::LocalOwnerLiveness {
+    use super::LocalOwnerLiveness;
+    let Some(pid) = record
+        .metadata
+        .get("runner_pid")
+        .and_then(Value::as_u64)
+        .and_then(|pid| u32::try_from(pid).ok())
+    else {
+        return LocalOwnerLiveness::Absent;
+    };
+    let start_identity = record
+        .metadata
+        .get("runner_process_start_identity")
+        .cloned()
+        .and_then(|value| serde_json::from_value(value).ok());
+    match homeboy_core::process::process_identity_state_with_start_identity(
+        pid,
+        None,
+        start_identity.as_ref(),
+    ) {
+        homeboy_core::process::ProcessIdentityState::Live => LocalOwnerLiveness::Live,
+        homeboy_core::process::ProcessIdentityState::Dead
+        | homeboy_core::process::ProcessIdentityState::IdentityMismatch => LocalOwnerLiveness::Dead,
+        homeboy_core::process::ProcessIdentityState::Unverifiable => {
+            LocalOwnerLiveness::Unverifiable
+        }
+    }
+}
+
+pub(crate) fn should_annotate_stale(record: &AgentTaskRunRecord) -> bool {
+    if record.runner_job_id().is_some() && record.has_fresh_update() {
+        return false;
+    }
+    classify_liveness(record, chrono::Utc::now(), &BTreeSet::new()).is_reconcilable()
+}
+
+pub(crate) fn classify_liveness(
+    record: &AgentTaskRunRecord,
+    now: chrono::DateTime<chrono::Utc>,
+    live: &BTreeSet<Uuid>,
+) -> AgentTaskLiveness {
+    if record.owner_process_is_running()
+        || crate::agent_task_service::live_cook_continuation(record).is_some()
+        || record.has_live_execution_step_owner()
+        || live_local_cook_retry_supervisor(record, live)
+        || live_local_cook_retry_child(record)
+    {
+        return AgentTaskLiveness::Active;
+    }
+    if crate::agent_task_lifecycle::detached_cook_admission_is_live(record, now) {
+        return AgentTaskLiveness::Active;
+    }
+    if record.lab_handoff_validation_error().is_some() {
+        return AgentTaskLiveness::Unreconciled;
+    }
+    if durable_queued_retry_is_live(record) {
+        return AgentTaskLiveness::Active;
+    }
+    if record.has_fresh_controller_pre_provider_heartbeat() {
+        return AgentTaskLiveness::Active;
+    }
+    if crate::agent_task_lifecycle::has_expired_pending_runner_submission_intent(record, now) {
+        return AgentTaskLiveness::Unreconciled;
+    }
+    if record.state() != homeboy_lifecycle_contract::RunExecutionState::Running {
+        return if record.has_planned_runner_execution() && record.has_fresh_update() {
+            AgentTaskLiveness::Active
+        } else {
+            AgentTaskLiveness::Stale
+        };
+    }
+
+    if record.has_planned_runner_execution() && record.has_fresh_update() {
+        return AgentTaskLiveness::Active;
+    }
+
+    match record.local_owner_liveness() {
+        crate::agent_task_lifecycle::LocalOwnerLiveness::Live => return AgentTaskLiveness::Active,
+        crate::agent_task_lifecycle::LocalOwnerLiveness::Unverifiable => {
+            return AgentTaskLiveness::Unreconciled;
+        }
+        crate::agent_task_lifecycle::LocalOwnerLiveness::Dead => return AgentTaskLiveness::Stale,
+        crate::agent_task_lifecycle::LocalOwnerLiveness::Absent => {}
+    }
+
+    if record.is_stale_running() {
+        return AgentTaskLiveness::Stale;
+    }
+
+    let stale_by_age = record
+        .updated_at
+        .as_deref()
+        .and_then(|timestamp| chrono::DateTime::parse_from_rfc3339(timestamp).ok())
+        .is_some_and(|updated| {
+            now.signed_duration_since(updated).num_minutes()
+                >= homeboy_core::observation::RUNNING_HEARTBEAT_STALE_MINUTES
+        });
+
+    let has_owner_signal =
+        record.metadata.get("runner_pid").is_some() || record.runner_job_id().is_some();
+
+    match (stale_by_age, has_owner_signal) {
+        (true, true) => AgentTaskLiveness::Suspect,
+        (true, false) => AgentTaskLiveness::Stale,
+        (false, true) => AgentTaskLiveness::Active,
+        (false, false) => AgentTaskLiveness::Stale,
+    }
+}
+
+fn durable_queued_retry_is_live(record: &AgentTaskRunRecord) -> bool {
+    record.state() == homeboy_lifecycle_contract::RunExecutionState::Queued
+        && record.metadata["retry_of"]
+            .as_str()
+            .is_some_and(|run_id| !run_id.is_empty())
+}
+
+pub(crate) fn live_supervisor_jobs() -> BTreeSet<Uuid> {
+    live_supervisor_jobs_at(
+        homeboy_core::daemon::read_status(),
+        homeboy_core::paths::observation_db(),
+    )
+}
+
+pub(crate) fn live_supervisor_jobs_at(
+    status: homeboy_core::error::Result<homeboy_core::daemon::DaemonStatus>,
+    path: homeboy_core::error::Result<std::path::PathBuf>,
+) -> BTreeSet<Uuid> {
+    let lease = status
+        .ok()
+        .filter(|daemon| daemon.reachable && daemon.fresh)
+        .and_then(|daemon| daemon.state.map(|state| state.lease_id));
+    let store = path
+        .ok()
+        .and_then(|path| JobStore::open_without_reconciliation(path).ok());
+    let operation = ["controller.", homeboy_core::daemon::step_job::STEP_JOB_TYPE].concat();
+    lease
+        .zip(store)
+        .map_or_else(BTreeSet::new, |(lease, store)| {
+            store
+                .list()
+                .into_iter()
+                .filter(|job| {
+                    job.operation == operation
+                        && job.daemon_lease_id.as_deref() == Some(lease.as_str())
+                        && matches!(job.status, JobStatus::Queued | JobStatus::Running)
+                })
+                .map(|job| job.id)
+                .collect()
+        })
+}
+
+fn live_local_cook_retry_supervisor(record: &AgentTaskRunRecord, live: &BTreeSet<Uuid>) -> bool {
+    let supervisor = &record.metadata["local_cook_supervisor"];
+    if supervisor["job_type"].as_str() != Some(homeboy_core::daemon::step_job::STEP_JOB_TYPE) {
+        return false;
+    }
+    let Some(job_id) = supervisor["job_id"].as_str() else {
+        return false;
+    };
+    let Ok(job_id) = Uuid::parse_str(job_id) else {
+        return false;
+    };
+    live.contains(&job_id)
+}
+
+fn live_local_cook_retry_child(record: &AgentTaskRunRecord) -> bool {
+    let supervisor = &record.metadata["local_cook_supervisor"];
+    if supervisor["state"].as_str() != Some("supervising")
+        || supervisor["pinned_run_id"].as_str() != Some(record.run_id.as_str())
+    {
+        return false;
+    }
+    let Some(pid) = supervisor["child_pid"]
+        .as_u64()
+        .and_then(|pid| u32::try_from(pid).ok())
+    else {
+        return false;
+    };
+    let Ok(start_identity) = serde_json::from_value::<homeboy_core::process::ProcessStartIdentity>(
+        supervisor["child_start_identity"].clone(),
+    ) else {
+        return false;
+    };
+    matches!(
+        homeboy_core::process::process_identity_state_with_start_identity(
+            pid,
+            None,
+            Some(&start_identity),
+        ),
+        homeboy_core::process::ProcessIdentityState::Live
+    )
+}
 
 /// Where one Cook run is in its lifecycle.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
@@ -220,6 +474,8 @@ impl CookRunAction {
 /// The one classification of a Cook run, read by every surface.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct CookRunState {
+    #[serde(skip)]
+    pub(crate) liveness: AgentTaskLiveness,
     pub phase: CookRunPhase,
     /// The record's execution ended. A [`CookRunPhase::Continuing`] run is
     /// terminal but still in flight: its continuation owner carries it.
@@ -243,6 +499,7 @@ impl CookRunState {
     /// Classify `record`. This is the only place a Cook run's phase,
     /// terminality and recoverability are decided.
     pub fn of(record: &AgentTaskRunRecord) -> Self {
+        let liveness = classify_liveness(record, chrono::Utc::now(), &BTreeSet::new());
         let execution = record.state();
         let phase = if execution.is_terminal()
             && crate::agent_task_service::live_cook_continuation(record).is_some()
@@ -260,6 +517,7 @@ impl CookRunState {
             _ => terminal_status_label(record, phase),
         };
         Self {
+            liveness,
             phase,
             terminal: execution.is_terminal(),
             retryable: matches!(
@@ -330,7 +588,7 @@ pub fn legal_actions(state: &CookRunState) -> BTreeSet<CookRunAction> {
     if !state.terminal || state.live_owner {
         actions.insert(A::Cancel);
     }
-    if state.fenced {
+    if state.fenced || state.live_owner || (!state.terminal && !state.liveness.is_reconcilable()) {
         return actions;
     }
     match state.phase {
@@ -368,6 +626,7 @@ mod tests {
 
     fn state(phase: CookRunPhase, fenced: bool, live_owner: bool) -> CookRunState {
         CookRunState {
+            liveness: AgentTaskLiveness::Stale,
             phase,
             terminal: !matches!(phase, P::Queued | P::Running),
             retryable: false,
@@ -376,6 +635,48 @@ mod tests {
             live_owner,
             status: phase.as_str().to_string(),
         }
+    }
+
+    #[test]
+    fn provider_never_launched_and_controller_restart_are_reconcilable() {
+        for metadata in [
+            serde_json::json!({}),
+            serde_json::json!({"runner_pid": 99_999_999}),
+        ] {
+            let run = record(RunExecutionState::Running, metadata);
+            let state = CookRunState::of(&run);
+            assert_eq!(state.liveness, AgentTaskLiveness::Stale);
+            assert!(state.allows(A::Cancel));
+            assert!(state.allows(A::Recover));
+            assert!(state.allows(A::Continue));
+        }
+    }
+
+    #[test]
+    fn live_owner_outranks_expired_heartbeat_and_stale_projection() {
+        let run = record(
+            RunExecutionState::Running,
+            serde_json::json!({
+                "runner_pid": std::process::id(), "stale_running": true,
+            }),
+        );
+        let state = CookRunState::of(&run);
+        assert_eq!(state.liveness, AgentTaskLiveness::Active);
+        assert!(state.allows(A::Cancel));
+        assert!(!state.allows(A::Recover));
+        assert!(!state.allows(A::Continue));
+    }
+
+    #[test]
+    fn discovery_and_record_annotation_delegate_liveness() {
+        let discovery = include_str!("../agent_task_service/discovery.rs")
+            .split("#[cfg(test)]")
+            .next()
+            .unwrap();
+        assert!(!discovery.contains("fn classify_liveness("));
+        assert!(!discovery.contains("process_identity_state_with_start_identity("));
+        let records = include_str!("records.rs");
+        assert!(!records.contains("process_identity_state_with_start_identity(\n            pid,"));
     }
 
     /// The exhaustive eligibility table: every phase, with and without a fence
@@ -388,6 +689,7 @@ mod tests {
                 for live_owner in [false, true] {
                     let cancel = matches!(phase, P::Queued | P::Running) || live_owner;
                     let mut expected = match (fenced, phase) {
+                        (_, _) if fenced || live_owner => all(&[]),
                         (true, _) | (false, P::Queued | P::Continuing) => all(&[]),
                         (false, P::Running) => all(&[A::Recover, A::Continue]),
                         (false, P::CandidateRecoverable | P::Succeeded) => {

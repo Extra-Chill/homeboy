@@ -1,4 +1,4 @@
-use super::{AgentTaskRunRecord, CookRunAction, CookRunPhase, CookRunState, LocalOwnerLiveness};
+use super::{AgentTaskRunRecord, CookRunAction, CookRunPhase, CookRunState};
 use crate::agent_task_schedule::AgentTaskPlan;
 use homeboy_control_plane_contract::{
     ControlPlaneAction, ControlPlaneActionAvailability, ControlPlaneActionConfirmation,
@@ -283,15 +283,15 @@ fn resume_availability(
             }
             available("queued run can re-enter execution")
         }
-        CookRunPhase::Running => match record.local_owner_liveness() {
-            LocalOwnerLiveness::Live => unavailable("run has an authoritative live local owner"),
-            LocalOwnerLiveness::Unverifiable => {
-                indeterminate("local owner identity cannot be verified without reconciliation")
-            }
-            LocalOwnerLiveness::Dead | LocalOwnerLiveness::Absent => {
+        CookRunPhase::Running => {
+            if state.liveness.is_reconcilable() {
                 available("running record has no live local owner")
+            } else if state.live_owner {
+                unavailable("run has an authoritative live local owner")
+            } else {
+                indeterminate("owner cannot be verified without reconciliation")
             }
-        },
+        }
         _ => unavailable("terminal runs cannot be resumed"),
     }
 }
@@ -443,6 +443,7 @@ mod tests {
         // alone, so Reconcile must not be advertised (it used to be).
         let mut runner_fresh = record(RunExecutionState::Running, false);
         runner_fresh.metadata["runner_id"] = serde_json::json!("homeboy-lab");
+        runner_fresh.metadata["runner_job_id"] = serde_json::json!("accepted-job");
         runner_fresh.updated_at = Some(fresh);
 
         // A queued run with no owner and an old timestamp: the reconciler
