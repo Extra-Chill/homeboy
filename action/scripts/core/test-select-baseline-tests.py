@@ -97,6 +97,19 @@ with tempfile.TemporaryDirectory() as tmp:
     run("plan")
     assert output.read_text() == "runner=\n", "missing evidence retains safe fallback"
 
+    # File-granular runners report method failures bound to file units; the
+    # baseline must rerun the unit, not a method ID it cannot plan (#18425).
+    evidence(results, ["tests/FooTest.php", "tests/BarTest.php"], ["Foo::a", "Foo::b"])
+    outcomes = json.loads((results / "review-test.test-outcomes.json").read_text())
+    outcomes["failed_test_units"] = {"Foo::a": "tests/FooTest.php", "Foo::b": "tests/FooTest.php"}
+    write(results / "review-test.test-outcomes.json", outcomes)
+    write(base_inventory, dict(schema="homeboy/test-inventory/v1", runner="nextest",
+                              runner_fingerprint="d" * 64, workspace_fingerprint="e" * 64,
+                              inventory_fingerprint="f" * 64,
+                              tests=[{"id": identity} for identity in ["tests/FooTest.php", "tests/BarTest.php"]]))
+    run("materialize")
+    assert json.loads(selection.read_text())["tests"] == ["tests/FooTest.php"]
+
 # Verify the workflow actually transports and consumes the selection.
 import yaml
 workflow = yaml.safe_load((ROOT.parents[1] / ".github/workflows/ci.yml").read_text())

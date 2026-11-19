@@ -58,6 +58,83 @@ def write_inventory(directory: Path, payload: dict) -> None:
     outcomes_path.write_text(json.dumps(outcomes), encoding="utf-8")
 
 
+def write_file_unit_pair(directory: Path, failures: dict[str, str | None]) -> None:
+    """Write a file-granular (WordPress PHPUnit) evidence pair.
+
+    `failures` maps each precise failed ID to the inventory unit it is bound to,
+    or None for a failure whose ID is itself an inventory identity.
+    """
+    provenance = {
+        "runner": "phpunit",
+        "runner_fingerprint": "a" * 64,
+        "workspace_fingerprint": "b" * 64,
+        "execution_fingerprint": "c" * 64,
+    }
+    inventory = {
+        "schema": "homeboy/test-inventory/v1",
+        "command": COMMAND,
+        **provenance,
+        "tests": [{"id": "tests/unit/BarTest.php"}, {"id": "tests/unit/FooTest.php"}],
+    }
+    outcomes = {
+        "schema": "homeboy/test-outcomes/v1",
+        "command": COMMAND,
+        **provenance,
+        "failed_test_ids": sorted(failures),
+    }
+    units = {identity: unit for identity, unit in failures.items() if unit is not None}
+    if units:
+        outcomes["failed_test_units"] = units
+    (directory / f"{STEM}.test-outcomes.json").write_text(json.dumps(outcomes), encoding="utf-8")
+    write_inventory(directory, inventory)
+
+
+def file_unit_reconciliation(root: Path) -> None:
+    """Method-level failures inside file-granular units (#18425)."""
+    current, baseline = root / "file-current", root / "file-baseline"
+    current.mkdir()
+    baseline.mkdir()
+    (baseline / "baseline-status.json").write_text(json.dumps(BASELINE_STATUS), encoding="utf-8")
+    foo = "tests/unit/FooTest.php"
+
+    write_file_unit_pair(baseline, {"Foo_Test::test_a": foo})
+    write_file_unit_pair(current, {"Foo_Test::test_a": foo})
+    assert gate(current, baseline) == {COMMAND: "baseline_red"}, "the same method failure reproduces on the baseline"
+
+    # Same failing file on both sides, but the candidate breaks one more method:
+    # binding to the file unit must not mask the new failure.
+    write_file_unit_pair(current, {"Foo_Test::test_a": foo, "Foo_Test::test_b": foo})
+    completed = run_gate(current, baseline)
+    assert json.loads(completed.stdout) == {COMMAND: "fail"}, completed.stderr
+    assert "candidate-only failed test identity(s): Foo_Test::test_b." in completed.stderr, completed.stderr
+    introduced = subprocess.run(
+        ["python3", str(GATE), "--emit-introduced", COMMAND, str(current), str(baseline)],
+        check=True, text=True, capture_output=True,
+    )
+    assert json.loads(introduced.stdout) == {"introduced": ["Foo_Test::test_b"], "runner": "phpunit"}
+
+    # Units are optional: a failure that is itself an inventory ID needs none.
+    write_file_unit_pair(current, {foo: None})
+    write_file_unit_pair(baseline, {foo: None})
+    assert gate(current, baseline) == {COMMAND: "baseline_red"}, "file-level failure IDs stay valid"
+
+    write_file_unit_pair(baseline, {"Foo_Test::test_a": foo})
+    for failures, why in (
+        ({"Foo_Test::test_a": None}, "an unbound method failure"),
+        ({"Foo_Test::test_a": "tests/unit/OtherTest.php"}, "a unit outside the inventory"),
+        ({foo: foo}, "a mapping that shadows an inventory identity"),
+    ):
+        write_file_unit_pair(current, failures)
+        assert gate(current, baseline) == {COMMAND: "invalid_evidence"}, f"{why} must fail closed"
+
+    write_file_unit_pair(current, {"Foo_Test::test_a": foo})
+    outcomes_path = current / f"{STEM}.test-outcomes.json"
+    outcomes = json.loads(outcomes_path.read_text(encoding="utf-8"))
+    outcomes["failed_test_units"]["Foo_Test::not_failed"] = foo
+    outcomes_path.write_text(json.dumps(outcomes), encoding="utf-8")
+    assert gate(current, baseline) == {COMMAND: "invalid_evidence"}, "a unit for an unobserved failure must fail closed"
+
+
 def main() -> None:
     with tempfile.TemporaryDirectory() as temporary:
         root = Path(temporary)
@@ -210,6 +287,8 @@ def main() -> None:
         payload["invalid_evidence"]["reason"] = reason + " on baseline"
         baseline_outcomes.write_text(json.dumps(payload), encoding="utf-8")
         assert gate(current, baseline) == {COMMAND: "invalid_evidence"}, "different producer defects must fail closed"
+
+        file_unit_reconciliation(root)
 
     print("PASS: Test outcome/inventory reconciliation fixtures")
 
