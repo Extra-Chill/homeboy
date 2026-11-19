@@ -22,6 +22,7 @@ pub mod doctor;
 pub(crate) mod fake_pi_test;
 pub(crate) mod feedback;
 pub(crate) mod gate_contract;
+pub(crate) mod history;
 pub mod prompts;
 pub(crate) mod provider_evidence;
 pub(crate) mod recover;
@@ -35,7 +36,7 @@ pub use args::{
     AcceptArgs, AgentTaskArgs, AgentTaskAuthArgs, AgentTaskAuthCommand, AgentTaskBatchPrepareArgs,
     AgentTaskCapacityArgs, AgentTaskCommand, AgentTaskCookArgs, AgentTaskDoctorArgs,
     AgentTaskFanoutArgs, AgentTaskFanoutCommand, AgentTaskFanoutCookBatchArgs, CancelArgs,
-    ContractArgs, ContractFormat, CookFeedbackArgs, DiagnoseArgs, FinalizePrArgs,
+    ContractArgs, ContractFormat, CookFeedbackArgs, DiagnoseArgs, FinalizePrArgs, HistoryArgs,
     PlacementUpdateArgs, PromotionProviderArgs, ProvidersArgs, RecoverArgs, RetainedArtifactsArgs,
     RetainedArtifactsCommand, RetryArgs, ReviewArgs, RunPlanArgs, StatusArgs, ValidatePlanArgs,
     VerifyGateArgs,
@@ -363,6 +364,7 @@ pub(crate) fn run_with_cook_progress_and_provenance(
             };
             Ok((value, 0))
         }
+        AgentTaskCommand::History(args) => history::history(args),
         AgentTaskCommand::Reconcile(args) => status::reconcile_run(args),
         AgentTaskCommand::RetainedArtifacts(args) => retained_artifacts::run(args),
         AgentTaskCommand::Diagnose(diagnose_args) => status::diagnose(diagnose_args),

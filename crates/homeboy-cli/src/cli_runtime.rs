@@ -964,6 +964,7 @@ fn register_startup_providers_after_reconcile(
     // durable Work jobs below rather than this unrelated periodic sweep.
     crate::agents::agent_task_service::register_orchestration_driver();
     crate::commands::agent_task::capacity::register_capacity_snapshot_provider();
+    crate::commands::agent_task::history::register_task_history_resource();
     crate::commands::route::register_execution_orchestration();
     crate::agents::agent_task_service::register_controller_upgrade_admission_provider();
     // New orchestration submissions share one versioned lifecycle driver.

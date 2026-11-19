@@ -85,6 +85,11 @@ pub fn route(method: HttpMethod, path: &str) -> Result<HttpEndpoint> {
                 query: read_resource_query(path),
             })
         }
+        (HttpMethod::Get, ["v1", "control-plane", "task-history"]) => {
+            Ok(HttpEndpoint::ControlPlaneTaskHistory {
+                query: read_resource_query(path),
+            })
+        }
         (HttpMethod::Get, ["v1", "control-plane", "missions"]) => {
             Ok(HttpEndpoint::ControlPlaneMissions {
                 request: control_plane_mission_list_request(path)?,
@@ -308,6 +313,7 @@ pub fn route(method: HttpMethod, path: &str) -> Result<HttpEndpoint> {
                 "GET /bench/runs".to_string(),
                 "GET /v1/control-plane/capabilities".to_string(),
                 "GET /v1/control-plane/capacity".to_string(),
+                "GET /v1/control-plane/task-history".to_string(),
                 "GET /v1/control-plane/missions".to_string(),
                 "GET /v1/control-plane/missions/:id".to_string(),
                 "GET /v1/control-plane/runs".to_string(),
@@ -488,6 +494,12 @@ where
                 crate::control_plane::read_resource("capacity", query)?,
             );
         }
+        HttpEndpoint::ControlPlaneTaskHistory { query } => {
+            return control_plane_ok(
+                endpoint.clone(),
+                crate::control_plane::read_resource("task-history", query)?,
+            );
+        }
         HttpEndpoint::ControlPlaneRunActions { id } => {
             return control_plane_action_response(
                 endpoint.clone(),
@@ -631,7 +643,7 @@ where
         | HttpEndpoint::ControlPlaneCapabilities => {
             unreachable!("returned before store open")
         }
-        HttpEndpoint::ControlPlaneCapacity { .. } => {
+        HttpEndpoint::ControlPlaneCapacity { .. } | HttpEndpoint::ControlPlaneTaskHistory { .. } => {
             unreachable!("returned before store open")
         }
         HttpEndpoint::Jobs => {

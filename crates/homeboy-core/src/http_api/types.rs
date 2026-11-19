@@ -63,6 +63,9 @@ pub enum HttpEndpoint {
     ControlPlaneCapacity {
         query: Value,
     },
+    ControlPlaneTaskHistory {
+        query: Value,
+    },
     ControlPlaneMissions {
         request: homeboy_control_plane_contract::ControlPlaneMissionListRequest,
     },
@@ -217,6 +220,7 @@ impl HttpEndpoint {
             Self::BenchRuns => "bench.runs",
             Self::ControlPlaneCapabilities => "control_plane.capabilities",
             Self::ControlPlaneCapacity { .. } => "control_plane.capacity",
+            Self::ControlPlaneTaskHistory { .. } => "control_plane.task_history",
             Self::ControlPlaneMissions { .. } => "control_plane.missions.list",
             Self::ControlPlaneMission { .. } => "control_plane.missions.show",
             Self::ControlPlaneRuns { .. } => "control_plane.runs.list",
