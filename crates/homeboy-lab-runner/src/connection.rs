@@ -417,7 +417,13 @@ pub(crate) fn restart_daemon_in_place(
             restart_direct_daemon_in_place(&runner, previous, &previous_lease)?
         };
         if exit_code != 0 {
-            return Err(Error::internal_unexpected("runner restart failed"));
+            return Err(Error::internal_unexpected(format!(
+                "runner restart failed: {}",
+                report
+                    .failure_message
+                    .as_deref()
+                    .unwrap_or("the restarted daemon did not connect")
+            )));
         }
         if exit_code == 0 {
             let session = read_session(runner_id)?.ok_or_else(|| {
