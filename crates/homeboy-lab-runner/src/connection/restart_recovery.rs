@@ -60,6 +60,24 @@ impl RestartState {
     }
 }
 
+/// Whether `error` refuses a lease that a finished restart stopped: the restart
+/// failed or its holder died, so the recorded daemon is gone and nothing will
+/// publish its replacement. The runner's one recovery is a full `connect`,
+/// exactly as for an unreachable daemon (#17717).
+pub(crate) fn is_abandoned_restart_refusal(error: &Error) -> bool {
+    error
+        .details
+        .get("kind")
+        .and_then(serde_json::Value::as_str)
+        == Some("runner_restarting")
+        && error
+            .details
+            .get("restart")
+            .cloned()
+            .and_then(|restart| serde_json::from_value::<RestartState>(restart).ok())
+            .is_some_and(|state| state.phase != "published" && !state.in_progress())
+}
+
 /// Publish the restart lifecycle under the recovery lock, never runner-state.lock.
 /// Failed state remains visible so pollers cannot revive a stopped lease.
 pub(crate) fn with_restart<T>(
@@ -347,6 +365,61 @@ mod tests {
                 .expect("restart thread")
                 .expect("restart publishes");
         });
+    }
+
+    /// A finished restart that stopped the recorded lease leaves nothing to
+    /// wait for, so admission reconnects like for an unreachable daemon instead
+    /// of failing until an operator runs `runner connect` (#17717). A restart
+    /// whose holder is still alive keeps its own outcome.
+    #[test]
+    fn admission_reconnects_past_an_abandoned_restart_of_the_recorded_lease() {
+        let dead_pid = {
+            let mut child = std::process::Command::new("true").spawn().unwrap();
+            let pid = child.id();
+            child.wait().unwrap();
+            pid
+        };
+        for (phase, holder_pid, budget_elapsed, reconnects) in [
+            ("failed", std::process::id(), false, true),
+            ("restarting", dead_pid, false, true),
+            ("restarting", std::process::id(), true, false),
+        ] {
+            crate::test_support::with_isolated_home(|_| {
+                write_session(&session("lease-old", None)).expect("connected session");
+                let state_path = crate::runner_state_lock::runner_state_dir_in_root(
+                    &paths::homeboy().expect("root"),
+                    "runner-a",
+                )
+                .join("restart-state");
+                let budget = RESTART_BUDGET.as_millis() as i64;
+                let now = chrono::Utc::now().timestamp_millis();
+                crate::runner_state_lock::write_durable_json(
+                    &state_path,
+                    &RestartState {
+                        holder_pid,
+                        phase: phase.into(),
+                        started_at: if budget_elapsed { now - budget } else { now },
+                        budget_ms: budget as u64,
+                        previous_lease: "lease-old".into(),
+                    },
+                )
+                .expect("restart state");
+
+                let connected = std::cell::Cell::new(false);
+                let result = crate::connection::reach_runner_with(
+                    "runner-a",
+                    |_| Ok(true),
+                    |runner_id| with_restart_recovery_lock(runner_id, || Ok(())),
+                    |_| {
+                        connected.set(true);
+                        Ok(())
+                    },
+                );
+
+                assert_eq!(connected.get(), reconnects, "{phase} by {holder_pid}");
+                assert_eq!(result.is_ok(), reconnects, "{phase} by {holder_pid}");
+            });
+        }
     }
 
     /// Exercise the same recovery entry point used by transport pollers.

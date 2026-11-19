@@ -351,7 +351,10 @@ pub(crate) fn reach_runner_with(
         return connect(runner_id);
     }
     match ensure(runner_id) {
-        Err(error) if TransportFailure::of(&error) == Some(TransportFailure::Unreachable) => {
+        Err(error)
+            if TransportFailure::of(&error) == Some(TransportFailure::Unreachable)
+                || restart_recovery::is_abandoned_restart_refusal(&error) =>
+        {
             connect(runner_id)
         }
         result => result,

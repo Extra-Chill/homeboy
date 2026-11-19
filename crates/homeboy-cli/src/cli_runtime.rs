@@ -2812,7 +2812,7 @@ fn preflight_hot_command_with_input(
                             )
                         } else {
                             format!(
-                                "Lab runner `{}` was disconnected; a bounded reconnect was attempted and failed ({}). Falling back to local.",
+                                "Lab runner `{}` was disconnected; a bounded reconnect was attempted and failed ({}).",
                                 attempt.runner_id.as_deref().unwrap_or("?"),
                                 attempt.reason.as_deref().unwrap_or("unknown reason")
                             )
