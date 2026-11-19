@@ -23,6 +23,13 @@ pub(crate) fn lifecycle_action_eligibility_with_roots(
     roots: Option<&homeboy_core::paths::PathRoots>,
 ) -> ControlPlaneActionEligibilityReport {
     let state = CookRunState::of(record);
+    if record.metadata.get("cook_id").is_some() && super::legal_actions(&state).is_empty() {
+        return ControlPlaneActionEligibilityReport {
+            schema: CONTROL_PLANE_ACTION_ELIGIBILITY_SCHEMA.to_string(),
+            run: RunId::new(&record.run_id).expect("validated durable run ID"),
+            actions: Vec::new(),
+        };
+    }
     let cancellation = if !state.allows(CookRunAction::Cancel) {
         unavailable(format!(
             "agent-task run '{}' is already terminal with state {} and no live owner",
