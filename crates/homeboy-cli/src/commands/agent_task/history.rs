@@ -35,7 +35,12 @@ impl homeboy::core::control_plane::ControlPlaneReadResourceProvider for TaskHist
 
     fn read(&self, query: &Value) -> homeboy::core::Result<Value> {
         let invalid = |message: String| {
-            homeboy::core::Error::validation_invalid_argument("task-history.query", message, None, None)
+            homeboy::core::Error::validation_invalid_argument(
+                "task-history.query",
+                message,
+                None,
+                None,
+            )
         };
         let query: TaskHistoryQuery =
             serde_json::from_value(query.clone()).map_err(|error| invalid(error.to_string()))?;

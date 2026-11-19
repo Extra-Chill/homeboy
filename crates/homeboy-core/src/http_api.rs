@@ -643,7 +643,8 @@ where
         | HttpEndpoint::ControlPlaneCapabilities => {
             unreachable!("returned before store open")
         }
-        HttpEndpoint::ControlPlaneCapacity { .. } | HttpEndpoint::ControlPlaneTaskHistory { .. } => {
+        HttpEndpoint::ControlPlaneCapacity { .. }
+        | HttpEndpoint::ControlPlaneTaskHistory { .. } => {
             unreachable!("returned before store open")
         }
         HttpEndpoint::Jobs => {

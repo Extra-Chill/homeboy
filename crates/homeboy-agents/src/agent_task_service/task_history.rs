@@ -134,7 +134,12 @@ fn history_entry(record: AgentTaskRunRecord) -> AgentTaskHistoryEntry {
         .as_ref()
         .and_then(|outcome| serde_json::to_value(outcome).ok())
         .and_then(|outcome| outcome["kind"].as_str().map(str::to_string))
-        .or_else(|| serde_json::to_value(state).ok()?.as_str().map(str::to_string))
+        .or_else(|| {
+            serde_json::to_value(state)
+                .ok()?
+                .as_str()
+                .map(str::to_string)
+        })
         .unwrap_or_default();
     let failure_class = match &terminal {
         Some(CookTerminalOutcome::Infrastructure { error_code }) => Some(error_code.clone()),
