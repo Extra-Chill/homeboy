@@ -1,5 +1,22 @@
 # Recorded gate verdicts
 
+## Cook base admission
+
+Before provider dispatch, Cook observes declared verification gates on its pinned
+base in the candidate gate placement. It records `cook_gate_baseline` on the
+initial run, including exit status, parsed failing identities and an output tail.
+Identical admissions reuse durable baseline observations for the same base and
+gate inputs; placements do not share observations.
+
+The default `--baseline-policy=new-failures-only` accepts candidate failures that
+are a subset of the base failures. Comparison diagnostics list inherited and new
+failures separately. If test identities cannot be parsed, a red base and red
+candidate are reported as `baseline_red`, not a candidate regression.
+`--baseline-policy=strict` stops before provider dispatch when a base gate is red.
+Repro gates retain their separate requirement to demonstrate the issue on base.
+
+## Candidate verdict reuse
+
 `homeboy agent-task gate <cook-id> gate-1` runs the first public shell gate
 from the Cook's persisted policy in the current directory. Use the candidate
 workspace, not the promotion destination. Private gates remain controller-owned.

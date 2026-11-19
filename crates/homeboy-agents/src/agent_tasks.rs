@@ -152,7 +152,7 @@ pub mod gate {
         AgentTaskGateExtensionInput, AgentTaskGateInputSource,
         AgentTaskGatePackageArtifactRequirement, AgentTaskGateRequirements,
         AgentTaskGateRevealPolicy, AgentTaskGateToolchainRequirement, AgentTaskGateVisibility,
-        VerifyGateOptions,
+        BaselinePolicy, VerifyGateOptions,
     };
 }
 

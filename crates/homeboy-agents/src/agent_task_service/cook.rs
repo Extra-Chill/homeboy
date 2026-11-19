@@ -6021,6 +6021,47 @@ fn run_cook_spine(
             ));
         }
     }
+    if !verification_pending_continuation
+        && (!options.gates.verify.is_empty()
+            || !options.gates.private_verify.is_empty()
+            || options.gates.test_execution_plan.is_some())
+    {
+        if let Some(base) = options.workspace.task_base_sha.clone().or_else(|| {
+            options.identity.initial_plan.metadata["cook_workspace_base"]["sha"]
+                .as_str()
+                .map(str::to_string)
+        }) {
+            let admission = super::cook_baseline::admit_base_gates(
+                &options,
+                &lifecycle_store.open_observation_initialized()?,
+                &base,
+            )?;
+            lifecycle_store.record_metadata_value(
+                &options.identity.initial_run_id,
+                "cook_gate_baseline",
+                admission.clone(),
+            )?;
+            if options.gates.baseline_policy == crate::agent_task_gate::BaselinePolicy::Strict
+                && admission
+                    .as_array()
+                    .is_some_and(|gates| gates.iter().any(|gate| gate["status"] == "baseline_red"))
+            {
+                return Ok(stores.report(CookReportInput {
+                    cook_id: options.identity.cook_id.clone(),
+                    status: CookStatus::Failed.as_str(),
+                    disposition: CookDisposition::Terminal,
+                    attempts: Vec::new(),
+                    finalization: None,
+                    stop_reason: Some(
+                        "baseline_red: strict baseline policy stopped before provider dispatch"
+                            .to_string(),
+                    ),
+                    exit_code: 1,
+                    invocation_latest_run_id: Some(&options.identity.initial_run_id),
+                }));
+            }
+        }
+    }
     // A repro must fail on the pinned base before any provider work starts;
     // one that passes there does not reproduce the issue (#17653).
     if !options.gates.repro.is_empty()

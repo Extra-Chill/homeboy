@@ -4312,10 +4312,45 @@ impl CandidateAdoptionFixture {
 }
 
 #[test]
+fn baseline_admission_records_failure_set_and_reuses_base_observation() {
+    homeboy_core::test_support::with_isolated_home(|_| {
+        let mut fixture = CandidateAdoptionFixture::new("baseline-admission", 1, 0, true, None);
+        let counter = fixture.source.parent().unwrap().join("baseline-counter");
+        fixture.options.workspace.source_worktree_path = Some(fixture.source.clone());
+        fixture.options.gates.hydrate_dependencies = false;
+        fixture.options.gates.gate_environment.hydrate_dependencies = false;
+        fixture.options.gates.verify = vec![format!(
+            "echo run >> '{}'; printf 'test A ... FAILED\\n'; exit 1",
+            counter.display()
+        )];
+        let base = git_output(&fixture.source, &["rev-parse", "HEAD"]).unwrap();
+        let store = homeboy_core::observation::store::ObservationStore::open_initialized_at(
+            fixture.source.parent().unwrap().join("baseline.sqlite"),
+        )
+        .unwrap();
+        let first =
+            super::super::cook_baseline::admit_base_gates(&fixture.options, &store, &base).unwrap();
+        assert_eq!(first[0]["status"], "baseline_red");
+        assert!(first[0]["facts"]["failure_records"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|record| record.as_str().unwrap().contains("A")));
+        let second =
+            super::super::cook_baseline::admit_base_gates(&fixture.options, &store, &base).unwrap();
+        assert_eq!(first, second);
+        // Admission policy changes must not execute an unchanged gate again.
+        fixture.options.gates.baseline_policy = crate::agent_task_gate::BaselinePolicy::Strict;
+        let strict =
+            super::super::cook_baseline::admit_base_gates(&fixture.options, &store, &base).unwrap();
+        assert_eq!(first, strict);
+        assert_eq!(std::fs::read_to_string(counter).unwrap().lines().count(), 1);
+    });
+}
+
+#[test]
 fn adoption_compares_immutable_baseline_failures() {
-    use crate::agent_task_gate::AgentTaskGateDifferentialResult::{
-        BaselineRed, CandidateRegression,
-    };
+    use crate::agent_task_gate::AgentTaskGateDifferentialResult::BaselineRed;
     for (case, command, status, exit_code, comparison) in [
         (
             "inherited",
@@ -4325,11 +4360,11 @@ fn adoption_compares_immutable_baseline_failures() {
             BaselineRed,
         ),
         (
-            "regression",
+            "opaque_red",
             "cat lib.rs >&2; exit 1",
-            "gate_failed",
-            1,
-            CandidateRegression,
+            "green_no_finalize",
+            0,
+            BaselineRed,
         ),
     ] {
         homeboy_core::test_support::with_isolated_home(|_| {
