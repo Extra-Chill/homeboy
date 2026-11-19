@@ -274,7 +274,7 @@ esac
 const FAKE_SYSTEMCTL: &str = r#"#!/bin/sh
 printf '%s\n' "$*" >> '__SYSTEMCTL_LOG__'
 case "$*" in
-  "--user restart "*)
+  "--user start homeboy-runner.service")
     printf '__NEW_LEASE__' > '__LEASE__'
     ;;
 esac
@@ -695,15 +695,18 @@ fn service_refresh_repoints_and_restarts_the_unit_in_place_and_keeps_its_re_adop
             .expect("unit runs the stable binary link");
         assert_eq!(std::fs::read_link(link).expect("binary link"), promoted);
         let systemctl = std::fs::read_to_string(&fixture.systemctl_log).expect("systemctl log");
+        // The unit's daemon stops and starts around the job adoption (#18543);
+        // `KillMode=process` and the separate job tree unit keep the job.
+        let lines = systemctl.lines().collect::<Vec<_>>();
+        let position = |line: String| lines.iter().position(|logged| *logged == line);
+        let stop = position(format!("--user stop {unit}")).expect(&systemctl);
+        let start = position(format!("--user start {unit}")).expect(&systemctl);
+        assert!(stop < start, "{systemctl}");
         assert!(
-            systemctl
-                .lines()
-                .any(|line| line == format!("--user restart {unit}")),
-            "{systemctl}"
-        );
-        assert!(
-            !systemctl.lines().any(|line| line.contains(" stop ")),
-            "{systemctl}"
+            !lines
+                .iter()
+                .any(|line| line.contains(" stop ") && !line.ends_with(&unit)),
+            "the job tree unit is never stopped: {systemctl}"
         );
 
         // The controller neither stopped the daemon nor started one itself.
