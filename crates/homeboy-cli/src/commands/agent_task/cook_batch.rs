@@ -537,11 +537,12 @@ fn git(path: &Path, args: &[&str]) -> Result<String> {
     Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
 }
 
-/// Whether an `agent-task status`/`diagnose` id names a workflow instance.
+/// Whether an `agent-task status`/`diagnose` or `runs show` id names a
+/// workflow instance.
 /// A workflow cook item's run id (`wf-…-cook-i1-n3-a1`) is the Cook id it
 /// launched: once that Cook has a durable run record it reads as the Cook,
 /// whether or not the workflow instance is still live (#17758).
-pub(super) fn is_workflow_instance(id: &str) -> bool {
+pub(crate) fn is_workflow_instance(id: &str) -> bool {
     id.starts_with("wf-") && !names_durable_cook(id)
 }
 

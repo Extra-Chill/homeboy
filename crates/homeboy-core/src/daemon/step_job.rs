@@ -62,6 +62,8 @@ pub const STEP_LOG_FILE: &str = "step.log";
 /// The exit status atomically recorded by the child wrapper, including when
 /// its supervising daemon has restarted.
 pub const STEP_EXIT_FILE: &str = "exit.json";
+/// The step's exact usage from its job cgroup, read before the cgroup goes.
+const STEP_USAGE_FILE: &str = "usage.json";
 
 const WAIT_POLL: Duration = Duration::from_millis(250);
 const RUNNER_WAIT_INITIAL: Duration = Duration::from_secs(1);
@@ -536,13 +538,27 @@ pub fn recorded_step_exit_code(job_id: &str) -> Option<i32> {
         .and_then(|code| i32::try_from(code).ok())
 }
 
-/// The step's usage block: its process tree's CPU totals, reaped by the
-/// wrapper at finish (`times`), marked `estimated`.
+/// The step's usage block: its job cgroup's counters when it ran in one,
+/// otherwise its process tree's CPU totals reaped by the wrapper at finish
+/// (`times`), marked `estimated`.
 pub fn recorded_step_usage(
     job_id: &str,
     wall_ms: u64,
 ) -> Option<homeboy_engine_primitives::resource_usage::ResourceUsage> {
-    let bytes = std::fs::read(step_job_dir(job_id).ok()?.join(STEP_EXIT_FILE)).ok()?;
+    let dir = step_job_dir(job_id).ok()?;
+    if let Some(mut usage) = std::fs::read(dir.join(STEP_USAGE_FILE))
+        .ok()
+        .and_then(|bytes| {
+            serde_json::from_slice::<homeboy_engine_primitives::resource_usage::ResourceUsage>(
+                &bytes,
+            )
+            .ok()
+        })
+    {
+        usage.wall_ms = wall_ms;
+        return Some(usage);
+    }
+    let bytes = std::fs::read(dir.join(STEP_EXIT_FILE)).ok()?;
     let value: Value = serde_json::from_slice(&bytes).ok()?;
     if value["schema"] != STEP_EXIT_SCHEMA {
         return None;
@@ -815,7 +831,7 @@ fn run_step(mut checkpoint: StepJobCheckpoint, job: &ControllerJobHandle) -> Res
             job.progress(checkpoint.progress())?;
             let cgroup = adopted_cgroup(&child);
             supervise_adopted(&child, cgroup.as_ref(), job)?;
-            stop_finished_cgroup(cgroup.as_ref());
+            stop_finished_cgroup(&job_id, cgroup.as_ref());
             checkpoint.exit_code = recorded_step_exit_code(&job_id);
             checkpoint.phase = StepPhase::Exited;
             job.checkpoint(to_value(&checkpoint)?)?;
@@ -973,6 +989,7 @@ fn run_step(mut checkpoint: StepJobCheckpoint, job: &ControllerJobHandle) -> Res
 
     loop {
         if job.is_cancelled() {
+            record_cgroup_usage(&job_id, cgroup.as_ref());
             let _ = stop_child(&child, cgroup.as_ref());
             let _ = process.wait();
             checkpoint.phase = StepPhase::Exited;
@@ -994,7 +1011,7 @@ fn run_step(mut checkpoint: StepJobCheckpoint, job: &ControllerJobHandle) -> Res
         }
     }
     // Descendants the child left behind end with their step.
-    stop_finished_cgroup(cgroup.as_ref());
+    stop_finished_cgroup(&job_id, cgroup.as_ref());
     checkpoint.phase = StepPhase::Exited;
     job.checkpoint(to_value(&checkpoint)?)?;
     job.progress(checkpoint.progress())?;
@@ -1317,8 +1334,29 @@ fn stop_child(child: &StepChild, cgroup: Option<&JobCgroup>) -> Result<()> {
     }
 }
 
+/// Record the step's exact usage from its cgroup's counters, which go with
+/// the cgroup (#18461). Steps without a cgroup keep the wrapper's estimate.
+fn record_cgroup_usage(job_id: &str, cgroup: Option<&JobCgroup>) {
+    let Some(usage) = cgroup.and_then(|cgroup| cgroup.usage(0)) else {
+        return;
+    };
+    let written = step_job_dir(job_id).and_then(|dir| {
+        let tmp = dir.join(format!("{STEP_USAGE_FILE}.tmp"));
+        std::fs::write(&tmp, serde_json::to_vec(&usage)?)
+            .and_then(|()| std::fs::rename(&tmp, dir.join(STEP_USAGE_FILE)))
+            .map_err(|error| {
+                Error::internal_io(error.to_string(), Some("record step usage".into()))
+            })
+    });
+    if let Err(error) = written {
+        crate::log_status!("step", "Could not record a step's cgroup usage: {}", error);
+    }
+}
+
 /// A finished step's cgroup holds only descendants that outlived the child.
-fn stop_finished_cgroup(cgroup: Option<&JobCgroup>) {
+/// Its counters are read first: they cover the whole step.
+fn stop_finished_cgroup(job_id: &str, cgroup: Option<&JobCgroup>) {
+    record_cgroup_usage(job_id, cgroup);
     if let Some(cgroup) = cgroup {
         if let Err(error) = cgroup.stop() {
             crate::log_status!("step", "Could not stop a finished step's cgroup: {}", error);
@@ -2210,6 +2248,49 @@ mod tests {
             assert!(!alive(detached), "cancel left detached child {detached}");
             assert_eq!(survivors(&sleep), Vec::<String>::new());
             assert_job_cgroups_removed(jobs);
+        });
+    }
+
+    /// #18461: a step in its own cgroup records the cgroup's exact counters,
+    /// including CPU a detached descendant burned that the wrapper's `times`
+    /// never reaps.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn a_finished_step_records_its_cgroups_exact_usage() {
+        crate::job_cgroup::test_support::run_in_delegated_scope(
+            "daemon::step_job::tests::delegated_step_records_cgroup_usage",
+            &[],
+        );
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    #[ignore = "inner half of a_finished_step_records_its_cgroups_exact_usage"]
+    fn delegated_step_records_cgroup_usage() {
+        if !crate::job_cgroup::test_support::inside_delegated_scope() {
+            return;
+        }
+        crate::job_cgroup::initialize(0).expect("a delegated scope initializes job cgroups");
+        with_isolated_home(|home| {
+            let done = home.path().join("burned");
+            let script = format!(
+                "(setsid sh -c 'end=$(($(date +%s) + 2)); while [ $(date +%s) -lt $end ]; do :; done; touch {done}' &); \
+                 while [ ! -e {done} ]; do sleep 0.1; done",
+                done = done.display(),
+            );
+            let request = request(&script, EnvMaterializationPlan::default());
+            let harness = step_harness(&request, home.path());
+            harness.start_via_controller_boundary().unwrap();
+            let job = harness.wait_until_terminal().unwrap();
+            assert_eq!(job.status, crate::api_jobs::JobStatus::Succeeded);
+            let usage = recorded_step_usage(&job.id.to_string(), 7).expect("step usage");
+            assert!(!usage.estimated, "{usage:?}");
+            assert_eq!(
+                usage.source,
+                homeboy_engine_primitives::resource_usage::USAGE_SOURCE_JOB_CGROUP
+            );
+            assert_eq!(usage.wall_ms, 7);
+            assert!(usage.cpu_usage_usec >= 500_000, "{usage:?}");
         });
     }
 
