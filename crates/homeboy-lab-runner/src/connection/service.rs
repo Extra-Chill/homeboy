@@ -234,37 +234,35 @@ fn repoint_script(binary: &str, startup_token: &str, daemon_env: &[(String, Stri
     )
 }
 
-/// Move job cgroups a pre-#18493 daemon left inside the runner unit into the
-/// job tree unit, so the unit's start is not refused while they run. Each job
-/// is frozen while its processes move, so none forks behind the move; it
-/// keeps its job id, so the new daemon re-adopts it. The stopped runner unit's
-/// leftover `daemon/` leaf and enabled controllers are cleared too: either
-/// alone refuses the unit's next start. A no-op on the new layout.
+/// Move what a pre-#18493 daemon left running inside the runner unit into the
+/// job tree unit, so the unit's next start is not refused. Each job cgroup
+/// keeps its job id, so the new daemon re-adopts it; children the old daemon
+/// left in its `daemon/` leaf move to `jobs/legacy-daemon`. Each source is
+/// frozen while its processes move, so none forks behind the move. The runner
+/// unit's enabled controllers are cleared last, since they alone refuse a
+/// start. A no-op on the new layout.
 fn adopt_in_unit_jobs_script() -> String {
     format!(
         r#"tree="/sys/fs/cgroup$(systemctl --user show --property=ControlGroup --value {job_tree})"
 runner="$(dirname "$tree")/{unit}"
-if [ -d "$runner/{jobs}" ]; then
-  mkdir -p "$tree/{jobs}"
-  for job in "$runner/{jobs}"/*/; do
-    [ -d "$job" ] || continue
-    job=${{job%/}}
-    # cgroupfs files report size 0, so test content, not `-s`.
-    if grep -q . "$job/cgroup.procs"; then
-      dest="$tree/{jobs}/$(basename "$job")"
-      mkdir -p "$dest"
-      echo 1 > "$job/cgroup.freeze"
-      for _ in 1 2 3 4 5; do
-        grep -q . "$job/cgroup.procs" || break
-        while read -r pid; do echo "$pid" > "$dest/cgroup.procs" || true; done < "$job/cgroup.procs"
-      done
-    fi
-    rmdir "$job" || true
-  done
-  rmdir "$runner/{jobs}" || true
-fi
+adopt() {{
+  # cgroupfs files report size 0, so test content, not `-s`.
+  if grep -q . "$1/cgroup.procs"; then
+    mkdir -p "$tree/{jobs}" "$2"
+    echo 1 > "$1/cgroup.freeze"
+    for _ in 1 2 3 4 5; do
+      grep -q . "$1/cgroup.procs" || break
+      while read -r pid; do echo "$pid" > "$2/cgroup.procs" || true; done < "$1/cgroup.procs"
+    done
+  fi
+  rmdir "$1" || true
+}}
 if [ -d "$runner" ]; then
-  rmdir "$runner/daemon" 2>/dev/null || true
+  for job in "$runner/{jobs}"/*/; do
+    [ -d "$job" ] && adopt "${{job%/}}" "$tree/{jobs}/$(basename "$job")"
+  done
+  [ -d "$runner/{jobs}" ] && { rmdir "$runner/{jobs}" || true; }
+  [ -d "$runner/daemon" ] && adopt "$runner/daemon" "$tree/{jobs}/legacy-daemon"
   for controller in io memory pids; do
     echo "-$controller" > "$runner/cgroup.subtree_control" 2>/dev/null || true
   done
