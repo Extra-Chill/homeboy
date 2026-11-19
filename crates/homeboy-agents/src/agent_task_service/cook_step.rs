@@ -266,10 +266,25 @@ fn workflow_cook_record(
 /// A Cook superseded by the live Cook that owns its destination never runs:
 /// its step follows the owner and settles with the owner's outcome, so a
 /// workflow waits on the real work instead of settling at once (#18301).
+///
+/// An owner whose mission is fenced is no longer live: the fence rejects every
+/// later attempt, so one its recipe declared may never materialize. The
+/// follower settles cancelled, naming the owner, instead of waiting (#18525).
 pub(super) fn workflow_cook_outcome(cook_id: &str) -> WorkflowRunOutcome {
     let mut followed = vec![cook_id.to_string()];
     loop {
         let current = followed.last().expect("followed Cook");
+        if followed.len() > 1 {
+            if let Some(fence) = cook_mission_fence(current) {
+                return WorkflowRunOutcome::Settled {
+                    outcome: "cancelled".to_string(),
+                    reason: Some(format!(
+                        "superseded_by_active_cook: owner Cook {current} was cancelled: {}",
+                        fence["reason"].as_str().unwrap_or("cancel requested")
+                    )),
+                };
+            }
+        }
         let record = match workflow_cook_record(current) {
             Ok(record) => record,
             Err(outcome) => return outcome,
@@ -281,6 +296,15 @@ pub(super) fn workflow_cook_outcome(cook_id: &str) -> WorkflowRunOutcome {
             _ => return settled_cook_outcome(current, record),
         }
     }
+}
+
+/// The fence that closed `cook_id`'s mission, if any.
+fn cook_mission_fence(cook_id: &str) -> Option<Value> {
+    agent_task_lifecycle::AgentTaskLifecycleStore::from_environment()
+        .ok()?
+        .read_cook_index(cook_id)
+        .ok()?
+        .cancellation_fence
 }
 
 fn settled_cook_outcome(
