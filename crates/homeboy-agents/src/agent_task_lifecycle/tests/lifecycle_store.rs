@@ -26,44 +26,6 @@ fn record(store: &AgentTaskLifecycleStore, run_id: &str, marker: &str) -> AgentT
 }
 
 #[test]
-fn cook_state_round_trips_through_fenced_store_transitions() {
-    use crate::agent_task_lifecycle::cook_run_state::{CookRunPhase, CookRunState};
-    let context = homeboy_core::test_support::HermeticTestContext::new();
-    let store = AgentTaskLifecycleStore::new(context.path_roots());
-    let seed = record(&store, "cook-state", "persisted");
-    store.write_record(&seed).unwrap();
-    let queued = store.read_record("cook-state").unwrap();
-    assert!(queued.persisted_cook_state().is_some());
-    assert_eq!(CookRunState::of(&queued).phase, CookRunPhase::Queued);
-    store
-        .mutate_record("cook-state", |record| {
-            super::super::terminal_transition::start_run(record);
-            true
-        })
-        .unwrap();
-    let running = store.read_record("cook-state").unwrap();
-    assert_eq!(CookRunState::of(&running).phase, CookRunPhase::Running);
-    store
-        .mutate_record("cook-state", |record| {
-            super::super::terminal_transition::set_run_state(
-                record,
-                RunExecutionState::CandidateRecoverable,
-            );
-            true
-        })
-        .unwrap();
-    let candidate = store.read_record("cook-state").unwrap();
-    let state = CookRunState::of(&candidate);
-    assert_eq!(state.phase, CookRunPhase::CandidateRecoverable);
-    assert!(state.terminal && state.recoverable);
-    assert_eq!(candidate.persisted_cook_state(), Some(&state));
-    assert!(serde_json::to_value(candidate)
-        .unwrap()
-        .get("cook_run_state")
-        .is_none());
-}
-
-#[test]
 fn terminal_outcomes_are_countable_through_public_status_json() {
     let context = homeboy_core::test_support::HermeticTestContext::new();
     let store = AgentTaskLifecycleStore::new(context.path_roots());

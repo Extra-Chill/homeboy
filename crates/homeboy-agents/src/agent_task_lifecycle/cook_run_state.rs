@@ -14,10 +14,9 @@
 //! of classifying on their own. [`CookRunPhase::transition`] is the phase
 //! transition table the record's writers are held to.
 //!
-//! State is persisted internally on the lifecycle record. The revision-fenced
-//! store adapts legacy execution/subsystem writes into replay-keyed events in
-//! the same transaction. Derivation remains only for records without state;
-//! remove that migration fallback once all retained records have been rewritten.
+//! The state is derived on read, not persisted: it is a pure function of the
+//! record's execution state, its continuation claim and its fence, so it can
+//! never drift from the record it describes.
 
 use std::collections::BTreeSet;
 
@@ -68,15 +67,6 @@ pub enum CookRunEvent {
     PartiallyFailed,
     Failed,
     Cancelled,
-    /// Return a stopped or unclaimed attempt to admission.
-    Requeued,
-    /// Later durable aggregate, harvest, regate or promotion evidence settles
-    /// an outcome. Unlike a new execution, this can replace a prior verdict.
-    OutcomeRecorded {
-        phase: CookRunPhase,
-    },
-    /// Refresh fence, status and ownership facts without moving phase.
-    FactsUpdated,
 }
 
 impl CookRunPhase {
@@ -151,32 +141,8 @@ impl CookRunPhase {
             return Some(self);
         }
         match (self, event) {
-            (_, E::FactsUpdated) => Some(self),
-            (P::Unknown, E::Requeued) => None,
-            (_, E::Requeued) => Some(P::Queued),
-            (from, E::OutcomeRecorded { phase }) => {
-                let execution = |phase| match phase {
-                    P::Queued => RunExecutionState::Queued,
-                    P::Running => RunExecutionState::Running,
-                    P::Continuing | P::CandidateRecoverable => {
-                        RunExecutionState::CandidateRecoverable
-                    }
-                    P::Succeeded => RunExecutionState::Succeeded,
-                    P::PartialFailure => RunExecutionState::PartialFailure,
-                    P::Failed => RunExecutionState::Failed,
-                    P::Cancelled => RunExecutionState::Cancelled,
-                    P::Unknown => RunExecutionState::Unknown,
-                };
-                (phase != P::Continuing && execution(from).can_transition_to(execution(phase)))
-                    .then_some(phase)
-            }
             // A newer binary's state carries no verdict to transition from.
             (P::Unknown, _) => None,
-            // A cancelled attempt's Cook may still hand its remaining phases
-            // (successor admission, finalization) to a continuation owner;
-            // the attempt's own cancellation outcome is otherwise final.
-            (P::Cancelled, E::ContinuationClaimed) => Some(P::Continuing),
-            (P::Cancelled, E::ContinuationReleased) => Some(P::Cancelled),
             // Cancellation is final, and any live phase can be cancelled.
             (P::Cancelled, _) => None,
             (_, E::Cancelled) => Some(P::Cancelled),
@@ -252,11 +218,8 @@ impl CookRunAction {
 }
 
 /// The one classification of a Cook run, read by every surface.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct CookRunState {
-    /// Internal replay ledger; never part of public state JSON.
-    #[serde(default, skip_serializing)]
-    applied_events: Vec<(String, CookRunEvent)>,
     pub phase: CookRunPhase,
     /// The record's execution ended. A [`CookRunPhase::Continuing`] run is
     /// terminal but still in flight: its continuation owner carries it.
@@ -280,13 +243,6 @@ impl CookRunState {
     /// Classify `record`. This is the only place a Cook run's phase,
     /// terminality and recoverability are decided.
     pub fn of(record: &AgentTaskRunRecord) -> Self {
-        record
-            .persisted_cook_state()
-            .cloned()
-            .unwrap_or_else(|| Self::derive_legacy(record))
-    }
-
-    fn derive_legacy(record: &AgentTaskRunRecord) -> Self {
         let execution = record.state();
         let phase = if execution.is_terminal()
             && crate::agent_task_service::live_cook_continuation(record).is_some()
@@ -304,7 +260,6 @@ impl CookRunState {
             _ => terminal_status_label(record, phase),
         };
         Self {
-            applied_events: Vec::new(),
             phase,
             terminal: execution.is_terminal(),
             retryable: matches!(
@@ -316,43 +271,6 @@ impl CookRunState {
             live_owner: record.owner_process_is_running(),
             status,
         }
-    }
-
-    /// Apply a keyed event. An exact replay is a no-op even after later events;
-    /// reusing a key for a different event or taking an illegal edge is refused.
-    pub fn apply(&self, event: CookRunEvent, key: &str) -> Result<Self, CookRunTransitionError> {
-        if let Some((_, previous)) = self.applied_events.iter().find(|(seen, _)| seen == key) {
-            return if *previous == event {
-                Ok(self.clone())
-            } else {
-                Err(CookRunTransitionError::ReplayKeyConflict {
-                    key: key.to_owned(),
-                })
-            };
-        }
-        let phase =
-            self.phase
-                .transition(event)
-                .ok_or(CookRunTransitionError::IllegalTransition {
-                    from: self.phase,
-                    event,
-                })?;
-        let mut next = self.clone();
-        next.phase = phase;
-        next.terminal = !matches!(phase, CookRunPhase::Queued | CookRunPhase::Running);
-        next.retryable = matches!(
-            phase,
-            CookRunPhase::Failed | CookRunPhase::Cancelled | CookRunPhase::PartialFailure
-        );
-        next.recoverable = phase == CookRunPhase::CandidateRecoverable && !next.fenced;
-        next.status = if phase == CookRunPhase::Continuing {
-            "in_flight"
-        } else {
-            phase.as_str()
-        }
-        .to_owned();
-        next.applied_events.push((key.to_owned(), event));
-        Ok(next)
     }
 
     /// The same state seen through the Cook index's mission fence.
@@ -367,87 +285,6 @@ impl CookRunState {
     pub fn allows(&self, action: CookRunAction) -> bool {
         legal_actions(self).contains(&action)
     }
-}
-
-/// A refused state write. Neither variant mutates the record.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum CookRunTransitionError {
-    IllegalTransition {
-        from: CookRunPhase,
-        event: CookRunEvent,
-    },
-    ReplayKeyConflict {
-        key: String,
-    },
-}
-
-#[derive(Clone, Copy)]
-pub(crate) struct CookStateWriteAuthority(());
-
-/// Adapt existing lifecycle writers at their common fenced commit boundary.
-/// Use the stored state, never a caller's stale projection, as the source.
-/// The next record revision is a stable replay identity within this run.
-pub(crate) fn transition_record(
-    record: &mut AgentTaskRunRecord,
-    stored: Option<&AgentTaskRunRecord>,
-) -> homeboy_core::Result<()> {
-    let facts = CookRunState::derive_legacy(record);
-    let source = stored
-        .map(CookRunState::of)
-        .unwrap_or_else(|| facts.clone());
-    let mut comparable = source.clone();
-    comparable.applied_events.clear();
-    if stored.is_some() && comparable == facts {
-        record.write_cook_state(source, CookStateWriteAuthority(()));
-        return Ok(());
-    }
-    let event = if source.phase == facts.phase {
-        CookRunEvent::FactsUpdated
-    } else {
-        match facts.phase {
-            CookRunPhase::Queued => CookRunEvent::Requeued,
-            CookRunPhase::Running if source.phase != CookRunPhase::Cancelled => {
-                CookRunEvent::Started
-            }
-            CookRunPhase::Continuing => CookRunEvent::ContinuationClaimed,
-            phase => CookRunEvent::OutcomeRecorded { phase },
-        }
-    };
-    let mut next = source
-        .apply(event, &format!("record:{}", record.revision))
-        .map_err(|error| {
-            homeboy_core::Error::validation_invalid_argument(
-                "cook_run_state",
-                format!("Cook transition refused: {error:?}"),
-                Some(record.run_id.clone()),
-                None,
-            )
-        })?;
-    // Facts are captured by the same commit as the phase event, not refreshed
-    // on read. Subsystem-to-event adapters can replace this compatibility seam.
-    next.terminal = facts.terminal;
-    next.retryable = facts.retryable;
-    next.recoverable = facts.recoverable;
-    next.fenced = facts.fenced;
-    next.live_owner = facts.live_owner;
-    next.status = facts.status;
-    record.write_cook_state(next, CookStateWriteAuthority(()));
-    Ok(())
-}
-
-/// Internal store encoding; public record serialization deliberately omits it.
-pub(crate) fn persist_state(
-    record: &AgentTaskRunRecord,
-    value: &mut Value,
-) -> homeboy_core::Result<()> {
-    if let Some(state) = record.persisted_cook_state() {
-        let mut encoded = serde_json::to_value(state)
-            .map_err(|error| homeboy_core::Error::internal_json(error.to_string(), None))?;
-        encoded["applied_events"] = serde_json::to_value(&state.applied_events)
-            .map_err(|error| homeboy_core::Error::internal_json(error.to_string(), None))?;
-        value["cook_run_state"] = encoded;
-    }
-    Ok(())
 }
 
 /// The label of a terminal attempt: delivery's typed read model first, then
@@ -531,7 +368,6 @@ mod tests {
 
     fn state(phase: CookRunPhase, fenced: bool, live_owner: bool) -> CookRunState {
         CookRunState {
-            applied_events: Vec::new(),
             phase,
             terminal: !matches!(phase, P::Queued | P::Running),
             retryable: false,
@@ -544,82 +380,6 @@ mod tests {
 
     /// The exhaustive eligibility table: every phase, with and without a fence
     /// and a live owner, against every action.
-    #[test]
-    fn keyed_events_replay_after_later_events_and_refuse_illegal_edges() {
-        let initial = state(P::Queued, false, false);
-        let running = initial.apply(CookRunEvent::Started, "start-1").unwrap();
-        assert_eq!(
-            running.apply(CookRunEvent::Started, "start-1").unwrap(),
-            running
-        );
-        let candidate = running
-            .apply(CookRunEvent::CandidateRetained, "harvest-1")
-            .unwrap();
-        assert_eq!(
-            candidate.apply(CookRunEvent::Started, "start-1").unwrap(),
-            candidate
-        );
-        assert!(matches!(
-            candidate.apply(CookRunEvent::Failed, "start-1"),
-            Err(CookRunTransitionError::ReplayKeyConflict { .. })
-        ));
-        assert!(matches!(
-            initial.apply(CookRunEvent::Succeeded, "bad"),
-            Err(CookRunTransitionError::IllegalTransition { .. })
-        ));
-        assert_eq!(initial.phase, P::Queued);
-    }
-
-    #[test]
-    fn persisted_state_wins_over_legacy_derivation_and_is_not_public_json() {
-        let mut legacy = record(RunExecutionState::Running, serde_json::json!({}));
-        assert!(legacy.persisted_cook_state().is_none());
-        assert_eq!(CookRunState::of(&legacy).phase, P::Running);
-        legacy.revision = 1;
-        transition_record(&mut legacy, None).unwrap();
-        let mut internal = serde_json::to_value(&legacy).unwrap();
-        assert!(internal.get("cook_run_state").is_none());
-        persist_state(&legacy, &mut internal).unwrap();
-        let mut restored: AgentTaskRunRecord = serde_json::from_value(internal).unwrap();
-        assert_eq!(CookRunState::of(&restored), CookRunState::of(&legacy));
-        let replayed = CookRunState::of(&restored)
-            .apply(CookRunEvent::FactsUpdated, "record:1")
-            .unwrap();
-        assert_eq!(replayed, CookRunState::of(&restored));
-        restored.set_state_for_test(RunExecutionState::Failed);
-        assert_eq!(CookRunState::of(&restored).phase, P::Running);
-    }
-
-    #[test]
-    fn cook_state_write_authority_is_exclusive() {
-        fn scan(path: &std::path::Path) {
-            for entry in std::fs::read_dir(path).unwrap() {
-                let path = entry.unwrap().path();
-                if path.is_dir() {
-                    scan(&path);
-                    continue;
-                }
-                if path.extension().and_then(|ext| ext.to_str()) != Some("rs") {
-                    continue;
-                }
-                let source = std::fs::read_to_string(&path).unwrap();
-                let name = path.file_name().unwrap().to_str().unwrap();
-                if name != "cook_run_state.rs" {
-                    assert!(
-                        !source.contains("CookStateWriteAuthority(()"),
-                        "{}",
-                        path.display()
-                    );
-                    assert!(!source.contains(".write_cook_state("), "{}", path.display());
-                }
-                if name != "records.rs" && name != "cook_run_state.rs" {
-                    assert!(!source.contains(".cook_run_state ="), "{}", path.display());
-                }
-            }
-        }
-        scan(&std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src"));
-    }
-
     #[test]
     fn legal_actions_table_is_exhaustive() {
         let all = |actions: &[A]| actions.iter().copied().collect::<BTreeSet<_>>();
@@ -766,16 +526,7 @@ mod tests {
             ),
             (
                 P::Cancelled,
-                [
-                    None,
-                    None,
-                    Some(P::Continuing),
-                    Some(P::Cancelled),
-                    None,
-                    None,
-                    None,
-                    Some(P::Cancelled),
-                ],
+                [None, None, None, None, None, None, None, Some(P::Cancelled)],
             ),
             (P::Unknown, [None; 8]),
         ];
