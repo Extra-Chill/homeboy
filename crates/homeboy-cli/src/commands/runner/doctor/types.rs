@@ -48,6 +48,10 @@ pub struct RunnerDoctorOutput {
     /// Provider-specific Lab readiness, separate from runner substrate checks.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub provider_readiness: Option<RunnerDoctorProviderReadiness>,
+    /// Host disk, memory, and load plus Homeboy-owned root sizes, observed
+    /// within a bounded deadline on the runner itself.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub pressure: Option<homeboy::core::runner_inventory::PressureReport>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub repairs: Vec<RunnerRepair>,
 }

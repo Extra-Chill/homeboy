@@ -108,14 +108,31 @@ pub fn disk_inventory(runner_id: &str) -> homeboy_core::error::Result<serde_json
                 "connect the runner before requesting its inventory",
             )
         })?;
+    daemon_pressure(
+        url,
+        crate::load(runner_id)?.workspace_root.as_deref(),
+        std::time::Duration::from_secs(3),
+    )
+}
+
+/// The runner daemon's bounded pressure report (`/runner-inventory`), read
+/// through an already-connected session URL within `timeout`.
+pub fn daemon_pressure(
+    daemon_url: &str,
+    workspace_root: Option<&str>,
+    timeout: std::time::Duration,
+) -> homeboy_core::error::Result<serde_json::Value> {
     let client = reqwest::blocking::Client::builder()
         .no_proxy()
-        .timeout(std::time::Duration::from_secs(3))
+        .timeout(timeout)
         .build()
         .map_err(|error| homeboy_core::error::Error::internal_unexpected(error.to_string()))?;
     let response = client
-        .post(format!("{}/runner-inventory", url.trim_end_matches('/')))
-        .json(&serde_json::json!({"workspace_root": crate::load(runner_id)?.workspace_root}))
+        .post(format!(
+            "{}/runner-inventory",
+            daemon_url.trim_end_matches('/')
+        ))
+        .json(&serde_json::json!({ "workspace_root": workspace_root }))
         .send()
         .and_then(|response| response.error_for_status())
         .map_err(|error| homeboy_core::error::Error::internal_unexpected(error.to_string()))?;

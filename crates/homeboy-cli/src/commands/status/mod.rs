@@ -52,6 +52,8 @@ use types::{
 const STATUS_PROBE_CAPTURE_LIMIT: usize = 1024 * 1024;
 const STATUS_PROBE_HEARTBEAT: Duration = Duration::from_secs(1);
 const GLOBAL_STATUS_PROBE_BUDGET: Duration = Duration::from_secs(25);
+/// Deadline for compact status's walk of the Homeboy-owned roots.
+const STATUS_PRESSURE_BUDGET: Duration = Duration::from_secs(1);
 
 pub fn run(args: StatusArgs) -> CmdResult<StatusResult> {
     if args.full && (requires_component_enrichment(&args) || args.refresh) {
@@ -157,6 +159,10 @@ fn run_unisolated(
         timer.begin("refresh_dispatch_readiness");
         let dispatch = compact_dispatch_readiness();
 
+        timer.begin("observe_runner_pressure");
+        let pressure =
+            homeboy::core::runner_inventory::pressure_report(None, STATUS_PRESSURE_BUDGET).ok();
+
         return Ok((
             StatusResult::Compact(CompactStatusOutput {
                 command: "status",
@@ -169,6 +175,7 @@ fn run_unisolated(
                     command: "homeboy status --full",
                 },
                 dispatch,
+                pressure,
                 action: "Run `homeboy status --full` for context/inventory enrichment, `homeboy status --all` to inspect every configured component, or `homeboy status --global` for local control-plane health.",
             }),
             0,

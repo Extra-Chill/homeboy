@@ -245,6 +245,10 @@ pub struct CompactStatusOutput {
     /// this is a live, bounded refresh, never a cached negative served
     /// without a reprobe.
     pub dispatch: DispatchReadinessStatus,
+    /// Host disk, memory, and load plus Homeboy-owned root sizes, from
+    /// recorded estimates or a deadline-limited walk.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub pressure: Option<homeboy::core::runner_inventory::PressureReport>,
     pub action: &'static str,
 }
 

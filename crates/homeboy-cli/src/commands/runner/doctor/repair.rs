@@ -390,6 +390,7 @@ mod tests {
                 }),
                 admission_summary: None,
                 provider_readiness: None,
+                pressure: None,
                 repairs: Vec::new(),
             };
 
@@ -450,6 +451,7 @@ mod tests {
             }),
             admission_summary: None,
             provider_readiness: None,
+            pressure: None,
             repairs: Vec::new(),
         };
 
