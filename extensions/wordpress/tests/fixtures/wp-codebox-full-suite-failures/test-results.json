@@ -1,0 +1,62 @@
+{
+  "rawLogReferences": [
+    {
+      "kind": "commands-jsonl",
+      "path": "commands.jsonl"
+    },
+    {
+      "kind": "commands-log",
+      "path": "logs/commands.log"
+    },
+    {
+      "kind": "phpunit-result",
+      "path": "files/phpunit/.wp-codebox-result.txt"
+    },
+    {
+      "kind": "phpunit-output",
+      "path": "files/phpunit/.pg-test-result.txt"
+    },
+    {
+      "kind": "phpunit-junit",
+      "path": "files/phpunit/.wp-codebox-junit.xml"
+    }
+  ],
+  "schema": "wp-codebox/test-results/v1",
+  "status": "failed",
+  "suites": [
+    {
+      "failed": 17,
+      "name": "wordpress.phpunit",
+      "passed": 617,
+      "rawLogReferences": [
+        {
+          "kind": "phpunit-result",
+          "path": "files/phpunit/.wp-codebox-result.txt"
+        },
+        {
+          "kind": "phpunit-output",
+          "path": "files/phpunit/.pg-test-result.txt"
+        },
+        {
+          "kind": "phpunit-junit",
+          "path": "files/phpunit/.wp-codebox-junit.xml"
+        },
+        {
+          "kind": "commands-log",
+          "path": "logs/commands.log"
+        }
+      ],
+      "skipped": 7,
+      "status": "failed",
+      "tests": 641,
+      "unknown": 0
+    }
+  ],
+  "summary": {
+    "failed": 17,
+    "passed": 617,
+    "skipped": 7,
+    "total": 641,
+    "unknown": 0
+  }
+}
