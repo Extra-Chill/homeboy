@@ -55,6 +55,31 @@ def inventory_payload(command: str, provenance: dict[str, str], tests: list[str]
     }
 
 
+def failed_test_units(outcomes: dict[str, Any], failed_ids: list[str], inventory_ids: list[str]) -> dict[str, str] | None:
+    """Bind each failed ID to exactly one inventory unit of this shard.
+
+    A failed ID is either itself an inventory identity, or the optional
+    `failed_test_units` mapping names the inventory unit containing it (a
+    PHPUnit `Class::method` inside a file-granular unit; #18425). Returns the
+    mapping, or None when a failure is unbound, doubly bound, or the mapping
+    names anything outside the shard.
+    """
+    units = outcomes.get("failed_test_units", {})
+    if not isinstance(units, dict) or any(
+        not isinstance(key, str) or not key or not isinstance(value, str) or not value
+        for key, value in units.items()
+    ):
+        return None
+    inventory = set(inventory_ids)
+    if (
+        any((identity in inventory) == (identity in units) for identity in failed_ids)
+        or not set(units).issubset(failed_ids)
+        or not set(units.values()).issubset(inventory)
+    ):
+        return None
+    return dict(units)
+
+
 def write_json(path: Path, value: dict[str, Any]) -> None:
     temporary = path.with_name(f".{path.name}.tmp")
     temporary.write_text(json.dumps(value, indent=2, sort_keys=True) + "\n", encoding="utf-8")
@@ -92,6 +117,7 @@ def main() -> int:
 
     aggregate_ids: list[str] = []
     aggregate_failed: list[str] = []
+    aggregate_units: dict[str, str] = {}
     executions: list[dict[str, str]] = []
     shared_fields = ("command", "runner", "runner_fingerprint", "workspace_fingerprint", "execution_fingerprint", "inventory_fingerprint")
     for shard in shards:
@@ -128,7 +154,10 @@ def main() -> int:
         failed_ids = outcomes.get("failed_test_ids")
         if sorted(inventory_ids) != sorted(tests) or len(inventory_ids) != len(set(inventory_ids)):
             fail(f"{shard_id} inventory is not its exact planned projection")
-        if not isinstance(failed_ids, list) or any(not isinstance(value, str) or not value for value in failed_ids) or len(failed_ids) != len(set(failed_ids)) or not set(failed_ids).issubset(inventory_ids):
+        if not isinstance(failed_ids, list) or any(not isinstance(value, str) or not value for value in failed_ids) or len(failed_ids) != len(set(failed_ids)):
+            fail(f"{shard_id} outcomes contain malformed, duplicate, or unknown failures")
+        failed_units = failed_test_units(outcomes, failed_ids, inventory_ids)
+        if failed_units is None:
             fail(f"{shard_id} outcomes contain malformed, duplicate, or unknown failures")
         expected_inventory = inventory_payload(evidence_command, expected_provenance, inventory_ids)
         if inventory.get("inventory_fingerprint") != canonical_sha256(expected_inventory):
@@ -141,6 +170,7 @@ def main() -> int:
             fail(f"{shard_id} failed without complete observed failure identities")
         aggregate_ids.extend(inventory_ids)
         aggregate_failed.extend(failed_ids)
+        aggregate_units.update(failed_units)
         executions.append({"execution_fingerprint": execution, "id": shard_id})
 
     if len(aggregate_ids) != len(set(aggregate_ids)) or sorted(aggregate_ids) != sorted(parent_ids):
@@ -162,6 +192,8 @@ def main() -> int:
         "inventory_fingerprint": aggregate_inventory["inventory_fingerprint"],
         "failed_test_ids": sorted(aggregate_failed),
     }
+    if aggregate_units:
+        aggregate_outcomes["failed_test_units"] = dict(sorted(aggregate_units.items()))
     stem = "".join(char if char.isalnum() or char in "._-" else "-" for char in full_command).strip("-") or "homeboy-output"
     write_json(output / f"{stem}.test-inventory.json", aggregate_inventory)
     write_json(output / f"{stem}.test-outcomes.json", aggregate_outcomes)

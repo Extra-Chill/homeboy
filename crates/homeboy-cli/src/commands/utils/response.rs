@@ -2348,6 +2348,7 @@ pub(crate) fn write_test_evidence_sidecars(
             execution_fingerprint,
             mut tests,
             mut failed_test_ids,
+            failed_test_units,
         }) => {
             tests.sort_by(|left, right| left.id.cmp(&right.id));
             failed_test_ids.sort();
@@ -2372,16 +2373,24 @@ pub(crate) fn write_test_evidence_sidecars(
                     "inventory_fingerprint": inventory_fingerprint,
                     "tests": tests,
                 }),
-                serde_json::json!({
-                    "schema": "homeboy/test-outcomes/v1",
-                    "command": command,
-                    "runner": runner,
-                    "runner_fingerprint": runner_fingerprint,
-                    "workspace_fingerprint": workspace_fingerprint,
-                    "execution_fingerprint": execution_fingerprint,
-                    "inventory_fingerprint": inventory_fingerprint,
-                    "failed_test_ids": failed_test_ids,
-                }),
+                {
+                    let mut outcomes = serde_json::json!({
+                        "schema": "homeboy/test-outcomes/v1",
+                        "command": command,
+                        "runner": runner,
+                        "runner_fingerprint": runner_fingerprint,
+                        "workspace_fingerprint": workspace_fingerprint,
+                        "execution_fingerprint": execution_fingerprint,
+                        "inventory_fingerprint": inventory_fingerprint,
+                        "failed_test_ids": failed_test_ids,
+                    });
+                    // Failures reported more precisely than the planned unit
+                    // name the inventory entry that contains them (#18425).
+                    if !failed_test_units.is_empty() {
+                        outcomes["failed_test_units"] = serde_json::json!(failed_test_units);
+                    }
+                    outcomes
+                },
             )
         }
         Some(homeboy_extension_contract::test_results::TestRuntimeEvidence::InvalidEvidence {

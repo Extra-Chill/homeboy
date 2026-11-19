@@ -121,30 +121,48 @@ fn runtime_test_evidence(
         Err(reason) => return invalid(&reason),
     };
 
-    let mut failed_test_ids = failures
+    let observed = failures
         .map(|input| {
             input
                 .failures
                 .iter()
-                .map(|failure| failure.test_name.trim().to_string())
+                .map(|failure| {
+                    (
+                        failure.test_name.trim().to_string(),
+                        normalize_failure_test_file(&failure.test_file, source_path),
+                    )
+                })
                 .collect::<Vec<_>>()
         })
         .unwrap_or_default();
-    if failed_test_ids
+    if observed
         .iter()
-        .any(|id| id.is_empty() || id == "unknown test")
+        .any(|(id, _)| id.is_empty() || id == "unknown test")
     {
         return invalid("failed-test detail parser did not expose stable test IDs");
     }
+    let mut failed_test_ids = observed
+        .iter()
+        .map(|(id, _)| id.clone())
+        .collect::<Vec<_>>();
     failed_test_ids.sort();
     if failed_test_ids.windows(2).any(|ids| ids[0] == ids[1]) {
         return invalid("failed-test detail parser exposed duplicate test IDs");
     }
-    if failed_test_ids
-        .iter()
-        .any(|id| plan.tests.binary_search(id).is_err())
-    {
-        return invalid("observed failed test ID is absent from the runtime plan");
+    // A failure is bound to the planned unit that contains it: either its own
+    // ID is a planned identity (exact-ID runners), or the runner plans whole
+    // test files and the failure names the planned file it ran in (#18425).
+    let mut failed_test_units = BTreeMap::new();
+    for (id, test_file) in &observed {
+        if plan.tests.binary_search(id).is_ok() {
+            continue;
+        }
+        match test_file {
+            Some(unit) if plan.tests.binary_search(unit).is_ok() => {
+                failed_test_units.insert(id.clone(), unit.clone());
+            }
+            _ => return invalid("observed failed test ID is absent from the runtime plan"),
+        }
     }
     if !runner_succeeded {
         let Some(counts) = counts else {
@@ -179,7 +197,28 @@ fn runtime_test_evidence(
             .map(|id| TestRuntimeIdentity { id })
             .collect(),
         failed_test_ids,
+        failed_test_units,
     }
+}
+
+/// Normalize a failure's reported test file into the component-relative form
+/// runtime plans use for file-granular test units.
+fn normalize_failure_test_file(test_file: &str, source_path: &Path) -> Option<String> {
+    let mut file = test_file.trim().replace('\\', "/");
+    if file.is_empty() {
+        return None;
+    }
+    let root = source_path.to_string_lossy().replace('\\', "/");
+    let root = root.trim_end_matches('/');
+    if !root.is_empty() {
+        if let Some(relative) = file.strip_prefix(&format!("{root}/")) {
+            file = relative.to_string();
+        }
+    }
+    while let Some(relative) = file.strip_prefix("./") {
+        file = relative.to_string();
+    }
+    (!file.is_empty() && !file.starts_with('/')).then_some(file)
 }
 
 fn runtime_test_plan(
@@ -425,6 +464,7 @@ fn empty_changed_scope_evidence(component_id: &str, changed_since: &str) -> Test
         execution_fingerprint,
         tests: Vec::new(),
         failed_test_ids: Vec::new(),
+        failed_test_units: BTreeMap::new(),
     }
 }
 
@@ -3012,6 +3052,7 @@ mod tests {
         let TestRuntimeEvidence::Complete {
             tests,
             failed_test_ids,
+            failed_test_units,
             execution_fingerprint,
             ..
         } = evidence
@@ -3023,7 +3064,155 @@ mod tests {
             vec!["suite::fails", "suite::passes"]
         );
         assert_eq!(failed_test_ids, vec!["suite::fails"]);
+        // Exact-ID runners bind each failure to itself: no unit mapping.
+        assert!(failed_test_units.is_empty());
         assert!(canonical_sha256(&execution_fingerprint));
+    }
+
+    fn file_unit_shard_env(root: &Path, profile: &InventoryProfile) -> Vec<(String, String)> {
+        let runner_fingerprint = runner_fingerprint(root, "rustc", profile).unwrap();
+        let workspace_fingerprint = workspace_fingerprint(root, profile).unwrap();
+        let manifest = root.join("shard.json");
+        std::fs::write(
+            &manifest,
+            serde_json::to_vec(&serde_json::json!({
+                "schema": "homeboy/test-shard-manifest/v1",
+                "id": "shard-1",
+                "runner": "rustc",
+                "runner_fingerprint": runner_fingerprint,
+                "workspace_fingerprint": workspace_fingerprint,
+                "inventory_fingerprint": "c".repeat(64),
+                "tests": ["tests/unit/BarTest.php", "tests/unit/FooTest.php"],
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+        vec![(
+            TEST_SHARD_MANIFEST_ENV.to_string(),
+            manifest.to_string_lossy().to_string(),
+        )]
+    }
+
+    fn failed_in_file(id: &str, test_file: &str) -> TestFailure {
+        TestFailure {
+            test_file: test_file.to_string(),
+            ..failed_identity(id)
+        }
+    }
+
+    #[test]
+    fn method_failures_bind_to_their_planned_file_unit() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let profile = runtime_fixture_profile(temp.path());
+        let ci_env = file_unit_shard_env(temp.path(), &profile);
+        let absolute = temp.path().join("tests/unit/FooTest.php");
+        let failures = TestAnalysisInput {
+            failures: vec![
+                failed_in_file("Foo_Test::test_b", "tests/unit/FooTest.php"),
+                failed_in_file("Foo_Test::test_a", &absolute.to_string_lossy()),
+            ],
+            total: 5,
+            passed: 3,
+        };
+
+        let evidence = runtime_test_evidence(
+            &ci_env,
+            temp.path(),
+            Some(&profile),
+            false,
+            Some(&TestCounts::new(5, 3, 2, 0)),
+            Some(&failures),
+            None,
+        );
+
+        let TestRuntimeEvidence::Complete {
+            tests,
+            failed_test_ids,
+            failed_test_units,
+            ..
+        } = evidence
+        else {
+            panic!("expected complete file-unit evidence, got {evidence:?}");
+        };
+        assert_eq!(
+            tests.into_iter().map(|test| test.id).collect::<Vec<_>>(),
+            vec!["tests/unit/BarTest.php", "tests/unit/FooTest.php"]
+        );
+        // Failures stay precise: two failing methods in one file are two IDs.
+        assert_eq!(
+            failed_test_ids,
+            vec!["Foo_Test::test_a", "Foo_Test::test_b"]
+        );
+        assert_eq!(
+            failed_test_units,
+            BTreeMap::from([
+                (
+                    "Foo_Test::test_a".to_string(),
+                    "tests/unit/FooTest.php".to_string()
+                ),
+                (
+                    "Foo_Test::test_b".to_string(),
+                    "tests/unit/FooTest.php".to_string()
+                ),
+            ])
+        );
+    }
+
+    #[test]
+    fn method_failure_outside_every_planned_unit_is_invalid_evidence() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let profile = runtime_fixture_profile(temp.path());
+        let ci_env = file_unit_shard_env(temp.path(), &profile);
+
+        for test_file in [
+            "tests/unit/OtherTest.php",
+            "",
+            "/wordpress/wp-content/plugins/foo/tests/unit/FooTest.php",
+        ] {
+            let failures = TestAnalysisInput {
+                failures: vec![failed_in_file("Foo_Test::test_a", test_file)],
+                total: 1,
+                passed: 0,
+            };
+            let evidence = runtime_test_evidence(
+                &ci_env,
+                temp.path(),
+                Some(&profile),
+                false,
+                Some(&TestCounts::new(1, 0, 1, 0)),
+                Some(&failures),
+                None,
+            );
+            assert!(
+                matches!(
+                    evidence,
+                    TestRuntimeEvidence::InvalidEvidence { ref reason }
+                        if reason == "observed failed test ID is absent from the runtime plan"
+                ),
+                "{test_file:?}: {evidence:?}"
+            );
+        }
+
+        // File binding does not relax the count reconciliation.
+        let failures = TestAnalysisInput {
+            failures: vec![failed_in_file("Foo_Test::test_a", "tests/unit/FooTest.php")],
+            total: 2,
+            passed: 0,
+        };
+        let evidence = runtime_test_evidence(
+            &ci_env,
+            temp.path(),
+            Some(&profile),
+            false,
+            Some(&TestCounts::new(2, 0, 2, 0)),
+            Some(&failures),
+            None,
+        );
+        assert!(matches!(
+            evidence,
+            TestRuntimeEvidence::InvalidEvidence { ref reason }
+                if reason.contains("do not account for every reported failure")
+        ));
     }
 
     #[test]

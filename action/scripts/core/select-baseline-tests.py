@@ -44,7 +44,11 @@ def main():
     if not base or base.get("schema") != "homeboy/test-inventory/v1" or base.get("runner") != runner:
         raise ValueError("Base inventory is missing or has a different runner")
     known = {test["id"] for test in base["tests"]}
-    selected = sorted(identities & known)
+    # Rerun the inventory unit that contains each failure: file-granular
+    # runners report failures per method but plan and shard whole files (#18425).
+    units = gate.failed_test_units(command, directory) or {}
+    candidate_units = {units.get(identity, identity) for identity in identities}
+    selected = sorted(candidate_units & known)
     # New candidate-only tests remain absent from the base evidence, so the
     # differential gate still attributes their failures to the candidate.
     if not selected:
@@ -57,7 +61,7 @@ def main():
     path.write_text(json.dumps(shard, sort_keys=True) + "\n")
     with open(os.environ["GITHUB_OUTPUT"], "a") as output:
         output.write(f"selection-file={path}\n")
-    print(f"Baseline selected {len(selected)} candidate failure identities ({len(identities - known)} candidate-only)")
+    print(f"Baseline selected {len(selected)} candidate failure identities ({len(candidate_units - known)} candidate-only)")
 
 
 if __name__ == "__main__":

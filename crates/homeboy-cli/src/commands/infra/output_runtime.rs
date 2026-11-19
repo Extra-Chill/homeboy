@@ -1046,6 +1046,57 @@ mod tests {
             json!([{"id": "nondeterministic"}, {"id": "stable"}])
         );
         assert_eq!(outcomes["failed_test_ids"], json!([]));
+        assert!(outcomes.get("failed_test_units").is_none());
+    }
+
+    /// Failures reported per method inside file-granular planned units keep
+    /// their precise IDs and name the containing inventory entry (#18425).
+    #[test]
+    fn review_test_outcomes_bind_method_failures_to_file_units() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let result_path = dir.path().join("review-test.json");
+        let result = json!({
+            "passed": false,
+            "status": "failed",
+            "test_runtime_evidence": {
+                "status": "complete",
+                "runner": "phpunit",
+                "runner_fingerprint": "a".repeat(64),
+                "workspace_fingerprint": "b".repeat(64),
+                "execution_fingerprint": "c".repeat(64),
+                "tests": [{"id": "tests/unit/FooTest.php"}, {"id": "tests/unit/BarTest.php"}],
+                "failed_test_ids": ["Foo_Test::test_b", "Foo_Test::test_a"],
+                "failed_test_units": {
+                    "Foo_Test::test_a": "tests/unit/FooTest.php",
+                    "Foo_Test::test_b": "tests/unit/FooTest.php",
+                },
+            }
+        });
+        let run = CommandRun::from_stdout_result(Ok(result), 1)
+            .with_identity(&CommandIdentity::with_operation("review", "test"));
+
+        assert!(write_output_file(
+            &run,
+            CommandOutputFileMode::GenericEnvelope,
+            Some(result_path.to_str().unwrap()),
+        ));
+
+        let outcomes: Value = serde_json::from_slice(
+            &std::fs::read(dir.path().join("review-test.test-outcomes.json")).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(outcomes["schema"], "homeboy/test-outcomes/v1");
+        assert_eq!(
+            outcomes["failed_test_ids"],
+            json!(["Foo_Test::test_a", "Foo_Test::test_b"])
+        );
+        assert_eq!(
+            outcomes["failed_test_units"],
+            json!({
+                "Foo_Test::test_a": "tests/unit/FooTest.php",
+                "Foo_Test::test_b": "tests/unit/FooTest.php",
+            })
+        );
     }
 
     /// A `--changed-since` selection that decided on zero tests still

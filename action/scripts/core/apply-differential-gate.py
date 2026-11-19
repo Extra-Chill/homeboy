@@ -161,13 +161,37 @@ def test_outcomes(command: str, directory: str) -> tuple[str, set[str] | None, s
 
     The inventory makes an empty failure set meaningful. Outcome evidence names
     only failures observed by the adapter; it never invents pass or skip facts.
+    Failed IDs stay precise even when the inventory plans coarser units: a new
+    failing method in an already-failing test file is still a new failure.
     """
+    state, inventory_ids, failed_ids, _units = test_outcomes_with_units(command, directory)
+    return state, inventory_ids, failed_ids
+
+
+def failed_test_units(command: str, directory: str) -> dict[str, str] | None:
+    """Map each validated failed test ID to the inventory unit that contains it.
+
+    Runners whose inventory is file-granular (WordPress PHPUnit) report failures
+    as `Class::method` and bind them to their planned file through the outcome
+    sidecar's `failed_test_units`; exact-ID runners map each failure to itself.
+    Use this whenever a failure must be turned into something to run again.
+    Returns None unless the evidence is complete. See Extra-Chill/homeboy#18425.
+    """
+    state, _inventory_ids, failed_ids, units = test_outcomes_with_units(command, directory)
+    if state != "complete" or failed_ids is None or units is None:
+        return None
+    return {identity: units.get(identity, identity) for identity in failed_ids}
+
+
+def test_outcomes_with_units(
+    command: str, directory: str
+) -> tuple[str, set[str] | None, set[str] | None, dict[str, str] | None]:
     stem = output_stem(command)
     evidence_command = test_evidence_command_identity(command)
     outcomes = read_json(os.path.join(directory, f"{stem}.test-outcomes.json"))
     inventory = read_json(os.path.join(directory, f"{stem}.test-inventory.json"))
     if outcomes is None or inventory is None:
-        return "missing", None, None
+        return "missing", None, None, None
     tests = inventory.get("tests") if isinstance(inventory, dict) else None
     failed_ids = outcomes.get("failed_test_ids") if isinstance(outcomes, dict) else None
     provenance = ("runner", "runner_fingerprint", "workspace_fingerprint", "execution_fingerprint")
@@ -186,18 +210,34 @@ def test_outcomes(command: str, directory: str) -> tuple[str, set[str] | None, s
         or not isinstance(tests, list)
         or not isinstance(failed_ids, list)
     ):
-        return "invalid", None, None
+        return "invalid", None, None, None
+    # Optional and additive: failures reported more precisely than the planned
+    # unit name the inventory entry that contains them (#18425).
+    units = outcomes.get("failed_test_units", {})
+    if not isinstance(units, dict) or any(
+        not isinstance(key, str) or not key or not isinstance(value, str) or not value
+        for key, value in units.items()
+    ):
+        return "invalid", None, None, None
     inventory_ids = [item.get("id") for item in tests if isinstance(item, dict)]
+    inventory_set = set(inventory_ids)
     if (
         len(inventory_ids) != len(tests)
         # An empty inventory is valid: a changed-scope run can correctly select
         # zero tests (Extra-Chill/homeboy#15022). It yields an empty failure set.
         or any(not isinstance(value, str) or not value for value in inventory_ids + failed_ids)
-        or len(set(inventory_ids)) != len(inventory_ids)
+        or len(inventory_set) != len(inventory_ids)
         or len(set(failed_ids)) != len(failed_ids)
-        or not set(failed_ids).issubset(inventory_ids)
+        # Every failure is bound to exactly one inventory unit: itself, or the
+        # unit its mapping names. A mapping never shadows an inventory ID.
+        or any(
+            (identity in inventory_set) == (identity in units)
+            for identity in failed_ids
+        )
+        or not set(units).issubset(failed_ids)
+        or not set(units.values()).issubset(inventory_set)
     ):
-        return "invalid", None, None
+        return "invalid", None, None, None
     canonical_inventory = {
         "command": evidence_command,
         "execution_fingerprint": inventory["execution_fingerprint"],
@@ -214,8 +254,8 @@ def test_outcomes(command: str, directory: str) -> tuple[str, set[str] | None, s
         any(len(inventory[key]) != 64 or any(char not in "0123456789abcdef" for char in inventory[key]) for key in ("runner_fingerprint", "workspace_fingerprint", "execution_fingerprint", "inventory_fingerprint"))
         or inventory["inventory_fingerprint"] != expected_fingerprint
     ):
-        return "invalid", None, None
-    return "complete", set(inventory_ids), set(failed_ids)
+        return "invalid", None, None, None
+    return "complete", inventory_set, set(failed_ids), dict(units)
 
 
 def test_evidence_defect(command: str, directory: str) -> str | None:
