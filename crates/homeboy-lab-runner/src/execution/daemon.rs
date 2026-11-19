@@ -992,12 +992,16 @@ fn admission_recovery_timeout_error(
             ADMISSION_RECOVERY_WINDOW.as_secs(),
             source.message,
         ),
-        json!({ "field": "reconnect", "id": runner_id, "phase": "lab_handoff" }),
+        json!({
+            "field": "reconnect",
+            "id": runner_id,
+            "phase": "lab_handoff",
+            "tried": [format!(
+                "Re-run `homeboy runner refresh-homeboy {runner_id}` once, then retry the batch."
+            )],
+        }),
     )
     .with_retryable(true)
-    .with_hint(format!(
-        "Re-run `homeboy runner refresh-homeboy {runner_id}` once, then retry the batch."
-    ))
 }
 
 fn strict_admission_response_is_complete(
