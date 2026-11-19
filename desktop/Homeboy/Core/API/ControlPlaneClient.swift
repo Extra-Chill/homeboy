@@ -226,6 +226,7 @@ private struct ControlPlaneActionAcknowledgement: Decodable {
 /// mirrors the versioned parameter schema Homeboy core validates against
 /// (`homeboy-control-plane-contract::action`).
 enum ControlPlaneActionParameters {
+    case recover
     case empty
     case cancel(reason: String?)
     case retry(force: Bool)
@@ -237,6 +238,8 @@ enum ControlPlaneActionParameters {
 
     var wireObject: [String: Any] {
         switch self {
+        case .recover:
+            return ["schema": "homeboy/control-plane-recover-parameters/v1", "data": [:] as [String: Any]]
         case .empty:
             return ["schema": "homeboy/control-plane-empty-action-payload/v1"]
         case .cancel(let reason):

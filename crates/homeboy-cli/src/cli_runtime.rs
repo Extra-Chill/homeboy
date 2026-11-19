@@ -973,6 +973,12 @@ fn register_startup_providers_after_reconcile(
     // environment its launcher admitted and reconciles its Cook record when
     // the child exits.
     crate::agents::agent_task_service::register_cook_step_hooks();
+    crate::agents::recovery_action::register_preflight(
+        crate::commands::agent_task::recover::recovery_preflight,
+    );
+    crate::agents::recovery_action::register_dispatcher(
+        crate::commands::route::reconstruct_cook_attempt_dispatcher,
+    );
     // A workflow instance is a daemon job that submits `step` jobs and
     // evaluates gates; it never runs work itself.
     homeboy::core::daemon::workflow_job::register_workflow_job_driver();

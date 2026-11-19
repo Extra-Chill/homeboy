@@ -495,7 +495,8 @@ impl CookRecoveryOverrides {
 
 /// Corrected replacement verification for the already-applied candidate of a
 /// [`CookRecoveryStep::ReplaceGates`] step.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub enum CookReplacementProof {
     /// Execute these corrected gates against the applied candidate.
     Gates(crate::agent_task_gate::VerifyGateOptions),
@@ -508,7 +509,8 @@ pub enum CookReplacementProof {
 /// Operator inputs that feed [`CookRecoveryStep::ReplaceGates`]. Replacement
 /// proof always requires an explicit authorization; `recover` never supplies
 /// one on its own.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct CookReplaceGatesRequest {
     pub proof: CookReplacementProof,
     /// Explicit operator authorization for the recorded replacement proof.
@@ -519,7 +521,8 @@ pub struct CookReplaceGatesRequest {
 }
 
 /// Operator inputs that feed [`CookRecoveryStep::Publish`].
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
 pub struct CookPublishRequest {
     /// Complete review form for a candidate whose provider outcome recorded
     /// none (or declared the task incomplete).
@@ -741,6 +744,10 @@ const RECIPE_ONLY_STATUS: &str = "recipe_only_recovery_required";
 /// A Cook ID resolves through the same latest-attempt selection continuation
 /// uses, so every step (including replacement gates and publication) acts on
 /// the attempt `agent-task status` reports.
+pub fn recovers_as_run(id: &str) -> Result<bool> {
+    crate::recovery_action::recovers_as_run(id)
+}
+
 pub fn plan_cook_recovery(id: &str) -> Result<CookRecoveryPlan> {
     let store = agent_task_lifecycle::AgentTaskLifecycleStore::from_environment()?;
     if let Ok(record) = store.read_record(id) {

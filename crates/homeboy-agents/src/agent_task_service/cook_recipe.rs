@@ -3790,6 +3790,127 @@ mod tests {
         }
     }
 
+    #[test]
+    fn recover_action_executes_the_planned_step() {
+        use homeboy_control_plane_contract::*;
+        for case in ["continue", "blocked", "resume", "candidate", "preflight"] {
+            homeboy_core::test_support::with_isolated_home(|_| {
+                let recipe = recipe();
+                let run_id = &recipe.attempts[0].run_id;
+                let resume_plan = AgentTaskPlan::new("resume", Vec::new());
+                let plan = if case == "resume" {
+                    &resume_plan
+                } else {
+                    &recipe.attempts[0].plan
+                };
+                let store =
+                    agent_task_lifecycle::AgentTaskLifecycleStore::from_environment().unwrap();
+                agent_task_lifecycle::submit_plan(plan, Some(run_id)).unwrap();
+                if case != "resume" {
+                    CookRecipeStore::from_environment()
+                        .unwrap()
+                        .persist_recipe(&recipe)
+                        .unwrap();
+                    agent_task_lifecycle::record_cook_attempt_in_store(
+                        &store,
+                        &recipe.cook_id,
+                        1,
+                        run_id,
+                    )
+                    .unwrap();
+                    store
+                        .mutate_record(run_id, |record| {
+                            record.metadata["cook_continuation"] =
+                                serde_json::json!({"state": "claimed", "owner_pid": u32::MAX});
+                            if case == "blocked" {
+                                record.metadata["cancellation_fence"] =
+                                    serde_json::json!({"reason": "test blocker"});
+                            }
+                            true
+                        })
+                        .unwrap();
+                }
+                let service = crate::orchestration::OrchestrationService::new(
+                    crate::orchestration::LifecycleStoreLookup::new(store.clone()),
+                );
+                let request = ControlPlaneActionRequest {
+                    schema: CONTROL_PLANE_ACTION_REQUEST_SCHEMA.into(),
+                    effect_id: action_effect_id("test", run_id, "recover", case),
+                    action: ControlPlaneAction::Recover,
+                    idempotency_key: case.into(),
+                    actor: "test".into(),
+                    expected_updated_at: None,
+                    confirmed: true,
+                    parameters: ControlPlaneActionPayload {
+                        schema: CONTROL_PLANE_RECOVER_PARAMETERS_SCHEMA.into(),
+                        data: serde_json::json!({"preflight": case == "preflight", "candidate_ref": if case == "candidate" { Some("missing-candidate") } else { None }}),
+                    },
+                };
+                let run = RunId::new(run_id).unwrap();
+                if case == "blocked" {
+                    let resource = crate::orchestration::project_record(
+                        &store.read_record(run_id).unwrap(),
+                        None,
+                    )
+                    .unwrap();
+                    let entry = resource
+                        .action_eligibility
+                        .unwrap()
+                        .actions
+                        .into_iter()
+                        .find(|a| a.action == ControlPlaneAction::Recover)
+                        .unwrap();
+                    assert_eq!(
+                        entry.availability,
+                        ControlPlaneActionAvailability::Unavailable
+                    );
+                    assert!(entry.reason.contains("fenced"), "{}", entry.reason);
+                }
+                let before = store.read_record(run_id).unwrap();
+                let ack = super::super::with_recovery_step_submit_for_test(
+                    |_| Ok("test-recovery-job".into()),
+                    || {
+                        super::super::with_scheduling_daemon_start(
+                            || Ok(()),
+                            || service.execute_action(&run, &request),
+                        )
+                    },
+                )
+                .unwrap();
+                match case {
+                    "continue" => {
+                        assert_eq!(ack.result.data["step"]["kind"], "continue", "{ack:?}");
+                        assert!(ack.result.data["admission"].is_object(), "{ack:?}");
+                    }
+                    "preflight" => {
+                        assert_eq!(ack.result.data["preflight"], true, "{ack:?}");
+                        assert_eq!(
+                            store.read_record(run_id).unwrap().updated_at,
+                            before.updated_at
+                        );
+                        assert_eq!(
+                            service
+                                .effect_status(&run, &request.effect_id)
+                                .unwrap()
+                                .state,
+                            ControlPlaneEffectExecutionState::NotStarted
+                        );
+                    }
+                    "candidate" => {
+                        assert_eq!(ack.outcome, ControlPlaneActionOutcome::Failed);
+                        assert!(ack.message.is_some());
+                    }
+                    "blocked" => assert_eq!(ack.outcome, ControlPlaneActionOutcome::Failed),
+                    "resume" => assert_eq!(
+                        ack.result.schema, CONTROL_PLANE_RECOVER_RESULT_SCHEMA,
+                        "{ack:?}"
+                    ),
+                    _ => unreachable!(),
+                }
+            });
+        }
+    }
+
     fn recipe() -> AgentTaskCookRecipe {
         let request = AgentTaskRequest {
             schema: crate::agent_task::AGENT_TASK_REQUEST_SCHEMA.to_string(),

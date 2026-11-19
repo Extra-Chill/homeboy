@@ -434,13 +434,13 @@ pub fn recovery_step_in_flight(run_id: &str) -> Result<Option<Value>> {
     ))
 }
 
-#[cfg(feature = "test-support")]
+#[cfg(any(test, feature = "test-support"))]
 thread_local! {
     static RECOVERY_SUBMIT: std::cell::RefCell<Option<Box<dyn Fn(&ExecutionStepIntent) -> Result<String>>>> = std::cell::RefCell::new(None);
 }
 
 /// Exercise the public admission adapter against an owned step-job harness.
-#[cfg(feature = "test-support")]
+#[cfg(any(test, feature = "test-support"))]
 pub fn with_recovery_step_submit_for_test<R>(
     submit: impl Fn(&ExecutionStepIntent) -> Result<String> + 'static,
     body: impl FnOnce() -> R,
@@ -501,7 +501,7 @@ pub fn recovery_step_exit_code(run_id: &str) -> Result<Option<i32>> {
 }
 
 fn recovery_job_id(intent: &ExecutionStepIntent) -> Result<String> {
-    #[cfg(feature = "test-support")]
+    #[cfg(any(test, feature = "test-support"))]
     if let Some(result) =
         RECOVERY_SUBMIT.with(|slot| slot.borrow().as_ref().map(|submit| submit(intent)))
     {

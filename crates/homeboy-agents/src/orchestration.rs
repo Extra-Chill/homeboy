@@ -1805,6 +1805,48 @@ impl OrchestrationService<LifecycleStoreLookup> {
             .store
             .read_record(&resolved)
             .map_err(map_lifecycle_error)?;
+        if request.action == ControlPlaneAction::Recover
+            && request.parameters.data["preflight"] == true
+        {
+            let parameters: crate::recovery_action::RecoverParameters =
+                serde_json::from_value(request.parameters.data.clone()).map_err(|error| {
+                    ControlPlaneError::invalid_argument(format!("recover parameters: {error}"))
+                })?;
+            let (data, code) = if crate::recovery_action::recovers_as_run(&resolved)
+                .map_err(map_lifecycle_error)?
+            {
+                (
+                    serde_json::json!({"run_id": resolved, "step": {"kind": "resume"}, "preflight": true}),
+                    0,
+                )
+            } else {
+                crate::recovery_action::execute(&resolved, parameters)
+                    .map_err(map_lifecycle_error)?
+            };
+            return Ok(ControlPlaneActionAcknowledgement {
+                schema: CONTROL_PLANE_ACTION_ACKNOWLEDGEMENT_SCHEMA.into(),
+                acknowledgement: request.effect_id.0.clone(),
+                run: RunId::new(&resolved)
+                    .map_err(|e| ControlPlaneError::invalid_argument(e.to_string()))?,
+                action: request.action,
+                idempotency_key: request.idempotency_key.clone(),
+                actor: request.actor.clone(),
+                accepted_at: now_timestamp(),
+                completed_at: now_timestamp(),
+                outcome: if code == 0 {
+                    ControlPlaneActionOutcome::Succeeded
+                } else {
+                    ControlPlaneActionOutcome::Failed
+                },
+                resource: project_record(&record, None)?,
+                result: ControlPlaneActionPayload {
+                    schema: homeboy_control_plane_contract::CONTROL_PLANE_RECOVER_RESULT_SCHEMA
+                        .into(),
+                    data,
+                },
+                message: None,
+            });
+        }
         // Admission is fenced by the projection committed with the lifecycle
         // record. The filesystem record is now a compatibility read for the
         // domain effect, never the authority deciding whether it may start.
@@ -1985,6 +2027,61 @@ impl OrchestrationService<LifecycleStoreLookup> {
             )
         } else {
             match request.action {
+                ControlPlaneAction::Recover => {
+                    let parameters: crate::recovery_action::RecoverParameters =
+                        serde_json::from_value(request.parameters.data.clone()).map_err(
+                            |error| {
+                                ControlPlaneError::invalid_argument(format!(
+                                    "recover parameters: {error}"
+                                ))
+                            },
+                        )?;
+                    let recovered = if parameters.candidate_ref.is_none()
+                        && crate::recovery_action::recovers_as_run(&resolved)
+                            .map_err(map_lifecycle_error)?
+                    {
+                        if parameters.preflight {
+                            Ok((
+                                serde_json::json!({"run_id": resolved, "step": {"kind": "resume"}, "preflight": true}),
+                                0,
+                            ))
+                        } else {
+                            let mut resume_request = request.clone();
+                            resume_request.action = ControlPlaneAction::Resume;
+                            resume_request.idempotency_key =
+                                homeboy_engine_primitives::content_hash::sha256_hex(
+                                    format!("recover-resume:{}", request.idempotency_key)
+                                        .as_bytes(),
+                                );
+                            resume_request.effect_id =
+                                homeboy_control_plane_contract::action_effect_id(
+                                    "recover",
+                                    &resolved,
+                                    "resume",
+                                    &request.idempotency_key,
+                                );
+                            resume_request.parameters = ControlPlaneActionPayload::empty();
+                            self.execute_action_with_delegates(requested_id, &resume_request, retry, resume, promote)
+                                .map(|ack| {
+                                    let code = ack.result.data["exit_code"].as_i64().map(|code| code as i32)
+                                        .unwrap_or_else(|| i32::from(ack.outcome == ControlPlaneActionOutcome::Failed));
+                                    (serde_json::json!({"resume": ack.result, "message": ack.message}), code)
+                                })
+                                .map_err(|error| run_boundary_error_to_homeboy(error, "recover", None))
+                        }
+                    } else {
+                        crate::recovery_action::execute(&resolved, parameters)
+                    };
+                    let current = self
+                        .lookup
+                        .store
+                        .read_record(&resolved)
+                        .map_err(map_lifecycle_error)?;
+                    match recovered {
+                        Ok((report, code)) => (if code == 0 { ControlPlaneActionOutcome::Succeeded } else { ControlPlaneActionOutcome::Failed }, project_record(&current, None)?, ControlPlaneActionPayload { schema: homeboy_control_plane_contract::CONTROL_PLANE_RECOVER_RESULT_SCHEMA.into(), data: report }, None),
+                        Err(error) => (ControlPlaneActionOutcome::Failed, project_record(&current, None)?, ControlPlaneActionPayload::empty(), Some(error.attributed_message())),
+                    }
+                }
                 ControlPlaneAction::Cancel if record.state().is_terminal() => {
                     let record = self
                         .lookup
@@ -2588,7 +2685,7 @@ fn action_unavailability(
     // These actions have explicit idempotent terminal dispositions below.
     if matches!(
         action,
-        ControlPlaneAction::Cancel | ControlPlaneAction::Reconcile
+        ControlPlaneAction::Recover | ControlPlaneAction::Cancel | ControlPlaneAction::Reconcile
     ) {
         return None;
     }
@@ -2633,6 +2730,7 @@ fn recover_interrupted_action_acknowledgement(
         ))
     };
     let (outcome, resource, result, message) = match request.action {
+        ControlPlaneAction::Recover => failed("interrupted recovery requires authoritative reconciliation")?,
         ControlPlaneAction::Cancel if current.state().is_terminal() => (
             if current.state() == RunExecutionState::Cancelled {
                 ControlPlaneActionOutcome::Succeeded
@@ -3673,6 +3771,7 @@ fn validate_action_request(request: &ControlPlaneActionRequest) -> Result<(), Co
 
 const fn action_name(action: ControlPlaneAction) -> &'static str {
     match action {
+        ControlPlaneAction::Recover => "recover",
         ControlPlaneAction::Cancel => "cancel",
         ControlPlaneAction::Resume => "resume",
         ControlPlaneAction::PlacementUpdate => "placement_update",
@@ -10418,7 +10517,15 @@ mod tests {
             let projected = project_record(&record, None).expect("projection");
             let actions = projected.action_eligibility.expect("report").actions;
             let recovery = projected.recovery.expect("Cook recovery projection");
-            assert_eq!(actions.is_empty(), legal.is_empty(), "{label}");
+            assert_eq!(
+                actions
+                    .iter()
+                    .filter(|a| a.action != ControlPlaneAction::Recover)
+                    .count()
+                    == 0,
+                legal.is_empty(),
+                "{label}"
+            );
             if actions.is_empty()
                 || !state.allows(crate::agent_task_lifecycle::CookRunAction::Recover)
             {
@@ -10442,7 +10549,12 @@ mod tests {
         record.metadata["cancellation_fence"] = json!({"reason": "cancelled"});
         let projected = project_record(&record, None).expect("projection");
         assert_eq!(projected.state, ControlPlaneState::Cancelled);
-        assert!(projected.action_eligibility.unwrap().actions.is_empty());
+        assert!(projected
+            .action_eligibility
+            .unwrap()
+            .actions
+            .iter()
+            .all(|a| a.availability == ControlPlaneActionAvailability::Unavailable));
         let recovery = projected.recovery.expect("Cook recovery projection");
         assert_eq!(recovery.step, "none");
         assert!(!recovery.command.contains("agent-task recover "));

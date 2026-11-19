@@ -27,7 +27,7 @@ pub(crate) fn lifecycle_action_eligibility_with_roots(
         return ControlPlaneActionEligibilityReport {
             schema: CONTROL_PLANE_ACTION_ELIGIBILITY_SCHEMA.to_string(),
             run: RunId::new(&record.run_id).expect("validated durable run ID"),
-            actions: Vec::new(),
+            actions: vec![recovery_action(record)],
         };
     }
     let cancellation = if !state.allows(CookRunAction::Cancel) {
@@ -56,6 +56,7 @@ pub(crate) fn lifecycle_action_eligibility_with_roots(
         schema: CONTROL_PLANE_ACTION_ELIGIBILITY_SCHEMA.to_string(),
         run: RunId::new(&record.run_id).expect("durable run IDs are validated before persistence"),
         actions: vec![
+            recovery_action(record),
             action(
                 ControlPlaneAction::Cancel,
                 cancellation,
@@ -106,6 +107,33 @@ pub(crate) fn lifecycle_action_eligibility_with_roots(
             ),
         ],
     }
+}
+
+fn recovery_action(record: &AgentTaskRunRecord) -> ControlPlaneActionEligibility {
+    use crate::agent_task_service::{plan_cook_recovery, CookRecoveryStep};
+    let decision = if record.metadata.get("cook_id").is_none()
+        && crate::agent_task_service::recovers_as_run(&record.run_id).unwrap_or(false)
+    {
+        available("resume")
+    } else {
+        match plan_cook_recovery(&record.run_id) {
+            Ok(plan) => match plan.step {
+                CookRecoveryStep::Blocked { blocker, .. } => unavailable(blocker),
+                CookRecoveryStep::None { reason } => unavailable(reason),
+                CookRecoveryStep::Continue => available("continue"),
+                step => available(step.action_name().unwrap_or("recover")),
+            },
+            Err(error) => unavailable(error.attributed_message()),
+        }
+    };
+    action(
+        ControlPlaneAction::Recover,
+        decision,
+        ControlPlaneActionConfirmation::None,
+        Vec::new(),
+        true,
+        "agent_task_run",
+    )
 }
 
 /// Reconcile is offered exactly when the fleet reconciler would select the run.
@@ -407,6 +435,7 @@ mod tests {
                     .map(|entry| entry.action)
                     .collect::<Vec<_>>(),
                 vec![
+                    ControlPlaneAction::Recover,
                     ControlPlaneAction::Cancel,
                     ControlPlaneAction::Resume,
                     ControlPlaneAction::PlacementUpdate,
