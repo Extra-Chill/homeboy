@@ -2,6 +2,11 @@
 
 All notable changes to the **wordpress** extension will be documented in this file.
 
+## [3.56.3] - 2026-11-19
+
+### Fixed
+- bind PHPUnit method failures to file-granular WordPress test units
+
 ## [3.56.2] - 2026-11-18
 
 ### Changed
