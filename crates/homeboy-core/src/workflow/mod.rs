@@ -16,7 +16,7 @@ pub use advance::{
     advance, Command, Event, FinishedStatus, InstanceState, InstanceStatus, StepPhase, StepResult,
     StepSubmission, SubmissionKind,
 };
-pub use definition::{Every, WorkflowDefinition, WORKFLOW_SCHEMA};
+pub use definition::{Every, Watch, WatchRef, WorkflowDefinition, WORKFLOW_SCHEMA};
 pub use gate::Gate;
 
 /// Directory of registered workflow definitions: `<config>/workflows/<id>.json`.

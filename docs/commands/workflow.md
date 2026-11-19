@@ -48,6 +48,7 @@ Reused steps retain their recorded outputs, run ids, item records, and original 
   "env":     { "public": ["NAME"], "secrets": ["SECRET_REF"] },   // the admitted environment; nothing else is inherited
   "budget":  { "max_step_runs": 20, "deadline": "12h" },          // hard stop → budget_exhausted
   "every":   { "interval": "24h", "at": "03:00Z", "overlap": "skip" },  // optional cadence (see below)
+  "watch":   { "refs": [{ "branch": "repo@main" }], "debounce": "5m" },  // optional ref trigger, instead of `every` (see below)
   "steps": [
     {
       "id": "string",
@@ -193,6 +194,14 @@ A step runs with `env_clear()` plus its admitted environment:
 - **Overlap skip.** A slot that comes due while the previous instance of the same cadence is not terminal is skipped and counted. `skip` is the only `overlap` policy.
 - **Where it lives.** Registrations are stored in the observation store beside the daemon job ledger, so they survive daemon restarts. A store schema bump starts fresh and drops them. A daemon that is not running admits nothing: run the always-on cadences on a resident daemon (`HOMEBOY_DAEMON_IDLE_TIMEOUT_SECS=0 homeboy daemon ensure-running`, or a runner's service daemon).
 - **Observe and stop.** `workflow list` shows every cadence with its next due time, fire and skip counts, last instance, and last admission error. `workflow cancel <workflow-id>` stops a cadence; its instances are ordinary instances you can cancel separately.
+
+### Ref trigger (`watch`)
+
+`workflow run` on a definition with `watch` registers it with the daemon like a cadence, but the daemon admits an instance when a watched ref changes instead of on a timer.
+
+- **Refs.** `{"branch": "repo@branch"}` watches the branch head SHA, `{"release": "repo"}` the latest version-sorted tag, `{"file": "path"}` the file's SHA-256. A repo is anything `git ls-remote` accepts; relative repos and files resolve against the directory `workflow run` was called from. A missing branch, tag, or file is an empty value; a ref that cannot be read is reported as `last_error` and never counts as a change.
+- **Debounce.** Registration records each ref's current value without starting anything. Each tick re-observes the refs and records them durably on the registration; a change (re)starts the `debounce`, and once it has elapsed with no further change one instance named `watch-<change time>` is admitted.
+- **One at a time.** A change whose debounce has elapsed while an instance this watch started is still running waits for it to finish, then starts one instance. `every` and `watch` cannot be combined, and neither can `next_pass`. `workflow list` shows the observed values and any pending change; `workflow cancel <workflow-id>` stops the watch.
 
 **Built-in `homeboy.retention`.** Homeboy ships a retention workflow, `homeboy.retention`: every hour, one `homeboy` step runs `cleanup automatic-retention` with a 50-minute timeout. The daemon registers it when it starts, first due one hour later, unless an operator registered their own `homeboy.retention` or cancelled it; both are kept. `workflow run homeboy.retention` and `workflow validate homeboy.retention` resolve the built-in when no registry file has that id.
 

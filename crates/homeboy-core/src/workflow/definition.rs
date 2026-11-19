@@ -34,6 +34,10 @@ pub struct WorkflowDefinition {
     /// daemon, which admits one instance per due slot.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub every: Option<Every>,
+    /// Optional ref trigger: `workflow run` registers the definition with
+    /// the daemon, which admits one instance when a watched ref changes.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub watch: Option<Watch>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub next_pass: Option<NextPass>,
     pub steps: Vec<StepDefinition>,
@@ -84,6 +88,66 @@ pub struct Every {
 pub enum Overlap {
     #[default]
     Skip,
+}
+
+/// Start one instance when any watched ref changes and has then held still
+/// for `debounce`.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Watch {
+    pub refs: Vec<WatchRef>,
+    pub debounce: String,
+}
+
+/// One watched ref. Local paths resolve against the admitting directory.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case", deny_unknown_fields)]
+pub enum WatchRef {
+    /// `repo@branch`: the branch head SHA.
+    Branch(String),
+    /// `repo`: the latest version-sorted tag.
+    Release(String),
+    /// `path`: the file's content hash.
+    File(String),
+}
+
+impl Watch {
+    pub fn debounce(&self) -> Result<Duration> {
+        crate::duration::parse_duration("watch.debounce", &self.debounce)
+    }
+
+    fn validate(&self) -> Result<()> {
+        self.debounce()?;
+        if self.refs.is_empty() {
+            return Err(invalid("watch.refs", "declare at least one ref"));
+        }
+        for watched in &self.refs {
+            let valid = match watched {
+                WatchRef::Branch(target) => target
+                    .rsplit_once('@')
+                    .is_some_and(|(repo, branch)| !repo.is_empty() && !branch.is_empty()),
+                WatchRef::Release(target) | WatchRef::File(target) => !target.is_empty(),
+            };
+            if !valid {
+                return Err(invalid(
+                    "watch.refs",
+                    format!("`{}` is not a `repo@branch`, repo, or file", watched.key()),
+                ));
+            }
+        }
+        Ok(())
+    }
+}
+
+impl WatchRef {
+    /// The stable key the daemon records this ref's last value under.
+    pub fn key(&self) -> String {
+        match self {
+            WatchRef::Branch(target) => format!("branch:{target}"),
+            WatchRef::Release(target) => format!("release:{target}"),
+            WatchRef::File(target) => format!("file:{target}"),
+        }
+    }
 }
 
 impl Every {
@@ -411,11 +475,20 @@ impl WorkflowDefinition {
             every.interval()?;
             every.at_offset()?;
         }
+        if let Some(watch) = &self.watch {
+            if self.every.is_some() {
+                return Err(invalid(
+                    "watch",
+                    "a workflow has `every` or `watch`, not both",
+                ));
+            }
+            watch.validate()?;
+        }
         if let Some(next) = &self.next_pass {
-            if next.max_iterations == 0 || self.every.is_some() {
+            if next.max_iterations == 0 || self.every.is_some() || self.watch.is_some() {
                 return Err(invalid(
                     "next_pass",
-                    "requires max_iterations >= 1 and no cadence",
+                    "requires max_iterations >= 1 and no cadence or watch",
                 ));
             }
             if self.inputs.contains_key("iteration") || self.inputs.contains_key("previous") {
@@ -989,6 +1062,14 @@ mod tests {
             (
                 |v| v["every"] = json!({"interval": "1h", "overlap": "allow"}),
                 "unknown variant",
+            ),
+            (
+                |v| v["watch"] = json!({"refs": [{"branch": "main"}], "debounce": "1m"}),
+                "`repo@branch`",
+            ),
+            (
+                |v| v["watch"] = json!({"refs": [{"file": "a"}], "debounce": "soon"}),
+                "duration",
             ),
             (|v| v["id"] = json!(".hidden"), "workflow id"),
             (

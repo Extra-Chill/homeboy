@@ -17,11 +17,18 @@
 //!   admitting it again.
 //!   Every registration write is a compare-and-set on the due time.
 //!
+//! - **Watch.** A definition with `watch` instead records its refs' last
+//!   observed values on the registration. Each tick re-observes them; a
+//!   change starts the debounce, and once it elapses one instance named by
+//!   the change is admitted, unless the previous one is still running.
+//!
 //! Registrations outlive any one daemon process, so they live in the
 //! observation store beside the daemon's job ledger. Every instance is
 //! admitted into and looked up in that one store, so overlap holds across
 //! daemon restarts.
 
+use std::collections::BTreeMap;
+use std::path::Path;
 use std::sync::{Arc, OnceLock, RwLock};
 
 use rusqlite::{params, Connection, OptionalExtension, TransactionBehavior};
@@ -31,7 +38,7 @@ use serde_json::{json, Value};
 use super::workflow_job::WorkflowJobRequest;
 use super::JobStore;
 use crate::error::{Error, Result};
-use crate::workflow::WorkflowDefinition;
+use crate::workflow::{WatchRef, WorkflowDefinition};
 
 pub const CADENCE_SCHEMA: &str = "homeboy/workflow-cadence/v1";
 const DAY_MS: u64 = 24 * 60 * 60 * 1000;
@@ -71,7 +78,34 @@ pub struct Cadence {
     /// so `status` can see a failing cadence in the local store (#17234).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub failing: Option<CadenceFailure>,
+    /// Durable observations of a `watch` registration.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub watch: Option<WatchState>,
 }
+
+/// What a `watch` registration last saw. While a change is waiting out its
+/// debounce, `next_due_ms` is when it may start an instance; otherwise 0.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct WatchState {
+    pub debounce_ms: u64,
+    /// Last observed value of each ref, by [`WatchRef::key`].
+    pub observed: BTreeMap<String, String>,
+    /// When the change not yet handled by an instance was last observed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub changed_at_ms: Option<u64>,
+    /// When the refs were last observed; they are polled at most every
+    /// [`WATCH_POLL_MS`], not on every orchestration tick.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub polled_at_ms: Option<u64>,
+}
+
+/// How often a watch re-observes its refs. Remote refs cost a network round
+/// trip, so the orchestration tick must not pay one every pass.
+pub const WATCH_POLL_MS: u64 = 60_000;
+/// Bound on one ref observation, so an unreachable remote cannot stall the
+/// orchestration tick.
+const WATCH_OBSERVE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
 
 /// The run of failed instances a cadence is currently in.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -164,10 +198,78 @@ pub fn decide(cadence: &Cadence, now_ms: u64, previous_active: bool) -> Decision
 
 /// `every-<slot as UTC RFC 3339>`: the instance name of one slot.
 pub fn slot_instance_name(slot_ms: u64) -> String {
-    let at = chrono::DateTime::<chrono::Utc>::from_timestamp_millis(slot_ms as i64)
+    instance_name("every", slot_ms, chrono::SecondsFormat::Secs)
+}
+
+/// `watch-<change as UTC RFC 3339>`: the instance name of one observed change.
+pub fn change_instance_name(changed_at_ms: u64) -> String {
+    instance_name("watch", changed_at_ms, chrono::SecondsFormat::Millis)
+}
+
+fn instance_name(prefix: &str, at_ms: u64, format: chrono::SecondsFormat) -> String {
+    let at = chrono::DateTime::<chrono::Utc>::from_timestamp_millis(at_ms as i64)
         .unwrap_or_default()
-        .to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
-    format!("every-{at}")
+        .to_rfc3339_opts(format, true);
+    format!("{prefix}-{at}")
+}
+
+/// The current value of every ref `template` watches, resolved from its
+/// admitting directory. A ref that could not be observed is left out and its
+/// error returned, so it is never mistaken for a change.
+fn observe_refs(template: &WorkflowJobRequest) -> (BTreeMap<String, String>, Option<String>) {
+    let mut observed = BTreeMap::new();
+    let mut errors = Vec::new();
+    let refs = template
+        .definition
+        .watch
+        .iter()
+        .flat_map(|watch| &watch.refs);
+    for watched in refs {
+        match observe_ref(watched, Path::new(&template.cwd)) {
+            Ok(value) => {
+                observed.insert(watched.key(), value);
+            }
+            Err(error) => errors.push(format!("{}: {error}", watched.key())),
+        }
+    }
+    (observed, (!errors.is_empty()).then(|| errors.join("; ")))
+}
+
+/// A branch head SHA, the latest version-sorted tag, or a file's SHA-256.
+/// An absent branch, tag, or file is the empty value.
+fn observe_ref(watched: &WatchRef, cwd: &Path) -> std::result::Result<String, String> {
+    let ls_remote = |args: &[&str]| -> std::result::Result<String, String> {
+        let args = [&["ls-remote"], args].concat();
+        let output = crate::git::run_git_with_env_timeout(
+            cwd,
+            &args,
+            "git ls-remote for workflow watch",
+            &[("GIT_TERMINAL_PROMPT".to_string(), "0".to_string())],
+            WATCH_OBSERVE_TIMEOUT,
+        )
+        .map_err(|error| error.message)?;
+        Ok(output.lines().next().unwrap_or_default().trim().to_string())
+    };
+    match watched {
+        WatchRef::Branch(target) => {
+            let (repo, branch) = target.rsplit_once('@').unwrap_or((target, ""));
+            let line = ls_remote(&[repo, &format!("refs/heads/{branch}")])?;
+            Ok(line
+                .split_whitespace()
+                .next()
+                .unwrap_or_default()
+                .to_string())
+        }
+        WatchRef::Release(repo) => ls_remote(&["--tags", "--refs", "--sort=-v:refname", repo]),
+        WatchRef::File(path) => match std::fs::read(cwd.join(path)) {
+            Ok(bytes) => {
+                use sha2::Digest;
+                Ok(format!("{:x}", sha2::Sha256::digest(bytes)))
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(String::new()),
+            Err(error) => Err(error.to_string()),
+        },
+    }
 }
 
 /// The request for one slot: the template, named by the slot.
@@ -267,7 +369,32 @@ pub fn register(
             "a cadence registers its workflow without `--instance`",
         ));
     }
-    let (anchor_ms, interval_ms) = grid(&template.definition, now_ms)?;
+    let watch = template
+        .definition
+        .watch
+        .as_ref()
+        .map(|watch| -> Result<WatchState> {
+            Ok(WatchState {
+                debounce_ms: watch.debounce()?.as_millis() as u64,
+                observed: observe_refs(&template).0,
+                changed_at_ms: None,
+                polled_at_ms: Some(now_ms),
+            })
+        })
+        .transpose()?;
+    let (anchor_ms, interval_ms) = match watch {
+        Some(_) => (now_ms, 0),
+        None => grid(&template.definition, now_ms)?,
+    };
+    // A watch is due only once a change has waited out its debounce.
+    let initial_due = |builtin: bool| match first_due(anchor_ms, interval_ms, now_ms) {
+        _ if watch.is_some() => 0,
+        // An operator's cadence fires on its first slot. A built-in is
+        // installed by a starting daemon and waits one interval, so daemon
+        // start never doubles as a maintenance run.
+        due if builtin && due <= now_ms => due + interval_ms,
+        due => due,
+    };
     let mut connection = open()?;
     let transaction = connection
         .transaction_with_behavior(TransactionBehavior::Immediate)
@@ -279,6 +406,7 @@ pub fn register(
         }
         Some(mut existing) => {
             let same_cadence = existing.request.definition.every == template.definition.every
+                && existing.request.definition.watch == template.definition.watch
                 && existing.cancelled_at_ms.is_none();
             let disposition = if same_cadence && existing.request == template {
                 "unchanged"
@@ -289,8 +417,9 @@ pub fn register(
                 existing.registered_at_ms = now_ms;
                 existing.anchor_ms = anchor_ms;
                 existing.interval_ms = interval_ms;
-                existing.next_due_ms = first_due(anchor_ms, interval_ms, now_ms);
+                existing.next_due_ms = initial_due(false);
                 existing.cancelled_at_ms = None;
+                existing.watch = watch;
             }
             existing.request = template;
             existing.builtin = builtin;
@@ -305,13 +434,7 @@ pub fn register(
                 registered_at_ms: now_ms,
                 anchor_ms,
                 interval_ms,
-                // An operator's cadence fires on its first slot. A built-in is
-                // installed by a starting daemon and waits one interval, so
-                // daemon start never doubles as a maintenance run.
-                next_due_ms: match first_due(anchor_ms, interval_ms, now_ms) {
-                    due if builtin && due <= now_ms => due + interval_ms,
-                    due => due,
-                },
+                next_due_ms: initial_due(builtin),
                 cancelled_at_ms: None,
                 last_instance: None,
                 pending: None,
@@ -321,6 +444,7 @@ pub fn register(
                 last_skipped_at_ms: None,
                 last_error: None,
                 failing: None,
+                watch,
             },
             "registered",
         ),
@@ -392,8 +516,12 @@ pub fn admit_due(store: &JobStore, now_ms: u64) -> Vec<Value> {
         .into_iter()
         .filter(|cadence| cadence.cancelled_at_ms.is_none())
         .inspect(|cadence| record_outcome(store, cadence))
-        .filter(|cadence| now_ms >= cadence.next_due_ms)
-        .filter_map(|cadence| admit_one(store, cadence, now_ms).ok())
+        .filter_map(|cadence| match cadence.watch {
+            Some(_) => admit_watched(store, cadence, now_ms).ok(),
+            None if now_ms >= cadence.next_due_ms => admit_one(store, cadence, now_ms).ok(),
+            None => None,
+        })
+        .filter(|admitted| !admitted.is_null())
         .collect()
 }
 
@@ -439,18 +567,8 @@ fn record_outcome(store: &JobStore, cadence: &Cadence) {
 fn admit_one(store: &JobStore, cadence: Cadence, now_ms: u64) -> Result<Value> {
     let due = cadence.next_due_ms;
     let workflow = cadence.workflow.clone();
-    // A crash left this slot pending: complete it where it was admitted.
-    if let Some(pending) = cadence.pending.clone() {
-        let admitted = if instance_activity(store, &pending.instance)?.is_some() {
-            Ok("existing")
-        } else {
-            admit_slot(
-                store,
-                &slot_request(&cadence.request, &pending.instance_name),
-            )
-        };
-        finish(&workflow, due, &pending, &admitted)?;
-        return Ok(fired(&workflow, &pending.instance, &admitted));
+    if let Some(pending) = &cadence.pending {
+        return complete_pending(store, &cadence, pending);
     }
     let previous_active = match cadence
         .last_instance
@@ -498,24 +616,109 @@ fn admit_one(store: &JobStore, cadence: Cadence, now_ms: u64) -> Result<Value> {
             slot_ms,
             instance_name,
             next_due_ms,
-        } => {
-            let request = slot_request(&cadence.request, &instance_name);
-            let pending = PendingSlot {
-                slot_ms,
-                instance_name,
-                instance: request.instance.clone(),
-                next_due_ms,
-            };
-            if !advance(&workflow, due, |cadence| {
-                cadence.pending = Some(pending.clone())
-            })? {
-                return Ok(Value::Null);
+        } => fire(store, &cadence, slot_ms, instance_name, next_due_ms),
+    }
+}
+
+/// A crash left this slot pending: complete it where it was admitted.
+fn complete_pending(store: &JobStore, cadence: &Cadence, pending: &PendingSlot) -> Result<Value> {
+    let admitted = if instance_activity(store, &pending.instance)?.is_some() {
+        Ok("existing")
+    } else {
+        admit_slot(
+            store,
+            &slot_request(&cadence.request, &pending.instance_name),
+        )
+    };
+    finish(&cadence.workflow, cadence.next_due_ms, pending, &admitted)?;
+    Ok(fired(&cadence.workflow, &pending.instance, &admitted))
+}
+
+/// Record the slot as pending, then admit its instance.
+fn fire(
+    store: &JobStore,
+    cadence: &Cadence,
+    slot_ms: u64,
+    instance_name: String,
+    next_due_ms: u64,
+) -> Result<Value> {
+    let request = slot_request(&cadence.request, &instance_name);
+    let pending = PendingSlot {
+        slot_ms,
+        instance_name,
+        instance: request.instance.clone(),
+        next_due_ms,
+    };
+    let (workflow, due) = (&cadence.workflow, cadence.next_due_ms);
+    if !advance(workflow, due, |cadence| {
+        cadence.pending = Some(pending.clone())
+    })? {
+        return Ok(Value::Null);
+    }
+    let admitted = admit_slot(store, &request);
+    finish(workflow, due, &pending, &admitted)?;
+    Ok(fired(workflow, &pending.instance, &admitted))
+}
+
+/// Re-observe a watch registration's refs. A change is recorded and restarts
+/// the debounce; once the debounce elapses with no instance of this watch
+/// running, one instance named by the change is admitted.
+fn admit_watched(store: &JobStore, cadence: Cadence, now_ms: u64) -> Result<Value> {
+    if let Some(pending) = &cadence.pending {
+        return complete_pending(store, &cadence, pending);
+    }
+    let Some(watch) = &cadence.watch else {
+        return Ok(Value::Null);
+    };
+    let poll_due = watch
+        .polled_at_ms
+        .is_none_or(|polled| now_ms >= polled + WATCH_POLL_MS);
+    if poll_due {
+        let (observed, error) = observe_refs(&cadence.request);
+        let changed = observed
+            .iter()
+            .filter(|(key, value)| watch.observed.get(*key) != Some(*value))
+            .map(|(key, _)| key.clone())
+            .collect::<Vec<_>>();
+        let debounce_ms = watch.debounce_ms;
+        advance(&cadence.workflow, cadence.next_due_ms, |cadence| {
+            if let Some(error) = error {
+                cadence.last_error = Some(error);
             }
-            let admitted = admit_slot(store, &request);
-            finish(&workflow, due, &pending, &admitted)?;
-            Ok(fired(&workflow, &pending.instance, &admitted))
+            if !changed.is_empty() {
+                cadence.next_due_ms = now_ms + debounce_ms;
+            }
+            if let Some(watch) = cadence.watch.as_mut() {
+                if !changed.is_empty() {
+                    watch.changed_at_ms = Some(now_ms);
+                }
+                watch.polled_at_ms = Some(now_ms);
+                watch.observed.extend(observed);
+            }
+        })?;
+        if !changed.is_empty() {
+            return Ok(json!({ "workflow": cadence.workflow, "changed": changed }));
         }
     }
+    let Some(changed_at_ms) = watch.changed_at_ms else {
+        return Ok(Value::Null);
+    };
+    if now_ms < cadence.next_due_ms {
+        return Ok(Value::Null);
+    }
+    // One instance per watch at a time: the change waits for it to finish.
+    if let Some(previous) = cadence.last_instance.as_deref() {
+        if instance_activity(store, previous)? == Some(true) {
+            return Ok(Value::Null);
+        }
+    }
+    fire(
+        store,
+        &cadence,
+        changed_at_ms,
+        change_instance_name(changed_at_ms),
+        0,
+    )
 }
 
 type Admission = Result<&'static str>;
@@ -525,6 +728,9 @@ fn finish(workflow: &str, due: u64, pending: &PendingSlot, admitted: &Admission)
     advance(workflow, due, |cadence| {
         cadence.pending = None;
         cadence.next_due_ms = pending.next_due_ms;
+        if let Some(watch) = cadence.watch.as_mut() {
+            watch.changed_at_ms = None;
+        }
         match admitted {
             Ok(_) => {
                 cadence.fired += 1;
@@ -616,12 +822,16 @@ pub fn view(cadence: &Cadence) -> Value {
     json!({
         "workflow": cadence.workflow,
         "every": cadence.request.definition.every,
+        "watch": cadence.request.definition.watch,
+        "observed": cadence.watch.as_ref().map(|watch| &watch.observed),
+        "changed_at": at(cadence.watch.as_ref().and_then(|watch| watch.changed_at_ms)),
         "status": if cadence.cancelled_at_ms.is_some() { "cancelled" } else { "active" },
         "builtin": cadence.builtin,
         "definition_digest": cadence.request.definition_digest,
         "inputs": cadence.request.inputs,
         "registered_at": at(Some(cadence.registered_at_ms)),
-        "next_due_at": at(Some(cadence.next_due_ms)).filter(|_| cadence.cancelled_at_ms.is_none()),
+        "next_due_at": at(Some(cadence.next_due_ms))
+            .filter(|_| cadence.cancelled_at_ms.is_none() && cadence.next_due_ms > 0),
         "cancelled_at": at(cadence.cancelled_at_ms),
         "fired": cadence.fired,
         "last_fired_slot": at(cadence.last_fired_at_ms),

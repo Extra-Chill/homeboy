@@ -236,12 +236,11 @@ pub fn run(args: WorkflowArgs) -> CmdResult<Value> {
 fn run_workflow(args: RunArgs) -> CmdResult<Value> {
     let (definition, source) = load(&args.workflow)?;
     validate(&definition)?;
-    if definition.every.is_some()
-        && (args.wait || args.instance.is_some() || args.resume_from.is_some())
-    {
+    let triggered = definition.every.is_some() || definition.watch.is_some();
+    if triggered && (args.wait || args.instance.is_some() || args.resume_from.is_some()) {
         return Err(Error::validation_invalid_argument(
-            "every",
-            "a workflow with `every` is registered as a cadence; each slot names its own instance, so `--wait`, `--instance`, and `--resume-from` do not apply",
+            if definition.watch.is_some() { "watch" } else { "every" },
+            "a workflow with `every` or `watch` is registered with the daemon; each trigger names its own instance, so `--wait`, `--instance`, and `--resume-from` do not apply",
             None,
             None,
         ));
@@ -249,7 +248,7 @@ fn run_workflow(args: RunArgs) -> CmdResult<Value> {
     if let Some(runner) = &args.on {
         return run_on_runner(runner, &definition, &args);
     }
-    if definition.every.is_some() {
+    if triggered {
         return register_cadence(&definition, source, &args);
     }
     let provided = args
@@ -757,6 +756,7 @@ fn registered_workflows() -> Result<Value> {
                     "valid": true,
                     "steps": definition.steps.len(),
                     "every": definition.every,
+                    "watch": definition.watch,
                 }),
                 Err(error) => json!({
                     "path": path.display().to_string(),
@@ -773,6 +773,7 @@ fn registered_workflows() -> Result<Value> {
             "valid": true,
             "steps": definition.steps.len(),
             "every": definition.every,
+            "watch": definition.watch,
         }));
     }
     Ok(json!({ "registry": dir.display().to_string(), "entities": workflows }))
