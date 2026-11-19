@@ -158,6 +158,12 @@ A step runs with `env_clear()` plus its admitted environment:
 - `homeboy` and `cook` steps also get the runtime environment a detached Cook gets (provider process variables and Homeboy's `HOMEBOY_*` configuration).
 - Every step also gets `HOMEBOY_WORKFLOW_INSTANCE`, the id of the instance whose step is running. `workflow run` reads it and records the admitting instance as the new instance's `parent`.
 
+### Process lifetime
+
+A step owns every process it starts, and they end when the step ends. Where the runner has a delegated cgroup subtree (the Lab runner unit has `Delegate=yes`), each step runs in its own `jobs/<job-id>/` cgroup from its first instruction. When the step finishes, is cancelled, or is replaced, Homeboy stops that cgroup with `cgroup.kill`, so a process that left the step's session or process group (`setsid`, `nohup`, `&`, a daemonizing server) is stopped too.
+
+So a long-lived service a later step needs (a `php -S` site, a database, a browser) must be started by the step that uses it, and stopped by that step or left to end with it. Without cgroup delegation (macOS, or hosts without cgroup v2), cancellation stops the step's process tree and a detached process may outlive a finished step. That is a gap in enforcement, not a supported way to share processes across steps.
+
 ### Native next passes (`next_pass`)
 
 `next_pass` starts another instance only after the current pass succeeds and its optional `when` gate passes. It forwards every input, replacing only `next_pass.inputs` (typed JSON values and templates). No self-admitting `again`/`retry` commands or caller-maintained stall counters are needed. A chain that ends records why in the last instance's `reason` (for example "chain ended: step `evaluate` output `/blocker_signatures` unchanged for 3 passes"), so `runs show` distinguishes a finished chain from a stalled one.
