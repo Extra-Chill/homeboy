@@ -166,7 +166,7 @@ fn a_stopped_chain_notifies_once_and_a_successful_one_never() {
             assert_eq!(fact("Attempts").as_deref(), Some("1"));
             let error = fact("Error").unwrap();
             assert!(
-                !error.contains('\n') && !error.contains("second line"),
+                error.contains("exited with status 3: import broke") && !error.contains('\n'),
                 "{error}"
             );
             assert!(
