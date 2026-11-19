@@ -9,6 +9,7 @@ pub(super) mod support;
 mod candidate_ref;
 mod contract;
 mod dispatch;
+mod history;
 mod lifecycle;
 mod promotion_review;
 mod status_purity;

@@ -101,6 +101,7 @@ pub(super) fn agent_task_resource_behavior(
         agent_task::AgentTaskCommand::Status(_)
         | agent_task::AgentTaskCommand::ValidatePlan(_)
         | agent_task::AgentTaskCommand::ActiveScope(_)
+        | agent_task::AgentTaskCommand::History(_)
         | agent_task::AgentTaskCommand::Diagnose(_)
         // Provider discovery reads controller-local extension and runtime
         // manifests under bounded probes. Classifying it as an admitted

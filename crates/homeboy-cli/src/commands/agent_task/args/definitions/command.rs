@@ -40,6 +40,20 @@ pub struct ActiveScopeArgs {
     pub context: String,
 }
 
+#[derive(Args, Debug)]
+pub struct HistoryArgs {
+    /// Task URL (issue or pull request) whose Cooks and attempts are listed.
+    /// A PR URL also returns the Cook that published that PR.
+    #[arg(long)]
+    pub task_url: String,
+    /// Maximum entries per page (capped at 100).
+    #[arg(long, default_value_t = 20)]
+    pub limit: usize,
+    /// Opaque continuation from a previous page's `next_cursor`.
+    #[arg(long)]
+    pub cursor: Option<String>,
+}
+
 #[derive(Subcommand, Debug)]
 pub enum AgentTaskCommand {
     /// Retrieve the canonical candidate into a clean git worktree.
@@ -96,6 +110,9 @@ pub enum AgentTaskCommand {
     Status(StatusArgs),
     /// Read the indexed active checkout ownership for an opaque caller context.
     ActiveScope(ActiveScopeArgs),
+    /// List every Cook and attempt for a task URL from the durable run store,
+    /// newest first, with outcome, failure class, candidate head and PR URL.
+    History(HistoryArgs),
     /// Reconcile one durable agent-task run or explicit Cook group, or the whole
     /// active fleet with `--all`. This is a preview by default; use `--apply`
     /// only after reviewing the authoritative provider state. Success leaves

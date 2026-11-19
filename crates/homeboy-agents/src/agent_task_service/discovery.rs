@@ -385,9 +385,80 @@ pub fn discover_runs_page(
     options: AgentTaskDiscoveryPageOptions,
 ) -> Result<AgentTaskDiscoveryPage> {
     let requested_limit = options.limit;
+    let scope = AgentTaskDiscoveryPageScope::from_options(filter, &options);
+    let filters = AgentTaskDiscoveryOptions {
+        repo: options.repo,
+        workspace: options.workspace,
+        task_url: options.task_url,
+        submitted_after: options.submitted_after,
+        state: options.state,
+        placement: options.placement,
+        parent_id: options.parent_id,
+        branch: options.branch,
+        ..Default::default()
+    };
+    let page = read_discovery_record_page(
+        filter,
+        requested_limit,
+        options.cursor.as_deref(),
+        scope,
+        |record, submitted_after| matches_discovery_options(record, &filters, submitted_after),
+    )?;
+    let now = chrono::Utc::now();
+    let live = (filter == AgentTaskDiscoveryFilter::Active).then(live_supervisor_jobs);
+    let runs = page
+        .records
+        .into_iter()
+        .map(|record| discovery_run(record, live.as_ref(), now))
+        .collect::<Vec<_>>();
+    // Active health covers the indexed set; other pages report the filtered rows.
+    let record_health = page
+        .active_health
+        .unwrap_or_else(|| AgentTaskRecordHealthSummary {
+            schema: agent_task_lifecycle::AGENT_TASK_RECORD_HEALTH_SCHEMA.to_string(),
+            healthy: runs.len(),
+            ..Default::default()
+        });
+    Ok(AgentTaskDiscoveryPage {
+        schema: "homeboy/agent-task-discovery-page/v1",
+        filter: filter_name(filter),
+        count: runs.len(),
+        total: None,
+        requested_limit,
+        limit: page.limit,
+        physical_count: page.physical_count,
+        search_status: page.search_status,
+        truncated: page.next_cursor.is_some(),
+        next_cursor: page.next_cursor,
+        record_health,
+        runs,
+    })
+}
+
+/// One bounded, newest-first page of matching durable records plus its
+/// scope-bound continuation.
+struct DiscoveryRecordPage {
+    records: Vec<AgentTaskRunRecord>,
+    limit: usize,
+    physical_count: usize,
+    search_status: AgentTaskDiscoverySearchStatus,
+    next_cursor: Option<String>,
+    active_health: Option<AgentTaskRecordHealthSummary>,
+}
+
+/// Read one immutable-keyset physical page and keep the records `matches`
+/// accepts. The cursor encodes the observation store's `(started_at, id)`
+/// ordering key, so it remains valid if the returned boundary row is deleted
+/// before the caller resumes.
+fn read_discovery_record_page(
+    filter: AgentTaskDiscoveryFilter,
+    requested_limit: usize,
+    cursor: Option<&str>,
+    mut scope: AgentTaskDiscoveryPageScope,
+    matches: impl Fn(&AgentTaskRunRecord, Option<&chrono::DateTime<chrono::Utc>>) -> bool,
+) -> Result<DiscoveryRecordPage> {
     let limit = requested_limit.clamp(1, MAX_AGENT_TASK_DISCOVERY_PAGE_LIMIT);
-    let mut scope = AgentTaskDiscoveryPageScope::from_options(filter, &options);
-    if let Some(value) = options.cursor.as_deref() {
+    if let Some(value) = cursor {
         let bytes = base64::engine::general_purpose::URL_SAFE_NO_PAD
             .decode(value)
             .map_err(|_| invalid_page_cursor(value))?;
@@ -395,16 +466,14 @@ pub fn discover_runs_page(
             serde_json::from_slice(&bytes).map_err(|_| invalid_page_cursor(value))?;
         scope.resolved_submitted_after = cursor.scope.resolved_submitted_after;
     } else {
-        scope.resolved_submitted_after = options
+        scope.resolved_submitted_after = scope
             .submitted_after
             .as_deref()
             .map(parse_submitted_after)
             .transpose()?
             .map(|bound| bound.to_rfc3339());
     }
-    let after = options
-        .cursor
-        .as_deref()
+    let after = cursor
         .map(|cursor| decode_page_cursor(cursor, &scope))
         .transpose()?;
     let store = agent_task_lifecycle::AgentTaskLifecycleStore::from_environment()?;
@@ -438,23 +507,10 @@ pub fn discover_runs_page(
         .as_deref()
         .map(parse_submitted_after)
         .transpose()?;
-    let filters = AgentTaskDiscoveryOptions {
-        repo: options.repo,
-        workspace: options.workspace,
-        task_url: options.task_url,
-        submitted_after: options.submitted_after,
-        state: options.state,
-        placement: options.placement,
-        parent_id: options.parent_id,
-        branch: options.branch,
-        ..Default::default()
-    };
     let mut records = records
         .into_iter()
         .filter(|page_record| !is_fixture_runner_record(&page_record.record))
-        .filter(|page_record| {
-            matches_discovery_options(&page_record.record, &filters, submitted_after.as_ref())
-        })
+        .filter(|page_record| matches(&page_record.record, submitted_after.as_ref()))
         .collect::<Vec<_>>();
     let matching_truncated = records.len() > limit;
     records.truncate(limit);
@@ -468,7 +524,6 @@ pub fn discover_runs_page(
             scope,
         )
     });
-    let truncated = next_cursor.is_some();
     let search_status = if records.len() == limit && (matching_truncated || physical_truncated) {
         AgentTaskDiscoverySearchStatus::MatchingLimitReached
     } else if physical_truncated {
@@ -476,31 +531,13 @@ pub fn discover_runs_page(
     } else {
         AgentTaskDiscoverySearchStatus::Complete
     };
-    let now = chrono::Utc::now();
-    let live = (filter == AgentTaskDiscoveryFilter::Active).then(live_supervisor_jobs);
-    let runs = records
-        .into_iter()
-        .map(|page_record| discovery_run(page_record.record, live.as_ref(), now))
-        .collect::<Vec<_>>();
-    // Active health covers the indexed set; other pages report the filtered rows.
-    let record_health = active_health.unwrap_or_else(|| AgentTaskRecordHealthSummary {
-        schema: agent_task_lifecycle::AGENT_TASK_RECORD_HEALTH_SCHEMA.to_string(),
-        healthy: runs.len(),
-        ..Default::default()
-    });
-    Ok(AgentTaskDiscoveryPage {
-        schema: "homeboy/agent-task-discovery-page/v1",
-        filter: filter_name(filter),
-        count: runs.len(),
-        total: None,
-        requested_limit,
+    Ok(DiscoveryRecordPage {
+        records: records.into_iter().map(|row| row.record).collect(),
         limit,
         physical_count,
         search_status,
-        truncated,
         next_cursor,
-        record_health,
-        runs,
+        active_health,
     })
 }
 
@@ -1547,6 +1584,10 @@ fn metadata_string(metadata: &Value, key: &str) -> Option<String> {
 fn metadata_bool(metadata: &Value, key: &str) -> Option<bool> {
     metadata.get(key).and_then(Value::as_bool)
 }
+
+#[path = "task_history.rs"]
+mod task_history;
+pub use task_history::*;
 
 #[cfg(test)]
 #[path = "discovery_tests.rs"]
