@@ -30,6 +30,10 @@ pub struct RunnerResourceMetrics {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub isolation: Option<String>,
     pub source: String,
+    /// The job's usage block, recorded at finish: exact from its own cgroup,
+    /// otherwise its process tree's totals marked `estimated` (#18461).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub usage: Option<homeboy_engine_primitives::resource_usage::ResourceUsage>,
 }
 
 /// Best-effort cgroup-v2 memory evidence owned by the runner execution boundary.
@@ -353,6 +357,7 @@ mod tests {
             },
             isolation: None,
             source: "process-tree".to_string(),
+            usage: None,
         };
 
         assert_eq!(serde_json::to_value(&metrics).expect("serialize"), value);

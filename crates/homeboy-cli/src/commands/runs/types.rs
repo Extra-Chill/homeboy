@@ -82,6 +82,9 @@ pub(super) enum RunsCommand {
     /// exclusive self time (with inclusive p50/p95 and version comparison),
     /// `--coverage` reports unattributed gaps; otherwise ranks fuzz artifacts
     Hotspots(RunsHotspotsArgs),
+    /// Total CPU, instance count and p50/p95 wall time and CPU per step or
+    /// phase name, from usage recorded on durable runs
+    Profile(super::profile::RunsProfileArgs),
     /// Rank CLI refusals, retries, interventions and stranded green Cooks.
     Friction(super::friction::RunsFrictionArgs),
     /// Reconcile running observation records. `--dry-run` previews the bounded
@@ -283,6 +286,7 @@ pub enum RunsOutput {
     BenchCompare(BenchCompareOutput),
     FuzzCompare(FuzzCompareOutput),
     Hotspots(RunsHotspotsOutput),
+    Profile(super::profile::RunsProfileOutput),
     Friction(serde_json::Value),
     Reconcile(RunsReconcileOutput),
     Watch(RunsWatchOutput),
@@ -1031,6 +1035,9 @@ pub struct RunDetail {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub cook: Option<crate::commands::cook_verdict::CookVerdict>,
     pub homeboy_version: Option<String>,
+    /// CPU, wall time and peak memory per step or phase, sorted by CPU.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub resources: Option<homeboy::core::performance_hotspots::RunResources>,
     pub metadata: Value,
     pub artifacts: Vec<ArtifactRecord>,
 }

@@ -1543,6 +1543,11 @@ pub(super) fn run_detail(
         observation_status,
         cook,
         homeboy_version: run.homeboy_version,
+        resources: homeboy::core::performance_hotspots::run_resources(store, run_id)
+            .unwrap_or_else(|error| {
+                homeboy::core::log_status!("runs", "skipping run resources {}: {}", run_id, error);
+                None
+            }),
         metadata: run.metadata_json,
         artifacts,
     })

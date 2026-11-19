@@ -26,6 +26,7 @@ pub fn capture(next: &mut InstanceState, now: u64) {
                     step.attempt,
                     step.phase == StepPhase::Done,
                     step.outcome.clone(),
+                    step.usage.clone(),
                 ),
             );
         }
@@ -37,12 +38,13 @@ pub fn capture(next: &mut InstanceState, now: u64) {
                         item.attempt,
                         item.phase == StepPhase::Done,
                         item.outcome.clone(),
+                        item.usage.clone(),
                     ),
                 );
             }
         }
     }
-    for (phase, (attempt, done, outcome)) in live {
+    for (phase, (attempt, done, outcome, usage)) in live {
         // Approval has no submitted attempt; retain its waiting origin when approved.
         let key = format!("{phase}/{}", attempt.max(1));
         let old: Vec<_> = next
@@ -52,8 +54,9 @@ pub fn capture(next: &mut InstanceState, now: u64) {
             .filter(|k| k.starts_with(&format!("{phase}/")) && **k != key)
             .cloned()
             .collect();
+        // A superseded attempt finished with the usage last recorded.
         for key in old {
-            finish(&mut next.timing, &key, &phase, now, true);
+            finish(&mut next.timing, &key, &phase, now, true, usage.clone());
         }
         let already = next
             .timing
@@ -73,6 +76,7 @@ pub fn capture(next: &mut InstanceState, now: u64) {
                 &phase,
                 now,
                 outcome.as_deref() != Some("succeeded"),
+                done.then_some(usage).flatten(),
             );
         }
     }
@@ -83,12 +87,19 @@ pub fn capture(next: &mut InstanceState, now: u64) {
                 .map(|(phase, _)| phase)
                 .unwrap_or(&key)
                 .to_string();
-            finish(&mut next.timing, &key, &phase, now, true);
+            finish(&mut next.timing, &key, &phase, now, true, None);
         }
     }
 }
 
-fn finish(timing: &mut WorkflowTiming, key: &str, phase: &str, now: u64, failed: bool) {
+fn finish(
+    timing: &mut WorkflowTiming,
+    key: &str,
+    phase: &str,
+    now: u64,
+    failed: bool,
+    usage: Option<homeboy_engine_primitives::resource_usage::ResourceUsage>,
+) {
     let Some(start) = timing.active.remove(key) else {
         return;
     };
@@ -105,5 +116,6 @@ fn finish(timing: &mut WorkflowTiming, key: &str, phase: &str, now: u64, failed:
         duration_ms: Some(now.saturating_sub(start) as f64),
         started_at: date.to_rfc3339_opts(chrono::SecondsFormat::Millis, true),
         homeboy_version: crate::build_identity::current().version,
+        usage,
     });
 }

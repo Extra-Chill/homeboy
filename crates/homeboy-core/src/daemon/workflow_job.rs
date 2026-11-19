@@ -985,6 +985,15 @@ fn step_result(
     } else {
         None
     };
+    let job_id = job.id.to_string();
+    let started_ms = store
+        .step_job_spawned_at_ms(job.id)
+        .or(job.started_at_ms)
+        .unwrap_or(job.created_at_ms);
+    let wall_ms = job
+        .finished_at_ms
+        .unwrap_or(job.updated_at_ms)
+        .saturating_sub(started_ms);
     Some(StepResult {
         key: key.to_string(),
         error,
@@ -992,6 +1001,7 @@ fn step_result(
         outcome,
         output,
         run_id,
+        usage: crate::daemon::step_job::recorded_step_usage(&job_id, wall_ms),
     })
 }
 

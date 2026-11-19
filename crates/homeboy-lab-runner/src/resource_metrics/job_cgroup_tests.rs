@@ -218,6 +218,11 @@ fn delegated_multithreaded_job() {
         "{:?}",
         output.metrics.guard_violation
     );
+    // The usage block is the job cgroup's exact `cpu.stat`, read at finish.
+    let usage = output.metrics.usage.expect("job usage");
+    assert_eq!(usage.source, "job_cgroup");
+    assert!(!usage.estimated);
+    assert!(usage.cpu_usage_usec > 0);
     assert_job_cgroups_removed(jobs);
 }
 

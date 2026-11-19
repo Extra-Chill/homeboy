@@ -21,6 +21,8 @@ use std::time::{Duration, Instant};
 
 use serde::{Deserialize, Serialize};
 
+pub use super::resource_usage::ResourceUsage;
+
 /// Generic run phase vocabulary. Domain sub-phases are namespaced under their
 /// owner, e.g. `stage.transfer` or `gate.cargo-test`.
 pub const PHASE_ADMIT: &str = "admit";
@@ -91,6 +93,9 @@ pub struct PhaseSpan {
     /// Version of the executable recording the span (not the primitive crate).
     #[serde(default)]
     pub homeboy_version: String,
+    /// What the step or phase consumed, recorded when it ended.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub usage: Option<ResourceUsage>,
 }
 
 impl PhaseSpan {
@@ -101,6 +106,7 @@ impl PhaseSpan {
             duration_ms: duration.map(duration_to_millis),
             started_at: Utc::now().to_rfc3339_opts(SecondsFormat::Millis, true),
             homeboy_version: String::new(),
+            usage: None,
         }
     }
 
@@ -166,7 +172,18 @@ impl PhaseTimer {
     }
 
     fn record(&mut self, id: impl Into<String>, status: PhaseStatus, duration: Option<Duration>) {
+        self.record_with_usage(id, status, duration, None);
+    }
+
+    fn record_with_usage(
+        &mut self,
+        id: impl Into<String>,
+        status: PhaseStatus,
+        duration: Option<Duration>,
+        usage: Option<ResourceUsage>,
+    ) {
         let mut span = PhaseSpan::new(id, status, duration);
+        span.usage = usage;
         span.started_at = (Utc::now()
             - chrono::Duration::from_std(duration.unwrap_or_default()).unwrap_or_default())
         .to_rfc3339_opts(SecondsFormat::Millis, true);
@@ -198,21 +215,23 @@ impl PhaseTimer {
         run: impl FnOnce() -> Result<T, E>,
     ) -> Result<T, E> {
         let started = Instant::now();
+        let usage = super::resource_usage::usage_scope();
         let outcome = run();
         let elapsed = started.elapsed();
-        let id = id.into();
-        match &outcome {
-            Ok(_) => self.record_ok(id, elapsed),
-            Err(_) => self.record_failed(id, elapsed),
-        }
+        let status = match &outcome {
+            Ok(_) => PhaseStatus::Ok,
+            Err(_) => PhaseStatus::Failed,
+        };
+        self.record_with_usage(id, status, Some(elapsed), usage.finish());
         outcome
     }
 
     /// Time an infallible closure as a single phase.
     pub fn time_ok<T>(&mut self, id: impl Into<String>, run: impl FnOnce() -> T) -> T {
         let started = Instant::now();
+        let usage = super::resource_usage::usage_scope();
         let value = run();
-        self.record_ok(id, started.elapsed());
+        self.record_with_usage(id, PhaseStatus::Ok, Some(started.elapsed()), usage.finish());
         value
     }
 
@@ -225,7 +244,7 @@ impl PhaseTimer {
             timer: self,
             id: id.into(),
             started: Instant::now(),
-            disarmed: false,
+            usage: Some(super::resource_usage::usage_scope()),
         }
     }
 
@@ -262,26 +281,30 @@ pub struct PhaseGuard<'a> {
     timer: &'a mut PhaseTimer,
     id: String,
     started: Instant,
-    disarmed: bool,
+    /// `None` once disarmed.
+    usage: Option<super::resource_usage::UsageScope>,
 }
 
 impl PhaseGuard<'_> {
     /// Drop the guard without recording a span (e.g. the phase was skipped
     /// after the guard was created).
     pub fn disarm(mut self) {
-        self.disarmed = true;
+        if let Some(usage) = self.usage.take() {
+            usage.discard();
+        }
     }
 }
 
 impl Drop for PhaseGuard<'_> {
     fn drop(&mut self) {
-        if self.disarmed {
+        let Some(usage) = self.usage.take() else {
             return;
-        }
+        };
         let elapsed = self.started.elapsed();
         let id = std::mem::take(&mut self.id);
         // A guard always timed work, so it records an `ok` span on drop.
-        self.timer.record_ok(id, elapsed);
+        self.timer
+            .record_with_usage(id, PhaseStatus::Ok, Some(elapsed), usage.finish());
     }
 }
 

@@ -3474,6 +3474,7 @@ mod tests {
                         error: value["summary"].as_str().map(str::to_string),
                         output: Some(payload.clone()),
                         run_id: None,
+                        usage: None,
                     }),
                     1,
                 );

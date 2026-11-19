@@ -17,16 +17,19 @@ pub struct RunPhaseGuard<'a> {
     run_id: String,
     phase: String,
     started_at: String,
+    usage: Option<homeboy_engine_primitives::resource_usage::UsageScope>,
     _context: super::phase_timing::Scope,
 }
 
 impl Drop for RunPhaseGuard<'_> {
     fn drop(&mut self) {
-        if let Err(error) = self.store.finish_run_phase(
+        let usage = self.usage.take().and_then(|usage| usage.finish());
+        if let Err(error) = self.store.finish_run_phase_with_usage(
             &self.run_id,
             &self.phase,
             &self.started_at,
             std::thread::panicking(),
+            usage,
         ) {
             crate::log_status!("observe", "phase timing persistence failed: {}", error);
         }
@@ -65,6 +68,7 @@ impl ObservationStore {
             run_id: run_id.into(),
             phase: phase.into(),
             started_at: chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true),
+            usage: Some(homeboy_engine_primitives::resource_usage::usage_scope()),
         }
     }
 
@@ -118,6 +122,18 @@ impl ObservationStore {
         started_at: &str,
         failed: bool,
     ) -> Result<()> {
+        self.finish_run_phase_with_usage(run_id, phase, started_at, failed, None)
+    }
+
+    /// As `finish_run_phase`, recording what the phase consumed (#18461).
+    pub fn finish_run_phase_with_usage(
+        &self,
+        run_id: &str,
+        phase: &str,
+        started_at: &str,
+        failed: bool,
+        usage: Option<homeboy_engine_primitives::resource_usage::ResourceUsage>,
+    ) -> Result<()> {
         let parse = |value: &str| {
             chrono::DateTime::parse_from_rfc3339(value)
                 .map_err(|error| Error::internal_unexpected(error.to_string()))
@@ -146,6 +162,7 @@ impl ObservationStore {
         }
         let mut report = timer.into_report();
         report.spans[0].started_at = timestamp;
+        report.spans[0].usage = usage;
         self.record_phase_spans(run_id, &format!("{phase}:{started_at}"), &report)
     }
 

@@ -3,6 +3,7 @@ mod notification;
 mod notification_tests;
 mod phase_spans;
 mod reliability;
+mod resource_profile;
 mod verdict;
 #[cfg(test)]
 mod verdict_tests;
@@ -11,6 +12,10 @@ pub use phase_spans::{
     phase_hotspots, PhaseHotspot, PhaseHotspotQuery, PhaseHotspots, PhasePercentiles,
 };
 pub use reliability::{FailingPhase, Reliability, ReliabilityComparison, VersionReliability};
+pub use resource_profile::{
+    resource_profile, run_resources, CpuOverhead, PhaseProfileRow, PhaseUsageRow, ResourceProfile,
+    ResourceProfileQuery, RunResources, UsagePercentiles,
+};
 pub use verdict::{
     compare_phase_hotspots, Regression, RegressionComparison, RegressionThresholds, Verdict,
 };

@@ -367,6 +367,7 @@ mod tests {
             duration_ms: Some(duration_ms),
             status: PhaseStatus::Ok,
             homeboy_version: "v".to_string(),
+            usage: None,
         };
         let report = PhaseTimingReport {
             spans: vec![
