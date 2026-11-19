@@ -614,7 +614,7 @@ fn record_pre_execution_failure_locked(
     // controller reconciliation can adopt the completed candidate without
     // rerunning the provider.
     if record.has_recorded_provider_progress()
-        || (record.has_accepted_lab_handoff()
+        || (CookRunState::accepted_lab_handoff(&record)
             && crate::agent_task_service::is_store_contention(error))
     {
         return record_transport_follow_up_failure_in_store(lifecycle_store, record, phase, error)

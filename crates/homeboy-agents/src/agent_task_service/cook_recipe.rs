@@ -671,11 +671,8 @@ impl CookRecipeStore {
             return Ok(());
         }
         let record = lifecycle_store.read_record(run_id)?;
-        if !matches!(
-            record.state(),
-            homeboy_lifecycle_contract::RunExecutionState::Succeeded
-                | homeboy_lifecycle_contract::RunExecutionState::CandidateRecoverable
-        ) {
+        let state = agent_task_lifecycle::CookRunState::of(&record);
+        if !state.recoverable && state.phase != agent_task_lifecycle::CookRunPhase::Succeeded {
             return Ok(());
         }
         if lifecycle_continuation_state(lifecycle_continuation(&record))
@@ -3019,9 +3016,7 @@ pub(crate) fn has_unambiguous_zero_execution(
         // A submitted Lab staging job can still dispatch the provider, so it
         // owns execution exactly like an accepted runner job.
         && !record.has_remote_execution_owner()
-        && record.lab_handoff.as_ref().is_none_or(|handoff| {
-            handoff.state != agent_task_lifecycle::AgentTaskLabHandoffState::Accepted
-        })
+        && !agent_task_lifecycle::CookRunState::accepted_lab_handoff(record)
 }
 
 /// Resolve a Cook identifier to its latest durable attempt. Candidate selection
@@ -3123,10 +3118,9 @@ fn continuation_source_run_id(
             lifecycle_store
                 .read_record(&attempt.run_id)
                 .is_ok_and(|record| {
-                    matches!(
-                        record.state(),
-                        RunExecutionState::CandidateRecoverable | RunExecutionState::Succeeded
-                    )
+                    let state = agent_task_lifecycle::CookRunState::of(&record);
+                    state.recoverable
+                        || state.phase == agent_task_lifecycle::CookRunPhase::Succeeded
                 })
         })
         .map(|attempt| attempt.run_id.clone())

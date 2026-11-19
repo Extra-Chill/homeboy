@@ -6,6 +6,27 @@ use serde_json::{json, Value};
 
 use super::*;
 
+/// Translate wire handoff receipts at the fenced commit boundary.
+pub(crate) fn handoff_event(
+    record: &AgentTaskRunRecord,
+    stored: Option<&AgentTaskRunRecord>,
+) -> Option<CookRunEvent> {
+    let handoff = record.lab_handoff.as_ref()?;
+    if stored.is_some_and(|stored| {
+        stored.lab_handoff.as_ref() == Some(handoff) && stored.state() == record.state()
+    }) {
+        return None;
+    }
+    use AgentTaskLabHandoffState::*;
+    use RunExecutionState::*;
+    match (handoff.state, record.state()) {
+        (Accepted, Running) if handoff.is_valid() => Some(CookRunEvent::LabHandoffAccepted),
+        (Expired, Cancelled) => Some(CookRunEvent::LabHandoffExpired),
+        (Pending | Expired, Failed) => Some(CookRunEvent::LabHandoffRejected),
+        _ => None,
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct DetachedLabRunRecord<'a> {
     pub run_id: &'a str,
@@ -264,7 +285,7 @@ pub fn record_local_lab_identity_fallback(
     if record.state().is_terminal() {
         return Ok(record);
     }
-    if record.has_accepted_lab_handoff() || record.runner_job_id().is_some() {
+    if CookRunState::accepted_lab_handoff(&record) || record.runner_job_id().is_some() {
         return Err(Error::validation_invalid_argument(
             "lab_identity_fallback",
             "cannot replace an accepted Lab runner job with a local fallback",
@@ -647,10 +668,11 @@ pub(crate) fn record_detached_lab_run_with_submission_locked_in_store(
     // permission gate over the retained workspace, so it is read from this
     // store's own roots rather than the process environment's (#7505).
     require_record_workspace_owner_in_store(&lifecycle_store.workspace_claim_store(), &record)?;
-    if let Some(accepted) = record.lab_handoff.as_ref().filter(|handoff| {
-        handoff.state == AgentTaskLabHandoffState::Accepted
-            && handoff.authority == AgentTaskLabHandoffAuthority::RunnerDaemon
-    }) {
+    if let Some(accepted) = record
+        .lab_handoff
+        .as_ref()
+        .filter(|_| CookRunState::accepted_lab_handoff(&record))
+    {
         // Idempotent re-acceptance: the incoming acceptance names the same
         // run/runner/job as the already-accepted handoff. Route through the
         // shared `RunnerJobIdentity` so this agrees with every other
@@ -949,10 +971,11 @@ fn record_lab_offload_proxy_in_store(
             None,
         ));
     }
-    if let Some(accepted) = record.lab_handoff.as_ref().filter(|handoff| {
-        handoff.state == AgentTaskLabHandoffState::Accepted
-            && handoff.authority == AgentTaskLabHandoffAuthority::RunnerDaemon
-    }) {
+    if let Some(accepted) = record
+        .lab_handoff
+        .as_ref()
+        .filter(|_| CookRunState::accepted_lab_handoff(&record))
+    {
         if accepted.runner_id == runner_id {
             return Ok(record);
         }

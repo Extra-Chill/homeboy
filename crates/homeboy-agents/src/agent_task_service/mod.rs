@@ -67,12 +67,12 @@ pub use cook_budget::*;
 pub use cook_delivery::publication_receipt;
 #[cfg(any(test, feature = "test-support"))]
 pub use cook_delivery::test_support::*;
-pub(crate) use cook_delivery::COOK_DELIVERY_KEY;
 pub use cook_delivery::{
     CookDelivery, CookDeliveryArtifacts, CookDeliveryBlocker, CookDeliveryBlockerCode,
     CookDeliveryCandidate, CookDeliveryDestination, CookDeliveryGate, CookDeliveryLifecycle,
-    CookDeliveryPublication, CookDeliveryState, CookManualPublication, COOK_DELIVERY_SCHEMA,
+    CookDeliveryPublication, CookManualPublication, COOK_DELIVERY_SCHEMA,
 };
+pub(crate) use cook_delivery::{CookDeliveryState, COOK_DELIVERY_KEY};
 pub use cook_delivery_artifacts::*;
 pub use cook_lineage::{CookAttemptLineage, CookLineageKind};
 #[cfg(test)]

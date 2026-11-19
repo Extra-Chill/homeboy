@@ -18,10 +18,15 @@ pub(crate) fn has_expired_pending_runner_submission_intent(
         RunExecutionState::Queued | RunExecutionState::Running
     ) && record.runner_job_id().is_none()
         && record.lab_handoff.as_ref().is_some_and(|handoff| {
-            handoff.state == AgentTaskLabHandoffState::Pending
+            handoff.is_valid()
+                && handoff.state == AgentTaskLabHandoffState::Pending
                 && handoff.authority == AgentTaskLabHandoffAuthority::Controller
+                && handoff
+                    .acceptance_deadline_at
+                    .as_deref()
+                    .and_then(|value| chrono::DateTime::parse_from_rfc3339(value).ok())
+                    .is_some_and(|deadline| deadline <= now)
         })
-        && record.has_expired_pending_lab_handoff(now)
 }
 
 /// Bind a direct-daemon job whose accepted response was lost after the daemon
@@ -143,7 +148,7 @@ pub fn run_owes_candidate_follow_up_in_store(
 /// Pure durable-handoff predicate for callers that already hold the lifecycle
 /// record and must not re-enter the store.
 pub(crate) fn is_accepted_runner_handoff(record: &AgentTaskRunRecord) -> bool {
-    record.has_accepted_lab_handoff()
+    CookRunState::accepted_lab_handoff(record)
 }
 
 // The ambient `expire_unaccepted_lab_handoff()` shim that used to sit here is
@@ -315,7 +320,7 @@ pub(crate) fn terminalize_lost_accepted_lab_job_in_store(
     record: &mut AgentTaskRunRecord,
     checked_generations: usize,
 ) -> Result<()> {
-    if !record.has_accepted_lab_handoff() {
+    if !CookRunState::accepted_lab_handoff(record) {
         return Ok(());
     }
     let plan = lifecycle_store.read_controller_plan(&record.run_id)?;

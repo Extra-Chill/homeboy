@@ -326,6 +326,12 @@ pub enum CookRunPhase {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum CookRunEvent {
+    LabHandoffAccepted,
+    LabHandoffExpired,
+    LabHandoffRejected,
+    DeliveryRecorded {
+        phase: CookRunPhase,
+    },
     /// An execution owner started (or a recovery re-admitted) the run.
     Started,
     /// Execution ended holding a candidate that has not been published.
@@ -423,6 +429,10 @@ impl CookRunPhase {
             return Some(self);
         }
         match (self, event) {
+            (_, E::LabHandoffAccepted) => self.transition(E::OutcomeRecorded { phase: P::Running }),
+            (_, E::LabHandoffExpired) => self.transition(E::Cancelled),
+            (_, E::LabHandoffRejected) => self.transition(E::Failed),
+            (_, E::DeliveryRecorded { phase }) => self.transition(E::OutcomeRecorded { phase }),
             (_, E::FactsUpdated) => Some(self),
             (P::Unknown, E::Requeued) => None,
             (_, E::Requeued) => Some(P::Queued),
@@ -551,6 +561,30 @@ pub struct CookRunState {
 }
 
 impl CookRunState {
+    pub(crate) fn accepted_lab_handoff(record: &AgentTaskRunRecord) -> bool {
+        record
+            .persisted_cook_state()
+            .and_then(|state| {
+                use CookRunEvent::{LabHandoffAccepted, LabHandoffExpired, LabHandoffRejected};
+                state
+                    .applied_events
+                    .iter()
+                    .rev()
+                    .find(|(_, event)| {
+                        matches!(
+                            event,
+                            LabHandoffAccepted | LabHandoffExpired | LabHandoffRejected
+                        )
+                    })
+                    .map(|(_, event)| *event == LabHandoffAccepted)
+            })
+            .unwrap_or_else(|| {
+                record.lab_handoff.as_ref().is_some_and(|handoff| {
+                    handoff.is_valid() && handoff.state == super::AgentTaskLabHandoffState::Accepted
+                })
+            })
+    }
+
     /// Classify `record`. This is the only place a Cook run's phase,
     /// terminality and recoverability are decided.
     pub fn of(record: &AgentTaskRunRecord) -> Self {
@@ -695,8 +729,12 @@ pub(crate) fn transition_record(
     // part of the durable state and must not influence transition selection.
     record.observed_cook_phase = None;
     let phase = CookRunPhase::of_execution(record.state());
+    let handoff_event = super::lab_offload::handoff_event(record, stored);
+    let delivery_changed = stored.is_some_and(|stored| {
+        stored.metadata.get("cook_delivery") != record.metadata.get("cook_delivery")
+    });
     if let Some(state) = stored.and_then(AgentTaskRunRecord::persisted_cook_state) {
-        if state.phase == phase {
+        if state.phase == phase && handoff_event.is_none() && !delivery_changed {
             record.write_cook_state(state.clone(), CookStateWriteAuthority(()));
             return Ok(());
         }
@@ -712,7 +750,11 @@ pub(crate) fn transition_record(
         .map(|state| state.phase)
         .or_else(|| stored.map(|record| CookRunPhase::of_execution(record.state())))
         .unwrap_or(phase);
-    let event = if source.phase == phase {
+    let event = if let Some(event) = handoff_event {
+        event
+    } else if delivery_changed {
+        CookRunEvent::DeliveryRecorded { phase }
+    } else if source.phase == phase {
         CookRunEvent::FactsUpdated
     } else {
         match phase {
@@ -1233,6 +1275,8 @@ mod tests {
         );
     }
 
+    include!("cook_run_state_tests.rs");
+
     #[test]
     fn verbs_do_not_reclassify_candidate_or_in_flight_status() {
         for source in [
@@ -1240,6 +1284,8 @@ mod tests {
             include_str!("../agent_task_service/cook_recovery.rs"),
         ] {
             let production = source.split("#[cfg(test)]").next().expect("source");
+            assert!(!production.contains("AgentTaskLabHandoffState::"));
+            assert!(!production.contains("CookDeliveryState::"));
             assert!(!production.contains("CookStatus::CandidateRecoverable"));
             assert!(!production.contains(".is_in_flight()"));
         }
