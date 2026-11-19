@@ -570,7 +570,7 @@ esac
 
         assert_eq!(
             std::fs::read_to_string(root.join("systemctl.log")).expect("service command log"),
-            "--user daemon-reload\n--user enable --now homeboy-runner.service\n",
+            "--user daemon-reload\n--user enable --now homeboy-runner-jobs.service\n--user enable --now homeboy-runner.service\n",
             "install must block at its first service start, before waiting for the lease"
         );
 
