@@ -3074,17 +3074,19 @@ fn superseded_workflow_cook_step_settles_when_its_owner_mission_is_fenced() {
     with_isolated_home(|_| {
         let (owner, superseded) = ("cook-owner-18525", "cook-superseded-18525");
         let owner_attempt = agent_task_lifecycle::cook_attempt_run_id(owner, 1);
-        for run_id in [owner_attempt.as_str(), superseded] {
+        for run_id in [owner, owner_attempt.as_str(), superseded] {
             agent_task_lifecycle::submit_plan(&test_plan(), Some(run_id)).unwrap();
         }
         let store = agent_task_lifecycle::AgentTaskLifecycleStore::from_environment().unwrap();
         agent_task_lifecycle::record_cook_attempt_in_store(&store, owner, 1, &owner_attempt)
             .unwrap();
-        agent_task_lifecycle::rewrite_record_for_test(&owner_attempt, |record| {
-            agent_task_lifecycle::set_run_state(record, RunExecutionState::Running);
-            record.metadata["cook_id"] = serde_json::json!(owner);
-        })
-        .unwrap();
+        for run_id in [owner, owner_attempt.as_str()] {
+            agent_task_lifecycle::rewrite_record_for_test(run_id, |record| {
+                agent_task_lifecycle::set_run_state(record, RunExecutionState::Running);
+                record.metadata["cook_id"] = serde_json::json!(owner);
+            })
+            .unwrap();
+        }
         agent_task_lifecycle::rewrite_record_for_test(superseded, |record| {
             agent_task_lifecycle::set_run_state(record, RunExecutionState::Cancelled);
             record.metadata["cook_id"] = serde_json::json!(superseded);
