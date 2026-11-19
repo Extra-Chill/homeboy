@@ -2,6 +2,11 @@
 
 All notable changes to Homeboy Action will be documented in this file.
 
+## [2.27.5] - 2026-11-19
+
+### Fixed
+- bind PHPUnit method failures to file-granular WordPress test units
+
 ## [2.27.4] - 2026-11-19
 
 ### Fixed
