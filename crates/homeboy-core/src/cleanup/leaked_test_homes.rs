@@ -442,18 +442,8 @@ fn owner_is_alive(pid: u32) -> bool {
 
 /// Recursive on-disk size, never following symlinks.
 fn entry_size_bytes(path: &Path) -> u64 {
-    let Ok(metadata) = fs::symlink_metadata(path) else {
-        return 0;
-    };
-    if metadata.file_type().is_symlink() || !metadata.is_dir() {
-        return metadata.len();
-    }
-    let Ok(read) = fs::read_dir(path) else {
-        return metadata.len();
-    };
-    read.flatten().fold(metadata.len(), |total, entry| {
-        total.saturating_add(entry_size_bytes(&entry.path()))
-    })
+    crate::cleanup::path_usage::measure_path(path, Default::default())
+        .map(|result| result.usage.logical_bytes).unwrap_or(0)
 }
 
 /// Assign every entry a verdict, then relax the age floor for as few abandoned

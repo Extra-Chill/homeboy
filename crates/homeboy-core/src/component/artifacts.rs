@@ -243,23 +243,8 @@ fn invalid_artifact_path(path: &str) -> Error {
 }
 
 fn path_size(path: &Path) -> Result<u64> {
-    let metadata = fs::symlink_metadata(path).map_err(|error| {
-        Error::internal_io(error.to_string(), Some(format!("stat {}", path.display())))
-    })?;
-    if metadata.is_file() || metadata.file_type().is_symlink() {
-        return Ok(metadata.len());
-    }
-
-    let mut total = metadata.len();
-    for entry in fs::read_dir(path).map_err(|error| {
-        Error::internal_io(error.to_string(), Some(format!("read {}", path.display())))
-    })? {
-        let entry = entry.map_err(|error| {
-            Error::internal_io(error.to_string(), Some(format!("read {}", path.display())))
-        })?;
-        total = total.saturating_add(path_size(&entry.path())?);
-    }
-    Ok(total)
+    crate::cleanup::path_usage::measure_path(path, Default::default())
+        .map(|result| result.usage.logical_bytes)
 }
 
 fn remove_artifact_path(path: &Path) -> Result<()> {

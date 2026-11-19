@@ -248,39 +248,17 @@ pub(crate) fn path_is_within_root(path: &Path, artifact_root: &Path) -> bool {
     candidate.starts_with(root)
 }
 
-fn path_size_bytes(path: &Path, metadata: &fs::Metadata) -> Result<u64> {
-    if metadata.is_dir() {
-        let mut total = 0;
-        for entry in
-            fs::read_dir(path).map_err(|err| persisted_artifact_read_dir_error(path, err))?
-        {
-            let entry = entry.map_err(|err| persisted_artifact_read_dir_error(path, err))?;
-            let entry_path = entry.path();
-            let metadata = fs::symlink_metadata(&entry_path).map_err(|err| {
-                Error::internal_io(
-                    err.to_string(),
-                    Some(format!("read persisted artifact {}", entry_path.display())),
-                )
-            })?;
-            if metadata.file_type().is_symlink() {
-                continue;
-            }
-            total += path_size_bytes(&entry_path, &metadata)?;
-        }
-        Ok(total)
-    } else {
-        Ok(metadata.len())
-    }
-}
+fn path_size_bytes(path: &Path, _metadata: &fs::Metadata) -> Result<u64> {
+    use crate::cleanup::path_usage::{measure_path, PathUsageOptions};
 
-fn persisted_artifact_read_dir_error(path: &Path, err: io::Error) -> Error {
-    Error::internal_io(
-        err.to_string(),
-        Some(format!(
-            "read persisted artifact directory {}",
-            path.display()
-        )),
+    measure_path(
+        path,
+        PathUsageOptions {
+            skip_symlinks: true,
+            ..Default::default()
+        },
     )
+    .map(|result| result.usage.logical_bytes)
 }
 
 fn persisted_artifact_remove_error(path: &Path, err: io::Error) -> Error {

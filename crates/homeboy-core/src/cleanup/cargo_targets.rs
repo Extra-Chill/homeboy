@@ -1524,26 +1524,23 @@ struct FilesystemCapacity {
 
 #[cfg(unix)]
 fn filesystem_capacity(path: &Path) -> Result<FilesystemCapacity> {
-    use std::ffi::CString;
+    use std::os::unix::fs::MetadataExt;
 
     let probe = existing_ancestor(path);
-    let path = CString::new(probe.as_os_str().as_encoded_bytes())
-        .map_err(|error| Error::internal_unexpected(error.to_string()))?;
-    let mut stat = std::mem::MaybeUninit::<libc::statvfs>::uninit();
-    if unsafe { libc::statvfs(path.as_ptr(), stat.as_mut_ptr()) } != 0 {
-        return Err(io_error(
-            std::io::Error::last_os_error(),
-            "probe shared Cargo target filesystem",
-        ));
-    }
-    let stat = unsafe { stat.assume_init() };
+    let budget = crate::observation::disk_budget::disk_budget(
+        probe,
+        "shared Cargo target",
+        "filesystem capacity is unavailable",
+    );
+    let available_bytes = budget.available_bytes.ok_or_else(|| {
+        Error::internal_unexpected("shared Cargo target filesystem capacity is unavailable")
+    })?;
+    let metadata = fs::metadata(probe)
+        .map_err(|error| io_error(error, "stat shared Cargo target filesystem"))?;
     Ok(FilesystemCapacity {
-        filesystem: format!("device:{}", stat.f_fsid),
-        available_bytes: u64::try_from(
-            u128::from(stat.f_bavail).saturating_mul(u128::from(stat.f_frsize)),
-        )
-        .unwrap_or(u64::MAX),
-        available_inodes: u64::from(stat.f_favail),
+        filesystem: format!("device:{}", metadata.dev()),
+        available_bytes,
+        available_inodes: budget.available_inodes.unwrap_or(u64::MAX),
     })
 }
 
@@ -1950,26 +1947,18 @@ fn order_stores(left: &CargoTargetStore, right: &CargoTargetStore) -> std::cmp::
         .then_with(|| left.path.cmp(&right.path))
 }
 fn path_size(path: &Path) -> Result<u64> {
-    let mut total = 0;
-    for entry in fs::read_dir(path).map_err(|error| io_error(error, "read shared Cargo target"))? {
-        let path = entry
-            .map_err(|error| io_error(error, "read shared Cargo target entry"))?
-            .path();
-        if path
-            .file_name()
-            .is_some_and(|name| is_lifecycle_sidecar(name))
-        {
-            continue;
-        }
-        let metadata = fs::symlink_metadata(&path)
-            .map_err(|error| io_error(error, "stat shared Cargo target entry"))?;
-        total += if metadata.is_dir() && !metadata.file_type().is_symlink() {
-            path_size(&path)?
-        } else {
-            metadata.len()
-        };
-    }
-    Ok(total)
+    use crate::cleanup::path_usage::{measure_path, PathUsageOptions};
+
+    let include =
+        |entry: &Path| entry == path || !entry.file_name().is_some_and(is_lifecycle_sidecar);
+    measure_path(
+        path,
+        PathUsageOptions {
+            entry_filter: Some(&include),
+            ..Default::default()
+        },
+    )
+    .map(|result| result.usage.logical_bytes)
 }
 fn io_error(error: std::io::Error, operation: &str) -> Error {
     Error::internal_io(error.to_string(), Some(operation.to_string()))

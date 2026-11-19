@@ -933,37 +933,12 @@ fn artifact_exists(artifact: &ArtifactRecord) -> bool {
 }
 
 fn artifact_size_bytes(artifact: &ArtifactRecord) -> u64 {
-    if let Some(size) = artifact
-        .size_bytes
-        .and_then(|size| u64::try_from(size).ok())
-    {
+    if let Some(size) = artifact.size_bytes.and_then(|size| u64::try_from(size).ok()) {
         return size;
     }
-    let path = Path::new(&artifact.path);
-    if path.is_file() {
-        return fs::metadata(path).map(|meta| meta.len()).unwrap_or(0);
-    }
-    if path.is_dir() {
-        return directory_size_bytes(path);
-    }
-    0
-}
-
-fn directory_size_bytes(path: &Path) -> u64 {
-    let Ok(entries) = fs::read_dir(path) else {
-        return 0;
-    };
-    entries
-        .flatten()
-        .map(|entry| {
-            let path = entry.path();
-            if path.is_dir() {
-                directory_size_bytes(&path)
-            } else {
-                fs::metadata(&path).map(|meta| meta.len()).unwrap_or(0)
-            }
-        })
-        .sum()
+    crate::cleanup::path_usage::measure_path(Path::new(&artifact.path), Default::default())
+        .map(|result| result.usage.logical_bytes)
+        .unwrap_or(0)
 }
 
 /// Build the failure summary surfaced by `runs evidence`.

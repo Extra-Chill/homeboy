@@ -355,24 +355,8 @@ fn terminal_run_lifecycle_directory(
 }
 
 fn path_size_bytes(path: &Path) -> Result<u64> {
-    let metadata = fs::symlink_metadata(path).map_err(|error| {
-        Error::internal_io(error.to_string(), Some(format!("read {}", path.display())))
-    })?;
-    if !metadata.is_dir() || metadata.file_type().is_symlink() {
-        return Ok(metadata.len());
-    }
-    fs::read_dir(path)
-        .map_err(|error| {
-            Error::internal_io(error.to_string(), Some(format!("read {}", path.display())))
-        })?
-        .try_fold(metadata.len(), |total, entry| {
-            Ok(total
-                + path_size_bytes(
-                    &entry
-                        .map_err(|error| Error::internal_io(error.to_string(), None))?
-                        .path(),
-                )?)
-        })
+    crate::cleanup::path_usage::measure_path(path, Default::default())
+        .map(|result| result.usage.logical_bytes)
 }
 
 #[cfg(test)]
