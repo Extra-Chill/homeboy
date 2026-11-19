@@ -2480,6 +2480,16 @@ fn completion_notifications(
         }) {
             continue;
         }
+        // A workflow instance announces only a stopped chain (#18540): its
+        // steps' Cooks already announce their own outcomes, and a looping
+        // workflow would otherwise notify on every successful pass.
+        if run.as_ref().is_some_and(|run| {
+            run.kind == "workflow"
+                && crate::observation::RunStatus::from_label(&run.status)
+                    == Some(crate::observation::RunStatus::Pass)
+        }) {
+            continue;
+        }
         let status = run
             .as_ref()
             .map(|run| run.status.as_str())

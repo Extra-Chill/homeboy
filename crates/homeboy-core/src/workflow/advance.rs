@@ -178,11 +178,11 @@ impl StepState {
         }
     }
 
-    fn settled(&self) -> bool {
+    pub(crate) fn settled(&self) -> bool {
         self.phase == StepPhase::Done
     }
 
-    fn succeeded(&self) -> bool {
+    pub(crate) fn succeeded(&self) -> bool {
         self.settled() && self.outcome.as_deref() == Some("succeeded")
     }
 }
