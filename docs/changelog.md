@@ -4,6 +4,15 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.474.16] - 2026-11-19
+
+### Changed
+- Cook read surfaces project CookRunState
+
+### Fixed
+- bind PHPUnit method failures to file-granular WordPress test units
+- reclaim every per-attempt path on the daemon maintenance cadence
+
 ## [0.474.15] - 2026-11-19
 
 ### Fixed
