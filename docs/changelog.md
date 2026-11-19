@@ -4,6 +4,12 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.479.1] - 2026-11-19
+
+### Fixed
+- keep job cgroups in their own unit so the runner restarts with live jobs
+- centralize run liveness and recovery eligibility
+
 ## [0.479.0] - 2026-11-19
 
 ### Added
