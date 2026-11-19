@@ -4,6 +4,12 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.478.0] - 2026-11-19
+
+### Added
+- history --task-url reads attempt history from the run store
+- start instances on watched ref changes with a debounce
+
 ## [0.477.0] - 2026-11-19
 
 ### Added
