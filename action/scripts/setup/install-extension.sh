@@ -210,6 +210,12 @@ install_extension_at_ref() {
 
   if reused_commit="$(cached_install_reusable "${extension_id}" 2>/dev/null)"; then
     echo "Reusing cached extension '${extension_id}' from $(normalize_source "${EXTENSION_SOURCE}") at ${EXTENSION_REF} (commit ${reused_commit}); skipping reinstall."
+    # `extension install` also runs the extension's setup, which provisions
+    # runtime state outside the cached tree (e.g. WordPress installs WP Codebox
+    # under ~/.cache and exports HOMEBOY_WP_CODEBOX_BIN to GITHUB_ENV). Reuse
+    # skips the download, never the provisioning: a cache hit must leave the
+    # job in the same state as a fresh install (Extra-Chill/homeboy#18488).
+    homeboy extension setup "${extension_id}"
     return 0
   fi
 
