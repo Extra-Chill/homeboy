@@ -69,7 +69,7 @@ use homeboy::runner::runners::{
 };
 
 #[test]
-fn synced_node_workload_receives_runner_extension_environment() {
+fn synced_workload_receives_runner_extension_environment() {
     use std::fs;
 
     homeboy::test_support::with_isolated_home(|_| {
@@ -105,21 +105,21 @@ fn synced_node_workload_receives_runner_extension_environment() {
         let mut input = RunnerExecInput::new(
             "lab-node",
             vec![
-                "node".to_string(),
-                "-e".to_string(),
-                "if (process.env.FIXTURE_RUNTIME !== 'runner-local') process.exit(1)".to_string(),
+                "sh".to_string(),
+                "-c".to_string(),
+                r#"test "$FIXTURE_RUNTIME" = runner-local"#.to_string(),
             ],
         );
         input.sync_workspace = Some(project.path().display().to_string());
-        input.run_id = Some("synced-node-run".to_string());
+        input.run_id = Some("synced-run".to_string());
         input.extension_env_providers = vec!["fixture".to_string()];
-        let (output, code) = execute(input).expect("synced Node execution");
+        let (output, code) = execute(input).expect("synced execution");
 
         assert_eq!(code, 0, "{}", output.stderr);
         assert_eq!(output.stdout, "");
         let store = ObservationStore::open_initialized().expect("store");
         let run = store
-            .get_run("synced-node-run")
+            .get_run("synced-run")
             .expect("read run")
             .expect("persisted run");
         assert_eq!(
@@ -738,6 +738,22 @@ fn empty_script_cannot_emit_a_runner_execution_plan() {
     assert!(err.to_string().contains("script is empty"));
 }
 
+/// Run a prepared script command with its own runtime dir: concurrent tests
+/// under `with_isolated_home` repoint and delete the process-wide
+/// `XDG_RUNTIME_DIR`, which the wrapper materializes its script under.
+fn run_script_command(command: &[String], job_id: Option<&str>) -> std::process::Output {
+    let runtime = tempfile::tempdir().expect("runtime dir");
+    let mut child = std::process::Command::new(&command[0]);
+    child
+        .args(&command[1..])
+        .env("XDG_RUNTIME_DIR", runtime.path());
+    match job_id {
+        Some(job_id) => child.env("HOMEBOY_RUNNER_JOB_ID", job_id),
+        None => child.env_remove("HOMEBOY_RUNNER_JOB_ID"),
+    };
+    child.output().expect("run constructed script command")
+}
+
 #[test]
 fn script_file_accepts_whitespace_only_and_preserves_non_empty_newlines() {
     let whitespace_only = " \n\t\n";
@@ -746,10 +762,7 @@ fn script_file_accepts_whitespace_only_and_preserves_non_empty_newlines() {
             .expect("whitespace-only stdin script");
     let whitespace_command =
         prepare_runner_exec_command(Some(&whitespace_script), Vec::new()).expect("script command");
-    let whitespace_output = std::process::Command::new(&whitespace_command[0])
-        .args(&whitespace_command[1..])
-        .output()
-        .expect("run whitespace-only constructed command");
+    let whitespace_output = run_script_command(&whitespace_command, None);
 
     assert_eq!(whitespace_script, whitespace_only);
     assert!(whitespace_output.status.success());
@@ -759,10 +772,7 @@ fn script_file_accepts_whitespace_only_and_preserves_non_empty_newlines() {
     let script = read_runner_exec_script_from_reader(source.as_bytes(), "stdin")
         .expect("non-empty stdin script");
     let command = prepare_runner_exec_command(Some(&script), Vec::new()).expect("script command");
-    let output = std::process::Command::new(&command[0])
-        .args(&command[1..])
-        .output()
-        .expect("run constructed command");
+    let output = run_script_command(&command, None);
 
     assert_eq!(script, source);
     assert!(output.status.success());
@@ -785,11 +795,7 @@ fn script_file_materializes_a_content_addressed_file_for_bash() {
     assert!(command[2].contains("trap cleanup EXIT"));
     assert!(!command[2].contains("bash -s"));
 
-    let output = std::process::Command::new(&command[0])
-        .args(&command[1..])
-        .env("HOMEBOY_RUNNER_JOB_ID", "test-job")
-        .output()
-        .expect("run materialized script command");
+    let output = run_script_command(&command, Some("test-job"));
     assert!(output.status.success());
     let lines = String::from_utf8(output.stdout)
         .expect("script output")
@@ -815,11 +821,7 @@ fn materialized_script_preserves_bash_exit_status() {
     let command =
         prepare_runner_exec_command(Some(&source.to_string()), Vec::new()).expect("script command");
 
-    let output = std::process::Command::new(&command[0])
-        .args(&command[1..])
-        .env("HOMEBOY_RUNNER_JOB_ID", "test-failure")
-        .output()
-        .expect("run materialized script command");
+    let output = run_script_command(&command, Some("test-failure"));
 
     assert_eq!(output.status.code(), Some(17));
     let script_path = String::from_utf8(output.stdout).expect("script path");
