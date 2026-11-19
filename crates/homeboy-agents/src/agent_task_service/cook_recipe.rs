@@ -3878,11 +3878,17 @@ mod tests {
                 .unwrap();
                 match case {
                     "continue" => {
-                        assert_eq!(ack.result.data["step"]["kind"], "continue", "{ack:?}");
-                        assert!(ack.result.data["admission"].is_object(), "{ack:?}");
+                        assert_eq!(
+                            ack.result.data["report"]["step"]["kind"], "continue",
+                            "{ack:?}"
+                        );
+                        assert!(
+                            ack.result.data["report"]["admission"].is_object(),
+                            "{ack:?}"
+                        );
                     }
                     "preflight" => {
-                        assert_eq!(ack.result.data["preflight"], true, "{ack:?}");
+                        assert_eq!(ack.result.data["report"]["preflight"], true, "{ack:?}");
                         assert_eq!(
                             store.read_record(run_id).unwrap().updated_at,
                             before.updated_at

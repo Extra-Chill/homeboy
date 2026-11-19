@@ -4488,7 +4488,13 @@ fn unmaterialized_cook_resume_replays_the_canonical_action_result() {
             homeboy_control_plane_contract::CONTROL_PLANE_ACTION_ACKNOWLEDGEMENT_SCHEMA
         );
         assert_eq!(first.0["action"], "resume");
-        assert_eq!(first.0["idempotency_key"], "resume-unmaterialized-1");
+        // The nested resume carries a key derived from the recover key.
+        assert_eq!(
+            first.0["idempotency_key"],
+            homeboy_engine_primitives::content_hash::sha256_hex(
+                b"recover-resume:resume-unmaterialized-1"
+            )
+        );
         assert_eq!(
             first.0["result"]["schema"],
             "homeboy/unmaterialized-cook-resume/v1"
