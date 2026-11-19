@@ -510,6 +510,20 @@ pub(super) enum RunnerServiceCommand {
         /// Runner ID
         runner_id: String,
     },
+    /// Run on the runner host by a controller's repoint: this binary writes
+    /// its own units, migrates an older layout, and restarts the service.
+    #[command(hide = true)]
+    Repoint {
+        /// Binary the unit executes
+        #[arg(long)]
+        binary: String,
+        /// Daemon startup token the controller expects
+        #[arg(long)]
+        startup_token: String,
+        /// Allowlisted daemon policy env, as KEY=VALUE
+        #[arg(long = "env")]
+        env: Vec<String>,
+    },
 }
 
 #[derive(Subcommand)]

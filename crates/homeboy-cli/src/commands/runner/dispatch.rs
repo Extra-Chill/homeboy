@@ -342,6 +342,14 @@ pub fn run(args: RunnerArgs) -> CmdResult<RunnerCommandOutput> {
                     "runner.service.status",
                     homeboy::runner::runner_service_status(&runner_id)?,
                 ),
+                RunnerServiceCommand::Repoint {
+                    binary,
+                    startup_token,
+                    env,
+                } => (
+                    "runner.service.repoint",
+                    homeboy::runner::repoint_local_runner_service(&binary, &startup_token, &env)?,
+                ),
             };
             Ok((
                 RunnerCommandOutput::Service(Box::new(super::types::RunnerServiceOutput {
