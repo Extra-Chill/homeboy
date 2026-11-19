@@ -1,6 +1,6 @@
 //! Per-attempt storage the daemon reclaims on its maintenance cadence (#18420).
 //!
-//! Every runner attempt leaves a path behind in one of four categories. Each
+//! Every runner attempt leaves a path behind in one of three categories. Each
 //! already has a cleanup implementation and a retention policy in
 //! `homeboy cleanup`; this pass runs that same planner over exactly those
 //! categories with `--apply` and default retention, inside the daemon's
@@ -29,9 +29,11 @@ use super::{
 /// Remote workspaces run last: they are the only category that talks to
 /// another host, so a slow runner can only spend the budget nothing after it
 /// needs.
-pub(super) const DAEMON_MAINTENANCE_CATEGORIES: [CleanupCategoryArg; 4] = [
+///
+/// Task worktrees are operator work: like automatic retention, the daemon
+/// never reclaims them unattended.
+pub(super) const DAEMON_MAINTENANCE_CATEGORIES: [CleanupCategoryArg; 3] = [
     CleanupCategoryArg::ControllerScratch,
-    CleanupCategoryArg::TaskWorktrees,
     CleanupCategoryArg::RuntimeTmp,
     CleanupCategoryArg::RemoteLabWorkspaces,
 ];
@@ -240,7 +242,6 @@ mod tests {
     fn the_plan_covers_every_per_attempt_path() {
         for category in [
             CleanupCategoryArg::ControllerScratch,
-            CleanupCategoryArg::TaskWorktrees,
             CleanupCategoryArg::RuntimeTmp,
             // Needs a connected runner to exercise end to end; its presence in
             // the plan is what puts `_lab_workspaces/*` on the cadence.
@@ -254,7 +255,8 @@ mod tests {
                 cleanup_category_metadata(category).category
             ));
         }
-        assert_eq!(DAEMON_MAINTENANCE_CATEGORIES.len(), 4);
+        assert_eq!(DAEMON_MAINTENANCE_CATEGORIES.len(), 3);
+        assert!(!DAEMON_MAINTENANCE_CATEGORIES.contains(&CleanupCategoryArg::TaskWorktrees));
         assert!(!reclaimed_by_daemon("terminal_runs"));
     }
 
@@ -286,8 +288,8 @@ mod tests {
             .unwrap();
             std::fs::write(active.path.join("live"), "active").unwrap();
 
-            // task-worktrees: a clean, unowned checkout with nothing unlanded,
-            // and one owned by a running attempt with an unpushed commit.
+            // task-worktrees are operator work: a clean, unowned checkout an
+            // operator just created survives the pass, as does an owned one.
             let source = root.path().join("repo");
             std::fs::create_dir_all(&source).unwrap();
             git(&source, &["init", "-q", "-b", "main"]);
@@ -362,8 +364,8 @@ mod tests {
                 "active scratch was reclaimed"
             );
             assert!(
-                !finished_worktree.exists(),
-                "finished task worktree was kept"
+                finished_worktree.exists(),
+                "an operator's task worktree was reclaimed unattended"
             );
             assert!(
                 active_worktree.join("work").exists(),
