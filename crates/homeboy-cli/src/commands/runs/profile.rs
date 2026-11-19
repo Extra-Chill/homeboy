@@ -148,7 +148,7 @@ mod tests {
                 .unwrap();
             let span = |id: &str, cpu: u64, homeboy: u64| {
                 json!({"id": id, "status": "ok", "started_at": "2026-11-19T00:00:00.000Z",
-                    "usage": {"cpu_usage_usec": cpu, "homeboy_cpu_usec": homeboy,
+                    "usage": {"cpu_usage_usec": cpu, "cpu_user_usec": cpu, "cpu_system_usec": 0, "homeboy_cpu_usec": homeboy, "wall_ms": 1,
                         "source": "rusage", "estimated": true}})
             };
             let report = serde_json::from_value(json!({"spans": [
