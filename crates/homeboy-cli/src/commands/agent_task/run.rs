@@ -8477,6 +8477,18 @@ fn run_preflight_cook_execution(
     if let Some(provenance) = provenance {
         record_cook_argument_provenance(&mut initial_plan, provenance);
     }
+    if let Some(key) = &args.admission_key {
+        if key.trim().is_empty() {
+            return Err(homeboy::core::Error::validation_invalid_argument(
+                "admission-key",
+                "--admission-key must not be empty",
+                None,
+                None,
+            ));
+        }
+        initial_plan.metadata[agent_task_service_direct::COOK_ADMISSION_KEY_METADATA] =
+            Value::String(key.clone());
+    }
     if args.require_acceptance {
         let authority = args.acceptance_authority.clone().ok_or_else(|| {
             homeboy::core::Error::validation_invalid_argument(

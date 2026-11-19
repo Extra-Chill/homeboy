@@ -13773,3 +13773,72 @@ fn unreachable_origin_repository(temp: &Path, with_tracking_ref: bool) -> (PathB
     ]);
     (repository, head)
 }
+
+/// #18450: concurrent submissions sharing an admission key admit exactly one
+/// Cook, and every caller receives its id. Once that Cook is terminal, the key
+/// admits a new Cook.
+#[test]
+fn concurrent_submits_with_one_admission_key_admit_exactly_one_cook() {
+    homeboy_core::test_support::with_isolated_home(|_| {
+        const SUBMITTERS: usize = 6;
+        let roots = homeboy_core::paths::PathRoots::from_environment().expect("isolated roots");
+        let store = CookRecipeStore::new(roots.clone());
+        let lifecycle_store = AgentTaskLifecycleStore::new(roots);
+        let dispatches = Arc::new(AtomicUsize::new(0));
+        let submit = |cook_id: String| {
+            let mut request = batch_cook_options(
+                &cook_id,
+                Arc::new(RecordingDetachedAttemptDispatcher {
+                    dispatches: Arc::clone(&dispatches),
+                }),
+            );
+            request.identity.initial_plan.metadata[super::super::COOK_ADMISSION_KEY_METADATA] =
+                serde_json::json!("import-loop:task-61");
+            CookService::run(
+                request,
+                CookRuntime::production(Arc::new(UnusedExecutor), &store, &lifecycle_store),
+                CookMode::Start,
+            )
+            .expect("submission returns a Cook")
+            .value
+        };
+        let barrier = Barrier::new(SUBMITTERS);
+        let reports = std::thread::scope(|scope| {
+            let handles = (0..SUBMITTERS)
+                .map(|index| {
+                    let (barrier, submit) = (&barrier, &submit);
+                    scope.spawn(move || {
+                        barrier.wait();
+                        submit(format!("admission-key-cook-{index}"))
+                    })
+                })
+                .collect::<Vec<_>>();
+            handles
+                .into_iter()
+                .map(|handle| handle.join().expect("submitter"))
+                .collect::<Vec<_>>()
+        });
+
+        let admitted = (0..SUBMITTERS)
+            .map(|index| format!("admission-key-cook-{index}"))
+            .filter(|cook_id| store.recipe_exists(cook_id))
+            .collect::<Vec<_>>();
+        assert_eq!(admitted.len(), 1, "exactly one Cook is admitted");
+        assert_eq!(dispatches.load(Ordering::SeqCst), 1);
+        let admitted = &admitted[0];
+        let run_id = format!("{admitted}-run");
+        for report in &reports {
+            assert_eq!(&report.cook_id, admitted, "every caller receives its id");
+            assert_eq!(report.latest_run_id.as_deref(), Some(run_id.as_str()));
+            assert!(!report.disposition.is_terminal(), "{}", report.status);
+        }
+
+        agent_task_lifecycle::rewrite_record_for_test(&run_id, |record| {
+            record.set_state_for_test(RunExecutionState::Failed);
+        })
+        .expect("terminal Cook");
+        let fresh = submit("admission-key-cook-after-terminal".to_string());
+        assert_eq!(fresh.cook_id, "admission-key-cook-after-terminal");
+        assert_eq!(dispatches.load(Ordering::SeqCst), 2);
+    });
+}

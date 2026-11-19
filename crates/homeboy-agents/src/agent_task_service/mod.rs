@@ -11,7 +11,9 @@ mod cook;
 mod cook_ci;
 pub use cook_ci::{cook_ci_status, repoll_cook_ci};
 pub(crate) mod cook_activity;
+mod cook_admission_key;
 mod cook_adoption;
+pub use cook_admission_key::COOK_ADMISSION_KEY_METADATA;
 /// Fresh provider attempts start from a clean Cook base tree.
 mod cook_attempt_workspace;
 pub use cook_attempt_workspace::{gate_cook_base, AttemptWorkspaceNotAtBase};

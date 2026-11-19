@@ -4920,6 +4920,26 @@ fn run_cook_reported(
     ) {
         Ok(result) => result,
         Err(mut error) => {
+            if let Some(admitted) = error
+                .details
+                .get(super::cook_admission_key::ADMITTED_COOK_DETAIL)
+                .cloned()
+            {
+                // The key's in-flight Cook is the answer: report its identity
+                // and status instead of admitting another (#18450).
+                let mut report = stores.report(CookReportInput {
+                    cook_id: admitted["cook_id"].as_str().unwrap_or_default().to_string(),
+                    status: admitted["status"].as_str().unwrap_or("in_flight"),
+                    disposition: CookDisposition::InFlight,
+                    attempts: Vec::new(),
+                    finalization: None,
+                    stop_reason: Some(error.message.clone()),
+                    exit_code: 0,
+                    invocation_latest_run_id: admitted["run_id"].as_str(),
+                });
+                report.value.failure_context = None;
+                return Ok(report);
+            }
             if error.details["concurrent_cook_creation_loser"] == Value::Bool(true) {
                 let mut report = stores.report(CookReportInput {
                         cook_id: failure_options.identity.cook_id.clone(),
@@ -5357,8 +5377,20 @@ fn run_cook_spine(
     // attempt. Re-persisting it as a fresh initial recipe would falsely look
     // like an unsafe post-gate correction because the durable lineage now has
     // more attempts than the caller's one-attempt input.
+    let mut admission_key = None;
     if !store.recipe_exists(&options.identity.cook_id) {
         lifecycle_store.require_detached_cook_handoff_fence_open(&options.identity.cook_id)?;
+        // Held until this admission is durable, so concurrent submitters with
+        // one key admit exactly one Cook (#18450).
+        if let Some(key) =
+            options.identity.initial_plan.metadata[super::COOK_ADMISSION_KEY_METADATA].as_str()
+        {
+            admission_key = Some(super::cook_admission_key::acquire(
+                store,
+                lifecycle_store,
+                key,
+            )?);
+        }
     }
     let recipe_materialization = match store.load_recipe(&options.identity.cook_id) {
         Ok(recipe)
@@ -5460,6 +5492,9 @@ fn run_cook_spine(
         return Err(Error::internal_unexpected(
             "materialized Cook lifecycle record does not match its initial run id",
         ));
+    }
+    if let Some(admission_key) = admission_key {
+        admission_key.claim(&options.identity.cook_id)?;
     }
     // Snapshot before report_cook_progress overwrites the phase. Older Cooks
     // have no started notification marker, so a continuation must not label a
