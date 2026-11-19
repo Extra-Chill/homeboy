@@ -4,6 +4,11 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.479.0] - 2026-11-19
+
+### Added
+- attribute CPU per step and phase with runs show and runs profile
+
 ## [0.478.0] - 2026-11-19
 
 ### Added
