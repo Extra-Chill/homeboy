@@ -2,6 +2,11 @@
 
 All notable changes to Homeboy Action will be documented in this file.
 
+## [2.27.4] - 2026-11-19
+
+### Fixed
+- run extension setup when reusing a cached extension
+
 ## [2.27.3] - 2026-11-18
 
 ### Changed
