@@ -2302,7 +2302,7 @@ pub(super) fn run_cook_spine(
                 None
             }
         };
-        let _terminal_phase = terminal_timing
+        let terminal_phase = terminal_timing
             .as_ref()
             .map(|store| store.run_phase_guard(&run_id, "terminal.decision"));
         let review_form = if review_form_unavailable {
@@ -2594,6 +2594,9 @@ pub(super) fn run_cook_spine(
                 let budget_limit = budget_limit
                     .as_ref()
                     .expect("budget is initialized from the loaded attempt plan");
+                // The decision is made. A local follow-up runs the next attempt
+                // inside this call, and that time belongs to the next attempt.
+                drop(terminal_phase);
                 match dispatch_cook_follow_up(
                     (store, lifecycle_store),
                     &options,

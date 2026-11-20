@@ -8966,10 +8966,12 @@ fn verified_empty_attempt_dispatches_the_next_rotation_route() {
                 let phases = test_lifecycle_store()
                     .open_observation_initialized()?
                     .phase_spans(&self.source_run_id)?;
-                assert!(
-                    phases.spans.iter().any(|span| span.id == "terminal.schedule_next_attempt"),
-                    "scheduling must finish before receiver staging, capacity waits, or provider execution"
-                );
+                for phase in ["terminal.decision", "terminal.schedule_next_attempt"] {
+                    assert!(
+                        phases.spans.iter().any(|span| span.id == phase),
+                        "{phase} must finish before receiver staging, capacity waits, or provider execution"
+                    );
+                }
                 self.inner.dispatch_attempt(plan, run_id, baseline)
             }
         }
