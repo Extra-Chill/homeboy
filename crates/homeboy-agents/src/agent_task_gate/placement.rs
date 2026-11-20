@@ -1812,7 +1812,12 @@ mod tests {
         let error = runner_gate_execution_error(error);
         let report = gate_non_execution_report(
             1,
-            vec!["homeboy".into(), "review".into(), "test".into(), "homeboy".into()],
+            vec![
+                "homeboy".into(),
+                "review".into(),
+                "test".into(),
+                "homeboy".into(),
+            ],
             AgentTaskGateVisibility::Visible,
             AgentTaskGateRevealPolicy::FullEvidence,
             &error,
