@@ -657,10 +657,12 @@ fn batch_child(instance: &str, item: &Value, status: &str, batch_reason: &str) -
     }
     let reason = match (outcome, error) {
         (Some(homeboy::core::workflow::advance::NEVER_STARTED), Some(error)) => error.to_string(),
-        (_, Some(error)) => format!("admission refused: {error}"),
-        (Some("cancelled"), None) | (None, None) if status == "cancelled" => {
+        // A stopping terminal settles open items as cancelled with its cause
+        // as their error; the batch's own reason is that cause.
+        (Some("cancelled"), _) | (None, None) if status == "cancelled" => {
             format!("cancelled before admission: {batch_reason}")
         }
+        (_, Some(error)) => format!("admission refused: {error}"),
         (Some(outcome), None) if cook_id.is_some() => format!(
             "admission refused: the child's Cook ended `{outcome}` before it wrote a run record"
         ),
