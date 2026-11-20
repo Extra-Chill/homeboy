@@ -97,6 +97,9 @@ struct GateExecution<'a> {
 /// field group lives in exactly one place.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct VerifyGateOptions {
+    /// Stop before provider dispatch when any base gate is red.
+    #[serde(default)]
+    pub baseline_policy: BaselinePolicy,
     /// Defer full verification to required PR checks after local gates pass.
     #[serde(default)]
     pub verify_ci: bool,
@@ -166,6 +169,15 @@ pub struct VerifyGateOptions {
     /// checkout before deterministic verification.
     #[serde(default = "default_hydrate_dependencies")]
     pub hydrate_dependencies: bool,
+}
+
+/// Admission policy for known failures on the immutable Cook base.
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "kebab-case")]
+pub enum BaselinePolicy {
+    Strict,
+    #[default]
+    NewFailuresOnly,
 }
 
 /// Controller-captured provenance for an inline or file-backed gate program.
@@ -605,6 +617,7 @@ fn npm_run_script(command: &str) -> Option<&str> {
 impl Default for VerifyGateOptions {
     fn default() -> Self {
         Self {
+            baseline_policy: BaselinePolicy::default(),
             verify_ci: false,
             verify: Vec::new(),
             private_verify: Vec::new(),

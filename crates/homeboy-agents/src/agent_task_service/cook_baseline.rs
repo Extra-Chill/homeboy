@@ -299,10 +299,12 @@ struct BaselineFacts {
     failure_fingerprint: String,
     #[serde(default)]
     failure_records: Vec<String>,
-    /// Separately retain exit/diagnostic identity so a subset cannot hide a new diagnostic.
+    /// Retained for compatibility with previously recorded baseline facts.
     #[serde(default)]
     diagnostic_fingerprint: Option<String>,
     package_artifacts: Vec<AgentTaskGatePackageArtifactProvenance>,
+    #[serde(default)]
+    output_tail: String,
 }
 
 impl BaselineFacts {
@@ -319,7 +321,16 @@ impl BaselineFacts {
                     .map(|e| e.diagnostics.as_slice())
                     .unwrap_or_default(),
             ),
-            failure_records: crate::agent_task_gate::failure_records(&gate.stdout, &gate.stderr),
+            failure_records: {
+                let mut records =
+                    crate::agent_task_gate::failure_records(&gate.stdout, &gate.stderr);
+                if let Some(evidence) = &gate.failure_evidence {
+                    records.extend(evidence.failed_tests.iter().map(|test| format!("{test:?}")));
+                }
+                records.sort();
+                records.dedup();
+                records
+            },
             diagnostic_fingerprint: Some(failure_fingerprint(
                 gate.exit_code,
                 "",
@@ -330,6 +341,14 @@ impl BaselineFacts {
                     .unwrap_or_default(),
             )),
             package_artifacts: gate.environment.package_artifacts.clone(),
+            output_tail: format!("{}\n{}", gate.stdout, gate.stderr)
+                .chars()
+                .rev()
+                .take(4096)
+                .collect::<String>()
+                .chars()
+                .rev()
+                .collect(),
         }
     }
 
@@ -343,19 +362,26 @@ impl BaselineFacts {
 
     fn apply(&self, gate: &mut AgentTaskGateReport, base_sha: &str, diagnostic: Option<String>) {
         let candidate = Self::from_gate(gate);
-        // Old cache entries have no records: preserve their exact-digest behavior.
-        // Empty record sets must never make unrelated unrecognized output inherited.
-        let inherited_subset = !candidate.failure_records.is_empty()
-            && self.diagnostic_fingerprint.is_some()
-            && self.diagnostic_fingerprint == candidate.diagnostic_fingerprint
-            && candidate
-                .failure_records
-                .iter()
-                .all(|record| self.failure_records.contains(record));
+        let inherited: Vec<_> = candidate
+            .failure_records
+            .iter()
+            .filter(|record| self.failure_records.contains(record))
+            .cloned()
+            .collect();
+        let new: Vec<_> = candidate
+            .failure_records
+            .iter()
+            .filter(|record| !self.failure_records.contains(record))
+            .cloned()
+            .collect();
+        // Opaque gates have only an exit-status contract. Do not attribute an
+        // already-red host or toolchain to the candidate based on output text.
+        let opaque = self.failure_records.is_empty() || candidate.failure_records.is_empty();
         let matches = self.status == AgentTaskGateStatus::Failed
             && gate.status == AgentTaskGateStatus::Failed
-            && self.exit_code == candidate.exit_code
-            && (self.failure_fingerprint == candidate.failure_fingerprint || inherited_subset);
+            && (opaque || new.is_empty());
+        let diagnostic = Some(format!("{}; inherited failures: {:?}; new failures: {:?}; base failures: {:?}; base output tail: {}",
+            diagnostic.unwrap_or_default(), inherited, new, self.failure_records, self.output_tail));
         gate.baseline_comparison = Some(AgentTaskGateBaselineComparison {
             base_ref: base_sha.to_string(),
             exit_code: self.exit_code,
@@ -372,6 +398,190 @@ impl BaselineFacts {
             gate.accept_inherited_failure();
         }
     }
+}
+
+/// Observe all declared gates before paid provider work. The cache includes
+/// placement and gate inputs, not just the SHA, so hosts never share verdicts.
+pub(crate) fn admit_base_gates(
+    options: &super::cook::CookRequest,
+    store: &ObservationStore,
+    base_sha: &str,
+) -> Result<Value> {
+    let Some(root) = options.workspace.source_worktree_path.as_ref() else {
+        return Ok(serde_json::json!([]));
+    };
+    let workspace =
+        super::cook_promotion::component_workspace_path(options)?.unwrap_or_else(|| root.clone());
+    let gates = super::cook_recipe::admitted_gate_policy(options)?;
+    let mut environment = gates.gate_environment.clone();
+    environment.admitted_component_id =
+        super::cook::cook_repository_identity_component_id(&options.identity.initial_plan);
+    let component = environment.admitted_component_id.clone();
+    let inputs = serde_json::json!([root, base_sha, gates]);
+    let key = format!(
+        "admission-{:x}",
+        Sha256::digest(inputs.to_string().as_bytes())
+    );
+    // Serialize identical admissions across controller processes. Recheck the
+    // durable cache only after obtaining the lock; concurrent Cooks must not
+    // both pay for the same base observation.
+    let lock_root = homeboy_core::artifacts::root()?.join("cook-baseline-locks");
+    std::fs::create_dir_all(&lock_root)
+        .map_err(|error| Error::internal_unexpected(error.to_string()))?;
+    let lock = std::fs::OpenOptions::new()
+        .create(true)
+        .truncate(false)
+        .read(true)
+        .write(true)
+        .open(lock_root.join(&key))
+        .map_err(|error| Error::internal_unexpected(error.to_string()))?;
+    lock.lock()
+        .map_err(|error| Error::internal_unexpected(error.to_string()))?;
+    if let Some(record) = store.coordination_record(BASELINE_RECORDS, &key)? {
+        return Ok(record.payload);
+    }
+    let results = crate::agent_task_promotion::with_gate_supervision(
+        gates.declared_supervision(),
+        || {
+            with_detached_base_checkout(root, &workspace, base_sha, component.as_deref(), |base| {
+                let commands: Vec<_> = gates
+                    .verify
+                    .iter()
+                    .chain(&gates.private_verify)
+                    .cloned()
+                    .collect();
+                hydrate_base_gate_workspace(
+                    base,
+                    &environment,
+                    component.as_deref(),
+                    &commands,
+                    gates.gate_timeout(),
+                )?;
+                let mut results = Vec::new();
+                for index in 0..(commands.len() + usize::from(gates.test_execution_plan.is_some()))
+                {
+                    let input = serde_json::json!([
+                        root,
+                        workspace,
+                        base_sha,
+                        commands.get(index),
+                        if commands.get(index).is_none() {
+                            gates.test_execution_plan.as_ref()
+                        } else {
+                            None
+                        },
+                        environment,
+                        gates.gate_package_artifacts,
+                        gates.gate_diagnostic_sidecars,
+                        gates.gate_timeout_seconds,
+                        gates.gate_no_progress_timeout_seconds,
+                        gates.gate_heartbeat_interval_seconds,
+                        index < gates.verify.len(),
+                        gates.private_gate_reveal,
+                    ]);
+                    let observation_key = format!(
+                        "gate-admission-{:x}",
+                        Sha256::digest(input.to_string().as_bytes())
+                    );
+                    let gate_lock = std::fs::OpenOptions::new()
+                        .create(true)
+                        .truncate(false)
+                        .read(true)
+                        .write(true)
+                        .open(lock_root.join(&observation_key))
+                        .map_err(|error| Error::internal_unexpected(error.to_string()))?;
+                    gate_lock
+                        .lock()
+                        .map_err(|error| Error::internal_unexpected(error.to_string()))?;
+                    if let Some(record) =
+                        store.coordination_record(BASELINE_RECORDS, &observation_key)?
+                    {
+                        results.push(record.payload);
+                        continue;
+                    }
+                    let run_dir = homeboy_core::engine::run_dir::RunDir::create()?;
+                    let result = (|| {
+                        let runtime = homeboy_core::engine::invocation::InvocationGuard::acquire(
+                            &run_dir,
+                            &homeboy_core::engine::invocation::InvocationRequirements::default(),
+                        )?;
+                        let visibility =
+                            if index < gates.verify.len() || commands.get(index).is_none() {
+                                crate::agent_task_gate::AgentTaskGateVisibility::Visible
+                            } else {
+                                crate::agent_task_gate::AgentTaskGateVisibility::Private
+                            };
+                        if let Some(command) = commands.get(index) {
+                            run_gate_command_with_timeout(
+                                base,
+                                index + 1,
+                                command,
+                                visibility,
+                                gates.private_gate_reveal,
+                                &runtime.context().tmp_dir,
+                                gates.gate_timeout(),
+                                &environment,
+                                &gates.gate_package_artifacts,
+                            )
+                        } else {
+                            run_declared_test_with_timeout(
+                                base,
+                                index + 1,
+                                gates.test_execution_plan.as_ref().unwrap(),
+                                visibility,
+                                gates.private_gate_reveal,
+                                &runtime.context().tmp_dir,
+                                &environment,
+                                &gates.gate_package_artifacts,
+                            )
+                        }
+                    })();
+                    run_dir.finish(result.is_ok());
+                    let gate = result?;
+                    let facts = BaselineFacts::from_gate(&gate);
+                    let payload = serde_json::to_value(&facts)
+                        .map_err(|error| Error::internal_unexpected(error.to_string()))?;
+                    if facts.comparable() {
+                        let gate_key = baseline_record_key(&gate, base_sha, component.as_deref())?;
+                        store.put_coordination_record(
+                            BASELINE_RECORDS,
+                            &gate_key,
+                            ExpectedRevision::Absent,
+                            RecordWrite {
+                                state: "comparable",
+                                payload: &payload,
+                                expires_at_ms: None,
+                            },
+                        )?;
+                    }
+                    let observation = serde_json::json!({"command": gate.command, "status": if gate.status == AgentTaskGateStatus::Failed { "baseline_red" } else if gate.status == AgentTaskGateStatus::Succeeded { "passed" } else { "inconclusive" }, "facts": payload});
+                    store.put_coordination_record(
+                        BASELINE_RECORDS,
+                        &observation_key,
+                        ExpectedRevision::Absent,
+                        RecordWrite {
+                            state: "observed",
+                            payload: &observation,
+                            expires_at_ms: None,
+                        },
+                    )?;
+                    results.push(observation);
+                }
+                Ok(Value::Array(results))
+            })
+        },
+    )?;
+    store.put_coordination_record(
+        BASELINE_RECORDS,
+        &key,
+        ExpectedRevision::Absent,
+        RecordWrite {
+            state: "observed",
+            payload: &results,
+            expires_at_ms: None,
+        },
+    )?;
+    Ok(results)
 }
 
 fn baseline_record_key(
@@ -1045,6 +1255,48 @@ mod tests {
     use sha2::{Digest, Sha256};
 
     #[test]
+    fn baseline_fixture_gate_attributes_only_new_test_failures() {
+        let workspace = tempfile::tempdir().unwrap();
+        let run = |failures: &str| {
+            run_gate_command_with_timeout(
+                workspace.path(),
+                1,
+                &format!("printf '{failures}'; exit 1"),
+                HomeboyGateVisibility::Visible,
+                AgentTaskGateRevealPolicy::FullEvidence,
+                workspace.path(),
+                std::time::Duration::from_secs(10),
+                &Default::default(),
+                &[],
+            )
+            .unwrap()
+        };
+        let base = BaselineFacts::from_gate(&run("test A ... FAILED\\n"));
+        let mut inherited = run("test A ... FAILED\\n");
+        base.apply(&mut inherited, "base", None);
+        assert_eq!(
+            inherited.status,
+            AgentTaskGateStatus::AcceptedInheritedFailure
+        );
+        let mut regression = run("test A ... FAILED\\ntest B ... FAILED\\n");
+        base.apply(&mut regression, "base", None);
+        assert_eq!(regression.status, AgentTaskGateStatus::Failed);
+        let comparison = regression.baseline_comparison.unwrap();
+        assert_eq!(
+            comparison.result,
+            AgentTaskGateDifferentialResult::CandidateRegression
+        );
+        assert!(comparison.diagnostic.unwrap().contains("B"));
+        let opaque = BaselineFacts::from_gate(&run("host unavailable"));
+        let mut candidate = run("different host error");
+        opaque.apply(&mut candidate, "base", None);
+        assert_eq!(
+            candidate.status,
+            AgentTaskGateStatus::AcceptedInheritedFailure
+        );
+    }
+
+    #[test]
     fn vitest_failure_attribution_uses_base_failure_subset() {
         let failures = [
             " × fluid readiness > keeps hero fluid 12ms\n FAIL  src/lib/fluid-readiness.test.ts > fluid readiness > keeps hero fluid\nAssertionError: expected true to be false\n",
@@ -1253,12 +1505,12 @@ mod tests {
                     true,
                 ),
                 (
-                    "regression",
+                    "opaque_red",
                     "cat state >&2; exit 1",
                     "candidate\n",
                     std::time::Duration::from_secs(1),
-                    AgentTaskGateDifferentialResult::CandidateRegression,
-                    false,
+                    AgentTaskGateDifferentialResult::BaselineRed,
+                    true,
                 ),
                 // The counter assertion needs the shell to record its run
                 // before the timeout kills it. A 10ms timeout could fire
@@ -1415,7 +1667,7 @@ mod tests {
                             .as_ref()
                             .unwrap()
                             .result,
-                        AgentTaskGateDifferentialResult::CandidateRegression
+                        AgentTaskGateDifferentialResult::BaselineRed
                     );
                     assert_eq!(runs(), 1);
                     let mut changed = original.clone();
@@ -1851,7 +2103,7 @@ mod tests {
             );
             assert_eq!(
                 gate.baseline_comparison.as_ref().unwrap().result,
-                AgentTaskGateDifferentialResult::CandidateRegression
+                AgentTaskGateDifferentialResult::BaselineRed
             );
         });
     }

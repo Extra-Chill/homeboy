@@ -368,6 +368,9 @@ pub struct VerifyGateArgs {
     )]
     #[arg(value_parser = ["ordered-fail-fast", "continue-all"])]
     pub gate_execution_policy: String,
+    /// How Cook handles gates already failing on the base commit.
+    #[arg(long, default_value = "new-failures-only", value_parser = ["strict", "new-failures-only"])]
+    pub baseline_policy: String,
     /// Wall-clock timeout, in seconds, for each verification gate command
     /// (default 1800 = 30 min). A gate exceeding this fails.
     #[arg(long = "gate-timeout-seconds", default_value_t = 30 * 60, value_name = "SECONDS")]
@@ -728,6 +731,11 @@ impl From<VerifyGateArgs> for VerifyGateOptions {
                 "continue-all" => AgentTaskGateExecutionPolicy::ContinueAll,
                 _ => AgentTaskGateExecutionPolicy::OrderedFailFast,
             },
+            baseline_policy: if args.baseline_policy == "strict" {
+                homeboy::agents::agent_tasks::gate::BaselinePolicy::Strict
+            } else {
+                homeboy::agents::agent_tasks::gate::BaselinePolicy::NewFailuresOnly
+            },
             gate_timeout_seconds: args.gate_timeout_seconds,
             gate_heartbeat_interval_seconds: args.gate_heartbeat_interval_seconds,
             gate_no_progress_timeout_seconds: args.gate_no_progress_timeout_seconds,
@@ -1042,7 +1050,8 @@ mod tests {
             ("repro", "test -f FIXED"), ("repro-file", "/repro.sh"),
             ("gate-input-source", r#"{"visibility":"visible","source_kind":"inline","sha256":"sha256:abc","size_bytes":1,"redaction_policy":"full_evidence"}"#),
             ("private-gate-reveal", "full-evidence"),
-            ("gate-execution-policy", "continue-all"), ("gate-timeout-seconds", "42"),
+            ("gate-execution-policy", "continue-all"), ("baseline-policy", "strict"),
+            ("gate-timeout-seconds", "42"),
             ("gate-heartbeat-interval-seconds", "7"), ("gate-no-progress-timeout-seconds", "11"),
             ("gate-environment-mode", "replace"), ("gate-runner", "lab"),
             ("gate-requirements", r#"{"host_tools":["tool"],"secrets":["TOKEN"]}"#),
