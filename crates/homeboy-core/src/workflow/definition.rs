@@ -874,22 +874,29 @@ impl WorkflowDefinition {
     }
 
     /// A resumed instance continues its source: every input the definition
-    /// still declares and the caller did not provide keeps the source's value,
-    /// and a next-pass instance keeps its `iteration` and `previous` so
-    /// iteration-dependent step keys still match.
-    pub fn carry_resumed_inputs(
+    /// still declares and the caller did not provide keeps the source's value
+    /// (and so satisfies `required`), and a next-pass instance keeps its
+    /// `iteration` and `previous` so iteration-dependent step keys still match.
+    pub fn resolve_resumed_inputs(
         &self,
-        inputs: &mut BTreeMap<String, Value>,
-        source: &BTreeMap<String, Value>,
         provided: &BTreeMap<String, Value>,
-    ) {
-        for (name, value) in source {
-            let declared = self.inputs.contains_key(name)
-                || (self.next_pass.is_some() && matches!(name.as_str(), "iteration" | "previous"));
-            if declared && !provided.contains_key(name) {
-                inputs.insert(name.clone(), value.clone());
+        source: &BTreeMap<String, Value>,
+    ) -> Result<BTreeMap<String, Value>> {
+        let mut merged: BTreeMap<String, Value> = source
+            .iter()
+            .filter(|(name, _)| self.inputs.contains_key(*name))
+            .map(|(name, value)| (name.clone(), value.clone()))
+            .collect();
+        merged.extend(provided.clone());
+        let mut resolved = self.resolve_inputs(&merged)?;
+        if self.next_pass.is_some() {
+            for name in ["iteration", "previous"] {
+                if let Some(value) = source.get(name) {
+                    resolved.insert(name.to_string(), value.clone());
+                }
             }
         }
+        Ok(resolved)
     }
 
     /// `wf-<id>-<sha256(definition digest, inputs, instance name)[..12]>`.
@@ -978,6 +985,41 @@ mod tests {
         let definition = WorkflowDefinition::from_value(value)?;
         definition.validate(&any_flag)?;
         Ok(definition)
+    }
+
+    /// `--resume-from` keeps every still-declared source input the caller did
+    /// not pass again, which satisfies `required`; a passed input wins, an
+    /// input the definition no longer declares is dropped, and a next pass
+    /// keeps its place in the chain.
+    #[test]
+    fn resumed_inputs_satisfy_required_from_the_source() {
+        let mut value = base();
+        value["inputs"]["mode"] = json!({"default": "fast"});
+        value["next_pass"] = json!({"max_iterations": 5});
+        let definition = definition(value).unwrap();
+        let source = BTreeMap::from([
+            ("url".to_string(), json!("https://source.test")),
+            ("mode".to_string(), json!("slow")),
+            ("removed".to_string(), json!("gone")),
+            ("iteration".to_string(), json!(3)),
+            ("previous".to_string(), json!({"unchanged_passes": 1})),
+        ]);
+        for (provided, url) in [
+            (BTreeMap::new(), "https://source.test"),
+            (
+                BTreeMap::from([("url".to_string(), json!("https://passed.test"))]),
+                "https://passed.test",
+            ),
+        ] {
+            let resolved = definition
+                .resolve_resumed_inputs(&provided, &source)
+                .unwrap();
+            assert_eq!(resolved["url"], url);
+            assert_eq!(resolved["mode"], "slow");
+            assert!(!resolved.contains_key("removed"));
+            assert_eq!(resolved["iteration"], 3);
+            assert_eq!(resolved["previous"], json!({"unchanged_passes": 1}));
+        }
     }
 
     fn base() -> Value {

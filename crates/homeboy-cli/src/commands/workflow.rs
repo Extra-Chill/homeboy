@@ -286,14 +286,22 @@ fn admit_with_resume(
     source: &str,
     resumed_from: Option<&str>,
 ) -> CmdResult<Value> {
-    let mut inputs = definition.resolve_inputs(provided)?;
-    let client = LocalControllerJobClient::connect_current_build()?;
-    if let Some(source) = resumed_from {
-        let view = client.workflow(source)?;
-        if let Ok(source_inputs) = serde_json::from_value(view["inputs"].clone()) {
-            definition.carry_resumed_inputs(&mut inputs, &source_inputs, provided);
+    // A fresh admission validates its inputs before reaching the daemon; a
+    // resumed one first reads its source's inputs from the daemon.
+    let client;
+    let inputs = match resumed_from {
+        None => {
+            let inputs = definition.resolve_inputs(provided)?;
+            client = LocalControllerJobClient::connect_current_build()?;
+            inputs
         }
-    }
+        Some(source) => {
+            client = LocalControllerJobClient::connect_current_build()?;
+            let view = client.workflow(source)?;
+            let source_inputs = serde_json::from_value(view["inputs"].clone()).unwrap_or_default();
+            definition.resolve_resumed_inputs(provided, &source_inputs)?
+        }
+    };
     let mut resumed_from = resumed_from.map(str::to_string);
     let mut instance =
         definition.instance_id_with_resume(&inputs, instance_name, resumed_from.as_deref());
