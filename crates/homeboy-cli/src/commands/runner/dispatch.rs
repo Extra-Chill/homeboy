@@ -1062,6 +1062,7 @@ mod tests {
                     daemon_fresh: false,
                     owners: Vec::new(),
                     continuation: Some("homeboy runner refresh-homeboy lab".to_string()),
+                    admission_paused: None,
                 }),
                 failure: Some(runner::HomeboyBinaryRefreshFailure {
                     exit_code: 2,

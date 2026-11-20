@@ -219,6 +219,10 @@ pub struct HomeboyRefreshReadiness {
     /// One command that resumes the blocked lifecycle from its current state.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub continuation: Option<String>,
+    /// Why a converged runner is momentarily not admitting work, e.g. host
+    /// pressure. Back-pressure is healthy, so it is a note, not a failure.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub admission_paused: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -1050,6 +1054,7 @@ fn failed_refresh_readiness(plan: &HomeboyBinaryRefreshPlan) -> HomeboyRefreshRe
             "homeboy runner refresh-homeboy {}",
             shell_arg(&plan.runner_id)
         )),
+        admission_paused: None,
     }
 }
 
@@ -1063,6 +1068,7 @@ fn blocked_refresh_readiness(plan: &HomeboyBinaryRefreshPlan) -> HomeboyRefreshR
             "homeboy runner connect {}",
             shell_arg(&plan.runner_id)
         )),
+        admission_paused: None,
     }
 }
 
@@ -1200,13 +1206,23 @@ fn refresh_readiness_from_status(
     report: &super::RunnerStatusReport,
 ) -> HomeboyRefreshReadiness {
     let summary = report.admission_summary();
-    if summary.accepting_jobs {
+    // The daemon is on target and would admit but for host pressure: the
+    // refresh converged, and admission resumes on its own as pressure clears.
+    let paused_by_pressure = !summary.accepting_jobs
+        && summary.connected
+        && summary.daemon_fresh
+        && summary.daemon_compatible
+        && summary.active_job_count.is_some()
+        && report.under_pressure();
+    if summary.accepting_jobs || paused_by_pressure {
         return HomeboyRefreshReadiness {
             state: HomeboyRefreshReadinessState::Ready,
-            accepting_jobs: true,
+            accepting_jobs: summary.accepting_jobs,
             daemon_fresh: true,
             owners: Vec::new(),
             continuation: None,
+            admission_paused: paused_by_pressure
+                .then(|| pressure_pause_note(summary.pressure.as_ref())),
         };
     }
     // The owner fencing convergence is the runner's one current daemon: the
@@ -1232,7 +1248,16 @@ fn refresh_readiness_from_status(
                 format!("homeboy runner status {} --full", shell_arg(runner_id))
             }),
         ),
+        admission_paused: None,
     }
+}
+
+fn pressure_pause_note(pressure: Option<&homeboy_core::runner_pressure::RunnerPressure>) -> String {
+    let cpu = pressure
+        .and_then(|pressure| pressure.cpu)
+        .map(|cpu| format!(", cpu PSI {}.{:02}", cpu / 100, cpu % 100))
+        .unwrap_or_default();
+    format!("runner on target; admission paused (pressure{cpu})")
 }
 
 /// The refresh's final, non-phase-scoped verdict: a reconnect can complete
