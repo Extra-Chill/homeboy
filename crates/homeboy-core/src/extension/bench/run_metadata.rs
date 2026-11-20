@@ -336,7 +336,7 @@ mod tests {
         );
         assert_eq!(
             metadata.workloads[0].sha256,
-            Some(content_hash::sha256_bytes(b"fn main() {}\n"))
+            Some(content_hash::sha256_hex(b"fn main() {}\n"))
         );
 
         // Unreadable workload metadata remains available without a content hash.
