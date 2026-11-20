@@ -4,6 +4,19 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.482.0] - 2026-11-20
+
+### Added
+- priority lanes, owner share cap, and queue position for Lab admission
+
+### Changed
+- Let recover --regate replace verify commands and offer regate for incomplete candidates
+
+### Fixed
+- process-tree liveness for no-progress; re-gate supervision stops as infra
+- reap queued runner jobs whose waiting owner is gone
+- admit /dev pseudo-files in prompt diff headers
+
 ## [0.481.7] - 2026-11-20
 
 ### Changed
