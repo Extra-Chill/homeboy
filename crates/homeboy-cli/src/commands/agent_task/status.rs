@@ -206,6 +206,31 @@ fn status_without_feedback(args: StatusArgs) -> CmdResult<Value> {
                 .get("candidate_ref")
                 .cloned()
                 .unwrap_or(Value::Null);
+            value["gated_sha"] = promotion
+                .pointer("/candidate/candidate_sha")
+                .cloned()
+                .unwrap_or(Value::Null);
+            value["publication_sha"] = promotion
+                .get("publication_sha")
+                .cloned()
+                .unwrap_or(Value::Null);
+            value["tree"] = promotion
+                .pointer("/candidate/tree_sha")
+                .cloned()
+                .unwrap_or(Value::Null);
+            if value["publication_sha"].is_null() {
+                if let (Some(path), Some(reference)) = (
+                    promotion.pointer("/target/path").and_then(Value::as_str),
+                    promotion.get("candidate_ref").and_then(Value::as_str),
+                ) {
+                    value["publication_sha"] = json!(homeboy::core::git::rev_parse(
+                        std::path::Path::new(path),
+                        reference
+                    ));
+                }
+            }
+            value["identity_note"] =
+                json!("The publication commit carries the gated tree unchanged.");
             value["candidate_sha"] = promotion
                 .pointer("/candidate/candidate_sha")
                 .cloned()
@@ -214,6 +239,8 @@ fn status_without_feedback(args: StatusArgs) -> CmdResult<Value> {
         // The typed immutable candidate commit harvest recorded (#16303).
         if let Some(candidate) = &record.candidate {
             value["candidate_commit"] = json!(candidate);
+            value["gated_sha"] = json!(candidate.candidate_sha);
+            value["tree"] = json!(candidate.tree_sha);
         }
         // Provider response identity, distinct from the requested routing tier.
         value["served_models"] = json!(record.served_models);

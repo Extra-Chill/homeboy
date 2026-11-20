@@ -792,8 +792,13 @@ fn render_status_summary(payload: &Value) -> Option<String> {
     if let Some(reference) = string_value(payload, &["candidate_ref"]) {
         lines.push(format!("Candidate ref: {reference}"));
     }
-    if let Some(sha) = string_value(payload, &["candidate_sha"]) {
-        lines.push(format!("Candidate SHA: {sha}"));
+    for key in ["gated_sha", "publication_sha", "tree"] {
+        if let Some(value) = string_value(payload, &[key]) {
+            lines.push(format!("{key}: {value}"));
+        }
+    }
+    if let Some(note) = string_value(payload, &["identity_note"]) {
+        lines.push(note.to_string());
     }
     if let Some(candidate) = string_value(payload, &["candidate", "state"]) {
         lines.push(format!("Candidate: {candidate}"));
