@@ -78,7 +78,12 @@ fn allocated_bytes(metadata: &fs::Metadata) -> u64 {
 }
 
 pub(super) fn filesystem_available_bytes(path: &Path) -> Option<u64> {
-    fs4::available_space(path.parent().unwrap_or(path)).ok()
+    crate::observation::disk_budget::disk_budget(
+        path.parent().unwrap_or(path),
+        "temporary storage",
+        "filesystem capacity is unavailable",
+    )
+    .available_bytes
 }
 
 pub(super) fn verified_reclaimed_bytes(
