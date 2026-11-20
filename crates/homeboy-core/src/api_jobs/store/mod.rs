@@ -35,6 +35,7 @@ mod controller_completion;
 mod daemon_scope_tests;
 #[cfg(test)]
 mod gate_reserve_tests;
+pub(super) mod queued_observers;
 mod reconciliation;
 pub(super) mod terminal_delivery;
 
@@ -78,6 +79,9 @@ pub struct JobStore {
     /// process. Shared by every clone, so the reservation reconciler can tell
     /// a slow, live worker from an orphaned reservation (#18318).
     pub(super) live_local_child_workers: Arc<Mutex<HashSet<Uuid>>>,
+    /// Last owner heartbeat for each queued job whose waiting client opted in
+    /// to queued-owner liveness; see the `queued_observers` module (#18601).
+    pub(super) queued_observers: Arc<Mutex<HashMap<Uuid, u64>>>,
     #[cfg(test)]
     terminal_write_failures: Arc<AtomicU64>,
     #[cfg(test)]
@@ -1106,6 +1110,7 @@ impl JobStore {
             daemon_lease_id: None,
             daemon_scope: None,
             live_local_child_workers: Arc::default(),
+            queued_observers: Arc::default(),
             #[cfg(test)]
             terminal_write_failures: Arc::new(AtomicU64::new(0)),
             #[cfg(test)]
@@ -1211,6 +1216,7 @@ impl JobStore {
             daemon_lease_id: None,
             daemon_scope: None,
             live_local_child_workers: Arc::default(),
+            queued_observers: Arc::default(),
             #[cfg(test)]
             terminal_write_failures: Arc::new(AtomicU64::new(0)),
             #[cfg(test)]

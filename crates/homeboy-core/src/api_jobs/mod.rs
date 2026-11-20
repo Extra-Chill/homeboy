@@ -22,6 +22,7 @@ pub(crate) use runner_job_preparation::with_runner_job_preparation;
 pub use runner_job_preparation::{
     register_runner_job_preparation_provider, RunnerJobPreparationProvider,
 };
+pub use store::queued_observers::{QUEUED_OWNER_DEADLINE_MS, QUEUED_OWNER_HEARTBEAT_METADATA};
 pub(crate) use store::ControllerJobStartOutcome;
 pub(crate) use store::ControllerJobState;
 pub(crate) use store::ControllerJobSubmissionOutcome;

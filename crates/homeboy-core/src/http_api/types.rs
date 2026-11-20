@@ -152,6 +152,9 @@ pub enum HttpEndpoint {
     JobCancel {
         id: String,
     },
+    JobObserve {
+        id: String,
+    },
     JobProjectionCancel {
         id: String,
     },
@@ -279,6 +282,7 @@ impl HttpEndpoint {
             Self::JobEvents { .. } => "jobs.events",
             Self::JobWatch { .. } => "jobs.watch",
             Self::JobCancel { .. } => "jobs.cancel",
+            Self::JobObserve { .. } => "jobs.observe",
             Self::JobProjectionCancel { .. } => "jobs.cancel_projection",
             Self::JobReadyRun { .. } => "jobs.required",
             Self::SandboxTools => "tools.list",

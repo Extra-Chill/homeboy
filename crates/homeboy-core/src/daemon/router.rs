@@ -112,6 +112,10 @@ where
                 "gate_reserve": job_store.gate_capacity(),
                 "queued_work": job_store.active_runner_jobs().into_iter()
                     .filter(|job| job.status == JobStatus::Queued).collect::<Vec<_>>(),
+                // Owner silence per opted-in queued job; an entry past the
+                // deadline leaves the queue on the next maintenance pass.
+                "queued_owner_heartbeat_age_ms": job_store.queued_owner_heartbeat_ages(),
+                "queued_owner_deadline_ms": crate::api_jobs::QUEUED_OWNER_DEADLINE_MS,
             }),
         ),
         ("GET", "/capabilities") => daemon_endpoint_response(

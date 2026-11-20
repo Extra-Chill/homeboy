@@ -2206,6 +2206,9 @@ fn spawn_local_child_reservation_reconciler(
         maintenance_tick(|| {
             let _ = job_store.reconcile_expired_local_child_reservations();
             let _ = job_store.reconcile_expired_admissions();
+            // A queued job whose waiting owner went silent leaves the queue
+            // before admission can hand it a slot (#18601).
+            let _ = job_store.reconcile_abandoned_queued_jobs();
             let _ = job_store.reconcile_direct_admissions();
             let _ = job_store.compact_retained_history();
             for (id, state) in job_store.active_controller_jobs() {
@@ -3788,6 +3791,12 @@ fn enqueue_exec_request(
         })?;
     let execution_metadata =
         (!request.envelope.metadata.is_null()).then_some(&request.envelope.metadata);
+    // The submitting client waits on this job and heartbeats it while queued,
+    // so its silence is evidence the owner is gone (#18601).
+    let queued_owner_heartbeat = execution_metadata
+        .and_then(|metadata| metadata.get(crate::api_jobs::QUEUED_OWNER_HEARTBEAT_METADATA))
+        .and_then(serde_json::Value::as_bool)
+        == Some(true);
     let inline_secret_names = secret_env_plan
         .secret_env_names()
         .into_iter()
@@ -4035,6 +4044,10 @@ fn enqueue_exec_request(
         }
     };
     let _workspace_owner_lease = pending_owner_lease.disarm();
+    if queued_owner_heartbeat {
+        // Liveness is best effort: the job is already durably accepted.
+        let _ = job_store.observe_queued_job(runner.job_id);
+    }
     let job = job_store.get(runner.job_id)?;
 
     Ok(json!({
