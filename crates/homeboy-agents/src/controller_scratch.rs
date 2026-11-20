@@ -1,4 +1,3 @@
-use homeboy_engine_primitives::content_hash;
 use std::collections::BTreeMap;
 use std::fs::{self, File, OpenOptions};
 use std::path::{Path, PathBuf};
@@ -2880,13 +2879,7 @@ fn recovered_workspace_matches(resource: &ControllerScratchResource, workspace: 
         && file_sha256(Path::new(patch_path)).ok().as_deref() == Some(patch_sha256)
 }
 
-fn file_sha256(path: &Path) -> Result<String> {
-    content_hash::sha256_file(path)
-}
-
-fn sha256(bytes: &[u8]) -> String {
-    content_hash::sha256_hex(bytes)
-}
+use homeboy_engine_primitives::content_hash::{sha256_file as file_sha256, sha256_hex as sha256};
 
 fn cleanup_page_command(options: ControllerScratchCleanupOptions, cursor: Option<&str>) -> String {
     match cursor {

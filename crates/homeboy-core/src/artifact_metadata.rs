@@ -1,4 +1,3 @@
-use crate::error::Result;
 use std::path::Path;
 
 /// SHA-256 of a file's bytes as lowercase hex.
@@ -6,9 +5,7 @@ use std::path::Path;
 /// Retained as the historical entry point for artifact hashing; the streaming
 /// implementation lives in `homeboy_engine_primitives::content_hash` so every
 /// crate produces byte-identical artifact identities.
-pub fn sha256_file(path: &Path) -> Result<String> {
-    homeboy_engine_primitives::content_hash::sha256_file(path)
-}
+pub use homeboy_engine_primitives::content_hash::sha256_file;
 
 pub fn content_type_from_path(path: &Path) -> Option<String> {
     let extension = path.extension()?.to_string_lossy().to_ascii_lowercase();

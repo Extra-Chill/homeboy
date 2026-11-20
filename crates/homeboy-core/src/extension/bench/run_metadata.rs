@@ -116,7 +116,7 @@ fn workload_metadata(
                 .to_string(),
             source: Some("rig".to_string()),
             path: Some(path_string),
-            sha256: sha256_file(path),
+            sha256: content_hash::sha256_file(path).ok(),
             provenance: Default::default(),
         });
     }
@@ -131,10 +131,6 @@ fn resolve_workload_path(path: &str, component: &Component) -> PathBuf {
     } else {
         PathBuf::from(&component.local_path).join(workload_path)
     }
-}
-
-fn sha256_file(path: &Path) -> Option<String> {
-    content_hash::sha256_file(path).ok()
 }
 
 fn bench_warmup_iterations() -> Option<u64> {

@@ -1239,7 +1239,7 @@ fn run_bounded_asset_download(
         ))
     })?;
     let started = Instant::now();
-    let mut hasher = Sha256::new();
+    let mut hasher = content_hash::sha256_hasher();
     let mut size = 0_u64;
     let mut diagnostics = Vec::new();
     let mut diagnostics_truncated = false;

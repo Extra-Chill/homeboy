@@ -4361,7 +4361,7 @@ impl TailCapture {
             bytes: Vec::new(),
             bytes_seen: 0,
             byte_limit,
-            hasher: Sha256::new(),
+            hasher: crate::content_hash::sha256_hasher(),
         }
     }
 

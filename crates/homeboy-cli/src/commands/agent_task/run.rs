@@ -10220,7 +10220,7 @@ fn secure_provider_evidence_copy_with_limit(
     }
     let mut output = unsafe { std::fs::File::from_raw_fd(fd) };
     let mut input = input;
-    let mut digest = sha2::Sha256::new();
+    let mut digest = homeboy_engine_primitives::content_hash::sha256_hasher();
     let mut total = 0u64;
     let mut buffer = [0u8; 64 * 1024];
     loop {

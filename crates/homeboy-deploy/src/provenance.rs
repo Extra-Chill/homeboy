@@ -77,7 +77,7 @@ fn resolve_artifact_identity(path: &Path) -> Option<ArtifactIdentity> {
         Some(ArtifactIdentity {
             path: path.to_string_lossy().to_string(),
             size_bytes: Some(metadata.len()),
-            sha256: sha256_file(path),
+            sha256: content_hash::sha256_file(path).ok(),
             modified_unix,
         })
     } else {
@@ -89,10 +89,6 @@ fn resolve_artifact_identity(path: &Path) -> Option<ArtifactIdentity> {
             modified_unix,
         })
     }
-}
-
-fn sha256_file(path: &Path) -> Option<String> {
-    content_hash::sha256_file(path).ok()
 }
 
 pub(crate) use homeboy_core::tag_gap::{detect_tag_gap, warn_tag_gap};

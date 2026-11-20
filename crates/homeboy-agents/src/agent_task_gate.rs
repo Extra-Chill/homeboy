@@ -4017,7 +4017,7 @@ impl SelectedGateEnvironment {
 }
 
 fn rust_cache_identity(cwd: &Path) -> Result<String> {
-    let mut hasher = Sha256::new();
+    let mut hasher = homeboy_engine_primitives::content_hash::sha256_hasher();
     for path in [
         cwd.join("rust-toolchain.toml"),
         cwd.join(".cargo/config.toml"),
@@ -5325,7 +5325,7 @@ fn materialize_extension_inputs(
         let identity = if shared_assets.is_empty() {
             extension_identity.clone()
         } else {
-            let mut hasher = Sha256::new();
+            let mut hasher = homeboy_engine_primitives::content_hash::sha256_hasher();
             hasher.update(b"homeboy/gate-extension-closure/v1\0");
             hasher.update(extension_identity.as_bytes());
             for asset in &shared_assets {
@@ -5426,7 +5426,7 @@ fn extension_tree_identity(source: &Path) -> Result<String> {
     let mut files = Vec::new();
     visit(source, source, &mut files)?;
     files.sort_by(|left, right| left.0.cmp(&right.0));
-    let mut hasher = Sha256::new();
+    let mut hasher = homeboy_engine_primitives::content_hash::sha256_hasher();
     for (path, bytes) in files {
         hasher.update(path.as_bytes());
         hasher.update([0]);

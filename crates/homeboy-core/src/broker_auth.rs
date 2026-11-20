@@ -217,7 +217,7 @@ impl BrokerAuthStore {
             ));
         };
 
-        let presented_hash = sha256_hex(token);
+        let presented_hash = content_hash::sha256_hex(token.as_bytes());
         let Some(credential) = self
             .credentials
             .iter()
@@ -314,7 +314,7 @@ impl BrokerAuthStore {
         let credential = BrokerCredential {
             id: id.clone(),
             runner_id: runner_id.clone(),
-            token_sha256: sha256_hex(&token),
+            token_sha256: content_hash::sha256_hex(token.as_bytes()),
             token: Some(token.clone()),
             scopes,
             revoked_at: None,
@@ -387,7 +387,9 @@ impl BrokerAuthStore {
             })
             .find_map(|credential| {
                 let token = credential.token.as_deref()?.trim();
-                if token.is_empty() || sha256_hex(token) != credential.token_sha256 {
+                if token.is_empty()
+                    || content_hash::sha256_hex(token.as_bytes()) != credential.token_sha256
+                {
                     return None;
                 }
                 Some(token.to_string())
@@ -440,10 +442,6 @@ pub fn store_path() -> Result<PathBuf> {
 /// [`store_path`] below an explicitly injected config root.
 pub fn store_path_in_root(config_root: &Path) -> PathBuf {
     config_root.join("broker_auth.json")
-}
-
-fn sha256_hex(token: &str) -> String {
-    content_hash::sha256_hex(token.as_bytes())
 }
 
 /// Length-independent constant-time string compare for hashes to avoid leaking
@@ -670,7 +668,10 @@ mod tests {
         let (store, token) = store_with("runner-a", BrokerScope::Submit);
         assert!(token.starts_with("hbk_"));
         assert!(token.len() > 32);
-        assert_eq!(store.credentials[0].token_sha256, sha256_hex(&token));
+        assert_eq!(
+            store.credentials[0].token_sha256,
+            content_hash::sha256_hex(token.as_bytes())
+        );
         assert_eq!(store.credentials[0].token.as_deref(), Some(token.as_str()));
     }
 
@@ -686,7 +687,7 @@ mod tests {
             .all(|credential| credential.token.is_none()));
         assert_eq!(
             enforcement_store.credentials[0].token_sha256,
-            sha256_hex(&token)
+            content_hash::sha256_hex(token.as_bytes())
         );
     }
 

@@ -3,7 +3,7 @@ use std::io::Write;
 use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
-use sha2::{Digest, Sha256};
+use sha2::Digest;
 
 use homeboy_core::error::Error;
 use homeboy_core::project::Project;
@@ -265,7 +265,7 @@ fn path_in_roots(
     target: &str,
     version: &str,
 ) -> PathBuf {
-    let mut hash = Sha256::new();
+    let mut hash = homeboy_engine_primitives::content_hash::sha256_hasher();
     for value in [&project.id, component_id, target, version] {
         hash.update(value.as_bytes());
         hash.update([0]);

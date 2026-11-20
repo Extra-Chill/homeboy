@@ -2,7 +2,7 @@
 
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use sha2::{Digest, Sha256};
+use sha2::Digest;
 
 use crate::{ControlPlaneAction, ControlPlaneRef, ControlPlaneRun, RunId};
 
@@ -63,7 +63,7 @@ pub fn action_effect_id(
         return EffectId(legacy);
     }
 
-    let mut digest = Sha256::new();
+    let mut digest = homeboy_engine_primitives::content_hash::sha256_hasher();
     for component in [provenance, target_id, action, idempotency_key] {
         digest.update((component.len() as u64).to_be_bytes());
         digest.update(component.as_bytes());

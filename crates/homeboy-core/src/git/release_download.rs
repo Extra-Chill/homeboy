@@ -19,7 +19,6 @@ use std::sync::{Arc, Mutex, OnceLock};
 use crate::component::{Component, GithubConfig};
 use crate::error::{Error, Result};
 use crate::git::github_cli_env;
-use homeboy_engine_primitives::content_hash;
 use serde_json::Value;
 
 const PACKAGE_DEPENDENCY_FIELDS: &[&str] = &[
@@ -1248,9 +1247,7 @@ fn split_curl_body_and_status(output: &[u8]) -> (Vec<u8>, Option<u16>) {
     }
 }
 
-fn sha256_file(path: &Path) -> Result<String> {
-    content_hash::sha256_file(path)
-}
+use homeboy_engine_primitives::content_hash::sha256_file;
 
 fn release_asset_name_matches(asset_name: &str, artifact_name: &str) -> bool {
     if asset_name == artifact_name {

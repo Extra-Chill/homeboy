@@ -1,6 +1,6 @@
 //! Shared content-addressed package artifacts. Failure to identify inputs disables reuse.
 use super::*;
-use sha2::{Digest, Sha256};
+use sha2::Digest;
 use std::{fs, process::Command};
 
 fn output(path: &Path, program: &str, args: &[&str]) -> Option<Vec<u8>> {
@@ -80,7 +80,7 @@ fn key(component: &Component, trail: &mut Vec<PathBuf>) -> Option<String> {
     if index.is_empty() {
         return None;
     }
-    let mut hash = Sha256::new();
+    let mut hash = homeboy_engine_primitives::content_hash::sha256_hasher();
     hash.update(b"homeboy-package-v1\0");
     hash.update(index);
     hash.update(serde_json::to_vec(&build_inputs(component)).ok()?);

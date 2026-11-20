@@ -12,11 +12,9 @@
 //! - `sha256_file` streams the file in 64 KiB chunks so hashing a multi-gigabyte
 //!   release artifact does not read it into memory.
 //!
-//! Deliberately *not* covered here: digests that hash something other than the
-//! raw bytes (canonicalized overlays, ordered directory trees, salted inputs)
-//! and digests that are intentionally truncated. Those are separate identity
-//! schemes and collapsing them into this primitive would silently change what
-//! they identify.
+//! Structured and truncated identity schemes retain their framing at the call
+//! site and use [`sha256_hasher`] for incremental hashing. Collapsing those
+//! schemes into the raw-byte helpers would silently change what they identify.
 
 use std::io::Read;
 use std::path::Path;
@@ -27,6 +25,14 @@ use homeboy_error::{Error, Result};
 
 /// Chunk size used when streaming a file into the hasher.
 const FILE_CHUNK_BYTES: usize = 64 * 1024;
+
+/// Start an incremental SHA-256 digest for structured or streamed input.
+///
+/// Callers retain their existing framing and streaming budgets; construction
+/// lives here alongside the canonical blob and file helpers.
+pub fn sha256_hasher() -> Sha256 {
+    Sha256::new()
+}
 
 /// SHA-256 of `bytes`, rendered as lowercase hex.
 pub fn sha256_hex(bytes: &[u8]) -> String {
@@ -210,6 +216,15 @@ mod tests {
         assert!(!is_safe_evidence_relative_path("../website/index.html"));
         assert!(!is_safe_evidence_relative_path("/website/index.html"));
         assert!(!is_safe_evidence_relative_path("website//index.html"));
+    }
+
+    #[test]
+    fn incremental_hash_matches_blob_hash_across_chunk_boundaries() {
+        let mut hasher = sha256_hasher();
+        hasher.update(b"a");
+        hasher.update(b"bc");
+        assert_eq!(format!("{:x}", hasher.finalize()), ABC_SHA256);
+        assert_eq!(format!("{:x}", sha256_hasher().finalize()), EMPTY_SHA256);
     }
 
     #[test]

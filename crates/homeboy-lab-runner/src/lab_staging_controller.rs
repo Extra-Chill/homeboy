@@ -2640,12 +2640,7 @@ const LAB_STAGING_POLL_INITIAL_BACKOFF: Duration = Duration::from_millis(200);
 /// produced.
 const LAB_STAGING_POLL_MAX_BACKOFF: Duration = Duration::from_secs(5);
 
-fn now_unix_ms() -> u64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_millis() as u64
-}
+use homeboy_engine_primitives::now_ms as now_unix_ms;
 
 /// Remaining wall-clock budget for polling on behalf of `request`.
 ///

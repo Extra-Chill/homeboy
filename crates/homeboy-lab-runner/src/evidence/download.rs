@@ -360,7 +360,7 @@ impl<R> HashingReader<R> {
     fn new(inner: R) -> Self {
         Self {
             inner,
-            hasher: Sha256::new(),
+            hasher: homeboy_engine_primitives::content_hash::sha256_hasher(),
             read_failed: false,
         }
     }

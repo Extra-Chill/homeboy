@@ -14,16 +14,10 @@ use crate::paths;
 use serde::de::DeserializeOwned;
 use serde::Serialize;
 use std::path::{Path, PathBuf};
-use std::time::{SystemTime, UNIX_EPOCH};
 
 /// Current unix timestamp in seconds. Returns `0` if the system clock is
 /// before the epoch (matching the prior per-module behavior).
-pub fn now_unix() -> u64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|duration| duration.as_secs())
-        .unwrap_or(0)
-}
+pub use homeboy_engine_primitives::now_secs as now_unix;
 
 /// Resolve the cache file under the homeboy data directory. Returns
 /// `None` when the homeboy directory cannot be resolved (matching the

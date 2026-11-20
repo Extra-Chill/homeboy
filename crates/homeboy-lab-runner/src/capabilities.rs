@@ -1,5 +1,5 @@
 use serde_json::{json, Value};
-use sha2::{Digest, Sha256};
+use sha2::Digest;
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 
 use homeboy_agents::agent_tasks::provider::{
@@ -672,7 +672,7 @@ struct RunnerToolCapabilityProbe {
 /// the same question of the same runner and may share one connection; two with
 /// different fingerprints may not, and are only bounded by the concurrency cap.
 fn batch_probe_fingerprint(script: &str, env: &HashMap<String, String>) -> String {
-    let mut hasher = Sha256::new();
+    let mut hasher = homeboy_engine_primitives::content_hash::sha256_hasher();
     hasher.update(script.as_bytes());
     for (key, value) in env.iter().collect::<BTreeMap<_, _>>() {
         hasher.update([0x1f]);

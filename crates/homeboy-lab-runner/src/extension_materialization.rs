@@ -5,7 +5,7 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use serde::{Deserialize, Serialize};
-use sha2::{Digest, Sha256};
+use sha2::Digest;
 
 use homeboy_core::engine::shell;
 use homeboy_core::error::{Error, Result};
@@ -712,7 +712,7 @@ pub(crate) fn extension_source_content_hash(path: &Path) -> Result<String> {
     let mut entries = Vec::new();
     collect_hash_entries(path, path, &mut entries)?;
     entries.sort();
-    let mut hasher = Sha256::new();
+    let mut hasher = homeboy_engine_primitives::content_hash::sha256_hasher();
     for (relative, path) in entries {
         hasher.update(relative.as_bytes());
         hasher.update([0]);

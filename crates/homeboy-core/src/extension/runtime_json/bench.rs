@@ -17,9 +17,7 @@ pub fn artifact_ref(path: &str, kind: &str, label: &str) -> Json {
     Json::Object(entries)
 }
 
-pub fn now_ms() -> i64 {
-    chrono::Utc::now().timestamp_millis()
-}
+pub use homeboy_engine_primitives::now_ms;
 
 /// Append one responsiveness ping line to `file`.
 pub fn responsiveness_ping(file: &str, started_ms: i64, label: &str) -> Result<(), String> {

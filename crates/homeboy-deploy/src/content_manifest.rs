@@ -5,13 +5,12 @@ use std::time::Duration;
 
 use serde::ser::SerializeStruct;
 use serde::{Deserialize, Serialize};
-use sha2::{Digest, Sha256};
+use sha2::Digest;
 
 use homeboy_core::content_diff::{self, TreeEntry, TreeEntryKind, TreeScanOptions};
 use homeboy_core::engine::shell;
 use homeboy_core::error::{CommandEvidence, Error, RemoteCapabilityMissingDetails, TargetDetails};
 use homeboy_core::server::{CommandOutput, SshClient};
-use homeboy_engine_primitives::content_hash;
 
 use super::types::PreparedDeployArtifact;
 use super::types::{ContentManifestComparison, ContentManifestProvenance};
@@ -136,7 +135,7 @@ impl<'de> Deserialize<'de> for Manifest {
 
 impl Manifest {
     pub(super) fn digest(&self) -> String {
-        let mut hash = Sha256::new();
+        let mut hash = homeboy_engine_primitives::content_hash::sha256_hasher();
         for (path, entry) in &self.entries {
             hash.update(path.as_bytes());
             hash.update([0]);
@@ -784,7 +783,7 @@ fn archive_manifest(path: &Path, exclusions: &[String]) -> Result<Manifest, Erro
         } else {
             TreeEntryKind::File
         };
-        let mut hash = Sha256::new();
+        let mut hash = homeboy_engine_primitives::content_hash::sha256_hasher();
         let value = if kind == TreeEntryKind::Symlink {
             let mut target = String::new();
             std::io::Read::read_to_string(&mut entry, &mut target).map_err(|error| {
@@ -846,11 +845,7 @@ fn archive_root(names: &[String]) -> Option<String> {
     .then(|| first.to_string())
 }
 
-fn sha256(path: &Path) -> Result<String, Error> {
-    // `sha256_file` already classifies its own IO failures (including ENOSPC);
-    // propagate that classification rather than flattening it to a sentence.
-    content_hash::sha256_file(path)
-}
+use homeboy_engine_primitives::content_hash::sha256_file as sha256;
 
 /// Structured evidence for a failed remote content-manifest probe.
 ///

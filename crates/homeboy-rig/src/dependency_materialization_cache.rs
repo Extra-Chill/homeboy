@@ -11,7 +11,7 @@ use std::time::{Duration, Instant};
 use fs4::fs_std::FileExt;
 use homeboy_engine_primitives::content_hash;
 use serde::{Deserialize, Serialize};
-use sha2::{Digest, Sha256};
+use sha2::Digest;
 
 use crate::expand::expand_vars_with_settings;
 use crate::runner::{dependency_step_cwd, resolve_dependency_output_path};
@@ -680,12 +680,7 @@ fn write_json(path: &Path, value: &impl Serialize) -> Result<()> {
     )
     .map_err(|error| io_error("write dependency cache manifest", error))
 }
-fn hash_bytes(bytes: &[u8]) -> String {
-    content_hash::sha256_hex(bytes)
-}
-fn hash_file(path: &Path) -> Result<String> {
-    content_hash::sha256_file(path)
-}
+use homeboy_engine_primitives::content_hash::{sha256_file as hash_file, sha256_hex as hash_bytes};
 fn hash_path(path: &Path) -> Result<String> {
     if path.is_file() {
         return hash_file(path);
@@ -696,7 +691,7 @@ fn hash_directory(root: &Path) -> Result<String> {
     let mut files = Vec::new();
     collect_files(root, &mut files)?;
     files.sort();
-    let mut hasher = Sha256::new();
+    let mut hasher = content_hash::sha256_hasher();
     for file in files {
         hasher.update(
             file.strip_prefix(root)

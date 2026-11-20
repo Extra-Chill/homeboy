@@ -8,12 +8,10 @@
 //! `always` `cleanup` step removes the checkouts.
 
 use std::collections::{BTreeMap, BTreeSet};
-use std::io::Read;
 use std::path::{Component, Path, PathBuf};
 use std::process::{Command, Stdio};
 
 use serde_json::{json, Value};
-use sha2::{Digest, Sha256};
 
 use crate::error::{Error, Result};
 
@@ -484,19 +482,7 @@ fn walk(path: &Path, out: &mut Vec<PathBuf>) {
     }
 }
 
-pub fn sha256_file(path: &Path) -> Result<String> {
-    let mut file = std::fs::File::open(path).map_err(|error| io(error, path))?;
-    let mut hasher = Sha256::new();
-    let mut buffer = [0u8; 64 * 1024];
-    loop {
-        let read = file.read(&mut buffer).map_err(|error| io(error, path))?;
-        if read == 0 {
-            break;
-        }
-        hasher.update(&buffer[..read]);
-    }
-    Ok(format!("{:x}", hasher.finalize()))
-}
+pub use homeboy_engine_primitives::content_hash::sha256_file;
 
 fn log_tail(path: &Path) -> String {
     let bytes = std::fs::read(path).unwrap_or_default();

@@ -4,7 +4,6 @@
 //! keyed by `owner_run_ref`. Every update is a read-modify-write guarded by a
 //! revision compare-and-set and retried on conflict, so a recovered finalizer
 //! can never race a still-running owner into a lost update.
-use std::time::{SystemTime, UNIX_EPOCH};
 
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -151,7 +150,7 @@ impl OperationRecordStore {
         // Configured provider mutation timeouts may be as high as fifteen
         // minutes. Never steal a lease while that mutation can still be live.
         const STALE_LEASE_MS: u128 = 16 * 60 * 1000;
-        let now = now_ms();
+        let now = u128::from(now_ms());
         let candidate_lease = uuid::Uuid::new_v4().to_string();
         self.update(owner_run_ref, |record| {
             let mut record = record.ok_or_else(|| {
@@ -306,12 +305,7 @@ impl OperationRecordStore {
     }
 }
 
-fn now_ms() -> u128 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_millis()
-}
+use homeboy_engine_primitives::now_ms;
 
 fn parse_record(row: &CoordinationRecord) -> Result<OperationRecord> {
     serde_json::from_value(row.payload.clone())

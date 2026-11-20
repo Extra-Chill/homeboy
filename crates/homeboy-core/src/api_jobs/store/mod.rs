@@ -10,7 +10,7 @@ use fs4::fs_std::FileExt;
 use homeboy_lab_contract::lab::execution_envelope::lab_runner_workload_from_execution_envelope;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use sha2::{Digest, Sha256};
+use sha2::Digest;
 use uuid::Uuid;
 
 #[cfg(test)]
@@ -4161,7 +4161,7 @@ impl JobStore {
 }
 
 fn controller_submission_fingerprint(state: &ControllerJobState) -> String {
-    let mut hasher = Sha256::new();
+    let mut hasher = homeboy_engine_primitives::content_hash::sha256_hasher();
     hasher.update(state.job_type.as_bytes());
     hasher.update(state.version.to_be_bytes());
     hasher.update(state.request_digest.as_bytes());

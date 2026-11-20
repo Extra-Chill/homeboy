@@ -836,6 +836,7 @@ dependencies = [
 name = "homeboy-control-plane-contract"
 version = "0.1.0"
 dependencies = [
+ "homeboy-engine-primitives",
  "homeboy-lifecycle-contract",
  "serde",
  "serde_json",

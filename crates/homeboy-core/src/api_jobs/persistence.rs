@@ -1,7 +1,6 @@
 use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::path::Path;
-use std::time::{SystemTime, UNIX_EPOCH};
 
 use homeboy_lab_contract::lab::execution_envelope::lab_runner_workload_from_execution_envelope;
 use rusqlite::{params, Connection, OptionalExtension};
@@ -711,9 +710,6 @@ pub(super) fn job_not_found(job_id: Uuid) -> Error {
     Error::validation_invalid_argument("job_id", "job not found", Some(job_id.to_string()), None)
 }
 
-pub(crate) fn timestamp_ms() -> u64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .expect("system clock must be after unix epoch")
-        .as_millis() as u64
-}
+// Persistence timestamps are metadata, not a clock validity assertion. Use the
+// shared epoch fallback so clock skew cannot panic while recording a job.
+pub(crate) use homeboy_engine_primitives::now_ms as timestamp_ms;

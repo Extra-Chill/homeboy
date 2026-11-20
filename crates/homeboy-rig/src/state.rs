@@ -230,9 +230,7 @@ pub(crate) fn test_state_store() -> RigStateStore {
 }
 
 /// RFC3339 timestamp for state fields.
-pub(crate) fn now_rfc3339() -> String {
-    chrono::Utc::now().to_rfc3339()
-}
+pub(crate) use homeboy_engine_primitives::now_rfc3339;
 
 #[cfg(test)]
 #[path = "../../../tests/core/rig/state_test.rs"]

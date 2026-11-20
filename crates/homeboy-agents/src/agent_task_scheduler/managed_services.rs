@@ -10,7 +10,7 @@ use std::net::{TcpListener, TcpStream};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::thread;
-use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant};
 
 #[cfg(test)]
 use homeboy_core::agent_task_config::AgentTaskManagedServiceReadiness;
@@ -906,12 +906,7 @@ fn write_json_atomically<T: serde::Serialize>(path: &Path, value: &T) -> Result<
     std::fs::rename(temporary, path).map_err(|error| error.to_string())
 }
 
-fn now_unix_ms() -> u64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_millis() as u64
-}
+use homeboy_engine_primitives::now_ms as now_unix_ms;
 
 fn parent_process_identity(pid: u32) -> Result<Option<ProcessStartIdentity>, String> {
     if pid == 0 {

@@ -1754,9 +1754,7 @@ fn upgrade_instance(
     }))
 }
 
-fn now_ms() -> u64 {
-    chrono::Utc::now().timestamp_millis().max(0) as u64
-}
+use homeboy_engine_primitives::now_ms;
 
 fn to_value<T: Serialize>(value: T) -> Result<Value> {
     serde_json::to_value(value).map_err(|error| {

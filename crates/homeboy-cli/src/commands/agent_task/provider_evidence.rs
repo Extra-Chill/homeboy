@@ -963,7 +963,7 @@ fn hash_nofollow(path: &Path) -> homeboy::core::Result<(u64, String)> {
         ));
     }
     let mut file = file;
-    let mut hasher = sha2::Sha256::new();
+    let mut hasher = homeboy_engine_primitives::content_hash::sha256_hasher();
     let mut total = 0u64;
     let mut buffer = [0u8; 64 * 1024];
     loop {

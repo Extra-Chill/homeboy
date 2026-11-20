@@ -49,7 +49,7 @@ const PUBLICATION_LEASE_MS: i64 = 5 * 60 * 1000;
 const PUBLICATION_ARTIFACT_FILENAME_LIMIT: usize = 240;
 
 fn artifact_handle(run_id: &str, artifact_id: &str) -> String {
-    let mut hasher = Sha256::new();
+    let mut hasher = homeboy_engine_primitives::content_hash::sha256_hasher();
     hasher.update(b"homeboy/artifact-handle/v1\0");
     hasher.update(run_id.as_bytes());
     hasher.update([0]);
@@ -2026,7 +2026,7 @@ pub fn directory_tree_sha256(path: &Path) -> Result<String> {
     let mut entries = Vec::new();
     collect_directory_tree_entries(path, Path::new(""), &mut entries)?;
     entries.sort_by(|left, right| left.0.cmp(&right.0));
-    let mut digest = Sha256::new();
+    let mut digest = homeboy_engine_primitives::content_hash::sha256_hasher();
     for (relative, kind, content) in entries {
         digest.update(relative.as_os_str().as_encoded_bytes());
         digest.update([0]);

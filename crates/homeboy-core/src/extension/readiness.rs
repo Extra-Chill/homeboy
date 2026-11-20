@@ -266,7 +266,7 @@ fn readiness_identity(
     ready_check: &str,
     entrypoint: Option<&str>,
 ) -> String {
-    let mut hasher = Sha256::new();
+    let mut hasher = homeboy_engine_primitives::content_hash::sha256_hasher();
     hasher.update(extension.id.as_bytes());
     hasher.update([0]);
     hasher.update(extension.version.as_bytes());

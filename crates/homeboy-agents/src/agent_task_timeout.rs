@@ -1,5 +1,5 @@
 use std::cell::RefCell;
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::Duration;
 
 const MAX_TIMEOUT_GRACE_MS: u64 = 30_000;
 const MIN_TIMEOUT_GRACE_MS: u64 = 100;
@@ -78,12 +78,7 @@ pub fn extended_provider_deadline_ms(
     )
 }
 
-pub(crate) fn now_unix_ms() -> u64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_millis() as u64
-}
+pub(crate) use homeboy_engine_primitives::now_ms as now_unix_ms;
 
 pub(crate) fn remaining_execution_deadline_ms(deadline_unix_ms: Option<u64>) -> Option<u64> {
     deadline_unix_ms.map(|deadline| deadline.saturating_sub(now_unix_ms()))
