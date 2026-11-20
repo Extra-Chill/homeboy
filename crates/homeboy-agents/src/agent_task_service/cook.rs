@@ -4799,7 +4799,14 @@ fn finish_cook_terminal_with_report(
         Some(reported) => reported,
         None => {
             let record = cook_observation_in_store(lifecycle, cook_id)?;
-            if !driverless_cook_settled(lifecycle, cook_id, &record)? {
+            use agent_task_lifecycle::cook_run_state::cook_settlement_in_store;
+            let recipes = CookRecipeStore::new(lifecycle.roots().clone());
+            if !record.state().is_terminal() || recipes.cook_driver_held(cook_id)? {
+                return Ok(());
+            }
+            if !cook_settlement_in_store(&recipes, cook_id, &record.run_id)?
+                .is_settled(&record, false)
+            {
                 return Ok(());
             }
             fallback = crate::agent_task_notify::terminal_attempt_report(
@@ -4822,37 +4829,6 @@ fn finish_cook_terminal_with_report(
     agent_task_lifecycle::settle_cook_terminal_observations_in_store(lifecycle, cook_id, &ids)?;
     crate::agent_task_notify::cook_terminal_in_store(lifecycle, report, component, exit_code);
     Ok(())
-}
-
-/// Whether a Cook has ended without a driver: no live driver will report it,
-/// and it is terminal with no pending continuation or runner-result
-/// continuation left to admit.
-fn driverless_cook_settled(
-    lifecycle: &AgentTaskLifecycleStore,
-    cook_id: &str,
-    record: &agent_task_lifecycle::AgentTaskRunRecord,
-) -> Result<bool> {
-    use homeboy_lifecycle_contract::RunExecutionState;
-    if !record.state().is_terminal() {
-        return Ok(false);
-    }
-    let recipes = CookRecipeStore::new(lifecycle.roots().clone());
-    if recipes.cook_driver_held(cook_id)? {
-        return Ok(false);
-    }
-    Ok(
-        match super::continuation_state_in_store(&recipes, cook_id, &record.run_id)? {
-            super::CookContinuationState::Pending | super::CookContinuationState::Claimed => false,
-            super::CookContinuationState::Absent => {
-                record.runner_id().is_none()
-                    || !matches!(
-                        record.state(),
-                        RunExecutionState::Succeeded | RunExecutionState::CandidateRecoverable
-                    )
-            }
-            _ => true,
-        },
-    )
 }
 
 /// The component a cook is working on, for notification attribution.

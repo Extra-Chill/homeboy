@@ -324,8 +324,10 @@ pub(super) fn succeeded_aggregate(plan: &AgentTaskPlan) -> AgentTaskAggregate {
 }
 
 mod aggregate_status;
+mod continuation_boundary;
 mod cook_delivery_writer;
 mod cook_effects;
+mod cook_settlement;
 mod durable_progress;
 mod handoff_and_proxy;
 mod lifecycle_store;

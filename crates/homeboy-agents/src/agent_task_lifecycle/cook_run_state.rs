@@ -35,6 +35,48 @@ use crate::agent_task_service::AgentTaskLiveness;
 use homeboy_core::api_jobs::{JobStatus, JobStore};
 use uuid::Uuid;
 
+use crate::agent_task_service::CookContinuationState as Continuation;
+/// Read-only continuation facts shared by settlement and recovery admission.
+/// Never persisted: the continuation protocol remains the owner of these facts.
+pub(crate) struct CookSettlement(pub(crate) Continuation);
+
+impl CookSettlement {
+    pub(crate) fn pending(&self) -> bool {
+        self.0 == Continuation::Pending
+    }
+    pub(crate) fn running(&self) -> bool {
+        self.0 == Continuation::Claimed
+    }
+    pub(crate) fn failed(&self) -> bool {
+        self.0 == Continuation::Failed
+    }
+    pub(crate) fn completed(&self) -> bool {
+        self.0 == Continuation::Completed
+    }
+
+    pub(crate) fn is_settled(&self, record: &AgentTaskRunRecord, driver_held: bool) -> bool {
+        record.state().is_terminal()
+            && !driver_held
+            && !self.pending()
+            && !self.running()
+            && !(self.0 == Continuation::Absent
+                && record.runner_id().is_some()
+                && matches!(
+                    record.state(),
+                    RunExecutionState::Succeeded | RunExecutionState::CandidateRecoverable
+                ))
+    }
+}
+
+pub(crate) fn cook_settlement_in_store(
+    store: &crate::agent_task_service::CookRecipeStore,
+    cook_id: &str,
+    run_id: &str,
+) -> homeboy_core::Result<CookSettlement> {
+    crate::agent_task_service::continuation_state_in_store(store, cook_id, run_id)
+        .map(CookSettlement)
+}
+
 pub(crate) fn continuation_child_owner(record: &AgentTaskRunRecord) -> Option<u32> {
     let child_provider_owner_pid = record
         .metadata

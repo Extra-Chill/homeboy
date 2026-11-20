@@ -4872,11 +4872,12 @@ pub(crate) fn reconcile_terminal_cook_provider_result_with_scheduler(
         // active idempotency key (#16054).
         let mut continuation_running = false;
         for attempt in &recipe.attempts {
-            continuation_running |= crate::agent_task_service::continuation_state_in_store(
+            continuation_running |= super::cook_run_state::cook_settlement_in_store(
                 &recipe_store,
                 &cook_id,
                 &attempt.run_id,
-            )? == crate::agent_task_service::CookContinuationState::Claimed;
+            )?
+            .running();
         }
         if continuation_running {
             return Ok(record);
