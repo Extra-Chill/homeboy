@@ -1466,9 +1466,9 @@ fn verify_refreshed_daemon_topology_status(
                 "runner `{runner_id}` reconnect did not persist a daemon build identity"
             ))
         })?;
-    if actual_identity
-        .strip_prefix("homeboy ")
-        .and_then(build_identity_commit)
+    if homeboy_core::build_identity::parse(actual_identity)
+        .and_then(|identity| identity.git_commit)
+        .as_deref()
         != Some(expected_commit)
     {
         return Err(Error::internal_unexpected(format!(
@@ -1483,9 +1483,9 @@ fn verify_refreshed_daemon_topology_status(
                 "runner `{runner_id}` reconnect did not read the configured job binary build identity"
             ))
         })?;
-    if configured_identity
-        .strip_prefix("homeboy ")
-        .and_then(build_identity_commit)
+    if homeboy_core::build_identity::parse(configured_identity)
+        .and_then(|identity| identity.git_commit)
+        .as_deref()
         != Some(expected_commit)
     {
         return Err(Error::internal_unexpected(format!(
@@ -1493,11 +1493,6 @@ fn verify_refreshed_daemon_topology_status(
         )));
     }
     Ok(())
-}
-
-pub(crate) fn build_identity_commit(identity: &str) -> Option<&str> {
-    let (_, commit) = identity.split_once('+')?;
-    Some(commit.strip_suffix("-dirty").unwrap_or(commit))
 }
 
 /// Prove the reconnected daemon will admit a Lab handoff before the refresh
@@ -1886,14 +1881,6 @@ fn fresh_refresh_promotion_authorities() -> RefreshPromotionAuthorities {
     }
 }
 
-fn build_identity_version(identity: &str) -> Option<String> {
-    identity
-        .strip_prefix("homeboy ")?
-        .split('+')
-        .next()
-        .map(str::to_string)
-}
-
 fn refresh_promotion_authorities_in_roots(
     runner_id: &str,
     status: &super::RunnerStatusReport,
@@ -1906,14 +1893,16 @@ fn refresh_promotion_authorities_in_roots(
         .map(|path| configured_runner_homeboy_build_identity(&runner, path))
         .transpose()?
         .flatten()
-        .and_then(|identity| build_identity_version(&identity));
+        .and_then(|identity| homeboy_core::build_identity::parse(&identity))
+        .map(|identity| identity.version);
     Ok(RefreshPromotionAuthorities {
         controller: Some(homeboy_product_identity::product_version().to_string()),
         active_daemon: status
             .session
             .as_ref()
             .and_then(|session| session.homeboy_build_identity.as_deref())
-            .and_then(build_identity_version),
+            .and_then(homeboy_core::build_identity::parse)
+            .map(|identity| identity.version),
         configured_selected,
     })
 }

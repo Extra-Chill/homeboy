@@ -45,11 +45,10 @@ const REMOTE_RUNNER_CONNECT_TIMEOUT: Duration = Duration::from_secs(30);
 const CONTROLLER_PROXY_ENV: &str = "HOMEBOY_CONTROLLER_PROXY";
 #[path = "connection_daemon.rs"]
 mod connection_daemon;
-pub(crate) use connection_daemon::versions_match;
+use connection_daemon::daemon_http_identity;
 use connection_daemon::{
     connect_remote_daemon, daemon_http_freshness_with_timeout, daemon_http_version,
 };
-use connection_daemon::{daemon_http_identity, normalize_homeboy_version_owned};
 use connection_daemon::{
     daemon_http_version_body_with_timeout, daemon_identity_from_body,
     daemon_runtime_loaded_paths_from_body, daemon_runtime_stale_paths_from_body,
@@ -2498,7 +2497,7 @@ fn stale_daemon_warning_until(
         return Ok((None, None));
     };
     // A failed probe read nothing, so there is nothing to compare. Substituting
-    // the session's own version here made `versions_match` trivially true and
+    // the session's own version here made the version comparison trivially true and
     // published a fabricated "current version" alongside a vague unverifiable
     // message, hiding the actual SSH failure (#11106).
     let current_identity = match remote_daemon::bounded_remote_homeboy_identity_until(
@@ -2623,7 +2622,7 @@ fn reconcile_session_metadata(
     observed_identity: &str,
     configured: &RemoteHomeboyIdentity,
 ) -> bool {
-    if !versions_match(observed_version, &configured.version)
+    if !homeboy_core::build_identity::same_build(observed_version, &configured.version)
         || compare_identities(
             Some(observed_identity),
             configured.build_identity.as_deref(),
@@ -2631,7 +2630,7 @@ fn reconcile_session_metadata(
     {
         return false;
     }
-    let version = normalize_homeboy_version_owned(observed_version);
+    let version = homeboy_core::build_identity::canonical(observed_version).to_string();
     let identity = observed_identity.trim();
     let changed = session.homeboy_version != version
         || session.homeboy_build_identity.as_deref() != Some(identity)

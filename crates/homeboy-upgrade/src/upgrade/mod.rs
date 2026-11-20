@@ -19,12 +19,10 @@ pub use admission::{
     controller_upgrade_admission, register_controller_upgrade_admission_provider,
     ControllerUpgradeAdmission, ControllerUpgradeAdmissionProvider, ControllerUpgradeBlocker,
 };
-pub use execution::{
-    controller_source_checkout, parse_build_identity_display, RELEASE_INSTALLER_SCRIPT,
-};
+pub use execution::{controller_source_checkout, RELEASE_INSTALLER_SCRIPT};
 pub use helpers::{
     current_build_version, current_version, detect_install_method, fetch_latest_version,
-    run_upgrade_with_operation, start_installed_daemon, version_is_newer,
+    run_upgrade_with_operation, start_installed_daemon,
 };
 pub use operation::{
     load_upgrade_operation_status, UpgradeOperationFailure, UpgradeOperationStatus,
@@ -66,15 +64,6 @@ mod tests {
     use super::*;
     use std::fs;
     use tempfile::tempdir;
-
-    #[test]
-    fn test_version_comparison() {
-        assert!(helpers::version_is_newer("0.12.0", "0.11.0"));
-        assert!(helpers::version_is_newer("1.0.0", "0.99.99"));
-        assert!(helpers::version_is_newer("0.11.1", "0.11.0"));
-        assert!(!helpers::version_is_newer("0.11.0", "0.11.0"));
-        assert!(!helpers::version_is_newer("0.10.0", "0.11.0"));
-    }
 
     #[test]
     fn same_version_upgrade_completion_still_syncs_extensions_and_runners() {

@@ -9,7 +9,7 @@ use super::super::session::RunnerStaleRuntimePath;
 use super::connection_daemon::{
     daemon_identity_from_body, daemon_lab_handoff_capabilities_from_body,
     daemon_runtime_loaded_paths_from_body, daemon_runtime_stale_paths_from_body,
-    daemon_version_from_body, versions_match,
+    daemon_version_from_body,
 };
 
 #[test]

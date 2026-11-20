@@ -17,7 +17,7 @@
 use homeboy_product_identity::BuildIdentity;
 
 use super::remote_daemon::{remote_homeboy_identity, resolve_ssh_runner};
-use super::{load, normalize_homeboy_version_owned, remote_runner_homeboy_path};
+use super::{load, remote_runner_homeboy_path};
 use crate::homeboy_refresh::{install_controller_release, ControllerReleaseInstall};
 use crate::{RunnerBinaryConvergence, RunnerBinaryConvergenceStatus};
 
@@ -82,7 +82,7 @@ pub(crate) fn converge_runner_binary_with(
             .unwrap_or_else(|| format!("homeboy {}", remote.version)),
     );
     let Ok(remote_version) =
-        semver::Version::parse(&normalize_homeboy_version_owned(&remote.version))
+        semver::Version::parse(homeboy_core::build_identity::canonical(&remote.version))
     else {
         return report(
             RunnerBinaryConvergenceStatus::SkippedUnverifiable,

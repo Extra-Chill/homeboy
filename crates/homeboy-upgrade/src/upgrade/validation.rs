@@ -1,8 +1,7 @@
+use homeboy_core::build_identity;
 use homeboy_core::error::Result;
 
-use super::helpers::{
-    current_version, detect_install_method, fetch_latest_version, version_is_newer,
-};
+use super::helpers::{current_version, detect_install_method, fetch_latest_version};
 use super::release_catalog::{self, InstallableSelection, ReleaseEntry};
 use super::types::{InstallMethod, VersionCheck};
 
@@ -28,7 +27,7 @@ pub fn check_for_updates() -> Result<VersionCheck> {
     }
 
     let latest = fetch_latest_version()?;
-    let update_available = version_is_newer(&latest, &current);
+    let update_available = build_identity::is_newer(&latest, &current);
 
     Ok(VersionCheck {
         command: "upgrade.check".to_string(),
@@ -108,7 +107,7 @@ pub(crate) fn version_check_from_selection(
 
     let update_available = installable
         .as_ref()
-        .map(|version| version_is_newer(version, current))
+        .map(|version| build_identity::is_newer(version, current))
         .unwrap_or(false);
 
     let notice = match (target, &installable) {
