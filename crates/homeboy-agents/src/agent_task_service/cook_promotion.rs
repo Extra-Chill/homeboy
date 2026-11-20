@@ -2107,6 +2107,14 @@ fn record_regate_gate_run(
     mut report: AgentTaskPromotionReport,
     authorization: &str,
 ) -> Result<AgentTaskPromotionReport> {
+    let reviewer_command = |gate: &crate::agent_task_gate::AgentTaskGateReport| {
+        if gate.visibility == crate::agent_task_gate::AgentTaskGateVisibility::Private {
+            return "<private>".to_string();
+        }
+        gate.invocation()
+            .map(|invocation| invocation.reviewer_command())
+            .unwrap_or_else(|_| quote_args(&gate.command))
+    };
     let gate_summary = |promotion: &AgentTaskPromotionReport| {
         promotion
             .deterministic_gates
@@ -2114,7 +2122,7 @@ fn record_regate_gate_run(
             .map(|gate| {
                 serde_json::json!({
                     "gate_id": gate.id,
-                    "command": gate.command,
+                    "command": reviewer_command(gate),
                     "status": gate.status,
                     "lab_execution": gate
                         .lab_receipt
@@ -2132,7 +2140,7 @@ fn record_regate_gate_run(
         "commands": report
             .deterministic_gates
             .iter()
-            .map(|gate| gate.command.clone())
+            .map(reviewer_command)
             .collect::<Vec<_>>(),
         "gates": gate_summary(&report),
         "superseded_gate_run": {

@@ -10101,11 +10101,20 @@ fn failing_regate_is_the_latest_gate_run_not_the_stale_receipt() {
             "agent_task.regate_gates_not_passing"
         );
         let result = report.result.as_ref().unwrap();
-        assert_eq!(result["deterministic_gates"][0]["command"], command);
+        assert_eq!(
+            result["deterministic_gates"][0]["invocation"]["command"],
+            command
+        );
 
         let latest = persisted_promotion_for_attempt(run_id).unwrap().unwrap();
         assert_eq!(latest.status, AgentTaskPromotionStatus::GateFailed);
-        assert_eq!(latest.deterministic_gates[0].command, command);
+        assert_eq!(
+            latest.deterministic_gates[0]
+                .invocation()
+                .unwrap()
+                .reviewer_command(),
+            command
+        );
         assert_ne!(latest.deterministic_gates, stale.deterministic_gates);
         let run = &latest.provenance["regate_gate_run"];
         assert_eq!(run["commands"][0], command);
