@@ -374,3 +374,49 @@ pub(super) fn ok_with_details(
         details,
     }
 }
+
+/// The runner unit's systemd account (#18538): a unit that is not running
+/// names its state, result, restart count and first start error, so doctor
+/// explains a down runner instead of only reporting it unreachable.
+pub(crate) fn runner_unit_check(
+    runner_id: &str,
+    probe: std::result::Result<homeboy::runner::RunnerUnitState, String>,
+) -> RunnerCheck {
+    let unit = match probe {
+        Ok(unit) => unit,
+        Err(reason) => {
+            return warning(
+                "runner.unit",
+                format!("Runner unit state could not be read: {reason}"),
+                None,
+            )
+        }
+    };
+    let mut details = BTreeMap::from([
+        ("active_state".to_string(), unit.active_state.clone()),
+        ("sub_state".to_string(), unit.sub_state.clone()),
+        ("result".to_string(), unit.result.clone()),
+        ("n_restarts".to_string(), unit.n_restarts.to_string()),
+    ]);
+    if unit.running() {
+        return ok_with_details(
+            "runner.unit",
+            format!("Runner unit is running: {}", unit.summary()),
+            details,
+        );
+    }
+    let error_line = unit
+        .last_error
+        .as_deref()
+        .map(|error| format!("; start error: {error}"))
+        .unwrap_or_default();
+    if let Some(start_error) = &unit.last_error {
+        details.insert("start_error".to_string(), start_error.clone());
+    }
+    error(
+        "runner.unit",
+        format!("Runner unit is not running: {}{error_line}", unit.summary()),
+        Some(format!("homeboy runner connect {runner_id}")),
+        details,
+    )
+}

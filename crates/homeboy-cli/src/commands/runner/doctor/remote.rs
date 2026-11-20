@@ -39,18 +39,26 @@ pub fn report(
     if options.scope == RunnerDoctorScope::LabOffload {
         match persisted_status.as_ref() {
             Some(status) if !status.connected => {
-                return disconnected_report(
-                    runner_id,
+                return with_unit_check(
+                    disconnected_report(
+                        runner_id,
+                        runner,
+                        server,
+                        status.daemon_freshness.clone(),
+                        admission_snapshot
+                            .as_ref()
+                            .map(|snapshot| snapshot.summary.clone()),
+                    ),
                     runner,
-                    server,
-                    status.daemon_freshness.clone(),
-                    admission_snapshot
-                        .as_ref()
-                        .map(|snapshot| snapshot.summary.clone()),
+                    client,
                 );
             }
             None => {
-                return disconnected_report(runner_id, runner, server, None, None);
+                return with_unit_check(
+                    disconnected_report(runner_id, runner, server, None, None),
+                    runner,
+                    client,
+                );
             }
             Some(_) => {}
         }
@@ -72,6 +80,12 @@ pub fn report(
         format!("SSH runner {} is reachable", runner_id),
         ssh_details,
     ));
+    if runner.settings.service_managed {
+        checks.push(checks::runner_unit_check(
+            runner_id,
+            homeboy::runner::probe_runner_unit_state(client),
+        ));
+    }
 
     let homeboy_command = runner.settings.homeboy_path.as_deref().unwrap_or("homeboy");
     let local_homeboy_identity = homeboy_product_identity::build_identity();
@@ -526,6 +540,21 @@ pub(super) fn unreachable_report(
         pressure: None,
         repairs: Vec::new(),
     }
+}
+
+/// A disconnected service-managed runner also reports why its unit is down.
+fn with_unit_check(
+    mut report: RunnerDoctorOutput,
+    runner: &Runner,
+    client: &SshClient,
+) -> RunnerDoctorOutput {
+    if runner.settings.service_managed {
+        report.checks.push(checks::runner_unit_check(
+            &report.runner_id,
+            homeboy::runner::probe_runner_unit_state(client),
+        ));
+    }
+    report
 }
 
 pub(super) fn disconnected_report(
