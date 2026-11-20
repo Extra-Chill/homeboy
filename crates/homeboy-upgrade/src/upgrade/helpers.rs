@@ -2596,10 +2596,20 @@ fn refresh_installed_extensions(
     let skipped: Vec<_> = result
         .skipped_details
         .into_iter()
-        .map(|entry| ExtensionUpgradeSkip {
-            extension_id: entry.extension_id,
-            reason: entry.reason,
-            recovery_commands: Vec::new(),
+        .map(|entry| {
+            let force = if entry.reason.starts_with(DIRTY_LINKED_PREFIX) {
+                " --force"
+            } else {
+                ""
+            };
+            ExtensionUpgradeSkip {
+                recovery_commands: vec![format!(
+                    "homeboy extension update {}{force}",
+                    entry.extension_id
+                )],
+                extension_id: entry.extension_id,
+                reason: entry.reason,
+            }
         })
         .collect();
     let dirty = skipped

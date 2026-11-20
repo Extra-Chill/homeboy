@@ -256,7 +256,10 @@ pub(crate) fn append_control_plane_event_on(
         if stored_digest != request_digest {
             return Err(Error::validation_invalid_argument(
                 "idempotency_key",
-                "control-plane event idempotency key was already used for different input",
+                format!(
+                    "control-plane event idempotency key was already used for different input (kind: {}, key digest: {})",
+                    request.kind, idempotency_digest,
+                ),
                 None,
                 None,
             ));
@@ -436,14 +439,16 @@ mod tests {
                 .unwrap(),
             event
         );
-        assert!(store
+        let conflict = store
             .append_control_plane_event(
                 &run,
                 &request("key-0", "other"),
                 &"a".repeat(64),
-                &"c".repeat(64)
+                &"c".repeat(64),
             )
-            .is_err());
+            .unwrap_err();
+        assert!(conflict.message.contains("kind: other"));
+        assert!(conflict.message.contains(&"a".repeat(64)));
         for sequence in 2..=102 {
             let request = request(&format!("key-{sequence}"), "state");
             store

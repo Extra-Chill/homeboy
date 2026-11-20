@@ -13,6 +13,7 @@ use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
 use homeboy_engine_primitives::artifact_ref_scheme::{decode_uri_component, encode_uri_component};
 
+use crate::artifact_links::{classify_url_host, UrlHostClass};
 use crate::observation::ArtifactRecord;
 
 pub const ARTIFACT_REF_SCHEMA: &str = "homeboy/artifact-ref/v1";
@@ -88,7 +89,7 @@ impl fmt::Display for ReviewerFacingArtifactRefError {
         let message = match self {
             Self::Empty => "reviewer-facing artifact ref cannot be empty",
             Self::LocalhostUrl => {
-                "reviewer-facing artifact ref cannot use localhost or loopback URLs"
+                "reviewer-facing artifact ref cannot use local-only or private host URLs"
             }
             Self::FileUrl => "reviewer-facing artifact ref cannot use file URLs",
             Self::LocalAbsolutePath => {
@@ -207,7 +208,9 @@ pub fn validate_reviewer_facing_artifact_ref(
     }
 
     if lower.starts_with("http://") || lower.starts_with("https://") {
-        if is_localhost_http_url(value) {
+        let url = reqwest::Url::parse(value)
+            .map_err(|_| ReviewerFacingArtifactRefError::UnsupportedScheme)?;
+        if classify_url_host(&url) != UrlHostClass::Public {
             return Err(ReviewerFacingArtifactRefError::LocalhostUrl);
         }
         return Ok(());
@@ -218,27 +221,6 @@ pub fn validate_reviewer_facing_artifact_ref(
     }
 
     Err(ReviewerFacingArtifactRefError::UnsupportedScheme)
-}
-
-fn is_localhost_http_url(value: &str) -> bool {
-    let Some(authority_and_path) = value.split_once("://").map(|(_, rest)| rest) else {
-        return false;
-    };
-    let authority = authority_and_path
-        .split(['/', '?', '#'])
-        .next()
-        .unwrap_or_default();
-    let host = authority
-        .rsplit_once('@')
-        .map(|(_, host)| host)
-        .unwrap_or(authority)
-        .trim_matches(['[', ']'])
-        .split(':')
-        .next()
-        .unwrap_or_default()
-        .to_ascii_lowercase();
-
-    host == "localhost" || host == "::1" || host.starts_with("127.")
 }
 
 fn is_windows_absolute_path(value: &str) -> bool {

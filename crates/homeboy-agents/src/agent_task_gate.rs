@@ -3099,6 +3099,10 @@ fn run_gate_argv_local(
         ));
     }
     let process_group = containment.leader_pid().expect("attached gate owner");
+    let execution_identity = containment
+        .owner_mut()
+        .expect("attached gate owner")
+        .identity();
     let timeout = declared_plan
         .map(|plan| plan.suite_timeout())
         .or(execution.timeout);
@@ -3163,7 +3167,12 @@ fn run_gate_argv_local(
             )
             .map_err(|error| {
                 Error::internal_io(
-                    error.to_string(),
+                    format!(
+                        "{error}; execution owner wait_pid={}, root_pid={}, root_pgid={:?}",
+                        execution_identity.wait_pid,
+                        execution_identity.root_pid,
+                        execution_identity.root_pgid,
+                    ),
                     Some(format!("supervise deterministic gate {command}")),
                 )
             })?;

@@ -3,9 +3,7 @@
 //! components): artifact-URI scheme rules built on `artifact_ref`'s scheme
 //! constants, plus the one path-touching evidence classifier.
 
-use crate::artifact_ref::{
-    ArtifactReference, METADATA_ONLY_REF_SCHEME, RUNNER_ARTIFACT_REF_SCHEME,
-};
+use crate::artifact_ref::{METADATA_ONLY_REF_SCHEME, RUNNER_ARTIFACT_REF_SCHEME};
 
 // The URI codec primitives live in `homeboy-engine-primitives` (the slim shared
 // base) alongside the artifact-ref schemes. Re-exported here to preserve
@@ -47,18 +45,17 @@ impl ArtifactUriContract {
     }
 
     pub fn runner_artifact_ref(self, runner_id: &str, run_id: &str, artifact_id: &str) -> String {
-        ArtifactReference::parse(format!(
+        format!(
             "{}{}/{}/{}",
             self.runner_artifact_scheme,
             encode_uri_component(runner_id),
             encode_uri_component(run_id),
             encode_uri_component(artifact_id)
-        ))
-        .to_string()
+        )
     }
 
     pub fn metadata_only_ref(self, label: &str) -> String {
-        ArtifactReference::parse(format!("{}{label}", self.metadata_only_scheme)).to_string()
+        format!("{}{label}", self.metadata_only_scheme)
     }
 }
 

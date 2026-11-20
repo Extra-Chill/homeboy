@@ -1160,11 +1160,9 @@ fn routed_slow_child_streams_promotion_progress_and_replays_it_after_completion(
             .expect("controller record remains observable after accepted handoff");
         assert_eq!(controller_record.runner_id(), Some("lab"));
         assert_eq!(controller_record.runner_job_id(), Some(job_id.as_str()));
-        assert!(controller_record.lab_handoff.is_some_and(|handoff| {
-            handoff.state
-                == homeboy_agents::agent_task_lifecycle::AgentTaskLabHandoffState::Accepted
-                && handoff.runner_job_id.as_deref() == Some(job_id.as_str())
-        }));
+        assert!(controller_record
+            .lab_handoff
+            .is_some_and(|handoff| { handoff.runner_job_id.as_deref() == Some(job_id.as_str()) }));
         wait_for_path(&started, "blocked workload start");
         let client = Client::builder().no_proxy().build().expect("daemon client");
         let job = fetch_daemon_job(&client, &daemon_url, &job_id).expect("running daemon job");
@@ -1352,10 +1350,7 @@ fn foreground_portable_run_binds_the_daemon_job_before_terminal_projection(run_i
             .expect("terminal projection keeps controller record readable");
         assert_eq!(record.runner_id(), Some("lab"));
         assert_eq!(record.runner_job_id(), output.job_id.as_deref());
-        assert!(record.lab_handoff.is_some_and(|handoff| {
-            handoff.state
-                == homeboy_agents::agent_task_lifecycle::AgentTaskLabHandoffState::Accepted
-        }));
+        assert!(record.lab_handoff.is_some());
     });
 }
 

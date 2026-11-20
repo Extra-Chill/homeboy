@@ -3,6 +3,7 @@ use std::path::Path;
 use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
 
+use homeboy_engine_primitives::text::truncate_chars;
 use serde_json::{json, Value};
 
 use super::command_runner::ProviderReadinessInvocationResult;
@@ -388,10 +389,6 @@ fn structured_answer(text: &str) -> Option<Value> {
         })
 }
 
-fn truncate(text: &str, max: usize) -> String {
-    text.chars().take(max).collect()
-}
-
 pub(super) fn outcome(
     request: &Value,
     stdout: &str,
@@ -535,7 +532,7 @@ pub(super) fn outcome(
             AgentTaskOutcomeStatus::Failed,
             "execution_failed",
             "agent_task.pi_failed",
-            truncate(&format!("Pi execution failed: {reason}"), 500),
+            truncate_chars(&format!("Pi execution failed: {reason}"), 500, ""),
             format!(
                 "Pi exited with status {}. {reason}",
                 exit_code.unwrap_or(-1)
@@ -574,7 +571,7 @@ pub(super) fn outcome(
             } else {
                 "agent_task.pi_model_error"
             },
-            truncate(&format!("Pi model request failed: {reason}"), 500),
+            truncate_chars(&format!("Pi model request failed: {reason}"), 500, ""),
             reason,
         )
     } else if stop == "length" {
@@ -639,7 +636,7 @@ pub(super) fn outcome(
             if paragraph.is_empty() {
                 "Pi completed the task.".into()
             } else if paragraph.chars().count() > 400 {
-                format!("{}…", truncate(paragraph, 399))
+                format!("{}…", truncate_chars(paragraph, 399, ""))
             } else {
                 paragraph.into()
             }

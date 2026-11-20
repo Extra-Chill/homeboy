@@ -1,85 +1,38 @@
 # Planned Change Execution
 
-Homeboy's planned-change vocabulary is the shared core language for work that
-starts as a plan and may eventually mutate files or publish external state.
+Homeboy workflows use `HomeboyPlan` to describe planned work while retaining
+command-specific execution results and CLI behavior.
 
-The lifecycle is:
+## Plan-Step Execution
 
-```text
-plan -> execute -> artifact -> approve -> apply -> publish
-```
+`crates/homeboy-core/src/execution.rs` provides shared dispatch helpers:
 
-## Core Contract
+- `execute_plan_steps()` dispatches non-disabled, non-skipped steps.
+- `execute_plan_steps_filtered()` additionally accepts a caller-defined skip
+  predicate. A dispatcher returning `None` marks a plan-only step; a stop
+  predicate decides whether a produced result blocks the rest of the plan.
+- `PlanExecutionRun` collects workflow-specific results and whether execution
+  stopped early.
+- `executable_plan_step_needs()` returns only execution dependencies. Steps
+  with `needs_kind: display_order` retain stable presentation ordering without
+  blocking independent executable steps.
 
-The contract types live in `crates/homeboy-core/src/execution.rs` and are intentionally usable
-without changing existing command JSON output shapes.
+Release and review workflows use these helpers without projecting their results
+into a separate generic lifecycle envelope.
 
-- `ExecutionRequest` captures the subject, selected `ExecutionMode`, optional
-  `HomeboyPlan`, approval scope, inputs, and policy.
-- `ExecutionRun` captures the run status, step results, produced artifacts,
-  warnings, and metadata.
-- `ExecutionStepResult` records one executed step without forcing each command
-  to expose a new public output envelope.
-- `ChangeArtifact` records a proposed or captured change with provenance,
-  files, diff/path data, approval scope, and metadata.
-- `ApplyRequest` and `ApplyResult` describe local worktree mutation.
-- `PublishRequest` and `PublishResult` describe durable externalization such as
-  commits, pushes, pull requests, releases, and deploys.
+## Change Artifacts
 
-## Mode Mapping
+[`change_artifact::ChangeArtifact`](../../crates/homeboy-core/src/change_artifact.rs)
+contains the runner/Lab change payload, including its source snapshot, patch or
+file delta, provenance, and digest. See [Apply and publish contract](apply-publish-contract.md)
+for the local mutation boundary.
 
-Existing command flags keep their command-specific behavior and output. Internally
-they can map to `ExecutionMode` when a caller needs shared planned-change
-semantics:
+`execution::ChangeArtifactProvenance` remains a separate provenance record used
+by release and changelog guards; it is not a change artifact envelope.
 
-| Existing CLI vocabulary | `ExecutionMode` | Meaning |
-| --- | --- | --- |
-| `--plan`, `preview` | `plan` | Describe intended work without running executable steps. |
-| `--dry-run`, `dry-run` | `dry_run` | Run far enough to preview effects without durable writes. |
-| `--capture-patch`, `capture-patch` | `capture_patch` | Execute and preserve proposed file changes as artifacts. |
-| `--write`, `--apply`, `write`, `apply` | `apply` | Materialize an approved or command-permitted change locally. |
-| `--execute`, `run`, `execute` | `execute` | Execute the requested workflow directly. |
+## Command Behavior
 
-Operator **confirmations** are not execution modes and must not be added to this
-table. A confirmation attests to a condition; it does not select whether work
-happens. `deploy --confirm-dangerous` is the canonical example: deploy executes
-by default, and the flag only authorizes a non-canonical source mode
-(`--head`, `--ref`, `--release-set`, `--force`). It was spelled `--apply` until
-#11139, which read as an `apply` mode mapping and meant the opposite of
-`--apply` everywhere else. Confirmations follow the `--confirm-<condition>`
-spelling instead.
-
-Use `ExecutionMode::from_cli_value()` for value-style inputs. Boolean flag
-handlers should map their selected command behavior to the same mode values at
-the call site when they adopt the contract.
-
-## Existing Workflow Mapping
-
-- Release planning remains represented by `HomeboyPlan`; release run results can
-  project into `ExecutionRun` and `ChangeArtifact` without changing release CLI
-  JSON.
-- Plan steps use `needs` for stable plan ordering and dependency display. When an
-  edge is only presentational, set `needs_kind: display_order`; bounded parallel
-  executors should use `executable_plan_step_needs()` so only true execution
-  dependencies block independent read-only steps.
-- Runner/Lab patch capture can project captured patches or deltas into
-  `ChangeArtifact`; local mutation belongs in `ApplyResult`.
-- Refactor write paths can treat `--write` as `ExecutionMode::Apply` while
-  preserving their existing command outputs.
-- Sample Runtime-style adapters should split local file mutation from publish steps:
-  apply verifies and writes files, while publish commits, pushes, opens pull
-  requests, releases, or deploys.
-
-## Extension Guidance
-
-Extensions do not need to adopt every type at once. A useful first slice is:
-
-1. Accept or emit `ExecutionMode` when a command supports plan, dry-run,
-   capture, apply, or execute behavior.
-2. Emit `ChangeArtifact` for proposed file changes with enough provenance to
-   identify the source run, step, command, and captured snapshot.
-3. Return `ApplyResult` when an approved artifact mutates a local worktree.
-4. Return `PublishResult` only for post-apply externalization.
-
-This keeps the core vocabulary consistent for fleet cooking while allowing each
-command and extension to preserve current public JSON contracts during migration.
+Plan, dry-run, capture, apply, and execute behavior remains command-specific.
+Operator confirmations authorize conditions rather than selecting an execution
+mode: for example, `deploy --confirm-dangerous` authorizes a non-canonical source
+mode, while deploy executes by default.

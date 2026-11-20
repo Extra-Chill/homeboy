@@ -1,6 +1,7 @@
 use serde::{Deserialize, Serialize};
 
-use crate::execution_contract::encode_uri_component;
+use crate::artifact_links::{classify_url_host, UrlHostClass};
+use crate::artifact_ref::{artifact_uri, METADATA_ONLY_REF_SCHEME};
 use crate::observation::ArtifactRecord;
 
 pub const ARTIFACT_ADDRESS_SCHEMA: &str = "homeboy/artifact-address/v1";
@@ -47,7 +48,7 @@ impl ArtifactAddress {
 
         if artifact.artifact_type == "metadata-only" {
             let value = if std::path::Path::new(&artifact.path).is_absolute() {
-                format!("metadata-only:{}", artifact.id)
+                format!("{METADATA_ONLY_REF_SCHEME}{}", artifact.id)
             } else {
                 artifact.path.clone()
             };
@@ -58,11 +59,7 @@ impl ArtifactAddress {
             return Self::metadata_only(format!("unvalidated-url:{}", artifact.id));
         }
 
-        Self::local_operator_path(format!(
-            "homeboy://run/{}/artifact/{}",
-            encode_uri_component(&artifact.run_id),
-            encode_uri_component(&artifact.id)
-        ))
+        Self::local_operator_path(artifact_uri(&artifact.run_id, &artifact.id))
     }
 
     pub fn reviewer_target(&self) -> Option<&str> {
@@ -123,10 +120,7 @@ pub fn validated_public_url(value: &str) -> Option<String> {
     if !matches!(url.scheme(), "http" | "https") {
         return None;
     }
-    let host = url.host_str()?.to_ascii_lowercase();
-    let local_host =
-        host == "localhost" || host == "127.0.0.1" || host == "::1" || host.ends_with(".local");
-    (!local_host).then(|| value.to_string())
+    (classify_url_host(&url) == UrlHostClass::Public).then(|| value.to_string())
 }
 
 fn public_url_for_record(artifact: &ArtifactRecord) -> Option<String> {

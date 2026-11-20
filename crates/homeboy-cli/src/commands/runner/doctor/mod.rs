@@ -607,14 +607,7 @@ pub(crate) fn compact_command_run(
 }
 
 fn bounded_text(value: &str) -> String {
-    if value.len() <= COMPACT_TEXT_LIMIT {
-        return value.to_string();
-    }
-    let end = value
-        .char_indices()
-        .find_map(|(index, _)| (index >= COMPACT_TEXT_LIMIT).then_some(index))
-        .unwrap_or(value.len());
-    format!("{}...", &value[..end])
+    homeboy_engine_primitives::text::truncate_chars(value, COMPACT_TEXT_LIMIT, "...")
 }
 
 pub(crate) fn render_summary(payload: &serde_json::Value) -> Option<String> {

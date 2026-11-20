@@ -9,6 +9,7 @@ use std::thread;
 use std::time::Duration;
 
 use homeboy_engine_primitives::content_hash;
+use homeboy_engine_primitives::local_files::write_json_file as write_json_atomically;
 use serde::{Deserialize, Serialize};
 
 use super::*;
@@ -596,16 +597,7 @@ fn discard_other_staged_attempts(staging: &Path, completed_attempt: &Path) {
 }
 
 fn write_completion(path: &Path, completion: &PostprocessCompletion) -> homeboy_core::Result<()> {
-    let bytes = serde_json::to_vec_pretty(completion).map_err(|error| {
-        homeboy_core::Error::internal_json(error.to_string(), Some(path.display().to_string()))
-    })?;
-    let temporary = path.with_extension(format!("{}.tmp", uuid::Uuid::new_v4()));
-    std::fs::write(&temporary, bytes).map_err(|error| {
-        homeboy_core::Error::internal_io(error.to_string(), Some(temporary.display().to_string()))
-    })?;
-    std::fs::rename(&temporary, path).map_err(|error| {
-        homeboy_core::Error::internal_io(error.to_string(), Some(path.display().to_string()))
-    })
+    write_json_atomically(path, completion)
 }
 
 fn promote_attempt(
@@ -1090,19 +1082,6 @@ fn worker_is_alive(worker: &PostprocessWorkerSpawn) -> bool {
         )
 }
 
-fn write_json_atomically<T: Serialize>(path: &Path, value: &T) -> homeboy_core::Result<()> {
-    let bytes = serde_json::to_vec_pretty(value).map_err(|error| {
-        homeboy_core::Error::internal_json(error.to_string(), Some(path.display().to_string()))
-    })?;
-    let temporary = path.with_extension(format!("{}.tmp", uuid::Uuid::new_v4()));
-    std::fs::write(&temporary, bytes).map_err(|error| {
-        homeboy_core::Error::internal_io(error.to_string(), Some(temporary.display().to_string()))
-    })?;
-    std::fs::rename(temporary, path).map_err(|error| {
-        homeboy_core::Error::internal_io(error.to_string(), Some(path.display().to_string()))
-    })
-}
-
 fn heartbeat_claim(
     path: PathBuf,
     owner_id: String,
@@ -1128,18 +1107,10 @@ fn heartbeat_claim(
                 return;
             };
             claim.heartbeat_unix_secs = now_unix_secs();
-            let temporary = path.with_extension(format!("{}.tmp", uuid::Uuid::new_v4()));
-            if serde_json::to_vec(&claim)
-                .ok()
-                .and_then(|bytes| std::fs::write(&temporary, bytes).ok())
-                .is_none()
-            {
+            if !claim_owned_by(&path, &owner_id) {
                 return;
             }
-            if claim_owned_by(&path, &owner_id) {
-                let _ = std::fs::rename(&temporary, &path);
-            } else {
-                let _ = std::fs::remove_file(&temporary);
+            if write_json_atomically(&path, &claim).is_err() {
                 return;
             }
         }
@@ -1254,13 +1225,7 @@ fn write_checkpoint(
     .map_err(|error| {
         homeboy_core::Error::internal_json(error.to_string(), Some(path.display().to_string()))
     })?;
-    let temporary = path.with_extension(format!("{}.tmp", std::process::id()));
-    std::fs::write(&temporary, payload).map_err(|error| {
-        homeboy_core::Error::internal_io(error.to_string(), Some(temporary.display().to_string()))
-    })?;
-    std::fs::rename(&temporary, path).map_err(|error| {
-        homeboy_core::Error::internal_io(error.to_string(), Some(path.display().to_string()))
-    })
+    homeboy_engine_primitives::local_files::write_file_atomic(path, payload, "write checkpoint")
 }
 
 fn checkpoint_failure_outcome(

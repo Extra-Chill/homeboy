@@ -691,13 +691,7 @@ fn operator_summary_with_admission(
 }
 
 fn bounded_status_text(value: &str) -> String {
-    let mut chars = value.chars();
-    let bounded = chars.by_ref().take(256).collect::<String>();
-    if chars.next().is_some() {
-        format!("{bounded}...")
-    } else {
-        bounded
-    }
+    homeboy_engine_primitives::text::truncate_chars(value, 256, "...")
 }
 
 fn selected_lab_runner_status(

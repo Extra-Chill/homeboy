@@ -391,14 +391,7 @@ fn list_envelope_bytes(output: &SshListOutput) -> homeboy::core::Result<usize> {
 }
 
 fn bounded_text(value: &str, limit: usize) -> String {
-    if value.len() <= limit {
-        return value.to_string();
-    }
-    let end = value
-        .char_indices()
-        .find_map(|(index, _)| (index >= limit).then_some(index))
-        .unwrap_or(value.len());
-    format!("{}...", &value[..end])
+    homeboy_engine_primitives::text::truncate_chars(value, limit, "...")
 }
 
 pub(crate) fn render_list_summary(payload: &Value) -> Option<String> {

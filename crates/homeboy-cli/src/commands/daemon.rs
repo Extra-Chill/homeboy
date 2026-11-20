@@ -791,14 +791,7 @@ fn status_projection_bytes(projection: &Value) -> usize {
 }
 
 fn bounded_text(value: &str) -> String {
-    if value.len() <= COMPACT_STATUS_TEXT_LIMIT {
-        return value.to_string();
-    }
-    let end = value
-        .char_indices()
-        .find_map(|(index, _)| (index >= COMPACT_STATUS_TEXT_LIMIT).then_some(index))
-        .unwrap_or(value.len());
-    format!("{}...", &value[..end])
+    homeboy_engine_primitives::text::truncate_chars(value, COMPACT_STATUS_TEXT_LIMIT, "...")
 }
 
 /// Resolve the recovery for the local daemon and either print it or run it.
@@ -1126,10 +1119,7 @@ fn daemon_is_fresh(status: &DaemonStatus) -> bool {
 
 fn bounded_error_message(message: &str) -> String {
     const MAX_CHARS: usize = 500;
-    if message.chars().count() <= MAX_CHARS {
-        return message.to_string();
-    }
-    format!("{}...", message.chars().take(MAX_CHARS).collect::<String>())
+    homeboy_engine_primitives::text::truncate_chars(message, MAX_CHARS, "...")
 }
 
 fn rendered_plan(plan: &daemon::recovery_actions::DaemonRecoveryPlan) -> String {

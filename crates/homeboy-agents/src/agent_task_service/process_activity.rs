@@ -258,13 +258,7 @@ pub fn parse_ps_elapsed_seconds(etime: &str) -> Option<u64> {
 /// Truncation is on `char` boundaries so a multi-byte command line cannot panic
 /// the diagnostic that was supposed to explain what went wrong.
 pub fn truncate_command(command: &str) -> String {
-    let command = command.trim();
-    if command.chars().count() <= MAX_ACTIVITY_COMMAND_CHARS {
-        return command.to_string();
-    }
-    let mut truncated: String = command.chars().take(MAX_ACTIVITY_COMMAND_CHARS).collect();
-    truncated.push('…');
-    truncated
+    homeboy_engine_primitives::text::truncate_chars(command.trim(), MAX_ACTIVITY_COMMAND_CHARS, "…")
 }
 
 /// Select the descendant that best answers "what is the *provider* working on?".

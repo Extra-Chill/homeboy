@@ -9,6 +9,7 @@ use homeboy_core::engine::resource::{self, ExtensionChildResourceSummary};
 use homeboy_core::engine::run_dir::{self, RunDir};
 use homeboy_core::error::{Error, Result};
 use homeboy_core::server::CommandOutput;
+use homeboy_engine_primitives::local_files::write_json_file as write_json_sidecar;
 use homeboy_engine_primitives::shell;
 use homeboy_extension_contract::ExtensionPhaseTiming;
 use homeboy_extension_contract::{ExtensionCapability, TestSecretEnvProjection};
@@ -944,36 +945,6 @@ fn sidecar_has_payload(path: &Path) -> bool {
         Ok(_) => true,
         Err(_) => false,
     }
-}
-
-fn write_json_sidecar(path: &Path, value: &serde_json::Value) -> Result<()> {
-    if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent).map_err(|err| {
-            Error::internal_io(
-                err.to_string(),
-                Some(format!(
-                    "create structured failure sidecar directory {}",
-                    parent.display()
-                )),
-            )
-        })?;
-    }
-
-    let payload = serde_json::to_string_pretty(value).map_err(|err| {
-        Error::internal_json(
-            err.to_string(),
-            Some("serialize structured failure sidecar".to_string()),
-        )
-    })?;
-    std::fs::write(path, format!("{}\n", payload)).map_err(|err| {
-        Error::internal_io(
-            err.to_string(),
-            Some(format!(
-                "write structured failure sidecar {}",
-                path.display()
-            )),
-        )
-    })
 }
 
 #[cfg(test)]

@@ -780,6 +780,9 @@ fn failure_diagnostics_for_data(
     if let Some(diagnostics) = upgrade_runner_convergence_diagnostics(exit_code, data) {
         return Some(diagnostics);
     }
+    if let Some(diagnostics) = upgrade_extension_partial_diagnostics(exit_code, data) {
+        return Some(diagnostics);
+    }
     if let Some(diagnostics) = runner_reconciliation_diagnostics(exit_code, data) {
         return Some(diagnostics);
     }
@@ -1179,6 +1182,86 @@ fn upgrade_runner_convergence_diagnostics(
         retryable: Some(true),
         failure_digest: Some(failure_digest),
     })
+}
+
+/// Controller current and runners converged, but some extensions were not
+/// refreshed: a partial upgrade naming each extension and its recovery, not
+/// an upgrade that failed.
+fn upgrade_extension_partial_diagnostics(
+    exit_code: i32,
+    data: &Value,
+) -> Option<CommandDiagnostics> {
+    if !is_extension_partial_upgrade(data) {
+        return None;
+    }
+    let skips = data["extension_skips"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter(|skip| {
+            !skip["reason"]
+                .as_str()
+                .is_some_and(|reason| reason.starts_with("WARNING:"))
+        })
+        .collect::<Vec<_>>();
+    let message = format!(
+        "Upgrade completed except extensions: {}",
+        data.pointer("/extensions/summary")
+            .and_then(Value::as_str)
+            .unwrap_or("some extensions were not refreshed")
+    );
+    let next_actions = skips
+        .iter()
+        .flat_map(|skip| {
+            let id = skip["extension_id"].as_str().unwrap_or("extension");
+            skip["recovery_commands"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .filter_map(Value::as_str)
+                .map(move |command| {
+                    CommandNextAction::new(format!("repair {id}"), command)
+                        .with_kind(CommandNextActionKind::Repair)
+                })
+        })
+        .take(4)
+        .collect::<Vec<_>>();
+    Some(CommandDiagnostics {
+        code: "upgrade.extensions_partial".to_string(),
+        message: message.clone(),
+        details: serde_json::json!({
+            "exit_code": exit_code,
+            "source_pointer": "/extensions",
+            "outcome": data.get("outcome"),
+            "operation_id": data.get("operation_id"),
+            "controller": data.get("controller"),
+            "extensions": data.get("extensions"),
+            "extension_failures": skips,
+        }),
+        hints: None,
+        retryable: Some(true),
+        failure_digest: Some(CommandFailureDigest {
+            summary: message,
+            stdout_tail: None,
+            stderr_tail: None,
+            artifact_refs: Vec::new(),
+            next_actions,
+            retryable: Some(true),
+        }),
+    })
+}
+
+fn is_extension_partial_upgrade(data: &Value) -> bool {
+    data.get("command").and_then(Value::as_str) == Some("upgrade")
+        && data.pointer("/extensions/status").and_then(Value::as_str) == Some("partial")
+        && matches!(
+            data.pointer("/controller/status").and_then(Value::as_str),
+            Some("updated" | "unchanged")
+        )
+        && !matches!(
+            data.pointer("/runners/status").and_then(Value::as_str),
+            Some("partial" | "failed")
+        )
 }
 
 fn is_partial_upgrade_outcome(data: &Value) -> bool {
@@ -1983,13 +2066,7 @@ fn release_gate_repro_action(
 }
 
 fn bounded_text(value: &str, max_chars: usize) -> String {
-    let mut chars = value.chars();
-    let bounded: String = chars.by_ref().take(max_chars).collect();
-    if chars.next().is_some() {
-        format!("{bounded}...")
-    } else {
-        bounded
-    }
+    homeboy_engine_primitives::text::truncate_chars(value, max_chars, "...")
 }
 
 fn formatting_failure_digest(data: &Value) -> Option<CommandFailureDigest> {
@@ -2126,7 +2203,9 @@ fn status_for_result(data: Option<&Value>, exit_code: i32) -> String {
                 .expect("matched canonical status")
                 .to_string();
         }
-        if data.is_some_and(is_partial_upgrade_outcome) {
+        if data.is_some_and(|data| {
+            is_partial_upgrade_outcome(data) || is_extension_partial_upgrade(data)
+        }) {
             return "partial_failure".to_string();
         }
         return "failed".to_string();
@@ -2630,6 +2709,48 @@ mod tests {
             diagnostics.failure_digest.unwrap().next_actions[0].command,
             "homeboy agent-task status cook-attempt-1"
         );
+    }
+
+    /// An upgrade whose controller and runners converged but one extension
+    /// failed to refresh is a named partial with that extension's recovery,
+    /// and the orphan-directory warning stays out of the failure.
+    #[test]
+    fn an_extension_only_upgrade_failure_is_a_named_partial() {
+        let payload = json!({
+            "command": "upgrade",
+            "outcome": "controller_updated",
+            "runner_convergence": "converged",
+            "controller": {"status": "updated", "summary": "controller installation completed"},
+            "runners": {"status": "converged", "summary": "1 converged"},
+            "extensions": {"status": "partial", "summary": "11 updated, 1 skipped (cloudflare-workers: IO error: extract archive: Permission denied (os error 13))"},
+            "extension_skips": [{
+                "extension_id": "cloudflare-workers",
+                "reason": "IO error: extract archive: Permission denied (os error 13)",
+                "recovery_commands": ["homeboy extension update cloudflare-workers"]
+            }, {
+                "extension_id": "agent-runtimes",
+                "reason": "WARNING: directory has no extension manifest and no installed extension owns it; remove it",
+                "recovery_commands": ["rm -r /home/u/.config/homeboy/extensions/agent-runtimes"]
+            }]
+        });
+        let envelope = cli_response_for_json_result_for_command(&Ok(payload), 1, "upgrade", None);
+        let value = serde_json::to_value(envelope).expect("serialize envelope");
+
+        assert_eq!(value["status"], "partial_failure");
+        assert_eq!(value["diagnostics"]["code"], "upgrade.extensions_partial");
+        let failures = value["diagnostics"]["details"]["extension_failures"]
+            .as_array()
+            .expect("extension failures");
+        assert_eq!(failures.len(), 1);
+        assert_eq!(failures[0]["extension_id"], "cloudflare-workers");
+        let actions = value["next_actions"].as_array().expect("next actions");
+        assert!(actions
+            .iter()
+            .any(|action| action["command"] == "homeboy extension update cloudflare-workers"));
+        assert!(actions.iter().all(|action| !action["command"]
+            .as_str()
+            .unwrap_or("")
+            .starts_with("rm -r")));
     }
 
     #[test]

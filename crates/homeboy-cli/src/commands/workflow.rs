@@ -266,6 +266,28 @@ fn run_workflow(args: RunArgs) -> CmdResult<Value> {
     )
 }
 
+/// A resume reuses each succeeded step whose rendered definition is unchanged,
+/// and a step its `when` skipped re-evaluates that gate on the same reused
+/// outputs and skips again. With the same definition and inputs and every
+/// step succeeded or skipped, it runs nothing.
+fn resume_runs_nothing(
+    source: &Value,
+    definition: &WorkflowDefinition,
+    inputs: &BTreeMap<String, Value>,
+) -> bool {
+    let steps = source["steps"].as_object();
+    source["definition_digest"].as_str() == Some(definition.digest().as_str())
+        && serde_json::from_value::<BTreeMap<String, Value>>(source["inputs"].clone()).ok()
+            == Some(inputs.clone())
+        && steps.is_some_and(|steps| {
+            !steps.is_empty()
+                && steps.values().all(|step| {
+                    step["phase"] == "done"
+                        && matches!(step["outcome"].as_str(), Some("succeeded" | "skipped"))
+                })
+        })
+}
+
 /// Admit `definition` on the local daemon, or report the instance the same
 /// definition, inputs, and name already admitted.
 pub(crate) fn admit(
@@ -286,14 +308,33 @@ fn admit_with_resume(
     source: &str,
     resumed_from: Option<&str>,
 ) -> CmdResult<Value> {
-    let mut inputs = definition.resolve_inputs(provided)?;
-    let client = LocalControllerJobClient::connect_current_build()?;
-    if let Some(source) = resumed_from {
-        let view = client.workflow(source)?;
-        if let Ok(source_inputs) = serde_json::from_value(view["inputs"].clone()) {
-            definition.carry_resumed_inputs(&mut inputs, &source_inputs, provided);
+    // A fresh admission validates its inputs before reaching the daemon; a
+    // resumed one first reads its source's inputs from the daemon.
+    let client;
+    let inputs = match resumed_from {
+        None => {
+            let inputs = definition.resolve_inputs(provided)?;
+            client = LocalControllerJobClient::connect_current_build()?;
+            inputs
         }
-    }
+        Some(source) => {
+            client = LocalControllerJobClient::connect_current_build()?;
+            let view = client.workflow(source)?;
+            let source_inputs = serde_json::from_value(view["inputs"].clone()).unwrap_or_default();
+            let inputs = definition.resolve_resumed_inputs(provided, &source_inputs)?;
+            if resume_runs_nothing(&view, definition, &inputs) {
+                return Err(Error::validation_invalid_argument(
+                    "resume-from",
+                    format!(
+                        "nothing to resume: `{source}` succeeded or skipped every step with this same definition and inputs, so a resume would reuse them all and run nothing; to run it again, drop `--resume-from` and pass a new `--instance <name>`"
+                    ),
+                    None,
+                    None,
+                ));
+            }
+            inputs
+        }
+    };
     let mut resumed_from = resumed_from.map(str::to_string);
     let mut instance =
         definition.instance_id_with_resume(&inputs, instance_name, resumed_from.as_deref());
@@ -782,6 +823,44 @@ fn registered_workflows() -> Result<Value> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Resuming an instance that succeeded every step under the same
+    /// definition and inputs would run nothing, so admission refuses it; any
+    /// changed definition, changed input or unfinished step leaves work to do.
+    #[test]
+    fn a_resume_that_would_reuse_every_step_runs_nothing() {
+        let definition = WorkflowDefinition::from_value(json!({
+            "schema": "homeboy/workflow/v1",
+            "id": "loop",
+            "inputs": {"url": {"required": true}},
+            "steps": [{"id": "triage", "exec": {"program": "node", "args": ["{{inputs.url}}"]}}]
+        }))
+        .unwrap();
+        let inputs = BTreeMap::from([("url".to_string(), json!("u"))]);
+        let source = |digest: &str, url: &str, outcome: &str| {
+            json!({
+                "definition_digest": digest,
+                "inputs": {"url": url},
+                "steps": {
+                    "triage": {"phase": "done", "outcome": outcome},
+                    "fix": {"phase": "done", "outcome": "skipped"},
+                },
+            })
+        };
+        let digest = definition.digest();
+        for (view, runs_nothing) in [
+            (source(&digest, "u", "succeeded"), true),
+            (source("changed", "u", "succeeded"), false),
+            (source(&digest, "other", "succeeded"), false),
+            (source(&digest, "u", "failed"), false),
+        ] {
+            assert_eq!(
+                resume_runs_nothing(&view, &definition, &inputs),
+                runs_nothing,
+                "{view}"
+            );
+        }
+    }
 
     #[test]
     fn cook_keys_are_checked_against_the_live_cook_flags() {

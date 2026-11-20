@@ -134,6 +134,15 @@ fn runner_manifest_query_options(
     // daemon session, so transport selection would fall through to
     // `Unavailable` and lose the path it relies on today. Mirror the runner's
     // own admission rule instead.
+    //
+    // The query gates the runner refresh that clears build skew, so it is
+    // admitted as convergence like that refresh: a loaded Lab otherwise
+    // queues this read-only inventory behind bulk workload and stalls the
+    // whole upgrade in preflight for as long as the pressure lasts.
+    options.env.insert(
+        homeboy_core::runner_pressure::ADMISSION_CLASS_ENV.to_string(),
+        homeboy_core::runner_pressure::CONVERGENCE_ADMISSION_CLASS.to_string(),
+    );
     options
 }
 
@@ -389,9 +398,18 @@ mod manifest_preflight_tests {
             !runner_manifest_query_options(&runner, command.clone(), false).allow_diagnostic_ssh,
             "a refused diagnostic SSH decision must clear the exec flag"
         );
+        let options = runner_manifest_query_options(&runner, command, true);
         assert!(
-            runner_manifest_query_options(&runner, command, true).allow_diagnostic_ssh,
+            options.allow_diagnostic_ssh,
             "a permitted diagnostic SSH decision must keep the exec flag"
+        );
+        assert_eq!(
+            options
+                .env
+                .get(homeboy_core::runner_pressure::ADMISSION_CLASS_ENV)
+                .map(String::as_str),
+            Some(homeboy_core::runner_pressure::CONVERGENCE_ADMISSION_CLASS),
+            "the preflight inventory is admitted as convergence, not queued behind bulk pressure"
         );
     }
 

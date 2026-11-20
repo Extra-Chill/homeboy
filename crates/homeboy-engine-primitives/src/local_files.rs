@@ -144,14 +144,15 @@ pub fn write_file(path: &Path, content: &str, operation: &str) -> Result<()> {
         .map_err(|e| Error::internal_io(e.to_string(), Some(operation.to_string())))
 }
 
-/// Write content to file atomically (write to .tmp, then rename).
-pub fn write_file_atomic(path: &Path, content: &str, operation: &str) -> Result<()> {
-    write_file_atomic_with_owner_only(path, content, operation, false)
+/// Atomically replace a file with bytes, syncing the file and parent directory.
+/// The parent directory must already exist.
+pub fn write_file_atomic(path: &Path, content: impl AsRef<[u8]>, operation: &str) -> Result<()> {
+    write_file_atomic_with_owner_only(path, content.as_ref(), operation, false)
 }
 
 fn write_file_atomic_with_owner_only(
     path: &Path,
-    content: &str,
+    content: &[u8],
     operation: &str,
     owner_only: bool,
 ) -> Result<()> {
@@ -160,16 +161,16 @@ fn write_file_atomic_with_owner_only(
         content,
         operation,
         owner_only,
-        write_file_owner_only,
+        |path, content, operation| write_file_owner_only(path, content, operation),
     )
 }
 
 fn write_file_atomic_with_owner_only_writer(
     path: &Path,
-    content: &str,
+    content: &[u8],
     operation: &str,
     owner_only: bool,
-    owner_only_writer: fn(&Path, &str, &str) -> Result<()>,
+    owner_only_writer: fn(&Path, &[u8], &str) -> Result<()>,
 ) -> Result<()> {
     let parent = path.parent().ok_or_else(|| {
         Error::internal_io(
@@ -211,7 +212,7 @@ fn write_file_atomic_with_owner_only_writer(
                 )
             })?;
         use std::io::Write;
-        if let Err(error) = file.write_all(content.as_bytes()) {
+        if let Err(error) = file.write_all(content) {
             drop(file);
             let _ = fs::remove_file(&tmp_path);
             return Err(Error::internal_io(
@@ -296,7 +297,7 @@ fn write_json_file_with_owner_only<T: Serialize>(
     })?;
     write_file_atomic_with_owner_only(
         path,
-        &format!("{json}\n"),
+        format!("{json}\n").as_bytes(),
         &path.display().to_string(),
         owner_only,
     )
@@ -328,7 +329,12 @@ pub fn create_dir_all_durably(path: &Path) -> Result<()> {
 }
 
 /// Create a file owner-only on Unix before writing its contents.
-pub fn write_file_owner_only(path: &Path, content: &str, operation: &str) -> Result<()> {
+pub fn write_file_owner_only(
+    path: &Path,
+    content: impl AsRef<[u8]>,
+    operation: &str,
+) -> Result<()> {
+    let content = content.as_ref();
     #[cfg(unix)]
     {
         use std::io::Write;
@@ -340,13 +346,14 @@ pub fn write_file_owner_only(path: &Path, content: &str, operation: &str) -> Res
             .mode(0o600)
             .open(path)
             .map_err(|error| Error::internal_io(error.to_string(), Some(operation.to_string())))?;
-        file.write_all(content.as_bytes())
+        file.write_all(content)
             .map_err(|error| Error::internal_io(error.to_string(), Some(operation.to_string())))
     }
 
     #[cfg(not(unix))]
     {
-        write_file(path, content, operation)
+        fs::write(path, content)
+            .map_err(|error| Error::internal_io(error.to_string(), Some(operation.to_string())))
     }
 }
 
@@ -375,7 +382,7 @@ mod tests {
 
     fn partially_write_owner_only_then_fail(
         path: &Path,
-        content: &str,
+        content: &[u8],
         operation: &str,
     ) -> Result<()> {
         let mut file = fs::OpenOptions::new()
@@ -383,7 +390,7 @@ mod tests {
             .create_new(true)
             .open(path)
             .map_err(|error| Error::internal_io(error.to_string(), Some(operation.to_string())))?;
-        file.write_all(&content.as_bytes()[..1])
+        file.write_all(&content[..1])
             .map_err(|error| Error::internal_io(error.to_string(), Some(operation.to_string())))?;
         Err(Error::internal_io(
             "injected owner-only partial-write failure",
@@ -445,7 +452,7 @@ mod tests {
 
         let error = write_file_atomic_with_owner_only_writer(
             &path,
-            "replacement",
+            b"replacement",
             "replace owner-only config",
             true,
             partially_write_owner_only_then_fail,
@@ -471,6 +478,27 @@ mod tests {
             temp_files.is_empty(),
             "temp files left behind: {temp_files:?}"
         );
+    }
+
+    #[test]
+    fn binary_atomic_write_replaces_contents_without_temp_files() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("binary");
+        fs::write(&path, "old").unwrap();
+        let bytes = b"\xff\0\xfe";
+        write_file_atomic(&path, bytes, "write binary").unwrap();
+        assert_eq!(fs::read(&path).unwrap(), bytes.as_slice());
+        assert_eq!(fs::read_dir(dir.path()).unwrap().count(), 1);
+    }
+
+    #[test]
+    fn failed_atomic_rename_cleans_up_staged_file() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("directory");
+        fs::create_dir(&path).unwrap();
+        assert!(write_file_atomic(&path, "replacement", "write file").is_err());
+        assert!(path.is_dir());
+        assert_eq!(fs::read_dir(dir.path()).unwrap().count(), 1);
     }
 
     #[test]

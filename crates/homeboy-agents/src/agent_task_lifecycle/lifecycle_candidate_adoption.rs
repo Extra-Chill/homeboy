@@ -516,7 +516,6 @@ pub fn candidate_adoption_recovery_outcome(
             && record.provider_handles.is_empty()
             && record.latest_executor_evidence.is_none()
             && record.lab_handoff_validation_error().is_none()
-            && handoff.state == AgentTaskLabHandoffState::Expired
             && handoff.runner_job_id.is_none()
             && record.metadata["phase"] == "handoff_rejected"
             && record.metadata["provider_executions_consumed"] == 0

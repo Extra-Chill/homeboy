@@ -127,8 +127,7 @@ pub fn reviewer_public_artifact_base_url() -> Result<Option<String>> {
             None,
         )
     })?;
-    let host = url.host_str().unwrap_or_default();
-    if url.scheme() != "https" || host.is_empty() || non_public_host(host) {
+    if url.scheme() != "https" || classify_url_host(&url) != UrlHostClass::Public {
         return Err(Error::validation_invalid_argument(
             PUBLIC_ARTIFACT_BASE_URL_ENV,
             "public artifact origin must use HTTPS with a reviewer-reachable host",
@@ -139,23 +138,57 @@ pub fn reviewer_public_artifact_base_url() -> Result<Option<String>> {
     Ok(Some(value.to_string()))
 }
 
-fn non_public_host(host: &str) -> bool {
-    let host = host.trim_matches(['[', ']']);
-    let lower = host.to_ascii_lowercase();
-    if lower == "localhost" || lower.ends_with(".localhost") || lower.ends_with(".local") {
-        return true;
-    }
-    match host.parse::<std::net::IpAddr>() {
-        Ok(std::net::IpAddr::V4(ip)) => {
-            ip.is_loopback() || ip.is_private() || ip.is_link_local() || ip.is_unspecified()
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum UrlHostClass {
+    Public,
+    Loopback,
+    Private,
+    LocalTld,
+}
+
+/// Classify the parsed host without DNS resolution. Missing and unspecified
+/// hosts are Private (not reviewer-reachable); `.localhost` is loopback.
+pub fn classify_url_host(url: &reqwest::Url) -> UrlHostClass {
+    let classify_ipv4 = |ip: std::net::Ipv4Addr| {
+        if ip.is_loopback() {
+            UrlHostClass::Loopback
+        } else if ip.is_private() || ip.is_link_local() || ip.is_unspecified() {
+            UrlHostClass::Private
+        } else {
+            UrlHostClass::Public
         }
+    };
+    let Some(host) = url.host_str() else {
+        return UrlHostClass::Private;
+    };
+    match host.trim_matches(['[', ']']).parse::<std::net::IpAddr>() {
+        Err(_) => {
+            let host = host.trim_end_matches('.').to_ascii_lowercase();
+            if host == "localhost" || host.ends_with(".localhost") {
+                UrlHostClass::Loopback
+            } else if host == "local" || host.ends_with(".local") {
+                UrlHostClass::LocalTld
+            } else {
+                UrlHostClass::Public
+            }
+        }
+        Ok(std::net::IpAddr::V4(ip)) => classify_ipv4(ip),
         Ok(std::net::IpAddr::V6(ip)) => {
-            ip.is_loopback()
-                || ip.is_unspecified()
+            // IPv4-mapped IPv6 addresses retain the embedded IPv4 locality.
+            if let Some(ip) = ip.to_ipv4_mapped() {
+                return classify_ipv4(ip);
+            }
+            if ip.is_loopback() {
+                UrlHostClass::Loopback
+            } else if ip.is_unspecified()
                 || (ip.segments()[0] & 0xfe00) == 0xfc00
                 || (ip.segments()[0] & 0xffc0) == 0xfe80
+            {
+                UrlHostClass::Private
+            } else {
+                UrlHostClass::Public
+            }
         }
-        Err(_) => false,
     }
 }
 
@@ -453,6 +486,70 @@ mod tests {
     use std::sync::{Mutex, MutexGuard};
 
     static ENV_LOCK: Mutex<()> = Mutex::new(());
+
+    #[test]
+    fn hosts_follow_each_reviewer_url_policy() {
+        use UrlHostClass::*;
+        let cases = [
+            ("example.test", Public),
+            ("notlocalhost.example", Public),
+            ("8.8.8.8", Public),
+            ("[2606:4700:4700::1111]", Public),
+            ("localhost", Loopback),
+            ("LOCALHOST.", Loopback),
+            ("preview.localhost", Loopback),
+            ("127.0.0.1", Loopback),
+            ("127.0.0.2", Loopback),
+            ("127.255.255.254", Loopback),
+            ("[::1]", Loopback),
+            ("[::ffff:127.0.0.2]", Loopback),
+            ("10.0.0.5", Private),
+            ("172.16.0.1", Private),
+            ("192.168.1.1", Private),
+            ("169.254.1.1", Private),
+            ("0.0.0.0", Private),
+            ("[::]", Private),
+            ("[fc00::1]", Private),
+            ("[fd00::1]", Private),
+            ("[fe80::1]", Private),
+            ("[::ffff:10.0.0.5]", Private),
+            ("preview.local", LocalTld),
+            ("preview.LOCAL.", LocalTld),
+        ];
+        crate::test_support::with_isolated_home(|_| {
+            for (host, class) in cases {
+                let value = format!("https://{host}/evidence");
+                let url = reqwest::Url::parse(&value).expect("host URL");
+                assert_eq!(classify_url_host(&url), class, "{host}");
+                let public = class == Public;
+                let reviewer_ref = crate::artifact_postprocess::ArtifactPostprocessReviewerRef {
+                    kind: "evidence".to_string(),
+                    label: "Evidence".to_string(),
+                    url: value.clone(),
+                };
+                let _env = EnvGuard::set(PUBLIC_ARTIFACT_BASE_URL_ENV, &value);
+                let policies = [
+                    (
+                        "address",
+                        crate::artifact_address::validated_public_url(&value).is_some(),
+                    ),
+                    (
+                        "reference",
+                        crate::artifact_ref::validate_reviewer_facing_artifact_ref(&value).is_ok(),
+                    ),
+                    ("links", reviewer_public_artifact_base_url().is_ok()),
+                    ("origin", !crate::artifact_origin::is_local_only_url(&value)),
+                    (
+                        "postprocess",
+                        crate::artifact_postprocess::validate_reviewer_ref(&reviewer_ref).is_ok(),
+                    ),
+                ];
+                for (policy, accepted) in policies {
+                    assert_eq!(accepted, public, "{host}: {policy}");
+                }
+            }
+        });
+    }
 
     #[test]
     fn derives_viewer_link_from_public_artifact_url_metadata() {

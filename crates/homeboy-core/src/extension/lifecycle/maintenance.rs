@@ -175,7 +175,9 @@ pub fn update_all(
                 skipped.push(id.clone());
                 skipped_details.push(UpdateSkippedEntry {
                     extension_id: id.clone(),
-                    reason: err.message,
+                    // The message alone is a class ("IO error"); the cause
+                    // lives in details, so record the attributed form.
+                    reason: err.attributed_message(),
                     hints: err.hints.into_iter().map(|hint| hint.message).collect(),
                 });
             }

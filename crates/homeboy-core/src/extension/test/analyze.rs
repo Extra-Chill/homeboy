@@ -8,6 +8,7 @@ pub use homeboy_extension_contract::test_analysis::{
     FailureCategory, FailureCluster, TestAnalysis, TestAnalysisInput, TestFailure,
 };
 
+use homeboy_engine_primitives::text::truncate_chars;
 use std::collections::HashMap;
 
 // ============================================================================
@@ -241,18 +242,22 @@ fn derive_pattern(members: &[&TestFailure]) -> String {
     // If all share the same message, use it directly
     let first_msg = &members[0].message;
     if members.iter().all(|f| f.message == *first_msg) {
-        return truncate(first_msg, 120);
+        return truncate_chars(first_msg, 120, "...");
     }
 
     // Find common prefix
     let messages: Vec<&str> = members.iter().map(|f| f.message.as_str()).collect();
     let common = common_prefix(&messages);
     if common.len() > 20 {
-        return format!("{}... ({} variants)", truncate(&common, 80), members.len());
+        return format!(
+            "{}... ({} variants)",
+            truncate_chars(&common, 80, "..."),
+            members.len()
+        );
     }
 
     // Fall back to the first member's message
-    truncate(first_msg, 120)
+    truncate_chars(first_msg, 120, "...")
 }
 
 /// Suggest a fix for recognized failure patterns.
@@ -310,7 +315,7 @@ fn generate_hints(clusters: &[FailureCluster], total: usize) -> Vec<String> {
     hints.push(format!(
         "Largest cluster: {} failure(s) — {}",
         largest.count,
-        truncate(&largest.pattern, 80),
+        truncate_chars(&largest.pattern, 80, "..."),
     ));
 
     // Hint: top 3 cover what percentage
@@ -390,9 +395,7 @@ fn normalize_for_key(msg: &str) -> String {
     result = result.split_whitespace().collect::<Vec<_>>().join(" ");
 
     // Truncate for key stability
-    if result.len() > 80 {
-        result.truncate(80);
-    }
+    result = truncate_chars(&result, 80, "");
 
     // Replace characters that are bad for keys
     result
@@ -420,15 +423,6 @@ fn common_prefix(strings: &[&str]) -> String {
     }
 
     first[..prefix_len].to_string()
-}
-
-/// Truncate a string to max length, adding "..." if truncated.
-fn truncate(s: &str, max: usize) -> String {
-    if s.len() <= max {
-        s.to_string()
-    } else {
-        format!("{}...", &s[..max.min(s.len())])
-    }
 }
 
 // ============================================================================

@@ -1341,12 +1341,7 @@ fn record_cgroup_usage(job_id: &str, cgroup: Option<&JobCgroup>) {
         return;
     };
     let written = step_job_dir(job_id).and_then(|dir| {
-        let tmp = dir.join(format!("{STEP_USAGE_FILE}.tmp"));
-        std::fs::write(&tmp, serde_json::to_vec(&usage)?)
-            .and_then(|()| std::fs::rename(&tmp, dir.join(STEP_USAGE_FILE)))
-            .map_err(|error| {
-                Error::internal_io(error.to_string(), Some("record step usage".into()))
-            })
+        homeboy_engine_primitives::local_files::write_json_file(&dir.join(STEP_USAGE_FILE), &usage)
     });
     if let Err(error) = written {
         crate::log_status!("step", "Could not record a step's cgroup usage: {}", error);

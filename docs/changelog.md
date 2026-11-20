@@ -4,6 +4,50 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.481.4] - 2026-11-20
+
+### Fixed
+- compact only removable terminal rows instead of loading all history
+
+## [0.481.3] - 2026-11-20
+
+### Fixed
+- admit the runner manifest preflight as convergence
+- count when-skipped steps when refusing a --resume-from that runs nothing
+
+## [0.481.2] - 2026-11-20
+
+### Fixed
+- an extension-only refresh failure is a named partial with its cause and recovery
+
+## [0.481.1] - 2026-11-20
+
+### Fixed
+- refuse a --resume-from that would reuse every step and run nothing
+
+## [0.481.0] - 2026-11-20
+
+### Added
+- announce a failed or restart-looping runner unit once and show its start error
+
+## [0.480.1] - 2026-11-20
+
+### Fixed
+- a cook-batch child settled by a stop reads as cancelled, not refused
+- a refresh paused only by host pressure has converged
+
+## [0.480.0] - 2026-11-20
+
+### Added
+- a stopped chain notifies once through its run's notification route
+
+### Changed
+- route recover through a Recover control-plane action
+
+### Fixed
+- --resume-from satisfies required inputs from its source
+- a stopping terminal settles every running step and item
+
 ## [0.479.4] - 2026-11-20
 
 ### Fixed

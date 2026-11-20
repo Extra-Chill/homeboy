@@ -281,16 +281,7 @@ fn bounded_list_output(output: RunnerListOutput) -> RunnerListOutput {
 }
 
 fn bounded_list_text(value: &str) -> String {
-    let mut chars = value.chars();
-    let bounded = chars
-        .by_ref()
-        .take(RUNNER_LIST_TEXT_LIMIT)
-        .collect::<String>();
-    if chars.next().is_some() {
-        format!("{bounded}...")
-    } else {
-        bounded
-    }
+    homeboy_engine_primitives::text::truncate_chars(value, RUNNER_LIST_TEXT_LIMIT, "...")
 }
 
 pub(crate) fn compact_list_command_run(

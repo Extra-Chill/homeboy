@@ -4832,8 +4832,8 @@ fn driverless_cook_settled(
     cook_id: &str,
     record: &agent_task_lifecycle::AgentTaskRunRecord,
 ) -> Result<bool> {
-    use homeboy_lifecycle_contract::RunExecutionState;
-    if !record.state().is_terminal() {
+    let state = agent_task_lifecycle::CookRunState::of(record);
+    if !state.terminal {
         return Ok(false);
     }
     let recipes = CookRecipeStore::new(lifecycle.roots().clone());
@@ -4845,10 +4845,8 @@ fn driverless_cook_settled(
             super::CookContinuationState::Pending | super::CookContinuationState::Claimed => false,
             super::CookContinuationState::Absent => {
                 record.runner_id().is_none()
-                    || !matches!(
-                        record.state(),
-                        RunExecutionState::Succeeded | RunExecutionState::CandidateRecoverable
-                    )
+                    || !(state.recoverable
+                        || state.phase == agent_task_lifecycle::CookRunPhase::Succeeded)
             }
             _ => true,
         },
@@ -7327,11 +7325,10 @@ fn run_cook_spine(
         }
         // Only the adopted attempt itself carries adoption authority past a
         // terminal state; a failed form-only continuation of it does not.
-        if !matches!(
-            record.state(),
-            homeboy_lifecycle_contract::RunExecutionState::Succeeded
-                | homeboy_lifecycle_contract::RunExecutionState::CandidateRecoverable
-        ) && (adopted_continuation.is_none() || record.candidate_adoption.is_none())
+        use agent_task_lifecycle::CookRunPhase::{Continuing, Succeeded};
+        let state = agent_task_lifecycle::CookRunState::of(&record);
+        if !(state.recoverable || matches!(state.phase, Succeeded | Continuing))
+            && (adopted_continuation.is_none() || record.candidate_adoption.is_none())
             && !review_form_unavailable
         {
             attempts.push(AgentTaskCookAttemptReport {
@@ -8204,17 +8201,9 @@ fn cook_attempt_needs_execution_with_store(
 }
 
 fn cook_run_record_needs_execution(record: &agent_task_lifecycle::AgentTaskRunRecord) -> bool {
-    (!matches!(
-        record.state(),
-        homeboy_lifecycle_contract::RunExecutionState::Succeeded
-            | homeboy_lifecycle_contract::RunExecutionState::CandidateRecoverable
-            | homeboy_lifecycle_contract::RunExecutionState::PartialFailure
-            | homeboy_lifecycle_contract::RunExecutionState::Failed
-            | homeboy_lifecycle_contract::RunExecutionState::Cancelled
-    ) || retryable_pre_execution_failure(record))
-        && !record.lab_handoff.as_ref().is_some_and(|handoff| {
-            handoff.state == agent_task_lifecycle::AgentTaskLabHandoffState::Accepted
-        })
+    (!agent_task_lifecycle::CookRunState::of(record).terminal
+        || retryable_pre_execution_failure(record))
+        && !agent_task_lifecycle::CookRunState::accepted_lab_handoff(record)
 }
 
 /// Validate the Cook target before a provider can run. An explicit source path
@@ -8355,13 +8344,8 @@ fn supersede_previous_cook_candidate(
         // Cook cancelled mid-gate leaves its promoted candidate staged just
         // like a failed one (#17910), so it surrenders it too once its driver
         // has exited.
-        if !matches!(
-            old.state(),
-            homeboy_lifecycle_contract::RunExecutionState::CandidateRecoverable
-                | homeboy_lifecycle_contract::RunExecutionState::PartialFailure
-                | homeboy_lifecycle_contract::RunExecutionState::Failed
-                | homeboy_lifecycle_contract::RunExecutionState::Cancelled
-        ) {
+        let state = agent_task_lifecycle::CookRunState::of(&old);
+        if !state.recoverable && !state.retryable {
             continue;
         }
         if let Some(recipe) = super::load_recipe_for_attempt(&old.run_id)? {

@@ -571,7 +571,7 @@ fn validate_relative_output_path(output: &str) -> Result<()> {
     Ok(())
 }
 
-fn validate_reviewer_ref(reviewer_ref: &ArtifactPostprocessReviewerRef) -> Result<()> {
+pub(crate) fn validate_reviewer_ref(reviewer_ref: &ArtifactPostprocessReviewerRef) -> Result<()> {
     validate_non_empty(
         "artifact_postprocess.reviewer_refs.kind",
         &reviewer_ref.kind,
@@ -584,9 +584,10 @@ fn validate_reviewer_ref(reviewer_ref: &ArtifactPostprocessReviewerRef) -> Resul
     let url = reviewer_ref.url.trim();
     if url.starts_with('/')
         || url.starts_with("file:")
-        || url.contains("localhost")
-        || url.contains("127.0.0.1")
-        || url.contains("[::1]")
+        || reqwest::Url::parse(url).is_ok_and(|url| {
+            crate::artifact_links::classify_url_host(&url)
+                != crate::artifact_links::UrlHostClass::Public
+        })
     {
         return Err(Error::validation_invalid_argument(
             "artifact_postprocess.reviewer_refs.url",
