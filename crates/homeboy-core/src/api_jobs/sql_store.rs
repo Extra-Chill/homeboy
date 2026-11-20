@@ -165,11 +165,60 @@ pub(super) fn load_sql_store(
     load_sql_store_view(connection, path, true)
 }
 
-pub(super) fn load_sql_store_for_compaction(
+/// One terminal row as a retention pass sees it, read without parsing the
+/// job body in Rust.
+pub(super) struct TerminalHistoryRow {
+    pub(super) job_id: Uuid,
+    pub(super) workflow: bool,
+    /// A workflow instance whose payload retention already replaced.
+    pub(super) expired: bool,
+    pub(super) finished_at_ms: u64,
+    /// The same estimate `retention_due` measures: job body plus event bodies.
+    pub(super) bytes: usize,
+}
+
+pub(super) fn terminal_history_rows(
     connection: &Connection,
     path: &Path,
-) -> Result<(DurableJobStore, SqlSyncState)> {
-    load_sql_store_view(connection, path, false)
+) -> Result<Vec<TerminalHistoryRow>> {
+    let mut statement = connection
+        .prepare_cached(
+            "SELECT j.job_id,
+                    COALESCE(json_extract(j.body, '$.controller_job.job_type'), '') = ?1,
+                    json_extract(j.body, '$.controller_job.request.expired_at_ms') IS NOT NULL,
+                    COALESCE(json_extract(j.body, '$.job.finished_at_ms'), json_extract(j.body, '$.job.updated_at_ms'), 0),
+                    length(j.body) + COALESCE((SELECT SUM(length(e.body)) FROM daemon_job_events e WHERE e.job_id = j.job_id), 0)
+             FROM daemon_jobs j
+             WHERE j.active = 0",
+        )
+        .map_err(|error| store_error(path, "read terminal history", error))?;
+    let rows = statement
+        .query_map([crate::daemon::workflow_job::WORKFLOW_JOB_TYPE], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, bool>(1)?,
+                row.get::<_, bool>(2)?,
+                row.get::<_, i64>(3)?,
+                row.get::<_, i64>(4)?,
+            ))
+        })
+        .map_err(|error| store_error(path, "read terminal history", error))?;
+    let mut history = Vec::new();
+    for row in rows {
+        let (job_id, workflow, expired, finished_at_ms, bytes) =
+            row.map_err(|error| store_error(path, "read terminal history row", error))?;
+        let job_id = Uuid::parse_str(&job_id).map_err(|error| {
+            Error::internal_unexpected(format!("daemon job id `{job_id}` is not a UUID: {error}"))
+        })?;
+        history.push(TerminalHistoryRow {
+            job_id,
+            workflow,
+            expired,
+            finished_at_ms: finished_at_ms.max(0) as u64,
+            bytes: bytes.max(0) as usize,
+        });
+    }
+    Ok(history)
 }
 
 /// Whether compaction needs the terminal history that the live mirror no

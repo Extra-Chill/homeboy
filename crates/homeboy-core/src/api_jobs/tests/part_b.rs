@@ -1160,6 +1160,66 @@ fn terminal_collection_window_preserves_recent_results_over_budget() {
     assert!(reopened.get(recent.id).is_ok());
 }
 
+/// A retention pass loads only rows it can remove; in-window history is
+/// measured in SQL and still counts against the budget (#18597).
+#[test]
+fn a_retention_pass_loads_only_aged_rows_and_counts_the_rest() {
+    let temp = tempfile::tempdir().expect("temp dir");
+    let path = temp.path().join(crate::paths::OBSERVATION_DB_FILENAME);
+    let store = JobStore::open_without_reconciliation(&path).expect("open store");
+    let jobs = (0..4)
+        .map(|_| {
+            let job = store.create("terminal");
+            store.start(job.id).expect("start");
+            store.complete(job.id, None).expect("complete");
+            job.id
+        })
+        .collect::<Vec<_>>();
+    let aged = jobs[0];
+    store
+        .durable_job_transaction(aged, |inner| {
+            let stored = inner.jobs.get_mut(&aged).expect("job");
+            let finished = crate::api_jobs::persistence::timestamp_ms() - 25 * 60 * 60 * 1000;
+            stored.job.finished_at_ms = Some(finished);
+            stored.job.updated_at_ms = finished;
+            Ok(())
+        })
+        .expect("age fixture");
+    drop(store);
+
+    let store = JobStore::open_without_reconciliation_with_retention(&path, 100, 1)
+        .expect("reopen with a one-job budget");
+    store
+        .durable_transaction(|inner| {
+            store.load_history_for_compaction(inner)?;
+            assert_eq!(
+                inner.jobs.keys().copied().collect::<Vec<_>>(),
+                vec![aged],
+                "only the aged row is loaded"
+            );
+            assert_eq!(inner.unloaded_terminal_history.0, 3);
+            Ok(())
+        })
+        .expect("load pass");
+    store.compact_retained_history().expect("compact history");
+    assert!(store.get(aged).is_err(), "the aged row is removed");
+    for job in &jobs[1..] {
+        assert!(store.get(*job).is_ok(), "in-window rows are retained");
+    }
+    let report = store
+        .inner
+        .lock()
+        .expect("store")
+        .compaction
+        .clone()
+        .expect("compaction evidence");
+    assert_eq!(report.removed_terminal_jobs, 1);
+    assert_eq!(
+        report.retained_terminal_jobs, 3,
+        "unloaded rows are counted"
+    );
+}
+
 #[test]
 fn terminal_job_retention_compacts_existing_store_without_losing_active_recovery_evidence() {
     let temp = tempfile::tempdir().expect("temp dir");
