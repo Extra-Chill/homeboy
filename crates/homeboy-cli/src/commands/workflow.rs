@@ -266,9 +266,10 @@ fn run_workflow(args: RunArgs) -> CmdResult<Value> {
     )
 }
 
-/// A resume reuses each succeeded step whose rendered definition is unchanged.
-/// With the same definition and inputs and every step succeeded, it would
-/// reuse them all, re-evaluate the same gates and run nothing.
+/// A resume reuses each succeeded step whose rendered definition is unchanged,
+/// and a step its `when` skipped re-evaluates that gate on the same reused
+/// outputs and skips again. With the same definition and inputs and every
+/// step succeeded or skipped, it runs nothing.
 fn resume_runs_nothing(
     source: &Value,
     definition: &WorkflowDefinition,
@@ -280,9 +281,10 @@ fn resume_runs_nothing(
             == Some(inputs.clone())
         && steps.is_some_and(|steps| {
             !steps.is_empty()
-                && steps
-                    .values()
-                    .all(|step| step["phase"] == "done" && step["outcome"] == "succeeded")
+                && steps.values().all(|step| {
+                    step["phase"] == "done"
+                        && matches!(step["outcome"].as_str(), Some("succeeded" | "skipped"))
+                })
         })
 }
 
@@ -324,7 +326,7 @@ fn admit_with_resume(
                 return Err(Error::validation_invalid_argument(
                     "resume-from",
                     format!(
-                        "nothing to resume: `{source}` succeeded every step with this same definition and inputs, so a resume would reuse them all and run nothing; to run it again, drop `--resume-from` and pass a new `--instance <name>`"
+                        "nothing to resume: `{source}` succeeded or skipped every step with this same definition and inputs, so a resume would reuse them all and run nothing; to run it again, drop `--resume-from` and pass a new `--instance <name>`"
                     ),
                     None,
                     None,
@@ -839,7 +841,10 @@ mod tests {
             json!({
                 "definition_digest": digest,
                 "inputs": {"url": url},
-                "steps": {"triage": {"phase": "done", "outcome": outcome}},
+                "steps": {
+                    "triage": {"phase": "done", "outcome": outcome},
+                    "fix": {"phase": "done", "outcome": "skipped"},
+                },
             })
         };
         let digest = definition.digest();
