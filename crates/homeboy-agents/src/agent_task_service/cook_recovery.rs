@@ -92,6 +92,10 @@ impl CookRecoveryStep {
                 "adopt the preserved candidate".to_string(),
                 command(&["recover", run_id, "--candidate-ref", candidate_ref]),
             ),
+            Self::Regate => (
+                "re-run the gates on the existing candidate; add `--regate --verify '<COMMAND>'` to replace its declared verify commands".to_string(),
+                command(&["recover", run_id]),
+            ),
             _ => (
                 "perform the Cook's next recovery step".to_string(),
                 command(&["recover", run_id]),
@@ -216,6 +220,15 @@ pub(crate) fn incomplete_review_recovery_command(id: &str) -> String {
     )
 }
 
+/// The command that re-gates the existing candidate, optionally replacing its
+/// declared verify commands (#17802).
+pub(crate) fn regate_recovery_command(id: &str) -> String {
+    format!(
+        "homeboy agent-task recover {} --regate [--verify '<COMMAND>'] [--gate-timeout-seconds <SECONDS>]",
+        homeboy_core::engine::shell::quote_arg(id)
+    )
+}
+
 /// Decide the single next recovery step from durable Cook evidence. This is
 /// the one planner: `status` "Next:", `diagnose`, `recover --preflight` and
 /// `recover` all read their step from it, so none can name a step another
@@ -274,6 +287,18 @@ format!(
         |state| state.recoverable,
     );
     if recoverable || publishable {
+        // An incomplete verdict on a candidate whose gates never passed is not
+        // the last word: the candidate was never judged (or failed a gate the
+        // operator may correct), so re-gating it is the step that makes
+        // progress. The operator can still publish with a complete review
+        // form once the gates pass (#17802).
+        if inputs.agent_incomplete_reason.is_some()
+            && inputs.applied_gate_failure
+            && !publishable
+            && !status_is_settled(&status)
+        {
+            return CookRecoveryStep::Regate;
+        }
         if let Some(step) = agent_incomplete_stop(inputs) {
             return step;
         }
@@ -518,6 +543,77 @@ pub struct CookReplaceGatesRequest {
     pub authorize_interrupted_rerun: Option<String>,
 }
 
+/// Operator inputs for `recover --regate` (#17802). Empty inputs re-run the
+/// recorded gates unchanged. Replacement commands replace only the recorded
+/// deterministic commands; the recorded gate environment, runner placement
+/// and supervision are kept. The replacement is recorded as the authorization
+/// of the candidate's replacement gate proof, so the published evidence names
+/// the commands that passed.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct CookRegateInputs {
+    /// Replacement verification commands (`--verify`, `--verify-file`,
+    /// `--private-verify`, `--private-verify-file`).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub gates: Option<crate::agent_task_gate::VerifyGateOptions>,
+    /// Replacement wall-clock limit for each gate (`--gate-timeout-seconds`).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub gate_timeout_seconds: Option<u64>,
+}
+
+impl CookRegateInputs {
+    pub fn is_empty(&self) -> bool {
+        self.gates.is_none() && self.gate_timeout_seconds.is_none()
+    }
+
+    /// The gates a regate executes: the recorded policy with these operator
+    /// replacements applied.
+    pub fn apply(
+        &self,
+        mut recorded: crate::agent_task_gate::VerifyGateOptions,
+    ) -> crate::agent_task_gate::VerifyGateOptions {
+        if let Some(replacement) = &self.gates {
+            recorded.verify = replacement.verify.clone();
+            recorded.private_verify = replacement.private_verify.clone();
+            recorded.input_sources = replacement.input_sources.clone();
+            recorded.private_gate_reveal = replacement.private_gate_reveal;
+            recorded.execution_policy = replacement.execution_policy;
+            // Explicit commands replace every recorded command source.
+            recorded.repro = Vec::new();
+            recorded.test_execution_plan = None;
+        }
+        if let Some(seconds) = self.gate_timeout_seconds {
+            recorded.gate_timeout_seconds = seconds;
+        }
+        recorded
+    }
+
+    /// The authorization recorded with the replacement gate proof. It names
+    /// any replacement so reviewers can see which gates the candidate passed.
+    pub fn authorization(&self) -> String {
+        let mut authorization = "recover regate recorded deterministic gates".to_string();
+        if let Some(gates) = &self.gates {
+            authorization = format!(
+                "recover --regate replaced the declared verify commands with: {}",
+                gates
+                    .verify
+                    .iter()
+                    .map(|command| format!("`{command}`"))
+                    .chain(
+                        (!gates.private_verify.is_empty())
+                            .then(|| format!("{} private command(s)", gates.private_verify.len()))
+                    )
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            );
+        }
+        if let Some(seconds) = self.gate_timeout_seconds {
+            authorization.push_str(&format!(" (gate timeout {seconds}s)"));
+        }
+        authorization
+    }
+}
+
 /// Operator inputs that feed [`CookRecoveryStep::Publish`].
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields)]
@@ -544,6 +640,8 @@ pub struct CookRecoveryRequest {
     pub preflight: bool,
     /// Re-verify the newest candidate-bearing attempt without provider work.
     pub regate: bool,
+    /// Replacement commands or gate timeout for `regate`.
+    pub regate_inputs: CookRegateInputs,
     /// Perform a step the previous recovery reported `blocked`, after the
     /// operator resolved its named blocker.
     pub unblock: bool,
@@ -618,11 +716,24 @@ pub trait CookRecoveryPerformer {
             0,
         ))
     }
-    /// Re-run the durable deterministic gates without a provider attempt.
-    fn regate(&self, run_id: &str) -> Result<(Value, i32)> {
+    /// Re-run the durable deterministic gates without a provider attempt,
+    /// with the operator's replacement commands when `inputs` carries them.
+    /// Every regate executes fresh gate jobs; it never replays a recorded gate
+    /// receipt (#18315).
+    fn regate(&self, run_id: &str, inputs: &CookRegateInputs) -> Result<(Value, i32)> {
         if super::cook_promotion::persisted_promotion_for_attempt(run_id)?
             .is_some_and(|promotion| promotion.applied_with_passing_verdict())
         {
+            // Replacement commands for an already-green candidate would only
+            // replay its recorded proof, never execute them (#18315).
+            if !inputs.is_empty() {
+                return Err(Error::validation_invalid_argument(
+                    "regate",
+                    "the candidate already passed its gates; replacement regate gates would not execute",
+                    Some(run_id.to_string()),
+                    Some(vec![format!("homeboy agent-task recover {run_id}")]),
+                ));
+            }
             return self.publish(run_id, &CookPublishRequest::default(), false);
         }
         let recipe = super::load_recipe_for_attempt(run_id)?.ok_or_else(|| {
@@ -633,20 +744,34 @@ pub trait CookRecoveryPerformer {
                 None,
             )
         })?;
-        let gates = serde_json::from_value(recipe.gate_policy)
+        let gates = inputs.apply(
+            serde_json::from_value(recipe.gate_policy)
+                .map_err(|error| Error::internal_json(error.to_string(), None))?,
+        );
+        let report = super::verify_replacement_gates(run_id, gates, inputs.authorization(), None)?;
+        let mut value = serde_json::to_value(&report)
             .map_err(|error| Error::internal_json(error.to_string(), None))?;
-        let report = super::verify_replacement_gates(
-            run_id,
-            gates,
-            "recover regate recorded deterministic gates".into(),
-            None,
-        )?;
         if !report.finalization_eligible() {
-            return Ok((
-                serde_json::to_value(report)
-                    .map_err(|error| Error::internal_json(error.to_string(), None))?,
-                1,
-            ));
+            return Ok((value, 1));
+        }
+        // The agent declared the task incomplete: green gates cannot overrule
+        // that verdict (#16051), so the verified candidate is handed to the
+        // operator's review form instead of being published here.
+        if let Ok(store) = agent_task_lifecycle::AgentTaskLifecycleStore::from_environment() {
+            if let Some(reason) =
+                super::cook_promotion::attempt_agent_incomplete_reason(&store, run_id)
+            {
+                if let Some(object) = value.as_object_mut() {
+                    object.insert(
+                        "handoff".to_string(),
+                        serde_json::json!({
+                            "reason": format!("The candidate passed its gates, but the agent's review form declares the task incomplete: {reason}"),
+                            "next_command": incomplete_review_recovery_command(run_id),
+                        }),
+                    );
+                }
+                return Ok((value, 0));
+            }
         }
         self.publish(run_id, &CookPublishRequest::default(), false)
     }
@@ -687,6 +812,9 @@ pub struct CookRecoveryReport {
     /// Explicit operator overrides this recovery applied instead of the step.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub overrides: Option<CookRecoveryOverrides>,
+    /// Operator replacements a regate step executes with (#17802).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub regate: Option<CookRegateInputs>,
     /// Continuation admission `--preflight` validated for a continuation step.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub admission: Option<Value>,
@@ -985,6 +1113,7 @@ fn recover_cook_once(
     let CookRecoveryRequest {
         preflight,
         regate,
+        regate_inputs,
         unblock,
         overrides,
         mut replace_gates,
@@ -998,6 +1127,16 @@ fn recover_cook_once(
         || replace_gates.is_some()
         || corrected_gates.is_some()
         || !publish.is_empty();
+    if !regate && !regate_inputs.is_empty() {
+        return Err(Error::validation_invalid_argument(
+            "regate",
+            "replacement regate gates and gate timeout require --regate",
+            Some(id.to_string()),
+            Some(vec![format!(
+                "homeboy agent-task recover {id} --regate --verify '<COMMAND>'"
+            )]),
+        ));
+    }
     if unblock && !preflight {
         clear_no_progress_for(id);
     }
@@ -1044,6 +1183,7 @@ fn recover_cook_once(
                 },
                 preflight,
                 overrides: None,
+                regate: None,
                 admission: None,
                 result: Some(ci),
                 failure: None,
@@ -1181,6 +1321,7 @@ fn recover_cook_once(
                 )),
                 preflight,
                 overrides: None,
+                regate: None,
                 admission: None,
                 result: Some(serde_json::json!({
                     "continuation": owner,
@@ -1245,6 +1386,7 @@ fn recover_cook_once(
         step: plan.step,
         preflight,
         overrides: (!overrides.is_empty()).then(|| overrides.clone()),
+        regate: (!regate_inputs.is_empty()).then(|| regate_inputs.clone()),
         admission: None,
         result: None,
         failure: None,
@@ -1315,7 +1457,7 @@ fn recover_cook_once(
                     .schedule_recovery_continuation(&report.cook_id, run_id)?;
                 performer.continue_cook(run_id, false, &none)?
             }
-            CookRecoveryStep::Regate => performer.regate(run_id)?,
+            CookRecoveryStep::Regate => performer.regate(run_id, &regate_inputs)?,
             CookRecoveryStep::Rearm => performer.continue_cook(run_id, true, &none)?,
             CookRecoveryStep::Retry | CookRecoveryStep::ForkReplacement => {
                 // A fresh provider attempt never starts from a pre-patched
@@ -1935,6 +2077,7 @@ mod tests {
             step: decided.clone(),
             preflight: false,
             overrides: None,
+            regate: None,
             admission: None,
             result: None,
             failure: None,
@@ -1990,6 +2133,40 @@ mod tests {
                 None => assert!(decided.is_none(), "{status}: {decided:?}"),
             }
         }
+    }
+
+    #[test]
+    fn incomplete_candidate_without_passing_gates_offers_regate() {
+        // Unjudged or failed gates on a recoverable candidate: regate first,
+        // even though the agent's review form declares the task incomplete.
+        assert_eq!(
+            step("candidate_recoverable", |inputs| {
+                inputs.agent_incomplete_reason = Some("gates never ran");
+                inputs.applied_gate_failure = true;
+            }),
+            CookRecoveryStep::Regate
+        );
+        // Once the gates pass, the incomplete verdict still stops publication.
+        assert!(step("candidate_recoverable", |inputs| {
+            inputs.agent_incomplete_reason = Some("gates never ran");
+            inputs.verified_unpublished = true;
+        })
+        .is_none());
+        let replacement = CookRegateInputs {
+            gates: Some(crate::agent_task_gate::VerifyGateOptions {
+                verify: vec!["test -f fixed.txt".into()],
+                ..Default::default()
+            }),
+            gate_timeout_seconds: None,
+        };
+        let executed = replacement.apply(crate::agent_task_gate::VerifyGateOptions {
+            verify: vec!["cargo test missing".into()],
+            gate_timeout_seconds: 42,
+            ..Default::default()
+        });
+        assert_eq!(executed.verify, vec!["test -f fixed.txt".to_string()]);
+        assert_eq!(executed.gate_timeout_seconds, 42, "recorded timeout kept");
+        assert!(replacement.authorization().contains("`test -f fixed.txt`"));
     }
 
     #[test]
@@ -2293,6 +2470,7 @@ mod tests {
             step: CookRecoveryStep::none(reason),
             preflight: false,
             overrides: None,
+            regate: None,
             admission: None,
             result: None,
             failure: None,

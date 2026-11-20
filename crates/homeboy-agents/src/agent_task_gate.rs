@@ -6906,7 +6906,7 @@ impl From<AgentTaskGateReport> for HomeboyGateResult {
 /// Concrete next step for a gate that never executed: it has no verdict, so
 /// it is re-run, never repaired by the provider (#16932).
 pub const NON_EXECUTION_NEXT_STEP: &str =
-    "the candidate was not judged; re-run the gate, or re-verify the candidate with `homeboy agent-task recover <cook-id>`";
+    "the candidate was not judged; re-run its gates with `homeboy agent-task recover <cook-id> --regate`, adding `--verify '<COMMAND>'` to replace the declared verify commands";
 
 /// Typed cause of a Lab gate that never executed, read from its
 /// non-execution disposition. Codes, stages and job ids are not gate output,

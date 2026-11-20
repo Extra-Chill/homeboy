@@ -2613,8 +2613,9 @@ impl crate::agents::agent_task_service::ExecutionStepTransport for CliExecutionS
         run_id: &str,
         step: &crate::agents::agent_task_service::CookRecoveryStep,
         overrides: &crate::agents::agent_task_service::CookRecoveryOverrides,
+        regate: &crate::agents::agent_task_service::CookRegateInputs,
     ) -> homeboy::core::Result<i32> {
-        crate::commands::agent_task::recover::execute_admitted_step(run_id, step, overrides)
+        crate::commands::agent_task::recover::execute_admitted_step(run_id, step, overrides, regate)
     }
     fn admission(&self, argv: Vec<String>, runner: Option<String>) -> homeboy::core::Result<i32> {
         execute_admitted_cook_arguments(argv, runner)

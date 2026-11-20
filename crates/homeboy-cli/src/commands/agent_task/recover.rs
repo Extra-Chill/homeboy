@@ -10,7 +10,7 @@ use serde_json::Value;
 
 use homeboy::agents::agent_task_service::{
     self, CookPublishRequest, CookRecoveryOverrides, CookRecoveryPerformer, CookRecoveryRequest,
-    CookReplaceGatesRequest, CookReplacementProof,
+    CookRegateInputs, CookReplaceGatesRequest, CookReplacementProof,
 };
 
 use super::super::CmdResult;
@@ -68,9 +68,12 @@ fn recover_action(args: RecoverArgs) -> CmdResult<Value> {
         attempt,
         adoption_model,
         replace_interrupted,
-        corrected_gates: recovery.corrected_gates,
+        // The contract carries regate replacement commands in
+        // `corrected_gates`; `regate` disambiguates the two uses.
+        corrected_gates: recovery.regate_inputs.gates.or(recovery.corrected_gates),
         replace_gates: recovery.replace_gates,
         publish: Some(recovery.publish),
+        gate_timeout_seconds: recovery.regate_inputs.gate_timeout_seconds,
     };
 
     // A run with no lifecycle record (an unknown ID or a recipe-only Cook)
@@ -146,6 +149,13 @@ pub(super) fn recover_with(
 /// malformed input fails before any durable state is read.
 fn recovery_request(mut args: RecoverArgs) -> homeboy::core::Result<CookRecoveryRequest> {
     let overrides = args.overrides();
+    // `--regate` re-runs gates on the existing candidate; its verify commands
+    // and gate timeout replace the declared ones for that regate (#17802).
+    let regate_inputs = if args.regate {
+        regate_inputs(&mut args)?
+    } else {
+        CookRegateInputs::default()
+    };
     // Without external-proof authorization, verification corrects the recipe
     // before provider execution; authorized candidate replacement is unchanged.
     let corrected_gates = if args.authorize_external_proof.is_none()
@@ -171,11 +181,31 @@ fn recovery_request(mut args: RecoverArgs) -> homeboy::core::Result<CookRecovery
     Ok(CookRecoveryRequest {
         preflight: args.preflight,
         regate: args.regate,
+        regate_inputs,
         unblock: args.unblock,
         overrides,
         replace_gates,
         corrected_gates,
         publish,
+    })
+}
+
+/// `--regate` replacements. Explicit verify commands replace the declared
+/// commands; a non-default `--gate-timeout-seconds` replaces the recorded
+/// per-gate timeout. Everything else keeps the recorded gate policy.
+fn regate_inputs(args: &mut RecoverArgs) -> homeboy::core::Result<CookRegateInputs> {
+    let default_timeout = super::VerifyGateArgs::default().gate_timeout_seconds;
+    let gate_timeout_seconds = (args.gates.gate_timeout_seconds != default_timeout)
+        .then_some(args.gates.gate_timeout_seconds);
+    let gates = if args.gates.has_deterministic_gate() {
+        args.gates.snapshot_file_inputs()?;
+        Some(std::mem::take(&mut args.gates).into())
+    } else {
+        None
+    };
+    Ok(CookRegateInputs {
+        gates,
+        gate_timeout_seconds,
     })
 }
 
@@ -259,6 +289,7 @@ pub(crate) fn execute_admitted_step(
     run_id: &str,
     step: &agent_task_service::CookRecoveryStep,
     overrides: &CookRecoveryOverrides,
+    regate: &CookRegateInputs,
 ) -> homeboy::core::Result<i32> {
     let performer = homeboy::agents::recovery_action::ControlPlaneRecoveryPerformer;
     if !overrides.is_empty() {
@@ -270,7 +301,7 @@ pub(crate) fn execute_admitted_step(
         .map(|(_, code)| code);
     }
     let (_, code) = match step {
-        agent_task_service::CookRecoveryStep::Regate => performer.regate(run_id)?,
+        agent_task_service::CookRecoveryStep::Regate => performer.regate(run_id, regate)?,
         agent_task_service::CookRecoveryStep::Continue
         | agent_task_service::CookRecoveryStep::Rearm => {
             if *step == agent_task_service::CookRecoveryStep::Continue {

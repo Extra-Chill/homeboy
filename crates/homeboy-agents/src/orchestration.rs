@@ -4003,13 +4003,26 @@ fn project_snapshot(
                 .as_ref()
                 .map(|id| id.as_str())
                 .unwrap_or(&snapshot.record.run_id);
+            // A candidate whose gates never passed can be re-gated first;
+            // the review-form path stays available either way (#17802).
+            let review_form = crate::agent_task_service::incomplete_review_recovery_command(id);
+            let next = if crate::agent_task_service::applied_candidate_awaits_verification(
+                &snapshot.record.run_id,
+            ) {
+                format!(
+                    "{}; or publish with a complete review form: {review_form}",
+                    crate::agent_task_service::regate_recovery_command(id)
+                )
+            } else {
+                review_form
+            };
             resource.blocker = Some(ControlPlaneBlocker {
                 code: Some("review_form.incomplete".into()),
                 message: redacted_bounded(
                     &format!("The agent's review form declares the task incomplete: {reason}"),
                     MESSAGE_BOUND,
                 ),
-                reason: Some(crate::agent_task_service::incomplete_review_recovery_command(id)),
+                reason: Some(next),
                 details: None,
                 state: None,
                 retry: None,

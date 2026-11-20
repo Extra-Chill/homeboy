@@ -2752,6 +2752,104 @@ fn recover_public_entry_returns_before_blocking_gate_and_records_daemon_result()
     });
 }
 
+/// An unjudged candidate whose agent declared the task incomplete still offers
+/// regate, and `--regate --verify` admits a regate step that runs the replaced
+/// command (#17802).
+#[test]
+fn recover_regate_verify_replaces_gates_for_an_incomplete_unjudged_candidate() {
+    use homeboy::agents::agent_task_service as service;
+    with_temp_home(|| {
+        let cook_id = "cook-regate-verify";
+        let run_id = "cook-regate-verify-attempt-1";
+        persist_legacy_candidate_cook(cook_id, run_id, None);
+        let store = test_lifecycle_store();
+        let mut aggregate = store.read_aggregate(run_id).unwrap();
+        aggregate.outcomes[0].outputs = json!({"review_form": {
+            "summary": "Partial", "completion": "incomplete",
+            "incomplete_reason": "gates never ran"
+        }});
+        let plan = store.read_controller_plan(run_id).unwrap();
+        agent_task_lifecycle::record_run_aggregate(run_id, &plan, &aggregate).unwrap();
+        let gate = json!({"id": "gate-1", "status": "deferred", "command": ["sh", "-c", "false"], "exit_code": 1});
+        store
+            .record_promotion(
+                run_id,
+                json!({
+                    "status": "gates_deferred",
+                    "source": {"kind": "run", "task_id": "provider", "run_id": run_id},
+                    "to_worktree": "fixture@recover", "target": {"worktree": "fixture@recover"},
+                    "candidate": {"base_sha": "a".repeat(40), "candidate_sha": "b".repeat(40), "tree_sha": "c".repeat(40)},
+                    "deterministic_gates": [gate],
+                    "operator_notification": {"status": "blocked", "message": "gates_deferred"}
+                }),
+            )
+            .unwrap();
+
+        let (preflight, exit) = recover_preflight_probe(run_id);
+        assert_eq!(exit, 0, "{preflight:#}");
+        assert_eq!(preflight["step"]["kind"], "regate", "{preflight:#}");
+
+        let captured = Arc::new(std::sync::Mutex::new(None));
+        let capture = captured.clone();
+        service::with_scheduling_daemon_start(
+            || Ok(()),
+            || {
+                service::with_recovery_step_submit_for_test(
+                    move |intent| {
+                        *capture.lock().unwrap() = Some(intent.mode.clone());
+                        Ok("regate-job".to_string())
+                    },
+                    || {
+                        let cli = Cli::try_parse_from([
+                            "homeboy",
+                            "agent-task",
+                            "recover",
+                            run_id,
+                            "--regate",
+                            "--verify",
+                            "test -f fixed.txt",
+                            "--gate-timeout-seconds",
+                            "90",
+                        ])
+                        .unwrap();
+                        let Commands::AgentTask(args) = cli.command else {
+                            panic!("agent-task")
+                        };
+                        let (report, code) = super::super::run(args).unwrap();
+                        assert_eq!(code, 0, "{report:#}");
+                        assert_eq!(report["status"], "admitted", "{report:#}");
+                        assert_eq!(report["step"]["kind"], "regate");
+                        assert_eq!(
+                            report["regate"]["gates"]["verify"],
+                            json!(["test -f fixed.txt"])
+                        );
+                    },
+                )
+            },
+        );
+        let Some(service::ExecutionStepMode::Recovery { step, regate, .. }) =
+            captured.lock().unwrap().take()
+        else {
+            panic!("a recovery step was admitted")
+        };
+        assert_eq!(step, service::CookRecoveryStep::Regate);
+        assert_eq!(regate.gate_timeout_seconds, Some(90));
+        assert_eq!(
+            regate.gates.as_ref().expect("replacement gates").verify,
+            vec!["test -f fixed.txt".to_string()]
+        );
+        // The executed gates replace the declared command, and the recorded
+        // proof authorization names the replacement.
+        let executed = regate.apply(homeboy::agents::agent_tasks::gate::VerifyGateOptions {
+            verify: vec!["cargo test missing".to_string()],
+            ..Default::default()
+        });
+        assert_eq!(executed.verify, vec!["test -f fixed.txt".to_string()]);
+        assert_eq!(executed.gate_timeout_seconds, 90);
+        assert!(regate.authorization().contains("`test -f fixed.txt`"));
+    });
+}
+
 #[test]
 fn recover_preflight_is_read_only_and_recover_reaches_the_continuation_report() {
     let cook_id = "cook-cli-recover";

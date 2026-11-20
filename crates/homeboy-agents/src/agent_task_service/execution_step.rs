@@ -36,6 +36,9 @@ pub enum ExecutionStepMode {
     Recovery {
         step: super::CookRecoveryStep,
         overrides: super::CookRecoveryOverrides,
+        /// Operator replacements for a regate step (#17802).
+        #[serde(default, skip_serializing_if = "super::CookRegateInputs::is_empty")]
+        regate: super::CookRegateInputs,
     },
     Admission {
         admission_request: Value,
@@ -70,6 +73,7 @@ pub trait ExecutionStepTransport {
         _run_id: &str,
         _step: &super::CookRecoveryStep,
         _overrides: &super::CookRecoveryOverrides,
+        _regate: &super::CookRegateInputs,
     ) -> Result<i32> {
         Err(invalid("transport does not support recovery"))
     }
@@ -373,7 +377,11 @@ pub fn admit_recovery_execution_step(
             let work: WorkIntent = serde_json::from_value(record.metadata[PENDING_EXECUTION_INTENT].clone())
                 .map_err(|error| invalid(error.to_string()))?;
             let mut intent = ExecutionStepIntent::parse(&work.payload)?;
-            intent.mode = ExecutionStepMode::Recovery { step: report.step.clone(), overrides: overrides.clone() };
+            intent.mode = ExecutionStepMode::Recovery {
+                step: report.step.clone(),
+                overrides: overrides.clone(),
+                regate: report.regate.clone().unwrap_or_default(),
+            };
             // Recovery's gate/continuation adapter owns its recorded transport.
             // Waiting on the terminal source's runner would discard this step.
             intent.runner = None;
@@ -1026,9 +1034,11 @@ pub fn execute_execution_step(
         return Ok(75);
     };
     match &intent.mode {
-        ExecutionStepMode::Recovery { step, overrides } => {
-            transport.recovery(&intent.subject_id, step, overrides)
-        }
+        ExecutionStepMode::Recovery {
+            step,
+            overrides,
+            regate,
+        } => transport.recovery(&intent.subject_id, step, overrides, regate),
         ExecutionStepMode::Admission { admission_request } => {
             let record = crate::agent_task_lifecycle::recover_unmaterialized_cook_input_publication_in_store(&store, &intent.subject_id)?;
             if !intent.authorizes(&record) {
