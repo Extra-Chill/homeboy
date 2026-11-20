@@ -4,6 +4,14 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.482.3] - 2026-11-20
+
+### Changed
+- split agent task gate implementation and inline tests
+- split Cook orchestration into cohesive sibling modules
+- split commands/agent_task/run.rs into cohesive modules
+- fold Resume into the Recover action
+
 ## [0.482.2] - 2026-11-20
 
 ### Changed
