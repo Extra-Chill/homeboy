@@ -6,6 +6,11 @@ The desktop app currently shells out to the standalone Rust CLI (`homeboy`) for 
 
 For current behavior, prefer the code and other documentation (for example `docs/CLI.md`).
 
+## [0.13.8] - 2026-11-20
+
+### Changed
+- collapse CookRunAction and remove the Promote control-plane action
+
 ## [0.13.7] - 2026-11-20
 
 ### Changed
