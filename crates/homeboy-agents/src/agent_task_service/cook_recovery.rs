@@ -748,10 +748,29 @@ pub trait CookRecoveryPerformer {
             serde_json::from_value(recipe.gate_policy)
                 .map_err(|error| Error::internal_json(error.to_string(), None))?,
         );
-        let report = super::verify_replacement_gates(run_id, gates, inputs.authorization(), None)?;
+        // A failing or unavailable regate is persisted as the latest gate run
+        // and returned here, so the report names the fresh gates (#18315).
+        let report =
+            super::cook_promotion::regate_candidate_gates(run_id, gates, inputs.authorization())?;
         let mut value = serde_json::to_value(&report)
             .map_err(|error| Error::internal_json(error.to_string(), None))?;
         if !report.finalization_eligible() {
+            if let Some(object) = value.as_object_mut() {
+                object.insert(
+                    "failure".to_string(),
+                    serde_json::json!({
+                        "code": "agent_task.regate_gates_not_passing",
+                        "message": format!(
+                            "regate ran fresh gates on the candidate and they did not pass (status: {}); the new gate run is now the latest promotion",
+                            serde_json::to_value(report.status)
+                                .ok()
+                                .and_then(|status| status.as_str().map(str::to_string))
+                                .unwrap_or_default()
+                        ),
+                        "next_command": format!("homeboy agent-task status {run_id}"),
+                    }),
+                );
+            }
             return Ok((value, 1));
         }
         // The agent declared the task incomplete: green gates cannot overrule
