@@ -56,7 +56,7 @@ use homeboy_lab_contract::lab::handoff::{
     RUNNER_ARTIFACT_ROOT_DIR_SUFFIX, RUNNER_WORKSPACE_METADATA_FILE_NAME,
     RUNNER_WORKSPACE_STATE_DIR_SUFFIX,
 };
-use sha2::{Digest, Sha256};
+use sha2::Digest;
 
 #[cfg(test)]
 mod blob_tests;
@@ -663,7 +663,7 @@ fn prepared_source_marker_shell(variable: &str) -> String {
 /// commit resolve to the same cache entry instead of each hydrating
 /// independently (#14684).
 fn prepared_source_cache_path(workspace_root: &str, remote_url: &str, commit: &str) -> String {
-    let mut hasher = Sha256::new();
+    let mut hasher = homeboy_engine_primitives::content_hash::sha256_hasher();
     hasher.update(remote_url.as_bytes());
     hasher.update(commit.as_bytes());
     let digest = hex_prefix(&hasher.finalize(), 12);

@@ -193,9 +193,7 @@ fn refusal_ref(sha256: &str, size_bytes: u64, reason: &str) -> Value {
     })
 }
 
-fn sha256(bytes: &[u8]) -> String {
-    homeboy_engine_primitives::content_hash::sha256_hex(bytes)
-}
+use homeboy_engine_primitives::content_hash::sha256_hex as sha256;
 
 #[cfg(test)]
 mod tests {

@@ -10,7 +10,7 @@ use std::net::{TcpListener, TcpStream};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::thread;
-use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant};
 
 #[cfg(test)]
 use homeboy_core::agent_task_config::AgentTaskManagedServiceReadiness;
@@ -888,12 +888,7 @@ pub fn service_worker_state_path(run_id: &str) -> Result<PathBuf, String> {
     Ok(worker_root(run_id)?.join("state.json"))
 }
 
-fn now_unix_ms() -> u64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_millis() as u64
-}
+use homeboy_engine_primitives::now_ms as now_unix_ms;
 
 fn parent_process_identity(pid: u32) -> Result<Option<ProcessStartIdentity>, String> {
     if pid == 0 {

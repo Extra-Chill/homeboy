@@ -158,7 +158,7 @@ pub fn save<M: Serialize + for<'de> Deserialize<'de>>(
     }
 
     let baseline = Baseline {
-        created_at: utc_now_iso8601(),
+        created_at: crate::now_rfc3339(),
         context_id: context_id.to_string(),
         item_count: known_fingerprints.len(),
         known_fingerprints,
@@ -310,73 +310,4 @@ pub fn load_from_git_ref<M: for<'de> Deserialize<'de> + Serialize>(
     let root: Value = serde_json::from_str(&content).ok()?;
     let value = root.get(BASELINES_KEY)?.get(key)?;
     serde_json::from_value::<Baseline<M>>(value.clone()).ok()
-}
-
-fn utc_now_iso8601() -> String {
-    let now = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_secs();
-
-    let secs_per_day = 86400u64;
-    let secs_per_hour = 3600u64;
-    let secs_per_min = 60u64;
-
-    let days = now / secs_per_day;
-    let remaining = now % secs_per_day;
-    let hours = remaining / secs_per_hour;
-    let remaining = remaining % secs_per_hour;
-    let minutes = remaining / secs_per_min;
-    let seconds = remaining % secs_per_min;
-
-    let (year, month, day) = days_to_date(days);
-
-    format!(
-        "{:04}-{:02}-{:02}T{:02}:{:02}:{:02}Z",
-        year, month, day, hours, minutes, seconds
-    )
-}
-
-fn days_to_date(mut days: u64) -> (u64, u64, u64) {
-    let mut year = 1970u64;
-
-    loop {
-        let days_in_year = if is_leap_year(year) { 366 } else { 365 };
-        if days < days_in_year {
-            break;
-        }
-        days -= days_in_year;
-        year += 1;
-    }
-
-    let leap = is_leap_year(year);
-    let month_days = [
-        31,
-        if leap { 29 } else { 28 },
-        31,
-        30,
-        31,
-        30,
-        31,
-        31,
-        30,
-        31,
-        30,
-        31,
-    ];
-
-    let mut month = 1u64;
-    for &month_days in &month_days {
-        if days < month_days {
-            break;
-        }
-        days -= month_days;
-        month += 1;
-    }
-
-    (year, month, days + 1)
-}
-
-fn is_leap_year(year: u64) -> bool {
-    (year.is_multiple_of(4) && !year.is_multiple_of(100)) || year.is_multiple_of(400)
 }

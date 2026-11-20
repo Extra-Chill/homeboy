@@ -1,4 +1,3 @@
-use homeboy_engine_primitives::content_hash;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::fs;
@@ -321,9 +320,7 @@ impl PreparedDeployArtifact {
     }
 }
 
-pub fn sha256_file(path: &Path) -> Result<String> {
-    content_hash::sha256_file(path)
-}
+pub use homeboy_engine_primitives::content_hash::sha256_file;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]

@@ -1,4 +1,3 @@
-use homeboy_engine_primitives::content_hash;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::Arc;
@@ -1137,9 +1136,7 @@ pub(crate) fn fingerprint(contents: &[u8]) -> String {
     format!("sha256:{}", sha256_hex(contents))
 }
 
-fn sha256_hex(contents: &[u8]) -> String {
-    content_hash::sha256_hex(contents)
-}
+use homeboy_engine_primitives::content_hash::sha256_hex;
 
 #[cfg(test)]
 mod tests {

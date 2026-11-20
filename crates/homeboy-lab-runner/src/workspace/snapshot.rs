@@ -318,7 +318,7 @@ fn content_hash_root(path: &Path) -> Result<std::path::PathBuf> {
 // The content identity encoding. The walk and Git respelling both hash
 // through these encoders so the two can never disagree on the format.
 fn content_identity_hasher(algorithm: &str) -> Sha256 {
-    let mut hasher = Sha256::new();
+    let mut hasher = homeboy_engine_primitives::content_hash::sha256_hasher();
     hasher.update(algorithm.as_bytes());
     hasher.update(b"\0");
     hasher
@@ -482,7 +482,7 @@ impl ContentHashTraversal<'_> {
                 hash_file_entry_header(self.hasher, &relative, hash_executable, metadata.len());
                 self.stats.files += 1;
                 self.stats.bytes = self.stats.bytes.saturating_add(metadata.len());
-                let mut file_hash = Sha256::new();
+                let mut file_hash = homeboy_engine_primitives::content_hash::sha256_hasher();
                 let bytes = read_file_chunks(&resolved, self.control, |chunk| {
                     self.hasher.update(chunk);
                     file_hash.update(chunk);
@@ -1777,7 +1777,7 @@ pub(crate) fn replay_artifact_identity(path: &Path, excludes: &[String]) -> Resu
     let mut policy = excludes.to_vec();
     policy.sort();
     policy.dedup();
-    let mut hasher = Sha256::new();
+    let mut hasher = homeboy_engine_primitives::content_hash::sha256_hasher();
     hasher.update(b"homeboy/lab-replay-artifact/v1\0");
     hasher.update(content.as_bytes());
     hasher.update(b"\0");
@@ -1927,7 +1927,7 @@ pub(super) fn stream_snapshot_controlled(
 const SNAPSHOT_COPY_CHUNK_BYTES: usize = 64 * 1024;
 
 pub(super) fn snapshot_file_sha256(path: &Path, control: &WorkspaceControl) -> Result<String> {
-    let mut hash = Sha256::new();
+    let mut hash = homeboy_engine_primitives::content_hash::sha256_hasher();
     read_file_chunks(path, control, |chunk| {
         hash.update(chunk);
         Ok(())

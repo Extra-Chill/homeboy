@@ -8,7 +8,6 @@
 use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
-use sha2::{Digest, Sha256};
 
 use crate::error::{Error, Result};
 use crate::observation::coordination::{
@@ -522,7 +521,9 @@ impl WorkspaceClaimStore {
                     .iter()
                     .map(|owner| RedactedWorkspaceOwnerIdentity {
                         kind: "workspace-owner-sha256/v1".into(),
-                        redacted_id: sha256_hex(&owner.owner_id),
+                        redacted_id: homeboy_engine_primitives::content_hash::sha256_hex(
+                            owner.owner_id.as_bytes(),
+                        ),
                         lifecycle_revision: owner.lifecycle_revision,
                     })
                     .collect::<Vec<_>>();
@@ -807,18 +808,11 @@ fn live_owners(owners: &[WorkspaceOwnerLease]) -> Error {
     )
 }
 fn workspace_key(workspace: &WorkspaceIdentity) -> String {
-    let mut hasher = Sha256::new();
-    hasher.update(workspace.schema.as_bytes());
-    hasher.update([0]);
-    hasher.update(workspace.kind.as_bytes());
-    hasher.update([0]);
-    hasher.update(workspace.locator.as_bytes());
-    format!("{:x}", hasher.finalize())
-}
-fn sha256_hex(value: &str) -> String {
-    let mut hasher = Sha256::new();
-    hasher.update(value.as_bytes());
-    format!("{:x}", hasher.finalize())
+    homeboy_engine_primitives::content_hash::nul_separated_digest([
+        &workspace.schema,
+        &workspace.kind,
+        &workspace.locator,
+    ])
 }
 fn invalid(field: &str, message: &str) -> Error {
     Error::validation_invalid_argument(field, message, None, None)
@@ -830,6 +824,20 @@ mod tests {
     fn identity() -> WorkspaceIdentity {
         WorkspaceIdentity::new("managed-workspace", "repo@task").unwrap()
     }
+
+    #[test]
+    fn workspace_key_preserves_nul_separated_identity_bytes() {
+        let workspace = identity();
+        let bytes = format!(
+            "{}\0{}\0{}",
+            workspace.schema, workspace.kind, workspace.locator
+        );
+        assert_eq!(
+            workspace_key(&workspace),
+            homeboy_engine_primitives::content_hash::sha256_hex(bytes.as_bytes())
+        );
+    }
+
     fn store() -> (tempfile::TempDir, WorkspaceClaimStore) {
         let dir = tempfile::tempdir().unwrap();
         let store = WorkspaceClaimStore::in_data_root(dir.path());

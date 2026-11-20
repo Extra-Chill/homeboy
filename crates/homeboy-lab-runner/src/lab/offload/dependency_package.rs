@@ -5,7 +5,7 @@ use std::path::{Path, PathBuf};
 
 use homeboy_engine_primitives::content_hash;
 use serde::Serialize;
-use sha2::{Digest, Sha256};
+use sha2::Digest;
 use zip::write::FileOptions;
 
 use homeboy_core::{Error, Result};
@@ -175,7 +175,7 @@ fn create_archive(
 }
 
 fn output_identity(workspace: &Path, entries: &[DependencyEntry]) -> Result<String> {
-    let mut hasher = Sha256::new();
+    let mut hasher = homeboy_engine_primitives::content_hash::sha256_hasher();
     for entry in entries {
         let name = entry
             .path

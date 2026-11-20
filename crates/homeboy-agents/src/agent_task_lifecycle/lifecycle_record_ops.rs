@@ -300,9 +300,7 @@ pub fn cook_attempt_run_id(cook_id: &str, attempt: u32) -> String {
     format!("{cook_id}-attempt-{attempt}-{suffix}")
 }
 
-pub(crate) fn now_timestamp() -> String {
-    Utc::now().to_rfc3339()
-}
+pub(crate) use homeboy_engine_primitives::now_rfc3339 as now_timestamp;
 
 pub(crate) fn sanitize_run_id(run_id: &str) -> String {
     let sanitized = paths::sanitize_path_segment(run_id);

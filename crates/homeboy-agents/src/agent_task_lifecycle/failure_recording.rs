@@ -2103,7 +2103,8 @@ fn project_terminal_artifacts_in_store(
                 }
                 validate_artifact_runner_binding(artifact, runner_id)?;
                 if let Some(path) = finalized_path {
-                    let mut controller_hash = sha2::Sha256::new();
+                    let mut controller_hash =
+                        homeboy_engine_primitives::content_hash::sha256_hasher();
                     sha2::Digest::update(&mut controller_hash, b"controller");
                     sha2::Digest::update(&mut controller_hash, [0]);
                     sha2::Digest::update(&mut controller_hash, artifact_id.as_bytes());
@@ -2172,7 +2173,8 @@ fn project_terminal_artifacts_in_store(
                                     None,
                                 ));
                             }
-                            let mut controller_hash = sha2::Sha256::new();
+                            let mut controller_hash =
+                                homeboy_engine_primitives::content_hash::sha256_hasher();
                             sha2::Digest::update(&mut controller_hash, b"controller");
                             sha2::Digest::update(&mut controller_hash, [0]);
                             sha2::Digest::update(&mut controller_hash, artifact_id.as_bytes());
@@ -2462,7 +2464,7 @@ pub(crate) fn persisted_observation_artifact_id(
     task_id: &str,
     logical_artifact_id: &str,
 ) -> String {
-    let mut id_hash = sha2::Sha256::new();
+    let mut id_hash = homeboy_engine_primitives::content_hash::sha256_hasher();
     sha2::Digest::update(&mut id_hash, run_id.as_bytes());
     sha2::Digest::update(&mut id_hash, [0]);
     sha2::Digest::update(&mut id_hash, task_id.as_bytes());
@@ -2487,7 +2489,7 @@ pub fn canonical_runner_artifact_ref(
 }
 
 fn controller_projection_artifact_id(artifact_id: &str) -> String {
-    let mut controller_hash = sha2::Sha256::new();
+    let mut controller_hash = homeboy_engine_primitives::content_hash::sha256_hasher();
     sha2::Digest::update(&mut controller_hash, b"controller");
     sha2::Digest::update(&mut controller_hash, [0]);
     sha2::Digest::update(&mut controller_hash, artifact_id.as_bytes());

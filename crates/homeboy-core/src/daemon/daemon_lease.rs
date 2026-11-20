@@ -13,7 +13,7 @@
 use std::fs;
 use std::path::Path;
 
-use sha2::{Digest, Sha256};
+use sha2::Digest;
 
 use super::{
     read_termination_evidence, recovery_actions, runtime_path_fingerprint, DaemonFreshnessReport,
@@ -47,7 +47,7 @@ impl DaemonLeaseValidation {
 }
 
 pub(crate) fn daemon_state_identity(state_path: &Path, jobs_path: &Path) -> Result<String> {
-    let mut hasher = Sha256::new();
+    let mut hasher = homeboy_engine_primitives::content_hash::sha256_hasher();
     hasher.update(b"daemon-state\0");
     hasher.update(state_path.to_string_lossy().as_bytes());
     hasher.update([0]);

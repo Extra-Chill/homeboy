@@ -3,7 +3,7 @@ use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 
 use serde_json::json;
-use sha2::{Digest, Sha256};
+use sha2::Digest;
 
 use crate::agent_task::{
     AgentTaskArtifact, AgentTaskDiagnostic, AgentTaskExecutorRequest, AgentTaskOutcome,
@@ -398,7 +398,7 @@ pub(crate) fn retain_declared_workspace_artifacts(
 }
 
 fn declaration_token(name: &str) -> String {
-    let mut hash = Sha256::new();
+    let mut hash = homeboy_engine_primitives::content_hash::sha256_hasher();
     hash.update(name.as_bytes());
     format!("{:x}", hash.finalize())
 }
@@ -490,7 +490,7 @@ fn staged_file(
         ));
     }
     root.verify()?;
-    let mut token_hash = Sha256::new();
+    let mut token_hash = homeboy_engine_primitives::content_hash::sha256_hasher();
     token_hash.update(artifact.kind.as_bytes());
     token_hash.update([0]);
     token_hash.update(artifact.id.as_bytes());
@@ -518,7 +518,7 @@ fn staged_file(
             Some(format!("stage executor artifact {}", temporary.display())),
         )
     })?;
-    let mut hash = Sha256::new();
+    let mut hash = homeboy_engine_primitives::content_hash::sha256_hasher();
     let mut size = 0_u64;
     let mut buffer = [0_u8; 8192];
     loop {

@@ -165,7 +165,7 @@ impl ObservationStore {
         namespace: &'static str,
         key: &str,
     ) -> Result<Option<CoordinationRecord>> {
-        read_record(&self.connection, namespace, key, now_ms())
+        read_record(&self.connection, namespace, key, clock_ms() as i64)
     }
 
     /// Every live record in `namespace`, ordered by key. Expired records are
@@ -184,7 +184,7 @@ impl ObservationStore {
             )
             .map_err(sqlite_error("prepare coordination record list"))?;
         let rows = statement
-            .query_map(params![namespace, now_ms()], record_from_row)
+            .query_map(params![namespace, clock_ms() as i64], record_from_row)
             .map_err(sqlite_error("list coordination records"))?;
         super::collect_rows(rows, "collect coordination records")
     }
@@ -199,7 +199,14 @@ impl ObservationStore {
         expected: ExpectedRevision,
         write: RecordWrite<'_>,
     ) -> Result<RecordOutcome> {
-        put_record_at(&self.connection, namespace, key, expected, write, now_ms())
+        put_record_at(
+            &self.connection,
+            namespace,
+            key,
+            expected,
+            write,
+            clock_ms() as i64,
+        )
     }
 
     /// Delete a record when it is still at `expected_revision`.
@@ -211,7 +218,7 @@ impl ObservationStore {
     ) -> Result<RecordOutcome> {
         validate_key(namespace, key)?;
         let tx = begin_control_plane_write(&self.connection, "begin coordination record delete")?;
-        let current = read_record(&tx, namespace, key, now_ms())?;
+        let current = read_record(&tx, namespace, key, clock_ms() as i64)?;
         if current.as_ref().map(|record| record.revision) != Some(expected_revision) {
             return Ok(RecordOutcome::Conflict { current });
         }
@@ -230,7 +237,7 @@ impl ObservationStore {
     /// inside the same IMMEDIATE transaction, so two acquirers cannot both
     /// pass an exclusive or capacity check.
     pub fn acquire_coordination_lease(&self, request: LeaseRequest<'_>) -> Result<LeaseAcquire> {
-        acquire_lease_at(&self.connection, request, now_ms())
+        acquire_lease_at(&self.connection, request, clock_ms() as i64)
     }
 
     /// Extend a live holder. The fence must match so a holder that lost and
@@ -250,7 +257,7 @@ impl ObservationStore {
             holder_token,
             fence,
             ttl,
-            now_ms(),
+            clock_ms() as i64,
         )
     }
 
@@ -280,7 +287,7 @@ impl ObservationStore {
         key: &str,
     ) -> Result<Vec<LeaseHolder>> {
         let mut holders = holders_on(&self.connection, namespace, Some(key))?;
-        let now = now_ms();
+        let now = clock_ms() as i64;
         holders.retain(|holder| holder.expires_at_ms > now);
         Ok(holders)
     }
@@ -291,7 +298,12 @@ impl ObservationStore {
     /// with unverifiable owners are kept until they expire. Returns the
     /// removed holders.
     pub fn reap_coordination_leases(&self, namespace: &'static str) -> Result<Vec<LeaseHolder>> {
-        reap_leases_at(&self.connection, namespace, now_ms(), &local_host())
+        reap_leases_at(
+            &self.connection,
+            namespace,
+            clock_ms() as i64,
+            &local_host(),
+        )
     }
 
     /// Append one audit entry and return its sequence.
@@ -307,7 +319,13 @@ impl ObservationStore {
             .execute(
                 "INSERT INTO coordination_audit(namespace, subject_key, at_ms, event, payload_json)
                  VALUES (?1, ?2, ?3, ?4, ?5)",
-                params![namespace, subject_key, now_ms(), event, to_json(payload)?],
+                params![
+                    namespace,
+                    subject_key,
+                    clock_ms() as i64,
+                    event,
+                    to_json(payload)?
+                ],
             )
             .map_err(sqlite_error("append coordination audit"))?;
         Ok(self.connection.last_insert_rowid())
@@ -714,9 +732,7 @@ fn to_json(value: &Value) -> Result<String> {
     })
 }
 
-fn now_ms() -> i64 {
-    chrono::Utc::now().timestamp_millis()
-}
+use homeboy_engine_primitives::now_ms as clock_ms;
 
 #[cfg(test)]
 #[path = "coordination_tests.rs"]

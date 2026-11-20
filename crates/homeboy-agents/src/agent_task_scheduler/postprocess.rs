@@ -7,7 +7,6 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::thread;
 use std::time::Duration;
-use std::time::{SystemTime, UNIX_EPOCH};
 
 use homeboy_engine_primitives::content_hash;
 use homeboy_engine_primitives::local_files::write_json_file as write_json_atomically;
@@ -1141,12 +1140,7 @@ fn claim_owner_is_alive(pid: u32) -> bool {
     pid == std::process::id()
 }
 
-fn now_unix_secs() -> u64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_secs()
-}
+use homeboy_engine_primitives::now_secs as now_unix_secs;
 
 fn checkpoint_identity(
     plan: &AgentTaskPlan,

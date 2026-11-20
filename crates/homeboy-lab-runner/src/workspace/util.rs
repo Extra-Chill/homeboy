@@ -2,7 +2,7 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::time::{Duration, Instant};
 
-use sha2::{Digest, Sha256};
+use sha2::Digest;
 
 use homeboy_core::engine::shell;
 use homeboy_core::error::{Error, ErrorCode, Result};
@@ -69,7 +69,7 @@ pub(super) fn deterministic_remote_path(
     snapshot: &str,
     run_isolation_token: Option<&str>,
 ) -> String {
-    let mut hasher = Sha256::new();
+    let mut hasher = homeboy_engine_primitives::content_hash::sha256_hasher();
     hasher.update(local_path.display().to_string().as_bytes());
     hasher.update(snapshot.as_bytes());
     // Fold a per-run isolation token (when present) into the digest so two

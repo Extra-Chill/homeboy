@@ -204,6 +204,4 @@ pub(super) fn reclaim_with_store(
     })
 }
 
-fn now_ms() -> u64 {
-    chrono::Utc::now().timestamp_millis().max(0) as u64
-}
+use homeboy_engine_primitives::now_ms;

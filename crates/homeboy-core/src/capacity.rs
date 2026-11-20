@@ -32,7 +32,7 @@ use std::fs::{self, File, OpenOptions};
 use std::hash::{Hash, Hasher};
 use std::io::Write;
 use std::path::{Path, PathBuf};
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
 
@@ -479,12 +479,7 @@ fn owner_evidence(pid: u32) -> (u32, String, Option<crate::process::ProcessStart
     )
 }
 
-fn now_seconds() -> u64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_secs()
-}
+use homeboy_engine_primitives::now_secs as now_seconds;
 
 #[cfg(unix)]
 fn filesystem_identity(path: &Path) -> Result<String> {

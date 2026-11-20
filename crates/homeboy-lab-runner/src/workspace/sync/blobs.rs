@@ -206,7 +206,7 @@ impl Source {
         let file = fs::File::open(&self.path).materialization("open", &self.path, "controller")?;
         let mut reader = VerifiedReader {
             file,
-            hash: Sha256::new(),
+            hash: homeboy_engine_primitives::content_hash::sha256_hasher(),
             control,
         };
         let mut header = tar::Header::new_gnu();

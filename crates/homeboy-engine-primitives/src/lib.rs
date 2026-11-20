@@ -11,6 +11,7 @@ pub mod artifact_ref_scheme;
 pub mod baseline;
 pub mod canonical_json;
 pub mod cargo_target;
+pub mod clock;
 pub mod codebase_scan;
 pub mod command;
 pub mod command_path;
@@ -33,6 +34,8 @@ pub mod text;
 pub mod timestamp;
 pub mod validation;
 pub mod workload_compare;
+
+pub use clock::{now_ms, now_rfc3339, now_secs};
 
 // Re-exported so the `provider_registry!` / `provider_registry_arc!` expansions
 // can reach `inventory` as `$crate::inventory` from any crate in the workspace

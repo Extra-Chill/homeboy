@@ -181,13 +181,7 @@ struct SecretDigest {
     sha256: String,
 }
 
-fn sha256_hex(bytes: &[u8]) -> String {
-    use sha2::{Digest, Sha256};
-    Sha256::digest(bytes)
-        .iter()
-        .map(|byte| format!("{byte:02x}"))
-        .collect()
-}
+use homeboy_engine_primitives::content_hash::sha256_hex;
 
 fn read_redaction_digests(dir: &Path) -> Option<Vec<SecretDigest>> {
     let record: serde_json::Value =

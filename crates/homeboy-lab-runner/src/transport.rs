@@ -307,7 +307,7 @@ fn remote_digest_check(path: &str, sha256: &str, size: u64) -> String {
 fn local_file_digest(local_path: &str) -> Result<(String, u64)> {
     let mut input = fs::File::open(local_path)
         .map_err(|err| Error::internal_io(err.to_string(), Some(format!("open {local_path}"))))?;
-    let mut digest = sha2::Sha256::new();
+    let mut digest = homeboy_engine_primitives::content_hash::sha256_hasher();
     let mut total = 0u64;
     let mut buffer = [0u8; 64 * 1024];
     loop {
@@ -383,7 +383,7 @@ fn private_bounded_snapshot(
     let mut snapshot = crate::staging_temp::file().map_err(|error| {
         provider_evidence_io_error(error, "create evidence snapshot".to_string())
     })?;
-    let mut digest = sha2::Sha256::new();
+    let mut digest = homeboy_engine_primitives::content_hash::sha256_hasher();
     let mut total = 0u64;
     let mut buffer = [0u8; 64 * 1024];
     loop {

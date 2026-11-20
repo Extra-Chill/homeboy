@@ -291,7 +291,7 @@ fn bench_artifact_ref_and_ping_shapes() {
 
     let dir = tempfile::tempdir().unwrap();
     let file = dir.path().join("nested").join("pings.jsonl");
-    let started = bench::now_ms();
+    let started = bench::now_ms() as i64;
     bench::responsiveness_ping(&path_str(&file), started, "warm").unwrap();
     bench::responsiveness_ping(&path_str(&file), started + 60_000, "").unwrap();
     let text = std::fs::read_to_string(&file).unwrap();

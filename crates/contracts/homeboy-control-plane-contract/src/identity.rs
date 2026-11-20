@@ -20,8 +20,8 @@ use serde::{Deserialize, Serialize};
 /// Length framing prevents ambiguous component boundaries. The namespace is
 /// hashed too, so every result is exactly 64 ASCII bytes, within all ID bounds.
 pub fn derived_control_plane_identity(namespace: &str, components: &[&str]) -> String {
-    use sha2::{Digest, Sha256};
-    let mut hash = Sha256::new();
+    use sha2::Digest;
+    let mut hash = homeboy_engine_primitives::content_hash::sha256_hasher();
     for component in std::iter::once(namespace).chain(components.iter().copied()) {
         hash.update((component.len() as u64).to_be_bytes());
         hash.update(component.as_bytes());

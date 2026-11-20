@@ -916,7 +916,7 @@ fn prepare_copied_local_source(config_root: &Path, source: &str) -> Result<Prepa
             Some(vec![format!("source root: {}", source_root.display())]),
         )
     })?;
-    let mut hasher = Sha256::new();
+    let mut hasher = homeboy_engine_primitives::content_hash::sha256_hasher();
     hasher.update(source_root.to_string_lossy().as_bytes());
     let package_id = format!("local-{:016x}", hasher.finalize());
     let durable_root = paths::rig_package_in_root(config_root, &package_id);
@@ -978,7 +978,7 @@ pub fn package_content_hash(package_path: &Path) -> Result<String> {
     collect_package_files(package_path, package_path, &mut files)?;
     files.sort();
 
-    let mut hasher = Sha256::new();
+    let mut hasher = homeboy_engine_primitives::content_hash::sha256_hasher();
     for relative in files {
         let bytes = fs::read(package_path.join(&relative)).map_err(|error| {
             Error::internal_io(

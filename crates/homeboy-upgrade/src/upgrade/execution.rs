@@ -8,10 +8,8 @@ use homeboy_engine_primitives::command::{
     SupervisedCommandTermination,
 };
 use serde::{Deserialize, Serialize};
-use sha2::{Digest, Sha256};
 use std::env;
 use std::fs::File;
-use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
@@ -1428,35 +1426,7 @@ fn display_path(path: &Path) -> String {
     path.display().to_string()
 }
 
-fn sha256_file(path: &Path) -> Result<String> {
-    let mut file = File::open(path).map_err(|error| {
-        Error::internal_io(
-            error.to_string(),
-            Some(format!(
-                "hash controller replacement target {}",
-                path.display()
-            )),
-        )
-    })?;
-    let mut digest = Sha256::new();
-    let mut buffer = [0_u8; 64 * 1024];
-    loop {
-        let read = file.read(&mut buffer).map_err(|error| {
-            Error::internal_io(
-                error.to_string(),
-                Some(format!(
-                    "hash controller replacement target {}",
-                    path.display()
-                )),
-            )
-        })?;
-        if read == 0 {
-            break;
-        }
-        digest.update(&buffer[..read]);
-    }
-    Ok(format!("{:x}", digest.finalize()))
-}
+use homeboy_engine_primitives::content_hash::sha256_file;
 
 pub(crate) fn replacement_was_applied(replacement: &ReplacementEvidence) -> Result<bool> {
     Ok(sha256_file(&replacement.target)? == replacement.expected_sha256)

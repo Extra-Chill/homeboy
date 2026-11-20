@@ -9,7 +9,7 @@
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use sha2::{Digest, Sha256};
+use sha2::Digest;
 
 pub use homeboy_runner_contract::source_snapshot::{
     default_sync_excludes, RepositoryIntegrityEvidence, SourceSnapshot, SourceSnapshotPolicy,
@@ -119,7 +119,7 @@ pub(crate) fn existing_remote_with_policy(
     workspace_root: Option<&str>,
     policy: &SourceSnapshotPolicy,
 ) -> SourceSnapshot {
-    let mut hasher = Sha256::new();
+    let mut hasher = homeboy_engine_primitives::content_hash::sha256_hasher();
     hasher.update(PATH_MATERIALIZATION_MODE_EXISTING_REMOTE.as_bytes());
     hasher.update(b"\0");
     hasher.update(runner_id.as_bytes());
@@ -292,7 +292,7 @@ fn split_env_list(name: &str) -> Vec<String> {
 }
 
 fn git_snapshot_hash(path: &Path, git_sha: Option<&str>, status: &[u8]) -> String {
-    let mut hasher = Sha256::new();
+    let mut hasher = homeboy_engine_primitives::content_hash::sha256_hasher();
     hasher.update(b"homeboy-source-snapshot-v1\0");
     if let Some(git_sha) = git_sha {
         hasher.update(git_sha.as_bytes());
@@ -334,7 +334,7 @@ fn git_snapshot_hash(path: &Path, git_sha: Option<&str>, status: &[u8]) -> Strin
 }
 
 fn generic_snapshot_hash(identity: &str) -> String {
-    let mut hasher = Sha256::new();
+    let mut hasher = homeboy_engine_primitives::content_hash::sha256_hasher();
     hasher.update(b"non_git_path\0");
     hasher.update(identity.as_bytes());
     format!("sha256:{:x}", hasher.finalize())

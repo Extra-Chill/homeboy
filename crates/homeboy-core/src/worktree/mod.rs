@@ -229,9 +229,7 @@ fn normalize_existing_path(path: &Path) -> PathBuf {
     path.canonicalize().unwrap_or_else(|_| path.to_path_buf())
 }
 
-fn now_ms() -> u64 {
-    chrono::Utc::now().timestamp_millis().max(0) as u64
-}
+use homeboy_engine_primitives::now_ms;
 
 pub(crate) fn list_workspace_refs() -> Result<Vec<WorkspaceRefRecord>> {
     let mut records = list()?

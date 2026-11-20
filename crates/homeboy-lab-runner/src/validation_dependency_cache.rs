@@ -366,7 +366,7 @@ pub(crate) fn cache_key(
     let config_bytes = homeboy_engine_primitives::canonical_json::canonical_json_bytes(&config)
         .map_err(|err| format!("component config not serializable: {err}"))?;
 
-    let mut hasher = Sha256::new();
+    let mut hasher = homeboy_engine_primitives::content_hash::sha256_hasher();
     let mut field = |label: &str, value: &[u8]| {
         hasher.update(label.as_bytes());
         hasher.update([0]);
