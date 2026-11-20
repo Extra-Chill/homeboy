@@ -136,9 +136,23 @@ pub fn execute(id: &str, parameters: RecoverParameters) -> Result<(Value, i32)> 
             return Ok((receipt, 0));
         }
     }
+    // With `regate`, verify commands replace the candidate's declared gates
+    // for that re-gate instead of correcting a pre-provider recipe (#17802).
+    let (corrected_gates, regate_inputs) = if parameters.regate {
+        (
+            None,
+            service::CookRegateInputs {
+                gates: parameters.corrected_gates,
+                gate_timeout_seconds: parameters.gate_timeout_seconds,
+            },
+        )
+    } else {
+        (parameters.corrected_gates, Default::default())
+    };
     let request = service::CookRecoveryRequest {
         preflight: parameters.preflight,
         regate: parameters.regate,
+        regate_inputs,
         unblock: parameters.unblock,
         overrides: CookRecoveryOverrides {
             backend: parameters.backend,
@@ -147,7 +161,7 @@ pub fn execute(id: &str, parameters: RecoverParameters) -> Result<(Value, i32)> 
             acknowledge_model_override: parameters.acknowledge_model_override,
             timeout_ms: parameters.timeout_ms,
         },
-        corrected_gates: parameters.corrected_gates,
+        corrected_gates,
         replace_gates: parameters.replace_gates,
         publish: parameters.publish.unwrap_or_default(),
     };

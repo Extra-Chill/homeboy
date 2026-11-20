@@ -41,9 +41,15 @@ pub struct ControlPlaneRecoverParameters<G = Value, P = Value, R = Value> {
     pub adoption_model: Option<String>,
     #[serde(default)]
     pub replace_interrupted: bool,
+    /// With `regate`, the commands that replace the candidate's declared
+    /// verify commands for that re-gate; otherwise a pre-provider recipe
+    /// gate correction.
     pub corrected_gates: Option<G>,
     pub publish: Option<P>,
     pub replace_gates: Option<R>,
+    /// Per-gate wall-clock limit for a `regate`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub gate_timeout_seconds: Option<u64>,
 }
 
 pub const CONTROL_PLANE_ACTION_ID_BOUND: usize = 128;
@@ -363,6 +369,11 @@ impl ControlPlaneActionRequest {
             if parameters.acknowledge_model_override && parameters.model.is_none() {
                 return Err(crate::ControlPlaneError::invalid_argument(
                     "acknowledge_model_override requires model",
+                ));
+            }
+            if parameters.gate_timeout_seconds.is_some() && !parameters.regate {
+                return Err(crate::ControlPlaneError::invalid_argument(
+                    "gate_timeout_seconds requires regate",
                 ));
             }
         }

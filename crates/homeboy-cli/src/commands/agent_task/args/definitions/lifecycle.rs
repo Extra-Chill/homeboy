@@ -375,8 +375,16 @@ pub struct RecoverArgs {
     /// Maximum wait; timing out never cancels daemon-owned work.
     #[arg(long, default_value = "30m", requires = "wait")]
     pub timeout: String,
-    /// Re-run recorded gates on the newest candidate, without a provider attempt.
-    #[arg(long)]
+    /// Re-run deterministic gates on the newest candidate's existing SHA,
+    /// without a provider attempt. Each regate executes fresh gate jobs. With
+    /// `--verify`/`--verify-file`/`--private-verify`, those commands replace
+    /// the declared verify commands for this regate, and the replacement is
+    /// recorded in the candidate's gate evidence. `--gate-timeout-seconds`
+    /// replaces the recorded per-gate timeout.
+    #[arg(
+        long,
+        conflicts_with_all = ["authorize_external_proof", "authorize_interrupted_rerun", "promotion"]
+    )]
     pub regate: bool,
     /// Durable run ID, Cook ID, Cook attempt ID or batch-child run ID.
     pub id: String,
@@ -436,8 +444,10 @@ pub struct RecoverArgs {
         conflicts_with = "authorize_interrupted_rerun"
     )]
     pub promotion: Option<String>,
-    /// Corrected verification gates: update a pre-provider failure's recipe,
-    /// or, with --authorize-external-proof, verify the already-applied candidate.
+    /// Corrected verification gates: with --regate, replace the declared
+    /// verify commands for that regate; otherwise update a pre-provider
+    /// failure's recipe, or, with --authorize-external-proof, verify the
+    /// already-applied candidate.
     #[command(flatten)]
     pub gates: VerifyGateArgs,
     /// Publish step: complete typed AI review form for a candidate whose

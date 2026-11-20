@@ -4783,8 +4783,7 @@ pub(crate) fn cook_failure_context_with_stores(
                     .as_ref()
                     .is_some_and(cancelled_without_operator_request);
             let retry_refusal = retry_refusal.flatten();
-            let delivered_candidate =
-                delivered_candidate_facts(lifecycle_store, record.as_ref(), delivery.as_ref());
+            let delivered_candidate = delivered_candidate_facts(record.as_ref(), delivery.as_ref());
             // The adopt observation only matters for a terminal `no_changes`
             // attempt; skip the worktree inspection for every other state.
             let adoptable_candidate_ref = (status == "no_changes")
@@ -5368,6 +5367,14 @@ fn agent_incomplete_reason(
         .map(str::to_string)
 }
 
+/// [`agent_incomplete_reason`] for recovery steps outside this module.
+pub(crate) fn attempt_agent_incomplete_reason(
+    lifecycle_store: &agent_task_lifecycle::AgentTaskLifecycleStore,
+    run_id: &str,
+) -> Option<String> {
+    agent_incomplete_reason(lifecycle_store, run_id)
+}
+
 /// Facts about the attempt's applied candidate that select the replacement
 /// gate and publication steps.
 #[derive(Debug, Clone, Copy, Default)]
@@ -5444,7 +5451,6 @@ fn git_stdout(dir: &std::path::Path, args: &[&str]) -> Option<String> {
 }
 
 fn delivered_candidate_facts(
-    lifecycle_store: &agent_task_lifecycle::AgentTaskLifecycleStore,
     record: Option<&agent_task_lifecycle::AgentTaskRunRecord>,
     delivery: Option<&super::CookDelivery>,
 ) -> DeliveredCandidateFacts {
@@ -5464,8 +5470,9 @@ fn delivered_candidate_facts(
             .as_ref()
             .is_some_and(|candidate| !candidate.tree_sha.is_empty())
         && !delivery.is_some_and(super::CookDelivery::published);
+    // An agent-declared incomplete form does not hide regate: an unjudged
+    // candidate is re-gated first, and the review-form path stays open (#17802).
     let regate_ready = applied_gate_failure
-        && agent_incomplete_reason(lifecycle_store, &record.run_id).is_none()
         && promotion.finalization_blocking_gates().all(|gate| {
             matches!(
                 gate.status,
