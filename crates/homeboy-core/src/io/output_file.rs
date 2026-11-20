@@ -61,15 +61,14 @@ pub fn write_output_file_atomically(
 
     let contents = contents.as_ref();
     let mut terminated;
-    let contents = if options.trailing_newline == TrailingNewline::Ensure
-        && !contents.ends_with(b"\n")
-    {
-        terminated = contents.to_vec();
-        terminated.push(b'\n');
-        terminated.as_slice()
-    } else {
-        contents
-    };
+    let contents =
+        if options.trailing_newline == TrailingNewline::Ensure && !contents.ends_with(b"\n") {
+            terminated = contents.to_vec();
+            terminated.push(b'\n');
+            terminated.as_slice()
+        } else {
+            contents
+        };
     crate::engine::local_files::write_file_atomic(target, contents, "write output file")
         .map_err(|error| std::io::Error::other(error.to_string()))
 }

@@ -329,7 +329,11 @@ pub fn create_dir_all_durably(path: &Path) -> Result<()> {
 }
 
 /// Create a file owner-only on Unix before writing its contents.
-pub fn write_file_owner_only(path: &Path, content: impl AsRef<[u8]>, operation: &str) -> Result<()> {
+pub fn write_file_owner_only(
+    path: &Path,
+    content: impl AsRef<[u8]>,
+    operation: &str,
+) -> Result<()> {
     let content = content.as_ref();
     #[cfg(unix)]
     {
