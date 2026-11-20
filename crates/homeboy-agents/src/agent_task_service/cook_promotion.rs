@@ -1662,11 +1662,66 @@ const REPLACEMENT_GATE_PROOF_CLAIM_LEASE: std::time::Duration =
     std::time::Duration::from_secs(30 * 60);
 const REPLACEMENT_GATE_EXECUTION_FENCES_KEY: &str = "replacement_gate_execution_fences";
 
+/// Why a replacement gate execution runs. The mode decides how a dead start
+/// fence is handled and whether a non-passing gate run is persisted.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum ReplacementGateMode {
+    /// Operator replacement proof. A start fence whose owner died requires
+    /// explicit interrupted-rerun authorization before shell gates run again.
+    Replacement {
+        interrupted_rerun_authorization: Option<String>,
+    },
+    /// `recover --regate`: re-run deterministic gates on the candidate the
+    /// Cook already produced. It spends no provider budget and the operator
+    /// asked for exactly this rerun, so a dead start fence is superseded with
+    /// a recorded reason, and every gate run becomes the latest promotion so
+    /// status and diagnose never keep projecting a stale receipt (#18315).
+    Regate,
+}
+
 pub fn verify_replacement_gates(
     cook_or_attempt_id: &str,
     gates: crate::agent_task_gate::VerifyGateOptions,
     external_authorization: String,
     interrupted_rerun_authorization: Option<String>,
+) -> Result<AgentTaskPromotionReport> {
+    verify_replacement_gates_in_mode(
+        cook_or_attempt_id,
+        gates,
+        external_authorization,
+        ReplacementGateMode::Replacement {
+            interrupted_rerun_authorization,
+        },
+    )
+}
+
+/// Re-run deterministic gates on the candidate for `recover --regate`.
+///
+/// A passing run records replacement gate proof, exactly like
+/// [`verify_replacement_gates`]. A failing or unavailable run is returned
+/// (not raised) after it is persisted as the attempt's latest promotion, so
+/// status, diagnose and the Cook report show the new gate run while the
+/// promotion history keeps the earlier one. A start fence left by an
+/// interrupted earlier execution whose owner is gone is superseded instead of
+/// demanding interrupted-rerun authorization (#18042, #18075).
+pub(crate) fn regate_candidate_gates(
+    cook_or_attempt_id: &str,
+    gates: crate::agent_task_gate::VerifyGateOptions,
+    authorization: String,
+) -> Result<AgentTaskPromotionReport> {
+    verify_replacement_gates_in_mode(
+        cook_or_attempt_id,
+        gates,
+        authorization,
+        ReplacementGateMode::Regate,
+    )
+}
+
+fn verify_replacement_gates_in_mode(
+    cook_or_attempt_id: &str,
+    gates: crate::agent_task_gate::VerifyGateOptions,
+    external_authorization: String,
+    mode: ReplacementGateMode,
 ) -> Result<AgentTaskPromotionReport> {
     let run_id = super::cook_recipe::resolve_cook_continuation_run_id(cook_or_attempt_id)?;
     let lifecycle_store = agent_task_lifecycle::AgentTaskLifecycleStore::from_environment()?;
@@ -1711,13 +1766,23 @@ pub fn verify_replacement_gates(
                 &run_id,
                 gates,
                 external_authorization,
-                interrupted_rerun_authorization,
+                mode,
             );
             // Gates that returned, green or failing, are finished, not interrupted.
             lifecycle_store.mutate_record(&run_id, |record| {
                 finish_replacement_gate_execution(&mut record.metadata)
             })?;
             match result {
+                // A regate that ran but did not pass is persisted evidence, not
+                // a completed proof: fail the claim so the next regate runs
+                // fresh gates instead of replaying this result.
+                Ok(report) if !report.finalization_eligible() => {
+                    _lease.fail(serde_json::json!({
+                        "code": "regate_gates_not_passing",
+                        "message": format!("regate gates did not pass (status: {:?})", report.status),
+                    }))?;
+                    Ok(report)
+                }
                 Ok(report) => {
                     _lease.complete(
                         serde_json::to_value(&report)
@@ -1750,7 +1815,7 @@ fn verify_replacement_gates_owned(
     run_id: &str,
     gates: crate::agent_task_gate::VerifyGateOptions,
     external_authorization: String,
-    interrupted_rerun_authorization: Option<String>,
+    mode: ReplacementGateMode,
 ) -> Result<AgentTaskPromotionReport> {
     let mut gates = gates;
     // Recovery admits new commands, not a new execution placement. Reuse the
@@ -1785,8 +1850,15 @@ fn verify_replacement_gates_owned(
             None,
         ));
     }
-    let interrupted_rerun_authorization =
-        interrupted_rerun_authorization.filter(|authorization| !authorization.trim().is_empty());
+    let regate = mode == ReplacementGateMode::Regate;
+    let interrupted_rerun_authorization = match mode {
+        ReplacementGateMode::Replacement {
+            interrupted_rerun_authorization,
+        } => {
+            interrupted_rerun_authorization.filter(|authorization| !authorization.trim().is_empty())
+        }
+        ReplacementGateMode::Regate => None,
+    };
     let recovering_interrupted_execution =
         match replacement_gate_execution_owner_live(&lifecycle_store.read_record(run_id)?.metadata)
         {
@@ -1794,7 +1866,18 @@ fn verify_replacement_gates_owned(
             Some(false) => true,
             None => false,
         };
-    if recovering_interrupted_execution && interrupted_rerun_authorization.is_none() {
+    // A regate re-runs the deterministic gates of a candidate that already
+    // exists and spends no provider budget, so the dead fence protects
+    // nothing the operator's `--regate` did not just ask for (#18042, #18075).
+    let superseded_fence = if recovering_interrupted_execution && regate {
+        Some(supersede_interrupted_replacement_gate_fence(
+            lifecycle_store,
+            run_id,
+        )?)
+    } else {
+        None
+    };
+    if recovering_interrupted_execution && !regate && interrupted_rerun_authorization.is_none() {
         return Err(interrupted_replacement_gate_execution_error(run_id));
     }
     if !original.status.applied_without_passing_verdict() {
@@ -1938,7 +2021,15 @@ fn verify_replacement_gates_owned(
                 },
             ),
     );
-    if recovering_interrupted_execution {
+    if let Some(fence) = superseded_fence {
+        replacement.provenance["replacement_gate_execution_recovery"] = serde_json::json!({
+            "schema": "homeboy/agent-task-replacement-gate-execution-recovery/v1",
+            "superseded_by": "regate",
+            "reason": REGATE_SUPERSEDES_FENCE_REASON,
+            "superseded_fence": fence,
+            "automatic_rerun": false,
+        });
+    } else if recovering_interrupted_execution {
         let authorization = interrupted_rerun_authorization
             .expect("interrupted execution recovery requires explicit authorization");
         replacement.provenance["replacement_gate_execution_recovery"] = serde_json::json!({
@@ -1947,7 +2038,115 @@ fn verify_replacement_gates_owned(
             "automatic_rerun": false,
         });
     }
+    if regate {
+        replacement.repository_integrity_evidence = original.repository_integrity_evidence.clone();
+        replacement.normalize_gate_outcome();
+        if !replacement.finalization_eligible()
+            && replacement.status.applied_without_passing_verdict()
+        {
+            return record_regate_gate_run(
+                lifecycle_store,
+                run_id,
+                &original,
+                replacement,
+                &external_authorization,
+            );
+        }
+    }
     record_replacement_gate_proof(run_id, replacement, Some(external_authorization))
+}
+
+const REGATE_SUPERSEDES_FENCE_REASON: &str = "recover --regate re-runs the deterministic gates of the already-produced candidate without provider work; the interrupted execution's owner is gone, so its start fence is superseded";
+
+/// Lift a start fence whose owner process is gone so `recover --regate` can
+/// run fresh gates, recording which fence was superseded and why.
+fn supersede_interrupted_replacement_gate_fence(
+    lifecycle_store: &agent_task_lifecycle::AgentTaskLifecycleStore,
+    run_id: &str,
+) -> Result<Value> {
+    let mut superseded = Value::Null;
+    lifecycle_store.mutate_record(run_id, |record| {
+        let metadata = record.ensure_metadata_object();
+        let Some(fence) = metadata
+            .get_mut(REPLACEMENT_GATE_EXECUTION_FENCES_KEY)
+            .and_then(Value::as_object_mut)
+            .and_then(|fences| fences.remove("verify-replacement"))
+        else {
+            return false;
+        };
+        superseded = fence.clone();
+        let supersessions = metadata
+            .entry("replacement_gate_execution_fence_supersessions".to_string())
+            .or_insert_with(|| serde_json::json!([]));
+        if !supersessions.is_array() {
+            *supersessions = serde_json::json!([]);
+        }
+        let supersessions = supersessions.as_array_mut().expect("array");
+        supersessions.push(serde_json::json!({
+            "schema": "homeboy/agent-task-replacement-gate-fence-supersession/v1",
+            "superseded_by": "regate",
+            "reason": REGATE_SUPERSEDES_FENCE_REASON,
+            "fence": fence,
+            "superseded_at": chrono::Utc::now().to_rfc3339(),
+        }));
+        let overflow = supersessions.len().saturating_sub(16);
+        supersessions.drain(..overflow);
+        true
+    })?;
+    Ok(superseded)
+}
+
+/// Persist a regate whose fresh gates ran but did not pass as the attempt's
+/// latest promotion. The earlier promotion stays in the promotion history.
+/// The report carries no replacement proof, so it stays a recoverable,
+/// unverified candidate that a later regate or replacement may verify.
+fn record_regate_gate_run(
+    lifecycle_store: &agent_task_lifecycle::AgentTaskLifecycleStore,
+    run_id: &str,
+    original: &AgentTaskPromotionReport,
+    mut report: AgentTaskPromotionReport,
+    authorization: &str,
+) -> Result<AgentTaskPromotionReport> {
+    let gate_summary = |promotion: &AgentTaskPromotionReport| {
+        promotion
+            .deterministic_gates
+            .iter()
+            .map(|gate| {
+                serde_json::json!({
+                    "gate_id": gate.id,
+                    "command": gate.command,
+                    "status": gate.status,
+                    "lab_execution": gate
+                        .lab_receipt
+                        .as_ref()
+                        .and_then(|receipt| receipt.get("execution_context"))
+                        .cloned(),
+                })
+            })
+            .collect::<Vec<_>>()
+    };
+    report.provenance["regate_gate_run"] = serde_json::json!({
+        "schema": "homeboy/agent-task-regate-gate-run/v1",
+        "operator_authorization": authorization,
+        "verdict": report.status,
+        "commands": report
+            .deterministic_gates
+            .iter()
+            .map(|gate| gate.command.clone())
+            .collect::<Vec<_>>(),
+        "gates": gate_summary(&report),
+        "superseded_gate_run": {
+            "status": original.status,
+            "gates": gate_summary(original),
+        },
+        "recorded_at": chrono::Utc::now().to_rfc3339(),
+    });
+    lifecycle_store.record_promotion(
+        run_id,
+        serde_json::to_value(&report)
+            .map_err(|error| Error::internal_json(error.to_string(), None))?,
+    )?;
+    Ok(report)
 }
 
 pub(crate) fn persisted_promotion_source_in_store(
@@ -2066,13 +2265,19 @@ fn interrupted_replacement_gate_execution_error(run_id: &str) -> Error {
         "replacement_gate_proof",
         "replacement gate execution was interrupted after its durable start fence; Homeboy will not rerun shell gates automatically",
         Some(run_id.to_string()),
-        Some(vec![format!(
-            "Run homeboy agent-task recover {run_id} --promotion @replacement.json --authorize-external-proof <authorization> with candidate-bound external proof."
-        )]),
+        Some(vec![
+            format!(
+                "Re-run the candidate's deterministic gates: homeboy agent-task recover {run_id} --regate"
+            ),
+            format!(
+                "Run homeboy agent-task recover {run_id} --promotion @replacement.json --authorize-external-proof <authorization> with candidate-bound external proof."
+            ),
+        ]),
     );
     error.details["recovery"] = serde_json::json!({
         "kind": "external_candidate_bound_proof_required",
         "run_id": run_id,
+        "regate_command": format!("homeboy agent-task recover {run_id} --regate"),
         "command": format!(
             "homeboy agent-task recover {run_id} --authorize-external-proof <proof-authorization> --authorize-interrupted-rerun <rerun-authorization> --verify '<candidate-bound command>'"
         ),

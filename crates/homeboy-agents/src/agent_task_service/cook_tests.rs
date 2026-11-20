@@ -10069,6 +10069,122 @@ fn deferred_candidate_recovers_with_verify_file_and_publishes() {
     });
 }
 
+/// #18315: a regate whose fresh gates fail is the latest gate run in the
+/// recover report and the persisted promotion status reads, not the stale
+/// deferred receipt it replaced; that receipt stays in promotion history.
+#[test]
+fn failing_regate_is_the_latest_gate_run_not_the_stale_receipt() {
+    with_corrected_gate_failure(false, |options, _| {
+        let run_id = &options.identity.initial_run_id;
+        persist_deferred_fixture(run_id);
+        let stale = persisted_promotion_for_attempt(run_id).unwrap().unwrap();
+        let command = "test \"$(cat tracked.txt)\" != promoted";
+        let (report, exit) = crate::agent_task_service::recover_cook(
+            run_id,
+            crate::agent_task_service::CookRecoveryRequest {
+                regate: true,
+                regate_inputs: crate::agent_task_service::CookRegateInputs {
+                    gates: Some(VerifyGateOptions {
+                        verify: vec![command.to_string()],
+                        ..Default::default()
+                    }),
+                    gate_timeout_seconds: None,
+                },
+                ..Default::default()
+            },
+            &ReplacementOnlyRecoveryPerformer,
+        )
+        .unwrap();
+        assert_ne!(exit, 0, "{report:#?}");
+        assert_eq!(
+            report.failure.as_ref().unwrap()["code"],
+            "agent_task.regate_gates_not_passing"
+        );
+        let result = report.result.as_ref().unwrap();
+        assert_eq!(result["deterministic_gates"][0]["command"], command);
+
+        let latest = persisted_promotion_for_attempt(run_id).unwrap().unwrap();
+        assert_eq!(latest.status, AgentTaskPromotionStatus::GateFailed);
+        assert_eq!(latest.deterministic_gates[0].command, command);
+        assert_ne!(latest.deterministic_gates, stale.deterministic_gates);
+        let run = &latest.provenance["regate_gate_run"];
+        assert_eq!(run["commands"][0], command);
+        assert_eq!(run["superseded_gate_run"]["status"], "gates_deferred");
+        assert!(latest.provenance.get("replacement_gate_proof").is_none());
+        let record = test_lifecycle_store().read_record(run_id).unwrap();
+        let history = crate::agent_task_service::recorded_promotion_history(&record.metadata)
+            .unwrap()
+            .unwrap();
+        assert!(history
+            .iter()
+            .any(|promotion| promotion["status"] == "gates_deferred"));
+        assert!(replacement_gate_fence(run_id).is_null());
+    });
+}
+
+/// #18042 / #18075: an interrupted regate leaves a start fence whose owner is
+/// gone. The next `recover --regate` is admitted without interrupted-rerun or
+/// external-proof authorization, re-runs the recorded gates once, and records
+/// why the fence was superseded.
+#[test]
+fn regate_after_interrupted_regate_fence_runs_without_extra_authorization() {
+    with_corrected_gate_failure(false, |mut options, _| {
+        let run_id = options.identity.initial_run_id.clone();
+        persist_deferred_fixture(&run_id);
+        let runs = tempfile::tempdir().unwrap();
+        let ledger = runs.path().join("runs");
+        // The machine-local ledger path travels as gate env so the visible
+        // gate stays reviewer-safe.
+        options
+            .gates
+            .gate_environment
+            .variables
+            .insert("GATE_RUN_LEDGER".to_string(), ledger.display().to_string());
+        options.gates.verify = vec![
+            "echo run >> \"$GATE_RUN_LEDGER\"; test \"$(cat tracked.txt)\" = promoted".to_string(),
+        ];
+        let recipes = CookRecipeStore::from_current_data_root().unwrap();
+        let mut recipe = recipes.load_recipe(&options.identity.cook_id).unwrap();
+        recipe.gate_policy = serde_json::to_value(&options.gates).unwrap();
+        recipes.persist_recipe(&recipe).unwrap();
+        // The interrupted regate's owner process is gone.
+        let store = test_lifecycle_store();
+        mark_replacement_gate_execution_started(&store, &run_id).unwrap();
+        agent_task_lifecycle::rewrite_record_for_test(&run_id, |record| {
+            record.metadata["replacement_gate_execution_fences"]["verify-replacement"]
+                ["owner_pid"] = serde_json::json!(u32::MAX);
+        })
+        .unwrap();
+
+        let (report, exit) = crate::agent_task_service::recover_cook(
+            &run_id,
+            crate::agent_task_service::CookRecoveryRequest {
+                regate: true,
+                ..Default::default()
+            },
+            &ReplacementOnlyRecoveryPerformer,
+        )
+        .unwrap();
+        assert_eq!(exit, 0, "{report:#?}");
+        assert_eq!(
+            report.step,
+            crate::agent_task_service::CookRecoveryStep::Regate
+        );
+        assert_eq!(std::fs::read_to_string(&ledger).unwrap().lines().count(), 1);
+        assert!(replacement_gate_fence(&run_id).is_null());
+        let record = store.read_record(&run_id).unwrap();
+        let supersession = &record.metadata["replacement_gate_execution_fence_supersessions"][0];
+        assert_eq!(supersession["superseded_by"], "regate");
+        assert_eq!(supersession["fence"]["owner_pid"], u32::MAX);
+        let promotion = persisted_promotion_for_attempt(&run_id).unwrap().unwrap();
+        assert_eq!(promotion.status, AgentTaskPromotionStatus::Applied);
+        assert_eq!(
+            promotion.provenance["replacement_gate_execution_recovery"]["superseded_by"],
+            "regate"
+        );
+    });
+}
+
 #[test]
 fn deferred_recovery_supervises_declared_gate_and_persists_unavailability() {
     with_corrected_gate_failure(false, |mut options, _| {
