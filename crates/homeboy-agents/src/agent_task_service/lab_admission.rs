@@ -35,8 +35,19 @@ pub fn execution_step_wait(record: &agent_task_lifecycle::AgentTaskRunRecord) ->
     } else {
         String::new()
     };
+    // Position among this controller's waiters for the runner, by lane.
+    let queue = match wait["queue_position"].as_u64() {
+        Some(position) => format!(
+            "; queue position {position} ({} ahead, {} lane)",
+            wait["waiters_ahead"]
+                .as_u64()
+                .unwrap_or(position.saturating_sub(1)),
+            wait["priority"].as_str().unwrap_or("normal")
+        ),
+        None => String::new(),
+    };
     let message = format!(
-        "runner {runner}: {reason}; waiting since {}{builds}; next action: {action}",
+        "runner {runner}: {reason}; waiting since {}{queue}{builds}; next action: {action}",
         wait["waiting_since"].as_str().unwrap_or("unknown")
     );
     wait["builds"] = context;

@@ -7,13 +7,51 @@ single slot remains available for forward progress on a saturated host. Missing
 or invalid load data falls back to the CPU bound. Existing work is not killed
 when load rises.
 
-Heavy execution and workflow steps take a slot before launching. Waiting owners
-with the fewest active slots go first, with arrival order breaking ties. A waiting
-step polls actively and releases its ticket on cancellation. Launcher steps do
-not hold a slot while waiting for children. By default, direct runner job
-reservations keep their configured concurrency limit unchanged. Waiting progress reports `waiting_for: lab_capacity`,
-`queue_position`, `load_average_1m`, and `effective_budget`. `eta_seconds` is null:
-load and provider durations do not support an honest completion estimate.
+Heavy execution and workflow steps take a slot before launching. A step's owner
+is its workflow instance (`root_durable_run_id`), else its linked run. Waiters are
+ordered by lane, then by the owner with the fewest active slots, then by arrival.
+A waiting step polls actively and releases its ticket on cancellation. Launcher
+steps do not hold a slot while waiting for children. By default, direct runner job
+reservations keep their configured concurrency limit unchanged.
+
+### Priority lanes
+
+A step declares its lane with `HOMEBOY_LAB_PRIORITY=high|normal` in its public
+environment (default `normal`). `homeboy agent-task cook --priority high` sets it
+for every step the Cook admits; any `HOMEBOY_*` value in the caller environment
+travels the same way. When a slot frees, `high` waiters are admitted before
+`normal` waiters. Within a lane, the existing least-occupied-owner then FIFO
+order applies. A Cook waiting on the controller for a runner (`capacity_reached`)
+is ranked the same way against other waiters for that runner on the same
+controller. A free runner slot goes to a `high` waiter first. `high` waiters
+re-probe at most every 5 seconds.
+
+### Owner share cap
+
+While another owner is waiting, one owner (for example a single workflow
+fan-out) cannot be admitted beyond `HOMEBOY_LAB_OWNER_MAX_SHARE` percent of the
+effective budget. Set this in the executing daemon environment (1-100, default
+50, never below one slot). An over-share owner is deferred behind every other
+waiter, even a higher-lane one. With nobody else waiting it can still fill idle
+slots. Running work is never preempted. Only waiters known to the same daemon
+count: Cooks queued on another controller are not visible to it.
+
+### Queue position and ETA
+
+Waiting progress reports `waiting_for: lab_capacity`, `queue_position`,
+`waiters_ahead`, `active_slots`, `priority`, `owner_slot_cap`,
+`load_average_1m`, `effective_budget`, and `eta_seconds` with
+`eta_kind: upper_bound_from_declared_budgets`. A step declares its expected run
+time with `HOMEBOY_LAB_BUDGET_SECONDS`. `eta_seconds` is the time until enough
+holders reach their declared budgets to free a slot for this position. It is an
+estimate and an upper bound: it assumes the budget stays fixed and no
+higher-ranked waiter arrives. It is null when too few holders declared a budget.
+The daemon `/capacity` response includes `step_queue`, with holders (owner, lane,
+elapsed, budget) and ranked waiters (position, owner, lane, wait, ETA).
+`agent-task capacity` lists those waiters. A Cook waiting on runner eligibility
+reports `queue_position`, `waiters_ahead`, and `priority` in its step wait. The
+`agent-task status` message shows them. No ETA is available there, because the
+controller cannot see the Lab holders' budgets.
 
 `homeboy agent-task capacity` includes Lab observations alongside provider
 account capacity. `homeboy runner doctor` includes a `lab_capacity` check.

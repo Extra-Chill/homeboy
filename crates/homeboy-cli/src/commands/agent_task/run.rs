@@ -8480,6 +8480,10 @@ fn run_preflight_cook_execution(
         initial_plan.metadata[agent_task_service_direct::COOK_ADMISSION_KEY_METADATA] =
             Value::String(key.clone());
     }
+    // Admission itself reads the exported HOMEBOY_LAB_PRIORITY step environment.
+    if let Some(priority) = &args.priority {
+        initial_plan.metadata["lab_priority"] = Value::String(priority.clone());
+    }
     if args.require_acceptance {
         let authority = args.acceptance_authority.clone().ok_or_else(|| {
             homeboy::core::Error::validation_invalid_argument(

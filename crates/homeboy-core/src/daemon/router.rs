@@ -109,6 +109,7 @@ where
             json!({
                 "capacity": crate::lab_capacity::observe(None),
                 "queued_steps": crate::lab_capacity::queued_steps(),
+                "step_queue": crate::lab_capacity::step_queue_snapshot(),
                 "gate_reserve": job_store.gate_capacity(),
                 "queued_work": job_store.active_runner_jobs().into_iter()
                     .filter(|job| job.status == JobStatus::Queued).collect::<Vec<_>>(),
