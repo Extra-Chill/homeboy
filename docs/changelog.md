@@ -4,6 +4,20 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.481.5] - 2026-11-20
+
+### Changed
+- remove unused execution lifecycle contracts
+- consolidate atomic file writes in engine primitives
+
+### Fixed
+- unify filesystem size walkers and free-space probes
+- consolidate UTF-8-safe truncation and slug primitives
+- unify reviewer URL host classification
+- preserve terminal continuation delivery failures
+- make replayed Lab transport events content-scoped
+- retry unavailable Lab gate supervision receipts
+
 ## [0.481.4] - 2026-11-20
 
 ### Fixed
