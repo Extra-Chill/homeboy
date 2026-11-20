@@ -135,9 +135,10 @@ pub struct VerifyGateOptions {
     /// Cadence for durable liveness and bounded output-tail updates.
     #[serde(default = "default_gate_heartbeat_interval_seconds")]
     pub gate_heartbeat_interval_seconds: u64,
-    /// Maximum time a gate may go without a liveness signal. Any output counts
-    /// until the gate emits its first `HOMEBOY_PROGRESS` marker; after that,
-    /// only markers count.
+    /// Maximum time a gate may go without a liveness signal. Any output, or
+    /// CPU/I/O work by the gate's process tree, counts until the gate emits its
+    /// first `HOMEBOY_PROGRESS` marker; after that, only markers count. Zero
+    /// disables the no-progress deadline.
     #[serde(default = "default_gate_no_progress_timeout_seconds")]
     pub gate_no_progress_timeout_seconds: u64,
     /// Completed adoption gates are reused by default; a recipe must opt in to
@@ -459,8 +460,10 @@ impl VerifyGateOptions {
         Duration::from_secs(self.gate_heartbeat_interval_seconds.max(1))
     }
 
+    /// The no-progress window. Zero disables the no-progress deadline, so only
+    /// the wall-clock gate timeout bounds the gate.
     pub fn gate_no_progress_timeout(&self) -> Duration {
-        Duration::from_secs(self.gate_no_progress_timeout_seconds.max(1))
+        Duration::from_secs(self.gate_no_progress_timeout_seconds)
     }
 
     /// Supervision carrying exactly the declared gate budgets with no-op
@@ -937,6 +940,12 @@ pub struct AgentTaskGateReport {
     /// one re-run: durable flake evidence, not a refusal (#18300).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub flaky: Option<AgentTaskGateFailureEvidence>,
+    /// The first run's evidence when supervision stopped this gate (wall-clock
+    /// or no-progress limit) and Homeboy re-ran it once on the same candidate
+    /// under the same budgets. Recorded alongside the re-run's own result
+    /// (#18554).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub supervision_regate: Option<AgentTaskGateFailureEvidence>,
 }
 
 /// Difference between the admitted candidate tree and the gate workspace
@@ -1765,6 +1774,7 @@ impl AgentTaskGateReport {
             workspace_mutation: None,
             label: None,
             flaky: None,
+            supervision_regate: None,
         }
     }
 
@@ -1829,7 +1839,31 @@ impl AgentTaskGateReport {
             workspace_mutation: None,
             label: None,
             flaky: None,
+            supervision_regate: None,
         }
+    }
+
+    /// Whether supervision stopped this gate at its wall-clock or no-progress
+    /// limit. The command never reached its own verdict, so this is an
+    /// infrastructure outcome, never candidate blame (#17958, #18554).
+    pub fn stopped_by_supervision(&self) -> bool {
+        self.status == AgentTaskGateStatus::Failed
+            && matches!(
+                self.termination,
+                AgentTaskGateTermination::TimedOut | AgentTaskGateTermination::NoProgress
+            )
+    }
+
+    /// Classify a supervision stop as unavailable verification: the candidate
+    /// stays unverified, not rejected, and the Cook stops at
+    /// `gate_environment_unavailable` with a re-gate next step instead of
+    /// `gate_failed`. The typed termination and budget evidence are kept.
+    fn classify_supervision_stop_as_unavailable(&mut self) {
+        if !self.stopped_by_supervision() {
+            return;
+        }
+        self.status = AgentTaskGateStatus::Unavailable;
+        placement::rebuild_terminal_step(self);
     }
 
     /// Whether a failure is the command's own verdict on the candidate, which
@@ -2817,15 +2851,51 @@ fn run_gate_argv_with_supervision(
             },
         )
     };
-    let report = run()?;
+    // Call sites that thread no explicit supervision still run inside the
+    // declared scope a Lab request reads.
+    let scope = crate::agent_task_promotion::active_gate_supervision();
+    let cancelled = || {
+        supervision
+            .or(scope.as_deref())
+            .is_some_and(|supervision| (supervision.is_cancelled)())
+    };
+    regate_after_supervision_stop(run, cancelled)
+}
+
+/// Run a gate, re-gating a supervision stop once and re-running a candidate
+/// failure once.
+///
+/// A supervision stop (wall-clock or no-progress limit) never reached the
+/// command's verdict, so it is re-run once on the same candidate, under the
+/// same declared budgets, without spending a provider attempt. A stop that
+/// repeats is classified as unavailable verification, never a candidate
+/// failure (#17958, #18554).
+fn regate_after_supervision_stop(
+    run: impl Fn() -> Result<AgentTaskGateReport>,
+    cancelled: impl Fn() -> bool,
+) -> Result<AgentTaskGateReport> {
+    let mut report = run()?;
+    let mut supervision_regate = None;
+    if report.stopped_by_supervision() && !cancelled() {
+        supervision_regate = report.failure_evidence.take();
+        report = run()?;
+    }
+    if report.stopped_by_supervision() {
+        report.classify_supervision_stop_as_unavailable();
+        report.supervision_regate = supervision_regate;
+        return Ok(report);
+    }
+    report.supervision_regate = supervision_regate;
     if !report.reruns_on_failure() {
         return Ok(report);
     }
     // A command that ran and failed is re-run once in the same workspace: a
     // single failure under host load (a test timeout, a race) is not proof
     // against the candidate. Only a second failure refuses it.
-    let rerun = run()?;
+    let mut rerun = run()?;
+    rerun.supervision_regate = report.supervision_regate.take();
     if rerun.status != AgentTaskGateStatus::Succeeded {
+        rerun.classify_supervision_stop_as_unavailable();
         return Ok(rerun);
     }
     Ok(AgentTaskGateReport {
@@ -2936,6 +3006,11 @@ fn run_gate_argv(
         let supervision = execution.supervision.or(scope.as_deref());
         let candidate =
             crate::agent_task_promotion::candidate_fingerprint(&cwd.display().to_string())?;
+        let timeout_seconds = execution
+            .timeout
+            .or_else(|| supervision.map(|policy| policy.timeout))
+            .unwrap_or(Duration::from_secs(1800))
+            .as_secs();
         let request = placement::LabGateRequest {
             schema: placement::LabGateRequestSchema::V2,
             preflight_only: false,
@@ -2951,14 +3026,17 @@ fn run_gate_argv(
             environment: with_controller_extension_sources(gate_environment, cwd),
             package_artifacts: package_artifacts.to_vec(),
             declared_plan: declared_plan.cloned(),
-            timeout_seconds: execution
-                .timeout
-                .or_else(|| supervision.map(|policy| policy.timeout))
-                .unwrap_or(Duration::from_secs(1800))
-                .as_secs(),
-            no_progress_timeout_seconds: supervision
+            timeout_seconds,
+            // A disabled (zero) no-progress window travels as the wall-clock
+            // limit, which every runner version reads as "bounded by the gate
+            // timeout only".
+            no_progress_timeout_seconds: match supervision
                 .map(|policy| policy.no_progress_timeout.as_secs())
-                .unwrap_or(300),
+                .unwrap_or(300)
+            {
+                0 => timeout_seconds.max(1),
+                seconds => seconds,
+            },
         };
         return placement::dispatch(cwd, &request, supervision);
     }
@@ -3133,7 +3211,9 @@ fn run_gate_argv_local(
                 containment.owner_mut().expect("attached gate owner"),
                 65_536,
                 timeout,
-                supervision.map(|supervision| supervision.no_progress_timeout),
+                supervision
+                    .map(|supervision| supervision.no_progress_timeout)
+                    .filter(|limit| !limit.is_zero()),
                 supervision
                     .map(|supervision| supervision.heartbeat_interval)
                     .unwrap_or(Duration::from_secs(5)),
@@ -6894,6 +6974,24 @@ fn gate_result_summary(report: &AgentTaskGateReport, command: &str) -> String {
         report.status,
         AgentTaskGateStatus::Deferred | AgentTaskGateStatus::Unavailable
     ) {
+        // A supervision stop ran but reached no verdict: name the limit, not
+        // the (possibly private) command.
+        let limit = match report.termination {
+            AgentTaskGateTermination::TimedOut => Some("wall-clock"),
+            AgentTaskGateTermination::NoProgress => Some("no-progress"),
+            _ => None,
+        };
+        if let Some(limit) = limit {
+            let regated = if report.supervision_regate.is_some() {
+                " again after one automatic re-gate"
+            } else {
+                ""
+            };
+            return format!(
+                "deterministic gate {} was stopped at its {limit} limit{regated} without reaching a verdict; {NON_EXECUTION_NEXT_STEP}",
+                report.id
+            );
+        }
         let cause = report
             .non_execution_cause()
             .unwrap_or_else(|| format!("deterministic gate {} did not execute", report.id));
@@ -9014,7 +9112,10 @@ mod tests {
 
     /// #18300: a gate that ran and failed is re-run once. Fail-then-pass
     /// passes with the first failure kept as flake evidence; a second failure
-    /// refuses; a budget stop is not re-run.
+    /// refuses. #18554: a supervision stop is not a candidate verdict: it is
+    /// re-gated once on the same candidate under the same budgets, a re-gate that
+    /// passes is green with the stop recorded alongside, and a repeated stop is
+    /// unavailable verification, never `failed`.
     #[test]
     fn a_failed_gate_is_rerun_once_and_a_recovered_failure_is_recorded_as_flaky() {
         let timeout = GateSupervision {
@@ -9025,22 +9126,39 @@ mod tests {
             on_heartbeat: Arc::new(|_| Ok(())),
             is_cancelled: Arc::new(|| false),
         };
-        for (script, supervision, status, flaky, expected_runs) in [
+        for (script, supervision, status, flaky, regated, expected_runs) in [
             (
                 "[ \"$(wc -l < \"$RUNS\")\" -ge 2 ] || { echo first run lost a race; exit 1; }",
                 None,
                 AgentTaskGateStatus::Succeeded,
                 true,
+                false,
                 2,
             ),
-            ("exit 1", None, AgentTaskGateStatus::Failed, false, 2),
-            ("true", None, AgentTaskGateStatus::Succeeded, false, 1),
+            ("exit 1", None, AgentTaskGateStatus::Failed, false, false, 2),
+            (
+                "true",
+                None,
+                AgentTaskGateStatus::Succeeded,
+                false,
+                false,
+                1,
+            ),
             (
                 "sleep 5",
                 Some(&timeout),
-                AgentTaskGateStatus::Failed,
+                AgentTaskGateStatus::Unavailable,
                 false,
-                1,
+                true,
+                2,
+            ),
+            (
+                "[ \"$(wc -l < \"$RUNS\")\" -ge 2 ] || sleep 5",
+                Some(&timeout),
+                AgentTaskGateStatus::Succeeded,
+                false,
+                true,
+                2,
             ),
         ] {
             let workspace = tempfile::tempdir().expect("workspace");
@@ -9060,6 +9178,13 @@ mod tests {
             .expect("gate report");
             assert_eq!(report.status, status, "{script}");
             assert_eq!(report.flaky.is_some(), flaky, "{script}");
+            assert_eq!(report.supervision_regate.is_some(), regated, "{script}");
+            if let Some(first) = &report.supervision_regate {
+                assert!(
+                    first.summary.contains("wall-clock limit of 200 ms"),
+                    "{first:?}"
+                );
+            }
             if let Some(first) = &report.flaky {
                 assert_eq!(first.exit_code, 1);
                 assert!(
@@ -10642,8 +10767,14 @@ mod tests {
             serde_json::to_value(evidence.classification).unwrap(),
             "execution_budget"
         );
+        // The stop was re-gated once under the same budgets; the first run's
+        // evidence is kept alongside, and the repeat is unavailable
+        // verification rather than a candidate failure (#18554).
         assert!(evidence.summary.contains("no output for 30 ms"));
         assert!(evidence.summary.contains("no_progress"));
+        let first = report.supervision_regate.as_ref().expect("first run");
+        assert!(first.summary.contains("no output for 30 ms"));
+        assert_eq!(report.status, AgentTaskGateStatus::Unavailable);
     }
 
     #[cfg(unix)]
@@ -10743,6 +10874,14 @@ mod tests {
             "{}",
             evidence.summary
         );
+        let first = report.supervision_regate.as_ref().expect("first run");
+        assert!(
+            first
+                .summary
+                .contains("no HOMEBOY_PROGRESS marker for 250 ms"),
+            "{}",
+            first.summary
+        );
     }
 
     /// A marker with `"liveness":"output"` hands a delegated phase (a cargo
@@ -10798,6 +10937,14 @@ mod tests {
                 .contains("no HOMEBOY_PROGRESS marker for 250 ms"),
             "{}",
             evidence.summary
+        );
+        let first = report.supervision_regate.as_ref().expect("first run");
+        assert!(
+            first
+                .summary
+                .contains("no HOMEBOY_PROGRESS marker for 250 ms"),
+            "{}",
+            first.summary
         );
     }
 
@@ -10880,6 +11027,8 @@ mod tests {
             "execution_budget"
         );
         assert!(evidence.summary.contains("wall-clock limit of 30 ms"));
+        let first = report.supervision_regate.as_ref().expect("first run");
+        assert!(first.summary.contains("wall-clock limit of 30 ms"));
     }
 
     #[test]

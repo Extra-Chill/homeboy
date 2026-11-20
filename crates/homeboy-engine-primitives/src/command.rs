@@ -170,6 +170,17 @@ impl ExecutionOwner {
     /// Sample work performed by tool descendants, excluding the workload root.
     /// Unsupported or unreadable counters provide no liveness evidence.
     pub fn descendant_activity(&self) -> DescendantActivity {
+        self.tree_activity(false)
+    }
+
+    /// Sample work performed by the whole workload tree, the root included.
+    /// A deterministic gate's root is its command (`sh -lc` often `exec`s it),
+    /// so the root's own CPU and I/O are workload progress too.
+    pub fn process_tree_activity(&self) -> DescendantActivity {
+        self.tree_activity(true)
+    }
+
+    fn tree_activity(&self, include_root: bool) -> DescendantActivity {
         #[cfg(target_os = "linux")]
         {
             if !root_identity_is_live(self.identity) {
@@ -184,9 +195,40 @@ impl ExecutionOwner {
                     Some((pid, linux_process_stat(pid)?))
                 })
                 .collect();
-            let mut owned = vec![self.identity.root_pid];
-            let mut cursor = 0;
+            fn record(activity: &mut DescendantActivity, pid: u32, stat: &LinuxProcStat) {
+                if stat.state == 'Z' {
+                    return;
+                }
+                let io = std::fs::read_to_string(format!("/proc/{pid}/io")).unwrap_or_default();
+                let counter = |name: &str| {
+                    io.lines()
+                        .find_map(|line| {
+                            let (key, value) = line.split_once(':')?;
+                            (key == name)
+                                .then(|| value.trim().parse::<u64>().ok())
+                                .flatten()
+                        })
+                        .unwrap_or(0)
+                };
+                if linux_process_stat(pid)
+                    .is_none_or(|current| current.starttime_ticks != stat.starttime_ticks)
+                {
+                    return;
+                }
+                activity.counters.insert(
+                    (pid, stat.starttime_ticks),
+                    [stat.cpu_ticks, counter("rchar"), counter("wchar")],
+                );
+            }
+            let root = self.identity.root_pid;
             let mut activity = DescendantActivity::default();
+            if include_root {
+                if let Some((pid, stat)) = processes.iter().find(|(pid, _)| *pid == root) {
+                    record(&mut activity, *pid, stat);
+                }
+            }
+            let mut owned = vec![root];
+            let mut cursor = 0;
             while cursor < owned.len() {
                 let parent = owned[cursor];
                 for (pid, stat) in &processes {
@@ -194,29 +236,7 @@ impl ExecutionOwner {
                         continue;
                     }
                     owned.push(*pid);
-                    if stat.state == 'Z' {
-                        continue;
-                    }
-                    let io = std::fs::read_to_string(format!("/proc/{pid}/io")).unwrap_or_default();
-                    let counter = |name: &str| {
-                        io.lines()
-                            .find_map(|line| {
-                                let (key, value) = line.split_once(':')?;
-                                (key == name)
-                                    .then(|| value.trim().parse::<u64>().ok())
-                                    .flatten()
-                            })
-                            .unwrap_or(0)
-                    };
-                    if linux_process_stat(*pid)
-                        .is_none_or(|current| current.starttime_ticks != stat.starttime_ticks)
-                    {
-                        continue;
-                    }
-                    activity.counters.insert(
-                        (*pid, stat.starttime_ticks),
-                        [stat.cpu_ticks, counter("rchar"), counter("wchar")],
-                    );
+                    record(&mut activity, *pid, stat);
                 }
                 cursor += 1;
             }
@@ -230,7 +250,7 @@ impl ExecutionOwner {
             let Ok(snapshot) = unix_process_snapshot() else {
                 return DescendantActivity::default();
             };
-            unix_descendant_activity(self.identity.root_pid, &snapshot)
+            unix_descendant_activity(self.identity.root_pid, &snapshot, include_root)
         }
         #[cfg(not(unix))]
         DescendantActivity::default()
@@ -2026,9 +2046,24 @@ pub fn wait_with_bounded_output_supervised_owned(
     )
 }
 
+/// How often the owned supervisor samples process-tree activity for a given
+/// no-progress window: often enough to observe several samples per window,
+/// rarely enough that a `/proc` scan stays negligible.
+fn activity_sample_interval(no_progress_timeout: Duration) -> Duration {
+    (no_progress_timeout / 4).clamp(Duration::from_millis(20), Duration::from_secs(5))
+}
+
 /// Supervise an [`ExecutionOwner`] with wall-clock and optional structured-progress
 /// deadlines. Cancellation requests owner drain rather than signaling the wait
 /// handle as a workload process group.
+///
+/// Wherever output counts as liveness, so does work by the workload tree: CPU
+/// time or I/O counters advancing for a live member
+/// ([`ExecutionOwner::process_tree_activity`]). A silent `npm ci` or a libtest
+/// suite that prints nothing until a test finishes is busy, not hung, so the
+/// no-progress deadline fires only when the tree is both silent and idle. The
+/// wall-clock `timeout` remains the hard limit. A zero `no_progress_timeout`
+/// disables the no-progress deadline.
 #[allow(clippy::too_many_arguments)]
 pub fn wait_with_bounded_output_supervised_with_progress_owned(
     owner: &mut ExecutionOwner,
@@ -2061,9 +2096,29 @@ pub fn wait_with_bounded_output_supervised_with_progress_owned(
             })
         }
     });
+    let no_progress_timeout = no_progress_timeout.filter(|limit| !limit.is_zero());
     let started = std::time::Instant::now();
     let mut last_heartbeat = started.checked_sub(heartbeat_interval).unwrap_or(started);
+    let mut activity = no_progress_timeout.map(|limit| {
+        (
+            owner.process_tree_activity(),
+            std::time::Instant::now(),
+            activity_sample_interval(limit),
+        )
+    });
     let (status, termination) = loop {
+        if let Some((previous, sampled_at, interval)) = activity.as_mut() {
+            if sampled_at.elapsed() >= *interval {
+                let current = owner.process_tree_activity();
+                if current.advanced_since(previous) {
+                    if let Ok(mut live) = live_output.lock() {
+                        live.last_activity_at = Some(std::time::Instant::now());
+                    }
+                }
+                *previous = current;
+                *sampled_at = std::time::Instant::now();
+            }
+        }
         if let Some(outcome) = owner.try_wait_outcome()? {
             break (
                 outcome.into_root_status()?,
@@ -2162,6 +2217,10 @@ struct LiveOutputTail {
     stderr: TailCapture,
     last_progress: Option<(CommandProgress, std::time::Instant)>,
     last_output_at: Option<std::time::Instant>,
+    /// Last time the supervised process tree advanced its CPU or I/O counters.
+    /// Counts as liveness exactly like output: a silent but busy build or test
+    /// run is making progress (#17958, #18554).
+    last_activity_at: Option<std::time::Instant>,
 }
 
 impl LiveOutputTail {
@@ -2171,6 +2230,7 @@ impl LiveOutputTail {
             stderr: TailCapture::new(byte_limit),
             last_progress: None,
             last_output_at: None,
+            last_activity_at: None,
         }
     }
 
@@ -2211,13 +2271,16 @@ impl LiveOutputTail {
     /// `HOMEBOY_PROGRESS` marker any output counts; once a command has emitted
     /// a marker it is instrumented, and only markers count, so chatty output
     /// cannot mask a stalled test case. A marker with `"liveness":"output"`
-    /// makes output count again until the next marker.
+    /// makes output count again until the next marker. Process-tree activity
+    /// counts wherever output does.
     fn quiet_for(&self, elapsed: Duration) -> Duration {
         let marker_at = self.last_progress.as_ref().map(|(_, at)| *at);
         let last_signal = if self.marker_only() {
             marker_at
         } else {
-            marker_at.max(self.last_output_at)
+            marker_at
+                .max(self.last_output_at)
+                .max(self.last_activity_at)
         };
         last_signal.map_or(elapsed, |at| at.elapsed())
     }
@@ -3019,10 +3082,15 @@ struct UnixProcessIdentity {
     cpu_time: Option<u64>,
 }
 
-/// Sample CPU progress of `root_pid`'s descendants (excluding the root), keyed
-/// by `(pid, kernel start time)` so a reused PID is never progress.
+/// Sample CPU progress of `root_pid`'s descendants (the root itself only when
+/// `include_root`), keyed by `(pid, kernel start time)` so a reused PID is
+/// never progress.
 #[cfg(all(unix, not(target_os = "linux")))]
-fn unix_descendant_activity(root_pid: u32, snapshot: &[UnixProcessIdentity]) -> DescendantActivity {
+fn unix_descendant_activity(
+    root_pid: u32,
+    snapshot: &[UnixProcessIdentity],
+    include_root: bool,
+) -> DescendantActivity {
     use std::hash::{Hash, Hasher};
 
     let parents: Vec<(u32, u32)> = snapshot
@@ -3030,7 +3098,10 @@ fn unix_descendant_activity(root_pid: u32, snapshot: &[UnixProcessIdentity]) -> 
         .map(|process| (process.pid, process.parent_pid))
         .collect();
     let mut activity = DescendantActivity::default();
-    for pid in walk_descendant_pids(root_pid, &parents).into_iter().skip(1) {
+    for pid in walk_descendant_pids(root_pid, &parents)
+        .into_iter()
+        .skip(usize::from(!include_root))
+    {
         let Some(process) = snapshot.iter().find(|process| process.pid == pid) else {
             continue;
         };
@@ -4683,6 +4754,72 @@ mod tests {
         .expect_err("heartbeat persistence failure stops gate");
         assert!(error.to_string().contains("durable heartbeat write failed"));
         assert_ne!(unsafe { libc::kill(pid as libc::pid_t, 0) }, 0);
+    }
+
+    /// #17958 / #18554: no-progress supervision counts process-tree work as
+    /// liveness. A silent tree that is burning CPU is busy, not hung, and runs
+    /// to completion; a silent idle tree is still stopped as `NoProgress`, and
+    /// a zero window disables the deadline so only the wall clock bounds it.
+    #[cfg(unix)]
+    #[test]
+    fn owned_no_progress_counts_process_tree_activity_as_liveness() {
+        let cases: [(&str, &str, Duration, SupervisedCommandTermination); 4] = [
+            (
+                "silent but busy descendant",
+                "while :; do :; done & busy=$!; sleep 1.5; kill $busy",
+                Duration::from_millis(400),
+                SupervisedCommandTermination::Completed,
+            ),
+            (
+                "silent but busy root",
+                "end=$(( $(date +%s) + 2 )); i=0; while [ $i -ge 0 ]; do i=$((i+1)); if [ $((i % 2000)) -eq 0 ] && [ $(date +%s) -ge $end ]; then exit 0; fi; done",
+                Duration::from_millis(400),
+                SupervisedCommandTermination::Completed,
+            ),
+            (
+                "silent and idle",
+                "sleep 5",
+                Duration::from_millis(400),
+                SupervisedCommandTermination::NoProgress,
+            ),
+            (
+                "zero window disables no-progress",
+                "sleep 1",
+                Duration::ZERO,
+                SupervisedCommandTermination::Completed,
+            ),
+        ];
+        for (name, script, no_progress, expected) in cases {
+            let mut command = Command::new("/bin/sh");
+            command
+                .args(["-c", script])
+                .stdout(std::process::Stdio::piped())
+                .stderr(std::process::Stdio::piped());
+            let mut owner = ExecutionOwner::spawn(&mut command).expect("spawn supervised root");
+            let started = std::time::Instant::now();
+            let supervised = wait_with_bounded_output_supervised_with_progress_owned(
+                &mut owner,
+                1024,
+                Duration::from_secs(20),
+                Some(no_progress),
+                Duration::from_millis(50),
+                None,
+                || false,
+                |_| Ok(()),
+            )
+            .expect("supervise silent command");
+            assert_eq!(supervised.termination, expected, "{name}");
+            assert!(
+                supervised.output.stdout.is_empty(),
+                "{name} must stay silent"
+            );
+            if expected == SupervisedCommandTermination::NoProgress {
+                assert!(
+                    started.elapsed() < Duration::from_secs(4),
+                    "{name}: an idle tree is stopped near its no-progress window"
+                );
+            }
+        }
     }
 
     #[cfg(unix)]

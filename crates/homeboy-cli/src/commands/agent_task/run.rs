@@ -1223,7 +1223,8 @@ fn cook_preview_resolved_request(args: &AgentTaskCookArgs, placement: Value) -> 
             // On Lab, dependency setup and the gate command share this one
             // time limit (#16938).
             "timeout_seconds": args.gates.gate_timeout_seconds.max(1),
-            "no_progress_timeout_seconds": args.gates.gate_no_progress_timeout_seconds.max(1),
+            // Zero means the no-progress deadline is disabled.
+            "no_progress_timeout_seconds": args.gates.gate_no_progress_timeout_seconds,
             // A repro must fail on base and pass on the candidate (#17653).
             "repro": args.repro.repro,
             "repro_warning": (!args.repro.is_declared())

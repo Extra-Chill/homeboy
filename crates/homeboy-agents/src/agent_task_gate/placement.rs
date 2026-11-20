@@ -1537,7 +1537,8 @@ impl LabGateBudget {
             started,
             deadline: started + limit,
             limit,
-            no_progress_limit: Duration::from_secs(request.no_progress_timeout_seconds.max(1)),
+            // Zero disables the no-progress deadline; the gate limit still holds.
+            no_progress_limit: Duration::from_secs(request.no_progress_timeout_seconds),
         }
     }
 
