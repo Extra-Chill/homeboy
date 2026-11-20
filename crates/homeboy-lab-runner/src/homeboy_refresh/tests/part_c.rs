@@ -391,3 +391,38 @@ fn unconverged_readiness_message_names_state_owners_and_next_action() {
         "must surface the exact continuation command"
     );
 }
+
+#[test]
+fn refresh_converges_when_only_host_pressure_pauses_admission() {
+    let paused = |fresh, reason: Option<DaemonStaleReasonCode>| {
+        let mut freshness = freshness(fresh, reason);
+        freshness.runtime_paths = Some(homeboy_core::daemon::DaemonRuntimeSnapshot {
+            pressure: Some(homeboy_core::runner_pressure::RunnerPressure {
+                cpu: Some(1680),
+                admission_reason: Some("pressure".to_string()),
+                ..Default::default()
+            }),
+            pressure_thresholds: Default::default(),
+            loaded_at: String::new(),
+            paths: Vec::new(),
+        });
+        refresh_readiness_from_status("homeboy-lab", &readiness_report(freshness))
+    };
+
+    let converged = paused(true, None);
+    assert_eq!(converged.state, HomeboyRefreshReadinessState::Ready);
+    assert!(!converged.accepting_jobs);
+    assert!(converged.continuation.is_none());
+    assert_eq!(
+        converged.admission_paused.as_deref(),
+        Some("runner on target; admission paused (pressure, cpu PSI 16.80)")
+    );
+
+    // Pressure never masks a daemon that is genuinely off target.
+    let stale = paused(
+        false,
+        Some(DaemonStaleReasonCode::LabContractVersionMismatch),
+    );
+    assert_eq!(stale.state, HomeboyRefreshReadinessState::Blocked);
+    assert!(stale.admission_paused.is_none());
+}
