@@ -167,6 +167,7 @@ fn status_without_feedback(args: StatusArgs) -> CmdResult<Value> {
     }
     // Status is a pure projection (#13697, #15718): every read below is
     // bounded and never initializes, migrates, or reconciles durable state.
+    value["failure"] = Value::Null;
     if let Ok(record) = bounded_exact_record(&target.run_id) {
         let outcome = cook_outcome_record(&args, &record);
         let outcome = outcome.as_ref().unwrap_or(&record);
@@ -239,6 +240,7 @@ fn status_without_feedback(args: StatusArgs) -> CmdResult<Value> {
             });
             value["lab_staging_diagnostic"] = collected_diagnostic_value(diagnostic);
         }
+        attach_gate_failure(&mut value, &record);
     }
     attach_promotion_replay(&mut value, &target.run_id, &args.run_id);
     if value["action_eligibility"]["actions"]
@@ -296,7 +298,9 @@ fn bounded_exact_record(run_id: &str) -> homeboy::core::Result<AgentTaskRunRecor
 }
 
 fn attach_promotion_replay(value: &mut Value, run_id: &str, requested_id: &str) {
-    if crate::commands::agent_task_summary::live_gate_verifying(value) {
+    if !value["failure"].is_null()
+        || crate::commands::agent_task_summary::live_gate_verifying(value)
+    {
         return;
     }
     let Ok(record) = bounded_exact_record(run_id) else {
@@ -1047,8 +1051,11 @@ fn preserve_controller_owner_placement_with_prefix(
             }
         }
         Value::Object(values) => {
-            for value in values.values_mut() {
-                preserve_controller_owner_placement_with_prefix(value, run_id, recovery_prefix);
+            for (key, value) in values.iter_mut() {
+                // Retained gate evidence is data, not a suggested lifecycle command.
+                if key != "failure" {
+                    preserve_controller_owner_placement_with_prefix(value, run_id, recovery_prefix);
+                }
             }
         }
         _ => {}
@@ -1143,3 +1150,83 @@ mod cancel_exit_code_tests;
 #[cfg(test)]
 #[path = "status/tests.rs"]
 mod tests;
+
+#[cfg(test)]
+mod gate_failure_projection_tests {
+    use super::*;
+
+    #[test]
+    fn status_and_diagnose_failure_table() {
+        for (status, private, termination, expected_action) in [
+            (
+                "failed",
+                false,
+                "completed",
+                "homeboy agent-task recover run",
+            ),
+            (
+                "failed",
+                true,
+                "completed",
+                "homeboy agent-task recover run",
+            ),
+            (
+                "failed",
+                false,
+                "no_progress",
+                "homeboy agent-task recover run --regate",
+            ),
+            ("succeeded", false, "completed", ""),
+        ] {
+            let stdout = (1..=50)
+                .map(|n| format!("line {n}"))
+                .collect::<Vec<_>>()
+                .join("\n");
+            let report = json!({"deterministic_gates": [{
+                "id": "verify", "status": status,
+                "visibility": if private { "private" } else { "public" },
+                "reveal_policy": "summary_only", "command": ["cargo", "test"],
+                "exit_code": 1, "termination": termination, "stdout": stdout,
+                "lab_receipt": {"artifact_ref": "homeboy://run/run/artifact/output"}
+            }]});
+            let failure = agent_task_service_direct::gate_failure_projection(&report);
+            let mut status_value = json!({"run": "run"});
+            let mut diagnose_value =
+                json!({"summary": "deterministic gates rejected the candidate"});
+            project_gate_failure(&mut status_value, failure.clone(), "run");
+            project_gate_failure(&mut diagnose_value, failure, "run");
+            let status_value = compact_control_plane_status(status_value);
+            assert_eq!(status_value["failure"], diagnose_value["failure"]);
+            if status == "succeeded" {
+                assert!(status_value["failure"].is_null());
+                continue;
+            }
+            let failure = &status_value["failure"];
+            assert_eq!(failure["gate"], "verify#1");
+            assert_eq!(failure["exit_code"], 1);
+            assert_eq!(failure["termination"], termination);
+            assert_eq!(failure["artifact"], "homeboy://run/run/artifact/output");
+            if private {
+                assert!(failure["command"].is_null());
+                assert!(failure["output_tail"].is_null());
+            } else {
+                assert_eq!(failure["command"], "cargo test");
+                let tail = failure["output_tail"].as_str().unwrap();
+                assert_eq!(tail.lines().count(), 40);
+                assert!(tail.starts_with("line 11\n"));
+            }
+            for value in [&status_value, &diagnose_value] {
+                assert_eq!(value["next_action"]["command"], expected_action);
+                if termination == "no_progress" {
+                    let suggestion = value["next_action"]["description"].as_str().unwrap();
+                    assert!(suggestion.contains("--gate-timeout-seconds"));
+                    assert!(suggestion.contains("--gate-no-progress-timeout-seconds"));
+                }
+            }
+            let summary = diagnose_value["summary"].as_str().unwrap();
+            assert!(summary.contains("verify#1"));
+            assert!(summary.contains("exit 1"));
+            assert!(summary.contains("homeboy://run/run/artifact/output"));
+        }
+    }
+}
