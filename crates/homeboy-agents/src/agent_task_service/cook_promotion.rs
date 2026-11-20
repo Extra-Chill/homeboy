@@ -4762,21 +4762,18 @@ pub(crate) fn cook_failure_context_with_stores(
                     .map(|error| error.message)
             });
             let retry_admitted = matches!(retry_refusal, Some(None));
-            let continuation_state = record.as_ref().and_then(|record| {
-                super::cook_recipe::continuation_state_in_store(
-                    &super::cook_recipe::CookRecipeStore::for_lifecycle_store(lifecycle_store),
-                    cook_id,
-                    &record.run_id,
-                )
-                .ok()
+            use agent_task_lifecycle::cook_run_state::cook_settlement_in_store;
+            let recipes = super::cook_recipe::CookRecipeStore::for_lifecycle_store(lifecycle_store);
+            let settlement = record.as_ref().and_then(|record| {
+                cook_settlement_in_store(&recipes, cook_id, &record.run_id).ok()
             });
-            let continuation_pending =
-                continuation_state == Some(super::cook_recipe::CookContinuationState::Pending);
             let continuation_admitted = continuation_action_admitted(
                 record
                     .as_ref()
                     .and_then(|record| record.metadata.get("cook_continuation_admission")),
-                retry_admitted || (cook_status.is_gate_failure() && continuation_pending),
+                retry_admitted
+                    || (cook_status.is_gate_failure()
+                        && settlement.as_ref().is_some_and(|s| s.pending())),
             );
             let involuntary_cancellation_retry_admitted = retry_admitted
                 && record
@@ -4844,8 +4841,8 @@ pub(crate) fn cook_failure_context_with_stores(
                 retry_refusal.as_deref(),
                 involuntary_cancellation_retry_admitted,
                 exact_checkpoint_candidate_mismatch(&diagnostic),
-                continuation_state == Some(super::cook_recipe::CookContinuationState::Failed),
-                continuation_state == Some(super::cook_recipe::CookContinuationState::Completed),
+                settlement.as_ref().is_some_and(|s| s.failed()),
+                settlement.as_ref().is_some_and(|s| s.completed()),
                 continuation_refusal.as_deref(),
                 provider_outcome_missing,
                 agent_incomplete_reason(lifecycle_store, record_run_id).as_deref(),

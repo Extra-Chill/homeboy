@@ -311,30 +311,13 @@ fn settled_cook_outcome(
     cook_id: &str,
     record: agent_task_lifecycle::AgentTaskRunRecord,
 ) -> WorkflowRunOutcome {
-    if !record.state().is_terminal() {
+    use agent_task_lifecycle::cook_run_state::cook_settlement_in_store;
+    if !record.state().is_terminal()
+        || super::CookRecipeStore::from_current_data_root()
+            .and_then(|store| cook_settlement_in_store(&store, cook_id, &record.run_id))
+            .is_ok_and(|settlement| !settlement.is_settled(&record, false))
+    {
         return WorkflowRunOutcome::Pending;
-    }
-    let continuation = super::CookRecipeStore::from_current_data_root()
-        .and_then(|store| super::continuation_state_in_store(&store, cook_id, &record.run_id));
-    match continuation {
-        Ok(super::CookContinuationState::Pending | super::CookContinuationState::Claimed) => {
-            return WorkflowRunOutcome::Pending;
-        }
-        // A runner-executed attempt that produced a candidate is promoted and
-        // finalized by the terminal continuation the controller admits once
-        // it projects the runner's result: until that continuation exists and
-        // ends, the Cook has not settled.
-        Ok(super::CookContinuationState::Absent)
-            if record.runner_id().is_some()
-                && matches!(
-                    record.state(),
-                    homeboy_lifecycle_contract::RunExecutionState::Succeeded
-                        | homeboy_lifecycle_contract::RunExecutionState::CandidateRecoverable
-                ) =>
-        {
-            return WorkflowRunOutcome::Pending;
-        }
-        _ => {}
     }
     // The Cook's outcome is its canonical subject read, the one `agent-task
     // status <cook>` and the control-plane API serve: an attempt record alone
