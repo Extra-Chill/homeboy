@@ -19,6 +19,15 @@
                   "result_resource_type": "agent_task_run"
                 },
                 {
+                  "action": "recover",
+                  "availability": "available",
+                  "confirmation": "none",
+                  "idempotent": true,
+                  "reason": "continue",
+                  "requires_revalidation": true,
+                  "result_resource_type": "agent_task_run"
+                },
+                {
                   "action": "resume",
                   "availability": "unavailable",
                   "confirmation": "none",
@@ -233,6 +242,15 @@
                   "result_resource_type": "agent_task_run"
                 },
                 {
+                  "action": "recover",
+                  "availability": "unavailable",
+                  "confirmation": "none",
+                  "idempotent": true,
+                  "reason": "Cook mission was fenced; its candidate is retired",
+                  "requires_revalidation": true,
+                  "result_resource_type": "agent_task_run"
+                },
+                {
                   "action": "resume",
                   "availability": "available",
                   "confirmation": "none",
@@ -336,6 +354,15 @@
                   "confirmation": "required",
                   "idempotent": true,
                   "reason": "Invalid argument 'run_id': agent-task run 'agent-task-b8697b3a-d156-407e-a099-e687fee69b09-attempt-1-1b68ad9a' is already terminal with state Failed",
+                  "requires_revalidation": true,
+                  "result_resource_type": "agent_task_run"
+                },
+                {
+                  "action": "recover",
+                  "availability": "available",
+                  "confirmation": "none",
+                  "idempotent": true,
+                  "reason": "resume",
                   "requires_revalidation": true,
                   "result_resource_type": "agent_task_run"
                 },

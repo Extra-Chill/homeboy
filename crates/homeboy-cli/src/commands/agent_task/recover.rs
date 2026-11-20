@@ -17,52 +17,19 @@ use super::super::CmdResult;
 use super::run::CookContinueArgs;
 use super::RecoverArgs;
 
+pub(crate) fn recovery_preflight(id: &str, rearm: bool) -> homeboy::core::Result<(Value, i32)> {
+    super::run::preflight_continue_cook(continuation_args(
+        id,
+        rearm,
+        &CookRecoveryOverrides::default(),
+    ))
+}
+
 pub(super) fn recover(args: RecoverArgs) -> CmdResult<Value> {
-    recover_using(args, resume_run, super::review::recover_candidate)
+    recover_action(args)
 }
 
-fn resume_run(args: RecoverArgs) -> CmdResult<Value> {
-    super::run::run_resume_with_executor(
-        args.id,
-        args.full,
-        args.idempotency_key,
-        std::sync::Arc::new(
-            homeboy::agents::agent_task_provider::ExtensionProviderAgentTaskExecutor::discover(),
-        ),
-    )
-}
-
-fn recover_using(
-    args: RecoverArgs,
-    resume: fn(RecoverArgs) -> CmdResult<Value>,
-    adopt: fn(RecoverArgs) -> CmdResult<Value>,
-) -> CmdResult<Value> {
-    if args.candidate_ref.is_some() {
-        return adopt(args);
-    }
-    let is_cook = agent_task_service::recipe_exists(&args.id)?
-        || agent_task_service::load_recipe_for_attempt(&args.id)?.is_some()
-        || homeboy::agents::agent_task_lifecycle::AgentTaskLifecycleStore::from_environment()?
-            .read_record(&args.id)
-            .is_ok_and(|record| {
-                record.state().is_terminal()
-                    && record.metadata["unmaterialized_cook_admission"].is_object()
-            });
-    if !is_cook && agent_task_service::cook_recovery_delegation(&args.id).is_none() {
-        if homeboy::agents::agent_task_lifecycle::AgentTaskLifecycleStore::from_environment()?
-            .read_record(&args.id)
-            .is_err()
-        {
-            return recover_with(args, &CliCookRecoveryPerformer);
-        }
-        if args.preflight {
-            return Ok((
-                serde_json::json!({"run_id": args.id, "step": {"kind": "resume"}, "preflight": true}),
-                0,
-            ));
-        }
-        return resume(args);
-    }
+fn recover_action(args: RecoverArgs) -> CmdResult<Value> {
     let wait = args.wait;
     let full = args.full;
     let timeout = args.timeout.clone();
@@ -77,8 +44,69 @@ fn recover_using(
             return Ok((receipt, 0));
         }
     }
-    let performer = CliCookRecoveryPerformer;
-    let (mut report, code) = recover_with(args, &performer)?;
+    use homeboy_control_plane_contract::*;
+    let id = args.id.clone();
+    let key = args
+        .idempotency_key
+        .clone()
+        .unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
+    let candidate_ref = args.candidate_ref.clone();
+    let attempt = args.attempt;
+    let adoption_model = args.adoption_model.clone();
+    let replace_interrupted = args.replace_interrupted;
+    let recovery = recovery_request(args)?;
+    let parameters = homeboy::agents::recovery_action::RecoverParameters {
+        preflight: recovery.preflight,
+        regate: recovery.regate,
+        unblock: recovery.unblock,
+        backend: recovery.overrides.backend,
+        selector: recovery.overrides.selector,
+        model: recovery.overrides.model,
+        acknowledge_model_override: recovery.overrides.acknowledge_model_override,
+        timeout_ms: recovery.overrides.timeout_ms,
+        candidate_ref,
+        attempt,
+        adoption_model,
+        replace_interrupted,
+        corrected_gates: recovery.corrected_gates,
+        replace_gates: recovery.replace_gates,
+        publish: Some(recovery.publish),
+    };
+
+    // A run with no lifecycle record (an unknown ID or a recipe-only Cook)
+    // has no control-plane resource, so the Cook planner answers directly.
+    let (mut report, code) =
+        if homeboy::agents::agent_task_lifecycle::AgentTaskLifecycleStore::from_environment()?
+            .read_record(&id)
+            .is_err()
+        {
+            homeboy::agents::recovery_action::execute(&id, parameters)?
+        } else {
+            let request = ControlPlaneActionRequest {
+                schema: CONTROL_PLANE_ACTION_REQUEST_SCHEMA.into(),
+                effect_id: action_effect_id("cli", &id, "recover", &key),
+                action: ControlPlaneAction::Recover,
+                idempotency_key: key,
+                actor: "cli".into(),
+                expected_updated_at: None,
+                confirmed: true,
+                parameters: ControlPlaneActionPayload {
+                    schema: CONTROL_PLANE_RECOVER_PARAMETERS_SCHEMA.into(),
+                    data: serde_json::to_value(parameters)
+                        .map_err(|e| homeboy::core::Error::internal_json(e.to_string(), None))?,
+                },
+            };
+            let mut ack = homeboy::agents::orchestration::execute_action_from_current_environment(
+                &id, &request,
+            )?;
+            match ack.result.data["exit_code"].as_i64() {
+                Some(code) => (ack.result.data["report"].take(), code as i32),
+                None => (
+                    serde_json::json!({"run_id": id, "failure": {"message": ack.message}}),
+                    1,
+                ),
+            }
+        };
     if wait && report["admission"].is_object() {
         let run_id = report["run_id"].as_str().unwrap().to_string();
         let (status, exit_code) = super::status::wait_for_recovery_status(&run_id, full, duration)?;
@@ -98,6 +126,7 @@ fn recover_using(
     Ok((report, code))
 }
 
+#[cfg(test)]
 pub(super) fn recover_with(
     args: RecoverArgs,
     performer: &dyn CookRecoveryPerformer,
@@ -225,80 +254,13 @@ pub(super) fn continuation_args(
     }
 }
 
-struct CliCookRecoveryPerformer;
-
-impl CookRecoveryPerformer for CliCookRecoveryPerformer {
-    fn admit_step(
-        &self,
-        report: &agent_task_service::CookRecoveryReport,
-        overrides: &CookRecoveryOverrides,
-    ) -> homeboy::core::Result<Option<Value>> {
-        agent_task_service::admit_recovery_execution_step(report, overrides).map(Some)
-    }
-    fn continue_cook(
-        &self,
-        run_id: &str,
-        rearm: bool,
-        overrides: &CookRecoveryOverrides,
-    ) -> homeboy::core::Result<(Value, i32)> {
-        let _ = (run_id, rearm, overrides);
-        Err(homeboy::core::Error::internal_unexpected(
-            "recovery continuation must be admitted as a daemon execution step",
-        ))
-    }
-
-    fn preflight_continue_cook(
-        &self,
-        run_id: &str,
-        rearm: bool,
-    ) -> homeboy::core::Result<(Value, i32)> {
-        super::run::preflight_continue_cook(continuation_args(
-            run_id,
-            rearm,
-            &CookRecoveryOverrides::default(),
-        ))
-    }
-
-    /// Return once the successor is admitted; never wait on the retry (#17768).
-    fn retry(&self, run_id: &str) -> homeboy::core::Result<(Value, i32)> {
-        super::run::admit_retry_for_recovery(run_id)
-    }
-
-    fn reconcile(&self, run_id: &str) -> homeboy::core::Result<(Value, i32)> {
-        super::status::reconcile_run(super::args::ReconcileArgs {
-            all: false,
-            run_id: Some(run_id.to_string()),
-            dry_run: false,
-            apply: true,
-            idempotency_key: None,
-        })
-    }
-
-    fn adopt(&self, run_id: &str, candidate_ref: &str) -> homeboy::core::Result<(Value, i32)> {
-        let result = homeboy::agents::agent_task_service::
-            adopt_cook_candidate_with_options_dispatcher_and_executor_for_attempt(
-                run_id,
-                None,
-                candidate_ref,
-                homeboy::agents::agent_task_service::AgentTaskCandidateAdoptionOptions::default(),
-                crate::commands::infra::route::reconstruct_cook_attempt_dispatcher,
-                std::sync::Arc::new(
-                    homeboy::agents::agent_task_provider::ExtensionProviderAgentTaskExecutor::discover(),
-                ),
-            )?;
-        let value = serde_json::to_value(result.value)
-            .map_err(|error| homeboy::core::Error::internal_json(error.to_string(), None))?;
-        Ok((value, result.exit_code))
-    }
-}
-
 /// Execute only the step frozen by the daemon intent; never admit recursively.
 pub(crate) fn execute_admitted_step(
     run_id: &str,
     step: &agent_task_service::CookRecoveryStep,
     overrides: &CookRecoveryOverrides,
 ) -> homeboy::core::Result<i32> {
-    let performer = CliCookRecoveryPerformer;
+    let performer = homeboy::agents::recovery_action::ControlPlaneRecoveryPerformer;
     if !overrides.is_empty() {
         return super::run::continue_cook(continuation_args(
             run_id,
@@ -338,87 +300,6 @@ mod tests {
 
     use crate::cli_surface::{Cli, Commands};
     use crate::commands::agent_task::AgentTaskCommand;
-
-    #[test]
-    fn recover_dispatches_resume_and_candidate_adoption() {
-        crate::test_support::with_isolated_home(|_| {
-            homeboy::agents::agent_task_lifecycle::submit_plan(
-                &homeboy::agents::agent_tasks::scheduler::AgentTaskPlan::new(
-                    "resume-test",
-                    Vec::new(),
-                ),
-                Some("run-1"),
-            )
-            .unwrap();
-            for (flags, expected) in [
-                (vec![], "resume"),
-                (vec!["--preflight"], "resume"),
-                (
-                    vec![
-                        "--candidate-ref",
-                        "abc123",
-                        "--attempt",
-                        "2",
-                        "--adoption-model",
-                        "author-model",
-                        "--replace-interrupted",
-                    ],
-                    "adopt",
-                ),
-            ] {
-                let mut argv = vec!["homeboy", "agent-task", "recover", "run-1"];
-                argv.extend(flags);
-                let Commands::AgentTask(task) = Cli::try_parse_from(argv).unwrap().command else {
-                    panic!("agent-task")
-                };
-                let AgentTaskCommand::Recover(args) = task.command else {
-                    panic!("recover")
-                };
-                let preflight = args.preflight;
-                let (report, code) = super::recover_using(
-                    args,
-                    |args| {
-                        assert!(!args.preflight, "preflight must not resume");
-                        Ok((serde_json::json!({"performed": "resume"}), 0))
-                    },
-                    |args| {
-                        assert_eq!(args.candidate_ref.as_deref(), Some("abc123"));
-                        assert_eq!(args.attempt, Some(2));
-                        assert_eq!(args.adoption_model.as_deref(), Some("author-model"));
-                        assert!(args.replace_interrupted);
-                        Ok((serde_json::json!({"performed": "adopt"}), 0))
-                    },
-                )
-                .unwrap();
-                assert_eq!(code, 0);
-                if preflight {
-                    assert_eq!(report["step"]["kind"], expected);
-                    assert!(report.get("performed").is_none());
-                } else {
-                    assert_eq!(report["performed"], expected);
-                }
-            }
-            for flags in [
-                vec!["--preflight"],
-                vec!["--regate"],
-                vec!["--model", "route-model"],
-                vec!["--backend", "backend"],
-                vec!["--selector", "selector"],
-                vec!["--timeout-ms", "1000"],
-            ] {
-                let mut argv = vec![
-                    "homeboy",
-                    "agent-task",
-                    "recover",
-                    "run-1",
-                    "--candidate-ref",
-                    "abc123",
-                ];
-                argv.extend(flags);
-                assert!(Cli::try_parse_from(argv).is_err());
-            }
-        });
-    }
 
     /// A Cook whose admission failed before materializing is relaunched from
     /// its recorded admission inputs under a fresh run id, and replaying

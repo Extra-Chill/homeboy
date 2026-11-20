@@ -16,6 +16,36 @@ pub const CONTROL_PLANE_CANCEL_PARAMETERS_SCHEMA: &str =
 pub const CONTROL_PLANE_CANCEL_RESULT_SCHEMA: &str = "homeboy/control-plane-cancel-result/v1";
 pub const CONTROL_PLANE_RETRY_PARAMETERS_SCHEMA: &str = "homeboy/control-plane-retry-parameters/v1";
 pub const CONTROL_PLANE_RETRY_RESULT_SCHEMA: &str = "homeboy/control-plane-retry-result/v1";
+pub const CONTROL_PLANE_RECOVER_PARAMETERS_SCHEMA: &str =
+    "homeboy/control-plane-recover-parameters/v1";
+pub const CONTROL_PLANE_RECOVER_RESULT_SCHEMA: &str = "homeboy/control-plane-recover-result/v1";
+
+/// Recovery inputs; domain owners supply the typed gate and publication values.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct ControlPlaneRecoverParameters<G = Value, P = Value, R = Value> {
+    #[serde(default)]
+    pub preflight: bool,
+    #[serde(default)]
+    pub regate: bool,
+    #[serde(default)]
+    pub unblock: bool,
+    pub backend: Option<String>,
+    pub selector: Option<String>,
+    pub model: Option<String>,
+    #[serde(default)]
+    pub acknowledge_model_override: bool,
+    pub timeout_ms: Option<u64>,
+    pub candidate_ref: Option<String>,
+    pub attempt: Option<u32>,
+    pub adoption_model: Option<String>,
+    #[serde(default)]
+    pub replace_interrupted: bool,
+    pub corrected_gates: Option<G>,
+    pub publish: Option<P>,
+    pub replace_gates: Option<R>,
+}
+
 pub const CONTROL_PLANE_ACTION_ID_BOUND: usize = 128;
 
 /// Builds the durable effect identity for an action without coupling it to the
@@ -290,6 +320,7 @@ impl ControlPlaneActionRequest {
             }
         }
         let (name, expected_schema) = match self.action {
+            ControlPlaneAction::Recover => ("recover", CONTROL_PLANE_RECOVER_PARAMETERS_SCHEMA),
             ControlPlaneAction::Cancel => ("cancel", CONTROL_PLANE_CANCEL_PARAMETERS_SCHEMA),
             ControlPlaneAction::Promote => ("promote", CONTROL_PLANE_PROMOTE_PARAMETERS_SCHEMA),
             ControlPlaneAction::Reconcile => {
@@ -316,6 +347,24 @@ impl ControlPlaneActionRequest {
             return Err(crate::ControlPlaneError::invalid_argument(
                 "resume parameters must be an object",
             ));
+        }
+        if self.action == ControlPlaneAction::Recover {
+            let parameters = serde_json::from_value::<ControlPlaneRecoverParameters>(
+                self.parameters.data.clone(),
+            )
+            .map_err(|error| {
+                crate::ControlPlaneError::invalid_argument(format!("recover parameters: {error}"))
+            })?;
+            if parameters.preflight && parameters.candidate_ref.is_some() {
+                return Err(crate::ControlPlaneError::invalid_argument(
+                    "candidate adoption cannot be combined with preflight",
+                ));
+            }
+            if parameters.acknowledge_model_override && parameters.model.is_none() {
+                return Err(crate::ControlPlaneError::invalid_argument(
+                    "acknowledge_model_override requires model",
+                ));
+            }
         }
         if self.action == ControlPlaneAction::Cancel {
             let parameters: ControlPlaneCancelParameters =
@@ -444,6 +493,30 @@ mod tests {
         let value = serde_json::to_value(&acknowledgement).expect("serialize");
         assert_eq!(value["schema"], CONTROL_PLANE_ACTION_ACKNOWLEDGEMENT_SCHEMA);
         assert_eq!(value["outcome"], "succeeded");
+    }
+
+    #[test]
+    fn recover_parameters_are_versioned_and_reject_unknown_inputs() {
+        let mut request = ControlPlaneActionRequest {
+            schema: CONTROL_PLANE_ACTION_REQUEST_SCHEMA.into(),
+            effect_id: action_effect_id("test", "run-1", "recover", "key"),
+            action: ControlPlaneAction::Recover,
+            idempotency_key: "key".into(),
+            actor: "test".into(),
+            expected_updated_at: None,
+            confirmed: true,
+            parameters: ControlPlaneActionPayload::empty(),
+        };
+        request.parameters = ControlPlaneActionPayload {
+            schema: CONTROL_PLANE_RECOVER_PARAMETERS_SCHEMA.into(),
+            data: serde_json::json!({}),
+        };
+        request.validate().unwrap();
+        assert_eq!(serde_json::to_value(request.action).unwrap(), "recover");
+        request.parameters.data = serde_json::json!({"preflight": true, "candidate_ref": "abc"});
+        assert!(request.validate().is_err());
+        request.parameters.data = serde_json::json!({"unexpected": true});
+        assert!(request.validate().is_err());
     }
 
     #[test]

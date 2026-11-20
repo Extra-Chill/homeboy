@@ -108,6 +108,43 @@ pub(crate) fn lifecycle_action_eligibility_with_roots(
     }
 }
 
+/// The `recover` entry for a single-run read, derived from the recovery step
+/// that read already projected (`ControlPlaneRun::recovery`) so the API and
+/// `recover` name the same step. A run without a Cook recovery projection
+/// recovers by resuming, so it mirrors the `resume` entry. Record writes never
+/// compute it: it reads the recovery planner, which is read-time only.
+pub(crate) fn recover_entry(
+    recovery: Option<&homeboy_control_plane_contract::ControlPlaneRecovery>,
+    report: &ControlPlaneActionEligibilityReport,
+) -> ControlPlaneActionEligibility {
+    let decision = match recovery {
+        Some(recovery) if recovery.step != "none" => available(recovery.step.clone()),
+        Some(recovery) => unavailable(format!(
+            "no recovery step is available; inspect with `{}`",
+            recovery.command
+        )),
+        None => match report
+            .actions
+            .iter()
+            .find(|entry| entry.action == ControlPlaneAction::Resume)
+        {
+            Some(resume) if resume.availability == ControlPlaneActionAvailability::Available => {
+                available("resume")
+            }
+            Some(resume) => unavailable(resume.reason.clone()),
+            None => unavailable("run has no recovery step"),
+        },
+    };
+    action(
+        ControlPlaneAction::Recover,
+        decision,
+        ControlPlaneActionConfirmation::None,
+        Vec::new(),
+        true,
+        "agent_task_run",
+    )
+}
+
 /// Reconcile is offered exactly when the fleet reconciler would select the run.
 ///
 /// Both read the one liveness rule, `liveness_for_record` (the classifier
