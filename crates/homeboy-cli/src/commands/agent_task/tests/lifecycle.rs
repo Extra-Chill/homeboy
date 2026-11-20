@@ -1827,10 +1827,14 @@ fn invalid_cook_sources_stop_before_worktree_provider_runner_executor_or_budget(
             let executor = Arc::new(CountingCookExecutor::default());
             let dispatcher = Arc::new(CountingCookDispatcher::default());
 
-            let error = run_cook_with_executor_and_dispatcher(
+            let error = run_cook(
                 cook_args_from_cli(command),
-                executor.clone(),
-                Some(dispatcher.clone()),
+                CookEntryContext {
+                    executor: executor.clone(),
+                    attempt_dispatcher: Some(dispatcher.clone()),
+                    progress: None,
+                    provenance: None,
+                },
             )
             .expect_err(diagnostic);
 
@@ -2121,10 +2125,14 @@ fn cook_runner_preflight_failure_is_visible_through_public_commands() {
             unavailable: AtomicBool::new(true),
         });
 
-        let (failed, exit_code) = run_cook_with_executor_and_dispatcher(
+        let (failed, exit_code) = run_cook(
             recoverable_runner_cook_args(&source),
-            Arc::new(CapturingExecutor::default()),
-            Some(dispatcher.clone()),
+            CookEntryContext {
+                executor: Arc::new(CapturingExecutor::default()),
+                attempt_dispatcher: Some(dispatcher.clone()),
+                progress: None,
+                provenance: None,
+            },
         )
         .expect("runner preflight failure is durably reported");
         assert_eq!(exit_code, 1);
@@ -2430,10 +2438,14 @@ fn cli_cook_converges_recipe_lifecycle_and_index_after_transient_first_write_fai
         });
         agent_task_lifecycle::fail_next_record_write_for_test();
 
-        let (failed, exit_code) = run_cook_with_executor_and_dispatcher(
+        let (failed, exit_code) = run_cook(
             recoverable_runner_cook_args(&source),
-            Arc::new(CapturingExecutor::default()),
-            Some(dispatcher),
+            CookEntryContext {
+                executor: Arc::new(CapturingExecutor::default()),
+                attempt_dispatcher: Some(dispatcher),
+                progress: None,
+                provenance: None,
+            },
         )
         .expect("CLI Cook converges its durable admission");
 
@@ -7320,9 +7332,14 @@ fn cook_without_gate_but_with_no_finalize_passes_the_gate_requirement() {
             .expect("create linked worktree")
             .success());
 
-        let result = run_cook_with_executor(
+        let result = run_cook(
             gate_requirement_cook_args(&target, false, true),
-            Arc::new(CapturingExecutor::default()),
+            CookEntryContext {
+                executor: Arc::new(CapturingExecutor::default()),
+                attempt_dispatcher: None,
+                progress: None,
+                provenance: None,
+            },
         );
 
         if let Err(error) = result {
