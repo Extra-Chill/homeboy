@@ -367,7 +367,6 @@ fn a_no_change_gate_failure_is_recoverable_and_canonically_spelled() {
 /// both readings.
 #[test]
 fn a_candidate_recoverable_run_reads_the_same_before_and_after_delivery() {
-    use homeboy_control_plane_contract::{ControlPlaneAction, ControlPlaneActionAvailability};
     let context = homeboy_core::test_support::HermeticTestContext::new();
     let run_id = "run-cook-delivery-one-recoverable-state";
     let lifecycle_store = store_with_run(&context, run_id);
@@ -378,22 +377,14 @@ fn a_candidate_recoverable_run_reads_the_same_before_and_after_delivery() {
     aggregate.outcomes[0].status = crate::agent_task::AgentTaskOutcomeStatus::CandidateRecoverable;
     aggregate.events[0].state = ControlPlaneState::CandidateRecoverable;
     let recover_eligibility = |record: &AgentTaskRunRecord| {
-        lifecycle_action_eligibility(record, None)
-            .actions
-            .into_iter()
-            .find(|entry| entry.action == ControlPlaneAction::Promote)
-            .expect("promote action")
-            .availability
+        crate::agent_task_lifecycle::CookRunState::of(record).allows_regate()
     };
 
     let before = record_run_aggregate_in_store(&lifecycle_store, run_id, &plan, &aggregate)
         .expect("aggregate recorded");
     assert_eq!(aggregate.status(), RunExecutionState::CandidateRecoverable);
     assert_eq!(before.state(), RunExecutionState::CandidateRecoverable);
-    assert_eq!(
-        recover_eligibility(&before),
-        ControlPlaneActionAvailability::Indeterminate
-    );
+    assert!(recover_eligibility(&before));
 
     let after = record_promotion_in_store(
         &lifecycle_store,
@@ -410,8 +401,5 @@ fn a_candidate_recoverable_run_reads_the_same_before_and_after_delivery() {
         lifecycle_store.read_record(run_id).expect("reread").state(),
         RunExecutionState::CandidateRecoverable
     );
-    assert_eq!(
-        recover_eligibility(&after),
-        ControlPlaneActionAvailability::Indeterminate
-    );
+    assert!(recover_eligibility(&after));
 }

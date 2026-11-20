@@ -175,7 +175,6 @@ fn schema_error(action: &str, expected: &str, actual: &str) -> Error {
 fn action_name(action: ControlPlaneAction) -> &'static str {
     match action {
         ControlPlaneAction::Cancel => "cancel",
-        ControlPlaneAction::Promote => "promote",
         ControlPlaneAction::Reconcile => "reconcile",
         ControlPlaneAction::Recover => "recover",
         ControlPlaneAction::Resume => "resume",

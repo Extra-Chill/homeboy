@@ -75,9 +75,6 @@ pub const CONTROL_PLANE_PLACEMENT_UPDATE_PARAMETERS_SCHEMA: &str =
     "homeboy/control-plane-placement-update-parameters/v1";
 pub const CONTROL_PLANE_PLACEMENT_UPDATE_RESULT_SCHEMA: &str =
     "homeboy/control-plane-placement-update-result/v1";
-pub const CONTROL_PLANE_PROMOTE_PARAMETERS_SCHEMA: &str =
-    "homeboy/control-plane-promote-parameters/v1";
-pub const CONTROL_PLANE_PROMOTE_RESULT_SCHEMA: &str = "homeboy/control-plane-promote-result/v1";
 pub const CONTROL_PLANE_ACTION_INTENT_SCHEMA: &str = "homeboy/control-plane-action-intent/v1";
 pub const CONTROL_PLANE_ACTION_FENCE_SCHEMA: &str = "homeboy/control-plane-action-fence/v1";
 pub const CONTROL_PLANE_EFFECT_LEASE_SCHEMA: &str = "homeboy/control-plane-effect-lease/v1";
@@ -322,7 +319,6 @@ impl ControlPlaneActionRequest {
         let (name, expected_schema) = match self.action {
             ControlPlaneAction::Recover => ("recover", CONTROL_PLANE_RECOVER_PARAMETERS_SCHEMA),
             ControlPlaneAction::Cancel => ("cancel", CONTROL_PLANE_CANCEL_PARAMETERS_SCHEMA),
-            ControlPlaneAction::Promote => ("promote", CONTROL_PLANE_PROMOTE_PARAMETERS_SCHEMA),
             ControlPlaneAction::Reconcile => {
                 ("reconcile", CONTROL_PLANE_EMPTY_ACTION_PAYLOAD_SCHEMA)
             }
@@ -406,7 +402,6 @@ impl ControlPlaneActionRequest {
             self.action,
             ControlPlaneAction::Cancel
                 | ControlPlaneAction::PlacementUpdate
-                | ControlPlaneAction::Promote
                 | ControlPlaneAction::Retry
         ) && !self.confirmed
         {

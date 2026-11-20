@@ -497,42 +497,6 @@ impl CookRunPhase {
     }
 }
 
-/// A Cook verb whose legality the state decides.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum CookRunAction {
-    /// `agent-task recover`: plan and perform the one next recovery step.
-    Recover,
-    /// `agent-task recover --regate`: re-verify a retained candidate.
-    Regate,
-    /// `agent-task cancel`.
-    Cancel,
-    /// Re-enter the Cook continuation from its durable recipe.
-    Continue,
-    /// Promote a retained candidate into a target worktree.
-    Promote,
-}
-
-impl CookRunAction {
-    pub const ALL: [CookRunAction; 5] = [
-        Self::Recover,
-        Self::Regate,
-        Self::Cancel,
-        Self::Continue,
-        Self::Promote,
-    ];
-
-    pub fn as_str(self) -> &'static str {
-        match self {
-            Self::Recover => "recover",
-            Self::Regate => "regate",
-            Self::Cancel => "cancel",
-            Self::Continue => "continue",
-            Self::Promote => "promote",
-        }
-    }
-}
-
 /// The one classification of a Cook run, read by every surface.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct CookRunState {
@@ -683,7 +647,12 @@ impl CookRunState {
         self
     }
 
-    pub fn allows(&self, action: CookRunAction) -> bool {
+    pub fn allows_regate(&self) -> bool {
+        self.phase != CookRunPhase::Running
+            && self.allows(homeboy_control_plane_contract::ControlPlaneAction::Recover)
+    }
+
+    pub fn allows(&self, action: homeboy_control_plane_contract::ControlPlaneAction) -> bool {
         legal_actions(self).contains(&action)
     }
 }
@@ -835,8 +804,10 @@ fn terminal_status_label(record: &AgentTaskRunRecord, phase: CookRunPhase) -> St
 
 /// Every action `state` makes legal. Verbs refuse exactly what is absent here,
 /// so `status` can never advertise a verb that refuses the same run.
-pub fn legal_actions(state: &CookRunState) -> BTreeSet<CookRunAction> {
-    use CookRunAction as A;
+pub fn legal_actions(
+    state: &CookRunState,
+) -> BTreeSet<homeboy_control_plane_contract::ControlPlaneAction> {
+    use homeboy_control_plane_contract::ControlPlaneAction as A;
     use CookRunPhase as P;
     let mut actions = BTreeSet::new();
     if !state.terminal || state.live_owner {
@@ -849,14 +820,14 @@ pub fn legal_actions(state: &CookRunState) -> BTreeSet<CookRunAction> {
         // Admission or a live continuation owns every transition.
         P::Queued | P::Continuing => {}
         // Recovery first reconciles a running record whose owner is gone.
-        P::Running => {
-            actions.extend([A::Recover, A::Continue]);
-        }
-        P::CandidateRecoverable | P::Succeeded => {
-            actions.extend([A::Recover, A::Regate, A::Continue, A::Promote]);
-        }
-        P::PartialFailure | P::Failed | P::Cancelled | P::Unknown => {
-            actions.extend([A::Recover, A::Regate, A::Continue]);
+        P::Running
+        | P::CandidateRecoverable
+        | P::Succeeded
+        | P::PartialFailure
+        | P::Failed
+        | P::Cancelled
+        | P::Unknown => {
+            actions.insert(A::Recover);
         }
     }
     actions
@@ -865,7 +836,7 @@ pub fn legal_actions(state: &CookRunState) -> BTreeSet<CookRunAction> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use CookRunAction as A;
+    use homeboy_control_plane_contract::ControlPlaneAction as A;
     use CookRunPhase as P;
 
     fn record(state: RunExecutionState, metadata: Value) -> AgentTaskRunRecord {
@@ -903,7 +874,6 @@ mod tests {
             assert_eq!(state.liveness, AgentTaskLiveness::Stale);
             assert!(state.allows(A::Cancel));
             assert!(state.allows(A::Recover));
-            assert!(state.allows(A::Continue));
         }
     }
 
@@ -919,7 +889,6 @@ mod tests {
         assert_eq!(state.liveness, AgentTaskLiveness::Active);
         assert!(state.allows(A::Cancel));
         assert!(!state.allows(A::Recover));
-        assert!(!state.allows(A::Continue));
     }
 
     #[test]
@@ -1061,12 +1030,10 @@ mod tests {
                     let mut expected = match (fenced, phase) {
                         (_, _) if fenced || live_owner => all(&[]),
                         (true, _) | (false, P::Queued | P::Continuing) => all(&[]),
-                        (false, P::Running) => all(&[A::Recover, A::Continue]),
-                        (false, P::CandidateRecoverable | P::Succeeded) => {
-                            all(&[A::Recover, A::Regate, A::Continue, A::Promote])
-                        }
+                        (false, P::Running) => all(&[A::Recover]),
+                        (false, P::CandidateRecoverable | P::Succeeded) => all(&[A::Recover]),
                         (false, P::PartialFailure | P::Failed | P::Cancelled | P::Unknown) => {
-                            all(&[A::Recover, A::Regate, A::Continue])
+                            all(&[A::Recover])
                         }
                     };
                     if cancel {
@@ -1077,7 +1044,13 @@ mod tests {
                         actual, expected,
                         "{phase:?} fenced={fenced} live={live_owner}"
                     );
-                    for action in A::ALL {
+                    let current = state(phase, fenced, live_owner);
+                    assert_eq!(
+                        current.allows_regate(),
+                        expected.contains(&A::Recover) && phase != P::Running,
+                        "regate: {phase:?} fenced={fenced} live={live_owner}"
+                    );
+                    for action in [A::Recover, A::Cancel] {
                         assert_eq!(
                             state(phase, fenced, live_owner).allows(action),
                             expected.contains(&action),

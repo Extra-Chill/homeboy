@@ -1116,7 +1116,6 @@ fn control_plane_run_requires_action(
                 ControlPlaneAction::Resume
                     | ControlPlaneAction::PlacementUpdate
                     | ControlPlaneAction::Retry
-                    | ControlPlaneAction::Promote
             ) && action.availability == ControlPlaneActionAvailability::Available
         })
     })
@@ -1235,7 +1234,7 @@ pub(crate) fn wait_for_terminal_status(run_id: &str) -> CmdResult<Value> {
             run_id: run_id.to_string(),
             full: false,
             exact: false,
-            // A successful --no-finalize run may still offer Promote. Its
+            // A successful --no-finalize run may still offer follow-up actions. Its
             // available follow-up actions do not make terminal execution fail.
             strict_subject_exit: false,
             watch: true,
