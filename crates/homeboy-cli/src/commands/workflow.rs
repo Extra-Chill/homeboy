@@ -324,12 +324,10 @@ fn admit_with_resume(
                 return Err(Error::validation_invalid_argument(
                     "resume-from",
                     format!(
-                        "nothing to resume: `{source}` succeeded every step with this same definition and inputs, so a resume would reuse them all and run nothing"
+                        "nothing to resume: `{source}` succeeded every step with this same definition and inputs, so a resume would reuse them all and run nothing; to run it again, drop `--resume-from` and pass a new `--instance <name>`"
                     ),
                     None,
-                    Some(vec![
-                        "To run it again, admit a fresh instance: drop `--resume-from` and pass a new `--instance <name>`".to_string(),
-                    ]),
+                    None,
                 ));
             }
             inputs
