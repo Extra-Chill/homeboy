@@ -98,7 +98,9 @@ fn workload_metadata(
             path: resolved
                 .as_ref()
                 .map(|path| path.to_string_lossy().to_string()),
-            sha256: resolved.as_deref().and_then(sha256_file),
+            sha256: resolved
+                .as_deref()
+                .and_then(|path| content_hash::sha256_file(path).ok()),
             provenance: scenario.provenance.clone(),
         });
     }
@@ -332,7 +334,17 @@ mod tests {
             metadata.workloads[0].path.as_deref(),
             Some(workload.to_string_lossy().as_ref())
         );
-        assert_eq!(metadata.workloads[0].sha256.as_ref().unwrap().len(), 64);
+        assert_eq!(
+            metadata.workloads[0].sha256,
+            Some(content_hash::sha256_bytes(b"fn main() {}\n"))
+        );
+
+        // Unreadable workload metadata remains available without a content hash.
+        std::fs::remove_file(&workload).expect("remove workload");
+        let missing_workloads = workload_metadata(&results.scenarios, &component, &[]);
+        assert_eq!(missing_workloads.len(), 1);
+        assert_eq!(missing_workloads[0].id, "boot");
+        assert_eq!(missing_workloads[0].sha256, None);
         assert_eq!(
             metadata.provenance.labels,
             vec!["source: zendesk".to_string()]
