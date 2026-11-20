@@ -1520,7 +1520,7 @@ fn review_retry_context(run_id: &str) -> Value {
     serde_json::json!({
         "run_id": run_id,
         "retry_action": ControlPlaneAction::Retry,
-        "resume_action": ControlPlaneAction::Resume,
+        "recover_action": ControlPlaneAction::Recover,
     })
 }
 
@@ -2038,29 +2038,33 @@ impl OrchestrationService<LifecycleStoreLookup> {
                                 0,
                             ))
                         } else {
-                            let mut resume_request = request.clone();
-                            resume_request.action = ControlPlaneAction::Resume;
-                            resume_request.idempotency_key =
-                                homeboy_engine_primitives::content_hash::sha256_hex(
-                                    format!("recover-resume:{}", request.idempotency_key)
-                                        .as_bytes(),
-                                );
-                            resume_request.effect_id =
-                                homeboy_control_plane_contract::action_effect_id(
-                                    "recover",
-                                    &resolved,
-                                    "resume",
-                                    &request.idempotency_key,
-                                );
-                            resume_request.parameters = ControlPlaneActionPayload::empty();
-                            self.execute_action_with_delegates(
+                            let (outcome, resource, result, message) = self.continue_run(
                                 requested_id,
-                                &resume_request,
-                                retry,
+                                request,
+                                &record,
+                                &resolved,
                                 resume,
+                            )?;
+                            let report = serde_json::json!({
+                                "schema": CONTROL_PLANE_ACTION_ACKNOWLEDGEMENT_SCHEMA,
+                                "acknowledgement": acknowledgement,
+                                "run": record.run_id,
+                                "action": request.action,
+                                "idempotency_key": request.idempotency_key,
+                                "actor": request.actor,
+                                "accepted_at": accepted_at,
+                                "completed_at": now_timestamp(),
+                                "outcome": outcome,
+                                "resource": resource,
+                                "result": result,
+                                "message": message,
+                            });
+                            crate::agent_task_action_result::resume_report(
+                                &result,
+                                outcome,
+                                report,
+                                message.as_deref(),
                             )
-                            .map_err(|error| run_boundary_error_to_homeboy(error, "recover", None))
-                            .and_then(|ack| crate::agent_task_action_result::resume_report(&ack))
                         }
                     } else {
                         crate::recovery_action::execute(&resolved, parameters)
@@ -2347,163 +2351,6 @@ impl OrchestrationService<LifecycleStoreLookup> {
                         ),
                     }
                 }
-                ControlPlaneAction::Resume
-                    if record
-                        .metadata
-                        .get("unmaterialized_cook_admission")
-                        .is_some_and(serde_json::Value::is_object) =>
-                {
-                    if record.state().is_terminal() {
-                        let terminal_error = record
-                            .metadata
-                            .get("cancel_reason")
-                            .and_then(serde_json::Value::as_str)
-                            .map(str::to_string)
-                            .or_else(|| {
-                                record.metadata["unmaterialized_cook_admission"]["reason"]
-                                    .as_str()
-                                    .map(str::to_string)
-                            });
-                        (
-                            ControlPlaneActionOutcome::AlreadySatisfied,
-                            project_record(&record, None)?,
-                            ControlPlaneActionPayload {
-                                schema: "homeboy/unmaterialized-cook-resume/v1".to_string(),
-                                data: serde_json::json!({
-                                    "schema": "homeboy/unmaterialized-cook-resume/v1",
-                                    "status": record.metadata["unmaterialized_cook_admission"]["state"],
-                                    "run_id": record.run_id,
-                                    "idempotent": true,
-                                    "terminal": true,
-                                    "terminal_state": record.state(),
-                                    "error": terminal_error,
-                                }),
-                            },
-                            None,
-                        )
-                    } else {
-                        let resumed = (|| -> homeboy_core::Result<_> {
-                            let rearmed =
-                                crate::agent_task_lifecycle::rearm_unmaterialized_cook_admission(
-                                    requested_id.as_str(),
-                                )?;
-                            let reconciliation = rearmed.metadata["execution_scheduling"].clone();
-                            let current = self.lookup.store.read_record(&resolved)?;
-                            Ok((current, reconciliation))
-                        })();
-                        match resumed {
-                            Ok((current, reconciliation)) => {
-                                // The re-armed admission waits on the local
-                                // controller daemon's scheduling.
-                                let data = with_scheduling_blocker(serde_json::json!({
-                                    "schema": "homeboy/unmaterialized-cook-resume/v1",
-                                    "status": current.metadata["unmaterialized_cook_admission"]["state"],
-                                    "run_id": requested_id,
-                                    "idempotent": true,
-                                    "reconciliation": reconciliation,
-                                    "execution_step_wait": crate::agent_task_service::execution_step_wait(&current),
-                                }));
-                                (
-                                    ControlPlaneActionOutcome::Succeeded,
-                                    project_record(&current, None)?,
-                                    ControlPlaneActionPayload {
-                                        schema: "homeboy/unmaterialized-cook-resume/v1".to_string(),
-                                        data,
-                                    },
-                                    None,
-                                )
-                            }
-                            Err(error) => (
-                                ControlPlaneActionOutcome::Failed,
-                                project_record(&record, None)?,
-                                ControlPlaneActionPayload::empty(),
-                                Some(redacted_bounded(&error.attributed_message(), MESSAGE_BOUND)),
-                            ),
-                        }
-                    }
-                }
-                ControlPlaneAction::Resume => {
-                    let needs_transport_recovery =
-                        crate::agent_task_service::terminal_transport_recovery_required(
-                            requested_id.as_str(),
-                        );
-                    let terminal_projection_recovery = record.state().is_terminal()
-                        && record.runner_id().is_some()
-                        && record.runner_job_id().is_some();
-                    // A terminal runner-backed CandidateRecoverable record
-                    // holds an unpromoted candidate. Re-reading its terminal
-                    // evidence cannot verify or promote anything: the cook
-                    // continuation owns that recovery. Name the cause instead
-                    // of exiting 1 silently (#15668).
-                    let candidate_recoverable_continuation = terminal_projection_recovery
-                        && record.state() == RunExecutionState::CandidateRecoverable;
-                    let resumed = (|| -> homeboy_core::Result<_> {
-                        if terminal_projection_recovery {
-                            crate::agent_task_service::reconcile_terminal_artifact_projection(
-                                &resolved,
-                            )?;
-                            let result = crate::agent_task_service::terminal_run_result(&resolved)?
-                                .ok_or_else(|| {
-                                    homeboy_core::Error::internal_unexpected(
-                                        "terminal transport recovery has no terminal result",
-                                    )
-                                })?;
-                            let current = self.lookup.store.read_record(&resolved)?;
-                            return Ok((result, current));
-                        }
-                        if needs_transport_recovery {
-                            crate::agent_task_service::recover_terminal_transport_proxy_evidence(
-                                requested_id.as_str(),
-                            )?;
-                        }
-                        let result = resume(&resolved, request)?;
-                        if needs_transport_recovery {
-                            crate::agent_task_service::reconcile_terminal_artifact_projection(
-                                requested_id.as_str(),
-                            )?;
-                        }
-                        let current = self.lookup.store.read_record(&resolved)?;
-                        Ok((result, current))
-                    })();
-                    match resumed {
-                        Ok((_, current)) if candidate_recoverable_continuation => (
-                            ControlPlaneActionOutcome::Failed,
-                            project_record(&current, None)?,
-                            ControlPlaneActionPayload::empty(),
-                            Some(redacted_bounded(
-                                &format!(
-                                    "run is candidate_recoverable holding an unpromoted candidate; resume only re-reads terminal evidence and cannot verify it: recover the cook with `homeboy agent-task recover {}`",
-                                    record.metadata["cook_id"]
-                                        .as_str()
-                                        .unwrap_or(record.run_id.as_str())
-                                ),
-                                MESSAGE_BOUND,
-                            )),
-                        ),
-                        Ok((result, current)) => (
-                            if record.state().is_terminal() {
-                                ControlPlaneActionOutcome::AlreadySatisfied
-                            } else {
-                                ControlPlaneActionOutcome::Succeeded
-                            },
-                            project_record(&current, None)?,
-                            ControlPlaneActionPayload {
-                                schema: CONTROL_PLANE_RESUME_RESULT_SCHEMA.to_string(),
-                                data: serde_json::json!({
-                                    "aggregate": result.value,
-                                    "exit_code": result.exit_code,
-                                }),
-                            },
-                            None,
-                        ),
-                        Err(error) => (
-                            ControlPlaneActionOutcome::Failed,
-                            project_record(&record, None)?,
-                            ControlPlaneActionPayload::empty(),
-                            Some(redacted_bounded(&error.attributed_message(), MESSAGE_BOUND)),
-                        ),
-                    }
-                }
             }
         };
         let result = ControlPlaneActionAcknowledgement {
@@ -2548,6 +2395,205 @@ impl OrchestrationService<LifecycleStoreLookup> {
             &result,
         )?;
         Ok(result)
+    }
+    fn continue_run<R>(
+        &self,
+        requested_id: &RunId,
+        request: &ControlPlaneActionRequest,
+        record: &AgentTaskRunRecord,
+        resolved: &str,
+        resume: R,
+    ) -> Result<
+        (
+            ControlPlaneActionOutcome,
+            ControlPlaneRun,
+            ControlPlaneActionPayload,
+            Option<String>,
+        ),
+        ControlPlaneError,
+    >
+    where
+        R: FnOnce(
+            &str,
+            &ControlPlaneActionRequest,
+        ) -> homeboy_core::Result<
+            crate::agent_task_service::AgentTaskRunResult<
+                crate::agent_task_schedule::AgentTaskAggregate,
+            >,
+        >,
+    {
+        // Terminal runner-backed runs reproject durable evidence, which is
+        // idempotent; every other continuation honours run eligibility.
+        let terminal_reprojection = record.state().is_terminal()
+            && record.runner_id().is_some()
+            && record.runner_job_id().is_some();
+        if !terminal_reprojection {
+            if let Some(reason) = eligibility_unavailability(record, ControlPlaneAction::Recover) {
+                return Ok((
+                    ControlPlaneActionOutcome::Failed,
+                    project_record(record, None)?,
+                    ControlPlaneActionPayload::empty(),
+                    Some(reason),
+                ));
+            }
+        }
+        Ok(
+            if record
+                .metadata
+                .get("unmaterialized_cook_admission")
+                .is_some_and(Value::is_object)
+            {
+                if record.state().is_terminal() {
+                    let terminal_error = record
+                        .metadata
+                        .get("cancel_reason")
+                        .and_then(serde_json::Value::as_str)
+                        .map(str::to_string)
+                        .or_else(|| {
+                            record.metadata["unmaterialized_cook_admission"]["reason"]
+                                .as_str()
+                                .map(str::to_string)
+                        });
+                    (
+                        ControlPlaneActionOutcome::AlreadySatisfied,
+                        project_record(&record, None)?,
+                        ControlPlaneActionPayload {
+                            schema: "homeboy/unmaterialized-cook-resume/v1".to_string(),
+                            data: serde_json::json!({
+                                "schema": "homeboy/unmaterialized-cook-resume/v1",
+                                "status": record.metadata["unmaterialized_cook_admission"]["state"],
+                                "run_id": record.run_id,
+                                "idempotent": true,
+                                "terminal": true,
+                                "terminal_state": record.state(),
+                                "error": terminal_error,
+                            }),
+                        },
+                        None,
+                    )
+                } else {
+                    let resumed = (|| -> homeboy_core::Result<_> {
+                        let rearmed =
+                            crate::agent_task_lifecycle::rearm_unmaterialized_cook_admission(
+                                requested_id.as_str(),
+                            )?;
+                        let reconciliation = rearmed.metadata["execution_scheduling"].clone();
+                        let current = self.lookup.store.read_record(&resolved)?;
+                        Ok((current, reconciliation))
+                    })();
+                    match resumed {
+                        Ok((current, reconciliation)) => {
+                            // The re-armed admission waits on the local
+                            // controller daemon's scheduling.
+                            let data = with_scheduling_blocker(serde_json::json!({
+                                "schema": "homeboy/unmaterialized-cook-resume/v1",
+                                "status": current.metadata["unmaterialized_cook_admission"]["state"],
+                                "run_id": requested_id,
+                                "idempotent": true,
+                                "reconciliation": reconciliation,
+                                "execution_step_wait": crate::agent_task_service::execution_step_wait(&current),
+                            }));
+                            (
+                                ControlPlaneActionOutcome::Succeeded,
+                                project_record(&current, None)?,
+                                ControlPlaneActionPayload {
+                                    schema: "homeboy/unmaterialized-cook-resume/v1".to_string(),
+                                    data,
+                                },
+                                None,
+                            )
+                        }
+                        Err(error) => (
+                            ControlPlaneActionOutcome::Failed,
+                            project_record(&record, None)?,
+                            ControlPlaneActionPayload::empty(),
+                            Some(redacted_bounded(&error.attributed_message(), MESSAGE_BOUND)),
+                        ),
+                    }
+                }
+            } else {
+                let needs_transport_recovery =
+                    crate::agent_task_service::terminal_transport_recovery_required(
+                        requested_id.as_str(),
+                    );
+                let terminal_projection_recovery = record.state().is_terminal()
+                    && record.runner_id().is_some()
+                    && record.runner_job_id().is_some();
+                // A terminal runner-backed CandidateRecoverable record
+                // holds an unpromoted candidate. Re-reading its terminal
+                // evidence cannot verify or promote anything: the cook
+                // continuation owns that recovery. Name the cause instead
+                // of exiting 1 silently (#15668).
+                let candidate_recoverable_continuation = terminal_projection_recovery
+                    && record.state() == RunExecutionState::CandidateRecoverable;
+                let resumed = (|| -> homeboy_core::Result<_> {
+                    if terminal_projection_recovery {
+                        crate::agent_task_service::reconcile_terminal_artifact_projection(
+                            &resolved,
+                        )?;
+                        let result = crate::agent_task_service::terminal_run_result(&resolved)?
+                            .ok_or_else(|| {
+                                homeboy_core::Error::internal_unexpected(
+                                    "terminal transport recovery has no terminal result",
+                                )
+                            })?;
+                        let current = self.lookup.store.read_record(&resolved)?;
+                        return Ok((result, current));
+                    }
+                    if needs_transport_recovery {
+                        crate::agent_task_service::recover_terminal_transport_proxy_evidence(
+                            requested_id.as_str(),
+                        )?;
+                    }
+                    let result = resume(&resolved, request)?;
+                    if needs_transport_recovery {
+                        crate::agent_task_service::reconcile_terminal_artifact_projection(
+                            requested_id.as_str(),
+                        )?;
+                    }
+                    let current = self.lookup.store.read_record(&resolved)?;
+                    Ok((result, current))
+                })();
+                match resumed {
+                        Ok((_, current)) if candidate_recoverable_continuation => (
+                            ControlPlaneActionOutcome::Failed,
+                            project_record(&current, None)?,
+                            ControlPlaneActionPayload::empty(),
+                            Some(redacted_bounded(
+                                &format!(
+                                    "run is candidate_recoverable holding an unpromoted candidate; resume only re-reads terminal evidence and cannot verify it: recover the cook with `homeboy agent-task recover {}`",
+                                    record.metadata["cook_id"]
+                                        .as_str()
+                                        .unwrap_or(record.run_id.as_str())
+                                ),
+                                MESSAGE_BOUND,
+                            )),
+                        ),
+                        Ok((result, current)) => (
+                            if record.state().is_terminal() {
+                                ControlPlaneActionOutcome::AlreadySatisfied
+                            } else {
+                                ControlPlaneActionOutcome::Succeeded
+                            },
+                            project_record(&current, None)?,
+                            ControlPlaneActionPayload {
+                                schema: CONTROL_PLANE_RESUME_RESULT_SCHEMA.to_string(),
+                                data: serde_json::json!({
+                                    "aggregate": result.value,
+                                    "exit_code": result.exit_code,
+                                }),
+                            },
+                            None,
+                        ),
+                        Err(error) => (
+                            ControlPlaneActionOutcome::Failed,
+                            project_record(&record, None)?,
+                            ControlPlaneActionPayload::empty(),
+                            Some(redacted_bounded(&error.attributed_message(), MESSAGE_BOUND)),
+                        ),
+                    }
+            },
+        )
     }
 }
 
@@ -2617,19 +2663,19 @@ fn action_unavailability(
     ) {
         return None;
     }
+    eligibility_unavailability(record, action)
+}
+
+/// The lifecycle eligibility verdict for `action`: fenced missions refuse every
+/// action, otherwise the run's eligibility report decides.
+fn eligibility_unavailability(
+    record: &AgentTaskRunRecord,
+    action: ControlPlaneAction,
+) -> Option<String> {
     if record.metadata.get("cancellation_fence").is_some()
         || record.metadata.get("candidate_retirement").is_some()
     {
         return Some("Cook mission is fenced; its candidate is retired".into());
-    }
-    if action == ControlPlaneAction::Resume
-        && record.state().is_terminal()
-        && record.runner_id().is_some()
-        && record.runner_job_id().is_some()
-    {
-        // This is an idempotent evidence/artifact reprojection, not execution
-        // resume. The Resume branch below performs only that recovery first.
-        return None;
     }
     let report = lifecycle_action_eligibility(record, None);
     let eligibility = report
@@ -2658,7 +2704,6 @@ fn recover_interrupted_action_acknowledgement(
         ))
     };
     let (outcome, resource, result, message) = match request.action {
-        ControlPlaneAction::Recover => failed("interrupted recovery requires authoritative reconciliation")?,
         ControlPlaneAction::Cancel if current.state().is_terminal() => (
             if current.state() == RunExecutionState::Cancelled {
                 ControlPlaneActionOutcome::Succeeded
@@ -2722,58 +2767,38 @@ fn recover_interrupted_action_acknowledgement(
                 )?
             }
         }
-        ControlPlaneAction::Resume
-            if current
-                .metadata
-                .get("unmaterialized_cook_admission")
-                .is_some_and(Value::is_object)
-                && current.state().is_terminal() =>
-        {
-            (
-                ControlPlaneActionOutcome::AlreadySatisfied,
-                project_record(&current, None)?,
-                ControlPlaneActionPayload {
-                    schema: "homeboy/unmaterialized-cook-resume/v1".to_string(),
-                    data: serde_json::json!({
-                        "schema": "homeboy/unmaterialized-cook-resume/v1",
-                        "status": current.metadata["unmaterialized_cook_admission"]["state"],
-                        "run_id": current.run_id,
-                        "idempotent": true,
-                        "terminal": true,
-                        "terminal_state": current.state(),
-                        "recovered": true,
-                    }),
-                },
-                Some("recovered from the durable terminal admission state".to_string()),
-            )
-        }
-                ControlPlaneAction::Resume if current.state().is_terminal() => {
+        ControlPlaneAction::Recover if current.state().is_terminal() && current.metadata["unmaterialized_cook_admission"].is_object() => (
+            ControlPlaneActionOutcome::Failed,
+            project_record(&current, None)?,
+            ControlPlaneActionPayload {
+                schema: homeboy_control_plane_contract::CONTROL_PLANE_RECOVER_RESULT_SCHEMA.into(),
+                data: serde_json::json!({"report": {"run_id": current.run_id, "terminal": true, "terminal_state": current.state(), "recovered": true}, "exit_code": 2}),
+            },
+            Some("recovered from the durable terminal admission state".into()),
+        ),
+        ControlPlaneAction::Recover if current.state().is_terminal() => {
             match crate::agent_task_lifecycle::read_aggregate_in_store(store, &current.run_id) {
                 Ok(aggregate) => {
                     let exit_code = crate::agent_task_service::aggregate_exit_code(&aggregate);
                     let aggregate =
                         crate::agent_task_artifacts::reviewer_facing_aggregate(&aggregate);
                     (
-                        ControlPlaneActionOutcome::AlreadySatisfied,
+                        if exit_code == 0 { ControlPlaneActionOutcome::Succeeded } else { ControlPlaneActionOutcome::Failed },
                         project_record(&current, None)?,
                         ControlPlaneActionPayload {
-                            schema: CONTROL_PLANE_RESUME_RESULT_SCHEMA.to_string(),
-                            data: serde_json::json!({
-                                "aggregate": aggregate,
-                                "exit_code": exit_code,
-                                "recovered": true,
-                            }),
+                            schema: homeboy_control_plane_contract::CONTROL_PLANE_RECOVER_RESULT_SCHEMA.to_string(),
+                            data: serde_json::json!({"report": aggregate, "exit_code": exit_code}),
                         },
                         Some("recovered from the durable terminal aggregate".to_string()),
                     )
                 }
                 Err(_) => failed(
-                    "resume was interrupted and the terminal run has no authoritative aggregate; no second execution was attempted",
+                    "recover was interrupted and the terminal run has no authoritative aggregate; no second execution was attempted",
                 )?,
             }
         }
-        ControlPlaneAction::Resume => failed(
-            "resume was interrupted after acceptance without authoritative terminal evidence; no second execution was attempted",
+        ControlPlaneAction::Recover => failed(
+            "recover was interrupted after acceptance without authoritative terminal evidence; no second execution was attempted",
         )?,
     };
 
@@ -3606,7 +3631,6 @@ const fn action_name(action: ControlPlaneAction) -> &'static str {
     match action {
         ControlPlaneAction::Recover => "recover",
         ControlPlaneAction::Cancel => "cancel",
-        ControlPlaneAction::Resume => "resume",
         ControlPlaneAction::PlacementUpdate => "placement_update",
         ControlPlaneAction::Retry => "retry",
         ControlPlaneAction::Reconcile => "reconcile",
@@ -3846,7 +3870,7 @@ where
     )
 }
 
-pub fn execute_resume_action_from_current_environment(
+pub fn execute_recover_action_from_current_environment(
     run_id: &str,
     request: &ControlPlaneActionRequest,
     executor: crate::agent_task_scheduler::SharedAgentTaskExecutor,
@@ -3962,6 +3986,9 @@ pub fn project_record(
     if !eligibility.actions.is_empty() {
         let recover =
             crate::agent_task_lifecycle::recover_entry(resource.recovery.as_ref(), &eligibility);
+        eligibility
+            .actions
+            .retain(|entry| entry.action != ControlPlaneAction::Recover);
         eligibility.actions.insert(0, recover);
     }
     resource.action_eligibility = Some(eligibility);
@@ -4206,8 +4233,11 @@ fn projected_cook_recovery(record: &AgentTaskRunRecord) -> Option<ControlPlaneRe
         .and_then(Value::as_str)
         .map(str::to_string)
         .or_else(|| {
-            crate::agent_task_lifecycle::is_unmaterialized_cook_admission(record)
-                .then(|| record.run_id.clone())
+            // A live admission is rearmed by continuing the run; only a
+            // terminal one is recovered as a Cook (`recovers_as_run`).
+            (record.state().is_terminal()
+                && crate::agent_task_lifecycle::is_unmaterialized_cook_admission(record))
+            .then(|| record.run_id.clone())
         })?;
     let quote = homeboy_core::engine::shell::quote_arg;
     // The step belongs to the Cook, not this attempt: a superseded attempt
@@ -6295,9 +6325,9 @@ mod tests {
         CONTROL_PLANE_ACTION_ELIGIBILITY_SCHEMA, CONTROL_PLANE_ACTION_INTENT_SCHEMA,
         CONTROL_PLANE_ACTION_REQUEST_SCHEMA, CONTROL_PLANE_CANCEL_PARAMETERS_SCHEMA,
         CONTROL_PLANE_EVENT_APPEND_REQUEST_SCHEMA, CONTROL_PLANE_EVENT_SCHEMA,
-        CONTROL_PLANE_REFERENCE_REGISTRATION_SCHEMA, CONTROL_PLANE_RESUME_RESULT_SCHEMA,
-        CONTROL_PLANE_RETRY_PARAMETERS_SCHEMA, CONTROL_PLANE_RETRY_RESULT_SCHEMA,
-        CONTROL_PLANE_RUN_SCHEMA, CONTROL_PLANE_SUBMISSION_REQUEST_SCHEMA,
+        CONTROL_PLANE_REFERENCE_REGISTRATION_SCHEMA, CONTROL_PLANE_RETRY_PARAMETERS_SCHEMA,
+        CONTROL_PLANE_RETRY_RESULT_SCHEMA, CONTROL_PLANE_RUN_SCHEMA,
+        CONTROL_PLANE_SUBMISSION_REQUEST_SCHEMA,
     };
     use homeboy_core::control_plane::ControlPlaneProvider;
     use homeboy_core::run_lifecycle_record::RunHeartbeat;
@@ -9249,11 +9279,11 @@ mod tests {
             let request = ControlPlaneActionRequest {
                 schema: CONTROL_PLANE_ACTION_REQUEST_SCHEMA.to_string(),
                 effect_id: EffectId("test:resume-request-1".to_string()),
-                action: ControlPlaneAction::Resume,
+                action: ControlPlaneAction::Recover,
                 idempotency_key: "resume-request-1".to_string(),
                 actor: "test".to_string(),
                 expected_updated_at: None,
-                parameters: ControlPlaneActionPayload::empty(),
+                parameters: ControlPlaneActionPayload::recover(),
                 confirmed: true,
             };
             let executions = std::rc::Rc::new(std::cell::Cell::new(0));
@@ -9284,7 +9314,10 @@ mod tests {
                 ControlPlaneActionOutcome::Succeeded,
                 "{first:?}"
             );
-            assert_eq!(first.result.schema, CONTROL_PLANE_RESUME_RESULT_SCHEMA);
+            assert_eq!(
+                first.result.schema,
+                homeboy_control_plane_contract::CONTROL_PLANE_RECOVER_RESULT_SCHEMA
+            );
             assert_eq!(replay, first);
             assert_eq!(executions.get(), 1);
         });
@@ -9326,11 +9359,11 @@ mod tests {
             let request = ControlPlaneActionRequest {
                 schema: CONTROL_PLANE_ACTION_REQUEST_SCHEMA.to_string(),
                 effect_id: EffectId("test:resume-candidate-recoverable".to_string()),
-                action: ControlPlaneAction::Resume,
+                action: ControlPlaneAction::Recover,
                 idempotency_key: "resume-candidate-recoverable".to_string(),
                 actor: "test".to_string(),
                 expected_updated_at: None,
-                parameters: ControlPlaneActionPayload::empty(),
+                parameters: ControlPlaneActionPayload::recover(),
                 confirmed: true,
             };
 
@@ -9379,7 +9412,7 @@ mod tests {
             let mut report: ControlPlaneActionEligibilityReport =
                 serde_json::from_value(projection.eligibility.clone()).expect("eligibility");
             for entry in &mut report.actions {
-                if entry.action == ControlPlaneAction::Resume {
+                if entry.action == ControlPlaneAction::Recover {
                     entry.availability = ControlPlaneActionAvailability::Unavailable;
                     entry.reason = "stale advisory resume ineligibility".to_string();
                 }
@@ -9393,11 +9426,11 @@ mod tests {
             let request = ControlPlaneActionRequest {
                 schema: CONTROL_PLANE_ACTION_REQUEST_SCHEMA.to_string(),
                 effect_id: EffectId("test:terminal-runner-resume".to_string()),
-                action: ControlPlaneAction::Resume,
+                action: ControlPlaneAction::Recover,
                 idempotency_key: "terminal-runner-resume".to_string(),
                 actor: "test".to_string(),
                 expected_updated_at: None,
-                parameters: ControlPlaneActionPayload::empty(),
+                parameters: ControlPlaneActionPayload::recover(),
                 confirmed: false,
             };
 
@@ -9850,13 +9883,14 @@ mod tests {
             .expect("action eligibility")
             .actions
             .into_iter()
-            .find(|action| action.action == ControlPlaneAction::Resume)
+            .find(|action| action.action == ControlPlaneAction::Recover)
             .expect("resume action");
         assert_eq!(
             resume.availability,
             ControlPlaneActionAvailability::Available
         );
-        assert!(resume.reason.contains("explicitly rearmed"));
+        // A live admission is rearmed by continuing the run, not a Cook step.
+        assert_eq!(resume.reason, "resume");
     }
 
     #[test]
@@ -10103,7 +10137,7 @@ mod tests {
             .expect("eligibility")
             .actions
             .into_iter()
-            .find(|action| action.action == ControlPlaneAction::Resume)
+            .find(|action| action.action == ControlPlaneAction::Recover)
             .expect("resume action");
         assert_eq!(
             resume.availability,
@@ -10260,7 +10294,7 @@ mod tests {
         );
         let resume = actions
             .iter()
-            .find(|action| action.action == ControlPlaneAction::Resume)
+            .find(|action| action.action == ControlPlaneAction::Recover)
             .expect("resume action");
         assert_eq!(
             resume.availability,

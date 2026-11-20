@@ -995,7 +995,7 @@ mod tests {
             )
             .unwrap();
         let run = RunId::new("run-1").unwrap();
-        for action in [ControlPlaneAction::Resume, ControlPlaneAction::Reconcile] {
+        for action in [ControlPlaneAction::Recover, ControlPlaneAction::Reconcile] {
             append_delegated_action_event(
                 &store,
                 &run,
@@ -1006,7 +1006,11 @@ mod tests {
                     idempotency_key: "same-key".to_string(),
                     actor: "test".to_string(),
                     expected_updated_at: None,
-                    parameters: ControlPlaneActionPayload::empty(),
+                    parameters: if action == ControlPlaneAction::Recover {
+                        ControlPlaneActionPayload::recover()
+                    } else {
+                        ControlPlaneActionPayload::empty()
+                    },
                     confirmed: false,
                 },
                 "action.accepted",
@@ -1041,11 +1045,11 @@ mod tests {
         let request = ControlPlaneActionRequest {
             schema: CONTROL_PLANE_ACTION_REQUEST_SCHEMA.to_string(),
             effect_id: EffectId("projection-failure-effect".to_string()),
-            action: ControlPlaneAction::Resume,
+            action: ControlPlaneAction::Recover,
             idempotency_key: "projection-failure".to_string(),
             actor: "test".to_string(),
             expected_updated_at: None,
-            parameters: ControlPlaneActionPayload::empty(),
+            parameters: ControlPlaneActionPayload::recover(),
             confirmed: false,
         };
 

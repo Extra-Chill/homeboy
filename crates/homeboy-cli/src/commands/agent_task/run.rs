@@ -11752,8 +11752,7 @@ pub(super) fn placement_update(
 }
 
 #[cfg(test)]
-#[cfg(test)]
-pub(super) fn run_resume_with_executor(
+pub(super) fn run_recover_with_executor(
     run_id: String,
     _full: bool,
     idempotency_key: Option<String>,
@@ -11761,29 +11760,45 @@ pub(super) fn run_resume_with_executor(
 ) -> CmdResult<Value> {
     let idempotency_key = idempotency_key.unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
     let acknowledgement =
-        homeboy::agents::orchestration::execute_resume_action_from_current_environment(
+        homeboy::agents::orchestration::execute_recover_action_from_current_environment(
             &run_id,
             &homeboy_control_plane_contract::ControlPlaneActionRequest {
                 schema: homeboy_control_plane_contract::CONTROL_PLANE_ACTION_REQUEST_SCHEMA
                     .to_string(),
-                action: homeboy_control_plane_contract::ControlPlaneAction::Resume,
+                action: homeboy_control_plane_contract::ControlPlaneAction::Recover,
                 effect_id: homeboy_control_plane_contract::action_effect_id(
                     "cli",
                     &run_id,
-                    "resume",
+                    "recover",
                     &idempotency_key,
                 ),
                 idempotency_key,
                 actor: "homeboy-cli".to_string(),
                 expected_updated_at: None,
-                parameters: homeboy_control_plane_contract::ControlPlaneActionPayload::empty(),
+                parameters: homeboy_control_plane_contract::ControlPlaneActionPayload::recover(),
                 confirmed: true,
             },
             executor,
         )?;
-    Ok(homeboy::agents::agent_task_action_result::resume_report(
-        &acknowledgement,
-    )?)
+    if acknowledgement.outcome == homeboy_control_plane_contract::ControlPlaneActionOutcome::Failed
+        && acknowledgement.result.data.get("report").is_none()
+    {
+        return Err(homeboy_core::Error::validation_invalid_argument(
+            "recover",
+            acknowledgement
+                .message
+                .unwrap_or_else(|| "recover action failed".into()),
+            None,
+            None,
+        )
+        .into());
+    }
+    Ok((
+        acknowledgement.result.data["report"].clone(),
+        acknowledgement.result.data["exit_code"]
+            .as_i64()
+            .unwrap_or(1) as i32,
+    ))
 }
 
 /// `retry` submits a fresh run from any run's plan. A Cook ID whose durable

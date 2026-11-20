@@ -201,11 +201,11 @@ mod tests {
             request: ControlPlaneActionRequest {
                 schema: CONTROL_PLANE_ACTION_REQUEST_SCHEMA.to_string(),
                 effect_id: effect_id.clone(),
-                action: ControlPlaneAction::Resume,
+                action: ControlPlaneAction::Recover,
                 idempotency_key: effect_id.0.clone(),
                 actor: "test".to_string(),
                 expected_updated_at: None,
-                parameters: ControlPlaneActionPayload::empty(),
+                parameters: ControlPlaneActionPayload::recover(),
                 confirmed: false,
             },
             request_digest: request_digest.clone(),

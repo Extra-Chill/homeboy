@@ -1249,7 +1249,7 @@ mod tests {
                 .expect("deploy run");
             assert_eq!(
                 record.metadata_json["control_plane"]["actions"][0]["action"],
-                "resume"
+                "recover"
             );
             assert_eq!(
                 record.metadata_json["control_plane"]["actions"][0]["availability"],
@@ -1260,11 +1260,11 @@ mod tests {
                 effect_id: homeboy_control_plane_contract::EffectId(
                     "fixture:release-deploy-recovery-1".to_string(),
                 ),
-                action: ControlPlaneAction::Resume,
+                action: ControlPlaneAction::Recover,
                 idempotency_key: "release-deploy-recovery-1".to_string(),
                 actor: "test".to_string(),
                 expected_updated_at: None,
-                parameters: ControlPlaneActionPayload::empty(),
+                parameters: ControlPlaneActionPayload::recover(),
                 confirmed: false,
             };
             let interrupted =
@@ -1300,7 +1300,7 @@ mod tests {
                 "same key replays one acknowledgement"
             );
             let recovered_after_effect =
-                crate::release::control_plane::resume_deploy_action(&record, &request)
+                crate::release::control_plane::execute_recover_deploy_action(&record, &request)
                     .expect("reconcile interrupted acknowledgement");
             assert_eq!(
                 recovered_after_effect.outcome,

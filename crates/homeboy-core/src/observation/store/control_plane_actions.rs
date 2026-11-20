@@ -792,7 +792,7 @@ mod tests {
         store.upsert_control_plane_resource_projection(&ControlPlaneResourceProjection {
             resource_type: "agent_task_run".to_string(), resource_id: run.to_string(),
             version: version.to_string(), state: "queued".to_string(), aliases: vec![run.to_string()],
-            eligibility: serde_json::json!({"actions":[{"action":"resume","availability":"available"}]}),
+            eligibility: serde_json::json!({"actions":[{"action":"recover","availability":"available"}]}),
             provenance: serde_json::json!({"source":"test"}),
         }).unwrap();
     }
@@ -812,7 +812,11 @@ mod tests {
             idempotency_key: effect.to_string(),
             actor: "test".to_string(),
             expected_updated_at: expected_updated_at.map(str::to_string),
-            parameters: ControlPlaneActionPayload::empty(),
+            parameters: if action == ControlPlaneAction::Recover {
+                ControlPlaneActionPayload::recover()
+            } else {
+                ControlPlaneActionPayload::empty()
+            },
             confirmed: true,
         };
         ControlPlaneActionIntent {
@@ -913,11 +917,11 @@ mod tests {
             request: ControlPlaneActionRequest {
                 schema: CONTROL_PLANE_ACTION_REQUEST_SCHEMA.to_string(),
                 effect_id: EffectId("effect-1".to_string()),
-                action: ControlPlaneAction::Resume,
+                action: ControlPlaneAction::Recover,
                 idempotency_key: "key".to_string(),
                 actor: "test".to_string(),
                 expected_updated_at: None,
-                parameters: ControlPlaneActionPayload::empty(),
+                parameters: ControlPlaneActionPayload::recover(),
                 confirmed: false,
             },
             request_digest: "b".repeat(64),
@@ -980,7 +984,7 @@ mod tests {
             schema: CONTROL_PLANE_ACTION_ACKNOWLEDGEMENT_SCHEMA.to_string(),
             acknowledgement: "ack".to_string(),
             run: run.clone(),
-            action: ControlPlaneAction::Resume,
+            action: ControlPlaneAction::Recover,
             idempotency_key: "key".to_string(),
             actor: "test".to_string(),
             accepted_at: intent.accepted_at.clone(),
@@ -1034,11 +1038,11 @@ mod tests {
         let request = ControlPlaneActionRequest {
             schema: CONTROL_PLANE_ACTION_REQUEST_SCHEMA.to_string(),
             effect_id: EffectId("effect-atomic".to_string()),
-            action: ControlPlaneAction::Resume,
+            action: ControlPlaneAction::Recover,
             idempotency_key: "atomic".to_string(),
             actor: "test".to_string(),
             expected_updated_at: None,
-            parameters: ControlPlaneActionPayload::empty(),
+            parameters: ControlPlaneActionPayload::recover(),
             confirmed: false,
         };
         let intent = ControlPlaneActionIntent {
@@ -1103,11 +1107,11 @@ mod tests {
             request: ControlPlaneActionRequest {
                 schema: CONTROL_PLANE_ACTION_REQUEST_SCHEMA.to_string(),
                 effect_id: EffectId("effect-race".to_string()),
-                action: ControlPlaneAction::Resume,
+                action: ControlPlaneAction::Recover,
                 idempotency_key: "race".to_string(),
                 actor: "test".to_string(),
                 expected_updated_at: None,
-                parameters: ControlPlaneActionPayload::empty(),
+                parameters: ControlPlaneActionPayload::recover(),
                 confirmed: false,
             },
             request_digest: "c".repeat(64),
@@ -1177,7 +1181,7 @@ mod tests {
         let intent = action_intent(
             "run-1",
             "effect-held-writer",
-            ControlPlaneAction::Resume,
+            ControlPlaneAction::Recover,
             None,
             &"c".repeat(64),
         );
@@ -1230,7 +1234,7 @@ mod tests {
         let intent = action_intent(
             "run-1",
             "effect-normal-timeout",
-            ControlPlaneAction::Resume,
+            ControlPlaneAction::Recover,
             None,
             &"c".repeat(64),
         );
@@ -1280,7 +1284,7 @@ mod tests {
             let intent = action_intent(
                 "run-1",
                 "effect-exhausted",
-                ControlPlaneAction::Resume,
+                ControlPlaneAction::Recover,
                 None,
                 &"c".repeat(64),
             );

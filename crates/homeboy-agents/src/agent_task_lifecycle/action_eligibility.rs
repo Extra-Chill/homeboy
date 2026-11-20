@@ -60,7 +60,7 @@ pub(crate) fn lifecycle_action_eligibility_with_roots(
                 "agent_task_run",
             ),
             action(
-                ControlPlaneAction::Resume,
+                ControlPlaneAction::Recover,
                 resume,
                 ControlPlaneActionConfirmation::None,
                 Vec::new(),
@@ -98,27 +98,27 @@ pub(crate) fn lifecycle_action_eligibility_with_roots(
 /// The `recover` entry for a single-run read, derived from the recovery step
 /// that read already projected (`ControlPlaneRun::recovery`) so the API and
 /// `recover` name the same step. A run without a Cook recovery projection
-/// recovers by resuming, so it mirrors the `resume` entry. Record writes never
+/// recovers by continuing, so it mirrors the continuation entry. Record writes never
 /// compute it: it reads the recovery planner, which is read-time only.
 pub(crate) fn recover_entry(
     recovery: Option<&homeboy_control_plane_contract::ControlPlaneRecovery>,
     report: &ControlPlaneActionEligibilityReport,
 ) -> ControlPlaneActionEligibility {
+    let continuation = report
+        .actions
+        .iter()
+        .find(|entry| entry.action == ControlPlaneAction::Recover);
     let decision = match recovery {
         Some(recovery) if recovery.step != "none" => available(recovery.step.clone()),
         Some(recovery) => unavailable(format!(
             "no recovery step is available; inspect with `{}`",
             recovery.command
         )),
-        None => match report
-            .actions
-            .iter()
-            .find(|entry| entry.action == ControlPlaneAction::Resume)
-        {
-            Some(resume) if resume.availability == ControlPlaneActionAvailability::Available => {
+        None => match continuation {
+            Some(entry) if entry.availability == ControlPlaneActionAvailability::Available => {
                 available("resume")
             }
-            Some(resume) => unavailable(resume.reason.clone()),
+            Some(entry) => unavailable(entry.reason.clone()),
             None => unavailable("run has no recovery step"),
         },
     };
@@ -432,7 +432,7 @@ mod tests {
                     .collect::<Vec<_>>(),
                 vec![
                     ControlPlaneAction::Cancel,
-                    ControlPlaneAction::Resume,
+                    ControlPlaneAction::Recover,
                     ControlPlaneAction::PlacementUpdate,
                     ControlPlaneAction::Retry,
                     ControlPlaneAction::Reconcile,
@@ -515,7 +515,7 @@ mod tests {
         let resume = report
             .actions
             .iter()
-            .find(|action| action.action == ControlPlaneAction::Resume)
+            .find(|action| action.action == ControlPlaneAction::Recover)
             .expect("resume action");
         assert!(resume.idempotent);
         assert_eq!(
@@ -539,7 +539,7 @@ mod tests {
         let resume = lifecycle_action_eligibility(&proxy, None)
             .actions
             .into_iter()
-            .find(|action| action.action == ControlPlaneAction::Resume)
+            .find(|action| action.action == ControlPlaneAction::Recover)
             .expect("resume action");
         assert_eq!(
             resume.availability,
@@ -549,7 +549,7 @@ mod tests {
 
         let local = lifecycle_action_eligibility(&record(RunExecutionState::Queued, false), None);
         assert_eq!(
-            decision(&local, ControlPlaneAction::Resume),
+            decision(&local, ControlPlaneAction::Recover),
             ControlPlaneActionAvailability::Available
         );
     }
@@ -564,7 +564,7 @@ mod tests {
         let resume = lifecycle_action_eligibility(&record, None)
             .actions
             .into_iter()
-            .find(|entry| entry.action == ControlPlaneAction::Resume)
+            .find(|entry| entry.action == ControlPlaneAction::Recover)
             .expect("resume action");
         assert_eq!(
             resume.availability,
@@ -585,7 +585,7 @@ mod tests {
             assert_eq!(
                 decision(
                     &lifecycle_action_eligibility(&record, None),
-                    ControlPlaneAction::Resume
+                    ControlPlaneAction::Recover
                 ),
                 ControlPlaneActionAvailability::Unavailable
             );
@@ -599,7 +599,7 @@ mod tests {
         assert_eq!(
             decision(
                 &lifecycle_action_eligibility(&running, None),
-                ControlPlaneAction::Resume
+                ControlPlaneAction::Recover
             ),
             ControlPlaneActionAvailability::Unavailable
         );
@@ -611,7 +611,7 @@ mod tests {
         assert_eq!(
             decision(
                 &lifecycle_action_eligibility(&exhausted, None),
-                ControlPlaneAction::Resume
+                ControlPlaneAction::Recover
             ),
             ControlPlaneActionAvailability::Unavailable
         );

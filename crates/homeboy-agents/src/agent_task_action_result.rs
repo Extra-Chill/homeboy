@@ -2,14 +2,14 @@
 
 use homeboy_control_plane_contract::{
     ControlPlaneAction, ControlPlaneActionAcknowledgement, ControlPlaneActionOutcome,
-    CONTROL_PLANE_ACTION_ACKNOWLEDGEMENT_SCHEMA, CONTROL_PLANE_RESUME_RESULT_SCHEMA,
-    CONTROL_PLANE_RETRY_RESULT_SCHEMA,
+    ControlPlaneActionPayload, CONTROL_PLANE_ACTION_ACKNOWLEDGEMENT_SCHEMA,
+    CONTROL_PLANE_RESUME_RESULT_SCHEMA, CONTROL_PLANE_RETRY_RESULT_SCHEMA,
 };
 use homeboy_core::{Error, Result};
 use serde::Deserialize;
 use serde_json::Value;
 
-use crate::{agent_task_lifecycle::AgentTaskRunRecord, agent_tasks::AgentTaskAggregate};
+use crate::agent_task_lifecycle::AgentTaskRunRecord;
 
 pub const UNMATERIALIZED_COOK_RESUME_RESULT_SCHEMA: &str = "homeboy/unmaterialized-cook-resume/v1";
 
@@ -18,18 +18,6 @@ pub struct RetryActionResult {
     pub record: AgentTaskRunRecord,
     pub runnable: bool,
     pub created: bool,
-}
-
-#[derive(Debug, Clone, PartialEq)]
-pub enum ResumeActionResult {
-    Resumed {
-        aggregate: AgentTaskAggregate,
-        exit_code: i32,
-    },
-    UnmaterializedCook {
-        result: Value,
-        terminal: bool,
-    },
 }
 
 pub fn retry(acknowledgement: &ControlPlaneActionAcknowledgement) -> Result<RetryActionResult> {
@@ -46,56 +34,48 @@ pub fn retry(acknowledgement: &ControlPlaneActionAcknowledgement) -> Result<Retr
     })
 }
 
-pub fn resume(acknowledgement: &ControlPlaneActionAcknowledgement) -> Result<ResumeActionResult> {
-    validate_action_and_outcome(acknowledgement, ControlPlaneAction::Resume)?;
-    match acknowledgement.result.schema.as_str() {
+/// Project inline run continuation into the Recover report, preserving its
+/// aggregate/acknowledgement distinction and terminal admission exit status.
+pub fn resume_report(
+    payload: &ControlPlaneActionPayload,
+    outcome: ControlPlaneActionOutcome,
+    acknowledgement: Value,
+    message: Option<&str>,
+) -> Result<(Value, i32)> {
+    if outcome == ControlPlaneActionOutcome::Failed {
+        return Err(Error::validation_invalid_argument(
+            "action acknowledgement",
+            message.unwrap_or("recover action failed"),
+            None,
+            None,
+        ));
+    }
+    match payload.schema.as_str() {
         CONTROL_PLANE_RESUME_RESULT_SCHEMA => {
-            let result: ResumeActionResultPayload = decode(acknowledgement, "resume")?;
-            Ok(ResumeActionResult::Resumed {
-                aggregate: result.aggregate,
-                exit_code: result.exit_code,
-            })
+            let report = if outcome == ControlPlaneActionOutcome::AlreadySatisfied {
+                payload.data["aggregate"].clone()
+            } else {
+                acknowledgement
+            };
+            Ok((
+                report,
+                payload.data["exit_code"].as_i64().unwrap_or(1) as i32,
+            ))
         }
-        UNMATERIALIZED_COOK_RESUME_RESULT_SCHEMA => {
-            let result: UnmaterializedCookResumeActionResultPayload =
-                decode(acknowledgement, "unmaterialized Cook resume")?;
-            Ok(ResumeActionResult::UnmaterializedCook {
-                result: acknowledgement.result.data.clone(),
-                terminal: result.terminal,
-            })
-        }
+        UNMATERIALIZED_COOK_RESUME_RESULT_SCHEMA => Ok((
+            acknowledgement,
+            if payload.data["terminal"].as_bool().unwrap_or(false) {
+                2
+            } else {
+                0
+            },
+        )),
         schema => Err(schema_error(
-            "resume",
-            UNMATERIALIZED_COOK_RESUME_RESULT_SCHEMA,
+            "recover",
+            CONTROL_PLANE_RESUME_RESULT_SCHEMA,
             schema,
         )),
     }
-}
-
-/// The `recover` report for a resumed run: the aggregate when the run was
-/// already satisfied, otherwise the acknowledgement itself, with the exit code
-/// the resume result names (an unmaterialized Cook that is terminal exits 2).
-pub fn resume_report(acknowledgement: &ControlPlaneActionAcknowledgement) -> Result<(Value, i32)> {
-    let result = resume(acknowledgement)?;
-    let (value, exit_code) = match &result {
-        ResumeActionResult::Resumed {
-            aggregate,
-            exit_code,
-        } if acknowledgement.outcome == ControlPlaneActionOutcome::AlreadySatisfied => {
-            (serde_json::to_value(aggregate), *exit_code)
-        }
-        ResumeActionResult::Resumed { exit_code, .. } => {
-            (serde_json::to_value(acknowledgement), *exit_code)
-        }
-        ResumeActionResult::UnmaterializedCook { terminal, .. } => (
-            serde_json::to_value(acknowledgement),
-            i32::from(*terminal) * 2,
-        ),
-    };
-    Ok((
-        value.map_err(|error| homeboy_core::Error::internal_json(error.to_string(), None))?,
-        exit_code,
-    ))
 }
 
 fn validate(
@@ -177,7 +157,6 @@ fn action_name(action: ControlPlaneAction) -> &'static str {
         ControlPlaneAction::Cancel => "cancel",
         ControlPlaneAction::Reconcile => "reconcile",
         ControlPlaneAction::Recover => "recover",
-        ControlPlaneAction::Resume => "resume",
         ControlPlaneAction::PlacementUpdate => "placement_update",
         ControlPlaneAction::Retry => "retry",
     }
@@ -189,21 +168,6 @@ struct RetryActionResultPayload {
     record: AgentTaskRunRecord,
     runnable: bool,
     created: bool,
-}
-
-#[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
-struct ResumeActionResultPayload {
-    aggregate: AgentTaskAggregate,
-    exit_code: i32,
-}
-
-#[derive(Deserialize)]
-struct UnmaterializedCookResumeActionResultPayload {
-    #[serde(default)]
-    terminal: bool,
-    #[serde(flatten)]
-    _additional: serde_json::Map<String, Value>,
 }
 
 #[cfg(test)]
@@ -238,7 +202,7 @@ mod tests {
     #[test]
     fn retry_refuses_an_acknowledgement_for_another_action_before_decoding() {
         let error = retry(&acknowledgement(
-            ControlPlaneAction::Resume,
+            ControlPlaneAction::Recover,
             CONTROL_PLANE_RETRY_RESULT_SCHEMA,
         ))
         .expect_err("action mismatch must be refused");

@@ -4585,14 +4585,9 @@ fn unmaterialized_cook_resume_replays_the_canonical_action_result() {
             first.0["schema"],
             homeboy_control_plane_contract::CONTROL_PLANE_ACTION_ACKNOWLEDGEMENT_SCHEMA
         );
-        assert_eq!(first.0["action"], "resume");
-        // The nested resume carries a key derived from the recover key.
-        assert_eq!(
-            first.0["idempotency_key"],
-            homeboy_engine_primitives::content_hash::sha256_hex(
-                b"recover-resume:resume-unmaterialized-1"
-            )
-        );
+        assert_eq!(first.0["action"], "recover");
+        // Inline continuation records the original Recover idempotency key.
+        assert_eq!(first.0["idempotency_key"], "resume-unmaterialized-1");
         assert_eq!(
             first.0["result"]["schema"],
             "homeboy/unmaterialized-cook-resume/v1"
@@ -4617,7 +4612,7 @@ fn controller_proxy_resume_uses_transport_recovery_without_provider_dispatch() {
         .expect("controller proxy persisted");
         let executor = Arc::new(CapturingExecutor::default());
 
-        let error = run_resume_with_executor(
+        let error = run_recover_with_executor(
             "run-cli-resume-transport-proxy".to_string(),
             false,
             None,
@@ -6943,7 +6938,7 @@ fn resume_from_a_different_build_executes_in_process_and_returns_replayable_ackn
         .expect("stamp previous build identity");
         let observed_status = Arc::new(Mutex::new(None));
 
-        let (value, exit_code) = run_resume_with_executor(
+        let (value, exit_code) = run_recover_with_executor(
             "run-resume-cli".to_string(),
             false,
             Some("resume-cli-1".to_string()),
@@ -6970,7 +6965,7 @@ fn resume_from_a_different_build_executes_in_process_and_returns_replayable_ackn
         );
         assert_eq!(
             acknowledgement.action,
-            homeboy_control_plane_contract::ControlPlaneAction::Resume
+            homeboy_control_plane_contract::ControlPlaneAction::Recover
         );
         assert_eq!(acknowledgement.idempotency_key, "resume-cli-1");
         assert_eq!(
@@ -6981,7 +6976,7 @@ fn resume_from_a_different_build_executes_in_process_and_returns_replayable_ackn
         assert_eq!(completed.state(), RunExecutionState::Succeeded);
 
         let replay_executor = Arc::new(CapturingExecutor::default());
-        let replay = run_resume_with_executor(
+        let replay = run_recover_with_executor(
             "run-resume-cli".to_string(),
             false,
             Some("resume-cli-1".to_string()),
