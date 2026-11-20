@@ -4,6 +4,18 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.480.0] - 2026-11-20
+
+### Added
+- a stopped chain notifies once through its run's notification route
+
+### Changed
+- route recover through a Recover control-plane action
+
+### Fixed
+- --resume-from satisfies required inputs from its source
+- a stopping terminal settles every running step and item
+
 ## [0.479.4] - 2026-11-20
 
 ### Fixed
