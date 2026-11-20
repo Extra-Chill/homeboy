@@ -1171,7 +1171,9 @@ fn a_retention_pass_loads_only_aged_rows_and_counts_the_rest() {
         .map(|_| {
             let job = store.create("terminal");
             store.start(job.id).expect("start");
-            store.complete(job.id, None).expect("complete");
+            store
+                .complete(job.id, Some(json!({"output": "x".repeat(300_000)})))
+                .expect("complete");
             job.id
         })
         .collect::<Vec<_>>();
@@ -1187,8 +1189,8 @@ fn a_retention_pass_loads_only_aged_rows_and_counts_the_rest() {
         .expect("age fixture");
     drop(store);
 
-    let store = JobStore::open_without_reconciliation_with_retention(&path, 100, 1)
-        .expect("reopen with a one-job budget");
+    // Default budgets: four 300 KB results exceed the 1 MiB terminal budget.
+    let store = JobStore::open_without_reconciliation(&path).expect("reopen");
     store
         .durable_transaction(|inner| {
             store.load_history_for_compaction(inner)?;
