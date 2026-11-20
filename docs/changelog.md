@@ -4,6 +4,12 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.480.1] - 2026-11-20
+
+### Fixed
+- a cook-batch child settled by a stop reads as cancelled, not refused
+- a refresh paused only by host pressure has converged
+
 ## [0.480.0] - 2026-11-20
 
 ### Added
