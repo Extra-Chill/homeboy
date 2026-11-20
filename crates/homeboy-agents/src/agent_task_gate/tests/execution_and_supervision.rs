@@ -1997,16 +1997,16 @@ fn completed_gate_keeps_verdict_when_process_tree_cleanup_is_incomplete() {
 import os, signal, time
 pid = os.fork()
 if pid == 0:
-os.setsid()
-signal.signal(signal.SIGTERM, signal.SIG_IGN)
-os.close(1)
-os.close(2)
-with open('descendant.pid', 'w') as f:
-    f.write(str(os.getpid()))
-while True:
-    time.sleep(1)
+    os.setsid()
+    signal.signal(signal.SIGTERM, signal.SIG_IGN)
+    os.close(1)
+    os.close(2)
+    with open('descendant.pid', 'w') as f:
+        f.write(str(os.getpid()))
+    while True:
+        time.sleep(1)
 while not os.path.exists('tracer.ready'):
-time.sleep(0.01)
+    time.sleep(0.01)
 print('root output captured', flush=True)
 os._exit({code})
 "#
