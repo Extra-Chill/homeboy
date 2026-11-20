@@ -926,17 +926,20 @@ impl Machine<'_> {
         if reason.is_some() {
             self.state.reason = reason.clone();
         }
-        self.close_unstarted_items(status);
+        self.close_open_work(status);
         self.commands.push(Command::Complete {
             status,
             reason: self.state.reason.clone(),
         });
     }
 
-    /// A terminal instance starts nothing more: every `foreach` item still
-    /// waiting for its first submission settles as `never_started`, naming
-    /// why, so the result lists every declared item instead of omitting it.
-    fn close_unstarted_items(&mut self, status: InstanceStatus) {
+    /// A terminal instance starts nothing more and hears no more results: an
+    /// event arriving after the terminal is ignored. So the same decision
+    /// settles all open work. Every `foreach` item still waiting for its first
+    /// submission settles as `never_started`, and every running attempt (whose
+    /// child the terminal cancels) settles as `cancelled`, both naming why. The
+    /// result lists every declared item, and none stays `running`.
+    fn close_open_work(&mut self, status: InstanceStatus) {
         let cause = self
             .state
             .reason
@@ -949,13 +952,23 @@ impl Machine<'_> {
             }
             _ => format!("batch ended before admission: {cause}"),
         };
+        let cancelled = format!("cancelled: {cause}");
         for step in self.state.steps.values_mut() {
             for item in &mut step.items {
                 if item.phase == StepPhase::Pending && item.attempt == 0 {
                     item.phase = StepPhase::Done;
                     item.outcome = Some(NEVER_STARTED.to_string());
                     item.error = Some(reason.clone());
+                } else if item.phase != StepPhase::Done {
+                    item.phase = StepPhase::Done;
+                    item.outcome = Some("cancelled".to_string());
+                    item.error.get_or_insert_with(|| cancelled.clone());
                 }
+            }
+            if matches!(step.phase, StepPhase::Running | StepPhase::AwaitingApproval) {
+                step.phase = StepPhase::Done;
+                step.outcome = Some("cancelled".to_string());
+                step.error.get_or_insert_with(|| cancelled.clone());
             }
         }
     }

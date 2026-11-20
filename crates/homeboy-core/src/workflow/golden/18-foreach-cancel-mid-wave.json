@@ -379,6 +379,7 @@
         "steps": {
           "cook": {
             "attempt": 0,
+            "error": "cancelled: operator cancelled the batch",
             "items": [
               {
                 "attempt": 1,
@@ -389,19 +390,19 @@
               {
                 "attempt": 1,
                 "key": "wf-golden/cook/1/item-1/1",
-                "outcome": null,
-                "phase": "running"
+                "outcome": "cancelled",
+                "phase": "done"
               },
               {
                 "attempt": 1,
                 "key": "wf-golden/cook/1/item-2/1",
-                "outcome": null,
-                "phase": "running"
+                "outcome": "cancelled",
+                "phase": "done"
               }
             ],
             "key": null,
-            "outcome": null,
-            "phase": "running"
+            "outcome": "cancelled",
+            "phase": "done"
           },
           "prepare": {
             "attempt": 1,
@@ -435,6 +436,7 @@
         "steps": {
           "cook": {
             "attempt": 0,
+            "error": "cancelled: operator cancelled the batch",
             "items": [
               {
                 "attempt": 1,
@@ -445,19 +447,19 @@
               {
                 "attempt": 1,
                 "key": "wf-golden/cook/1/item-1/1",
-                "outcome": null,
-                "phase": "running"
+                "outcome": "cancelled",
+                "phase": "done"
               },
               {
                 "attempt": 1,
                 "key": "wf-golden/cook/1/item-2/1",
-                "outcome": null,
-                "phase": "running"
+                "outcome": "cancelled",
+                "phase": "done"
               }
             ],
             "key": null,
-            "outcome": null,
-            "phase": "running"
+            "outcome": "cancelled",
+            "phase": "done"
           },
           "prepare": {
             "attempt": 1,
