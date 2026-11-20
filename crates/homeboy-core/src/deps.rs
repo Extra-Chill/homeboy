@@ -946,11 +946,12 @@ fn run_hydration_command(
             &mut child,
             DEPENDENCY_HYDRATION_OUTPUT_LIMIT_BYTES,
             deadline,
-            Some(
+            // A zero window disables the no-progress deadline.
+            (!policy.no_progress_timeout.is_zero()).then(|| {
                 policy
                     .no_progress_timeout
-                    .max(DEPENDENCY_HYDRATION_MIN_NO_PROGRESS_TIMEOUT),
-            ),
+                    .max(DEPENDENCY_HYDRATION_MIN_NO_PROGRESS_TIMEOUT)
+            }),
             policy.heartbeat_interval.max(Duration::from_millis(1)),
             move || cancellation() || Instant::now() >= deadline,
             |heartbeat| {

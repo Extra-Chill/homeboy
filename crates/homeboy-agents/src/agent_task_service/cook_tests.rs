@@ -10080,6 +10080,66 @@ fn deferred_recovery_supervises_declared_gate_and_persists_unavailability() {
     });
 }
 
+/// #18554 / #17958: a gate that supervision stops (here: silent and idle past
+/// its no-progress window) is re-gated once on the same candidate, and a
+/// repeated stop ends the Cook terminal as unavailable verification with a
+/// re-gate next step: never `gate_failed`, never parked in `running`.
+#[cfg(unix)]
+#[test]
+fn supervision_stopped_gate_is_regated_once_and_ends_as_unavailable_verification() {
+    with_corrected_gate_failure(false, |mut options, _| {
+        let run_id = options.identity.initial_run_id.clone();
+        persist_deferred_fixture(&run_id);
+        let runs = tempfile::tempdir().unwrap();
+        let ledger = runs.path().join("runs");
+        options.gates.verify = vec![format!("echo run >> '{}'; exec sleep 30", ledger.display())];
+        options.gates.gate_timeout_seconds = 30;
+        options.gates.gate_no_progress_timeout_seconds = 1;
+        let recipes = CookRecipeStore::from_current_data_root().unwrap();
+        let mut recipe = recipes.load_recipe(&options.identity.cook_id).unwrap();
+        recipe.gate_policy = serde_json::to_value(&options.gates).unwrap();
+        recipes.persist_recipe(&recipe).unwrap();
+        let store = test_lifecycle_store();
+        let recipe_store = CookRecipeStore::from_current_data_root().unwrap();
+        let runtime = CookRuntime::with_finalizer(
+            Arc::new(UnusedExecutor),
+            &recipe_store,
+            &store,
+            |_, _, _, _| panic!("a supervision-stopped gate must not publish"),
+            &noop_cook_progress_observer,
+        );
+        let result = CookService::run(options, runtime, CookMode::ContinueTerminal).unwrap();
+        assert_eq!(
+            result.value.status, "gate_environment_unavailable",
+            "{:#?}",
+            result.value
+        );
+        assert_ne!(result.exit_code, 0);
+        let record = store.read_record(&run_id).unwrap();
+        assert!(record.state().is_terminal());
+        let promotion = persisted_promotion_for_attempt_in_store(&store, &run_id)
+            .unwrap()
+            .unwrap();
+        assert_eq!(promotion.status, AgentTaskPromotionStatus::GateDeferred);
+        let gate = &promotion.deterministic_gates[0];
+        assert_eq!(
+            gate.status,
+            crate::agent_task_gate::AgentTaskGateStatus::Unavailable
+        );
+        assert_eq!(
+            gate.termination,
+            crate::agent_task_gate::AgentTaskGateTermination::NoProgress
+        );
+        assert!(gate.supervision_regate.is_some(), "{gate:#?}");
+        // Exactly one automatic re-gate on the same candidate.
+        let ran = std::fs::read_to_string(&ledger).unwrap().lines().count();
+        assert_eq!(ran, 2);
+        let reason = result.value.stop_reason.as_deref().unwrap_or_default();
+        assert!(reason.contains("gate infrastructure timeout"), "{reason}");
+        assert!(reason.contains("homeboy agent-task recover"), "{reason}");
+    });
+}
+
 #[test]
 fn a_finished_failing_replacement_run_is_replaced_without_interrupted_rerun_authority() {
     with_corrected_gate_failure(false, |options, _target| {
@@ -12435,6 +12495,51 @@ fn gates_deferred_stop_reason_names_the_non_execution_cause_and_next_step() {
         "private gate commands stay withheld"
     );
     assert!(!reason.contains("stayed red"));
+}
+
+/// #18554: a gate stopped by supervision even after its automatic re-gate is
+/// an infrastructure timeout: the stop reason names the gate and the limit,
+/// withholds the private command, and gives the re-gate step.
+#[test]
+fn gate_budget_exceeded_stop_reason_names_the_limit_and_the_regate_step() {
+    let mut stopped = promotion("run-gate-budget");
+    let mut gate = crate::agent_task_gate::AgentTaskGateReport::skipped(
+        "gate-1".to_string(),
+        crate::agent_task_gate::legacy_gate_argv("npm test"),
+        crate::agent_task_gate::AgentTaskGateVisibility::Private,
+        crate::agent_task_gate::AgentTaskGateRevealPolicy::SummaryOnly,
+        "unused",
+    );
+    gate.status = crate::agent_task_gate::AgentTaskGateStatus::Unavailable;
+    gate.termination = crate::agent_task_gate::AgentTaskGateTermination::NoProgress;
+    gate.supervision_regate = Some(crate::agent_task_gate::AgentTaskGateFailureEvidence {
+        classification: crate::agent_task_gate::AgentTaskGateFailureClassification::ExecutionBudget,
+        summary: "no output for 1 s".to_string(),
+        command: "npm test".to_string(),
+        exit_code: 125,
+        stdout_tail: String::new(),
+        stderr_tail: String::new(),
+        failed_tests: Vec::new(),
+        agent_feedback: String::new(),
+        diagnostics: Vec::new(),
+    });
+    stopped.deterministic_gates = vec![gate];
+
+    let reason = super::gate_budget_exceeded_stop_reason(&stopped, "cook-18554");
+
+    assert!(reason.contains("gate infrastructure timeout"), "{reason}");
+    assert!(
+        reason.contains(
+            "gate `gate-1` stopped at its no-progress limit, again after one automatic re-gate"
+        ),
+        "{reason}"
+    );
+    assert!(
+        reason.contains("`homeboy agent-task recover cook-18554`"),
+        "{reason}"
+    );
+    assert!(!reason.contains("npm test"), "{reason}");
+    assert!(!reason.contains("gate_failed"), "{reason}");
 }
 
 #[test]

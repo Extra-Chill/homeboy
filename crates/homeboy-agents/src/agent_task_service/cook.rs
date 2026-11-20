@@ -7790,17 +7790,19 @@ fn run_cook_spine(
                     invocation_latest_run_id: Some(&run_id),
                 }));
             }
+            // #18554: a supervision stop is infrastructure, not a candidate
+            // verdict. The gate was already re-gated once on this candidate;
+            // stop as unavailable verification with a
+            // concrete re-gate step rather than `gate_failed`.
             AgentTaskCookLoopStatus::GateBudgetExceeded => {
+                let stop_reason = gate_budget_exceeded_stop_reason(&promotion, &cook_id);
                 return Ok(stores.report(CookReportInput {
                     cook_id,
-                    status: "timed_out",
+                    status: "gate_environment_unavailable",
                     disposition: CookDisposition::Terminal,
                     attempts,
                     finalization: None,
-                    stop_reason: Some(
-                        "deterministic gate supervision exceeded its wall-clock or no-progress budget; candidate verification remains unproven. Inspect the gate runtime and budget, then resume verification"
-                            .to_string(),
-                    ),
+                    stop_reason: Some(stop_reason),
                     exit_code: 1,
                     invocation_latest_run_id: Some(&run_id),
                 }));
@@ -8070,6 +8072,39 @@ mod publication_title_tests {
 
 /// A deferred gate never executed, so the stop reason names each typed cause
 /// and the concrete next step instead of a candidate verdict (#16932).
+/// Stop reason for a Cook whose gate supervision stopped a gate at its
+/// wall-clock or no-progress limit, even after the automatic re-gate. Names the
+/// gate and the limit (never a private command) and the re-gate step.
+pub(super) fn gate_budget_exceeded_stop_reason(
+    promotion: &AgentTaskPromotionReport,
+    cook_id: &str,
+) -> String {
+    let stopped = promotion
+        .deterministic_gates
+        .iter()
+        .filter_map(|gate| {
+            let limit = match gate.termination {
+                crate::agent_task_gate::AgentTaskGateTermination::TimedOut => "wall-clock",
+                crate::agent_task_gate::AgentTaskGateTermination::NoProgress => "no-progress",
+                _ => return None,
+            };
+            let regated = if gate.supervision_regate.is_some() {
+                ", again after one automatic re-gate"
+            } else {
+                ""
+            };
+            Some(format!(
+                "gate `{}` stopped at its {limit} limit{regated}",
+                gate.id
+            ))
+        })
+        .collect::<Vec<_>>()
+        .join("; ");
+    format!(
+        "stop: gate infrastructure timeout; {stopped}. The gate never reached a verdict, so the candidate is preserved and unverified, not failed. Raise --gate-timeout-seconds or --gate-no-progress-timeout-seconds (0 disables the no-progress limit) if the suite needs longer, then run `homeboy agent-task recover {cook_id}` to re-gate"
+    )
+}
+
 pub(super) fn gates_deferred_stop_reason(
     promotion: &AgentTaskPromotionReport,
     cook_id: &str,

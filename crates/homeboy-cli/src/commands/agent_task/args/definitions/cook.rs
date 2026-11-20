@@ -381,10 +381,13 @@ pub struct VerifyGateArgs {
     )]
     pub gate_heartbeat_interval_seconds: u64,
     /// Maximum time, in seconds, a gate may go without a liveness signal
-    /// (default 300 = 5 min). Any output counts until the gate emits its first
-    /// `HOMEBOY_PROGRESS` marker; after that, only markers count.
+    /// (default 300 = 5 min; 0 disables it, leaving only the gate timeout).
+    /// Any output, or CPU/I/O work by the gate's process tree, counts until the
+    /// gate emits its first `HOMEBOY_PROGRESS` marker; after that, only markers
+    /// count.
     #[arg(
         long = "gate-no-progress-timeout-seconds",
+        visible_alias = "gate-no-progress-seconds",
         default_value_t = 5 * 60,
         value_name = "SECONDS"
     )]
@@ -1193,6 +1196,15 @@ mod tests {
         assert!(options.rerun_completed_gates);
         assert!(options.gate_environment.isolate_home);
         assert!(options.gate_environment.isolate_xdg);
+
+        // The short alias sets the same window; zero disables it.
+        let options: VerifyGateOptions =
+            TestCli::try_parse_from(["homeboy", "--gate-no-progress-seconds", "0"])
+                .expect("parse disabled no-progress window")
+                .gates
+                .into();
+        assert_eq!(options.gate_no_progress_timeout_seconds, 0);
+        assert!(options.gate_no_progress_timeout().is_zero());
 
         let options: VerifyGateOptions =
             TestCli::try_parse_from(["homeboy", "--gate-execution-policy", "continue-all"])
