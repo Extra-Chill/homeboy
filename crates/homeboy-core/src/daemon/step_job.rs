@@ -68,6 +68,8 @@ const STEP_USAGE_FILE: &str = "usage.json";
 const WAIT_POLL: Duration = Duration::from_millis(250);
 const RUNNER_WAIT_INITIAL: Duration = Duration::from_secs(1);
 const RUNNER_WAIT_CAP: Duration = Duration::from_secs(30);
+/// High-lane waiters re-probe sooner so they claim a freed slot promptly.
+const RUNNER_WAIT_HIGH_CAP: Duration = Duration::from_secs(5);
 const RUNNER_WAIT_DEADLINE: Duration = Duration::from_secs(10 * 60);
 
 /// Non-transient runner refusals have a bounded convergence budget.
@@ -84,6 +86,17 @@ pub fn runner_wait_is_bounded(reason: &str) -> bool {
     matches!(
         reason,
         "daemon_incompatible" | "daemon_not_fresh" | "stale_jobs"
+    )
+}
+
+/// The admission lane a step declared through its public environment.
+fn step_priority(request: &StepJobRequest) -> crate::lab_capacity::LabPriority {
+    crate::lab_capacity::LabPriority::from_env_value(
+        request
+            .env
+            .public_env
+            .get(crate::lab_capacity::LAB_PRIORITY_ENV)
+            .map(String::as_str),
     )
 }
 
@@ -710,6 +723,9 @@ impl ControllerJobDriver for StepJobDriver {
             "exit_code": progress.get("exit_code").cloned().unwrap_or(Value::Null),
             "waiting_for": progress.get("waiting_for").cloned().unwrap_or(Value::Null),
             "queue_position": progress.get("queue_position").cloned().unwrap_or(Value::Null),
+            "waiters_ahead": progress.get("waiters_ahead").cloned().unwrap_or(Value::Null),
+            "priority": progress.get("priority").cloned().unwrap_or(Value::Null),
+            "eta_seconds": progress.get("eta_seconds").cloned().unwrap_or(Value::Null),
         }))
     }
 
@@ -867,18 +883,39 @@ fn run_step(mut checkpoint: StepJobCheckpoint, job: &ControllerJobHandle) -> Res
         .as_deref()
         .or(checkpoint.request.linked_durable_run_id.as_deref())
         .unwrap_or(&checkpoint.request.key);
+    let public_env = &checkpoint.request.env.public_env;
+    let claim = crate::lab_capacity::StepClaim {
+        owner,
+        priority: step_priority(&checkpoint.request),
+        budget: public_env
+            .get(crate::lab_capacity::LAB_BUDGET_ENV)
+            .and_then(|seconds| seconds.trim().parse::<u64>().ok())
+            .filter(|seconds| *seconds > 0)
+            .map(Duration::from_secs),
+    };
     let capacity_permit = if !checkpoint.request.waits_for_children {
+        let mut last_standing = None;
         let Some(permit) =
-            crate::lab_capacity::acquire_step(limit, owner, |position, capacity| {
+            crate::lab_capacity::acquire_step(limit, claim, |standing, capacity| {
                 if job.is_cancelled() {
                     return Ok(false);
                 }
-                job.progress(json!({
-                    "waiting_for": "lab_capacity", "queue_position": position,
-                    "load_average_1m": capacity.load_average_1m,
-                    "effective_budget": capacity.effective_budget,
-                    "eta_seconds": null,
-                }))?;
+                // Re-publish when the standing (position, holders, ETA) changes.
+                if last_standing.as_ref() != Some(standing) {
+                    job.progress(json!({
+                        "waiting_for": "lab_capacity",
+                        "queue_position": standing.queue_position,
+                        "waiters_ahead": standing.waiters_ahead,
+                        "active_slots": standing.active_slots,
+                        "priority": standing.priority,
+                        "owner_slot_cap": standing.owner_slot_cap,
+                        "load_average_1m": capacity.load_average_1m,
+                        "effective_budget": capacity.effective_budget,
+                        "eta_seconds": standing.eta_seconds,
+                        "eta_kind": "upper_bound_from_declared_budgets",
+                    }))?;
+                    last_standing = Some(standing.clone());
+                }
                 Ok(true)
             })?
         else {
@@ -1133,6 +1170,17 @@ fn await_wait_with(
             })
         })
         .transpose()?;
+    // Rank this waiter among the same runner's waiters on this controller so a
+    // higher lane takes a freed slot first and status can report a position.
+    let runner_ticket = runner_probe
+        .as_ref()
+        .map(|(runner, _)| crate::lab_capacity::join_runner_wait(runner, step_priority(request)));
+    let wait_cap = if step_priority(request) == crate::lab_capacity::LabPriority::High {
+        RUNNER_WAIT_HIGH_CAP
+    } else {
+        RUNNER_WAIT_CAP
+    };
+    let mut last_position = None;
     let budget = runner_wait_budget();
     let mut blocked_since = None;
     let prior_wait = job.job().store().step_runner_wait(&request.key)?;
@@ -1180,7 +1228,14 @@ fn await_wait_with(
                 }
             }
             if now() >= next_probe {
-                let observation = probe(runner);
+                let standing = runner_ticket.as_ref().map(|ticket| ticket.standing());
+                // A free slot belongs to a higher-lane waiter first.
+                let observation = match probe(runner) {
+                    Ok(()) if standing.is_some_and(|standing| !standing.may_proceed) => {
+                        Err("capacity_reached".to_string())
+                    }
+                    observation => observation,
+                };
                 if observation
                     .as_ref()
                     .err()
@@ -1197,7 +1252,8 @@ fn await_wait_with(
                 ) {
                     backoff = RUNNER_WAIT_INITIAL;
                 }
-                if last_observation.as_ref() != Some(&observation) {
+                let position = standing.map(|standing| standing.queue_position);
+                if last_observation.as_ref() != Some(&observation) || last_position != position {
                     if let Err(reason) = &observation {
                         job.progress(json!({
                             "phase": "waiting",
@@ -1205,12 +1261,16 @@ fn await_wait_with(
                             "reason": reason,
                             "waiting_since": waiting_since,
                             "builds": step_runner_wait_context(runner),
+                            "queue_position": position,
+                            "waiters_ahead": standing.map(|standing| standing.waiters_ahead),
+                            "priority": step_priority(request),
                         }))?;
                     }
                 }
+                last_position = position;
                 last_observation = Some(observation);
                 next_probe = now() + backoff;
-                backoff = (backoff * 2).min(RUNNER_WAIT_CAP);
+                backoff = (backoff * 2).min(wait_cap);
             }
         }
         let runner_ready = runner_probe.is_none()
@@ -1919,10 +1979,13 @@ mod tests {
                 uncapped,
             };
             let request = super::super::workflow_job::step_request(&workflow, &submission).unwrap();
-            let permit =
-                crate::lab_capacity::acquire_step(Some(1), "capacity-test", |_, _| Ok(true))
-                    .unwrap()
-                    .unwrap();
+            let permit = crate::lab_capacity::acquire_step(
+                Some(1),
+                crate::lab_capacity::StepClaim::owner("capacity-test"),
+                |_, _| Ok(true),
+            )
+            .unwrap()
+            .unwrap();
             let harness = step_harness(&request, home.path());
             harness.start_via_controller_boundary().unwrap();
             if uncapped {

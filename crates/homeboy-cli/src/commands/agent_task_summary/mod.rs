@@ -232,6 +232,7 @@ fn render_capacity_summary(payload: &Value) -> Option<String> {
             slots("free_slots")
         ));
     }
+    render_lab_step_queue(&mut lines, payload);
     if routes.is_empty() {
         lines.push("Agent task capacity: no configured provider routes".to_string());
     }
@@ -290,6 +291,33 @@ fn render_capacity_summary(payload: &Value) -> Option<String> {
         }
     }
     Some(lines.join("\n"))
+}
+
+/// One line per Lab step waiter, in admission order, with its upper-bound ETA.
+fn render_lab_step_queue(lines: &mut Vec<String>, payload: &Value) {
+    for runner in payload
+        .get("lab_capacity")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+    {
+        let runner_id = runner["runner_id"].as_str().unwrap_or("unknown");
+        let queue = &runner["observation"]["step_queue"];
+        for waiter in queue["waiting"].as_array().into_iter().flatten() {
+            let position = waiter["queue_position"].as_u64().unwrap_or(0);
+            let eta = waiter["eta_seconds"]
+                .as_u64()
+                .map(|seconds| format!(", ETA <= {seconds}s (estimate from declared budgets)"))
+                .unwrap_or_else(|| ", ETA unknown".to_string());
+            lines.push(format!(
+                "  Lab/{runner_id} queued {position}: {} ({} lane, {} ahead, {} holders){eta}",
+                waiter["owner"].as_str().unwrap_or("unknown"),
+                waiter["priority"].as_str().unwrap_or("normal"),
+                position.saturating_sub(1),
+                queue["holders"].as_array().map_or(0, Vec::len),
+            ));
+        }
+    }
 }
 
 /// Name a capacity route by its account pool (`pi:anthropic` reads as
@@ -706,6 +734,29 @@ fn agent_task_capacity_names_lab_runner_and_slots() {
     let summary = render_capacity_summary(&payload).unwrap();
     assert!(summary.contains("Lab/lab-a: 2 active slots, 3 free slots"));
     assert!(summary.contains("capacity not published"));
+}
+
+#[test]
+fn agent_task_capacity_lists_lab_step_queue_with_eta() {
+    let payload = serde_json::json!({
+        "schema": "homeboy/agent-task-capacity/v1",
+        "routes": [],
+        "lab_capacity": [{"runner_id": "lab-a", "observation": {"step_queue": {
+            "holders": [{"owner": "wf-1"}, {"owner": "wf-1"}],
+            "waiting": [
+                {"queue_position": 1, "owner": "publish", "priority": "high", "eta_seconds": 90},
+                {"queue_position": 2, "owner": "wf-1", "priority": "normal", "eta_seconds": null}
+            ]
+        }}}]
+    });
+    let summary = render_capacity_summary(&payload).unwrap();
+    assert!(summary.contains(
+        "Lab/lab-a queued 1: publish (high lane, 0 ahead, 2 holders), ETA <= 90s (estimate from declared budgets)"
+    ), "{summary}");
+    assert!(
+        summary.contains("Lab/lab-a queued 2: wf-1 (normal lane, 1 ahead, 2 holders), ETA unknown"),
+        "{summary}"
+    );
 }
 
 #[test]

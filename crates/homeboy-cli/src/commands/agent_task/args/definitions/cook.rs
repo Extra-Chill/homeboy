@@ -1830,6 +1830,12 @@ pub struct AgentTaskCookArgs {
     /// --prompt, it supplies the one provider task.
     #[arg(long, value_name = "TEXT")]
     pub goal: Option<String>,
+    /// Lab admission lane for this Cook's steps: `high` waiters take a freed
+    /// slot before `normal` ones (FIFO within a lane). Use it for short
+    /// follow-ups such as publish fixes. Defaults to `normal`, or to
+    /// HOMEBOY_LAB_PRIORITY when set.
+    #[arg(long, value_name = "LANE", value_parser = ["normal", "high"])]
+    pub priority: Option<String>,
     /// Workspace handle the cook edits, verifies, and finalizes into. The handle
     /// is `<repo>@<branch-slug>`, where the slug replaces every character of
     /// --head outside [A-Za-z0-9_-] with `-`, so branch `fix/1234-x` is handle
@@ -1939,6 +1945,16 @@ pub struct AgentTaskCookArgs {
     /// Operator-supplied `--attempt-run-id` captured before preview lifecycle binding.
     #[arg(skip)]
     pub requested_attempt_run_id: Option<String>,
+}
+
+impl AgentTaskCookArgs {
+    /// Export the declared lane so every step this Cook admits carries it in
+    /// its captured `HOMEBOY_*` environment.
+    pub(crate) fn export_lab_priority(&self) {
+        if let Some(priority) = &self.priority {
+            std::env::set_var(homeboy::core::lab_capacity::LAB_PRIORITY_ENV, priority);
+        }
+    }
 }
 
 impl std::ops::Deref for AgentTaskCookArgs {
