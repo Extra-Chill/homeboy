@@ -811,9 +811,18 @@ pub(super) fn dispatch(
         let cancelled = result.setup.iter().any(|outcome| {
             outcome.termination == homeboy_core::deps::DependencyHydrationTermination::Cancelled
         });
+        // Retry runner supervision non-verdicts within this bounded gate
+        // dispatch, without asking Cook for another provider attempt.
+        let execution_unavailable = result.report.status == AgentTaskGateStatus::Unavailable
+            && result.report.termination != AgentTaskGateTermination::Cancelled
+            && result
+                .report
+                .lab_receipt
+                .as_ref()
+                .is_some_and(|receipt| receipt["retryable"] == true);
         setup_attempts.extend(result.setup.iter().cloned());
         receipt = Some(result);
-        if !failed
+        if !(failed || execution_unavailable)
             || cancelled
             || supervision.is_some_and(|policy| (policy.is_cancelled)())
             || attempt == 1
@@ -919,6 +928,12 @@ fn gate_execute_unavailable(mut error: Error, stage: &str, artifact_ref: Option<
     }
     error.retryable.get_or_insert(true);
     error
+}
+
+/// Runner-side execution errors need the same retry contract as transport
+/// failures: neither produced a verdict that can reject the candidate.
+fn runner_gate_execution_error(error: Error) -> Error {
+    gate_execute_unavailable(error, "gate_execute", None)
 }
 
 /// The typed cause `gate-execute` reports with its non-zero exit, so it never
@@ -1462,8 +1477,9 @@ fn execute_with_context_and_resources(
     let (mut report, readiness) = match result {
         Ok(report) => (report, request.preflight_only.then(|| serde_json::json!({"schema":"homeboy/lab-gate-readiness/v1", "status":"ready", "executed_gate":false, "toolchains":request.toolchains}))),
         Err(error) => {
-            let mut setup = error.clone();
-            setup.details["gate_disposition"] = serde_json::json!("unavailable");
+            // Supervision can fail without a candidate verdict. Preserve the
+            // cause, but give Cook the same retry contract as transport errors.
+            let setup = runner_gate_execution_error(error.clone());
             let mut report = non_execution_report(&request, &setup);
             report.lab_receipt.as_mut().expect("non-execution receipt")["diagnostic"] = homeboy_core::redaction::redact_json(&serde_json::json!({"code":error.code.as_str(), "message":error.message, "details":error.details}));
             (report, Some(serde_json::json!({"schema":"homeboy/lab-gate-readiness/v1", "status":"unavailable", "executed_gate":false})))
@@ -1785,6 +1801,35 @@ mod tests {
             );
             assert_eq!(report.lab_receipt.as_ref().unwrap()["retryable"], true);
         }
+    }
+
+    #[test]
+    fn supervision_cleanup_failure_is_retryable_non_execution() {
+        let error = Error::internal_io(
+            "execution owner cleanup did not complete".to_string(),
+            Some("supervise deterministic gate homeboy review test homeboy".to_string()),
+        );
+        let error = runner_gate_execution_error(error);
+        let report = gate_non_execution_report(
+            1,
+            vec!["homeboy".into(), "review".into(), "test".into(), "homeboy".into()],
+            AgentTaskGateVisibility::Visible,
+            AgentTaskGateRevealPolicy::FullEvidence,
+            &error,
+        );
+
+        assert_eq!(report.status, AgentTaskGateStatus::Unavailable);
+        assert_eq!(report.step.status, PlanStepStatus::Skipped);
+        assert!(report.failure_evidence.is_none());
+        let receipt = report.lab_receipt.as_ref().unwrap();
+        assert_eq!(receipt["retryable"], true);
+        assert_eq!(receipt["disposition"], "unavailable");
+        assert_eq!(receipt["executed"], false);
+        assert_eq!(receipt["stage"], "gate_execute");
+        assert_eq!(
+            receipt["diagnostic"]["details"]["context"],
+            error.details["context"]
+        );
     }
 
     #[test]
