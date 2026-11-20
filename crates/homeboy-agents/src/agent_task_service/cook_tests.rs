@@ -10134,7 +10134,7 @@ fn supervision_stopped_gate_is_regated_once_and_ends_as_unavailable_verification
             .gate_environment
             .variables
             .insert("GATE_RUN_LEDGER".to_string(), ledger.display().to_string());
-        options.gates.verify = vec!["echo run >> \"$GATE_RUN_LEDGER\"; exec sleep 30".to_string()];
+        options.gates.verify = vec!["pwd -P >> \"$GATE_RUN_LEDGER\"; exec sleep 30".to_string()];
         options.gates.gate_timeout_seconds = 30;
         options.gates.gate_no_progress_timeout_seconds = 1;
         let recipes = CookRecipeStore::from_current_data_root().unwrap();
@@ -10173,9 +10173,16 @@ fn supervision_stopped_gate_is_regated_once_and_ends_as_unavailable_verification
             crate::agent_task_gate::AgentTaskGateTermination::NoProgress
         );
         assert!(gate.supervision_regate.is_some(), "{gate:#?}");
-        // Exactly one automatic re-gate on the same candidate.
-        let ran = std::fs::read_to_string(&ledger).unwrap().lines().count();
-        assert_eq!(ran, 2);
+        // Exactly one automatic re-gate in the candidate worktree, plus the
+        // single base-checkout observation before provider dispatch (#18557).
+        let ledger = std::fs::read_to_string(&ledger).unwrap();
+        let mut runs = std::collections::BTreeMap::<&str, usize>::new();
+        for dir in ledger.lines() {
+            *runs.entry(dir).or_default() += 1;
+        }
+        let mut counts: Vec<_> = runs.values().copied().collect();
+        counts.sort_unstable();
+        assert_eq!(counts, [1, 2], "{ledger}");
         let reason = result.value.stop_reason.as_deref().unwrap_or_default();
         assert!(reason.contains("gate infrastructure timeout"), "{reason}");
         assert!(reason.contains("homeboy agent-task recover"), "{reason}");
