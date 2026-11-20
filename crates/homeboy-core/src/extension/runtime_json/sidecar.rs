@@ -1,13 +1,12 @@
 //! JSON sidecar file mechanics behind `sidecar-writer.sh`.
 //!
 //! Every write lands atomically: the document is written to a
-//! `.homeboy-sidecar-*.json` temp file beside the target and renamed over it,
+//! unique temp file beside the target and renamed over it,
 //! so a reader never observes a partial sidecar. Output is compact UTF-8 with
 //! a trailing newline.
 
 use super::json::Json;
 use std::fs;
-use std::io::Write;
 use std::path::Path;
 
 /// Replace `target` with a JSON array of `items`.
@@ -85,19 +84,10 @@ fn write_atomic(target: &str, value: &Json) -> Result<(), String> {
         Some(parent) if !parent.as_os_str().is_empty() => parent,
         _ => Path::new("."),
     };
-    fs::create_dir_all(directory)
-        .map_err(|error| format!("create {}: {error}", directory.display()))?;
-    let mut temp = tempfile::Builder::new()
-        .prefix(".homeboy-sidecar-")
-        .suffix(".json")
-        .tempfile_in(directory)
-        .map_err(|error| format!("create temp sidecar in {}: {error}", directory.display()))?;
+    homeboy_engine_primitives::local_files::create_dir_all_durably(directory)
+        .map_err(|error| error.to_string())?;
     let mut text = value.to_compact();
     text.push('\n');
-    temp.write_all(text.as_bytes())
-        .and_then(|()| temp.flush())
-        .map_err(|error| format!("write temp sidecar: {error}"))?;
-    temp.persist(target)
-        .map_err(|error| format!("replace {}: {}", target.display(), error.error))?;
-    Ok(())
+    homeboy_engine_primitives::local_files::write_file_atomic(target, text, "write sidecar")
+        .map_err(|error| error.to_string())
 }

@@ -100,11 +100,8 @@ pub(super) fn json<T: serde::de::DeserializeOwned>(bytes: &[u8]) -> Result<T> {
 }
 
 pub(super) fn write_json(path: &Path, value: &impl Serialize) -> Result<()> {
-    fs::write(path, serde_json::to_vec(value).map_err(io)?).materialization(
-        "write",
-        path,
-        "controller",
-    )
+    homeboy_engine_primitives::local_files::write_json_file(path, value)
+        .materialization("write", path, "controller")
 }
 
 /// Runner-side plan endpoint. Its response is the sole source of admission and

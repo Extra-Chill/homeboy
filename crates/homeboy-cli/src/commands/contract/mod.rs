@@ -1435,7 +1435,7 @@ mod tests {
 
     fn write_json(dir: &TempDir, name: &str, value: Value) -> PathBuf {
         let path = dir.path().join(name);
-        fs::write(&path, serde_json::to_string_pretty(&value).unwrap()).unwrap();
+        homeboy::core::engine::local_files::write_json_file(&path, &value).unwrap();
         path
     }
 

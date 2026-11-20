@@ -11,7 +11,7 @@ fn temp_entries(dir: &std::path::Path) -> Vec<String> {
     std::fs::read_dir(dir)
         .unwrap()
         .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
-        .filter(|name| name.starts_with(".homeboy-sidecar-"))
+        .filter(|name| name.ends_with(".tmp"))
         .collect()
 }
 
