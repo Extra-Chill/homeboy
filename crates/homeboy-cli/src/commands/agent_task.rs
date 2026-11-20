@@ -29,6 +29,13 @@ pub(crate) mod recover;
 pub mod retained_artifacts;
 pub mod review;
 pub mod run;
+mod run_continuation;
+mod run_destination;
+mod run_disclosure;
+mod run_execution;
+mod run_preview;
+mod run_provider_evidence;
+mod run_repository;
 pub mod status;
 pub mod tool;
 

@@ -28,7 +28,7 @@ fn continuation_store_reads_stay_at_the_boundary() {
             "homeboy-agents/src/agent_task_service/cook_recipe.rs",
             "homeboy-agents/src/agent_task_lifecycle/cook_run_state.rs",
             "homeboy-cli/src/commands/infra/route.rs",
-            "homeboy-cli/src/commands/agent_task/run.rs",
+            "homeboy-cli/src/commands/agent_task/run_continuation.rs",
         ]
         .contains(&relative)
         {
