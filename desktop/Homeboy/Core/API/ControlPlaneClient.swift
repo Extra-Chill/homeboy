@@ -231,7 +231,7 @@ enum ControlPlaneActionParameters {
     case cancel(reason: String?)
     case retry(force: Bool)
     case placementUpdate(placement: String)
-    /// Generic fallback for actions whose full payload shape (e.g. `promote`)
+    /// Generic fallback for actions whose full payload shape
     /// is not yet modeled client-side. Callers supply the `required_inputs`
     /// Homeboy core reported as a flat string dictionary.
     case raw(schema: String, data: [String: String])

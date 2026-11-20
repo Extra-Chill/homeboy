@@ -799,7 +799,7 @@ pub struct ControlPlaneStateSummary {
     pub state: String,
 }
 
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord)]
 #[serde(rename_all = "snake_case")]
 pub enum ControlPlaneAction {
     Recover,
@@ -807,7 +807,6 @@ pub enum ControlPlaneAction {
     Resume,
     PlacementUpdate,
     Retry,
-    Promote,
     Reconcile,
 }
 

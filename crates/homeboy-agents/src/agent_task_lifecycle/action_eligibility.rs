@@ -1,4 +1,4 @@
-use super::{AgentTaskRunRecord, CookRunAction, CookRunPhase, CookRunState};
+use super::{AgentTaskRunRecord, CookRunPhase, CookRunState};
 use crate::agent_task_schedule::AgentTaskPlan;
 use homeboy_control_plane_contract::{
     ControlPlaneAction, ControlPlaneActionAvailability, ControlPlaneActionConfirmation,
@@ -30,7 +30,7 @@ pub(crate) fn lifecycle_action_eligibility_with_roots(
             actions: Vec::new(),
         };
     }
-    let cancellation = if !state.allows(CookRunAction::Cancel) {
+    let cancellation = if !state.allows(ControlPlaneAction::Cancel) {
         unavailable(format!(
             "agent-task run '{}' is already terminal with state {} and no live owner",
             record.run_id,
@@ -45,11 +45,6 @@ pub(crate) fn lifecycle_action_eligibility_with_roots(
     let resume = resume_availability(record, &state);
     let placement_update = placement_update_availability(record, &state);
     let retry = retry_availability(record, &state, plan, roots);
-    let promotion = if state.allows(CookRunAction::Promote) {
-        indeterminate("promotion requires a target worktree and candidate preflight")
-    } else {
-        unavailable("run does not retain a potentially promotable candidate")
-    };
     let reconcile = reconcile_availability(record, &state, roots);
 
     ControlPlaneActionEligibilityReport {
@@ -87,14 +82,6 @@ pub(crate) fn lifecycle_action_eligibility_with_roots(
                 Vec::new(),
                 true,
                 "agent_task_run",
-            ),
-            action(
-                ControlPlaneAction::Promote,
-                promotion,
-                ControlPlaneActionConfirmation::Required,
-                vec!["to_worktree"],
-                true,
-                "agent_task_promotion",
             ),
             action(
                 ControlPlaneAction::Reconcile,
@@ -422,7 +409,7 @@ mod tests {
     }
 
     #[test]
-    fn lifecycle_action_contract_covers_every_durable_state_without_false_promotion() {
+    fn lifecycle_action_contract_covers_every_durable_state() {
         for state in [
             RunExecutionState::Queued,
             RunExecutionState::Running,
@@ -448,7 +435,6 @@ mod tests {
                     ControlPlaneAction::Resume,
                     ControlPlaneAction::PlacementUpdate,
                     ControlPlaneAction::Retry,
-                    ControlPlaneAction::Promote,
                     ControlPlaneAction::Reconcile,
                 ]
             );
@@ -456,15 +442,6 @@ mod tests {
                 assert_eq!(
                     decision(&report, ControlPlaneAction::Cancel),
                     ControlPlaneActionAvailability::Unavailable
-                );
-            }
-            if matches!(
-                state,
-                RunExecutionState::Succeeded | RunExecutionState::CandidateRecoverable
-            ) {
-                assert_eq!(
-                    decision(&report, ControlPlaneAction::Promote),
-                    ControlPlaneActionAvailability::Indeterminate
                 );
             }
         }

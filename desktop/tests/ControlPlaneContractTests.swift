@@ -283,9 +283,9 @@ func testControlPlaneReview(fixturesDir: String, decoder: JSONDecoder) throws {
         throw NSError(domain: "ContractTest", code: 231,
             userInfo: [NSLocalizedDescriptionKey: "review.resource.state did not decode as candidate_recoverable"])
     }
-    guard review.resource.actionEligibility?.actions.contains(where: { $0.action == "promote" }) == true else {
+    guard review.resource.actionEligibility?.actions.contains(where: { $0.action == "recover" }) == true else {
         throw NSError(domain: "ContractTest", code: 232,
-            userInfo: [NSLocalizedDescriptionKey: "review.resource.action_eligibility did not decode the promote action"])
+            userInfo: [NSLocalizedDescriptionKey: "review.resource.action_eligibility did not decode the recover action"])
     }
     print("[PASS] Review wraps the same run resource shape as the run list/detail")
     print("")

@@ -38,10 +38,9 @@ use homeboy_control_plane_contract::{
     CONTROL_PLANE_EVENT_RETENTION_SCHEMA, CONTROL_PLANE_EXECUTION_PAGE_SCHEMA,
     CONTROL_PLANE_EXECUTION_SCHEMA, CONTROL_PLANE_MISSION_PAGE_SCHEMA,
     CONTROL_PLANE_MISSION_SCHEMA, CONTROL_PLANE_PLACEMENT_UPDATE_RESULT_SCHEMA,
-    CONTROL_PLANE_PROMOTE_RESULT_SCHEMA, CONTROL_PLANE_REFERENCE_PAGE_SCHEMA,
-    CONTROL_PLANE_REFERENCE_SCHEMA, CONTROL_PLANE_RESUME_RESULT_SCHEMA,
-    CONTROL_PLANE_RETRY_RESULT_SCHEMA, CONTROL_PLANE_RUN_PAGE_SCHEMA,
-    CONTROL_PLANE_TASK_PAGE_SCHEMA, CONTROL_PLANE_TASK_SCHEMA,
+    CONTROL_PLANE_REFERENCE_PAGE_SCHEMA, CONTROL_PLANE_REFERENCE_SCHEMA,
+    CONTROL_PLANE_RESUME_RESULT_SCHEMA, CONTROL_PLANE_RETRY_RESULT_SCHEMA,
+    CONTROL_PLANE_RUN_PAGE_SCHEMA, CONTROL_PLANE_TASK_PAGE_SCHEMA, CONTROL_PLANE_TASK_SCHEMA,
 };
 use homeboy_control_plane_contract::{
     ControlPlanePlacementUpdateParameters, ControlPlaneRetryParameters,
@@ -1675,7 +1674,6 @@ impl OrchestrationService<LifecycleStoreLookup> {
             request,
             |run_id, parameters, _intent| default_retry(run_id, parameters),
             |run_id, _intent| default_resume(run_id),
-            |promotion, _intent| default_promote(promotion),
         )
     }
 
@@ -1738,13 +1736,12 @@ impl OrchestrationService<LifecycleStoreLookup> {
         Ok(status)
     }
 
-    fn execute_action_with_delegates<F, R, P>(
+    fn execute_action_with_delegates<F, R>(
         &self,
         requested_id: &RunId,
         request: &ControlPlaneActionRequest,
         retry: F,
         resume: R,
-        promote: P,
     ) -> Result<ControlPlaneActionAcknowledgement, ControlPlaneError>
     where
         F: FnOnce(
@@ -1761,11 +1758,6 @@ impl OrchestrationService<LifecycleStoreLookup> {
                 crate::agent_task_schedule::AgentTaskAggregate,
             >,
         >,
-        P: FnOnce(
-            &crate::agent_task_service::AgentTaskPromotionRequest,
-            &ControlPlaneActionRequest,
-        )
-            -> homeboy_core::Result<crate::agent_task_promotion::AgentTaskPromotionReport>,
     {
         validate_action_request(request)?;
         let observation = self
@@ -2066,7 +2058,6 @@ impl OrchestrationService<LifecycleStoreLookup> {
                                 &resume_request,
                                 retry,
                                 resume,
-                                promote,
                             )
                             .map_err(|error| run_boundary_error_to_homeboy(error, "recover", None))
                             .and_then(|ack| crate::agent_task_action_result::resume_report(&ack))
@@ -2354,71 +2345,6 @@ impl OrchestrationService<LifecycleStoreLookup> {
                             ControlPlaneActionPayload::empty(),
                             Some(redacted_bounded(&error.attributed_message(), MESSAGE_BOUND)),
                         ),
-                    }
-                }
-                ControlPlaneAction::Promote => {
-                    let parameters: crate::agent_task_service::AgentTaskPromotionRequest =
-                        serde_json::from_value(request.parameters.data.clone()).map_err(
-                            |error| {
-                                ControlPlaneError::invalid_argument(format!(
-                                    "promote parameters: {error}"
-                                ))
-                            },
-                        )?;
-                    match promote(&parameters, request) {
-                        Ok(report) => {
-                            let current = self
-                                .lookup
-                                .store
-                                .read_record(&resolved)
-                                .map_err(map_lifecycle_error)?;
-                            let mut result = serde_json::to_value(&report).unwrap_or_default();
-                            result["handoff"] = promotion_handoff(&report);
-                            if !parameters.dry_run {
-                                result["recorded_on_run"] = serde_json::json!({
-                                    "run_id": current.run_id,
-                                    "metadata_key": "cook_delivery.artifacts.promotion",
-                                });
-                            }
-                            (
-                                ControlPlaneActionOutcome::Succeeded,
-                                project_record(&current, None)?,
-                                ControlPlaneActionPayload {
-                                    schema: CONTROL_PLANE_PROMOTE_RESULT_SCHEMA.to_string(),
-                                    data: result,
-                                },
-                                None,
-                            )
-                        }
-                        Err(error) => {
-                            // Promotion can fail after applying the candidate (for
-                            // example while setting up the destination gate). Keep
-                            // the causal error on the run instead of reducing the
-                            // action acknowledgement to "IO error". The durable
-                            // post-apply promotion checkpoint remains resumable.
-                            let diagnostic =
-                                crate::agent_task_service::bounded_error_diagnostic(&error);
-                            crate::agent_task_lifecycle::record_cook_controller_failure_in_store(
-                                &self.lookup.store,
-                                &resolved,
-                                &diagnostic,
-                            )
-                            .map_err(map_lifecycle_error)?;
-                            let current = self
-                                .lookup
-                                .store
-                                .read_record(&resolved)
-                                .map_err(map_lifecycle_error)?;
-                            (
-                                ControlPlaneActionOutcome::Failed,
-                                project_record(&current, None)?,
-                                ControlPlaneActionPayload {
-                                    schema: "homeboy/control-plane-action-failure/v1".to_string(),
-                                    data: diagnostic,
-                                },
-                                Some(redacted_bounded(&error.attributed_message(), MESSAGE_BOUND)),
-                            )
-                        }
                     }
                 }
                 ControlPlaneAction::Resume
@@ -2849,58 +2775,6 @@ fn recover_interrupted_action_acknowledgement(
         ControlPlaneAction::Resume => failed(
             "resume was interrupted after acceptance without authoritative terminal evidence; no second execution was attempted",
         )?,
-        ControlPlaneAction::Promote => {
-            let parameters: crate::agent_task_service::AgentTaskPromotionRequest =
-                serde_json::from_value(request.parameters.data.clone()).map_err(|error| {
-                    ControlPlaneError::invalid_argument(format!("promote parameters: {error}"))
-                })?;
-            let request_fingerprint =
-                crate::agent_task_service::promotion_request_fingerprint(&parameters)
-                    .map_err(map_lifecycle_error)?;
-            let report = crate::agent_task_service::recorded_promotion_report_typed(
-                &current.metadata,
-            )
-            .map_err(map_lifecycle_error)?
-            .filter(
-                    |report: &crate::agent_task_promotion::AgentTaskPromotionReport| {
-                        report.source.run_id.as_deref() == Some(original.run_id.as_str())
-                            && report.to_worktree == parameters.to_worktree
-                            && parameters
-                                .task_id
-                                .as_deref()
-                                .is_none_or(|task| report.source.task_id == task)
-                            && parameters
-                                .artifact_id
-                                .as_deref()
-                                .is_none_or(|artifact| report.candidate.as_ref().is_some_and(|candidate| candidate.candidate_sha == artifact))
-                            && report.provenance["promotion_request_fingerprint"]
-                                == request_fingerprint
-                            && report.status
-                                != crate::agent_task_promotion::AgentTaskPromotionStatus::VerificationPending
-                    },
-                );
-            if let Some(report) = report {
-                let mut data = serde_json::to_value(&report).unwrap_or_default();
-                data["handoff"] = promotion_handoff(&report);
-                data["recorded_on_run"] = serde_json::json!({
-                    "run_id": current.run_id,
-                    "metadata_key": "cook_delivery.artifacts.promotion",
-                });
-                (
-                    ControlPlaneActionOutcome::Succeeded,
-                    project_record(&current, None)?,
-                    ControlPlaneActionPayload {
-                        schema: CONTROL_PLANE_PROMOTE_RESULT_SCHEMA.to_string(),
-                        data,
-                    },
-                    Some("recovered from the durable promotion report".to_string()),
-                )
-            } else {
-                failed(
-                    "promote was interrupted without a matching terminal promotion report; no second mutation was attempted",
-                )?
-            }
-        }
     };
 
     Ok(ControlPlaneActionAcknowledgement {
@@ -3723,51 +3597,8 @@ fn cancel_result_payload(result: ControlPlaneCancelResult) -> ControlPlaneAction
     }
 }
 
-fn promotion_handoff(report: &crate::agent_task_promotion::AgentTaskPromotionReport) -> Value {
-    let target_applied = report.status.patch_promoted();
-    let verified = matches!(
-        report.status,
-        crate::agent_task_promotion::AgentTaskPromotionStatus::Applied
-    );
-    let next_action = if report.status.gate_failed() {
-        "patch promoted but deterministic gates failed; use gate feedback before finalizing"
-    } else if target_applied && verified {
-        "patch promoted and deterministic gates verified; finalize a PR"
-    } else if target_applied {
-        "patch promoted into the target worktree; verify, then finalize a PR"
-    } else {
-        "dry run only; rerun promote without `--dry-run` before finalizing"
-    };
-
-    serde_json::json!({
-        "schema": "homeboy/agent-task-promotion-handoff/v1",
-        "states": {
-            "candidate_produced": true,
-            "candidate_retained": true,
-            "target_applied": target_applied,
-            "patch_promoted": target_applied,
-            "verified": verified,
-            "finalized": false,
-            "pr_opened": false,
-        },
-        "boundary": report.status.handoff_boundary(),
-        "finalize_command": report.source.run_id.as_ref().map(|run_id| format!(
-            "homeboy agent-task recover {run_id}"
-        )),
-        "next_actions": [next_action],
-    })
-}
-
 fn validate_action_request(request: &ControlPlaneActionRequest) -> Result<(), ControlPlaneError> {
     request.validate()?;
-    if request.action == ControlPlaneAction::Promote {
-        serde_json::from_value::<crate::agent_task_service::AgentTaskPromotionRequest>(
-            request.parameters.data.clone(),
-        )
-        .map_err(|error| {
-            ControlPlaneError::invalid_argument(format!("promote parameters: {error}"))
-        })?;
-    }
     Ok(())
 }
 
@@ -3778,7 +3609,6 @@ const fn action_name(action: ControlPlaneAction) -> &'static str {
         ControlPlaneAction::Resume => "resume",
         ControlPlaneAction::PlacementUpdate => "placement_update",
         ControlPlaneAction::Retry => "retry",
-        ControlPlaneAction::Promote => "promote",
         ControlPlaneAction::Reconcile => "reconcile",
     }
 }
@@ -4013,7 +3843,6 @@ where
             )
         },
         |resolved, _intent| default_resume(resolved),
-        |promotion, _intent| default_promote(promotion),
     )
 }
 
@@ -4027,16 +3856,14 @@ pub fn execute_resume_action_from_current_environment(
         request,
         |resolved, parameters, _intent| default_retry(resolved, parameters),
         |resolved, _intent| crate::agent_task_service::resume(resolved.to_string(), executor),
-        |promotion, _intent| default_promote(promotion),
     )
 }
 
-fn execute_action_from_current_environment_with_delegates<F, R, P>(
+fn execute_action_from_current_environment_with_delegates<F, R>(
     run_id: &str,
     request: &ControlPlaneActionRequest,
     retry: F,
     resume: R,
-    promote: P,
 ) -> homeboy_core::Result<ControlPlaneActionAcknowledgement>
 where
     F: FnOnce(
@@ -4052,15 +3879,11 @@ where
             crate::agent_task_schedule::AgentTaskAggregate,
         >,
     >,
-    P: FnOnce(
-        &crate::agent_task_service::AgentTaskPromotionRequest,
-        &ControlPlaneActionRequest,
-    ) -> homeboy_core::Result<crate::agent_task_promotion::AgentTaskPromotionReport>,
 {
     let requested_id = parse_run_id(run_id)?;
     let store = AgentTaskLifecycleStore::from_environment()?;
     OrchestrationService::new(LifecycleStoreLookup::new(store))
-        .execute_action_with_delegates(&requested_id, request, retry, resume, promote)
+        .execute_action_with_delegates(&requested_id, request, retry, resume)
         .map_err(|error| run_boundary_error_to_homeboy(error, "action", None))
 }
 
@@ -4113,12 +3936,6 @@ fn default_resume(
             crate::agent_task_provider::ExtensionProviderAgentTaskExecutor::discover(),
         ),
     )
-}
-
-fn default_promote(
-    promotion: &crate::agent_task_service::AgentTaskPromotionRequest,
-) -> homeboy_core::Result<crate::agent_task_promotion::AgentTaskPromotionReport> {
-    crate::agent_task_service::execute_promotion(promotion.clone())
 }
 
 /// Project a durable record and optional plan the caller already loaded.
@@ -4391,8 +4208,8 @@ fn projected_cook_recovery(record: &AgentTaskRunRecord) -> Option<ControlPlaneRe
             cook_id,
         });
     };
-    let allowed = crate::agent_task_lifecycle::CookRunState::of(record)
-        .allows(crate::agent_task_lifecycle::CookRunAction::Recover);
+    let allowed =
+        crate::agent_task_lifecycle::CookRunState::of(record).allows(ControlPlaneAction::Recover);
     let step = if allowed {
         plan.step.action_name().unwrap_or("none")
     } else {
@@ -6465,7 +6282,6 @@ mod tests {
         CONTROL_PLANE_ACTION_ELIGIBILITY_SCHEMA, CONTROL_PLANE_ACTION_INTENT_SCHEMA,
         CONTROL_PLANE_ACTION_REQUEST_SCHEMA, CONTROL_PLANE_CANCEL_PARAMETERS_SCHEMA,
         CONTROL_PLANE_EVENT_APPEND_REQUEST_SCHEMA, CONTROL_PLANE_EVENT_SCHEMA,
-        CONTROL_PLANE_PROMOTE_PARAMETERS_SCHEMA, CONTROL_PLANE_PROMOTE_RESULT_SCHEMA,
         CONTROL_PLANE_REFERENCE_REGISTRATION_SCHEMA, CONTROL_PLANE_RESUME_RESULT_SCHEMA,
         CONTROL_PLANE_RETRY_PARAMETERS_SCHEMA, CONTROL_PLANE_RETRY_RESULT_SCHEMA,
         CONTROL_PLANE_RUN_SCHEMA, CONTROL_PLANE_SUBMISSION_REQUEST_SCHEMA,
@@ -9090,7 +8906,6 @@ mod tests {
                     &request,
                     |_, _, _| panic!("retry delegate must not run"),
                     |_, _| panic!("resume delegate must not run"),
-                    |_, _| panic!("promote delegate must not run"),
                 )
                 .expect("recover interrupted cancel");
             assert_eq!(recovered.outcome, ControlPlaneActionOutcome::Succeeded);
@@ -9166,7 +8981,6 @@ mod tests {
                     &request,
                     |_, _, _| panic!("retry delegate must not run"),
                     |_, _| panic!("resume delegate must not run"),
-                    |_, _| panic!("promote delegate must not run"),
                 )
                 .expect("recover interrupted retry");
             assert_eq!(
@@ -9182,79 +8996,6 @@ mod tests {
                     .expect("effect status")
                     .state,
                 ControlPlaneEffectExecutionState::Succeeded
-            );
-            assert_eq!(
-                service.execute_action(&run, &request).expect("replay"),
-                recovered
-            );
-        });
-    }
-
-    #[test]
-    fn interrupted_promotion_recovers_only_its_exact_request_report() {
-        with_isolated_home(|_| {
-            let store = AgentTaskLifecycleStore::from_environment().expect("store");
-            store.write_record(&record(AGENT_TASK_RUN)).expect("record");
-            let service = OrchestrationService::new(LifecycleStoreLookup::new(store.clone()));
-            let run = RunId::new(AGENT_TASK_RUN).expect("run");
-            let request = ControlPlaneActionRequest {
-                schema: CONTROL_PLANE_ACTION_REQUEST_SCHEMA.to_string(),
-                effect_id: EffectId("test:interrupted-promote-1".to_string()),
-                action: ControlPlaneAction::Promote,
-                idempotency_key: "interrupted-promote-1".to_string(),
-                actor: "test".to_string(),
-                expected_updated_at: None,
-                parameters: ControlPlaneActionPayload {
-                    schema: CONTROL_PLANE_PROMOTE_PARAMETERS_SCHEMA.to_string(),
-                    data: json!({
-                        "source": "{}",
-                        "source_run_id": AGENT_TASK_RUN,
-                        "to_worktree": "homeboy@candidate",
-                        "artifact_id": "patch-1",
-                        "dry_run": false,
-                    }),
-                },
-                confirmed: true,
-            };
-            let parameters: crate::agent_task_service::AgentTaskPromotionRequest =
-                serde_json::from_value(request.parameters.data.clone()).expect("parameters");
-            let fingerprint = crate::agent_task_service::promotion_request_fingerprint(&parameters)
-                .expect("request fingerprint");
-            let mut report: crate::agent_task_promotion::AgentTaskPromotionReport =
-                serde_json::from_value(json!({
-                    "schema": "homeboy/agent-task-promotion-report/v1",
-                    "status": "applied",
-                    "source": { "kind": "aggregate", "run_id": AGENT_TASK_RUN, "task_id": "task" },
-                    "to_worktree": "homeboy@candidate",
-                    "target": { "worktree": "homeboy@candidate" },
-                    "candidate": { "base_sha": "base", "candidate_sha": "patch-1", "tree_sha": "tree" },
-                    "operator_notification": { "status": "completed", "message": "complete" }
-                }))
-                .expect("promotion report");
-            report.provenance["promotion_request_fingerprint"] = json!(fingerprint);
-            interrupt_action_after_effect(&service, &run, &request, || {
-                store
-                    .record_promotion(
-                        run.as_str(),
-                        serde_json::to_value(report).expect("report value"),
-                    )
-                    .expect("durable promotion report");
-            });
-
-            let recovered = service
-                .execute_action_with_delegates(
-                    &run,
-                    &request,
-                    |_, _, _| panic!("retry delegate must not run"),
-                    |_, _| panic!("resume delegate must not run"),
-                    |_, _| panic!("promote delegate must not run"),
-                )
-                .expect("recover interrupted promotion");
-            assert_eq!(recovered.outcome, ControlPlaneActionOutcome::Succeeded);
-            assert_eq!(recovered.result.schema, CONTROL_PLANE_PROMOTE_RESULT_SCHEMA);
-            assert_eq!(
-                recovered.result.data["handoff"]["states"]["target_applied"],
-                true
             );
             assert_eq!(
                 service.execute_action(&run, &request).expect("replay"),
@@ -9519,7 +9260,6 @@ mod tests {
                             exit_code: 0,
                         })
                     },
-                    |_, _| panic!("promote delegate must not run"),
                 )
             };
 
@@ -9587,7 +9327,6 @@ mod tests {
                     &request,
                     |_, _, _| panic!("retry delegate must not run"),
                     |_, _| panic!("resume delegate must not run"),
-                    |_, _| panic!("promote delegate must not run"),
                 )
                 .expect("candidate_recoverable resume names its cause");
 
@@ -9662,138 +9401,6 @@ mod tests {
                 service.execute_action(&run, &request).expect("replay"),
                 first
             );
-        });
-    }
-
-    #[test]
-    fn failed_promotion_action_replays_without_reexecuting() {
-        with_isolated_home(|_| {
-            let store = AgentTaskLifecycleStore::from_environment().expect("store");
-            store.write_record(&record(AGENT_TASK_RUN)).expect("record");
-            let service = OrchestrationService::new(LifecycleStoreLookup::new(store));
-            let run = RunId::new(AGENT_TASK_RUN).expect("run");
-            let request = ControlPlaneActionRequest {
-                schema: CONTROL_PLANE_ACTION_REQUEST_SCHEMA.to_string(),
-                effect_id: EffectId("test:promote-request-1".to_string()),
-                action: ControlPlaneAction::Promote,
-                idempotency_key: "promote-request-1".to_string(),
-                actor: "test".to_string(),
-                expected_updated_at: None,
-                parameters: ControlPlaneActionPayload {
-                    schema: CONTROL_PLANE_PROMOTE_PARAMETERS_SCHEMA.to_string(),
-                    data: json!({
-                        "source": "{}",
-                        "source_run_id": AGENT_TASK_RUN,
-                        "to_worktree": "repo@candidate",
-                        "dry_run": true,
-                    }),
-                },
-                confirmed: true,
-            };
-            let mut malformed = request.clone();
-            malformed.parameters.data = json!({ "source": "{}" });
-            let error = service
-                .execute_action_with_delegates(
-                    &run,
-                    &malformed,
-                    |_, _, _| panic!("retry delegate must not run"),
-                    |_, _| panic!("resume delegate must not run"),
-                    |_, _| panic!("promote delegate must not run"),
-                )
-                .expect_err("malformed parameters");
-            assert_eq!(error.class, ControlPlaneErrorClass::InvalidArgument);
-            let executions = std::rc::Rc::new(std::cell::Cell::new(0));
-            let execute = || {
-                let executions = std::rc::Rc::clone(&executions);
-                service.execute_action_with_delegates(
-                    &run,
-                    &request,
-                    |_, _, _| panic!("retry delegate must not run"),
-                    |_, _| panic!("resume delegate must not run"),
-                    move |_, _| {
-                        executions.set(executions.get() + 1);
-                        Err(homeboy_core::Error::internal_unexpected(
-                            "promotion fixture failed",
-                        ))
-                    },
-                )
-            };
-
-            let first = execute().expect("failed acknowledgement");
-            let replay = execute().expect("failed replay");
-
-            assert_eq!(first.outcome, ControlPlaneActionOutcome::Failed);
-            assert_eq!(replay, first);
-            assert_eq!(executions.get(), 1);
-        });
-    }
-
-    #[test]
-    fn promotion_action_owns_handoff_recording_and_idempotent_replay() {
-        with_isolated_home(|_| {
-            let store = AgentTaskLifecycleStore::from_environment().expect("store");
-            store.write_record(&record(AGENT_TASK_RUN)).expect("record");
-            let service = OrchestrationService::new(LifecycleStoreLookup::new(store));
-            let run = RunId::new(AGENT_TASK_RUN).expect("run");
-            let request = ControlPlaneActionRequest {
-                schema: CONTROL_PLANE_ACTION_REQUEST_SCHEMA.to_string(),
-                effect_id: EffectId("test:promote-handoff-request-1".to_string()),
-                action: ControlPlaneAction::Promote,
-                idempotency_key: "promote-request-1".to_string(),
-                actor: "test".to_string(),
-                expected_updated_at: None,
-                parameters: ControlPlaneActionPayload {
-                    schema: CONTROL_PLANE_PROMOTE_PARAMETERS_SCHEMA.to_string(),
-                    data: json!({
-                        "source": "{}",
-                        "source_run_id": AGENT_TASK_RUN,
-                        "to_worktree": "homeboy@candidate",
-                        "dry_run": false,
-                    }),
-                },
-                confirmed: true,
-            };
-            let report: crate::agent_task_promotion::AgentTaskPromotionReport =
-                serde_json::from_value(json!({
-                "schema": "homeboy/agent-task-promotion-report/v1",
-                "status": "applied",
-                "source": { "kind": "aggregate", "run_id": AGENT_TASK_RUN, "task_id": "task" },
-                "to_worktree": "homeboy@candidate",
-                "target": { "worktree": "homeboy@candidate" },
-                "candidate": { "base_sha": "base", "candidate_sha": "patch-1", "tree_sha": "tree" },
-                "operator_notification": { "status": "completed", "message": "complete" },
-                }))
-                .expect("promotion report");
-            let executions = std::rc::Rc::new(std::cell::Cell::new(0));
-            let execute = || {
-                let executions = std::rc::Rc::clone(&executions);
-                let report = report.clone();
-                service.execute_action_with_delegates(
-                    &run,
-                    &request,
-                    |_, _, _| panic!("retry delegate must not run"),
-                    |_, _| panic!("resume delegate must not run"),
-                    move |_, _| {
-                        executions.set(executions.get() + 1);
-                        Ok(report)
-                    },
-                )
-            };
-
-            let first = execute().expect("promote");
-            let replay = execute().expect("replay");
-
-            assert_eq!(first.result.schema, CONTROL_PLANE_PROMOTE_RESULT_SCHEMA);
-            assert_eq!(
-                first.result.data["handoff"]["states"]["target_applied"],
-                true
-            );
-            assert_eq!(
-                first.result.data["recorded_on_run"]["metadata_key"],
-                "cook_delivery.artifacts.promotion"
-            );
-            assert_eq!(replay, first);
-            assert_eq!(executions.get(), 1);
         });
     }
 
@@ -10536,9 +10143,7 @@ mod tests {
                 legal.is_empty(),
                 "{label}"
             );
-            if actions.is_empty()
-                || !state.allows(crate::agent_task_lifecycle::CookRunAction::Recover)
-            {
+            if actions.is_empty() || !state.allows(ControlPlaneAction::Recover) {
                 assert_eq!(recovery.step, "none", "{label}: {recovery:?}");
                 assert!(
                     !recovery.command.contains("agent-task recover "),

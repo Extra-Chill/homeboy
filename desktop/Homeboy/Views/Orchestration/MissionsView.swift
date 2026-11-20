@@ -387,6 +387,8 @@ struct MissionsView: View {
     /// -parameters/v1` schema naming core uses for the modeled cases.
     private func parameters(for action: ControlPlaneRunAction, inputs: [String: String]) -> ControlPlaneActionParameters {
         switch action.action {
+        case "recover":
+            return .recover
         case "cancel":
             return .cancel(reason: inputs["reason"])
         case "retry":

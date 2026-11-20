@@ -294,15 +294,9 @@ pub fn register_promotion_job_driver() {
     });
 }
 
-impl AgentTaskPromotionRequest {}
-
 /// Execute or resume an immutable controller-owned promotion. The durable run
 /// is the operation key: each post-apply checkpoint is persisted before gates,
 /// so a restart can only verify the same materialized candidate.
-pub fn execute_promotion(request: AgentTaskPromotionRequest) -> Result<AgentTaskPromotionReport> {
-    execute_promotion_with_progress_and_cancellation(request, None, Arc::new(|| false))
-}
-
 pub fn execute_promotion_with_progress_and_cancellation(
     request: AgentTaskPromotionRequest,
     progress: Option<PromotionProgressCallback>,

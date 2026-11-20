@@ -253,11 +253,9 @@ format!(
         return CookRecoveryStep::Continue;
     }
     let status = CookStatus::from_status(inputs.status);
-    if inputs
-        .run_state
-        .as_ref()
-        .is_some_and(|state| !state.allows(agent_task_lifecycle::CookRunAction::Recover))
-    {
+    if inputs.run_state.as_ref().is_some_and(|state| {
+        !state.allows(homeboy_control_plane_contract::ControlPlaneAction::Recover)
+    }) {
         return CookRecoveryStep::none(
 format!(
             "The Cook is still in flight; watch it with `homeboy agent-task status {} --watch` instead.",
@@ -1077,7 +1075,7 @@ fn recover_cook_once(
         let regate_legal = match agent_task_lifecycle::exact_record(&plan.run_id) {
             Ok(record) => agent_task_lifecycle::CookRunState::of(&record)
                 .with_cook_index_fence(index_fenced)
-                .allows(agent_task_lifecycle::CookRunAction::Regate),
+                .allows_regate(),
             Err(_) => !index_fenced,
         };
         if !regate_legal || plan.step == CookRecoveryStep::Reconcile {
@@ -1148,7 +1146,7 @@ fn recover_cook_once(
         let record = agent_task_lifecycle::exact_record(&plan.run_id)?;
         let candidate_state =
             agent_task_lifecycle::CookRunState::of(&record).with_cook_index_fence(index_fenced);
-        if !candidate_state.allows(agent_task_lifecycle::CookRunAction::Regate) {
+        if !candidate_state.allows_regate() {
             return Err(Error::validation_invalid_argument(
                 "regate",
                 "candidate is retired, in flight, or fenced",
@@ -1539,7 +1537,7 @@ fn validate_step_inputs(
     };
     if agent_task_lifecycle::exact_record(&plan.run_id).is_ok_and(|record| {
         !agent_task_lifecycle::CookRunState::of(&record)
-            .allows(agent_task_lifecycle::CookRunAction::Recover)
+            .allows(homeboy_control_plane_contract::ControlPlaneAction::Recover)
     }) {
         return refuse(
             field,
@@ -2713,9 +2711,9 @@ mod tests {
         );
         let state = agent_task_lifecycle::CookRunState::of(&record);
         assert_eq!(state.status, "candidate_recoverable");
-        assert!(state.allows(agent_task_lifecycle::CookRunAction::Recover));
+        assert!(state.allows(homeboy_control_plane_contract::ControlPlaneAction::Recover));
         assert!(
-            state.allows(agent_task_lifecycle::CookRunAction::Regate),
+            state.allows_regate(),
             "the regate guard reads this legal action"
         );
         let (status_step, recover_step) = status_and_recover_steps(&record, |_| {});
@@ -2729,8 +2727,7 @@ mod tests {
         let (status_step, recover_step) = status_and_recover_steps(&live, |_| {});
         assert!(status_step.is_none(), "{status_step:?}");
         assert_eq!(recover_step, status_step);
-        assert!(!agent_task_lifecycle::CookRunState::of(&live)
-            .allows(agent_task_lifecycle::CookRunAction::Regate));
+        assert!(!agent_task_lifecycle::CookRunState::of(&live).allows_regate());
     }
 
     #[test]
@@ -2783,7 +2780,7 @@ mod tests {
             ControlPlaneActionAvailability::Unavailable
         );
         assert!(!agent_task_lifecycle::CookRunState::of(&record)
-            .allows(agent_task_lifecycle::CookRunAction::Cancel));
+            .allows(homeboy_control_plane_contract::ControlPlaneAction::Cancel));
         // The verb the review projection names accepts the run.
         let (status_step, recover_step) = status_and_recover_steps(&record, |_| {});
         assert_eq!(recover_step, CookRecoveryStep::Continue);
@@ -2804,8 +2801,7 @@ mod tests {
         );
         let state = agent_task_lifecycle::CookRunState::of(&record);
         assert_eq!(state.status, "candidate_recoverable");
-        assert!(state.allows(agent_task_lifecycle::CookRunAction::Regate));
-        assert!(state.allows(agent_task_lifecycle::CookRunAction::Promote));
+        assert!(state.allows_regate());
         let (status_step, recover_step) = status_and_recover_steps(&record, |inputs| {
             inputs.applied_gate_failure = true;
             inputs.regate_ready = true;

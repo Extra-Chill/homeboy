@@ -79,18 +79,6 @@
                   "result_resource_type": "agent_task_run"
                 },
                 {
-                  "action": "promote",
-                  "availability": "indeterminate",
-                  "confirmation": "required",
-                  "idempotent": true,
-                  "reason": "promotion requires a target worktree and candidate preflight",
-                  "required_inputs": [
-                    "to_worktree"
-                  ],
-                  "requires_revalidation": true,
-                  "result_resource_type": "agent_task_promotion"
-                },
-                {
                   "action": "reconcile",
                   "availability": "unavailable",
                   "confirmation": "none",
@@ -302,18 +290,6 @@
                   "result_resource_type": "agent_task_run"
                 },
                 {
-                  "action": "promote",
-                  "availability": "unavailable",
-                  "confirmation": "required",
-                  "idempotent": true,
-                  "reason": "run does not retain a potentially promotable candidate",
-                  "required_inputs": [
-                    "to_worktree"
-                  ],
-                  "requires_revalidation": true,
-                  "result_resource_type": "agent_task_promotion"
-                },
-                {
                   "action": "reconcile",
                   "availability": "unavailable",
                   "confirmation": "none",
@@ -416,18 +392,6 @@
                   "reason": "run is not quarantined",
                   "requires_revalidation": true,
                   "result_resource_type": "agent_task_run"
-                },
-                {
-                  "action": "promote",
-                  "availability": "unavailable",
-                  "confirmation": "required",
-                  "idempotent": true,
-                  "reason": "run does not retain a potentially promotable candidate",
-                  "required_inputs": [
-                    "to_worktree"
-                  ],
-                  "requires_revalidation": true,
-                  "result_resource_type": "agent_task_promotion"
                 },
                 {
                   "action": "reconcile",
