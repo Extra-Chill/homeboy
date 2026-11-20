@@ -2963,7 +2963,7 @@ mod tests {
             }),
         );
         use homeboy_control_plane_contract::{ControlPlaneAction, ControlPlaneActionAvailability};
-        let resume = eligibility(&record, ControlPlaneAction::Resume);
+        let resume = eligibility(&record, ControlPlaneAction::Recover);
         assert_eq!(
             resume.availability,
             ControlPlaneActionAvailability::Unavailable

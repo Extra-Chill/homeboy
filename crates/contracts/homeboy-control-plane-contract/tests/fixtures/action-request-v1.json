@@ -1,11 +1,11 @@
 {
   "schema": "homeboy/control-plane-action-request/v1",
   "effect_id": "fixture:run-1:resume:resume-run-1",
-  "action": "resume",
+  "action": "recover",
   "idempotency_key": "resume-run-1",
   "actor": "external-client",
   "parameters": {
-    "schema": "homeboy/control-plane-empty-action-payload/v1"
+    "schema": "homeboy/control-plane-recover-parameters/v1"
   },
   "confirmed": false
 }

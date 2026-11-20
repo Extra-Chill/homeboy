@@ -17,15 +17,6 @@
                 "result_resource_type": "agent_task_run"
               },
               {
-                "action": "resume",
-                "availability": "unavailable",
-                "confirmation": "none",
-                "idempotent": true,
-                "reason": "terminal runs cannot be resumed",
-                "requires_revalidation": true,
-                "result_resource_type": "agent_task_run"
-              },
-              {
                 "action": "placement_update",
                 "availability": "unavailable",
                 "confirmation": "required",
@@ -1424,7 +1415,7 @@
             "size_bytes": 267984
           },
           "retry_context": {
-            "resume_action": "resume",
+            "recover_action": "recover",
             "retry_action": "retry",
             "run_id": "cook-detached-1b9a02ee-40d4-40df-94b9-9dd8ba2800f7-attempt-1-5361759d"
           },
@@ -1443,15 +1434,6 @@
                 "confirmation": "required",
                 "idempotent": true,
                 "reason": "Invalid argument 'run_id': agent-task run 'cook-detached-1b9a02ee-40d4-40df-94b9-9dd8ba2800f7-attempt-1-5361759d' is already terminal with state CandidateRecoverable",
-                "requires_revalidation": true,
-                "result_resource_type": "agent_task_run"
-              },
-              {
-                "action": "resume",
-                "availability": "unavailable",
-                "confirmation": "none",
-                "idempotent": true,
-                "reason": "terminal runs cannot be resumed",
                 "requires_revalidation": true,
                 "result_resource_type": "agent_task_run"
               },

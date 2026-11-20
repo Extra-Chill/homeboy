@@ -207,6 +207,17 @@ impl ControlPlaneActionPayload {
             data: Value::Null,
         }
     }
+
+    /// Recover parameters with every field at its default.
+    pub fn recover() -> Self {
+        Self {
+            schema: CONTROL_PLANE_RECOVER_PARAMETERS_SCHEMA.to_string(),
+            data: serde_json::to_value(
+                ControlPlaneRecoverParameters::<Value, Value, Value>::default(),
+            )
+            .expect("default recover parameters serialize"),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -328,27 +339,16 @@ impl ControlPlaneActionRequest {
             ControlPlaneAction::Reconcile => {
                 ("reconcile", CONTROL_PLANE_EMPTY_ACTION_PAYLOAD_SCHEMA)
             }
-            ControlPlaneAction::Resume => ("resume", CONTROL_PLANE_EMPTY_ACTION_PAYLOAD_SCHEMA),
             ControlPlaneAction::PlacementUpdate => (
                 "placement_update",
                 CONTROL_PLANE_PLACEMENT_UPDATE_PARAMETERS_SCHEMA,
             ),
             ControlPlaneAction::Retry => ("retry", CONTROL_PLANE_RETRY_PARAMETERS_SCHEMA),
         };
-        let resume_legacy_empty = self.action == ControlPlaneAction::Resume
-            && self.parameters.schema == CONTROL_PLANE_EMPTY_ACTION_PAYLOAD_SCHEMA;
-        if self.parameters.schema != expected_schema && !resume_legacy_empty {
+        if self.parameters.schema != expected_schema {
             return Err(crate::ControlPlaneError::invalid_argument(format!(
                 "{name} requires parameters schema {expected_schema}"
             )));
-        }
-        if self.action == ControlPlaneAction::Resume
-            && !resume_legacy_empty
-            && !self.parameters.data.is_object()
-        {
-            return Err(crate::ControlPlaneError::invalid_argument(
-                "resume parameters must be an object",
-            ));
         }
         if self.action == ControlPlaneAction::Recover {
             let parameters = serde_json::from_value::<ControlPlaneRecoverParameters>(

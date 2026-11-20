@@ -28,15 +28,6 @@
                   "result_resource_type": "agent_task_run"
                 },
                 {
-                  "action": "resume",
-                  "availability": "unavailable",
-                  "confirmation": "none",
-                  "idempotent": true,
-                  "reason": "terminal runs cannot be resumed",
-                  "requires_revalidation": true,
-                  "result_resource_type": "agent_task_run"
-                },
-                {
                   "action": "placement_update",
                   "availability": "unavailable",
                   "confirmation": "required",
@@ -239,15 +230,6 @@
                   "result_resource_type": "agent_task_run"
                 },
                 {
-                  "action": "resume",
-                  "availability": "available",
-                  "confirmation": "none",
-                  "idempotent": true,
-                  "reason": "terminal runner evidence may be reprojected idempotently without reopening execution",
-                  "requires_revalidation": true,
-                  "result_resource_type": "agent_task_run"
-                },
-                {
                   "action": "placement_update",
                   "availability": "unavailable",
                   "confirmation": "required",
@@ -339,15 +321,6 @@
                   "confirmation": "none",
                   "idempotent": true,
                   "reason": "resume",
-                  "requires_revalidation": true,
-                  "result_resource_type": "agent_task_run"
-                },
-                {
-                  "action": "resume",
-                  "availability": "unavailable",
-                  "confirmation": "none",
-                  "idempotent": true,
-                  "reason": "terminal runs cannot be resumed",
                   "requires_revalidation": true,
                   "result_resource_type": "agent_task_run"
                 },

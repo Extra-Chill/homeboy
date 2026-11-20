@@ -355,7 +355,7 @@ fn control_plane_run_requires_action(
         report.actions.iter().any(|action| {
             matches!(
                 action.action,
-                ControlPlaneAction::Resume
+                ControlPlaneAction::Recover
                     | ControlPlaneAction::PlacementUpdate
                     | ControlPlaneAction::Retry
             ) && action.availability == ControlPlaneActionAvailability::Available

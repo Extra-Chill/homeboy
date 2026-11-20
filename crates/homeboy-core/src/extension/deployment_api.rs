@@ -855,7 +855,7 @@ fn provider_reconciliation_terminal(
             .to_string(),
         acknowledgement: format!("{}:provider-reconciliation", request.effect_id.0),
         run: run.clone(),
-        action: ControlPlaneAction::Resume,
+        action: ControlPlaneAction::Recover,
         idempotency_key: request.effect_id.0.clone(),
         actor: "deployment-provider-reconciler".to_string(),
         accepted_at: effect.intent.accepted_at.clone(),
@@ -926,11 +926,11 @@ fn admit_provider_effect(
     let action_request = ControlPlaneActionRequest {
         schema: CONTROL_PLANE_ACTION_REQUEST_SCHEMA.to_string(),
         effect_id: request.effect_id.clone(),
-        action: ControlPlaneAction::Resume,
+        action: ControlPlaneAction::Recover,
         idempotency_key: request.effect_id.0.clone(),
         actor: "deployment-provider".to_string(),
         expected_updated_at: None,
-        parameters: ControlPlaneActionPayload::empty(),
+        parameters: ControlPlaneActionPayload::recover(),
         confirmed: false,
     };
     let intent = ControlPlaneActionIntent {
@@ -1049,7 +1049,7 @@ fn terminalize_provider_effect(
             .to_string(),
         acknowledgement: format!("{}:provider-effect", request.effect_id.0),
         run: run.clone(),
-        action: ControlPlaneAction::Resume,
+        action: ControlPlaneAction::Recover,
         idempotency_key: request.effect_id.0.clone(),
         actor: "deployment-provider".to_string(),
         accepted_at: lease.intent.accepted_at.clone(),

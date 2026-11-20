@@ -335,7 +335,7 @@ impl DeployObservation {
             && self.metadata["control_plane"]["recovery_component_id"].is_string()
         {
             json!([{
-                "action": "resume",
+                "action": "recover",
                 "availability": "available",
                 "reason": "release deployment has a durable recovery checkpoint",
                 "confirmation": "none",

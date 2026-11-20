@@ -30,7 +30,7 @@ impl ControlPlaneActionDelegate for DeployActionDelegate {
         request: &ControlPlaneActionRequest,
         _context: &homeboy_core::control_plane::ControlPlaneInvocationContext,
     ) -> std::result::Result<ControlPlaneActionDelegateResult, ControlPlaneError> {
-        resume_deploy_action(run, request)
+        execute_recover_deploy_action(run, request)
     }
 
     fn recover(
@@ -47,9 +47,9 @@ pub(super) fn recover_deploy_action(
     run: &homeboy_core::observation::RunRecord,
     request: &ControlPlaneActionRequest,
 ) -> std::result::Result<ControlPlaneActionDelegateResult, ControlPlaneError> {
-    if request.action != ControlPlaneAction::Resume {
+    if request.action != ControlPlaneAction::Recover {
         return Err(ControlPlaneError::invalid_argument(
-            "deploy runs currently support only the resume action",
+            "deploy runs currently support only the recover action",
         ));
     }
     let roots = homeboy_core::paths::PathRoots::from_environment()
@@ -75,7 +75,7 @@ pub(super) fn recover_deploy_action(
         message: Some(if succeeded {
             "recovered from the durable successful deploy run".to_string()
         } else {
-            "deploy resume was interrupted after acceptance without authoritative completion evidence; no second deployment was attempted".to_string()
+            "deploy recover was interrupted after acceptance without authoritative completion evidence; no second deployment was attempted".to_string()
         }),
     })
 }
@@ -84,13 +84,13 @@ pub fn register_action_delegate() {
     register_control_plane_action_delegate(Arc::new(DeployActionDelegate));
 }
 
-pub(super) fn resume_deploy_action(
+pub(super) fn execute_recover_deploy_action(
     run: &homeboy_core::observation::RunRecord,
     request: &ControlPlaneActionRequest,
 ) -> std::result::Result<ControlPlaneActionDelegateResult, ControlPlaneError> {
-    if request.action != ControlPlaneAction::Resume {
+    if request.action != ControlPlaneAction::Recover {
         return Err(ControlPlaneError::invalid_argument(
-            "deploy runs currently support only the resume action",
+            "deploy runs currently support only the recover action",
         ));
     }
     if run.status == RunStatus::Running.as_str() {
