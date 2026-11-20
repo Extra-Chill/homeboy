@@ -8,7 +8,15 @@
 pub use crate::agent_task_gate::failure_excerpt::gate_failure_excerpt_from_value;
 
 mod cook;
+mod cook_admission;
 mod cook_ci;
+mod cook_driver;
+mod cook_follow_up;
+mod cook_gate_setup;
+mod cook_projections;
+mod cook_spine;
+mod cook_timeout;
+mod cook_workspace;
 pub use cook_ci::{cook_ci_status, repoll_cook_ci};
 pub(crate) mod cook_activity;
 mod cook_admission_key;
