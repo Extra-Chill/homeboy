@@ -154,20 +154,17 @@ fn pre_provider_event_collision_is_retryable_not_invalid_input() {
     store
         .submit_plan_with_runtime_admission(&plan, run_id, |_| Ok(json!({})))
         .unwrap();
-    let record = record_pre_execution_failure_in_store(
-        &store,
-        run_id,
-        &plan,
-        "lab_handoff",
-        &error,
-    )
-    .unwrap();
+    let record =
+        record_pre_execution_failure_in_store(&store, run_id, &plan, "lab_handoff", &error)
+            .unwrap();
     assert_eq!(record.metadata["pre_execution_failure"]["retryable"], true);
     assert_eq!(
         record.metadata["pre_execution_failure"]["provider_executions_consumed"],
         0
     );
-    assert!(crate::agent_task_service::retryable_pre_execution_failure(&record));
+    assert!(crate::agent_task_service::retryable_pre_execution_failure(
+        &record
+    ));
 }
 
 #[test]
@@ -841,7 +838,7 @@ fn oversize_runner_message_appends_a_bounded_projection() {
 }
 
 #[test]
-fn conflicting_runner_event_digest_does_not_skip_silently() {
+fn changed_runner_event_content_is_recorded_and_replays_idempotently() {
     let context = homeboy_core::test_support::HermeticTestContext::new();
     let lifecycle_store = AgentTaskLifecycleStore::new(context.path_roots());
     let command = vec!["homeboy".to_string(), "agent-task".to_string()];
@@ -871,24 +868,34 @@ fn conflicting_runner_event_digest_does_not_skip_silently() {
         .expect("live reconciliation");
 
     snapshot.events[0].message = Some("mutated progress".to_string());
-    let error = reconcile_runner_job_snapshot_in_store(&lifecycle_store, &mut record, &snapshot)
-        .expect_err("different digest must not skip");
-    assert!(error.message.contains("idempotency"));
+    reconcile_runner_job_snapshot_in_store(&lifecycle_store, &mut record, &snapshot)
+        .expect("changed transport content gets a distinct receipt");
+    reconcile_runner_job_snapshot_in_store(&lifecycle_store, &mut record, &snapshot)
+        .expect("identical changed content replays idempotently");
 
     let events = durable_events(&lifecycle_store, &record.run_id);
     assert!(events.iter().any(|event| event.kind == "runner.progress"
         && event.data["message"]
             .as_str()
             .is_some_and(|message| message.contains("provider started"))));
-    assert!(!events.iter().any(|event| event.data["message"]
-        .as_str()
-        .is_some_and(|message| message.contains("mutated progress"))));
+    assert!(events.iter().any(|event| event.kind == "runner.progress"
+        && event.data["message"]
+            .as_str()
+            .is_some_and(|message| message.contains("mutated progress"))));
+    assert_eq!(
+        events
+            .iter()
+            .filter(|event| event.kind == "runner.progress")
+            .count(),
+        2,
+        "changed content appends once, while identical replay adds no event"
+    );
     let persisted = lifecycle_store
         .read_record(&record.run_id)
-        .expect("rolled back record");
+        .expect("updated record");
     assert_eq!(
         persisted.metadata["runner_job_events"][0]["message"],
-        "provider started"
+        "mutated progress"
     );
 }
 
