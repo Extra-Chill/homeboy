@@ -7749,7 +7749,13 @@ fn derived_cook_branch(task_url: &str) -> homeboy::core::Result<String> {
             None,
         ));
     }
-    Ok(format!("fix/issue-{number}-{}", slugify_cook_branch(repo)))
+    Ok(format!(
+        "fix/issue-{number}-{}",
+        homeboy_engine_primitives::identifier::slugify(
+            repo,
+            homeboy_engine_primitives::identifier::SlugStyle::Branch,
+        )
+    ))
 }
 
 /// Reduce an issue URL to the issue it names.
@@ -7766,21 +7772,6 @@ fn normalize_cook_task_url(task_url: &str) -> String {
         .unwrap_or_default()
         .trim_end_matches('/')
         .to_string()
-}
-
-fn slugify_cook_branch(value: &str) -> String {
-    let mut slug = String::new();
-    let mut last_dash = false;
-    for character in value.chars() {
-        if character.is_ascii_alphanumeric() {
-            slug.push(character.to_ascii_lowercase());
-            last_dash = false;
-        } else if !last_dash {
-            slug.push('-');
-            last_dash = true;
-        }
-    }
-    slug.trim_matches('-').to_string()
 }
 
 pub(crate) fn record_cook_provision(plan: &mut AgentTaskPlan, provision: Value) {

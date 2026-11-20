@@ -304,17 +304,9 @@ fn shell_quote(value: &str) -> String {
     format!("'{}'", value.replace('\'', "'\\''"))
 }
 
-/// Last `max_bytes` of a gate's output, trimmed to a char boundary.
-fn output_tail(output: &str, max_bytes: usize) -> String {
-    let trimmed = output.trim_end();
-    if trimmed.len() <= max_bytes {
-        return trimmed.to_string();
-    }
-    let mut start = trimmed.len() - max_bytes;
-    while !trimmed.is_char_boundary(start) {
-        start += 1;
-    }
-    format!("…{}", &trimmed[start..])
+/// Last `max_chars` Unicode scalar values of a gate's output.
+fn output_tail(output: &str, max_chars: usize) -> String {
+    homeboy_engine_primitives::text::truncate_tail_chars(output.trim_end(), max_chars, "…")
 }
 
 /// Copy the gate's declared evidence directory into the durable release
@@ -601,7 +593,7 @@ mod tests {
     fn output_tail_is_bounded_and_char_safe() {
         let long = "é".repeat(5000);
         let tail = output_tail(&long, 100);
-        assert!(tail.len() <= 104);
+        assert_eq!(tail.chars().count(), 101);
         assert!(tail.starts_with('…'));
         assert_eq!(output_tail("short", 100), "short");
     }
