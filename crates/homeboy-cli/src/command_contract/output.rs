@@ -3,9 +3,9 @@
 //! This module owns the shapes that describe how a command emits output
 //! (`CommandResponseMode`, `CommandOutputFileMode`, `CommandJsonFamily`,
 //! `CommandOutputContractKind`) plus the output-only
-//! [`CommandOutputDescriptor`], aggregate [`CommandDescriptor`],
-//! [`CommandResponsePlan`], and the `Commands` impl that resolves a parsed CLI
-//! command into these contracts.
+//! [`CommandOutputDescriptor`] and aggregate [`CommandDescriptor`]. Parsed CLI
+//! commands are routed onto these contracts in
+//! `commands::contract_output_routing`.
 //!
 //! Lab-specific fields on [`CommandDescriptor`] are populated by
 //! [`crate::command_contract::lab`], which post-processes the descriptor
@@ -132,10 +132,4 @@ impl CommandOutputDescriptor {
         apply_lab_contract_to_descriptor(&mut descriptor, contract);
         descriptor
     }
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct CommandResponsePlan {
-    pub stdout: CommandResponseMode,
-    pub output_file: CommandOutputFileMode,
 }

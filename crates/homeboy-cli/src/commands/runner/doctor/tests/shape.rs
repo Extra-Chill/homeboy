@@ -78,6 +78,8 @@ fn compact_doctor_projection_bounds_evidence_and_renders_action() {
         })
         .collect();
 
+    // This test exercises projection, not the test host's readiness probes.
+    report.status = RunnerDoctorStatus::Warning;
     let mut compact = output_projection(report, false);
     // The observed environment is the test host's; pin it so the rendered
     // summary is deterministic on every platform.

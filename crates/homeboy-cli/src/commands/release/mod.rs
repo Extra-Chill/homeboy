@@ -40,19 +40,17 @@ pub struct ReleaseArgs {
 }
 
 impl ReleaseArgs {
-    pub(crate) fn is_changelog_markdown(&self) -> bool {
-        matches!(
-            &self.command,
-            Some(ReleaseSubcommand::Changelog(args)) if changelog::is_show_markdown(args)
-        )
-    }
-
-    pub(crate) fn markdown_changelog_args(self) -> Option<changelog::ChangelogArgs> {
+    /// Split `release changelog --format markdown` (rendered as raw markdown)
+    /// from every other release invocation (JSON envelope).
+    pub(crate) fn into_markdown_changelog(self) -> Result<changelog::ChangelogArgs, Self> {
         match self.command {
             Some(ReleaseSubcommand::Changelog(args)) if changelog::is_show_markdown(&args) => {
-                Some(args)
+                Ok(args)
             }
-            _ => None,
+            command => Err(Self {
+                command,
+                execute: self.execute,
+            }),
         }
     }
 }

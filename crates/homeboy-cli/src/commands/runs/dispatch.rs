@@ -121,9 +121,20 @@ impl RunsArgs {
         matches!(self.command, RunsCommand::Artifacts(_))
     }
 
-    pub(crate) fn is_markdown_mode(&self) -> bool {
-        matches!(self.command, RunsCommand::Compare(ref compare) if compare::is_table_mode(compare))
-            || matches!(self.command, RunsCommand::Report(ref report_args) if report::is_markdown_mode(report_args))
+    /// Split `runs compare --format=table` and markdown `runs report`
+    /// invocations (raw markdown) from every other runs invocation (JSON
+    /// envelope).
+    pub(crate) fn into_markdown(self) -> Result<RunsMarkdown, Self> {
+        let markdown = match self.command {
+            RunsCommand::Compare(compare) if compare::is_table_mode(&compare) => {
+                RunsMarkdownCommand::Compare(compare)
+            }
+            RunsCommand::Report(report_args) if report::is_markdown_mode(&report_args) => {
+                RunsMarkdownCommand::Report(report_args)
+            }
+            command => return Err(Self { command, ..self }),
+        };
+        Ok(RunsMarkdown(markdown))
     }
 
     pub(crate) fn is_bundle_export(&self) -> bool {
@@ -300,19 +311,21 @@ pub(crate) fn global_runner_error(args: &RunsArgs, runner_id: &str) -> Error {
     Error::validation_invalid_argument("runner", message, Some(runner_id.to_string()), Some(hints))
 }
 
-pub(crate) fn run_markdown(args: RunsArgs) -> CmdResult<String> {
+/// A runs invocation that renders raw markdown instead of a JSON envelope.
+pub(crate) struct RunsMarkdown(RunsMarkdownCommand);
+
+enum RunsMarkdownCommand {
+    Compare(compare::RunsCompareArgs),
+    Report(report::ReportArgs),
+}
+
+pub(crate) fn run_markdown(markdown: RunsMarkdown) -> CmdResult<String> {
     // Same boundary rule as `run`: one invocation, one store (#7505).
     let roots = PathRoots::from_environment()?;
     let store = ObservationStore::open_initialized_in_roots(&roots)?;
-    match args.command {
-        RunsCommand::Compare(args) => compare::run_markdown(&store, args),
-        RunsCommand::Report(args) => report::run_markdown(args),
-        _ => Err(Error::validation_invalid_argument(
-            "output_mode",
-            "Only `homeboy runs compare --format=table` supports table output",
-            None,
-            None,
-        )),
+    match markdown.0 {
+        RunsMarkdownCommand::Compare(args) => compare::run_markdown(&store, args),
+        RunsMarkdownCommand::Report(args) => report::run_markdown(args),
     }
 }
 
@@ -424,7 +437,7 @@ mod presentation_tests {
             "--results",
             r#"{"audit":"pass"}"#,
         ]);
-        assert!(report.is_markdown_mode());
+        assert!(report.into_markdown().is_ok());
     }
 
     #[test]
