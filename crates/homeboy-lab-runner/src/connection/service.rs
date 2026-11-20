@@ -486,18 +486,19 @@ pub(crate) fn repoint_and_restart(runner_id: &str, binary: &str) -> Result<()> {
 /// A failed restart then explains itself instead of pointing the operator at
 /// the runner (#18539).
 fn with_unit_evidence(client: &SshClient, message: String) -> String {
-    let unit = shell::quote_arg(&service_unit_name());
-    let output = client.execute_with_timeout(
-        &format!(
-            "systemctl --user show -p ActiveState -p SubState -p Result -p ExecMainStatus {unit} | paste -sd ' '; journalctl --user -u {unit} -n 8 --no-pager -o cat 2>/dev/null"
-        ),
-        SERVICE_SSH_TIMEOUT,
-    );
-    let evidence = output.stdout.trim();
-    if evidence.is_empty() {
+    let Ok(unit) = super::probe_unit_state(client) else {
         return message;
-    }
-    format!("{message}\nRunner unit {}: {evidence}", service_unit_name())
+    };
+    let error = unit
+        .last_error
+        .as_deref()
+        .map(|error| format!("; start error: {error}"))
+        .unwrap_or_default();
+    format!(
+        "{message}\nRunner unit {}: {}{error}",
+        service_unit_name(),
+        unit.summary()
+    )
 }
 
 /// Repoint through the target binary, so the version that knows the unit

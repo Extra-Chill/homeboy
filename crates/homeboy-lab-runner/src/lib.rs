@@ -440,6 +440,12 @@ pub use connection::{
     install_runner_service, repoint_local_runner_service, runner_service_status,
     RunnerServiceReport,
 };
+pub use connection::{
+    observe_service_runner_health, observe_unit_health,
+    probe_unit_state as probe_runner_unit_state, register_runner_health_provider,
+    runner_unit_health, RunnerUnitHealth, RunnerUnitIncident, RunnerUnitState,
+    RunnerUnitTransition,
+};
 pub use runner_probe_gate::observe_runner_capabilities;
 mod upgrade_runners;
 pub use availability_provider::register as register_runner_availability_provider;
