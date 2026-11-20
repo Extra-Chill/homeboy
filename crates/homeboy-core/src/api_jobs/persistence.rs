@@ -286,6 +286,7 @@ pub(super) struct JobStoreCompactionEvidence {
 
 pub(super) fn compact_terminal_jobs(
     durable: &mut DurableJobStore,
+    (unloaded_terminal_jobs, unloaded_terminal_bytes): (usize, usize),
     event_retention_limit: usize,
     terminal_job_retention_limit: usize,
     terminal_job_retention_bytes: usize,
@@ -338,11 +339,14 @@ pub(super) fn compact_terminal_jobs(
             (stored, serialized_len)
         })
         .collect::<Vec<_>>();
-    let original_terminal_count = terminal.len();
+    // Unloaded history is terminal and inside the collection window, so the
+    // loop below would skip each of those rows; it only counts toward budgets.
+    let original_terminal_count = terminal.len() + unloaded_terminal_jobs;
     let original_terminal_bytes = terminal
         .iter()
         .map(|(_, serialized_len)| serialized_len)
-        .sum::<usize>();
+        .sum::<usize>()
+        + unloaded_terminal_bytes;
     if original_terminal_count <= terminal_job_retention_limit
         && original_terminal_bytes <= terminal_job_retention_bytes
     {

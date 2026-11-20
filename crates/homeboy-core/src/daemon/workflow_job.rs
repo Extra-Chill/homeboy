@@ -487,7 +487,7 @@ fn run_instance(
         }
     }
     // Repair a projection interrupted after the previous checkpoint commit.
-    if let Err(error) = project_timing(&state) {
+    if let Err(error) = project_timing(&request, &state) {
         crate::log_status!("observe", "workflow timing persistence failed: {}", error);
     }
     job.progress(progress_summary(&state))?;
@@ -588,7 +588,7 @@ fn cancelled(
         to_value(&next).and_then(|value| store.record_controller_prepared(job_id, value));
     match persisted {
         Ok(()) => {
-            let _ = project_timing(&next);
+            let _ = project_timing(&request, &next);
         }
         Err(error) => crate::log_status!(
             "observe",
@@ -641,7 +641,7 @@ fn finish(
             // Persist the failure before returning it: status views and replay
             // must not retain the successful step-completion checkpoint.
             store.record_controller_prepared(job_id, to_value(&state)?)?;
-            if let Err(error) = project_timing(&state) {
+            if let Err(error) = project_timing(&request, &state) {
                 crate::log_status!("observe", "workflow timing persistence failed: {}", error);
             }
         }
@@ -1109,7 +1109,7 @@ fn commit(
         cancellations.clone(),
     )?;
     // Projection follows the checkpoint commit; replay uses stable attempt identities.
-    if let Err(error) = project_timing(next) {
+    if let Err(error) = project_timing(request, next) {
         crate::log_status!("observe", "workflow timing persistence failed: {}", error);
     }
     for child in admitted {
@@ -1125,13 +1125,19 @@ fn commit(
     Ok(())
 }
 
-fn project_timing(state: &InstanceState) -> Result<()> {
-    crate::observation::ObservationStore::open_initialized()?.record_workflow_timing(state)
+/// The instance's run record carries the notification route admitted with the
+/// request, so the daemon's completion notifier announces a stopped chain
+/// through the same outbox as every other run (#18540).
+fn project_timing(request: &WorkflowJobRequest, state: &InstanceState) -> Result<()> {
+    crate::notification_route::with_current(request.notification_route.clone(), || {
+        crate::observation::ObservationStore::open_initialized()?
+            .record_workflow_timing(&request.definition.id, state)
+    })
 }
 
 impl crate::observation::ObservationStore {
     /// Replay completed attempts only after their checkpoint has committed.
-    pub fn record_workflow_timing(&self, state: &InstanceState) -> Result<()> {
+    pub fn record_workflow_timing(&self, workflow: &str, state: &InstanceState) -> Result<()> {
         use crate::observation::{NewRunRecord, RunStatus};
         let store = self;
         if store.get_run(&state.instance)?.is_none() {
@@ -1150,19 +1156,53 @@ impl crate::observation::ObservationStore {
             )?;
         }
         if state.status.is_terminal() {
+            let succeeded = state.status == InstanceStatus::Succeeded;
             store.finish_run(
                 &state.instance,
-                if state.status == InstanceStatus::Succeeded {
+                if succeeded {
                     RunStatus::Pass
                 } else {
                     RunStatus::Fail
                 },
-                None,
+                (!succeeded).then(|| workflow_stop_metadata(workflow, state)),
             )?;
         }
         Ok(())
     }
 }
+
+/// What stopped a chain, recorded on its run for the stop notification: the
+/// first step that settled without succeeding (later steps are usually
+/// cancelled because of it), its attempts, and the first line of its error.
+fn workflow_stop_metadata(workflow: &str, state: &InstanceState) -> Value {
+    let failed = state
+        .steps
+        .iter()
+        .filter(|(_, step)| step.settled() && !step.succeeded())
+        .min_by_key(|(_, step)| {
+            (
+                step.outcome.as_deref() == Some("cancelled"),
+                step.started_at_ms.unwrap_or(u64::MAX),
+            )
+        });
+    let first_line = |text: &str| text.lines().next().unwrap_or_default().to_string();
+    let error = failed
+        .and_then(|(_, step)| step.error.as_deref())
+        .or(state.reason.as_deref())
+        .map(first_line);
+    serde_json::json!({
+        WORKFLOW_STOP_METADATA_KEY: {
+            "workflow": workflow,
+            "status": state.status.as_str(),
+            "step": failed.map(|(id, _)| id),
+            "attempts": failed.map(|(_, step)| step.attempt),
+            "error": error,
+        }
+    })
+}
+
+/// Run metadata key for [`workflow_stop_metadata`].
+pub const WORKFLOW_STOP_METADATA_KEY: &str = "workflow_stop";
 
 /// Compile one submission into the `step` job that runs it.
 pub fn step_request(

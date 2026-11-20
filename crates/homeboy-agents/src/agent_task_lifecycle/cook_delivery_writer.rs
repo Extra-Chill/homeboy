@@ -110,14 +110,12 @@ fn delivery_run_state(
     if run.state() == RunExecutionState::Cancelled || previous == Some(next) {
         return None;
     }
-    match next.lifecycle().run_state? {
-        RunExecutionState::CandidateRecoverable => Some(RunExecutionState::CandidateRecoverable),
-        RunExecutionState::Succeeded => (run.state() == RunExecutionState::CandidateRecoverable
+    let state = next.lifecycle().run_state?;
+    (state != RunExecutionState::Succeeded
+        || (CookRunState::of(run).recoverable
             && previous.is_some_and(CookDelivery::is_unverified)
-            && run.candidate_adoption.is_none())
-        .then_some(RunExecutionState::Succeeded),
-        _ => None,
-    }
+            && run.candidate_adoption.is_none()))
+    .then_some(state)
 }
 
 /// A `gates_deferred` Cook result describes deferred gates. Once a later gate

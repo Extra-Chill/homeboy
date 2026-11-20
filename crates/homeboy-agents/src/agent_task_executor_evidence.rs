@@ -370,18 +370,7 @@ fn redacted_outcome_value(outcome: &AgentTaskOutcome, policy: &RedactionPolicy) 
 /// Atomically persist `value` to `path` and return a stable `file://` URI when
 /// the write succeeds. Returns `None` on any IO failure (best-effort evidence).
 fn persist_evidence_file(path: &Path, value: &Value) -> Option<String> {
-    let serialized = serde_json::to_vec_pretty(value).ok()?;
-    let parent = path.parent()?;
-    let tmp = parent.join(format!(
-        ".{}.{}.tmp",
-        path.file_name()?.to_string_lossy(),
-        std::process::id()
-    ));
-    fs::write(&tmp, &serialized).ok()?;
-    if fs::rename(&tmp, path).is_err() {
-        let _ = fs::remove_file(&tmp);
-        return None;
-    }
+    homeboy_engine_primitives::local_files::write_json_file(path, value).ok()?;
     Some(format!("file://{}", path.display()))
 }
 

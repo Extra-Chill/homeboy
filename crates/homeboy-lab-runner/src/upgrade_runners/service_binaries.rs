@@ -22,7 +22,8 @@ use homeboy_upgrade::upgrade::{RunnerServiceBinaryEntry, RunnerUpgradeEntry};
 /// host service unit.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum ServiceRefreshOutcome {
-    Refreshed,
+    /// Converged, with an optional note such as paused admission.
+    Refreshed(Option<String>),
     Failed(String),
 }
 
@@ -183,11 +184,12 @@ pub(crate) fn converge_runner_service_binaries(
         .is_some_and(|unit| unit.status == "stale" && !unit.binary.is_empty());
     if service_managed && host_stale {
         match refresh(runner, &entry.homeboy_path) {
-            ServiceRefreshOutcome::Refreshed => match observe_and_classify(&mut *observe) {
+            ServiceRefreshOutcome::Refreshed(note) => match observe_and_classify(&mut *observe) {
                 Ok(mut refreshed) => {
                     if let Some(unit) = host_unit(&mut refreshed) {
                         if unit.status == "current" {
                             unit.status = "refreshed".to_string();
+                            unit.reason = note;
                         } else {
                             let reason = unit.reason.take().unwrap_or_default();
                             unit.reason = Some(format!(
@@ -277,7 +279,11 @@ pub(crate) fn refresh_runner_service(runner: &Runner, homeboy_path: &str) -> Ser
         dry_run: false,
     };
     match crate::refresh_homeboy_binary(options) {
-        Ok((output, 0)) if output.failure.is_none() => ServiceRefreshOutcome::Refreshed,
+        Ok((output, 0)) if output.failure.is_none() => ServiceRefreshOutcome::Refreshed(
+            output
+                .readiness
+                .and_then(|readiness| readiness.admission_paused),
+        ),
         Ok((output, exit_code)) => ServiceRefreshOutcome::Failed(format!(
             "refresh-homeboy exited {exit_code}: {}",
             output
@@ -497,7 +503,7 @@ mod tests {
             &mut |_| Ok(observations.next().expect("observed at most twice")),
             &mut |runner, path| {
                 refreshed_paths.push((runner.id.clone(), path.to_string()));
-                ServiceRefreshOutcome::Refreshed
+                ServiceRefreshOutcome::Refreshed(None)
             },
         );
 
@@ -520,7 +526,7 @@ mod tests {
             &runner(true),
             converged_entry("homeboy-lab", "0.417.15"),
             &mut |_| Ok(vec![unit(HOST_UNIT, "0.417.14")]),
-            &mut |_, _| ServiceRefreshOutcome::Refreshed,
+            &mut |_, _| ServiceRefreshOutcome::Refreshed(None),
         );
 
         assert!(!entry.success);

@@ -82,7 +82,7 @@ pub(crate) fn project_terminal_runner_record(
         && context.runner_id == runner_id
         && context.runner_job_id == job_id
         && context.verification.state == "verified";
-    if !identity_matches || !record.has_accepted_lab_handoff() {
+    if !identity_matches || !CookRunState::accepted_lab_handoff(record) {
         return Err(Error::validation_invalid_argument(
             "runner_terminal_record",
             "terminal run resource does not match the accepted handoff",
@@ -170,7 +170,7 @@ pub(crate) fn recorded_store_contention(record: &AgentTaskRunRecord) -> bool {
 /// Only the synthetic controller failure may be superseded by retained runner evidence.
 pub(crate) fn lost_observation_write(record: &AgentTaskRunRecord) -> bool {
     record.state() == RunExecutionState::Failed
-        && record.has_accepted_lab_handoff()
+        && CookRunState::accepted_lab_handoff(record)
         && record.metadata["pre_execution_failure"]["message"]
             .as_str()
             .is_some_and(crate::agent_task_service::is_store_contention_message)
@@ -545,7 +545,7 @@ fn verified_pre_provider_cancellation(
     snapshot: &homeboy_core::api_jobs::RunnerJobLogSnapshot,
 ) -> bool {
     if snapshot.job.status != homeboy_core::api_jobs::JobStatus::Cancelled
-        || !record.has_accepted_lab_handoff()
+        || !CookRunState::accepted_lab_handoff(record)
         || !record.provider_handles.is_empty()
         || snapshot.job.target_runner_id.as_deref() != record.runner_id()
         || snapshot.job.event_count != snapshot.events.len()

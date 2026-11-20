@@ -684,20 +684,13 @@ fn homeboy_owns_worktree(path: &Path, data_root: &Path, recorded: &HashSet<PathB
         })
 }
 
-#[cfg(unix)]
 fn filesystem_available_bytes(path: &Path) -> Option<u64> {
-    use std::ffi::CString;
-    let path = CString::new(path.as_os_str().as_encoded_bytes()).ok()?;
-    let mut stat = std::mem::MaybeUninit::<libc::statvfs>::uninit();
-    (unsafe { libc::statvfs(path.as_ptr(), stat.as_mut_ptr()) } == 0).then(|| unsafe {
-        let stat = stat.assume_init();
-        u64::from(stat.f_bavail).saturating_mul(stat.f_frsize)
-    })
-}
-
-#[cfg(not(unix))]
-fn filesystem_available_bytes(_path: &Path) -> Option<u64> {
-    None
+    crate::observation::disk_budget::disk_budget(
+        path,
+        "artifact cleanup",
+        "filesystem capacity is unavailable",
+    )
+    .available_bytes
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
@@ -2994,40 +2987,8 @@ pub fn is_safe_artifact_path(relative_path: &str) -> bool {
             .all(|component| matches!(component, std::path::Component::Normal(_)))
 }
 
-/// What one artifact path costs and how recently it was touched.
-///
-/// Apparent size and allocated size diverge sharply for large trees of small
-/// files: apparent size answers "how much content", allocated size answers "how
-/// much disk comes back". Both are reported so an operator can reconcile a
-/// cleanup report against free space.
-#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
-pub(crate) struct PathUsage {
-    pub(crate) logical_bytes: u64,
-    pub(crate) allocated_bytes: u64,
-    pub(crate) newest_modified: Option<SystemTime>,
-}
-
-impl PathUsage {
-    fn merge(&mut self, other: PathUsage) {
-        self.logical_bytes = self.logical_bytes.saturating_add(other.logical_bytes);
-        self.allocated_bytes = self.allocated_bytes.saturating_add(other.allocated_bytes);
-        self.newest_modified = match (self.newest_modified, other.newest_modified) {
-            (Some(left), Some(right)) => Some(left.max(right)),
-            (Some(value), None) | (None, Some(value)) => Some(value),
-            (None, None) => None,
-        };
-    }
-
-    /// Seconds since the newest write anywhere in the tree. `None` when no
-    /// timestamp could be read, or when the newest write is in the future.
-    pub(crate) fn age_seconds(&self) -> Option<u64> {
-        let newest = self.newest_modified?;
-        SystemTime::now()
-            .duration_since(newest)
-            .ok()
-            .map(|elapsed| elapsed.as_secs())
-    }
-}
+pub mod path_usage;
+use path_usage::PathUsage;
 
 pub(crate) fn path_usage(path: &Path) -> Result<PathUsage> {
     path_usage_with_deadline(path, None)
@@ -3052,25 +3013,9 @@ fn path_usage_resumable(
             allocated_bytes: 0,
             newest_modified_unix_seconds: None,
         });
-    let mut steps = 0usize;
-    while let Some(relative_path) = cursor.pending_paths.pop() {
-        // A walk always takes its first step before honoring the wall-clock
-        // budget. One step is a single stat plus one directory read, and
-        // guaranteeing it is what lets every continuation pass advance the
-        // persisted measurement frontier even when earlier work in the pass
-        // spent the entire budget (#16293). Without it, a budget exhausted
-        // before the walk began re-emitted the same checkpoint forever and
-        // reclaimed nothing on every pass.
-        if (steps > 0 && deadline.is_some_and(|deadline| Instant::now() >= deadline))
-            || step_limit.is_some_and(|limit| steps >= limit)
-        {
-            cursor.pending_paths.push(relative_path);
-            return Ok(PathUsageMeasurement::Interrupted(cursor));
-        }
-        let relative = Path::new(&relative_path);
-        if !relative_path.is_empty()
-            && (!is_safe_artifact_path(&relative_path) || relative.is_absolute())
-        {
+    let mut pending = Vec::new();
+    for relative in &cursor.pending_paths {
+        if !relative.is_empty() && !is_safe_artifact_path(relative) {
             return Err(Error::validation_invalid_argument(
                 "cursor",
                 "artifact cleanup measurement cursor contains an unsafe path",
@@ -3078,63 +3023,52 @@ fn path_usage_resumable(
                 None,
             ));
         }
-        let entry_path = path.join(relative);
-        let metadata = fs::symlink_metadata(&entry_path).map_err(|error| {
-            Error::internal_io(
-                error.to_string(),
-                Some(format!("stat {}", entry_path.display())),
-            )
-        })?;
-        steps = steps.saturating_add(1);
-        cursor.newest_modified_unix_seconds = match (
-            cursor.newest_modified_unix_seconds,
-            metadata
-                .modified()
+        pending.push(path.join(relative));
+    }
+    let measured = path_usage::walk_paths(
+        pending,
+        path_usage::PathUsageOptions {
+            deadline,
+            visit_budget: step_limit,
+            // Every continuation advances even if earlier work spent its deadline.
+            allow_first_step: true,
+            ..Default::default()
+        },
+        &mut Instant::now,
+    )?;
+    cursor.logical_bytes = cursor
+        .logical_bytes
+        .saturating_add(measured.usage.logical_bytes);
+    cursor.allocated_bytes = cursor
+        .allocated_bytes
+        .saturating_add(measured.usage.allocated_bytes);
+    let modified = measured
+        .usage
+        .newest_modified
+        .and_then(|modified| modified.duration_since(SystemTime::UNIX_EPOCH).ok())
+        .map(|duration| duration.as_secs());
+    cursor.newest_modified_unix_seconds = cursor.newest_modified_unix_seconds.max(modified);
+    cursor.pending_paths = measured
+        .pending
+        .into_iter()
+        .map(|entry| {
+            entry
+                .strip_prefix(path)
                 .ok()
-                .and_then(|modified| modified.duration_since(SystemTime::UNIX_EPOCH).ok())
-                .map(|duration| duration.as_secs()),
-        ) {
-            (Some(left), Some(right)) => Some(left.max(right)),
-            (Some(value), None) | (None, Some(value)) => Some(value),
-            (None, None) => None,
-        };
-        if metadata.is_file() || metadata.file_type().is_symlink() {
-            cursor.logical_bytes = cursor.logical_bytes.saturating_add(metadata.len());
-            cursor.allocated_bytes = cursor
-                .allocated_bytes
-                .saturating_add(allocated_bytes(&metadata, metadata.len()));
-            continue;
-        }
-        cursor.allocated_bytes = cursor
-            .allocated_bytes
-            .saturating_add(allocated_bytes(&metadata, 0));
-        for child in fs::read_dir(&entry_path).map_err(|error| {
-            Error::internal_io(
-                error.to_string(),
-                Some(format!("read directory {}", entry_path.display())),
-            )
-        })? {
-            let child = child.map_err(|error| {
-                Error::internal_io(
-                    error.to_string(),
-                    Some(format!("read directory entry {}", entry_path.display())),
-                )
-            })?;
-            let child_path = if relative_path.is_empty() {
-                child.file_name()
-            } else {
-                relative.join(child.file_name()).into_os_string()
-            };
-            let child_path = child_path.into_string().map_err(|_| {
-                Error::validation_invalid_argument(
-                    "cursor",
-                    "artifact cleanup cannot resume a non-Unicode artifact path",
-                    None,
-                    None,
-                )
-            })?;
-            cursor.pending_paths.push(child_path);
-        }
+                .and_then(|relative| relative.to_str())
+                .map(str::to_owned)
+                .ok_or_else(|| {
+                    Error::validation_invalid_argument(
+                        "cursor",
+                        "artifact cleanup cannot resume a non-Unicode artifact path",
+                        None,
+                        None,
+                    )
+                })
+        })
+        .collect::<Result<Vec<_>>>()?;
+    if !cursor.pending_paths.is_empty() {
+        return Ok(PathUsageMeasurement::Interrupted(cursor));
     }
     Ok(PathUsageMeasurement::Complete(PathUsage {
         logical_bytes: cursor.logical_bytes,
@@ -3154,70 +3088,20 @@ fn path_usage_with_deadline_and_now(
     deadline: Option<Instant>,
     now: &mut impl FnMut() -> Instant,
 ) -> Result<PathUsage> {
-    if deadline.is_some_and(|deadline| now() >= deadline) {
+    let measured = path_usage::walk_paths(
+        vec![path.to_path_buf()],
+        path_usage::PathUsageOptions {
+            deadline,
+            ..Default::default()
+        },
+        now,
+    )?;
+    if !measured.pending.is_empty() {
         return Err(Error::internal_unexpected(
             "artifact cleanup runtime limit reached during size inspection",
         ));
     }
-    let metadata = fs::symlink_metadata(path)
-        .map_err(|e| Error::internal_io(e.to_string(), Some(format!("stat {}", path.display()))))?;
-    let modified = metadata.modified().ok();
-    if metadata.is_file() || metadata.file_type().is_symlink() {
-        return Ok(PathUsage {
-            logical_bytes: metadata.len(),
-            allocated_bytes: allocated_bytes(&metadata, metadata.len()),
-            newest_modified: modified,
-        });
-    }
-
-    // Sum only the reclaimable file/symlink content. A directory's own
-    // `metadata.len()` is the inode/directory-entry size (typically a 4 KiB
-    // block on ext4/tmpfs), not reclaimable payload — counting it made size
-    // sorting reflect directory nesting depth rather than actual artifact
-    // weight (e.g. a 5-byte file under two nested dirs outranking a 256-byte
-    // file under one). Recurse over children and count their bytes only.
-    //
-    // Allocated bytes do include directory blocks: removing the tree frees the
-    // directory inodes too, and a deep tree of small files can hold a
-    // meaningful share of its footprint there.
-    let mut usage = PathUsage {
-        logical_bytes: 0,
-        allocated_bytes: allocated_bytes(&metadata, 0),
-        newest_modified: modified,
-    };
-    for entry in fs::read_dir(path).map_err(|e| {
-        Error::internal_io(
-            e.to_string(),
-            Some(format!("read directory {}", path.display())),
-        )
-    })? {
-        let entry = entry.map_err(|e| {
-            Error::internal_io(
-                e.to_string(),
-                Some(format!("read directory entry {}", path.display())),
-            )
-        })?;
-        usage.merge(path_usage_with_deadline_and_now(
-            &entry.path(),
-            deadline,
-            now,
-        )?);
-    }
-    Ok(usage)
-}
-
-/// Disk actually charged to an entry. Falls back to apparent size on platforms
-/// that do not report block allocation.
-#[cfg(unix)]
-fn allocated_bytes(metadata: &fs::Metadata, _fallback: u64) -> u64 {
-    use std::os::unix::fs::MetadataExt;
-
-    metadata.blocks().saturating_mul(512)
-}
-
-#[cfg(not(unix))]
-fn allocated_bytes(_metadata: &fs::Metadata, fallback: u64) -> u64 {
-    fallback
+    Ok(measured.usage)
 }
 
 fn remove_artifact_path(path: &Path) -> Result<()> {

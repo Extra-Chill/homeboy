@@ -7,9 +7,7 @@
 //! infrastructure and lives in core so the command layer stays a thin adapter.
 
 use crate::{Error, Result};
-use std::fs::OpenOptions;
-use std::io::Write;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TrailingNewline {
@@ -61,86 +59,23 @@ pub fn write_output_file_atomically(
         }
     }
 
-    write_output_file_atomically_with(
-        target,
-        contents.as_ref(),
-        options,
-        |path| OpenOptions::new().write(true).create_new(true).open(path),
-        |file, bytes| file.write_all(bytes),
-        std::fs::File::sync_all,
-        |from, to| std::fs::rename(from, to),
-        |parent| OpenOptions::new().read(true).open(parent)?.sync_all(),
-    )
-}
-
-fn write_output_file_atomically_with<C, W, S, R, D>(
-    target: &Path,
-    contents: &[u8],
-    options: OutputWriteOptions,
-    create: C,
-    mut write: W,
-    sync: S,
-    rename: R,
-    sync_parent: D,
-) -> std::io::Result<()>
-where
-    C: FnOnce(&Path) -> std::io::Result<std::fs::File>,
-    W: FnMut(&mut std::fs::File, &[u8]) -> std::io::Result<()>,
-    S: FnOnce(&std::fs::File) -> std::io::Result<()>,
-    R: FnOnce(&Path, &Path) -> std::io::Result<()>,
-    D: FnOnce(&Path) -> std::io::Result<()>,
-{
-    let temp = atomic_output_temp_path(target);
-    let cleanup = || {
-        let _ = std::fs::remove_file(&temp);
-    };
-    let mut file = create(&temp)?;
-    if let Err(error) = write(&mut file, contents) {
-        drop(file);
-        cleanup();
-        return Err(error);
-    }
-    if options.trailing_newline == TrailingNewline::Ensure && !contents.ends_with(b"\n") {
-        if let Err(error) = write(&mut file, b"\n") {
-            drop(file);
-            cleanup();
-            return Err(error);
-        }
-    }
-    if let Err(error) = sync(&file) {
-        drop(file);
-        cleanup();
-        return Err(error);
-    }
-    drop(file);
-
-    match rename(&temp, target) {
-        Ok(()) => {
-            let parent = target
-                .parent()
-                .filter(|parent| !parent.as_os_str().is_empty())
-                .unwrap_or_else(|| Path::new("."));
-            sync_parent(parent)
-        }
-        Err(err) => {
-            let _ = std::fs::remove_file(&temp);
-            Err(err)
-        }
-    }
+    let contents = contents.as_ref();
+    let mut terminated;
+    let contents =
+        if options.trailing_newline == TrailingNewline::Ensure && !contents.ends_with(b"\n") {
+            terminated = contents.to_vec();
+            terminated.push(b'\n');
+            terminated.as_slice()
+        } else {
+            contents
+        };
+    crate::engine::local_files::write_file_atomic(target, contents, "write output file")
+        .map_err(|error| std::io::Error::other(error.to_string()))
 }
 
 pub fn write_output_file(path: &str, contents: &str) -> Result<()> {
     write_output_file_atomically(path, contents, OutputWriteOptions::file())
         .map_err(|err| Error::internal_io(err.to_string(), Some(format!("write {path}"))))
-}
-
-fn atomic_output_temp_path(target: &Path) -> PathBuf {
-    let file_name = target
-        .file_name()
-        .and_then(|name| name.to_str())
-        .unwrap_or("output");
-    let temp_name = format!(".{file_name}.{}.tmp", uuid::Uuid::new_v4());
-    target.with_file_name(temp_name)
 }
 
 #[cfg(test)]
@@ -185,97 +120,28 @@ mod tests {
     }
 
     #[test]
-    fn atomic_writer_fsyncs_dot_for_a_bare_relative_target() {
-        let dir = tempfile::tempdir().expect("temp dir");
-        let path = Path::new("output.json");
-        write_output_file_atomically_with(
-            path,
-            b"published",
-            OutputWriteOptions::file(),
-            |relative| {
-                OpenOptions::new()
-                    .write(true)
-                    .create_new(true)
-                    .open(dir.path().join(relative))
-            },
-            |file, bytes| file.write_all(bytes),
-            |file| file.sync_all(),
-            |from, to| std::fs::rename(dir.path().join(from), dir.path().join(to)),
-            |parent| {
-                assert_eq!(parent, Path::new("."));
-                std::fs::File::open(dir.path())?.sync_all()
-            },
-        )
-        .expect("a published bare relative output must not fail its parent fsync");
+    fn output_preserves_binary_contents_and_existing_newline() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("output");
+        for contents in [b"\xff\0".as_slice(), b"already terminated\n", b""] {
+            write_output_file_atomically(&path, contents, OutputWriteOptions::file()).unwrap();
+            assert_eq!(std::fs::read(&path).unwrap(), contents);
 
-        assert_eq!(
-            std::fs::read_to_string(dir.path().join(path)).unwrap(),
-            "published"
-        );
-    }
-
-    fn assert_injected_staging_failure_removes_temp(fail_write: bool, fail_sync: bool) {
-        let dir = tempfile::tempdir().expect("temp dir");
-        let output_path = dir.path().join("output.json");
-        let error = write_output_file_atomically_with(
-            &output_path,
-            b"{}",
-            OutputWriteOptions::artifact(),
-            |path| OpenOptions::new().write(true).create_new(true).open(path),
-            move |file, bytes| {
-                if fail_write {
-                    Err(std::io::Error::other("injected write failure"))
-                } else {
-                    file.write_all(bytes)
-                }
-            },
-            move |file| {
-                if fail_sync {
-                    Err(std::io::Error::other("injected sync failure"))
-                } else {
-                    file.sync_all()
-                }
-            },
-            |from, to| std::fs::rename(from, to),
-            |parent| std::fs::File::open(parent)?.sync_all(),
-        )
-        .expect_err("injected failure");
-
-        assert!(error.to_string().contains("injected"));
-        assert!(!output_path.exists());
-        assert!(std::fs::read_dir(dir.path())
-            .expect("read dir")
-            .next()
-            .is_none());
+            write_output_file_atomically(&path, contents, OutputWriteOptions::json_output())
+                .unwrap();
+            let mut expected = contents.to_vec();
+            if !expected.ends_with(b"\n") {
+                expected.push(b'\n');
+            }
+            assert_eq!(std::fs::read(&path).unwrap(), expected);
+        }
     }
 
     #[test]
-    fn atomic_writer_removes_temp_after_write_failure() {
-        assert_injected_staging_failure_removes_temp(true, false);
-    }
-
-    #[test]
-    fn atomic_writer_removes_temp_after_sync_failure() {
-        assert_injected_staging_failure_removes_temp(false, true);
-    }
-
-    #[test]
-    fn atomic_writer_surfaces_parent_directory_sync_failure_after_rename() {
-        let dir = tempfile::tempdir().expect("temp dir");
-        let output_path = dir.path().join("output.json");
-        let error = write_output_file_atomically_with(
-            &output_path,
-            b"{}",
-            OutputWriteOptions::artifact(),
-            |path| std::fs::File::create(path),
-            |file, bytes| file.write_all(bytes),
-            |file| file.sync_all(),
-            |from, to| std::fs::rename(from, to),
-            |_| Err(std::io::Error::other("injected directory sync failure")),
-        )
-        .expect_err("directory sync failure must not report durable success");
-
-        assert!(error.to_string().contains("directory sync failure"));
-        assert_eq!(std::fs::read_to_string(output_path).unwrap(), "{}");
+    fn output_does_not_create_parents_unless_requested() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("missing/output");
+        assert!(write_output_file_atomically(&path, "data", OutputWriteOptions::file()).is_err());
+        assert!(!path.parent().unwrap().exists());
     }
 }

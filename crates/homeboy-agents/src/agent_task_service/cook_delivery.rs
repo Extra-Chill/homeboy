@@ -53,7 +53,7 @@ const RECORDED_BLOCKER_EVIDENCE: &str = "/cook_delivery/blocker";
 /// One typed read of where a Cook's candidate is on its way to publication.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CookDelivery {
-    pub state: CookDeliveryState,
+    pub(crate) state: CookDeliveryState,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub candidate: Option<CookDeliveryCandidate>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -178,7 +178,7 @@ pub struct CookDeliveryLifecycle {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
-pub enum CookDeliveryState {
+pub(crate) enum CookDeliveryState {
     /// The candidate reached its destination but its gates have not passed.
     Applied,
     /// The candidate's deterministic gates passed; it is not yet published.
@@ -481,6 +481,10 @@ impl CookDelivery {
 
     /// The candidate reached its destination but has not been verified:
     /// gates are pending or could not execute.
+    pub(crate) fn is_no_change(&self) -> bool {
+        self.state == CookDeliveryState::NoChange
+    }
+
     pub fn is_unverified(&self) -> bool {
         self.state == CookDeliveryState::Applied
             || self.blocker_code() == Some(CookDeliveryBlockerCode::GatesDeferred)

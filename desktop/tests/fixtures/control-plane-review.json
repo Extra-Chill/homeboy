@@ -6,6 +6,7 @@
         "evidence": {
           "action_eligibility": {
             "actions": [
+              {"action": "recover", "availability": "available", "confirmation": "none", "idempotent": true, "reason": "continue", "requires_revalidation": true, "result_resource_type": "agent_task_run"},
               {
                 "action": "cancel",
                 "availability": "unavailable",
@@ -1447,6 +1448,7 @@
         "resource": {
           "action_eligibility": {
             "actions": [
+              {"action": "recover", "availability": "available", "confirmation": "none", "idempotent": true, "reason": "continue", "requires_revalidation": true, "result_resource_type": "agent_task_run"},
               {
                 "action": "cancel",
                 "availability": "unavailable",

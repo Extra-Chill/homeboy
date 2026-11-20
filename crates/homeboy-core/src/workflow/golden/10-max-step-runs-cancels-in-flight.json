@@ -150,9 +150,10 @@
           },
           "b": {
             "attempt": 1,
+            "error": "cancelled: max_step_runs reached",
             "key": "wf-golden/b/1/1",
-            "outcome": null,
-            "phase": "running"
+            "outcome": "cancelled",
+            "phase": "done"
           },
           "c": {
             "attempt": 0,
@@ -186,9 +187,10 @@
           },
           "b": {
             "attempt": 1,
+            "error": "cancelled: max_step_runs reached",
             "key": "wf-golden/b/1/1",
-            "outcome": null,
-            "phase": "running"
+            "outcome": "cancelled",
+            "phase": "done"
           },
           "c": {
             "attempt": 0,

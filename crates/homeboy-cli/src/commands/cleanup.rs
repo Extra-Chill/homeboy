@@ -1270,75 +1270,29 @@ fn filesystem_usage_with_budget(
     path: &Path,
     budget: &mut FilesystemScanBudget,
 ) -> homeboy::core::Result<FilesystemUsage> {
-    let mut seen = HashSet::new();
-    let mut usage = FilesystemUsage::default();
-    accumulate_filesystem_usage(path, &mut seen, &mut usage, budget)?;
-    Ok(usage)
-}
+    use homeboy::core::cleanup::path_usage::{measure_path, PathUsageOptions};
 
-fn accumulate_filesystem_usage(
-    path: &Path,
-    seen: &mut HashSet<(u64, u64)>,
-    usage: &mut FilesystemUsage,
-    budget: &mut FilesystemScanBudget,
-) -> homeboy::core::Result<()> {
-    if budget.exhausted() {
-        usage.truncated = true;
-        return Ok(());
-    }
-    budget.visited += 1;
-    let metadata = match std::fs::symlink_metadata(path) {
-        Ok(metadata) => metadata,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
-        Err(error) => {
-            return Err(homeboy::core::Error::internal_io(
-                error.to_string(),
-                Some(format!("measure Homeboy storage path {}", path.display())),
-            ))
-        }
+    let measured = measure_path(
+        path,
+        PathUsageOptions {
+            dedupe_hard_links: true,
+            visit_budget: Some(
+                RETAINED_STORAGE_FILESYSTEM_ENTRY_BUDGET.saturating_sub(budget.visited),
+            ),
+            ..Default::default()
+        },
+    );
+    let measured = match measured {
+        Ok(measured) => measured,
+        Err(_) if !path.exists() => return Ok(FilesystemUsage::default()),
+        Err(error) => return Err(error),
     };
-    #[cfg(unix)]
-    let identity = {
-        use std::os::unix::fs::MetadataExt;
-        (metadata.dev(), metadata.ino())
-    };
-    #[cfg(not(unix))]
-    let identity = (0, 0);
-    if seen.insert(identity) {
-        usage.apparent_bytes = usage.apparent_bytes.saturating_add(metadata.len());
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::MetadataExt;
-            usage.physical_bytes = usage
-                .physical_bytes
-                .saturating_add(metadata.blocks().saturating_mul(512));
-        }
-        #[cfg(not(unix))]
-        {
-            usage.physical_bytes = usage.physical_bytes.saturating_add(metadata.len());
-        }
-    }
-    if metadata.file_type().is_dir() {
-        for entry in std::fs::read_dir(path).map_err(|error| {
-            homeboy::core::Error::internal_io(
-                error.to_string(),
-                Some(format!("read Homeboy storage path {}", path.display())),
-            )
-        })? {
-            let entry = entry.map_err(|error| {
-                homeboy::core::Error::internal_io(
-                    error.to_string(),
-                    Some(format!("read Homeboy storage path {}", path.display())),
-                )
-            })?;
-            accumulate_filesystem_usage(&entry.path(), seen, usage, budget)?;
-            if usage.truncated || budget.exhausted() {
-                usage.truncated = true;
-                break;
-            }
-        }
-    }
-    Ok(())
+    budget.visited = budget.visited.saturating_add(measured.visited);
+    Ok(FilesystemUsage {
+        apparent_bytes: measured.usage.logical_bytes,
+        physical_bytes: measured.usage.allocated_bytes,
+        truncated: !measured.pending.is_empty(),
+    })
 }
 
 fn largest_children_with_budget(

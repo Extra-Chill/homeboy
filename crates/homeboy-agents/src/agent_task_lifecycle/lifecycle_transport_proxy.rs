@@ -231,8 +231,7 @@ pub fn recover_disconnected_runner_in_store(
 
 fn is_authenticated_transport_recovery_record(record: &AgentTaskRunRecord) -> bool {
     record.lab_handoff.as_ref().is_some_and(|handoff| {
-        handoff.validation_error().is_none()
-            && handoff.state == AgentTaskLabHandoffState::Accepted
+        CookRunState::accepted_lab_handoff(record)
             && handoff.authority == AgentTaskLabHandoffAuthority::RunnerDaemon
             && record.runner_id() == Some(handoff.runner_id.as_str())
             && record.runner_job_id() == handoff.runner_job_id.as_deref()
@@ -372,7 +371,7 @@ pub(crate) fn bind_pending_lab_handoff_snapshot_in_store(
         .lab_handoff
         .as_ref()
         .filter(|handoff| {
-            handoff.state == AgentTaskLabHandoffState::Pending
+            !CookRunState::accepted_lab_handoff(record)
                 && handoff.authority == AgentTaskLabHandoffAuthority::Controller
         })
         .map(|handoff| handoff.runner_id.clone())

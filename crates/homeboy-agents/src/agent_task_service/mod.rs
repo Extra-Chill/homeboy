@@ -67,12 +67,12 @@ pub use cook_budget::*;
 pub use cook_delivery::publication_receipt;
 #[cfg(any(test, feature = "test-support"))]
 pub use cook_delivery::test_support::*;
-pub(crate) use cook_delivery::COOK_DELIVERY_KEY;
 pub use cook_delivery::{
     CookDelivery, CookDeliveryArtifacts, CookDeliveryBlocker, CookDeliveryBlockerCode,
     CookDeliveryCandidate, CookDeliveryDestination, CookDeliveryGate, CookDeliveryLifecycle,
-    CookDeliveryPublication, CookDeliveryState, CookManualPublication, COOK_DELIVERY_SCHEMA,
+    CookDeliveryPublication, CookManualPublication, COOK_DELIVERY_SCHEMA,
 };
+pub(crate) use cook_delivery::{CookDeliveryState, COOK_DELIVERY_KEY};
 pub use cook_delivery_artifacts::*;
 pub use cook_lineage::{CookAttemptLineage, CookLineageKind};
 #[cfg(test)]
@@ -83,10 +83,11 @@ pub use cook_recipe::*;
 pub(crate) use cook_recovery::incomplete_review_recovery_command;
 pub use cook_recovery::{
     cook_recovery_delegation, is_store_contention, is_store_contention_message, plan_cook_recovery,
-    prepare_admitted_recovery_continuation, recover_cook, with_store_contention_backoff,
-    CookPublishRequest, CookRecoveryOverrides, CookRecoveryPerformer, CookRecoveryPlan,
-    CookRecoveryReport, CookRecoveryRequest, CookRecoveryStep, CookReplaceGatesRequest,
-    CookReplacementProof, COOK_RECOVERY_SCHEMA, STORE_BUSY_CODE,
+    prepare_admitted_recovery_continuation, recover_cook, recovers_as_run,
+    with_store_contention_backoff, CookPublishRequest, CookRecoveryOverrides,
+    CookRecoveryPerformer, CookRecoveryPlan, CookRecoveryReport, CookRecoveryRequest,
+    CookRecoveryStep, CookReplaceGatesRequest, CookReplacementProof, COOK_RECOVERY_SCHEMA,
+    STORE_BUSY_CODE,
 };
 
 /// Observe the local controller daemon with the one freshness report

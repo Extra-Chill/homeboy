@@ -56,6 +56,7 @@ use controller_supervisor::dispatch_claimed_controller_job;
 pub mod runner_exec_driver;
 pub mod runner_exec_job;
 mod runner_exec_worker;
+pub mod runner_health;
 pub mod runner_staging;
 pub(crate) mod runner_watch;
 mod serve;
@@ -2129,6 +2130,12 @@ fn orchestration_tick_loop(
                 job_store.reconcile_controller_completions().map(|_| ())
             });
         });
+        // A failed or restart-looping runner unit announces itself (#18538).
+        isolated_tick(|| {
+            observed_daemon_pass("runner_health", || {
+                runner_health::with_provider(|provider| provider.observe())
+            });
+        });
         // Finished attempts leave per-attempt paths behind; reclaiming them is
         // bounded so one pass never delays the next tick's reconciliation.
         maintenance_tick(|| {
@@ -2477,6 +2484,16 @@ fn completion_notifications(
             run.kind == "agent-task"
                 && crate::observation::RunStatus::from_label(&run.status)
                     != Some(crate::observation::RunStatus::Stale)
+        }) {
+            continue;
+        }
+        // A workflow instance announces only a stopped chain (#18540): its
+        // steps' Cooks already announce their own outcomes, and a looping
+        // workflow would otherwise notify on every successful pass.
+        if run.as_ref().is_some_and(|run| {
+            run.kind == "workflow"
+                && crate::observation::RunStatus::from_label(&run.status)
+                    == Some(crate::observation::RunStatus::Pass)
         }) {
             continue;
         }

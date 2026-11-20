@@ -115,38 +115,88 @@ fn foreach_failure_keeps_item_error_and_first_failure_reason() {
     );
 }
 
-/// #17708: cancelling a fan-out settles every item that never got a
-/// submission as `never_started` with the reason, instead of leaving it out.
+/// #17708: a terminal that stops a fan-out settles every item that never got a
+/// submission as `never_started`, and every running attempt as `cancelled`, both
+/// naming why. Events after the terminal are ignored, so nothing it leaves
+/// `running` could ever settle: an operator cancel and an exhausted budget
+/// both leave no step or item running.
 #[test]
-fn workflow_cancel_reports_unsubmitted_foreach_items_as_never_started() {
+fn a_stopping_terminal_settles_every_open_step_and_item() {
     let definition = parse_definition(&json!({
         "schema": "homeboy/workflow/v1",
-        "id": "fan-cancel",
-        "steps": [{
-            "id": "work", "foreach": ["a", "b", "c"], "max_parallel": 1,
-            "exec": {"program": "true"}
-        }]
+        "id": "fan-stop",
+        "budget": {"max_step_runs": 2},
+        "steps": [
+            {"id": "work", "foreach": ["a", "b", "c", "d"], "max_parallel": 2,
+             "exec": {"program": "true"}},
+            {"id": "side", "exec": {"program": "true"}}
+        ]
     }));
-    let initial = InstanceState::new(&definition, INSTANCE, BTreeMap::new());
-    let (state, _) = advance(&definition, &initial, &Event::Start, 0);
-    let (state, _) = advance(
-        &definition,
-        &state,
+    let started = |definition: &WorkflowDefinition| {
+        let initial = InstanceState::new(definition, INSTANCE, BTreeMap::new());
+        advance(definition, &initial, &Event::Start, 0).0
+    };
+    // An operator cancel stops the instance with `work` items 0 and 1 running.
+    let mut unbudgeted = definition.clone();
+    unbudgeted.budget = None;
+    let running = started(&unbudgeted);
+    let (cancelled, _) = advance(
+        &unbudgeted,
+        &running,
         &Event::Cancel {
             reason: Some("operator stop".to_string()),
         },
         1,
     );
-    let items = &state.steps["work"].items;
-    assert_eq!(items[0].phase, StepPhase::Running);
-    for item in &items[1..] {
-        assert_eq!(item.phase, StepPhase::Done);
-        assert_eq!(item.outcome.as_deref(), Some(NEVER_STARTED));
-        assert_eq!(
-            item.error.as_deref(),
-            Some("cancelled before admission: operator stop")
+    // Two runs fit the budget; the third reservation exhausts it at start.
+    let exhausted = started(&definition);
+    for (state, status, cause, unstarted) in [
+        (
+            &cancelled,
+            InstanceStatus::Cancelled,
+            "operator stop",
+            "cancelled before admission",
+        ),
+        (
+            &exhausted,
+            InstanceStatus::BudgetExhausted,
+            "max_step_runs reached",
+            "budget exhausted before admission",
+        ),
+    ] {
+        assert_eq!(state.status, status);
+        assert!(
+            state.awaited_keys().is_empty(),
+            "{status:?}: {:?}",
+            state.awaited_keys()
         );
-        assert!(item.run_id.is_none());
+        let work = &state.steps["work"];
+        assert_eq!(work.phase, StepPhase::Done);
+        assert_eq!(work.outcome.as_deref(), Some("cancelled"));
+        for item in &work.items {
+            assert_eq!(item.phase, StepPhase::Done, "{status:?}");
+            if item.run_id.is_some() || item.key.is_some() {
+                assert_eq!(item.outcome.as_deref(), Some("cancelled"), "{status:?}");
+                assert_eq!(
+                    item.error.as_deref(),
+                    Some(format!("cancelled: {cause}").as_str())
+                );
+            } else {
+                assert_eq!(item.outcome.as_deref(), Some(NEVER_STARTED), "{status:?}");
+                assert_eq!(
+                    item.error.as_deref(),
+                    Some(format!("{unstarted}: {cause}").as_str())
+                );
+            }
+        }
+        assert!(work
+            .items
+            .iter()
+            .any(|item| item.outcome.as_deref() == Some("cancelled")));
+        assert!(work
+            .items
+            .iter()
+            .any(|item| item.outcome.as_deref() == Some(NEVER_STARTED)));
     }
 }
 
@@ -829,7 +879,7 @@ fn recorded_transcripts_reach_workflow_hotspots_idempotently() {
         let report = &state.timing.completed;
         assert!(!report.spans.is_empty());
         for _ in 0..2 {
-            store.record_workflow_timing(&state).unwrap();
+            store.record_workflow_timing("fixture", &state).unwrap();
         }
         let run = store.get_run(&state.instance).unwrap().unwrap();
         assert_eq!(

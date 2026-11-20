@@ -527,20 +527,8 @@ fn default_blocking() -> bool {
 }
 
 fn slug_fragment(value: &str) -> String {
-    let slug = value
-        .chars()
-        .map(|ch| {
-            if ch.is_ascii_alphanumeric() {
-                ch.to_ascii_lowercase()
-            } else {
-                '-'
-            }
-        })
-        .collect::<String>()
-        .split('-')
-        .filter(|part| !part.is_empty())
-        .collect::<Vec<_>>()
-        .join("-");
+    use homeboy_engine_primitives::identifier::{slugify, SlugStyle};
+    let slug = slugify(value, SlugStyle::Branch);
 
     if slug.is_empty() {
         "unspecified".to_string()

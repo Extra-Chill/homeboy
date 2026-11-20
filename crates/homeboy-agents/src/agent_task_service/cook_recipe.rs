@@ -671,11 +671,8 @@ impl CookRecipeStore {
             return Ok(());
         }
         let record = lifecycle_store.read_record(run_id)?;
-        if !matches!(
-            record.state(),
-            homeboy_lifecycle_contract::RunExecutionState::Succeeded
-                | homeboy_lifecycle_contract::RunExecutionState::CandidateRecoverable
-        ) {
+        let state = agent_task_lifecycle::CookRunState::of(&record);
+        if !state.recoverable && state.phase != agent_task_lifecycle::CookRunPhase::Succeeded {
             return Ok(());
         }
         if lifecycle_continuation_state(lifecycle_continuation(&record))
@@ -3019,9 +3016,7 @@ pub(crate) fn has_unambiguous_zero_execution(
         // A submitted Lab staging job can still dispatch the provider, so it
         // owns execution exactly like an accepted runner job.
         && !record.has_remote_execution_owner()
-        && record.lab_handoff.as_ref().is_none_or(|handoff| {
-            handoff.state != agent_task_lifecycle::AgentTaskLabHandoffState::Accepted
-        })
+        && !agent_task_lifecycle::CookRunState::accepted_lab_handoff(record)
 }
 
 /// Resolve a Cook identifier to its latest durable attempt. Candidate selection
@@ -3123,10 +3118,9 @@ fn continuation_source_run_id(
             lifecycle_store
                 .read_record(&attempt.run_id)
                 .is_ok_and(|record| {
-                    matches!(
-                        record.state(),
-                        RunExecutionState::CandidateRecoverable | RunExecutionState::Succeeded
-                    )
+                    let state = agent_task_lifecycle::CookRunState::of(&record);
+                    state.recoverable
+                        || state.phase == agent_task_lifecycle::CookRunPhase::Succeeded
                 })
         })
         .map(|attempt| attempt.run_id.clone())
@@ -3787,6 +3781,132 @@ mod tests {
             >,
         ) -> Result<()> {
             Ok(())
+        }
+    }
+
+    #[test]
+    fn recover_action_executes_the_planned_step() {
+        use homeboy_control_plane_contract::*;
+        for case in ["continue", "blocked", "resume", "candidate", "preflight"] {
+            homeboy_core::test_support::with_isolated_home(|_| {
+                let recipe = recipe();
+                let run_id = &recipe.attempts[0].run_id;
+                let resume_plan = AgentTaskPlan::new("resume", Vec::new());
+                let plan = if case == "resume" {
+                    &resume_plan
+                } else {
+                    &recipe.attempts[0].plan
+                };
+                let store =
+                    agent_task_lifecycle::AgentTaskLifecycleStore::from_environment().unwrap();
+                agent_task_lifecycle::submit_plan(plan, Some(run_id)).unwrap();
+                if case != "resume" {
+                    CookRecipeStore::from_environment()
+                        .unwrap()
+                        .persist_recipe(&recipe)
+                        .unwrap();
+                    agent_task_lifecycle::record_cook_attempt_in_store(
+                        &store,
+                        &recipe.cook_id,
+                        1,
+                        run_id,
+                    )
+                    .unwrap();
+                    store
+                        .mutate_record(run_id, |record| {
+                            record.metadata["cook_continuation"] =
+                                serde_json::json!({"state": "claimed", "owner_pid": u32::MAX});
+                            if case == "blocked" {
+                                record.metadata["cancellation_fence"] =
+                                    serde_json::json!({"reason": "test blocker"});
+                            }
+                            true
+                        })
+                        .unwrap();
+                }
+                let service = crate::orchestration::OrchestrationService::new(
+                    crate::orchestration::LifecycleStoreLookup::new(store.clone()),
+                );
+                let request = ControlPlaneActionRequest {
+                    schema: CONTROL_PLANE_ACTION_REQUEST_SCHEMA.into(),
+                    effect_id: action_effect_id("test", run_id, "recover", case),
+                    action: ControlPlaneAction::Recover,
+                    idempotency_key: case.into(),
+                    actor: "test".into(),
+                    expected_updated_at: None,
+                    confirmed: true,
+                    parameters: ControlPlaneActionPayload {
+                        schema: CONTROL_PLANE_RECOVER_PARAMETERS_SCHEMA.into(),
+                        data: serde_json::json!({"preflight": case == "preflight", "candidate_ref": if case == "candidate" { Some("missing-candidate") } else { None }}),
+                    },
+                };
+                let run = RunId::new(run_id).unwrap();
+                if case == "blocked" {
+                    let resource = crate::orchestration::project_record(
+                        &store.read_record(run_id).unwrap(),
+                        None,
+                    )
+                    .unwrap();
+                    let entry = resource
+                        .action_eligibility
+                        .unwrap()
+                        .actions
+                        .into_iter()
+                        .find(|a| a.action == ControlPlaneAction::Recover)
+                        .unwrap();
+                    assert_eq!(
+                        entry.availability,
+                        ControlPlaneActionAvailability::Unavailable
+                    );
+                }
+                let before = store.read_record(run_id).unwrap();
+                let ack = super::super::with_recovery_step_submit_for_test(
+                    |_| Ok("test-recovery-job".into()),
+                    || {
+                        super::super::with_scheduling_daemon_start(
+                            || Ok(()),
+                            || service.execute_action(&run, &request),
+                        )
+                    },
+                )
+                .unwrap();
+                match case {
+                    "continue" => {
+                        assert_eq!(
+                            ack.result.data["report"]["step"]["kind"], "continue",
+                            "{ack:?}"
+                        );
+                        assert!(
+                            ack.result.data["report"]["admission"].is_object(),
+                            "{ack:?}"
+                        );
+                    }
+                    "preflight" => {
+                        assert_eq!(ack.result.data["report"]["preflight"], true, "{ack:?}");
+                        assert_eq!(
+                            store.read_record(run_id).unwrap().updated_at,
+                            before.updated_at
+                        );
+                        assert_eq!(
+                            service
+                                .effect_status(&run, &request.effect_id)
+                                .unwrap()
+                                .state,
+                            ControlPlaneEffectExecutionState::NotStarted
+                        );
+                    }
+                    "candidate" => {
+                        assert_eq!(ack.outcome, ControlPlaneActionOutcome::Failed);
+                        assert!(ack.message.is_some());
+                    }
+                    "blocked" => assert_eq!(ack.outcome, ControlPlaneActionOutcome::Failed),
+                    "resume" => assert_eq!(
+                        ack.result.schema, CONTROL_PLANE_RECOVER_RESULT_SCHEMA,
+                        "{ack:?}"
+                    ),
+                    _ => unreachable!(),
+                }
+            });
         }
     }
 

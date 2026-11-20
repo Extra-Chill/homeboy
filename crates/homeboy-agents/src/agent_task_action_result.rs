@@ -72,6 +72,32 @@ pub fn resume(acknowledgement: &ControlPlaneActionAcknowledgement) -> Result<Res
     }
 }
 
+/// The `recover` report for a resumed run: the aggregate when the run was
+/// already satisfied, otherwise the acknowledgement itself, with the exit code
+/// the resume result names (an unmaterialized Cook that is terminal exits 2).
+pub fn resume_report(acknowledgement: &ControlPlaneActionAcknowledgement) -> Result<(Value, i32)> {
+    let result = resume(acknowledgement)?;
+    let (value, exit_code) = match &result {
+        ResumeActionResult::Resumed {
+            aggregate,
+            exit_code,
+        } if acknowledgement.outcome == ControlPlaneActionOutcome::AlreadySatisfied => {
+            (serde_json::to_value(aggregate), *exit_code)
+        }
+        ResumeActionResult::Resumed { exit_code, .. } => {
+            (serde_json::to_value(acknowledgement), *exit_code)
+        }
+        ResumeActionResult::UnmaterializedCook { terminal, .. } => (
+            serde_json::to_value(acknowledgement),
+            i32::from(*terminal) * 2,
+        ),
+    };
+    Ok((
+        value.map_err(|error| homeboy_core::Error::internal_json(error.to_string(), None))?,
+        exit_code,
+    ))
+}
+
 fn validate(
     acknowledgement: &ControlPlaneActionAcknowledgement,
     action: ControlPlaneAction,
@@ -151,6 +177,7 @@ fn action_name(action: ControlPlaneAction) -> &'static str {
         ControlPlaneAction::Cancel => "cancel",
         ControlPlaneAction::Promote => "promote",
         ControlPlaneAction::Reconcile => "reconcile",
+        ControlPlaneAction::Recover => "recover",
         ControlPlaneAction::Resume => "resume",
         ControlPlaneAction::PlacementUpdate => "placement_update",
         ControlPlaneAction::Retry => "retry",

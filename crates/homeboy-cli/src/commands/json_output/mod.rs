@@ -608,42 +608,10 @@ fn release_publication_url(data: &Value) -> Option<&str> {
 /// branch is 'main'` is answered entirely by its head. Both ends carry signal,
 /// so the middle is what gets dropped, and the elision states how much went.
 ///
-/// The marker is budgeted inside `MAX_RELEASE_TEXT_BYTES` rather than added on
-/// top, so this stays within the bound callers already rely on.
+/// The marker is included in the character budget. ASCII retains the original
+/// byte-sized bound; Unicode is limited by scalar values, not encoded bytes.
 fn bounded_release_text(value: &str) -> String {
-    if value.len() <= MAX_RELEASE_TEXT_BYTES {
-        return value.to_string();
-    }
-
-    // Reserved so the marker never pushes the result past the existing bound.
-    // `... [<digits>] bytes omitted ...` plus newlines fits comfortably.
-    const ELISION_RESERVE: usize = 40;
-
-    let budget = MAX_RELEASE_TEXT_BYTES.saturating_sub(ELISION_RESERVE);
-    // The tail gets the larger share: build tools put the actionable error last.
-    let head_budget = budget / 3;
-    let tail_budget = budget - head_budget;
-
-    let mut head_end = head_budget.min(value.len());
-    while head_end > 0 && !value.is_char_boundary(head_end) {
-        head_end -= 1;
-    }
-
-    let mut tail_start = value.len().saturating_sub(tail_budget);
-    while tail_start < value.len() && !value.is_char_boundary(tail_start) {
-        tail_start += 1;
-    }
-
-    if tail_start <= head_end {
-        return value[..head_end].to_string();
-    }
-
-    format!(
-        "{}\n... [{} bytes omitted] ...\n{}",
-        &value[..head_end],
-        tail_start - head_end,
-        &value[tail_start..]
-    )
+    homeboy_engine_primitives::text::truncate_middle(value, MAX_RELEASE_TEXT_BYTES)
 }
 
 fn release_reproduction_commands(step: &Value, result: &Value) -> Vec<String> {
@@ -824,14 +792,10 @@ fn refresh_failure_summary(failure: Option<&Value>) -> Value {
 }
 
 fn bounded_refresh_text(value: &str) -> String {
-    if value.len() <= MAX_REFRESH_TEXT_BYTES {
+    if value.chars().count() <= MAX_REFRESH_TEXT_BYTES {
         return value.to_string();
     }
-    let mut end = MAX_REFRESH_TEXT_BYTES - 3;
-    while !value.is_char_boundary(end) {
-        end -= 1;
-    }
-    format!("{}...", &value[..end])
+    homeboy_engine_primitives::text::truncate_chars(value, MAX_REFRESH_TEXT_BYTES - 3, "...")
 }
 
 fn command_run_with_summary(
@@ -1067,9 +1031,9 @@ mod tests {
     /// Multi-byte input must not panic or split a character.
     #[test]
     fn bounded_release_text_handles_multibyte_boundaries() {
-        let value = "é".repeat(MAX_RELEASE_TEXT_BYTES);
+        let value = "é".repeat(MAX_RELEASE_TEXT_BYTES * 2);
         let bounded = bounded_release_text(&value);
-        assert!(bounded.len() <= MAX_RELEASE_TEXT_BYTES);
+        assert!(bounded.chars().count() <= MAX_RELEASE_TEXT_BYTES);
         assert!(!bounded.is_empty());
     }
 

@@ -2,9 +2,6 @@ use clap::Args;
 use serde_json::Value;
 use std::io::Write;
 use std::process::{Command, Stdio};
-use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::Arc;
-use std::time::Instant;
 
 use homeboy::agents::agent_task_builtin_backend::BUILTIN_DEFAULT_BACKEND;
 use homeboy::agents::agent_tasks::dispatch_service as agent_task_dispatch_service;
@@ -15,8 +12,7 @@ use homeboy::agents::agent_tasks::finalization::{
 use homeboy::agents::agent_tasks::promotion::AgentTaskPromotionReport;
 use homeboy::agents::agent_tasks::provider::{
     evaluate_provider_dispatchability, resolve_provider_for_backend, AgentTaskExecutorProvider,
-    AgentTaskProviderCatalog, ExtensionProviderAgentTaskExecutor, ProviderResolution,
-    ProviderRuntimeReadinessCache,
+    AgentTaskProviderCatalog, ProviderResolution, ProviderRuntimeReadinessCache,
 };
 use homeboy::agents::agent_tasks::review_dossier::{
     resolve_review_profile, validate_issue_reference, AgentTaskExternalUsageEvidence,
@@ -32,7 +28,7 @@ use homeboy::core::Error;
 use homeboy_engine_primitives::shell::shell_arg;
 
 use super::super::CmdResult;
-use super::{merge_route_provider_config, FinalizePrArgs, ProvidersArgs, RecoverArgs, ReviewArgs};
+use super::{merge_route_provider_config, FinalizePrArgs, ProvidersArgs, ReviewArgs};
 
 #[derive(Args, Debug)]
 pub struct FinalizePrEvidenceArgs {
@@ -274,129 +270,6 @@ fn compact_fields(value: &Value, fields: &[&str]) -> Value {
         }
     }
     Value::Object(object)
-}
-
-struct AdoptionProgressReporter {
-    stopped: Arc<AtomicBool>,
-    worker: Option<std::thread::JoinHandle<()>>,
-}
-
-impl AdoptionProgressReporter {
-    fn new(source: &str, candidate_ref: &str, interval: std::time::Duration) -> Self {
-        promotion_progress_line(&format!(
-            "adoption: candidate `{candidate_ref}` accepted for `{source}`; status -> homeboy agent-task status {source}"
-        ));
-        let stopped = Arc::new(AtomicBool::new(false));
-        let worker_stopped = stopped.clone();
-        let started = Instant::now();
-        let source = source.to_string();
-        let worker = std::thread::spawn(move || {
-            while !worker_stopped.load(Ordering::SeqCst) {
-                let deadline = Instant::now() + interval;
-                while !worker_stopped.load(Ordering::SeqCst) && Instant::now() < deadline {
-                    std::thread::sleep(std::time::Duration::from_millis(50));
-                }
-                if worker_stopped.load(Ordering::SeqCst) {
-                    break;
-                }
-                promotion_progress_line(&format!(
-                    "adoption heartbeat: source={source} phase=verification elapsed={}s; status -> homeboy agent-task status {source}",
-                    started.elapsed().as_secs(),
-                ));
-            }
-        });
-        Self {
-            stopped,
-            worker: Some(worker),
-        }
-    }
-
-    fn finish(mut self) {
-        self.stopped.store(true, Ordering::SeqCst);
-        if let Some(worker) = self.worker.take() {
-            let _ = worker.join();
-        }
-    }
-}
-
-fn promotion_progress_line(message: &str) {
-    let message = homeboy::core::redaction::redact_string(message);
-    if std::env::var_os(homeboy::core::lab_contract::LAB_EXECUTION_RUNNER_ID_ENV).is_some() {
-        let frame = serde_json::json!({
-            "schema": "homeboy/runner-progress/v1",
-            "phase": "promotion",
-            "metadata": {
-                "promotion": {
-                    "schema": "homeboy/promotion-progress-frame/v1",
-                    "message": message,
-                }
-            }
-        });
-        let mut stdout = std::io::stdout().lock();
-        let _ = writeln!(stdout, "HOMEBOY_RUNNER_PROGRESS {frame}");
-        let _ = stdout.flush();
-        return;
-    }
-    let mut stderr = std::io::stderr().lock();
-    let _ = writeln!(stderr, "{message}");
-    let _ = stderr.flush();
-}
-
-pub(crate) fn recover_candidate(args: RecoverArgs) -> CmdResult<Value> {
-    let reporter = AdoptionProgressReporter::new(
-        &args.id,
-        args.candidate_ref.as_deref().expect("candidate recovery"),
-        std::time::Duration::from_secs(5),
-    );
-    let result =
-        agent_task_service::adopt_cook_candidate_with_options_dispatcher_and_executor_for_attempt(
-            &args.id,
-            args.attempt,
-            args.candidate_ref.as_deref().expect("candidate recovery"),
-            agent_task_service::AgentTaskCandidateAdoptionOptions {
-                ai_model: args.adoption_model.clone(),
-                replace_interrupted: args.replace_interrupted,
-            },
-            crate::commands::infra::route::reconstruct_cook_attempt_dispatcher,
-            Arc::new(ExtensionProviderAgentTaskExecutor::discover()),
-        );
-    reporter.finish();
-    let result = result?;
-    let exit_code = result.exit_code;
-    let cook_id = result.value.cook_id.clone();
-    let selected_attempt = result.value.attempts.first().ok_or_else(|| {
-        homeboy::core::Error::internal_unexpected(
-            "candidate adoption report is missing its resolved attempt".to_string(),
-        )
-    })?;
-    let selected_attempt_number = selected_attempt.attempt;
-    let selected_run_id = selected_attempt.run_id.clone();
-    let mut value = super::status::compact_cook_report(
-        serde_json::to_value(result.value).unwrap_or(Value::Null),
-        args.full,
-    );
-    value["adoption"] =
-        adoption_envelope(&args, &cook_id, selected_attempt_number, &selected_run_id);
-    Ok((value, exit_code))
-}
-
-fn adoption_envelope(
-    args: &RecoverArgs,
-    cook_id: &str,
-    selected_attempt: u32,
-    selected_run_id: &str,
-) -> Value {
-    serde_json::json!({
-        "schema": "homeboy/agent-task-candidate-adoption/v1",
-        "source": args.id,
-        "cook_id": cook_id,
-        "attempt": selected_attempt,
-        "run_id": selected_run_id,
-        "candidate_ref": args.candidate_ref,
-        "ai_model": args.adoption_model,
-        "replace_interrupted": args.replace_interrupted,
-        "controller_owned": true,
-    })
 }
 
 fn manual_finalization_options(
@@ -2191,13 +2064,7 @@ fn readiness_validation_projection(
 }
 
 fn bounded_text(value: &str, limit: usize) -> String {
-    let mut chars = value.chars();
-    let bounded = chars.by_ref().take(limit).collect::<String>();
-    if chars.next().is_some() {
-        format!("{bounded}...")
-    } else {
-        bounded
-    }
+    homeboy_engine_primitives::text::truncate_chars(value, limit, "...")
 }
 
 fn provider_full_command(args: &ProvidersArgs) -> String {
@@ -2439,27 +2306,6 @@ mod tests {
         assert!(message.contains("gates=npm test | npm run build"));
         assert!(message.contains("homeboy agent-task status manual-run-15181"));
         assert!(message.contains("homeboy agent-task recover manual-run-15181"));
-    }
-
-    #[test]
-    fn adoption_envelope_reports_canonical_selection_for_a_child_run_source() {
-        let args = RecoverArgs {
-            id: "cook-42-attempt-2".to_string(),
-            attempt: None,
-            candidate_ref: Some("deadbeef".to_string()),
-            adoption_model: Some("openai/gpt-5.6-terra".to_string()),
-            replace_interrupted: false,
-
-            full: false,
-            ..Default::default()
-        };
-
-        let envelope = adoption_envelope(&args, "cook-42", 2, "cook-42-attempt-2");
-
-        assert_eq!(envelope["source"], "cook-42-attempt-2");
-        assert_eq!(envelope["cook_id"], "cook-42");
-        assert_eq!(envelope["attempt"], 2);
-        assert_eq!(envelope["run_id"], "cook-42-attempt-2");
     }
 
     #[test]

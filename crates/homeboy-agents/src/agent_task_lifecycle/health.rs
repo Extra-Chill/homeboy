@@ -16,7 +16,7 @@ pub(crate) fn fixture_runner_provenance(
 ) -> Option<Value> {
     let runner_id = record.runner_id()?;
     let runner_job_id = record.runner_job_id()?;
-    (record.has_accepted_lab_handoff()
+    (CookRunState::accepted_lab_handoff(record)
         && !plan.tasks.is_empty()
         && plan
             .tasks

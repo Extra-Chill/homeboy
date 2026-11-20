@@ -164,11 +164,10 @@ impl AgentTaskAdvance {
 
 /// The runner daemon's accepted handoff, when the record carries one.
 fn accepted(record: &AgentTaskRunRecord) -> Option<&AgentTaskLabHandoff> {
-    record.lab_handoff.as_ref().filter(|handoff| {
-        handoff.state == AgentTaskLabHandoffState::Accepted
-            && handoff.authority == AgentTaskLabHandoffAuthority::RunnerDaemon
-            && handoff.runner_job_id.is_some()
-    })
+    record
+        .lab_handoff
+        .as_ref()
+        .filter(|handoff| handoff.is_valid() && handoff.state == AgentTaskLabHandoffState::Accepted)
 }
 
 /// Why `prepared` changes something only a typed transition may change.

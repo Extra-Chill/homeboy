@@ -419,7 +419,7 @@ fn normalize_capture_diagnostics(
 
 pub fn truncate_text_sample(input: &str, limit: usize) -> String {
     let normalized = input.split_whitespace().collect::<Vec<_>>().join(" ");
-    normalized.chars().take(limit).collect()
+    homeboy_engine_primitives::text::truncate_chars(&normalized, limit, "")
 }
 
 fn entrypoint_request_path(root: &Path, entrypoint: &Path) -> Result<String> {

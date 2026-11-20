@@ -11,6 +11,7 @@ use std::io::{Cursor, Write};
 use std::path::{Path, PathBuf};
 
 use homeboy_engine_primitives::content_hash;
+use homeboy_engine_primitives::local_files::write_json_file as write_json;
 use serde::{Deserialize, Serialize};
 
 use crate::build_identity;
@@ -273,14 +274,14 @@ pub fn write_bundle_dir(path: &Path, bundle: &ObservationBundle) -> crate::Resul
             Some(format!("create observation bundle dir {}", path.display())),
         )
     })?;
-    write_json(path.join("manifest.json"), &bundle.manifest)?;
-    write_json(path.join("runs.json"), &bundle.runs)?;
-    write_json(path.join("artifacts.json"), &bundle.artifacts)?;
-    write_json(path.join("artifact_bytes.json"), &bundle.artifact_bytes)?;
+    write_json(&path.join("manifest.json"), &bundle.manifest)?;
+    write_json(&path.join("runs.json"), &bundle.runs)?;
+    write_json(&path.join("artifacts.json"), &bundle.artifacts)?;
+    write_json(&path.join("artifact_bytes.json"), &bundle.artifact_bytes)?;
     write_artifact_bytes(path, &bundle.artifact_bytes)?;
-    write_json(path.join("trace_spans.json"), &bundle.trace_spans)?;
-    write_json(path.join("findings.json"), &bundle.findings)?;
-    write_json(path.join("test_failures.json"), &bundle.test_failures)?;
+    write_json(&path.join("trace_spans.json"), &bundle.trace_spans)?;
+    write_json(&path.join("findings.json"), &bundle.findings)?;
+    write_json(&path.join("test_failures.json"), &bundle.test_failures)?;
     Ok(())
 }
 
@@ -616,18 +617,6 @@ pub fn portable_artifact_label(path: &str, fallback: &str) -> String {
         .find(|segment| !segment.is_empty())
         .unwrap_or(fallback)
         .to_string()
-}
-
-fn write_json(path: PathBuf, value: &impl Serialize) -> crate::Result<()> {
-    let json = serde_json::to_string_pretty(value).map_err(|e| {
-        Error::internal_json(e.to_string(), Some(format!("serialize {}", path.display())))
-    })?;
-    fs::write(&path, json).map_err(|e| {
-        Error::internal_io(
-            e.to_string(),
-            Some(format!("write observation bundle file {}", path.display())),
-        )
-    })
 }
 
 fn read_json<T: for<'de> Deserialize<'de>>(path: PathBuf) -> crate::Result<T> {

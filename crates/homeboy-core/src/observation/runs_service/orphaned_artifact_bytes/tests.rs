@@ -324,7 +324,7 @@ fn owned_name_shapes_match_their_constructors() {
 }
 
 /// The module docstring's headline invariant: size is advisory and never gates
-/// removal. `best_effort_size` gives up past `MAX_DEPTH` and returns `None`,
+/// removal. `best_effort_size` sets a shared walker depth limit and returns `None`,
 /// which is the same shape a failed `read_dir` produces. The candidate must
 /// still be removed, with `size_measured: false` marking the number as a floor
 /// rather than a fact -- the opposite of the lab workspace pruner, which

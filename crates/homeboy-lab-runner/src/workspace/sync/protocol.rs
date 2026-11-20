@@ -100,7 +100,7 @@ pub(super) fn json<T: serde::de::DeserializeOwned>(bytes: &[u8]) -> Result<T> {
 }
 
 pub(super) fn write_json(path: &Path, value: &impl Serialize) -> Result<()> {
-    fs::write(path, serde_json::to_vec(value).map_err(io)?).materialization(
+    homeboy_engine_primitives::local_files::write_json_file(path, value).materialization(
         "write",
         path,
         "controller",

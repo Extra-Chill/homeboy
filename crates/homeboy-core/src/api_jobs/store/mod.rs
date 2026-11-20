@@ -122,7 +122,7 @@ impl JobStore {
             ));
         }
         self.durable_transaction(|inner| {
-            self.load_history_for_compaction(inner)?;
+            self.load_full_history(inner)?;
             let ids = terminal_controller_job_ids_in(inner, job_type, version)?;
             let mut expected = expected_ids.to_vec();
             expected.sort_unstable();
@@ -282,6 +282,10 @@ pub(super) struct JobStoreInner {
     pub(super) controller_submissions: HashMap<String, ControllerJobSubmission>,
     pub(super) expired_controller_submissions: HashMap<String, ControllerJobSubmission>,
     pub(super) compaction: Option<JobStoreCompactionEvidence>,
+    /// Terminal history a retention pass measured in SQL but left unloaded,
+    /// as `(jobs, bytes)`. It counts against the budgets in the next commit,
+    /// then resets.
+    pub(super) unloaded_terminal_history: (usize, usize),
 }
 
 /// A durable, caller-owned admission identity. The fingerprint makes reuse of a
@@ -711,19 +715,76 @@ impl JobStore {
         })
     }
 
-    /// Retention is an explicit full-history operation, not part of live reload.
-    fn load_history_for_compaction(&self, inner: &mut JobStoreInner) -> Result<()> {
+    /// An exact operator prune checks its expected set against every terminal
+    /// row, so it reads the whole history.
+    fn load_full_history(&self, inner: &mut JobStoreInner) -> Result<()> {
         if let Some(persistence) = &self.persistence {
             let connection_guard = persistence.connection()?;
             if let Some(connection) = connection_guard.as_ref() {
                 let (durable, baseline) =
-                    sql_store::load_sql_store_for_compaction(connection, &persistence.path)?;
+                    sql_store::load_sql_store_for_prune(connection, &persistence.path)?;
                 for stored in durable.jobs {
                     inner.jobs.entry(stored.job.id).or_insert(stored);
                 }
                 persistence.record_synced_state(baseline);
             }
         }
+        Ok(())
+    }
+
+    /// Load only the terminal rows a retention pass can change: non-workflow
+    /// jobs past the collection window, and workflow instances past their
+    /// retention without an expiry marker. Every other terminal row is still
+    /// within the window, so compaction would skip it anyway. It is measured
+    /// in SQL and stays unloaded, which keeps a pass proportional to what it
+    /// removes rather than to the whole history held under the store lock
+    /// (#18597).
+    pub(super) fn load_history_for_compaction(&self, inner: &mut JobStoreInner) -> Result<()> {
+        let Some(persistence) = &self.persistence else {
+            return Ok(());
+        };
+        let now = super::persistence::timestamp_ms();
+        let collection_deadline = now.saturating_sub(persistence.terminal_job_collection_window_ms);
+        let workflow_deadline = now.saturating_sub(
+            crate::defaults::load_config()
+                .retention
+                .workflow_instance_days
+                .saturating_mul(86_400_000),
+        );
+        let connection_guard = persistence.connection()?;
+        let Some(connection) = connection_guard.as_ref() else {
+            return Ok(());
+        };
+        let mut unloaded = (0, 0);
+        for row in sql_store::terminal_history_rows(connection, &persistence.path)? {
+            if inner.jobs.contains_key(&row.job_id) {
+                continue;
+            }
+            let changeable = if row.workflow {
+                !row.expired && row.finished_at_ms <= workflow_deadline
+            } else {
+                row.finished_at_ms <= collection_deadline
+            };
+            if !changeable {
+                if !row.workflow {
+                    unloaded.0 += 1;
+                    unloaded.1 += row.bytes;
+                }
+                continue;
+            }
+            let Some(mut stored) =
+                sql_store::read_job_readonly(connection, &persistence.path, row.job_id, true)?
+            else {
+                continue;
+            };
+            persistence
+                .synced
+                .lock()
+                .expect("store sync mutex poisoned")
+                .include_job(&mut stored)?;
+            inner.jobs.insert(row.job_id, stored);
+        }
+        inner.unloaded_terminal_history = unloaded;
         Ok(())
     }
 
@@ -815,6 +876,7 @@ impl JobStore {
         };
         compact_terminal_jobs(
             &mut durable,
+            std::mem::take(&mut inner.unloaded_terminal_history),
             persistence.event_retention_limit,
             persistence.terminal_job_retention_limit,
             persistence.terminal_job_retention_bytes,

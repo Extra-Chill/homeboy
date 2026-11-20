@@ -205,7 +205,7 @@ pub fn persist_private_run_attachment<T: Serialize + DeserializeOwned + Clone + 
     let record = store::read_record(&run_id)?;
     super::require_record_workspace_owner(&record)?;
     if let Some(handoff) = record.lab_handoff.as_ref() {
-        if handoff.state == super::AgentTaskLabHandoffState::Accepted
+        if super::CookRunState::accepted_lab_handoff(&record)
             && (handoff.workspace_identity != record.workspace_identity
                 || handoff.workspace_lifecycle_revision != record.workspace_lifecycle_revision
                 || handoff.workspace_owner_lease != record.workspace_owner_lease)

@@ -222,64 +222,33 @@ fn unwalked(name: String, root: PathBuf) -> RootUsage {
 /// Bounded, non-following walk. Partial totals are lower bounds.
 fn walk(name: String, root: PathBuf, deadline: Instant) -> RootUsage {
     let mut usage = unwalked(name, root.clone());
-    usage.complete = true;
-    let mut pending = vec![root.clone()];
-    while let Some(path) = pending.pop() {
-        if Instant::now() >= deadline {
-            usage.complete = false;
-            break;
+    use crate::cleanup::path_usage::{measure_path, PathUsageOptions};
+
+    let measured = measure_path(
+        &root,
+        PathUsageOptions {
+            deadline: Some(deadline),
+            ignore_errors: true,
+            max_pending: Some(MAX_PENDING),
+            ..Default::default()
+        },
+    );
+    if let Ok(measured) = measured {
+        usage.bytes = measured.usage.allocated_bytes;
+        usage.entries = measured.visited.saturating_sub(1) as u64;
+        usage.errors = measured.errors as u64;
+        // An absent root is an empty inventory, not an inspection failure.
+        if !root.exists() && measured.visited == 1 {
+            usage.errors = 0;
         }
-        match std::fs::symlink_metadata(&path) {
-            Ok(meta) => {
-                if path != root {
-                    usage.entries += 1;
-                }
-                usage.bytes += allocated_bytes(&meta);
-                if meta.is_dir() {
-                    match std::fs::read_dir(&path) {
-                        Ok(entries) => {
-                            for entry in entries {
-                                if pending.len() >= MAX_PENDING || Instant::now() >= deadline {
-                                    usage.complete = false;
-                                    break;
-                                }
-                                match entry {
-                                    Ok(entry) => pending.push(entry.path()),
-                                    Err(_) => usage.errors += 1,
-                                }
-                            }
-                        }
-                        Err(_) => usage.errors += 1,
-                    }
-                }
-            }
-            // An absent root is measured as empty.
-            Err(error) if path == root && error.kind() == std::io::ErrorKind::NotFound => {}
-            Err(_) => usage.errors += 1,
-        }
-        if !usage.complete {
-            break;
-        }
+        usage.complete = measured.pending.is_empty() && usage.errors == 0;
     }
-    usage.complete &= usage.errors == 0;
     usage.measurement = if usage.complete {
         Measurement::Measured
     } else {
         Measurement::Estimated
     };
     usage
-}
-
-fn allocated_bytes(meta: &std::fs::Metadata) -> u64 {
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::MetadataExt;
-        meta.blocks() * 512
-    }
-    #[cfg(not(unix))]
-    {
-        meta.len()
-    }
 }
 
 fn volume_usage(data: &Path) -> Option<VolumeUsage> {

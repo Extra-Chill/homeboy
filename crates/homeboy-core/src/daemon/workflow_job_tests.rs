@@ -265,11 +265,10 @@ fn resume_from_a_next_pass_instance_keeps_its_iteration_and_previous() {
         fixed["steps"][2]["exec"] = sh("touch finish");
         let mut resumed = request(fixed, home.path());
         assert_eq!(resumed.inputs["iteration"], 1);
-        resumed.definition.carry_resumed_inputs(
-            &mut resumed.inputs,
-            &original.inputs,
-            &BTreeMap::new(),
-        );
+        resumed.inputs = resumed
+            .definition
+            .resolve_resumed_inputs(&BTreeMap::new(), &original.inputs)
+            .unwrap();
         resumed.resumed_from = Some(original.instance.clone());
         resumed.instance = resumed.definition.instance_id_with_resume(
             &resumed.inputs,

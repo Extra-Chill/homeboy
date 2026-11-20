@@ -528,28 +528,19 @@ fn sorted_child_names(path: &Path) -> Result<Vec<String>> {
 /// Apparent size for reporting. Returns `None` on any read failure rather than
 /// a partial total, so the report can say the number is untrustworthy instead
 /// of quietly presenting a floor as a measurement. Never follows symlinks.
-fn best_effort_size(path: &Path, metadata: &fs::Metadata) -> Option<u64> {
-    const MAX_DEPTH: usize = 64;
-    fn walk(path: &Path, metadata: &fs::Metadata, depth: usize) -> Option<u64> {
-        if metadata.file_type().is_symlink() {
-            return Some(0);
-        }
-        if !metadata.is_dir() {
-            return Some(metadata.len());
-        }
-        if depth == 0 {
-            return None;
-        }
-        let mut total = metadata.len();
-        for entry in fs::read_dir(path).ok()? {
-            let entry = entry.ok()?;
-            let child = entry.path();
-            let child_metadata = fs::symlink_metadata(&child).ok()?;
-            total = total.checked_add(walk(&child, &child_metadata, depth - 1)?)?;
-        }
-        Some(total)
-    }
-    walk(path, metadata, MAX_DEPTH)
+fn best_effort_size(path: &Path, _metadata: &fs::Metadata) -> Option<u64> {
+    use crate::cleanup::path_usage::{measure_path, PathUsageOptions};
+
+    measure_path(
+        path,
+        PathUsageOptions {
+            skip_symlinks: true,
+            max_depth: Some(64),
+            ..Default::default()
+        },
+    )
+    .ok()
+    .map(|result| result.usage.logical_bytes)
 }
 
 #[cfg(test)]

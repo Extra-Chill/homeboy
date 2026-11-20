@@ -2,6 +2,77 @@
 
 use homeboy_error::{Error, Result};
 
+/// Identifier families have existing, intentionally different separator rules.
+#[derive(Clone, Copy)]
+pub enum SlugStyle {
+    /// Drop punctuation; collapse whitespace, underscores and dashes.
+    Identifier,
+    /// Lowercase, preserve underscores, replace each punctuation character.
+    CookBatch,
+    /// Lowercase and collapse all non-alphanumeric runs to a dash.
+    Branch,
+    /// Preserve case and underscores for existing materialized cache paths.
+    Path,
+}
+
+/// Normalize a slug using the caller's established identifier contract.
+pub fn slugify(value: &str, style: SlugStyle) -> String {
+    let (separator, collapse) = match style {
+        SlugStyle::Identifier | SlugStyle::Branch => ('-', true),
+        SlugStyle::CookBatch => ('-', false),
+        SlugStyle::Path => ('_', false),
+    };
+    let mut out = String::new();
+    for ch in value.chars() {
+        let normalized = if ch.is_ascii_alphanumeric() {
+            Some(if matches!(style, SlugStyle::Path) {
+                ch
+            } else {
+                ch.to_ascii_lowercase()
+            })
+        } else {
+            match style {
+                SlugStyle::Identifier if ch.is_whitespace() || ch == '_' || ch == '-' => Some('-'),
+                SlugStyle::Identifier => None,
+                SlugStyle::CookBatch | SlugStyle::Path if ch == '_' || ch == '-' => Some(ch),
+                _ => Some(separator),
+            }
+        };
+        if let Some(ch) = normalized {
+            if collapse && ch == separator && (out.is_empty() || out.ends_with(separator)) {
+                continue;
+            }
+            out.push(ch);
+        }
+    }
+    out.trim_matches(separator).to_string()
+}
+
+#[cfg(test)]
+mod slug_tests {
+    use super::*;
+
+    #[test]
+    fn slug_styles_preserve_existing_contracts() {
+        for (style, input, expected) in [
+            (
+                SlugStyle::Identifier,
+                " Hello_ World! / Again ",
+                "hello-world-again",
+            ),
+            (SlugStyle::Identifier, "a/b", "ab"),
+            (SlugStyle::CookBatch, "_Hello//World_", "_hello--world_"),
+            (SlugStyle::Branch, "_Hello//World_", "hello-world"),
+            (SlugStyle::Path, " /Hello//World/ ", "Hello__World"),
+            (SlugStyle::Branch, "🦀中文", ""),
+        ] {
+            assert_eq!(slugify(input, style), expected);
+        }
+        assert!(slugify_id("!!!", "name").is_err());
+        assert!(slugify_id(" ", "name").is_err());
+    }
+}
+
 pub fn slugify_id(value: &str, field_name: &str) -> Result<String> {
     let trimmed = value.trim();
     if trimmed.is_empty() {
@@ -13,34 +84,7 @@ pub fn slugify_id(value: &str, field_name: &str) -> Result<String> {
         ));
     }
 
-    let mut out = String::new();
-    let mut prev_was_dash = false;
-
-    for ch in trimmed.chars() {
-        let normalized = match ch {
-            'a'..='z' | '0'..='9' => Some(ch),
-            'A'..='Z' => Some(ch.to_ascii_lowercase()),
-            _ if ch.is_whitespace() || ch == '_' || ch == '-' => Some('-'),
-            _ => None,
-        };
-
-        if let Some(c) = normalized {
-            if c == '-' {
-                if out.is_empty() || prev_was_dash {
-                    continue;
-                }
-                out.push('-');
-                prev_was_dash = true;
-            } else {
-                out.push(c);
-                prev_was_dash = false;
-            }
-        }
-    }
-
-    while out.ends_with('-') {
-        out.pop();
-    }
+    let out = slugify(trimmed, SlugStyle::Identifier);
 
     if out.is_empty() {
         return Err(Error::validation_invalid_argument(
