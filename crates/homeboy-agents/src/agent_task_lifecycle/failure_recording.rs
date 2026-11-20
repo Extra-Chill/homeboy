@@ -986,7 +986,9 @@ fn candidate_adoption_recovery(phase: &str, error: &Error) -> Option<serde_json:
 pub(super) fn pre_execution_failure_classification(
     error: &Error,
 ) -> AgentTaskFailureClassification {
-    if crate::agent_task_service::is_store_contention(error) {
+    if crate::agent_task_service::is_store_contention(error)
+        || is_control_plane_event_collision(error)
+    {
         return AgentTaskFailureClassification::Transient;
     }
     if error.details["pre_execution_phase"] == "gate_toolchain_preflight" {
@@ -1013,6 +1015,16 @@ pub(super) fn pre_execution_failure_is_retryable(error: &Error) -> bool {
     error.retryable == Some(true)
         || is_controller_infrastructure_failure(error)
         || crate::agent_task_service::is_store_contention(error)
+        || is_control_plane_event_collision(error)
+}
+
+// Control-plane adapters preserve the attributed message but may wrap the
+// structured field. Match only this controller-owned receipt conflict, not
+// arbitrary invalid input or other idempotency contracts.
+fn is_control_plane_event_collision(error: &Error) -> bool {
+    error
+        .message
+        .contains("control-plane event idempotency key was already used for different input")
 }
 
 fn is_controller_infrastructure_failure(error: &Error) -> bool {

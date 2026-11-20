@@ -820,9 +820,10 @@ fn progress_request(
         }
         None => None,
     };
-    // Gate projections can be rewritten by replacement verification. Other
-    // producers (notably runner job sequences) own immutable event identities.
-    let identity = if source == "agent-task-gate" {
+    // Gate results and Lab transport snapshots can be rebuilt on replay.
+    // A sequence identifies a runner log slot, not an immutable projection:
+    // replacement transport evidence must not reuse a key for different input.
+    let identity = if matches!(source, "agent-task-gate" | "lab-runner") {
         let digest = homeboy_engine_primitives::content_hash::sha256_hex(
             &serde_json::to_vec(&json!([source, task, occurred_at, data]))
                 .map_err(|error| Error::internal_unexpected(error.to_string()))?,
