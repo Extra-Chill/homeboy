@@ -122,7 +122,7 @@ impl JobStore {
             ));
         }
         self.durable_transaction(|inner| {
-            self.load_history_for_compaction(inner)?;
+            self.load_full_history(inner)?;
             let ids = terminal_controller_job_ids_in(inner, job_type, version)?;
             let mut expected = expected_ids.to_vec();
             expected.sort_unstable();
@@ -713,6 +713,23 @@ impl JobStore {
             }
             Ok(())
         })
+    }
+
+    /// An exact operator prune checks its expected set against every terminal
+    /// row, so it reads the whole history.
+    fn load_full_history(&self, inner: &mut JobStoreInner) -> Result<()> {
+        if let Some(persistence) = &self.persistence {
+            let connection_guard = persistence.connection()?;
+            if let Some(connection) = connection_guard.as_ref() {
+                let (durable, baseline) =
+                    sql_store::load_sql_store_for_prune(connection, &persistence.path)?;
+                for stored in durable.jobs {
+                    inner.jobs.entry(stored.job.id).or_insert(stored);
+                }
+                persistence.record_synced_state(baseline);
+            }
+        }
+        Ok(())
     }
 
     /// Load only the terminal rows a retention pass can change: non-workflow

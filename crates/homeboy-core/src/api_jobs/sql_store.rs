@@ -165,6 +165,13 @@ pub(super) fn load_sql_store(
     load_sql_store_view(connection, path, true)
 }
 
+pub(super) fn load_sql_store_for_prune(
+    connection: &Connection,
+    path: &Path,
+) -> Result<(DurableJobStore, SqlSyncState)> {
+    load_sql_store_view(connection, path, false)
+}
+
 /// One terminal row as a retention pass sees it, read without parsing the
 /// job body in Rust.
 pub(super) struct TerminalHistoryRow {
