@@ -308,7 +308,8 @@ pub(super) fn compact_control_plane_status(value: Value) -> Value {
         "waiting_for": value.get("waiting_for"),
         "lab_admission_wait": bounded_control_plane_value(value.get("lab_admission_wait").unwrap_or(&Value::Null)),
         "runner_ownership_diagnostic": bounded_control_plane_value(value.get("runner_ownership_diagnostic").unwrap_or(&Value::Null)),
-        "next_action": { "command": next_action },
+        "next_action": { "command": next_action, "description": value.pointer("/next_action/description") },
+        "failure": value.get("failure"),
         "action_eligibility": {
             "actions": selected_action,
             "available_action_count": available

@@ -50,6 +50,7 @@ mod lab_admission;
 pub use lab_admission::{execution_step_wait, queued_admission, QueuedAdmission};
 mod execution;
 mod execution_step;
+mod gate_failure;
 /// Read-only process-tree activity sampling for a running Cook.
 ///
 /// Lived in `homeboy-core` as a top-level module even though `cook_activity`
@@ -60,6 +61,7 @@ pub mod process_activity;
 mod promotion_service;
 mod reconcile;
 mod status_support;
+pub use gate_failure::{gate_failure_next_action, gate_failure_projection};
 /// Shared daemon lifecycle for newly submitted orchestration work.
 mod work_job;
 

@@ -151,13 +151,21 @@ pub(in crate::commands::agent_task) fn diagnose(args: DiagnoseArgs) -> CmdResult
     }
     let retry = retry_replay_action(&record);
     let lab_snapshot_failure = lab_snapshot_recovery_projection(&record, &retry);
-    let next_commands = diagnose_next_commands(
-        &record,
-        retry.action.as_ref(),
-        retry.continuation.as_ref(),
-        current_lifecycle_diagnostic.is_some(),
-        queued_runner_ownership.is_some(),
-    );
+    let gate_failure = agent_task_service_direct::recorded_promotion_report(&record.metadata)
+        .ok()
+        .flatten()
+        .and_then(|report| agent_task_service_direct::gate_failure_projection(&report));
+    let next_commands = if gate_failure.is_some() {
+        Vec::new() // The shared classification table below owns gate actions.
+    } else {
+        diagnose_next_commands(
+            &record,
+            retry.action.as_ref(),
+            retry.continuation.as_ref(),
+            current_lifecycle_diagnostic.is_some(),
+            queued_runner_ownership.is_some(),
+        )
+    };
     let next_commands = if let Some(skew) = build_skew.as_ref() {
         provenance_build_skew_next_commands(&record, skew)
     } else if lab_staging_root_cause(&record).is_some() {
@@ -171,6 +179,7 @@ pub(in crate::commands::agent_task) fn diagnose(args: DiagnoseArgs) -> CmdResult
 
     let mut value = json!({
         "schema": "homeboy/agent-task-diagnose/v1",
+        "failure": null,
         "run_id": record.run_id.clone(),
         "state": state,
         "record_state": record_state,
@@ -191,9 +200,6 @@ pub(in crate::commands::agent_task) fn diagnose(args: DiagnoseArgs) -> CmdResult
         "lab_snapshot_failure": lab_snapshot_failure,
         "next_commands": next_commands,
     });
-    if let Some(output) = gate_failure_output(&record) {
-        value["gate_failure_output"] = Value::String(output);
-    }
     if let Ok(Some(promotion)) =
         agent_task_service_direct::recorded_promotion_report(&record.metadata)
     {
@@ -228,15 +234,22 @@ pub(in crate::commands::agent_task) fn diagnose(args: DiagnoseArgs) -> CmdResult
             ),
         );
     }
-    // Cook recovery owns the next-step decision, including its durable
-    // no-progress marker. Diagnostic classifications must not override it.
-    let recovery_plan = agent_task_service::load_recipe_for_attempt(run_id)
-        .ok()
-        .flatten()
-        .and_then(|_| agent_task_service_direct::plan_cook_recovery(run_id).ok());
+    // Gate classifications own their recovery guidance. Other diagnoses use
+    // the Cook recovery planner, including its durable no-progress marker.
+    let recovery_plan = gate_failure
+        .is_none()
+        .then(|| {
+            agent_task_service::load_recipe_for_attempt(run_id)
+                .ok()
+                .flatten()
+                .and_then(|_| agent_task_service_direct::plan_cook_recovery(run_id).ok())
+        })
+        .flatten();
     let recovery_prefix =
         agent_task_service_direct::cook_recovery_command_prefix_for_record(&record);
-    if let Some(plan) = recovery_plan {
+    if gate_failure.is_some() {
+        project_gate_failure(&mut value, gate_failure, run_id);
+    } else if let Some(plan) = recovery_plan {
         let action = cook_diagnose_next_action(&plan.step, &recovery_prefix, &plan.cook_id);
         value["next_commands"] = json!([action.command]);
         value["recovery_step"] = json!(plan.step);
@@ -282,6 +295,47 @@ pub(in crate::commands::agent_task) fn diagnose(args: DiagnoseArgs) -> CmdResult
     Ok((value, 0))
 }
 
+/// Status and diagnose use the same retained-report projection and action table.
+pub(super) fn attach_gate_failure(value: &mut Value, record: &AgentTaskRunRecord) {
+    let failure = agent_task_service_direct::recorded_promotion_report(&record.metadata)
+        .ok()
+        .flatten()
+        .and_then(|report| agent_task_service_direct::gate_failure_projection(&report));
+    project_gate_failure(value, failure, &record.run_id);
+}
+
+pub(super) fn project_gate_failure(value: &mut Value, failure: Option<Value>, run: &str) {
+    value["failure"] = failure.clone().unwrap_or(Value::Null);
+    let Some(failure) = failure else { return };
+    let (command, description) = agent_task_service_direct::gate_failure_next_action(
+        failure["reason"].as_str().unwrap_or("gate_failed"),
+        &quote_arg(run),
+    );
+    let action = CommandNextAction::new(description.clone(), command.clone());
+    value["next_action"] = json!({"command": command, "description": description});
+    if value["blocker"].is_object() {
+        value["blocker"]["reason"] = json!(command);
+    }
+    value["next_commands"] = json!([command]);
+    value["next_action_basis"] = json!(DIAGNOSE_ACTION_BASIS_DIAGNOSIS);
+    attach_actionable_metadata(
+        value,
+        CommandActionableMetadata {
+            next_actions: vec![action],
+            ..Default::default()
+        },
+    );
+    if value.get("summary").is_some() {
+        value["summary"] = json!(format!(
+            "gate {}: {} (exit {}); artifact: {}",
+            failure["gate"].as_str().unwrap_or("unknown"),
+            failure["termination"].as_str().unwrap_or("unavailable"),
+            failure["exit_code"],
+            failure["artifact"].as_str().unwrap_or("unavailable")
+        ));
+    }
+}
+
 /// Diagnose's Cook next action is exactly the shared recovery renderer's.
 pub(super) fn cook_diagnose_next_action(
     step: &CookRecoveryStep,
@@ -294,17 +348,6 @@ pub(super) fn cook_diagnose_next_action(
         return action.with_kind(CommandNextActionKind::Show);
     }
     action
-}
-
-/// The bounded output excerpt of the failed deterministic gate that blocked
-/// this Cook's delivery (#16218): gate, command, exit code, cwd and the
-/// relevant output lines, redacted. `None` when no gate failure is recorded.
-pub(super) fn gate_failure_output(record: &AgentTaskRunRecord) -> Option<String> {
-    CookDelivery::from_run_metadata(&record.metadata)?
-        .blocker?
-        .output
-        .filter(|output| !output.trim().is_empty())
-        .map(|output| homeboy::core::redaction::redact_string(&output))
 }
 
 /// These fields are deliberately separate from secondary compact tables. They
