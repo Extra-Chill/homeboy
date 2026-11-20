@@ -1360,6 +1360,7 @@ pub(super) fn run_cook_spine(
                                 if tick.stop_now {
                                     let outcome = match homeboy_core::process::terminate_process_tree(
                                         heartbeat_owner_pid,
+                                        homeboy_core::process::PROCESS_TREE_SIGTERM_GRACE,
                                     ) {
                                         Ok(termination) => serde_json::json!({
                                             "status": "terminated",
@@ -1410,6 +1411,7 @@ pub(super) fn run_cook_spine(
                                     deadline_stop_issued = true;
                                     let outcome = match homeboy_core::process::terminate_process_tree(
                                         heartbeat_owner_pid,
+                                        homeboy_core::process::PROCESS_TREE_SIGTERM_GRACE,
                                     ) {
                                         Ok(termination) => serde_json::json!({
                                             "status": "terminated",

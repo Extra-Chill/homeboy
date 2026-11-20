@@ -830,7 +830,10 @@ fn cancel_resolved_run_in_store(
             Some(&start_identity),
         ) {
             homeboy_core::process::ProcessIdentityState::Live => {
-                let termination = homeboy_core::process::terminate_process_tree(pid)?;
+                let termination = homeboy_core::process::terminate_process_tree(
+                    pid,
+                    homeboy_core::process::PROCESS_TREE_SIGTERM_GRACE,
+                )?;
                 let evidence = json!({
                     "child_pid": pid,
                     "signal": termination.signal,
@@ -905,27 +908,23 @@ fn cancel_resolved_run_in_store(
         })?;
 
         if let Some(process_group) = process_group {
-            if homeboy_core::process::isolated_process_group_is_running(process_group).map_err(
+            if homeboy_engine_primitives::command::process_group_is_running(process_group).map_err(
                 |error| {
                     Error::internal_unexpected(format!(
                         "inspect adoption gate process group: {error}"
                     ))
                 },
             )? {
-                homeboy_core::process::terminate_isolated_process_group(process_group)?;
-                if !homeboy_core::process::wait_for_isolated_process_group_exit(
+                homeboy_core::process::terminate_isolated_process_group(
                     process_group,
-                    std::time::Duration::from_secs(2),
+                    homeboy_core::process::PROCESS_TREE_SIGTERM_GRACE,
                 )
                 .map_err(|error| {
                     Error::internal_unexpected(format!(
-                        "verify adoption gate process group termination: {error}"
+                        "terminate adoption gate process group {process_group}: {}",
+                        error.message
                     ))
-                })? {
-                    return Err(Error::internal_unexpected(format!(
-                        "adoption gate process group {process_group} remains alive after cancellation"
-                    )));
-                }
+                })?;
             }
         }
         let now = now_timestamp();
@@ -1544,7 +1543,10 @@ fn classify_live_cancellation(record: &AgentTaskRunRecord) -> Result<LiveCancell
     // SIGKILL escalation handled inside terminate_process_tree).
     if let Some(pid) = owner_pid {
         if record.owner_process_is_running() {
-            let termination = homeboy_core::process::terminate_process_tree(pid)?;
+            let termination = homeboy_core::process::terminate_process_tree(
+                pid,
+                homeboy_core::process::PROCESS_TREE_SIGTERM_GRACE,
+            )?;
             return Ok(LiveCancellationOutcome::Terminated(termination));
         }
     }
@@ -2094,7 +2096,10 @@ mod tests {
                 homeboy_core::process::ProcessIdentityState::Live,
                 "a mismatched persisted identity must not signal the live PID"
             );
-            let _ = homeboy_core::process::terminate_process_tree(child.id());
+            let _ = homeboy_core::process::terminate_process_tree(
+                child.id(),
+                homeboy_core::process::PROCESS_TREE_SIGTERM_GRACE,
+            );
             let _ = child.wait();
         });
     }

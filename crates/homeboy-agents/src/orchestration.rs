@@ -4301,7 +4301,7 @@ fn project_dead_candidate_adoption(record: &AgentTaskRunRecord) -> AgentTaskRunR
     }
     adoption.state = "interrupted".to_string();
     adoption.phase = if adoption.gate_process_group.is_some_and(|pgid| {
-        homeboy_core::process::isolated_process_group_is_running(pgid).unwrap_or(false)
+        homeboy_engine_primitives::command::process_group_is_running(pgid).unwrap_or(false)
     }) {
         "gate_orphaned"
     } else {

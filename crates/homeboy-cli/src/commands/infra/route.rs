@@ -2224,7 +2224,10 @@ fn spawn_terminal_cook_worker(
     let start_identity = match homeboy::core::process::process_start_identity(pid) {
         Ok(Some(identity)) => identity,
         other => {
-            let _ = homeboy::core::process::terminate_process_tree(pid);
+            let _ = homeboy::core::process::terminate_process_tree(
+                pid,
+                homeboy::core::process::PROCESS_TREE_SIGTERM_GRACE,
+            );
             let _ = process.wait();
             return Err(Error::internal_unexpected(format!(
                 "terminal Cook continuation worker start identity is unavailable: {other:?}"

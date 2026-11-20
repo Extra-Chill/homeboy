@@ -2038,7 +2038,10 @@ fn recovered_terminal_work_waits_for_an_existing_claim_instead_of_reporting_comp
         };
         let worker = parse_terminal_cook_job(&spawned).unwrap().worker.unwrap();
         // The test executable is not the CLI; only admission/spawning is under test.
-        let _ = homeboy::core::process::terminate_process_tree(worker.pid);
+        let _ = homeboy::core::process::terminate_process_tree(
+            worker.pid,
+            homeboy::core::process::PROCESS_TREE_SIGTERM_GRACE,
+        );
         let _ = fs::remove_dir_all(worker.outcome_path.parent().unwrap());
         let claim = store
             .claim_continuation_for(cook_id, run_id)

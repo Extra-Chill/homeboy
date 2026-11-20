@@ -235,10 +235,12 @@ fn cleanup_process_group_fallback_within(pgid: libc::pid_t, grace: Duration) {
     // Give the group up to the grace period to exit, but return as soon as it
     // has: a command that already finished must not pay the whole grace.
     let deadline = std::time::Instant::now() + grace;
-    while crate::process::process_group_is_running(pgid) && std::time::Instant::now() < deadline {
+    while homeboy_engine_primitives::command::process_group_is_running(pgid as u32).unwrap_or(false)
+        && std::time::Instant::now() < deadline
+    {
         std::thread::sleep(Duration::from_millis(5));
     }
-    if crate::process::process_group_is_running(pgid) {
+    if homeboy_engine_primitives::command::process_group_is_running(pgid as u32).unwrap_or(false) {
         unsafe {
             libc::kill(-pgid, libc::SIGKILL);
         }

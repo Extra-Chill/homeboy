@@ -481,9 +481,7 @@ mod platform {
     }
 
     fn process_group_alive(pgid: u32) -> bool {
-        i32::try_from(pgid)
-            .map(homeboy_core::process::process_group_is_running)
-            .unwrap_or(false)
+        homeboy_engine_primitives::command::process_group_is_running(pgid).unwrap_or(false)
     }
 
     fn target_alive(pid: u32, process_group: bool) -> bool {
