@@ -9537,7 +9537,7 @@ fn classify_absolute_host_path(
 ) -> Option<&'static str> {
     let trimmed = path.trim_start_matches('/');
     let root = trimmed.split('/').next()?;
-    if trimmed.is_empty() || path.contains('#') {
+    if trimmed.is_empty() || path.contains('#') || is_device_pseudo_file(trimmed) {
         return None;
     }
     if file_url {
@@ -9575,6 +9575,23 @@ fn classify_absolute_host_path(
         return Some("unix-host-root");
     }
     None
+}
+
+/// Device pseudo-files such as `/dev/null` appear in diff headers and shell
+/// redirections; they are never projectable host evidence.
+fn is_device_pseudo_file(trimmed: &str) -> bool {
+    matches!(
+        trimmed,
+        "dev/null"
+            | "dev/stdin"
+            | "dev/stdout"
+            | "dev/stderr"
+            | "dev/zero"
+            | "dev/random"
+            | "dev/urandom"
+            | "dev/tty"
+            | "dev/fd"
+    ) || trimmed.starts_with("dev/fd/")
 }
 
 fn bounded_prompt_path_token(token: &str) -> String {
@@ -10622,6 +10639,32 @@ mod provider_evidence_tests {
 
         validate_provider_evidence_inputs(&[], Some("Read https://example.test/evidence.json"))
             .expect("HTTPS URLs are not host evidence");
+    }
+
+    #[test]
+    fn prompt_path_classifier_admits_device_pseudo_files_but_flags_real_devices() {
+        for (prompt, flagged) in [
+            (
+                "--- /dev/null\n+++ b/new.txt\n@@ -0,0 +1 @@\n+hello\n",
+                false,
+            ),
+            ("Run `cmd 2>/dev/null` quietly.", false),
+            (
+                "Pipe from /dev/stdin to /dev/stdout; read /dev/fd/3.",
+                false,
+            ),
+            ("Inspect /dev/sda1 for evidence.", true),
+        ] {
+            let result = validate_provider_evidence_inputs(&[], Some(prompt));
+            assert_eq!(result.is_err(), flagged, "{prompt}");
+            if let Err(error) = result {
+                assert!(
+                    error.message.contains("undeclared absolute evidence path"),
+                    "{prompt}: {}",
+                    error.message
+                );
+            }
+        }
     }
 
     #[test]
