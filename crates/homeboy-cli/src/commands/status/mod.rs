@@ -528,7 +528,37 @@ const GLOBAL_ACTIVITY_LIMIT: i64 = 100;
 /// configured this returns immediately (`state: "absent"`, no probes) —
 /// dispatch readiness is unconditionally reported, not conditionally cheap.
 fn compact_dispatch_readiness() -> DispatchReadinessStatus {
-    dispatch_readiness_from_refresh(runner::refresh_lab_runner_readiness_for_admission())
+    let mut readiness =
+        dispatch_readiness_from_refresh(runner::refresh_lab_runner_readiness_for_admission());
+    // The daemon's last unit observation (#18538), read from its record: an
+    // open incident says why a runner is down without probing it again.
+    for registered in runner::list().unwrap_or_default() {
+        let Some(health) = homeboy::runner::runner_unit_health(&registered.id) else {
+            continue;
+        };
+        let Some(incident) = &health.incident else {
+            continue;
+        };
+        let start_error = health
+            .unit
+            .as_ref()
+            .and_then(|unit| unit.last_error.as_deref())
+            .map(|error| format!("; start error: {error}"))
+            .unwrap_or_default();
+        readiness.runner.blockers.push(format!(
+            "runner {} unit incident since {}: {}{start_error}",
+            registered.id,
+            chrono::DateTime::from_timestamp_millis(incident.since_ms as i64)
+                .map(|at| at.to_rfc3339_opts(chrono::SecondsFormat::Secs, true))
+                .unwrap_or_default(),
+            incident.reason
+        ));
+        readiness
+            .runner
+            .remediation_commands
+            .push(format!("homeboy runner doctor {}", registered.id));
+    }
+    readiness
 }
 
 /// Pure mapping from a readiness refresh outcome to the compact dispatch

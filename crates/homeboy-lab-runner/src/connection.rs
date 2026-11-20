@@ -2858,6 +2858,13 @@ pub(crate) fn await_daemon_restart(runner_id: &str) -> Result<()> {
     restart_recovery::with_restart_recovery_lock(runner_id, || Ok(()))
 }
 mod service;
+mod unit_health;
+pub use unit_health::probe_unit_state;
+pub use unit_health::{
+    observe_service_runner_health, observe_unit_health, register_runner_health_provider,
+    runner_unit_health, RunnerUnitHealth, RunnerUnitIncident, RunnerUnitState,
+    RunnerUnitTransition,
+};
 mod session_store;
 mod transport;
 pub(crate) use transport::no_current_daemon_session_error;

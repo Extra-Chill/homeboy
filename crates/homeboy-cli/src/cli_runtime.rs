@@ -1026,6 +1026,9 @@ fn register_startup_providers_after_reconcile(
     // Register per-attempt storage reclamation so the daemon's maintenance
     // pass runs the cleanup planner without core depending on the command.
     crate::commands::cleanup::register_storage_maintenance();
+    // Register runner unit health so the daemon's tick announces a failed or
+    // restart-looping runner without core depending on the runner layer.
+    crate::runner::register_runner_health_provider();
     // Register the agent-task secret provider so core's trace secret
     // resolution can consult the agent-task secret store.
     crate::agents::agent_task_secrets::register();

@@ -56,6 +56,7 @@ use controller_supervisor::dispatch_claimed_controller_job;
 pub mod runner_exec_driver;
 pub mod runner_exec_job;
 mod runner_exec_worker;
+pub mod runner_health;
 pub mod runner_staging;
 pub(crate) mod runner_watch;
 mod serve;
@@ -2127,6 +2128,12 @@ fn orchestration_tick_loop(
         isolated_tick(|| {
             observed_daemon_pass("controllers", || {
                 job_store.reconcile_controller_completions().map(|_| ())
+            });
+        });
+        // A failed or restart-looping runner unit announces itself (#18538).
+        isolated_tick(|| {
+            observed_daemon_pass("runner_health", || {
+                runner_health::with_provider(|provider| provider.observe())
             });
         });
         // Finished attempts leave per-attempt paths behind; reclaiming them is
