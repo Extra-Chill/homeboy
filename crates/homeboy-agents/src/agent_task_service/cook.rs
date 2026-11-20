@@ -8070,8 +8070,6 @@ mod publication_title_tests {
     }
 }
 
-/// A deferred gate never executed, so the stop reason names each typed cause
-/// and the concrete next step instead of a candidate verdict (#16932).
 /// Stop reason for a Cook whose gate supervision stopped a gate at its
 /// wall-clock or no-progress limit, even after the automatic re-gate. Names the
 /// gate and the limit (never a private command) and the re-gate step.
@@ -8105,6 +8103,8 @@ pub(super) fn gate_budget_exceeded_stop_reason(
     )
 }
 
+/// A deferred gate never executed, so the stop reason names each typed cause
+/// and the concrete next step instead of a candidate verdict (#16932).
 pub(super) fn gates_deferred_stop_reason(
     promotion: &AgentTaskPromotionReport,
     cook_id: &str,

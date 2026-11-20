@@ -10092,7 +10092,14 @@ fn supervision_stopped_gate_is_regated_once_and_ends_as_unavailable_verification
         persist_deferred_fixture(&run_id);
         let runs = tempfile::tempdir().unwrap();
         let ledger = runs.path().join("runs");
-        options.gates.verify = vec![format!("echo run >> '{}'; exec sleep 30", ledger.display())];
+        // The machine-local ledger path travels as gate env so the visible
+        // gate stays reviewer-safe.
+        options
+            .gates
+            .gate_environment
+            .variables
+            .insert("GATE_RUN_LEDGER".to_string(), ledger.display().to_string());
+        options.gates.verify = vec!["echo run >> \"$GATE_RUN_LEDGER\"; exec sleep 30".to_string()];
         options.gates.gate_timeout_seconds = 30;
         options.gates.gate_no_progress_timeout_seconds = 1;
         let recipes = CookRecipeStore::from_current_data_root().unwrap();
