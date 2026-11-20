@@ -210,17 +210,14 @@ fn inspect_summary(
     parts.join(" | ")
 }
 
-fn is_local_only_url(value: &str) -> bool {
+pub(crate) fn is_local_only_url(value: &str) -> bool {
     let Ok(url) = reqwest::Url::parse(value) else {
         return false;
     };
     if url.scheme() == "file" {
         return true;
     }
-    let Some(host) = url.host_str().map(|host| host.to_ascii_lowercase()) else {
-        return false;
-    };
-    host == "localhost" || host.ends_with(".localhost") || host == "127.0.0.1" || host == "::1"
+    crate::artifact_links::classify_url_host(&url) != crate::artifact_links::UrlHostClass::Public
 }
 
 pub(crate) fn handle_stream(mut stream: TcpStream, root: &Path) -> Result<()> {
