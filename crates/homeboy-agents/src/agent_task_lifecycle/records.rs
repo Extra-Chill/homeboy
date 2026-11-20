@@ -437,7 +437,7 @@ impl AgentTaskCandidateAdoptionAttempt {
 /// controller record because it remains authoritative across transport loss.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct AgentTaskLabHandoff {
-    pub state: AgentTaskLabHandoffState,
+    pub(crate) state: AgentTaskLabHandoffState,
     pub authority: AgentTaskLabHandoffAuthority,
     pub runner_id: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -509,7 +509,7 @@ impl AgentTaskLabRuntimeRecovery {
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
-pub enum AgentTaskLabHandoffState {
+pub(crate) enum AgentTaskLabHandoffState {
     Pending,
     Accepted,
     Expired,
@@ -674,7 +674,7 @@ impl AgentTaskRunRecord {
     /// Refresh the durable summary from the same facts status already exposes.
     /// Also used when decoding older records that predate this summary.
     pub(crate) fn refresh_terminal_outcome(&mut self) {
-        use crate::agent_task_service::{CookDelivery, CookDeliveryBlockerCode, CookDeliveryState};
+        use crate::agent_task_service::{CookDelivery, CookDeliveryBlockerCode};
         self.recoverable =
             self.lifecycle.execution.state == RunExecutionState::CandidateRecoverable;
         self.terminal_outcome = None;
@@ -728,7 +728,7 @@ impl AgentTaskRunRecord {
                 CookTerminalOutcome::AgentDeclined
             } else if delivery
                 .as_ref()
-                .is_some_and(|delivery| delivery.state == CookDeliveryState::NoChange)
+                .is_some_and(|delivery| delivery.is_no_change())
             {
                 CookTerminalOutcome::NoChange
             } else {
@@ -796,29 +796,16 @@ impl AgentTaskRunRecord {
         self
     }
 
-    pub(crate) fn has_accepted_lab_handoff(&self) -> bool {
-        self.lab_handoff.as_ref().is_some_and(|handoff| {
-            handoff.is_valid() && handoff.state == AgentTaskLabHandoffState::Accepted
-        })
-    }
-
-    /// Whether this run already carries durable evidence of a *completed*
-    /// provider attempt whose candidate must survive a later transport/handoff
-    /// error. When true, recording a pre-execution failure would overwrite a
-    /// succeeded candidate with a `Failed`, zero-artifact,
-    /// `provider_executions_consumed: 0` terminal record and strand the work
-    /// (#9377).
-    ///
-    /// This deliberately requires *completed-work* evidence, not merely an
-    /// accepted handoff or a claimed runner job id: an accepted job can later be
-    /// confirmed absent/lost with no candidate, and that genuinely-lost case
-    /// must still terminalize (see `terminalize_lost_accepted_runner_job`, which
-    /// only fires when `provider_handles` is empty). The completed-work signals:
-    /// - one or more provider handles (a provider run id was returned), or
-    /// - a successful / recoverable-candidate terminal state (the run produced a
-    ///   candidate), i.e. a terminal state other than a bare `Failed`/`Cancelled`.
+    /// Preserve completed provider work across transport failure (#9377).
+    /// Acceptance alone is not completed-work evidence.
     pub(crate) fn has_recorded_provider_progress(&self) -> bool {
-        !self.provider_handles.is_empty() || self.has_candidate_terminal_state()
+        !self.provider_handles.is_empty()
+            || matches!(
+                self.state(),
+                RunExecutionState::Succeeded
+                    | RunExecutionState::CandidateRecoverable
+                    | RunExecutionState::PartialFailure
+            )
     }
 
     /// Whether runner placement was recorded without any execution ever taking
@@ -863,18 +850,6 @@ impl AgentTaskRunRecord {
             })
     }
 
-    /// A terminal state that carries a produced candidate (success or a
-    /// recoverable/partial candidate), as opposed to a bare failure/cancellation
-    /// that produced nothing to preserve.
-    fn has_candidate_terminal_state(&self) -> bool {
-        matches!(
-            self.lifecycle.execution.state,
-            RunExecutionState::Succeeded
-                | RunExecutionState::CandidateRecoverable
-                | RunExecutionState::PartialFailure
-        )
-    }
-
     pub(crate) fn lab_handoff_validation_error(&self) -> Option<&'static str> {
         if self.lab_handoff.is_none()
             && self
@@ -887,24 +862,6 @@ impl AgentTaskRunRecord {
         self.lab_handoff
             .as_ref()
             .and_then(AgentTaskLabHandoff::validation_error)
-    }
-
-    pub(crate) fn has_expired_pending_lab_handoff(
-        &self,
-        now: chrono::DateTime<chrono::Utc>,
-    ) -> bool {
-        matches!(
-            self.lifecycle.execution.state,
-            RunExecutionState::Queued | RunExecutionState::Running
-        ) && self.lab_handoff.as_ref().is_some_and(|handoff| {
-            handoff.is_valid()
-                && handoff.state == AgentTaskLabHandoffState::Pending
-                && handoff
-                    .acceptance_deadline_at
-                    .as_deref()
-                    .and_then(parse_rfc3339)
-                    .is_some_and(|deadline| deadline <= now)
-        })
     }
 
     pub(crate) fn record_runner_metadata(&mut self, reclaimed_stale: bool) {
@@ -1014,11 +971,10 @@ impl AgentTaskRunRecord {
     }
 
     pub fn runner_job_id(&self) -> Option<&str> {
-        if let Some(handoff) = self.lab_handoff.as_ref() {
-            if let Some(job_id) = handoff
-                .is_valid()
-                .then_some(handoff)
-                .filter(|handoff| handoff.state == AgentTaskLabHandoffState::Accepted)
+        if CookRunState::accepted_lab_handoff(self) {
+            if let Some(job_id) = self
+                .lab_handoff
+                .as_ref()
                 .and_then(|handoff| handoff.runner_job_id.as_deref())
             {
                 return Some(job_id);
@@ -1275,7 +1231,7 @@ impl AgentTaskLabHandoff {
         }
     }
 
-    fn is_valid(&self) -> bool {
+    pub(crate) fn is_valid(&self) -> bool {
         self.validation_error().is_none()
     }
 
@@ -1635,7 +1591,8 @@ mod tests {
         }));
         assert!(record.lab_handoff.is_none());
         assert!(record.lab_handoff_validation_error().is_some());
-        assert!(!record.has_expired_pending_lab_handoff(
+        assert!(!super::has_expired_pending_runner_submission_intent(
+            &record,
             chrono::DateTime::parse_from_rfc3339("2026-01-01T00:02:00+00:00")
                 .expect("timestamp")
                 .with_timezone(&chrono::Utc)
@@ -1684,13 +1641,13 @@ mod tests {
             }
         });
         let accepted = legacy_record(metadata.clone());
-        assert!(!accepted.has_accepted_lab_handoff());
+        assert!(!CookRunState::accepted_lab_handoff(&accepted));
         assert!(accepted.lab_handoff_validation_error().is_some());
 
         let mut inconsistent = legacy_record(metadata);
         inconsistent.metadata["runner_handoff"]["identity"]["runner_job_id"] = json!("other-job");
         assert!(inconsistent.lab_handoff.is_none());
-        assert!(!inconsistent.has_accepted_lab_handoff());
+        assert!(!CookRunState::accepted_lab_handoff(&inconsistent));
     }
 
     #[test]
@@ -1733,7 +1690,7 @@ mod tests {
             let mut record = legacy_record(Value::Null);
             record.lab_handoff = Some(handoff);
             assert!(record.lab_handoff_validation_error().is_some());
-            assert!(!record.has_accepted_lab_handoff());
+            assert!(!CookRunState::accepted_lab_handoff(&record));
         }
     }
 

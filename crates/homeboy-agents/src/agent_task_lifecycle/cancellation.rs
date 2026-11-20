@@ -1506,7 +1506,7 @@ fn classify_live_cancellation(record: &AgentTaskRunRecord) -> Result<LiveCancell
                 // An accepted Lab handoff has an authoritative remote owner.
                 // Leaving it active while only cancelling this projection loses
                 // the result, so propagate the failure before mutating the run.
-                Err(error) if record.has_accepted_lab_handoff() => return Err(error),
+                Err(error) if CookRunState::accepted_lab_handoff(&record) => return Err(error),
                 Err(_) => {}
             }
         }

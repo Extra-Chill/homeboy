@@ -783,11 +783,7 @@ fn accepted_runner_handoff_can_materialize(record: &AgentTaskRunRecord) -> bool 
         return false;
     };
     record.runner_id() == Some(runner_id.as_str())
-        && record.lab_handoff.as_ref().is_some_and(|handoff| {
-            handoff.state == agent_task_lifecycle::AgentTaskLabHandoffState::Accepted
-                && handoff.authority
-                    == agent_task_lifecycle::AgentTaskLabHandoffAuthority::RunnerDaemon
-        })
+        && agent_task_lifecycle::CookRunState::accepted_lab_handoff(record)
 }
 
 fn with_submission_lock<T>(

@@ -2710,10 +2710,7 @@ where
                 .metadata
                 .get(homeboy_core::controller_runtime::CONTROLLER_RUNTIME_METADATA_KEY)
                 .cloned();
-            if existing.lab_handoff.as_ref().is_some_and(|handoff| {
-                handoff.state == AgentTaskLabHandoffState::Accepted
-                    && handoff.authority == AgentTaskLabHandoffAuthority::RunnerDaemon
-            }) {
+            if CookRunState::accepted_lab_handoff(&existing) {
                 record.lab_handoff = existing.lab_handoff;
             }
         }
@@ -4782,7 +4779,7 @@ fn candidate_adoption_terminal_state_is_known(
     lifecycle_store: &AgentTaskLifecycleStore,
     record: &AgentTaskRunRecord,
 ) -> bool {
-    if record.state() != RunExecutionState::CandidateRecoverable
+    if !CookRunState::of(record).recoverable
         || record.metadata.get("pre_execution_failure").is_none()
     {
         return false;
@@ -5120,10 +5117,8 @@ fn converge_resolved_run_in_store(
     }
     // Convergence only writes the durable continuation signal. The separate
     // consumer owns execution and cannot inherit a local closure.
-    if matches!(
-        record.state(),
-        RunExecutionState::Succeeded | RunExecutionState::CandidateRecoverable
-    ) {
+    let state = CookRunState::of(&record);
+    if state.recoverable || state.phase == CookRunPhase::Succeeded {
         let recipe_by_cook_id = record
             .metadata
             .get("cook_id")
