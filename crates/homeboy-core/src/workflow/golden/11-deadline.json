@@ -123,9 +123,10 @@
         "steps": {
           "a": {
             "attempt": 1,
+            "error": "cancelled: the workflow deadline passed",
             "key": "wf-golden/a/1/1",
-            "outcome": null,
-            "phase": "running"
+            "outcome": "cancelled",
+            "phase": "done"
           }
         }
       }
