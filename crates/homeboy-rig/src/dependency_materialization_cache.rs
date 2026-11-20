@@ -10,6 +10,7 @@ use std::time::{Duration, Instant};
 
 use fs4::fs_std::FileExt;
 use homeboy_engine_primitives::content_hash;
+use homeboy_engine_primitives::local_files::write_json_file as write_json;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
@@ -667,18 +668,6 @@ fn read_json<T: for<'a> Deserialize<'a>>(path: &Path) -> Result<T> {
             None,
         )
     })
-}
-fn write_json(path: &Path, value: &impl Serialize) -> Result<()> {
-    fs::write(
-        path,
-        serde_json::to_vec_pretty(value).map_err(|error| {
-            Error::internal_json(
-                error.to_string(),
-                Some("serialize dependency cache manifest".to_string()),
-            )
-        })?,
-    )
-    .map_err(|error| io_error("write dependency cache manifest", error))
 }
 fn hash_bytes(bytes: &[u8]) -> String {
     content_hash::sha256_hex(bytes)

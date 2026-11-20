@@ -148,15 +148,7 @@ pub(crate) fn write_json_artifact<T: Serialize>(
     path: &Path,
     value: &T,
 ) -> homeboy::core::Result<()> {
-    let content = serde_json::to_string_pretty(value).map_err(|err| {
-        homeboy::core::Error::internal_json(err.to_string(), Some("trace.compare.json".to_string()))
-    })?;
-    std::fs::write(path, content).map_err(|err| {
-        homeboy::core::Error::internal_io(
-            format!("Failed to write trace artifact {}: {}", path.display(), err),
-            Some("trace.compare.write".to_string()),
-        )
-    })
+    homeboy::core::engine::local_files::write_json_file(path, value)
 }
 
 /// Persist the full compare artifact set into `output_dir`, returning the

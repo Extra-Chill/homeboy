@@ -49,13 +49,7 @@ pub fn repoll_cook_ci(id: &str) -> Result<Option<Value>> {
 
 pub(crate) fn save(store: &CookRecipeStore, cook_id: &str, value: &Value) -> Result<()> {
     let path = store.ci_path(cook_id);
-    let temp = path.with_extension(format!("{}.tmp", uuid::Uuid::new_v4()));
-    std::fs::write(
-        &temp,
-        serde_json::to_vec_pretty(value).expect("JSON receipt"),
-    )
-    .and_then(|_| std::fs::rename(&temp, &path))
-    .map_err(|e| Error::internal_unexpected(e.to_string()))
+    homeboy_engine_primitives::local_files::write_json_file(&path, value)
 }
 
 #[cfg(test)]

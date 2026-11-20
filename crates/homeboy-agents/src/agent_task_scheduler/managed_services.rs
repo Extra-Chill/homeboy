@@ -506,7 +506,8 @@ impl ManagedServices {
             parent_ttl_ms: default_worker_ttl_ms(),
         };
         let request_path = service_worker_request_path(run_id)?;
-        write_json_atomically(&request_path, &request)?;
+        homeboy_engine_primitives::local_files::write_json_file(&request_path, &request)
+            .map_err(|error| error.to_string())?;
         let worker = std::env::var_os("HOMEBOY_SERVICE_SUPERVISOR_WORKER")
             .map(PathBuf::from)
             .unwrap_or_else(|| std::env::current_exe().expect("current Homeboy executable"));
@@ -561,7 +562,7 @@ impl ManagedServices {
                 if let Some(mut state) = initial_state.clone() {
                     state.state = "stop_requested".to_string();
                     state.heartbeat_unix_ms = now_unix_ms();
-                    let _ = write_json_atomically(
+                    let _ = homeboy_engine_primitives::local_files::write_json_file(
                         &service_worker_state_path(&run_id).unwrap_or_default(),
                         &state,
                     );
@@ -776,12 +777,8 @@ fn persist_record_at(
         .join(run_id)
         .join("services")
         .join(format!("{}.json", record.id));
-    let bytes = serde_json::to_vec_pretty(record).map_err(|error| error.to_string())?;
-    let temporary = path.with_extension("json.tmp");
-    std::fs::write(&temporary, bytes)
-        .map_err(|error| format!("persist managed service ownership: {error}"))?;
-    std::fs::rename(temporary, path)
-        .map_err(|error| format!("commit managed service ownership: {error}"))
+    homeboy_engine_primitives::local_files::write_json_file(&path, record)
+        .map_err(|error| format!("persist managed service ownership: {error}"))
 }
 
 pub(super) fn startup_failure_evidence(run_id: &str) -> (Vec<AgentTaskEvidenceRef>, Value) {
@@ -891,21 +888,6 @@ pub fn service_worker_state_path(run_id: &str) -> Result<PathBuf, String> {
     Ok(worker_root(run_id)?.join("state.json"))
 }
 
-fn write_json_atomically<T: serde::Serialize>(path: &Path, value: &T) -> Result<(), String> {
-    std::fs::create_dir_all(
-        path.parent()
-            .ok_or_else(|| "worker path has no parent".to_string())?,
-    )
-    .map_err(|error| error.to_string())?;
-    let temporary = path.with_extension(format!("{}.tmp", uuid::Uuid::new_v4()));
-    std::fs::write(
-        &temporary,
-        serde_json::to_vec_pretty(value).map_err(|error| error.to_string())?,
-    )
-    .map_err(|error| error.to_string())?;
-    std::fs::rename(temporary, path).map_err(|error| error.to_string())
-}
-
 fn now_unix_ms() -> u64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -954,11 +936,12 @@ pub fn run_service_worker(request_path: &Path) -> Result<(), String> {
                 .ok_or_else(|| "service worker state is absent".to_string())?;
             state.state = "stop_requested".to_string();
             state.heartbeat_unix_ms = now_unix_ms();
-            return write_json_atomically(&state_path, &state);
+            return homeboy_engine_primitives::local_files::write_json_file(&state_path, &state)
+                .map_err(|error| error.to_string());
         }
         "reconcile" => {
             let records = reconcile_run_services(&request.run_id, "worker_reconcile")?;
-            return write_json_atomically(
+            return homeboy_engine_primitives::local_files::write_json_file(
                 &state_path,
                 &AgentTaskServiceWorkerState {
                     schema: AgentTaskServiceWorkerState::SCHEMA.to_string(),
@@ -973,7 +956,8 @@ pub fn run_service_worker(request_path: &Path) -> Result<(), String> {
                     services: records,
                     detail: Some("reconciled".to_string()),
                 },
-            );
+            )
+            .map_err(|error| error.to_string());
         }
         "start" => {}
         _ => {
@@ -995,7 +979,8 @@ pub fn run_service_worker(request_path: &Path) -> Result<(), String> {
         services: Vec::new(),
         detail: None,
     };
-    write_json_atomically(&state_path, &state)?;
+    homeboy_engine_primitives::local_files::write_json_file(&state_path, &state)
+        .map_err(|error| error.to_string())?;
     let supervisor = match AgentTaskServiceSupervisor::start(&request.services, &request.run_id) {
         Ok(supervisor) => supervisor,
         Err(error) => {
@@ -1003,13 +988,15 @@ pub fn run_service_worker(request_path: &Path) -> Result<(), String> {
             state.detail = Some(error);
             state.services = read_service_records(&request.run_id);
             state.heartbeat_unix_ms = now_unix_ms();
-            return write_json_atomically(&state_path, &state);
+            return homeboy_engine_primitives::local_files::write_json_file(&state_path, &state)
+                .map_err(|error| error.to_string());
         }
     };
     state.state = "ready".to_string();
     state.services = supervisor.records();
     state.heartbeat_unix_ms = now_unix_ms();
-    write_json_atomically(&state_path, &state)?;
+    homeboy_engine_primitives::local_files::write_json_file(&state_path, &state)
+        .map_err(|error| error.to_string())?;
     let started_unix_ms = state.heartbeat_unix_ms;
     loop {
         thread::sleep(Duration::from_millis(50));
@@ -1045,10 +1032,12 @@ pub fn run_service_worker(request_path: &Path) -> Result<(), String> {
                 }
                 .to_string(),
             );
-            return write_json_atomically(&state_path, &state);
+            return homeboy_engine_primitives::local_files::write_json_file(&state_path, &state)
+                .map_err(|error| error.to_string());
         }
         state.heartbeat_unix_ms = now_unix_ms();
-        write_json_atomically(&state_path, &state)?;
+        homeboy_engine_primitives::local_files::write_json_file(&state_path, &state)
+            .map_err(|error| error.to_string())?;
     }
 }
 
@@ -1065,7 +1054,8 @@ pub fn run_service_worker_operation(run_id: &str, operation: &str) -> Result<(),
         parent_ttl_ms: default_worker_ttl_ms(),
     };
     let request_path = service_worker_request_path(run_id)?;
-    write_json_atomically(&request_path, &request)?;
+    homeboy_engine_primitives::local_files::write_json_file(&request_path, &request)
+        .map_err(|error| error.to_string())?;
     run_service_worker(&request_path)
 }
 
@@ -1697,7 +1687,8 @@ mod tests {
             parent_ttl_ms: 10,
         };
         let path = service_worker_request_path(run_id).expect("worker request path");
-        write_json_atomically(&path, &request).expect("write worker request");
+        homeboy_engine_primitives::local_files::write_json_file(&path, &request)
+            .expect("write worker request");
         path
     }
 
