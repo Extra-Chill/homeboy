@@ -829,7 +829,7 @@ fn recorded_transcripts_reach_workflow_hotspots_idempotently() {
         let report = &state.timing.completed;
         assert!(!report.spans.is_empty());
         for _ in 0..2 {
-            store.record_workflow_timing(&state).unwrap();
+            store.record_workflow_timing("fixture", &state).unwrap();
         }
         let run = store.get_run(&state.instance).unwrap().unwrap();
         assert_eq!(

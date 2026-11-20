@@ -259,8 +259,26 @@ pub fn run_completed_payload(run: &crate::observation::RunRecord) -> NotifyPaylo
     let mut subject =
         crate::notification_payload::NotifySubject::new(run.kind.clone(), run.id.clone());
     subject.component = run.component_id.clone();
+    // What stopped a workflow chain, recorded by the instance at its terminal.
+    let stop = run
+        .metadata_json
+        .get(crate::daemon::workflow_job::WORKFLOW_STOP_METADATA_KEY);
+    let stop_fact = |field: &str| {
+        stop.and_then(|stop| stop.get(field))
+            .filter(|value| !value.is_null())
+            .map(|value| {
+                value
+                    .as_str()
+                    .map_or_else(|| value.to_string(), str::to_string)
+            })
+    };
     NotifyPayload::new(kind, subject)
         .with_fact("Status", run.status.clone())
+        .with_optional_fact("Workflow", stop_fact("workflow"))
+        .with_optional_fact("Stopped as", stop_fact("status"))
+        .with_optional_fact("Failed step", stop_fact("step"))
+        .with_optional_fact("Attempts", stop_fact("attempts"))
+        .with_optional_fact("Error", stop_fact("error"))
         .with_optional_fact("Command", run.command.clone())
         .with_optional_fact("Component", run.component_id.clone())
         .with_optional_fact("Finished", run.finished_at.clone())

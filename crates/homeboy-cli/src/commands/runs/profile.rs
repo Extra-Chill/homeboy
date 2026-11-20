@@ -137,7 +137,7 @@ mod tests {
             }
             assert!(state.status.is_terminal(), "{:?}", state.status);
             let store = ObservationStore::open_initialized().unwrap();
-            store.record_workflow_timing(&state).unwrap();
+            store.record_workflow_timing("fixture", &state).unwrap();
             // A Cook the instance launched records which part of its CPU was
             // Homeboy's own and which was staging.
             let cook = store
