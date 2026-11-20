@@ -98,6 +98,8 @@ impl ExecutionOutcome {
         }
     }
 
+    /// Strict conversion for callers that require successful tree cleanup.
+    /// Completed supervised captures retain `root_status` and report cleanup separately.
     pub fn into_root_status(self) -> io::Result<ExitStatus> {
         match self.cleanup {
             ExecutionCleanup::Complete => Ok(self.root_status),
@@ -1483,8 +1485,27 @@ pub struct SupervisedCommandHeartbeat {
     pub output_tail: String,
 }
 
+/// Post-exit infrastructure warning; the root verdict and captured output remain valid.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ExecutionCleanupWarning {
+    pub root_pid: u32,
+    pub process_group: Option<u32>,
+    pub failed_step: String,
+}
+
+impl ExecutionCleanupWarning {
+    fn from_outcome(outcome: ExecutionOutcome, identity: ExecutionIdentity) -> Option<Self> {
+        (outcome.cleanup == ExecutionCleanup::Incomplete).then(|| Self {
+            root_pid: identity.root_pid,
+            process_group: identity.root_pgid,
+            failed_step: "process_tree_drain_and_reap".to_string(),
+        })
+    }
+}
+
 #[derive(Debug)]
 pub struct SupervisedCommandOutput {
+    pub cleanup_warning: Option<ExecutionCleanupWarning>,
     pub output: BoundedCommandOutput,
     pub termination: SupervisedCommandTermination,
     /// Only `HOMEBOY_PROGRESS` markers (not ordinary output) counted as
@@ -1701,6 +1722,7 @@ pub fn wait_with_bounded_output_supervised_guarded(
     });
     let started = std::time::Instant::now();
     let mut last_heartbeat = started.checked_sub(heartbeat_interval).unwrap_or(started);
+    let mut cleanup_warning = None;
     let supervision: io::Result<_> = loop {
         #[cfg(all(unix, not(target_os = "linux")))]
         if let Err(error) = guard.observe_owned_processes(child.id()) {
@@ -1714,10 +1736,13 @@ pub fn wait_with_bounded_output_supervised_guarded(
             let deadline = std::time::Instant::now() + PROCESS_TREE_CLEANUP_DEADLINE;
             break (|| {
                 let identity = guard.execution_identity(child.id())?;
-                guard
-                    .outcome_after_wait(status, identity)?
-                    .into_root_status()
-                    .map(|status| (status, SupervisedCommandTermination::Completed, deadline))
+                let outcome = guard.outcome_after_wait(status, identity)?;
+                cleanup_warning = ExecutionCleanupWarning::from_outcome(outcome, identity);
+                Ok((
+                    outcome.root_status,
+                    SupervisedCommandTermination::Completed,
+                    deadline,
+                ))
             })();
         }
         if is_cancelled() {
@@ -1770,6 +1795,7 @@ pub fn wait_with_bounded_output_supervised_guarded(
     let capture_deadline = cleanup_deadline.min(std::time::Instant::now() + CAPTURE_JOIN_GRACE);
     let (stdout, stderr) = join_capture_pair(stdout_handle, stderr_handle, capture_deadline)?;
     Ok(SupervisedCommandOutput {
+        cleanup_warning,
         output: BoundedCommandOutput {
             status,
             stdout: stdout.bytes,
@@ -1912,6 +1938,7 @@ pub fn wait_with_bounded_output_supervised_with_progress_until(
     };
     let (stdout, stderr) = join_capture_pair(stdout_handle, stderr_handle, deadline)?;
     Ok(SupervisedCommandOutput {
+        cleanup_warning: None,
         output: BoundedCommandOutput {
             status,
             stdout: stdout.bytes,
@@ -2012,6 +2039,7 @@ pub fn wait_with_bounded_output_supervised_with_progress_and_passthrough(
     let stdout = join_capture(stdout_handle)?;
     let stderr = join_capture(stderr_handle)?;
     Ok(SupervisedCommandOutput {
+        cleanup_warning: None,
         output: BoundedCommandOutput {
             status,
             stdout: stdout.bytes,
@@ -2106,6 +2134,7 @@ pub fn wait_with_bounded_output_supervised_with_progress_owned(
             activity_sample_interval(limit),
         )
     });
+    let mut cleanup_warning = None;
     let (status, termination) = loop {
         if let Some((previous, sampled_at, interval)) = activity.as_mut() {
             if sampled_at.elapsed() >= *interval {
@@ -2120,10 +2149,8 @@ pub fn wait_with_bounded_output_supervised_with_progress_owned(
             }
         }
         if let Some(outcome) = owner.try_wait_outcome()? {
-            break (
-                outcome.into_root_status()?,
-                SupervisedCommandTermination::Completed,
-            );
+            cleanup_warning = ExecutionCleanupWarning::from_outcome(outcome, owner.identity());
+            break (outcome.root_status, SupervisedCommandTermination::Completed);
         }
         if is_cancelled() {
             break (
@@ -2165,9 +2192,13 @@ pub fn wait_with_bounded_output_supervised_with_progress_owned(
         }
         thread::sleep(Duration::from_millis(50));
     };
-    let stdout = join_capture(stdout_handle)?;
-    let stderr = join_capture(stderr_handle)?;
+    let (stdout, stderr) = join_capture_pair(
+        stdout_handle,
+        stderr_handle,
+        std::time::Instant::now() + CAPTURE_JOIN_GRACE,
+    )?;
     Ok(SupervisedCommandOutput {
+        cleanup_warning,
         output: BoundedCommandOutput {
             status,
             stdout: stdout.bytes,

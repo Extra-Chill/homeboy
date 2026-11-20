@@ -644,6 +644,9 @@ pub type AgentTaskGateSetupEvidence = homeboy_core::deps::DependencyHydrationOut
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct AgentTaskGateReport {
+    /// Infrastructure warning after a completed root; does not replace its verdict.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cleanup_warning: Option<homeboy_engine_primitives::command::ExecutionCleanupWarning>,
     /// Durable original verdict and exact execution identity.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub verdict: Option<verdict::GateVerdictEvidence>,
@@ -1452,6 +1455,7 @@ impl AgentTaskGateReport {
             label: None,
             flaky: None,
             supervision_regate: None,
+            cleanup_warning: None,
         }
     }
 
@@ -1517,6 +1521,7 @@ impl AgentTaskGateReport {
             label: None,
             flaky: None,
             supervision_regate: None,
+            cleanup_warning: None,
         }
     }
 

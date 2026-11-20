@@ -580,7 +580,7 @@ pub(super) fn run_gate_argv_local(
         }
         None => timeout,
     };
-    let (mut output, termination, progress_instrumented) = if let Some(timeout) = timeout {
+    let (mut output, termination, progress_instrumented, cleanup_warning) = {
         let supervision = execution.supervision;
         if let Some(supervision) = supervision {
             if let Err(error) = (supervision.on_spawn)(process_group, command) {
@@ -599,7 +599,7 @@ pub(super) fn run_gate_argv_local(
             homeboy_core::engine::command::wait_with_bounded_output_supervised_with_progress_owned(
                 containment.owner_mut().expect("attached gate owner"),
                 65_536,
-                timeout,
+                timeout.unwrap_or(Duration::MAX),
                 supervision
                     .map(|supervision| supervision.no_progress_timeout)
                     .filter(|limit| !limit.is_zero()),
@@ -649,23 +649,7 @@ pub(super) fn run_gate_argv_local(
             supervised.output,
             supervised.termination,
             supervised.progress_instrumented,
-        )
-    } else {
-        let output = homeboy_core::engine::command::wait_with_bounded_output_until_cancelled_owned(
-            containment.owner_mut().expect("attached gate owner"),
-            65_536,
-            || false,
-        )
-        .map_err(|error| {
-            Error::internal_io(
-                error.to_string(),
-                Some(format!("run deterministic gate {command}")),
-            )
-        })?;
-        (
-            output,
-            homeboy_core::engine::command::SupervisedCommandTermination::Completed,
-            false,
+            supervised.cleanup_warning,
         )
     };
     // The wait loops above already reap survivors once they observe the
@@ -771,6 +755,7 @@ pub(super) fn run_gate_argv_local(
     report.test_result = test_result;
     report.cargo_selection = cargo_selection;
     report.termination = termination;
+    report.cleanup_warning = cleanup_warning;
     #[cfg(unix)]
     {
         use std::os::unix::process::ExitStatusExt;
