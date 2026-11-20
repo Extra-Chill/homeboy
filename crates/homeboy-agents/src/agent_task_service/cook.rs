@@ -7325,8 +7325,9 @@ fn run_cook_spine(
         }
         // Only the adopted attempt itself carries adoption authority past a
         // terminal state; a failed form-only continuation of it does not.
+        use agent_task_lifecycle::CookRunPhase::{Continuing, Succeeded};
         let state = agent_task_lifecycle::CookRunState::of(&record);
-        if !(state.recoverable || state.phase == agent_task_lifecycle::CookRunPhase::Succeeded)
+        if !(state.recoverable || matches!(state.phase, Succeeded | Continuing))
             && (adopted_continuation.is_none() || record.candidate_adoption.is_none())
             && !review_form_unavailable
         {
