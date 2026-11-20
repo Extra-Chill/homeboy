@@ -15,16 +15,31 @@ pub enum CandidateCommand {
 }
 
 fn git(path: &Path, args: &[&str]) -> Result<String> {
+    git_operation(path, args, "candidate", args[0])
+}
+
+fn git_operation(path: &Path, args: &[&str], field: &str, operation: &str) -> Result<String> {
     let output = std::process::Command::new("git")
         .arg("-C")
         .arg(path)
         .args(args)
         .output()
-        .map_err(|e| Error::internal_io(e.to_string(), None))?;
+        .map_err(|e| {
+            Error::validation_invalid_argument(
+                field,
+                format!("{operation} at {}: {e}", path.display()),
+                None,
+                None,
+            )
+        })?;
     if !output.status.success() {
         return Err(Error::validation_invalid_argument(
-            "candidate",
-            String::from_utf8_lossy(&output.stderr).trim(),
+            field,
+            format!(
+                "{operation} at {}: {}",
+                path.display(),
+                String::from_utf8_lossy(&output.stderr).trim()
+            ),
             None,
             None,
         ));
@@ -37,7 +52,9 @@ pub(super) fn run(command: CandidateCommand) -> crate::commands::CmdResult<Value
         cook_or_attempt,
         into,
     } = command;
-    ensure_clean(&into)?;
+    if into.exists() {
+        ensure_clean(&into)?;
+    }
     let target = super::status::resolve_cook_reader_target(&cook_or_attempt, false)?;
     let store = homeboy::agents::agent_task_lifecycle::AgentTaskLifecycleStore::from_environment()?;
     let record = homeboy::agents::agent_task_lifecycle::exact_record_bounded_in_store(
@@ -60,6 +77,49 @@ pub(super) fn run(command: CandidateCommand) -> crate::commands::CmdResult<Value
                 None,
             )
         })?;
+    if !into.exists() {
+        let source = promotion
+            .pointer("/target/path")
+            .and_then(Value::as_str)
+            .or_else(|| {
+                recipe
+                    .as_ref()
+                    .and_then(|r| r.finalization["source_worktree_path"].as_str())
+            })
+            .ok_or_else(|| {
+                Error::validation_invalid_argument(
+                    "into",
+                    format!(
+                        "cannot create {}: Cook repository is unavailable",
+                        into.display()
+                    ),
+                    None,
+                    None,
+                )
+            })?;
+        homeboy::core::worktree::create_at(
+            homeboy::core::worktree::WorktreeCreateOptions {
+                component_id: source.into(),
+                source_path: Some(source.into()),
+                branch: format!("homeboy-checkout/{}", target.run_id),
+                from: Some("HEAD".into()),
+                task_url: None,
+                run_id: None,
+                cleanup_policy: None,
+                require_handoff_freshness: false,
+            },
+            &into,
+        )?;
+    }
+    let gated_sha = record
+        .candidate
+        .as_ref()
+        .map(|c| c.candidate_sha.as_str())
+        .or_else(|| {
+            promotion
+                .pointer("/candidate/candidate_sha")
+                .and_then(Value::as_str)
+        });
     let cook = recipe
         .as_ref()
         .map(|r| r.cook_id.as_str())
@@ -68,7 +128,7 @@ pub(super) fn run(command: CandidateCommand) -> crate::commands::CmdResult<Value
     let reference = format!("refs/homeboy/candidates/{cook}");
     if let Some(source) = promotion.pointer("/target/path").and_then(Value::as_str) {
         if git(Path::new(source), &["show-ref", "--verify", &reference]).is_ok() {
-            return checkout_from(&into, source, &reference, branch, &title);
+            return checkout_from(&into, source, &reference, branch, &title, gated_sha);
         }
     }
     let observation = homeboy::core::observation::ObservationStore::open_initialized()?;
@@ -129,14 +189,36 @@ pub(super) fn run(command: CandidateCommand) -> crate::commands::CmdResult<Value
         &sha,
         branch,
         &title,
+        gated_sha.or(Some(&sha)),
     )
 }
 
 fn ensure_clean(into: &Path) -> Result<()> {
-    if !git(into, &["status", "--porcelain", "--untracked-files=all"])?.is_empty() {
+    let root = git_operation(
+        into,
+        &["rev-parse", "--show-toplevel"],
+        "into",
+        "validate worktree",
+    )?;
+    if into.canonicalize().ok() != Path::new(&root).canonicalize().ok() {
         return Err(Error::validation_invalid_argument(
             "into",
-            "worktree has uncommitted changes",
+            format!("{} is not a git worktree root", into.display()),
+            None,
+            None,
+        ));
+    }
+    if !git_operation(
+        into,
+        &["status", "--porcelain", "--untracked-files=all"],
+        "into",
+        "inspect worktree",
+    )?
+    .is_empty()
+    {
+        return Err(Error::validation_invalid_argument(
+            "into",
+            format!("worktree {} has uncommitted changes", into.display()),
             None,
             None,
         ));
@@ -150,12 +232,47 @@ fn checkout_from(
     revision: &str,
     branch: &str,
     title: &str,
+    gated_sha: Option<&str>,
 ) -> crate::commands::CmdResult<Value> {
     ensure_clean(into)?;
-    git(into, &["check-ref-format", "--branch", branch])?;
-    git(into, &["fetch", "--no-tags", "--", source, revision])?;
-    let sha =
-        homeboy::core::git::publication_candidate(&into.to_string_lossy(), "FETCH_HEAD", title)?;
+    git_operation(
+        into,
+        &["check-ref-format", "--branch", branch],
+        "candidate",
+        "validate branch",
+    )?;
+    git_operation(
+        into,
+        &["fetch", "--no-tags", "--", source, revision],
+        "candidate",
+        "fetch candidate",
+    )?;
+    let fetched = git(into, &["rev-parse", "FETCH_HEAD"])?;
+    let gated_sha = gated_sha.unwrap_or(&fetched);
+    if git(
+        into,
+        &["cat-file", "-e", &format!("{gated_sha}^{{commit}}")],
+    )
+    .is_err()
+    {
+        git_operation(
+            into,
+            &["fetch", "--no-tags", "--", source, gated_sha],
+            "candidate",
+            "fetch gated candidate",
+        )?;
+    }
+    let tree = git(into, &["rev-parse", &format!("{gated_sha}^{{tree}}")])?;
+    let sha = homeboy::core::git::publication_candidate(&into.to_string_lossy(), &fetched, title)?;
+    let publication_tree = git(into, &["rev-parse", &format!("{sha}^{{tree}}")])?;
+    if publication_tree != tree {
+        return Err(Error::validation_invalid_argument(
+            "candidate",
+            "publication commit tree differs from gated tree",
+            None,
+            None,
+        ));
+    }
     let path = into
         .canonicalize()
         .map_err(|e| Error::internal_io(e.to_string(), None))?;
@@ -163,12 +280,22 @@ fn checkout_from(
     // worktree keeps its branch; this one gets the candidate detached.
     let branch_owner = other_worktree_on_branch(into, &path, branch)?;
     if branch_owner.is_some() {
-        git(into, &["checkout", "--detach", &sha, "--"])?;
+        git_operation(
+            into,
+            &["checkout", "--detach", &sha, "--"],
+            "into",
+            "checkout branch",
+        )?;
     } else {
-        git(into, &["checkout", "-B", branch, &sha, "--"])?;
+        git_operation(
+            into,
+            &["checkout", "-B", branch, &sha, "--"],
+            "into",
+            "checkout branch",
+        )?;
     }
     Ok((
-        serde_json::json!({"command": "agent-task.candidate.checkout", "candidate_sha": sha, "branch": branch, "detached": branch_owner.is_some(), "branch_checked_out_in": branch_owner, "worktree": path}),
+        serde_json::json!({"command": "agent-task.candidate.checkout", "candidate_sha": sha, "gated_sha": gated_sha, "publication_sha": sha, "tree": tree, "identity_note": "The publication commit carries the gated tree unchanged.", "branch": branch, "detached": branch_owner.is_some(), "branch_checked_out_in": branch_owner, "worktree": path}),
         0,
     ))
 }
@@ -387,6 +514,11 @@ mod tests {
             let destination = home.path().join("destination");
             std::fs::create_dir(&source).unwrap();
             git(&source, &["init", "-b", "main"]).unwrap();
+            git(
+                &source,
+                &["remote", "add", "origin", "https://example.test/repo.git"],
+            )
+            .unwrap();
             git(&source, &["config", "user.name", "Test"]).unwrap();
             git(&source, &["config", "user.email", "test@example.test"]).unwrap();
             std::fs::write(source.join("file"), "base").unwrap();
@@ -455,7 +587,7 @@ mod tests {
                 record.set_state_for_test(homeboy_lifecycle_contract::RunExecutionState::Succeeded);
                 record.metadata = json!({"cook_id": "checkout-cook", "cook_delivery": {"artifacts": {"promotion": {
                     "target": {"path": source, "branch": "cook/head"}
-                }}}});
+                }, "candidate": {"candidate_sha": sha, "tree_sha": git(&source, &["rev-parse", "HEAD^{tree}"]).unwrap()}}}});
             }).unwrap();
             homeboy::agents::agent_task_lifecycle::record_cook_attempt_in_store(
                 &lifecycle,
@@ -483,6 +615,45 @@ mod tests {
                     &["update-ref", "refs/homeboy/candidates/checkout-cook", &sha],
                 )
                 .unwrap();
+            }
+            if !bundle {
+                for case in ["missing", "dirty", "non-git"] {
+                    let into = home.path().join(case);
+                    if case == "dirty" {
+                        git(
+                            home.path(),
+                            &["clone", source.to_str().unwrap(), into.to_str().unwrap()],
+                        )
+                        .unwrap();
+                        std::fs::write(into.join("untracked"), "dirty").unwrap();
+                    } else if case == "non-git" {
+                        std::fs::create_dir(&into).unwrap();
+                    }
+                    let result = run(CandidateCommand::Checkout {
+                        cook_or_attempt: "checkout-cook".into(),
+                        into: into.clone(),
+                    });
+                    if case == "missing" {
+                        let (value, _) = result.unwrap();
+                        assert_eq!(value["gated_sha"], sha);
+                        assert_eq!(
+                            value["publication_sha"],
+                            git(&into, &["rev-parse", "HEAD"]).unwrap()
+                        );
+                        assert_eq!(
+                            value["tree"],
+                            git(&source, &["rev-parse", "HEAD^{tree}"]).unwrap()
+                        );
+                        assert_eq!(
+                            value["tree"],
+                            git(&into, &["rev-parse", "HEAD^{tree}"]).unwrap()
+                        );
+                    } else {
+                        let error = result.unwrap_err().to_string();
+                        assert!(error.contains("into"), "{error}");
+                        assert!(error.contains(into.to_str().unwrap()), "{error}");
+                    }
+                }
             }
             // A stale worktree may still hold the Cook head branch (bundle case).
             let stale = home.path().join("stale-head");

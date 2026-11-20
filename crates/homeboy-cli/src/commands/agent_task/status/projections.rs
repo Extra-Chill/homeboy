@@ -364,6 +364,10 @@ pub(super) fn compact_control_plane_status(value: Value) -> Value {
         "candidate_commit",
         "candidate_ref",
         "candidate_sha",
+        "gated_sha",
+        "publication_sha",
+        "tree",
+        "identity_note",
         "lab_snapshot_failure",
         "lab_staging_diagnostic",
     ] {

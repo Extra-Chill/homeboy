@@ -548,12 +548,23 @@ pub(super) fn create_with_store(
     options: WorktreeCreateOptions,
     store_dir: &Path,
 ) -> Result<WorktreeCreateOutput> {
-    with_task_worktree_registry_write_lock(|| create_with_store_unlocked(options, store_dir))
+    create_at_with_store(options, store_dir, None)
+}
+
+pub(super) fn create_at_with_store(
+    options: WorktreeCreateOptions,
+    store_dir: &Path,
+    destination: Option<&Path>,
+) -> Result<WorktreeCreateOutput> {
+    with_task_worktree_registry_write_lock(|| {
+        create_with_store_unlocked(options, store_dir, destination)
+    })
 }
 
 fn create_with_store_unlocked(
     options: WorktreeCreateOptions,
     store_dir: &Path,
+    destination: Option<&Path>,
 ) -> Result<WorktreeCreateOutput> {
     let target = component::resolve_target(TargetSpec {
         component_id: Some(&options.component_id),
@@ -583,7 +594,9 @@ fn create_with_store_unlocked(
         ))
     })?;
     let id = format!("{}@{}", target.component_id, branch_slug(&options.branch));
-    let worktree_path = parent.join(&id);
+    let worktree_path = destination
+        .map(normalize_missing_path)
+        .unwrap_or_else(|| parent.join(&id));
     let existing = record_path(store_dir, &id)
         .exists()
         .then(|| read_record(store_dir, &id))
