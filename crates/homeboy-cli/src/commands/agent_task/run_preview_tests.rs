@@ -1031,4 +1031,5 @@ fn preview_warns_when_no_repro_gate_is_declared() {
     });
 }
 
-include!("run_preview_admission_tests.rs");
+#[path = "run_preview_admission_tests.rs"]
+mod admission;
