@@ -107,7 +107,16 @@ pub(super) fn exec_via_daemon(
         extension_env_providers: extension_env_providers.clone(),
         workload: lab_runner_workload.clone(),
         lifecycle,
-        metadata: runner_exec_request_metadata(run_id.as_deref(), "daemon", &runner.id),
+        metadata: {
+            let mut metadata =
+                runner_exec_request_metadata(run_id.as_deref(), "daemon", &runner.id);
+            if !detach_after_handoff {
+                // This call waits on the job below, so it owns the job's
+                // queued-owner heartbeat from the moment it is accepted.
+                metadata[homeboy_core::api_jobs::QUEUED_OWNER_HEARTBEAT_METADATA] = json!(true);
+            }
+            metadata
+        },
     })?;
     let submission = RunnerApiSubmitRequest {
         schema: RUNNER_API_SUBMIT_REQUEST_SCHEMA.to_string(),
@@ -192,6 +201,7 @@ pub(super) fn exec_via_daemon(
     let foreground_source_lease = std::cell::RefCell::new(None);
     let daemon_endpoint = std::cell::RefCell::new(local_url.to_string());
     let owner_transport = JobOwnerTransport::new(accepted_session.as_ref());
+    let queued_owner_heartbeat = QueuedOwnerHeartbeat::default();
     // The runner owns the job's event log; the controller keeps only a
     // cursor into it (#13881 step 2).
     let watch_follow = std::cell::RefCell::new(DaemonWatchFollow::default());
@@ -264,6 +274,11 @@ pub(super) fn exec_via_daemon(
                     .renew_running_runner_exec_source_lease(run_id, token)?;
             }
             let job_id = current.id.to_string();
+            // `current` keeps the accepted status until terminal; the beat
+            // itself stops once the daemon reports the job admitted.
+            if current.status == JobStatus::Queued {
+                queued_owner_heartbeat.beat(&client, &daemon_endpoint.borrow(), &job_id);
+            }
             let reload = || owner_transport.reload(&runner.id, &client, &job_id);
             let poll_failure = |err| {
                 terminal_runner_poll_failure(
@@ -1850,6 +1865,60 @@ const DAEMON_TERMINAL_WAIT_INITIAL_BACKOFF: Duration = Duration::from_millis(200
 /// steady low rate instead of 5 times a second for its whole duration.
 const DAEMON_TERMINAL_WAIT_MAX_BACKOFF: Duration = Duration::from_secs(5);
 
+/// How often a waiting client renews its owner heartbeat on a queued job. The
+/// daemon reaps an opted-in queued job after
+/// [`homeboy_core::api_jobs::QUEUED_OWNER_DEADLINE_MS`] of silence (#18601).
+const QUEUED_OWNER_HEARTBEAT_INTERVAL: Duration = Duration::from_secs(60);
+
+/// A waiting client's owner heartbeat for one queued daemon job.
+///
+/// While the job is queued, each [`Self::beat`] tells the daemon, at most once
+/// per [`QUEUED_OWNER_HEARTBEAT_INTERVAL`], that this client still waits for
+/// it. If the client is cancelled, killed, or gives up, the beats stop and the
+/// daemon frees the job's queue position instead of holding it for hours.
+/// Beats stop once the daemon reports the job admitted or settled, or rejects
+/// the route (an older daemon keeps its no-deadline queue policy). A failed
+/// beat is never an observation failure: the poll loop owns transport errors.
+#[derive(Default)]
+struct QueuedOwnerHeartbeat {
+    last: std::cell::Cell<Option<Instant>>,
+    done: std::cell::Cell<bool>,
+}
+
+impl QueuedOwnerHeartbeat {
+    fn beat(&self, client: &Client, endpoint: &str, job_id: &str) {
+        if self.done.get()
+            || self
+                .last
+                .get()
+                .is_some_and(|last| last.elapsed() < QUEUED_OWNER_HEARTBEAT_INTERVAL)
+        {
+            return;
+        }
+        self.last.set(Some(Instant::now()));
+        let Ok(response) = daemon_post_json_text(
+            client,
+            endpoint,
+            &format!("/jobs/{job_id}/observe"),
+            &json!({}),
+            DaemonPostOptions::default(),
+        ) else {
+            return;
+        };
+        if response.status_code >= 400 {
+            self.done.set(true);
+            return;
+        }
+        let status = serde_json::from_str::<Value>(&response.body)
+            .ok()
+            .and_then(|body| body.pointer("/data/body/job/status").cloned())
+            .and_then(|status| serde_json::from_value::<JobStatus>(status).ok());
+        if status.is_some_and(|status| status != JobStatus::Queued) {
+            self.done.set(true);
+        }
+    }
+}
+
 /// Sleep up to `interval`, returning `true` if cancellation was observed.
 fn sleep_daemon_wait_unless_cancelled(interval: Duration, cancelled: &dyn Fn() -> bool) -> bool {
     crate::cancellable_sleep::sleep_unless_cancelled(interval, || cancelled())
@@ -1924,6 +1993,7 @@ pub(crate) fn observe_daemon_job_until_terminal(
         },
         || refreshed_daemon_endpoint(runner_id),
     )?;
+    let queued_owner_heartbeat = QueuedOwnerHeartbeat::default();
     let (job, endpoint) = follow_daemon_job_to_terminal(
         endpoint,
         runner_job_id,
@@ -1931,6 +2001,9 @@ pub(crate) fn observe_daemon_job_until_terminal(
         cancelled,
         |endpoint| {
             let job = fetch_daemon_job(&client, endpoint, runner_job_id)?;
+            if job.status == JobStatus::Queued {
+                queued_owner_heartbeat.beat(&client, endpoint, runner_job_id);
+            }
             if !job.status.is_terminal() {
                 if let Some(run_id) = job
                     .runner_job_projection

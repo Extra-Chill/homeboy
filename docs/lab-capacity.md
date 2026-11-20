@@ -42,6 +42,16 @@ The daemon `/capacity` response includes `gate_reserve.reserved_cpus`,
 `slots`, `active` (entries with `slot`, `cpus`, and `job_id`), and `queued_slots`
 (accepted gates not yet holding a child reservation).
 
+A client that waits on a queued job heartbeats it with `POST /jobs/:id/observe`
+about once a minute, or opts in at submission with the envelope metadata flag
+`queued_owner_heartbeat: true`. If an opted-in job is still queued after
+`queued_owner_deadline_ms` (30 minutes) without a heartbeat, the client is gone.
+The daemon cancels the job with reason `queued_owner_abandoned`, which frees its
+queue position and `queued_slots` entry. `/capacity` reports each opted-in
+job's silence in `queued_owner_heartbeat_age_ms`. Detached handoffs and older
+clients never opt in, and their queued jobs keep the no-deadline policy
+(Refs #18601).
+
 Detached child handles retain wait ownership on early supervisor returns;
 reapers wait only their own child PID and do not steal other command statuses.
 This does not stop attempt servers or change provider error classification.

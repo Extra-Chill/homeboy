@@ -270,6 +270,9 @@ pub fn route(method: HttpMethod, path: &str) -> Result<HttpEndpoint> {
         (HttpMethod::Post, ["jobs", id, "cancel"]) => Ok(HttpEndpoint::JobCancel {
             id: (*id).to_string(),
         }),
+        (HttpMethod::Post, ["jobs", id, "observe"]) => Ok(HttpEndpoint::JobObserve {
+            id: (*id).to_string(),
+        }),
         (HttpMethod::Post, ["jobs", id, "cancel-projection"]) => {
             Ok(HttpEndpoint::JobProjectionCancel {
                 id: (*id).to_string(),
@@ -331,6 +334,7 @@ pub fn route(method: HttpMethod, path: &str) -> Result<HttpEndpoint> {
                 "GET /jobs/:id/events".to_string(),
                 "GET /jobs/:id/watch".to_string(),
                 "POST /jobs/:id/cancel".to_string(),
+                "POST /jobs/:id/observe".to_string(),
                 "GET /tools".to_string(),
                 "GET /tools/:id".to_string(),
                 "POST /tools/:id/run".to_string(),
@@ -678,6 +682,15 @@ where
                 "command": "api.jobs.watch",
                 "job_id": id,
                 "response": response,
+            })
+        }
+        HttpEndpoint::JobObserve { id } => {
+            // A waiting client's owner heartbeat for a queued job (#18601).
+            // It touches only in-memory liveness, never the durable ledger.
+            json!({
+                "command": "api.jobs.observe",
+                "job": job_store.observe_queued_job(parse_job_id(id)?)?,
+                "queued_owner_deadline_ms": crate::api_jobs::QUEUED_OWNER_DEADLINE_MS,
             })
         }
         HttpEndpoint::JobCancel { id } => {
