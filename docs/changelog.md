@@ -4,6 +4,12 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.482.4] - 2026-11-20
+
+### Fixed
+- create candidate checkout worktrees and clarify SHA identities
+- expose structured gate failures in status and diagnose
+
 ## [0.482.3] - 2026-11-20
 
 ### Changed
