@@ -4,6 +4,11 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.481.0] - 2026-11-20
+
+### Added
+- announce a failed or restart-looping runner unit once and show its start error
+
 ## [0.480.1] - 2026-11-20
 
 ### Fixed
