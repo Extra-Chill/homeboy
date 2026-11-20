@@ -4,6 +4,11 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.481.7] - 2026-11-20
+
+### Changed
+- collapse CookRunAction and remove the Promote control-plane action
+
 ## [0.481.6] - 2026-11-20
 
 ### Changed
