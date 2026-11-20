@@ -4,6 +4,11 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.482.2] - 2026-11-20
+
+### Changed
+- Persist every regate gate run and let regate supersede an interrupted start fence
+
 ## [0.482.1] - 2026-11-20
 
 ### Changed
