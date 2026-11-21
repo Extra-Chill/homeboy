@@ -647,17 +647,6 @@ fn parses_daemon_envelope_after_noisy_stdout_preamble() {
 }
 
 #[test]
-fn compares_cli_and_daemon_version_shapes() {
-    assert!(versions_match("homeboy 0.204.0", "0.204.0"));
-    assert!(versions_match("0.204.0", "homeboy 0.204.0"));
-    assert!(versions_match(
-        "homeboy 0.204.0+19a41cd5102d",
-        "0.204.0+19a41cd5102d"
-    ));
-    assert!(!versions_match("homeboy 0.201.3", "homeboy 0.204.0"));
-}
-
-#[test]
 fn extracts_current_daemon_version_shape() {
     assert_eq!(
         daemon_version_from_body(&serde_json::json!({"version":"0.204.0"})),
@@ -1284,7 +1273,7 @@ fn runtime_path_warning_uses_rebuild_specific_message() {
 
 /// #11106 failure mode 1: the identity probe's error was discarded and the
 /// unread "current" version was replaced with the session's own recorded
-/// version, which made `versions_match` trivially true and published a
+/// version, which made the version comparison trivially true and published a
 /// fabricated current version. The failure must now be the report.
 #[test]
 fn failed_identity_probe_reports_the_error_instead_of_the_session_version() {

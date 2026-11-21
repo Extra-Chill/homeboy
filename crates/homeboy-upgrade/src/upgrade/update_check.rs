@@ -114,7 +114,7 @@ pub struct AllowedStableRuntime {
 /// controller. This is a pure local-cache decision for Cook pre-dispatch.
 pub fn incompatible_allowed_stable(controller_version: &str) -> Option<AllowedStableRuntime> {
     latest_allowed_stable().filter(|stable| {
-        crate::upgrade::version_is_newer(&stable.version, controller_version)
+        homeboy_core::build_identity::is_newer(&stable.version, controller_version)
             && stable
                 .compatibility
                 .as_ref()
@@ -421,9 +421,9 @@ pub fn prefetch_release() -> homeboy_core::Result<Option<PathBuf>> {
             check.latest_version.filter(|_| check.update_available)
         }
     };
-    let Some(latest) =
-        latest.filter(|latest| upgrade::version_is_newer(latest, upgrade::current_version()))
-    else {
+    let Some(latest) = latest.filter(|latest| {
+        homeboy_core::build_identity::is_newer(latest, upgrade::current_version())
+    }) else {
         return Ok(None);
     };
     let tag = format!("v{}", latest.trim_start_matches('v'));

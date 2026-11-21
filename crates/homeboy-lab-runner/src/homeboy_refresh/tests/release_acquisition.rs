@@ -27,7 +27,7 @@ exit 64
 
 #[test]
 fn upgrade_recovery_ref_passes_refresh_validation() {
-    let target = homeboy_upgrade::upgrade::parse_build_identity_display(
+    let target = homeboy_core::build_identity::parse(
         "homeboy 0.401.0+bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
     )
     .unwrap();

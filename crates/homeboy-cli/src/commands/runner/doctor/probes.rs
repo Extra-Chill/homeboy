@@ -341,7 +341,8 @@ pub(super) fn homeboy_path_shadow_check(
     let configured_version = configured_probe.version.trim();
     if configured_version.is_empty()
         || configured_version == "unknown"
-        || !version_is_older(bare_version, configured_version)
+        || homeboy_core::build_identity::compare(bare_version, configured_version)
+            != Some(std::cmp::Ordering::Less)
     {
         if configured_command != "homeboy" && configured_path != bare_path {
             return Some(checks::ok_with_details(
@@ -369,27 +370,6 @@ pub(super) fn homeboy_path_shadow_check(
         check.details = details;
         check
     })
-}
-
-fn version_is_older(candidate: &str, baseline: &str) -> bool {
-    let candidate = semantic_version_parts(candidate);
-    let baseline = semantic_version_parts(baseline);
-    !candidate.is_empty() && !baseline.is_empty() && candidate < baseline
-}
-
-fn semantic_version_parts(version: &str) -> Vec<u64> {
-    version
-        .trim()
-        .trim_start_matches('v')
-        .split('.')
-        .map(|part| {
-            part.chars()
-                .take_while(|ch| ch.is_ascii_digit())
-                .collect::<String>()
-        })
-        .take_while(|part| !part.is_empty())
-        .filter_map(|part| part.parse::<u64>().ok())
-        .collect()
 }
 
 pub(crate) fn eligible_provider_ids(

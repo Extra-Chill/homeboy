@@ -641,7 +641,7 @@ pub(crate) fn upgrade_runners(
 /// this process's own build is the version being replaced (#15552, #16845).
 pub(crate) fn runner_upgrade_target(expected_controller_identity: Option<&str>) -> BuildIdentity {
     expected_controller_identity
-        .and_then(homeboy_upgrade::upgrade::parse_build_identity_display)
+        .and_then(homeboy_core::build_identity::parse)
         .unwrap_or_else(homeboy_product_identity::build_identity)
 }
 

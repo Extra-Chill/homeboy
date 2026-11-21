@@ -15,20 +15,73 @@ pub const PROVENANCE_TRANSPORT_FIELD: &str = "provenance_transport";
 /// whatever build the runner itself is on (#18376).
 pub const PROVENANCE_REFERENCE_MIN_VERSION: (u64, u64, u64) = (0, 310, 0);
 
-/// Parse the semantic version out of a build identity such as
-/// `homeboy 0.470.0+c463cb25` or a bare `0.470.0`.
+/// Parse a build identity of the form `[homeboy ]<version>[+<commit>[-dirty]]`
+/// (the format `homeboy_product_identity` emits), a bare version, or a
+/// `v`-prefixed version. The last whitespace-delimited token is the identity, so
+/// a leading product name is tolerated without hard-coding it.
+///
+/// Returns `None` when the version is not semver, so callers stay on their safe
+/// unverifiable path rather than pretend to parse.
+pub fn parse(identity: &str) -> Option<BuildIdentity> {
+    let display = identity.trim();
+    let token = display.split_whitespace().last()?;
+    let (version, commit, dirty) = match token.split_once('+') {
+        Some((version, remainder)) => {
+            let (commit, dirty) = match remainder.strip_suffix("-dirty") {
+                Some(commit) => (commit, true),
+                None => (remainder, false),
+            };
+            // A `+` with no commit yields no verifiable commit identity.
+            let commit = (!commit.is_empty()).then(|| commit.to_string());
+            let dirty = commit.as_ref().map(|_| dirty);
+            (version, commit, dirty)
+        }
+        None => (token, None, None),
+    };
+    semantic_version(version)?;
+    Some(BuildIdentity {
+        display: display.to_string(),
+        version: version.to_string(),
+        git_commit: commit,
+        git_dirty: dirty,
+    })
+}
+
+fn semantic_version(version: &str) -> Option<semver::Version> {
+    semver::Version::parse(version.trim_start_matches('v')).ok()
+}
+
+/// The `(major, minor, patch)` release of a build identity such as
+/// `homeboy 0.470.0+c463cb25` or a bare `0.470.0`. Pre-release and build
+/// suffixes do not participate.
 pub fn build_version(build: &str) -> Option<(u64, u64, u64)> {
-    let build = build.trim();
-    let version = build.strip_prefix("homeboy ").unwrap_or(build).trim();
-    let core = version
-        .split(|c| c == '+' || c == '-' || c == ' ')
-        .next()?
-        .trim_start_matches('v');
-    let mut parts = core.split('.');
-    let major = parts.next()?.parse().ok()?;
-    let minor = parts.next()?.parse().ok()?;
-    let patch = parts.next()?.parse().ok()?;
-    parts.next().is_none().then_some((major, minor, patch))
+    let identity = parse(build)?;
+    let version = semantic_version(&identity.version)?;
+    Some((version.major, version.minor, version.patch))
+}
+
+/// Release ordering of two build identities, or `None` when either cannot be
+/// parsed. Commits and pre-release suffixes do not participate.
+pub fn compare(left: &str, right: &str) -> Option<std::cmp::Ordering> {
+    Some(build_version(left)?.cmp(&build_version(right)?))
+}
+
+/// Whether `candidate` is a strictly newer release than `current`. An
+/// unparseable identity is never newer.
+pub fn is_newer(candidate: &str, current: &str) -> bool {
+    compare(candidate, current) == Some(std::cmp::Ordering::Greater)
+}
+
+/// The canonical text of a build identity: trimmed, without the `homeboy `
+/// product prefix, so `homeboy 0.1.0+abc` and `0.1.0+abc` compare equal.
+pub fn canonical(identity: &str) -> &str {
+    let identity = identity.trim();
+    identity.strip_prefix("homeboy ").unwrap_or(identity)
+}
+
+/// Whether two build identities name the same exact build.
+pub fn same_build(left: &str, right: &str) -> bool {
+    canonical(left) == canonical(right)
 }
 
 /// Whether a child on `build` reads provenance references. An identity whose
@@ -222,15 +275,76 @@ mod tests {
     }
 
     #[test]
-    fn build_version_reads_build_identities() {
-        assert_eq!(build_version("homeboy 0.470.0+c463cb25"), Some((0, 470, 0)));
+    fn build_identities_parse_order_and_compare_from_one_parser() {
+        // (input, version, commit, dirty, release)
+        let cases: &[(
+            &str,
+            Option<(&str, Option<&str>, Option<bool>, (u64, u64, u64))>,
+        )] = &[
+            ("0.482.0", Some(("0.482.0", None, None, (0, 482, 0)))),
+            (
+                "homeboy 0.482.0+4a57291e",
+                Some(("0.482.0", Some("4a57291e"), Some(false), (0, 482, 0))),
+            ),
+            (
+                " homeboy 0.482.0+4a57291e-dirty ",
+                Some(("0.482.0", Some("4a57291e"), Some(true), (0, 482, 0))),
+            ),
+            (
+                "homeboy 0.482.0+",
+                Some(("0.482.0", None, None, (0, 482, 0))),
+            ),
+            ("v0.482.0", Some(("v0.482.0", None, None, (0, 482, 0)))),
+            (
+                "homeboy v0.482.1+abc",
+                Some(("v0.482.1", Some("abc"), Some(false), (0, 482, 1))),
+            ),
+            (
+                "homeboy 0.470.3-dirty",
+                Some(("0.470.3-dirty", None, None, (0, 470, 3))),
+            ),
+            ("homeboy not-a-version", None),
+            ("homeboy older-build", None),
+            ("homeboy 1.2", None),
+            ("", None),
+        ];
+        for (input, expected) in cases {
+            let parsed = parse(input);
+            assert_eq!(
+                parsed.as_ref().map(|identity| (
+                    identity.version.as_str(),
+                    identity.git_commit.as_deref(),
+                    identity.git_dirty,
+                )),
+                expected.map(|(version, commit, dirty, _)| (version, commit, dirty)),
+                "parse({input:?})"
+            );
+            assert_eq!(
+                build_version(input),
+                expected.map(|(.., release)| release),
+                "build_version({input:?})"
+            );
+        }
         assert_eq!(
-            build_version("homeboy 0.470.0+c463-dirty"),
-            Some((0, 470, 0))
+            parse("homeboy 0.482.0+4a57291e").map(|identity| identity.display),
+            Some("homeboy 0.482.0+4a57291e".to_string())
         );
-        assert_eq!(build_version("0.1.2"), Some((0, 1, 2)));
-        assert_eq!(build_version("homeboy older-build"), None);
-        assert_eq!(build_version("homeboy 1.2"), None);
+
+        assert!(is_newer("homeboy 0.482.1+b", "0.482.0"));
+        assert!(is_newer("v1.0.0", "0.99.99"));
+        assert!(!is_newer("0.482.0", "homeboy 0.482.0+a"));
+        assert!(!is_newer("0.481.9", "0.482.0"));
+        assert!(!is_newer("not-a-version", "0.482.0"));
+        assert_eq!(
+            compare("0.481.0", "0.482.0"),
+            Some(std::cmp::Ordering::Less)
+        );
+        assert_eq!(compare("0.482.0", "garbage"), None);
+
+        assert_eq!(canonical(" homeboy 0.482.0+a "), "0.482.0+a");
+        assert!(same_build("homeboy 0.482.0+a", "0.482.0+a"));
+        assert!(!same_build("homeboy 0.482.0+a", "homeboy 0.482.0+b"));
+        assert!(!same_build("homeboy 0.481.0", "homeboy 0.482.0"));
     }
 
     #[test]

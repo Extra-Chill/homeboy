@@ -105,26 +105,6 @@ where
     InstallMethod::Unknown
 }
 
-pub fn version_is_newer(latest: &str, current: &str) -> bool {
-    let parse = |v: &str| -> Option<(u32, u32, u32)> {
-        let parts: Vec<&str> = v.split('.').collect();
-        if parts.len() >= 3 {
-            Some((
-                parts[0].parse().ok()?,
-                parts[1].parse().ok()?,
-                parts[2].parse().ok()?,
-            ))
-        } else {
-            None
-        }
-    };
-
-    match (parse(latest), parse(current)) {
-        (Some(l), Some(c)) => l > c,
-        _ => latest != current,
-    }
-}
-
 #[allow(clippy::too_many_arguments)]
 pub fn run_upgrade_with_operation(
     force: bool,
@@ -197,7 +177,7 @@ fn installed_controller_meets_selected_release(
     Ok(
         installed_target_build_identity_from_disk(&active_binary_path()?)?.filter(|installed| {
             installed.version == selected.version
-                || version_is_newer(&installed.version, &selected.version)
+                || build_identity::is_newer(&installed.version, &selected.version)
         }),
     )
 }
