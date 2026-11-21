@@ -114,22 +114,21 @@ pub fn task_history(options: AgentTaskHistoryOptions) -> Result<AgentTaskHistory
 }
 
 fn published_pr_url(record: &AgentTaskRunRecord) -> Option<String> {
-    match &record.terminal_outcome {
-        Some(CookTerminalOutcome::Published { pr, .. }) => Some(pr.clone()),
+    match record.terminal_outcome() {
+        Some(CookTerminalOutcome::Published { pr, .. }) => Some(pr),
         _ => None,
     }
 }
 
-/// Project one durable record. The store derives `terminal_outcome` from the
-/// record's delivery and failure facts on every write, so outcome, failure
-/// class and PR URL read that one summary.
+/// Project one durable record using its current execution and delivery facts.
 fn history_entry(record: AgentTaskRunRecord) -> AgentTaskHistoryEntry {
     let projected = discovery_outcome(&record);
     let state = projected.state();
+    // A Cook mission record can stay non-terminal while its projected attempt
+    // is terminal, so the projection answers when the record does not.
     let terminal = record
-        .terminal_outcome
-        .clone()
-        .or_else(|| projected.terminal_outcome.clone());
+        .terminal_outcome()
+        .or_else(|| projected.terminal_outcome());
     let outcome = terminal
         .as_ref()
         .and_then(|outcome| serde_json::to_value(outcome).ok())
