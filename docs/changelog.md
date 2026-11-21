@@ -4,6 +4,12 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.482.6] - 2026-11-21
+
+### Fixed
+- stop treating URL routes like /media as host evidence paths
+- record a local dispatch pressure wait as durable Cook progress
+
 ## [0.482.5] - 2026-11-21
 
 ### Fixed
