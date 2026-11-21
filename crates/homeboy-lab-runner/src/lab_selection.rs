@@ -194,7 +194,7 @@ pub fn compile_lab_admission_plan(
         ));
     }
     let capability = super::prepare_lab_runner_capability(super::LabRunnerCapabilityContract {
-        command: command.hot_label,
+        command: command.hot_label.clone(),
         required_tools: command_prefix_required_tools.to_vec(),
         required_capabilities: command
             .required_capabilities
@@ -771,7 +771,7 @@ pub(super) fn preflight_lab_runner_availability(
         vec![availability.clone()]
     };
     Err(lab_runner_availability_error(
-        command.hot_label,
+        &command.hot_label,
         Some(&availability),
         Some(&status),
         eligible,
@@ -1089,7 +1089,7 @@ pub(super) fn fail_if_no_default_runner_accepts_jobs_with(
     }
 
     Err(lab_runner_availability_error(
-        command.hot_label,
+        &command.hot_label,
         None,
         None,
         eligible,
@@ -2318,7 +2318,7 @@ mod placement_readiness_tests {
     fn incompatible_is_blocked_with_capability_remediation() {
         let decision = super::super::LabRunnerGateDecision::Missing {
             runner_id: "lab".to_string(),
-            command: "runner preflight",
+            command: "runner preflight".to_string(),
             missing_tools: Vec::new(),
             reason: "missing capability.alpha".to_string(),
             remediation: vec!["configure capability.alpha".to_string()],

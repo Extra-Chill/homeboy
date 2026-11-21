@@ -97,7 +97,8 @@ pub struct LabCommandRouteContract {
     pub workload: Option<LabRigWorkloadArguments>,
 }
 
-#[derive(Debug, Clone, serde::Serialize, PartialEq, Eq)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
 pub struct LabRigWorkloadArguments {
     pub kind: LabRigWorkloadKind,
     pub rig_ids: Vec<String>,

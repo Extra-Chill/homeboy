@@ -60,7 +60,7 @@ pub struct RunnerWorkspaceSyncOptions {
 /// A lab runner capability prepared from a contract, ready to preflight.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PreparedLabRunnerCapability {
-    pub command: &'static str,
+    pub command: String,
     pub required_tools: Vec<RunnerRequiredTool>,
     /// Declared workload capabilities retained from the command contract.
     /// Consumers that have a capability inventory can make admission decisions
@@ -88,7 +88,7 @@ impl From<PreparedLabRunnerCapability> for RunnerCapabilityPreflight {
 /// The capability contract a lab runner must satisfy for a command.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct LabRunnerCapabilityContract {
-    pub command: &'static str,
+    pub command: String,
     pub required_tools: Vec<RunnerRequiredTool>,
     pub required_capabilities: Vec<String>,
 }
@@ -106,7 +106,7 @@ pub enum LabRunnerGateDecision {
     Eligible,
     Missing {
         runner_id: String,
-        command: &'static str,
+        command: String,
         missing_tools: Vec<RunnerRequiredTool>,
         reason: String,
         remediation: Vec<String>,

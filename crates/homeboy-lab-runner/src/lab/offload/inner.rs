@@ -1691,7 +1691,7 @@ pub(crate) fn run_lab_offload_inner(
         runner_id,
         &runner_status,
         runner.settings.concurrency_limit,
-        contract.hot_label,
+        &contract.hot_label,
     )?;
     plan = with_step(
         plan,
@@ -1799,7 +1799,7 @@ pub(crate) fn run_lab_offload_inner(
                 plan = with_step(
                     plan,
                     PlanStep::ready("lab.capability_preflight", "lab.capability_preflight")
-                        .inputs(PlanValues::new().string("command", capability_plan.command))
+                        .inputs(PlanValues::new().string("command", &capability_plan.command))
                         .gate_result(crate::capabilities::gate_result_from_lab_decision(
                             gate_result,
                         ))
@@ -1886,7 +1886,7 @@ pub(crate) fn run_lab_offload_inner(
     let workspace_sync_timer = observation.timer.start("stage.lab.materialize");
     let workspace_stage = match prepare_lab_offload_workspace_stage(
         &request,
-        crate::lab::offload::workspace_stage::LabWorkspaceStageCommand::from(&contract),
+        contract.clone(),
         plan,
         runner_id,
         &source_path,
@@ -2154,7 +2154,7 @@ pub(crate) fn run_lab_offload_inner(
     let env_delta_before_secret_handoff = env_delta.clone();
     lab_metadata["runtime_overlays"] = runtime_overlay_metadata;
     let mut secret_env_handoff = build_lab_secret_env_handoff_plan(
-        contract.secret_env_sources,
+        &contract.secret_env_sources,
         &changed_since_preflight.args,
         env_delta,
     )?;
@@ -2803,15 +2803,13 @@ mod tests {
             mode: RunnerTunnelMode::DirectSsh,
         };
         let contract = LabOffloadCommand {
-            command: homeboy_core::lab_contract::LabCommandContract::portable(
-                "test",
-                None,
-                true,
-                &[],
-            ),
             required_extensions: vec!["fixture".to_string()],
             required_capabilities: Vec::new(),
             workload: None,
+            ..homeboy_core::lab_routing::lab_offload_command_from_contract(
+                homeboy_core::lab_contract::LabCommandContract::portable("test", None, true, &[]),
+                Vec::new(),
+            )
         };
         let secret_env_handoff = build_lab_secret_env_handoff_plan(&[], &args, Default::default())
             .expect("empty secret handoff");

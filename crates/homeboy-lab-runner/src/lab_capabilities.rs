@@ -6,7 +6,7 @@ use super::{LabOffloadCommand, RunnerCapabilityPreflight, RunnerToolchainReadine
 pub(super) fn toolchain_readiness_preflight(
     command: &LabOffloadCommand,
 ) -> homeboy_core::Result<Option<RunnerCapabilityPreflight>> {
-    toolchain_readiness_preflight_for_extensions(command.hot_label, &command.required_extensions)
+    toolchain_readiness_preflight_for_extensions(&command.hot_label, &command.required_extensions)
 }
 
 /// Compile probes from extension manifests only. This is deliberately crate
