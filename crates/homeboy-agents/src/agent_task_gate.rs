@@ -782,6 +782,35 @@ pub struct AgentTaskGateBaselineComparison {
     /// carries that reason forward. Conclusive results leave it `None`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub diagnostic: Option<String>,
+    /// Machine-readable attribution of the candidate's failures against the
+    /// immutable baseline: whether the candidate broke the gate or the gate
+    /// was already red, and which failure identities are inherited or new.
+    /// Present only when the baseline run produced a conclusive comparison.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub failure_attribution: Option<AgentTaskGateFailureAttribution>,
+}
+
+/// Who owns a failing gate once it has been reproduced on the immutable base.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum AgentTaskGateFailureOrigin {
+    /// The candidate introduced at least one failure the baseline does not have.
+    CandidateBrokeGate,
+    /// Every candidate failure already exists on the baseline.
+    GateAlreadyRedOnBaseline,
+}
+
+/// Per-failure attribution recorded in the gate receipt so an operator can
+/// tell inherited breakage from candidate regressions without reading logs.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct AgentTaskGateFailureAttribution {
+    pub classification: AgentTaskGateFailureOrigin,
+    /// Candidate failures that also fail on the baseline.
+    #[serde(default)]
+    pub inherited_failures: Vec<String>,
+    /// Candidate failures absent from the baseline. These block promotion.
+    #[serde(default)]
+    pub new_failures: Vec<String>,
 }
 
 /// The durable outcome of replaying a candidate gate against its immutable base.

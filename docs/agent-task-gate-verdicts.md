@@ -9,9 +9,21 @@ Identical admissions reuse durable baseline observations for the same base and
 gate inputs; placements do not share observations.
 
 The default `--baseline-policy=new-failures-only` accepts candidate failures that
-are a subset of the base failures. Comparison diagnostics list inherited and new
-failures separately. If test identities cannot be parsed, a red base and red
-candidate are reported as `baseline_red`, not a candidate regression.
+are a subset of the base failures. When a required gate fails, Cook replays it
+on the immutable base automatically (cached per base SHA and gate inputs), so no
+flag is needed to recover from a gate that is already red on trunk.
+
+Each conclusive comparison records `baseline_comparison.failure_attribution` in
+the gate receipt: `classification` is `gate_already_red_on_baseline` when every
+candidate failure also fails on the base, or `candidate_broke_gate` otherwise,
+with the failing identities listed in `inherited_failures` and `new_failures`.
+Only new failures block; inherited failures keep their failed exit code and the
+gate is reported as an accepted inherited failure.
+
+Subset acceptance requires comparable failure identities on both sides. If
+neither run names its failures, a red base and red candidate are reported as
+`baseline_red`. If only one side names failures, the runs are not comparable
+and the candidate failure blocks as `candidate_broke_gate`.
 `--baseline-policy=strict` stops before provider dispatch when a base gate is red.
 Repro gates retain their separate requirement to demonstrate the issue on base.
 
