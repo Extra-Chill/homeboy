@@ -4,6 +4,12 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.488.1] - 2026-11-21
+
+### Fixed
+- route pending Cook feedback to revision attempts
+- host-daemon stages gate files on its shared filesystem
+
 ## [0.488.0] - 2026-11-21
 
 ### Added
