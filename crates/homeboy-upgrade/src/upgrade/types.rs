@@ -131,6 +131,21 @@ pub struct RunnerCheckEntry {
     pub error: Option<String>,
 }
 
+/// What runner refresh did to one login-shell `PATH` install location on the
+/// runner host (#17241, #18725).
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct HomeboyPathBinarySync {
+    pub path: String,
+    /// `repointed`, `replaced`, `current`, `skipped`, or `failed`.
+    pub action: String,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub detail: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub version_before: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub version_after: Option<String>,
+}
+
 /// One systemd user unit on a runner host that runs a Homeboy runner daemon.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct RunnerServiceBinaryEntry {
@@ -420,6 +435,9 @@ pub struct RunnerUpgradeEntry {
     /// Runner-service unit binaries observed after convergence (#15733).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub service_binaries: Vec<RunnerServiceBinaryEntry>,
+    /// Login-shell `PATH` binaries the runner refresh converged (#18725).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub path_binaries: Vec<HomeboyPathBinarySync>,
     pub exit_code: i32,
     pub detail: String,
 }

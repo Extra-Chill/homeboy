@@ -55,6 +55,7 @@ pub(crate) fn converge_runner_binary_with(
         from,
         to: to.clone(),
         detail,
+        path_binaries: Vec::new(),
     };
     // A dev or source build has no published release to install; the runner
     // binary is left alone and not even probed.
@@ -107,11 +108,15 @@ pub(crate) fn converge_runner_binary_with(
         );
     }
     match install() {
-        ControllerReleaseInstall::Installed { identity } => RunnerBinaryConvergence {
+        ControllerReleaseInstall::Installed {
+            identity,
+            path_binaries,
+        } => RunnerBinaryConvergence {
             status: RunnerBinaryConvergenceStatus::Converged,
             from,
             to: identity.or(to),
             detail: None,
+            path_binaries,
         },
         ControllerReleaseInstall::Failed(detail) => {
             report(RunnerBinaryConvergenceStatus::Failed, from, Some(detail))
@@ -179,6 +184,7 @@ mod tests {
             || remote("0.438.2"),
             || ControllerReleaseInstall::Installed {
                 identity: Some("homeboy 0.439.0+abc1234".to_string()),
+                path_binaries: Vec::new(),
             },
         );
         assert_eq!(report.status, RunnerBinaryConvergenceStatus::Converged);
@@ -248,6 +254,7 @@ mod tests {
                     refreshed.set(true);
                     ControllerReleaseInstall::Installed {
                         identity: Some(release().display),
+                        path_binaries: Vec::new(),
                     }
                 },
             );

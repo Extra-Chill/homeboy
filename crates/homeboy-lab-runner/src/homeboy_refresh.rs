@@ -405,6 +405,8 @@ pub(crate) enum ControllerReleaseInstall {
     /// The release is selected and the daemon now runs it.
     Installed {
         identity: Option<String>,
+        /// The runner host's `PATH` binaries the refresh converged (#18725).
+        path_binaries: Vec<HomeboyPathBinarySync>,
     },
     Failed(String),
 }
@@ -439,6 +441,7 @@ pub(crate) fn install_controller_release_with(
     };
     if exit_code == 0 && output.daemon_refreshed {
         return ControllerReleaseInstall::Installed {
+            path_binaries: output.path_binaries.clone(),
             identity: output
                 .identity
                 .as_ref()
@@ -1065,6 +1068,8 @@ fn sync_runner_path_binaries(
             path: "$HOME/.local/bin/homeboy".to_string(),
             action: "failed".to_string(),
             detail: error.attributed_message(),
+            version_before: None,
+            version_after: None,
         }],
     }
 }

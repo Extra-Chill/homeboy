@@ -12,22 +12,11 @@
 //! directory is repointed, and a user-owned regular file that reports an older
 //! Homeboy version is replaced. Anything else is reported and left alone.
 
-use serde::{Deserialize, Serialize};
-
 use homeboy_core::engine::shell::quote_arg;
+pub use homeboy_upgrade::upgrade::HomeboyPathBinarySync;
 
 /// Report-line marker emitted by [`path_binary_sync_script`].
 const REPORT_MARKER: &str = "HOMEBOY_PATH_SYNC";
-
-/// What happened to one `PATH` install location on the runner host.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub struct HomeboyPathBinarySync {
-    pub path: String,
-    /// `repointed`, `replaced`, `current`, `skipped`, or `failed`.
-    pub action: String,
-    #[serde(default, skip_serializing_if = "String::is_empty")]
-    pub detail: String,
-}
 
 /// A bash script converging `$HOME/.local/bin/homeboy` and
 /// `$HOME/.cargo/bin/homeboy` onto `slot`. Absent locations are ignored.
@@ -37,7 +26,7 @@ pub(crate) fn path_binary_sync_script(slot: &str, binaries_dir: &str) -> String 
         r#"set -u
 slot={slot}
 managed={managed}
-report() {{ printf '{REPORT_MARKER}\t%s\t%s\t%s\n' "$1" "$2" "$3"; }}
+report() {{ printf '{REPORT_MARKER}\t%s\t%s\t%s\t%s\t%s\n' "$1" "$2" "$3" "${{4:-}}" "${{5:-}}"; }}
 version_of() {{ "$1" --version 2>/dev/null | awk 'NR==1 && $1=="homeboy" {{ sub(/\+.*/, "", $2); print $2 }}'; }}
 resolve() {{ readlink -f "$1" 2>/dev/null || printf '%s' "$1"; }}
 managed_real=$(resolve "$managed")
@@ -56,12 +45,15 @@ for target in "$HOME/.local/bin/homeboy" "$HOME/.cargo/bin/homeboy"; do
       *) report "$target" skipped "symlink points outside the managed binaries dir"; continue ;;
     esac
     if [ "$resolved" = "$slot_real" ]; then
-      report "$target" current "already points at the promoted slot"
-    elif ln -s "$slot" "$tmp" && mv -f "$tmp" "$target"; then
-      report "$target" repointed "$slot"
+      report "$target" current "already points at the promoted slot" "$slot_version" "$slot_version"
+      continue
+    fi
+    current=$(version_of "$target")
+    if ln -s "$slot" "$tmp" && mv -f "$tmp" "$target"; then
+      report "$target" repointed "$slot" "$current" "$slot_version"
     else
       rm -f "$tmp"
-      report "$target" failed "could not repoint the symlink"
+      report "$target" failed "could not repoint the symlink" "$current"
     fi
   elif [ -f "$target" ]; then
     if [ ! -O "$target" ]; then
@@ -72,14 +64,14 @@ for target in "$HOME/.local/bin/homeboy" "$HOME/.cargo/bin/homeboy"; do
     if [ -z "$current" ]; then
       report "$target" skipped "does not report a Homeboy version"
     elif [ "$current" = "$slot_version" ]; then
-      report "$target" current "already runs $slot_version"
+      report "$target" current "already runs $slot_version" "$current" "$current"
     elif [ "$(printf '%s\n%s\n' "$current" "$slot_version" | sort -V | tail -n 1)" = "$current" ]; then
-      report "$target" skipped "runs $current, newer than the promoted $slot_version"
+      report "$target" skipped "runs $current, newer than the promoted $slot_version" "$current" "$current"
     elif cp "$slot" "$tmp" && chmod 755 "$tmp" && mv -f "$tmp" "$target"; then
-      report "$target" replaced "$current -> $slot_version"
+      report "$target" replaced "$current -> $slot_version" "$current" "$slot_version"
     else
       rm -f "$tmp"
-      report "$target" failed "could not replace the binary"
+      report "$target" failed "could not replace the binary" "$current"
     fi
   fi
 done
@@ -94,14 +86,24 @@ pub(crate) fn parse_path_binary_sync(stdout: &str) -> Vec<HomeboyPathBinarySync>
     stdout
         .lines()
         .filter_map(|line| {
-            let mut fields = line.trim_end_matches('\r').splitn(4, '\t');
+            let mut fields = line.trim_end_matches('\r').splitn(6, '\t');
             if fields.next()? != REPORT_MARKER {
                 return None;
             }
+            let mut optional = || {
+                fields
+                    .next()
+                    .filter(|value| !value.is_empty())
+                    .map(str::to_string)
+            };
+            let path = optional()?;
+            let action = optional()?;
             Some(HomeboyPathBinarySync {
-                path: fields.next()?.to_string(),
-                action: fields.next()?.to_string(),
-                detail: fields.next().unwrap_or_default().to_string(),
+                path,
+                action,
+                detail: optional().unwrap_or_default(),
+                version_before: optional(),
+                version_after: optional(),
             })
         })
         .collect()
@@ -168,6 +170,12 @@ mod tests {
         let reports = run(&home, &slot, &binaries);
         assert_eq!(action(&reports, &local), "repointed");
         assert_eq!(action(&reports, &cargo), "replaced");
+        let cargo_report = reports
+            .iter()
+            .find(|report| report.path == cargo.to_string_lossy())
+            .unwrap();
+        assert_eq!(cargo_report.version_before.as_deref(), Some("0.482.7"));
+        assert_eq!(cargo_report.version_after.as_deref(), Some("0.484.0"));
         assert_eq!(std::fs::read_link(&local).unwrap(), slot);
         assert_eq!(version(&cargo), "homeboy 0.484.0+abc1234");
         assert_eq!(version(&old_slot), "homeboy 0.426.0+abc1234");

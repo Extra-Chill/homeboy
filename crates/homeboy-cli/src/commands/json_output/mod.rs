@@ -13,6 +13,7 @@ type JsonRun = (homeboy::core::Result<Value>, i32);
 const MAX_REFRESH_PROJECTION_BYTES: usize = 8 * 1024;
 const MAX_REFRESH_TEXT_BYTES: usize = 256;
 const MAX_REFRESH_PHASES: usize = 12;
+const MAX_REFRESH_PATH_BINARIES: usize = 4;
 const MAX_RELEASE_STDOUT_BYTES: usize = 16 * 1024;
 const MAX_RELEASE_ARTIFACTS: usize = 16;
 const MAX_RELEASE_URLS: usize = 16;
@@ -652,6 +653,7 @@ fn bounded_refresh_projection(payload: &Value, exit_code: i32, output_file: Opti
             "status": phase.get("status").and_then(Value::as_str).map(bounded_refresh_text),
             "exit_code": phase.get("exit_code").and_then(Value::as_i64),
         })).collect::<Vec<_>>()).unwrap_or_default(),
+        "path_binaries": refresh_path_binaries_summary(payload.get("path_binaries")),
         "failure": refresh_failure_summary(payload.get("failure")),
         "artifacts": artifacts,
         "full_command": "homeboy runner refresh-homeboy <runner> --full",
@@ -751,6 +753,28 @@ fn refresh_readiness_summary(readiness: Option<&Value>) -> Value {
         "daemon_fresh": readiness.get("daemon_fresh").and_then(Value::as_bool),
         "continuation": readiness.get("continuation").and_then(Value::as_str).map(bounded_refresh_text),
     })
+}
+
+/// Each runner-host `PATH` binary the refresh checked (#18725): what happened,
+/// why it was left alone, and the version it ran before and after.
+fn refresh_path_binaries_summary(path_binaries: Option<&Value>) -> Vec<Value> {
+    path_binaries
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .take(MAX_REFRESH_PATH_BINARIES)
+        .map(|binary| {
+            let text = |key: &str| binary.get(key).and_then(Value::as_str).map(bounded_refresh_text);
+            let action = binary.get("action").and_then(Value::as_str);
+            serde_json::json!({
+                "path": text("path"),
+                "action": action.map(bounded_refresh_text),
+                "reason": matches!(action, Some("skipped" | "failed")).then(|| text("detail")).flatten(),
+                "version_before": text("version_before"),
+                "version_after": text("version_after"),
+            })
+        })
+        .collect()
 }
 
 fn refresh_failure_summary(failure: Option<&Value>) -> Value {
@@ -1360,6 +1384,26 @@ mod tests {
                 <= MAX_REFRESH_PROJECTION_BYTES
         );
         assert_eq!(projection["artifacts"]["run_id"], "run-1");
+    }
+
+    #[test]
+    fn refresh_homeboy_projection_keeps_path_binary_results() {
+        let payload = serde_json::json!({
+            "runner_id": "lab",
+            "path_binaries": [
+                { "path": "/home/lab/.local/bin/homeboy", "action": "replaced", "detail": "0.482.7 -> 0.485.1", "version_before": "0.482.7", "version_after": "0.485.1" },
+                { "path": "/home/lab/.cargo/bin/homeboy", "action": "skipped", "detail": "not owned by the runner user" },
+            ],
+        });
+
+        let projection = bounded_refresh_projection(&payload, 0, None);
+        assert_eq!(
+            projection["path_binaries"],
+            serde_json::json!([
+                { "path": "/home/lab/.local/bin/homeboy", "action": "replaced", "reason": null, "version_before": "0.482.7", "version_after": "0.485.1" },
+                { "path": "/home/lab/.cargo/bin/homeboy", "action": "skipped", "reason": "not owned by the runner user", "version_before": null, "version_after": null },
+            ])
+        );
     }
 
     #[test]
