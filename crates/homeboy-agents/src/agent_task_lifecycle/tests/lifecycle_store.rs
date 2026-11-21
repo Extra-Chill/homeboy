@@ -33,7 +33,6 @@ fn cook_state_round_trips_through_fenced_store_transitions() {
     let seed = record(&store, "cook-state", "persisted");
     store.write_record(&seed).unwrap();
     let queued = store.read_record("cook-state").unwrap();
-    assert!(queued.persisted_cook_state().is_some());
     assert_eq!(CookRunState::of(&queued).phase, CookRunPhase::Queued);
     store
         .mutate_record("cook-state", |record| {
@@ -56,7 +55,6 @@ fn cook_state_round_trips_through_fenced_store_transitions() {
     let state = CookRunState::of(&candidate);
     assert_eq!(state.phase, CookRunPhase::CandidateRecoverable);
     assert!(state.terminal && state.recoverable);
-    assert!(candidate.persisted_cook_state().is_some());
     assert_eq!(
         CookRunState::of(&store.read_record("cook-state").unwrap()),
         state
