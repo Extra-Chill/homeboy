@@ -4,6 +4,20 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.483.0] - 2026-11-21
+
+### Added
+- admit local gates through visible host-wide capacity queue
+
+### Changed
+- one BuildIdentity parser for version/commit compare
+
+### Fixed
+- wait for queued Cook reports before settling steps
+- safely reclaim unrecorded worktrees and missing-path records
+- expose admitted regate jobs and pre-gate failures
+- regate gate-failed candidates and accept regate gate budgets
+
 ## [0.482.13] - 2026-11-21
 
 ### Changed
