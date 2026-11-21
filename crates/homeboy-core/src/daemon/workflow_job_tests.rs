@@ -18,6 +18,94 @@ mod notification_queue_tests;
 mod notification_tests;
 
 #[test]
+fn workflow_job_stall_watchdog_reports_and_only_settles_proven_runs() {
+    for (resolved, age, expected_action) in [
+        (
+            WorkflowRunOutcome::Settled {
+                outcome: "failed".into(),
+                reason: Some("budget_exhausted".into()),
+            },
+            1_801_000,
+            Some("settled as failed"),
+        ),
+        (
+            WorkflowRunOutcome::Pending,
+            1_801_000,
+            Some("reported only"),
+        ),
+        (
+            WorkflowRunOutcome::Unknown,
+            1_801_000,
+            Some("reported only"),
+        ),
+        (WorkflowRunOutcome::Pending, 1_000, None),
+    ] {
+        with_isolated_home(|home| {
+            let mut manifest: homeboy_extension_contract::ExtensionManifest = serde_json::from_value(json!({
+                "name": "Offline transport", "version": "1.0.0",
+                "notification_transports": [{
+                    "schema": homeboy_extension_contract::notification_transport_config::NOTIFICATION_TRANSPORT_SCHEMA,
+                    "id": "offline.test", "command": ["false"]
+                }]
+            })).unwrap();
+            manifest.id = "offline-test".into();
+            crate::extension::catalog::save_manifest(&manifest).unwrap();
+            let store = JobStore::open_without_reconciliation(
+                &home.path().join(crate::paths::OBSERVATION_DB_FILENAME),
+            )
+            .unwrap();
+            let mut request = request(
+                json!({
+                    "schema": "homeboy/workflow/v1", "id": "watchdog",
+                    "steps": [{"id": "cook", "foreach": [1], "cook": {"prompt": "fix {{item}}"}}]
+                }),
+                home.path(),
+            );
+            request.notification_route = Some(
+                crate::notification_route::NotificationRoute::new("offline.test", "thread")
+                    .unwrap(),
+            );
+            let outcome = resolved.clone();
+            register_workflow_run_outcome_resolver(Arc::new(move |_| outcome.clone()));
+            register_workflow_run_progress_resolver(Arc::new(|_| None));
+            let id = admit(&store, &request);
+            let (state, commands) = advance(
+                &request.definition,
+                &request.initial_state(),
+                &Event::Start,
+                now_ms(),
+            );
+            commit_without_start(&request, id, &state, &commands, &store);
+            let key = state.steps["cook"].items[0].key.as_ref().unwrap();
+            let child = store.controller_job_for_key(key).unwrap();
+            store.claim_controller_execution(child.id, false).unwrap();
+            let now = now_ms() + age;
+            stall_watchdog::observe_stalls(&store, now, Duration::from_secs(1800)).unwrap();
+            let pending = crate::notify_outbox::pending_entries();
+            assert_eq!(pending.len(), usize::from(expected_action.is_some()));
+            if let Some(action) = expected_action {
+                assert!(serde_json::to_string(&pending[0]).unwrap().contains(action));
+            }
+            stall_watchdog::observe_stalls(&store, now, Duration::from_secs(1800)).unwrap();
+            assert_eq!(crate::notify_outbox::pending_entries().len(), pending.len());
+            if matches!(resolved, WorkflowRunOutcome::Settled { .. }) {
+                assert_eq!(store.get(child.id).unwrap().status, JobStatus::Failed);
+                // Consume the normal terminal observation through the public
+                // workflow driver, not a watchdog-specific checkpoint writer.
+                crate::daemon::start_controller_job(id, &store).unwrap();
+                wait_terminal(&store, id, 20);
+                let view = workflow_status(&store, &request.instance).unwrap();
+                assert_eq!(view["steps"]["cook"]["items"][0]["outcome"], "failed");
+            } else {
+                assert_eq!(store.get(child.id).unwrap().status, JobStatus::Running);
+                let view = workflow_status(&store, &request.instance).unwrap();
+                assert_eq!(view["steps"]["cook"]["items"][0]["phase"], "running");
+            }
+        });
+    }
+}
+
+#[test]
 fn workflow_job_errors_preserve_redacted_io_and_lock_diagnostics() {
     use crate::daemon::step_job::StepJobDriver;
 

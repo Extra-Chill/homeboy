@@ -46,6 +46,10 @@ const OUTPUT_FILE: &str = "output.json";
 const MAX_OUTPUT_BYTES: u64 = 256 * 1024;
 const POLL: Duration = Duration::from_millis(500);
 
+#[path = "workflow_stall_watchdog.rs"]
+mod stall_watchdog;
+pub(crate) use stall_watchdog::stall_watchdog;
+
 fn step_terminal_consumer() -> &'static RwLock<Option<String>> {
     static CONSUMER: OnceLock<RwLock<Option<String>>> = OnceLock::new();
     CONSUMER.get_or_init(|| RwLock::new(None))

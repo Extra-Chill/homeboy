@@ -2130,6 +2130,11 @@ fn orchestration_tick_loop(
                 job_store.reconcile_controller_completions().map(|_| ())
             });
         });
+        isolated_tick(|| {
+            observed_daemon_pass("stall_watchdog", || {
+                workflow_job::stall_watchdog(&job_store)
+            });
+        });
         // A failed or restart-looping runner unit announces itself (#18538).
         isolated_tick(|| {
             observed_daemon_pass("runner_health", || {
