@@ -375,6 +375,7 @@ mod tests {
             daemon_previous_version: None,
             daemon_new_version: None,
             service_binaries: Vec::new(),
+            path_binaries: Vec::new(),
             exit_code: 0,
             detail: "extension sync failed".to_string(),
         });
@@ -435,6 +436,7 @@ mod tests {
             daemon_previous_version: None,
             daemon_new_version: None,
             service_binaries: Vec::new(),
+            path_binaries: Vec::new(),
             exit_code: 1,
             detail: "runner unavailable".to_string(),
         });
@@ -468,6 +470,7 @@ mod tests {
             daemon_previous_version: None,
             daemon_new_version: None,
             service_binaries: Vec::new(),
+            path_binaries: Vec::new(),
             exit_code: 0,
             detail: "runner remains degraded".to_string(),
         });
@@ -501,6 +504,7 @@ mod tests {
             daemon_previous_version: None,
             daemon_new_version: None,
             service_binaries: Vec::new(),
+            path_binaries: Vec::new(),
             exit_code: 0,
             detail: "upgraded".to_string(),
         });

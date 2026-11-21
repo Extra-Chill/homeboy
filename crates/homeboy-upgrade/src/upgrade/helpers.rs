@@ -4626,6 +4626,7 @@ mod convergence_tests {
             daemon_previous_version: None,
             daemon_new_version: None,
             service_binaries: Vec::new(),
+            path_binaries: Vec::new(),
             exit_code: 0,
             detail: String::new(),
         }

@@ -687,9 +687,10 @@ pub fn upgrade_runner_with_executor(
     converge: &mut impl FnMut(&Runner, &BuildIdentity) -> RunnerBinaryStep,
 ) -> RunnerUpgradeEntry {
     let RunnerBinaryStep {
-        convergence,
+        mut convergence,
         homeboy_path,
     } = converge(runner, target);
+    let path_binaries = std::mem::take(&mut convergence.path_binaries);
     let previous_version = convergence
         .from
         .as_deref()
@@ -784,6 +785,7 @@ pub fn upgrade_runner_with_executor(
         daemon_previous_version: None,
         daemon_new_version: None,
         service_binaries: Vec::new(),
+        path_binaries,
         exit_code: i32::from(!success),
         detail: binary,
     }
@@ -898,10 +900,19 @@ mod upgrade_runner_tests {
                 || remote("0.400.0"),
                 || ControllerReleaseInstall::Installed {
                     identity: Some(INSTALLED.to_string()),
+                    path_binaries: vec![crate::HomeboyPathBinarySync {
+                        path: "/home/lab/.local/bin/homeboy".to_string(),
+                        action: "replaced".to_string(),
+                        detail: "0.400.0 -> 0.401.0".to_string(),
+                        version_before: Some("0.400.0".to_string()),
+                        version_after: Some("0.401.0".to_string()),
+                    }],
                 },
             )
         });
         assert!(entry.success && entry.upgraded, "{entry:?}");
+        assert_eq!(entry.path_binaries.len(), 1, "{entry:?}");
+        assert_eq!(entry.path_binaries[0].action, "replaced");
         assert_eq!(entry.previous_version.as_deref(), Some("0.400.0"));
         assert_eq!(entry.new_version.as_deref(), Some("0.401.0"));
         assert_eq!(entry.homeboy_path, "/slot/homeboy");

@@ -455,6 +455,9 @@ pub struct RunnerBinaryConvergence {
     pub to: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub detail: Option<String>,
+    /// The runner host's `PATH` binaries the install's refresh converged.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub path_binaries: Vec<crate::HomeboyPathBinarySync>,
 }
 
 #[derive(Debug, Clone, Serialize)]
