@@ -362,7 +362,25 @@ impl BaselineFacts {
     }
 
     fn apply(&self, gate: &mut AgentTaskGateReport, base_sha: &str, diagnostic: Option<String>) {
-        let candidate = Self::from_gate(gate);
+        self.apply_candidate(
+            gate,
+            base_sha,
+            diagnostic,
+            &Self::from_gate(gate),
+            Vec::new(),
+            false,
+        );
+    }
+
+    fn apply_candidate(
+        &self,
+        gate: &mut AgentTaskGateReport,
+        base_sha: &str,
+        diagnostic: Option<String>,
+        candidate: &Self,
+        flaky: Vec<String>,
+        reproduced_named: bool,
+    ) {
         let inherited: Vec<_> = candidate
             .failure_records
             .iter()
@@ -384,11 +402,12 @@ impl BaselineFacts {
         let opaque = self.failure_records.is_empty() && candidate.failure_records.is_empty();
         let comparable_records =
             !self.failure_records.is_empty() && !candidate.failure_records.is_empty();
-        let matches = self.status == AgentTaskGateStatus::Failed
-            && gate.status == AgentTaskGateStatus::Failed
-            && (opaque || (comparable_records && new.is_empty()));
-        let diagnostic = Some(format!("{}; inherited failures: {:?}; new failures: {:?}; base failures: {:?}; base output tail: {}",
-            diagnostic.unwrap_or_default(), inherited, new, self.failure_records, self.output_tail));
+        let matches = gate.status == AgentTaskGateStatus::Failed
+            && ((self.status == AgentTaskGateStatus::Failed
+                && (opaque || (comparable_records && new.is_empty())))
+                || (reproduced_named && new.is_empty()));
+        let diagnostic = Some(format!("{}; inherited failures: {:?}; new failures: {:?}; flaky failures: {:?}; base failures: {:?}; base output tail: {}",
+            diagnostic.unwrap_or_default(), inherited, new, flaky, self.failure_records, self.output_tail));
         gate.baseline_comparison = Some(AgentTaskGateBaselineComparison {
             base_ref: base_sha.to_string(),
             exit_code: self.exit_code,
@@ -409,6 +428,7 @@ impl BaselineFacts {
                     },
                     inherited_failures: inherited,
                     new_failures: new,
+                    flaky_failures: flaky,
                 }
             }),
         });
@@ -416,6 +436,167 @@ impl BaselineFacts {
             gate.accept_inherited_failure();
         }
     }
+}
+
+/// Execute exactly one comparison probe under the recorded invocation contract.
+fn replay_comparison_gate(
+    gate: &AgentTaskGateReport,
+    workspace: &std::path::Path,
+    index: usize,
+    timeout: std::time::Duration,
+    component_id: Option<&str>,
+) -> Result<AgentTaskGateReport> {
+    let run_dir = homeboy_core::engine::run_dir::RunDir::create()?;
+    let result = (|| {
+        let runtime = homeboy_core::engine::invocation::InvocationGuard::acquire(
+            &run_dir,
+            &homeboy_core::engine::invocation::InvocationRequirements::default(),
+        )?;
+        let artifacts = gate
+            .environment
+            .package_artifact_replay_requirements()
+            .ok_or_else(|| {
+                Error::internal_unexpected("comparison probe has no package artifact contract")
+            })?;
+        let policy = replay_gate_policy(&gate.environment, component_id);
+        let replay = match gate.invocation()? {
+            AgentTaskGateInvocation::LegacyShell { command, .. } => run_gate_command_with_timeout(
+                workspace,
+                index,
+                &command,
+                gate.visibility,
+                gate.reveal_policy,
+                &runtime.context().tmp_dir,
+                timeout,
+                &policy,
+                &artifacts,
+            ),
+            AgentTaskGateInvocation::DeclaredTest { plan } => run_declared_test_with_timeout(
+                workspace,
+                index,
+                &plan,
+                gate.visibility,
+                gate.reveal_policy,
+                &runtime.context().tmp_dir,
+                &policy,
+                &artifacts,
+            ),
+        }?;
+        if replay.invocation()?.identity_digest()? != gate.invocation()?.identity_digest()?
+            || replay.environment.package_artifacts != gate.environment.package_artifacts
+        {
+            return Err(Error::internal_unexpected(
+                "comparison probe changed gate inputs",
+            ));
+        }
+        Ok(replay)
+    })();
+    run_dir.finish(result.is_ok());
+    result
+}
+
+fn refine_gate_comparison(
+    baseline: &BaselineFacts,
+    gate: &mut AgentTaskGateReport,
+    candidate_retry: &AgentTaskGateReport,
+    baseline_retry: &AgentTaskGateReport,
+    base_sha: &str,
+) {
+    let candidate = BaselineFacts::from_gate(gate);
+    let candidate_second = BaselineFacts::from_gate(candidate_retry);
+    let mut baseline_second = BaselineFacts::from_gate(baseline_retry);
+    if !candidate_second.comparable() || !baseline_second.comparable() {
+        if let Some(comparison) = &mut gate.baseline_comparison {
+            comparison.result = AgentTaskGateDifferentialResult::Inconclusive;
+            comparison.failure_attribution = None;
+            comparison.diagnostic =
+                Some("bounded flake replay did not produce comparable results".to_string());
+        }
+        return;
+    }
+    let mut flaky = Vec::new();
+    for (first, second) in [
+        (
+            &candidate.failure_records,
+            &candidate_second.failure_records,
+        ),
+        (&baseline.failure_records, &baseline_second.failure_records),
+    ] {
+        flaky.extend(
+            first
+                .iter()
+                .filter(|failure| !second.contains(failure))
+                .cloned(),
+        );
+        flaky.extend(
+            second
+                .iter()
+                .filter(|failure| !first.contains(failure))
+                .cloned(),
+        );
+    }
+    flaky.sort();
+    flaky.dedup();
+    // An outright recovery is a passing gate, but retain the original failure
+    // evidence and an explicit receipt: never silently turn red into green.
+    if candidate_retry.status == AgentTaskGateStatus::Succeeded {
+        let evidence = gate.failure_evidence.clone();
+        let mut recovered = candidate_retry.clone();
+        recovered.flaky = evidence;
+        recovered.baseline_comparison = Some(AgentTaskGateBaselineComparison {
+            base_ref: base_sha.to_string(),
+            exit_code: baseline.exit_code,
+            failure_fingerprint: baseline.failure_fingerprint.clone(),
+            matches_candidate_failure: false,
+            result: AgentTaskGateDifferentialResult::CandidateImprovement,
+            diagnostic: Some(
+                "candidate passed bounded comparison replay; flaky-passing gate".to_string(),
+            ),
+            failure_attribution: Some(AgentTaskGateFailureAttribution {
+                classification: AgentTaskGateFailureOrigin::GateAlreadyRedOnBaseline,
+                inherited_failures: Vec::new(),
+                new_failures: Vec::new(),
+                flaky_failures: flaky,
+            }),
+        });
+        *gate = recovered;
+        return;
+    }
+    // Do not excuse a named/opaque mismatch. A failed run with no identities
+    // cannot establish that a named failure disappeared.
+    let named = !candidate.failure_records.is_empty()
+        && !candidate_second.failure_records.is_empty()
+        && (!baseline.failure_records.is_empty()
+            || !baseline_second.failure_records.is_empty()
+            || (baseline.status == AgentTaskGateStatus::Succeeded
+                && baseline_second.status == AgentTaskGateStatus::Succeeded));
+    if !named {
+        if let Some(attribution) = gate
+            .baseline_comparison
+            .as_mut()
+            .and_then(|comparison| comparison.failure_attribution.as_mut())
+        {
+            attribution.flaky_failures = flaky;
+        }
+        return;
+    }
+    let mut stable_candidate = candidate;
+    stable_candidate
+        .failure_records
+        .retain(|failure| candidate_second.failure_records.contains(failure));
+    baseline_second
+        .failure_records
+        .extend(baseline.failure_records.iter().cloned());
+    baseline_second.failure_records.sort();
+    baseline_second.failure_records.dedup();
+    baseline_second.apply_candidate(
+        gate,
+        base_sha,
+        Some("bounded two-sided flake comparison".to_string()),
+        &stable_candidate,
+        flaky,
+        true,
+    );
 }
 
 /// Observe all declared gates before paid provider work. The cache includes
@@ -681,13 +862,23 @@ pub(crate) fn compare_gate_failures_to_verified_base(
                 if facts.comparable()
                     && facts.package_artifacts == gate.environment.package_artifacts
                 {
+                    let mut comparison = gate.clone();
                     facts.apply(
-                        gate,
+                        &mut comparison,
                         base_sha,
                         Some(format!("reused recorded baseline {key}")),
                     );
-                    compared += 1;
-                    checkpoint(compared, unresolved)?;
+                    // A cached regression still needs the bounded two-sided
+                    // probe. Do not let its receipt skip that work below.
+                    if comparison
+                        .baseline_comparison
+                        .as_ref()
+                        .is_some_and(|result| result.matches_candidate_failure)
+                    {
+                        *gate = comparison;
+                        compared += 1;
+                        checkpoint(compared, unresolved)?;
+                    }
                 }
             }
         }
@@ -861,6 +1052,49 @@ pub(crate) fn compare_gate_failures_to_verified_base(
                     Ok(baseline) => {
                         let facts = BaselineFacts::from_gate(&baseline);
                         facts.apply(gate, base_sha, None);
+                        if gate.baseline_comparison.as_ref().is_some_and(|comparison| {
+                            comparison.result
+                                == AgentTaskGateDifferentialResult::CandidateRegression
+                        }) {
+                            let retry: Result<(AgentTaskGateReport, AgentTaskGateReport)> =
+                                (|| {
+                                    let candidate_retry = replay_comparison_gate(
+                                        gate,
+                                        gate_workspace,
+                                        index + 1,
+                                        timeout,
+                                        component_id,
+                                    )?;
+                                    let baseline_retry = replay_comparison_gate(
+                                        gate,
+                                        baseline_gate_workspace,
+                                        index + 1,
+                                        timeout,
+                                        component_id,
+                                    )?;
+                                    Ok((candidate_retry, baseline_retry))
+                                })();
+                            match retry {
+                                Ok((candidate_retry, baseline_retry)) => {
+                                    refine_gate_comparison(
+                                        &facts,
+                                        gate,
+                                        &candidate_retry,
+                                        &baseline_retry,
+                                        base_sha,
+                                    );
+                                }
+                                Err(error) => {
+                                    if let Some(comparison) = &mut gate.baseline_comparison {
+                                        comparison.result =
+                                            AgentTaskGateDifferentialResult::Inconclusive;
+                                        comparison.failure_attribution = None;
+                                        comparison.diagnostic =
+                                            Some(format!("bounded flake replay failed: {error}"));
+                                    }
+                                }
+                            }
+                        }
                         let key = baseline_record_key(gate, base_sha, component_id)?;
                         let payload = serde_json::to_value(&facts).map_err(|error| {
                             Error::internal_io(
@@ -1373,6 +1607,141 @@ mod tests {
         let mut unnamed = run("compile error");
         base.apply(&mut unnamed, "base", None);
         assert_eq!(unnamed.status, AgentTaskGateStatus::Failed);
+    }
+
+    #[test]
+    fn bounded_comparison_separates_stable_new_inherited_and_flaky_failures() {
+        let gate = |names: &[&str], exit_code| {
+            let mut gate = AgentTaskGateReport::new(
+                "probe",
+                crate::agent_task_gate::legacy_gate_argv("tests"),
+                exit_code,
+                names
+                    .iter()
+                    .map(|name| format!("test {name} ... FAILED\n"))
+                    .collect::<String>(),
+                "",
+                None,
+                HomeboyGateVisibility::Visible,
+                AgentTaskGateRevealPolicy::FullEvidence,
+                AgentTaskGateEnvironment::default(),
+            );
+            if exit_code != 0 {
+                gate.failure_evidence = Some(AgentTaskGateFailureEvidence {
+                    classification: AgentTaskGateFailureClassification::CandidateCode,
+                    summary: "tests failed".into(),
+                    command: "tests".into(),
+                    exit_code,
+                    stdout_tail: gate.stdout.clone(),
+                    stderr_tail: String::new(),
+                    failed_tests: Vec::new(),
+                    agent_feedback: String::new(),
+                    diagnostics: Vec::new(),
+                });
+            }
+            gate
+        };
+        let base = BaselineFacts::from_gate(&gate(&["a", "b"], 1));
+        let mut candidate = gate(&["a", "b", "c"], 1);
+        base.apply(&mut candidate, "base", None);
+        refine_gate_comparison(
+            &base,
+            &mut candidate,
+            &gate(&["a", "c"], 1),
+            &gate(&["a"], 1),
+            "base",
+        );
+        let attribution = candidate
+            .baseline_comparison
+            .as_ref()
+            .unwrap()
+            .failure_attribution
+            .as_ref()
+            .unwrap();
+        assert_eq!(attribution.new_failures, vec!["test:c"]);
+        assert_eq!(attribution.inherited_failures, vec!["test:a"]);
+        assert_eq!(attribution.flaky_failures, vec!["test:b"]);
+        assert_eq!(candidate.status, AgentTaskGateStatus::Failed);
+
+        // A candidate-only intermittent failure does not block promotion.
+        let mut candidate = gate(&["a", "c"], 1);
+        base.apply(&mut candidate, "base", None);
+        refine_gate_comparison(
+            &base,
+            &mut candidate,
+            &gate(&["a"], 1),
+            &gate(&["a"], 1),
+            "base",
+        );
+        assert_eq!(
+            candidate.status,
+            AgentTaskGateStatus::AcceptedInheritedFailure
+        );
+        assert!(candidate
+            .baseline_comparison
+            .unwrap()
+            .failure_attribution
+            .unwrap()
+            .new_failures
+            .is_empty());
+
+        // A failure first observed on the baseline's second run belongs to
+        // the baseline union, even if it reproduces on the candidate.
+        let mut candidate = gate(&["a", "c"], 1);
+        base.apply(&mut candidate, "base", None);
+        refine_gate_comparison(
+            &base,
+            &mut candidate,
+            &gate(&["a", "c"], 1),
+            &gate(&["a", "c"], 1),
+            "base",
+        );
+        assert_eq!(
+            candidate.status,
+            AgentTaskGateStatus::AcceptedInheritedFailure
+        );
+        let attribution = candidate
+            .baseline_comparison
+            .unwrap()
+            .failure_attribution
+            .unwrap();
+        assert!(attribution.new_failures.is_empty());
+        assert!(attribution.flaky_failures.contains(&"test:c".to_string()));
+
+        // Opaque failures that recover are visibly flaky-passing.
+        let mut candidate = gate(&[], 1);
+        base.apply(&mut candidate, "base", None);
+        refine_gate_comparison(
+            &base,
+            &mut candidate,
+            &gate(&[], 0),
+            &gate(&["a"], 1),
+            "base",
+        );
+        assert_eq!(candidate.status, AgentTaskGateStatus::Succeeded);
+        assert!(candidate.flaky.is_some());
+        assert!(candidate
+            .baseline_comparison
+            .unwrap()
+            .diagnostic
+            .unwrap()
+            .contains("flaky-passing"));
+
+        // A timeout cannot erase a real regression.
+        let mut candidate = gate(&["a", "c"], 1);
+        base.apply(&mut candidate, "base", None);
+        refine_gate_comparison(
+            &base,
+            &mut candidate,
+            &gate(&["a"], 124),
+            &gate(&["a"], 1),
+            "base",
+        );
+        assert_eq!(candidate.status, AgentTaskGateStatus::Failed);
+        assert_eq!(
+            candidate.baseline_comparison.unwrap().result,
+            AgentTaskGateDifferentialResult::Inconclusive
+        );
     }
 
     #[test]
