@@ -43,13 +43,15 @@ pub(crate) enum RunnerTransport {
     Unavailable,
 }
 
-/// Lab runner file transfer has one channel: direct SSH to the runner's
-/// configured `server_id`. A connected daemon session does not change it.
+/// Lab runner file transfer is direct SSH to the runner's configured
+/// `server_id`; a connected daemon session does not change it. The host
+/// daemon runner shares this machine's filesystem, so its transfers are local.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum RunnerFileTransferCapability {
     DirectSsh {
         server_id: String,
     },
+    CoLocated,
     Unsupported {
         transport: &'static str,
         reason: &'static str,
@@ -60,10 +62,14 @@ pub(crate) enum RunnerFileTransferCapability {
 pub(crate) struct RunnerFileTransfer {
     runner_id: String,
     client: SshClient,
+    transport: &'static str,
 }
 
 impl RunnerFileTransferCapability {
     pub(crate) fn for_runner(runner: &Runner) -> RunnerFileTransferCapability {
+        if crate::host_runner::is_host(runner) {
+            return RunnerFileTransferCapability::CoLocated;
+        }
         match (&runner.kind, &runner.server_id) {
             (RunnerKind::Ssh, Some(server_id)) => RunnerFileTransferCapability::DirectSsh {
                 server_id: server_id.clone(),
@@ -79,30 +85,27 @@ impl RunnerFileTransferCapability {
             },
         }
     }
-
-    pub(crate) fn ensure_supported(&self, runner_id: &str) -> Result<()> {
-        match self {
-            RunnerFileTransferCapability::DirectSsh { .. } => Ok(()),
-            RunnerFileTransferCapability::Unsupported { transport, reason } => Err(
-                unsupported_file_transfer_error(runner_id, transport, reason),
-            ),
-        }
-    }
 }
 
 impl RunnerFileTransfer {
     pub(crate) fn for_runner(runner: &Runner) -> Result<RunnerFileTransfer> {
-        let capability = RunnerFileTransferCapability::for_runner(runner);
-        capability.ensure_supported(&runner.id)?;
-        let RunnerFileTransferCapability::DirectSsh { server_id } = capability else {
-            unreachable!("checked above");
+        let (mut client, transport) = match RunnerFileTransferCapability::for_runner(runner) {
+            RunnerFileTransferCapability::DirectSsh { server_id } => (
+                SshClient::from_server(&server::load(&server_id)?, &server_id)?,
+                FILE_TRANSFER_TRANSPORT,
+            ),
+            RunnerFileTransferCapability::CoLocated => (SshClient::local(), "co_located"),
+            RunnerFileTransferCapability::Unsupported { transport, reason } => {
+                return Err(unsupported_file_transfer_error(
+                    &runner.id, transport, reason,
+                ));
+            }
         };
-        let server = server::load(&server_id)?;
-        let mut client = SshClient::from_server(&server, &server_id)?;
         client.env.extend(runner.env.clone());
         Ok(RunnerFileTransfer {
             runner_id: runner.id.clone(),
             client,
+            transport,
         })
     }
 
@@ -289,7 +292,7 @@ impl RunnerFileTransfer {
             operation,
             remote_path,
             stderr,
-            FILE_TRANSFER_TRANSPORT,
+            self.transport,
         )
     }
 }
@@ -732,14 +735,40 @@ mod tests {
     #[test]
     fn ssh_runner_without_server_id_cannot_transfer_files() {
         let runner = runner(RunnerKind::Ssh);
-        let capability = RunnerFileTransferCapability::for_runner(&runner);
-        let error = capability
-            .ensure_supported(&runner.id)
-            .expect_err("no SSH authority");
+        let error = RunnerFileTransfer::for_runner(&runner)
+            .err()
+            .expect("no SSH authority");
 
         assert_eq!(error.code, ErrorCode::RunnerLabTransportFailure);
         assert_eq!(error.retryable, Some(false));
         assert_eq!(error.details["supported_transports"], json!(["direct_ssh"]));
+    }
+
+    #[test]
+    fn host_daemon_runner_stages_files_on_the_shared_filesystem() {
+        // The host daemon runs on the controller's machine; staging a gate's
+        // files there is a verified local copy, not an SSH transfer.
+        let mut host = runner(RunnerKind::Local);
+        host.id = crate::host_runner::ID.to_string();
+        assert_eq!(
+            RunnerFileTransferCapability::for_runner(&host),
+            RunnerFileTransferCapability::CoLocated
+        );
+        let transfer = RunnerFileTransfer::for_runner(&host).expect("co-located transfer");
+        let dir = tempfile::tempdir().unwrap();
+        let source = dir.path().join("request.json");
+        std::fs::write(&source, b"{\"gate\":true}").unwrap();
+        let staged = dir.path().join("runner/inputs/request.json");
+        transfer
+            .ensure_directory(&staged.parent().unwrap().display().to_string())
+            .unwrap();
+        transfer
+            .upload_file(&source.display().to_string(), &staged.display().to_string())
+            .unwrap();
+        assert_eq!(std::fs::read(&staged).unwrap(), b"{\"gate\":true}");
+
+        let builtin = runner(RunnerKind::Local);
+        assert!(RunnerFileTransfer::for_runner(&builtin).is_err());
     }
 
     #[cfg(unix)]

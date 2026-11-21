@@ -265,6 +265,20 @@ impl SshClient {
         })
     }
 
+    /// A client for this machine: every command and file operation runs
+    /// locally, the same mode a localhost server selects.
+    pub fn local() -> Self {
+        Self {
+            host: "localhost".to_string(),
+            user: String::new(),
+            port: 22,
+            identity_file: None,
+            auth: None,
+            is_local: true,
+            env: Default::default(),
+        }
+    }
+
     /// Apply bounded execution only to a sequence of short diagnostic probes.
     /// Ordinary runner commands retain their existing execution semantics.
     pub fn scoped_probe_limits(
