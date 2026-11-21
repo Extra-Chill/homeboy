@@ -330,11 +330,7 @@ fn explicit_wait_and_runner_owned_cooks_return_terminal_failure() {
         let started_file = context.root().join("provider-started");
         let mut command = context.command(TestBinary::HomeboyFixture);
         command
-            // Local admission otherwise polls real host load until it cools;
-            // that wait dominates this foreground/terminal contract test.
-            // Use the existing CI load seam, not a shorter execution deadline.
             .env("GITHUB_ACTIONS", "true")
-            .env("HOMEBOY_TEST_LOAD_AVERAGES", "0,0,0")
             .env("HOMEBOY_FIXTURE_PROVIDER_STARTED_FILE", &started_file)
             .env("HOMEBOY_FIXTURE_PROVIDER_DELAY_MS", "1000");
         if runner_owned {
@@ -957,7 +953,6 @@ fn foreground_local_cook_survives_client_termination_with_artifacts() {
     client
         .env("HOMEBOY_FIXTURE_PROVIDER_RELEASE_SOCKET", &release_socket)
         .env("GITHUB_ACTIONS", "true")
-        .env("HOMEBOY_TEST_LOAD_AVERAGES", "0,0,0")
         .args([
             "--wait",
             "--placement",
@@ -1124,41 +1119,30 @@ fn attached_nonlocal_cook_observes_terminal_execution() {
     )
     .expect("disable host-capacity admission for fixture worktree");
     let mut cook = context.command(TestBinary::HomeboyFixture);
-    // The resource policy's local-admission gate reads real host load average
-    // by default. This host runs other real ambient work (this is a shared
-    // VPS, not a clean CI runner), so under sustained load the gate classifies
-    // the machine as "warm" and never falls back to local execution — the
-    // attached Cook stays `queued`/`blocked_runner_unavailable` until the
-    // hermetic subprocess budget kills it (homeboy#14984). Pin a quiet load
-    // reading the same way `no_runner_lab_or_local_cook_reaches_local_execution`
-    // already does, so this test's outcome depends on Cook's own admission
-    // logic instead of on how busy the host happens to be right now.
-    cook.env("GITHUB_ACTIONS", "true")
-        .env("HOMEBOY_TEST_LOAD_AVERAGES", "0,0,0")
-        .args([
-            "agent-task",
-            "cook",
-            "--wait",
-            "--run-id",
-            "attached-cook-terminal",
-            "--repo",
-            component_id,
-            "--backend",
-            "fixture",
-            "--prompt",
-            "complete while attached",
-            "--base",
-            "main",
-            "--cwd",
-            task_worktree.to_str().expect("task worktree path"),
-            "--to-worktree",
-            task_worktree.to_str().expect("task worktree path"),
-            "--verify",
-            "true",
-            "--max-attempts",
-            "1",
-            "--no-finalize",
-        ]);
+    cook.env("GITHUB_ACTIONS", "true").args([
+        "agent-task",
+        "cook",
+        "--wait",
+        "--run-id",
+        "attached-cook-terminal",
+        "--repo",
+        component_id,
+        "--backend",
+        "fixture",
+        "--prompt",
+        "complete while attached",
+        "--base",
+        "main",
+        "--cwd",
+        task_worktree.to_str().expect("task worktree path"),
+        "--to-worktree",
+        task_worktree.to_str().expect("task worktree path"),
+        "--verify",
+        "true",
+        "--max-attempts",
+        "1",
+        "--no-finalize",
+    ]);
     let output = bounded_output(cook);
     let stdout = String::from_utf8_lossy(&output.stdout);
     assert!(
@@ -1186,7 +1170,6 @@ fn no_runner_lab_or_local_cook_reaches_local_execution() {
     let terminal_output = context.root().join("terminal.json");
     let mut cook = context.command(TestBinary::HomeboyFixture);
     cook.env("GITHUB_ACTIONS", "true");
-    cook.env("HOMEBOY_TEST_LOAD_AVERAGES", "0,0,0");
     cook.args([
         "--placement",
         "lab-or-local",
