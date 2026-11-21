@@ -83,6 +83,7 @@ fn prune_workspaces_previews_orphans_without_deleting_by_default() {
         let (synced, _) = crate::workspace::sync::sync_workspace(
             "lab-local-prune-preview",
             sync_options(source.display().to_string()),
+            &crate::WorkspaceControl::default(),
         )
         .expect("sync workspace");
         fs::remove_dir_all(&source).expect("remove source");
@@ -136,11 +137,13 @@ fn prune_workspaces_apply_removes_only_metadata_backed_orphans() {
             let (orphan, _) = crate::workspace::sync::sync_workspace(
                 "lab-local-prune-apply",
                 sync_options(orphan_source.display().to_string()),
+                &crate::WorkspaceControl::default(),
             )
             .expect("sync orphan workspace");
             let (live, _) = crate::workspace::sync::sync_workspace(
                 "lab-local-prune-apply",
                 sync_options(live_source.display().to_string()),
+                &crate::WorkspaceControl::default(),
             )
             .expect("sync live workspace");
             let unmanaged = runner_root
@@ -687,6 +690,7 @@ fn non_agent_task_polling_loss_retains_job_owned_workspace_until_terminal_reconc
         let (synced, _) = sync_workspace(
             "lab-local-review-poll-loss",
             sync_options(source.display().to_string()),
+            &crate::WorkspaceControl::default(),
         )
         .expect("sync review workspace");
 
@@ -759,6 +763,7 @@ fn prune_workspaces_reaps_ttl_expired_lifecycle_workspace_with_live_source() {
         let (synced, _) = crate::workspace::sync::sync_workspace(
             "lab-local-prune-ttl",
             sync_options(source.display().to_string()),
+            &crate::WorkspaceControl::default(),
         )
         .expect("sync workspace");
         let metadata_path = workspace_metadata_file(&synced.remote_path);
@@ -804,6 +809,7 @@ fn prune_workspaces_reaps_stale_materialized_workspace_with_live_source() {
         let (synced, _) = crate::workspace::sync::sync_workspace(
             "lab-local-prune-materialized",
             sync_options(source.display().to_string()),
+            &crate::WorkspaceControl::default(),
         )
         .expect("sync workspace");
 
@@ -848,6 +854,7 @@ fn prune_workspaces_prefers_stale_materialized_lifecycle_when_source_is_missing(
         let (synced, _) = crate::workspace::sync::sync_workspace(
             "lab-local-prune-materialized-missing",
             sync_options(source.display().to_string()),
+            &crate::WorkspaceControl::default(),
         )
         .expect("sync workspace");
         fs::remove_dir_all(&source).expect("remove source");
@@ -894,6 +901,7 @@ fn preserved_failure_lifecycle_is_registered_for_ttl_pruning() {
         let (synced, _) = sync_workspace(
             "lab-local-prune-retained",
             sync_options(source.display().to_string()),
+            &crate::WorkspaceControl::default(),
         )
         .expect("sync workspace");
         let mut lifecycle = synced.resource_lifecycle;
@@ -989,6 +997,7 @@ fn uncertain_handoff_disarms_ttl_pruning() {
         let (synced, _) = sync_workspace(
             "lab-local-prune-handoff",
             sync_options(source.display().to_string()),
+            &crate::WorkspaceControl::default(),
         )
         .expect("sync workspace");
         let mut lifecycle = synced.resource_lifecycle;
@@ -1103,11 +1112,13 @@ fn prune_workspaces_reports_remaining_bytes_and_drain_command_when_limited() {
         crate::workspace::sync::sync_workspace(
             "lab-local-prune-limited",
             sync_options(source_a.display().to_string()),
+            &crate::WorkspaceControl::default(),
         )
         .expect("sync source a");
         crate::workspace::sync::sync_workspace(
             "lab-local-prune-limited",
             sync_options(source_b.display().to_string()),
+            &crate::WorkspaceControl::default(),
         )
         .expect("sync source b");
         fs::remove_dir_all(&source_a).expect("remove source a");
@@ -1163,11 +1174,13 @@ fn prune_workspaces_apply_passes_drain_until_empty() {
         let (workspace_a, _) = crate::workspace::sync::sync_workspace(
             "lab-local-prune-drain",
             sync_options(source_a.display().to_string()),
+            &crate::WorkspaceControl::default(),
         )
         .expect("sync source a");
         let (workspace_b, _) = crate::workspace::sync::sync_workspace(
             "lab-local-prune-drain",
             sync_options(source_b.display().to_string()),
+            &crate::WorkspaceControl::default(),
         )
         .expect("sync source b");
         fs::remove_dir_all(&source_a).expect("remove source a");

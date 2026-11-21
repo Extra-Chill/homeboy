@@ -339,5 +339,6 @@ fn sync(
             validation_dependency_ids: None,
             run_isolation_token: None,
         },
+        &runner::WorkspaceControl::default(),
     )
 }

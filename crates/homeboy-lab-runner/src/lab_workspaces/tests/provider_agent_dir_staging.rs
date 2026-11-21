@@ -5,7 +5,7 @@ use std::path::Path;
 use super::super::provider_agent_dir_staging::{
     is_native_binary_magic, plan_provider_agent_dir_staging,
 };
-use super::super::{sync_extra_lab_workspaces, ExtraLabWorkspace};
+use super::super::{sync_lab_workspace_roots_controlled, ExtraLabWorkspace};
 
 const MACH_O_ARM64: &[u8] = &[0xcf, 0xfa, 0xed, 0xfe, 0x0c, 0x00, 0x00, 0x01];
 
@@ -99,10 +99,11 @@ fn assert_portable_agent_dir_staging(symlink_bin: bool) {
             std::os::unix::fs::symlink(&linked_bin, agent.join("bin")).expect("linked bin");
         }
         let mut mapping = Vec::new();
-        let synced = sync_extra_lab_workspaces(
+        let (_, synced, extra_mapping) = sync_lab_workspace_roots_controlled(
             "agent-dir-staging",
             primary.path().to_str().expect("primary path"),
-            vec![ExtraLabWorkspace {
+            None,
+            &[ExtraLabWorkspace {
                 role: "provider_config".to_string(),
                 path: agent.canonicalize().expect("canonical agent dir"),
                 snapshot_includes: Vec::new(),
@@ -110,9 +111,10 @@ fn assert_portable_agent_dir_staging(symlink_bin: bool) {
                 allow_dirty_lab_workspace: false,
                 source_provenance: None,
             }],
-            &mut mapping,
+            &crate::WorkspaceControl::default(),
         )
         .expect("stage provider agent dir");
+        mapping.extend(extra_mapping);
         assert_eq!(synced.len(), 1);
         assert_eq!(mapping.len(), 1);
 
@@ -168,10 +170,11 @@ fn provider_agent_dir_staging_leaves_non_provider_workspaces_untouched() {
         )
         .expect("local runner");
         let mut mapping = Vec::new();
-        sync_extra_lab_workspaces(
+        let (_, _, extra_mapping) = sync_lab_workspace_roots_controlled(
             "extra-staging",
             primary.path().to_str().expect("primary path"),
-            vec![ExtraLabWorkspace {
+            None,
+            &[ExtraLabWorkspace {
                 role: "extra".to_string(),
                 path: agent.canonicalize().expect("canonical dir"),
                 snapshot_includes: Vec::new(),
@@ -179,9 +182,10 @@ fn provider_agent_dir_staging_leaves_non_provider_workspaces_untouched() {
                 allow_dirty_lab_workspace: false,
                 source_provenance: None,
             }],
-            &mut mapping,
+            &crate::WorkspaceControl::default(),
         )
         .expect("stage extra workspace");
+        mapping.extend(extra_mapping);
 
         assert!(Path::new(mapping[0].remote_path()).join("bin/rg").exists());
         let entry = serde_json::to_value(&mapping[0]).expect("mapping entry json");

@@ -152,7 +152,11 @@ fn changed_since_private_origin_without_controller_closure_falls_back_to_snapsho
             validation_dependency_ids: None,
             run_isolation_token: None,
         };
-        let sync_result = sync_workspace("lab-local-git-bundle", sync_options);
+        let sync_result = sync_workspace(
+            "lab-local-git-bundle",
+            sync_options,
+            &crate::WorkspaceControl::default(),
+        );
 
         let (output, exit_code) = sync_result.expect("sync workspace");
 
@@ -313,6 +317,7 @@ fn changed_since_promisor_base_without_controller_closure_falls_back_to_snapshot
                 validation_dependency_ids: None,
                 run_isolation_token: None,
             },
+            &crate::WorkspaceControl::default(),
         );
 
         let (output, exit_code) = sync_result
@@ -488,6 +493,7 @@ fn git_materialization_keeps_homeboy_state_outside_checkout_and_refuses_dirty_st
                     validation_dependency_ids: None,
                     run_isolation_token: None,
                 },
+                &crate::WorkspaceControl::default(),
             )
         };
 
@@ -555,6 +561,7 @@ fn controller_routed_git_sync_materializes_bundle_for_public_remote() {
                 validation_dependency_ids: None,
                 run_isolation_token: None,
             },
+            &crate::WorkspaceControl::default(),
         )
         .expect("sync workspace");
 
@@ -865,6 +872,7 @@ fn controller_routed_git_sync_rejects_shallow_source_checkout() {
                 validation_dependency_ids: None,
                 run_isolation_token: None,
             },
+            &crate::WorkspaceControl::default(),
         )
         .expect_err("shallow source checkout should fail before bundle creation");
 
@@ -903,6 +911,7 @@ fn controller_routed_git_sync_rejects_shallow_source_checkout() {
                 validation_dependency_ids: None,
                 run_isolation_token: None,
             },
+            &crate::WorkspaceControl::default(),
         )
         .expect("deepened source bundles through runner sync");
         assert_eq!(status, 0);
@@ -1004,6 +1013,7 @@ fn git_sync_of_detached_extension_source_preserves_source_revision() {
                 validation_dependency_ids: None,
                 run_isolation_token: None,
             },
+            &crate::WorkspaceControl::default(),
         )
         .expect("sync workspace");
 
@@ -1781,6 +1791,7 @@ fn promisor_configured_transport_seals_local_lab_bundle_without_runner_transport
                 changed_since_base: Some(fixture.base.clone()),
                 ..Default::default()
             },
+            &crate::WorkspaceControl::default(),
         )
         .expect("persisted selected-promisor policy must hydrate and seal the bundle");
         let reopened = homeboy_core::observation::ObservationStore::open_initialized_at(

@@ -137,6 +137,7 @@ fn snapshot_git_readback_failure_rolls_back_remote_workspace_and_registration() 
                 validation_dependency_ids: None,
                 run_isolation_token: None,
             },
+            &crate::WorkspaceControl::default(),
         );
         std::env::set_var("PATH", original_path);
 
@@ -237,6 +238,7 @@ fn snapshot_git_reports_checkout_provenance_for_committed_harvest() {
                 validation_dependency_ids: None,
                 run_isolation_token: None,
             },
+            &crate::WorkspaceControl::default(),
         )
         .expect("materialize local-only committed source");
 
@@ -368,6 +370,7 @@ fn snapshot_git_carries_a_pinned_base_absent_from_destination_history() {
                 validation_dependency_ids: None,
                 run_isolation_token: None,
             },
+            &crate::WorkspaceControl::default(),
         )
         .expect("materialize behind Cook destination with pinned base");
 
@@ -444,6 +447,7 @@ fn snapshot_git_materializes_linked_worktree_with_valid_git_before_handoff() {
                 validation_dependency_ids: None,
                 run_isolation_token: None,
             },
+            &crate::WorkspaceControl::default(),
         )
         .expect("snapshot-git materializes a linked worktree");
 
@@ -530,6 +534,7 @@ fn snapshot_git_fails_before_handoff_when_controller_closure_is_unavailable() {
                 mode: RunnerWorkspaceSyncMode::SnapshotGit,
                 ..Default::default()
             },
+            &crate::WorkspaceControl::default(),
         );
         std::env::set_var("PATH", original_path);
 
@@ -754,6 +759,7 @@ fn runner_snapshot_includes_override_generated_output_excludes() {
                 validation_dependency_ids: None,
                 run_isolation_token: None,
             },
+            &crate::WorkspaceControl::default(),
         )
         .expect("sync workspace");
         assert_eq!(exit_code, 0);
@@ -801,6 +807,7 @@ fn runner_snapshot_excludes_extend_default_snapshot_policy() {
                 validation_dependency_ids: None,
                 run_isolation_token: None,
             },
+            &crate::WorkspaceControl::default(),
         )
         .expect("sync workspace");
 
@@ -847,6 +854,7 @@ fn runner_snapshot_transports_source_owned_homeboy_paths_as_ordinary_content() {
                     validation_dependency_ids: None,
                     run_isolation_token: None,
                 },
+                &crate::WorkspaceControl::default(),
             )
             .expect("source-owned .homeboy content syncs");
 
@@ -971,6 +979,7 @@ fn test_sync_workspace() {
                 validation_dependency_ids: None,
                 run_isolation_token: None,
             },
+            &crate::WorkspaceControl::default(),
         )
         .expect("sync workspace");
 
@@ -1046,6 +1055,7 @@ fn snapshot_sync_uses_source_gitignore_discovered_excludes_as_fallback() {
                 validation_dependency_ids: None,
                 run_isolation_token: None,
             },
+            &crate::WorkspaceControl::default(),
         )
         .expect("sync workspace");
 
@@ -1122,6 +1132,7 @@ fn snapshot_sync_excludes_late_injected_dmc_context_from_every_manifest() {
                     mode: RunnerWorkspaceSyncMode::Snapshot,
                     ..Default::default()
                 },
+                &crate::WorkspaceControl::default(),
             )
             .expect("late configured context must remain outside the snapshot");
 
@@ -1171,15 +1182,23 @@ fn snapshot_sync_uses_unique_clean_workspace_for_same_snapshot() {
             validation_dependency_ids: None,
             run_isolation_token: None,
         };
-        let (first, _) = crate::workspace::sync::sync_workspace("lab-local", options.clone())
-            .expect("first sync");
+        let (first, _) = crate::workspace::sync::sync_workspace(
+            "lab-local",
+            options.clone(),
+            &crate::WorkspaceControl::default(),
+        )
+        .expect("first sync");
         let remote_path = Path::new(&first.remote_path);
         assert!(remote_path.join("Cargo.toml").exists());
 
         fs::write(remote_path.join("sentinel.txt"), "kept\n").expect("sentinel");
 
-        let (second, _) =
-            crate::workspace::sync::sync_workspace("lab-local", options).expect("second sync");
+        let (second, _) = crate::workspace::sync::sync_workspace(
+            "lab-local",
+            options,
+            &crate::WorkspaceControl::default(),
+        )
+        .expect("second sync");
         let second_remote_path = Path::new(&second.remote_path);
 
         assert_ne!(second.remote_path, first.remote_path);
@@ -1213,6 +1232,7 @@ fn workspace_sync_materialization_contract_records_inputs_provenance_policy_and_
                 validation_dependency_ids: None,
                 run_isolation_token: Some("run-123".to_string()),
             },
+            &crate::WorkspaceControl::default(),
         )
         .expect("sync workspace");
 
@@ -1294,6 +1314,7 @@ fn workspace_list_reports_recent_lab_workspaces_with_exec_commands() {
                 validation_dependency_ids: None,
                 run_isolation_token: None,
             },
+            &crate::WorkspaceControl::default(),
         )
         .expect("sync workspace");
 
@@ -1425,6 +1446,7 @@ fn snapshot_git_sync_falls_back_for_unpublished_commit_and_preserves_dirty_overl
                     validation_dependency_ids: None,
                     run_isolation_token: None,
                 },
+                &crate::WorkspaceControl::default(),
             )
             .expect("sync workspace");
 
@@ -1591,6 +1613,7 @@ fn snapshot_git_hydrates_partial_clone_on_controller_without_lab_remote_access()
                 mode: RunnerWorkspaceSyncMode::SnapshotGit,
                 ..Default::default()
             },
+            &crate::WorkspaceControl::default(),
         )
         .expect("controller must hydrate and bundle the partial clone");
         std::env::set_var("PATH", original_path);
@@ -1883,6 +1906,7 @@ fn snapshot_staging_is_stable_with_sibling_worktrees_and_ignored_outputs() {
             let (synced, exit_code) = crate::workspace::sync::sync_workspace(
                 "lab-stable-clean-worktree",
                 options.clone(),
+                &crate::WorkspaceControl::default(),
             )
             .expect("clean worktree snapshot must remain stable");
             assert_eq!(exit_code, 0, "attempt {attempt}");
@@ -1964,6 +1988,7 @@ fn git_backed_snapshot_preserves_tracked_internal_file_and_directory_links() {
                     mode: RunnerWorkspaceSyncMode::SnapshotGit,
                     ..Default::default()
                 },
+                &crate::WorkspaceControl::default(),
             )
             .expect("materialize Git-backed snapshot");
             let remote = Path::new(&output.remote_path);
@@ -2036,6 +2061,7 @@ fn snapshot_git_omits_absent_optional_root_context_paths() {
                     mode: RunnerWorkspaceSyncMode::SnapshotGit,
                     ..Default::default()
                 },
+                &crate::WorkspaceControl::default(),
             )
             .expect("absent optional context paths must not block SnapshotGit materialization");
 
@@ -2709,6 +2735,7 @@ fn snapshot_git_subdirectory_gate_candidate_verifies_at_repository_root() {
                     validation_dependency_ids: None,
                     run_isolation_token: None,
                 },
+                &crate::WorkspaceControl::default(),
             )
             .expect("materialize gate candidate")
             .0

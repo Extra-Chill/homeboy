@@ -337,17 +337,19 @@ fn prepare_lab_offload_workspace_stage_inner(
         || {
             control.checkpoint()?;
             if sync_mode != RunnerWorkspaceSyncMode::Git {
+                let primary_path = sync_options.path.clone();
                 let (primary, extras, mapping) =
                     crate::lab_workspaces::sync_lab_workspace_roots_controlled(
                         runner_id,
-                        sync_options,
+                        &primary_path,
+                        Some(sync_options),
                         &extra_workspaces,
                         control,
                     )?;
                 batched_extras = Some((extras, mapping));
-                return Ok((primary, 0));
+                return Ok((primary.expect("primary root"), 0));
             }
-            crate::workspace::sync_workspace_controlled(runner_id, sync_options, control)
+            crate::workspace::sync_workspace(runner_id, sync_options, control)
         },
     )?
     .0;
@@ -485,18 +487,21 @@ fn prepare_lab_offload_workspace_stage_inner(
             );
         }
 
-        let synced_extra_workspaces = if let Some((extras, mapping)) = batched_extras {
-            workspace_mapping.extend(mapping);
-            extras
-        } else {
-            crate::lab_workspaces::sync_extra_lab_workspaces_controlled(
-                runner_id,
-                &synced.local_path,
-                extra_workspaces,
-                &mut workspace_mapping,
-                control,
-            )?
+        let (synced_extra_workspaces, extra_mapping) = match batched_extras {
+            Some(batched) => batched,
+            None => {
+                let (_, extras, mapping) =
+                    crate::lab_workspaces::sync_lab_workspace_roots_controlled(
+                        runner_id,
+                        &synced.local_path,
+                        None,
+                        &extra_workspaces,
+                        control,
+                    )?;
+                (extras, mapping)
+            }
         };
+        workspace_mapping.extend(extra_mapping);
         completed_extras = serde_json::json!(synced_extra_workspaces);
         if !synced_extra_workspaces.is_empty() {
             plan = with_step(
@@ -517,7 +522,7 @@ fn prepare_lab_offload_workspace_stage_inner(
         // runtimes a deterministic way to install their deps remotely without
         // syncing huge dependency trees. No-overlay offload returns an empty list
         // here, leaving behavior unchanged (#3831).
-        let synced_runtime_overlays = crate::lab_workspaces::sync_lab_runtime_overlays_controlled(
+        let synced_runtime_overlays = crate::lab_workspaces::sync_lab_runtime_overlays(
             runner_id,
             &synced.local_path,
             lab_runtime_overlays()?,
