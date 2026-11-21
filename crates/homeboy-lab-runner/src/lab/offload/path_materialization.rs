@@ -189,15 +189,13 @@ mod tests {
             fixture.display().to_string(),
         ];
         let mut contract = LabOffloadCommand {
-            command: homeboy_core::lab_contract::LabCommandContract::portable(
-                "bench",
-                None,
-                false,
-                &[],
-            ),
             required_extensions: Vec::new(),
             required_capabilities: Vec::new(),
             workload: None,
+            ..homeboy_core::lab_routing::lab_offload_command_from_contract(
+                homeboy_core::lab_contract::LabCommandContract::portable("bench", None, false, &[]),
+                Vec::new(),
+            )
         };
         contract.workload = Some(homeboy_core::lab_contract::LabRigWorkloadArguments {
             kind: homeboy_core::lab_contract::LabRigWorkloadKind::Bench,

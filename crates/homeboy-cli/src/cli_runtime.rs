@@ -622,7 +622,7 @@ fn generic_route_policy_snapshot(
         automatic_authorized: command.as_ref().is_some_and(|command| {
             cli.runner.is_some()
                 || crate::core::lab_routing::authorizes_policy_lab_runner(
-                    &command.command,
+                    command,
                     cli.placement,
                     crate::core::lab_routing::captured_pressure_severity().as_deref(),
                 )

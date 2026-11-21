@@ -17,10 +17,7 @@ use homeboy_core::daemon::controller_job_driver::{
     self, ControllerJobDriver, ControllerJobHandle, ControllerJobPublicError,
 };
 use homeboy_core::engine::canonical_json::canonical_json_bytes;
-use homeboy_core::lab_contract::{
-    LabRigWorkloadKind, LabRoutingPolicy, LabRunnerWorkloadCapability, LabSecretEnvSource,
-    LabSourcePathMode, LabWorkspaceModePolicy,
-};
+use homeboy_core::lab_contract::LabWorkspaceModePolicy;
 use homeboy_core::runner_execution_envelope::PathMaterializationPlan;
 use homeboy_core::{Error, Result};
 
@@ -45,66 +42,6 @@ const DURABLE_LAB_TERMINAL_RECEIPT_ATTACHMENT_KIND: &str = "durable-lab-terminal
 const DEFERRED_RUNNER_STAGING_RECEIPT_ATTACHMENT_KIND: &str = "deferred-runner-staging-receipt";
 const CONTROLLER_SUBMISSION_ATTEMPTS: usize = 3;
 
-/// Serializable, owned counterpart to the static Lab command contract.
-/// This is the persisted, owned command representation.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(deny_unknown_fields)]
-pub struct LabStagingCommand {
-    pub hot_label: String,
-    pub portable: bool,
-    pub source_path_mode: LabSourcePathMode,
-    pub workspace_mode_policy: LabWorkspaceModePolicy,
-    pub capture_mutation_patch: bool,
-    pub mutation_flag: Option<String>,
-    pub extra_required_capabilities: Vec<String>,
-    pub secret_env_sources: Vec<LabSecretEnvSource>,
-    pub routing_policy: LabRoutingPolicy,
-    pub required_extensions: Vec<String>,
-    pub required_capabilities: Vec<LabRunnerWorkloadCapability>,
-    pub workload: Option<LabStagingWorkload>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(deny_unknown_fields)]
-pub struct LabStagingWorkload {
-    pub kind: LabRigWorkloadKind,
-    pub rig_ids: Vec<String>,
-    pub component: Option<String>,
-    pub extension_overrides: Vec<String>,
-}
-
-impl From<&LabOffloadCommand> for LabStagingCommand {
-    fn from(command: &LabOffloadCommand) -> Self {
-        Self {
-            hot_label: command.command.hot_label.to_string(),
-            portable: command.command.is_portable(),
-            source_path_mode: command.command.source_path_mode,
-            workspace_mode_policy: command.command.workspace_mode_policy,
-            capture_mutation_patch: command.command.capture_mutation_patch,
-            mutation_flag: command.command.mutation_flag.map(str::to_string),
-            extra_required_capabilities: command
-                .command
-                .extra_required_capabilities
-                .iter()
-                .map(|value| (*value).to_string())
-                .collect(),
-            secret_env_sources: command.command.secret_env_sources.to_vec(),
-            routing_policy: command.command.routing_policy,
-            required_extensions: command.required_extensions.clone(),
-            required_capabilities: command.required_capabilities.clone(),
-            workload: command
-                .workload
-                .as_ref()
-                .map(|workload| LabStagingWorkload {
-                    kind: workload.kind,
-                    rig_ids: workload.rig_ids.clone(),
-                    component: workload.component.clone(),
-                    extension_overrides: workload.extension_overrides.clone(),
-                }),
-        }
-    }
-}
-
 /// Immutable pre-staging input stored privately against an agent-task attempt.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(deny_unknown_fields)]
@@ -119,7 +56,7 @@ pub struct LabStagingRecipe {
     pub required_homeboy_build_identity: String,
     #[serde(default = "default_lab_staging_tunnel_mode")]
     pub tunnel_mode: crate::RunnerTunnelMode,
-    pub command: LabStagingCommand,
+    pub command: LabOffloadCommand,
     pub normalized_args: Vec<String>,
     pub placement: homeboy_lab_contract::Placement,
     pub allow_local_fallback: bool,
@@ -200,7 +137,7 @@ impl LabStagingRecipe {
             placement_decision: request.placement_decision.clone(),
             required_homeboy_build_identity: homeboy_product_identity::build_identity().display,
             tunnel_mode,
-            command: command.into(),
+            command: command.clone(),
             normalized_args: request.normalized_args.to_vec(),
             placement: request.placement_decision.requested,
             allow_local_fallback: request.placement_decision.fallback.local_allowed,
@@ -1465,7 +1402,7 @@ fn stage_deferred_cook_workspace(
     let stage =
         crate::lab::offload::workspace_stage::prepare_lab_offload_workspace_stage_controlled(
             request,
-            crate::lab::offload::workspace_stage::LabWorkspaceStageCommand::from(&recipe.command),
+            recipe.command.clone(),
             crate::lab_plan::base_lab_plan(None),
             runner_id,
             source_path,
@@ -3372,9 +3309,7 @@ impl LabStagingStageOperations for ProductionLabStagingOperations {
         let stage =
             crate::lab::offload::workspace_stage::prepare_lab_offload_workspace_stage_controlled(
                 &offload_request,
-                crate::lab::offload::workspace_stage::LabWorkspaceStageCommand::from(
-                    &request.recipe.command,
-                ),
+                request.recipe.command.clone(),
                 crate::lab_plan::base_lab_plan(None),
                 &request.recipe.runner_id,
                 source_path,
@@ -5097,13 +5032,16 @@ mod tests {
 
     fn recipe_command() -> LabOffloadCommand {
         LabOffloadCommand {
-            command: LabCommandContract::portable("agent-task run-plan", None, false, &[]),
             required_extensions: vec!["agent-runtime".to_string()],
-            required_capabilities: vec![LabRunnerWorkloadCapability {
+            required_capabilities: vec![homeboy_core::lab_contract::LabRunnerWorkloadCapability {
                 name: "agent-task".to_string(),
                 required: true,
             }],
             workload: None,
+            ..homeboy_core::lab_routing::lab_offload_command_from_contract(
+                LabCommandContract::portable("agent-task run-plan", None, false, &[]),
+                Vec::new(),
+            )
         }
     }
 
@@ -5463,7 +5401,7 @@ mod tests {
             "/controller/private/static-site-importer".to_string(),
         ];
         let mut command = recipe_command();
-        command.command = LabCommandContract::portable("bench", None, false, &[]);
+        command.hot_label = "bench".to_string();
         let recipe = LabStagingRecipe::from_request(
             "ssi-fixture-37-20260727-runtime-fixed",
             "lab-1",

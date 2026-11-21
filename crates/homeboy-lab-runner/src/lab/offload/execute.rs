@@ -133,9 +133,11 @@ pub fn execute_lab_offload(request: LabOffloadRequest<'_>) -> Result<LabOffloadO
         });
     };
 
-    if let homeboy_core::lab_contract::LabCommandPortability::LocalOnly(reason) =
-        contract.portability
-    {
+    if !contract.portable {
+        let reason = contract
+            .local_only_reason
+            .as_deref()
+            .unwrap_or("command is local-only");
         if let Some(runner_id) = pinned_runner {
             let message = format!(
                 "--runner is unavailable for this local-only resource-pressure command. {reason}"
