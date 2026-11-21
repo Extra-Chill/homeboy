@@ -2062,7 +2062,8 @@ impl AgentTaskCookArgs {
             + gates.private_verify.len()
             + gates.private_verify_file.len())
         .max(1) as u64;
-        provider_seconds.saturating_add(gate_commands.saturating_mul(gates.gate_timeout_seconds))
+        provider_seconds
+            .saturating_add(gate_commands.saturating_mul(gates.effective_gate_timeout_seconds()))
     }
 }
 
