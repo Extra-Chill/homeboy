@@ -47,7 +47,9 @@ mod cook_step;
 mod cook_supervision;
 mod discovery;
 mod lab_admission;
-pub use lab_admission::{execution_step_wait, queued_admission, QueuedAdmission};
+pub use lab_admission::{
+    cook_admission_wait, execution_step_wait, queued_admission, QueuedAdmission,
+};
 mod execution;
 mod execution_step;
 mod gate_failure;

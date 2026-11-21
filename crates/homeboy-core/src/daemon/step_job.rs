@@ -1264,6 +1264,10 @@ fn await_wait_with(
                             "queue_position": position,
                             "waiters_ahead": standing.map(|standing| standing.waiters_ahead),
                             "priority": step_priority(request),
+                            "next_attempt_at": (chrono::Utc::now()
+                                + chrono::Duration::from_std(backoff)
+                                    .expect("runner backoff fits chrono"))
+                            .to_rfc3339(),
                         }))?;
                     }
                 }

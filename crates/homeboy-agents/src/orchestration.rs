@@ -4871,7 +4871,7 @@ fn blocker(
             unmaterialized_admission_blocker(record, admission)
         {
             return Some(ControlPlaneBlocker {
-                details: None,
+                details: Some(crate::agent_task_service::cook_admission_wait(record)),
                 code: Some(state.clone()),
                 message: reason.clone(),
                 state: Some(state),
@@ -5046,8 +5046,11 @@ fn unmaterialized_admission_blocker(
         .as_u64()
         .unwrap_or_default();
     let max_attempts = 20;
-    // Deadlines belong to the immutable step request, not lifecycle status.
-    let next_attempt_at = None;
+    let next_attempt_at = admission["wait"]["not_before"]
+        .as_str()
+        .or_else(|| admission["next_attempt_at"].as_str())
+        .or_else(|| record.metadata["execution_scheduling"]["next_attempt_at"].as_str())
+        .map(str::to_string);
     let disposition = if state == "exhausted" || attempts >= max_attempts {
         ControlPlaneAdmissionRetryDisposition::Exhausted
     } else {
@@ -9850,6 +9853,7 @@ mod tests {
             "schema": "homeboy/unmaterialized-cook-admission/v1",
             "state": "queued",
             "reason": "Lab admission predicate controller_version != job_command_binary_version failed token=secret-value",
+            "wait": {"not_before": "2099-01-01T00:00:00Z"},
         });
         record.metadata["execution_scheduling"] =
             json!({"epoch": 1, "current_intent_id": "step", "recovery_failures": 3});
@@ -9870,9 +9874,9 @@ mod tests {
         assert_eq!(retry.policy, "bounded_exponential");
         assert_eq!(retry.attempts, 3);
         assert_eq!(retry.max_attempts, 20);
-        assert!(
-            retry.next_attempt_at.is_none(),
-            "deadlines belong to the exact step"
+        assert_eq!(
+            retry.next_attempt_at.as_deref(),
+            Some("2099-01-01T00:00:00Z")
         );
         assert_eq!(
             retry.disposition,
