@@ -683,7 +683,22 @@ pub(super) fn run_preflight_cook_execution(
     // finalization: a Cook PR has one commit, and GitHub squash-merges a
     // single-commit PR under that commit's subject (#16052).
     let commit_message = args.commit_message.clone().unwrap_or_default();
+    // Capacity may wait indefinitely. CookService must first persist the recipe
+    // and executable attempt so detached admission can expose a durable handle.
+    // Keep the lease alive until the whole Cook returns, not just this callback.
+    let local_dispatch_lease = std::sync::Mutex::new(None);
+    let needs_local_admission = !args.preview && attempt_dispatcher.is_none();
+    let recipe_store = agent_task_service::CookRecipeStore::from_current_data_root()?;
+    let lifecycle_store = agent_task_lifecycle::AgentTaskLifecycleStore::from_environment()?;
     let durable_observer = |event: &agent_task_service::CookProgressEvent<'_>| {
+        if event.phase == "durable_identity" && needs_local_admission {
+            let mut lease = local_dispatch_lease
+                .lock()
+                .expect("local dispatch lease lock");
+            if lease.is_none() {
+                *lease = admit_local_cook_dispatch(event.run_id, event.cook_id, &lifecycle_store)?;
+            }
+        }
         if no_progress && event.phase != "durable_identity" {
             return Ok(());
         }
@@ -716,17 +731,6 @@ pub(super) fn run_preflight_cook_execution(
             })
             .unwrap_or(Ok(()))
     };
-    let recipe_store = agent_task_service::CookRecipeStore::from_current_data_root()?;
-    let lifecycle_store = agent_task_lifecycle::AgentTaskLifecycleStore::from_environment()?;
-    // A local provider dispatch — not a Lab-routed one — is the workload that
-    // saturates this machine, so only local dispatch consults the concurrency
-    // ceiling. The lease is held for this whole cook (provider, promotion, and
-    // gates all run on this host) and released when the function returns,
-    // whether by success or by an early `?` (#14732).
-    let _local_dispatch_lease = (!args.preview && attempt_dispatcher.is_none())
-        .then(|| admit_local_cook_dispatch(&run_id, &cook_id, &lifecycle_store))
-        .transpose()?
-        .flatten();
     let result = agent_task_service::CookService::run(
             agent_task_service::CookRequest {
             identity: homeboy::agents::agent_task_service::CookIdentity {

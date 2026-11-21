@@ -305,6 +305,58 @@ fn cook_accepts_local_detachment_after_pending_attempt_materialization() {
     assert!(status_stdout.contains("local-detach-exits-before-attempt"));
 }
 
+/// A capacity wait must not hide the executable attempt from a detached client.
+#[test]
+fn detached_cook_materializes_attempt_before_waiting_for_local_pressure() {
+    let context = HermeticTestContext::new();
+    let (_guard, checkout) =
+        homeboy_core::test_support::shared_committed_git_repo_fixture("detach-hot");
+    let (_handle, worktree) = native_task_worktree(&context, "detach-hot", &checkout, "hot");
+    let mut command = context.command(TestBinary::HomeboyFixture);
+    command
+        .env("HOMEBOY_TEST_LOAD_AVERAGES", "1000000,1000000,1000000")
+        .env("HOMEBOY_COOK_DETACH_HANDOFF_TIMEOUT_MS", "30000")
+        .args([
+            "--placement",
+            "local",
+            "agent-task",
+            "cook",
+            "--run-id",
+            "detach-hot",
+            "--backend",
+            "fixture",
+            "--repo",
+            "detach-hot",
+            "--prompt",
+            "wait for capacity",
+            "--base",
+            "main",
+            "--cwd",
+            worktree.to_str().unwrap(),
+            "--to-worktree",
+            worktree.to_str().unwrap(),
+            "--verify",
+            "true",
+        ]);
+    let output = bounded_output(command);
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(output.status.success(), "{stdout}");
+    assert!(stdout.contains("\"state\": \"accepted\""), "{stdout}");
+    let store = AgentTaskLifecycleStore::new(context.path_roots());
+    let deadline = Instant::now() + Duration::from_secs(10);
+    loop {
+        let record = store.read_record("detach-hot").unwrap();
+        if record.metadata["cook_progress"]["phase"] == "queued_local_pressure" {
+            break;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "pressure wait was not recorded: {record:?}"
+        );
+        std::thread::sleep(Duration::from_millis(50));
+    }
+}
+
 #[test]
 fn explicit_wait_and_runner_owned_cooks_return_terminal_failure() {
     for runner_owned in [false, true] {
