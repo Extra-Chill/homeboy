@@ -190,7 +190,7 @@ pub(in crate::commands::agent_task) fn diagnose(args: DiagnoseArgs) -> CmdResult
     }
     let replay_record = record.clone();
     let retry_probe = bounded_diagnostic_probe(DIAGNOSTIC_PROBE_TIMEOUT, move || {
-        retry_replay_action_with_probe_policy(&replay_record, false)
+        retry_replay_action(&replay_record)
     });
     let replay_probe_timed_out = retry_probe.is_none();
     let retry = retry_probe.unwrap_or_else(|| {
@@ -1132,20 +1132,13 @@ impl RetryReplayAction {
 /// typed action share this one admission decision, so a human hint cannot claim
 /// a retry exists when route materialization will reject it.
 pub(super) fn retry_replay_action(record: &AgentTaskRunRecord) -> RetryReplayAction {
-    retry_replay_action_with_probe_policy(record, true)
-}
-
-fn retry_replay_action_with_probe_policy(
-    record: &AgentTaskRunRecord,
-    live_probes: bool,
-) -> RetryReplayAction {
     // Candidate readers may be observing an older substantive attempt. Retry
     // eligibility and the advertised action must describe the mutation target.
     if let Ok(latest) = agent_task_service_direct::resolve_retry_run_id(&record.run_id) {
         if latest != record.run_id {
             if let Ok(store) = agent_task_lifecycle::AgentTaskLifecycleStore::from_environment() {
                 if let Ok(latest_record) = store.read_record_bounded(&latest) {
-                    return retry_replay_action_with_probe_policy(&latest_record, live_probes);
+                    return retry_replay_action(&latest_record);
                 }
             }
         }
@@ -1174,12 +1167,6 @@ fn retry_replay_action_with_probe_policy(
         );
     }
     let generic_lab_replay = has_generic_lab_replay;
-    if generic_lab_replay && !live_probes {
-        return RetryReplayAction::unavailable(
-            local_owner,
-            "live workspace preflight is deferred to retry; diagnosis reads recorded evidence only",
-        );
-    }
     let admission = if generic_lab_replay {
         // Status advertises the exact persisted generic replay, rather than a
         // Cook-derived retry plan that may no longer carry its workspace proof.
