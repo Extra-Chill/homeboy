@@ -17,6 +17,7 @@ mod reclaim;
 pub mod stale_destination;
 mod store_ops;
 mod types;
+mod unrecorded;
 
 static TASK_WORKTREE_REGISTRY_GATE: OnceLock<RwLock<()>> = OnceLock::new();
 const MALFORMED_RECORD_REPAIR_LIMIT: usize = 20;
@@ -51,6 +52,7 @@ pub use types::{
     WorktreeSafetyReport, WorktreeStaleLeaseRelease, WorktreeStatusOutput,
     TERMINAL_WORKSPACE_AUTHORITY_CAPABILITY, TERMINAL_WORKSPACE_AUTHORITY_SCHEMA,
 };
+pub use unrecorded::UNRECORDED_WORKTREE_LIVENESS;
 
 /// The managed handle a repo and branch pair resolves to. Creation slugifies the
 /// branch, so `fix/1234-x` becomes `repo@fix-1234-x` and the handle a caller must
@@ -815,20 +817,28 @@ pub fn remove(options: WorktreeRemoveOptions) -> Result<WorktreeRemoveOutput> {
 
 pub fn cleanup(options: WorktreeCleanupOptions) -> Result<WorktreeCleanupOutput> {
     let store = metadata_dir()?;
-    cleanup_with_store_page(
+    let mut output = cleanup_with_store_page(
         WorktreeCleanupPageOptions {
-            cleanup: options,
+            cleanup: options.clone(),
             limit: usize::MAX,
             cursor: None,
             deadline: None,
         },
         &store,
-    )
+    )?;
+    unrecorded::append_cleanup(&mut output, &options, &store, None)?;
+    Ok(output)
 }
 
 pub fn cleanup_page(options: WorktreeCleanupPageOptions) -> Result<WorktreeCleanupOutput> {
     let store = metadata_dir()?;
-    cleanup_with_store_page(options, &store)
+    let cleanup = options.cleanup.clone();
+    let deadline = options.deadline;
+    let mut output = cleanup_with_store_page(options, &store)?;
+    if output.next_cursor.is_none() {
+        unrecorded::append_cleanup(&mut output, &cleanup, &store, deadline)?;
+    }
+    Ok(output)
 }
 
 /// Reclaim disk space held by completed task-worktree loops.

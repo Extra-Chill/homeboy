@@ -293,11 +293,66 @@ pub(super) fn cleanup_with_store_page(
             last_id = Some(record.id.clone());
             continue;
         }
+        // A missing checkout needs no discard authority: nothing remains at
+        // the path to delete. Retire only metadata under the normal lease and
+        // claim fence, preserving any local branch regardless of flags.
+        if !Path::new(&record.worktree_path).exists() {
+            let owners = live_workspace_owners(&record, store)?;
+            if owners.is_empty() {
+                let safety = orphan_safety_report(&record);
+                let branch_cleanup =
+                    branch_cleanup_unknown(&record, "missing path; branch preserved".to_string());
+                candidates.push(WorktreeCleanupCandidate {
+                    record: record.clone(),
+                    safety,
+                    branch_cleanup,
+                });
+                if !options.dry_run {
+                    match with_task_worktree_registry_write_lock(|| {
+                        let current = read_record(store, &record.id)?;
+                        if Path::new(&current.worktree_path).exists() {
+                            return Err(Error::internal_unexpected(
+                                "worktree reappeared during metadata reconciliation",
+                            ));
+                        }
+                        retire_orphan_record(
+                            WorktreeRemoveOptions {
+                                id: current.id.clone(),
+                                force: false,
+                                cleanup_branch: false,
+                                allow_unmerged_branch: false,
+                                reason: Some("cleanup missing worktree metadata".to_string()),
+                                reaper: options.reaper.clone(),
+                            },
+                            store,
+                            current,
+                        )
+                    }) {
+                        Ok(output) => removed.push(output),
+                        Err(error) => skipped.push(WorktreeCleanupSkipped {
+                            record: record.clone(),
+                            safety: None,
+                            reasons: vec![error.message],
+                        }),
+                    }
+                }
+                last_id = Some(record.id.clone());
+                continue;
+            }
+        }
         if record.cleanup_policy == CleanupPolicy::PreserveOnFailure {
             last_id = Some(record.id.clone());
             continue;
         }
-        let safety = match safety_report_until(&record, page.deadline) {
+        // One stuck filesystem/Git probe must not hold a whole cleanup plan
+        // forever. Keep the page deadline as the outer bound as well.
+        let probe_deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        let probe_deadline = Some(
+            page.deadline
+                .map_or(probe_deadline, |end| end.min(probe_deadline)),
+        );
+        eprintln!("Inspecting task worktree {}", record.id);
+        let safety = match safety_report_until(&record, probe_deadline) {
             Ok(safety) => safety,
             Err(error) => {
                 if deadline_exhausted(page.deadline) {
@@ -314,7 +369,7 @@ pub(super) fn cleanup_with_store_page(
                 continue;
             }
         };
-        let branch_cleanup = match branch_cleanup_report_until(&record, page.deadline) {
+        let branch_cleanup = match branch_cleanup_report_until(&record, probe_deadline) {
             Ok(report) => report,
             Err(_error) if deadline_exhausted(page.deadline) => {
                 next_cursor = last_id.clone().or_else(|| page.cursor.clone());
@@ -345,7 +400,7 @@ pub(super) fn cleanup_with_store_page(
             break;
         }
         let branch_never_moved = branch_cleanup.status == BranchCleanupStatus::Merged
-            && branch_never_moved_since_creation(&record, page.deadline);
+            && branch_never_moved_since_creation(&record, probe_deadline);
         let skip_reasons = cleanup_skip_reasons(
             &record,
             &safety,
@@ -517,6 +572,13 @@ fn cleanup_skip_reasons(
         ));
     }
     if !force {
+        if safety
+            .reasons
+            .iter()
+            .any(|reason| reason == "repository contains stashed work")
+        {
+            reasons.push("repository contains stashed work".to_string());
+        }
         if safety.dirty {
             reasons.push("dirty worktree".to_string());
         }
@@ -2175,7 +2237,7 @@ fn unpushed_branch_commit_count_until(
     })
 }
 
-fn run_inventory_git_until(
+pub(super) fn run_inventory_git_until(
     source: &Path,
     args: &[&str],
     context: &str,
@@ -2214,7 +2276,14 @@ pub(super) fn list_adopted_with_store(store_dir: &Path) -> Result<Vec<AdoptedWor
 }
 
 pub(super) fn status_with_store(id: &str, store_dir: &Path) -> Result<WorktreeStatusOutput> {
-    let mut record = read_record(store_dir, id)?;
+    let id = match unrecorded::resolve_record_handle(store_dir, id)? {
+        Some(handle) => handle,
+        None => match unrecorded::status(id)? {
+            Some(output) => return Ok(output),
+            None => id.to_string(),
+        },
+    };
+    let mut record = read_record(store_dir, &id)?;
     if record.state == TaskWorktreeState::Removed {
         return Ok(WorktreeStatusOutput {
             record,
@@ -2317,6 +2386,15 @@ fn remove_with_store_unlocked_until(
 ) -> Result<WorktreeRemoveOutput> {
     // The registry lease fences the complete decision and Git mutation. Always
     // re-read under it so finalization that won the lease first is preserved.
+    let mut options = options;
+    match unrecorded::resolve_record_handle(store_dir, &options.id)? {
+        Some(handle) => options.id = handle,
+        None => {
+            if let Some(output) = unrecorded::remove(&options, store_dir, deadline)? {
+                return Ok(output);
+            }
+        }
+    }
     let mut record = read_record(store_dir, &options.id)?;
     if is_orphan_record(&record) {
         return retire_orphan_record(options, store_dir, record);
@@ -2490,7 +2568,12 @@ fn retire_orphan_record(
     mut record: TaskWorktreeRecord,
 ) -> Result<WorktreeRemoveOutput> {
     refuse_live_workspace_owners(&record, store_dir)?;
-    let safety = orphan_safety_report(&record);
+    let mut safety = orphan_safety_report(&record);
+    safety.source_checkout_missing = !Path::new(&record.source_checkout).exists();
+    safety.reasons = vec![format!(
+        "missing worktree path {}; retiring metadata only, preserving branch",
+        record.worktree_path
+    )];
     let claims = workspace_claim_store_for_worktrees(store_dir)?;
     let claim = claims.acquire(
         record.effective_workspace_identity()?,
@@ -2527,8 +2610,11 @@ fn retire_orphan_record(
             safe_delete: false,
             deleted: false,
             reason: Some(
-                "orphan record: source checkout is missing, so no branch was inspected or deleted"
-                    .to_string(),
+                if safety.source_checkout_missing {
+                    "orphan record: source checkout is missing, so no branch was inspected or deleted"
+                } else {
+                    "missing worktree path: metadata reconciled; no branch was inspected or deleted"
+                }.to_string(),
             ),
             cleanup_command: format!(
                 "homeboy worktree remove {} --cleanup-branch",
@@ -2726,7 +2812,7 @@ fn apply_branch_cleanup_until(
     Ok(report)
 }
 
-fn branch_cleanup_unknown(
+pub(super) fn branch_cleanup_unknown(
     record: &TaskWorktreeRecord,
     reason: String,
 ) -> WorktreeBranchCleanupReport {
@@ -2802,6 +2888,15 @@ fn safety_report_until(
     if dirty {
         reasons.push("dirty worktree".to_string());
     }
+    if !worktree_missing {
+        // Stashes share the repository. Conservatively retain recorded trees
+        // with stash evidence too; no lifecycle finalization discards it.
+        let stashes =
+            run_inventory_git_until(&worktree, &["stash", "list"], "git stash list", deadline)?;
+        if !stashes.trim().is_empty() {
+            reasons.push("repository contains stashed work".to_string());
+        }
+    }
     if unpushed_commits > 0 {
         reasons.push(format!("{unpushed_commits} unpushed commit(s)"));
     }
@@ -2827,7 +2922,8 @@ fn safety_report_until(
     })
 }
 
-const LIVE_CWD_REASON: &str = "refuses to remove the caller's live current working directory";
+pub(super) const LIVE_CWD_REASON: &str =
+    "refuses to remove the caller's live current working directory";
 
 fn is_dirty_until(path: &Path, deadline: Option<std::time::Instant>) -> Result<bool> {
     Ok(
@@ -2909,7 +3005,7 @@ fn unpushed_commit_count_until(
 /// The synthetic-commit fallback covers multi-commit worktree branches, which
 /// a single-SHA patch-id compare cannot: a squash of N commits has no
 /// individual commit whose patch-id matches the combined squash commit.
-fn branch_content_merged_until(
+pub(super) fn branch_content_merged_until(
     path: &Path,
     branch_ref: &str,
     target_ref: &str,
