@@ -200,6 +200,8 @@ pub(super) enum RunnerCommand {
     },
     /// Diagnose a local or configured SSH runner without mutating it
     Doctor {
+        #[arg(long)]
+        reason: Option<String>,
         /// Runner ID. Use `local`, `localhost`, or `self` for this machine;
         /// other values resolve through `homeboy runner` configuration.
         /// Omit to select the only configured non-local runner.
@@ -238,6 +240,8 @@ pub(super) enum RunnerCommand {
     },
     /// Connect to a runner by starting a loopback-only remote daemon and SSH tunnel
     Connect {
+        #[arg(long)]
+        reason: Option<String>,
         /// Runner ID. Omit to select the only configured non-local runner.
         id: Option<String>,
 
@@ -248,6 +252,12 @@ pub(super) enum RunnerCommand {
         /// Current remote daemon PID paired with --adopt-live-lease
         #[arg(long)]
         expected_live_pid: Option<u32>,
+    },
+    /// Disconnect and reconnect a runner using the lease-safe lifecycle
+    Restart {
+        id: Option<String>,
+        #[arg(long)]
+        reason: Option<String>,
     },
     /// Bounded disk usage inventory of Homeboy-owned roots (two-second scan).
     Inventory { id: String },
@@ -293,6 +303,8 @@ pub(super) enum RunnerCommand {
     },
     /// Close a runner tunnel and remove its persisted session state
     Disconnect {
+        #[arg(long)]
+        reason: Option<String>,
         /// Runner ID. Omit to select the only configured non-local runner.
         id: Option<String>,
 

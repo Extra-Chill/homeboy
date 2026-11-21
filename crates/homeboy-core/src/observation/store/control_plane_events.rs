@@ -19,8 +19,12 @@ pub const CONTROL_PLANE_EVENT_RETENTION_LIMIT: i64 = 100;
 /// `run.transitioned` is the audit record a compare-and-swap terminal
 /// transition appends in its commit (#15718). A run has a handful at most, so
 /// keeping them does not unbound storage the way progress events would.
-pub const DURABLE_CONTROL_PLANE_EVENT_KINDS: [&str; 3] =
-    ["run.cancelled", "run.transitioned", "run.phase_spans"];
+pub const DURABLE_CONTROL_PLANE_EVENT_KINDS: [&str; 4] = [
+    "run.cancelled",
+    "run.transitioned",
+    "run.phase_spans",
+    "operator.intervention",
+];
 /// At most 1024 timing reports survive progress pruning for a run. Each timed
 /// phase is one report; a Lab Cook spends dozens on repeated leaf spans before
 /// its gate, publish and terminal owners, which must still fit (#16443).

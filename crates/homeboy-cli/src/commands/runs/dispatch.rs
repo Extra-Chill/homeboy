@@ -209,6 +209,33 @@ impl RunsArgs {
 }
 
 pub fn run(args: RunsArgs) -> CmdResult<RunsOutput> {
+    if let RunsCommand::Interventions { since, limit } = &args.command {
+        let since = since
+            .as_deref()
+            .map(|value| {
+                let duration = crate::commands::utils::watch::parse_duration("--since", value)?;
+                chrono::Duration::from_std(duration)
+                    .ok()
+                    .and_then(|duration| chrono::Utc::now().checked_sub_signed(duration))
+                    .map(|time| time.to_rfc3339())
+                    .ok_or_else(|| {
+                        homeboy::core::Error::validation_invalid_argument(
+                            "since",
+                            "duration is out of range",
+                            Some(value.into()),
+                            None,
+                        )
+                    })
+            })
+            .transpose()?;
+        let store = ObservationStore::open_readonly()?;
+        return Ok((
+            RunsOutput::Cook(serde_json::json!(
+                store.interventions(since.as_deref(), *limit)?
+            )),
+            0,
+        ));
+    }
     if args.workflow_reader_id().is_some() || args.workflow_discovery() {
         return super::workflow::run(args);
     }
@@ -232,6 +259,7 @@ pub fn run(args: RunsArgs) -> CmdResult<RunsOutput> {
     let roots = PathRoots::from_environment()?;
     let store = ObservationStore::open_initialized_in_roots(&roots)?;
     match args.command {
+        RunsCommand::Interventions { .. } => unreachable!("interventions dispatched above"),
         RunsCommand::Logs(_) => unreachable!("durable logs dispatched before opening the store"),
         RunsCommand::List(args) => handlers::list_runs(&store, args, "runs.list"),
         RunsCommand::Distribution(args) => {
@@ -244,7 +272,16 @@ pub fn run(args: RunsArgs) -> CmdResult<RunsOutput> {
         RunsCommand::Friction(args) => super::friction::friction(&store, args),
         RunsCommand::Reconcile(args) => reconcile::reconcile_runs(&store, args),
         RunsCommand::Watch(args) => watch::watch_run(&store, args),
-        RunsCommand::Cancel { run_id } => handlers::cancel_run(&store, &run_id),
+        RunsCommand::Cancel { run_id, reason } => {
+            let result = handlers::cancel_run(&store, &run_id)?;
+            homeboy::core::observation::store::record_intervention(
+                &store,
+                &run_id,
+                "runs cancel",
+                reason.as_deref(),
+            )?;
+            Ok(result)
+        }
         RunsCommand::Show {
             run_id,
             json: _,

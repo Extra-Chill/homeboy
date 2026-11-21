@@ -658,6 +658,14 @@ pub(crate) fn evidence(args: EvidenceArgs) -> CmdResult<Value> {
 }
 
 pub(in crate::commands::agent_task) fn cancel(args: CancelArgs) -> CmdResult<Value> {
+    let audit_store = homeboy::core::observation::ObservationStore::open_initialized()?;
+    let resolved_id = agent_task_service::resolve_cook_continuation_run_id(&args.run_id)
+        .unwrap_or_else(|_| args.run_id.clone());
+    let audit_run = homeboy_control_plane_contract::RunId::new(resolved_id)
+        .map_err(|e| homeboy::core::Error::internal_unexpected(e.to_string()))?;
+    let already_cancelled = audit_store
+        .durable_control_plane_event(&audit_run, "run.cancelled")?
+        .is_some();
     let idempotency_key = args
         .idempotency_key
         .unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
@@ -684,6 +692,21 @@ pub(in crate::commands::agent_task) fn cancel(args: CancelArgs) -> CmdResult<Val
         },
     )?;
     let exit_code = cancel_exit_code(acknowledgement.outcome, &acknowledgement.result)?;
+    if !already_cancelled
+        && acknowledgement.outcome
+            != homeboy_control_plane_contract::ControlPlaneActionOutcome::AlreadySatisfied
+        && matches!(
+            acknowledgement.result.data["disposition"].as_str(),
+            Some("cancelled" | "requested")
+        )
+    {
+        homeboy::core::observation::store::record_intervention(
+            &audit_store,
+            acknowledgement.run.as_str(),
+            "agent-task cancel",
+            args.reason.as_deref(),
+        )?;
+    }
     Ok((
         serde_json::to_value(acknowledgement).unwrap_or(Value::Null),
         exit_code,

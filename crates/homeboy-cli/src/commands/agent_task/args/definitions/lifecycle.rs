@@ -349,6 +349,9 @@ mod tests {
 }
 #[derive(Args, Debug, Default)]
 pub struct RecoverArgs {
+    /// Explanation for this operator intervention
+    #[arg(long)]
+    pub reason: Option<String>,
     /// Adopt this immutable commit through the recorded Cook recipe.
     #[arg(long, value_name = "SHA", conflicts_with_all = ["preflight", "regate", "timeout_ms", "backend", "selector", "model", "acknowledge_model_override"])]
     pub candidate_ref: Option<String>,

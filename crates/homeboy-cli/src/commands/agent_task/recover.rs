@@ -79,7 +79,11 @@ fn recover_action(args: RecoverArgs) -> CmdResult<Value> {
     let attempt = args.attempt;
     let adoption_model = args.adoption_model.clone();
     let replace_interrupted = args.replace_interrupted;
+    let reason = args.reason.clone();
+    let command = "agent-task recover";
+    let preflight = args.preflight;
     let recovery = recovery_request(args)?;
+    let mut replayed = false;
     let parameters = homeboy::agents::recovery_action::RecoverParameters {
         preflight: recovery.preflight,
         regate: recovery.regate,
@@ -128,6 +132,7 @@ fn recover_action(args: RecoverArgs) -> CmdResult<Value> {
             let mut ack = homeboy::agents::orchestration::execute_action_from_current_environment(
                 &id, &request,
             )?;
+            replayed = ack.outcome == ControlPlaneActionOutcome::AlreadySatisfied;
             match ack.result.data["exit_code"].as_i64() {
                 Some(code) => (ack.result.data["report"].take(), code as i32),
                 None => (
@@ -136,6 +141,18 @@ fn recover_action(args: RecoverArgs) -> CmdResult<Value> {
                 ),
             }
         };
+    if !preflight
+        && !replayed
+        && code == 0
+        && (report["admission"].is_object() || report["result"].is_object())
+    {
+        homeboy::core::observation::store::record_intervention(
+            &homeboy::core::observation::ObservationStore::open_initialized()?,
+            report["run_id"].as_str().unwrap_or(&id),
+            command,
+            reason.as_deref(),
+        )?;
+    }
     if wait && report["admission"].is_object() {
         homeboy::core::foreground_wait::observe_signals();
         let run_id = report["run_id"].as_str().unwrap().to_string();

@@ -171,6 +171,7 @@ pub(super) fn run(args: AbArgs) -> CmdResult<Value> {
         }
         Some(runner) => {
             let run_args = super::RunArgs {
+                reason: None,
                 workflow: ab::AB_WORKFLOW_ID.to_string(),
                 inputs,
                 instance: args.instance.clone(),

@@ -19,6 +19,19 @@ use super::{
     workspace,
 };
 
+fn record_runner_intervention(
+    id: &str,
+    command: &str,
+    reason: Option<&str>,
+) -> homeboy::core::Result<()> {
+    homeboy::core::observation::store::record_intervention(
+        &ObservationStore::open_initialized()?,
+        &format!("runner:{id}"),
+        command,
+        reason,
+    )
+}
+
 pub fn run(args: RunnerArgs) -> CmdResult<RunnerCommandOutput> {
     match args.command {
         RunnerCommand::Add {
@@ -130,9 +143,11 @@ pub fn run(args: RunnerArgs) -> CmdResult<RunnerCommandOutput> {
             scope,
             repair,
             full,
-        } => map_doctor(
-            doctor::run_with_options(
-                &super::selection::resolve(runner_id)?,
+            reason,
+        } => {
+            let id = super::selection::resolve(runner_id)?;
+            let result = doctor::run_with_options(
+                &id,
                 doctor::RunnerDoctorOptions {
                     path,
                     extensions: required_extensions,
@@ -142,9 +157,16 @@ pub fn run(args: RunnerArgs) -> CmdResult<RunnerCommandOutput> {
                     scope: scope.into(),
                     repair,
                 },
-            ),
-            full,
-        ),
+            );
+            if let Ok((report, _)) = &result {
+                if report.repairs.iter().any(|step| {
+                    step.status == doctor::RunnerDoctorStatus::Ok && !step.commands.is_empty()
+                }) {
+                    record_runner_intervention(&id, "runner doctor", reason.as_deref())?;
+                }
+            }
+            map_doctor(result, full)
+        }
         RunnerCommand::Preflight { request } => Ok((
             RunnerCommandOutput::Preflight(Box::new(runner::placement_readiness(
                 &serde_json::from_str(&request).map_err(|error| {
@@ -162,13 +184,46 @@ pub fn run(args: RunnerArgs) -> CmdResult<RunnerCommandOutput> {
             id,
             adopt_live_lease,
             expected_live_pid,
-        } => map_registry(connect(
-            &super::selection::resolve(id)?,
-            registry::RunnerConnectInput {
-                adopt_live_lease,
-                expected_live_pid,
-            },
-        )),
+            reason,
+        } => {
+            let id = super::selection::resolve(id)?;
+            let before = runner::persisted_statuses()?
+                .into_iter()
+                .find(|session| session.runner_id == id);
+            let result = connect(
+                &id,
+                registry::RunnerConnectInput {
+                    adopt_live_lease,
+                    expected_live_pid,
+                },
+            )?;
+            if result.1 == 0 && !before.as_ref().is_some_and(|session| session.connected) {
+                record_runner_intervention(&id, "runner connect", reason.as_deref())?;
+            }
+            map_registry(Ok(result))
+        }
+        RunnerCommand::Restart { id, reason } => {
+            let id = super::selection::resolve(id)?;
+            let disconnected = registry::disconnect(&id, false)?;
+            let mutated = matches!(&disconnected.0.extra.connection, Some(super::types::RunnerConnectionOutput::Disconnect(report)) if report.disconnected);
+            if mutated {
+                record_runner_intervention(&id, "runner restart", reason.as_deref())?;
+            }
+            if disconnected.1 != 0 {
+                return map_registry(Ok(disconnected));
+            }
+            let result = connect(
+                &id,
+                registry::RunnerConnectInput {
+                    adopt_live_lease: None,
+                    expected_live_pid: None,
+                },
+            )?;
+            if !mutated && result.1 == 0 {
+                record_runner_intervention(&id, "runner restart", reason.as_deref())?;
+            }
+            map_registry(Ok(result))
+        }
         RunnerCommand::Inventory { id } => map_registry(Ok((
             RunnerOutput {
                 command: "runner.inventory".to_string(),
@@ -201,10 +256,19 @@ pub fn run(args: RunnerArgs) -> CmdResult<RunnerCommandOutput> {
         RunnerCommand::Reconcile { id, attest_absent } => {
             map_registry(status_mod::reconcile(&id, attest_absent))
         }
-        RunnerCommand::Disconnect { id, local_recovery } => map_registry(registry::disconnect(
-            &super::selection::resolve(id)?,
+        RunnerCommand::Disconnect {
+            id,
             local_recovery,
-        )),
+            reason,
+        } => {
+            let id = super::selection::resolve(id)?;
+            let result = registry::disconnect(&id, local_recovery)?;
+            if matches!(&result.0.extra.connection, Some(super::types::RunnerConnectionOutput::Disconnect(report)) if report.disconnected)
+            {
+                record_runner_intervention(&id, "runner disconnect", reason.as_deref())?;
+            }
+            map_registry(Ok(result))
+        }
         RunnerCommand::RefreshHomeboy {
             runner_id,
             select,
