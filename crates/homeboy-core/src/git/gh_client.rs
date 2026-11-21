@@ -25,13 +25,26 @@ const TRANSIENT_RETRY_DELAYS: [Duration; 3] = [
 #[cfg(test)]
 const TRANSIENT_RETRY_DELAYS: [Duration; 3] = [Duration::from_millis(1); 3];
 
-/// GitHub's own server faults, which a later identical request can succeed
-/// past. Client errors, auth, rate limits, and validation are not retried.
+/// GitHub's own server faults and network faults on the way to it, which a
+/// later identical request can succeed past. Client errors, auth, rate
+/// limits, and validation are not retried.
 fn is_transient_github_failure(stderr: &str) -> bool {
-    stderr.contains("Something went wrong while executing your query")
-        || ["HTTP 500", "HTTP 502", "HTTP 503", "HTTP 504"]
-            .iter()
-            .any(|status| stderr.contains(status))
+    [
+        "Something went wrong while executing your query",
+        "HTTP 500",
+        "HTTP 502",
+        "HTTP 503",
+        "HTTP 504",
+        // Go net/http faults `gh` reports when GitHub is unreachable.
+        "TLS handshake timeout",
+        "i/o timeout",
+        "Client.Timeout exceeded",
+        "connection reset by peer",
+        "connection refused",
+        "unexpected EOF",
+    ]
+    .iter()
+    .any(|fault| stderr.contains(fault))
 }
 
 #[derive(Clone)]
@@ -836,7 +849,7 @@ mod tests {
         assert!(evidence.contains("[REDACTED]"));
     }
 
-    /// A GitHub server fault is retried; a client error fails at once.
+    /// A GitHub server or network fault is retried; a client error fails at once.
     #[test]
     fn transient_github_failures_retry_and_client_errors_do_not() {
         let fixture = tempfile::tempdir().unwrap();
@@ -844,7 +857,7 @@ mod tests {
         homeboy_test_support::write_executable(
             &fixture.path().join("gh"),
             format!(
-                "#!/bin/sh\necho x >> {calls}\nn=0\nwhile read -r _; do n=$((n+1)); done < {calls}\ncase \"$1:$n\" in\n  flaky:1) echo 'GraphQL: Something went wrong while executing your query on 2026-11-20T23:58:21Z.' >&2; exit 1;;\n  flaky:2) echo 'HTTP 502: Bad Gateway' >&2; exit 1;;\n  flaky:*) echo https://github.com/o/r/pull/7;;\n  *) echo 'GraphQL: Could not resolve to a Repository' >&2; exit 1;;\nesac\n",
+                "#!/bin/sh\necho x >> {calls}\nn=0\nwhile read -r _; do n=$((n+1)); done < {calls}\ncase \"$1:$n\" in\n  flaky:1) echo 'GraphQL: Something went wrong while executing your query on 2026-11-20T23:58:21Z.' >&2; exit 1;;\n  flaky:2) echo 'HTTP 502: Bad Gateway' >&2; exit 1;;\n  flaky:3) echo 'Post \"https://api.github.com/graphql\": net/http: TLS handshake timeout' >&2; exit 1;;\n  flaky:*) echo https://github.com/o/r/pull/7;;\n  *) echo 'GraphQL: Could not resolve to a Repository' >&2; exit 1;;\nesac\n",
                 calls = homeboy_engine_primitives::shell::quote_path(&calls.to_string_lossy()),
             ),
             0o755,
@@ -857,7 +870,7 @@ mod tests {
             client.run(&["flaky".into()]).unwrap().trim(),
             "https://github.com/o/r/pull/7"
         );
-        assert_eq!(count(), 3);
+        assert_eq!(count(), 4);
         std::fs::remove_file(&calls).unwrap();
         let error = client.run(&["missing".into()]).unwrap_err();
         assert!(error.message.contains("Could not resolve"), "{error:?}");

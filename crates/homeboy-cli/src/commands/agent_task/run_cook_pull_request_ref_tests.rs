@@ -210,6 +210,25 @@ fn cook_pr_refs_resolve_for_linked_worktree_and_repo_preview_with_fake_gh() {
             input.dispatch.task_url.as_deref(),
             Some("https://github.com/example/repo/pull/1895")
         );
+        // A network fault resolving PR refs is GitHub being unreachable, not
+        // a bad `task_url`: it is retried, then reported retryable.
+        std::fs::write(
+            &gh,
+            "#!/bin/sh\necho 'Post \"https://api.github.com/graphql\": net/http: TLS handshake timeout' >&2\nexit 1\n",
+        )
+        .unwrap();
+        let error = cook_pull_request_refs(None, "https://github.com/example/repo/pull/1895")
+            .expect_err("unreachable GitHub fails the lookup");
+        assert_ne!(
+            error.code.as_str(),
+            "validation.invalid_argument",
+            "{error:?}"
+        );
+        assert_eq!(error.retryable, Some(true), "{error:?}");
+        assert!(
+            error.message.contains("GitHub was unreachable"),
+            "{error:?}"
+        );
         std::fs::write(
             &gh,
             "#!/bin/sh\necho 'gh: Not Found (HTTP 404)' >&2\nexit 1\n",

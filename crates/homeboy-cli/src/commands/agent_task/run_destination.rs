@@ -486,10 +486,44 @@ pub(super) fn resolve_cook_base(
     Ok(())
 }
 
-/// Read an issue's timeline. A missing issue is a bad `task_url`; any other
-/// `gh` failure (TLS or connection timeouts, 5xx) is transient, so it is
-/// retried briefly and then reported as retryable rather than as the caller's
-/// argument error.
+/// Run one `gh` lookup that resolves the Cook's `task_url`. GitHub server and
+/// network faults (5xx, TLS or connection timeouts) are retried through the
+/// shared GitHub retry. Only "not found" is the caller's bad `task_url`; any
+/// other failure that outlasts the retry means GitHub was unreachable, so it is
+/// reported as retryable rather than as invalid input.
+fn task_url_github_lookup(
+    mut command: impl FnMut() -> std::process::Command,
+    what: &str,
+    url: &str,
+) -> homeboy::core::Result<std::process::Output> {
+    let output = homeboy::core::git::retry_transient_github_failures(|| {
+        command().output().map_err(|error| {
+            homeboy::core::Error::internal_io(error.to_string(), Some(format!("gh {what}")))
+        })
+    })?;
+    if output.status.success() {
+        return Ok(output);
+    }
+    let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+    if ["Could not resolve", "Not Found", "HTTP 404"]
+        .iter()
+        .any(|missing| stderr.contains(missing))
+    {
+        return Err(homeboy::core::Error::validation_invalid_argument(
+            "task_url",
+            format!("could not resolve {what}: {stderr}"),
+            Some(url.to_string()),
+            None,
+        ));
+    }
+    Err(homeboy::core::Error::new(
+        homeboy::core::ErrorCode::RemoteCommandFailed,
+        format!("GitHub was unreachable while resolving {what}; retry the Cook: {stderr}"),
+        serde_json::json!({ "command": format!("gh {what}"), "task_url": url, "stderr": stderr }),
+    )
+    .with_retryable(true))
+}
+
 /// Open pull requests GitHub links to close the issue: a closing keyword or a
 /// Development-sidebar link. A pull request that only mentions the issue is
 /// not one, nor is one already merged or closed.
@@ -500,10 +534,10 @@ pub(super) fn issue_closing_pull_requests(
     url: &str,
 ) -> homeboy::core::Result<Vec<String>> {
     const QUERY: &str = "query($owner:String!,$repo:String!,$number:Int!){repository(owner:$owner,name:$repo){issue(number:$number){closedByPullRequestsReferences(first:20,includeClosedPrs:false){nodes{url state}}}}}";
-    let mut stderr = String::new();
-    for delay in [2, 5, 0] {
-        let output = std::process::Command::new("gh")
-            .args([
+    let output = task_url_github_lookup(
+        || {
+            let mut command = std::process::Command::new("gh");
+            command.args([
                 "api",
                 "graphql",
                 "-f",
@@ -516,46 +550,26 @@ pub(super) fn issue_closing_pull_requests(
                 &format!("number={number}"),
                 "--jq",
                 ".data.repository.issue.closedByPullRequestsReferences.nodes",
-            ])
-            .output()
-            .map_err(|error| {
-                homeboy::core::Error::internal_io(
-                    error.to_string(),
-                    Some("gh api graphql issue closing pull requests".into()),
-                )
-            })?;
-        if output.status.success() {
-            // `includeClosedPrs:false` still returns merged PRs; only an
-            // open PR is a candidate this Cook can rework.
-            #[derive(serde::Deserialize)]
-            struct Node {
-                url: String,
-                state: String,
-            }
-            let nodes: Vec<Node> = serde_json::from_slice(&output.stdout)
-                .map_err(|error| homeboy::core::Error::internal_json(error.to_string(), None))?;
-            return Ok(nodes
-                .into_iter()
-                .filter(|node| node.state == "OPEN")
-                .map(|node| node.url)
-                .collect());
-        }
-        stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
-        if stderr.contains("Could not resolve") || stderr.contains("Not Found") {
-            return Err(homeboy::core::Error::validation_invalid_argument(
-                "task_url",
-                format!("could not resolve issue's linked PRs: {stderr}"),
-                Some(url.to_string()),
-                None,
-            ));
-        }
-        std::thread::sleep(std::time::Duration::from_secs(delay));
+            ]);
+            command
+        },
+        "issue's linked PRs",
+        url,
+    )?;
+    // `includeClosedPrs:false` still returns merged PRs; only an open PR is a
+    // candidate this Cook can rework.
+    #[derive(serde::Deserialize)]
+    struct Node {
+        url: String,
+        state: String,
     }
-    Err(homeboy::core::Error::internal_io(
-        format!("GitHub was unreachable while resolving the issue's linked PRs; retry the Cook: {stderr}"),
-        Some("gh api graphql issue closing pull requests".into()),
-    )
-    .with_retryable(true))
+    let nodes: Vec<Node> = serde_json::from_slice(&output.stdout)
+        .map_err(|error| homeboy::core::Error::internal_json(error.to_string(), None))?;
+    Ok(nodes
+        .into_iter()
+        .filter(|node| node.state == "OPEN")
+        .map(|node| node.url)
+        .collect())
 }
 
 /// Resolve linked PRs from the issue, not from a guessed branch name.
@@ -720,29 +734,23 @@ pub(super) fn cook_pull_request_refs(
     path: Option<&Path>,
     url: &str,
 ) -> homeboy::core::Result<(String, String)> {
-    let mut command = std::process::Command::new("gh");
-    command.args(["pr", "view", url, "--json", "baseRefName,headRefName"]);
-    // Full GitHub URLs identify their repository without a checkout. Even for
-    // relative PR identifiers, never pass a missing path to process spawning.
-    if !url.starts_with("https://github.com/") {
-        if let Some(path) = path.filter(|path| path.is_dir()) {
-            command.current_dir(path);
-        }
-    }
-    let output = command.output().map_err(|error| {
-        homeboy::core::Error::internal_io(error.to_string(), Some("gh pr view".to_string()))
-    })?;
-    if !output.status.success() {
-        return Err(homeboy::core::Error::validation_invalid_argument(
-            "task_url",
-            format!(
-                "could not resolve canonical pull request refs: {}",
-                String::from_utf8_lossy(&output.stderr).trim()
-            ),
-            Some(url.to_string()),
-            None,
-        ));
-    }
+    let output = task_url_github_lookup(
+        || {
+            let mut command = std::process::Command::new("gh");
+            command.args(["pr", "view", url, "--json", "baseRefName,headRefName"]);
+            // Full GitHub URLs identify their repository without a checkout.
+            // Even for relative PR identifiers, never pass a missing path to
+            // process spawning.
+            if !url.starts_with("https://github.com/") {
+                if let Some(path) = path.filter(|path| path.is_dir()) {
+                    command.current_dir(path);
+                }
+            }
+            command
+        },
+        "canonical pull request refs",
+        url,
+    )?;
     let refs: Value = serde_json::from_slice(&output.stdout)
         .map_err(|error| homeboy::core::Error::internal_json(error.to_string(), None))?;
     let base = refs["baseRefName"]
