@@ -4,6 +4,11 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.482.12] - 2026-11-21
+
+### Fixed
+- stop github_release resolution at GitHub's 1000-release window
+
 ## [0.482.11] - 2026-11-21
 
 ### Fixed
