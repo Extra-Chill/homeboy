@@ -346,7 +346,14 @@ pub fn resource_profile(
                 continue;
             }
         };
-        for cook in cook_usage(store, &run.id, &spans)? {
+        // Unfiltered, every child Cook is itself a listed run; only a workflow
+        // filter (which lists workflow runs alone) needs its children expanded.
+        let run_cooks = if query.workflow.is_some() || workflow_of(&run.id).is_none() {
+            cook_usage(store, &run.id, &spans)?
+        } else {
+            Vec::new()
+        };
+        for cook in run_cooks {
             cooks.insert(cook.run_id.clone(), cook);
         }
         let mut has_usage = false;
@@ -399,8 +406,19 @@ pub fn resource_profile(
     let limit = query.limit.clamp(1, MAX_ROWS);
     let omitted_phases = phases.len().saturating_sub(limit);
     phases.truncate(limit);
+    // The heaviest Cooks first, bounded like the phase rows.
+    let mut cooks: Vec<CookUsage> = cooks.into_values().collect();
+    let cook_cpu = |cook: &CookUsage| -> f64 {
+        cook.attempts
+            .iter()
+            .flat_map(|attempt| &attempt.buckets)
+            .map(|bucket| bucket.cpu_seconds)
+            .sum()
+    };
+    cooks.sort_by(|a, b| by_cpu_then_name((cook_cpu(a), &a.run_id), (cook_cpu(b), &b.run_id)));
+    cooks.truncate(limit);
     Ok(ResourceProfile {
-        cooks: cooks.into_values().collect(),
+        cooks,
         runs_inspected,
         runs_with_usage,
         cpu_seconds: overhead.homeboy_cpu_seconds
