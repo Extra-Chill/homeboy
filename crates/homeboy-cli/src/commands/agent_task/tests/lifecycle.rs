@@ -2850,6 +2850,86 @@ fn recover_regate_verify_replaces_gates_for_an_incomplete_unjudged_candidate() {
     });
 }
 
+/// #18556: a candidate whose gate was stopped for no progress plans `regate`
+/// on a plain `recover --preflight`, and `recover --regate` carries explicit
+/// gate budgets into the admitted step, even a timeout equal to the CLI
+/// default and a disabled (`0`) no-progress window.
+#[test]
+fn recover_regate_carries_explicit_gate_budgets_for_a_no_progress_candidate() {
+    use homeboy::agents::agent_task_service as service;
+    with_temp_home(|| {
+        let cook_id = "cook-regate-budgets";
+        let run_id = "cook-regate-budgets-attempt-1";
+        persist_legacy_candidate_cook(cook_id, run_id, None);
+        let gate = json!({"id": "gate-1", "status": "unavailable", "termination": "no_progress", "command": ["sh", "-c", "cargo test"], "exit_code": 1});
+        test_lifecycle_store()
+            .record_promotion(
+                run_id,
+                json!({
+                    "status": "gates_deferred",
+                    "source": {"kind": "run", "task_id": "provider", "run_id": run_id},
+                    "to_worktree": "fixture@recover", "target": {"worktree": "fixture@recover"},
+                    "candidate": {"base_sha": "a".repeat(40), "candidate_sha": "b".repeat(40), "tree_sha": "c".repeat(40)},
+                    "deterministic_gates": [gate],
+                    "operator_notification": {"status": "blocked", "message": "gates_deferred"}
+                }),
+            )
+            .unwrap();
+
+        let (preflight, exit) = recover_preflight_probe(run_id);
+        assert_eq!(exit, 0, "{preflight:#}");
+        assert_eq!(preflight["step"]["kind"], "regate", "{preflight:#}");
+
+        let captured = Arc::new(std::sync::Mutex::new(None));
+        let capture = captured.clone();
+        service::with_scheduling_daemon_start(
+            || Ok(()),
+            || {
+                service::with_recovery_step_submit_for_test(
+                    move |intent| {
+                        *capture.lock().unwrap() = Some(intent.mode.clone());
+                        Ok("regate-job".to_string())
+                    },
+                    || {
+                        let cli = Cli::try_parse_from([
+                            "homeboy",
+                            "agent-task",
+                            "recover",
+                            run_id,
+                            "--regate",
+                            "--gate-timeout-seconds",
+                            "1800",
+                            "--gate-no-progress-seconds",
+                            "0",
+                        ])
+                        .unwrap();
+                        let Commands::AgentTask(args) = cli.command else {
+                            panic!("agent-task")
+                        };
+                        let (report, code) = super::super::run(args).unwrap();
+                        assert_eq!(code, 0, "{report:#}");
+                        assert_eq!(report["status"], "admitted", "{report:#}");
+                        assert_eq!(report["regate"]["gate_timeout_seconds"], 1800);
+                        assert_eq!(report["regate"]["gate_no_progress_timeout_seconds"], 0);
+                    },
+                )
+            },
+        );
+        let Some(service::ExecutionStepMode::Recovery { step, regate, .. }) =
+            captured.lock().unwrap().take()
+        else {
+            panic!("a recovery step was admitted")
+        };
+        assert_eq!(step, service::CookRecoveryStep::Regate);
+        assert_eq!(regate.gate_timeout_seconds, Some(1800));
+        assert_eq!(regate.gate_no_progress_timeout_seconds, Some(0));
+        assert!(
+            regate.gates.is_none(),
+            "budgets alone keep the declared commands"
+        );
+    });
+}
+
 #[test]
 fn recover_preflight_is_read_only_and_recover_reaches_the_continuation_report() {
     let cook_id = "cook-cli-recover";

@@ -372,9 +372,10 @@ pub struct VerifyGateArgs {
     #[arg(long, default_value = "new-failures-only", value_parser = ["strict", "new-failures-only"])]
     pub baseline_policy: String,
     /// Wall-clock timeout, in seconds, for each verification gate command
-    /// (default 1800 = 30 min). A gate exceeding this fails.
-    #[arg(long = "gate-timeout-seconds", default_value_t = 30 * 60, value_name = "SECONDS")]
-    pub gate_timeout_seconds: u64,
+    /// (default 1800 = 30 min). A gate exceeding this fails. `None` when not
+    /// passed, so `recover --regate` can tell an explicit value from the default.
+    #[arg(long = "gate-timeout-seconds", value_name = "SECONDS")]
+    pub gate_timeout_seconds: Option<u64>,
     /// How often, in seconds, to emit a heartbeat while a gate runs so long
     /// gates are not mistaken for a stalled cook (default 5).
     #[arg(
@@ -387,14 +388,13 @@ pub struct VerifyGateArgs {
     /// (default 300 = 5 min; 0 disables it, leaving only the gate timeout).
     /// Any output, or CPU/I/O work by the gate's process tree, counts until the
     /// gate emits its first `HOMEBOY_PROGRESS` marker; after that, only markers
-    /// count.
+    /// count. `None` when not passed.
     #[arg(
         long = "gate-no-progress-timeout-seconds",
         visible_alias = "gate-no-progress-seconds",
-        default_value_t = 5 * 60,
         value_name = "SECONDS"
     )]
-    pub gate_no_progress_timeout_seconds: u64,
+    pub gate_no_progress_timeout_seconds: Option<u64>,
     /// Re-run gates that already recorded a passing result on a previous
     /// attempt instead of reusing the recorded pass. Off by default.
     #[arg(long = "rerun-completed-gates")]
@@ -490,6 +490,18 @@ impl Default for VerifyGateArgs {
 }
 
 impl VerifyGateArgs {
+    /// The per-gate wall-clock timeout this contract runs with.
+    pub(crate) fn effective_gate_timeout_seconds(&self) -> u64 {
+        self.gate_timeout_seconds
+            .unwrap_or_else(|| VerifyGateOptions::default().gate_timeout_seconds)
+    }
+
+    /// The per-gate no-progress window this contract runs with; `0` disables it.
+    pub(crate) fn effective_gate_no_progress_timeout_seconds(&self) -> u64 {
+        self.gate_no_progress_timeout_seconds
+            .unwrap_or_else(|| VerifyGateOptions::default().gate_no_progress_timeout_seconds)
+    }
+
     pub(crate) fn has_deterministic_gate(&self) -> bool {
         !self.verify.is_empty()
             || !self.verify_file.is_empty()
@@ -718,6 +730,8 @@ fn snapshot_gate_file(
 }
 impl From<VerifyGateArgs> for VerifyGateOptions {
     fn from(args: VerifyGateArgs) -> Self {
+        let gate_timeout_seconds = args.effective_gate_timeout_seconds();
+        let gate_no_progress_timeout_seconds = args.effective_gate_no_progress_timeout_seconds();
         Self {
             verify: args.verify,
             verify_ci: args.verify_ci,
@@ -736,9 +750,9 @@ impl From<VerifyGateArgs> for VerifyGateOptions {
             } else {
                 homeboy::agents::agent_tasks::gate::BaselinePolicy::NewFailuresOnly
             },
-            gate_timeout_seconds: args.gate_timeout_seconds,
+            gate_timeout_seconds,
             gate_heartbeat_interval_seconds: args.gate_heartbeat_interval_seconds,
-            gate_no_progress_timeout_seconds: args.gate_no_progress_timeout_seconds,
+            gate_no_progress_timeout_seconds,
             rerun_completed_gates: args.rerun_completed_gates,
 
             gate_environment: AgentTaskGateEnvironmentPolicy {

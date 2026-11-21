@@ -144,6 +144,7 @@ pub fn execute(id: &str, parameters: RecoverParameters) -> Result<(Value, i32)> 
             service::CookRegateInputs {
                 gates: parameters.corrected_gates,
                 gate_timeout_seconds: parameters.gate_timeout_seconds,
+                gate_no_progress_timeout_seconds: parameters.gate_no_progress_timeout_seconds,
             },
         )
     } else {

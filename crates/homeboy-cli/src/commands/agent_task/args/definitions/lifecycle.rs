@@ -379,8 +379,10 @@ pub struct RecoverArgs {
     /// without a provider attempt. Each regate executes fresh gate jobs. With
     /// `--verify`/`--verify-file`/`--private-verify`, those commands replace
     /// the declared verify commands for this regate, and the replacement is
-    /// recorded in the candidate's gate evidence. `--gate-timeout-seconds`
-    /// replaces the recorded per-gate timeout.
+    /// recorded in the candidate's gate evidence. `--gate-timeout-seconds` and
+    /// `--gate-no-progress-timeout-seconds` (`0` disables it) replace the
+    /// recorded per-gate budgets whenever passed; the override is recorded as
+    /// operator authority in the gate evidence.
     #[arg(
         long,
         conflicts_with_all = ["authorize_external_proof", "authorize_interrupted_rerun", "promotion"]
