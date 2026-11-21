@@ -55,7 +55,7 @@ pub(crate) fn prepare_cook_request(
         .and_then(|repo| repo.as_ref())
         .map(|repo| &repo.component);
     apply_component_default_verify_gates(args, component)?;
-    validate_cook_request_with_provenance(args, provenance)?;
+    validate_cook_request(args, provenance, PrTitlePolicy::for_component(component))?;
     repository
 }
 
@@ -111,11 +111,19 @@ pub(crate) fn validate_cook_request_with_provenance(
     args: &AgentTaskCookArgs,
     provenance: Option<&crate::cli_surface::CommandArgumentProvenance>,
 ) -> homeboy::core::Result<()> {
+    validate_cook_request(args, provenance, cook_title_policy(args))
+}
+
+fn validate_cook_request(
+    args: &AgentTaskCookArgs,
+    provenance: Option<&crate::cli_surface::CommandArgumentProvenance>,
+    title_policy: PrTitlePolicy,
+) -> homeboy::core::Result<()> {
     validate_cook_source_authority(args, provenance)?;
     validate_cook_subjects(
         args.title.as_deref(),
         args.commit_message.as_deref(),
-        cook_title_policy(args),
+        title_policy,
     )?;
     if args.dispatch.cwd.is_none() {
         if let (Some(handle), Some(repository), Some(head)) = (
@@ -268,38 +276,25 @@ pub(crate) fn promotion_provider(args: PromotionProviderArgs) -> CmdResult<Value
     .map(|value| (value, 0))
 }
 
-pub(super) fn run_cook_with_executor(
-    args: AgentTaskCookArgs,
-    executor: SharedAgentTaskExecutor,
-) -> CmdResult<Value> {
-    run_cook_with_executor_and_dispatcher(args, executor, None)
+/// Dependencies supplied by the caller for a new Cook execution.
+pub(crate) struct CookEntryContext<'a> {
+    pub executor: SharedAgentTaskExecutor,
+    pub attempt_dispatcher:
+        Option<Arc<dyn crate::agents::agent_task_service::AgentTaskCookAttemptDispatcher>>,
+    pub progress: super::CookProgress<'a>,
+    pub provenance: Option<&'a crate::cli_surface::CommandArgumentProvenance>,
 }
 
-pub(crate) fn run_cook_with_executor_and_dispatcher(
-    args: AgentTaskCookArgs,
-    executor: SharedAgentTaskExecutor,
-    attempt_dispatcher: Option<
-        Arc<dyn crate::agents::agent_task_service::AgentTaskCookAttemptDispatcher>,
-    >,
+pub(crate) fn run_cook(
+    mut args: AgentTaskCookArgs,
+    context: CookEntryContext<'_>,
 ) -> CmdResult<Value> {
-    run_cook_with_executor_and_dispatcher_with_progress(
-        args,
+    let CookEntryContext {
         executor,
         attempt_dispatcher,
-        None,
-        None,
-    )
-}
-
-pub(crate) fn run_cook_with_executor_and_dispatcher_with_progress(
-    mut args: AgentTaskCookArgs,
-    executor: SharedAgentTaskExecutor,
-    attempt_dispatcher: Option<
-        Arc<dyn crate::agents::agent_task_service::AgentTaskCookAttemptDispatcher>,
-    >,
-    progress: super::CookProgress<'_>,
-    provenance: Option<&crate::cli_surface::CommandArgumentProvenance>,
-) -> CmdResult<Value> {
+        progress,
+        provenance,
+    } = context;
     let retained_gate_contract = args.gates.has_retained_contract();
     snapshot_cook_prompt(&mut args)?;
     args.gates.snapshot_file_inputs()?;

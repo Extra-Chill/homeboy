@@ -1409,7 +1409,16 @@ fn unmaterialized_preview_admits_replay_and_cook_materializes_origin_base() {
         assert!(Path::new(projected_path).is_file());
 
         let executor = Arc::new(UnmaterializedPreviewExecutor);
-        let (report, _) = run_cook_with_executor(args, executor).expect("cook replay");
+        let (report, _) = run_cook(
+            args,
+            CookEntryContext {
+                executor,
+                attempt_dispatcher: None,
+                progress: None,
+                provenance: None,
+            },
+        )
+        .expect("cook replay");
         assert_eq!(
             report["failure_context"]["provider_executions_consumed"], 1,
             "{report}"
