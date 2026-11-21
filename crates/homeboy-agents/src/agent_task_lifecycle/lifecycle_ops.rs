@@ -1300,6 +1300,7 @@ pub fn cancel_reserved_detached_cook_handoff_attempt_if_cancelled_in_store(
         lifecycle_store,
         attempt_run_id,
         Some("detached Cook handoff cancelled"),
+        None,
     )?;
     Ok(true)
 }

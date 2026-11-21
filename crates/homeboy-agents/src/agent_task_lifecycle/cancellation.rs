@@ -6,13 +6,13 @@ enum CancelResolvedOutcome {
     Cancelled(AgentTaskRunRecord),
     AlreadyTerminal(AgentTaskRunRecord),
     /// The record was not terminal when this cancellation began, but became
-    /// terminal *during* it — a runner daemon publishing its terminal result
-    /// while cancellation was in flight. This is a race the operator's exact
+    /// terminal *during* it — a runner daemon or controller job publishing its
+    /// terminal result while cancellation was in flight. This is a race the
     /// cancellation request legitimately loses, not evidence the request
-    /// targeted an already-finished run; [`cancel_run_in_store`] reports it as
-    /// success and returns the now-terminal projection rather than the
-    /// `already_terminal` error reserved for a request that never had
-    /// anything left to cancel.
+    /// targeted an already-finished run; every entry point reports it as
+    /// success and returns the now-terminal projection (carrying the request
+    /// as `cancellation_request` evidence) rather than the `already_terminal`
+    /// error reserved for a request that never had anything left to cancel.
     RaceWonByTerminalRunnerResult(AgentTaskRunRecord),
 }
 
@@ -286,19 +286,19 @@ pub fn cancel_run_in_store(
             }
         }
         run_before_resolved_cancellation_for_test();
-        let record = match cancel_resolved_run_in_store(lifecycle_store, &resolved_run_id, reason)?
-        {
-            CancelResolvedOutcome::Cancelled(record) => record,
-            CancelResolvedOutcome::RaceWonByTerminalRunnerResult(record) => record,
-            CancelResolvedOutcome::AlreadyTerminal(record)
-                if resolved_run_id != requested_run_id =>
-            {
-                record
-            }
-            CancelResolvedOutcome::AlreadyTerminal(record) => {
-                return Err(already_terminal_error(&record));
-            }
-        };
+        let record =
+            match cancel_resolved_run_in_store(lifecycle_store, &resolved_run_id, reason, None)? {
+                CancelResolvedOutcome::Cancelled(record) => record,
+                CancelResolvedOutcome::RaceWonByTerminalRunnerResult(record) => record,
+                CancelResolvedOutcome::AlreadyTerminal(record)
+                    if resolved_run_id != requested_run_id =>
+                {
+                    record
+                }
+                CancelResolvedOutcome::AlreadyTerminal(record) => {
+                    return Err(already_terminal_error(&record));
+                }
+            };
         // A first child can have been submitted after reservation but before
         // index publication. Cancel it through the reservation link so it
         // cannot remain an unindexed queued record.
@@ -362,310 +362,34 @@ pub fn cancel_claimed_detached_cook_in_store(
     cancel_run_in_store(lifecycle_store, &cook_id, reason).map(Some)
 }
 
-// The ambient `cancel_exact_run()` shim that used to sit here is gone; its one
-// remaining caller was a cancellation test, which now cancels inside the store
-// it resolves (#7505).
-
 /// Cancel one literal run through an explicitly selected lifecycle store.
 ///
-/// Reserved handoff reconciliation needs exact-record semantics, but must not
-/// cross into another root merely because two test or controller roots use the
-/// same run ID.
-pub(crate) fn cancel_exact_run_in_store(
-    lifecycle_store: &AgentTaskLifecycleStore,
-    run_id: &str,
-    reason: Option<&str>,
-) -> Result<AgentTaskRunRecord> {
-    cancel_exact_run_in_store_with_provenance(lifecycle_store, run_id, reason, None)
-}
-
-/// [`cancel_exact_run_in_store`] for a caller that is not an operator.
+/// This is the same cancellation pipeline as [`cancel_run_in_store`] without
+/// Cook alias resolution: reserved handoff reconciliation and the stale-run
+/// reconciler need exact-record semantics, and must not cross into another
+/// root merely because two roots use the same run ID.
 ///
 /// `provenance` is written as the run's `cancellation_provenance` (and so its
 /// immutable `run.cancelled` receipt) instead of the operator default. A
 /// reconciler records itself and the evidence it acted on, so the receipt never
 /// claims an operator requested a cancellation nobody asked for. An already
 /// retained canonical receipt still wins: its event key is immutable.
-pub(crate) fn cancel_exact_run_in_store_with_provenance(
+pub(crate) fn cancel_exact_run_in_store(
     lifecycle_store: &AgentTaskLifecycleStore,
     run_id: &str,
     reason: Option<&str>,
     provenance: Option<Value>,
 ) -> Result<AgentTaskRunRecord> {
-    let run_id = sanitize_run_id(run_id);
-    let mut rooted_record = lifecycle_store.read_record(&run_id)?;
-    ensure_rooted_exact_cancellation_supported(&rooted_record)?;
-    // Re-read and classify only after owning the same rooted fence that
-    // protects the irreversible runner admission.
-    let mut pending_handoff_lock = Some(LabHandoffLock::lock_in_store(lifecycle_store, &run_id)?);
-    rooted_record = lifecycle_store.read_record(&run_id)?;
-    ensure_rooted_exact_cancellation_supported(&rooted_record)?;
-    let submission_state = rooted_record
-        .metadata
-        .pointer("/runner_submission_intent/state")
-        .and_then(Value::as_str)
-        .map(str::to_string);
-    let submission_handoff_open = submission_state.as_deref() == Some("preparing");
-    if submission_handoff_open {
-        let requested_at = now_timestamp();
-        lifecycle_store.mutate_record(&run_id, |record| {
-            if record.state().is_terminal() {
-                return false;
-            }
-            record.ensure_metadata_object().insert(
-                "runner_submission_cancellation".to_string(),
-                json!({
-                    "state": "requested",
-                    "requested_at": requested_at,
-                    "reason": reason.unwrap_or("cancel requested"),
-                    "recovery_action": format!("homeboy agent-task cancel {run_id}"),
-                }),
-            );
-            true
-        })?;
-        rooted_record = lifecycle_store.read_record(&run_id)?;
+    match cancel_resolved_run_in_store(
+        lifecycle_store,
+        &sanitize_run_id(run_id),
+        reason,
+        provenance,
+    )? {
+        CancelResolvedOutcome::Cancelled(record)
+        | CancelResolvedOutcome::RaceWonByTerminalRunnerResult(record) => Ok(record),
+        CancelResolvedOutcome::AlreadyTerminal(record) => Err(already_terminal_error(&record)),
     }
-    let mut controller_cancelled = false;
-    let mut cancelled_controller_job_id = None;
-    if let Some(controller_job_id) = rooted_record
-        .metadata
-        .get("lab_staging_controller_job_id")
-        .and_then(Value::as_str)
-        .filter(|id| !id.trim().is_empty())
-        .map(str::to_string)
-    {
-        // Fence pending runner admission before dropping the handoff lock. The
-        // controller owner may synchronously reconcile its child during this
-        // cancellation request, and must not deadlock trying to take the same
-        // per-run lock from its worker.
-        drop(pending_handoff_lock.take());
-        let job = homeboy_core::daemon::LocalControllerJobClient::connect_existing_job_in_root(
-            &controller_job_id,
-            lifecycle_store.roots().config(),
-        )?
-        .cancel(
-            &controller_job_id,
-            reason.unwrap_or("agent-task cancellation requested"),
-        )?;
-        if !job.status.is_terminal() {
-            let recovery_action = format!("homeboy agent-task cancel {run_id}");
-            let _ = lifecycle_store.mutate_record(&run_id, |record| {
-                if record.state().is_terminal() {
-                    return false;
-                }
-                record.ensure_metadata_object().insert(
-                    "controller_job_cancellation".to_string(),
-                    json!({
-                        "controller_job_id": job.id,
-                        "status": job.status,
-                        "phase": "requested",
-                        "reason": reason.unwrap_or("agent-task cancellation requested"),
-                        "recovery_action": recovery_action,
-                    }),
-                );
-                true
-            })?;
-            return Ok(lifecycle_store.read_record(&run_id)?);
-        }
-        // As for the fleet path: a job that settled on its own before handing
-        // off left nothing running; one that handed off defers to its runner job.
-        controller_cancelled = job.status == homeboy_core::api_jobs::JobStatus::Cancelled
-            || rooted_record.runner_job_id().is_none();
-        cancelled_controller_job_id = Some((controller_job_id, job.status));
-    }
-    let canonical_provenance =
-        canonical_cancellation_provenance_in_store(lifecycle_store, &run_id)?;
-    let committed = lifecycle_store.with_store_lock(|| {
-        let record = lifecycle_store.read_record(&run_id)?;
-        ensure_rooted_exact_cancellation_supported(&record)?;
-        if successful_provider_execution_is_pending_import(&record) {
-            let mut blocker = None;
-            return lifecycle_store
-                .mutate_record_locked_without_terminal_projection(&run_id, |record| {
-                    if record.state().is_terminal() {
-                        return false;
-                    }
-                    if let Err(error) = ensure_rooted_exact_cancellation_supported(record) {
-                        blocker = Some(error);
-                        return false;
-                    }
-                    defer_cancellation_for_terminal_provider(record, reason)
-                })
-                .and_then(|record| match blocker {
-                    Some(error) => Err(error),
-                    None => Ok(record),
-                });
-        }
-        let service_cleanup = if record.metadata.get("managed_service_supervisor").is_some() {
-            let services = crate::agent_task_scheduler::managed_services::reconcile_run_services_at(
-                &lifecycle_store.data_root(),
-                &record.run_id,
-                reason.unwrap_or("cancelled"),
-            )
-            .map_err(Error::internal_unexpected)?;
-            Some(json!({ "transport": "local", "services": services }))
-        } else {
-            None
-        };
-        let cancellation = if controller_cancelled {
-            LiveCancellationOutcome::NotRunning
-        } else if record.state() == RunExecutionState::Running
-            || (record.state() == RunExecutionState::Queued
-                && record.runner_id().is_some()
-                && record.runner_job_id().is_some())
-        {
-            classify_live_cancellation(&record)?
-        } else {
-            LiveCancellationOutcome::NotRunning
-        };
-        if let LiveCancellationOutcome::RunnerJobCancelled { job, events } = &cancellation {
-            if job.status.is_terminal() && job.status != homeboy_core::api_jobs::JobStatus::Cancelled {
-                return Err(Error::validation_invalid_argument(
-                    "run_id",
-                    "runner completed before rooted cancellation could be projected; refusing to overwrite its terminal result",
-                    Some(record.run_id),
-                    None,
-                ));
-            }
-            if !job.status.is_terminal() {
-                return lifecycle_store.mutate_record_locked_without_terminal_projection(
-                    &run_id,
-                    |current| {
-                        if current.state().is_terminal() {
-                            return false;
-                        }
-                        retain_pending_runner_cancellation(current, job, events, reason);
-                        true
-                    },
-                );
-            }
-        }
-        let mut blocker = None;
-        lifecycle_store.mutate_record_locked_without_terminal_projection(&run_id, |record| {
-            if record.state().is_terminal() {
-                return false;
-            }
-            if let Err(error) = ensure_rooted_exact_cancellation_supported(record) {
-                blocker = Some(error);
-                return false;
-            }
-            if successful_provider_execution_is_pending_import(record) {
-                return defer_cancellation_for_terminal_provider(record, reason);
-            }
-            let cancelled_at = now_timestamp();
-            record.updated_at = Some(cancelled_at.clone());
-            settle_run(record, RunExecutionState::Cancelled, ControlPlaneState::Cancelled);
-            let runner_id = record.runner_id().map(str::to_string);
-            let runner_job_id = record.runner_job_id().map(str::to_string);
-            let record_run_id = record.run_id.clone();
-            let metadata = record.ensure_metadata_object();
-            metadata.remove("runner_cancellation_pending");
-            terminalize_running_provider_executions(metadata, &cancelled_at);
-            metadata.insert("cancelled_at".to_string(), json!(cancelled_at));
-            metadata.insert(
-                "cancel_reason".to_string(),
-                json!(reason.unwrap_or("cancel requested")),
-            );
-            // A superseded cancellation (an expired Lab handoff the runner later
-            // accepted) may already have emitted run.cancelled. Its keyed event
-            // is immutable.
-            if let Some(provenance) = canonical_provenance.clone() {
-                metadata.insert("cancellation_provenance".to_string(), provenance);
-            } else if let Some(provenance) = provenance.clone() {
-                let mut provenance = provenance;
-                if let Some(object) = provenance.as_object_mut() {
-                    object
-                        .entry("timestamp".to_string())
-                        .or_insert_with(|| json!(cancelled_at));
-                }
-                metadata.insert("cancellation_provenance".to_string(), provenance);
-            } else {
-                metadata.entry("cancellation_provenance".to_string()).or_insert_with(|| json!({
-                    "actor": "controller",
-                    "cause": "operator_requested",
-                    "reason": reason.unwrap_or("cancel requested"),
-                    "timestamp": cancelled_at,
-                    "recovery_action": "inspect retained diagnostics with: homeboy runs logs <run-id>",
-                }));
-            }
-            if let Some(service_cleanup) = service_cleanup.clone() {
-                metadata.insert("managed_service_cleanup".to_string(), service_cleanup);
-            }
-            if controller_cancelled {
-                metadata.insert(
-                    "controller_job_cancellation".to_string(),
-                    json!({
-                        "controller_job_id": cancelled_controller_job_id.as_ref().map(|(id, _)| id),
-                        "status": cancelled_controller_job_id.as_ref().map(|(_, status)| status),
-                        "phase": if cancelled_controller_job_id.as_ref().is_some_and(|(_, status)| *status == homeboy_core::api_jobs::JobStatus::Cancelled) { "cancelled" } else { "settled" },
-                        "reason": reason.unwrap_or("agent-task cancellation requested"),
-                        "recovery_action": format!("homeboy agent-task status {record_run_id}"),
-                    }),
-                );
-            }
-            match &cancellation {
-                LiveCancellationOutcome::Terminated(termination) => {
-                    metadata.insert(
-                        "live_cancellation".to_string(),
-                        json!({
-                            "owner_pid": termination.owner_pid,
-                            "descendant_pids": termination.descendant_pids,
-                            "signalled_pids": termination.signalled_pids,
-                            "signal": termination.signal,
-                            "killed_pids": termination.killed_pids,
-                            "surviving_pids": termination.surviving_pids,
-                            "recovery_commands": termination.recovery_commands,
-                        }),
-                    );
-                }
-                LiveCancellationOutcome::RunnerJobCancelled { job, events } => {
-                    metadata.insert(
-                        "live_cancellation".to_string(),
-                        json!({
-                            "runner_id": runner_id,
-                            "runner_job_id": runner_job_id,
-                            "runner_job_status": job.status,
-                            "runner_job_events": events,
-                            "cancellation": "runner_job_cancel",
-                        }),
-                    );
-                }
-                LiveCancellationOutcome::Unsupported(unsupported) => {
-                    metadata.insert(
-                        "live_cancellation_unsupported".to_string(),
-                        json!({
-                            "reason": unsupported.reason,
-                            "owner_pid": unsupported.owner_pid,
-                            "runner_id": unsupported.runner_id,
-                            "runner_job_id": unsupported.runner_job_id,
-                            "recovery_commands": unsupported.recovery_commands,
-                        }),
-                    );
-                }
-                LiveCancellationOutcome::RunnerJobNotRunning { evidence } => {
-                    metadata.insert("live_cancellation".to_string(), evidence.clone());
-                }
-                LiveCancellationOutcome::NotRunning => {}
-            }
-            true
-        })
-        .and_then(|record| match blocker {
-            Some(error) => Err(error),
-            None => Ok(record),
-        })
-    })?;
-    if let Some(record) = committed.as_ref() {
-        lifecycle_store.project_terminal_record_after_unlock(&record.run_id)?;
-    }
-    let record = committed.unwrap_or(lifecycle_store.read_record(&run_id)?);
-    if record.state() == RunExecutionState::Cancelled {
-        crate::controller_scratch::finalize_run_at_explicit_roots(
-            &lifecycle_store.data_root(),
-            &lifecycle_store.artifact_root(),
-            &run_id,
-        )?;
-    }
-    Ok(record)
 }
 
 pub(super) fn ensure_rooted_exact_cancellation_supported(
@@ -684,9 +408,7 @@ pub(super) fn ensure_rooted_exact_cancellation_supported(
         ));
     }
     // Candidate adoption and runner-owned managed services still have no
-    // lifecycle-rooted owner transport. Controller staging and pending runner
-    // submissions are handled below using this store's daemon route and the
-    // per-run handoff admission fence.
+    // lifecycle-rooted owner transport for the action-eligibility projection.
     if record.candidate_adoption.as_ref().is_some_and(|attempt| {
         attempt.is_active()
             || attempt.state == "cancel_requested"
@@ -742,7 +464,19 @@ fn successful_provider_execution_is_pending_import(record: &AgentTaskRunRecord) 
             })
 }
 
-/// Cancel one already-resolved durable run inside an explicitly rooted store.
+/// The one agent-task cancellation pipeline: cancel one already-resolved
+/// durable run inside an explicitly rooted store.
+///
+/// It owns the whole sequence — handoff lock, classify, submission fence,
+/// controller job, process termination, terminal commit. Alias resolution
+/// ([`cancel_run_in_store`]) and non-operator provenance
+/// ([`cancel_exact_run_in_store`]) are inputs to it, never separate copies.
+///
+/// When the runner or controller job reaches a terminal state on its own
+/// before cancellation commits, that terminal result is imported as the run
+/// outcome and the cancellation request is recorded alongside it as evidence
+/// ([`CancelResolvedOutcome::RaceWonByTerminalRunnerResult`]); finished work
+/// is never overwritten and the race is not an error.
 ///
 /// Cancellation is destructive and it is not one write: it terminalizes the
 /// record, reaps the run's managed services, cancels a controller staging job,
@@ -754,11 +488,13 @@ fn successful_provider_execution_is_pending_import(record: &AgentTaskRunRecord) 
 /// admission intact while reporting success (#7505).
 ///
 /// There is no ambient wrapper: both entry points ([`cancel_run_in_store`] and
-/// [`cancel_exact_run`]) resolve exactly one store for the whole operation.
+/// [`cancel_exact_run_in_store`]) resolve exactly one store for the whole
+/// operation.
 fn cancel_resolved_run_in_store(
     lifecycle_store: &AgentTaskLifecycleStore,
     run_id: &str,
     reason: Option<&str>,
+    provenance: Option<Value>,
 ) -> Result<CancelResolvedOutcome> {
     #[cfg(test)]
     if let Some(error) = RESOLVED_CANCEL_ERROR.with(|slot| slot.borrow_mut().take()) {
@@ -973,22 +709,9 @@ fn cancel_resolved_run_in_store(
     // the aggregate. Its terminal reservation is durable proof that cancelling
     // now would overwrite completed work; leave the run joinable so the late
     // aggregate import is authoritative.
-    if record.state() == RunExecutionState::Running
-        && !record.is_runner_backed()
-        && record.metadata["provider_executions"]
-            .as_array()
-            .is_some_and(|executions| {
-                executions
-                    .iter()
-                    .any(|execution| execution["state"] == json!("succeeded"))
-            })
-    {
-        let now = now_timestamp();
+    if successful_provider_execution_is_pending_import(&record) {
         record = annotate_stored_record(lifecycle_store, &record.run_id, |stored| {
-            stored.ensure_metadata_object().insert(
-                "cancellation_deferred_for_terminal_provider".to_string(),
-                json!({ "requested_at": now, "reason": reason.unwrap_or("cancel requested") }),
-            );
+            defer_cancellation_for_terminal_provider(stored, reason);
         })?;
         return Ok(CancelResolvedOutcome::Cancelled(record));
     }
@@ -1025,15 +748,11 @@ fn cancel_resolved_run_in_store(
             true
         })?;
         let Some(marked) = marked else {
-            let terminal = lifecycle_store.read_record(&record.run_id)?;
-            return Ok(
-                if terminal.state().is_terminal()
-                    && terminal.state() != RunExecutionState::Cancelled
-                {
-                    CancelResolvedOutcome::RaceWonByTerminalRunnerResult(terminal)
-                } else {
-                    CancelResolvedOutcome::Cancelled(terminal)
-                },
+            return settled_during_cancellation(
+                lifecycle_store,
+                &record.run_id,
+                reason,
+                provenance.as_ref(),
             );
         };
         record = marked;
@@ -1068,15 +787,11 @@ fn cancel_resolved_run_in_store(
             true
         })?;
         let Some(updated) = updated else {
-            let terminal = lifecycle_store.read_record(&record.run_id)?;
-            return Ok(
-                if terminal.state().is_terminal()
-                    && terminal.state() != RunExecutionState::Cancelled
-                {
-                    CancelResolvedOutcome::RaceWonByTerminalRunnerResult(terminal)
-                } else {
-                    CancelResolvedOutcome::Cancelled(terminal)
-                },
+            return settled_during_cancellation(
+                lifecycle_store,
+                &record.run_id,
+                reason,
+                provenance.as_ref(),
             );
         };
         record = updated;
@@ -1122,12 +837,11 @@ fn cancel_resolved_run_in_store(
                     events: events.clone(),
                 },
             )?;
-            return Ok(
-                if record.state().is_terminal() && record.state() != RunExecutionState::Cancelled {
-                    CancelResolvedOutcome::RaceWonByTerminalRunnerResult(record)
-                } else {
-                    CancelResolvedOutcome::Cancelled(record)
-                },
+            return settled_during_cancellation(
+                lifecycle_store,
+                &record.run_id,
+                reason,
+                provenance.as_ref(),
             );
         }
         if !job.status.is_terminal() {
@@ -1146,123 +860,121 @@ fn cancel_resolved_run_in_store(
     // imported; never overwrite an already durable success.
     let canonical_provenance =
         canonical_cancellation_provenance_in_store(lifecycle_store, &record.run_id)?;
-    let record = lifecycle_store.mutate_record(&record.run_id, |record| {
-        // An aggregate or runner projection may have finished after the live
-        // cancellation transport returned. Its terminal state is authoritative.
-        if record.state().is_terminal() {
-            return false;
-        }
-        if record.state() == RunExecutionState::Running
-            && !record.is_runner_backed()
-            && record.metadata["provider_executions"]
-                .as_array()
-                .is_some_and(|executions| {
-                    executions
-                        .iter()
-                        .any(|execution| execution["state"] == json!("succeeded"))
-                })
-        {
-            record.ensure_metadata_object().insert(
-                "cancellation_deferred_for_terminal_provider".to_string(),
-                json!({ "requested_at": now_timestamp(), "reason": reason.unwrap_or("cancel requested") }),
+    let record = lifecycle_store
+        .mutate_record(&record.run_id, |record| {
+            // An aggregate or runner projection may have finished after the live
+            // cancellation transport returned. Its terminal state is authoritative.
+            if record.state().is_terminal() {
+                return false;
+            }
+            if successful_provider_execution_is_pending_import(record) {
+                return defer_cancellation_for_terminal_provider(record, reason);
+            }
+
+            let cancelled_at = now_timestamp();
+            let was_stale_running = record.state() == RunExecutionState::Running;
+            record.updated_at = Some(cancelled_at.clone());
+            settle_run(
+                record,
+                RunExecutionState::Cancelled,
+                ControlPlaneState::Cancelled,
             );
-            return true;
-        }
 
-        let cancelled_at = now_timestamp();
-        let was_stale_running = record.state() == RunExecutionState::Running;
-        record.updated_at = Some(cancelled_at.clone());
-        settle_run(record, RunExecutionState::Cancelled, ControlPlaneState::Cancelled);
-
-        let detached_handoff_parent =
-            record.metadata["detached_cook_handoff"]["cook_id"] == record.run_id;
-        let metadata = record.ensure_metadata_object();
-        terminalize_running_provider_executions(metadata, &cancelled_at);
-        metadata.insert("cancelled_at".to_string(), json!(cancelled_at));
-        metadata.insert(
-            "cancel_reason".to_string(),
-            json!(reason.unwrap_or("cancel requested")),
-        );
-        // Keep the first provenance payload bound to the canonical event key;
-        // cancel_reason records this operator request independently.
-        if let Some(provenance) = canonical_provenance.clone() {
-            metadata.insert("cancellation_provenance".to_string(), provenance);
-        } else {
-            metadata.entry("cancellation_provenance".to_string()).or_insert_with(|| json!({
+            let detached_handoff_parent =
+                record.metadata["detached_cook_handoff"]["cook_id"] == record.run_id;
+            let metadata = record.ensure_metadata_object();
+            terminalize_running_provider_executions(metadata, &cancelled_at);
+            metadata.insert("cancelled_at".to_string(), json!(cancelled_at));
+            metadata.insert(
+                "cancel_reason".to_string(),
+                json!(reason.unwrap_or("cancel requested")),
+            );
+            // Keep the first provenance payload bound to the canonical event key;
+            // cancel_reason records this request independently. A non-operator
+            // caller (the reconciler) names itself instead of the operator default.
+            if let Some(provenance) = canonical_provenance.clone() {
+                metadata.insert("cancellation_provenance".to_string(), provenance);
+            } else if let Some(mut provenance) = provenance.clone() {
+                if let Some(object) = provenance.as_object_mut() {
+                    object
+                        .entry("timestamp".to_string())
+                        .or_insert_with(|| json!(cancelled_at));
+                }
+                metadata.insert("cancellation_provenance".to_string(), provenance);
+            } else {
+                metadata.entry("cancellation_provenance".to_string()).or_insert_with(|| json!({
                 "actor": "controller",
                 "cause": "operator_requested",
                 "reason": reason.unwrap_or("cancel requested"),
                 "timestamp": cancelled_at,
                 "recovery_action": "inspect retained diagnostics with: homeboy runs logs <run-id>",
             }));
-        }
-        if detached_handoff_parent {
-            metadata["detached_cook_handoff"]["cancellation_fence"]["state"] =
-                json!("cancelled");
-        }
-        metadata.remove("live_cancellation");
-        metadata.remove("live_cancellation_unsupported");
-        metadata.remove("runner_cancellation_pending");
-        match &cancellation {
-            LiveCancellationOutcome::Terminated(termination) => {
+            }
+            if detached_handoff_parent {
+                metadata["detached_cook_handoff"]["cancellation_fence"]["state"] =
+                    json!("cancelled");
+            }
+            metadata.remove("live_cancellation");
+            metadata.remove("live_cancellation_unsupported");
+            metadata.remove("runner_cancellation_pending");
+            match &cancellation {
+                LiveCancellationOutcome::Terminated(termination) => {
+                    metadata.insert(
+                        "live_cancellation".to_string(),
+                        json!({
+                            "owner_pid": termination.owner_pid,
+                            "descendant_pids": termination.descendant_pids,
+                            "signalled_pids": termination.signalled_pids,
+                            "signal": termination.signal,
+                            "killed_pids": termination.killed_pids,
+                            "surviving_pids": termination.surviving_pids,
+                            "recovery_commands": termination.recovery_commands,
+                        }),
+                    );
+                }
+                LiveCancellationOutcome::RunnerJobCancelled { job, events } => {
+                    metadata.insert(
+                        "live_cancellation".to_string(),
+                        json!({
+                            "runner_id": runner_id,
+                            "runner_job_id": runner_job_id,
+                            "runner_job_status": job.status,
+                            "runner_job_events": events,
+                            "cancellation": "runner_job_cancel",
+                        }),
+                    );
+                }
+                LiveCancellationOutcome::Unsupported(unsupported) => {
+                    metadata.insert(
+                        "live_cancellation_unsupported".to_string(),
+                        json!({
+                            "reason": unsupported.reason,
+                            "owner_pid": unsupported.owner_pid,
+                            "runner_id": unsupported.runner_id,
+                            "runner_job_id": unsupported.runner_job_id,
+                            "recovery_commands": unsupported.recovery_commands,
+                        }),
+                    );
+                }
+                LiveCancellationOutcome::RunnerJobNotRunning { evidence } => {
+                    metadata.insert("live_cancellation".to_string(), evidence.clone());
+                }
+                LiveCancellationOutcome::NotRunning => {}
+            }
+            if was_stale_running {
                 metadata.insert(
-                    "live_cancellation".to_string(),
-                    json!({
-                        "owner_pid": termination.owner_pid,
-                        "descendant_pids": termination.descendant_pids,
-                        "signalled_pids": termination.signalled_pids,
-                        "signal": termination.signal,
-                        "killed_pids": termination.killed_pids,
-                        "surviving_pids": termination.surviving_pids,
-                        "recovery_commands": termination.recovery_commands,
-                    }),
+                    METADATA_KEY_CANCELLED_STALE_RUNNING.to_string(),
+                    json!(true),
                 );
             }
-            LiveCancellationOutcome::RunnerJobCancelled { job, events } => {
-                metadata.insert(
-                    "live_cancellation".to_string(),
-                    json!({
-                        "runner_id": runner_id,
-                        "runner_job_id": runner_job_id,
-                        "runner_job_status": job.status,
-                        "runner_job_events": events,
-                        "cancellation": "runner_job_cancel",
-                    }),
-                );
-            }
-            LiveCancellationOutcome::Unsupported(unsupported) => {
-                metadata.insert(
-                    "live_cancellation_unsupported".to_string(),
-                    json!({
-                        "reason": unsupported.reason,
-                        "owner_pid": unsupported.owner_pid,
-                        "runner_id": unsupported.runner_id,
-                        "runner_job_id": unsupported.runner_job_id,
-                        "recovery_commands": unsupported.recovery_commands,
-                    }),
-                );
-            }
-            LiveCancellationOutcome::RunnerJobNotRunning { evidence } => {
-                metadata.insert("live_cancellation".to_string(), evidence.clone());
-            }
-            LiveCancellationOutcome::NotRunning => {}
-        }
-        if was_stale_running {
-            metadata.insert(
-                METADATA_KEY_CANCELLED_STALE_RUNNING.to_string(),
-                json!(true),
-            );
-        }
-        metadata.remove(METADATA_KEY_STALE_RUNNING);
-        metadata.remove(METADATA_KEY_STALE_RUNNING_REASON);
-        true
-    })?
-    .unwrap_or(lifecycle_store.read_record(&record.run_id)?);
+            metadata.remove(METADATA_KEY_STALE_RUNNING);
+            metadata.remove(METADATA_KEY_STALE_RUNNING_REASON);
+            true
+        })?
+        .unwrap_or(lifecycle_store.read_record(&record.run_id)?);
     if record.state() == RunExecutionState::Cancelled {
-        // The same two rooted side effects `cancel_exact_run_in_store` already
-        // uses: scratch finalization needs both the data and artifact roots,
-        // and admission release needs the controller-runtime store below this
-        // store's data root.
+        // Scratch finalization needs both the data and artifact roots of this
+        // one store.
         crate::controller_scratch::finalize_run_at_explicit_roots(
             &lifecycle_store.data_root(),
             &lifecycle_store.artifact_root(),
@@ -1271,9 +983,44 @@ fn cancel_resolved_run_in_store(
         return Ok(CancelResolvedOutcome::Cancelled(record));
     }
     if record.state().is_terminal() {
-        return Ok(CancelResolvedOutcome::AlreadyTerminal(record));
+        // The run was live when this cancellation began; its own terminal
+        // result landed before the commit above.
+        return settled_during_cancellation(
+            lifecycle_store,
+            &record.run_id,
+            reason,
+            provenance.as_ref(),
+        );
     }
     Ok(CancelResolvedOutcome::Cancelled(record))
+}
+
+/// Classify a run that a runner, controller job or aggregate import settled
+/// while cancellation was in flight. A result other than cancellation is the
+/// run outcome; the cancellation request is kept beside it as evidence rather
+/// than overwriting it or failing the request.
+fn settled_during_cancellation(
+    lifecycle_store: &AgentTaskLifecycleStore,
+    run_id: &str,
+    reason: Option<&str>,
+    provenance: Option<&Value>,
+) -> Result<CancelResolvedOutcome> {
+    let record = lifecycle_store.read_record(run_id)?;
+    if !record.state().is_terminal() || record.state() == RunExecutionState::Cancelled {
+        return Ok(CancelResolvedOutcome::Cancelled(record));
+    }
+    let evidence = json!({
+        "requested_at": now_timestamp(),
+        "reason": reason.unwrap_or("cancel requested"),
+        "provenance": provenance,
+        "outcome": "superseded_by_terminal_result",
+    });
+    let record = annotate_stored_record(lifecycle_store, run_id, |stored| {
+        stored
+            .ensure_metadata_object()
+            .insert("cancellation_request".to_string(), evidence);
+    })?;
+    Ok(CancelResolvedOutcome::RaceWonByTerminalRunnerResult(record))
 }
 
 fn retain_pending_runner_cancellation(
@@ -1325,8 +1072,8 @@ fn retain_pending_runner_cancellation(
 /// `paths::artifact_root()`, and `cancel_admission` opens the ambient runtime
 /// root. A read reconciling a record from injected roots would have marked
 /// another home's scratch resources finalized and released another home's
-/// admission (#7505). This mirrors `cancel_exact_run_in_store`, which already
-/// uses exactly these two rooted forms.
+/// admission (#7505). This mirrors the cancellation pipeline
+/// (`cancel_resolved_run_in_store`), which uses exactly these rooted forms.
 ///
 /// The caller mutates `record` in place and persists it itself (through the
 /// compare-and-swap terminal commit when this cancels), so no record write
@@ -2052,7 +1799,8 @@ mod tests {
                     cancel_exact_run_in_store(
                         &AgentTaskLifecycleStore::from_environment().expect("lifecycle store"),
                         &attempt_id,
-                        None
+                        None,
+                        None,
                     )
                     .is_err(),
                     "direct cancellation retains strict terminal-run semantics"
@@ -2147,7 +1895,7 @@ mod tests {
                 .expect("mark child running");
         }
 
-        cancel_exact_run_in_store(&left, run_id, Some("parent cancelled"))
+        cancel_exact_run_in_store(&left, run_id, Some("parent cancelled"), None)
             .expect("cancel running child in selected root");
 
         assert_eq!(
@@ -2176,7 +1924,7 @@ mod tests {
             })
             .unwrap();
 
-        let record = cancel_exact_run_in_store(&store, run_id, Some("parent cancelled"))
+        let record = cancel_exact_run_in_store(&store, run_id, Some("parent cancelled"), None)
             .expect("defer cancellation for successful provider");
 
         assert_eq!(record.state(), RunExecutionState::Running);
