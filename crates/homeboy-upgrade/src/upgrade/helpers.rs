@@ -475,6 +475,7 @@ fn complete_without_controller_replacement(
     };
     if !completion.superseded {
         result.extension_skips.extend(orphan_extension_warnings());
+        report_host_runner_service(&mut result);
     }
     result.daemon_pending_restart =
         converge_resident_daemon_after_controller_reconciliation(&completion)?;
@@ -1067,6 +1068,7 @@ fn run_controller_upgrade_with_operation(
             };
             if !completion_superseded {
                 result.extension_skips.extend(orphan_extension_warnings());
+                report_host_runner_service(&mut result);
             }
             if completion_superseded {
                 invalidate_superseded_evidence(&mut result);
@@ -2285,6 +2287,36 @@ fn installed_daemon_matches(installed_identity: &str) -> bool {
                 .as_ref()
                 .is_some_and(|state| state.build_identity.display == installed_identity)
     })
+}
+
+/// On a runner host (no configured runners of its own), report its runner
+/// service unit as pending when it does not run the installed build. That unit
+/// is converged by its controller's `homeboy upgrade`, so a runner-host upgrade
+/// names that command and does not report success (#18550).
+fn report_host_runner_service(result: &mut UpgradeResult) {
+    if result.runner_convergence != Some(RunnerConvergenceDisposition::NoRunnersConfigured) {
+        return;
+    }
+    let Some(version) = result.new_version.as_deref() else {
+        return;
+    };
+    let pending = super::with_runner_upgrade(|provider| {
+        provider.host_runner_service_pending_restart(version)
+    });
+    if pending.is_empty() {
+        return;
+    }
+    warn_pending_resident_services(&pending);
+    let units: Vec<_> = pending
+        .iter()
+        .map(|entry| entry.service_id.as_str())
+        .collect();
+    result.message = format!(
+        "{}. HOST RUNNER SERVICE PENDING: {} not on {version}; run `homeboy upgrade` on its controller",
+        result.message.trim_end_matches('.'),
+        units.join(", "),
+    );
+    result.services_pending_restart.extend(pending);
 }
 
 /// Surface declared resident services that still hold the old binary, with the
