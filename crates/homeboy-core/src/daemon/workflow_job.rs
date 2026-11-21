@@ -1358,13 +1358,40 @@ fn progress_summary(state: &InstanceState) -> Value {
 
 /// A pure projection of the instance for status.
 pub fn projection(state: &InstanceState, store: Option<&JobStore>) -> Value {
+    let attempt_keys = |key: &str, attempt: u32| {
+        let prefix = key
+            .rsplit_once('/')
+            .map(|(prefix, _)| prefix)
+            .unwrap_or(key);
+        (1..=attempt)
+            .map(|attempt| format!("{prefix}/{attempt}"))
+            .collect::<Vec<_>>()
+    };
+    let keys = state
+        .steps
+        .values()
+        .flat_map(|step| {
+            step.key
+                .iter()
+                .flat_map(|key| attempt_keys(key, step.attempt))
+                .chain(step.items.iter().flat_map(|item| {
+                    item.key
+                        .iter()
+                        .flat_map(|key| attempt_keys(key, item.attempt))
+                }))
+        })
+        .collect::<Vec<_>>();
+    let timings = store
+        .map(|store| store.controller_job_timings(&keys))
+        .unwrap_or_default();
     let job_of = |key: &str| -> Value {
-        store
-            .and_then(|store| store.controller_job_for_key(key))
-            .map(|job| json!({ "job_id": job.id, "status": job.status }))
+        timings
+            .get(key)
+            .map(|job| json!({"job_id": job["job_id"], "status": job["status"]}))
             .unwrap_or(Value::Null)
     };
-    json!({
+    let mut view = json!({
+
         "instance": state.instance,
         "status": state.status.as_str(),
         "iteration": state.iteration,
@@ -1398,7 +1425,40 @@ pub fn projection(state: &InstanceState, store: Option<&JobStore>) -> Value {
                 "error": step.error,
             }))
         }).collect::<serde_json::Map<_, _>>(),
-    })
+    });
+    let enrich = |entry: &mut Value| {
+        let Some(key) = entry["key"].as_str().map(str::to_owned) else {
+            return;
+        };
+        let attempt = entry["attempt"].as_u64().unwrap_or(0) as u32;
+        if let Some(timing) = timings.get(&key).and_then(Value::as_object) {
+            for (field, value) in timing {
+                if field != "job_id" && field != "status" {
+                    entry[field] = value.clone();
+                }
+            }
+        }
+        entry["attempts"] = json!(attempt_keys(&key, attempt)
+            .iter()
+            .enumerate()
+            .filter_map(|(index, key)| {
+                let mut timing = timings.get(key)?.clone();
+                timing["attempt"] = json!(index + 1);
+                Some(timing)
+            })
+            .collect::<Vec<_>>());
+    };
+    if let Some(steps) = view["steps"].as_object_mut() {
+        for step in steps.values_mut() {
+            enrich(step);
+            if let Some(items) = step["items"].as_array_mut() {
+                for item in items {
+                    enrich(item);
+                }
+            }
+        }
+    }
+    view
 }
 
 /// The instance job admitted under `instance`, with its state.

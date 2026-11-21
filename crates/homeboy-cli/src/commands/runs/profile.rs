@@ -62,8 +62,8 @@ pub(crate) fn runs_profile(
 mod tests {
     use std::collections::BTreeMap;
 
+    use homeboy::core::daemon::step_job::recorded_step_usage;
     use homeboy::core::daemon::step_job::StepJobRequest;
-    use homeboy::core::daemon::step_job::{recorded_step_usage, step_command, step_job_dir};
     use homeboy::core::workflow::{
         advance, Command, Event, FinishedStatus, InstanceState, StepResult, SubmissionKind,
         WorkflowDefinition,
@@ -85,7 +85,9 @@ mod tests {
             let definition = WorkflowDefinition::from_value(json!({
                 "schema": "homeboy/workflow/v1", "id": "cpu-proof",
                 "steps": [
-                    {"id": "light", "exec": burn(20_000)},
+                    {"id": "light", "exec": {"program": "/bin/sh", "args": ["-c",
+                        "if [ ! -f retried ]; then touch retried; exit 1; fi; i=0; while [ $i -lt 20000 ]; do i=$((i+1)); done"]},
+                        "retry": {"max": 1, "on": ["failed"]}}, 
                     {"id": "heavy", "needs": ["light"], "exec": burn(400_000)},
                 ]
             }))
@@ -93,6 +95,12 @@ mod tests {
             definition.validate(&|_| true).unwrap();
             let instance = definition.instance_id(&BTreeMap::new(), None);
             let mut state = InstanceState::new(&definition, &instance, BTreeMap::new());
+            let jobs = homeboy::core::api_jobs::JobStore::open_without_reconciliation(
+                &home.path().join("step-jobs.db"),
+            )
+            .unwrap();
+            homeboy::core::daemon::step_job::register_step_job_driver();
+            let service = homeboy::core::daemon::DaemonControllerJobService::new(jobs.clone());
             let mut event = Event::Start;
             let started = std::time::Instant::now();
             let now = || started.elapsed().as_millis() as u64;
@@ -110,32 +118,81 @@ mod tests {
                 let SubmissionKind::Exec { program, args, .. } = &submission.kind else {
                     panic!("exec steps only");
                 };
-                let job_id = format!("cpu-proof-{}", submission.step);
-                let dir = step_job_dir(&job_id).unwrap();
-                std::fs::create_dir_all(&dir).unwrap();
+
                 let request = StepJobRequest::new(
                     &submission.key,
                     program,
                     args.clone(),
                     home.path().display().to_string(),
                     Default::default(),
-                    "workflow",
-                );
+                    homeboy::core::daemon::step_job::STEP_RECEIPT_CONSUMER,
+                )
+                .without_capacity_slot();
                 let spawned = std::time::Instant::now();
-                assert!(step_command(&request, &dir).status().unwrap().success());
+                let job = service
+                    .submit_with_disposition(request.submission().unwrap())
+                    .unwrap()
+                    .job;
+                let job = loop {
+                    let job = jobs.get(job.id).unwrap();
+                    if job.status.is_terminal() {
+                        break job;
+                    }
+                    assert!(spawned.elapsed().as_secs() < 20);
+                    std::thread::sleep(std::time::Duration::from_millis(10));
+                };
                 let usage =
-                    recorded_step_usage(&job_id, spawned.elapsed().as_millis() as u64).unwrap();
+                    recorded_step_usage(&job.id.to_string(), spawned.elapsed().as_millis() as u64)
+                        .unwrap();
                 event = Event::StepFinished(StepResult {
                     key: submission.key.clone(),
                     error: None,
-                    status: FinishedStatus::Succeeded,
+                    status: if job.status == homeboy::core::api_jobs::JobStatus::Succeeded {
+                        FinishedStatus::Succeeded
+                    } else {
+                        FinishedStatus::Failed
+                    },
                     outcome: None,
                     output: None,
                     run_id: None,
-                    usage: Some(usage),
+                    usage: (job.status == homeboy::core::api_jobs::JobStatus::Succeeded)
+                        .then_some(usage),
                 });
             }
             assert!(state.status.is_terminal(), "{:?}", state.status);
+            // The exact projection served by the workflow runs-show reader;
+            // timing comes from daemon history, independently of CPU usage.
+            let jobs = homeboy::core::api_jobs::JobStore::open_without_reconciliation(
+                &home.path().join("step-jobs.db"),
+            )
+            .unwrap();
+            let view = homeboy::core::daemon::workflow_job::projection(&state, Some(&jobs));
+            for id in ["light", "heavy"] {
+                let step = &view["steps"][id];
+                let parse = |field: &str| {
+                    chrono::DateTime::parse_from_rfc3339(step[field].as_str().unwrap())
+                        .unwrap()
+                        .timestamp_millis()
+                };
+                assert_eq!(
+                    step["elapsed_ms"].as_i64().unwrap(),
+                    parse("finished_at") - parse("started_at")
+                );
+                assert_eq!(
+                    step["queued_ms"].as_i64().unwrap(),
+                    parse("started_at") - parse("queued_at")
+                );
+            }
+            let attempts = view["steps"]["light"]["attempts"].as_array().unwrap();
+            assert_eq!(attempts.len(), 2);
+            assert_eq!(attempts[0]["attempt"], 1);
+            assert_eq!(attempts[0]["status"], "failed");
+            assert_eq!(attempts[1]["status"], "succeeded");
+            for attempt in attempts {
+                assert!(attempt["started_at"].is_string());
+                assert!(attempt["finished_at"].is_string());
+                assert!(attempt["elapsed_ms"].is_u64());
+            }
             let store = ObservationStore::open_initialized().unwrap();
             store.record_workflow_timing("fixture", &state).unwrap();
             // A Cook the instance launched records which part of its CPU was
