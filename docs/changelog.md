@@ -4,6 +4,19 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.482.13] - 2026-11-21
+
+### Changed
+- one process-group terminator, liveness probe, and tree walker
+- remove legacy Cook-state and session-store dual-read paths
+- one argv flag lookup helper in args_util
+- read GitHub releases only from the release catalog
+- unobserved-readiness fixture uses a command preflight still refuses
+
+### Fixed
+- wait through retryable runner conditions during worktree provider lookup
+- run nested review test locally when no Lab runner exists to wait for
+
 ## [0.482.12] - 2026-11-21
 
 ### Fixed
