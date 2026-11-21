@@ -5226,6 +5226,8 @@ pub(crate) fn cook_failure_context_with_probe_policy(
                     .map(|error| error.message)
             });
             let retry_admitted = matches!(retry_refusal, Some(None));
+            let pending_operator_feedback =
+                crate::agent_task_feedback::has_pending(lifecycle_store, cook_id);
             use agent_task_lifecycle::cook_run_state::cook_settlement_in_store;
             let recipes = super::cook_recipe::CookRecipeStore::for_lifecycle_store(lifecycle_store);
             let settlement = record.as_ref().and_then(|record| {
@@ -5296,7 +5298,8 @@ pub(crate) fn cook_failure_context_with_probe_policy(
                 live_driver,
                 recovery_legal,
                 blocking_claim.is_some(),
-                if provider_outcome_missing {
+                pending_operator_feedback,
+                if provider_outcome_missing || pending_operator_feedback {
                     retry_admitted
                 } else {
                     continuation_admitted
@@ -5991,6 +5994,7 @@ fn cook_recovery_actions(
         false,
         recovery_legal,
         blocking_claim,
+        false,
         retry_admitted,
         None,
         false,
@@ -6016,6 +6020,7 @@ fn cook_recovery_actions_with_prefix(
     live_driver: bool,
     recovery_legal: bool,
     blocking_claim: bool,
+    pending_operator_feedback: bool,
     retry_admitted: bool,
     retry_refusal: Option<&str>,
     involuntary_cancellation_retry_admitted: bool,
@@ -6041,6 +6046,7 @@ fn cook_recovery_actions_with_prefix(
             disconnected_runner,
             live_driver,
             blocking_claim,
+            pending_operator_feedback,
             retry_admitted,
             retry_refusal,
             involuntary_cancellation_retry_admitted,

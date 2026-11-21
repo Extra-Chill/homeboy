@@ -701,22 +701,6 @@ impl CookRecipeStore {
         Ok(())
     }
 
-    /// Queue feedback remediation against the existing terminal Cook attempt.
-    /// Failed continuation records may be rearmed, but no new attempt or budget
-    /// is created here; normal continuation admission remains authoritative.
-    pub fn enqueue_feedback_remediation(&self, cook_id: &str, run_id: &str) -> Result<bool> {
-        let lifecycle_store = self.lifecycle_store();
-        let record = lifecycle_store.read_record(run_id)?;
-        if !record.state().is_terminal() {
-            return Ok(false);
-        }
-        let rearm_failed = matches!(
-            continuation_state_in_store(self, cook_id, run_id)?,
-            CookContinuationState::Failed
-        );
-        self.enqueue_terminal_continuation_with_recovery(cook_id, run_id, rearm_failed)
-    }
-
     /// Publish continuation work for a terminal attempt. `rearm_failed` is the
     /// single authority that re-opens an already failed continuation, so a
     /// rearm and its controller-failure clear land in one record write.
@@ -5280,27 +5264,6 @@ mod tests {
             feedback_store.list("cook").unwrap()[0].state,
             crate::agent_task_feedback::FeedbackState::Pending
         );
-    }
-
-    #[test]
-    fn feedback_remediation_queues_the_existing_terminal_attempt() {
-        let context = homeboy_core::test_support::HermeticTestContext::new();
-        let (store, lifecycle_store) = rooted_stores(&context);
-        persist_recipe_run(&store, &lifecycle_store);
-        lifecycle_store
-            .mutate_record("run", |record| {
-                record.set_state_for_test(homeboy_lifecycle_contract::RunExecutionState::Failed);
-                true
-            })
-            .unwrap();
-
-        assert!(store.enqueue_feedback_remediation("cook", "run").unwrap());
-        let claim = store
-            .claim_continuation_for("cook", "run")
-            .unwrap()
-            .expect("same Cook attempt is queued");
-        assert_eq!(claim.continuation().cook_id, "cook");
-        assert_eq!(claim.continuation().run_id, "run");
     }
 
     #[test]

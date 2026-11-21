@@ -172,6 +172,8 @@ pub(crate) struct CookRecoveryInputs<'a> {
     pub blocking_claim: bool,
     /// Retry (or continuation) admission accepted this attempt.
     pub retry_admitted: bool,
+    /// Operator findings waiting for a fresh provider attempt.
+    pub pending_operator_feedback: bool,
     /// Why retry admission refused this attempt, when it did.
     pub retry_refusal: Option<&'a str>,
     /// The attempt was cancelled without an operator request (a runner-side
@@ -263,7 +265,7 @@ format!(
     if removed_runner_attempt(inputs.run_id) {
         return CookRecoveryStep::Reconcile;
     }
-    if inputs.disconnected_runner {
+    if inputs.disconnected_runner && !inputs.pending_operator_feedback {
         return CookRecoveryStep::Continue;
     }
     let status = CookStatus::from_status(inputs.status);
@@ -278,6 +280,28 @@ format!(
     }
     if inputs.blocking_claim {
         return CookRecoveryStep::Reconcile;
+    }
+    if inputs.pending_operator_feedback
+        && !matches!(status, CookStatus::DraftPublished)
+        && !matches!(inputs.status, "published" | "merged")
+        && (status != CookStatus::Cancelled || inputs.involuntary_cancellation_retry_admitted)
+    {
+        // Both a fresh attempt and a continuation dispatch the provider with
+        // the pending findings; only a refusal of both blocks the revision.
+        return if inputs.retry_admitted {
+            CookRecoveryStep::Retry
+        } else if inputs.continuation_refusal.is_none() && !inputs.provider_outcome_missing {
+            if inputs.continuation_rearm_required {
+                CookRecoveryStep::Rearm
+            } else {
+                CookRecoveryStep::Continue
+            }
+        } else {
+            CookRecoveryStep::none(format!(
+                "Pending operator feedback requires a revision, but retry admission refused this attempt: {}.",
+                inputs.retry_refusal.unwrap_or("retry is not admitted")
+            ))
+        };
     }
     // A publishable candidate whose agent declared the task incomplete stops
     // here whatever the gate status: rearming would replay provider work only
@@ -2084,6 +2108,34 @@ mod tests {
         };
         configure(&mut inputs);
         cook_recovery_step(&inputs)
+    }
+
+    #[test]
+    fn pending_feedback_revises_a_gate_failed_candidate() {
+        for (pending, admitted, expected) in [
+            (true, true, CookRecoveryStep::Retry),
+            (false, true, CookRecoveryStep::Regate),
+            (
+                true,
+                false,
+                CookRecoveryStep::none(
+                    "Pending operator feedback requires a revision, but retry admission refused this attempt: budget exhausted.",
+                ),
+            ),
+        ] {
+            assert_eq!(
+                step("gate_failed", |inputs| {
+                    inputs.pending_operator_feedback = pending;
+                    inputs.retry_admitted = admitted;
+                    inputs.retry_refusal = (!admitted).then_some("budget exhausted");
+                    inputs.continuation_refusal = (!admitted).then_some("no candidate");
+                    inputs.applied_gate_failure = true;
+                    inputs.regate_ready = true;
+                }),
+                expected,
+                "pending={pending}, admitted={admitted}"
+            );
+        }
     }
 
     #[test]
