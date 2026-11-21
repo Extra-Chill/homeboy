@@ -686,6 +686,11 @@ impl HermeticTestContext {
             .env_remove(crate::runner_job_execution_context::RUNNER_CHILD_RESERVATION_ENV)
             .env_remove(crate::runner_job_execution_context::RUNNER_JOB_EXECUTION_CONTEXT_ID_ENV)
             .env(crate::runner_pressure::SAMPLE_ENV, "{}")
+            // A quiet host load reading, like the pressure sample above: the
+            // local Cook dispatch "machine is hot" gate otherwise reads the
+            // CI runner's real load and queues fixture Cooks past their
+            // handoff bounds. Tests of that gate set their own reading.
+            .env("HOMEBOY_TEST_LOAD_AVERAGES", "0,0,0")
             .env("HOMEBOY_NO_UPDATE_CHECK", "1");
         command
     }
