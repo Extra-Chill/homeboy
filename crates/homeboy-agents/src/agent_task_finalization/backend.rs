@@ -1027,9 +1027,11 @@ fn publication_gh_output(path: &str, args: &[&str]) -> Result<std::process::Outp
             .env("GH_ENTERPRISE_TOKEN", credential.token())
             .env("GH_HOST", &repo.host);
     }
-    let mut output = command
-        .output()
-        .map_err(|_| Error::git_command_failed("Could not invoke gh"))?;
+    let mut output = homeboy_core::git::retry_transient_github_failures(|| {
+        command
+            .output()
+            .map_err(|_| Error::git_command_failed("Could not invoke gh"))
+    })?;
     if let Some((_, credential)) = credential {
         output.stdout = String::from_utf8_lossy(&output.stdout)
             .replace(credential.token(), "[REDACTED]")
