@@ -4,6 +4,14 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.485.0] - 2026-11-21
+
+### Added
+- a stall watchdog reports and settles workflow items whose run already settled
+
+### Fixed
+- a source edited mid-stream rebuilds the snapshot instead of failing as invalid input
+
 ## [0.484.3] - 2026-11-21
 
 ### Fixed
