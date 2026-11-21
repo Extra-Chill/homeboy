@@ -1080,11 +1080,16 @@ jobs:
           name: artifacts-dist-manifest
           path: dist-manifest.json
 
+      # Build artifacts only. `dist-manifest.json` was written by this job's
+      # `host` step and is already on disk; re-downloading the artifact this
+      # job just uploaded races artifact-service visibility (listed but not
+      # yet downloadable, or not listed at all), which left releases as drafts
+      # without `dist-manifest.json`.
       - name: Download GitHub Artifacts
         if: needs.plan.outputs.draft-complete != 'true'
         uses: actions/download-artifact@v7
         with:
-          pattern: artifacts-*
+          pattern: artifacts-build-*
           path: artifacts
           merge-multiple: true
 
@@ -1092,6 +1097,7 @@ jobs:
         if: needs.plan.outputs.draft-complete != 'true'
         run: |
           rm -f artifacts/*-dist-manifest.json
+          cp dist-manifest.json artifacts/dist-manifest.json
 
       - name: Download current Homeboy finalizer
         uses: actions/download-artifact@v7
