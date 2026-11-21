@@ -697,7 +697,37 @@ fn prefer_cwd_for_component(
     }
 
     let Some(registered) = registered else {
-        return Ok(None);
+        let root = detect_git_root(&cwd)
+            .or_else(|| materialized_snapshot_root(&cwd))
+            .unwrap_or(cwd);
+        let mut matches = Vec::new();
+        for directory in nested_portable_directories(&root) {
+            if let Some(discovered) = try_discover_from_portable(&directory)? {
+                if discovered.id == component_id {
+                    matches.push(discovered);
+                }
+            }
+        }
+        if matches.len() > 1 {
+            let paths = matches
+                .iter()
+                .map(|component| component.local_path.as_str())
+                .collect::<Vec<_>>()
+                .join(", ");
+            return Err(Error::validation_invalid_argument(
+                "component",
+                format!("Ambiguous component ID '{component_id}': matches {paths}"),
+                Some(component_id.to_string()),
+                Some(vec![
+                    "Use --path <component-dir> to select a checkout".to_string()
+                ]),
+            ));
+        }
+        let mut discovered = matches.pop();
+        if let Some(component) = discovered.as_mut() {
+            apply_standalone_fallbacks_at(config_root, component);
+        }
+        return Ok(discovered);
     };
     let registered_path = PathBuf::from(shellexpand::tilde(&registered.local_path).into_owned());
     if let Some(snapshot_root) = materialized_snapshot_root(&cwd) {
@@ -814,6 +844,71 @@ fn overlay_registered_local_checkout(
     component.local_path = registered.local_path.clone();
     resolve_remote_path_at(config_root, &mut component);
     Ok(component)
+}
+
+/// Inventory nested portable manifests without traversing dependency trees.
+/// Git provides the tracked/unignored inventory when available; materialized
+/// runner snapshots need a bounded, symlink-free filesystem walk instead.
+fn nested_portable_directories(root: &Path) -> Vec<PathBuf> {
+    fn excluded(name: &str) -> bool {
+        name.starts_with('.')
+            || matches!(
+                name,
+                "vendor" | "node_modules" | "target" | "build" | "dist"
+            )
+    }
+
+    let mut directories = Vec::new();
+    if let Some(files) = crate::git::output_optional(
+        root,
+        &[
+            "ls-files",
+            "--cached",
+            "--others",
+            "--exclude-standard",
+            "-z",
+        ],
+    ) {
+        for file in files.split('\0') {
+            let path = Path::new(file);
+            if path.file_name().is_some_and(|name| name == "homeboy.json") {
+                if let Some(parent) = path.parent().filter(|p| !p.as_os_str().is_empty()) {
+                    if !parent
+                        .components()
+                        .any(|part| excluded(&part.as_os_str().to_string_lossy()))
+                        && root.join(path).is_file()
+                    {
+                        directories.push(root.join(parent));
+                    }
+                }
+            }
+        }
+    } else {
+        fn walk(root: &Path, depth: usize, directories: &mut Vec<PathBuf>) {
+            if depth == 0 {
+                return;
+            }
+            let Ok(entries) = std::fs::read_dir(root) else {
+                return;
+            };
+            for entry in entries.flatten() {
+                if excluded(&entry.file_name().to_string_lossy())
+                    || !entry.file_type().is_ok_and(|kind| kind.is_dir())
+                {
+                    continue;
+                }
+                let directory = entry.path();
+                if directory.join("homeboy.json").is_file() {
+                    directories.push(directory.clone());
+                }
+                walk(&directory, depth - 1, directories);
+            }
+        }
+        walk(root, 4, &mut directories);
+    }
+    directories.sort();
+    directories.dedup();
+    directories
 }
 
 /// A repository-level checkout has nested portable components but no root
@@ -1891,6 +1986,110 @@ mod tests {
                 worktree.to_str().expect("worktree path"),
             ],
         );
+    }
+
+    #[test]
+    fn nested_unregistered_component_resolves_from_monorepo_root() {
+        crate::test_support::with_isolated_home(|_| {
+            for with_git in [true, false] {
+                let root = tempfile::tempdir().expect("monorepo");
+                if with_git {
+                    git(root.path(), &["init"]);
+                }
+                write_portable(&root.path().join("plugins/a"), "a");
+                write_portable(&root.path().join("plugins/b"), "b");
+                let resolved = with_cwd(root.path(), || resolve_effective(Some("a"), None, None))
+                    .expect("resolve nested component");
+                assert_eq!(
+                    Path::new(&resolved.local_path),
+                    root.path().join("plugins/a")
+                );
+                assert_eq!(resolved.id, "a");
+                assert_eq!(resolved.build_artifact.as_deref(), Some("build/a.zip"));
+            }
+        });
+    }
+
+    #[test]
+    fn nested_unregistered_component_uses_materialized_snapshot_root() {
+        crate::test_support::with_isolated_home(|_| {
+            let root = tempfile::tempdir().expect("snapshot");
+            let cwd = root.path().join("scripts");
+            fs::create_dir(&cwd).expect("snapshot subdirectory");
+            let component_path = root.path().join("plugins/a");
+            write_portable(&component_path, "a");
+            let _snapshot = crate::test_support::EnvVarGuard::set(
+                crate::observation::SOURCE_SNAPSHOT_METADATA_ENV,
+                serde_json::json!({ "remote_path": root.path() }).to_string(),
+            );
+            let resolved = with_cwd(&cwd, || resolve_effective(Some("a"), None, None))
+                .expect("resolve sibling component through snapshot root");
+            assert_eq!(Path::new(&resolved.local_path), component_path);
+        });
+    }
+
+    #[test]
+    fn nested_unregistered_component_rejects_duplicate_ids() {
+        crate::test_support::with_isolated_home(|_| {
+            for with_git in [true, false] {
+                let root = tempfile::tempdir().expect("monorepo");
+                if with_git {
+                    git(root.path(), &["init"]);
+                }
+                write_portable(&root.path().join("plugins/a"), "duplicate");
+                write_portable(&root.path().join("plugins/b"), "duplicate");
+                let error = with_cwd(root.path(), || {
+                    resolve_effective(Some("duplicate"), None, None)
+                })
+                .expect_err("duplicate IDs must be ambiguous")
+                .to_string();
+                assert!(
+                    error.contains("Ambiguous component ID 'duplicate'"),
+                    "{error}"
+                );
+                for path in ["plugins/a", "plugins/b"] {
+                    assert!(
+                        error.contains(root.path().join(path).to_str().unwrap()),
+                        "{error}"
+                    );
+                }
+            }
+        });
+    }
+
+    #[test]
+    fn nested_registered_component_keeps_registered_checkout() {
+        crate::test_support::with_isolated_home(|home| {
+            let root = tempfile::tempdir().expect("fixture");
+            let registered = root.path().join("registered");
+            write_portable(&registered, "a");
+            write_standalone_registration(home.path(), "a", &registered);
+            let checkout = root.path().join("monorepo");
+            write_portable(&checkout.join("plugins/a"), "a");
+            write_portable(&checkout.join("plugins/duplicate"), "a");
+            let resolved = with_cwd(&checkout, || resolve_effective(Some("a"), None, None))
+                .expect("registered ID must not use nested discovery");
+            assert_eq!(Path::new(&resolved.local_path), registered);
+        });
+    }
+
+    #[test]
+    fn nested_portable_snapshot_walk_is_bounded_and_skips_dependencies() {
+        let root = tempfile::tempdir().expect("snapshot");
+        for path in [
+            "vendor/a",
+            "node_modules/a",
+            "target/a",
+            "build/a",
+            "dist/a",
+            ".hidden/a",
+            "one/two/three/four/five",
+        ] {
+            write_portable(&root.path().join(path), "ignored");
+        }
+        let expected = root.path().join("one/two/three/four");
+        write_portable(&expected, "included");
+        assert_eq!(nested_portable_directories(root.path()), vec![expected]);
     }
 
     #[test]
