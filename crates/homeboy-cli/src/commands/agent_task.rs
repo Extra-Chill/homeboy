@@ -323,19 +323,17 @@ pub(crate) fn run_with_cook_progress_and_provenance(
             // Reject unsupported Cook source shapes before discovering a provider
             // or preparing the local/Lab execution route.
             run::validate_cook_request_with_provenance(&cook_args, provenance)?;
-            if progress.is_some() {
-                run::run_cook_with_executor_and_dispatcher_with_progress(
-                    *cook_args,
-                    std::sync::Arc::new(
+            run::run_cook(
+                *cook_args,
+                run::CookEntryContext {
+                    executor: std::sync::Arc::new(
                         homeboy::agents::agent_tasks::provider::ExtensionProviderAgentTaskExecutor::discover(),
                     ),
-                    None,
+                    attempt_dispatcher: None,
                     progress,
                     provenance,
-                )
-            } else {
-                run::run_cook(*cook_args)
-            }
+                },
+            )
         }
         AgentTaskCommand::CookFeedback(args) => feedback::feedback(args),
         AgentTaskCommand::RunPlan(run_args) => run::run_plan(run_args),

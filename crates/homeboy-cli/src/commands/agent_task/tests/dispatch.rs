@@ -2311,9 +2311,14 @@ fn cook_rejects_queue_only_before_creating_a_durable_recipe() {
             panic!("cook command");
         };
 
-        let error = super::super::run::run_cook_with_executor(
+        let error = run_cook(
             *cook,
-            Arc::new(ExtensionProviderAgentTaskExecutor::default()),
+            CookEntryContext {
+                executor: Arc::new(ExtensionProviderAgentTaskExecutor::default()),
+                attempt_dispatcher: None,
+                progress: None,
+                provenance: None,
+            },
         )
         .expect_err("queue-only cook must fail before resolving its worktree");
 
@@ -2351,8 +2356,16 @@ fn cook_rejects_non_cli_no_finalize_authorization_before_provisioning() {
     let mut provenance = compiled.provenance;
     provenance.set("no_finalize", ArgumentSource::Configuration);
 
-    let error = super::super::run::validate_cook_request_with_provenance(&cook, Some(&provenance))
-        .expect_err("configuration cannot authorize finalization suppression");
+    let error = run_cook(
+        *cook,
+        CookEntryContext {
+            executor: Arc::new(CapturingExecutor::default()),
+            attempt_dispatcher: None,
+            progress: None,
+            provenance: Some(&provenance),
+        },
+    )
+    .expect_err("configuration cannot authorize finalization suppression");
 
     assert!(error.message.contains("explicitly authorized"));
 }
@@ -2425,10 +2438,14 @@ fn cook_goal_frames_explicit_prompt_without_creating_another_provider_cell() {
             panic!("cook command");
         };
 
-        run_cook_with_executor_and_dispatcher(
+        run_cook(
             *cook,
-            Arc::new(CapturingExecutor::default()),
-            Some(Arc::new(RecipeOnlyDispatcher)),
+            CookEntryContext {
+                executor: Arc::new(CapturingExecutor::default()),
+                attempt_dispatcher: Some(Arc::new(RecipeOnlyDispatcher)),
+                progress: None,
+                provenance: None,
+            },
         )
         .expect("persist Cook recipe before provider dispatch");
 
@@ -2495,10 +2512,14 @@ fn cook_goal_without_explicit_work_remains_one_provider_cell() {
             panic!("cook command");
         };
 
-        run_cook_with_executor_and_dispatcher(
+        run_cook(
             *cook,
-            Arc::new(CapturingExecutor::default()),
-            Some(Arc::new(RecipeOnlyDispatcher)),
+            CookEntryContext {
+                executor: Arc::new(CapturingExecutor::default()),
+                attempt_dispatcher: Some(Arc::new(RecipeOnlyDispatcher)),
+                progress: None,
+                provenance: None,
+            },
         )
         .expect("persist Cook recipe before provider dispatch");
 
@@ -2774,8 +2795,16 @@ fn cook_rejects_an_inactive_managed_destination_before_provider_execution() {
             "--no-finalize".to_string(),
         ]);
         let executor = Arc::new(CountingExecutor::default());
-        let error = run_cook_with_executor(args, executor.clone())
-            .expect_err("inactive managed destination must fail before execution");
+        let error = run_cook(
+            args,
+            CookEntryContext {
+                executor: executor.clone(),
+                attempt_dispatcher: None,
+                progress: None,
+                provenance: None,
+            },
+        )
+        .expect_err("inactive managed destination must fail before execution");
 
         assert_eq!(error.details["field"], "to_worktree");
         assert!(error.message.contains("is no longer active"));
@@ -3916,10 +3945,14 @@ fn component_lint_gate_is_added_after_file_gates_are_snapshotted() {
             "cook-linted-file-gate".to_string(),
         ]);
 
-        run_cook_with_executor_and_dispatcher(
+        run_cook(
             cook,
-            Arc::new(CapturingExecutor::default()),
-            Some(Arc::new(RecipeOnlyDispatcher)),
+            CookEntryContext {
+                executor: Arc::new(CapturingExecutor::default()),
+                attempt_dispatcher: Some(Arc::new(RecipeOnlyDispatcher)),
+                progress: None,
+                provenance: None,
+            },
         )
         .expect("file gates and the component lint gate admit together");
 

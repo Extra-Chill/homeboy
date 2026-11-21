@@ -3174,14 +3174,16 @@ fn run_split_placement_cook_with_runtime(
         Ok(())
     };
     let (value, exit_code) =
-        crate::commands::agent_task::run::run_cook_with_executor_and_dispatcher_with_progress(
+        crate::commands::agent_task::run::run_cook(
             *controller,
-            executor_override.unwrap_or_else(|| std::sync::Arc::new(
-                homeboy::agents::agent_tasks::provider::ExtensionProviderAgentTaskExecutor::discover(),
-            )),
-            Some(dispatcher),
-            Some(&progress),
-            provenance,
+            crate::commands::agent_task::run::CookEntryContext {
+                executor: executor_override.unwrap_or_else(|| std::sync::Arc::new(
+                    homeboy::agents::agent_tasks::provider::ExtensionProviderAgentTaskExecutor::discover(),
+                )),
+                attempt_dispatcher: Some(dispatcher),
+                progress: Some(&progress),
+                provenance,
+            },
         )?;
     let stdout = serde_json::to_string_pretty(&value).map_err(|error| {
         Error::internal_json(

@@ -44,16 +44,6 @@ pub(super) const MAX_PROVIDER_EVIDENCE_BYTES: u64 = 64 * 1024 * 1024;
 pub(super) const PREVIEW_STDIN_TIMEOUT: Duration = Duration::from_secs(5);
 pub(super) const PREVIEW_PROGRESS_HEARTBEAT: Duration = Duration::from_secs(5);
 
-pub(crate) fn run_cook(mut args: AgentTaskCookArgs) -> CmdResult<Value> {
-    snapshot_cook_prompt(&mut args)?;
-    args.gates.snapshot_file_inputs()?;
-    args.repro.snapshot_file_inputs()?;
-    run_cook_with_executor(
-        args,
-        Arc::new(ExtensionProviderAgentTaskExecutor::discover()),
-    )
-}
-
 /// Add a registered component's `default_verify_gates` when the caller
 /// supplied none. Defaults belong to the component, so they run in its
 /// repository-relative directory. Runs before request validation, which
@@ -723,10 +713,6 @@ pub(super) use super::run_execution::resolve_cook_execution_budget;
 #[allow(unused_imports)] // Preserve the existing run module path.
 pub(super) use super::run_execution::resolve_dispatch_prompt;
 pub(super) use super::run_execution::resolved_dispatch_args_for_cook;
-pub(super) use super::run_execution::run_cook_with_executor;
-#[allow(unused_imports)] // Preserve the existing run module path.
-pub(crate) use super::run_execution::run_cook_with_executor_and_dispatcher;
-pub(crate) use super::run_execution::run_cook_with_executor_and_dispatcher_with_progress;
 pub(crate) use super::run_execution::snapshot_cook_prompt;
 pub(super) use super::run_execution::snapshot_cook_prompt_bounded;
 pub(super) use super::run_execution::validate_cook_provider_execution_plan;
@@ -738,6 +724,7 @@ pub(super) use super::run_execution::validate_cook_subjects;
 pub(super) use super::run_execution::{
     admit_local_cook_dispatch_with_clock, record_local_dispatch_wait,
 };
+pub(crate) use super::run_execution::{run_cook, CookEntryContext};
 #[cfg(test)]
 pub(super) use super::run_preview::append_preview_lifecycle_replay_argv;
 #[cfg(test)]
