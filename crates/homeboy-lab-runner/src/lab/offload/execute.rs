@@ -69,14 +69,11 @@ pub fn execute_lab_offload(request: LabOffloadRequest<'_>) -> Result<LabOffloadO
             })
             .build(),
         );
-        return Ok(LabOffloadOutcome::RunLocal {
+        return Ok(run_local(
             plan,
-            metadata: Some(serde_json::json!({
-                "status": "skipped",
-                "execution_placement_decision": request.placement_decision,
-            })),
-            messages: Vec::new(),
-        });
+            LocalFallbackReason::CanonicalPlacement(&request.placement_decision),
+            LocalFallbackContext::default(),
+        ));
     }
     if should_skip_managed_runner_placement(
         placement,
@@ -84,14 +81,12 @@ pub fn execute_lab_offload(request: LabOffloadRequest<'_>) -> Result<LabOffloadO
         homeboy_core::resource_policy_context::is_managed_runner_placement_context(),
     ) {
         record_local_outcome(&request)?;
-        return Ok(LabOffloadOutcome::RunLocal {
-            plan: disabled_select_runner_plan(
-                base_lab_plan(request.command.as_ref()),
-                "runner placement already resolved",
-            ),
-            metadata: None,
-            messages: Vec::new(),
-        });
+        let reason = LocalFallbackReason::ManagedPlacement;
+        return Ok(run_local(
+            base_lab_plan(request.command.as_ref()),
+            reason,
+            LocalFallbackContext::default(),
+        ));
     }
     let unsupported_runner_error = |runner_id: &str, message: String| {
         Error::validation_invalid_argument(
@@ -126,11 +121,8 @@ pub fn execute_lab_offload(request: LabOffloadRequest<'_>) -> Result<LabOffloadO
             ));
         }
         record_local_outcome(&request)?;
-        return Ok(LabOffloadOutcome::RunLocal {
-            plan: disabled_select_runner_plan(plan, "command has no Lab contract"),
-            metadata: None,
-            messages: Vec::new(),
-        });
+        let reason = LocalFallbackReason::NoContract;
+        return Ok(run_local(plan, reason, LocalFallbackContext::default()));
     };
 
     if let homeboy_core::lab_contract::LabCommandPortability::LocalOnly(reason) =
@@ -147,7 +139,11 @@ pub fn execute_lab_offload(request: LabOffloadRequest<'_>) -> Result<LabOffloadO
         }
         plan = disabled_select_runner_plan(plan, reason);
         record_local_outcome(&request)?;
-        return Ok(skipped_automatic_run_local(plan, reason));
+        return Ok(run_local(
+            plan,
+            LocalFallbackReason::LocalOnly(reason),
+            LocalFallbackContext::default(),
+        ));
     }
 
     // Commands that explicitly prefer Lab retain that contract regardless of
@@ -181,11 +177,8 @@ pub fn execute_lab_offload(request: LabOffloadRequest<'_>) -> Result<LabOffloadO
         && !placement.requests_lab()
     {
         record_local_outcome(&request)?;
-        return Ok(LabOffloadOutcome::RunLocal {
-            plan: disabled_select_runner_plan(plan, "automatic Lab offload disabled"),
-            metadata: None,
-            messages: Vec::new(),
-        });
+        let reason = LocalFallbackReason::AutomaticOffloadDisabled;
+        return Ok(run_local(plan, reason, LocalFallbackContext::default()));
     }
 
     preflight_required_git_checkout_workspace(
@@ -226,11 +219,12 @@ pub fn execute_lab_offload(request: LabOffloadRequest<'_>) -> Result<LabOffloadO
         if placement == homeboy_lab_contract::Placement::Auto {
             fail_if_no_default_runner_accepts_jobs(&contract)?;
         }
-        let reason = if placement == homeboy_lab_contract::Placement::Local {
-            "placement_local_override"
+        let fallback_reason = if placement == homeboy_lab_contract::Placement::Local {
+            LocalFallbackReason::LocalOverride
         } else {
-            "no_default_runner"
+            LocalFallbackReason::NoDefaultRunner
         };
+        let reason = fallback_reason.diagnostic();
         plan = with_step(
             plan,
             PlanStep::builder(
@@ -238,20 +232,23 @@ pub fn execute_lab_offload(request: LabOffloadRequest<'_>) -> Result<LabOffloadO
                 "lab.select_runner",
                 PlanStepStatus::Skipped,
             )
-            .skip_reason(reason)
+            .skip_reason(&reason)
             .build(),
         );
         if placement == homeboy_lab_contract::Placement::Lab {
-            return Err(local_execution_denied_error(reason, None));
+            return Err(local_execution_denied_error(&reason, None));
         }
         // No runner was selected: record the skip reason as the fallback so the
         // selection metadata consistently explains why this ran locally.
-        observation.set_fallback_reason(reason);
+        observation.set_fallback_reason(&reason);
         record_local_outcome(&request)?;
-        return Ok(skipped_automatic_run_local_with_selection(
+        return Ok(run_local(
             plan,
-            reason,
-            &observation,
+            fallback_reason,
+            LocalFallbackContext {
+                observation: Some(&observation),
+                ..Default::default()
+            },
         ));
     };
 
@@ -332,24 +329,22 @@ pub fn execute_lab_offload(request: LabOffloadRequest<'_>) -> Result<LabOffloadO
                         .verifies_outcome(homeboy_lab_contract::EffectiveExecutionPlacement::Local)
                         && matches!(selection.source, LabRunnerSelectionSource::Default)
                     {
-                        let reason = format!("runner_unavailable: {}", error.message);
+                        let fallback_reason =
+                            LocalFallbackReason::RunnerUnavailable(&error.message);
+                        let reason = fallback_reason.diagnostic();
                         observation.set_fallback_reason(&reason);
-                        let mut metadata = lab_offload_metadata(
-                            &plan,
-                            selection.source.metadata_value(),
-                            Some(&selection.runner_id),
-                            Some(selection.mode.metadata_value()),
-                            "fallback",
-                            None,
-                            Some(&reason),
-                        );
-                        attach_offload_selection(&mut metadata, &observation);
                         record_local_outcome(&request)?;
-                        return Ok(LabOffloadOutcome::RunLocal {
-                            metadata: Some(metadata),
+                        return Ok(run_local(
                             plan,
-                            messages: vec![format!("Lab offload: {reason}; running locally.")],
-                        });
+                            fallback_reason,
+                            LocalFallbackContext {
+                                source: Some(selection.source.metadata_value()),
+                                runner_id: Some(&selection.runner_id),
+                                mode: Some(selection.mode.metadata_value()),
+                                observation: Some(&observation),
+                                ..Default::default()
+                            },
+                        ));
                     }
                     return Err(error);
                 }
@@ -408,22 +403,18 @@ pub fn execute_lab_offload(request: LabOffloadRequest<'_>) -> Result<LabOffloadO
                 ));
             }
             observation.set_fallback_reason(&reason);
-            let mut metadata = lab_offload_metadata(
-                &plan,
-                selection.source.metadata_value(),
-                Some(&selection.runner_id),
-                Some(selection.mode.metadata_value()),
-                "fallback",
-                None,
-                Some(&reason),
-            );
-            attach_offload_selection(&mut metadata, &observation);
             record_local_outcome(&request)?;
-            return Ok(LabOffloadOutcome::RunLocal {
-                metadata: Some(metadata),
+            return Ok(run_local(
                 plan,
-                messages: vec![format!("Lab offload: {reason}; running locally.")],
-            });
+                LocalFallbackReason::PreparationFailed(&reason),
+                LocalFallbackContext {
+                    source: Some(selection.source.metadata_value()),
+                    runner_id: Some(&selection.runner_id),
+                    mode: Some(selection.mode.metadata_value()),
+                    observation: Some(&observation),
+                    ..Default::default()
+                },
+            ));
         }
     };
 
