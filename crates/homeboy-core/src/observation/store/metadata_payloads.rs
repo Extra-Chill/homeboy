@@ -107,44 +107,60 @@ fn prepare(value: &mut Value, root: PayloadRoot) -> Result<()> {
     Ok(())
 }
 
+/// Count compact JSON bytes without allocating a temporary copy of evidence.
+fn serialized_size(value: &Value) -> usize {
+    struct Counter(usize);
+    impl std::io::Write for Counter {
+        fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+            self.0 += bytes.len();
+            Ok(bytes.len())
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+    let mut counter = Counter(0);
+    serde_json::to_writer(&mut counter, value).expect("JSON values are serializable");
+    counter.0
+}
+
 /// The deepest value on the largest-child path that is still above the
 /// externalization threshold and not already a payload reference.
-fn largest_inline_payload(value: &mut Value) -> Option<&mut Value> {
-    fn size(value: &Value) -> usize {
-        serde_json::to_vec(value).map_or(0, |bytes| bytes.len())
-    }
-    if value.get(REFERENCE).is_some() || size(value) <= METADATA_PAYLOAD_THRESHOLD {
+fn largest_inline_payload(value: &mut Value, size: usize) -> Option<(&mut Value, usize)> {
+    if value.get(REFERENCE).is_some() || size <= METADATA_PAYLOAD_THRESHOLD {
         return None;
     }
     let largest_child = match value {
         Value::Object(object) => object
             .iter()
-            .max_by_key(|(_, child)| size(child))
-            .map(|(key, _)| key.clone()),
+            .map(|(key, child)| (key.clone(), serialized_size(child)))
+            .max_by_key(|(_, size)| *size),
         Value::Array(array) => array
             .iter()
             .enumerate()
-            .max_by_key(|(_, child)| size(child))
-            .map(|(index, _)| index.to_string()),
+            .map(|(index, child)| (index.to_string(), serialized_size(child)))
+            .max_by_key(|(_, size)| *size),
         _ => None,
     };
-    let descends = largest_child.as_ref().is_some_and(|key| {
+    let descends = largest_child.as_ref().is_some_and(|(key, size)| {
         let child = match &*value {
             Value::Object(object) => object.get(key),
             Value::Array(array) => key.parse::<usize>().ok().and_then(|i| array.get(i)),
             _ => None,
         };
         child.is_some_and(|child| {
-            child.get(REFERENCE).is_none() && size(child) > METADATA_PAYLOAD_THRESHOLD
+            child.get(REFERENCE).is_none() && *size > METADATA_PAYLOAD_THRESHOLD
         })
     });
     if !descends {
-        return Some(value);
+        return Some((value, size));
     }
-    let key = largest_child.expect("descends implies a child");
+    let (key, size) = largest_child.expect("descends implies a child");
     match value {
-        Value::Object(object) => largest_inline_payload(object.get_mut(&key)?),
-        Value::Array(array) => largest_inline_payload(array.get_mut(key.parse::<usize>().ok()?)?),
+        Value::Object(object) => largest_inline_payload(object.get_mut(&key)?, size),
+        Value::Array(array) => {
+            largest_inline_payload(array.get_mut(key.parse::<usize>().ok()?)?, size)
+        }
         _ => None,
     }
 }
@@ -259,21 +275,21 @@ pub fn resolve_metadata_payload(value: &Value, root: &Path) -> Result<Value> {
         let payload = load_payload(sha, reference.get("bytes").and_then(Value::as_u64), root)?;
         return resolve_metadata_payload(&payload, root);
     }
-    let mut result = value.clone();
-    match &mut result {
-        Value::Object(object) => {
-            for child in object.values_mut() {
-                *child = resolve_metadata_payload(child, root)?;
-            }
-        }
-        Value::Array(array) => {
-            for child in array {
-                *child = resolve_metadata_payload(child, root)?;
-            }
-        }
-        _ => {}
+    // Build the resolved tree once; cloning the subtree at every level makes
+    // deeply nested aggregate evidence cost proportional to its depth.
+    match value {
+        Value::Object(object) => object
+            .iter()
+            .map(|(key, child)| Ok((key.clone(), resolve_metadata_payload(child, root)?)))
+            .collect::<Result<serde_json::Map<String, Value>>>()
+            .map(Value::Object),
+        Value::Array(array) => array
+            .iter()
+            .map(|child| resolve_metadata_payload(child, root))
+            .collect::<Result<Vec<_>>>()
+            .map(Value::Array),
+        _ => Ok(value.clone()),
     }
-    Ok(result)
 }
 
 impl ObservationStore {
@@ -299,19 +315,20 @@ impl ObservationStore {
         let mut value = value.clone();
         let root = || self.artifact_root();
         prepare(&mut value, &root)?;
-        let mut serialized = serialize_metadata(&value)?;
-        // Any other oversized value moves to the same content-addressed store,
-        // largest first, so the row stays bounded without losing evidence.
-        while serialized.len() > RUN_METADATA_CAP {
-            let Some(oversized) = largest_inline_payload(&mut value) else {
+        let mut size = serialized_size(&value);
+        // Replacing a subtree changes compact JSON length by exactly the
+        // difference in subtree lengths. Do not serialize the entire remaining
+        // aggregate again for every payload removed from it.
+        while size > RUN_METADATA_CAP {
+            let Some((oversized, old_size)) = largest_inline_payload(&mut value, size) else {
                 return Err(Error::internal_unexpected(format!(
                     "run metadata exceeds {RUN_METADATA_CAP} byte cap with no value above {METADATA_PAYLOAD_THRESHOLD} bytes left to externalize"
                 )));
             };
             externalize(oversized, &root)?;
-            serialized = serialize_metadata(&value)?;
+            size = size - old_size + serialized_size(oversized);
         }
-        Ok(serialized)
+        serialize_metadata(&value)
     }
 
     /// Retire up to 32 oversized terminal legacy rows per retention pass.

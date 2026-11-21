@@ -54,3 +54,48 @@ fn stale_task_event_does_not_override_terminal_outcome() {
         ControlPlaneState::Running
     );
 }
+
+/// Manual publish.aggregate timing fixture; excluded from ordinary test runs.
+#[test]
+#[ignore]
+fn publish_aggregate_large_evidence_timing() {
+    let context = homeboy_core::test_support::HermeticTestContext::new();
+    let store = AgentTaskLifecycleStore::new(context.path_roots());
+    let plan = test_plan();
+    let mut aggregate = succeeded_aggregate(&plan);
+    let changes: Vec<_> = (0..1200)
+        .map(|i| {
+            json!({
+                "path": format!("crates/component/src/file_{i}.rs"),
+                "diff": "+ evidence line\n".repeat(16),
+            })
+        })
+        .collect();
+    aggregate.outcomes[0].metadata = json!({
+        "attempts": (0..24).map(|attempt| json!({
+            "attempt": attempt,
+            "evidence": {"review": {"changed_files": changes}},
+        })).collect::<Vec<_>>()
+    });
+    for i in 0..3 {
+        let run_id = format!("publish-timing-{i}");
+        store
+            .submit_plan_with_runtime_admission(&plan, &run_id, |_| Ok(json!({})))
+            .expect("submit");
+        let start = std::time::Instant::now();
+        record_run_aggregate_in_store(&store, &run_id, &plan, &aggregate)
+            .expect("publish aggregate");
+        eprintln!(
+            "publish.aggregate iteration={i} wall_ms={}",
+            start.elapsed().as_millis()
+        );
+        let observation = store.open_observation_readonly().expect("observation");
+        let run = observation
+            .get_run(&run_id)
+            .expect("read run")
+            .expect("run");
+        let stored = serde_json::to_vec(&run.metadata_json["agent_task_aggregate"])
+            .expect("serialize stored projection");
+        eprintln!("aggregate projection sha256={:x}", Sha256::digest(&stored));
+    }
+}
