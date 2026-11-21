@@ -226,11 +226,34 @@ fn render_capacity_summary(payload: &Value) -> Option<String> {
                 .map(|n| n.to_string())
                 .unwrap_or_else(|| "unknown".to_string())
         };
-        lines.push(format!(
+        let mut line = format!(
             "Lab/{runner}: {} active slots, {} free slots",
             slots("active_slots"),
             slots("free_slots")
-        ));
+        );
+        if let Some(budget) = route.get("effective_budget").and_then(Value::as_u64) {
+            line.push_str(&format!(" (effective budget {budget})"));
+        }
+        let next = route.get("next_admission").unwrap_or(&Value::Null);
+        if next.get("refused").and_then(Value::as_bool) == Some(true) {
+            let state = next
+                .get("readiness_state")
+                .and_then(Value::as_str)
+                .unwrap_or("unknown");
+            let reasons = next
+                .get("reasons")
+                .and_then(Value::as_array)
+                .into_iter()
+                .flatten()
+                .filter_map(Value::as_str)
+                .collect::<Vec<_>>();
+            line.push_str(&format!("; next admission waits ({state}"));
+            if !reasons.is_empty() {
+                line.push_str(&format!(": {}", reasons.join(", ")));
+            }
+            line.push(')');
+        }
+        lines.push(line);
     }
     render_lab_step_queue(&mut lines, payload);
     if routes.is_empty() {
@@ -734,6 +757,24 @@ fn agent_task_capacity_names_lab_runner_and_slots() {
     let summary = render_capacity_summary(&payload).unwrap();
     assert!(summary.contains("Lab/lab-a: 2 active slots, 3 free slots"));
     assert!(summary.contains("capacity not published"));
+}
+
+#[test]
+fn agent_task_capacity_names_the_admission_refusal_reason() {
+    let payload = serde_json::json!({
+        "schema": "homeboy/agent-task-capacity/v1",
+        "routes": [],
+        "lab_routes": [{
+            "runner_id": "homeboy-lab", "active_slots": 11, "free_slots": 0,
+            "effective_budget": 1,
+            "next_admission": {"refused": true, "readiness_state": "capacity_blocked", "reasons": ["pressure"]}
+        }]
+    });
+    let summary = render_capacity_summary(&payload).unwrap();
+    assert!(
+        summary.contains("Lab/homeboy-lab: 11 active slots, 0 free slots (effective budget 1); next admission waits (capacity_blocked: pressure)"),
+        "{summary}"
+    );
 }
 
 #[test]
