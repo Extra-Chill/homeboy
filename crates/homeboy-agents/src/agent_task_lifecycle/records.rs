@@ -620,6 +620,7 @@ pub(crate) const CONTROLLER_PRE_PROVIDER_PHASES: &[&str] = &[
     "workspace_capacity_reservation",
     "worktree_provider_lookup",
     "worktree_provider_ensure",
+    "baseline_gate_admission",
     "repro_base_check",
     "provider_ready",
     "provider_start",
