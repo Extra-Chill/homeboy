@@ -263,6 +263,39 @@ pub(super) fn cleanup_with_store_page(
             .as_ref()
             .is_none_or(|cursor| record.id > *cursor)
     });
+    let concurrency = std::thread::available_parallelism()
+        .map_or(1, usize::from)
+        .min(8)
+        .min(page.limit.max(1));
+    // Workers only observe state. Consume results in registry order and keep
+    // mutations serial, under the existing removal fences.
+    let mut records = std::iter::from_fn(|| {
+        let batch: Vec<_> = records.by_ref().take(concurrency).collect();
+        if batch.is_empty() {
+            return None;
+        }
+        Some(std::thread::scope(|scope| {
+            let workers: Vec<_> = batch
+                .into_iter()
+                .map(|record| {
+                    if cleanup_probe_eligible(&record) && !deadline_exhausted(page.deadline) {
+                        eprintln!("Inspecting task worktree {}", record.id);
+                    }
+                    scope.spawn(move || {
+                        let probe = (cleanup_probe_eligible(&record)
+                            && !deadline_exhausted(page.deadline))
+                        .then(|| inspect_cleanup_record(&record, page.deadline));
+                        (record, probe)
+                    })
+                })
+                .collect();
+            workers
+                .into_iter()
+                .map(|worker| worker.join().expect("worktree probe worker panicked"))
+                .collect::<Vec<_>>()
+        }))
+    })
+    .flatten();
     let mut next_cursor = None;
     let mut continuation = None;
     // Only advance the cursor after a record has been fully inspected. If the
@@ -270,7 +303,7 @@ pub(super) fn cleanup_with_store_page(
     // it from every subsequent page.
     let mut last_id = None;
     let mut inspected = 0usize;
-    for record in records.by_ref() {
+    for (record, probe) in records.by_ref() {
         if task_worktree_liveness(&record, false).residue() {
             last_id = Some(record.id.clone());
             continue;
@@ -344,15 +377,8 @@ pub(super) fn cleanup_with_store_page(
             last_id = Some(record.id.clone());
             continue;
         }
-        // One stuck filesystem/Git probe must not hold a whole cleanup plan
-        // forever. Keep the page deadline as the outer bound as well.
-        let probe_deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
-        let probe_deadline = Some(
-            page.deadline
-                .map_or(probe_deadline, |end| end.min(probe_deadline)),
-        );
-        eprintln!("Inspecting task worktree {}", record.id);
-        let safety = match safety_report_until(&record, probe_deadline) {
+        let probe = probe.unwrap_or_else(|| inspect_cleanup_record(&record, page.deadline));
+        let safety = match probe.safety {
             Ok(safety) => safety,
             Err(error) => {
                 if deadline_exhausted(page.deadline) {
@@ -369,7 +395,7 @@ pub(super) fn cleanup_with_store_page(
                 continue;
             }
         };
-        let branch_cleanup = match branch_cleanup_report_until(&record, probe_deadline) {
+        let branch_cleanup = match probe.branch_cleanup {
             Ok(report) => report,
             Err(_error) if deadline_exhausted(page.deadline) => {
                 next_cursor = last_id.clone().or_else(|| page.cursor.clone());
@@ -399,8 +425,7 @@ pub(super) fn cleanup_with_store_page(
             continuation = Some(cleanup_continuation(&page, next_cursor.as_deref()));
             break;
         }
-        let branch_never_moved = branch_cleanup.status == BranchCleanupStatus::Merged
-            && branch_never_moved_since_creation(&record, probe_deadline);
+        let branch_never_moved = probe.branch_never_moved;
         let skip_reasons = cleanup_skip_reasons(
             &record,
             &safety,
@@ -411,10 +436,11 @@ pub(super) fn cleanup_with_store_page(
         );
         if !skip_reasons.is_empty() {
             skipped.push(WorktreeCleanupSkipped {
-                record,
+                record: record.clone(),
                 safety: Some(safety),
                 reasons: skip_reasons,
             });
+            last_id = Some(record.id.clone());
             continue;
         }
 
@@ -500,6 +526,38 @@ pub(super) fn cleanup_with_store_page(
     })
 }
 
+struct CleanupProbe {
+    safety: Result<WorktreeSafetyReport>,
+    branch_cleanup: Result<WorktreeBranchCleanupReport>,
+    branch_never_moved: bool,
+}
+
+fn cleanup_probe_eligible(record: &TaskWorktreeRecord) -> bool {
+    record.state == TaskWorktreeState::Active
+        && record.cleanup_policy != CleanupPolicy::PreserveOnFailure
+        && Path::new(&record.worktree_path).exists()
+}
+
+fn inspect_cleanup_record(
+    record: &TaskWorktreeRecord,
+    deadline: Option<std::time::Instant>,
+) -> CleanupProbe {
+    // Each worker has its own timeout, bounded by the page deadline.
+    let end = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    let deadline = Some(deadline.map_or(end, |page_end| page_end.min(end)));
+    let safety = safety_report_until(record, deadline);
+    let branch_cleanup = branch_cleanup_report_until(record, deadline);
+    let branch_never_moved = branch_cleanup.as_ref().is_ok_and(|report| {
+        report.status == BranchCleanupStatus::Merged
+            && branch_never_moved_since_creation(record, deadline)
+    });
+    CleanupProbe {
+        safety,
+        branch_cleanup,
+        branch_never_moved,
+    }
+}
+
 fn cleanup_continuation(page: &WorktreeCleanupPageOptions, cursor: Option<&str>) -> String {
     let cursor = cursor
         .map(|cursor| format!(" --cursor {}", shell_arg(cursor)))
@@ -517,7 +575,7 @@ fn deadline_exhausted(deadline: Option<std::time::Instant>) -> bool {
     deadline.is_some_and(|deadline| std::time::Instant::now() >= deadline)
 }
 
-fn cleanup_skip_reasons(
+pub(super) fn cleanup_skip_reasons(
     record: &TaskWorktreeRecord,
     safety: &WorktreeSafetyReport,
     branch_cleanup: &WorktreeBranchCleanupReport,
@@ -572,13 +630,13 @@ fn cleanup_skip_reasons(
         ));
     }
     if !force {
-        if safety
-            .reasons
-            .iter()
-            .any(|reason| reason == "repository contains stashed work")
-        {
-            reasons.push("repository contains stashed work".to_string());
-        }
+        reasons.extend(
+            safety
+                .reasons
+                .iter()
+                .filter(|reason| reason.starts_with("stash entry belongs to this worktree:"))
+                .cloned(),
+        );
         if safety.dirty {
             reasons.push("dirty worktree".to_string());
         }
@@ -2337,6 +2395,18 @@ fn with_orphan_record_hint(error: Error, record: &TaskWorktreeRecord) -> Error {
 }
 
 fn orphan_safety_report(record: &TaskWorktreeRecord) -> WorktreeSafetyReport {
+    let source_checkout_missing = !Path::new(&record.source_checkout).exists();
+    let mut reasons = vec![format!("worktree_missing: {}", record.worktree_path)];
+    if source_checkout_missing {
+        reasons.push(format!(
+            "source_checkout_missing: {}",
+            record.source_checkout
+        ));
+    }
+    reasons.push(format!(
+        "orphan record; retire metadata with `{}`",
+        orphan_remove_command(record)
+    ));
     WorktreeSafetyReport {
         dirty: false,
         unpushed_commits: 0,
@@ -2344,16 +2414,9 @@ fn orphan_safety_report(record: &TaskWorktreeRecord) -> WorktreeSafetyReport {
         // Containment is vacuous: no path exists that a removal could touch.
         path_contained: true,
         worktree_missing: true,
-        source_checkout_missing: true,
+        source_checkout_missing,
         safe: false,
-        reasons: vec![
-            format!("worktree_missing: {}", record.worktree_path),
-            format!("source_checkout_missing: {}", record.source_checkout),
-            format!(
-                "orphan record; retire metadata with `{}`",
-                orphan_remove_command(record)
-            ),
-        ],
+        reasons,
     }
 }
 
@@ -2569,7 +2632,6 @@ fn retire_orphan_record(
 ) -> Result<WorktreeRemoveOutput> {
     refuse_live_workspace_owners(&record, store_dir)?;
     let mut safety = orphan_safety_report(&record);
-    safety.source_checkout_missing = !Path::new(&record.source_checkout).exists();
     safety.reasons = vec![format!(
         "missing worktree path {}; retiring metadata only, preserving branch",
         record.worktree_path
@@ -2889,12 +2951,25 @@ fn safety_report_until(
         reasons.push("dirty worktree".to_string());
     }
     if !worktree_missing {
-        // Stashes share the repository. Conservatively retain recorded trees
-        // with stash evidence too; no lifecycle finalization discards it.
-        let stashes =
-            run_inventory_git_until(&worktree, &["stash", "list"], "git stash list", deadline)?;
-        if !stashes.trim().is_empty() {
-            reasons.push("repository contains stashed work".to_string());
+        let head = run_inventory_git_until(
+            &worktree,
+            &["rev-parse", "HEAD"],
+            "git rev-parse HEAD",
+            deadline,
+        )?;
+        let branch = run_inventory_git_until(
+            &worktree,
+            &["branch", "--show-current"],
+            "git branch",
+            deadline,
+        )?;
+        if let Some(stash) = unrecorded::matching_stash(
+            &worktree,
+            Some(branch.trim()).filter(|branch| !branch.is_empty()),
+            head.trim(),
+            deadline,
+        )? {
+            reasons.push(format!("stash entry belongs to this worktree: {stash}"));
         }
     }
     if unpushed_commits > 0 {

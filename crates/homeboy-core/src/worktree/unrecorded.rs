@@ -264,7 +264,9 @@ impl UnrecordedWorktree {
                     .unwrap_or("a remote default branch")
             ));
         }
-        if let Some(stash) = self.matching_stash(deadline)? {
+        if let Some(stash) =
+            matching_stash(&self.worktree, self.branch.as_deref(), &self.head, deadline)?
+        {
             blockers.push(format!("stash entry belongs to this worktree: {stash}"));
         }
         let caller_cwd =
@@ -349,33 +351,36 @@ impl UnrecordedWorktree {
         };
         probe().unwrap_or(false)
     }
+}
 
-    /// The first stash entry recorded on this worktree's branch or at its
-    /// `HEAD`. Stashes live in the shared repository, so only entries this
-    /// worktree produced block its removal.
-    fn matching_stash(&self, deadline: Option<std::time::Instant>) -> Result<Option<String>> {
-        let listing = run_inventory_git_until(
-            &self.worktree,
-            &["stash", "list", "--format=%gd%x09%P%x09%gs"],
-            "git stash list",
-            deadline,
-        )?;
-        Ok(listing.lines().find_map(|line| {
-            let mut fields = line.splitn(3, '\t');
-            let (Some(selector), Some(parents), Some(subject)) =
-                (fields.next(), fields.next(), fields.next())
-            else {
-                return None;
-            };
-            let at_head = !self.head.is_empty()
-                && parents.split_whitespace().next() == Some(self.head.as_str());
-            let on_branch = self.branch.as_deref().is_some_and(|branch| {
-                subject.starts_with(&format!("WIP on {branch}:"))
-                    || subject.starts_with(&format!("On {branch}:"))
-            });
-            (at_head || on_branch).then(|| format!("{selector} ({subject})"))
-        }))
-    }
+/// The first stash entry recorded on this worktree's branch or at its HEAD.
+/// Stashes are shared, so unrelated entries do not block removal.
+pub(super) fn matching_stash(
+    worktree: &Path,
+    branch: Option<&str>,
+    head: &str,
+    deadline: Option<std::time::Instant>,
+) -> Result<Option<String>> {
+    let listing = run_inventory_git_until(
+        worktree,
+        &["stash", "list", "--format=%gd%x09%P%x09%gs"],
+        "git stash list",
+        deadline,
+    )?;
+    Ok(listing.lines().find_map(|line| {
+        let mut fields = line.splitn(3, '\t');
+        let (Some(selector), Some(parents), Some(subject)) =
+            (fields.next(), fields.next(), fields.next())
+        else {
+            return None;
+        };
+        let at_head = !head.is_empty() && parents.split_whitespace().next() == Some(head);
+        let on_branch = branch.is_some_and(|branch| {
+            subject.starts_with(&format!("WIP on {branch}:"))
+                || subject.starts_with(&format!("On {branch}:"))
+        });
+        (at_head || on_branch).then(|| format!("{selector} ({subject})"))
+    }))
 }
 
 fn merged_pr_preserves_head(pr: &Value, head: &str) -> bool {
