@@ -1087,6 +1087,7 @@ mod tests {
                 }),
                 bootstrap_provenance: None,
                 rollback: None,
+                path_binaries: Vec::new(),
                 build_transcript: None,
                 artifacts: None,
             };
@@ -1156,6 +1157,7 @@ mod tests {
                 failure: None,
                 bootstrap_provenance: None,
                 rollback: None,
+                path_binaries: Vec::new(),
                 build_transcript: Some("stdout:\nbuild complete\n\nstderr:\n".to_string()),
                 artifacts: None,
             };

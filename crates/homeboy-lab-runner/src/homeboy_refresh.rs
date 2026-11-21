@@ -25,6 +25,10 @@ use super::{
     RunnerExtensionMaterializationSource, RunnerFileTransfer, RunnerKind,
 };
 
+mod path_binary_sync;
+pub use path_binary_sync::HomeboyPathBinarySync;
+use path_binary_sync::{parse_path_binary_sync, path_binary_sync_script};
+
 const REFRESH_SUBPHASES: &[&str] = &[
     "prepare",
     "reconcile",
@@ -178,6 +182,10 @@ pub struct HomeboyBinaryRefreshOutput {
     pub bootstrap_provenance: Option<HomeboyBootstrapProvenance>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub rollback: Option<HomeboyBinaryRefreshRollback>,
+    /// The runner host's login-shell `homeboy` install locations converged
+    /// onto the promoted slot, so the host runs one Homeboy version (#17241).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub path_binaries: Vec<HomeboyPathBinarySync>,
     /// Complete materialization/select transcript retained by the controller
     /// artifact projection. It is intentionally excluded from response payloads.
     #[serde(skip)]
@@ -470,6 +478,7 @@ fn new_refresh_output(
         failure: None,
         bootstrap_provenance: None,
         rollback: None,
+        path_binaries: Vec::new(),
         build_transcript: None,
         artifacts: None,
         plan: plan.clone(),
@@ -995,10 +1004,16 @@ fn refresh_homeboy_binary_inner_in_roots(
     // #15087's "exited 1 without reporting a failure cause" with every listed
     // phase green.
     let failure = unconverged_refresh_failure(&plan, &exec_output, converged, readiness.as_ref());
+    let path_binaries = if converged {
+        sync_runner_path_binaries(&runner, &selected_binary_path)
+    } else {
+        Vec::new()
+    };
     Ok((
         HomeboyBinaryRefreshOutput {
             phase_summary,
             daemon_refreshed,
+            path_binaries,
             followup_commands,
             readiness,
             failure,
@@ -1026,6 +1041,40 @@ fn refresh_homeboy_binary_inner_in_roots(
         },
         if converged { 0 } else { 1 },
     ))
+}
+
+/// Point the SSH runner host's login-shell `homeboy` at the promoted managed
+/// slot. Best effort: the daemon already converged, so a failure is reported
+/// rather than failing the refresh. A local runner shares the controller's
+/// host, whose `PATH` binary `homeboy upgrade` owns.
+fn sync_runner_path_binaries(
+    runner: &super::Runner,
+    selected_binary_path: &str,
+) -> Vec<HomeboyPathBinarySync> {
+    if runner.kind != RunnerKind::Ssh {
+        return Vec::new();
+    }
+    let Some(binaries_dir) = managed_binaries_dir_of(selected_binary_path) else {
+        return Vec::new();
+    };
+    let script = path_binary_sync_script(selected_binary_path, binaries_dir);
+    let options = refresh_execution_options(&script, vec!["bash".to_string()], false);
+    match exec(&runner.id, options) {
+        Ok((output, _)) => parse_path_binary_sync(&output.stdout),
+        Err(error) => vec![HomeboyPathBinarySync {
+            path: "$HOME/.local/bin/homeboy".to_string(),
+            action: "failed".to_string(),
+            detail: error.attributed_message(),
+        }],
+    }
+}
+
+/// The managed `_homeboy_binaries` directory containing `slot`, when the slot
+/// is a managed one.
+fn managed_binaries_dir_of(slot: &str) -> Option<&str> {
+    const MANAGED: &str = "/_homeboy_binaries/";
+    slot.find(MANAGED)
+        .map(|index| &slot[..index + MANAGED.len() - 1])
 }
 
 fn acquire_runner_binary_promotion_in_roots(

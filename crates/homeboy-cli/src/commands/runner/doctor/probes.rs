@@ -339,11 +339,24 @@ pub(super) fn homeboy_path_shadow_check(
         .unwrap_or(configured_command);
     let bare_path = bare.path.as_deref().unwrap_or("homeboy");
     let configured_version = configured_probe.version.trim();
-    if configured_version.is_empty()
-        || configured_version == "unknown"
-        || homeboy_core::build_identity::compare(bare_version, configured_version)
-            != Some(std::cmp::Ordering::Less)
-    {
+    let ordering = (!configured_version.is_empty() && configured_version != "unknown")
+        .then(|| homeboy_core::build_identity::compare(bare_version, configured_version))
+        .flatten();
+    if ordering == Some(std::cmp::Ordering::Greater) {
+        let bare_release = bare_version.split('+').next().unwrap_or(bare_version);
+        return Some(checks::warning_with_details(
+            "lab.homeboy.path_shadow",
+            format!(
+                "Runner PATH `homeboy` at {bare_path} is {bare_version}, newer than the runner daemon's Homeboy {configured_version} at {configured_path}"
+            ),
+            Some(format!(
+                "Upgrade the controller, then converge the daemon with `homeboy runner refresh-homeboy {} --ref v{bare_release}`",
+                shell::quote_arg(runner_id),
+            )),
+            details,
+        ));
+    }
+    if ordering != Some(std::cmp::Ordering::Less) {
         if configured_command != "homeboy" && configured_path != bare_path {
             return Some(checks::ok_with_details(
                 "lab.homeboy.path_shadow",
@@ -357,19 +370,58 @@ pub(super) fn homeboy_path_shadow_check(
         return None;
     }
 
-    Some(checks::ok(
+    // An operator or agent who SSHes in runs the bare `homeboy`, so an older
+    // copy diagnoses a different reality than the daemon (#17241). Refresh
+    // converges Homeboy-managed PATH copies onto the daemon's slot.
+    let local_version = local_version.trim();
+    let mut check = checks::warning_with_details(
         "lab.homeboy.path_shadow",
         format!(
-            "Runner uses configured Homeboy {configured_version} at {configured_path}; bare PATH `homeboy` is older ({bare_version} at {bare_path})"
+            "Runner PATH `homeboy` at {bare_path} is {bare_version}, older than the runner daemon's Homeboy {configured_version} at {configured_path}"
         ),
         Some(format!(
-            "No runner repair is needed while jobs use configured homeboy_path `{configured_command}`. To clean up interactive PATH skew, run `homeboy ssh {server_id} -- 'command -v homeboy && homeboy --version'` and update/remove the stale bare `homeboy`."
+            "Converge the host PATH binary onto the daemon's managed slot with `homeboy runner refresh-homeboy {} --ref v{local_version}`; it repoints Homeboy-managed symlinks and replaces older user-owned copies. Otherwise update or remove `{bare_path}` on server `{server_id}`.",
+            shell::quote_arg(runner_id),
         )),
-    ))
-    .map(|mut check| {
-        check.details = details;
-        check
-    })
+        details,
+    );
+    check = check.with_action(types::RunnerRepairAction::RefreshHomeboy {
+        git_ref: Some(format!("v{local_version}")),
+        allow_downgrade: false,
+    });
+    Some(check)
+}
+
+/// The bare-`PATH` `homeboy` shadow check for a general (non-Lab) doctor run.
+pub(crate) fn homeboy_path_shadow_probe(
+    client: &SshClient,
+    runner_id: &str,
+    server_id: &str,
+    configured_command: &str,
+    local_version: &str,
+    configured_probe: &HomeboyProbe,
+) -> Option<RunnerCheck> {
+    let bare = remote_homeboy_probe(client, "homeboy");
+    let mut details = BTreeMap::new();
+    if let Some(path) = &bare.path {
+        details.insert("bare_path".to_string(), path.clone());
+    }
+    if let Some(version) = &bare.version {
+        details.insert("bare_version".to_string(), version.clone());
+    }
+    details.insert(
+        "configured_version".to_string(),
+        configured_probe.version.clone(),
+    );
+    homeboy_path_shadow_check(
+        runner_id,
+        server_id,
+        configured_command,
+        local_version,
+        configured_probe,
+        &bare,
+        details,
+    )
 }
 
 pub(crate) fn eligible_provider_ids(

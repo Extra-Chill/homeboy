@@ -96,7 +96,7 @@ fn lab_homeboy_path_drift_keeps_configured_binary_for_different_build_identity()
 }
 
 #[test]
-fn lab_homeboy_path_shadow_is_ok_when_configured_homeboy_is_current() {
+fn older_bare_path_homeboy_than_the_daemon_is_a_finding_with_the_refresh_repair() {
     let mut details = BTreeMap::new();
     details.insert(
         "configured_command".to_string(),
@@ -131,7 +131,7 @@ fn lab_homeboy_path_shadow_is_ok_when_configured_homeboy_is_current() {
     .expect("stale bare homeboy warning");
 
     assert_eq!(check.id, "lab.homeboy.path_shadow");
-    assert_eq!(check.status, RunnerDoctorStatus::Ok);
+    assert_eq!(check.status, RunnerDoctorStatus::Warning);
     assert!(check.message.contains("0.229.9"));
     assert!(check.message.contains("0.228.22"));
     assert_eq!(
@@ -142,10 +142,47 @@ fn lab_homeboy_path_shadow_is_ok_when_configured_homeboy_is_current() {
         check.details.get("bare_path").map(String::as_str),
         Some("/home/user/.local/bin/homeboy")
     );
+    assert!(check.remediation.as_deref().is_some_and(|value| {
+        value.contains("homeboy runner refresh-homeboy homeboy-lab --ref v0.229.9")
+    }));
+    assert_eq!(
+        check.remediation_action,
+        Some(types::RunnerRepairAction::RefreshHomeboy {
+            git_ref: Some("v0.229.9".to_string()),
+            allow_downgrade: false,
+        })
+    );
+}
+
+#[test]
+fn newer_bare_path_homeboy_than_the_daemon_is_a_finding() {
+    let check = probes::homeboy_path_shadow_check(
+        "homeboy-lab",
+        "lab-server",
+        "/runner/slot/homeboy",
+        "0.229.9",
+        &configured_homeboy_at("/runner/slot/homeboy", "0.229.9"),
+        &probes::RemoteHomeboyCandidateProbe {
+            path: Some("/runner/bin/homeboy".to_string()),
+            version: Some("0.230.0+abc1234".to_string()),
+        },
+        BTreeMap::new(),
+    )
+    .expect("newer bare homeboy is reported");
+
+    assert_eq!(check.status, RunnerDoctorStatus::Warning);
+    assert!(check.message.contains("newer than the runner daemon"));
     assert!(check
         .remediation
         .as_deref()
-        .is_some_and(|value| value.contains("No runner repair is needed")));
+        .is_some_and(|value| value.contains("--ref v0.230.0")));
+}
+
+fn configured_homeboy_at(path: &str, version: &str) -> HomeboyProbe {
+    HomeboyProbe {
+        version: version.to_string(),
+        path: Some(path.to_string()),
+    }
 }
 
 #[test]
