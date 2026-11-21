@@ -372,6 +372,7 @@ pub(super) fn compact_control_plane_status(value: Value) -> Value {
         "identity_note",
         "lab_snapshot_failure",
         "lab_staging_diagnostic",
+        "recovery_step",
     ] {
         if let Some(diagnostic) = value.get(key) {
             compact[key] = bounded_control_plane_value(diagnostic);

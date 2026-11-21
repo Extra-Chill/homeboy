@@ -33,16 +33,7 @@ pub(crate) fn render_agent_task_summary(
 ) -> Option<String> {
     let summary = match kind {
         AgentTaskSummaryKind::Cook => render_cook_summary(payload),
-        AgentTaskSummaryKind::Recover => Some(format!(
-            "Recovery step: {}\nAttempt: {}\nStatus: {}",
-            payload
-                .pointer("/step/kind")
-                .or_else(|| payload.get("step"))
-                .and_then(Value::as_str)
-                .unwrap_or("none"),
-            string_value(payload, &["run_id"]).unwrap_or("unknown"),
-            string_value(payload, &["status"]).unwrap_or("unknown"),
-        )),
+        AgentTaskSummaryKind::Recover => Some(render_recover_summary(payload)),
         AgentTaskSummaryKind::Status => render_status_summary(payload),
         AgentTaskSummaryKind::Logs => render_logs_summary(payload),
         AgentTaskSummaryKind::Review => render_review_summary(payload),
@@ -71,6 +62,60 @@ pub(crate) fn render_agent_task_summary(
         }
         summary
     })
+}
+
+fn render_recover_summary(payload: &Value) -> String {
+    let run_id = string_value(payload, &["run_id"]).unwrap_or("unknown");
+    let mut lines = vec![
+        format!(
+            "Recovery step: {}",
+            payload
+                .pointer("/step/kind")
+                .or_else(|| payload.get("step"))
+                .and_then(Value::as_str)
+                .unwrap_or("none")
+        ),
+        format!("Attempt: {run_id}"),
+        format!(
+            "Status: {}",
+            string_value(payload, &["status"]).unwrap_or("unknown")
+        ),
+    ];
+    // An admitted step runs as a step job on the local controller daemon; it
+    // is not a fresh execution placement awaiting a decision (#18657).
+    if let Some(admission) = payload.get("admission").filter(|value| value.is_object()) {
+        if let Some(job) = string_value(admission, &["job_id"]) {
+            lines.push(format!("Step job: {job}"));
+            lines.push("Placement: local (controller daemon step job)".to_string());
+        }
+        let watch = string_value(admission, &["status_command"])
+            .map(str::to_string)
+            .unwrap_or_else(|| format!("homeboy agent-task status {run_id} --watch"));
+        lines.push(format!("Next: {watch}"));
+    }
+    lines.join("\n")
+}
+
+#[cfg(test)]
+#[test]
+fn recover_summary_names_the_admitted_step_job_and_how_to_watch_it() {
+    let summary = render_agent_task_summary(
+        AgentTaskSummaryKind::Recover,
+        &serde_json::json!({
+            "step": {"kind": "regate"}, "run_id": "cook-attempt-1", "status": "admitted",
+            "admission": {
+                "status": "admitted", "job_id": "job-1",
+                "status_command": "homeboy agent-task status cook-attempt-1 --watch"
+            }
+        }),
+    )
+    .unwrap();
+    assert!(summary.contains("Step job: job-1"), "{summary}");
+    assert!(
+        summary.contains("Next: homeboy agent-task status cook-attempt-1 --watch"),
+        "{summary}"
+    );
+    assert!(!summary.contains("Placement: pending"), "{summary}");
 }
 
 #[cfg(test)]
@@ -1010,6 +1055,7 @@ fn render_status_summary(payload: &Value) -> Option<String> {
             }
         }
     }
+    lines.extend(recovery_step_lines(payload));
     if payload.get("blocker").is_none_or(Value::is_null) {
         if let Some(reason) = string_value(payload, &["reason"]) {
             lines.push(format!("Reason: {reason}"));
@@ -1049,6 +1095,62 @@ fn render_status_summary(payload: &Value) -> Option<String> {
         control_plane_next_action(payload, run_id)
     ));
     Some(finish(lines))
+}
+
+/// The latest admitted recovery step and its recorded outcome (#18657): an
+/// admitted `recover --regate` that already failed names its cause instead of
+/// leaving the source attempt's original gate verdict as the only evidence.
+fn recovery_step_lines(payload: &Value) -> Vec<String> {
+    let Some(step) = payload.get("recovery_step").filter(|step| step.is_object()) else {
+        return Vec::new();
+    };
+    let kind = string_value(step, &["step"]).unwrap_or("recovery");
+    let state = string_value(step, &["state"]).unwrap_or("unknown");
+    let job = string_value(step, &["job_id"])
+        .map(|job| format!(" (job {job})"))
+        .unwrap_or_default();
+    let mut lines = vec![format!("Recovery step: {kind} {state}{job}")];
+    if let Some(message) = string_value(step, &["failure", "message"]) {
+        lines.push(format!(
+            "Recovery step failure: {}",
+            compact_status_text(message, 240)
+        ));
+    }
+    lines
+}
+
+fn recovery_step_in_flight(payload: &Value) -> bool {
+    string_value(payload, &["recovery_step", "state"]) == Some("in_flight")
+}
+
+#[test]
+fn status_summary_names_a_failed_recovery_step_and_its_cause() {
+    let lines = recovery_step_lines(&serde_json::json!({
+        "recovery_step": {
+            "step": "regate", "state": "failed", "job_id": "job-1", "exit_code": 2,
+            "failure": { "message": "target filesystem is below the configured free-space reserve" }
+        }
+    }));
+    assert_eq!(lines[0], "Recovery step: regate failed (job job-1)");
+    assert!(lines[1].contains("free-space reserve"), "{lines:?}");
+}
+
+#[test]
+fn in_flight_recovery_step_points_next_at_watching_status() {
+    let payload = serde_json::json!({
+        "state": "candidate_recoverable",
+        "recovery": { "step": "regate", "command": "homeboy agent-task recover run" },
+        "recovery_step": { "step": "regate", "state": "in_flight", "job_id": "job-1" },
+        "action_eligibility": { "actions": [{ "action": "recover", "availability": "available" }] }
+    });
+    assert_eq!(
+        control_plane_next_action(&payload, "run"),
+        "homeboy agent-task status run --watch"
+    );
+    assert_eq!(
+        recovery_step_lines(&payload),
+        vec!["Recovery step: regate in_flight (job job-1)".to_string()]
+    );
 }
 
 /// The control-plane run projects a live driver verifying its candidate.
@@ -1095,6 +1197,9 @@ fn recovery_step_wins_when_eligibility_reports_only_indeterminate_actions() {
 
 pub(crate) fn control_plane_next_action(payload: &Value, run_id: &str) -> String {
     // Render the canonical projection's live-owner phase, never infer it from artifacts.
+    if recovery_step_in_flight(payload) {
+        return format!("homeboy agent-task status {run_id} --watch");
+    }
     if live_gate_verifying(payload)
         || (string_value(payload, &["state"]) == Some("running")
             && string_value(payload, &["owner", "kind"]) == Some("cook_continuation"))

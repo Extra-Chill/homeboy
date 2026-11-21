@@ -3880,6 +3880,74 @@ mod tests {
                             ack.result.data["report"]["admission"].is_object(),
                             "{ack:?}"
                         );
+                        let record = store.read_record(run_id).unwrap();
+                        let projection = super::super::recovery_step_projection(&store, &record)
+                            .expect("admitted step is visible before any gates run");
+                        assert_eq!(projection["step"], "continue");
+                        assert_eq!(projection["state"], "in_flight");
+                        assert_eq!(projection["job_id"], "test-recovery-job");
+                        // A regate can fail before creating gate jobs: its
+                        // pre-execution diagnostic still has to be visible.
+                        let job_dir =
+                            homeboy_core::daemon::step_job::step_job_dir("test-recovery-job")
+                                .unwrap();
+                        std::fs::create_dir_all(&job_dir).unwrap();
+                        std::fs::write(job_dir.join("step.log"), serde_json::json!({
+                            "schema": "homeboy/command-result/v3", "success": false,
+                            "exit_code": 2, "diagnostics": {
+                                "code": "validation.invalid_argument",
+                                "message": "target filesystem is below the configured free-space reserve"
+                            }
+                        }).to_string()).unwrap();
+                        std::fs::write(
+                            job_dir.join("exit.json"),
+                            r#"{"schema":"homeboy/step-exit/v1","exit_code":2}"#,
+                        )
+                        .unwrap();
+                        let failed =
+                            super::super::recovery_step_projection(&store, &record).unwrap();
+                        assert_eq!(
+                            failed["state"], "failed",
+                            "exit is visible before terminal delivery"
+                        );
+                        assert!(failed["failure"]["message"]
+                            .as_str()
+                            .unwrap()
+                            .contains("free-space reserve"));
+                        std::fs::remove_file(job_dir.join("step.log")).unwrap();
+                        std::fs::remove_file(job_dir.join("exit.json")).unwrap();
+                        for (exit_code, state) in [(2, "failed"), (0, "succeeded")] {
+                            store
+                                .mutate_record(run_id, |record| {
+                                    record.metadata["recovery_step_terminal"] = serde_json::json!({
+                                        "intent_id": projection["intent_id"],
+                                        "job_id": "test-recovery-job",
+                                        "exit_code": exit_code,
+                                        "outcome": "exited",
+                                    });
+                                    true
+                                })
+                                .unwrap();
+                            let projection = super::super::recovery_step_projection(
+                                &store,
+                                &store.read_record(run_id).unwrap(),
+                            )
+                            .unwrap();
+                            assert_eq!(projection["state"], state);
+                            assert_eq!(projection["exit_code"], exit_code);
+                            if exit_code != 0 {
+                                assert_eq!(
+                                    projection["failure"]["code"],
+                                    "agent_task.recovery_step_failed"
+                                );
+                                assert!(projection["failure"]["message"]
+                                    .as_str()
+                                    .unwrap()
+                                    .contains("exit 2"));
+                            } else {
+                                assert!(projection["failure"].is_null());
+                            }
+                        }
                     }
                     "preflight" => {
                         assert_eq!(ack.result.data["report"]["preflight"], true, "{ack:?}");
