@@ -4,6 +4,14 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.482.7] - 2026-11-21
+
+### Fixed
+- retry transient GitHub server faults in gh invocations
+- diagnose names the recorded controller or gate failure, not the provider's stream tail
+- report queue position, retry time and pressure for admission waits
+- heartbeat baseline gate admission so live Cooks are not reconciled as dead
+
 ## [0.482.6] - 2026-11-21
 
 ### Fixed
