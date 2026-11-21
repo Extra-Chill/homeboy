@@ -1070,6 +1070,7 @@ fn compare_failed_gates_to_verified_base(
             compare_gate_failures_to_verified_base(
                 &lifecycle_store.open_observation_initialized()?,
                 promotion,
+                &options.gates.repro,
                 std::path::Path::new(&repository_root),
                 std::path::Path::new(&repository_root),
                 &base_sha,

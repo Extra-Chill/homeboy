@@ -4344,6 +4344,16 @@ fn baseline_admission_records_failure_set_and_reuses_base_observation() {
         let strict =
             super::super::cook_baseline::admit_base_gates(&fixture.options, &store, &base).unwrap();
         assert_eq!(first, strict);
+        assert_eq!(
+            std::fs::read_to_string(&counter).unwrap().lines().count(),
+            1
+        );
+        // A repro gate already ran on this base before dispatch; admission
+        // does not run it a second time.
+        fixture.options.gates.repro = fixture.options.gates.verify.clone();
+        let repro =
+            super::super::cook_baseline::admit_base_gates(&fixture.options, &store, &base).unwrap();
+        assert_eq!(repro, serde_json::json!([]));
         assert_eq!(std::fs::read_to_string(counter).unwrap().lines().count(), 1);
     });
 }
