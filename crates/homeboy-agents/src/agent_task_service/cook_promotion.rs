@@ -1947,6 +1947,7 @@ fn verify_replacement_gates_owned(
     // scope: they reach the gate runner without explicit supervision and rely
     // on the active scope for the declared budgets on a Lab runner (#15856).
     let supervision = replacement_gate_supervision(&gates);
+    let repro = gates.repro.clone();
     let mut replacement = crate::agent_task_promotion::with_gate_supervision(supervision, || {
         let mut replacement = resume_promoted_patch_replacement_gates_in_observation_store(
             AgentTaskPromotionRequest {
@@ -1986,6 +1987,7 @@ fn verify_replacement_gates_owned(
         super::cook_baseline::compare_gate_failures_to_verified_base(
             &observation_store,
             &mut replacement,
+            &repro,
             &target_path,
             replacement_gate_workspace
                 .as_deref()

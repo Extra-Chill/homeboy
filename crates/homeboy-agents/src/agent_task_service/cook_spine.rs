@@ -756,7 +756,11 @@ pub(super) fn run_cook_spine(
         }
     }
     if !verification_pending_continuation
-        && (!options.gates.verify.is_empty()
+        && (options
+            .gates
+            .verify
+            .iter()
+            .any(|command| !options.gates.repro.contains(command))
             || !options.gates.private_verify.is_empty()
             || options.gates.test_execution_plan.is_some())
     {
