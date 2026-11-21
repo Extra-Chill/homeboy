@@ -226,9 +226,12 @@ pub(super) const PRESSURE_BUDGET: std::time::Duration = std::time::Duration::fro
 const COMPACT_CHECK_LIMIT: usize = 12;
 const COMPACT_PROVIDER_LIMIT: usize = 10;
 const COMPACT_TEXT_LIMIT: usize = 256;
-/// The 8 KiB doctor budget plus a fixed allowance for the pressure block,
-/// whose root list has a constant length.
-const COMPACT_PROJECTION_BYTES: usize = 8 * 1024 + 2 * 1024;
+/// The 8 KiB doctor budget plus fixed allowances for the pressure block,
+/// whose root list has a constant length, and the human summary, whose check
+/// listing is bounded by `SUMMARY_CHECK_LIMIT` and `SUMMARY_TEXT_LIMIT`.
+const COMPACT_PROJECTION_BYTES: usize = 8 * 1024 + 2 * 1024 + 2 * 1024;
+const SUMMARY_CHECK_LIMIT: usize = 6;
+const SUMMARY_TEXT_LIMIT: usize = 120;
 
 /// Keep default doctor output to the facts needed to decide whether the runner
 /// is usable. `--full` remains a lossless, redacted evidence surface.
@@ -321,7 +324,8 @@ fn compact_projection(report: &RunnerDoctorOutput) -> serde_json::Value {
         "schema": "homeboy/runner-doctor/v1",
         "lab_capacity": report.checks.iter().find(|check| check.id == "lab_capacity")
             .and_then(|check| check.details.get("observation"))
-            .and_then(|value| serde_json::from_str::<serde_json::Value>(value).ok()),
+            .and_then(|value| serde_json::from_str::<serde_json::Value>(value).ok())
+            .map(|value| compact_lab_capacity(&value)),
         "command": report.command,
         "runner_id": runner_id,
         "runner": compact_runner_summary(&report.runner),
@@ -350,6 +354,19 @@ fn compact_projection(report: &RunnerDoctorOutput) -> serde_json::Value {
         }
     });
     projection
+}
+
+/// The admission capacity numbers without the daemon's queue listings, which
+/// are unbounded and remain available through `--full`.
+fn compact_lab_capacity(value: &serde_json::Value) -> serde_json::Value {
+    let observation = value.get("observation").unwrap_or(value);
+    serde_json::json!({
+        "runner_id": value.get("runner_id"),
+        "observation": {
+            "capacity": observation.get("capacity"),
+            "queued_steps": observation.get("queued_steps"),
+        },
+    })
 }
 
 /// Pressure without root paths or record provenance, which `--full` keeps.
@@ -565,22 +582,79 @@ fn bounded_projection_envelope(projection: serde_json::Value) -> serde_json::Val
         .get("pressure")
         .cloned()
         .unwrap_or(serde_json::Value::Null);
-    serde_json::json!({
-        "schema": "homeboy/runner-doctor/v1",
-        "command": "runner.doctor",
-        "status": "error",
-        "failure": failure,
-        "operator_summary": {
-            "identity": "runner doctor",
-            "state": "blocked",
-            "risk": ["doctor details exceed the default response budget"],
-            "next_action": "homeboy runner doctor <runner-id> --full",
-        },
-        "pressure": pressure,
-        "checks": [],
-        "repairs": repairs,
-        "truncation": { "checks": { "shown": 0, "omitted": "see_full_output", "full_command": "homeboy runner doctor <runner-id> --full" } },
-    })
+    let lab_capacity = projection
+        .get("lab_capacity")
+        .cloned()
+        .unwrap_or(serde_json::Value::Null);
+    let full_command = projection
+        .get("runner_id")
+        .and_then(serde_json::Value::as_str)
+        .map_or_else(
+            || "homeboy runner doctor <runner-id> --full".to_string(),
+            |runner_id| format!("homeboy runner doctor {runner_id} --full"),
+        );
+    let candidates = projection
+        .get("checks")
+        .and_then(serde_json::Value::as_array)
+        .map(|checks| {
+            checks
+                .iter()
+                .filter(|check| check.get("status").and_then(serde_json::Value::as_str) != Some("ok"))
+                .map(|check| {
+                    serde_json::json!({
+                        "id": check.get("id").and_then(serde_json::Value::as_str).map(fallback_text),
+                        "status": check.get("status"),
+                        "message": check.get("message").and_then(serde_json::Value::as_str).map(fallback_text),
+                        "remediation": check.get("remediation").and_then(serde_json::Value::as_str).map(fallback_text),
+                    })
+                })
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+    let envelope = |checks: &[serde_json::Value], lab_capacity: &serde_json::Value| {
+        serde_json::json!({
+            "schema": "homeboy/runner-doctor/v1",
+            "command": "runner.doctor",
+            "status": "error",
+            "failure": failure,
+            "operator_summary": {
+                "identity": "runner doctor",
+                "state": "blocked",
+                "risk": ["doctor details exceed the default response budget"],
+                "next_action": full_command,
+            },
+            "lab_capacity": lab_capacity,
+            "pressure": pressure,
+            "checks": checks,
+            "repairs": repairs,
+            "truncation": { "checks": { "shown": checks.len(), "omitted": "see_full_output", "full_command": full_command } },
+        })
+    };
+    // Blocking checks are the reason the operator is reading this output, so
+    // keep as many of them as the budget allows rather than dropping them all.
+    let fits = |value: &serde_json::Value| {
+        projection_envelope_bytes(value).is_ok_and(|bytes| bytes <= COMPACT_PROJECTION_BYTES)
+    };
+    let lab_capacity = if fits(&envelope(&[], &lab_capacity)) {
+        lab_capacity
+    } else {
+        serde_json::Value::Null
+    };
+    let mut kept = Vec::new();
+    for check in candidates {
+        kept.push(check);
+        if !fits(&envelope(&kept, &lab_capacity)) {
+            kept.pop();
+            break;
+        }
+    }
+    envelope(&kept, &lab_capacity)
+}
+
+const FALLBACK_TEXT_LIMIT: usize = 160;
+
+fn fallback_text(value: &str) -> String {
+    homeboy_engine_primitives::text::truncate_chars(value, FALLBACK_TEXT_LIMIT, "...")
 }
 
 fn projection_envelope_bytes(payload: &serde_json::Value) -> homeboy::core::Result<usize> {
@@ -612,20 +686,191 @@ fn bounded_text(value: &str) -> String {
 
 pub(crate) fn render_summary(payload: &serde_json::Value) -> Option<String> {
     let summary = payload.get("operator_summary")?;
-    let checks = payload.get("checks")?.as_array()?.len();
-    Some(format!(
-        "Runner doctor\nEnvironment: {}\nStatus: {}\nChecks shown: {checks}\nNext: {}",
-        payload
-            .get("environment")
-            .cloned()
-            .and_then(
-                |value| serde_json::from_value::<homeboy_runner_contract::RunnerEnvironment>(value)
-                    .ok()
-            )
-            .map_or_else(|| "unknown".to_string(), |env| env.to_string()),
-        summary.get("state")?.as_str()?,
-        summary.get("next_action")?.as_str()?,
-    ))
+    let environment = payload
+        .get("environment")
+        .cloned()
+        .and_then(|value| {
+            serde_json::from_value::<homeboy_runner_contract::RunnerEnvironment>(value).ok()
+        })
+        .map_or_else(|| "unknown".to_string(), |env| env.to_string());
+    let checks = payload.get("checks")?.as_array()?;
+    let attention = checks
+        .iter()
+        .filter(|check| matches!(check_status(check), "error" | "warn"))
+        .collect::<Vec<_>>();
+    let mut lines = vec![
+        "Runner doctor".to_string(),
+        format!("Environment: {environment}"),
+        format!("Status: {}", summary.get("state")?.as_str()?),
+    ];
+    if attention.is_empty() {
+        lines.push(format!(
+            "Checks: {} shown, none need attention",
+            checks.len()
+        ));
+    } else {
+        lines.push(format!("Checks needing attention: {}", attention.len()));
+        let mut ordered = attention.clone();
+        ordered.sort_by_key(|check| (check_status(check) != "error") as u8);
+        for check in ordered.iter().take(SUMMARY_CHECK_LIMIT) {
+            lines.push(format!(
+                "  [{}] {}: {}",
+                check_status(check),
+                summary_text(check_text(check, "id").unwrap_or("unknown")),
+                summary_text(check_text(check, "message").unwrap_or("")),
+            ));
+            if let Some(remediation) = check_text(check, "remediation") {
+                lines.push(format!("    Fix: {}", summary_text(remediation)));
+            }
+        }
+        if ordered.len() > SUMMARY_CHECK_LIMIT {
+            lines.push(format!(
+                "  ... {} more; see --full",
+                ordered.len() - SUMMARY_CHECK_LIMIT
+            ));
+        }
+    }
+    lines.extend(render_pressure(payload));
+    let next = ["error", "warn"]
+        .iter()
+        .find_map(|status| {
+            attention
+                .iter()
+                .filter(|check| check_status(check) == *status)
+                .find_map(|check| check_text(check, "remediation"))
+        })
+        .or_else(|| summary.get("next_action")?.as_str())?;
+    lines.push(format!("Next: {next}"));
+    Some(lines.join("\n"))
+}
+
+fn summary_text(value: &str) -> String {
+    homeboy_engine_primitives::text::truncate_chars(value, SUMMARY_TEXT_LIMIT, "...")
+}
+
+fn check_status(check: &serde_json::Value) -> &str {
+    check
+        .get("status")
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or("")
+}
+
+fn check_text<'a>(check: &'a serde_json::Value, key: &str) -> Option<&'a str> {
+    check
+        .get(key)
+        .and_then(serde_json::Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+}
+
+/// Admission pressure as the runner daemon reports it: the over-budget
+/// resource, observed value against its budget, the holders of admitted
+/// slots, and the condition that clears it.
+fn render_pressure(payload: &serde_json::Value) -> Vec<String> {
+    let mut lines = Vec::new();
+    if let Some(capacity) = payload.pointer("/lab_capacity/observation/capacity") {
+        let cpus = capacity.get("cpus").and_then(serde_json::Value::as_u64);
+        let load = capacity
+            .get("load_average_1m")
+            .and_then(serde_json::Value::as_f64);
+        let budget = capacity
+            .get("effective_budget")
+            .and_then(serde_json::Value::as_u64);
+        let holders = capacity
+            .get("active_slots_by_owner")
+            .and_then(serde_json::Value::as_object)
+            .map(|owners| {
+                owners
+                    .iter()
+                    .filter_map(|(owner, slots)| Some((owner.clone(), slots.as_u64()?)))
+                    .filter(|(_, slots)| *slots > 0)
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_default();
+        let held = holders.iter().map(|(_, slots)| slots).sum::<u64>();
+        if let (Some(cpus), Some(budget)) = (cpus, budget) {
+            let load_text = load.map_or_else(|| "unknown".to_string(), |load| format!("{load:.1}"));
+            let limit = capacity
+                .get("concurrency_limit")
+                .and_then(serde_json::Value::as_u64)
+                .map_or_else(String::new, |limit| format!(", limit {limit}"));
+            lines.push(format!(
+                "Capacity: admission budget {budget}{limit}; {held} slot(s) held; cpu load 1m {load_text} on {cpus} CPU(s)"
+            ));
+            let saturated = held >= budget;
+            let load_bound = load.is_some_and(|load| load > cpus.saturating_sub(1) as f64);
+            if load_bound || saturated {
+                let resource = if load_bound {
+                    "cpu load"
+                } else {
+                    "admission slots"
+                };
+                lines.push(format!(
+                    "Pressure: {resource} over budget (load {load_text} vs {cpus} CPU(s), {held}/{budget} slot(s) held)"
+                ));
+                lines.push(format!(
+                    "  Holders: {}",
+                    if holders.is_empty() {
+                        "none".to_string()
+                    } else {
+                        holders
+                            .iter()
+                            .map(|(owner, slots)| format!("{owner} ({slots})"))
+                            .collect::<Vec<_>>()
+                            .join(", ")
+                    }
+                ));
+                let mut clears = Vec::new();
+                if load_bound {
+                    clears.push(format!(
+                        "1m load falls below {}",
+                        cpus.saturating_sub(1).max(1)
+                    ));
+                }
+                if saturated && held > 0 {
+                    clears.push("a holder releases its slot".to_string());
+                }
+                if !clears.is_empty() {
+                    lines.push(format!("  Clears when: {}", clears.join(" or ")));
+                }
+            }
+        }
+    }
+    if let Some(pressure) = payload.get("pressure").filter(|value| !value.is_null()) {
+        let mut host = Vec::new();
+        if let Some(load) = pressure
+            .get("load_per_cpu")
+            .and_then(serde_json::Value::as_f64)
+        {
+            host.push(format!("load/cpu {load:.2}"));
+        }
+        if let Some(memory) = pressure.get("memory") {
+            if let (Some(available), Some(total)) = (
+                memory
+                    .get("available_bytes")
+                    .and_then(serde_json::Value::as_u64),
+                memory
+                    .get("total_bytes")
+                    .and_then(serde_json::Value::as_u64),
+            ) {
+                host.push(format!("memory {} free of {}", gib(available), gib(total)));
+            }
+        }
+        if let Some(free) = pressure
+            .pointer("/disk/free_bytes")
+            .and_then(serde_json::Value::as_u64)
+        {
+            host.push(format!("disk {} free", gib(free)));
+        }
+        if !host.is_empty() {
+            lines.push(format!("Host: {}", host.join(", ")));
+        }
+    }
+    lines
+}
+
+fn gib(bytes: u64) -> String {
+    format!("{:.1} GiB", bytes as f64 / (1024.0 * 1024.0 * 1024.0))
 }
 
 /// A bare `--repair` is the Lab daemon recovery request emitted by runner
