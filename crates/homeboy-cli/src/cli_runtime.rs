@@ -2941,15 +2941,26 @@ fn preflight_hot_command_with_input(
                         ),
                         // A selected runner that cannot admit the review test
                         // is not a reason to wait for it: deferral applies only
-                        // when no runner was selected at all.
-                        deferred_pressure_refusal: selected_runner_id.is_none()
-                            && warning.as_ref().is_some_and(|warning| {
+                        // when no runner was selected at all, and only when a
+                        // Lab runner exists to wait for. Without Lab inventory
+                        // (for example a nested gate under an isolated HOME)
+                        // the command runs locally where it was invoked.
+                        deferred_pressure_refusal: review_test_defers_to_lab_runner(
+                            selected_runner_id.is_some(),
+                            warning.as_ref().is_some_and(|warning| {
                                 review_test_deferred_workload_eligible(
                                     cli,
                                     warning,
                                     runner_admits_offload,
                                 )
                             }),
+                            || {
+                                crate::runner::lab_runner_wait_target()
+                                    .ok()
+                                    .flatten()
+                                    .is_some()
+                            },
+                        ),
                         runner_admitted: runner_admits_offload,
                         auto_local_capacity_fallback,
                     },
@@ -3481,6 +3492,17 @@ fn review_test_deferred_workload_eligible(
         )
 }
 
+/// Whether a resource-refused review test should be queued to wait for a Lab
+/// runner. Waiting needs a runner to wait for: with no Lab inventory there is
+/// nothing to route to, so the command executes locally instead (#18679).
+fn review_test_defers_to_lab_runner(
+    runner_selected: bool,
+    deferral_eligible: bool,
+    has_lab_wait_target: impl FnOnce() -> bool,
+) -> bool {
+    !runner_selected && deferral_eligible && has_lab_wait_target()
+}
+
 fn resource_policy_runner_hint<'a>(
     cli: &'a Cli,
     default_runner: Option<&'a str>,
@@ -3876,6 +3898,21 @@ mod tests {
     }
     use super::*;
     use clap::Parser;
+
+    #[test]
+    fn review_test_without_lab_inventory_runs_locally_instead_of_waiting() {
+        // No Lab runner to wait for (isolated gate HOME): never defer.
+        assert!(!review_test_defers_to_lab_runner(false, true, || false));
+        // A configured wait target keeps the durable runner-wait deferral.
+        assert!(review_test_defers_to_lab_runner(false, true, || true));
+        // A selected runner or an ineligible command never consults inventory.
+        assert!(!review_test_defers_to_lab_runner(true, true, || {
+            panic!("selected runner must not read inventory")
+        }));
+        assert!(!review_test_defers_to_lab_runner(false, false, || {
+            panic!("ineligible command must not read inventory")
+        }));
+    }
     use homeboy::core::parsed_command_preflight::RunnerIntent;
     use std::sync::{Mutex, MutexGuard, OnceLock};
 
