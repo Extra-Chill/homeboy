@@ -4,6 +4,16 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.484.1] - 2026-11-21
+
+### Changed
+- publish the host's dist-manifest.json from disk instead of re-downloading it
+- make RunExecutionState the only owner of a Cook's phase
+
+### Fixed
+- scope stash blockers and parallelize cleanup probes
+- status and capacity read the local gate registry without writing it
+
 ## [0.484.0] - 2026-11-21
 
 ### Added
