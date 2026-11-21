@@ -4,6 +4,15 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.483.1] - 2026-11-21
+
+### Changed
+- delete production-dead Cook/service/orchestration functions
+- delete production-dead lifecycle functions
+
+### Fixed
+- a repro gate red on the candidate is never inherited from base
+
 ## [0.483.0] - 2026-11-21
 
 ### Added
