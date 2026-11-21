@@ -330,6 +330,18 @@ pub fn connect_converging_binary(runner_id: &str) -> Result<(RunnerConnectReport
 /// is the answer and never reaches `connect`. A runner with no daemon session
 /// at all goes straight to `connect`.
 pub(crate) fn reach_runner(runner_id: &str) -> Result<()> {
+    if runner_id == crate::host_runner::ID {
+        // The host daemon is service-managed and reached over loopback; there
+        // is no tunnel to repair. A missing lease means no host runner.
+        return crate::host_runner::session().map(|_| ()).ok_or_else(|| {
+            Error::validation_invalid_argument(
+                "runner_id",
+                "this host's daemon lease is not live",
+                None,
+                Some(vec!["homeboy daemon status".to_string()]),
+            )
+        });
+    }
     reach_runner_with(
         runner_id,
         |runner_id| Ok(read_session(runner_id)?.is_some()),

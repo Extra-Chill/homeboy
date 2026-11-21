@@ -183,7 +183,8 @@ fn runner_inventory_summary(
     status: Option<&runner::RunnerStatusReport>,
 ) -> RunnerInventorySummary {
     let identity = bounded_list_text(&configured.runner_id);
-    let is_local = configured.kind == RunnerKind::Local;
+    let is_local = configured.kind == RunnerKind::Local
+        && !runner::is_host_daemon_runner(&configured.runner_id);
     let operator = status.map(super::status::operator_summary);
     let admission = status.map(|status| {
         homeboy::runner::runners::runner_readiness_admission_snapshot(
