@@ -2,6 +2,46 @@
 
 use super::*;
 
+// Optional observations must never hold recorded failure evidence hostage. A
+// timed-out worker owns only read-only inputs and cannot mutate the run.
+fn bounded_diagnostic_probe<T: Send + 'static>(
+    timeout: std::time::Duration,
+    probe: impl FnOnce() -> T + Send + 'static,
+) -> Option<T> {
+    let (sender, receiver) = std::sync::mpsc::sync_channel(1);
+    std::thread::spawn(move || {
+        let _ = sender.send(probe());
+    });
+    receiver.recv_timeout(timeout).ok()
+}
+
+const DIAGNOSTIC_PROBE_TIMEOUT: std::time::Duration = std::time::Duration::from_millis(500);
+
+#[cfg(test)]
+mod probe_tests {
+    use super::*;
+
+    #[test]
+    fn stalled_observation_returns_within_its_budget() {
+        let (release, stalled) = std::sync::mpsc::channel();
+        let start = std::time::Instant::now();
+        let result = bounded_diagnostic_probe(std::time::Duration::from_millis(20), move || {
+            stalled.recv().unwrap();
+        });
+        assert!(result.is_none());
+        assert!(start.elapsed() < std::time::Duration::from_secs(1));
+        release.send(()).unwrap();
+    }
+
+    #[test]
+    fn completed_observation_keeps_its_result() {
+        assert_eq!(
+            bounded_diagnostic_probe(DIAGNOSTIC_PROBE_TIMEOUT, || 42),
+            Some(42)
+        );
+    }
+}
+
 pub(in crate::commands::agent_task) fn diagnose(args: DiagnoseArgs) -> CmdResult<Value> {
     if crate::commands::agent_task::cook_batch::is_workflow_instance(&args.run_id) {
         return crate::commands::agent_task::cook_batch::batch_rollup_from_daemon(
@@ -11,12 +51,11 @@ pub(in crate::commands::agent_task) fn diagnose(args: DiagnoseArgs) -> CmdResult
     }
     let target = resolve_cook_reader_target(&args.run_id, false)?;
     let run_id = &target.run_id;
-    // Diagnosis starts from the bounded controller-local snapshot, then adds a
-    // read-only runner snapshot only when that runner owns an abnormal run.
+    // Diagnosis reads recorded evidence, never live runner state.
     let durable_read = agent_task_lifecycle::durable_local_read(run_id)?;
     let record = durable_read.record;
     let aggregate = durable_read.aggregate;
-    let runner_diagnostic_probe = agent_task_lifecycle::runner_diagnostic_probe(&record);
+    let runner_diagnostic_probe = agent_task_lifecycle::runner_diagnostic_probe_recorded(&record);
     let admission = agent_task_service_direct::queued_admission(&record);
     let queued_runner_ownership = admission
         .as_ref()
@@ -149,7 +188,17 @@ pub(in crate::commands::agent_task) fn diagnose(args: DiagnoseArgs) -> CmdResult
             }));
         }
     }
-    let retry = retry_replay_action(&record);
+    let replay_record = record.clone();
+    let retry_probe = bounded_diagnostic_probe(DIAGNOSTIC_PROBE_TIMEOUT, move || {
+        retry_replay_action_with_probe_policy(&replay_record, false)
+    });
+    let replay_probe_timed_out = retry_probe.is_none();
+    let retry = retry_probe.unwrap_or_else(|| {
+        RetryReplayAction::unavailable(
+            json!({ "runner_id": record.runner_id() }),
+            "probe_timed_out: replay workspace admission",
+        )
+    });
     let lab_snapshot_failure = lab_snapshot_recovery_projection(&record, &retry);
     let gate_failure = agent_task_service_direct::recorded_promotion_report(&record.metadata)
         .ok()
@@ -195,6 +244,7 @@ pub(in crate::commands::agent_task) fn diagnose(args: DiagnoseArgs) -> CmdResult
         "diagnostic_collection": diagnostic_collection_projection(&diagnostic_truncations),
         "causal_phase": causal_phase,
         "runner_diagnostic_probe": runner_diagnostic_probe,
+        "probe_timed_out": (replay_probe_timed_out.then_some("replay_workspace_admission").into_iter().collect::<Vec<_>>()),
         "continuation_admission": record.metadata.get("cook_continuation_admission"),
         "retry_replay": retry.projection(),
         "lab_snapshot_failure": lab_snapshot_failure,
@@ -243,7 +293,7 @@ pub(in crate::commands::agent_task) fn diagnose(args: DiagnoseArgs) -> CmdResult
             agent_task_service::load_recipe_for_attempt(run_id)
                 .ok()
                 .flatten()
-                .and_then(|_| agent_task_service_direct::plan_cook_recovery(run_id).ok())
+                .and_then(|_| agent_task_service_direct::plan_cook_recovery_recorded(run_id).ok())
         })
         .flatten();
     let recovery_prefix =
@@ -1082,13 +1132,20 @@ impl RetryReplayAction {
 /// typed action share this one admission decision, so a human hint cannot claim
 /// a retry exists when route materialization will reject it.
 pub(super) fn retry_replay_action(record: &AgentTaskRunRecord) -> RetryReplayAction {
+    retry_replay_action_with_probe_policy(record, true)
+}
+
+fn retry_replay_action_with_probe_policy(
+    record: &AgentTaskRunRecord,
+    live_probes: bool,
+) -> RetryReplayAction {
     // Candidate readers may be observing an older substantive attempt. Retry
     // eligibility and the advertised action must describe the mutation target.
     if let Ok(latest) = agent_task_service_direct::resolve_retry_run_id(&record.run_id) {
         if latest != record.run_id {
             if let Ok(store) = agent_task_lifecycle::AgentTaskLifecycleStore::from_environment() {
                 if let Ok(latest_record) = store.read_record_bounded(&latest) {
-                    return retry_replay_action(&latest_record);
+                    return retry_replay_action_with_probe_policy(&latest_record, live_probes);
                 }
             }
         }
@@ -1117,6 +1174,12 @@ pub(super) fn retry_replay_action(record: &AgentTaskRunRecord) -> RetryReplayAct
         );
     }
     let generic_lab_replay = has_generic_lab_replay;
+    if generic_lab_replay && !live_probes {
+        return RetryReplayAction::unavailable(
+            local_owner,
+            "live workspace preflight is deferred to retry; diagnosis reads recorded evidence only",
+        );
+    }
     let admission = if generic_lab_replay {
         // Status advertises the exact persisted generic replay, rather than a
         // Cook-derived retry plan that may no longer carry its workspace proof.
