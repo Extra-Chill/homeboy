@@ -103,7 +103,7 @@ pub fn gate_failure_next_action(reason: &str, run: &str) -> (String, String) {
     );
     if regate {
         (format!("homeboy agent-task recover {run} --regate"),
-         "Re-run retained gates; adjust --gate-timeout-seconds / --gate-no-progress-timeout-seconds to change the supervision budget.".into())
+         "Re-run retained gates; add --gate-timeout-seconds / --gate-no-progress-timeout-seconds (0 disables it) to this regate to change the supervision budget.".into())
     } else {
         (
             format!("homeboy agent-task recover {run}"),

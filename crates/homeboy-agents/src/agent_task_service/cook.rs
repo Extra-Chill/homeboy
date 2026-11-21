@@ -1497,7 +1497,7 @@ pub(super) fn gate_budget_exceeded_stop_reason(
         .collect::<Vec<_>>()
         .join("; ");
     format!(
-        "stop: gate infrastructure timeout; {stopped}. The gate never reached a verdict, so the candidate is preserved and unverified, not failed. Raise --gate-timeout-seconds or --gate-no-progress-timeout-seconds (0 disables the no-progress limit) if the suite needs longer, then run `homeboy agent-task recover {cook_id}` to re-gate"
+        "stop: gate infrastructure timeout; {stopped}. The gate never reached a verdict, so the candidate is preserved and unverified, not failed. Run `homeboy agent-task recover {cook_id}` to re-gate it; if the suite needs longer, re-gate with `homeboy agent-task recover {cook_id} --regate --gate-timeout-seconds <SECONDS> --gate-no-progress-timeout-seconds <SECONDS>` (0 disables the no-progress limit)"
     )
 }
 
@@ -1568,9 +1568,12 @@ mod cook_deadline_tests {
     /// the failure mode that kills real work.
     #[test]
     fn a_live_budget_does_not_trip_a_boundary() {
-        with_current_cook_deadline(Some(CookDeadline::from_duration_seconds(3_600)), || {
-            assert_eq!(expired_cook_deadline(), None);
-        });
+        with_current_cook_deadline(
+            Some(CookDeadline::from_unix_ms(now_unix_ms() + 3_600_000)),
+            || {
+                assert_eq!(expired_cook_deadline(), None);
+            },
+        );
     }
 
     #[test]

@@ -430,8 +430,9 @@ fn endpoint_identity_matches(
         || daemon_identity_from_body(&response.body)
             .is_some_and(|identity| identity.trim() == expected_identity.trim());
     let version_matches = expected_version.trim().is_empty()
-        || daemon_version_from_body(&response.body)
-            .is_some_and(|version| versions_match(version, expected_version));
+        || daemon_version_from_body(&response.body).is_some_and(|version| {
+            homeboy_core::build_identity::same_build(version, expected_version)
+        });
     identity_matches && version_matches
 }
 
@@ -688,21 +689,6 @@ fn open_daemon_tunnel(
         tunnel_process_start_identity,
         format!("http://127.0.0.1:{}", local_port),
     ))
-}
-
-pub(crate) fn versions_match(left: &str, right: &str) -> bool {
-    normalize_homeboy_version(left) == normalize_homeboy_version(right)
-}
-
-fn normalize_homeboy_version(version: &str) -> &str {
-    version
-        .trim()
-        .strip_prefix("homeboy ")
-        .unwrap_or(version.trim())
-}
-
-pub(super) fn normalize_homeboy_version_owned(version: &str) -> String {
-    normalize_homeboy_version(version).to_string()
 }
 
 pub(super) fn daemon_http_identity(local_url: &str) -> std::result::Result<String, String> {

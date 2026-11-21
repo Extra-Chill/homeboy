@@ -112,6 +112,30 @@ fn attach_recovery(runner_id: &str, homeboy_path: &str, entry: &mut RunnerServic
     )];
 }
 
+/// Host units on this runner host that do not run `target_version`, as
+/// pending service restarts. The unit belongs to the controller's runner
+/// convergence (see the module docs), so the command that converges it is
+/// the controller's `homeboy upgrade`, which repoints it and re-adopts
+/// running jobs (#18550).
+pub(crate) fn host_service_pending_restart(
+    observations: &[ServiceUnitObservation],
+    target_version: &str,
+) -> Vec<homeboy_upgrade::upgrade::ServiceRestartEntry> {
+    classify_service_binaries("host", "", observations, target_version)
+        .into_iter()
+        .filter(RunnerServiceBinaryEntry::blocks_convergence)
+        .map(|entry| homeboy_upgrade::upgrade::ServiceRestartEntry {
+            service_id: entry.unit,
+            restart_command: "homeboy upgrade".to_string(),
+            restarted: false,
+            detail: Some(format!(
+                "{}; this runner service is owned by its controller: run the command on the controller",
+                entry.reason.unwrap_or_else(|| "unit is not on the installed build".to_string())
+            )),
+        })
+        .collect()
+}
+
 fn shell_arg(value: &str) -> String {
     homeboy_core::engine::shell::quote_arg(value)
 }
@@ -427,6 +451,23 @@ mod tests {
             running_version: Some(format!("homeboy {version}+abcdef0")),
             active_state: Some("active".to_string()),
         }
+    }
+
+    #[test]
+    fn runner_host_upgrade_reports_its_stale_host_unit_with_the_controller_command() {
+        // #18550: the Lab's own `homeboy upgrade` must not report success
+        // while its host unit runs an older build.
+        let pending = host_service_pending_restart(&[unit(HOST_UNIT, "0.481.0")], "0.482.7");
+        assert_eq!(pending.len(), 1);
+        assert_eq!(pending[0].service_id, HOST_UNIT);
+        assert_eq!(pending[0].restart_command, "homeboy upgrade");
+        let detail = pending[0].detail.as_deref().unwrap();
+        assert!(
+            detail.contains("0.481.0") && detail.contains("controller"),
+            "{detail}"
+        );
+        assert!(host_service_pending_restart(&[unit(HOST_UNIT, "0.482.7")], "0.482.7").is_empty());
+        assert!(host_service_pending_restart(&[], "0.482.7").is_empty());
     }
 
     fn converged_entry(runner_id: &str, version: &str) -> RunnerUpgradeEntry {

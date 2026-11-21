@@ -220,7 +220,7 @@ pub(super) fn parse_self_identity_output(output: &str) -> Option<RemoteHomeboyId
         let dirty = data["git_dirty"].as_bool().unwrap_or(false);
         Some(format!(
             "homeboy {}+{}{}",
-            normalize_homeboy_version_owned(version),
+            homeboy_core::build_identity::canonical(version),
             commit,
             if dirty { "-dirty" } else { "" }
         ))
@@ -260,7 +260,7 @@ fn parse_daemon_recovery_capabilities(value: &Value) -> Option<Vec<LabCapability
 }
 
 fn immutable_build_identity(identity: &str) -> bool {
-    normalize_homeboy_version_owned(identity)
+    homeboy_core::build_identity::canonical(identity)
         .split_once('+')
         .is_some_and(|(version, commit)| !version.is_empty() && !commit.is_empty())
 }

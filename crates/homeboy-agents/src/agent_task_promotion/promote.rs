@@ -399,6 +399,7 @@ fn compare_operator_gate_failures(
     crate::agent_task_service::compare_gate_failures_to_verified_base(
         store,
         report,
+        &options.gates.repro,
         &root,
         &workspace,
         &base_sha,

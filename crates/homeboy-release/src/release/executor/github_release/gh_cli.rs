@@ -2992,7 +2992,8 @@ mod tests {
             .parse::<u32>()
             .expect("numeric descendant pid");
         for _ in 0..40 {
-            if !homeboy_core::process::process_group_is_running(leader_pid as i32)
+            if !homeboy_engine_primitives::command::process_group_is_running(leader_pid)
+                .unwrap_or(false)
                 && !homeboy_core::process::pid_is_running(descendant_pid)
             {
                 return;

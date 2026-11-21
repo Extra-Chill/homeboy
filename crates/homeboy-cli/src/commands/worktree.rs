@@ -149,9 +149,9 @@ enum WorktreeCommand {
         #[arg(long)]
         apply: bool,
     },
-    /// Inspect a native task worktree and its safety state
+    /// Inspect a recorded or unrecorded linked worktree and its safety state
     Status {
-        /// Task worktree ID, e.g. component@branch-slug
+        /// Task worktree ID or linked worktree root path
         id: String,
     },
     /// Report the session currently holding a managed checkout's write lease
@@ -159,11 +159,11 @@ enum WorktreeCommand {
         /// Managed worktree handle or any path inside the checkout
         target: String,
     },
-    /// Remove one task worktree after safety checks
+    /// Remove a recorded or unrecorded linked worktree after safety checks
     Remove {
-        /// Task worktree ID, e.g. component@branch-slug
+        /// Task worktree ID or linked worktree root path
         id: String,
-        /// Allow dirty/unpushed worktree removal; hard gates still apply
+        /// Allow recorded dirty/unpushed worktree removal; never bypass orphan or hard gates
         #[arg(long)]
         force: bool,
         /// Delete the local task branch after removing the worktree when branch safety allows it.
@@ -173,7 +173,7 @@ enum WorktreeCommand {
         #[arg(long, requires = "cleanup_branch")]
         allow_unmerged_branch: bool,
     },
-    /// Clean up eligible native task worktrees
+    /// Clean up eligible recorded and unrecorded linked worktrees
     Cleanup {
         // Remove planned worktrees and artifacts after safety checks.
         // Without --apply, only reports the plan; --dry-run names that

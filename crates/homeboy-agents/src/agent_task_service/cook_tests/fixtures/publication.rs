@@ -140,15 +140,7 @@ pub(super) fn normal_cook_promotion_fixture(cancel_gate: bool) {
         if cancel_gate {
             options.identity.cook_id = "cook-cancel-live-promotion".to_string();
             let cook_id = options.identity.cook_id.clone();
-            store
-                .write_cook_index_attempt(
-                    &cook_id,
-                    1,
-                    run_id,
-                    "2026-01-01T00:00:00Z".to_string(),
-                    None,
-                )
-                .unwrap();
+            store.record_cook_attempt(&cook_id, 1, run_id).unwrap();
             let started = repository.path().join("gate-pid");
             options.gates.verify = vec![format!("echo $$ > {}; exec sleep 60", started.display())];
             std::thread::scope(|scope| {

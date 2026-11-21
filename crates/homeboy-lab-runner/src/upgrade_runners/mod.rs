@@ -88,6 +88,16 @@ impl RunnerUpgradeProvider for RunnerUpgrade {
     ) -> Result<Vec<RunnerCheckEntry>> {
         check_configured_runners(runner_targets, target_version)
     }
+
+    fn host_runner_service_pending_restart(
+        &self,
+        target_version: &str,
+    ) -> Vec<homeboy_upgrade::upgrade::ServiceRestartEntry> {
+        service_binaries::host_service_pending_restart(
+            &crate::connection::observe_local_service_units(),
+            target_version,
+        )
+    }
 }
 
 /// Register this cluster's runner-upgrade provider with core. Called once at

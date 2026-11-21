@@ -4,6 +4,66 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.483.1] - 2026-11-21
+
+### Changed
+- delete production-dead Cook/service/orchestration functions
+- delete production-dead lifecycle functions
+
+### Fixed
+- a repro gate red on the candidate is never inherited from base
+
+## [0.483.0] - 2026-11-21
+
+### Added
+- admit local gates through visible host-wide capacity queue
+
+### Changed
+- one BuildIdentity parser for version/commit compare
+
+### Fixed
+- wait for queued Cook reports before settling steps
+- safely reclaim unrecorded worktrees and missing-path records
+- expose admitted regate jobs and pre-gate failures
+- regate gate-failed candidates and accept regate gate budgets
+
+## [0.482.13] - 2026-11-21
+
+### Changed
+- one process-group terminator, liveness probe, and tree walker
+- remove legacy Cook-state and session-store dual-read paths
+- one argv flag lookup helper in args_util
+- read GitHub releases only from the release catalog
+- unobserved-readiness fixture uses a command preflight still refuses
+
+### Fixed
+- wait through retryable runner conditions during worktree provider lookup
+- run nested review test locally when no Lab runner exists to wait for
+
+## [0.482.12] - 2026-11-21
+
+### Fixed
+- stop github_release resolution at GitHub's 1000-release window
+
+## [0.482.11] - 2026-11-21
+
+### Fixed
+- attribute candidate failures against the baseline
+- a runner host's upgrade reports its stale host runner service
+
+## [0.482.10] - 2026-11-21
+
+### Fixed
+- capacity reports the admission budget; Lab-required Cooks queue under pressure
+- doctor reads daemon pressure and lists blocking checks with fixes
+- status JSON reports the Cook's state and admission phase
+- an admitted Cook waits through a Lab outage instead of spending recovery budget
+
+## [0.482.9] - 2026-11-21
+
+### Fixed
+- diagnose reads recorded evidence instead of live probes
+
 ## [0.482.8] - 2026-11-21
 
 ### Changed

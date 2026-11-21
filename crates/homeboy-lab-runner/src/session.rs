@@ -1808,8 +1808,10 @@ impl RunnerStaleDaemonWarning {
         session_homeboy_build_identity: Option<String>,
         current_homeboy_build_identity: Option<String>,
     ) -> Self {
-        let version_matches =
-            same_homeboy_version(&session_homeboy_version, &current_homeboy_version);
+        let version_matches = homeboy_core::build_identity::same_build(
+            &session_homeboy_version,
+            &current_homeboy_version,
+        );
         let identity_matches = session_homeboy_build_identity
             .as_deref()
             .zip(current_homeboy_build_identity.as_deref())
@@ -1977,8 +1979,10 @@ impl RunnerStaleDaemonWarning {
         runner_id: &str,
         persisted_session_version: String,
     ) -> Self {
-        if !same_homeboy_version(&persisted_session_version, &self.current_homeboy_version)
-            && self.mismatch_predicate == "daemon_configured_identity == equal"
+        if !homeboy_core::build_identity::same_build(
+            &persisted_session_version,
+            &self.current_homeboy_version,
+        ) && self.mismatch_predicate == "daemon_configured_identity == equal"
         {
             self.mismatch_predicate = "session_homeboy_version != job_command_binary_version";
             self.session_homeboy_version = persisted_session_version;
@@ -2053,14 +2057,6 @@ fn rendered_commands(actions: &[ExecutableAction]) -> Vec<String> {
         .iter()
         .map(ExecutableAction::render_command)
         .collect()
-}
-
-fn same_homeboy_version(left: &str, right: &str) -> bool {
-    left.trim().strip_prefix("homeboy ").unwrap_or(left.trim())
-        == right
-            .trim()
-            .strip_prefix("homeboy ")
-            .unwrap_or(right.trim())
 }
 
 #[derive(Debug, Clone, Serialize)]

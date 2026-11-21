@@ -4066,14 +4066,16 @@ fn replaying_cancel_recovers_stale_released_and_orphaned_scratch_before_bounded_
         reserve_provider_execution_in_store(&test_lifecycle_store(), run_id, &plan.tasks[0], 1)
             .expect("provider execution reserved");
 
-        let released = crate::controller_scratch::allocate_attempt(
+        let released = crate::controller_scratch::allocate_attempt_at(
+            &homeboy_core::paths::homeboy_data().expect("data root"),
             run_id,
             &plan.plan_id,
             &plan.tasks[0].task_id,
             1,
         )
         .expect("released scratch");
-        let orphaned = crate::controller_scratch::allocate_attempt(
+        let orphaned = crate::controller_scratch::allocate_attempt_at(
+            &homeboy_core::paths::homeboy_data().expect("data root"),
             run_id,
             &plan.plan_id,
             &plan.tasks[0].task_id,
@@ -4968,7 +4970,9 @@ fn record_health_reports_plan_backed_missing_metadata_without_repair() {
         .upsert_imported_run(&observation)
         .expect("malformed fixture stored");
 
-    let before = record_health_summary_in_store(&lifecycle_store).expect("health");
+    let before = list_records_with_health_in_store(&lifecycle_store)
+        .expect("health")
+        .1;
     assert_eq!(before.malformed, 1);
     assert_eq!(
         before.samples[0].reason,
@@ -4976,7 +4980,8 @@ fn record_health_reports_plan_backed_missing_metadata_without_repair() {
     );
     // Missing metadata is reported, never reconstructed from the plan (#15742).
     assert_eq!(
-        record_health_summary_in_store(&lifecycle_store)
+        list_records_with_health_in_store(&lifecycle_store)
+            .map(|(_, health)| health)
             .expect("unmodified health")
             .malformed,
         1

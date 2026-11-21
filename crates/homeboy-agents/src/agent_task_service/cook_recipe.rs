@@ -528,37 +528,6 @@ impl CookRecipeStore {
         Err(error)
     }
 
-    /// Validate a Cook recipe against durable state without writing it. Fanout
-    /// uses this before creating worktrees so incompatible replays fail before any
-    /// lifecycle resources are mutated.
-    pub fn validate_initial_recipe_compatibility(&self, options: &CookRequest) -> Result<()> {
-        if !self.recipe_exists(&options.identity.cook_id) {
-            return Ok(());
-        }
-        let existing = self.load_recipe(&options.identity.cook_id)?;
-        let mut recipe = initial_recipe(options)?;
-        // The attempt plan is compiled only after the target worktree exists. Use
-        // the durable plan here so preflight compares every input already known
-        // without weakening persistence-time plan validation.
-        recipe.attempts = existing.attempts.clone();
-        recipe.retry_budget["execution_budget"] = existing.retry_budget["execution_budget"].clone();
-        // Recipes written before retry-policy provenance was introduced remain
-        // resumable. Their resolved execution budget is already immutable; omit
-        // the new descriptive field from the compatibility comparison until a
-        // pre-provider correction writes the current recipe shape.
-        if existing.retry_budget.get("policy").is_none() {
-            recipe
-                .retry_budget
-                .as_object_mut()
-                .expect("retry budget is an object")
-                .remove("policy");
-        }
-        let mismatches = recipe_mismatch_fields(&existing, &recipe);
-        let lifecycle_store = self.lifecycle_store();
-        ensure_correction_is_safe_in_store(&lifecycle_store, &existing, &recipe, &mismatches)?;
-        Ok(())
-    }
-
     /// Append an attempt. A remediation's lineage is read from the provenance its
     /// plan carries; use [`CookRecipeStore::record_recipe_retry_attempt`] for a
     /// lifecycle retry, whose plan says nothing about where it came from.
@@ -2762,10 +2731,6 @@ fn rearm_failed_terminal_continuation_in_store(
     Ok(rearmed)
 }
 
-pub fn claim_continuation() -> Result<Option<ClaimedCookContinuation>> {
-    Ok(claim_continuation_with_budget(usize::MAX)?.claim)
-}
-
 pub struct CookContinuationClaim {
     pub claim: Option<ClaimedCookContinuation>,
     pub inspected: usize,
@@ -3880,6 +3845,74 @@ mod tests {
                             ack.result.data["report"]["admission"].is_object(),
                             "{ack:?}"
                         );
+                        let record = store.read_record(run_id).unwrap();
+                        let projection = super::super::recovery_step_projection(&store, &record)
+                            .expect("admitted step is visible before any gates run");
+                        assert_eq!(projection["step"], "continue");
+                        assert_eq!(projection["state"], "in_flight");
+                        assert_eq!(projection["job_id"], "test-recovery-job");
+                        // A regate can fail before creating gate jobs: its
+                        // pre-execution diagnostic still has to be visible.
+                        let job_dir =
+                            homeboy_core::daemon::step_job::step_job_dir("test-recovery-job")
+                                .unwrap();
+                        std::fs::create_dir_all(&job_dir).unwrap();
+                        std::fs::write(job_dir.join("step.log"), serde_json::json!({
+                            "schema": "homeboy/command-result/v3", "success": false,
+                            "exit_code": 2, "diagnostics": {
+                                "code": "validation.invalid_argument",
+                                "message": "target filesystem is below the configured free-space reserve"
+                            }
+                        }).to_string()).unwrap();
+                        std::fs::write(
+                            job_dir.join("exit.json"),
+                            r#"{"schema":"homeboy/step-exit/v1","exit_code":2}"#,
+                        )
+                        .unwrap();
+                        let failed =
+                            super::super::recovery_step_projection(&store, &record).unwrap();
+                        assert_eq!(
+                            failed["state"], "failed",
+                            "exit is visible before terminal delivery"
+                        );
+                        assert!(failed["failure"]["message"]
+                            .as_str()
+                            .unwrap()
+                            .contains("free-space reserve"));
+                        std::fs::remove_file(job_dir.join("step.log")).unwrap();
+                        std::fs::remove_file(job_dir.join("exit.json")).unwrap();
+                        for (exit_code, state) in [(2, "failed"), (0, "succeeded")] {
+                            store
+                                .mutate_record(run_id, |record| {
+                                    record.metadata["recovery_step_terminal"] = serde_json::json!({
+                                        "intent_id": projection["intent_id"],
+                                        "job_id": "test-recovery-job",
+                                        "exit_code": exit_code,
+                                        "outcome": "exited",
+                                    });
+                                    true
+                                })
+                                .unwrap();
+                            let projection = super::super::recovery_step_projection(
+                                &store,
+                                &store.read_record(run_id).unwrap(),
+                            )
+                            .unwrap();
+                            assert_eq!(projection["state"], state);
+                            assert_eq!(projection["exit_code"], exit_code);
+                            if exit_code != 0 {
+                                assert_eq!(
+                                    projection["failure"]["code"],
+                                    "agent_task.recovery_step_failed"
+                                );
+                                assert!(projection["failure"]["message"]
+                                    .as_str()
+                                    .unwrap()
+                                    .contains("exit 2"));
+                            } else {
+                                assert!(projection["failure"].is_null());
+                            }
+                        }
                     }
                     "preflight" => {
                         assert_eq!(ack.result.data["report"]["preflight"], true, "{ack:?}");
@@ -4105,7 +4138,6 @@ mod tests {
             let mut options = reconstruct_options(&recipe()).expect("recipe options");
             options.workspace.source_refs = vec![source_ref.to_string()];
             store.persist_initial_recipe(&options)?;
-            store.validate_initial_recipe_compatibility(&options)?;
 
             let mut retry_plan = options.identity.initial_plan;
             retry_plan.plan_id = plan_id.to_string();
@@ -5320,74 +5352,6 @@ mod tests {
     }
 
     #[test]
-    fn persisted_old_retry_policy_remains_compatible_after_provider_execution() {
-        homeboy_core::test_support::with_isolated_home(|_| {
-            let mut persisted = recipe();
-            let old_policy = serde_json::json!({
-                "operator_intent": { "max_attempts": 1, "max_provider_executions": 1, "max_same_provider_retries": null },
-                "resolved": { "max_attempts": 1, "max_provider_executions": 1, "max_same_provider_retries": 0, "max_provider_rotations": 0 },
-            });
-            persisted.attempts[0].plan.metadata["cook_retry_policy"] = old_policy.clone();
-            persisted.retry_budget["policy"] = old_policy;
-            default_store().unwrap().persist_recipe(&persisted).unwrap();
-            crate::agent_task_lifecycle::submit_plan(&persisted.attempts[0].plan, Some("run"))
-                .expect("materialize old provider attempt");
-            crate::agent_task_lifecycle::rewrite_record_for_test("run", |record| {
-                record.metadata["provider_executions_consumed"] = serde_json::json!(1);
-            })
-            .expect("record provider execution");
-
-            let mut options = reconstruct_options(&persisted).expect("old recipe reconstructs");
-            options.identity.initial_plan.metadata["cook_retry_policy"] = serde_json::json!({
-                "operator_intent": { "max_attempts": 1, "max_provider_executions": 1, "max_same_provider_retries": null },
-                "resolved": { "max_attempts": 1, "max_provider_executions": 1, "max_same_provider_retries": 0, "max_provider_rotations": 0 },
-                "requested": { "max_attempts": 1, "max_provider_executions": 1, "max_same_provider_retries": 0, "max_provider_rotations": 0 },
-                "effective": { "max_attempts": 1, "max_provider_executions": 1, "max_same_provider_retries": 0, "max_provider_rotations": 0 },
-            });
-
-            default_store()
-                .unwrap()
-                .validate_initial_recipe_compatibility(&options)
-                .expect("descriptive retry-policy additions preserve the frozen recipe");
-
-            options.identity.initial_plan.metadata["cook_retry_policy"]["resolved"]
-                ["max_provider_executions"] = serde_json::json!(2);
-            assert!(
-                default_store()
-                    .unwrap()
-                    .validate_initial_recipe_compatibility(&options)
-                    .is_err(),
-                "a resolved execution budget mutation remains fenced after provider execution"
-            );
-        });
-    }
-
-    #[test]
-    fn legacy_recipe_without_retry_policy_remains_compatible_after_provider_execution() {
-        homeboy_core::test_support::with_isolated_home(|_| {
-            let legacy = recipe();
-            default_store().unwrap().persist_recipe(&legacy).unwrap();
-            crate::agent_task_lifecycle::submit_plan(&legacy.attempts[0].plan, Some("run"))
-                .expect("materialize legacy provider attempt");
-            crate::agent_task_lifecycle::rewrite_record_for_test("run", |record| {
-                record.metadata["provider_executions_consumed"] = serde_json::json!(1);
-            })
-            .expect("record legacy provider execution");
-
-            let mut options = reconstruct_options(&legacy).expect("legacy recipe reconstructs");
-            options.identity.initial_plan.metadata["cook_retry_policy"] = serde_json::json!({
-                "operator_intent": { "max_attempts": 1 },
-                "resolved": { "max_attempts": 1, "max_provider_executions": 1, "max_same_provider_retries": 0, "max_provider_rotations": 0 },
-            });
-
-            default_store()
-                .unwrap()
-                .validate_initial_recipe_compatibility(&options)
-                .expect("new retry-policy provenance does not reject a frozen legacy recipe");
-        });
-    }
-
-    #[test]
     fn durable_queue_deduplicates_and_survives_consumer_restart() {
         let context = homeboy_core::test_support::HermeticTestContext::new();
         let store = CookRecipeStore::new(context.path_roots());
@@ -6172,38 +6136,6 @@ mod tests {
     }
 
     #[test]
-    fn recipe_compatibility_preflight_is_read_only_and_allows_pre_provider_corrections() {
-        let context = homeboy_core::test_support::HermeticTestContext::new();
-        let store = CookRecipeStore::new(context.path_roots());
-        let options = reconstruct_options(&recipe()).expect("canonical options");
-
-        store
-            .validate_initial_recipe_compatibility(&options)
-            .expect("new recipe is compatible");
-        assert!(!store.recipe_exists(&options.identity.cook_id));
-
-        store
-            .persist_initial_recipe(&options)
-            .expect("persist canonical recipe");
-        store
-            .validate_initial_recipe_compatibility(&options)
-            .expect("exact replay is compatible");
-
-        let mut changed = options;
-        changed.finalization.title = "different title".to_string();
-        store
-            .validate_initial_recipe_compatibility(&changed)
-            .expect("pre-provider correction is compatible");
-        assert_eq!(
-            store
-                .load_recipe(&changed.identity.cook_id)
-                .unwrap()
-                .finalization["title"],
-            "title"
-        );
-    }
-
-    #[test]
     fn recipe_correction_transitions_from_pre_provider_supersede_to_frozen_boundaries() {
         homeboy_core::test_support::with_isolated_home(|_| {
             let mut original = reconstruct_options(&recipe()).expect("canonical options");
@@ -6392,9 +6324,7 @@ mod tests {
                 .push("corrected-source".to_string());
 
             assert!(
-                store
-                    .validate_initial_recipe_compatibility(&corrected)
-                    .is_err(),
+                store.persist_initial_recipe(&corrected).is_err(),
                 "the recipe-rooted check must see the provider execution outside the ambient home"
             );
         });

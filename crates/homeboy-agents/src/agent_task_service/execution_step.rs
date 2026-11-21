@@ -442,6 +442,75 @@ pub fn recovery_step_in_flight(run_id: &str) -> Result<Option<Value>> {
     ))
 }
 
+/// The latest admitted recovery step of `record` (regate, continuation,
+/// rearm), read from recorded evidence only: the lifecycle fence, the frozen
+/// intent and the step job's own exit and log files. `status` reports it so an
+/// admitted step that already ran (and failed before touching the candidate,
+/// for example on a resource guard) is never invisible behind the source
+/// attempt's original gate verdict (#18657).
+pub fn recovery_step_projection(
+    store: &AgentTaskLifecycleStore,
+    record: &AgentTaskRunRecord,
+) -> Option<Value> {
+    let job = &record.metadata["recovery_step_job"];
+    let intent_id = job["intent_id"].as_str()?;
+    if record.metadata["execution_scheduling"]["current_intent_id"].as_str() != Some(intent_id) {
+        return None;
+    }
+    let job_id = job["job_id"].as_str();
+    let step = load_execution_intent(store, intent_id)
+        .ok()
+        .and_then(|intent| match intent.mode {
+            ExecutionStepMode::Recovery { step, .. } => serde_json::to_value(step).ok(),
+            _ => None,
+        })
+        .and_then(|step| step.get("kind").cloned())
+        .unwrap_or(Value::Null);
+    let terminal = &record.metadata["recovery_step_terminal"];
+    let delivered = terminal["intent_id"].as_str() == Some(intent_id);
+    let exit_code = delivered
+        .then(|| terminal["exit_code"].as_i64())
+        .flatten()
+        .or_else(|| {
+            job_id
+                .and_then(step_job::recorded_step_exit_code)
+                .map(i64::from)
+        });
+    let state = match exit_code {
+        Some(0) => "succeeded",
+        Some(_) => "failed",
+        None if delivered => "failed",
+        None => "in_flight",
+    };
+    let failure = (state == "failed")
+        .then(|| {
+            let message = job_id
+                .and_then(step_job::recorded_step_failure_cause)
+                .unwrap_or_else(|| {
+                    format!(
+                        "recovery step ended without success (outcome {}, exit {})",
+                        terminal["outcome"].as_str().unwrap_or("unknown"),
+                        exit_code.map_or("unknown".to_string(), |code| code.to_string())
+                    )
+                });
+            json!({
+                "code": "agent_task.recovery_step_failed",
+                "message": message,
+                "details": { "job_id": job_id },
+            })
+        })
+        .unwrap_or(Value::Null);
+    Some(json!({
+        "step": step,
+        "intent_id": intent_id,
+        "job_id": job_id,
+        "state": state,
+        "exit_code": exit_code,
+        "failure": failure,
+        "status_command": format!("homeboy agent-task status {} --watch", record.run_id),
+    }))
+}
+
 #[cfg(any(test, feature = "test-support"))]
 thread_local! {
     static RECOVERY_SUBMIT: std::cell::RefCell<Option<Box<dyn Fn(&ExecutionStepIntent) -> Result<String>>>> = std::cell::RefCell::new(None);

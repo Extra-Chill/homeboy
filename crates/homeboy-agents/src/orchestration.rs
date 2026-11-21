@@ -647,24 +647,6 @@ fn parse_run_id(run_id: &str) -> homeboy_core::Result<RunId> {
     })
 }
 
-pub fn control_plane_error_to_homeboy(error: ControlPlaneError) -> homeboy_core::Error {
-    match error.class {
-        ControlPlaneErrorClass::InvalidArgument | ControlPlaneErrorClass::CursorExpired => {
-            homeboy_core::Error::validation_invalid_argument(
-                "control_plane",
-                error.message,
-                None,
-                None,
-            )
-        }
-        ControlPlaneErrorClass::NotFound
-        | ControlPlaneErrorClass::Unavailable
-        | ControlPlaneErrorClass::Unknown => {
-            homeboy_core::Error::internal_unexpected(error.message)
-        }
-    }
-}
-
 /// Keep the run service boundary's validation context while sharing its policy.
 fn run_boundary_error_to_homeboy(
     error: ControlPlaneError,
@@ -4089,10 +4071,17 @@ fn project_summary_fields(
     resource.location = location(record);
     resource.placement = placement(record);
     resource.phase = phase(record);
+    // An execution step held by runner admission (host pressure, capacity) has
+    // not started: its phase is admission, whatever owner it already holds
+    // (#18638). Read once; the blocker below carries the same wait.
+    let step_wait = crate::agent_task_service::execution_step_wait(record);
+    if step_wait.is_some() {
+        resource.phase = Some(ADMISSION_PHASE.to_string());
+    }
     resource.blocker = if resource.state == ControlPlaneState::Succeeded {
         None
     } else {
-        blocker(record, delivery.as_ref())
+        blocker(record, delivery.as_ref(), step_wait)
     };
     resource.owner = Some(owner(record));
     resource.runtime = runtime(record);
@@ -4302,7 +4291,7 @@ fn project_dead_candidate_adoption(record: &AgentTaskRunRecord) -> AgentTaskRunR
     }
     adoption.state = "interrupted".to_string();
     adoption.phase = if adoption.gate_process_group.is_some_and(|pgid| {
-        homeboy_core::process::isolated_process_group_is_running(pgid).unwrap_or(false)
+        homeboy_engine_primitives::command::process_group_is_running(pgid).unwrap_or(false)
     }) {
         "gate_orphaned"
     } else {
@@ -4666,7 +4655,18 @@ fn phase(record: &AgentTaskRunRecord) -> Option<String> {
     {
         return Some("source_materialization".to_string());
     }
+    // A queued execution step, or one parked in `pending_resource_admission`,
+    // is waiting on admission, not running gates (#18638).
+    if !record.state().is_terminal()
+        && record.metadata["execution_scheduling"]["admission_wait"]["status"]
+            == "pending_resource_admission"
+    {
+        return Some(ADMISSION_PHASE.to_string());
+    }
     if record.has_live_execution_step_owner() {
+        if record.state() == RunExecutionState::Queued {
+            return Some(ADMISSION_PHASE.to_string());
+        }
         return Some("promotion_gates".to_string());
     }
     if has_running_provider_execution(record) {
@@ -4798,11 +4798,15 @@ fn missing_argument_details(details: &Value) -> Option<Value> {
     })
 }
 
+/// The projected phase of a Cook whose execution waits on admission.
+const ADMISSION_PHASE: &str = "admission";
+
 fn blocker(
     record: &AgentTaskRunRecord,
     delivery: Option<&CookDelivery>,
+    step_wait: Option<Value>,
 ) -> Option<ControlPlaneBlocker> {
-    if let Some(wait) = crate::agent_task_service::execution_step_wait(record) {
+    if let Some(wait) = step_wait {
         return Some(ControlPlaneBlocker {
             details: Some(wait.clone()),
             code: wait["reason"].as_str().map(str::to_string),
@@ -8203,6 +8207,7 @@ mod tests {
             );
             let mut latest = record(latest_id);
             latest.metadata["cook_id"] = json!(cook_id);
+            latest.metadata["cook_attempt"] = json!(2);
             crate::agent_task_service::set_cook_delivery_artifact_for_test(
                 &mut latest.metadata,
                 "/promotion",
@@ -8216,13 +8221,7 @@ mod tests {
             for (attempt, row) in [(1, &candidate), (2, &latest)] {
                 store.write_record(row).expect("rooted record");
                 store
-                    .write_cook_index_attempt(
-                        cook_id,
-                        attempt,
-                        &row.run_id,
-                        row.submitted_at.clone(),
-                        None,
-                    )
+                    .record_cook_attempt(cook_id, attempt, &row.run_id)
                     .expect("rooted index attempt");
             }
             // Colliding ambient IDs must never supply this service's evidence.
@@ -8739,22 +8738,10 @@ mod tests {
             )
             .expect("second attempt");
             store
-                .write_cook_index_attempt(
-                    cook_id,
-                    1,
-                    &first_id,
-                    "2026-01-01T00:00:00Z".to_string(),
-                    None,
-                )
+                .record_cook_attempt(cook_id, 1, &first_id)
                 .expect("index first");
             store
-                .write_cook_index_attempt(
-                    cook_id,
-                    2,
-                    &second_id,
-                    "2026-01-01T00:00:01Z".to_string(),
-                    None,
-                )
+                .record_cook_attempt(cook_id, 2, &second_id)
                 .expect("rebind alias");
             let service = OrchestrationService::new(LifecycleStoreLookup::new(store.clone()));
             let request = ControlPlaneActionRequest {
@@ -8822,13 +8809,7 @@ mod tests {
                     })
                     .expect("gate-failed candidate");
                 store
-                    .write_cook_index_attempt(
-                        &cook_id,
-                        1,
-                        &attempt_id,
-                        "2026-01-01T00:00:00Z".to_string(),
-                        None,
-                    )
+                    .record_cook_attempt(&cook_id, 1, &attempt_id)
                     .expect("index");
                 let service = OrchestrationService::new(LifecycleStoreLookup::new(store.clone()));
                 let request = ControlPlaneActionRequest {
@@ -10249,6 +10230,30 @@ mod tests {
         assert_eq!(resource.state, ControlPlaneState::Succeeded);
         assert_eq!(resource.phase.as_deref(), Some("promotion_gates"));
         assert_eq!(resource.finished_at, record.updated_at);
+    }
+
+    #[test]
+    fn admission_pending_execution_step_projects_admission_not_promotion_gates() {
+        let mut queued = record(AGENT_TASK_RUN);
+        queued.set_state_for_test(RunExecutionState::Queued);
+        queued.metadata.as_object_mut().unwrap().extend(
+            crate::agent_task_lifecycle::execution_step_owner_fixture("cook"),
+        );
+        let resource = project_record(&queued, None).expect("project queued step");
+        assert_ne!(resource.state, ControlPlaneState::Succeeded);
+        assert_eq!(resource.phase.as_deref(), Some("admission"));
+
+        let mut parked = record(AGENT_TASK_RUN);
+        parked.set_state_for_test(RunExecutionState::Running);
+        parked.metadata.as_object_mut().unwrap().extend(
+            crate::agent_task_lifecycle::execution_step_owner_fixture("cook"),
+        );
+        parked.metadata["execution_scheduling"]["admission_wait"] = json!({
+            "status": "pending_resource_admission", "reason": "pressure",
+        });
+        let resource = project_record(&parked, None).expect("project parked step");
+        assert_ne!(resource.state, ControlPlaneState::Succeeded);
+        assert_eq!(resource.phase.as_deref(), Some("admission"));
     }
 
     #[test]

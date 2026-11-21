@@ -1,5 +1,5 @@
 //! Small, admission-only CPU policy. Running work is never preempted.
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::time::{Duration, Instant};
 
@@ -18,21 +18,38 @@ pub struct LabCapacity {
     pub load_average_1m: Option<f64>,
     pub concurrency_limit: Option<usize>,
     pub effective_budget: usize,
+    /// Local gates on this host (Cooks run with `--placement local`) holding
+    /// a host slot outside any daemon job; charged against the budget.
+    pub local_gate_holders: usize,
     pub active_slots_by_owner: BTreeMap<String, usize>,
+}
+
+/// Slot ceiling after local gate holders: the configured limit (or one slot per
+/// CPU when unset) less the holders, never below one so daemon work always
+/// progresses. Load is not reduced again: it already reflects those gates.
+pub fn slot_ceiling(cpus: usize, limit: Option<usize>, local_gate_holders: usize) -> usize {
+    limit
+        .unwrap_or(cpus)
+        .saturating_sub(local_gate_holders)
+        .max(1)
 }
 
 pub fn observe(limit: Option<usize>) -> LabCapacity {
     let cpus = std::thread::available_parallelism()
         .map(usize::from)
         .unwrap_or(1);
-    let load_average_1m = std::fs::read_to_string("/proc/loadavg")
-        .ok()
-        .and_then(|text| text.split_whitespace().next()?.parse::<f64>().ok());
+    let load_average_1m = crate::local_gate_admission::load_average_1m();
+    let local_gate_holders = crate::local_gate_admission::counted_holders();
     LabCapacity {
         cpus,
         load_average_1m,
         concurrency_limit: limit,
-        effective_budget: admission_budget(cpus, load_average_1m, limit.unwrap_or(usize::MAX)),
+        effective_budget: admission_budget(
+            cpus,
+            load_average_1m,
+            slot_ceiling(cpus, limit, local_gate_holders),
+        ),
+        local_gate_holders,
         active_slots_by_owner: STEP_STATE
             .lock()
             .unwrap_or_else(|e| e.into_inner())
@@ -95,7 +112,7 @@ pub fn gate_admission_reason(
 
 /// Admission lane a step declares through [`LAB_PRIORITY_ENV`]. Ordered so
 /// `High` sorts before `Normal`.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, PartialOrd, Ord, Serialize)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum LabPriority {
     /// Short follow-ups (publish, small fixes) admitted ahead of normal work.
@@ -609,6 +626,7 @@ mod tests {
                     load_average_1m: Some(0.0),
                     concurrency_limit: limit,
                     effective_budget: 2,
+                    local_gate_holders: 0,
                     active_slots_by_owner: BTreeMap::new(),
                 }
             }
@@ -882,5 +900,20 @@ mod tests {
                 "cpus={cpus} load={load:?} limit={limit}"
             );
         }
+    }
+
+    #[test]
+    fn local_gate_holders_reduce_the_slot_ceiling_but_never_starve_the_daemon() {
+        // Thirteen local Cook gates on a 32-slot Lab leave 19 daemon slots.
+        assert_eq!(slot_ceiling(64, Some(32), 13), 19);
+        assert_eq!(
+            admission_budget(64, Some(0.0), slot_ceiling(64, Some(32), 13)),
+            19
+        );
+        // Local holders filling the limit still leave one slot for remote work.
+        assert_eq!(slot_ceiling(64, Some(4), 13), 1);
+        // Unset limit: one slot per CPU, as the load term already caps it.
+        assert_eq!(slot_ceiling(8, None, 0), 8);
+        assert_eq!(slot_ceiling(8, None, 3), 5);
     }
 }

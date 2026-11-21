@@ -1,6 +1,23 @@
 use super::{compact_control_plane_status, deduplicate_control_plane_evidence};
 use serde_json::json;
 
+#[test]
+fn recovery_step_outcome_survives_compact_status() {
+    let step = json!({
+        "step": "regate", "intent_id": "intent-1", "job_id": "job-1",
+        "state": "failed", "exit_code": 2,
+        "failure": {"code": "agent_task.recovery_step_failed", "message": "free-space reserve"}
+    });
+    let compact = compact_control_plane_status(json!({
+        "schema": "homeboy/control-plane-run/v1", "run": "run",
+        "state": "candidate_recoverable", "recovery_step": step,
+        "blocker": step["failure"],
+    }));
+    assert_eq!(compact["recovery_step"]["job_id"], "job-1");
+    assert_eq!(compact["recovery_step"]["state"], "failed");
+    assert_eq!(compact["blocker"]["message"], "free-space reserve");
+}
+
 /// An interrupted owner without a recorded stop reason still reports
 /// truthfully whether a provider ever started.
 #[test]

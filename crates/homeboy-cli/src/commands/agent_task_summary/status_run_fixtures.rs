@@ -6,6 +6,33 @@ use homeboy::agents::orchestration::{LifecycleStoreLookup, OrchestrationService}
 use homeboy_control_plane_contract::{ControlPlaneRunListRequest, RunId};
 use serde_json::json;
 
+fn import_dispatch_result(record: &AgentTaskRunRecord, aggregate: &AgentTaskAggregate) {
+    use homeboy::agents::agent_task_lifecycle::{
+        record_remote_dispatch_failure, AgentTaskRemoteDispatchFailure, RunDispatchIdentity,
+    };
+    record_remote_dispatch_failure(
+        AgentTaskRemoteDispatchFailure {
+            identity: RunDispatchIdentity {
+                run_id: &record.run_id,
+                runner_id: "fixture-runner",
+            },
+            local_command: vec![],
+            remote_command: vec![],
+            remote_workspace: "/fixture/workspace",
+            stdout: "",
+            stderr: "",
+            exit_code: 1,
+        },
+        &json!({
+            "schema": "homeboy/agent-task-dispatch/v1",
+            "record": record,
+            "aggregate": aggregate,
+        }),
+    )
+    .expect("import production dispatch result")
+    .expect("dispatch envelope accepted");
+}
+
 #[test]
 fn agent_task_status_run_directories_preserve_recorded_cause_and_next_action() {
     crate::test_support::with_isolated_home(|_| {
@@ -21,7 +48,7 @@ fn agent_task_status_run_directories_preserve_recorded_cause_and_next_action() {
             let directory = root.join(class);
             let record: AgentTaskRunRecord = serde_json::from_slice(&std::fs::read(directory.join("record.json")).unwrap()).unwrap();
             let aggregate: AgentTaskAggregate = serde_json::from_slice(&std::fs::read(directory.join("aggregate.json")).unwrap()).unwrap();
-            store.write_aggregate_and_record(&record, &aggregate).unwrap();
+            import_dispatch_result(&record, &aggregate);
             assert!(store.aggregate_path(&record.run_id).exists());
             let run_id = RunId::new(&record.run_id).unwrap();
             let run = service.run(&run_id).unwrap();
@@ -78,9 +105,7 @@ fn agent_task_status_published_receipt_wins_over_terminal_and_promotion_snapshot
                     "invalid delivery: {:?}",
                     record.metadata
                 );
-                store
-                    .write_aggregate_and_record(&record, &aggregate)
-                    .unwrap();
+                import_dispatch_result(&record, &aggregate);
                 let before =
                     serde_json::to_value(store.read_record_bounded(&record.run_id).unwrap())
                         .unwrap();

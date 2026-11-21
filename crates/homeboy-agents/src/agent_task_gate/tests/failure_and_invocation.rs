@@ -456,6 +456,7 @@ fn baseline_comparison_omits_an_absent_diagnostic() {
         matches_candidate_failure: true,
         result: AgentTaskGateDifferentialResult::BaselineRed,
         diagnostic: None,
+        failure_attribution: None,
     };
     let json = serde_json::to_value(&comparison).expect("serialize");
     assert!(
@@ -493,6 +494,7 @@ fn baseline_comparison_round_trips_its_diagnostic() {
         matches_candidate_failure: false,
         result: AgentTaskGateDifferentialResult::Inconclusive,
         diagnostic: Some("baseline replay failed: boom".to_string()),
+        failure_attribution: None,
     };
     let json = serde_json::to_value(&comparison).expect("serialize");
     assert_eq!(json["diagnostic"], "baseline replay failed: boom");

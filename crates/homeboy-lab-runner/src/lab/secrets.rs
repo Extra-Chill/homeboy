@@ -21,7 +21,7 @@ use homeboy_core::{config, Error, Result};
 use homeboy_runner_contract::env_materialization_plan::{EnvMaterializationPlan, EnvSecretRef};
 
 use super::super::Runner;
-use super::args_util::{non_empty_arg, subcommand_index};
+use super::args_util::{flag_value, non_empty_arg, subcommand_index};
 
 /// Provenance key used when a missing runner secret_env name is contributed by
 /// the plan's provider runner requirements rather than an individual task.
@@ -778,12 +778,14 @@ fn agent_task_dispatch_provider_plan_from_args(args: &[String]) -> Result<Option
     let (backend_flag, selector_flag, model_flag, provider_config_flag) =
         ("--backend", "--selector", "--model", "--provider-config");
 
-    let Some(backend) = option_arg_after(args, agent_task_index + 2, backend_flag) else {
+    let Some(backend) = flag_value(args, agent_task_index + 2, backend_flag).map(str::to_string)
+    else {
         return Ok(None);
     };
-    let selector = option_arg_after(args, agent_task_index + 2, selector_flag);
-    let model = option_arg_after(args, agent_task_index + 2, model_flag);
-    let provider_config = option_arg_after(args, agent_task_index + 2, provider_config_flag)
+    let selector = flag_value(args, agent_task_index + 2, selector_flag).map(str::to_string);
+    let model = flag_value(args, agent_task_index + 2, model_flag).map(str::to_string);
+    let provider_config = flag_value(args, agent_task_index + 2, provider_config_flag)
+        .map(str::to_string)
         .map(|spec| read_provider_config_value(&spec))
         .transpose()?
         .unwrap_or(serde_json::Value::Null);
@@ -818,25 +820,6 @@ fn agent_task_dispatch_provider_plan_from_args(args: &[String]) -> Result<Option
             metadata: serde_json::Value::Null,
         }],
     )))
-}
-
-fn option_arg_after(args: &[String], start: usize, flag: &str) -> Option<String> {
-    let prefix = format!("{flag}=");
-    let mut index = start;
-    while index < args.len() {
-        let arg = &args[index];
-        if arg == "--" {
-            break;
-        }
-        if arg == flag {
-            return args.get(index + 1).cloned();
-        }
-        if let Some(value) = arg.strip_prefix(&prefix) {
-            return Some(value.to_string());
-        }
-        index += 1;
-    }
-    None
 }
 
 pub(crate) fn declared_trace_secret_env(args: &[String]) -> Vec<String> {
@@ -904,7 +887,7 @@ fn component_test_target_from_args(args: &[String]) -> Option<(Option<String>, O
     let component_id = args
         .get(test_index + 1)
         .and_then(|value| non_empty_arg(value));
-    let path_override = option_arg_after(args, test_index + 1, "--path");
+    let path_override = flag_value(args, test_index + 1, "--path").map(str::to_string);
     Some((component_id, path_override))
 }
 
@@ -1129,19 +1112,7 @@ fn agent_task_run_plan_plan_spec(args: &[String]) -> Option<String> {
             .map(|_| index + 1)
     })?;
 
-    let mut iter = args.iter().skip(run_plan_index + 1);
-    while let Some(arg) = iter.next() {
-        if arg == "--" {
-            break;
-        }
-        if arg == "--plan" {
-            return iter.next().cloned();
-        }
-        if let Some(value) = arg.strip_prefix("--plan=") {
-            return Some(value.to_string());
-        }
-    }
-    None
+    flag_value(args, run_plan_index + 1, "--plan").map(str::to_string)
 }
 
 #[cfg(test)]

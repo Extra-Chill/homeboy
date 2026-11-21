@@ -9,7 +9,7 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::time::Duration;
 
-use super::constants::{GITHUB_RELEASES_API, VERSION};
+use super::constants::VERSION;
 use super::execution::{
     active_binary_path, command_output_with_timeout, execute_upgrade,
     installed_target_build_identity, installed_target_build_identity_from_disk,
@@ -22,7 +22,6 @@ use super::operation::{
 use super::release_catalog::{self, InstallableSelection, ReleaseEntry, SelectedRelease};
 use super::services;
 use super::types::*;
-use super::update_check::RuntimeCompatibility;
 use super::validation::{check_for_updates, installable_check, selects_an_installable_release};
 
 pub(super) const CONTROLLER_UPGRADE_PROMOTION_WAIT_TIMEOUT: Duration = Duration::from_secs(20 * 60);
@@ -35,70 +34,9 @@ pub fn current_build_version() -> String {
     build_identity::current().display
 }
 
-fn fetch_latest_github_version_at(url: &str) -> Result<String> {
-    let response: GitHubRelease = super::github_api::fetch(url, Duration::from_secs(10))?
-        .json()
-        .map_err(|e| {
-            Error::internal_json(
-                e.to_string(),
-                Some("parse GitHub release response".to_string()),
-            )
-        })?;
-
-    // Strip "v" prefix if present (e.g., "v0.15.0" -> "0.15.0")
-    let version = response
-        .tag_name
-        .strip_prefix('v')
-        .unwrap_or(&response.tag_name);
-    Ok(version.to_string())
-}
-
+/// The newest published stable release, read from the one release catalog.
 pub fn fetch_latest_version() -> Result<String> {
-    let url = GITHUB_RELEASES_API;
-    #[cfg(test)]
-    let url = &release_catalog::test_release_url(url);
-    fetch_latest_github_version_at(url)
-}
-
-/// Read release-declared durable compatibility from the same daily update
-/// source. This is deliberately not called by Cook admission: the cache is the
-/// only runtime input there, so a durable command never adds a network edge.
-pub fn fetch_latest_runtime_compatibility(
-    expected_version: &str,
-) -> Result<Option<RuntimeCompatibility>> {
-    let url = GITHUB_RELEASES_API;
-    #[cfg(test)]
-    let url = &release_catalog::test_release_url(url);
-    let release: GitHubRelease = super::github_api::fetch(url, Duration::from_secs(10))?
-        .json()
-        .map_err(|e| {
-            Error::internal_json(
-                e.to_string(),
-                Some("parse GitHub release response".to_string()),
-            )
-        })?;
-    if release.tag_name.trim_start_matches('v') != expected_version.trim_start_matches('v') {
-        return Ok(None);
-    }
-    runtime_compatibility_from_release_notes(&release.body)
-}
-
-const RUNTIME_COMPATIBILITY_MARKER: &str = "<!-- homeboy-runtime-compatibility: ";
-
-fn runtime_compatibility_from_release_notes(body: &str) -> Result<Option<RuntimeCompatibility>> {
-    let Some(start) = body.find(RUNTIME_COMPATIBILITY_MARKER) else {
-        return Ok(None);
-    };
-    let value = &body[start + RUNTIME_COMPATIBILITY_MARKER.len()..];
-    let Some(json) = value.split_once(" -->").map(|(json, _)| json) else {
-        return Ok(None);
-    };
-    serde_json::from_str(json).map(Some).map_err(|error| {
-        Error::internal_json(
-            error.to_string(),
-            Some("parse release runtime compatibility".to_string()),
-        )
-    })
+    release_catalog::newest_stable_version(&release_catalog::fetch_release_catalog()?)
 }
 
 #[cfg(test)]
@@ -165,40 +103,6 @@ where
     }
 
     InstallMethod::Unknown
-}
-
-#[cfg(test)]
-#[test]
-fn release_notes_runtime_compatibility_is_explicit_and_versioned() {
-    let compatibility = runtime_compatibility_from_release_notes(
-        "release\n<!-- homeboy-runtime-compatibility: {\"schema\":\"homeboy/runtime-compatibility/v1\",\"required_contracts\":{\"snapshot\":2}} -->",
-    )
-    .expect("parse declaration")
-    .expect("declaration");
-    assert_eq!(compatibility.required_contracts["snapshot"], 2);
-    assert!(runtime_compatibility_from_release_notes("release")
-        .unwrap()
-        .is_none());
-}
-
-pub fn version_is_newer(latest: &str, current: &str) -> bool {
-    let parse = |v: &str| -> Option<(u32, u32, u32)> {
-        let parts: Vec<&str> = v.split('.').collect();
-        if parts.len() >= 3 {
-            Some((
-                parts[0].parse().ok()?,
-                parts[1].parse().ok()?,
-                parts[2].parse().ok()?,
-            ))
-        } else {
-            None
-        }
-    };
-
-    match (parse(latest), parse(current)) {
-        (Some(l), Some(c)) => l > c,
-        _ => latest != current,
-    }
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -273,7 +177,7 @@ fn installed_controller_meets_selected_release(
     Ok(
         installed_target_build_identity_from_disk(&active_binary_path()?)?.filter(|installed| {
             installed.version == selected.version
-                || version_is_newer(&installed.version, &selected.version)
+                || build_identity::is_newer(&installed.version, &selected.version)
         }),
     )
 }
@@ -475,6 +379,7 @@ fn complete_without_controller_replacement(
     };
     if !completion.superseded {
         result.extension_skips.extend(orphan_extension_warnings());
+        report_host_runner_service(&mut result);
     }
     result.daemon_pending_restart =
         converge_resident_daemon_after_controller_reconciliation(&completion)?;
@@ -1067,6 +972,7 @@ fn run_controller_upgrade_with_operation(
             };
             if !completion_superseded {
                 result.extension_skips.extend(orphan_extension_warnings());
+                report_host_runner_service(&mut result);
             }
             if completion_superseded {
                 invalidate_superseded_evidence(&mut result);
@@ -2285,6 +2191,36 @@ fn installed_daemon_matches(installed_identity: &str) -> bool {
                 .as_ref()
                 .is_some_and(|state| state.build_identity.display == installed_identity)
     })
+}
+
+/// On a runner host (no configured runners of its own), report its runner
+/// service unit as pending when it does not run the installed build. That unit
+/// is converged by its controller's `homeboy upgrade`, so a runner-host upgrade
+/// names that command and does not report success (#18550).
+fn report_host_runner_service(result: &mut UpgradeResult) {
+    if result.runner_convergence != Some(RunnerConvergenceDisposition::NoRunnersConfigured) {
+        return;
+    }
+    let Some(version) = result.new_version.as_deref() else {
+        return;
+    };
+    let pending = super::with_runner_upgrade(|provider| {
+        provider.host_runner_service_pending_restart(version)
+    });
+    if pending.is_empty() {
+        return;
+    }
+    warn_pending_resident_services(&pending);
+    let units: Vec<_> = pending
+        .iter()
+        .map(|entry| entry.service_id.as_str())
+        .collect();
+    result.message = format!(
+        "{}. HOST RUNNER SERVICE PENDING: {} not on {version}; run `homeboy upgrade` on its controller",
+        result.message.trim_end_matches('.'),
+        units.join(", "),
+    );
+    result.services_pending_restart.extend(pending);
 }
 
 /// Surface declared resident services that still hold the old binary, with the
@@ -5170,6 +5106,7 @@ mod pinned_release_tests {
             draft: false,
             prerelease: false,
             assets,
+            body: String::new(),
         }
     }
 

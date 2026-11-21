@@ -639,6 +639,19 @@ pub(crate) fn observe_service_units(runner_id: &str) -> Result<Vec<ServiceUnitOb
     Ok(parse_service_inventory(&stdout))
 }
 
+/// Observe the runner-service unit hosted on this machine, read-only. A
+/// machine that is not a runner host, or cannot run the probe, reports none.
+pub(crate) fn observe_local_service_units() -> Vec<ServiceUnitObservation> {
+    std::process::Command::new("sh")
+        .args(["-c", &service_inventory_script()])
+        .stdin(std::process::Stdio::null())
+        .output()
+        .ok()
+        .filter(|output| output.status.success())
+        .map(|output| parse_service_inventory(&String::from_utf8_lossy(&output.stdout)))
+        .unwrap_or_default()
+}
+
 /// First line of `<homeboy_path> --version` on the runner host, read-only over
 /// SSH. `upgrade --check` uses this instead of a runner job so a check never
 /// records work on the runner.

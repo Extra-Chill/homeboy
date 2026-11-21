@@ -447,13 +447,6 @@ pub(crate) fn require_exact_runner_version(
     settings.require_exact_homeboy_version.unwrap_or(false)
 }
 
-fn canonical_build_identity(identity: &str) -> &str {
-    identity
-        .trim()
-        .strip_prefix("homeboy ")
-        .unwrap_or(identity.trim())
-}
-
 /// Compare the recorded daemon to the controller's compatibility identity.
 pub(crate) fn lab_runner_homeboy_version_drift(status: &RunnerStatusReport) -> bool {
     observed_version_drift(status).is_some()
@@ -468,7 +461,7 @@ fn observed_version_drift(status: &RunnerStatusReport) -> Option<(String, String
         Some(identity) => (identity, controller.display),
         None => (session.homeboy_version.as_str(), controller.version),
     };
-    (canonical_build_identity(daemon) != canonical_build_identity(&controller))
+    (!homeboy_core::build_identity::same_build(daemon, &controller))
         .then(|| (daemon.to_string(), controller))
 }
 

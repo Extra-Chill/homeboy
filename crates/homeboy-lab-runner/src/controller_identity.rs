@@ -32,8 +32,7 @@ pub(crate) fn compatibility_controller_identity() -> BuildIdentity {
 /// `homeboy <version>+<commit>` display). An unparseable or absent identity
 /// leaves the process's own build in effect.
 pub(crate) fn with_converging_controller<T>(identity: Option<&str>, f: impl FnOnce() -> T) -> T {
-    let Some(identity) = identity.and_then(homeboy_upgrade::upgrade::parse_build_identity_display)
-    else {
+    let Some(identity) = identity.and_then(homeboy_core::build_identity::parse) else {
         return f();
     };
     let previous = CONVERGING_CONTROLLER.with(|slot| slot.replace(Some(identity)));

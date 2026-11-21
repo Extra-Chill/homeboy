@@ -779,7 +779,9 @@ fn public_admission_capacity_wait_keeps_cook_pending_resource_admission() {
 }
 
 /// The core preflight refusal for a pinned, connected runner whose daemon
-/// freshness probe has not produced readiness evidence.
+/// freshness probe has not produced readiness evidence. A split-placement
+/// Cook now waits in pending admission instead (#17832), so the fixture uses
+/// an ordinary Lab command, which still receives the refusal.
 fn readiness_unobserved_refusal() -> homeboy_core::Error {
     use homeboy_core::parsed_command_preflight::*;
     resolve_parsed_command_preflight(
@@ -790,7 +792,7 @@ fn readiness_unobserved_refusal() -> homeboy_core::Error {
                 operation: vec!["cook".into()],
             },
             resource_admission: ResourceAdmissionRequirement::Exempt,
-            controller_execution: ControllerExecution::SplitPlacementCoordinator,
+            controller_execution: ControllerExecution::Ordinary,
             deferred_workload: DeferredWorkloadPolicy::Eligible,
             placement: PlacementIntent::Lab,
             runner: RunnerIntent::Explicit("homeboy-lab".into()),
@@ -4372,123 +4374,6 @@ fn concurrent_provider_children_do_not_replace_controller_liveness() {
         let _ = child_b.kill();
         let _ = child_b.wait();
         result
-    });
-}
-
-#[test]
-fn discovery_latest_returns_only_newest_run() {
-    with_isolated_home(|_| {
-        agent_task_lifecycle::submit_plan(&discovery_plan(), Some("run-latest-a"))
-            .expect("first submitted");
-        agent_task_lifecycle::submit_plan(&discovery_plan(), Some("run-latest-z"))
-            .expect("second submitted");
-
-        let report = discovery::discover_filtered_latest_run(AgentTaskDiscoveryOptions::default())
-            .expect("latest listed");
-
-        assert_eq!(report.filter, "latest");
-        assert_eq!(report.count, 1);
-        assert_eq!(report.runs[0].run_id, "run-latest-z");
-    });
-}
-
-#[test]
-fn discovery_latest_walks_until_filter_match() {
-    for skipped in [1, 105] {
-        with_isolated_home(|_| {
-            let record =
-                agent_task_lifecycle::submit_plan(&discovery_plan(), Some("latest-target"))
-                    .expect("target submitted");
-            let store = homeboy_core::observation::ObservationStore::open_initialized()
-                .expect("observation store");
-            for index in 0..skipped {
-                let mut newer = record.clone();
-                newer.run_id = format!("newer-{index:03}");
-                store
-                    .upsert_imported_run(&homeboy_core::observation::RunRecord {
-                        id: newer.run_id.clone(),
-                        kind: "agent-task".to_string(),
-                        started_at: "2099-01-01T00:00:00Z".to_string(),
-                        status: "queued".to_string(),
-                        metadata_json: serde_json::json!({"agent_task_run": newer}),
-                        ..Default::default()
-                    })
-                    .expect("insert newer row");
-            }
-            agent_task_lifecycle::rewrite_record_for_test("latest-target", |record| {
-                agent_task_lifecycle::set_run_state(record, RunExecutionState::Running);
-            })
-            .expect("make only target match");
-            let report = discovery::discover_filtered_latest_run(AgentTaskDiscoveryOptions {
-                state: Some("running".to_string()),
-                ..Default::default()
-            })
-            .expect("filtered latest");
-            assert_eq!(report.filter, "latest");
-            assert_eq!(report.total, 1);
-            assert_eq!(report.runs[0].run_id, "latest-target");
-            assert!(report.limit.is_none());
-            assert!(!report.truncated);
-        });
-    }
-}
-
-#[test]
-fn discovery_latest_skips_fixtures_and_replayed_run_ids() {
-    with_isolated_home(|_| {
-        let target = agent_task_lifecycle::submit_plan(&discovery_plan(), Some("latest-target"))
-            .expect("target submitted");
-        let mut fixture_plan = discovery_plan();
-        fixture_plan.tasks[0].executor.backend = "fixture".to_string();
-        agent_task_lifecycle::submit_plan(&fixture_plan, Some("latest-fixture"))
-            .expect("fixture submitted");
-        let fixture = agent_task_lifecycle::record_detached_lab_run(
-            agent_task_lifecycle::DetachedLabRunRecord {
-                run_id: "latest-fixture",
-                runner_id: "fixture-lab",
-                runner_job_id: "fixture-job",
-                remote_workspace: "/runner/workspace",
-                remote_command: &["homeboy".to_string(), "agent-task".to_string()],
-            },
-        )
-        .expect("fixture runner");
-        let store = homeboy_core::observation::ObservationStore::open_initialized()
-            .expect("observation store");
-        // The newest canonical replay does not match. Its older matching copy
-        // must not win, even when the copies straddle the physical page boundary.
-        for index in 0..101 {
-            let mut record = target.clone();
-            record.run_id = "replayed".to_string();
-            if index == 100 {
-                agent_task_lifecycle::set_run_state(&mut record, RunExecutionState::Running);
-            }
-            store
-                .upsert_imported_run(&homeboy_core::observation::RunRecord {
-                    id: format!("replay-{index:03}"),
-                    kind: "agent-task".to_string(),
-                    started_at: format!("2099-01-01T00:{:02}:00Z", index / 60),
-                    status: "queued".to_string(),
-                    metadata_json: serde_json::json!({"agent_task_run": record}),
-                    ..Default::default()
-                })
-                .expect("insert replay");
-        }
-        store
-            .upsert_imported_run(&homeboy_core::observation::RunRecord {
-                id: "newest-fixture".to_string(),
-                kind: "agent-task".to_string(),
-                started_at: "2100-01-01T00:00:00Z".to_string(),
-                status: "queued".to_string(),
-                metadata_json: serde_json::json!({"agent_task_run": fixture}),
-                ..Default::default()
-            })
-            .expect("insert fixture");
-        let report = discovery::discover_filtered_latest_run(AgentTaskDiscoveryOptions {
-            state: Some("queued".to_string()),
-            ..Default::default()
-        })
-        .expect("filtered latest");
-        assert_eq!(report.runs[0].run_id, "latest-target");
     });
 }
 

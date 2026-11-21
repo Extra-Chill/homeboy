@@ -429,7 +429,42 @@ pub(super) fn run_gate_argv(
         };
         return placement::dispatch(cwd, &request, supervision);
     }
-    run_gate_argv_local(
+    // Local placement queues through the host-wide gate admission the Lab
+    // daemon on this host also charges (#18555). Runner-admitted Lab gates
+    // call `run_gate_argv_local` directly and are never queued twice.
+    let (_permit, wait) = match admission::acquire(cwd, index, || {
+        execution
+            .supervision
+            .is_some_and(|policy| (policy.is_cancelled)())
+    })? {
+        admission::Admission::Admitted(permit, wait) => (permit, wait),
+        admission::Admission::Cancelled => {
+            let error = Error::new(
+                homeboy_core::ErrorCode::InternalUnexpected,
+                "local gate admission cancelled before the gate started",
+                serde_json::json!({"gate_disposition": "cancelled", "stage": "local_admission"}),
+            );
+            let mut report = placement::gate_non_execution_report(
+                index,
+                command_vec,
+                visibility,
+                reveal_policy,
+                &error,
+            );
+            report.test_execution_outcome = declared_plan.map(|_| {
+                homeboy_engine_primitives::test_execution::TestExecutionOutcome::Cancelled
+            });
+            return Ok(report);
+        }
+    };
+    // Queue wait never spends the gate's execution budget.
+    let execution = GateExecution {
+        deadline: execution
+            .deadline
+            .and_then(|deadline| deadline.checked_add(wait)),
+        ..execution
+    };
+    let mut report = run_gate_argv_local(
         cwd,
         index,
         command_vec,
@@ -440,7 +475,11 @@ pub(super) fn run_gate_argv(
         gate_environment,
         package_artifacts,
         declared_plan,
-    )
+    )?;
+    if !wait.is_zero() {
+        report.environment.admission_wait_ms = Some(wait.as_millis());
+    }
+    Ok(report)
 }
 
 #[expect(

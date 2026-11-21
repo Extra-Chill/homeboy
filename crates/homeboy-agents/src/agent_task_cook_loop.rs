@@ -1832,6 +1832,7 @@ mod tests {
                 matches_candidate_failure: true,
                 result: crate::agent_task_gate::AgentTaskGateDifferentialResult::BaselineRed,
                 diagnostic: None,
+                failure_attribution: None,
             });
         // The baseline replay's matching failure must not convert a broken
         // declaration into an accepted inherited failure.
@@ -1869,6 +1870,7 @@ mod tests {
                 matches_candidate_failure: true,
                 result: crate::agent_task_gate::AgentTaskGateDifferentialResult::BaselineRed,
                 diagnostic: None,
+                failure_attribution: None,
             });
         let baseline_red = evaluate_cook_loop(AgentTaskCookLoopOptions {
             source_request: source_request(),
@@ -2902,6 +2904,7 @@ mod tests {
             matches_candidate_failure: false,
             result: crate::agent_task_gate::AgentTaskGateDifferentialResult::CandidateRegression,
             diagnostic: None,
+            failure_attribution: None,
         });
         gate
     }
@@ -2978,6 +2981,7 @@ mod tests {
             matches_candidate_failure: false,
             result: crate::agent_task_gate::AgentTaskGateDifferentialResult::CandidateRegression,
             diagnostic: None,
+            failure_attribution: None,
         });
         gate
     }

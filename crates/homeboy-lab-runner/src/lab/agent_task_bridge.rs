@@ -42,7 +42,7 @@ use super::super::lab_args::materialize_inline_agent_task_json_specs_in_args;
 use super::super::lab_workspaces::{workspace_mapping_entry, LabWorkspaceMappingEntry};
 #[cfg(test)]
 use super::super::RunnerWorkspaceSyncMode;
-use super::args_util::{subcommand_index, ArgEditor, CommandInvocation};
+use super::args_util::{flag_value, subcommand_index, ArgEditor, CommandInvocation};
 use homeboy_agents::agent_task_promotion::mirror_agent_task_run_plan_aggregate;
 
 #[cfg(test)]
@@ -423,27 +423,9 @@ fn agent_task_run_plan_recording_args(args: &[String]) -> Option<(String, String
             .map(|_| index + 1)
     })?;
 
-    let mut plan = None;
-    let mut record_run_id = None;
-    let mut iter = args.iter().skip(run_plan_index + 1);
-    while let Some(arg) = iter.next() {
-        if arg == "--" {
-            break;
-        }
-        match arg.as_str() {
-            "--plan" => plan = iter.next().cloned(),
-            "--record-run-id" => record_run_id = iter.next().cloned(),
-            _ => {
-                if let Some(value) = arg.strip_prefix("--plan=") {
-                    plan = Some(value.to_string());
-                } else if let Some(value) = arg.strip_prefix("--record-run-id=") {
-                    record_run_id = Some(value.to_string());
-                }
-            }
-        }
-    }
-
-    Some((plan?, record_run_id?))
+    let plan = flag_value(args, run_plan_index + 1, "--plan")?;
+    let record_run_id = flag_value(args, run_plan_index + 1, "--record-run-id")?;
+    Some((plan.to_string(), record_run_id.to_string()))
 }
 
 pub(super) fn agent_task_dispatch_requested_run_id(args: &[String]) -> Option<String> {

@@ -14,7 +14,8 @@
 //! schema live here and are unchanged.
 
 use crate::upgrade;
-use crate::upgrade::helpers::fetch_latest_runtime_compatibility;
+use crate::upgrade::release_catalog::latest_runtime_compatibility;
+use crate::upgrade::validation::check_for_updates_with_catalog;
 use homeboy_core::update_check_cache;
 use semver::Version;
 use serde::{Deserialize, Serialize};
@@ -113,7 +114,7 @@ pub struct AllowedStableRuntime {
 /// controller. This is a pure local-cache decision for Cook pre-dispatch.
 pub fn incompatible_allowed_stable(controller_version: &str) -> Option<AllowedStableRuntime> {
     latest_allowed_stable().filter(|stable| {
-        crate::upgrade::version_is_newer(&stable.version, controller_version)
+        homeboy_core::build_identity::is_newer(&stable.version, controller_version)
             && stable
                 .compatibility
                 .as_ref()
@@ -387,12 +388,12 @@ fn refresh_verdict() -> homeboy_core::Result<super::VersionCheck> {
     if let Some(refresh) = REFRESH_VERDICT.with(|hook| hook.get()) {
         return Ok(refresh());
     }
-    let check = upgrade::check_for_updates()?;
+    let (check, releases) = check_for_updates_with_catalog()?;
     let checked_at = update_check_cache::now_unix();
     let runtime_compatibility = check
         .latest_version
         .as_deref()
-        .and_then(|version| fetch_latest_runtime_compatibility(version).ok())
+        .and_then(|version| latest_runtime_compatibility(&releases, version).ok())
         .flatten();
     write_cache(&UpdateCheckCache {
         latest_version: check.latest_version.clone().unwrap_or_default(),
@@ -420,9 +421,9 @@ pub fn prefetch_release() -> homeboy_core::Result<Option<PathBuf>> {
             check.latest_version.filter(|_| check.update_available)
         }
     };
-    let Some(latest) =
-        latest.filter(|latest| upgrade::version_is_newer(latest, upgrade::current_version()))
-    else {
+    let Some(latest) = latest.filter(|latest| {
+        homeboy_core::build_identity::is_newer(latest, upgrade::current_version())
+    }) else {
         return Ok(None);
     };
     let tag = format!("v{}", latest.trim_start_matches('v'));
@@ -481,7 +482,7 @@ mod tests {
                 run_startup_check();
                 assert!(!path.exists(), "startup failure must not write a cache");
             });
-            assert_eq!(count, 10, "each check must try both release endpoints");
+            assert_eq!(count, 5, "each check reads the release catalog once");
         });
     }
 

@@ -799,25 +799,6 @@ pub(crate) fn continuation_candidate_refusal(
     result.err().map(|error| error.message)
 }
 
-/// Observe the exact persisted promote-or-load decision without opening a
-/// writable store, applying a patch, or running verification gates.
-pub fn preflight_cook_promotion_in_store(
-    lifecycle_store: &agent_task_lifecycle::AgentTaskLifecycleStore,
-    options: &CookRequest,
-    run_id: &str,
-    artifact_id: Option<&str>,
-) -> Result<Value> {
-    let (record, aggregate) = lifecycle_store.read_record_with_aggregate_bounded(run_id)?;
-    preflight_cook_promotion_for_observation_in_store(
-        lifecycle_store,
-        options,
-        run_id,
-        artifact_id,
-        &record,
-        aggregate.as_ref(),
-    )
-}
-
 pub fn preflight_cook_promotion_for_observation_in_store(
     lifecycle_store: &agent_task_lifecycle::AgentTaskLifecycleStore,
     options: &CookRequest,
@@ -1947,6 +1928,7 @@ fn verify_replacement_gates_owned(
     // scope: they reach the gate runner without explicit supervision and rely
     // on the active scope for the declared budgets on a Lab runner (#15856).
     let supervision = replacement_gate_supervision(&gates);
+    let repro = gates.repro.clone();
     let mut replacement = crate::agent_task_promotion::with_gate_supervision(supervision, || {
         let mut replacement = resume_promoted_patch_replacement_gates_in_observation_store(
             AgentTaskPromotionRequest {
@@ -1986,6 +1968,7 @@ fn verify_replacement_gates_owned(
         super::cook_baseline::compare_gate_failures_to_verified_base(
             &observation_store,
             &mut replacement,
+            &repro,
             &target_path,
             replacement_gate_workspace
                 .as_deref()

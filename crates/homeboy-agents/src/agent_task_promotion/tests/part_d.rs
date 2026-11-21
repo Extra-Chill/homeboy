@@ -439,14 +439,16 @@ fn committed_changes_retain_a_controller_baseline_before_source_cleanup() {
         )
         .expect("candidate survives without patch evidence");
         assert!(
-            crate::agent_task_lifecycle::verified_controller_artifact_projection_in_store(
-                &homeboy_core::observation::ObservationStore::open_initialized().unwrap(),
+            crate::agent_task_lifecycle::verified_controller_artifact_projection_path_in_store(
+                &observation_store,
                 "baseline-run",
                 "forged-task",
-                "forged",
-                "patch",
-                &sha256_hex(VALID_PATCH),
-                None,
+                &crate::agent_task::AgentTaskArtifact {
+                    id: "forged".into(),
+                    kind: "patch".into(),
+                    sha256: Some(sha256_hex(VALID_PATCH)),
+                    ..Default::default()
+                },
             )
             .expect("forged lookup")
             .is_none()

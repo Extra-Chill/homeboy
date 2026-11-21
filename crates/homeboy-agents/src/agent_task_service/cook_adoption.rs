@@ -640,6 +640,7 @@ pub(crate) fn adopt_cook_candidate_with_dispatcher_and_backend_for_attempt_with_
             super::cook_baseline::compare_gate_failures_to_verified_base(
                 &lifecycle_store.open_observation_initialized()?,
                 &mut promotion,
+                &options.gates.repro,
                 &source_worktree,
                 &gate_workspace,
                 &candidate_base_sha,

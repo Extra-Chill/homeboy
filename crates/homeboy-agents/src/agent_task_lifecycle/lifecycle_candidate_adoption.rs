@@ -67,17 +67,6 @@ pub(crate) fn project_cook_alias_adoption_in_store(
     }
 }
 
-/// Claim or resume the one controller-owned candidate adoption for a run. The
-/// record is written before promotion can invoke a workspace provider or gate.
-pub fn start_candidate_adoption(
-    run_id: &str,
-    candidate_sha: &str,
-    ai_model: &str,
-    active_gate: &str,
-) -> Result<AgentTaskRunRecord> {
-    start_candidate_adoption_with_rerun_policy(run_id, candidate_sha, ai_model, active_gate, false)
-}
-
 pub fn start_candidate_adoption_with_rerun_policy(
     run_id: &str,
     candidate_sha: &str,
@@ -134,7 +123,7 @@ pub fn start_candidate_adoption_with_policy_in_store(
         let mut replacement = None;
         if let Some(existing) = record.candidate_adoption.as_mut() {
             if existing.gate_process_group.is_some_and(|pgid| {
-                homeboy_core::process::isolated_process_group_is_running(pgid).unwrap_or(false)
+                homeboy_engine_primitives::command::process_group_is_running(pgid).unwrap_or(false)
             }) {
                 conflict = true;
                 return false;
@@ -487,7 +476,7 @@ pub(crate) fn reconcile_candidate_adoption(record: &mut AgentTaskRunRecord) -> b
     let now = now_timestamp();
     attempt.state = "interrupted".to_string();
     attempt.phase = if attempt.gate_process_group.is_some_and(|pgid| {
-        homeboy_core::process::isolated_process_group_is_running(pgid).unwrap_or(false)
+        homeboy_engine_primitives::command::process_group_is_running(pgid).unwrap_or(false)
     }) {
         "gate_orphaned"
     } else {

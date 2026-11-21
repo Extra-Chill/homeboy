@@ -488,8 +488,10 @@ fn reconstructable_admission_error(
 ) -> Error {
     let available_bytes = available_bytes.expect("measured reserve breach has available bytes");
     let path = root.display().to_string();
-    let (inspect_action, apply_action) = if let Ok(repository_root) = git_root(root) {
-        let repository_root = repository_root.display().to_string();
+    let repository_root = git_root(root)
+        .ok()
+        .map(|repository_root| repository_root.display().to_string());
+    let (inspect_action, apply_action) = if let Some(repository_root) = repository_root.clone() {
         (
             ExecutableAction::new(
                 "capacity.reserve.inspect_repository_artifacts",
@@ -546,7 +548,7 @@ fn reconstructable_admission_error(
             ),
         )
     };
-    Error::capacity_reserve(CapacityReserveDetails {
+    let error = Error::capacity_reserve(CapacityReserveDetails {
         filesystem: path.clone(),
         available_bytes,
         reserve_bytes,
@@ -570,8 +572,84 @@ fn reconstructable_admission_error(
     .with_hint(format!(
         "The {reserve_bytes}-byte reserve comes from `retention.reconstructable_artifact_reserve_bytes`; inspect it with `homeboy config show retention` and change it with `homeboy config set /retention/reconstructable_artifact_reserve_bytes <bytes>`."
     ))
-    .with_hint("Shared Cargo targets are not worktree artifacts; inspect them with `homeboy cleanup --include shared-cargo-targets`.")
+    .with_hint("Shared Cargo targets are not worktree artifacts; inspect them with `homeboy cleanup --include shared-cargo-targets`.");
+    // Linked worktrees with no task-worktree record hold whole checkouts that
+    // artifact cleanup never offers. Point at the inventory and the removal
+    // path that reclaims merged ones safely (#16310).
+    let error = match repository_root {
+        Some(repository_root) => error.with_action(ExecutableAction::new(
+            "capacity.reserve.inspect_repository_worktrees",
+            "inventory linked worktrees, including ones with no task-worktree record",
+            "git",
+            ["-C", repository_root.as_str(), "worktree", "list"],
+            ActionSafety::ReadOnly,
+        )),
+        None => error,
+    };
+    let error = if let Some(repository_root) = git_root(root).ok() {
+        orphan_inventory_hints(error, &repository_root)
+    } else {
+        error
+    };
+    error.with_hint(UNRECORDED_WORKTREE_RECLAIM_HINT)
 }
+
+fn orphan_inventory_hints(mut error: Error, root: &Path) -> Error {
+    let deadline = Instant::now() + Duration::from_secs(2);
+    let Ok(listing) = git::run_git_with_env_timeout(
+        root,
+        &["worktree", "list", "--porcelain"],
+        "inventory orphan worktrees for capacity refusal",
+        &[],
+        Duration::from_secs(1),
+    ) else {
+        return error;
+    };
+    let Ok(records) = crate::worktree::list_unlocked() else {
+        return error;
+    };
+    let recorded: HashSet<_> = records
+        .worktrees
+        .iter()
+        .map(|record| canonical_or_owned(Path::new(&record.worktree_path)))
+        .collect();
+    for path in listing
+        .lines()
+        .filter_map(|line| line.strip_prefix("worktree "))
+        .skip(1)
+    {
+        if Instant::now() >= deadline {
+            break;
+        }
+        let path = Path::new(path);
+        if recorded.contains(&canonical_or_owned(path)) {
+            continue;
+        }
+        let usage = path_usage::measure_path(
+            path,
+            path_usage::PathUsageOptions {
+                deadline: Some(deadline),
+                visit_budget: Some(10_000),
+                ignore_errors: true,
+                ..Default::default()
+            },
+        );
+        if let Ok(usage) = usage {
+            let qualifier = if usage.pending.is_empty() && usage.errors == 0 {
+                ""
+            } else {
+                "at least "
+            };
+            error = error.with_hint(format!(
+                "Orphan worktree {}: {qualifier}{} allocated bytes (including target/); inspect with `homeboy worktree status {}`.",
+                path.display(), usage.usage.allocated_bytes, homeboy_engine_primitives::shell::shell_arg(&path.display().to_string())
+            ));
+        }
+    }
+    error
+}
+
+const UNRECORDED_WORKTREE_RECLAIM_HINT: &str = "Linked worktrees with no task-worktree record are orphans, not artifact candidates; inventory them with `git worktree list` and reclaim merged ones with `homeboy worktree remove <path>`, which removes an unrecorded worktree once it is clean, has nothing stashed, and its HEAD is contained upstream.";
 
 #[cfg(test)]
 fn run_automatic_artifact_retention_in(
@@ -997,7 +1075,7 @@ impl ActiveWorktrees {
 /// Deliberately fail-open. An unreadable or absent lock means "no evidence of a
 /// build", never "definitely safe to delete" — the registry and age gates still
 /// apply on top of this.
-fn cargo_build_lock_is_held(worktree: &Path) -> bool {
+pub(crate) fn cargo_build_lock_is_held(worktree: &Path) -> bool {
     BUILTIN_ARTIFACT_PATHS
         .iter()
         .filter(|(_, kind)| *kind == "rust_target")
@@ -4116,6 +4194,44 @@ mod tests {
     }
 
     #[test]
+    fn reserve_error_inventories_unrecorded_worktree_bytes() {
+        crate::test_support::with_isolated_home(|_| {
+            let repo = repo_with_ignored_artifacts();
+            let worktree = repo.path().with_extension("orphan-worktree");
+            git::run_git(
+                repo.path(),
+                &[
+                    "worktree",
+                    "add",
+                    "-b",
+                    "orphan",
+                    &worktree.display().to_string(),
+                ],
+                "test worktree",
+            )
+            .unwrap();
+            write_file(&worktree.join("target/debug/app"), "rebuildable output");
+            let error = reconstructable_admission_error(repo.path(), Some(1), 100);
+            assert!(error
+                .hints
+                .iter()
+                .any(|hint| hint.message.contains("Orphan worktree")
+                    && hint.message.contains("allocated bytes (including target/)")));
+            git::run_git(
+                repo.path(),
+                &[
+                    "worktree",
+                    "remove",
+                    "--force",
+                    &worktree.display().to_string(),
+                ],
+                "test cleanup",
+            )
+            .unwrap();
+        });
+    }
+
+    #[test]
     fn pressure_admission_preserves_active_artifacts_and_refuses_when_reserve_remains_unmet() {
         crate::test_support::with_isolated_home(|_| {
             let repo = repo_with_ignored_artifacts();
@@ -4169,6 +4285,16 @@ mod tests {
                 error.details["_homeboy_actions"][2]["args"],
                 json!(["cleanup", "--include", "shared-cargo-targets"])
             );
+            // #16310: unrecorded worktrees are inventoried, not hidden.
+            assert_eq!(
+                error.details["_homeboy_actions"][3]["id"],
+                "capacity.reserve.inspect_repository_worktrees"
+            );
+            assert_eq!(error.details["_homeboy_actions"][3]["safety"], "read_only");
+            assert!(error
+                .hints
+                .iter()
+                .any(|hint| hint.message.contains("homeboy worktree remove <path>")));
             assert!(repo.path().join("target/debug/app").exists());
         });
     }

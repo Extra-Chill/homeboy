@@ -90,25 +90,9 @@ pub struct ControllerScratchAllocation {
 }
 
 /// Allocate and durably register one scheduler-owned temporary root for a
-/// provider dispatch attempt. Allocation remains separate from terminal lease
-/// handling and retention policy.
-pub fn allocate_attempt(
-    run_id: &str,
-    plan_id: &str,
-    task_id: &str,
-    attempt: u32,
-) -> Result<ControllerScratchAllocation> {
-    allocate_attempt_at_roots(
-        run_id,
-        plan_id,
-        task_id,
-        attempt,
-        paths::controller_scratch_store()?.join("attempts"),
-        index_path()?,
-    )
-}
-
-pub(crate) fn allocate_attempt_at(
+/// provider dispatch attempt under `data_root`. Allocation remains separate
+/// from terminal lease handling and retention policy.
+pub fn allocate_attempt_at(
     data_root: &Path,
     run_id: &str,
     plan_id: &str,

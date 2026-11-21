@@ -380,18 +380,11 @@ struct LabHandoffExecutionEvidence {
     command_build_identity: Option<String>,
 }
 
-fn canonical_homeboy_identity(identity: &str) -> &str {
-    identity
-        .trim()
-        .strip_prefix("homeboy ")
-        .unwrap_or(identity.trim())
-}
-
 fn runtime_set_compatibility(requested: &str, daemon: Option<&str>) -> RuntimeSetCompatibility {
     let Some(daemon) = daemon else {
         return RuntimeSetCompatibility::Exact;
     };
-    if canonical_homeboy_identity(requested) == canonical_homeboy_identity(daemon) {
+    if homeboy_core::build_identity::same_build(requested, daemon) {
         return RuntimeSetCompatibility::Exact;
     }
     RuntimeSetCompatibility::ContractCompatible
@@ -410,7 +403,7 @@ fn runtime_set_admission(
     if policy.enforce_latest_stable
         && !policy.controller_is_source_build
         && latest_allowed_stable.is_some_and(|latest| {
-            runtime_version_is_newer(&latest.version, controller)
+            homeboy_core::build_identity::is_newer(&latest.version, controller)
                 && latest.compatibility.as_ref().is_some_and(|required| {
                     !required.compatible_with(
                         &homeboy_upgrade::update_check::current_runtime_compatibility(),
@@ -421,9 +414,8 @@ fn runtime_set_admission(
         return RuntimeSetAdmission::RefuseControllerUpgrade;
     }
     let compatibility = runtime_set_compatibility(requested, daemon);
-    let command_matches = configured.is_some_and(|identity| {
-        canonical_homeboy_identity(requested) == canonical_homeboy_identity(identity)
-    });
+    let command_matches = configured
+        .is_some_and(|identity| homeboy_core::build_identity::same_build(requested, identity));
     if command_matches {
         return RuntimeSetAdmission::Ready(compatibility);
     }
@@ -432,21 +424,6 @@ fn runtime_set_admission(
     } else {
         RuntimeSetAdmission::RefuseRuntime
     }
-}
-
-fn runtime_version_is_newer(candidate: &str, current: &str) -> bool {
-    let parse = |value: &str| {
-        let value = canonical_homeboy_identity(value)
-            .split_once('+')
-            .map_or_else(|| canonical_homeboy_identity(value), |(version, _)| version);
-        let mut parts = value.split('.');
-        Some((
-            parts.next()?.parse::<u64>().ok()?,
-            parts.next()?.parse::<u64>().ok()?,
-            parts.next()?.parse::<u64>().ok()?,
-        ))
-    };
-    matches!((parse(candidate), parse(current)), (Some(candidate), Some(current)) if candidate > current)
 }
 
 /// Decide whether a Lab handoff may proceed given the runner's command-binary
@@ -483,7 +460,7 @@ fn handoff_identities_match(
 }
 
 fn handoff_build_reference(identity: &str) -> String {
-    let identity = canonical_homeboy_identity(identity);
+    let identity = homeboy_core::build_identity::canonical(identity);
     format!("v{}", identity.split('+').next().unwrap_or(identity))
 }
 
@@ -2851,9 +2828,10 @@ impl ProductionLabStagingOperations {
             .as_ref()
             .and_then(|session| session.homeboy_build_identity.clone());
         let configured = converged.configured_build_identity;
-        let compatibility = if configured.as_deref().is_some_and(|identity| {
-            canonical_homeboy_identity(identity) == canonical_homeboy_identity(requested)
-        }) {
+        let compatibility = if configured
+            .as_deref()
+            .is_some_and(|identity| homeboy_core::build_identity::same_build(identity, requested))
+        {
             RuntimeSetCompatibility::Exact
         } else {
             RuntimeSetCompatibility::ContractCompatible

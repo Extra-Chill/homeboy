@@ -33,16 +33,7 @@ pub(crate) fn render_agent_task_summary(
 ) -> Option<String> {
     let summary = match kind {
         AgentTaskSummaryKind::Cook => render_cook_summary(payload),
-        AgentTaskSummaryKind::Recover => Some(format!(
-            "Recovery step: {}\nAttempt: {}\nStatus: {}",
-            payload
-                .pointer("/step/kind")
-                .or_else(|| payload.get("step"))
-                .and_then(Value::as_str)
-                .unwrap_or("none"),
-            string_value(payload, &["run_id"]).unwrap_or("unknown"),
-            string_value(payload, &["status"]).unwrap_or("unknown"),
-        )),
+        AgentTaskSummaryKind::Recover => Some(render_recover_summary(payload)),
         AgentTaskSummaryKind::Status => render_status_summary(payload),
         AgentTaskSummaryKind::Logs => render_logs_summary(payload),
         AgentTaskSummaryKind::Review => render_review_summary(payload),
@@ -71,6 +62,60 @@ pub(crate) fn render_agent_task_summary(
         }
         summary
     })
+}
+
+fn render_recover_summary(payload: &Value) -> String {
+    let run_id = string_value(payload, &["run_id"]).unwrap_or("unknown");
+    let mut lines = vec![
+        format!(
+            "Recovery step: {}",
+            payload
+                .pointer("/step/kind")
+                .or_else(|| payload.get("step"))
+                .and_then(Value::as_str)
+                .unwrap_or("none")
+        ),
+        format!("Attempt: {run_id}"),
+        format!(
+            "Status: {}",
+            string_value(payload, &["status"]).unwrap_or("unknown")
+        ),
+    ];
+    // An admitted step runs as a step job on the local controller daemon; it
+    // is not a fresh execution placement awaiting a decision (#18657).
+    if let Some(admission) = payload.get("admission").filter(|value| value.is_object()) {
+        if let Some(job) = string_value(admission, &["job_id"]) {
+            lines.push(format!("Step job: {job}"));
+            lines.push("Placement: local (controller daemon step job)".to_string());
+        }
+        let watch = string_value(admission, &["status_command"])
+            .map(str::to_string)
+            .unwrap_or_else(|| format!("homeboy agent-task status {run_id} --watch"));
+        lines.push(format!("Next: {watch}"));
+    }
+    lines.join("\n")
+}
+
+#[cfg(test)]
+#[test]
+fn recover_summary_names_the_admitted_step_job_and_how_to_watch_it() {
+    let summary = render_agent_task_summary(
+        AgentTaskSummaryKind::Recover,
+        &serde_json::json!({
+            "step": {"kind": "regate"}, "run_id": "cook-attempt-1", "status": "admitted",
+            "admission": {
+                "status": "admitted", "job_id": "job-1",
+                "status_command": "homeboy agent-task status cook-attempt-1 --watch"
+            }
+        }),
+    )
+    .unwrap();
+    assert!(summary.contains("Step job: job-1"), "{summary}");
+    assert!(
+        summary.contains("Next: homeboy agent-task status cook-attempt-1 --watch"),
+        "{summary}"
+    );
+    assert!(!summary.contains("Placement: pending"), "{summary}");
 }
 
 #[cfg(test)]
@@ -199,6 +244,42 @@ fn capacity_reset_suffix(value: &Value) -> String {
         .unwrap_or_default()
 }
 
+/// Holders of the host-wide local gate queue, one indented line each.
+fn render_local_holders(lines: &mut Vec<String>, local: &Value) {
+    for holder in local["holders"].as_array().into_iter().flatten() {
+        lines.push(format!(
+            "  holder: {} {} ({}s elapsed)",
+            holder["cook_id"].as_str().unwrap_or("unknown"),
+            holder["gate"].as_str().unwrap_or("unknown"),
+            holder["elapsed_seconds"].as_u64().unwrap_or(0)
+        ));
+    }
+}
+
+/// Host-wide local gate queue (#18555): slots, pressure, holders, then
+/// waiters in admission order with the Lab step queue's line shape.
+fn render_local_capacity(lines: &mut Vec<String>, local: &Value) {
+    if local["available"].as_bool() != Some(true) {
+        return;
+    }
+    let pressure = &local["pressure"];
+    let load = pressure["load_average_1m"]
+        .as_f64()
+        .map(|load| format!("load {load:.2} of {}", pressure["max_load"]))
+        .unwrap_or_else(|| "load unknown".to_string());
+    let held = if pressure["blocked"].as_bool() == Some(true) {
+        ", holding new gates"
+    } else {
+        ""
+    };
+    lines.push(format!(
+        "Local: {} active slots, {} free slots (limit {}); pressure: {load}{held}",
+        local["active_slots"], local["free_slots"], local["slot_limit"]
+    ));
+    render_local_holders(lines, local);
+    render_queue_waiters(lines, "Local", local);
+}
+
 /// `agent-task capacity` summary (#15024): one block per route group, one
 /// indented line per pooled account, so an operator reads every connected
 /// plan's state and reset instant at a glance. Reuses the same capacity
@@ -209,6 +290,9 @@ fn render_capacity_summary(payload: &Value) -> Option<String> {
     }
     let routes = payload.get("routes").and_then(Value::as_array)?;
     let mut lines = Vec::new();
+    if let Some(local) = payload.get("local_capacity") {
+        render_local_capacity(&mut lines, local);
+    }
     for route in payload
         .get("lab_routes")
         .and_then(Value::as_array)
@@ -226,11 +310,34 @@ fn render_capacity_summary(payload: &Value) -> Option<String> {
                 .map(|n| n.to_string())
                 .unwrap_or_else(|| "unknown".to_string())
         };
-        lines.push(format!(
+        let mut line = format!(
             "Lab/{runner}: {} active slots, {} free slots",
             slots("active_slots"),
             slots("free_slots")
-        ));
+        );
+        if let Some(budget) = route.get("effective_budget").and_then(Value::as_u64) {
+            line.push_str(&format!(" (effective budget {budget})"));
+        }
+        let next = route.get("next_admission").unwrap_or(&Value::Null);
+        if next.get("refused").and_then(Value::as_bool) == Some(true) {
+            let state = next
+                .get("readiness_state")
+                .and_then(Value::as_str)
+                .unwrap_or("unknown");
+            let reasons = next
+                .get("reasons")
+                .and_then(Value::as_array)
+                .into_iter()
+                .flatten()
+                .filter_map(Value::as_str)
+                .collect::<Vec<_>>();
+            line.push_str(&format!("; next admission waits ({state}"));
+            if !reasons.is_empty() {
+                line.push_str(&format!(": {}", reasons.join(", ")));
+            }
+            line.push(')');
+        }
+        lines.push(line);
     }
     render_lab_step_queue(&mut lines, payload);
     if routes.is_empty() {
@@ -302,21 +409,30 @@ fn render_lab_step_queue(lines: &mut Vec<String>, payload: &Value) {
         .flatten()
     {
         let runner_id = runner["runner_id"].as_str().unwrap_or("unknown");
-        let queue = &runner["observation"]["step_queue"];
-        for waiter in queue["waiting"].as_array().into_iter().flatten() {
-            let position = waiter["queue_position"].as_u64().unwrap_or(0);
-            let eta = waiter["eta_seconds"]
-                .as_u64()
-                .map(|seconds| format!(", ETA <= {seconds}s (estimate from declared budgets)"))
-                .unwrap_or_else(|| ", ETA unknown".to_string());
-            lines.push(format!(
-                "  Lab/{runner_id} queued {position}: {} ({} lane, {} ahead, {} holders){eta}",
-                waiter["owner"].as_str().unwrap_or("unknown"),
-                waiter["priority"].as_str().unwrap_or("normal"),
-                position.saturating_sub(1),
-                queue["holders"].as_array().map_or(0, Vec::len),
-            ));
-        }
+        render_queue_waiters(
+            lines,
+            &format!("Lab/{runner_id}"),
+            &runner["observation"]["step_queue"],
+        );
+    }
+}
+
+/// One line per waiter of a ranked queue (Lab step queue or local gate
+/// queue), in admission order, with its upper-bound ETA.
+fn render_queue_waiters(lines: &mut Vec<String>, label: &str, queue: &Value) {
+    for waiter in queue["waiting"].as_array().into_iter().flatten() {
+        let position = waiter["queue_position"].as_u64().unwrap_or(0);
+        let eta = waiter["eta_seconds"]
+            .as_u64()
+            .map(|seconds| format!(", ETA <= {seconds}s (estimate from declared budgets)"))
+            .unwrap_or_else(|| ", ETA unknown".to_string());
+        lines.push(format!(
+            "  {label} queued {position}: {} ({} lane, {} ahead, {} holders){eta}",
+            waiter["owner"].as_str().unwrap_or("unknown"),
+            waiter["priority"].as_str().unwrap_or("normal"),
+            position.saturating_sub(1),
+            queue["holders"].as_array().map_or(0, Vec::len),
+        ));
     }
 }
 
@@ -737,6 +853,24 @@ fn agent_task_capacity_names_lab_runner_and_slots() {
 }
 
 #[test]
+fn agent_task_capacity_names_the_admission_refusal_reason() {
+    let payload = serde_json::json!({
+        "schema": "homeboy/agent-task-capacity/v1",
+        "routes": [],
+        "lab_routes": [{
+            "runner_id": "homeboy-lab", "active_slots": 11, "free_slots": 0,
+            "effective_budget": 1,
+            "next_admission": {"refused": true, "readiness_state": "capacity_blocked", "reasons": ["pressure"]}
+        }]
+    });
+    let summary = render_capacity_summary(&payload).unwrap();
+    assert!(
+        summary.contains("Lab/homeboy-lab: 11 active slots, 0 free slots (effective budget 1); next admission waits (capacity_blocked: pressure)"),
+        "{summary}"
+    );
+}
+
+#[test]
 fn agent_task_capacity_lists_lab_step_queue_with_eta() {
     let payload = serde_json::json!({
         "schema": "homeboy/agent-task-capacity/v1",
@@ -757,6 +891,41 @@ fn agent_task_capacity_lists_lab_step_queue_with_eta() {
         summary.contains("Lab/lab-a queued 2: wf-1 (normal lane, 1 ahead, 2 holders), ETA unknown"),
         "{summary}"
     );
+}
+
+#[test]
+fn local_capacity_admission_summary_exposes_queue_and_holders() {
+    let local = serde_json::json!({
+        "available": true, "active_slots": 1, "free_slots": 0, "slot_limit": 1,
+        "pressure": {"load_average_1m": 2.5, "max_load": 8.0, "blocked": false},
+        "holders": [{"owner": "cook-a", "cook_id": "cook-a", "gate": "gate-1", "elapsed_seconds": 50}],
+        "waiting": [{"queue_position": 1, "owner": "wf-import", "cook_id": "cook-b", "gate": "gate-2",
+            "priority": "normal", "waited_seconds": 20, "eta_seconds": 40}]
+    });
+    let capacity = serde_json::json!({"schema": "homeboy/agent-task-capacity/v1", "routes": [], "local_capacity": local});
+    let summary = render_capacity_summary(&capacity).unwrap();
+    assert!(
+        summary
+            .contains("Local: 1 active slots, 0 free slots (limit 1); pressure: load 2.50 of 8.0"),
+        "{summary}"
+    );
+    assert!(
+        summary.contains("holder: cook-a gate-1 (50s elapsed)"),
+        "{summary}"
+    );
+    assert!(
+        summary.contains("Local queued 1: wf-import (normal lane, 0 ahead, 1 holders), ETA <= 40s"),
+        "{summary}"
+    );
+    let status = serde_json::json!({"schema": "homeboy/control-plane-run/v1", "run": "cook-b", "state": "running",
+        "local_admission": {"queue_position": 1, "waiters_ahead": 0, "priority": "normal",
+            "eta_seconds": 40, "holders": local["holders"]}});
+    let summary = render_status_summary(&status).unwrap();
+    assert!(
+        summary.contains("Local gate queue position 1 (normal lane, 0 ahead), ETA <= 40s"),
+        "{summary}"
+    );
+    assert!(summary.contains("holder: cook-a gate-1"), "{summary}");
 }
 
 #[test]
@@ -783,9 +952,25 @@ fn render_status_summary(payload: &Value) -> Option<String> {
     }
     let run_id = string_value(payload, &["run"])?;
     let state = string_value(payload, &["state"]).unwrap_or("unknown");
-    // The envelope's `status` reports the status command itself, so the
-    // headline names the task's own state (#17838).
+    // The headline and the JSON envelope's `status` both name the task's own
+    // state from this one projection, so they cannot disagree (#18638).
     let mut lines = vec![format!("Agent task {state}"), format!("Run: {run_id}")];
+    if let Some(phase) = string_value(payload, &["phase"]) {
+        lines.push(format!("Phase: {phase}"));
+    }
+    if let Some(waiting) = payload.get("local_admission") {
+        let position = waiting["queue_position"].as_u64().unwrap_or(1);
+        let eta = waiting["eta_seconds"]
+            .as_u64()
+            .map(|seconds| format!(", ETA <= {seconds}s (estimate from declared budgets)"))
+            .unwrap_or_else(|| ", ETA unknown".to_string());
+        lines.push(format!(
+            "Local gate queue position {position} ({} lane, {} ahead){eta}",
+            waiting["priority"].as_str().unwrap_or("normal"),
+            position.saturating_sub(1),
+        ));
+        render_local_holders(&mut lines, waiting);
+    }
     if let Some(mission) = string_value(payload, &["mission"]) {
         lines.push(format!("Mission: {mission}"));
     }
@@ -870,6 +1055,7 @@ fn render_status_summary(payload: &Value) -> Option<String> {
             }
         }
     }
+    lines.extend(recovery_step_lines(payload));
     if payload.get("blocker").is_none_or(Value::is_null) {
         if let Some(reason) = string_value(payload, &["reason"]) {
             lines.push(format!("Reason: {reason}"));
@@ -909,6 +1095,62 @@ fn render_status_summary(payload: &Value) -> Option<String> {
         control_plane_next_action(payload, run_id)
     ));
     Some(finish(lines))
+}
+
+/// The latest admitted recovery step and its recorded outcome (#18657): an
+/// admitted `recover --regate` that already failed names its cause instead of
+/// leaving the source attempt's original gate verdict as the only evidence.
+fn recovery_step_lines(payload: &Value) -> Vec<String> {
+    let Some(step) = payload.get("recovery_step").filter(|step| step.is_object()) else {
+        return Vec::new();
+    };
+    let kind = string_value(step, &["step"]).unwrap_or("recovery");
+    let state = string_value(step, &["state"]).unwrap_or("unknown");
+    let job = string_value(step, &["job_id"])
+        .map(|job| format!(" (job {job})"))
+        .unwrap_or_default();
+    let mut lines = vec![format!("Recovery step: {kind} {state}{job}")];
+    if let Some(message) = string_value(step, &["failure", "message"]) {
+        lines.push(format!(
+            "Recovery step failure: {}",
+            compact_status_text(message, 240)
+        ));
+    }
+    lines
+}
+
+fn recovery_step_in_flight(payload: &Value) -> bool {
+    string_value(payload, &["recovery_step", "state"]) == Some("in_flight")
+}
+
+#[test]
+fn status_summary_names_a_failed_recovery_step_and_its_cause() {
+    let lines = recovery_step_lines(&serde_json::json!({
+        "recovery_step": {
+            "step": "regate", "state": "failed", "job_id": "job-1", "exit_code": 2,
+            "failure": { "message": "target filesystem is below the configured free-space reserve" }
+        }
+    }));
+    assert_eq!(lines[0], "Recovery step: regate failed (job job-1)");
+    assert!(lines[1].contains("free-space reserve"), "{lines:?}");
+}
+
+#[test]
+fn in_flight_recovery_step_points_next_at_watching_status() {
+    let payload = serde_json::json!({
+        "state": "candidate_recoverable",
+        "recovery": { "step": "regate", "command": "homeboy agent-task recover run" },
+        "recovery_step": { "step": "regate", "state": "in_flight", "job_id": "job-1" },
+        "action_eligibility": { "actions": [{ "action": "recover", "availability": "available" }] }
+    });
+    assert_eq!(
+        control_plane_next_action(&payload, "run"),
+        "homeboy agent-task status run --watch"
+    );
+    assert_eq!(
+        recovery_step_lines(&payload),
+        vec!["Recovery step: regate in_flight (job job-1)".to_string()]
+    );
 }
 
 /// The control-plane run projects a live driver verifying its candidate.
@@ -955,6 +1197,9 @@ fn recovery_step_wins_when_eligibility_reports_only_indeterminate_actions() {
 
 pub(crate) fn control_plane_next_action(payload: &Value, run_id: &str) -> String {
     // Render the canonical projection's live-owner phase, never infer it from artifacts.
+    if recovery_step_in_flight(payload) {
+        return format!("homeboy agent-task status {run_id} --watch");
+    }
     if live_gate_verifying(payload)
         || (string_value(payload, &["state"]) == Some("running")
             && string_value(payload, &["owner", "kind"]) == Some("cook_continuation"))
@@ -1401,6 +1646,47 @@ mod tests {
             control_plane_next_action(&payload, "attempt-1"),
             "homeboy agent-task status cook-1 --watch"
         );
+    }
+
+    /// #18638: an admission-pending Cook renders the same state and phase in
+    /// the human summary and the JSON envelope; neither reports `succeeded`.
+    #[test]
+    fn admission_pending_cook_renders_the_same_state_in_human_and_json() {
+        use crate::commands::utils::response::{
+            cli_response_for_json_result_for_identity, CommandIdentity,
+        };
+        let payload = json!({
+            "schema": "homeboy/control-plane-run/v1",
+            "run": "agent-task-1",
+            "state": "running",
+            "phase": "admission",
+            "gates": [],
+            "blocker": {
+                "code": "pressure",
+                "state": "waiting",
+                "message": "runner homeboy-lab: pressure; waiting since 2026-11-20T00:00:00Z",
+            },
+        });
+
+        let human = render_status_summary(&payload).expect("human summary");
+        assert!(human.starts_with("Agent task running\n"), "{human}");
+        assert!(human.contains("Phase: admission"), "{human}");
+        assert!(
+            human.contains("Blocker: runner homeboy-lab: pressure"),
+            "{human}"
+        );
+
+        let envelope = serde_json::to_value(cli_response_for_json_result_for_identity(
+            &Ok(payload),
+            0,
+            &CommandIdentity::with_operation("agent-task", "status"),
+            None,
+        ))
+        .expect("serialize envelope");
+        assert_eq!(envelope["status"], "running");
+        assert_eq!(envelope["subject_state"], "running");
+        assert_eq!(envelope["data"]["phase"], "admission");
+        assert_ne!(envelope["status"], "succeeded");
     }
 
     fn queued_status(daemon: Option<Value>) -> Value {

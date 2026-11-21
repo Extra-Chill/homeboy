@@ -16,8 +16,8 @@ use std::time::{Duration, Instant};
 use homeboy_core::agent_task_config::AgentTaskManagedServiceReadiness;
 use homeboy_core::process::{
     process_identity_state_with_start_identity, process_start_identity,
-    terminate_isolated_process_group_with_grace, terminate_process_tree_with_grace,
-    ProcessContainmentCleanupContext, ProcessIdentityState, ProcessStartIdentity,
+    terminate_isolated_process_group, terminate_process_tree, ProcessContainmentCleanupContext,
+    ProcessIdentityState, ProcessStartIdentity,
 };
 use serde_json::{json, Value};
 
@@ -1181,19 +1181,18 @@ pub(crate) fn reconcile_run_services_at(
         let outcome = match (record.pid, record.process_identity.as_ref()) {
             (Some(pid), identity) => {
                 match process_identity_state_with_start_identity(pid, None, identity) {
-                    ProcessIdentityState::Live => terminate_process_tree_with_grace(
-                        pid,
-                        Duration::from_millis(cleanup_deadline),
-                    )
-                    .map(|termination| {
-                        record.cleanup_outcome = Some(if termination.signal == "SIGKILL" {
-                            "deadline_escalation_forced".to_string()
-                        } else {
-                            "graceful".to_string()
-                        });
-                        "reaped".to_string()
-                    })
-                    .unwrap_or_else(|error| format!("cleanup_failed:{error}")),
+                    ProcessIdentityState::Live => {
+                        terminate_process_tree(pid, Duration::from_millis(cleanup_deadline))
+                            .map(|termination| {
+                                record.cleanup_outcome = Some(if termination.signal == "SIGKILL" {
+                                    "deadline_escalation_forced".to_string()
+                                } else {
+                                    "graceful".to_string()
+                                });
+                                "reaped".to_string()
+                            })
+                            .unwrap_or_else(|error| format!("cleanup_failed:{error}"))
+                    }
                     ProcessIdentityState::Dead => "already_exited".to_string(),
                     ProcessIdentityState::IdentityMismatch => {
                         record.cleanup_outcome = Some("skipped_ownership_mismatch".to_string());
@@ -1212,8 +1211,8 @@ pub(crate) fn reconcile_run_services_at(
         // for that case and is safe to signal independently of PID reuse.
         let outcome = match (record.process_group_id, outcome.as_str()) {
             (Some(group), "already_exited" | "no_process_identity") => {
-                match homeboy_core::process::isolated_process_group_is_running(group) {
-                    Ok(true) => terminate_isolated_process_group_with_grace(
+                match homeboy_engine_primitives::command::process_group_is_running(group) {
+                    Ok(true) => terminate_isolated_process_group(
                         group,
                         Duration::from_millis(cleanup_deadline),
                     )
@@ -1985,7 +1984,7 @@ mod tests {
                 .unwrap_or_default()
                 .contains("reaped_process_group"));
             assert!(
-                !homeboy_core::process::isolated_process_group_is_running(group)
+                !homeboy_engine_primitives::command::process_group_is_running(group)
                     .expect("inspect process group")
             );
         });

@@ -240,6 +240,7 @@ mod paths_tests;
 pub mod child_reaper;
 pub mod defaults;
 pub mod lab_capacity;
+pub mod local_gate_admission;
 
 // Re-export relocated modules so existing `homeboy::api`, `homeboy::auth`, etc. paths keep working.
 // Consumers within the crate have been updated to canonical paths; these re-exports

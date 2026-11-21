@@ -155,8 +155,11 @@ impl ProcessContainment {
         }
         #[cfg(not(target_os = "linux"))]
         {
-            let _ = leader_has_exited;
-            force_terminate_process_tree_bounded(pid, timeout)
+            let _ = (pid, timeout, leader_has_exited);
+            let group = self.process_group_id.ok_or_else(|| {
+                Error::internal_unexpected("process containment was not attached to a child")
+            })?;
+            terminate_isolated_process_group(group, Duration::ZERO).map(|_| ())
         }
     }
 
@@ -173,14 +176,7 @@ impl ProcessContainment {
             let group = self.process_group_id.ok_or_else(|| {
                 Error::internal_unexpected("process containment was not attached to a child")
             })?;
-            terminate_isolated_process_group(group)?;
-            if !wait_for_isolated_process_group_exit(group, timeout)
-                .map_err(Error::internal_unexpected)?
-            {
-                return Err(Error::internal_unexpected(format!(
-                    "isolated process group {group} remains alive after cleanup"
-                )));
-            }
+            terminate_isolated_process_group(group, LEADER_EXIT_GROUP_GRACE)?;
             return Ok(cleanup);
         }
         #[cfg(not(target_os = "linux"))]
@@ -188,22 +184,15 @@ impl ProcessContainment {
             let group = self.process_group_id.ok_or_else(|| {
                 Error::internal_unexpected("process containment was not attached to a child")
             })?;
-            terminate_isolated_process_group(group)?;
-            if wait_for_isolated_process_group_exit(group, timeout)
-                .map_err(Error::internal_unexpected)?
-            {
-                Ok(ProcessContainmentCleanup {
-                    forced: true,
-                    complete: true,
-                    diagnostic: None,
-                    detail: None,
-                    warning: None,
-                })
-            } else {
-                Err(Error::internal_unexpected(format!(
-                    "isolated process group {group} remains alive after cleanup"
-                )))
-            }
+            let _ = timeout;
+            terminate_isolated_process_group(group, LEADER_EXIT_GROUP_GRACE)?;
+            Ok(ProcessContainmentCleanup {
+                forced: true,
+                complete: true,
+                diagnostic: None,
+                detail: None,
+                warning: None,
+            })
         }
     }
 
@@ -221,7 +210,7 @@ impl ProcessContainment {
             let group = self.process_group_id.ok_or_else(|| {
                 Error::internal_unexpected("process containment was not attached to a child")
             })?;
-            let forced_group = terminate_isolated_process_group_with_grace(group, grace)?;
+            let forced_group = terminate_isolated_process_group(group, grace)?;
             return Ok(ProcessContainmentCleanup {
                 forced: cleanup.forced || forced_group,
                 complete: cleanup.complete,
@@ -236,7 +225,7 @@ impl ProcessContainment {
                 let pid = self.leader_pid.ok_or_else(|| {
                     Error::internal_unexpected("process containment was not attached to a child")
                 })?;
-                return terminate_process_tree_with_grace(pid, grace).map(|termination| {
+                return terminate_process_tree(pid, grace).map(|termination| {
                     ProcessContainmentCleanup {
                         forced: termination.signal == "SIGKILL",
                         complete: true,
@@ -249,14 +238,12 @@ impl ProcessContainment {
             let group = self.process_group_id.ok_or_else(|| {
                 Error::internal_unexpected("process containment was not attached to a child")
             })?;
-            terminate_isolated_process_group_with_grace(group, grace).map(|forced| {
-                ProcessContainmentCleanup {
-                    forced,
-                    complete: true,
-                    diagnostic: None,
-                    detail: None,
-                    warning: None,
-                }
+            terminate_isolated_process_group(group, grace).map(|forced| ProcessContainmentCleanup {
+                forced,
+                complete: true,
+                diagnostic: None,
+                detail: None,
+                warning: None,
             })
         }
     }
@@ -889,27 +876,6 @@ pub fn install_shutdown_handler(stop: Arc<AtomicBool>, context: &str) -> Result<
     .map_err(|err| Error::internal_unexpected(format!("install {context} signal handler: {err}")))
 }
 
-pub fn process_group_is_running(pgid: i32) -> bool {
-    if pgid <= 0 {
-        return false;
-    }
-
-    #[cfg(target_os = "linux")]
-    if let Some(running) = linux_process_group_has_running_member(pgid) {
-        return running;
-    }
-
-    #[cfg(unix)]
-    unsafe {
-        libc::kill(-(pgid as libc::pid_t), 0) == 0
-    }
-
-    #[cfg(not(unix))]
-    {
-        false
-    }
-}
-
 /// Capture the process group created for an isolated child before exposing it
 /// as running. Unix isolation requires the child to lead its own group. On
 /// non-Linux Unix, the caller's isolation setup already established that group
@@ -964,30 +930,6 @@ mod tests {
     }
 }
 
-/// Return whether a recorded isolated process group still has a member. A live
-/// group always blocks recovery because its numeric ID could have been reused.
-pub fn isolated_process_group_is_running(pgid: u32) -> std::result::Result<bool, String> {
-    if pgid == 0 || pgid > i32::MAX as u32 {
-        return Err(format!("invalid isolated process group ID {pgid}"));
-    }
-
-    #[cfg(target_os = "linux")]
-    if let Some(running) = linux_process_group_has_running_member(pgid as i32) {
-        return Ok(running);
-    }
-
-    #[cfg(unix)]
-    unsafe {
-        Ok(libc::kill(-(pgid as libc::pid_t), 0) == 0)
-    }
-
-    #[cfg(not(unix))]
-    {
-        let _ = pgid;
-        Err("isolated process-group liveness is unsupported on this platform".to_string())
-    }
-}
-
 /// Wait for a recorded isolated process group to have no remaining members.
 /// Supervisors may need a scheduling turn to reap a terminated direct child,
 /// which otherwise remains visible as a process-group member on macOS.
@@ -997,7 +939,7 @@ pub fn wait_for_isolated_process_group_exit(
 ) -> std::result::Result<bool, String> {
     let deadline = Instant::now() + timeout;
     loop {
-        if !isolated_process_group_is_running(pgid)? {
+        if !homeboy_engine_primitives::command::process_group_is_running(pgid)? {
             return Ok(true);
         }
         if Instant::now() >= deadline {
@@ -1019,56 +961,22 @@ fn signal_isolated_process_group(owner_pid: u32, signal: libc::c_int) -> std::io
     let error = std::io::Error::last_os_error();
     match error.raw_os_error() {
         Some(libc::ESRCH) => Ok(()),
-        Some(libc::EPERM) if !process_group_is_running(owner_pid as i32) => Ok(()),
+        Some(libc::EPERM)
+            if !homeboy_engine_primitives::command::process_group_is_running(owner_pid)
+                .unwrap_or(false) =>
+        {
+            Ok(())
+        }
         _ => Err(error),
     }
 }
 
-/// Terminate the dedicated process group created for a managed child command.
-/// Callers must only pass a PID they just spawned with process-group isolation.
-pub fn terminate_isolated_process_group(owner_pid: u32) -> Result<()> {
-    #[cfg(unix)]
-    {
-        if owner_pid == 0 || owner_pid > i32::MAX as u32 {
-            return Err(Error::validation_invalid_argument(
-                "pid",
-                "isolated process-group leader PID is invalid",
-                Some(owner_pid.to_string()),
-                None,
-            ));
-        }
-        signal_isolated_process_group(owner_pid, libc::SIGTERM).map_err(|error| {
-            Error::internal_unexpected(format!(
-                "terminate isolated process group {owner_pid}: {error}"
-            ))
-        })?;
-        std::thread::sleep(std::time::Duration::from_millis(100));
-        if process_group_is_running(owner_pid as i32) {
-            unsafe {
-                let _ = libc::kill(-(owner_pid as libc::pid_t), libc::SIGKILL);
-            }
-        }
-        Ok(())
-    }
-
-    #[cfg(not(unix))]
-    {
-        let _ = owner_pid;
-        Err(Error::validation_invalid_argument(
-            "pid",
-            "isolated process-group termination is unsupported on this platform",
-            None,
-            None,
-        ))
-    }
-}
-
-/// Gracefully stop an isolated process group, returning whether SIGKILL was
-/// required after the supplied grace period.
-pub fn terminate_isolated_process_group_with_grace(
-    owner_pid: u32,
-    grace: Duration,
-) -> Result<bool> {
+/// Stop the dedicated process group created for a managed child command:
+/// SIGTERM, wait up to `grace` for every member to exit, then SIGKILL the
+/// survivors and verify they are gone. Returns whether SIGKILL was required.
+/// Callers that want immediate escalation pass `Duration::ZERO`. Callers must
+/// only pass a PID they spawned with process-group isolation.
+pub fn terminate_isolated_process_group(owner_pid: u32, grace: Duration) -> Result<bool> {
     if owner_pid == 0 || owner_pid > i32::MAX as u32 {
         return Err(Error::validation_invalid_argument(
             "pid",
@@ -1126,7 +1034,7 @@ pub fn terminate_verified_isolated_process_group_and_reap(
     let pid = child.id();
     match process_identity_state_with_start_identity(pid, None, Some(expected_identity)) {
         ProcessIdentityState::Live => {
-            terminate_isolated_process_group_with_grace(pid, grace)?;
+            terminate_isolated_process_group(pid, grace)?;
         }
         ProcessIdentityState::Dead => {
             let _ = child.wait();
@@ -1152,109 +1060,6 @@ pub fn terminate_verified_isolated_process_group_and_reap(
         )));
     }
     Ok(())
-}
-
-/// Construct the Windows-native tree termination command without coupling
-/// callers to a platform-specific shell or product workflow.
-pub fn windows_taskkill_process_tree_step(pid: u32) -> ProcessStep {
-    ProcessStep::new("taskkill").args(["/PID", &pid.to_string(), "/T", "/F"])
-}
-
-/// Force-terminate an owned process tree without allowing cleanup itself to
-/// exceed `timeout`. Linux snapshots descendants from procfs so children that
-/// changed sessions or process groups remain under the owner's cleanup scope.
-pub fn force_terminate_process_tree_bounded(pid: u32, timeout: Duration) -> Result<()> {
-    if pid == 0 || pid > i32::MAX as u32 {
-        return Err(Error::validation_invalid_argument(
-            "pid",
-            "owned process-tree leader PID is invalid",
-            Some(pid.to_string()),
-            None,
-        ));
-    }
-
-    #[cfg(unix)]
-    {
-        #[cfg(target_os = "linux")]
-        let mut targets = linux_descendant_pids(pid)?;
-        #[cfg(not(target_os = "linux"))]
-        let mut targets = Vec::new();
-        targets.retain(|target| *target != std::process::id());
-        targets.sort_unstable();
-        targets.dedup();
-
-        unsafe {
-            if libc::kill(-(pid as libc::pid_t), libc::SIGKILL) != 0
-                && std::io::Error::last_os_error().raw_os_error() != Some(libc::ESRCH)
-            {
-                return Err(Error::internal_unexpected(format!(
-                    "force-terminate owned process group {pid}: {}",
-                    std::io::Error::last_os_error()
-                )));
-            }
-        }
-        signal_pids(&targets, libc::SIGKILL)?;
-        let survivors = wait_for_exit(&targets, timeout);
-        // The caller owns and reaps the direct child. Waiting for it here
-        // misidentifies an unreaped zombie as a surviving process on Unix
-        // platforms without Linux's procfs state inspection.
-        if survivors.is_empty() {
-            return Ok(());
-        }
-        Err(Error::internal_unexpected(format!(
-            "owned process tree {pid} did not exit within {} ms; surviving pids: {}",
-            timeout.as_millis(),
-            join_pids(&survivors)
-        )))
-    }
-
-    #[cfg(target_os = "windows")]
-    {
-        let step = windows_taskkill_process_tree_step(pid);
-        let mut taskkill = Command::new(&step.program)
-            .args(&step.args)
-            .stdout(std::process::Stdio::null())
-            .stderr(std::process::Stdio::null())
-            .spawn()
-            .map_err(|error| {
-                Error::internal_unexpected(format!(
-                    "terminate process tree {pid} with taskkill: {error}"
-                ))
-            })?;
-        let deadline = Instant::now() + timeout;
-        loop {
-            match taskkill.try_wait() {
-                Ok(Some(status)) if status.success() => return Ok(()),
-                Ok(Some(status)) => {
-                    return Err(Error::internal_unexpected(format!(
-                        "terminate process tree {pid} with taskkill exited {status}"
-                    )))
-                }
-                Ok(None) if Instant::now() >= deadline => {
-                    let _ = taskkill.kill();
-                    return Err(Error::internal_unexpected(format!(
-                        "terminate process tree {pid} with taskkill exceeded {} ms",
-                        timeout.as_millis()
-                    )));
-                }
-                Ok(None) => std::thread::sleep(Duration::from_millis(10)),
-                Err(error) => {
-                    let _ = taskkill.kill();
-                    return Err(Error::internal_unexpected(format!(
-                        "monitor process tree {pid} taskkill: {error}"
-                    )));
-                }
-            }
-        }
-    }
-
-    #[cfg(all(not(unix), not(target_os = "windows")))]
-    {
-        let _ = timeout;
-        Err(Error::internal_unexpected(
-            "bounded process-tree termination is unsupported on this platform",
-        ))
-    }
 }
 
 #[cfg(target_os = "linux")]
@@ -1450,10 +1255,10 @@ pub struct ProcessTreeTermination {
 /// How long to wait for a process tree to exit after SIGTERM before escalating
 /// to SIGKILL. Kept short so `agent-task cancel` stays responsive while still
 /// giving providers a chance to flush/cleanup on a graceful terminate.
-#[cfg(unix)]
-const SIGTERM_GRACE: std::time::Duration = std::time::Duration::from_millis(2000);
-#[cfg(not(unix))]
-const SIGTERM_GRACE: std::time::Duration = std::time::Duration::from_millis(2000);
+pub const PROCESS_TREE_SIGTERM_GRACE: Duration = Duration::from_millis(2000);
+/// SIGTERM window an isolated group gets once its leader has exited, before
+/// the remaining members are force-killed.
+const LEADER_EXIT_GROUP_GRACE: Duration = Duration::from_millis(100);
 #[cfg(unix)]
 const SIGTERM_POLL_INTERVAL: std::time::Duration = std::time::Duration::from_millis(100);
 /// How long to wait after SIGKILL for the kernel to actually tear the targets
@@ -1464,16 +1269,10 @@ const SIGTERM_POLL_INTERVAL: std::time::Duration = std::time::Duration::from_mil
 #[cfg(unix)]
 const SIGKILL_REAP_GRACE: std::time::Duration = std::time::Duration::from_millis(2000);
 
-pub fn terminate_process_tree(owner_pid: u32) -> Result<ProcessTreeTermination> {
-    terminate_process_tree_with_grace(owner_pid, SIGTERM_GRACE)
-}
-
 /// Terminate an owned process tree with a caller-selected, bounded SIGTERM
-/// grace period before escalation to SIGKILL.
-pub fn terminate_process_tree_with_grace(
-    owner_pid: u32,
-    grace: Duration,
-) -> Result<ProcessTreeTermination> {
+/// grace period before escalation to SIGKILL. Most callers pass
+/// [`PROCESS_TREE_SIGTERM_GRACE`].
+pub fn terminate_process_tree(owner_pid: u32, grace: Duration) -> Result<ProcessTreeTermination> {
     if owner_pid > i32::MAX as u32 {
         return Err(Error::validation_invalid_argument(
             "pid",
@@ -1585,25 +1384,6 @@ fn signal_pids(pids: &[u32], signal: libc::c_int) -> Result<()> {
         }
     }
     Ok(())
-}
-
-/// Poll the given pids until they all exit or `grace` elapses. Returns the pids
-/// still running when the window closes (the SIGKILL escalation set).
-#[cfg(unix)]
-fn wait_for_exit(pids: &[u32], grace: std::time::Duration) -> Vec<u32> {
-    let deadline = std::time::Instant::now() + grace;
-    loop {
-        let survivors: Vec<u32> = pids
-            .iter()
-            .copied()
-            .filter(|pid| pid_is_running(*pid))
-            .collect();
-        let now = std::time::Instant::now();
-        if survivors.is_empty() || now >= deadline {
-            return survivors;
-        }
-        std::thread::sleep(SIGTERM_POLL_INTERVAL.min(deadline.saturating_duration_since(now)));
-    }
 }
 
 #[cfg(unix)]
@@ -1742,78 +1522,6 @@ fn descendant_pids_from_ps(ps_output: &str, owner_pid: u32) -> Vec<u32> {
 }
 
 #[cfg(target_os = "linux")]
-fn linux_process_group_has_running_member(pgid: i32) -> Option<bool> {
-    let entries = std::fs::read_dir("/proc").ok()?;
-    for entry in entries.flatten() {
-        let file_name = entry.file_name();
-        let Some(name) = file_name.to_str() else {
-            continue;
-        };
-        if !name.bytes().all(|byte| byte.is_ascii_digit()) {
-            continue;
-        }
-        let Ok(stat) = std::fs::read_to_string(entry.path().join("stat")) else {
-            continue;
-        };
-        let Some(process) = parse_linux_stat(&stat) else {
-            continue;
-        };
-        if process.process_group_id != pgid {
-            continue;
-        }
-        if process.state != 'Z' {
-            return Some(true);
-        }
-    }
-    Some(false)
-}
-
-#[cfg(target_os = "linux")]
-struct LinuxProcessStat {
-    state: char,
-    parent_pid: u32,
-    process_group_id: i32,
-}
-
-#[cfg(target_os = "linux")]
-fn parse_linux_stat(stat: &str) -> Option<LinuxProcessStat> {
-    let after_command = stat.rsplit_once(") ")?.1;
-    let mut fields = after_command.split_whitespace();
-    let state = fields.next()?.chars().next()?;
-    let parent_pid = fields.next()?.parse().ok()?;
-    let process_group_id = fields.next()?.parse().ok()?;
-    Some(LinuxProcessStat {
-        state,
-        parent_pid,
-        process_group_id,
-    })
-}
-
-#[cfg(target_os = "linux")]
-fn linux_descendant_pids(owner_pid: u32) -> Result<Vec<u32>> {
-    let entries = std::fs::read_dir("/proc").map_err(|error| {
-        Error::internal_unexpected(format!("inspect owned process tree {owner_pid}: {error}"))
-    })?;
-    let mut rows = Vec::new();
-    for entry in entries.flatten() {
-        let file_name = entry.file_name();
-        let Some(name) = file_name.to_str() else {
-            continue;
-        };
-        let Ok(pid) = name.parse::<u32>() else {
-            continue;
-        };
-        let Ok(stat) = std::fs::read_to_string(entry.path().join("stat")) else {
-            continue;
-        };
-        if let Some(process) = parse_linux_stat(&stat) {
-            rows.push((pid, process.parent_pid));
-        }
-    }
-    Ok(descendant_pids_from_rows(&rows, owner_pid))
-}
-
-#[cfg(target_os = "linux")]
 struct LinuxScopeDiscovery {
     pids: Vec<u32>,
     unreadable_environments: usize,
@@ -1887,76 +1595,9 @@ fn linux_scope_pids(scope: &str) -> Result<LinuxScopeDiscovery> {
     })
 }
 
-#[cfg(target_os = "linux")]
-fn descendant_pids_from_rows(rows: &[(u32, u32)], owner_pid: u32) -> Vec<u32> {
-    let mut descendants = Vec::new();
-    let mut frontier = vec![owner_pid];
-    while let Some(parent) = frontier.pop() {
-        for (pid, parent_pid) in rows {
-            if *parent_pid == parent && !descendants.contains(pid) {
-                descendants.push(*pid);
-                frontier.push(*pid);
-            }
-        }
-    }
-    descendants
-}
-
 #[cfg(all(test, target_os = "linux"))]
 mod tests {
     use super::*;
-
-    #[test]
-    fn parse_linux_stat_handles_command_names_with_spaces() {
-        let stat = "123 (name with spaces) Z 1 456 456 0 -1 0 0 0";
-        let process = parse_linux_stat(stat).expect("process stat");
-
-        assert_eq!(process.state, 'Z');
-        assert_eq!(process.parent_pid, 1);
-        assert_eq!(process.process_group_id, 456);
-    }
-
-    #[test]
-    fn descendant_rows_include_children_outside_the_owner_group() {
-        assert_eq!(
-            descendant_pids_from_rows(&[(10, 1), (11, 10), (12, 11), (13, 1)], 10),
-            vec![11, 12]
-        );
-    }
-
-    #[test]
-    fn bounded_force_termination_kills_session_escapee() {
-        use std::os::unix::process::CommandExt;
-
-        let pid_file = std::env::temp_dir().join(format!(
-            "homeboy-process-escaped-descendant-{}.pid",
-            std::process::id()
-        ));
-        let _ = std::fs::remove_file(&pid_file);
-        let script = format!("setsid sleep 30 & echo $! > {}; wait", pid_file.display());
-        let mut command = Command::new("sh");
-        command.args(["-c", &script]).process_group(0);
-        let mut child = command.spawn().expect("spawn owned process tree");
-        for _ in 0..100 {
-            if pid_file.exists() {
-                break;
-            }
-            std::thread::sleep(Duration::from_millis(10));
-        }
-        let escaped_pid = std::fs::read_to_string(&pid_file)
-            .expect("escaped descendant pid")
-            .trim()
-            .parse::<u32>()
-            .expect("numeric escaped descendant pid");
-
-        let started = Instant::now();
-        force_terminate_process_tree_bounded(child.id(), Duration::from_millis(500))
-            .expect("force-terminate owned tree");
-        assert!(started.elapsed() < Duration::from_secs(1));
-        let _ = child.wait();
-        let _ = std::fs::remove_file(&pid_file);
-        assert!(!pid_is_running(escaped_pid));
-    }
 
     #[test]
     fn force_stop_environment_ownership_requires_an_exact_assignment() {
@@ -2293,14 +1934,6 @@ mod process_tree_tests {
         assert!(error.message.contains("7 9"));
     }
 
-    #[test]
-    fn windows_taskkill_process_tree_step_targets_the_root_and_tree() {
-        assert_eq!(
-            windows_taskkill_process_tree_step(4242),
-            ProcessStep::new("taskkill").args(["/PID", "4242", "/T", "/F"])
-        );
-    }
-
     /// Reap a test-owned child as soon as it exits, off-thread, so the kernel
     /// clears the zombie promptly while `terminate_process_tree` is still
     /// polling. The test process is the direct parent of these children, so it
@@ -2327,7 +1960,8 @@ mod process_tree_tests {
         // reap grace window instead of lingering as a false survivor.
         let reaper = reap_in_background(child);
 
-        let termination = terminate_process_tree(pid).expect("terminate sigterm-resistant tree");
+        let termination = terminate_process_tree(pid, PROCESS_TREE_SIGTERM_GRACE)
+            .expect("terminate sigterm-resistant tree");
 
         // It survived SIGTERM and had to be SIGKILL'd.
         assert_eq!(termination.signal, "SIGKILL");
@@ -2363,7 +1997,7 @@ mod process_tree_tests {
         let caller_group = process_group_of(std::process::id());
         let reaper = reap_in_background(child);
 
-        let _ = terminate_process_tree(pid);
+        let _ = terminate_process_tree(pid, PROCESS_TREE_SIGTERM_GRACE);
         let _ = reaper.join();
 
         assert_eq!(child_group, caller_group);
@@ -2380,7 +2014,7 @@ mod process_tree_tests {
         let caller_group = process_group_of(std::process::id());
         let reaper = reap_in_background(child);
 
-        let _ = terminate_process_tree(pid);
+        let _ = terminate_process_tree(pid, PROCESS_TREE_SIGTERM_GRACE);
         let _ = reaper.join();
 
         assert_ne!(child_group, caller_group);
@@ -2404,7 +2038,7 @@ mod process_tree_tests {
         let caller_group = process_group_of(std::process::id());
         let reaper = reap_in_background(child);
 
-        let _ = terminate_process_tree(pid);
+        let _ = terminate_process_tree(pid, PROCESS_TREE_SIGTERM_GRACE);
         let _ = reaper.join();
 
         assert_ne!(child_group, caller_group);
@@ -2422,7 +2056,8 @@ mod process_tree_tests {
         // grace window and is not mistaken for a process that ignored SIGTERM.
         let reaper = reap_in_background(child);
 
-        let termination = terminate_process_tree(pid).expect("terminate cooperative tree");
+        let termination = terminate_process_tree(pid, PROCESS_TREE_SIGTERM_GRACE)
+            .expect("terminate cooperative tree");
 
         assert_eq!(termination.signal, "SIGTERM");
         assert!(termination.killed_pids.is_empty());
@@ -2446,14 +2081,41 @@ mod process_tree_tests {
         // Leave the leader exited but unreaped: a zombie is still a group
         // member, and macOS answers a group signal to it with EPERM.
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
-        while process_group_is_running(pid as i32) {
+        while homeboy_engine_primitives::command::process_group_is_running(pid)
+            .expect("probe process group")
+        {
             assert!(std::time::Instant::now() < deadline, "leader never exited");
             std::thread::sleep(std::time::Duration::from_millis(10));
         }
 
-        terminate_isolated_process_group(pid).expect("SIGTERM path tolerates a gone group");
-        terminate_isolated_process_group_with_grace(pid, std::time::Duration::from_millis(50))
-            .expect("graceful path tolerates a gone group");
+        let forced = terminate_isolated_process_group(pid, std::time::Duration::from_millis(50))
+            .expect("termination tolerates a gone group");
+        assert!(!forced, "a gone group needs no escalation");
+        child.wait().expect("reap leader");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn terminating_a_sigterm_ignoring_process_group_escalates_to_sigkill() {
+        use std::os::unix::process::CommandExt;
+
+        let mut child = std::process::Command::new("sh")
+            .args(["-c", "trap '' TERM; sleep 30 & wait"])
+            .process_group(0)
+            .spawn()
+            .expect("spawn sigterm-ignoring group leader");
+        let pid = child.id();
+        // Give the shell time to install its trap before it is signalled.
+        std::thread::sleep(std::time::Duration::from_millis(200));
+
+        let forced = terminate_isolated_process_group(pid, std::time::Duration::from_millis(100))
+            .expect("terminate sigterm-ignoring group");
+
+        assert!(forced, "a group that ignores SIGTERM must be force-killed");
+        assert!(
+            !homeboy_engine_primitives::command::process_group_is_running(pid)
+                .expect("probe process group")
+        );
         child.wait().expect("reap leader");
     }
 }

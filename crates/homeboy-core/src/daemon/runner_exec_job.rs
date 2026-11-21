@@ -286,7 +286,7 @@ fn supervise_adopted(
     let observed_live = root_is_live(pid, ticks);
     while root_is_live(pid, ticks) {
         if job.is_cancelled() {
-            let _ = crate::process::terminate_isolated_process_group_with_grace(pid, CANCEL_GRACE);
+            let _ = crate::process::terminate_isolated_process_group(pid, CANCEL_GRACE);
             return;
         }
         std::thread::sleep(SUPERVISE_POLL);

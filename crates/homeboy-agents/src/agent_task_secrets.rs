@@ -78,24 +78,6 @@ pub struct AgentTaskSecretEnvScope {
     pub required_names: Vec<String>,
 }
 
-/// Redacted secret-env status for a single source map.
-///
-/// Prefer [`secret_env_status_for_scopes`] when more than one provider is in
-/// view: a required name must resolve against the provider that requires it,
-/// not against a merged map of unrelated sources (#13629).
-pub fn secret_env_status_for_scope(
-    explicit_names: &[String],
-    fallback_sources: &HashMap<String, AgentTaskSecretSource>,
-) -> Vec<AgentTaskSecretEnvStatus> {
-    secret_env_status_for_scopes(
-        explicit_names,
-        &[AgentTaskSecretEnvScope {
-            fallback_sources: fallback_sources.clone(),
-            required_names: Vec::new(),
-        }],
-    )
-}
-
 /// Resolve each scope against its own sources, then flatten to one row per name.
 ///
 /// A name a scope requires and cannot resolve vetoes `configured=true` from any
@@ -352,13 +334,6 @@ pub fn remove_secret_mapping(
 
 pub fn validate_secret_env(names: &[String]) -> Result<(), AgentTaskSecretResolutionError> {
     resolve_secret_env(names).map(|_| ())
-}
-
-pub fn validate_secret_env_with_fallbacks(
-    names: &[String],
-    fallback_sources: &HashMap<String, AgentTaskSecretSource>,
-) -> Result<(), AgentTaskSecretResolutionError> {
-    resolve_secret_env_with_fallbacks(names, fallback_sources).map(|_| ())
 }
 
 pub fn resolve_secret_env_with_fallbacks(
@@ -775,7 +750,11 @@ mod tests {
         // both call this with no explicit names when the operator names none,
         // and must report the identical scope the same way (#13629): every
         // secret this scope declares a source for, not an empty list.
-        let defaulted = secret_env_status_for_scope(&[], &fallback_sources);
+        let scope = [AgentTaskSecretEnvScope {
+            fallback_sources,
+            required_names: Vec::new(),
+        }];
+        let defaulted = secret_env_status_for_scopes(&[], &scope);
         let mut names: Vec<&str> = defaulted.iter().map(|entry| entry.name.as_str()).collect();
         names.sort();
         let mut expected = vec![configured.as_str(), missing.as_str()];
@@ -791,8 +770,7 @@ mod tests {
         // An explicit name list still wins and is not silently expanded, and
         // it must resolve to the same verdict the default sweep produced for
         // that name — one resolution path, one answer.
-        let explicit =
-            secret_env_status_for_scope(std::slice::from_ref(&configured), &fallback_sources);
+        let explicit = secret_env_status_for_scopes(std::slice::from_ref(&configured), &scope);
         assert_eq!(explicit.len(), 1);
         assert_eq!(explicit[0].name, configured);
         assert_eq!(

@@ -17,7 +17,7 @@ use std::time::{Duration, Instant};
 use std::{io, os::fd::RawFd};
 
 use super::constants::{VERIFY_READBACK_ATTEMPTS, VERIFY_READBACK_DELAY};
-use super::helpers::{current_version, source_promotion_decision, version_is_newer};
+use super::helpers::{current_version, source_promotion_decision};
 use super::planning::resolve_binary_on_path;
 use super::release_catalog::{self, SelectedRelease};
 use super::types::InstallMethod;
@@ -641,7 +641,7 @@ fn validate_binary_replacement_eligibility(
         .with_hint("Retry after the PATH-active controller reports a readable build identity.")
     })?;
     if installed.version == selected_version
-        || version_is_newer(&installed.version, selected_version)
+        || homeboy_core::build_identity::is_newer(&installed.version, selected_version)
     {
         return Err(Error::validation_invalid_argument(
             "selected_release",
@@ -704,7 +704,7 @@ fn verify_source_candidate_target_admission(
         candidate
             .build_identity
             .as_deref()
-            .and_then(parse_build_identity_display),
+            .and_then(homeboy_core::build_identity::parse),
     ) {
         if identity.git_dirty == Some(true)
             || identity
@@ -1973,7 +1973,7 @@ pub(crate) fn installed_target_build_identity_from_disk(
     Ok(info
         .build_identity
         .as_deref()
-        .and_then(parse_build_identity_display))
+        .and_then(homeboy_core::build_identity::parse))
 }
 
 /// Treat two paths as the same binary when they canonicalize to the same file.
@@ -1984,44 +1984,6 @@ fn paths_identify_same_binary(a: &Path, b: &Path) -> bool {
         (Ok(a), Ok(b)) => a == b,
         _ => a == b,
     }
-}
-
-/// Reconstruct a `BuildIdentity` from a controller `--version` display string of
-/// the form `homeboy <version>[+<commit>[-dirty]]` (the exact format
-/// `homeboy_product_identity` emits). Returns `None` for an unrecognizable
-/// string so callers can fall back to the safe unverifiable-replacement path.
-pub fn parse_build_identity_display(
-    display: &str,
-) -> Option<homeboy_core::build_identity::BuildIdentity> {
-    let display = display.trim();
-    // Take the last whitespace-delimited token so a leading product name
-    // (`homeboy 0.298.1+abc`) is tolerated without hard-coding it.
-    let token = display.split_whitespace().last()?;
-
-    let (version, commit, dirty) = match token.split_once('+') {
-        Some((version, remainder)) => {
-            let (commit, dirty) = match remainder.strip_suffix("-dirty") {
-                Some(commit) => (commit, Some(true)),
-                None => (remainder, Some(false)),
-            };
-            let commit = (!commit.is_empty()).then(|| commit.to_string());
-            // A `+` with no commit yields no verifiable commit identity.
-            let dirty = commit.as_ref().and(dirty);
-            (version.to_string(), commit, dirty)
-        }
-        None => (token.to_string(), None, None),
-    };
-
-    // Validate the version is semver-parseable; an unparseable version cannot
-    // participate in the deterministic decision and must stay unverifiable.
-    semver::Version::parse(version.trim_start_matches('v')).ok()?;
-
-    Some(homeboy_core::build_identity::BuildIdentity {
-        display: display.to_string(),
-        version,
-        git_commit: commit,
-        git_dirty: dirty,
-    })
 }
 
 pub(crate) fn upgrade_verification_result(
@@ -2036,7 +1998,7 @@ pub(crate) fn upgrade_verification_result(
         return false;
     };
 
-    if version_is_newer(active_version, previous_version) {
+    if homeboy_core::build_identity::is_newer(active_version, previous_version) {
         return true;
     }
 

@@ -137,10 +137,33 @@ fn status_once(args: StatusArgs) -> CmdResult<Value> {
     let cook_id = bounded_exact_record(&args.run_id)
         .ok()
         .and_then(|record| record.metadata["cook_id"].as_str().map(str::to_string))
-        .unwrap_or(args.run_id);
+        .unwrap_or_else(|| args.run_id.clone());
     let store = homeboy::agents::agent_task_feedback::CookFeedbackStore::from_current_data_root()?;
     value["cook_feedback"] = store.status_value(&cook_id)?;
     value["placement"] = crate::commands::run_placement::placement(&value);
+    // A queued local gate names its host-wide queue standing (#18555), with
+    // the same fields the Lab step queue publishes.
+    let local = homeboy::core::local_gate_admission::snapshot().unwrap_or(Value::Null);
+    let waiting = local["waiting"].as_array().and_then(|queue| {
+        queue.iter().find(|entry| {
+            entry["cook_id"].as_str().is_some_and(|id| {
+                id == cook_id || id == args.run_id || value["run"].as_str() == Some(id)
+            })
+        })
+    });
+    if let Some(waiting) = waiting {
+        let position = waiting["queue_position"].as_u64().unwrap_or(1);
+        value["local_admission"] = json!({
+            "queue_position": position,
+            "waiters_ahead": position.saturating_sub(1),
+            "priority": waiting["priority"],
+            "waited_seconds": waiting["waited_seconds"],
+            "eta_seconds": waiting["eta_seconds"],
+            "eta_kind": local["eta_kind"],
+            "holders": local["holders"],
+            "pressure": local["pressure"],
+        });
+    }
     Ok((value, code))
 }
 
@@ -292,6 +315,7 @@ fn status_without_feedback(args: StatusArgs) -> CmdResult<Value> {
             value["lab_staging_diagnostic"] = collected_diagnostic_value(diagnostic);
         }
         attach_gate_failure(&mut value, &record);
+        attach_recovery_step(&mut value, &record);
     }
     attach_promotion_replay(&mut value, &target.run_id, &args.run_id);
     if value["action_eligibility"]["actions"]
@@ -339,6 +363,21 @@ fn cook_outcome_record(
     bounded_exact_record(&selected.run_id)
         .ok()
         .filter(|record| homeboy::agents::agent_task_lifecycle::CookRunState::of(record).terminal)
+}
+
+/// The latest admitted recovery step (for example `recover --regate`) and its
+/// recorded outcome, so an admitted step is never invisible (#18657).
+fn attach_recovery_step(value: &mut Value, record: &AgentTaskRunRecord) {
+    let Ok(store) = agent_task_lifecycle::AgentTaskLifecycleStore::from_environment() else {
+        return;
+    };
+    if let Some(step) = agent_task_service_direct::recovery_step_projection(&store, record) {
+        if step["state"] == "failed" {
+            value["blocker"] = step["failure"].clone();
+            value["failure"] = step["failure"].clone();
+        }
+        value["recovery_step"] = step;
+    }
 }
 
 fn bounded_exact_record(run_id: &str) -> homeboy::core::Result<AgentTaskRunRecord> {

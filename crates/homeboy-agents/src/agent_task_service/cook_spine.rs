@@ -551,7 +551,30 @@ pub(super) fn run_cook_spine(
                     }
                 },
             ));
-            let result = materialize_pending_cook_workspace(lifecycle_store, &mut options);
+            let wait_cook_id = options.identity.cook_id.clone();
+            let wait_run_id = options.identity.initial_run_id.clone();
+            let lookup_cancelled =
+                || provider_lookup_cancelled(lifecycle_store, &wait_cook_id, &wait_run_id);
+            let result = lookup_through_substrate_waits(
+                homeboy_core::substrate_wait::SUBSTRATE_WAIT_DEADLINE,
+                lookup_cancelled,
+                |error, waited| {
+                    let _ = report_cook_progress(
+                        lifecycle_store,
+                        durable_observer,
+                        &wait_cook_id,
+                        &wait_run_id,
+                        "worktree_provider_lookup",
+                        1,
+                        Some(&format!(
+                            "waiting through retryable runner condition (waited {}s): {}",
+                            waited.as_secs(),
+                            error.message
+                        )),
+                    );
+                },
+                || materialize_pending_cook_workspace(lifecycle_store, &mut options),
+            );
             let _ = lookup_stop.send(());
             result
         });
@@ -733,7 +756,11 @@ pub(super) fn run_cook_spine(
         }
     }
     if !verification_pending_continuation
-        && (!options.gates.verify.is_empty()
+        && (options
+            .gates
+            .verify
+            .iter()
+            .any(|command| !options.gates.repro.contains(command))
             || !options.gates.private_verify.is_empty()
             || options.gates.test_execution_plan.is_some())
     {
@@ -1369,6 +1396,7 @@ pub(super) fn run_cook_spine(
                                 if tick.stop_now {
                                     let outcome = match homeboy_core::process::terminate_process_tree(
                                         heartbeat_owner_pid,
+                                        homeboy_core::process::PROCESS_TREE_SIGTERM_GRACE,
                                     ) {
                                         Ok(termination) => serde_json::json!({
                                             "status": "terminated",
@@ -1419,6 +1447,7 @@ pub(super) fn run_cook_spine(
                                     deadline_stop_issued = true;
                                     let outcome = match homeboy_core::process::terminate_process_tree(
                                         heartbeat_owner_pid,
+                                        homeboy_core::process::PROCESS_TREE_SIGTERM_GRACE,
                                     ) {
                                         Ok(termination) => serde_json::json!({
                                             "status": "terminated",
@@ -2689,4 +2718,121 @@ pub(super) fn run_cook_spine(
         exit_code: 1,
         invocation_latest_run_id: Some(&run_id),
     }))
+}
+
+/// Whether the operator cancelled the Cook while its provider workspace lookup
+/// was waiting.
+fn provider_lookup_cancelled(
+    lifecycle_store: &AgentTaskLifecycleStore,
+    cook_id: &str,
+    run_id: &str,
+) -> bool {
+    lifecycle_store
+        .read_record(run_id)
+        .ok()
+        .is_some_and(|record| {
+            record.state() == homeboy_lifecycle_contract::RunExecutionState::Cancelled
+        })
+        || lifecycle_store
+            .read_cook_index(cook_id)
+            .ok()
+            .is_some_and(|index| index.cancellation_fence.is_some())
+}
+
+/// Run the provider workspace lookup through the shared substrate wait. A
+/// retryable runner condition (observation deadline, pressure, a runner that
+/// is momentarily unobserved) keeps the Cook queued with backoff instead of
+/// terminalizing it in `worktree_provider_lookup` (#17918). Any other failure,
+/// or a transient one that outlives `deadline`, is returned unchanged.
+fn lookup_through_substrate_waits<T>(
+    deadline: std::time::Duration,
+    cancelled: impl Fn() -> bool,
+    on_wait: impl FnMut(&Error, std::time::Duration),
+    attempt: impl FnMut() -> Result<T>,
+) -> Result<T> {
+    homeboy_core::substrate_wait::wait_through(
+        "Cook provider workspace lookup",
+        deadline,
+        cancelled,
+        on_wait,
+        attempt,
+    )
+}
+
+#[cfg(test)]
+mod provider_lookup_wait_tests {
+    use super::*;
+    use std::cell::Cell;
+
+    fn degraded_runner_refusal() -> Error {
+        let mut error = Error::validation_invalid_argument(
+            "runner",
+            "Lab offload runner `homeboy-lab` is connected but is not ready for remote execution: connected runner `homeboy-lab` is degraded: observation_unavailable; runner observation unavailable (retryable): runner observation deadline exhausted",
+            Some("homeboy-lab".to_string()),
+            None,
+        );
+        error.details["substrate_wait"] = serde_json::json!("runner_connect");
+        error.with_retryable(true)
+    }
+
+    #[test]
+    fn retryable_runner_condition_waits_and_then_runs() {
+        let attempts = Cell::new(0);
+        let waits = Cell::new(0);
+        let result = lookup_through_substrate_waits(
+            std::time::Duration::from_secs(60),
+            || false,
+            |_, _| waits.set(waits.get() + 1),
+            || {
+                attempts.set(attempts.get() + 1);
+                if attempts.get() < 3 {
+                    Err(degraded_runner_refusal())
+                } else {
+                    Ok("materialized")
+                }
+            },
+        );
+        assert_eq!(result.expect("lookup recovers"), "materialized");
+        assert_eq!(attempts.get(), 3);
+        assert_eq!(waits.get(), 2);
+    }
+
+    #[test]
+    fn deterministic_lookup_failure_is_not_retried() {
+        let attempts = Cell::new(0);
+        let error = lookup_through_substrate_waits::<()>(
+            std::time::Duration::from_secs(60),
+            || false,
+            |_, _| panic!("a deterministic failure must not wait"),
+            || {
+                attempts.set(attempts.get() + 1);
+                Err(Error::validation_invalid_argument(
+                    "to_worktree",
+                    "worktree provider did not resolve the declared exact Cook handle",
+                    None,
+                    None,
+                ))
+            },
+        )
+        .expect_err("deterministic failure surfaces");
+        assert_eq!(attempts.get(), 1);
+        assert!(error.message.contains("exact Cook handle"));
+    }
+
+    #[test]
+    fn cancellation_stops_the_wait() {
+        let attempts = Cell::new(0);
+        let error = lookup_through_substrate_waits::<()>(
+            std::time::Duration::from_secs(60),
+            || true,
+            |_, _| {},
+            || {
+                attempts.set(attempts.get() + 1);
+                Err(degraded_runner_refusal())
+            },
+        )
+        .expect_err("cancelled lookup surfaces its last refusal");
+        assert_eq!(attempts.get(), 1);
+        assert_eq!(error.details["substrate_wait"], "runner_connect");
+    }
 }

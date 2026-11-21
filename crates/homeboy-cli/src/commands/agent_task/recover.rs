@@ -74,6 +74,7 @@ fn recover_action(args: RecoverArgs) -> CmdResult<Value> {
         replace_gates: recovery.replace_gates,
         publish: Some(recovery.publish),
         gate_timeout_seconds: recovery.regate_inputs.gate_timeout_seconds,
+        gate_no_progress_timeout_seconds: recovery.regate_inputs.gate_no_progress_timeout_seconds,
     };
 
     // A run with no lifecycle record (an unknown ID or a recipe-only Cook)
@@ -149,8 +150,24 @@ pub(super) fn recover_with(
 /// malformed input fails before any durable state is read.
 fn recovery_request(mut args: RecoverArgs) -> homeboy::core::Result<CookRecoveryRequest> {
     let overrides = args.overrides();
+    // Gate budgets alone only change a regate; refuse them rather than
+    // silently ignoring them (#18556).
+    let budgets_only = !args.gates.has_deterministic_gate()
+        && (args.gates.gate_timeout_seconds.is_some()
+            || args.gates.gate_no_progress_timeout_seconds.is_some());
+    if budgets_only && !args.regate {
+        return Err(homeboy::core::Error::validation_invalid_argument(
+            "regate",
+            "--gate-timeout-seconds and --gate-no-progress-timeout-seconds change the budgets of a regate; add --regate",
+            Some(args.id.clone()),
+            Some(vec![format!(
+                "homeboy agent-task recover {} --regate --gate-timeout-seconds <SECONDS> --gate-no-progress-timeout-seconds <SECONDS>",
+                args.id
+            )]),
+        ));
+    }
     // `--regate` re-runs gates on the existing candidate; its verify commands
-    // and gate timeout replace the declared ones for that regate (#17802).
+    // and gate budgets replace the declared ones for that regate (#17802).
     let regate_inputs = if args.regate {
         regate_inputs(&mut args)?
     } else {
@@ -191,12 +208,13 @@ fn recovery_request(mut args: RecoverArgs) -> homeboy::core::Result<CookRecovery
 }
 
 /// `--regate` replacements. Explicit verify commands replace the declared
-/// commands; a non-default `--gate-timeout-seconds` replaces the recorded
-/// per-gate timeout. Everything else keeps the recorded gate policy.
+/// commands; an explicitly passed `--gate-timeout-seconds` or
+/// `--gate-no-progress-timeout-seconds` (`0` disables it) replaces the
+/// recorded per-gate budget, even when it equals the CLI default. Everything
+/// else keeps the recorded gate policy.
 fn regate_inputs(args: &mut RecoverArgs) -> homeboy::core::Result<CookRegateInputs> {
-    let default_timeout = super::VerifyGateArgs::default().gate_timeout_seconds;
-    let gate_timeout_seconds = (args.gates.gate_timeout_seconds != default_timeout)
-        .then_some(args.gates.gate_timeout_seconds);
+    let gate_timeout_seconds = args.gates.gate_timeout_seconds;
+    let gate_no_progress_timeout_seconds = args.gates.gate_no_progress_timeout_seconds;
     let gates = if args.gates.has_deterministic_gate() {
         args.gates.snapshot_file_inputs()?;
         Some(std::mem::take(&mut args.gates).into())
@@ -206,6 +224,7 @@ fn regate_inputs(args: &mut RecoverArgs) -> homeboy::core::Result<CookRegateInpu
     Ok(CookRegateInputs {
         gates,
         gate_timeout_seconds,
+        gate_no_progress_timeout_seconds,
     })
 }
 
@@ -458,6 +477,37 @@ mod tests {
             assert!(request.regate);
             assert_eq!(request.preflight, preflight);
         }
+    }
+
+    /// An explicit budget always applies, even at the CLI default; without
+    /// `--regate` it is refused, never silently ignored (#18556).
+    #[test]
+    fn recover_regate_gate_budgets_apply_when_passed() {
+        let request = |extra: &[&str]| {
+            let mut argv = vec!["homeboy", "agent-task", "recover", "cook-1"];
+            argv.extend_from_slice(extra);
+            let Commands::AgentTask(task) = Cli::try_parse_from(argv).unwrap().command else {
+                panic!("agent-task")
+            };
+            let AgentTaskCommand::Recover(args) = task.command else {
+                panic!("recover")
+            };
+            super::recovery_request(args)
+        };
+        let regate = request(&[
+            "--regate",
+            "--gate-timeout-seconds",
+            "1800",
+            "--gate-no-progress-seconds",
+            "0",
+        ])
+        .unwrap()
+        .regate_inputs;
+        assert_eq!(regate.gate_timeout_seconds, Some(1800));
+        assert_eq!(regate.gate_no_progress_timeout_seconds, Some(0));
+        let recorded = request(&["--regate"]).unwrap().regate_inputs;
+        assert!(recorded.is_empty(), "{recorded:?}");
+        assert!(request(&["--gate-no-progress-timeout-seconds", "600"]).is_err());
     }
 
     #[test]

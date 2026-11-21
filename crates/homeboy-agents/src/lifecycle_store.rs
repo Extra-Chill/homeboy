@@ -448,15 +448,6 @@ impl AgentTaskLifecycleStore {
         super::cook_effects::complete_cook_operation_in_store(self, run_id, operation_key, result)
     }
 
-    pub fn fail_cook_operation(
-        &self,
-        run_id: &str,
-        operation_key: &str,
-        result: Value,
-    ) -> Result<()> {
-        super::cook_effects::fail_cook_operation_in_store(self, run_id, operation_key, result)
-    }
-
     pub(crate) fn aggregate_source_exact(&self, run_id: &str) -> Result<(String, PathBuf)> {
         let record = self.read_record(run_id)?;
         record.aggregate_path.as_ref().ok_or_else(|| {
@@ -719,19 +710,6 @@ impl AgentTaskLifecycleStore {
                 error.to_string(),
                 Some(format!("parse agent-task aggregate {}", run.id)),
             )
-        })
-    }
-
-    pub fn write_cook_index_attempt(
-        &self,
-        cook_id: &str,
-        attempt: u32,
-        run_id: &str,
-        recorded_at: String,
-        candidate: Option<AgentTaskCookLatestSubstantiveCandidate>,
-    ) -> Result<AgentTaskCookIndex> {
-        self.with_store_lock(|| {
-            self.write_cook_index_attempt_locked(cook_id, attempt, run_id, recorded_at, candidate)
         })
     }
 
@@ -1318,17 +1296,6 @@ impl AgentTaskLifecycleStore {
         .map(|_| ())
     }
 
-    /// [`Self::write_record`] that syncs the copy's revision. Test fixtures only.
-    #[cfg(any(test, feature = "test-support"))]
-    pub fn write_record_in_place(&self, record: &mut AgentTaskRunRecord) -> Result<()> {
-        let committed = self.write_record_with_aggregate(
-            record,
-            read_mirrored_aggregate_in_store(self, &record.run_id)?,
-        )?;
-        record.revision = committed.revision;
-        Ok(())
-    }
-
     /// Commit a snapshot the caller read and annotated, at the revision it was
     /// read at (#15718). Concurrent non-overlapping progress is rebased with
     /// bounded retries. Incompatible changes or exhausted retries return an
@@ -1565,29 +1532,6 @@ impl AgentTaskLifecycleStore {
             }
             Ok(committed)
         })
-    }
-
-    /// Unconditional record/aggregate replacement. Test fixtures only.
-    #[cfg(any(test, feature = "test-support"))]
-    pub(crate) fn write_aggregate_and_record_locked_without_terminal_projection(
-        &self,
-        record: &AgentTaskRunRecord,
-        aggregate: &AgentTaskAggregate,
-    ) -> Result<AgentTaskRunRecord> {
-        let committed = write_record_with_aggregate_without_workspace_authority(
-            self,
-            record,
-            Some(aggregate.clone()),
-        )?;
-        #[cfg(test)]
-        if INTERRUPT_AFTER_TERMINAL_COMMIT.replace(false) {
-            return Err(Error::internal_io(
-                "injected interruption after terminal lifecycle commit",
-                Some(record.run_id.clone()),
-            ));
-        }
-        self.write_aggregate(&record.run_id, aggregate)?;
-        Ok(committed)
     }
 
     pub fn mutate_record(
@@ -1921,20 +1865,6 @@ impl AgentTaskLifecycleStore {
                     &record,
                 )
             })
-    }
-
-    /// Unconditional record/aggregate replacement. Test fixtures only.
-    #[cfg(any(test, feature = "test-support"))]
-    pub fn write_aggregate_and_record(
-        &self,
-        record: &AgentTaskRunRecord,
-        aggregate: &AgentTaskAggregate,
-    ) -> Result<PathBuf> {
-        let committed = self.with_store_lock(|| {
-            self.write_aggregate_and_record_locked_without_terminal_projection(record, aggregate)
-        })?;
-        self.project_terminal_record_after_unlock(&committed.run_id)?;
-        Ok(self.aggregate_path(&committed.run_id))
     }
 
     #[cfg(any(test, feature = "test-support"))]
@@ -2354,7 +2284,11 @@ pub(super) fn write_record_guarded(
         .cloned()
         .map(serde_json::from_value::<AgentTaskRunRecord>)
         .transpose()
-        .map_err(|error| Error::internal_json(error.to_string(), None))?;
+        .map_err(|error| Error::internal_json(error.to_string(), None))?
+        .map(|mut stored| {
+            super::cook_run_state::migrate_stored_record(&mut stored);
+            stored
+        });
     // Unfenced test fixtures seed a state, rather than taking an edge.
     super::cook_run_state::transition_record(
         &mut record,
@@ -3165,12 +3099,14 @@ fn parse_record_from_run(run: &RunRecord) -> Result<AgentTaskRunRecord> {
             json!({ "context": run.id }),
         )
     })?;
-    serde_json::from_value(value.clone()).map_err(|error| {
+    let mut record = serde_json::from_value(value.clone()).map_err(|error| {
         Error::internal_json(
             error.to_string(),
             Some(format!("parse agent-task run {}; incompatible record shape: re-cook this work with the current binary", run.id)),
         )
-    })
+    })?;
+    super::cook_run_state::migrate_stored_record(&mut record);
+    Ok(record)
 }
 
 fn normalize_decoded_record(

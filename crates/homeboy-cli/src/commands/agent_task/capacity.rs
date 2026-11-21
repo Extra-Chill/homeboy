@@ -42,10 +42,19 @@ const MAX_CAPACITY_ROUTES: usize = 64;
 
 pub fn capacity(args: AgentTaskCapacityArgs) -> CmdResult<Value> {
     let query = json!({"backend": args.backend, "selector": args.selector, "model": args.model});
-    Ok((
-        homeboy::core::control_plane::read_resource("capacity", &query)?,
-        0,
-    ))
+    let mut value = homeboy::core::control_plane::read_resource("capacity", &query)?;
+    // Provider snapshots may be cached; host leases and queue positions must be live.
+    if let Some(object) = value.as_object_mut() {
+        object.insert("local_capacity".into(), local_capacity_snapshot());
+    }
+    Ok((value, 0))
+}
+
+/// Live host-wide local gate queue (#18555); needs no daemon transport. A
+/// registry read failure is reported in place rather than failing the view.
+fn local_capacity_snapshot() -> Value {
+    homeboy::core::local_gate_admission::snapshot()
+        .unwrap_or_else(|error| json!({"available": false, "unavailable": error.to_string()}))
 }
 
 struct ProviderCapacitySnapshot;
@@ -149,20 +158,38 @@ pub(crate) fn capacity_with_catalog(
         })
         .collect::<Vec<_>>();
 
-    let lab_routes = homeboy::runner::runners::list()?
+    let (lab_routes, lab_capacity): (Vec<_>, Vec<_>) = homeboy::runner::runners::list()?
         .into_iter()
         .map(|runner| {
-            let active = homeboy::runner::runners::runner_admission_snapshot(&runner.id)
+            let report = homeboy::runner::lab_capacity::report(&runner.id).unwrap_or_else(
+                |error| json!({ "runner_id": runner.id, "unavailable": error.to_string() }),
+            );
+            let admission = homeboy::runner::runners::runner_admission_snapshot(&runner.id)
                 .ok()
-                .and_then(|snapshot| snapshot.summary.active_job_count);
-            let free = runner
-                .settings
-                .concurrency_limit
-                .zip(active)
-                .map(|(limit, active)| limit.saturating_sub(active));
-            json!({ "runner_id": runner.id, "active_slots": active, "free_slots": free })
+                .map(homeboy::runner::runners::runner_readiness_admission_snapshot)
+                .map(|snapshot| LabAdmissionFacts {
+                    active_slots: snapshot.summary.active_job_count,
+                    accepts_jobs: snapshot
+                        .summary
+                        .accepts_jobs
+                        .unwrap_or(snapshot.summary.accepting_jobs),
+                    readiness_state: snapshot.summary.readiness_state,
+                    reasons: snapshot.summary.reasons,
+                    pressure: serde_json::to_value(snapshot.summary.pressure)
+                        .unwrap_or(Value::Null),
+                });
+            let route = lab_route_value(
+                &runner.id,
+                runner.settings.concurrency_limit,
+                report
+                    .pointer("/observation/capacity/effective_budget")
+                    .and_then(Value::as_u64)
+                    .map(|budget| budget as usize),
+                admission.as_ref(),
+            );
+            (route, report)
         })
-        .collect::<Vec<_>>();
+        .unzip();
     let groups = group_outcomes_by_scope(outcomes);
     let next_reset = groups
         .iter()
@@ -180,15 +207,63 @@ pub(crate) fn capacity_with_catalog(
             "generated_at": chrono::Utc::now().to_rfc3339(),
             "routes": route_values,
             "lab_routes": lab_routes,
-            "lab_capacity": homeboy::runner::list().unwrap_or_default().iter().map(|runner| {
-                homeboy::runner::lab_capacity::report(&runner.id).unwrap_or_else(|error| json!({
-                    "runner_id": runner.id, "unavailable": error.to_string(),
-                }))
-            }).collect::<Vec<_>>(),
+            "lab_capacity": lab_capacity,
+            "local_capacity": local_capacity_snapshot(),
             "next_reset": next_reset,
         }),
         0,
     ))
+}
+
+/// The runner admission verdict `capacity` reports: the same readiness
+/// projection `runner status` and Cook admission read.
+struct LabAdmissionFacts {
+    active_slots: Option<usize>,
+    accepts_jobs: bool,
+    readiness_state: Option<String>,
+    reasons: Vec<String>,
+    pressure: Value,
+}
+
+/// One Lab runner's slot report, computed from the same inputs Cook admission
+/// uses (#17832): free slots come from the effective admission budget (the
+/// configured concurrency limit clamped by host load), not the bare limit, and
+/// `next_admission` carries the readiness verdict that would refuse or queue
+/// the next Cook, with its reasons and pressure evidence.
+fn lab_route_value(
+    runner_id: &str,
+    concurrency_limit: Option<usize>,
+    effective_budget: Option<usize>,
+    admission: Option<&LabAdmissionFacts>,
+) -> Value {
+    let active = admission.and_then(|facts| facts.active_slots);
+    let budget = match (concurrency_limit, effective_budget) {
+        (Some(limit), Some(budget)) => Some(limit.min(budget)),
+        (limit, budget) => budget.or(limit),
+    };
+    let free = budget
+        .zip(active)
+        .map(|(budget, active)| budget.saturating_sub(active));
+    let next_admission = admission.map(|facts| {
+        let mut reasons = facts.reasons.clone();
+        if free == Some(0) && !reasons.iter().any(|reason| reason == "capacity_reached") {
+            reasons.push("capacity_reached".to_string());
+        }
+        json!({
+            "refused": !facts.accepts_jobs || free == Some(0),
+            "readiness_state": facts.readiness_state,
+            "reasons": reasons,
+            "pressure": facts.pressure,
+        })
+    });
+    json!({
+        "runner_id": runner_id,
+        "active_slots": active,
+        "concurrency_limit": concurrency_limit,
+        "effective_budget": budget,
+        "free_slots": free,
+        "next_admission": next_admission,
+    })
 }
 
 /// One walked rotation route: backend/selector/model identity plus the

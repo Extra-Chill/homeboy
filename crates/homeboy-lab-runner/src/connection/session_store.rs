@@ -83,8 +83,8 @@ fn session_is_live_with_probe(
     false
 }
 
-/// A persisted start identity upgrades PID liveness to exact process ownership.
-/// Legacy sessions without one retain their existing PID-only compatibility.
+/// A tunnel is owned only when its persisted start identity matches the live
+/// process; a PID without a recorded identity proves nothing.
 pub(crate) fn tunnel_process_is_owned<Inspect>(
     pid: u32,
     expected: Option<&RunnerTunnelProcessStartIdentity>,
@@ -94,26 +94,23 @@ where
     Inspect:
         Fn(u32) -> std::result::Result<Option<homeboy_core::process::ProcessStartIdentity>, String>,
 {
-    matches!(
-        tunnel_process_ownership(pid, expected, inspect),
-        TunnelProcessOwnership::Owned
-    )
+    expected.is_some_and(|expected| {
+        matches!(
+            tunnel_process_ownership(pid, expected, inspect),
+            TunnelProcessOwnership::Owned
+        )
+    })
 }
 
 pub(crate) fn tunnel_process_ownership<Inspect>(
     pid: u32,
-    expected: Option<&RunnerTunnelProcessStartIdentity>,
+    expected: &RunnerTunnelProcessStartIdentity,
     inspect: Inspect,
 ) -> TunnelProcessOwnership
 where
     Inspect:
         Fn(u32) -> std::result::Result<Option<homeboy_core::process::ProcessStartIdentity>, String>,
 {
-    let Some(expected) = expected else {
-        return homeboy_core::process::pid_is_running(pid)
-            .then_some(TunnelProcessOwnership::Owned)
-            .unwrap_or(TunnelProcessOwnership::ProcessAbsent);
-    };
     match inspect(pid) {
         Ok(None) => TunnelProcessOwnership::ProcessAbsent,
         Err(_) => TunnelProcessOwnership::KernelIdentityUnavailable,
@@ -236,44 +233,6 @@ fn system_hostname() -> Option<String> {
     {
         std::env::var("COMPUTERNAME").ok()
     }
-}
-
-fn retire_superseded_controller_sessions(
-    config_root: &Path,
-    runner_id: &str,
-    current: &str,
-) -> Result<()> {
-    let directory = paths::runner_sessions_dir_in_root(config_root).join(runner_id);
-    // Only the local hostname/uid alias is provably ours. Other historical
-    // controller ids may belong to peers, even when their PIDs exist locally.
-    let local_legacy = format!(
-        "{}-uid-{}",
-        system_hostname().unwrap_or_default(),
-        effective_uid()
-    );
-    for path in peer_session_paths(&directory)? {
-        if let Some(session) = read_session_at(&path)? {
-            if session.controller_id.as_deref() != Some(current)
-                && session.controller_id.as_deref() == Some(local_legacy.as_str())
-            {
-                terminate_tunnel_if_owned(&session);
-                std::fs::remove_file(&path).map_err(|error| {
-                    Error::internal_io(
-                        error.to_string(),
-                        Some(format!("delete superseded session {}", path.display())),
-                    )
-                })?;
-            }
-        }
-    }
-    Ok(())
-}
-
-#[cfg(test)]
-fn is_hostname_uid_controller_id(value: &str) -> bool {
-    value
-        .rsplit_once("-uid-")
-        .is_some_and(|(_, uid)| !uid.is_empty() && uid.chars().all(|c| c.is_ascii_digit()))
 }
 
 pub(crate) fn read_session(runner_id: &str) -> Result<Option<RunnerSession>> {
@@ -784,7 +743,6 @@ pub(super) fn write_session(session: &RunnerSession) -> Result<()> {
     } else {
         controller_id()
     };
-    retire_superseded_controller_sessions(&paths::homeboy()?, &session.runner_id, &controller_id)?;
     write_session_at(
         &paths::runner_controller_session_file(&session.runner_id, &controller_id)?,
         session,
@@ -1196,6 +1154,8 @@ mod tests {
             session.controller_id = Some(controller_id());
             // This process is alive, so only `/health` can refute the session.
             session.tunnel_pid = Some(std::process::id());
+            session.tunnel_process_start_identity =
+                capture_tunnel_process_start_identity(session.tunnel_pid).unwrap();
             write_session(&session).expect("write session");
             assert!(read_session(&session.runner_id)
                 .expect("read session")
@@ -1294,15 +1254,15 @@ mod tests {
             start_microseconds: 2,
         };
         assert_eq!(
-            tunnel_process_ownership(42, Some(&expected), |_| Ok(None)),
+            tunnel_process_ownership(42, &expected, |_| Ok(None)),
             TunnelProcessOwnership::ProcessAbsent
         );
         assert_eq!(
-            tunnel_process_ownership(42, Some(&expected), |_| Err("denied".to_string())),
+            tunnel_process_ownership(42, &expected, |_| Err("denied".to_string())),
             TunnelProcessOwnership::KernelIdentityUnavailable
         );
         assert_eq!(
-            tunnel_process_ownership(42, Some(&expected), |_| Ok(Some(
+            tunnel_process_ownership(42, &expected, |_| Ok(Some(
                 homeboy_core::process::ProcessStartIdentity::Macos {
                     start_seconds: 3,
                     start_microseconds: 4,
@@ -1667,31 +1627,6 @@ mod tests {
             controller_id_from_scope(Some("  "), "generated".into()),
             "generated"
         );
-    }
-
-    #[test]
-    fn old_hostname_uid_sessions_are_retired_when_the_current_session_is_written() {
-        let root = TempDir::new().expect("config root");
-        let runner = paths::runner_sessions_dir_in_root(root.path()).join("lab");
-        std::fs::create_dir_all(&runner).expect("runner session dir");
-        let legacy = format!(
-            "{}-uid-{}",
-            system_hostname().unwrap_or_default(),
-            effective_uid()
-        );
-        let old = session(&legacy, "orphan");
-        let current = session("stable-controller-a1b2c3d4", "current");
-        write_session_at(&runner.join(format!("{legacy}.json")), &old).expect("write old session");
-        write_session_at(&runner.join("stable-controller-a1b2c3d4.json"), &current)
-            .expect("write current");
-        retire_superseded_controller_sessions(root.path(), "lab", "stable-controller-a1b2c3d4")
-            .expect("retire old session");
-        assert!(!runner.join(format!("{legacy}.json")).exists());
-        assert_eq!(
-            read_session_at(&runner.join("stable-controller-a1b2c3d4.json")).expect("read current"),
-            Some(current)
-        );
-        assert!(!is_hostname_uid_controller_id("peer-controller"));
     }
 
     #[test]

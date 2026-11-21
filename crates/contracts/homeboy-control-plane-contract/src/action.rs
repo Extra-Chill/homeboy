@@ -50,6 +50,9 @@ pub struct ControlPlaneRecoverParameters<G = Value, P = Value, R = Value> {
     /// Per-gate wall-clock limit for a `regate`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub gate_timeout_seconds: Option<u64>,
+    /// Per-gate no-progress window for a `regate`; `0` disables it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub gate_no_progress_timeout_seconds: Option<u64>,
 }
 
 pub const CONTROL_PLANE_ACTION_ID_BOUND: usize = 128;
@@ -370,6 +373,11 @@ impl ControlPlaneActionRequest {
             if parameters.gate_timeout_seconds.is_some() && !parameters.regate {
                 return Err(crate::ControlPlaneError::invalid_argument(
                     "gate_timeout_seconds requires regate",
+                ));
+            }
+            if parameters.gate_no_progress_timeout_seconds.is_some() && !parameters.regate {
+                return Err(crate::ControlPlaneError::invalid_argument(
+                    "gate_no_progress_timeout_seconds requires regate",
                 ));
             }
         }

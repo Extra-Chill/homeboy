@@ -3800,6 +3800,11 @@ impl JobStore {
     ) -> Result<bool> {
         let reservation_id = Uuid::new_v4().to_string();
         let reservation_expires_at_ms = now.saturating_add(LOCAL_CHILD_RESERVATION_LEASE_MS);
+        // Gates of `--placement local` Cooks on this host draw from the same
+        // slots as runner children (#18555); read outside the store lock.
+        let local_gate_holders = runner_capacity
+            .map(|_| crate::local_gate_admission::counted_holders())
+            .unwrap_or(0);
         self.durable_transaction(|inner| {
             let job = inner
                 .jobs
@@ -3858,7 +3863,11 @@ impl JobStore {
                             .as_ref()
                             .is_some_and(|runner| runner.runner_id == runner_id)
                 });
-                if active.count() >= capacity {
+                // Charged holders never take the last slot: remote work progresses.
+                let ceiling = capacity
+                    .saturating_sub(local_gate_holders)
+                    .max(capacity.min(1));
+                if active.count() >= ceiling {
                     return Ok(false);
                 }
             }
@@ -4142,7 +4151,7 @@ pub(super) fn reap_cancelled_local_child(child: Option<&LocalChildProcessIdentit
             }
         }
     }
-    crate::process::terminate_isolated_process_group_with_grace(
+    crate::process::terminate_isolated_process_group(
         process_group_id,
         LOCAL_CHILD_CANCELLATION_GRACE,
     )?;
@@ -4416,7 +4425,7 @@ fn local_child_liveness(child: &LocalChildExecution) -> LocalChildLiveness {
             LocalChildLiveness::Dead | LocalChildLiveness::IdentityMismatch
         ) {
             if let Some(pgid) = process.process_group_id {
-                return match crate::process::isolated_process_group_is_running(pgid) {
+                return match homeboy_engine_primitives::command::process_group_is_running(pgid) {
                     Ok(true) => LocalChildLiveness::Live,
                     Ok(false) => root_liveness,
                     Err(evidence) => LocalChildLiveness::Unsupported(evidence),
