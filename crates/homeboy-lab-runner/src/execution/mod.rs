@@ -104,7 +104,7 @@ use submission::*;
 // lab_env, lab/offload) and re-exported by the parent `runner` module.
 pub(crate) use daemon::{
     daemon_observation_was_lost, observe_daemon_job_until_terminal,
-    observe_daemon_job_until_terminal_with, reserve_daemon_admission,
+    observe_daemon_job_until_terminal_with, read_daemon_job, reserve_daemon_admission,
     reserve_daemon_admission_with_recovery, result_event_data, DaemonAdmissionReservation,
 };
 pub use daemon_api::{canonical_daemon_body, daemon_api_get};

@@ -1467,6 +1467,24 @@ fn recover_cook_once(
     };
     let run_id = report.run_id.clone();
     let run_id = run_id.as_str();
+    // The daemon records when it admits a queued gate job. A gate it admitted
+    // after its controller died ran (or still runs) without a local fence:
+    // report that gate instead of a regate as if none had started (#18709).
+    let mut report = report;
+    if report.step == CookRecoveryStep::Regate {
+        if let Some(job) = super::cook_promotion::admitted_replacement_gate_job(run_id) {
+            if job["running"] == true {
+                report.status = "in_flight".into();
+                report.step = CookRecoveryStep::none(format!(
+                    "Lab gate job `{}` on runner `{}` was admitted by the daemon and is still running; wait for it: {}",
+                    job["job_id"].as_str().unwrap_or_default(),
+                    job["runner_id"].as_str().unwrap_or_default(),
+                    job["logs_command"].as_str().unwrap_or_default(),
+                ));
+            }
+            report.result = Some(serde_json::json!({ "admitted_gate_job": job }));
+        }
+    }
     if !preflight
         && (!overrides.is_empty()
             || matches!(
