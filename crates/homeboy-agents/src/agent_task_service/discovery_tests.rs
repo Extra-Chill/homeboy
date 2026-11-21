@@ -47,15 +47,15 @@ fn mission_discovery_uses_status_attempt_outcome() {
             };
             agent_task_lifecycle::set_run_state(&mut selected, expected);
             store.write_record(&selected).unwrap();
-            store
-                .write_cook_index_attempt(
-                    &mission,
-                    1,
+            if state == "succeeded" {
+                agent_task_lifecycle::record_cook_finalization_in_store(
+                    &store,
                     &attempt,
-                    "2026-01-01T00:00:00Z".into(),
-                    None,
+                    json!({"status":"review_ready", "pr_url":"https://github.com/example/repo/pull/1"}),
                 )
                 .unwrap();
+            }
+            store.record_cook_attempt(&mission, 1, &attempt).unwrap();
             let page = discover_runs_page(
                 AgentTaskDiscoveryFilter::All,
                 AgentTaskDiscoveryPageOptions {
@@ -107,9 +107,7 @@ fn terminal_transition_settles_cook_observations_and_span() {
                     ))
                     .unwrap();
             }
-            store
-                .write_cook_index_attempt(&cook, 1, &attempt, "2026-01-01T00:00:00Z".into(), None)
-                .unwrap();
+            store.record_cook_attempt(&cook, 1, &attempt).unwrap();
             if status == "published" {
                 for id in [&cook, &attempt] {
                     agent_task_lifecycle::record_cook_finalization_in_store(

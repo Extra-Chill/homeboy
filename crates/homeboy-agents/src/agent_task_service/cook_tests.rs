@@ -9946,9 +9946,7 @@ fn operator_attempt_cancel_preserves_earlier_candidate_for_recovery() {
             .unwrap();
         recipe.attempts.push(later.clone());
         recipes.persist_recipe(&recipe).unwrap();
-        let index = store
-            .write_cook_index_attempt(cook, 2, &later.run_id, "2026-01-01T00:00:00Z".into(), None)
-            .unwrap();
+        let index = store.record_cook_attempt(cook, 2, &later.run_id).unwrap();
         // The later cancelled record has no candidate of its own.
         agent_task_lifecycle::rewrite_record_for_test(&index.latest_run_id, |record| {
             record

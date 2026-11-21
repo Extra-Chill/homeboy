@@ -497,22 +497,6 @@ impl CompositeWorkspaceClaimAcquisitionGuard {
     }
 }
 
-#[expect(
-    clippy::result_large_err,
-    reason = "failure retains all acquired authority receipts for deterministic rollback"
-)]
-pub fn acquire_composite_workspace_claim(
-    workspace: WorkspaceIdentity,
-    generation: u64,
-) -> std::result::Result<CompositeWorkspaceClaim, CompositeWorkspaceClaimAcquisitionFailure> {
-    acquire_composite_workspace_claim_until(
-        workspace,
-        generation,
-        CompositeClaimAuthorities::ConfiguredRunners,
-        std::time::Instant::now() + std::time::Duration::from_secs(30),
-    )
-}
-
 /// Which authorities a composite claim fences.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CompositeClaimAuthorities {
@@ -738,13 +722,6 @@ pub fn composite_workspace_claim_ready_to_commit(claim: &CompositeWorkspaceClaim
     })
 }
 
-pub fn validate_composite_workspace_claim(claim: &CompositeWorkspaceClaim) -> Result<bool> {
-    validate_composite_workspace_claim_until(
-        claim,
-        std::time::Instant::now() + std::time::Duration::from_secs(30),
-    )
-}
-
 pub fn validate_composite_workspace_claim_until(
     claim: &CompositeWorkspaceClaim,
     deadline: std::time::Instant,
@@ -813,69 +790,6 @@ pub fn release_composite_workspace_claim_until(
     }
 }
 
-/// Persist an exact composite receipt before retrying its idempotent release.
-/// The returned status is safe to surface to users: opaque tokens remain only
-/// in the owner-only receipt.
-pub fn persist_and_retry_composite_workspace_cleanup(
-    claim: CompositeWorkspaceClaim,
-    error: &Error,
-) -> CompositeWorkspaceCleanupStatus {
-    let pending = PendingCompositeWorkspaceCleanup {
-        schema: PENDING_COMPOSITE_WORKSPACE_CLEANUP_SCHEMA.into(),
-        recovery_id: uuid::Uuid::new_v4().to_string(),
-        created_at: chrono::Utc::now().to_rfc3339(),
-        workspace: claim.workspace,
-        generation: claim.generation,
-        local: claim.local,
-        local_released: claim.local_released,
-        runners: claim
-            .runners
-            .into_iter()
-            .map(|component| PendingCompositeWorkspaceCleanupComponent {
-                runner_id: component.runner_id,
-                claim: component.claim,
-                released: component.released,
-            })
-            .collect(),
-        attempt_count: 0,
-        last_error: PendingCompositeWorkspaceCleanupError {
-            code: error.code.as_str().into(),
-            message: error.message.clone(),
-        },
-    };
-    let recovery_id = pending.recovery_id.clone();
-    let store = match open_composite_store().and_then(|store| {
-        write_pending_composite_cleanup(&store, &pending, ExpectedRevision::Absent)?;
-        Ok(store)
-    }) {
-        Ok(store) => store,
-        Err(error) => {
-            return CompositeWorkspaceCleanupStatus::Quarantined {
-                recovery_id,
-                reason: format!("could not persist cleanup receipt: {}", error.message),
-            }
-        }
-    };
-    // The exact receipt is durable now; removing the token-free intent cannot
-    // reopen acquisition because the receipt itself remains identity-scoped.
-    if let Err(error) = remove_composite_acquisition_intent(&store, &pending.workspace, None) {
-        return CompositeWorkspaceCleanupStatus::Quarantined {
-            recovery_id,
-            reason: format!(
-                "could not finalize cleanup receipt replacement: {}",
-                error.message
-            ),
-        };
-    }
-    retry_pending_composite_workspace_cleanup(&pending.recovery_id).unwrap_or_else(|error| {
-        CompositeWorkspaceCleanupStatus::Pending {
-            recovery_id: pending.recovery_id,
-            attempt_count: pending.attempt_count,
-            failures: vec![error.message],
-        }
-    })
-}
-
 /// Persist a cleanup receipt within a caller-owned operation budget. It never
 /// starts a remote release: an expired apply page leaves the receipt for the
 /// normal recovery worker rather than opening a fresh release window.
@@ -920,97 +834,6 @@ pub fn persist_and_retry_composite_workspace_cleanup_until(
             recovery_id,
             reason: format!("could not persist cleanup receipt: {}", error.message),
         },
-    }
-}
-
-/// Explicit lifecycle recovery API. Every pending receipt is replayed at most
-/// `limit` times; completed receipts are removed atomically after all component
-/// releases have reported success.
-pub fn retry_pending_composite_workspace_cleanups(
-    limit: usize,
-) -> Result<Vec<CompositeWorkspaceCleanupStatus>> {
-    let entries = read_pending_composite_cleanups(&open_composite_store()?)?;
-    entries
-        .into_iter()
-        .take(limit)
-        .map(|(_, pending)| retry_pending_composite_workspace_cleanup(&pending.recovery_id))
-        .collect()
-}
-
-/// Replay one receipt. Its record revision is the concurrency guard: a retry
-/// that loses the compare-and-set to another retry reports the stored state
-/// instead of overwriting it, and component releases are idempotent.
-fn retry_pending_composite_workspace_cleanup(
-    recovery_id: &str,
-) -> Result<CompositeWorkspaceCleanupStatus> {
-    let store = open_composite_store()?;
-    let Some((revision, mut pending)) = read_pending_composite_cleanups(&store)?
-        .into_iter()
-        .find(|(_, pending)| pending.recovery_id == recovery_id)
-    else {
-        return Ok(CompositeWorkspaceCleanupStatus::Released);
-    };
-    let mut claim = CompositeWorkspaceClaim {
-        workspace: pending.workspace.clone(),
-        generation: pending.generation,
-        // A cleanup receipt is never committed, so its old commit deadline is
-        // irrelevant to an idempotent release.
-        commit_deadline: std::time::Instant::now(),
-        local: pending.local.clone(),
-        local_released: pending.local_released,
-        runners: pending
-            .runners
-            .iter()
-            .map(|component| CompositeWorkspaceClaimComponent {
-                runner_id: component.runner_id.clone(),
-                claim: component.claim.clone(),
-                released: component.released,
-            })
-            .collect(),
-    };
-    match release_composite_workspace_claim(&mut claim)? {
-        CompositeWorkspaceClaimRelease::Released => {
-            match store.delete_coordination_record(
-                COMPOSITE_CLEANUP_NAMESPACE,
-                &pending.recovery_id,
-                revision,
-            )? {
-                RecordOutcome::Applied(_) | RecordOutcome::Conflict { current: None } => {
-                    Ok(CompositeWorkspaceCleanupStatus::Released)
-                }
-                RecordOutcome::Conflict { current: Some(_) } => Err(composite_error(
-                    "pending composite cleanup receipt changed while it was retried",
-                    Vec::new(),
-                )),
-            }
-        }
-        CompositeWorkspaceClaimRelease::Partial { failures } => {
-            pending.local_released = claim.local_released;
-            pending.runners = claim
-                .runners
-                .into_iter()
-                .map(|component| PendingCompositeWorkspaceCleanupComponent {
-                    runner_id: component.runner_id,
-                    claim: component.claim,
-                    released: component.released,
-                })
-                .collect();
-            pending.attempt_count = pending.attempt_count.saturating_add(1);
-            pending.last_error = PendingCompositeWorkspaceCleanupError {
-                code: "workspace_claim_composite".into(),
-                message: failures.join("; "),
-            };
-            write_pending_composite_cleanup(
-                &store,
-                &pending,
-                ExpectedRevision::Revision(revision),
-            )?;
-            Ok(CompositeWorkspaceCleanupStatus::Pending {
-                recovery_id: pending.recovery_id,
-                attempt_count: pending.attempt_count,
-                failures,
-            })
-        }
     }
 }
 
@@ -1469,15 +1292,6 @@ pub fn workspace_claim_binding(run_id: &str) -> Result<Option<WorkspaceClaimBind
             lifecycle_revision: record.workspace_lifecycle_revision,
             claim: Some(claim),
         }))
-}
-
-/// Legacy generic runner runs have a durable run id but no agent-task record.
-/// They remain unbound; an existing workspace-owning record still fails closed.
-pub fn workspace_claim_binding_if_present(run_id: &str) -> Result<Option<WorkspaceClaimBinding>> {
-    match store::read_record(run_id) {
-        Ok(_) => workspace_claim_binding(run_id),
-        Err(_) => Ok(None),
-    }
 }
 
 /// Direct daemons issue their own durable lease in their authority store. The
@@ -2024,8 +1838,13 @@ mod tests {
             let _provider = install_claim_provider(provider);
             let workspace = workspace();
 
-            let failure = acquire_composite_workspace_claim(workspace.clone(), 1)
-                .expect_err("enumeration must fail");
+            let failure = acquire_composite_workspace_claim_until(
+                workspace.clone(),
+                1,
+                CompositeClaimAuthorities::ConfiguredRunners,
+                std::time::Instant::now() + std::time::Duration::from_secs(30),
+            )
+            .expect_err("enumeration must fail");
 
             assert_eq!(failure.primary.message, "injected enumeration failure");
             assert!(failure.rollback_failures.is_empty());
@@ -2042,8 +1861,13 @@ mod tests {
             with_isolated_home(|_| {
                 let (provider, live) = provider(Ok(runner_ids));
                 let _provider = install_claim_provider(provider);
-                let failure = acquire_composite_workspace_claim(workspace(), 1)
-                    .expect_err("invalid runner IDs must fail");
+                let failure = acquire_composite_workspace_claim_until(
+                    workspace(),
+                    1,
+                    CompositeClaimAuthorities::ConfiguredRunners,
+                    std::time::Instant::now() + std::time::Duration::from_secs(30),
+                )
+                .expect_err("invalid runner IDs must fail");
                 assert!(failure.primary.message.contains("runner id"));
                 assert!(failure.cleanup.is_none());
                 assert!(live.lock().expect("live claims").is_empty());
@@ -2061,8 +1885,13 @@ mod tests {
             provider.fail_acquire_for = Some("runner-b".into());
             let _provider = install_claim_provider(provider);
 
-            let failure = acquire_composite_workspace_claim(workspace(), 1)
-                .expect_err("second remote acquisition must fail");
+            let failure = acquire_composite_workspace_claim_until(
+                workspace(),
+                1,
+                CompositeClaimAuthorities::ConfiguredRunners,
+                std::time::Instant::now() + std::time::Duration::from_secs(30),
+            )
+            .expect_err("second remote acquisition must fail");
 
             assert_eq!(
                 failure.primary.message,
@@ -2078,7 +1907,7 @@ mod tests {
     }
 
     #[test]
-    fn failed_remote_rollback_persists_and_retries_a_durable_cleanup_receipt() {
+    fn failed_remote_rollback_persists_a_durable_cleanup_receipt() {
         with_isolated_home(|_| {
             let (mut provider, live) = provider(Ok(vec!["runner-a".into(), "runner-b".into()]));
             provider.fail_acquire_for = Some("runner-b".into());
@@ -2086,8 +1915,13 @@ mod tests {
             faults.lock().expect("faults").insert("runner-a".into());
             let _provider = install_claim_provider(provider);
 
-            let failure = acquire_composite_workspace_claim(workspace(), 1)
-                .expect_err("second remote acquisition must fail");
+            let failure = acquire_composite_workspace_claim_until(
+                workspace(),
+                1,
+                CompositeClaimAuthorities::ConfiguredRunners,
+                std::time::Instant::now() + std::time::Duration::from_secs(30),
+            )
+            .expect_err("second remote acquisition must fail");
 
             assert_eq!(
                 failure.primary.message,
@@ -2112,29 +1946,26 @@ mod tests {
                 pending_composite_cleanup_for_workspace(&workspace()),
                 Some(CompositeWorkspaceCleanupStatus::Pending { .. })
             ));
-            let blocked = acquire_composite_workspace_claim(workspace(), 2)
-                .expect_err("same workspace must fail closed while cleanup is pending");
+            let blocked = acquire_composite_workspace_claim_until(
+                workspace(),
+                2,
+                CompositeClaimAuthorities::ConfiguredRunners,
+                std::time::Instant::now() + std::time::Duration::from_secs(30),
+            )
+            .expect_err("same workspace must fail closed while cleanup is pending");
             assert_eq!(blocked.primary.retryable, Some(true));
             faults.lock().expect("faults").clear();
-            let retry = retry_pending_composite_workspace_cleanups(1).expect("restart retry");
-            assert!(matches!(
-                retry.as_slice(),
-                [CompositeWorkspaceCleanupStatus::Released]
-            ));
-            let mut unrelated = acquire_composite_workspace_claim(
+            let mut unrelated = acquire_composite_workspace_claim_until(
                 WorkspaceIdentity::new("test", "unrelated-workspace-claim").expect("identity"),
                 1,
+                CompositeClaimAuthorities::ConfiguredRunners,
+                std::time::Instant::now() + std::time::Duration::from_secs(30),
             )
             .expect("unrelated workspace can proceed");
             assert!(matches!(
                 release_composite_workspace_claim(&mut unrelated).expect("unrelated release"),
                 CompositeWorkspaceClaimRelease::Released
             ));
-            // A fresh lifecycle call can replay the persisted receipt without
-            // retaining any process-local composite token map.
-            assert!(retry_pending_composite_workspace_cleanups(1)
-                .expect("idempotent retry")
-                .is_empty());
             assert!(live.lock().expect("live claims").is_empty());
         });
     }
@@ -2172,8 +2003,13 @@ mod tests {
             )
             .expect("corrupt receipt");
 
-            let blocked = acquire_composite_workspace_claim(workspace.clone(), 2)
-                .expect_err("malformed receipt must fail closed");
+            let blocked = acquire_composite_workspace_claim_until(
+                workspace.clone(),
+                2,
+                CompositeClaimAuthorities::ConfiguredRunners,
+                std::time::Instant::now() + std::time::Duration::from_secs(30),
+            )
+            .expect_err("malformed receipt must fail closed");
             assert!(
                 blocked.primary.details["workspace_claim_composite_cleanup"]["status"]
                     .as_str()
@@ -2229,9 +2065,11 @@ mod tests {
                 composite_acquisition_intent_for_workspace(&workspace),
                 Some(CompositeWorkspaceCleanupStatus::Pending { .. })
             ));
-            let mut unrelated = acquire_composite_workspace_claim(
+            let mut unrelated = acquire_composite_workspace_claim_until(
                 WorkspaceIdentity::new("test", "unrelated-intent").expect("identity"),
                 1,
+                CompositeClaimAuthorities::ConfiguredRunners,
+                std::time::Instant::now() + std::time::Duration::from_secs(30),
             )
             .expect("unrelated identity remains available");
             assert!(matches!(
@@ -2251,8 +2089,13 @@ mod tests {
             release_local_workspace_claim(&live).expect("release live authority");
             assert!(composite_acquisition_intent_for_workspace(&workspace).is_none());
 
-            let mut claim = acquire_composite_workspace_claim(workspace.clone(), 1)
-                .expect("clear intent permits acquisition");
+            let mut claim = acquire_composite_workspace_claim_until(
+                workspace.clone(),
+                1,
+                CompositeClaimAuthorities::ConfiguredRunners,
+                std::time::Instant::now() + std::time::Duration::from_secs(30),
+            )
+            .expect("clear intent permits acquisition");
             assert_eq!(
                 intent_record(&workspace).expect("active intent").state,
                 INTENT_STATE_ACTIVE
@@ -2300,8 +2143,13 @@ mod tests {
             let _provider = install_claim_provider(provider);
             FAIL_NEXT_PENDING_COMPOSITE_CLEANUP_WRITE.store(true, Ordering::SeqCst);
 
-            let failure = acquire_composite_workspace_claim(workspace(), 1)
-                .expect_err("incomplete rollback must fail");
+            let failure = acquire_composite_workspace_claim_until(
+                workspace(),
+                1,
+                CompositeClaimAuthorities::ConfiguredRunners,
+                std::time::Instant::now() + std::time::Duration::from_secs(30),
+            )
+            .expect_err("incomplete rollback must fail");
             assert!(
                 failure.primary.details["workspace_claim_composite_cleanup"]["status"]
                     .as_str()
@@ -2309,11 +2157,19 @@ mod tests {
                     .contains("quarantined")
             );
             assert!(intent_record(&workspace()).is_some());
-            assert!(acquire_composite_workspace_claim(workspace(), 2).is_err());
+            assert!(acquire_composite_workspace_claim_until(
+                workspace(),
+                2,
+                CompositeClaimAuthorities::ConfiguredRunners,
+                std::time::Instant::now() + std::time::Duration::from_secs(30)
+            )
+            .is_err());
 
-            let mut unrelated = acquire_composite_workspace_claim(
+            let mut unrelated = acquire_composite_workspace_claim_until(
                 WorkspaceIdentity::new("test", "unrelated-write-failure").expect("identity"),
                 1,
+                CompositeClaimAuthorities::ConfiguredRunners,
+                std::time::Instant::now() + std::time::Duration::from_secs(30),
             )
             .expect("unrelated identity remains available");
             // The injected runner failure is global to this test provider; the

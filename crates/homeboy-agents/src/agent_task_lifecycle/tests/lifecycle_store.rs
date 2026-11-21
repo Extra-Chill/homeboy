@@ -265,10 +265,10 @@ fn lifecycle_stores_isolate_identical_ids_and_lock_domains() {
     right
         .write_aggregate(run_id, &right_aggregate)
         .expect("write right aggregate");
-    left.write_cook_index_attempt(cook_id, 1, run_id, "left".to_string(), None)
+    left.record_cook_attempt(cook_id, 1, run_id)
         .expect("write left index");
     right
-        .write_cook_index_attempt(cook_id, 2, run_id, "right".to_string(), None)
+        .record_cook_attempt(cook_id, 2, run_id)
         .expect("write right index");
 
     assert_ne!(left.run_dir(run_id), right.run_dir(run_id));
@@ -560,12 +560,8 @@ fn cook_index_lives_only_in_the_store_and_survives_reopen() {
         run.metadata["cook_id"] = json!(cook_id);
         store.write_record(&run).unwrap();
     }
-    store
-        .write_cook_index_attempt(cook_id, 1, first_run, "first".to_string(), None)
-        .unwrap();
-    store
-        .write_cook_index_attempt(cook_id, 2, latest_run, "latest".to_string(), None)
-        .unwrap();
+    store.record_cook_attempt(cook_id, 1, first_run).unwrap();
+    store.record_cook_attempt(cook_id, 2, latest_run).unwrap();
 
     assert!(
         !store.cook_dir(cook_id).join("index.json").exists(),
@@ -588,7 +584,7 @@ fn cook_index_lives_only_in_the_store_and_survives_reopen() {
     assert!(reopened.cook_index_exists(cook_id));
 
     let error = reopened
-        .write_cook_index_attempt(cook_id, 3, first_run, "conflict".to_string(), None)
+        .record_cook_attempt(cook_id, 3, first_run)
         .expect_err("one run cannot claim a second attempt number");
     assert_eq!(
         error.code,

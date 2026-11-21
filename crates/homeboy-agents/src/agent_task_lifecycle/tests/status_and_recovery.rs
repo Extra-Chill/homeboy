@@ -2467,8 +2467,9 @@ fn record_health_reports_older_schema_as_malformed() {
         .expect("older schema stored");
         // Older record shapes are not migrated: they are reported and excluded
         // from typed reads (#15742).
-        let health =
-            record_health_summary_in_store(&test_lifecycle_store()).expect("older schema health");
+        let health = list_records_with_health_in_store(&test_lifecycle_store())
+            .expect("older schema health")
+            .1;
         assert_eq!(health.malformed, 1);
         assert_eq!(
             health.samples[0].reason,
@@ -2513,8 +2514,9 @@ fn malformed_typed_pending_handoff_is_health_malformed_and_unreconciled() {
         })
         .expect("raw corruption fixture stored");
 
-        let health =
-            record_health_summary_in_store(&test_lifecycle_store()).expect("health report");
+        let health = list_records_with_health_in_store(&test_lifecycle_store())
+            .expect("health report")
+            .1;
         assert_eq!(health.malformed, 1);
         assert_eq!(
             health.samples[0].reason,

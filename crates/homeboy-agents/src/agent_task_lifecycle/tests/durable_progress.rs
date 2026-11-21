@@ -1053,7 +1053,7 @@ fn imported_aggregate_does_not_invent_submit_for_foreign_tasks() {
         .read_record("durable-imported-tasks")
         .expect("record");
     lifecycle_store
-        .write_aggregate_and_record(&record, &aggregate)
+        .import_record_with_aggregate(&mut record.clone(), &aggregate)
         .expect("imported aggregate");
     record = lifecycle_store
         .read_record("durable-imported-tasks")
@@ -1188,7 +1188,7 @@ fn aggregate_replacement_replays_reordered_same_content() {
             .read_record("durable-reorder")
             .expect("record");
         lifecycle_store
-            .write_aggregate_and_record(&record, &reordered)
+            .import_record_with_aggregate(&mut record.clone(), &reordered)
             .expect("reordered aggregate replay");
         let running: Vec<_> = durable_events(&lifecycle_store, "durable-reorder")
             .into_iter()

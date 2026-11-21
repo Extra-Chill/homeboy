@@ -181,13 +181,7 @@ mod tests {
             };
             store.write_record(&record).expect("write linked record");
             store
-                .write_cook_index_attempt(
-                    "cook-alias-for-terminal-recovery",
-                    1,
-                    run_id,
-                    "2026-09-12T00:00:00Z".to_string(),
-                    None,
-                )
+                .record_cook_attempt("cook-alias-for-terminal-recovery", 1, run_id)
                 .expect("write cook alias");
 
             let calls = Arc::new(AtomicUsize::new(0));
