@@ -574,6 +574,28 @@ fn resource_lines(run: &Value) -> Vec<String> {
             .as_f64()
             .unwrap_or_default(),
     )];
+    for cook in resources["cooks"].as_array().into_iter().flatten() {
+        for attempt in cook["attempts"].as_array().into_iter().flatten() {
+            lines.push(format!(
+                "Cook {} ({}):",
+                cook["run_id"].as_str().unwrap_or_default(),
+                attempt["attempt_id"].as_str().unwrap_or("unattributed"),
+            ));
+            for bucket in attempt["buckets"].as_array().into_iter().flatten() {
+                let child = bucket["child_cpu_seconds"]
+                    .as_f64()
+                    .map(|cpu| format!("{cpu:.2}s"))
+                    .unwrap_or_else(|| "unrecorded".to_string());
+                lines.push(format!(
+                    "  {}: homeboy={:.2}s child={} wall={:.3}s",
+                    bucket["bucket"].as_str().unwrap_or_default(),
+                    bucket["homeboy_cpu_seconds"].as_f64().unwrap_or_default(),
+                    child,
+                    bucket["wall_ms"].as_f64().unwrap_or_default() / 1000.0,
+                ));
+            }
+        }
+    }
     for phase in resources["phases"].as_array().into_iter().flatten() {
         let memory = phase["memory_peak_bytes"]
             .as_u64()

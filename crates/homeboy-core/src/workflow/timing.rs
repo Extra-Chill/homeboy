@@ -108,6 +108,7 @@ fn finish(
     };
     timing.completed.spans.push(PhaseSpan {
         id: phase.into(),
+        attempt_id: None,
         status: if failed {
             PhaseStatus::Failed
         } else {

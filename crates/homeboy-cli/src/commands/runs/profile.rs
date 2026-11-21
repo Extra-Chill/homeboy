@@ -147,13 +147,20 @@ mod tests {
                 )
                 .unwrap();
             let span = |id: &str, cpu: u64, homeboy: u64| {
-                json!({"id": id, "status": "ok", "started_at": "2026-11-19T00:00:00.000Z",
+                json!({"id": id, "attempt_id": "attempt-1", "status": "ok", "started_at": "2026-11-19T00:00:00.000Z",
                     "usage": {"cpu_usage_usec": cpu, "cpu_user_usec": cpu, "cpu_system_usec": 0, "homeboy_cpu_usec": homeboy, "wall_ms": 1,
                         "source": "rusage", "estimated": true}})
             };
             let report = serde_json::from_value(json!({"spans": [
                 span("publish.aggregate", 20_000, 20_000),
                 span("stage.workspace", 10_000, 0),
+                span("provider.command", 0, 0),
+                span("gate.test", 0, 0),
+                span("unknown", 0, 0),
+                ({ let mut value = span("gate.retry", 0, 0);
+                  value["attempt_id"] = json!("attempt-2"); value }),
+                ({ let mut value = span("schedule", 0, 0);
+                  value.as_object_mut().unwrap().remove("attempt_id"); value }),
             ]}))
             .unwrap();
             store
@@ -198,6 +205,32 @@ mod tests {
                 );
             };
             split(&resources.overhead);
+            let cooks = &resources.cooks;
+            assert_eq!(cooks.len(), 1);
+            assert_eq!(cooks[0].run_id, cook.id);
+            assert_eq!(cooks[0].attempts.len(), 3);
+            assert_eq!(cooks[0].attempts[0].attempt_id, None);
+            assert_eq!(
+                cooks[0].attempts[2].attempt_id.as_deref(),
+                Some("attempt-2")
+            );
+            let attempt = &cooks[0].attempts[1];
+            assert_eq!(attempt.attempt_id.as_deref(), Some("attempt-1"));
+            assert_eq!(attempt.buckets[0].bucket, "setup");
+            assert_eq!(attempt.buckets[0].child_cpu_seconds, Some(0.01));
+            assert_eq!(attempt.buckets[3].bucket, "finalize");
+            assert_eq!(attempt.buckets[3].homeboy_cpu_seconds, 0.02);
+            assert_eq!(
+                attempt.buckets.iter().map(|b| b.bucket).collect::<Vec<_>>(),
+                ["setup", "agent", "verify", "finalize", "other"]
+            );
+            assert_eq!(attempt.buckets.iter().map(|b| b.wall_ms).sum::<f64>(), 5.0);
+            let (RunsOutput::Show(cook_show), _) =
+                super::super::handlers::show_run_in_store(&store, &cook.id).unwrap()
+            else {
+                panic!("Cook runs show output");
+            };
+            assert_eq!(cook_show.run.resources.unwrap().cooks, *cooks);
 
             let (RunsOutput::Profile(profile), _) = runs_profile(
                 &store,
@@ -227,6 +260,7 @@ mod tests {
             );
             assert!(rows[0].wall_ms.p50 > 0.0);
             split(&profile.profile.overhead);
+            assert_eq!(profile.profile.cooks, *cooks);
         });
     }
 }
