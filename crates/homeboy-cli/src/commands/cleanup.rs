@@ -3003,6 +3003,16 @@ fn run_cleanup_category(
             );
         }
     }
+    if !args.full {
+        let export = cleanup_replay_command(&args, true, false);
+        for category in &mut categories[first_category..] {
+            bound_category_evidence(
+                &mut category.output,
+                &category.continuation_command,
+                &export,
+            );
+        }
+    }
     homeboy::core::observation::phase_timing::finish(
         &format!("cleanup.{}", metadata.category),
         started,
@@ -4373,6 +4383,42 @@ fn category_outcome(apply: bool, metrics: &CleanupCategoryMetrics) -> String {
         CLEANUP_CATEGORY_OUTCOME_NO_EFFECT.to_string()
     } else {
         "completed".to_string()
+    }
+}
+
+/// Without `--full`, every evidence list in a category's output is a bounded
+/// collection, so the default output stays finite however many runs or
+/// artifacts a pass touched. Each bounded list gains a `<field>_truncation`
+/// disclosure; counts and totals are already in the category metrics. An
+/// unbounded list made the hourly `homeboy.retention` workflow step exceed its
+/// output limit and fail every pass.
+fn bound_category_evidence(value: &mut Value, continue_command: &str, export_command: &str) {
+    let Value::Object(object) = value else {
+        return;
+    };
+    let mut disclosures = Vec::new();
+    for (key, child) in object.iter_mut() {
+        match child {
+            Value::Array(items) => {
+                let total = items.len();
+                let (returned, truncation) = homeboy::core::output::budget_json_values(
+                    std::mem::take(items),
+                    total,
+                    OutputBudget::COLLECTION,
+                    continue_command,
+                    export_command,
+                );
+                *items = returned;
+                if truncation.truncated {
+                    disclosures.push((format!("{key}_truncation"), truncation));
+                }
+            }
+            Value::Object(_) => bound_category_evidence(child, continue_command, export_command),
+            _ => {}
+        }
+    }
+    for (key, truncation) in disclosures {
+        object.insert(key, serde_json::to_value(truncation).unwrap_or(Value::Null));
     }
 }
 
@@ -6867,6 +6913,59 @@ mod tests {
             "homeboy cleanup --include remote-lab-workspaces --apply"
         );
         assert!(!category.specialist_command.contains("<runner>"));
+    }
+
+    #[test]
+    fn default_category_output_is_a_bounded_collection_and_full_is_complete() {
+        // The hourly `homeboy.retention` step failed every pass once a
+        // category listed every run it touched past the workflow output limit.
+        homeboy::test_support::with_isolated_home(|_| {
+            let store =
+                homeboy::core::observation::ObservationStore::open_initialized().expect("store");
+            for _ in 0..30 {
+                let run = store
+                    .start_run(homeboy::core::observation::NewRunRecord::builder("bench").build())
+                    .expect("start");
+                store
+                    .finish_run(&run.id, homeboy::core::observation::RunStatus::Pass, None)
+                    .expect("finish");
+            }
+            let inventory = |full| {
+                let result = cleanup_inventory(CleanupArgs {
+                    apply: false,
+                    include: vec![CleanupCategoryArg::TerminalRuns],
+                    exclude: Vec::new(),
+                    include_untagged: false,
+                    older_than_days: Some(0),
+                    runtime_tmp_managed_older_than_days: None,
+                    limit: None,
+                    full,
+                    cursor: None,
+                    command: None,
+                })
+                .expect("inventory");
+                result.output["categories"][0].clone()
+            };
+            let bounded = inventory(false);
+            assert_eq!(bounded["candidate_count"], 30);
+            let ids = bounded["output"]["candidate_run_ids"].as_array().unwrap();
+            assert_eq!(ids.len(), OutputBudget::COLLECTION.max_items);
+            let truncation = &bounded["output"]["candidate_run_ids_truncation"];
+            assert_eq!(truncation["total_items"], 30);
+            assert!(truncation["export_command"]
+                .as_str()
+                .unwrap()
+                .ends_with("--full"));
+            let full = inventory(true);
+            assert_eq!(
+                full["output"]["candidate_run_ids"]
+                    .as_array()
+                    .unwrap()
+                    .len() as u64,
+                full["candidate_count"].as_u64().unwrap()
+            );
+            assert!(full["output"].get("candidate_run_ids_truncation").is_none());
+        });
     }
 
     #[test]
