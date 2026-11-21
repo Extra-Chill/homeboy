@@ -361,6 +361,7 @@ mod tests {
         // sibling [30,50) overlaps gate inside job.
         let span = |id: &str, start_ms: i64, duration_ms: f64| PhaseSpan {
             id: id.to_string(),
+            attempt_id: None,
             started_at: (chrono::DateTime::parse_from_rfc3339("2026-10-30T00:00:00Z").unwrap()
                 + chrono::Duration::milliseconds(start_ms))
             .to_rfc3339(),

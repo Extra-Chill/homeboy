@@ -4,6 +4,8 @@ mod notification_tests;
 mod phase_spans;
 mod reliability;
 mod resource_profile;
+mod usage_buckets;
+pub use usage_buckets::{usage_buckets, AttemptUsage, BucketUsage, CookUsage};
 mod verdict;
 #[cfg(test)]
 mod verdict_tests;

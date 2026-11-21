@@ -2,6 +2,8 @@
 //! spans (#18461), for one run (`runs show`) or across runs (`runs profile`).
 use std::collections::BTreeMap;
 
+use super::{usage_buckets, CookUsage};
+
 use serde::Serialize;
 
 use crate::observation::{runs_service, ObservationStore, RunListFilter};
@@ -50,6 +52,7 @@ pub struct CpuOverhead {
 #[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct RunResources {
     pub cpu_seconds: f64,
+    pub cooks: Vec<CookUsage>,
     pub overhead: CpuOverhead,
     pub phases: Vec<PhaseUsageRow>,
     #[serde(skip_serializing_if = "is_zero_count")]
@@ -86,6 +89,7 @@ pub struct ResourceProfileQuery {
 
 #[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct ResourceProfile {
+    pub cooks: Vec<CookUsage>,
     pub runs_inspected: usize,
     pub runs_with_usage: usize,
     pub cpu_seconds: f64,
@@ -177,11 +181,43 @@ fn by_cpu_then_name(a: (f64, &str), b: (f64, &str)) -> std::cmp::Ordering {
     b.0.total_cmp(&a.0).then(a.1.cmp(b.1))
 }
 
+fn cook_usage(
+    store: &ObservationStore,
+    run_id: &str,
+    spans: &[PhaseSpan],
+) -> Result<Vec<CookUsage>> {
+    if workflow_of(run_id).is_some() {
+        let mut cooks = Vec::new();
+        for id in store.run_ids_with_prefix(&format!("{run_id}-"), MAX_RUNS)? {
+            let attempts = usage_buckets(&store.phase_spans(&id)?.spans);
+            if !attempts.is_empty() {
+                cooks.push(CookUsage {
+                    run_id: id,
+                    attempts,
+                });
+            }
+        }
+        Ok(cooks)
+    } else {
+        let attempts = usage_buckets(spans);
+        Ok(if attempts.is_empty() {
+            vec![]
+        } else {
+            vec![CookUsage {
+                run_id: run_id.to_string(),
+                attempts,
+            }]
+        })
+    }
+}
+
 /// Usage recorded on one run's spans; `None` when nothing was measured.
 pub fn run_resources(store: &ObservationStore, run_id: &str) -> Result<Option<RunResources>> {
     let mut rows: BTreeMap<String, PhaseUsageRow> = BTreeMap::new();
     let mut overhead = CpuOverhead::default();
-    for span in store.phase_spans(run_id)?.spans {
+    let spans = store.phase_spans(run_id)?.spans;
+    let cooks = cook_usage(store, run_id, &spans)?;
+    for span in &spans {
         let Some(usage) = measured(&span) else {
             continue;
         };
@@ -222,7 +258,7 @@ pub fn run_resources(store: &ObservationStore, run_id: &str) -> Result<Option<Ru
             seconds(usage.homeboy_cpu_usec),
         );
     }
-    if rows.is_empty() {
+    if rows.is_empty() && cooks.is_empty() {
         return Ok(None);
     }
     if workflow_of(run_id).is_some() {
@@ -233,6 +269,7 @@ pub fn run_resources(store: &ObservationStore, run_id: &str) -> Result<Option<Ru
     let omitted_phases = phases.len().saturating_sub(MAX_ROWS);
     phases.truncate(MAX_ROWS);
     Ok(Some(RunResources {
+        cooks,
         cpu_seconds: phases.iter().map(|row| row.cpu_seconds).sum(),
         overhead,
         phases,
@@ -284,6 +321,7 @@ pub fn resource_profile(
     })?;
     let runs = runs_service::dedupe_runner_execution_mirrors(runs).canonical;
     let mut groups: BTreeMap<String, Samples> = BTreeMap::new();
+    let mut cooks = BTreeMap::new();
     let mut overhead = CpuOverhead::default();
     let (mut runs_inspected, mut runs_with_usage) = (0, 0);
     for run in runs {
@@ -308,6 +346,9 @@ pub fn resource_profile(
                 continue;
             }
         };
+        for cook in cook_usage(store, &run.id, &spans)? {
+            cooks.insert(cook.run_id.clone(), cook);
+        }
         let mut has_usage = false;
         let mut run_overhead = CpuOverhead::default();
         for span in &spans {
@@ -359,6 +400,7 @@ pub fn resource_profile(
     let omitted_phases = phases.len().saturating_sub(limit);
     phases.truncate(limit);
     Ok(ResourceProfile {
+        cooks: cooks.into_values().collect(),
         runs_inspected,
         runs_with_usage,
         cpu_seconds: overhead.homeboy_cpu_seconds

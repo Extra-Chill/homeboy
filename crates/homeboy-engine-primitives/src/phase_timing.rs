@@ -85,6 +85,9 @@ impl PhaseStatus {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct PhaseSpan {
     pub id: String,
+    /// Attempt identity, when carried by the recorded span.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub attempt_id: Option<String>,
     pub status: PhaseStatus,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub duration_ms: Option<f64>,
@@ -102,6 +105,7 @@ impl PhaseSpan {
     fn new(id: impl Into<String>, status: PhaseStatus, duration: Option<Duration>) -> Self {
         Self {
             id: id.into(),
+            attempt_id: None,
             status,
             duration_ms: duration.map(duration_to_millis),
             started_at: Utc::now().to_rfc3339_opts(SecondsFormat::Millis, true),
