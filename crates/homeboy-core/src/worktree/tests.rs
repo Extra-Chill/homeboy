@@ -2246,12 +2246,11 @@ fn cleanup_marks_missing_worktree_record_removed() {
     .unwrap();
     let updated = read_record(&store, &record.id).unwrap();
 
-    assert_eq!(output.counts.candidates, 0);
-    assert_eq!(output.counts.removed, 0);
-    assert_eq!(output.counts.skipped, 1);
-    assert_eq!(output.counts.reconciliation_blockers, 1);
-    assert!(output.skipped[0].reasons[0].contains("inventory --apply"));
-    assert_eq!(updated.state, TaskWorktreeState::Active);
+    assert_eq!(output.counts.candidates, 1);
+    assert_eq!(output.counts.removed, 1);
+    assert_eq!(output.counts.skipped, 0);
+    assert_eq!(output.counts.reconciliation_blockers, 0);
+    assert_eq!(updated.state, TaskWorktreeState::Removed);
 }
 
 #[test]
@@ -2470,7 +2469,7 @@ fn cleanup_and_remove_refuse_durable_live_workspace_owners_even_with_force() {
 }
 
 #[test]
-fn cleanup_reports_missing_active_records_as_reconciliation_blockers() {
+fn cleanup_offers_missing_active_records_as_metadata_reconciliation_candidates() {
     let dir = tempfile::tempdir().unwrap();
     let source = git_repo();
     let store = dir.path().join("store");
@@ -2495,10 +2494,10 @@ fn cleanup_reports_missing_active_records_as_reconciliation_blockers() {
     )
     .unwrap();
 
-    assert_eq!(output.counts.candidates, 0);
-    assert_eq!(output.counts.reconciliation_blockers, 4);
-    assert_eq!(output.counts.skipped, 4);
-    assert!(output.candidates.is_empty());
+    assert_eq!(output.counts.candidates, 4);
+    assert_eq!(output.counts.reconciliation_blockers, 0);
+    assert_eq!(output.counts.skipped, 0);
+    assert_eq!(output.candidates.len(), 4);
 }
 
 #[test]
@@ -3056,7 +3055,8 @@ fn cleanup_deletes_merged_task_branch_when_requested() {
 
     assert_eq!(output.counts.branch_delete_candidates, 0);
     assert_eq!(output.counts.branches_deleted, 0);
-    assert_eq!(output.counts.skipped, 1);
+    assert_eq!(output.counts.skipped, 0);
+    assert_eq!(output.counts.removed, 1);
     assert!(std::process::Command::new("git")
         .args(["show-ref", "--verify", "--quiet", "refs/heads/task"])
         .current_dir(source.path())
@@ -3080,7 +3080,7 @@ fn cleanup_deletes_merged_task_branch_when_requested() {
     assert_eq!(retry.counts.candidates, 0);
     assert_eq!(retry.counts.removed, 0);
     assert_eq!(retry.counts.branches_deleted, 0);
-    assert_eq!(retry.counts.reconciliation_blockers, 1);
+    assert_eq!(retry.counts.reconciliation_blockers, 0);
 }
 
 #[test]
@@ -3159,10 +3159,10 @@ fn cleanup_keeps_branch_when_worktree_removal_fails_and_continues() {
     )
     .unwrap();
 
-    assert_eq!(output.counts.candidates, 1);
-    assert_eq!(output.counts.removed, 0);
-    assert_eq!(output.counts.skipped, 2);
-    assert_eq!(output.counts.reconciliation_blockers, 1);
+    assert_eq!(output.counts.candidates, 2);
+    assert_eq!(output.counts.removed, 1);
+    assert_eq!(output.counts.skipped, 1);
+    assert_eq!(output.counts.reconciliation_blockers, 0);
     assert!(locked_worktree.exists());
     run_git(
         source.path(),
@@ -3174,12 +3174,12 @@ fn cleanup_keeps_branch_when_worktree_removal_fails_and_continues() {
     );
     assert_eq!(
         read_record(&store, &removable_record.id).unwrap().state,
-        TaskWorktreeState::Active
+        TaskWorktreeState::Removed
     );
 }
 
 #[test]
-fn cleanup_separates_actionable_candidates_from_reconciliation_blockers() {
+fn cleanup_offers_both_existing_and_missing_worktree_candidates() {
     let dir = tempfile::tempdir().unwrap();
     let source = git_repo();
     let store = dir.path().join("store");
@@ -3215,11 +3215,11 @@ fn cleanup_separates_actionable_candidates_from_reconciliation_blockers() {
     )
     .unwrap();
 
-    assert_eq!(output.counts.candidates, 1);
-    assert_eq!(output.counts.reconciliation_blockers, 1);
-    assert_eq!(output.counts.skipped, 1);
-    assert_eq!(output.candidates.len(), 1);
-    assert_eq!(output.skipped.len(), 1);
+    assert_eq!(output.counts.candidates, 2);
+    assert_eq!(output.counts.reconciliation_blockers, 0);
+    assert_eq!(output.counts.skipped, 0);
+    assert_eq!(output.candidates.len(), 2);
+    assert!(output.skipped.is_empty());
 }
 
 #[test]
@@ -3251,7 +3251,8 @@ fn cleanup_reports_unmerged_task_branch_without_deleting_by_default() {
     assert_eq!(output.counts.branch_delete_candidates, 0);
     assert_eq!(output.counts.branches_deleted, 0);
     assert_eq!(output.counts.unmerged_branches, 0);
-    assert_eq!(output.counts.skipped, 1);
+    assert_eq!(output.counts.skipped, 0);
+    assert_eq!(output.counts.removed, 1);
     run_git(
         source.path(),
         &["show-ref", "--verify", "--quiet", "refs/heads/task"],
@@ -3434,7 +3435,7 @@ fn list_page_rejects_malformed_and_version_mismatched_cursors() {
 }
 
 #[test]
-fn cleanup_skips_unrepairable_missing_source_and_continues() {
+fn cleanup_retires_missing_worktrees_even_when_the_source_is_gone() {
     use crate::test_support::with_isolated_home;
 
     with_isolated_home(|_| {
@@ -3467,12 +3468,12 @@ fn cleanup_skips_unrepairable_missing_source_and_continues() {
         let skipped = read_record(&store, &unrepairable.id).unwrap();
         let removed = read_record(&store, &removable.id).unwrap();
 
-        assert_eq!(output.counts.candidates, 0);
-        assert_eq!(output.counts.removed, 0);
-        assert_eq!(output.counts.skipped, 2);
-        assert_eq!(output.counts.reconciliation_blockers, 1);
-        assert_eq!(skipped.state, TaskWorktreeState::Active);
-        assert_eq!(removed.state, TaskWorktreeState::Active);
+        assert_eq!(output.counts.candidates, 2);
+        assert_eq!(output.counts.removed, 2);
+        assert_eq!(output.counts.skipped, 0);
+        assert_eq!(output.counts.reconciliation_blockers, 0);
+        assert_eq!(skipped.state, TaskWorktreeState::Removed);
+        assert_eq!(removed.state, TaskWorktreeState::Removed);
     });
 }
 
@@ -3516,10 +3517,10 @@ fn cleanup_skips_dirty_worktree_without_force() {
     .unwrap();
     let updated = read_record(&store, &dirty_record.id).unwrap();
 
-    assert_eq!(output.counts.candidates, 0);
-    assert_eq!(output.counts.removed, 0);
-    assert_eq!(output.counts.skipped, 2);
-    assert_eq!(output.counts.reconciliation_blockers, 1);
+    assert_eq!(output.counts.candidates, 1);
+    assert_eq!(output.counts.removed, 1);
+    assert_eq!(output.counts.skipped, 1);
+    assert_eq!(output.counts.reconciliation_blockers, 0);
     assert_eq!(output.skipped[0].record.id, dirty_record.id);
     assert!(output.skipped[0]
         .reasons
@@ -5148,4 +5149,203 @@ fn orphan_worktree_record_missing_worktree_with_existing_source_keeps_current_be
         "orphan record: source checkout is missing, so no branch was inspected or deleted"
     );
     assert!(source.path().exists());
+}
+
+/// A primary checkout with an `origin` remote and an unrecorded linked
+/// worktree on `task` holding one local commit (#16310).
+fn unrecorded_worktree_fixture() -> (tempfile::TempDir, tempfile::TempDir, PathBuf) {
+    let source = git_repo();
+    let remote = tempfile::tempdir().unwrap();
+    let bare = remote.path().join("origin.git");
+    run_git(
+        source.path(),
+        &["clone", "--bare", "-q", ".", &bare.to_string_lossy()],
+    );
+    run_git(
+        source.path(),
+        &["remote", "add", "origin", &bare.to_string_lossy()],
+    );
+    run_git(source.path(), &["fetch", "-q", "origin"]);
+    run_git(source.path(), &["remote", "set-head", "origin", "-a"]);
+    let worktree = sibling_worktree_path(source.path(), "unrecorded");
+    run_git(
+        source.path(),
+        &[
+            "worktree",
+            "add",
+            "-q",
+            "-b",
+            "task",
+            &worktree.to_string_lossy(),
+        ],
+    );
+    fs::write(worktree.join("task.txt"), "task\n").unwrap();
+    run_git(&worktree, &["add", "."]);
+    run_git(&worktree, &["commit", "-q", "-m", "task"]);
+    (source, remote, worktree)
+}
+
+fn unrecorded_store() -> (tempfile::TempDir, PathBuf) {
+    let data_root = tempfile::tempdir().unwrap();
+    let store = data_root.path().join("task-worktrees");
+    (data_root, store)
+}
+
+#[test]
+fn unrecorded_worktree_with_unpushed_work_is_an_orphan_that_removal_refuses() {
+    let (_source, _remote, worktree) = unrecorded_worktree_fixture();
+    let (_data_root, store) = unrecorded_store();
+    let id = worktree.to_string_lossy().to_string();
+
+    let status = status_with_store(&id, &store).expect("unrecorded worktree status");
+    assert_eq!(
+        status.record.terminal_disposition.as_deref(),
+        Some(UNRECORDED_WORKTREE_LIVENESS)
+    );
+    let safety = status.safety.expect("unrecorded status reports safety");
+    assert!(!safety.safe);
+    assert_eq!(safety.unpushed_commits, 1);
+    assert!(safety.path_contained && !safety.primary_checkout);
+    assert!(safety.reasons[0].starts_with(UNRECORDED_WORKTREE_LIVENESS));
+
+    let error = remove_with_store(orphan_remove_options(&id, true), &store)
+        .expect_err("--force never discards unpushed work without a record");
+    assert!(error.message.contains("not safe to remove"), "{error:?}");
+    assert!(worktree.exists());
+}
+
+#[test]
+fn unrecorded_worktree_reachable_from_a_remote_ref_is_removed() {
+    let (source, _remote, worktree) = unrecorded_worktree_fixture();
+    let (_data_root, store) = unrecorded_store();
+    run_git(&worktree, &["push", "-q", "origin", "task"]);
+    run_git(source.path(), &["fetch", "-q", "origin"]);
+    let id = worktree.to_string_lossy().to_string();
+    // Whole-worktree removal also reclaims ignored build output (#15926).
+    run_git(&worktree, &["config", "core.excludesfile", "/dev/null"]);
+    let exclude = source.path().join(".git/info/exclude");
+    fs::write(exclude, "target/\n").unwrap();
+    fs::create_dir_all(worktree.join("target/debug")).unwrap();
+    fs::write(worktree.join("target/debug/build-output"), "rebuildable").unwrap();
+
+    assert!(status_with_store(&id, &store).unwrap().safety.unwrap().safe);
+    let removed = remove_with_store(orphan_remove_options(&id, false), &store).unwrap();
+    assert!(removed.removed);
+    assert_eq!(removed.record.state, TaskWorktreeState::Removed);
+    assert_eq!(
+        removed.branch_cleanup.status,
+        BranchCleanupStatus::Preserved
+    );
+    assert!(!worktree.exists());
+    // Removal never invents a record for the unrecorded worktree.
+    assert!(!store
+        .join(format!("{}.json", paths::sanitize_path_segment(&id)))
+        .exists());
+    run_git(source.path(), &["rev-parse", "--verify", "refs/heads/task"]);
+}
+
+#[test]
+fn unrecorded_worktree_squash_merged_upstream_is_removed_but_dirt_and_stash_block() {
+    let (source, _remote, worktree) = unrecorded_worktree_fixture();
+    let (_data_root, store) = unrecorded_store();
+    // Squash-merge `task` into the default branch and publish it; the task
+    // branch never reaches the remote, as when a merged PR deletes its head.
+    run_git(source.path(), &["merge", "--squash", "-q", "task"]);
+    run_git(source.path(), &["commit", "-q", "-m", "squash task"]);
+    run_git(source.path(), &["push", "-q", "origin", "HEAD"]);
+    run_git(source.path(), &["fetch", "-q", "origin"]);
+    let id = worktree.to_string_lossy().to_string();
+    assert!(status_with_store(&id, &store).unwrap().safety.unwrap().safe);
+
+    fs::write(worktree.join("scratch.txt"), "local\n").unwrap();
+    let safety = status_with_store(&id, &store).unwrap().safety.unwrap();
+    assert!(safety.dirty && !safety.safe);
+    remove_with_store(orphan_remove_options(&id, false), &store)
+        .expect_err("untracked work blocks removal");
+
+    run_git(&worktree, &["stash", "push", "-q", "-u"]);
+    let safety = status_with_store(&id, &store).unwrap().safety.unwrap();
+    assert!(!safety.dirty && !safety.safe);
+    assert!(safety
+        .reasons
+        .iter()
+        .any(|reason| reason.contains("stash entry belongs to this worktree")));
+    assert!(worktree.exists());
+
+    run_git(&worktree, &["stash", "drop", "-q"]);
+    let removed = remove_with_store(orphan_remove_options(&id, false), &store).unwrap();
+    assert!(removed.removed);
+    assert!(!worktree.exists());
+}
+
+#[test]
+fn cleanup_offers_and_removes_unrecorded_worktrees_from_recorded_sources() {
+    crate::test_support::with_isolated_home(|home| {
+        let (source, _remote, worktree) = unrecorded_worktree_fixture();
+        let (_data_root, store) = unrecorded_store();
+        write_component_registration(home.path(), "fixture", source.path());
+        run_git(&worktree, &["push", "-q", "origin", "task"]);
+        let mut anchor = fixture_record(source.path(), &source.path().join("gone"));
+        anchor.state = TaskWorktreeState::Removed;
+        write_record(&store, &anchor).unwrap();
+        let mut options = WorktreeCleanupOptions {
+            force: false,
+            dry_run: true,
+            cleanup_branches: false,
+            allow_unmerged_branches: false,
+            reaper: None,
+        };
+        let mut plan = cleanup_with_store(options.clone(), &store).unwrap();
+        unrecorded::append_cleanup(&mut plan, &options, &store, None).unwrap();
+        assert_eq!(plan.candidates.len(), 1);
+        assert!(worktree.exists());
+        options.dry_run = false;
+        let mut applied = cleanup_with_store(options.clone(), &store).unwrap();
+        unrecorded::append_cleanup(&mut applied, &options, &store, None).unwrap();
+        assert_eq!(applied.removed.len(), 1);
+        assert!(!worktree.exists());
+    });
+}
+
+#[test]
+fn unrecorded_worktree_never_removes_primary_or_subdirectory_handles() {
+    let (source, _remote, worktree) = unrecorded_worktree_fixture();
+    let (_data_root, store) = unrecorded_store();
+    for path in [source.path().to_path_buf(), worktree.join("subdir")] {
+        fs::create_dir_all(&path).unwrap();
+        assert!(
+            remove_with_store(orphan_remove_options(&path.to_string_lossy(), true), &store)
+                .is_err()
+        );
+        assert!(path.exists());
+    }
+    fs::remove_dir(worktree.join("subdir")).unwrap();
+    run_git(
+        source.path(),
+        &["worktree", "remove", "--force", &worktree.to_string_lossy()],
+    );
+}
+
+#[test]
+fn recorded_worktree_path_resolves_to_its_record_handle() {
+    let (_data_root, store) = unrecorded_store();
+    let source = git_repo();
+    let worktree = sibling_worktree_path(source.path(), "recorded");
+    run_git(
+        source.path(),
+        &[
+            "worktree",
+            "add",
+            "-q",
+            "-b",
+            "task",
+            &worktree.to_string_lossy(),
+        ],
+    );
+    let record = fixture_record(source.path(), &worktree);
+    write_record(&store, &record).unwrap();
+
+    let status = status_with_store(&worktree.to_string_lossy(), &store).unwrap();
+    assert_eq!(status.record.id, record.id);
+    assert_eq!(status.record.terminal_disposition, None);
 }
