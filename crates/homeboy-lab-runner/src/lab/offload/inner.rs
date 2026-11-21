@@ -680,20 +680,14 @@ pub(crate) fn exec_lab_context(
                             ))
                         } else {
                             record_local_outcome(request)?;
-                            Ok(LabOffloadOutcome::RunLocal {
-                                metadata: Some(lab_offload_metadata_with_workspace_mapping(
-                                    &context.plan,
-                                    selection.source.metadata_value(),
-                                    Some(runner_id),
-                                    Some(status_tunnel_mode(context.runner_status).metadata_value()),
-                                    "fallback",
-                                    Some(&remote_cwd),
-                                    Some(&reason),
-                                    Some(&context.workspace_mapping_metadata),
-                                )),
-                                plan: context.plan,
-                                messages: vec![format!("Lab offload: {reason}; running locally.")],
-                            })
+                            Ok(run_local(context.plan, LocalFallbackReason::DaemonUnavailable(&reason), LocalFallbackContext {
+                                source: Some(selection.source.metadata_value()),
+                                runner_id: Some(runner_id),
+                                mode: Some(status_tunnel_mode(context.runner_status).metadata_value()),
+                                remote_cwd: Some(&remote_cwd),
+                                workspace_mapping: Some(&context.workspace_mapping_metadata),
+                                ..Default::default()
+                            }))
                         }
                     }
                     LabRunnerSelectionSource::Explicit => Err(Error::validation_invalid_argument(
@@ -1316,24 +1310,16 @@ fn late_direct_identity_fallback(
         return Ok(None);
     }
 
-    let reason = format!("runner_identity_drift: {}", identity_drift.message);
+    let fallback_reason = LocalFallbackReason::IdentityDrift(&identity_drift.message);
+    let reason = fallback_reason.diagnostic();
     observation.set_fallback_reason(&reason);
-    let mut metadata = lab_offload_metadata(
-        plan,
-        selection.source.metadata_value(),
-        Some(&selection.runner_id),
-        Some(selection.mode.metadata_value()),
-        "fallback",
-        None,
-        Some(&reason),
-    );
+    let mut metadata = serde_json::json!({});
     metadata["runner_identity_drift"] = serde_json::to_value(identity_drift.sanitized_for_output())
         .unwrap_or(serde_json::Value::Null);
     metadata["runner_homeboy"] = runner_homeboy.clone();
     metadata["final_placement"] = serde_json::json!("local");
     metadata["runner_jobs_created"] = serde_json::json!(0);
     metadata["transport_retry_attempts"] = serde_json::json!(0);
-    attach_offload_selection(&mut metadata, observation);
 
     if let Some(target) = request.placement_outcome_target {
         agent_task_lifecycle::record_local_lab_identity_fallback(
@@ -1344,11 +1330,18 @@ fn late_direct_identity_fallback(
         )?;
     }
     record_local_outcome(request)?;
-    Ok(Some(LabOffloadOutcome::RunLocal {
-        metadata: Some(metadata),
-        plan: plan.clone(),
-        messages: vec![format!("Lab offload: {reason}; running locally.")],
-    }))
+    Ok(Some(run_local(
+        plan.clone(),
+        fallback_reason,
+        LocalFallbackContext {
+            source: Some(selection.source.metadata_value()),
+            runner_id: Some(&selection.runner_id),
+            mode: Some(selection.mode.metadata_value()),
+            observation: Some(observation),
+            extra_metadata: Some(metadata),
+            ..Default::default()
+        },
+    )))
 }
 
 /// Hand a detached durable run to the controller staging job and return.
@@ -1785,14 +1778,17 @@ pub(crate) fn run_lab_offload_inner(
                     return Err(local_execution_denied_error(&reason, Some(runner_id)));
                 }
                 observation.set_fallback_reason(&reason);
-                return automatic_capability_fallback(
-                    &request,
+                record_local_outcome(&request)?;
+                return Ok(run_local(
                     plan,
-                    runner_id,
-                    &runner_status,
-                    reason,
-                    &observation,
-                );
+                    LocalFallbackReason::CapabilityMissing(&reason),
+                    LocalFallbackContext {
+                        runner_id: Some(runner_id),
+                        mode: Some(status_tunnel_mode(&runner_status).metadata_value()),
+                        observation: Some(&observation),
+                        ..Default::default()
+                    },
+                ));
             }
             Err(err) => return Err(err),
         };

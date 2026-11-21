@@ -130,8 +130,8 @@ use super::agent_task_bridge::{
 };
 use super::evidence::terminal_lab_run_evidence;
 use super::fallback::{
-    is_build_command, local_execution_denied_error, skipped_automatic_run_local,
-    skipped_automatic_run_local_with_selection, unsupported_build_lab_error,
+    is_build_command, local_execution_denied_error, run_local, unsupported_build_lab_error,
+    LocalFallbackContext, LocalFallbackReason,
 };
 use super::secrets::{
     build_lab_secret_env_handoff_plan, merge_managed_service_secret_env,
