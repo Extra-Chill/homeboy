@@ -2354,7 +2354,11 @@ pub(super) fn write_record_guarded(
         .cloned()
         .map(serde_json::from_value::<AgentTaskRunRecord>)
         .transpose()
-        .map_err(|error| Error::internal_json(error.to_string(), None))?;
+        .map_err(|error| Error::internal_json(error.to_string(), None))?
+        .map(|mut stored| {
+            super::cook_run_state::migrate_stored_record(&mut stored);
+            stored
+        });
     // Unfenced test fixtures seed a state, rather than taking an edge.
     super::cook_run_state::transition_record(
         &mut record,
@@ -3165,12 +3169,14 @@ fn parse_record_from_run(run: &RunRecord) -> Result<AgentTaskRunRecord> {
             json!({ "context": run.id }),
         )
     })?;
-    serde_json::from_value(value.clone()).map_err(|error| {
+    let mut record = serde_json::from_value(value.clone()).map_err(|error| {
         Error::internal_json(
             error.to_string(),
             Some(format!("parse agent-task run {}; incompatible record shape: re-cook this work with the current binary", run.id)),
         )
-    })
+    })?;
+    super::cook_run_state::migrate_stored_record(&mut record);
+    Ok(record)
 }
 
 fn normalize_decoded_record(

@@ -2155,7 +2155,7 @@ pub(crate) fn tunnel_process_ownership(
 ) -> session_store::TunnelProcessOwnership {
     session_store::tunnel_process_ownership(
         pid,
-        Some(identity),
+        identity,
         homeboy_core::process::process_start_identity,
     )
 }
