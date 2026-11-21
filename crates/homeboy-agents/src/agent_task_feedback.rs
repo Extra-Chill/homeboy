@@ -213,18 +213,6 @@ impl CookFeedbackStore {
         Ok(self.load(cook_id)?.feedback)
     }
 
-    /// Select and acknowledge all pending findings for the exact candidate.
-    /// Findings for another candidate become explicit stale records and are
-    /// never silently delivered to a later candidate.
-    pub fn consume_for_candidate(
-        &self,
-        cook_id: &str,
-        candidate_sha: &str,
-    ) -> Result<Vec<CookFeedback>> {
-        let pending = self.prepare_for_candidate(cook_id, candidate_sha)?;
-        self.acknowledge(cook_id, &pending)
-    }
-
     /// Prepare matching findings without acknowledging provider consumption.
     /// Candidate mismatches are still made explicit as stale under the same
     /// lock, while matching findings remain pending across a restart.
@@ -440,7 +428,7 @@ mod tests {
             FeedbackState::Superseded
         );
         assert!(store
-            .consume_for_candidate("cook-2", "candidate")
+            .prepare_for_candidate("cook-2", "candidate")
             .unwrap()
             .is_empty());
     }

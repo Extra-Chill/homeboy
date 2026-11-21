@@ -270,8 +270,12 @@ mod tests {
 
             // controller-scratch: a released lease whose owner exited, and one
             // still held by a running attempt.
-            let released = homeboy::agents::controller_scratch::allocate_attempt(
-                "finished", "plan", "task", 1,
+            let released = homeboy::agents::controller_scratch::allocate_attempt_at(
+                &homeboy::core::paths::homeboy_data().unwrap(),
+                "finished",
+                "plan",
+                "task",
+                1,
             )
             .unwrap();
             std::fs::write(released.path.join("output"), "done").unwrap();
@@ -279,7 +283,8 @@ mod tests {
                 &released,
             )
             .unwrap();
-            let active = homeboy::agents::controller_scratch::allocate_attempt(
+            let active = homeboy::agents::controller_scratch::allocate_attempt_at(
+                &homeboy::core::paths::homeboy_data().unwrap(),
                 &running.id,
                 "plan",
                 "task",

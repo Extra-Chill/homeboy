@@ -799,25 +799,6 @@ pub(crate) fn continuation_candidate_refusal(
     result.err().map(|error| error.message)
 }
 
-/// Observe the exact persisted promote-or-load decision without opening a
-/// writable store, applying a patch, or running verification gates.
-pub fn preflight_cook_promotion_in_store(
-    lifecycle_store: &agent_task_lifecycle::AgentTaskLifecycleStore,
-    options: &CookRequest,
-    run_id: &str,
-    artifact_id: Option<&str>,
-) -> Result<Value> {
-    let (record, aggregate) = lifecycle_store.read_record_with_aggregate_bounded(run_id)?;
-    preflight_cook_promotion_for_observation_in_store(
-        lifecycle_store,
-        options,
-        run_id,
-        artifact_id,
-        &record,
-        aggregate.as_ref(),
-    )
-}
-
 pub fn preflight_cook_promotion_for_observation_in_store(
     lifecycle_store: &agent_task_lifecycle::AgentTaskLifecycleStore,
     options: &CookRequest,

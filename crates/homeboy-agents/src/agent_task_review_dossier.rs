@@ -873,12 +873,6 @@ pub fn validate_profile(profile: &AgentTaskReviewProfile) -> Result<()> {
 }
 
 impl AgentTaskReviewDossier {
-    /// Report independent, operator-supplied dossier gaps together before a
-    /// preflight asks the caller to reconstruct a large finalization command.
-    pub fn validate_preflight_fields(&self, profile: &AgentTaskReviewProfile) -> Result<()> {
-        self.validate_preflight_for_publication(profile, false)
-    }
-
     pub(crate) fn validate_preflight_for_publication(
         &self,
         profile: &AgentTaskReviewProfile,
@@ -2693,7 +2687,7 @@ mod tests {
         value.ai_assistance.model = "unknown".to_string();
 
         let error = value
-            .validate_preflight_fields(&default_profile())
+            .validate_preflight_for_publication(&default_profile(), false)
             .expect_err("all supplied dossier gaps are reported together");
         assert!(error.message.contains("3 independent error(s)"));
         let diagnostics = error.details.to_string();

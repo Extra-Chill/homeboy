@@ -2630,20 +2630,3 @@ fn first_non_empty_json_string<'a>(
             .map(ToString::to_string)
     })
 }
-
-/// Component a task checks out: the workspace's own component when set,
-/// otherwise the `component_id` a Cook records in task metadata.
-fn task_component_id(request: &crate::agent_task::AgentTaskRequest) -> Option<String> {
-    request
-        .workspace
-        .component_id
-        .clone()
-        .or_else(|| {
-            request
-                .metadata
-                .get("component_id")
-                .and_then(serde_json::Value::as_str)
-                .map(str::to_string)
-        })
-        .filter(|id| !id.trim().is_empty())
-}

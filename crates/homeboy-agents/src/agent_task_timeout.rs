@@ -164,13 +164,8 @@ pub struct CookDeadline {
 }
 
 impl CookDeadline {
-    /// A budget expiring `max_duration_seconds` from now.
-    pub fn from_duration_seconds(max_duration_seconds: u64) -> Self {
-        Self {
-            deadline_unix_ms: now_unix_ms().saturating_add(max_duration_seconds * 1_000),
-        }
-    }
-
+    /// Production never binds a budget; tests construct one directly.
+    #[cfg(test)]
     pub fn from_unix_ms(deadline_unix_ms: u64) -> Self {
         Self { deadline_unix_ms }
     }
@@ -288,14 +283,14 @@ mod tests {
         assert!(past.is_expired());
         assert_eq!(past.remaining_ms(), 0);
 
-        let future = CookDeadline::from_duration_seconds(3_600);
+        let future = CookDeadline::from_unix_ms(now_unix_ms() + 3_600_000);
         assert!(!future.is_expired());
         assert!(future.remaining_ms() > 0);
     }
 
     #[test]
     fn a_bound_deadline_is_visible_and_is_restored_after_the_scope() {
-        let deadline = CookDeadline::from_duration_seconds(3_600);
+        let deadline = CookDeadline::from_unix_ms(now_unix_ms() + 3_600_000);
         with_current_cook_deadline(Some(deadline), || {
             assert_eq!(current_cook_deadline(), Some(deadline));
             // An expired check must not fire on a live budget.
@@ -316,7 +311,7 @@ mod tests {
     /// the thread boundary bounds only the coordinator and nothing it started.
     #[test]
     fn a_captured_deadline_crosses_a_thread_boundary() {
-        let deadline = CookDeadline::from_duration_seconds(3_600);
+        let deadline = CookDeadline::from_unix_ms(now_unix_ms() + 3_600_000);
         with_current_cook_deadline(Some(deadline), || {
             let propagated = capture_cook_deadline();
             assert_eq!(propagated.deadline(), Some(deadline));
