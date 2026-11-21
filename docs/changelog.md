@@ -4,6 +4,14 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.488.0] - 2026-11-21
+
+### Added
+- show per-step and per-attempt timing for workflow instances
+
+### Fixed
+- resolve unregistered IDs from nested checkout manifests
+
 ## [0.487.1] - 2026-11-21
 
 ### Fixed
