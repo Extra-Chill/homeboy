@@ -209,7 +209,7 @@ pub fn run(args: WorkflowArgs) -> CmdResult<Value> {
             if !was_terminal {
                 homeboy::core::observation::store::record_intervention(
                     &homeboy::core::observation::ObservationStore::open_initialized()?,
-                    &format!("workflow:{instance}"),
+                    &instance,
                     "workflow cancel",
                     reason.as_deref(),
                 )?;
@@ -286,7 +286,7 @@ fn run_workflow(args: RunArgs) -> CmdResult<Value> {
         if let Some(instance) = result.0["instance"].as_str() {
             homeboy::core::observation::store::record_intervention(
                 &homeboy::core::observation::ObservationStore::open_initialized()?,
-                &format!("workflow:{instance}"),
+                instance,
                 "workflow run",
                 args.reason.as_deref(),
             )?;

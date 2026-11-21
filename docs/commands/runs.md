@@ -14,7 +14,7 @@ workflow cancel/re-admission, or runner connect/disconnect/restart/doctor repair
 The actor is `HOMEBOY_ACTOR`, falling back to `$USER@hostname`. No-ops and
 validation failures do not produce events; automatic reconciliation and daemon
 recovery never call the operator audit primitive. Host actions outside Homeboy
-are not observable. Workflow and runner events use namespaced synthetic subjects.
+are not observable. Workflow events target the instance id; runner events target `runner:<id>`.
 
 ## Friction
 

@@ -7,7 +7,7 @@ fn interventions_are_durable_bounded_and_targeted() {
     let store = ObservationStore::open_initialized_at(&path).unwrap();
     for (target, command) in [
         ("run-1", "agent-task cancel"),
-        ("workflow:wf-1", "workflow cancel"),
+        ("wf-1", "workflow cancel"),
         ("runner:lab", "runner restart"),
     ] {
         record_intervention(&store, target, command, Some("maintenance")).unwrap();

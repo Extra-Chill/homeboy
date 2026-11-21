@@ -3,7 +3,8 @@ use super::*;
 use homeboy_control_plane_contract::*;
 use rusqlite::params;
 
-/// Record one completed operator mutation on a run or synthetic workflow/runner subject.
+/// Record one completed operator mutation on a run or workflow instance (both
+/// have run rows), or on a `runner:<id>` subject, which gets a minimal row.
 pub fn record_intervention(
     store: &ObservationStore,
     target: &str,
@@ -15,10 +16,10 @@ pub fn record_intervention(
     let time = chrono::Utc::now().to_rfc3339();
     let actor = std::env::var("HOMEBOY_ACTOR").unwrap_or_else(|_| {
         let user = std::env::var("USER").unwrap_or_else(|_| "unknown".into());
-        let host = std::fs::read_to_string("/etc/hostname").unwrap_or_else(|_| "unknown".into());
+        let host = crate::process::host_identity().unwrap_or_else(|| "unknown".into());
         format!("{user}@{}", host.trim())
     });
-    // Workflow instances and runners do not necessarily have observation run rows.
+    // Runners have no observation row of their own.
     if store.get_run(target)?.is_none() {
         store.connection.execute("INSERT OR IGNORE INTO runs(id, kind, started_at, status) VALUES (?1, 'intervention_subject', ?2, 'succeeded')", params![target, time])
             .map_err(sqlite_error("create intervention subject"))?;
