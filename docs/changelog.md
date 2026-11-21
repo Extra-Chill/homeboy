@@ -4,6 +4,14 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.488.4] - 2026-11-21
+
+### Changed
+- compute a Cook's terminal outcome on read instead of storing it
+
+### Fixed
+- distinguish flaky gate failures from reproducible regressions
+
 ## [0.488.3] - 2026-11-21
 
 ### Fixed
