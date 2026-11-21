@@ -4,6 +4,17 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.487.0] - 2026-11-21
+
+### Added
+- record operator interventions and list them with runs interventions
+
+### Changed
+- cut repeated metadata serialization in publish.aggregate
+
+### Fixed
+- default category output is a bounded collection, so homeboy.retention stops failing on output size
+
 ## [0.486.0] - 2026-11-21
 
 ### Added
