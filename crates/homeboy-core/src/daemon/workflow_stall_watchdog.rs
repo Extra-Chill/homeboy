@@ -28,9 +28,6 @@ pub(crate) fn stall_watchdog(store: &JobStore) -> Result<()> {
 }
 
 pub(super) fn observe_stalls(store: &JobStore, now: u64, bound: Duration) -> Result<()> {
-    if bound.is_zero() {
-        return Ok(());
-    }
     for (job, controller) in store.controller_jobs_of_type(WORKFLOW_JOB_TYPE, &[]) {
         if job.status.is_terminal() {
             continue;
@@ -60,6 +57,15 @@ pub(super) fn observe_stalls(store: &JobStore, now: u64, bound: Duration) -> Res
                     .unwrap_or(job.created_at_ms);
                 if let Some(child) = &child {
                     latest = latest.max(child.updated_at_ms);
+                }
+                // Cheapest signals first: a healthy item never reads its
+                // event log or resolves its run.
+                let quiet =
+                    |latest: u64| u128::from(now.saturating_sub(latest)) > bound.as_millis();
+                if !quiet(latest) {
+                    continue;
+                }
+                if let Some(child) = &child {
                     for event in store.events(child.id)? {
                         latest = latest.max(event.timestamp_ms);
                     }
@@ -73,10 +79,10 @@ pub(super) fn observe_stalls(store: &JobStore, now: u64, bound: Duration) -> Res
                 }) {
                     latest = latest.max(at);
                 }
-                let silent = now.saturating_sub(latest);
-                if u128::from(silent) <= bound.as_millis() {
+                if !quiet(latest) {
                     continue;
                 }
+                let silent = now.saturating_sub(latest);
                 let resolved = run_outcome_resolver()
                     .read()
                     .expect("workflow run outcome resolver lock")
@@ -126,7 +132,6 @@ pub(super) fn observe_stalls(store: &JobStore, now: u64, bound: Duration) -> Res
                         .with_fact("Step", step_id)
                         .with_fact("Item", index.to_string())
                         .with_fact("Run", run)
-                        .with_fact("Owner", run)
                         .with_fact("Silent for", format!("{} minutes", silent / 60_000))
                         .with_fact("Action taken", action)
                         .with_action(NotifyAction::new(
