@@ -571,8 +571,13 @@ fn cancel_through_staging_controller(
     let records = statuses
         .iter()
         .map(|_| {
-            cancel_exact_run_in_store(&lifecycle_store, run_id, Some("operator cancellation"))
-                .expect("controller-owned staging cancellation is routed in this root")
+            cancel_exact_run_in_store(
+                &lifecycle_store,
+                run_id,
+                Some("operator cancellation"),
+                None,
+            )
+            .expect("controller-owned staging cancellation is routed in this root")
         })
         .collect();
     server.join().expect("controller endpoint finished");
@@ -5401,7 +5406,7 @@ fn accepted_runner_cancel_only_settles_proven_ledger_absence() {
         let _hook = super::cancellation::test_cancel_hook::install(Box::new(move |_, _, _| {
             Err(error.clone())
         }));
-        let failure = cancel_exact_run_in_store(&lifecycle_store, run_id, None)
+        let failure = cancel_exact_run_in_store(&lifecycle_store, run_id, None, None)
             .expect_err("accepted handoff must propagate unproven absence");
         assert_eq!(failure.code, expected);
         assert!(!lifecycle_store
@@ -5415,7 +5420,7 @@ fn accepted_runner_cancel_only_settles_proven_ledger_absence() {
         error.details["runner_job_absence"] = json!("ledger_absent");
         Err(error)
     }));
-    let cancelled = cancel_exact_run_in_store(&lifecycle_store, run_id, None)
+    let cancelled = cancel_exact_run_in_store(&lifecycle_store, run_id, None, None)
         .expect("proven absence settles locally");
     assert_eq!(cancelled.state(), RunExecutionState::Cancelled);
     assert_eq!(
@@ -5483,9 +5488,13 @@ fn accepted_runner_cancel_stays_nonterminal_until_runner_confirms_cancellation()
         },
     ));
 
-    let pending =
-        cancel_exact_run_in_store(&lifecycle_store, run_id, Some("operator cancellation"))
-            .expect("asynchronous runner cancellation request");
+    let pending = cancel_exact_run_in_store(
+        &lifecycle_store,
+        run_id,
+        Some("operator cancellation"),
+        None,
+    )
+    .expect("asynchronous runner cancellation request");
     assert_eq!(pending.state(), RunExecutionState::Running);
     assert_eq!(
         pending.metadata["runner_cancellation_pending"]["state"],
@@ -5501,9 +5510,13 @@ fn accepted_runner_cancel_stays_nonterminal_until_runner_confirms_cancellation()
         .iter()
         .all(|event| event.kind != "run.cancelled"));
 
-    let cancelled =
-        cancel_exact_run_in_store(&lifecycle_store, run_id, Some("operator cancellation"))
-            .expect("retry until runner confirms cancellation");
+    let cancelled = cancel_exact_run_in_store(
+        &lifecycle_store,
+        run_id,
+        Some("operator cancellation"),
+        None,
+    )
+    .expect("retry until runner confirms cancellation");
     assert_eq!(cancelled.state(), RunExecutionState::Cancelled);
     assert!(cancelled
         .metadata
@@ -5518,4 +5531,118 @@ fn accepted_runner_cancel_stays_nonterminal_until_runner_confirms_cancellation()
         .events
         .iter()
         .any(|event| event.kind == "run.cancelled"));
+}
+
+/// #18619: a runner that settles on its own while cancellation is in flight
+/// wins on every entry point. Its terminal result is the run outcome, the
+/// cancellation request is kept beside it as evidence, and nobody errors.
+#[test]
+fn cancellation_imports_a_result_the_runner_settles_mid_cancel_on_every_entry_point() {
+    type Entry = fn(&AgentTaskLifecycleStore, &str) -> Result<AgentTaskRunRecord>;
+    let entries: [(&str, Entry, Option<Value>); 3] = [
+        (
+            "cancel",
+            |store, run_id| cancel_run_in_store(store, run_id, Some("operator cancellation")),
+            None,
+        ),
+        (
+            "cancel --exact",
+            |store, run_id| {
+                cancel_exact_run_in_store(store, run_id, Some("operator cancellation"), None)
+            },
+            None,
+        ),
+        (
+            "reconcile",
+            |store, run_id| {
+                cancel_exact_run_in_store(
+                    store,
+                    run_id,
+                    Some("operator cancellation"),
+                    Some(json!({ "actor": "reconciler", "cause": "stale_run" })),
+                )
+            },
+            Some(json!({ "actor": "reconciler", "cause": "stale_run" })),
+        ),
+    ];
+    for (entry, cancel, expected_provenance) in entries {
+        let context = homeboy_core::test_support::HermeticTestContext::new();
+        let lifecycle_store = AgentTaskLifecycleStore::new(context.path_roots());
+        let run_id = "runner-settles-mid-cancel";
+        let command = vec!["homeboy".to_string(), "agent-task".to_string()];
+        record_lab_offload_planned_in_store(
+            &lifecycle_store,
+            LabOffloadProxyPlan {
+                run_id,
+                runner_id: "homeboy-lab",
+                remote_workspace: "/runner/workspace/homeboy",
+                remote_command: &command,
+                durable_plan: None,
+            },
+        )
+        .expect("runner proxy");
+        let runner_jobs = JobStore::default();
+        let accepted_job = runner_jobs
+            .submit_runner_api_request(replay_request(run_id, &command))
+            .expect("accepted runner job");
+        record_detached_lab_run_in_store(
+            &lifecycle_store,
+            DetachedLabRunRecord {
+                run_id,
+                runner_id: "homeboy-lab",
+                runner_job_id: &accepted_job.id.to_string(),
+                remote_workspace: "/runner/workspace/homeboy",
+                remote_command: &command,
+            },
+        )
+        .expect("bind accepted runner owner");
+
+        let settling_store = AgentTaskLifecycleStore::new(context.path_roots());
+        let job_id = accepted_job.id;
+        let _cancel = super::cancellation::test_cancel_hook::install(Box::new(move |_, _, _| {
+            // The runner publishes its own terminal result while the
+            // cancellation request is in flight.
+            settling_store
+                .mutate_record(run_id, |record| {
+                    set_run_state(record, RunExecutionState::Succeeded);
+                    true
+                })
+                .expect("runner settles the run");
+            Ok((
+                runner_jobs
+                    .cancel(job_id, "cancel arrives after the result")
+                    .expect("cancel runner job"),
+                Vec::new(),
+            ))
+        }));
+
+        let record = cancel(&lifecycle_store, run_id)
+            .unwrap_or_else(|error| panic!("{entry}: settled run must not error: {error:?}"));
+        assert_eq!(record.state(), RunExecutionState::Succeeded, "{entry}");
+        let stored = lifecycle_store.read_record(run_id).expect("stored record");
+        assert_eq!(stored.state(), RunExecutionState::Succeeded, "{entry}");
+        let request = &stored.metadata["cancellation_request"];
+        assert_eq!(
+            request["outcome"], "superseded_by_terminal_result",
+            "{entry}"
+        );
+        assert_eq!(request["reason"], "operator cancellation", "{entry}");
+        assert_eq!(
+            request["provenance"],
+            expected_provenance.clone().unwrap_or(Value::Null),
+            "{entry}"
+        );
+        assert!(
+            stored.metadata.get("cancellation_provenance").is_none(),
+            "{entry}"
+        );
+        assert!(
+            logs_in_store(&lifecycle_store, run_id)
+                .expect("event stream")
+                .events
+                .iter()
+                .all(|event| event.kind != "run.cancelled"),
+            "{entry}"
+        );
+    }
 }

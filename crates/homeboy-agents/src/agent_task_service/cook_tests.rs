@@ -12606,7 +12606,7 @@ fn recover_retries_a_runner_cancelled_cook_but_not_an_operator_cancelled_one() {
                 .expect("materialize first attempt");
             let store = agent_task_lifecycle::AgentTaskLifecycleStore::from_environment()
                 .expect("lifecycle store");
-            agent_task_lifecycle::cancel_exact_run_in_store_with_provenance(
+            agent_task_lifecycle::cancel_exact_run_in_store(
                 &store,
                 &options.identity.initial_run_id,
                 Some("cancelled"),
