@@ -742,10 +742,19 @@ pub(super) fn run_cook_spine(
                 .as_str()
                 .map(str::to_string)
         }) {
-            let admission = super::cook_baseline::admit_base_gates(
-                &options,
-                &lifecycle_store.open_observation_initialized()?,
-                &base,
+            let admission = run_cook_startup_phase(
+                lifecycle_store,
+                durable_observer,
+                &options.identity.cook_id,
+                &options.identity.initial_run_id,
+                "baseline_gate_admission",
+                || {
+                    super::cook_baseline::admit_base_gates(
+                        &options,
+                        &lifecycle_store.open_observation_initialized()?,
+                        &base,
+                    )
+                },
             )?;
             lifecycle_store.record_metadata_value(
                 &options.identity.initial_run_id,
