@@ -1701,6 +1701,49 @@ mod tests {
     }
 
     #[test]
+    fn declared_lab_budget_derives_from_provider_and_gate_timeouts() {
+        let parse = |extra: &[&str]| {
+            let mut argv = vec![
+                "homeboy",
+                "agent-task",
+                "cook",
+                "--no-finalize",
+                "--prompt",
+                "test",
+                "--to-worktree",
+                "repo@branch",
+            ];
+            argv.extend_from_slice(extra);
+            let cli = crate::cli_surface::Cli::try_parse_from(argv).expect("parse Cook");
+            let crate::cli_surface::Commands::AgentTask(agent_task) = cli.command else {
+                panic!("agent-task command");
+            };
+            let super::super::AgentTaskCommand::Cook(cook) = agent_task.command else {
+                panic!("Cook command");
+            };
+            cook.declared_lab_budget_seconds()
+        };
+        // Provider ceiling is 3x the base timeout; one gate when none declared.
+        for (extra, expected) in [
+            (vec![], 3 * 1_200 + 1_800),
+            (vec!["--timeout-ms", "600000"], 3 * 600 + 1_800),
+            (
+                vec![
+                    "--verify",
+                    "a",
+                    "--verify",
+                    "b",
+                    "--gate-timeout-seconds",
+                    "60",
+                ],
+                3 * 1_200 + 2 * 60,
+            ),
+        ] {
+            assert_eq!(parse(&extra), expected, "{extra:?}");
+        }
+    }
+
+    #[test]
     fn cook_cli_preflight_explains_the_default_provider_budget_conflict() {
         let cli = crate::cli_surface::Cli::try_parse_from([
             "homeboy",
@@ -1983,12 +2026,44 @@ pub struct AgentTaskCookArgs {
 }
 
 impl AgentTaskCookArgs {
-    /// Export the declared lane so every step this Cook admits carries it in
-    /// its captured `HOMEBOY_*` environment.
-    pub(crate) fn export_lab_priority(&self) {
+    /// Export the declared lane and run-time budget so every step this Cook
+    /// admits carries them in its captured `HOMEBOY_*` environment. An
+    /// operator-set HOMEBOY_LAB_BUDGET_SECONDS wins over the derived budget.
+    pub(crate) fn export_lab_admission(&self) {
+        use homeboy::core::lab_capacity::{LAB_BUDGET_ENV, LAB_PRIORITY_ENV};
         if let Some(priority) = &self.priority {
-            std::env::set_var(homeboy::core::lab_capacity::LAB_PRIORITY_ENV, priority);
+            std::env::set_var(LAB_PRIORITY_ENV, priority);
         }
+        if std::env::var_os(LAB_BUDGET_ENV).is_none() {
+            std::env::set_var(
+                LAB_BUDGET_ENV,
+                self.declared_lab_budget_seconds().to_string(),
+            );
+        }
+    }
+
+    /// Declared Lab budget for one Cook attempt, from timeouts the Cook
+    /// already enforces: the provider's wall-clock ceiling (`--timeout-ms`,
+    /// extended up to its cap) plus every gate command's
+    /// `--gate-timeout-seconds`. Queue ETAs read it as an upper bound.
+    pub(crate) fn declared_lab_budget_seconds(&self) -> u64 {
+        use homeboy::agents::agent_task_timeout::{
+            effective_provider_max_timeout_ms, DEFAULT_PROVIDER_TIMEOUT_MS,
+        };
+        let base = self
+            .dispatch
+            .core
+            .timeout_ms
+            .unwrap_or(DEFAULT_PROVIDER_TIMEOUT_MS);
+        let provider_seconds = effective_provider_max_timeout_ms(base, None).div_ceil(1_000);
+        let gates = &self.gates;
+        let gate_commands = (gates.verify.len()
+            + gates.verify_file.len()
+            + gates.private_verify.len()
+            + gates.private_verify_file.len())
+        .max(1) as u64;
+        provider_seconds
+            .saturating_add(gate_commands.saturating_mul(gates.effective_gate_timeout_seconds()))
     }
 }
 

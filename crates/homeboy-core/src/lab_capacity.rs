@@ -184,20 +184,188 @@ pub fn admission_order(
     owner_cap: usize,
 ) -> Vec<usize> {
     let held_by = |owner: &str| held.get(owner).copied().unwrap_or(0);
-    let deferred = |waiter: &LabWaiter| {
-        held_by(&waiter.owner) >= owner_cap
-            && waiters.iter().any(|other| other.owner != waiter.owner)
-    };
     let mut order = waiters.iter().collect::<Vec<_>>();
     order.sort_by_key(|waiter| {
         (
-            deferred(waiter),
+            is_deferred(waiter, waiters, held, owner_cap),
             waiter.priority,
             held_by(&waiter.owner),
             waiter.ticket,
         )
     });
     order.into_iter().map(|waiter| waiter.ticket).collect()
+}
+
+/// An owner at its share cap is deferred while another owner waits.
+fn is_deferred(
+    waiter: &LabWaiter,
+    waiters: &[LabWaiter],
+    held: &BTreeMap<String, usize>,
+    owner_cap: usize,
+) -> bool {
+    held.get(&waiter.owner).copied().unwrap_or(0) >= owner_cap
+        && waiters.iter().any(|other| other.owner != waiter.owner)
+}
+
+/// Where a waiter stands among this Lab's own step waiters (`local`) and the
+/// waiters remote controllers registered through `POST /capacity/waiters`
+/// (`remote`), ranked together by [`admission_order`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+pub struct LabStanding {
+    pub queue_position: usize,
+    pub waiters_ahead: usize,
+    /// Whether the waiter may take a free slot now.
+    pub may_proceed: bool,
+}
+
+/// Rank `ticket` across local and remote waiters. A local waiter must head
+/// the local waiters, as before. Between the two queues, a waiter ranked
+/// ahead holds another back only through a strictly higher lane or the owner
+/// share cap, never by arrival alone: a remote waiter is admitted by its
+/// runner's job capacity, not by a step slot. A remote waiter holds back a
+/// local one only while some step holder runs, so a remote Cook blocked for
+/// another reason can never idle the Lab. `None` when `ticket` is not queued.
+pub fn lab_standing(
+    local: &[LabWaiter],
+    remote: &[LabWaiter],
+    held: &BTreeMap<String, usize>,
+    owner_cap: usize,
+    ticket: usize,
+    active: usize,
+) -> Option<LabStanding> {
+    let combined = local.iter().chain(remote).cloned().collect::<Vec<_>>();
+    let order = admission_order(&combined, held, owner_cap);
+    let index = order.iter().position(|candidate| *candidate == ticket)?;
+    let me = combined.iter().find(|waiter| waiter.ticket == ticket)?;
+    let is_remote = |ticket: usize| remote.iter().any(|waiter| waiter.ticket == ticket);
+    let deferred = is_deferred(me, &combined, held, owner_cap);
+    let holds_back = |other: &usize| {
+        let Some(other_waiter) = combined.iter().find(|waiter| waiter.ticket == *other) else {
+            return false;
+        };
+        let outranks = other_waiter.priority < me.priority || deferred;
+        match (is_remote(ticket), is_remote(*other)) {
+            (false, false) => true,
+            (false, true) => active > 0 && outranks,
+            (true, _) => outranks,
+        }
+    };
+    Some(LabStanding {
+        queue_position: index + 1,
+        waiters_ahead: index,
+        may_proceed: !order[..index].iter().any(holds_back),
+    })
+}
+
+/// How long a remote controller's waiter lives on the Lab without a heartbeat.
+/// Controllers re-probe at least every 30 seconds while they wait.
+pub const REMOTE_WAITER_TTL: Duration = Duration::from_secs(120);
+
+/// A remote controller's heartbeat for one Cook step waiting on this Lab.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct RemoteWaiterHeartbeat {
+    /// Stable per waiting step (its step key), so a re-sent beat renews it.
+    pub waiter_id: String,
+    /// The fairness unit: the step's workflow instance or linked run.
+    pub owner: String,
+    #[serde(default)]
+    pub priority: LabPriority,
+    /// Leave the queue now instead of waiting for the TTL.
+    #[serde(default)]
+    pub release: bool,
+}
+
+/// Waiters remote controllers hold on this Lab. Each keeps its arrival ticket
+/// while it heartbeats and expires [`REMOTE_WAITER_TTL`] after its last beat.
+#[derive(Debug, Default)]
+pub struct RemoteWaiters {
+    entries: Vec<RemoteEntry>,
+}
+
+#[derive(Debug, Clone)]
+struct RemoteEntry {
+    id: String,
+    waiter: LabWaiter,
+    since: Instant,
+    seen: Instant,
+}
+
+impl RemoteWaiters {
+    pub const fn new() -> Self {
+        Self {
+            entries: Vec::new(),
+        }
+    }
+
+    /// Register or renew a waiter, or release it. Returns its ticket while it
+    /// stays registered.
+    pub fn heartbeat(&mut self, beat: &RemoteWaiterHeartbeat, now: Instant) -> Option<usize> {
+        self.expire(now);
+        if beat.release {
+            self.entries.retain(|entry| entry.id != beat.waiter_id);
+            return None;
+        }
+        if let Some(entry) = self
+            .entries
+            .iter_mut()
+            .find(|entry| entry.id == beat.waiter_id)
+        {
+            entry.seen = now;
+            entry.waiter.owner = beat.owner.clone();
+            entry.waiter.priority = beat.priority;
+            return Some(entry.waiter.ticket);
+        }
+        let ticket = NEXT_TICKET.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        self.entries.push(RemoteEntry {
+            id: beat.waiter_id.clone(),
+            waiter: LabWaiter {
+                ticket,
+                owner: beat.owner.clone(),
+                priority: beat.priority,
+            },
+            since: now,
+            seen: now,
+        });
+        Some(ticket)
+    }
+
+    /// Drop waiters whose controller stopped heartbeating.
+    pub fn expire(&mut self, now: Instant) {
+        self.entries
+            .retain(|entry| now.saturating_duration_since(entry.seen) < REMOTE_WAITER_TTL);
+    }
+
+    pub fn waiters(&self) -> Vec<LabWaiter> {
+        self.entries
+            .iter()
+            .map(|entry| entry.waiter.clone())
+            .collect()
+    }
+
+    pub fn len(&self) -> usize {
+        self.entries.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.entries.is_empty()
+    }
+}
+
+/// Upper-bound ETA a controller derives from a Lab `step_queue` payload (the
+/// `/capacity` view or a waiter heartbeat reply) for a waiter at `position`:
+/// each holder's remaining declared budget, against the Lab's budget.
+pub fn eta_from_step_queue(queue: &serde_json::Value, position: usize) -> Option<u64> {
+    let budget = queue["effective_budget"].as_u64()? as usize;
+    let remaining = queue["holders"]
+        .as_array()?
+        .iter()
+        .map(|holder| {
+            let declared = holder["budget_seconds"].as_u64()?;
+            let elapsed = holder["elapsed_seconds"].as_u64().unwrap_or(0);
+            Some(Duration::from_secs(declared.saturating_sub(elapsed)))
+        })
+        .collect::<Vec<_>>();
+    eta_upper_bound_seconds(&remaining, position.max(1), budget)
 }
 
 /// Upper-bound seconds until a waiter at `position` can start, assuming each
@@ -252,6 +420,7 @@ impl Holder {
 struct StepState {
     slots: Vec<Option<Holder>>,
     queue: Vec<(LabWaiter, Instant)>,
+    remote: RemoteWaiters,
     last_budget: Option<usize>,
 }
 
@@ -274,11 +443,32 @@ impl StepState {
     fn remaining(&self) -> Vec<Option<Duration>> {
         self.slots.iter().flatten().map(Holder::remaining).collect()
     }
+
+    /// Holders without commands or environment: owner, lane, timing, budget.
+    fn holders_json(&self) -> Vec<serde_json::Value> {
+        let now = chrono::Utc::now();
+        self.slots
+            .iter()
+            .flatten()
+            .map(|holder| {
+                let elapsed = holder.started.elapsed();
+                serde_json::json!({
+                    "owner": holder.owner, "priority": holder.priority,
+                    "started_at": chrono::Duration::from_std(elapsed)
+                        .ok()
+                        .map(|elapsed| (now - elapsed).to_rfc3339()),
+                    "elapsed_seconds": elapsed.as_secs(),
+                    "budget_seconds": holder.budget.map(|budget| budget.as_secs()),
+                })
+            })
+            .collect()
+    }
 }
 
 static STEP_STATE: std::sync::Mutex<StepState> = std::sync::Mutex::new(StepState {
     slots: Vec::new(),
     queue: Vec::new(),
+    remote: RemoteWaiters::new(),
     last_budget: None,
 });
 static NEXT_TICKET: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
@@ -287,39 +477,84 @@ static NEXT_TICKET: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUs
 pub fn step_queue_snapshot() -> serde_json::Value {
     // `observe` takes the state lock itself.
     let fallback = observe(None).effective_budget;
-    let state = STEP_STATE.lock().unwrap_or_else(|e| e.into_inner());
+    let mut state = STEP_STATE.lock().unwrap_or_else(|e| e.into_inner());
+    state.remote.expire(Instant::now());
     let budget = state.last_budget.unwrap_or(fallback);
     let share = owner_max_share_percent();
     let cap = owner_slot_cap(budget, share);
     let held = state.active_slots_by_owner();
     let remaining = state.remaining();
-    let holders = state
-        .slots
-        .iter()
-        .flatten()
-        .map(|holder| {
-            serde_json::json!({
-                "owner": holder.owner, "priority": holder.priority,
-                "elapsed_seconds": holder.started.elapsed().as_secs(),
-                "budget_seconds": holder.budget.map(|budget| budget.as_secs()),
-            })
-        })
-        .collect::<Vec<_>>();
-    let waiting = admission_order(&state.waiters(), &held, cap)
+    let mut combined = state.waiters();
+    combined.extend(state.remote.waiters());
+    let waiting = admission_order(&combined, &held, cap)
         .into_iter()
         .enumerate()
         .filter_map(|(index, ticket)| {
-            let (waiter, queued) = state.queue.iter().find(|(w, _)| w.ticket == ticket)?;
+            let (waiter, since, remote) = state
+                .queue
+                .iter()
+                .find(|(w, _)| w.ticket == ticket)
+                .map(|(waiter, queued)| (waiter, *queued, false))
+                .or_else(|| {
+                    state
+                        .remote
+                        .entries
+                        .iter()
+                        .find(|entry| entry.waiter.ticket == ticket)
+                        .map(|entry| (&entry.waiter, entry.since, true))
+                })?;
             Some(serde_json::json!({
                 "queue_position": index + 1, "owner": waiter.owner, "priority": waiter.priority,
-                "waited_seconds": queued.elapsed().as_secs(),
+                "remote": remote,
+                "waited_seconds": since.elapsed().as_secs(),
                 "eta_seconds": eta_upper_bound_seconds(&remaining, index + 1, budget),
             }))
         })
         .collect::<Vec<_>>();
     serde_json::json!({
         "effective_budget": budget, "owner_max_share_percent": share, "owner_slot_cap": cap,
-        "holders": holders, "waiting": waiting, "eta_kind": "upper_bound_from_declared_budgets",
+        "holders": state.holders_json(), "waiting": waiting,
+        "remote_waiter_ttl_seconds": REMOTE_WAITER_TTL.as_secs(),
+        "eta_kind": "upper_bound_from_declared_budgets",
+    })
+}
+
+/// Register, renew, or release a remote controller's waiter and report its
+/// standing with this Lab's holders (no commands), so the controller can rank
+/// itself across controllers and compute an ETA with [`eta_from_step_queue`].
+pub fn heartbeat_remote_waiter(beat: &RemoteWaiterHeartbeat) -> serde_json::Value {
+    // `observe` takes the state lock itself.
+    let observation = observe(None);
+    let mut state = STEP_STATE.lock().unwrap_or_else(|e| e.into_inner());
+    let Some(ticket) = state.remote.heartbeat(beat, Instant::now()) else {
+        return serde_json::json!({ "waiter_id": beat.waiter_id, "registered": false });
+    };
+    let budget = state.last_budget.unwrap_or(observation.effective_budget);
+    let cap = owner_slot_cap(budget, owner_max_share_percent());
+    let held = state.active_slots_by_owner();
+    let active = state.slots.iter().flatten().count();
+    let standing = lab_standing(
+        &state.waiters(),
+        &state.remote.waiters(),
+        &held,
+        cap,
+        ticket,
+        active,
+    );
+    serde_json::json!({
+        "waiter_id": beat.waiter_id,
+        "registered": true,
+        "priority": beat.priority,
+        "queue_position": standing.map(|standing| standing.queue_position),
+        "waiters_ahead": standing.map(|standing| standing.waiters_ahead),
+        "may_proceed": standing.is_none_or(|standing| standing.may_proceed),
+        "active_slots": active,
+        "effective_budget": budget,
+        "owner_slot_cap": cap,
+        "load_average_1m": observation.load_average_1m,
+        "holders": state.holders_json(),
+        "ttl_seconds": REMOTE_WAITER_TTL.as_secs(),
+        "eta_kind": "upper_bound_from_declared_budgets",
     })
 }
 
@@ -514,12 +749,23 @@ fn acquire_step_with_observation(
             let counts = state.active_slots_by_owner();
             observation.active_slots_by_owner = counts.clone();
             let cap = owner_slot_cap(budget, share);
-            let position = 1 + admission_order(&state.waiters(), &counts, cap)
-                .iter()
-                .position(|candidate| *candidate == ticket)
-                .unwrap_or(0);
             let active = state.slots.iter().flatten().count();
-            if position == 1 && active < budget {
+            state.remote.expire(Instant::now());
+            let standing = lab_standing(
+                &state.waiters(),
+                &state.remote.waiters(),
+                &counts,
+                cap,
+                ticket,
+                active,
+            )
+            .unwrap_or(LabStanding {
+                queue_position: 1,
+                waiters_ahead: 0,
+                may_proceed: true,
+            });
+            let position = standing.queue_position;
+            if standing.may_proceed && active < budget {
                 let holder = Holder {
                     owner: claim.owner.to_owned(),
                     priority: claim.priority,
@@ -766,6 +1012,187 @@ mod tests {
         }
         assert_eq!(owner_slot_cap(32, 50), 16);
         assert_eq!(owner_slot_cap(1, 50), 1);
+    }
+
+    #[test]
+    fn cross_controller_standing_table() {
+        use LabPriority::{High, Normal};
+        let waiter = |ticket, owner: &str, priority| LabWaiter {
+            ticket,
+            owner: owner.into(),
+            priority,
+        };
+        let fanout_held: BTreeMap<String, usize> =
+            [("fanout".to_string(), 2)].into_iter().collect();
+        let none: BTreeMap<String, usize> = BTreeMap::new();
+        // (name, local, remote, held, ticket, active, position, may_proceed)
+        for (name, local, remote, held, ticket, active, position, may_proceed) in [
+            (
+                "remote high lane holds back a local normal step while holders run",
+                vec![waiter(1, "wf-a", Normal)],
+                vec![waiter(2, "run-b", High)],
+                &none,
+                1,
+                1,
+                2,
+                false,
+            ),
+            (
+                "the same remote waiter proceeds",
+                vec![waiter(1, "wf-a", Normal)],
+                vec![waiter(2, "run-b", High)],
+                &none,
+                2,
+                1,
+                1,
+                true,
+            ),
+            (
+                "an idle Lab never waits on a remote waiter",
+                vec![waiter(1, "wf-a", Normal)],
+                vec![waiter(2, "run-b", High)],
+                &none,
+                1,
+                0,
+                2,
+                true,
+            ),
+            (
+                "arrival alone does not hold a local step behind a remote one",
+                vec![waiter(2, "wf-a", Normal)],
+                vec![waiter(1, "run-b", Normal)],
+                &none,
+                2,
+                1,
+                2,
+                true,
+            ),
+            (
+                "a high waiter on another controller outranks an earlier normal one",
+                vec![],
+                vec![waiter(1, "run-a", Normal), waiter(2, "run-b", High)],
+                &none,
+                1,
+                1,
+                2,
+                false,
+            ),
+            (
+                "a high remote waiter ranks first across controllers",
+                vec![],
+                vec![waiter(1, "run-a", Normal), waiter(2, "run-b", High)],
+                &none,
+                2,
+                1,
+                1,
+                true,
+            ),
+            (
+                "an over-share local owner defers to a remote owner's waiter",
+                vec![waiter(1, "fanout", High)],
+                vec![waiter(2, "publish", Normal)],
+                &fanout_held,
+                1,
+                2,
+                2,
+                false,
+            ),
+            (
+                "local waiters keep strict order among themselves",
+                vec![waiter(1, "wf-a", Normal), waiter(2, "wf-b", Normal)],
+                vec![],
+                &none,
+                2,
+                1,
+                2,
+                false,
+            ),
+        ] {
+            let standing = lab_standing(&local, &remote, held, 2, ticket, active).unwrap();
+            assert_eq!(standing.queue_position, position, "{name}");
+            assert_eq!(standing.waiters_ahead, position - 1, "{name}");
+            assert_eq!(standing.may_proceed, may_proceed, "{name}");
+        }
+        assert!(lab_standing(&[], &[], &none, 2, 9, 0).is_none());
+    }
+
+    #[test]
+    fn remote_waiters_renew_release_and_expire_without_heartbeat() {
+        let beat = |id: &str, release| RemoteWaiterHeartbeat {
+            waiter_id: id.into(),
+            owner: format!("run-{id}"),
+            priority: LabPriority::High,
+            release,
+        };
+        let start = Instant::now();
+        let at = |seconds| start + Duration::from_secs(seconds);
+        let mut waiters = RemoteWaiters::new();
+        let a = waiters.heartbeat(&beat("a", false), at(0)).unwrap();
+        let b = waiters.heartbeat(&beat("b", false), at(10)).unwrap();
+        // A renewal keeps the arrival ticket.
+        assert_eq!(waiters.heartbeat(&beat("a", false), at(100)), Some(a));
+        // `b` last beat at 10s; it is gone one TTL later, `a` survives.
+        waiters.expire(at(10) + REMOTE_WAITER_TTL);
+        assert_eq!(
+            waiters
+                .waiters()
+                .iter()
+                .map(|waiter| waiter.ticket)
+                .collect::<Vec<_>>(),
+            vec![a]
+        );
+        // A lost waiter that returns queues again at the back.
+        let b_again = waiters.heartbeat(&beat("b", false), at(140)).unwrap();
+        assert!(b_again > b);
+        assert_eq!(waiters.heartbeat(&beat("a", true), at(141)), None);
+        assert_eq!(waiters.len(), 1);
+        waiters.expire(at(140) + REMOTE_WAITER_TTL);
+        assert!(waiters.is_empty());
+    }
+
+    #[test]
+    fn controller_eta_from_lab_capacity_payload_table() {
+        let queue = |budget: u64, holders: serde_json::Value| serde_json::json!({ "effective_budget": budget, "holders": holders });
+        let holder = |budget: Option<u64>, elapsed: u64| serde_json::json!({ "owner": "wf", "budget_seconds": budget, "elapsed_seconds": elapsed });
+        for (payload, position, expected) in [
+            (
+                queue(
+                    2,
+                    serde_json::json!([holder(Some(600), 100), holder(Some(900), 0)]),
+                ),
+                1,
+                Some(500),
+            ),
+            (
+                queue(
+                    2,
+                    serde_json::json!([holder(Some(600), 100), holder(Some(900), 0)]),
+                ),
+                2,
+                Some(900),
+            ),
+            (
+                queue(
+                    2,
+                    serde_json::json!([holder(None, 100), holder(Some(60), 90)]),
+                ),
+                1,
+                Some(0),
+            ),
+            (
+                queue(2, serde_json::json!([holder(None, 1), holder(None, 2)])),
+                1,
+                None,
+            ),
+            (queue(4, serde_json::json!([holder(None, 1)])), 1, Some(0)),
+            (serde_json::json!({ "holders": [] }), 1, None),
+        ] {
+            assert_eq!(
+                eta_from_step_queue(&payload, position),
+                expected,
+                "{payload} position={position}"
+            );
+        }
     }
 
     #[test]

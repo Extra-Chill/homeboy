@@ -100,6 +100,15 @@ fn step_priority(request: &StepJobRequest) -> crate::lab_capacity::LabPriority {
     )
 }
 
+/// The step's fairness unit: its workflow instance, else its linked run.
+fn step_owner(request: &StepJobRequest) -> &str {
+    request
+        .root_durable_run_id
+        .as_deref()
+        .or(request.linked_durable_run_id.as_deref())
+        .unwrap_or(&request.key)
+}
+
 /// Re-evaluate the same eligibility authority used by running steps.
 pub fn runner_wait_reason(runner: &str) -> Option<String> {
     runner_eligibility()
@@ -479,6 +488,74 @@ pub fn step_runner_wait_context(runner: &str) -> Value {
         .unwrap_or(Value::Null)
 }
 
+/// Registers, renews, or releases a waiting step with the runner's Lab daemon
+/// (`POST /capacity/waiters`) and returns its reply: Lab-wide standing plus
+/// holder budgets. `None` when the Lab is unreachable or predates the route,
+/// in which case the wait keeps its controller-local ranking.
+pub type StepRunnerLabWaiter =
+    Arc<dyn Fn(&str, &crate::lab_capacity::RemoteWaiterHeartbeat) -> Option<Value> + Send + Sync>;
+static LAB_WAITER: OnceLock<StepRunnerLabWaiter> = OnceLock::new();
+
+pub fn register_step_runner_lab_waiter(waiter: StepRunnerLabWaiter) {
+    let _ = LAB_WAITER.set(waiter);
+}
+
+/// A step's waiter reservation on its runner's Lab; dropping it releases the
+/// reservation, and a lost controller's reservation expires on the Lab.
+struct LabWaiterReservation {
+    hook: StepRunnerLabWaiter,
+    runner: String,
+    beat: crate::lab_capacity::RemoteWaiterHeartbeat,
+}
+
+impl LabWaiterReservation {
+    fn renew(&self) -> Option<Value> {
+        (self.hook)(&self.runner, &self.beat).filter(|reply| reply["registered"] == true)
+    }
+}
+
+impl Drop for LabWaiterReservation {
+    fn drop(&mut self) {
+        let release = crate::lab_capacity::RemoteWaiterHeartbeat {
+            release: true,
+            ..self.beat.clone()
+        };
+        let _ = (self.hook)(&self.runner, &release);
+    }
+}
+
+/// What a runner wait reports from its Lab reservation reply: Lab-wide
+/// position when the Lab ranked it, else the controller-local one, and an
+/// upper-bound ETA from the Lab holders' declared budgets.
+fn lab_wait_standing(
+    lab: Option<&Value>,
+    local: Option<crate::lab_capacity::RunnerWaitStanding>,
+) -> Value {
+    let lab_position = lab
+        .and_then(|reply| reply["queue_position"].as_u64())
+        .map(|position| position as usize);
+    let position = lab_position.or(local.map(|standing| standing.queue_position));
+    let eta = lab
+        .zip(position)
+        .and_then(|(reply, position)| crate::lab_capacity::eta_from_step_queue(reply, position));
+    json!({
+        "queue_position": position,
+        "waiters_ahead": lab
+            .and_then(|reply| reply["waiters_ahead"].as_u64())
+            .map(|ahead| ahead as usize)
+            .or(local.map(|standing| standing.waiters_ahead)),
+        "queue_scope": if lab_position.is_some() { "lab" } else { "controller" },
+        "may_proceed": lab
+            .and_then(|reply| reply["may_proceed"].as_bool())
+            .unwrap_or(true),
+        "eta_seconds": eta,
+        "eta_kind": eta.map(|_| "upper_bound_from_declared_budgets"),
+        "effective_budget": lab.map(|reply| reply["effective_budget"].clone()),
+        "active_slots": lab.map(|reply| reply["active_slots"].clone()),
+        "load_average_1m": lab.map(|reply| reply["load_average_1m"].clone()),
+    })
+}
+
 fn terminal_consumers() -> &'static RwLock<BTreeMap<String, StepTerminalConsumer>> {
     static CONSUMERS: OnceLock<RwLock<BTreeMap<String, StepTerminalConsumer>>> = OnceLock::new();
     CONSUMERS.get_or_init(|| RwLock::new(BTreeMap::new()))
@@ -726,6 +803,11 @@ impl ControllerJobDriver for StepJobDriver {
             "waiters_ahead": progress.get("waiters_ahead").cloned().unwrap_or(Value::Null),
             "priority": progress.get("priority").cloned().unwrap_or(Value::Null),
             "eta_seconds": progress.get("eta_seconds").cloned().unwrap_or(Value::Null),
+            "queue_scope": progress.get("queue_scope").cloned().unwrap_or(Value::Null),
+            "estimated_start_at": progress.get("estimated_start_at").cloned().unwrap_or(Value::Null),
+            "effective_budget": progress.get("effective_budget").cloned().unwrap_or(Value::Null),
+            "active_slots": progress.get("active_slots").cloned().unwrap_or(Value::Null),
+            "load_average_1m": progress.get("load_average_1m").cloned().unwrap_or(Value::Null),
         }))
     }
 
@@ -877,12 +959,7 @@ fn run_step(mut checkpoint: StepJobCheckpoint, job: &ControllerJobHandle) -> Res
         .public_env
         .get("HOMEBOY_LAB_CONCURRENCY_LIMIT")
         .and_then(|limit| limit.parse().ok());
-    let owner = checkpoint
-        .request
-        .root_durable_run_id
-        .as_deref()
-        .or(checkpoint.request.linked_durable_run_id.as_deref())
-        .unwrap_or(&checkpoint.request.key);
+    let owner = step_owner(&checkpoint.request);
     let public_env = &checkpoint.request.env.public_env;
     let claim = crate::lab_capacity::StepClaim {
         owner,
@@ -1181,6 +1258,21 @@ fn await_wait_with(
     let runner_ticket = runner_probe
         .as_ref()
         .map(|(runner, _)| crate::lab_capacity::join_runner_wait(runner, step_priority(request)));
+    // The Lab ranks this waiter against its own steps and other controllers'
+    // waiters, and reports holder budgets for an ETA.
+    let lab_waiter = runner_probe.as_ref().and_then(|(runner, _)| {
+        LAB_WAITER.get().map(|hook| LabWaiterReservation {
+            hook: hook.clone(),
+            runner: runner.to_string(),
+            beat: crate::lab_capacity::RemoteWaiterHeartbeat {
+                waiter_id: request.key.clone(),
+                owner: step_owner(request).to_string(),
+                priority: step_priority(request),
+                release: false,
+            },
+        })
+    });
+    let mut last_estimated_start: Option<chrono::DateTime<chrono::Utc>> = None;
     let wait_cap = if step_priority(request) == crate::lab_capacity::LabPriority::High {
         RUNNER_WAIT_HIGH_CAP
     } else {
@@ -1235,9 +1327,15 @@ fn await_wait_with(
             }
             if now() >= next_probe {
                 let standing = runner_ticket.as_ref().map(|ticket| ticket.standing());
-                // A free slot belongs to a higher-lane waiter first.
+                let lab_reply = lab_waiter.as_ref().and_then(LabWaiterReservation::renew);
+                let queue = lab_wait_standing(lab_reply.as_ref(), standing);
+                // A free slot belongs to a higher-lane waiter first, here or on
+                // another controller waiting on the same Lab.
                 let observation = match probe(runner) {
-                    Ok(()) if standing.is_some_and(|standing| !standing.may_proceed) => {
+                    Ok(())
+                        if standing.is_some_and(|standing| !standing.may_proceed)
+                            || queue["may_proceed"] == false =>
+                    {
                         Err("capacity_reached".to_string())
                     }
                     observation => observation,
@@ -1258,8 +1356,20 @@ fn await_wait_with(
                 ) {
                     backoff = RUNNER_WAIT_INITIAL;
                 }
-                let position = standing.map(|standing| standing.queue_position);
-                if last_observation.as_ref() != Some(&observation) || last_position != position {
+                let position = queue["queue_position"].as_u64();
+                let estimated_start = queue["eta_seconds"]
+                    .as_u64()
+                    .map(|seconds| chrono::Utc::now() + chrono::Duration::seconds(seconds as i64));
+                // Re-publish when the estimated start moves by over a minute.
+                let eta_moved = match (estimated_start, last_estimated_start) {
+                    (Some(now), Some(last)) => (now - last).num_seconds().abs() > 60,
+                    (now, last) => now.is_some() != last.is_some(),
+                };
+                if last_observation.as_ref() != Some(&observation)
+                    || last_position != position
+                    || eta_moved
+                {
+                    last_estimated_start = estimated_start;
                     if let Err(reason) = &observation {
                         job.progress(json!({
                             "phase": "waiting",
@@ -1268,7 +1378,14 @@ fn await_wait_with(
                             "waiting_since": waiting_since,
                             "builds": step_runner_wait_context(runner),
                             "queue_position": position,
-                            "waiters_ahead": standing.map(|standing| standing.waiters_ahead),
+                            "waiters_ahead": queue["waiters_ahead"],
+                            "queue_scope": queue["queue_scope"],
+                            "eta_seconds": queue["eta_seconds"],
+                            "eta_kind": queue["eta_kind"],
+                            "estimated_start_at": estimated_start.map(|at| at.to_rfc3339()),
+                            "effective_budget": queue["effective_budget"],
+                            "active_slots": queue["active_slots"],
+                            "load_average_1m": queue["load_average_1m"],
                             "priority": step_priority(request),
                             "next_attempt_at": (chrono::Utc::now()
                                 + chrono::Duration::from_std(backoff)
