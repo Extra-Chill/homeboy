@@ -282,13 +282,21 @@ pub(super) fn diagnostic_priority(item: &CollectedDiagnostic) -> (u8, u8, u8) {
     // happens to say "valid" or "schema") can never outrank them.
     let recorded_verdict = matches!(
         item.source.as_str(),
-        "current_lifecycle" | "terminal_operation_failure" | "review_form"
+        "current_lifecycle"
+            | "terminal_operation_failure"
+            | "review_form"
+            | "controller_failure"
+            | "gate_failure"
     );
     let class = item.class.to_ascii_lowercase();
     let text = format!("{} {}", item.class, item.message).to_ascii_lowercase();
     // Typed build skew explains every downstream continuation failure.
     let priority = if recorded_verdict || class == RUNNER_VERSION_SKEW_CLASS {
         0
+    } else if item.source == "hydrated_process_stream" && class == "provider.process_stream" {
+        // An unparsed stream tail is whatever the provider printed last,
+        // often its own prompt. Its words are not evidence of a cause.
+        4
     } else if class == "agent_task.provider_liveness_timeout" {
         // The typed lifecycle timeout is authoritative. An unparsed provider
         // stream can contain arbitrary words such as "error" and must not
@@ -831,6 +839,24 @@ pub(super) fn attach_lab_admission_wait(
             let command = format!("homeboy agent-task status {} --watch", quote_arg(run_id));
             value["next_commands"] = json!([command]);
         }
+    }
+}
+
+/// A failed deterministic gate is the run's recorded verdict. Its output tail
+/// (the gate's own report lines) is the cause a reader needs first.
+pub(super) fn gate_failure_diagnostic(failure: &Value) -> CollectedDiagnostic {
+    let reason = failure["reason"].as_str().unwrap_or("gate_failed");
+    let exit = failure["exit_code"]
+        .as_i64()
+        .map(|code| format!(" (exit {code})"))
+        .unwrap_or_default();
+    let tail = failure["output_tail"].as_str().unwrap_or_default();
+    CollectedDiagnostic {
+        task_id: failure["gate"].as_str().unwrap_or("gate").to_string(),
+        class: format!("gate.{reason}"),
+        message: format!("{reason}{exit}\n{tail}").trim().to_string(),
+        source: "gate_failure".to_string(),
+        data: json!({ "command": failure["command"], "artifact": failure["artifact"] }),
     }
 }
 

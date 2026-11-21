@@ -82,6 +82,11 @@ pub(in crate::commands::agent_task) fn diagnose(args: DiagnoseArgs) -> CmdResult
     if let Some(diagnostic) = build_skew.clone() {
         nested_reasons.insert(0, diagnostic);
     }
+    let gate_failure = agent_task_service_direct::recorded_promotion_report(&record.metadata)
+        .ok()
+        .flatten()
+        .and_then(|report| agent_task_service_direct::gate_failure_projection(&report));
+    nested_reasons.extend(gate_failure.as_ref().map(gate_failure_diagnostic));
     let ranked_reasons = ranked_diagnostics(nested_reasons);
     // The canonical Cook verdict, read exactly as `agent-task status --exact`
     // reads it (#15885). The raw lifecycle record can still say `succeeded`
@@ -151,10 +156,6 @@ pub(in crate::commands::agent_task) fn diagnose(args: DiagnoseArgs) -> CmdResult
     }
     let retry = retry_replay_action(&record);
     let lab_snapshot_failure = lab_snapshot_recovery_projection(&record, &retry);
-    let gate_failure = agent_task_service_direct::recorded_promotion_report(&record.metadata)
-        .ok()
-        .flatten()
-        .and_then(|report| agent_task_service_direct::gate_failure_projection(&report));
     let next_commands = if gate_failure.is_some() {
         Vec::new() // The shared classification table below owns gate actions.
     } else {
