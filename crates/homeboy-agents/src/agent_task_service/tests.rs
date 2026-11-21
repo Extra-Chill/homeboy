@@ -779,7 +779,9 @@ fn public_admission_capacity_wait_keeps_cook_pending_resource_admission() {
 }
 
 /// The core preflight refusal for a pinned, connected runner whose daemon
-/// freshness probe has not produced readiness evidence.
+/// freshness probe has not produced readiness evidence. A split-placement
+/// Cook now waits in pending admission instead (#17832), so the fixture uses
+/// an ordinary Lab command, which still receives the refusal.
 fn readiness_unobserved_refusal() -> homeboy_core::Error {
     use homeboy_core::parsed_command_preflight::*;
     resolve_parsed_command_preflight(
@@ -790,7 +792,7 @@ fn readiness_unobserved_refusal() -> homeboy_core::Error {
                 operation: vec!["cook".into()],
             },
             resource_admission: ResourceAdmissionRequirement::Exempt,
-            controller_execution: ControllerExecution::SplitPlacementCoordinator,
+            controller_execution: ControllerExecution::Ordinary,
             deferred_workload: DeferredWorkloadPolicy::Eligible,
             placement: PlacementIntent::Lab,
             runner: RunnerIntent::Explicit("homeboy-lab".into()),
