@@ -18,6 +18,8 @@ pub struct RetryActionResult {
     pub record: AgentTaskRunRecord,
     pub runnable: bool,
     pub created: bool,
+    pub blocker: Option<Value>,
+    pub recovered: bool,
 }
 
 pub fn retry(acknowledgement: &ControlPlaneActionAcknowledgement) -> Result<RetryActionResult> {
@@ -31,6 +33,8 @@ pub fn retry(acknowledgement: &ControlPlaneActionAcknowledgement) -> Result<Retr
         record: result.record,
         runnable: result.runnable,
         created: result.created,
+        blocker: result.blocker,
+        recovered: result.recovered,
     })
 }
 
@@ -168,6 +172,10 @@ struct RetryActionResultPayload {
     record: AgentTaskRunRecord,
     runnable: bool,
     created: bool,
+    #[serde(default)]
+    blocker: Option<Value>,
+    #[serde(default)]
+    recovered: bool,
 }
 
 #[cfg(test)]
@@ -197,6 +205,82 @@ mod tests {
             },
             message: None,
         }
+    }
+
+    fn retry_acknowledgement() -> ControlPlaneActionAcknowledgement {
+        let mut acknowledgement =
+            acknowledgement(ControlPlaneAction::Retry, CONTROL_PLANE_RETRY_RESULT_SCHEMA);
+        let record = AgentTaskRunRecord::new_queued(
+            "retry-1".to_string(),
+            "plan-1".to_string(),
+            "plan.json".to_string(),
+            "2026-01-01T00:00:00Z".to_string(),
+        );
+        acknowledgement.result.data = serde_json::json!({
+            "record": record,
+            "runnable": true,
+            "created": true,
+        });
+        acknowledgement
+    }
+
+    #[test]
+    fn retry_decodes_plain_producer_result() {
+        let acknowledgement = retry_acknowledgement();
+        let result = retry(&acknowledgement).expect("plain retry result");
+
+        assert_eq!(
+            serde_json::to_value(&result.record).unwrap(),
+            acknowledgement.result.data["record"]
+        );
+        assert!(result.runnable);
+        assert!(result.created);
+        assert_eq!(result.blocker, None);
+        assert!(!result.recovered);
+    }
+
+    #[test]
+    fn retry_decodes_scheduling_blocker_producer_result() {
+        let mut acknowledgement = retry_acknowledgement();
+        let blocker = serde_json::json!({
+            "error": "scheduling daemon unavailable",
+            "next_action": "homeboy daemon recover",
+        });
+        acknowledgement.result.data["blocker"] = blocker.clone();
+
+        let result = retry(&acknowledgement).expect("blocked retry result");
+
+        assert_eq!(result.blocker, Some(blocker));
+        assert!(result.runnable);
+        assert!(result.created);
+        assert!(!result.recovered);
+    }
+
+    #[test]
+    fn retry_decodes_recovered_successor_producer_result() {
+        let mut acknowledgement = retry_acknowledgement();
+        acknowledgement.result.data["created"] = Value::Bool(false);
+        acknowledgement.result.data["recovered"] = Value::Bool(true);
+
+        let result = retry(&acknowledgement).expect("recovered retry result");
+
+        assert!(result.recovered);
+        assert!(result.runnable);
+        assert!(!result.created);
+        assert_eq!(result.blocker, None);
+    }
+
+    #[test]
+    fn retry_rejects_unknown_result_fields() {
+        let mut acknowledgement = retry_acknowledgement();
+        acknowledgement.result.data["unexpected"] = Value::Bool(true);
+
+        let error = retry(&acknowledgement).expect_err("unknown field must be refused");
+
+        assert!(error.details["error"]
+            .as_str()
+            .expect("JSON decode error detail")
+            .contains("unknown field `unexpected`"));
     }
 
     #[test]

@@ -623,9 +623,17 @@ pub(super) fn retry_with(args: RetryArgs, _executor: SharedAgentTaskExecutor) ->
         None,
         idempotency_key,
     )?;
+    if let Some(blocker) = &retry.blocker {
+        // The reservation succeeded; preserve the blocker (including its
+        // recovery command) instead of waiting for work that cannot start.
+        eprintln!(
+            "Retry {} reserved; execution pending: {blocker}",
+            retry.record.run_id
+        );
+    }
     // The first reservation already committed the exact execution intent.
     // Waiting observes its durable outcome, including on action redelivery.
-    if args.run {
+    if args.run && retry.blocker.is_none() {
         return super::status::wait_for_terminal_status(&retry.record.run_id);
     }
     Ok((
