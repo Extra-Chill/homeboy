@@ -861,6 +861,7 @@ fn refresh_homeboy_binary_inner_in_roots(
                     phase_summary,
                     followup_commands: readiness.continuation.clone().into_iter().collect(),
                     readiness: Some(readiness),
+                    reconnect_required: true,
                     failure: Some(refresh_restart_failure(&plan, &exec_output, &error)),
                     bootstrap_provenance: Some(refresh_bootstrap_provenance(
                         diagnostic_ssh_bootstrap,
@@ -906,6 +907,7 @@ fn refresh_homeboy_binary_inner_in_roots(
                     .into_iter()
                     .collect(),
                 readiness: Some(blocked_refresh_readiness(&plan)),
+                reconnect_required: true,
                 failure: Some(refresh_reconnect_failure(
                     &plan,
                     &identity,
@@ -965,6 +967,7 @@ fn refresh_homeboy_binary_inner_in_roots(
                         .into_iter()
                         .collect(),
                     readiness: Some(blocked_refresh_readiness(&plan)),
+                    reconnect_required: true,
                     failure: Some(refresh_reconnect_failure(
                         &plan,
                         &identity,
@@ -1016,6 +1019,9 @@ fn refresh_homeboy_binary_inner_in_roots(
         HomeboyBinaryRefreshOutput {
             phase_summary,
             daemon_refreshed,
+            reconnect_required: readiness
+                .as_ref()
+                .is_some_and(|readiness| refresh_requires_reconnect(&plan.runner_id, readiness)),
             path_binaries,
             followup_commands,
             readiness,
@@ -1251,14 +1257,28 @@ fn require_completed_disconnect(
 /// process startup. This is intentionally shared with `runner status`'s
 /// admission projection so refresh cannot certify a state status rejects.
 fn refresh_readiness_postcondition(runner_id: &str) -> Result<HomeboyRefreshReadiness> {
-    let admission = super::runner_admission_snapshot(runner_id)?;
-    Ok(refresh_readiness_from_status(runner_id, &admission.status))
+    // Run after restart, rebind, and admission probing. The general status
+    // projection may select a peer controller's session; refresh must not.
+    let status = super::connection::status_current_controller(runner_id)?;
+    Ok(refresh_readiness_from_status(runner_id, &status))
 }
 
 fn refresh_readiness_from_status(
     runner_id: &str,
     report: &super::RunnerStatusReport,
 ) -> HomeboyRefreshReadiness {
+    // A remotely healthy daemon (or a live peer session) does not establish
+    // a usable controller tunnel. Disconnection always needs explicit connect.
+    if !report.is_connected() {
+        return HomeboyRefreshReadiness {
+            state: HomeboyRefreshReadinessState::Blocked,
+            accepting_jobs: false,
+            daemon_fresh: false,
+            owners: Vec::new(),
+            continuation: Some(format!("homeboy runner connect {}", shell_arg(runner_id))),
+            admission_paused: None,
+        };
+    }
     let summary = report.admission_summary();
     // The daemon is on target and would admit but for host pressure: the
     // refresh converged, and admission resumes on its own as pressure clears.
@@ -1304,6 +1324,12 @@ fn refresh_readiness_from_status(
         ),
         admission_paused: None,
     }
+}
+
+fn refresh_requires_reconnect(runner_id: &str, readiness: &HomeboyRefreshReadiness) -> bool {
+    readiness.state != HomeboyRefreshReadinessState::Ready
+        && readiness.continuation.as_deref()
+            == Some(format!("homeboy runner connect {}", shell_arg(runner_id)).as_str())
 }
 
 fn pressure_pause_note(pressure: Option<&homeboy_core::runner_pressure::RunnerPressure>) -> String {
@@ -1444,7 +1470,7 @@ fn verify_refreshed_daemon_topology(
         runner_id,
         expected_commit,
         previous_lease_id,
-        || super::connection::status(runner_id),
+        || super::connection::status_current_controller(runner_id),
         || std::thread::sleep(RECONNECT_VERIFICATION_RETRY_INTERVAL),
     )
 }
