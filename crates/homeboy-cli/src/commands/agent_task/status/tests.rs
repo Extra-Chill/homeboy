@@ -321,6 +321,45 @@ fn recorded_gate_failure_outranks_process_stream_text() {
     assert_eq!(diagnostics[0].class, "agent_task.promotion_gate_failed");
 }
 
+/// A recorded controller or gate verdict is the root cause, never the
+/// provider's echoed prompt, whatever words that prompt happens to contain.
+#[test]
+fn recorded_controller_and_gate_verdicts_outrank_an_echoed_prompt() {
+    let prompt = CollectedDiagnostic {
+        task_id: "cook".to_string(),
+        class: "provider.process_stream".to_string(),
+        message: "...the gate installs WordPress; a valid fix makes no error reappear".to_string(),
+        source: "hydrated_process_stream".to_string(),
+        data: Value::Null,
+    };
+    let controller = CollectedDiagnostic {
+        task_id: "controller".to_string(),
+        class: "internal.unexpected".to_string(),
+        message: "gh pr failed: GraphQL: Something went wrong".to_string(),
+        source: "controller_failure".to_string(),
+        data: Value::Null,
+    };
+    let gate = gate_failure_diagnostic(&json!({
+        "gate": "gate-1#1",
+        "reason": "gate_failed",
+        "exit_code": 1,
+        "output_tail": "{\"pass\":false,\"blockers_added\":[\"2f15c116f68e:2\"]}\nacceptance_exit=1",
+    }));
+
+    for cause in [controller, gate] {
+        let ranked = ranked_diagnostics(vec![prompt.clone(), cause.clone()]);
+        assert_eq!(ranked[0].message, cause.message);
+    }
+    let ranked = ranked_diagnostics(vec![
+        prompt.clone(),
+        gate_failure_diagnostic(&json!({
+            "reason": "gate_failed", "exit_code": 1, "output_tail": "{\"pass\":false}",
+        })),
+    ]);
+    assert_eq!(ranked[0].class, "gate.gate_failed");
+    assert_eq!(ranked[0].message, "gate_failed (exit 1)\n{\"pass\":false}");
+}
+
 #[test]
 fn duplicate_diagnostics_merge_richer_denial_data() {
     let diagnostics = ranked_diagnostics(vec![
