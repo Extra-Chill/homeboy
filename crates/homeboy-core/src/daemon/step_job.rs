@@ -969,6 +969,7 @@ fn run_step(mut checkpoint: StepJobCheckpoint, job: &ControllerJobHandle) -> Res
             .and_then(|seconds| seconds.trim().parse::<u64>().ok())
             .filter(|seconds| *seconds > 0)
             .map(Duration::from_secs),
+        job_id: Some(job_id.as_str()),
     };
     let capacity_permit = if !checkpoint.request.waits_for_children {
         let mut last_standing = None;

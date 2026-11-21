@@ -808,7 +808,8 @@ fn execute_owned(
             .insert("HOMEBOY_GATE_INPUT_STORE".to_string(), root.clone());
     }
     // The Lab charges this gate to its workflow/Cook owner's share, with the
-    // gate timeout as its declared budget for queue ETAs.
+    // gate timeout as its declared budget for queue ETAs. A Cook that itself
+    // runs in a Lab job names that job as parent so the gate rides its slot.
     options
         .env
         .extend(homeboy_core::lab_capacity::runner_job_claim_env(
@@ -819,6 +820,7 @@ fn execute_owned(
                     .as_deref(),
             ),
             Some(request.timeout_seconds),
+            homeboy_agents::agent_tasks::gate::lab_parent_job_id().as_deref(),
         ));
     let mut execution = crate::RunnerExecRequest::new(&request.runner_id, options);
     execution.workspace_ref = Some(candidate.workspace_ref);

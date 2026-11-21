@@ -481,6 +481,7 @@ pub(crate) fn exec_lab_context(
             &homeboy_agents::agent_tasks::gate::lab_admission_owner(run_id),
             LabPriority::from_env_value(process_env(LAB_PRIORITY_ENV).as_deref()),
             declared_budget(process_env(LAB_BUDGET_ENV).as_deref()).map(|budget| budget.as_secs()),
+            None,
         ) {
             env.entry(name).or_insert(value);
         }
