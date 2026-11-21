@@ -43,6 +43,9 @@ runner and a Cook placed on the Lab carry `HOMEBOY_LAB_OWNER` (the workflow
 instance, else the Cook), their lane, and a declared budget in their job
 environment: the gate timeout for a gate, the Cook's declared budget for a Cook.
 The daemon charges each one holding a child to that owner.
+A gate also carries `HOMEBOY_LAB_PARENT_JOB_ID`, the daemon job its Cook runs in.
+When that job is a current holder on the same Lab for the same owner, the gate
+uses the Cook's slot and is not charged again; its budget still counts toward ETAs.
 
 ### Cooks waiting on other controllers
 

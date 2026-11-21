@@ -1,5 +1,5 @@
 mod admission;
-pub use admission::lab_admission_owner;
+pub use admission::{lab_admission_owner, lab_parent_job_id};
 pub mod data_inputs;
 pub mod execution_start;
 pub mod failure_excerpt;

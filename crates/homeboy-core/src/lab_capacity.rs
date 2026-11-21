@@ -466,6 +466,11 @@ pub struct LabHolder {
     pub started_at_ms: u64,
     /// Declared run time (`HOMEBOY_LAB_BUDGET_SECONDS`; a gate's timeout).
     pub budget: Option<Duration>,
+    /// This daemon's job id for the holder, when it has one.
+    pub job_id: Option<String>,
+    /// The job that dispatched this one (`HOMEBOY_LAB_PARENT_JOB_ID`), e.g.
+    /// the Cook a gate belongs to.
+    pub parent_job_id: Option<String>,
 }
 
 impl LabHolder {
@@ -475,13 +480,30 @@ impl LabHolder {
     }
 }
 
-/// Slots each owner holds, the input to the owner share cap.
+/// Slots each owner holds, the input to the owner share cap. A holder whose
+/// parent job is itself a current holder for the same owner (a gate sent by a
+/// Cook running on this Lab) rides on the parent's slot and is not counted
+/// again; it still counts toward ETAs through [`remaining_budgets`].
 pub fn held_by_owner(holders: &[LabHolder]) -> BTreeMap<String, usize> {
     let mut counts = BTreeMap::new();
-    for holder in holders {
+    for holder in holders
+        .iter()
+        .filter(|holder| !covered_by_parent(holder, holders))
+    {
         *counts.entry(holder.owner.clone()).or_default() += 1;
     }
     counts
+}
+
+fn covered_by_parent(holder: &LabHolder, holders: &[LabHolder]) -> bool {
+    let Some(parent) = holder.parent_job_id.as_deref() else {
+        return false;
+    };
+    holders.iter().any(|other| {
+        !std::ptr::eq(other, holder)
+            && other.owner == holder.owner
+            && other.job_id.as_deref() == Some(parent)
+    })
 }
 
 /// Each holder's remaining declared budget at `now_ms`, for ETAs.
@@ -515,12 +537,20 @@ pub fn holders_json(holders: &[LabHolder], now_ms: u64) -> Vec<serde_json::Value
 /// Environment naming the owner a direct runner job is charged to.
 pub const LAB_OWNER_ENV: &str = "HOMEBOY_LAB_OWNER";
 
+/// Environment naming the daemon job that dispatched a direct runner job (the
+/// daemon step or runner job the sending Cook runs in). When that job is a
+/// current holder on the same Lab for the same owner, the child is not charged
+/// a second slot.
+pub const LAB_PARENT_JOB_ENV: &str = "HOMEBOY_LAB_PARENT_JOB_ID";
+
 /// Environment a direct runner job carries so the executing Lab charges it to
-/// `owner` (workflow instance, else Cook) with its lane and declared budget.
+/// `owner` (workflow instance, else Cook) with its lane, declared budget, and
+/// the daemon job that dispatched it, if any.
 pub fn runner_job_claim_env(
     owner: &str,
     priority: LabPriority,
     budget_seconds: Option<u64>,
+    parent_job_id: Option<&str>,
 ) -> Vec<(String, String)> {
     let mut env = vec![
         (LAB_OWNER_ENV.to_string(), owner.to_string()),
@@ -528,6 +558,12 @@ pub fn runner_job_claim_env(
     ];
     if let Some(seconds) = budget_seconds.filter(|seconds| *seconds > 0) {
         env.push((LAB_BUDGET_ENV.to_string(), seconds.to_string()));
+    }
+    if let Some(parent) = parent_job_id
+        .map(str::trim)
+        .filter(|parent| !parent.is_empty())
+    {
+        env.push((LAB_PARENT_JOB_ENV.to_string(), parent.to_string()));
     }
     env
 }
@@ -547,6 +583,11 @@ pub fn runner_job_holder<'a>(
         kind: HolderKind::RunnerJob,
         started_at_ms,
         budget: declared_budget(env(LAB_BUDGET_ENV)),
+        job_id: None,
+        parent_job_id: env(LAB_PARENT_JOB_ENV)
+            .map(str::trim)
+            .filter(|parent| !parent.is_empty())
+            .map(str::to_string),
     })
 }
 
@@ -827,6 +868,9 @@ pub struct StepClaim<'a> {
     pub priority: LabPriority,
     /// Declared run time, used only for waiters' ETA estimates.
     pub budget: Option<Duration>,
+    /// The daemon step job holding the slot; children it dispatches name it
+    /// as their parent and ride on this slot.
+    pub job_id: Option<&'a str>,
 }
 
 impl<'a> StepClaim<'a> {
@@ -835,6 +879,7 @@ impl<'a> StepClaim<'a> {
             owner,
             priority: LabPriority::Normal,
             budget: None,
+            job_id: None,
         }
     }
 }
@@ -914,6 +959,8 @@ fn acquire_step_with_observation(
                     kind: HolderKind::Step,
                     started_at_ms: epoch_ms(),
                     budget: claim.budget,
+                    job_id: claim.job_id.map(str::to_string),
+                    parent_job_id: None,
                 };
                 let slot = state
                     .slots
@@ -1369,7 +1416,7 @@ mod tests {
     fn runner_job_holders_count_toward_share_cap_and_eta() {
         let now_ms = 10_000_000;
         let gate = |owner: &str, budget: u64, elapsed_s: u64| {
-            let env = runner_job_claim_env(owner, LabPriority::High, Some(budget))
+            let env = runner_job_claim_env(owner, LabPriority::High, Some(budget), None)
                 .into_iter()
                 .collect::<BTreeMap<_, _>>();
             runner_job_holder(
@@ -1426,6 +1473,72 @@ mod tests {
                 "started_at"
             ]
         );
+    }
+
+    #[test]
+    fn gate_riding_a_held_parent_job_is_not_charged_twice() {
+        let now_ms = 10_000_000;
+        // A runner job as the daemon stores it: env-declared owner and parent,
+        // plus this daemon's job id.
+        let job = |owner: &str, job_id: &str, parent: Option<&str>| {
+            let env = runner_job_claim_env(owner, LabPriority::Normal, Some(600), parent)
+                .into_iter()
+                .collect::<BTreeMap<_, _>>();
+            LabHolder {
+                job_id: Some(job_id.to_string()),
+                ..runner_job_holder(|name| env.get(name).map(String::as_str), now_ms).unwrap()
+            }
+        };
+        let step = |owner: &str, job_id: &str| LabHolder {
+            owner: owner.into(),
+            priority: LabPriority::Normal,
+            kind: HolderKind::Step,
+            started_at_ms: now_ms,
+            budget: None,
+            job_id: Some(job_id.into()),
+            parent_job_id: None,
+        };
+        let held = |pairs: &[(&str, usize)]| {
+            pairs
+                .iter()
+                .map(|(owner, n)| (owner.to_string(), *n))
+                .collect::<BTreeMap<_, _>>()
+        };
+        for (name, holders, expected) in [
+            (
+                "lab-placed cook + its gate",
+                vec![job("wf", "cook", None), job("wf", "gate", Some("cook"))],
+                held(&[("wf", 1)]),
+            ),
+            (
+                "cook as lab step + its gate",
+                vec![step("wf", "step"), job("wf", "gate", Some("step"))],
+                held(&[("wf", 1)]),
+            ),
+            (
+                "remote cook's gate",
+                vec![job("wf", "gate", Some("remote-daemon-job"))],
+                held(&[("wf", 1)]),
+            ),
+            (
+                "orphan gate, parent ended",
+                vec![job("wf", "gate", Some("cook"))],
+                held(&[("wf", 1)]),
+            ),
+            (
+                "parent held for another owner",
+                vec![job("wf-a", "cook", None), job("wf-b", "gate", Some("cook"))],
+                held(&[("wf-a", 1), ("wf-b", 1)]),
+            ),
+        ] {
+            assert_eq!(held_by_owner(&holders), expected, "{name}");
+            // Every holder, covered or not, still feeds the ETA.
+            assert_eq!(
+                remaining_budgets(&holders, now_ms).len(),
+                holders.len(),
+                "{name}"
+            );
+        }
     }
 
     #[test]

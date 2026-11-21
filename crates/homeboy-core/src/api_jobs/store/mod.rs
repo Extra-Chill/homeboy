@@ -3486,6 +3486,11 @@ impl JobStore {
                     |name| dispatch.env.get(name).map(String::as_str),
                     stored.job.started_at_ms.unwrap_or(stored.job.created_at_ms),
                 )
+                .map(|holder| crate::lab_capacity::LabHolder {
+                    // Children name this id as their parent (HOMEBOY_RUNNER_JOB_ID).
+                    job_id: Some(stored.job.id.to_string()),
+                    ..holder
+                })
             })
             .collect()
     }

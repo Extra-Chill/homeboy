@@ -43,6 +43,15 @@ pub fn lab_admission_owner(fallback: &str) -> String {
         .unwrap_or_else(|| fallback.to_string())
 }
 
+/// The daemon job this process runs under, if any: a runner job, a daemon
+/// step, or a local Cook supervisor. A Cook in such a job already holds a
+/// slot, so local gates and Lab gate jobs it dispatches are not charged again.
+pub fn lab_parent_job_id() -> Option<String> {
+    env(homeboy_core::runner_job_execution_context::RUNNER_JOB_ID_ENV)
+        .or_else(|| env(homeboy_core::daemon::step_job::STEP_JOB_ID_ENV))
+        .or_else(|| env(homeboy_core::daemon::step_job::LOCAL_COOK_SUPERVISOR_JOB_ID_ENV))
+}
+
 pub(super) fn acquire(
     cwd: &std::path::Path,
     index: usize,
@@ -71,9 +80,7 @@ pub(super) fn acquire(
             .map(Duration::from_secs),
         // A Cook supervised by a daemon step or runner child already holds a
         // daemon slot; its gates queue here but the daemon does not charge them.
-        daemon_job: env(homeboy_core::daemon::step_job::LOCAL_COOK_SUPERVISOR_JOB_ID_ENV)
-            .or_else(|| env(homeboy_core::daemon::step_job::STEP_JOB_ID_ENV))
-            .or_else(|| env(homeboy_core::runner_job_execution_context::RUNNER_JOB_ID_ENV)),
+        daemon_job: lab_parent_job_id(),
     };
     let permit = registry.enqueue(claim)?;
     Ok(match permit.wait(cancelled)? {
