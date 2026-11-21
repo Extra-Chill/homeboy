@@ -4625,6 +4625,20 @@ const RUNNER_DIAGNOSTIC_EVENT_LIMIT: usize = 12;
 /// terminal run. Controller-local and healthy successful records remain fully
 /// local reads.
 pub fn runner_diagnostic_probe(record: &AgentTaskRunRecord) -> AgentTaskRunnerDiagnosticProbe {
+    runner_diagnostic_probe_with_policy(record, true)
+}
+
+/// Controller-local diagnostic read; never contacts the execution owner.
+pub fn runner_diagnostic_probe_recorded(
+    record: &AgentTaskRunRecord,
+) -> AgentTaskRunnerDiagnosticProbe {
+    runner_diagnostic_probe_with_policy(record, false)
+}
+
+fn runner_diagnostic_probe_with_policy(
+    record: &AgentTaskRunRecord,
+    live: bool,
+) -> AgentTaskRunnerDiagnosticProbe {
     let runner_id = record.runner_id().map(str::to_string);
     let runner_job_id = record.runner_job_id().map(str::to_string);
     let applicable = matches!(
@@ -4640,6 +4654,8 @@ pub fn runner_diagnostic_probe(record: &AgentTaskRunRecord) -> AgentTaskRunnerDi
         Some("missing_runner_id")
     } else if runner_job_id.is_none() {
         Some("missing_runner_job_id")
+    } else if !live {
+        Some("recorded_evidence_only")
     } else {
         None
     };

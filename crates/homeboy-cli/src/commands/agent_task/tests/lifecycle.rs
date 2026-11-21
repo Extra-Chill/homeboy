@@ -4232,7 +4232,7 @@ fn diagnose_projects_missing_runner_pid_without_an_aggregate_and_keeps_replay_re
 }
 
 #[test]
-fn diagnose_probes_a_runner_owned_terminal_record_when_the_job_is_known() {
+fn diagnose_reads_runner_owned_terminal_record_without_contacting_runner() {
     with_temp_home(|| {
         let run_id = "run-cli-diagnose-runner-evidence";
         agent_task_lifecycle::submit_plan(&test_plan(), Some(run_id)).expect("persist attempt");
@@ -4249,11 +4249,11 @@ fn diagnose_probes_a_runner_owned_terminal_record_when_the_job_is_known() {
         })
         .expect("diagnose runner-owned terminal record");
 
-        assert_eq!(diagnosis["runner_diagnostic_probe"]["performed"], true);
-        assert!(diagnosis["runner_diagnostic_probe"]["error"]
-            .as_str()
-            .expect("runner probe error")
-            .contains("runner subsystem is unavailable"));
+        assert_eq!(diagnosis["runner_diagnostic_probe"]["performed"], false);
+        assert_eq!(
+            diagnosis["runner_diagnostic_probe"]["skipped_reason"],
+            "recorded_evidence_only"
+        );
     });
 }
 
@@ -7676,6 +7676,7 @@ fn real_failed_gate_is_visible_in_diagnose_and_failure_only_evidence() {
             "status": "gate_failed",
             "deterministic_gates": [{
                 "id": "fixture", "status": "failed", "exit_code": 7,
+                "command": "sleep 60 # recorded gate must not be executed",
                 "stdout": String::from_utf8_lossy(&output.stdout),
                 "stderr": String::from_utf8_lossy(&output.stderr),
                 "lab_receipt": {"artifact_ref": "homeboy://run/lab-gate-fixture/artifact/output"}
@@ -7686,6 +7687,28 @@ fn real_failed_gate_is_visible_in_diagnose_and_failure_only_evidence() {
             full: false,
         })
         .unwrap();
+        // A known remote job must not cause a reachability probe, and the
+        // recorded command above must never be re-executed by diagnosis.
+        agent_task_lifecycle::rewrite_record_for_test(run_id, |record| {
+            record.set_state_for_test(RunExecutionState::Failed);
+            record.metadata["runner_id"] = json!("unreachable-runner");
+            record.metadata["runner_job_id"] = json!("recorded-job");
+        })
+        .unwrap();
+        let start = std::time::Instant::now();
+        let (remote_diagnosis, _) = diagnose(DiagnoseArgs {
+            run_id: run_id.into(),
+            full: false,
+        })
+        .unwrap();
+        assert!(start.elapsed() < std::time::Duration::from_secs(3));
+        assert_eq!(
+            remote_diagnosis["runner_diagnostic_probe"]["performed"],
+            false
+        );
+        assert!(remote_diagnosis["gate_failure_outputs"]
+            .to_string()
+            .contains("sleep 60"));
         let (proof, _) = evidence(EvidenceArgs {
             run_id: run_id.into(),
             kind: None,
@@ -7694,7 +7717,7 @@ fn real_failed_gate_is_visible_in_diagnose_and_failure_only_evidence() {
             full: false,
         })
         .unwrap();
-        for value in [diagnosis, proof] {
+        for value in [diagnosis, remote_diagnosis, proof] {
             let outputs = value["gate_failure_outputs"].to_string();
             assert!(outputs.contains("FAIL broken fixture"), "{value}");
             assert!(outputs.contains("Error: ENOENT fixture"));

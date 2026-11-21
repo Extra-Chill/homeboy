@@ -4699,6 +4699,24 @@ pub(crate) fn cook_failure_context_with_stores(
     latest_run_id: Option<&str>,
     status: &str,
 ) -> Option<super::AgentTaskCookFailureContext> {
+    cook_failure_context_with_probe_policy(
+        recipe_store,
+        lifecycle_store,
+        cook_id,
+        latest_run_id,
+        status,
+        true,
+    )
+}
+
+pub(crate) fn cook_failure_context_with_probe_policy(
+    recipe_store: &super::cook_recipe::CookRecipeStore,
+    lifecycle_store: &agent_task_lifecycle::AgentTaskLifecycleStore,
+    cook_id: &str,
+    latest_run_id: Option<&str>,
+    status: &str,
+    live_probes: bool,
+) -> Option<super::AgentTaskCookFailureContext> {
     let recipe = recipe_store.load_recipe(cook_id).ok()?;
     let chronological_latest_run_id = latest_run_id
         .map(str::to_string)
@@ -4797,7 +4815,13 @@ pub(crate) fn cook_failure_context_with_stores(
     let live_reserve_failure = record
         .as_ref()
         .and_then(|record| record.metadata.get("pre_execution_failure"))
-        .and_then(reprobe_capacity_reserve_failure);
+        .and_then(|failure| {
+            if live_probes {
+                reprobe_capacity_reserve_failure(failure)
+            } else {
+                (failure["error_code"] == "resource.capacity_reserve").then(|| failure.clone())
+            }
+        });
     let pre_execution_diagnostic = record.as_ref().and_then(|record| {
         let failure = record.metadata.get("pre_execution_failure")?;
         let details = failure.get("details")?;
@@ -4946,6 +4970,9 @@ pub(crate) fn cook_failure_context_with_stores(
     };
     let recovery_actions = capacity_reserve_recovery_actions(live_reserve_failure.as_ref())
         .or_else(|| {
+            if !live_probes {
+                return None;
+            }
             dirty_candidate_adoption_recovery_actions(
                 &recipe,
                 record.as_ref(),
@@ -4957,6 +4984,9 @@ pub(crate) fn cook_failure_context_with_stores(
             )
         })
         .or_else(|| {
+            if !live_probes {
+                return None;
+            }
             unfingerprinted_timeout_worktree_recovery(
                 &recipe,
                 record.as_ref(),
@@ -4996,7 +5026,7 @@ pub(crate) fn cook_failure_context_with_stores(
             let delivered_candidate = delivered_candidate_facts(record.as_ref(), delivery.as_ref());
             // The adopt observation only matters for a terminal `no_changes`
             // attempt; skip the worktree inspection for every other state.
-            let adoptable_candidate_ref = (status == "no_changes")
+            let adoptable_candidate_ref = (live_probes && status == "no_changes")
                 .then(|| no_changes_adoption_candidate(&recipe))
                 .flatten();
             // The kernel driver lock is the one liveness fact: a live driver

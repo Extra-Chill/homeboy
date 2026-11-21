@@ -1506,6 +1506,14 @@ projects that diagnosis into the shared `_homeboy_actionable` envelope (`run`,
 `refs`, `next_actions`, `artifacts`, `evidence`) instead of returning only
 prose. The existing `next_commands` field is unchanged.
 
+Diagnosis reads recorded gate reports and artifacts; it never reruns gate
+commands or contacts the runner. `gate_failure_outputs` retains the failed
+command, exit code, and bounded output tail even when the runner is unavailable.
+Recovery projections use recorded evidence rather than live capacity or
+worktree inspection. Replay admission has an independent 500 ms budget; an
+unavailable observation is listed in `probe_timed_out` without suppressing the
+rest of the diagnosis. Generic Lab workspace preflight is deferred to retry.
+
 The default diagnosis keeps bounded causal excerpts and artifact refs. Use
 `--full`, `runs evidence --kind <kind> --full`, or their `--output` forms
 to hydrate the complete durable detail explicitly.

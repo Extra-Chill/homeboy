@@ -4222,8 +4222,9 @@ fn project_live_gate_verification_in(
 
 /// The one recovery step (#15925) a Cook's durable state names, projected so
 /// `status`, `diagnose`, the Cook verdict and `review` read the decision
-/// [`plan_cook_recovery`] makes for `agent-task recover` instead of deciding
-/// again. A state with no step projects step `none` and the `diagnose`
+/// the recorded-evidence recovery planner makes, without live worktree or
+/// capacity probes. Execution admission may refine that observation. A state
+/// with no step projects step `none` and the `diagnose`
 /// command, which explains why, so no surface ever names a step `recover`
 /// would not perform. Runs that are not Cooks project nothing.
 fn projected_cook_recovery(record: &AgentTaskRunRecord) -> Option<ControlPlaneRecovery> {
@@ -4242,7 +4243,7 @@ fn projected_cook_recovery(record: &AgentTaskRunRecord) -> Option<ControlPlaneRe
     let quote = homeboy_core::engine::shell::quote_arg;
     // The step belongs to the Cook, not this attempt: a superseded attempt
     // names the same `recover <cook>` command, so it projects the Cook's plan.
-    let Ok(plan) = crate::agent_task_service::plan_cook_recovery(&cook_id) else {
+    let Ok(plan) = crate::agent_task_service::plan_cook_recovery_recorded(&cook_id) else {
         return Some(ControlPlaneRecovery {
             run: RunId::new(&record.run_id).ok()?,
             step: "none".to_string(),
