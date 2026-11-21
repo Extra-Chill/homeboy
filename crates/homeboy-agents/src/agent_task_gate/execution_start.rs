@@ -6,7 +6,7 @@ use std::rc::Rc;
 use homeboy_core::Result;
 
 type Start = Box<dyn FnOnce() -> Result<()>>;
-type Submitted = Rc<dyn Fn(&str, &str) -> Result<()>>;
+type Submitted = Rc<dyn Fn(&str, &str, &serde_json::Value) -> Result<()>>;
 
 thread_local! {
     static BEFORE_COMMAND: RefCell<Option<Start>> = RefCell::new(None);
@@ -51,10 +51,12 @@ pub(crate) fn with_job_submission<T>(submitted: Submitted, operation: impl FnOnc
 /// Called once a remote daemon has accepted a gate job, before the controller
 /// waits for it to leave the daemon's queue. The daemon records the job's
 /// start itself; this durable job id is how recovery reads that record.
-pub fn job_submitted(runner_id: &str, job_id: &str) -> Result<()> {
+/// `submission` is what the transport needs to read the finished job's
+/// receipt back, so recovery can adopt its verdict (#18727).
+pub fn job_submitted(runner_id: &str, job_id: &str, submission: &serde_json::Value) -> Result<()> {
     let submitted = ON_JOB_SUBMITTED.with(|slot| slot.borrow().clone());
     match submitted {
-        Some(submitted) => submitted(runner_id, job_id),
+        Some(submitted) => submitted(runner_id, job_id, submission),
         None => Ok(()),
     }
 }

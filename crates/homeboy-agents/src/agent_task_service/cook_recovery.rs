@@ -1506,7 +1506,24 @@ fn recover_cook_once(
                     job["logs_command"].as_str().unwrap_or_default(),
                 ));
             }
-            report.result = Some(serde_json::json!({ "admitted_gate_job": job }));
+            // A finished job's receipt is adopted by the regate when it is
+            // bound to the recorded candidate and gate commands (#18727).
+            let adoption = (job["adoptable"] == true).then(|| {
+                serde_json::json!({
+                    "plan": "adopt",
+                    "runner_id": job["runner_id"],
+                    "job_id": job["job_id"],
+                    "summary": format!(
+                        "the regate adopts finished Lab gate job `{}`'s receipt without running the gate again when the receipt is bound to the recorded candidate and gate commands; otherwise it re-runs the gate and records why",
+                        job["job_id"].as_str().unwrap_or_default(),
+                    ),
+                })
+            });
+            let mut result = serde_json::json!({ "admitted_gate_job": job });
+            if let Some(adoption) = adoption {
+                result["gate_job_adoption"] = adoption;
+            }
+            report.result = Some(result);
         }
     }
     if !preflight

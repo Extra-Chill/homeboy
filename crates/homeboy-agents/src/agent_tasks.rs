@@ -151,10 +151,10 @@ pub mod gate {
     };
     pub use super::super::agent_task_gate::{
         AgentTaskGateEnvironmentMode, AgentTaskGateEnvironmentPolicy, AgentTaskGateExecutionPolicy,
-        AgentTaskGateExtensionInput, AgentTaskGateInputSource,
-        AgentTaskGatePackageArtifactRequirement, AgentTaskGateRequirements,
-        AgentTaskGateRevealPolicy, AgentTaskGateToolchainRequirement, AgentTaskGateVisibility,
-        BaselinePolicy, VerifyGateOptions,
+        AgentTaskGateExtensionInput, AgentTaskGateExtensionInputProvenance,
+        AgentTaskGateInputSource, AgentTaskGatePackageArtifactRequirement,
+        AgentTaskGateRequirements, AgentTaskGateRevealPolicy, AgentTaskGateToolchainRequirement,
+        AgentTaskGateVisibility, BaselinePolicy, VerifyGateOptions,
     };
 }
 

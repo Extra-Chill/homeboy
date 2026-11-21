@@ -572,6 +572,19 @@ pub trait LabGateTransport: Send + Sync {
     fn gate_job(&self, _runner_id: &str, _job_id: &str) -> Result<Option<LabGateJobState>> {
         Ok(None)
     }
+    /// Read back the receipt of a gate job that already finished, through the
+    /// same terminal projection a controller applies when it watched the job
+    /// to its end, so recovery can adopt that verdict instead of re-running
+    /// the gate (#18727). The caller binds the receipt to `request` before
+    /// adopting it. Transports that cannot read a finished job report none.
+    fn finished_gate_receipt(
+        &self,
+        _cwd: &Path,
+        _request: &LabGateRequest,
+        _job: &LabGateSubmittedJob,
+    ) -> Result<Option<LabGateReceipt>> {
+        Ok(None)
+    }
     fn execute(
         &self,
         cwd: &Path,
@@ -591,6 +604,188 @@ pub struct LabGateJobState {
 /// Read a submitted gate job through the registered transport.
 pub(crate) fn gate_job(runner_id: &str, job_id: &str) -> Result<Option<LabGateJobState>> {
     active_transport().gate_job(runner_id, job_id)
+}
+
+/// Schema of the submission record a transport attaches to a gate job it
+/// hands to a daemon, so a later controller can read the job's receipt back.
+pub const LAB_GATE_JOB_SUBMISSION_SCHEMA: &str = "homeboy/lab-gate-job-submission/v1";
+
+/// A gate job a controller handed to a daemon, as recorded at submission
+/// (#18727). `submission` carries what the transport needs to read the job's
+/// receipt back (its request identity, receipt location, evidence owner).
+#[derive(Debug, Clone, PartialEq)]
+pub struct LabGateSubmittedJob {
+    pub runner_id: String,
+    pub job_id: String,
+    pub submission: serde_json::Value,
+}
+
+struct AdoptableGateJob {
+    job: LabGateSubmittedJob,
+    /// Why the last gate that read this job's receipt did not adopt it.
+    rejection: Option<String>,
+}
+
+#[derive(Default)]
+struct GateJobAdoption {
+    jobs: Vec<AdoptableGateJob>,
+    outcomes: Vec<serde_json::Value>,
+}
+
+thread_local! {
+    static ADOPTABLE_GATE_JOBS: std::cell::RefCell<Option<GateJobAdoption>> =
+        std::cell::RefCell::new(None);
+}
+
+/// Run `operation` with `jobs`, finished gate jobs a dead controller
+/// submitted, offered to the gates it dispatches: a gate whose request the
+/// finished job's receipt is bound to adopts that receipt instead of running
+/// again (#18727). Returns one outcome per offered job: adopted, or why not.
+pub(crate) fn with_adoptable_gate_jobs<T>(
+    jobs: Vec<LabGateSubmittedJob>,
+    operation: impl FnOnce() -> T,
+) -> (T, Vec<serde_json::Value>) {
+    if jobs.is_empty() {
+        return (operation(), Vec::new());
+    }
+    struct Restore(Option<Option<GateJobAdoption>>);
+    impl Drop for Restore {
+        fn drop(&mut self) {
+            if let Some(previous) = self.0.take() {
+                ADOPTABLE_GATE_JOBS.with(|slot| *slot.borrow_mut() = previous);
+            }
+        }
+    }
+    let adoption = GateJobAdoption {
+        jobs: jobs
+            .into_iter()
+            .map(|job| AdoptableGateJob {
+                job,
+                rejection: None,
+            })
+            .collect(),
+        outcomes: Vec::new(),
+    };
+    let restore = Restore(Some(
+        ADOPTABLE_GATE_JOBS.with(|slot| slot.replace(Some(adoption))),
+    ));
+    let result = operation();
+    let adoption = ADOPTABLE_GATE_JOBS
+        .with(|slot| slot.borrow_mut().take())
+        .unwrap_or_default();
+    drop(restore);
+    let mut outcomes = adoption.outcomes;
+    outcomes.extend(adoption.jobs.into_iter().map(|pending| {
+        adoption_outcome(
+            &pending.job,
+            false,
+            pending.rejection.as_deref().unwrap_or(
+                "no gate of this execution has the request the job ran (candidate or gate commands differ)",
+            ),
+        )
+    }));
+    (result, outcomes)
+}
+
+fn adoption_outcome(job: &LabGateSubmittedJob, adopted: bool, reason: &str) -> serde_json::Value {
+    serde_json::json!({
+        "runner_id": job.runner_id,
+        "job_id": job.job_id,
+        "request_sha256": job.submission.get("request_sha256"),
+        "adopted": adopted,
+        "reason": reason,
+    })
+}
+
+/// The receipt of an offered finished gate job that ran exactly `request`:
+/// the recorded candidate and gate command, bound by the receipt's request
+/// identity and candidate (`verify_receipt`). A receipt that cannot be read
+/// withdraws the job; one bound to another request leaves it for another gate.
+fn adopt_finished_gate_job(cwd: &Path, request: &LabGateRequest) -> Option<LabGateReceipt> {
+    if request.preflight_only {
+        return None;
+    }
+    let identity = request.identity().ok()?;
+    let offered = ADOPTABLE_GATE_JOBS.with(|slot| {
+        slot.borrow().as_ref().map(|adoption| {
+            adoption
+                .jobs
+                .iter()
+                .map(|pending| pending.job.clone())
+                .filter(|job| {
+                    job.runner_id == request.runner_id
+                        && job
+                            .submission
+                            .get("request_sha256")
+                            .and_then(serde_json::Value::as_str)
+                            .is_none_or(|recorded| recorded == identity)
+                })
+                .collect::<Vec<_>>()
+        })
+    })?;
+    let settle = |job: &LabGateSubmittedJob, adopted: bool, reason: String, withdraw: bool| {
+        ADOPTABLE_GATE_JOBS.with(|slot| {
+            let mut slot = slot.borrow_mut();
+            let Some(adoption) = slot.as_mut() else {
+                return;
+            };
+            let Some(position) = adoption.jobs.iter().position(|pending| &pending.job == job)
+            else {
+                return;
+            };
+            if withdraw {
+                adoption.jobs.remove(position);
+                adoption
+                    .outcomes
+                    .push(adoption_outcome(job, adopted, &reason));
+            } else {
+                adoption.jobs[position].rejection = Some(reason);
+            }
+        });
+    };
+    for job in offered {
+        let receipt = match active_transport().finished_gate_receipt(cwd, request, &job) {
+            Ok(Some(receipt)) => receipt,
+            Ok(None) => {
+                settle(
+                    &job,
+                    false,
+                    "receipt_unavailable: the runner transport cannot read this finished job's receipt".to_string(),
+                    true,
+                );
+                continue;
+            }
+            Err(error) => {
+                settle(
+                    &job,
+                    false,
+                    format!("receipt_unavailable: {}", error.message),
+                    true,
+                );
+                continue;
+            }
+        };
+        if let Err(error) = request.verify_receipt(&receipt) {
+            settle(
+                &job,
+                false,
+                format!("receipt_mismatch: {}", error.message),
+                false,
+            );
+            continue;
+        }
+        settle(
+            &job,
+            true,
+            format!(
+                "receipt bound to gate-{} of the recorded candidate ({identity})",
+                request.index
+            ),
+            true,
+        );
+        return Some(receipt);
+    }
+    None
 }
 
 pub(crate) fn with_local_reserve_recovery(mut error: Error) -> Error {
@@ -806,9 +1001,21 @@ pub(super) fn dispatch(
     let mut setup_attempts = Vec::new();
     let mut receipt = None;
     for attempt in 0..2 {
+        // A finished job a dead controller submitted for exactly this request
+        // already ran the gate: adopt its receipt instead of running it again
+        // (#18727). Its verdict goes through the same checks as a fresh one.
+        let adopted = if attempt == 0 {
+            adopt_finished_gate_job(cwd, request)
+        } else {
+            None
+        };
         // The daemon queues pressure itself; this waits only through a lease
         // republish or other substrate transient where the gate never ran (#17776).
-        let result = match execute_through_substrate_waits(cwd, request, supervision) {
+        let executed = match adopted {
+            Some(receipt) => Ok(receipt),
+            None => execute_through_substrate_waits(cwd, request, supervision),
+        };
+        let result = match executed {
             Ok(receipt) => receipt,
             Err(error) => {
                 let error = gate_execute_unavailable(error, "transport", None);

@@ -10214,6 +10214,17 @@ struct FakeLabRunner {
     previous: Arc<dyn crate::agent_task_gate::placement::LabGateTransport>,
     at_capacity: AtomicBool,
     daemon_job: Mutex<Option<crate::agent_task_gate::placement::LabGateJobState>>,
+    /// The gate a finished daemon job ran, whose receipt the runner can still
+    /// serve; `None` when the finished job's receipt is unretrievable.
+    finished_gate: Mutex<Option<FinishedGate>>,
+}
+
+/// What the daemon's finished gate job ran (#18727): its gate appended to
+/// `ledger`, and with `foreign_candidate` it ran another candidate SHA.
+#[derive(Clone)]
+struct FinishedGate {
+    ledger: PathBuf,
+    foreign_candidate: bool,
 }
 
 impl FakeLabRunner {
@@ -10224,6 +10235,7 @@ impl FakeLabRunner {
             previous: placement::active_transport(),
             at_capacity: AtomicBool::new(at_capacity),
             daemon_job: Mutex::new(None),
+            finished_gate: Mutex::new(None),
         });
         placement::register_lab_gate_transport(transport.clone());
         (transport, restore)
@@ -10252,6 +10264,28 @@ impl crate::agent_task_gate::placement::LabGateTransport for FakeLabRunner {
         }
         Ok(*self.daemon_job.lock().unwrap())
     }
+    fn finished_gate_receipt(
+        &self,
+        cwd: &std::path::Path,
+        request: &crate::agent_task_gate::placement::LabGateRequest,
+        job: &crate::agent_task_gate::placement::LabGateSubmittedJob,
+    ) -> Result<Option<crate::agent_task_gate::placement::LabGateReceipt>> {
+        if job.runner_id != "replacement-placement-runner" {
+            return self.previous.finished_gate_receipt(cwd, request, job);
+        }
+        let Some(finished) = self.finished_gate.lock().unwrap().clone() else {
+            return Ok(None);
+        };
+        let mut receipt = self.run_gate(cwd, request, None, Some(&finished.ledger))?;
+        if finished.foreign_candidate {
+            if let crate::agent_task_promotion::AgentTaskPromotionCandidate::Git { fingerprint } =
+                &mut receipt.candidate
+            {
+                fingerprint.head = "0".repeat(40);
+            }
+        }
+        Ok(Some(receipt))
+    }
     fn execute(
         &self,
         cwd: &std::path::Path,
@@ -10270,7 +10304,26 @@ impl crate::agent_task_gate::placement::LabGateTransport for FakeLabRunner {
             }
             .refusal(&request.runner_id, None));
         }
+        self.run_gate(cwd, request, supervision, None)
+    }
+}
+
+impl FakeLabRunner {
+    /// Run the gate locally as the runner would. `ledger` redirects the
+    /// gate's run ledger, standing in for the daemon job that ran it earlier.
+    fn run_gate(
+        &self,
+        cwd: &std::path::Path,
+        request: &crate::agent_task_gate::placement::LabGateRequest,
+        supervision: Option<&crate::agent_task_gate::GateSupervision>,
+        ledger: Option<&std::path::Path>,
+    ) -> Result<crate::agent_task_gate::placement::LabGateReceipt> {
         let mut environment = request.environment.clone();
+        if let Some(ledger) = ledger {
+            environment
+                .variables
+                .insert("GATE_RUN_LEDGER".to_string(), ledger.display().to_string());
+        }
         environment.lab_runner = None;
         environment.shared_cargo_target = Some(false);
         let mut report = crate::agent_task_gate::run_gate_command_with_supervision(
@@ -10437,6 +10490,7 @@ fn submitted_gate_job_of_dead_controller(run_id: &str, job_id: &str) {
         run_id,
         "replacement-placement-runner",
         job_id,
+        &serde_json::json!({}),
     )
     .unwrap();
     agent_task_lifecycle::rewrite_record_for_test(run_id, |record| {
@@ -10514,6 +10568,123 @@ fn regate_reports_a_gate_the_daemon_admitted_after_its_controller_died() {
         let fence = &record.metadata["replacement_gate_execution_fence_supersessions"][0]["fence"];
         assert_eq!(fence["reconciled_from"], "daemon_job_start", "{fence:#}");
         assert_eq!(fence["runner_job"]["job_id"], "job-7");
+        assert!(record.metadata["replacement_gate_execution_jobs"]["verify-replacement"].is_null());
+        let promotion = persisted_promotion_for_attempt(&run_id).unwrap().unwrap();
+        assert_eq!(promotion.status, AgentTaskPromotionStatus::Applied);
+    });
+}
+
+/// A dead controller's gate job the daemon admitted and finished green.
+fn finished_green_gate_job(
+    transport: &FakeLabRunner,
+    run_id: &str,
+    job_id: &str,
+    finished: FinishedGate,
+) {
+    use crate::agent_task_gate::placement::LabGateJobState;
+    submitted_gate_job_of_dead_controller(run_id, job_id);
+    *transport.daemon_job.lock().unwrap() = Some(LabGateJobState {
+        status: homeboy_core::api_jobs::JobStatus::Succeeded,
+        started: true,
+    });
+    *transport.finished_gate.lock().unwrap() = Some(finished);
+}
+
+/// #18727: the daemon finished the gate job a dead controller submitted, and
+/// its receipt is bound to the recorded candidate and gate command.
+/// `recover --preflight` says the regate adopts it; the regate applies that
+/// verdict without running the gate again and clears the job and fence.
+#[test]
+fn regate_adopts_a_finished_gate_job_without_running_the_gate_again() {
+    with_corrected_gate_failure(false, |mut options, _| {
+        let run_id = options.identity.initial_run_id.clone();
+        let (runs, ledger) = lab_regate_fixture(&mut options, &run_id);
+        let daemon_ledger = runs.path().join("daemon-runs");
+        let (transport, _restore) = FakeLabRunner::register(false);
+        finished_green_gate_job(
+            &transport,
+            &run_id,
+            "job-9",
+            FinishedGate {
+                ledger: daemon_ledger.clone(),
+                foreign_candidate: false,
+            },
+        );
+
+        let (preview, exit) = recover_regate(&run_id, true);
+        assert_eq!(exit, 0, "{preview:#?}");
+        assert_eq!(
+            preview.step,
+            crate::agent_task_service::CookRecoveryStep::Regate
+        );
+        let result = preview.result.as_ref().unwrap();
+        assert_eq!(result["admitted_gate_job"]["adoptable"], true, "{result:#}");
+        assert_eq!(result["gate_job_adoption"]["plan"], "adopt", "{result:#}");
+        assert_eq!(result["gate_job_adoption"]["job_id"], "job-9");
+        assert!(!daemon_ledger.exists(), "preflight reads no receipt");
+
+        let (report, exit) = recover_regate(&run_id, false);
+        assert_eq!(exit, 0, "{report:#?}");
+        assert!(!ledger.exists(), "the adopted gate is not run again");
+        assert_eq!(
+            std::fs::read_to_string(&daemon_ledger)
+                .unwrap()
+                .lines()
+                .count(),
+            1,
+            "only the daemon job ran the gate"
+        );
+        let record = test_lifecycle_store().read_record(&run_id).unwrap();
+        let adoptions = &record.metadata["replacement_gate_job_adoptions"];
+        assert_eq!(adoptions.as_array().map(Vec::len), Some(1), "{adoptions:#}");
+        assert_eq!(adoptions[0]["job_id"], "job-9");
+        assert_eq!(adoptions[0]["adopted"], true, "{adoptions:#}");
+        assert!(record.metadata["replacement_gate_execution_jobs"]["verify-replacement"].is_null());
+        assert!(replacement_gate_fence(&run_id).is_null());
+        let promotion = persisted_promotion_for_attempt(&run_id).unwrap().unwrap();
+        assert_eq!(promotion.status, AgentTaskPromotionStatus::Applied);
+    });
+}
+
+/// #18727: a finished gate job whose receipt names another candidate SHA is
+/// not adopted: the regate re-runs the gate under the reconciled fence and
+/// records why it did not adopt the job.
+#[test]
+fn regate_reruns_a_finished_gate_job_that_ran_another_candidate() {
+    with_corrected_gate_failure(false, |mut options, _| {
+        let run_id = options.identity.initial_run_id.clone();
+        let (runs, ledger) = lab_regate_fixture(&mut options, &run_id);
+        let (transport, _restore) = FakeLabRunner::register(false);
+        finished_green_gate_job(
+            &transport,
+            &run_id,
+            "job-10",
+            FinishedGate {
+                ledger: runs.path().join("daemon-runs"),
+                foreign_candidate: true,
+            },
+        );
+
+        let (report, exit) = recover_regate(&run_id, false);
+        assert_eq!(exit, 0, "{report:#?}");
+        assert_eq!(
+            std::fs::read_to_string(&ledger).unwrap().lines().count(),
+            1,
+            "the gate re-runs once"
+        );
+        let record = test_lifecycle_store().read_record(&run_id).unwrap();
+        let adoptions = &record.metadata["replacement_gate_job_adoptions"];
+        assert_eq!(adoptions[0]["job_id"], "job-10");
+        assert_eq!(adoptions[0]["adopted"], false, "{adoptions:#}");
+        assert!(
+            adoptions[0]["reason"]
+                .as_str()
+                .is_some_and(|reason| reason.starts_with("receipt_mismatch")),
+            "{adoptions:#}"
+        );
+        let fence = &record.metadata["replacement_gate_execution_fence_supersessions"][0]["fence"];
+        assert_eq!(fence["reconciled_from"], "daemon_job_start", "{fence:#}");
+        assert_eq!(fence["runner_job"]["job_id"], "job-10");
         assert!(record.metadata["replacement_gate_execution_jobs"]["verify-replacement"].is_null());
         let promotion = persisted_promotion_for_attempt(&run_id).unwrap().unwrap();
         assert_eq!(promotion.status, AgentTaskPromotionStatus::Applied);

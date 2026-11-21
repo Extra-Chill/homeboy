@@ -6,7 +6,7 @@ use std::sync::Arc;
 
 use homeboy_agents::agent_tasks::gate::placement::{
     LabGateAdmission, LabGateFreshness, LabGateJobState, LabGateReceipt, LabGateRequest,
-    LabGateTransport, RunnerBuildSkew,
+    LabGateSubmittedJob, LabGateTransport, RunnerBuildSkew,
 };
 use homeboy_agents::agent_tasks::gate::GateSupervision;
 use homeboy_core::{Error, Result};
@@ -30,6 +30,14 @@ impl LabGateTransport for NativeLabGateTransport {
     fn gate_job(&self, runner_id: &str, job_id: &str) -> Result<Option<LabGateJobState>> {
         let job = crate::execution::read_daemon_job(runner_id, job_id)?;
         Ok(Some(gate_job_state(&job)))
+    }
+    fn finished_gate_receipt(
+        &self,
+        _cwd: &Path,
+        request: &LabGateRequest,
+        job: &LabGateSubmittedJob,
+    ) -> Result<Option<LabGateReceipt>> {
+        finished_gate_job_receipt(request, job)
     }
     fn build_skew(&self, runner_id: &str) -> Result<Option<RunnerBuildSkew>> {
         let controller = crate::controller_identity::compatibility_controller_identity().version;
@@ -88,6 +96,75 @@ impl LabGateTransport for NativeLabGateTransport {
             }
         }
     }
+}
+
+/// Read the receipt of a finished gate job a controller submitted but did not
+/// live to see finish, through the same terminal projection that controller
+/// would have applied (#18727). The submission record names the request the
+/// job ran and where it wrote its receipt; a job without one, or submitted for
+/// another request, has nothing to adopt. Never waits on a running gate.
+fn finished_gate_job_receipt(
+    request: &LabGateRequest,
+    job: &LabGateSubmittedJob,
+) -> Result<Option<LabGateReceipt>> {
+    let text = |key: &str| job.submission.get(key).and_then(serde_json::Value::as_str);
+    if text("schema")
+        != Some(homeboy_agents::agent_tasks::gate::placement::LAB_GATE_JOB_SUBMISSION_SCHEMA)
+        || job.runner_id != request.runner_id
+    {
+        return Ok(None);
+    }
+    let (Some(controller_run_id), Some(receipt_file)) =
+        (text("controller_run_id"), text("receipt_file"))
+    else {
+        return Ok(None);
+    };
+    if text("request_sha256") != Some(request.identity()?.as_str()) {
+        return Err(Error::invalid_argument(
+            "gate.receipt",
+            "finished Lab gate job ran another request than this gate",
+        ));
+    }
+    let terminal = crate::execution::observe_daemon_job_until_terminal(
+        &job.runner_id,
+        &job.job_id,
+        std::time::Duration::from_secs(30),
+        &|| false,
+    )?;
+    let resource_run = homeboy_core::engine::run_dir::RunDir::create()?;
+    let invocation = homeboy_core::engine::invocation::InvocationGuard::acquire(
+        &resource_run,
+        &Default::default(),
+    )?;
+    let tmp_dir = invocation.context().tmp_dir.clone();
+    std::fs::create_dir_all(&tmp_dir)
+        .map_err(|error| Error::internal_io(error.to_string(), None))?;
+    // Sealing the declared closure is deterministic: it reproduces the
+    // provenance the submitting controller sealed before submission.
+    let (_, sealed_provenance) =
+        homeboy_agents::agent_tasks::gate::placement::seal_extension_resources(
+            &tmp_dir.join("adopted-resources"),
+            &request.environment.extension_inputs,
+        )?;
+    let receipt = settle_terminal_gate_job(
+        TerminalGateJob {
+            request,
+            job_id: &job.job_id,
+            controller_run_id,
+            evidence_run_id: text("evidence_run_id"),
+            receipt_file,
+            sealed_provenance: &sealed_provenance,
+            tmp_dir: &tmp_dir,
+            materialization: job
+                .submission
+                .get("materialization")
+                .cloned()
+                .unwrap_or_else(|| serde_json::json!({})),
+        },
+        terminal,
+    )?;
+    resource_run.finish(true);
+    Ok(Some(receipt))
 }
 
 /// The daemon stamps `started_at_ms` when it admits a job out of its capacity
@@ -822,6 +899,31 @@ fn execute_owned(
             Some(request.timeout_seconds),
             homeboy_agents::agent_tasks::gate::lab_parent_job_id().as_deref(),
         ));
+    // Materialization evidence for the receipt, known before the job exists,
+    // so a later controller adopting the finished job records the same (#18727).
+    let materialization = serde_json::json!({
+        "gate_inputs": input_store
+            .as_ref()
+            .map(|(_, evidence)| evidence.clone())
+            .unwrap_or_default(),
+        "candidate_snapshot": candidate.snapshot_identity,
+        "resource_snapshot": snapshot.snapshot_identity,
+        "private_input_sha256": at_files.iter().map(|spec| &spec.content_sha256).collect::<Vec<_>>(),
+    });
+    // What a later controller needs to read this job's receipt back and bind
+    // it to the request it ran, recorded with the submitted job (#18727).
+    let submission = |evidence_run_id: Option<&str>| -> Result<serde_json::Value> {
+        Ok(serde_json::json!({
+            "schema": homeboy_agents::agent_tasks::gate::placement::LAB_GATE_JOB_SUBMISSION_SCHEMA,
+            "request_sha256": request.identity()?,
+            "candidate": request.candidate,
+            "gate_index": request.index,
+            "controller_run_id": run_id,
+            "evidence_run_id": evidence_run_id,
+            "receipt_file": receipt_file,
+            "materialization": materialization,
+        }))
+    };
     let mut execution = crate::RunnerExecRequest::new(&request.runner_id, options);
     execution.workspace_ref = Some(candidate.workspace_ref);
     let daemon_generation = status
@@ -841,10 +943,13 @@ fn execute_owned(
             {
                 if !request.preflight_only {
                     // Best effort: recovery can still read this job's start.
-                    let _ = homeboy_agents::agent_tasks::gate::execution_start::job_submitted(
-                        &request.runner_id,
-                        &job.id,
-                    );
+                    if let Ok(submission) = submission(None) {
+                        let _ = homeboy_agents::agent_tasks::gate::execution_start::job_submitted(
+                            &request.runner_id,
+                            &job.id,
+                            &submission,
+                        );
+                    }
                 }
                 for workspace in [&mut snapshot_workspace, &mut candidate_workspace] {
                     workspace.admitted(&job.id, job.daemon_generation.as_deref());
@@ -867,10 +972,13 @@ fn execute_owned(
     // daemon start record stands in for the fence (#18709). A job that cannot
     // be recorded is withdrawn rather than left to start untracked.
     if !request.preflight_only {
-        if let Err(error) = homeboy_agents::agent_tasks::gate::execution_start::job_submitted(
-            &request.runner_id,
-            job_id,
-        ) {
+        if let Err(error) = submission(output.mirror_run_id.as_deref()).and_then(|submission| {
+            homeboy_agents::agent_tasks::gate::execution_start::job_submitted(
+                &request.runner_id,
+                job_id,
+                &submission,
+            )
+        }) {
             let _ = crate::runner_job_cancel(
                 &request.runner_id,
                 job_id,
@@ -1011,6 +1119,52 @@ fn execute_owned(
     for workspace in [&mut snapshot_workspace, &mut candidate_workspace] {
         workspace.terminal(outcome);
     }
+    let receipt = settle_terminal_gate_job(
+        TerminalGateJob {
+            request,
+            job_id,
+            controller_run_id: run_id,
+            evidence_run_id: output.mirror_run_id.as_deref(),
+            receipt_file: &receipt_file,
+            sealed_provenance: &sealed_provenance,
+            tmp_dir: &resource_invocation.context().tmp_dir,
+            materialization,
+        },
+        terminal,
+    )?;
+    resource_run.finish(true);
+    Ok(receipt)
+}
+
+/// What a controller needs to turn a gate job's terminal daemon record into
+/// its verified receipt: the request it submitted and where the job writes
+/// its receipt. A controller watching the job to its end and a later
+/// controller adopting a finished job (#18727) read it the same way.
+struct TerminalGateJob<'a> {
+    request: &'a LabGateRequest,
+    job_id: &'a str,
+    /// The `lab-gate-*` run that submitted the job; the receipt names it.
+    controller_run_id: &'a str,
+    /// The durable run that owns the receipt artifact.
+    evidence_run_id: Option<&'a str>,
+    receipt_file: &'a str,
+    sealed_provenance:
+        &'a [homeboy_agents::agent_tasks::gate::AgentTaskGateExtensionInputProvenance],
+    tmp_dir: &'a Path,
+    /// Materialization evidence known at submission; the runner's extension
+    /// sources are added from the receipt.
+    materialization: serde_json::Value,
+}
+
+/// Read, bind and record the receipt of a gate job the daemon reported
+/// terminal. Projection and authority checks are the same for every reader.
+fn settle_terminal_gate_job(
+    job: TerminalGateJob<'_>,
+    terminal: crate::execution::DaemonTerminalObservation,
+) -> Result<LabGateReceipt> {
+    let request = job.request;
+    let job_id = job.job_id;
+    let receipt_file = job.receipt_file;
     let result = crate::execution::result_event_data(&terminal.events).ok_or_else(|| {
         // Setup may fail before the receipt-producing command starts.
         let evidence = serde_json::to_string(&terminal.events).unwrap_or_default();
@@ -1050,20 +1204,17 @@ fn execute_owned(
     {
         return Err(missing_terminal_artifact_evidence(
             job_id,
-            &receipt_file,
+            receipt_file,
             &value,
             stdout.len(),
             stderr,
             private,
         ));
     }
-    let receipt_path = resource_invocation
-        .context()
-        .tmp_dir
-        .join("received-gate-receipt.json");
+    let receipt_path = job.tmp_dir.join("received-gate-receipt.json");
     download_gate_receipt(|| {
         crate::lab::offload::lab_runner_file_transfer(&request.runner_id)?
-            .download_file(&receipt_file, &receipt_path.display().to_string())
+            .download_file(receipt_file, &receipt_path.display().to_string())
     })?;
     let bytes = std::fs::read(&receipt_path).map_err(|error| {
         Error::internal_io(
@@ -1103,7 +1254,7 @@ fn execute_owned(
         && !request.preflight_only
     {
         homeboy_agents::agent_tasks::gate::placement::verify_extension_resource_closure(
-            &sealed_provenance,
+            job.sealed_provenance,
             &receipt.report.environment.extension_inputs,
         )?;
     }
@@ -1116,7 +1267,7 @@ fn execute_owned(
             .execution_context
             .pointer("/context/controller_run_id")
             .and_then(serde_json::Value::as_str)
-            != Some(run_id)
+            != Some(job.controller_run_id)
     {
         return Err(Error::invalid_argument(
             "gate.receipt",
@@ -1127,14 +1278,11 @@ fn execute_owned(
         .map_err(|error| Error::internal_json(error.to_string(), None))?;
     let (_, revalidated_provenance) =
         homeboy_agents::agent_tasks::gate::placement::seal_extension_resources(
-            &resource_invocation
-                .context()
-                .tmp_dir
-                .join("revalidated-resources"),
+            &job.tmp_dir.join("revalidated-resources"),
             &request.environment.extension_inputs,
         )?;
     homeboy_agents::agent_tasks::gate::placement::verify_extension_resource_closure(
-        &sealed_provenance,
+        job.sealed_provenance,
         &revalidated_provenance,
     )
     .map_err(|mut error| {
@@ -1146,7 +1294,7 @@ fn execute_owned(
         .environment
         .extension_inputs
         .iter_mut()
-        .zip(&sealed_provenance)
+        .zip(job.sealed_provenance)
     {
         actual.source = original.source.clone();
         for asset in &mut actual.shared_assets {
@@ -1163,22 +1311,16 @@ fn execute_owned(
             asset.source = source.source.clone();
         }
     }
-    receipt.materialization = Some(
-        serde_json::json!({"runner_extension_sources":actual_sources,
-            "gate_inputs": input_store.map(|(_, evidence)| evidence).unwrap_or_default(),
-            "candidate_snapshot":candidate.snapshot_identity, "resource_snapshot":snapshot.snapshot_identity,
-            "private_input_sha256":at_files.iter().map(|spec| &spec.content_sha256).collect::<Vec<_>>()}),
-    );
-    let run_id = output.mirror_run_id.as_deref().ok_or_else(|| {
+    let mut materialization = job.materialization;
+    materialization["runner_extension_sources"] = actual_sources;
+    receipt.materialization = Some(materialization);
+    let run_id = job.evidence_run_id.ok_or_else(|| {
         Error::invalid_argument(
             "gate.receipt",
             "native gate receipt has no durable evidence owner",
         )
     })?;
-    let path = resource_invocation
-        .context()
-        .tmp_dir
-        .join("terminal-gate-receipt.json");
+    let path = job.tmp_dir.join("terminal-gate-receipt.json");
     std::fs::write(
         &path,
         serde_json::to_vec(&receipt)
@@ -1203,7 +1345,6 @@ fn execute_owned(
             events: terminal.events,
         },
     )?;
-    resource_run.finish(true);
     Ok(receipt)
 }
 
