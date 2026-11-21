@@ -36,6 +36,43 @@ fn interrupted_owner_fallback_reports_zero_execution_before_provider_start() {
 }
 
 #[test]
+fn cleanup_warning_survives_status_and_diagnose_projection() {
+    crate::test_support::with_isolated_home(|_| {
+        use homeboy::agents::agent_task_lifecycle::{
+            rewrite_record_for_test, seed_status_purity_fixtures_for_test,
+        };
+        seed_status_purity_fixtures_for_test().unwrap();
+        let run_id = "purity-cook-recoverable-attempt";
+        let warning = json!({
+            "root_pid": 123, "process_group": 123,
+            "failed_step": "process_tree_drain_and_reap"
+        });
+        rewrite_record_for_test(run_id, |record| {
+            record.metadata["cook_delivery"] = json!({
+                "schema": "homeboy/cook-delivery/v2",
+                "artifacts": {"promotion": {"deterministic_gates": [{
+                    "id": "gate-1", "status": "succeeded", "cleanup_warning": warning
+                }]}}
+            });
+        })
+        .unwrap();
+        let record = super::bounded_exact_record(run_id).unwrap();
+        // Status and diagnose share this projection, including successful gates.
+        let mut value = json!({});
+        super::attach_gate_cleanup_warnings(&mut value, &record);
+        assert_eq!(
+            value["gate_cleanup_warnings"][0]["cleanup_warning"],
+            warning
+        );
+        let compact = super::compact_control_plane_status(value);
+        assert_eq!(
+            compact["gate_cleanup_warnings"][0]["cleanup_warning"],
+            warning
+        );
+    });
+}
+
+#[test]
 fn terminal_cook_status_exposes_record_outcome_by_cook_and_run_id() {
     crate::test_support::with_isolated_home(|_| {
         use homeboy::agents::agent_task_lifecycle::{

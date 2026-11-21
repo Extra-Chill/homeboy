@@ -200,6 +200,7 @@ pub(in crate::commands::agent_task) fn diagnose(args: DiagnoseArgs) -> CmdResult
         "lab_snapshot_failure": lab_snapshot_failure,
         "next_commands": next_commands,
     });
+    attach_gate_cleanup_warnings(&mut value, &record);
     if let Ok(Some(promotion)) =
         agent_task_service_direct::recorded_promotion_report(&record.metadata)
     {

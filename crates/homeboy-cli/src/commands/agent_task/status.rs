@@ -68,6 +68,29 @@ use crate::commands::utils::watch::{
 /// aggregate cannot flood recovery output. Overflow is reported as an
 /// `omitted` count rather than dropped silently.
 const COMPACT_REF_LIMIT: usize = 12;
+
+fn attach_gate_cleanup_warnings(value: &mut Value, record: &AgentTaskRunRecord) {
+    let Ok(Some(promotion)) =
+        agent_task_service_direct::recorded_promotion_report(&record.metadata)
+    else {
+        return;
+    };
+    let warnings: Vec<_> = promotion
+        .get("deterministic_gates")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(|gate| {
+            gate.get("cleanup_warning")
+                .filter(|warning| !warning.is_null())
+                .map(|warning| json!({"gate_id": gate.get("id"), "cleanup_warning": warning}))
+        })
+        .take(COMPACT_REF_LIMIT)
+        .collect();
+    if !warnings.is_empty() {
+        value["gate_cleanup_warnings"] = json!(warnings);
+    }
+}
 const COMPACT_TASK_LIMIT: usize = 12;
 const COMPACT_TEXT_LIMIT: usize = 512;
 /// A runnable command is the point of status; one that embeds durable input
@@ -244,6 +267,7 @@ fn status_without_feedback(args: StatusArgs) -> CmdResult<Value> {
         }
         // Provider response identity, distinct from the requested routing tier.
         value["served_models"] = json!(record.served_models);
+        attach_gate_cleanup_warnings(&mut value, outcome);
         attach_lab_snapshot_failure_projection(&mut value, &record);
         let admission = agent_task_service_direct::queued_admission(&record);
         attach_lab_admission_wait(&mut value, admission.as_ref());

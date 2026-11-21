@@ -1939,3 +1939,109 @@ fn command_owned_budget_exit_codes_remain_candidate_failures() {
         );
     }
 }
+
+/// A ptrace exit-stop makes cleanup genuinely incomplete, rather than merely
+/// slow: even SIGKILL cannot reap the detached child until the tracer resumes it.
+#[cfg(target_os = "linux")]
+#[test]
+fn completed_gate_keeps_verdict_when_process_tree_cleanup_is_incomplete() {
+    for (code, expected) in [
+        (0, AgentTaskGateStatus::Succeeded),
+        (1, AgentTaskGateStatus::Failed),
+    ] {
+        let workspace = tempfile::tempdir().expect("workspace");
+        let pid_path = workspace.path().join("descendant.pid");
+        let ready_path = workspace.path().join("tracer.ready");
+        let (release, released) = std::sync::mpsc::channel::<()>();
+        let tracer = std::thread::spawn(move || {
+            let deadline = Instant::now() + Duration::from_secs(20);
+            let pid: libc::pid_t = loop {
+                if let Ok(text) = std::fs::read_to_string(&pid_path) {
+                    if let Ok(pid) = text.parse() {
+                        break pid;
+                    }
+                }
+                assert!(Instant::now() < deadline, "descendant did not start");
+                std::thread::sleep(Duration::from_millis(10));
+            };
+            unsafe {
+                assert_eq!(libc::ptrace(libc::PTRACE_ATTACH, pid, 0, 0), 0);
+                let mut status = 0;
+                assert_eq!(libc::waitpid(pid, &mut status, libc::__WALL), pid);
+                assert!(libc::WIFSTOPPED(status));
+                assert_eq!(
+                    libc::ptrace(libc::PTRACE_SETOPTIONS, pid, 0, libc::PTRACE_O_TRACEEXIT),
+                    0
+                );
+                assert_eq!(libc::ptrace(libc::PTRACE_CONT, pid, 0, 0), 0);
+                std::fs::write(ready_path, "ready").expect("release root");
+                // Hold the SIGKILL exit event until the report is built.
+                loop {
+                    assert_eq!(libc::waitpid(pid, &mut status, libc::__WALL), pid);
+                    if status >> 16 == libc::PTRACE_EVENT_EXIT {
+                        break;
+                    }
+                    assert!(libc::WIFSTOPPED(status));
+                    assert_eq!(
+                        libc::ptrace(libc::PTRACE_CONT, pid, 0, libc::WSTOPSIG(status)),
+                        0
+                    );
+                }
+                let _ = released.recv_timeout(Duration::from_secs(20));
+                assert_eq!(libc::ptrace(libc::PTRACE_CONT, pid, 0, 0), 0);
+                assert_eq!(libc::waitpid(pid, &mut status, libc::__WALL), pid);
+            }
+        });
+        let script = format!(
+            r#"
+import os, signal, time
+pid = os.fork()
+if pid == 0:
+    os.setsid()
+    signal.signal(signal.SIGTERM, signal.SIG_IGN)
+    os.close(1)
+    os.close(2)
+    with open('descendant.pid', 'w') as f:
+        f.write(str(os.getpid()))
+    while True:
+        time.sleep(1)
+while not os.path.exists('tracer.ready'):
+    time.sleep(0.01)
+print('root output captured', flush=True)
+os._exit({code})
+"#
+        );
+        let result = run_gate_argv(
+            workspace.path(),
+            1,
+            vec!["python3".into(), "-c".into(), script],
+            "cleanup fixture",
+            AgentTaskGateVisibility::Visible,
+            AgentTaskGateRevealPolicy::FullEvidence,
+            GateExecution {
+                runtime_tmpdir: None,
+                timeout: None,
+                supervision: None,
+                baseline_timeout_diagnostic: false,
+                deadline: None,
+            },
+            &AgentTaskGateEnvironmentPolicy::default(),
+            &[],
+            None,
+        );
+        drop(release);
+        tracer.join().expect("tracer cleanup");
+        let report = result.expect("completed gate report");
+        assert_eq!(report.status, expected);
+        assert_eq!(report.exit_code, code);
+        assert_eq!(report.termination, AgentTaskGateTermination::Completed);
+        assert_eq!(report.stdout.trim(), "root output captured");
+        let warning = report.cleanup_warning.as_ref().expect("cleanup warning");
+        assert!(warning.process_group.is_some());
+        assert_eq!(warning.failed_step, "process_tree_drain_and_reap");
+        let encoded = serde_json::to_value(&report).expect("receipt report");
+        let decoded: AgentTaskGateReport =
+            serde_json::from_value(encoded).expect("receipt roundtrip");
+        assert_eq!(decoded.cleanup_warning, report.cleanup_warning);
+    }
+}
