@@ -211,23 +211,21 @@ mod tests {
 
     #[test]
     fn migrated_adapter_output_descriptors_match_command_contracts() {
-        let commands = [(
-            "contract",
-            parsed_command(&["homeboy", "contract", "manifest"]),
-        )];
+        let commands = [("contract", &["homeboy", "contract", "manifest"][..])];
         let output_file_modes = [
             CommandOutputFileMode::None,
             CommandOutputFileMode::GenericEnvelope,
         ];
 
-        for (name, command) in commands {
+        for (name, argv) in commands {
             let spec = crate::command_contract::registered_command(name).unwrap();
             for output_file_mode in output_file_modes {
                 let has_output_file = output_file_mode != CommandOutputFileMode::None;
+                let command = parsed_command(argv);
 
                 assert_eq!(
                     output_descriptor(&command, output_file_mode),
-                    Some(command.output_descriptor(spec, has_output_file))
+                    Some(command.route(spec, has_output_file).descriptor)
                 );
             }
         }
@@ -246,7 +244,7 @@ mod tests {
         let spec = crate::command_contract::registered_command("trace").unwrap();
 
         assert_eq!(
-            command.output_descriptor(spec, false),
+            command.route(spec, false).descriptor,
             spec.output_descriptor(CommandOutputFileMode::None)
         );
     }

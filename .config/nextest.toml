@@ -5,12 +5,16 @@
 live-daemons = { max-threads = 4 }
 
 [profile.default]
+# The suite launches real providers, Git operations, and daemon process trees.
+# CPU-count parallelism on large lab hosts overwhelms their bounded probes and
+# durable-store I/O (including the 1001-record admission fixture).
+test-threads = 8
 # Termination emits a failed JSON event with reason="time limit exceeded".
 # The review harness preserves that reason even when captured output is empty.
 slow-timeout = { period = "30s", terminate-after = 4 }
 
 [[profile.default.overrides]]
-filter = 'binary(cook_lab_handoff_test) | binary(execution_step_chaos) | binary(daemon_ensure_running_cli) | test(repository_cleanliness_fixture_cook_leaves_only_the_provider_edit)'
+filter = 'binary(cook_lab_handoff_test) | binary(execution_step_chaos) | binary(daemon_ensure_running_cli) | test(cli_binary::daemon_chaos::) | test(repository_cleanliness_fixture_cook_leaves_only_the_provider_edit)'
 test-group = "live-daemons"
 
 # The same-child recovery proof owns two local Cook daemons, a live provider,

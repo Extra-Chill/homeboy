@@ -251,24 +251,48 @@ enum ChangedFormat {
     Ids,
 }
 
-pub fn is_changed(args: &ComponentArgs) -> bool {
-    matches!(args.command, ComponentCommand::Changed { .. })
+/// A parsed `component changed` invocation, rendered as raw plain text.
+pub struct ComponentChanged {
+    base: String,
+    head: String,
+    path: String,
+    format: ChangedFormat,
+    shared_paths: Vec<String>,
+    direct_only: bool,
 }
 
-pub fn run_changed(args: ComponentArgs) -> CmdResult<String> {
-    let ComponentCommand::Changed {
+/// Split `component changed` (raw plain text) from every other component
+/// subcommand (JSON envelope).
+pub fn into_changed(args: ComponentArgs) -> Result<ComponentChanged, ComponentArgs> {
+    match args.command {
+        ComponentCommand::Changed {
+            base,
+            head,
+            path,
+            format,
+            shared_paths,
+            direct_only,
+        } => Ok(ComponentChanged {
+            base,
+            head,
+            path,
+            format,
+            shared_paths,
+            direct_only,
+        }),
+        command => Err(ComponentArgs { command }),
+    }
+}
+
+pub fn run_changed(changed: ComponentChanged) -> CmdResult<String> {
+    let ComponentChanged {
         base,
         head,
         path,
         format,
         shared_paths,
         direct_only,
-    } = args.command
-    else {
-        return Err(homeboy::core::Error::internal_unexpected(
-            "Expected component changed",
-        ));
-    };
+    } = changed;
     let output =
         component::changed::changed(Path::new(&path), &base, &head, &shared_paths, direct_only)?;
     let text = match format {
@@ -1226,8 +1250,8 @@ mod tests {
                 format,
             ])
             .unwrap();
-            assert!(is_changed(&cli.component));
-            let (text, code) = run_changed(cli.component).unwrap();
+            let changed = into_changed(cli.component).ok().expect("component changed");
+            let (text, code) = run_changed(changed).unwrap();
             assert_eq!(code, 0);
             assert_eq!(text, expected);
         }

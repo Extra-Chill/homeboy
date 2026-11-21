@@ -56,7 +56,7 @@ pub(crate) use lab::{
 // commands::contract_lab_routing (the spec module itself stays private).
 pub use output::{
     CommandDescriptor, CommandJsonFamily, CommandOutputContractKind, CommandOutputDescriptor,
-    CommandOutputFileMode, CommandRawOutputMode, CommandResponseMode, CommandResponsePlan,
+    CommandOutputFileMode, CommandRawOutputMode, CommandResponseMode,
 };
 pub use public_variants::{PublicOutputVariantContract, PUBLIC_OUTPUT_VARIANT_CONTRACTS};
 pub(crate) use registry::{registered_contract, registered_contracts, ContractRegistryEntry};

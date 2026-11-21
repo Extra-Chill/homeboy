@@ -53,7 +53,7 @@ mod watch;
 use super::CmdResult;
 
 // Public command-layer API consumed by routing, raw/json output, rig, and bench.
-pub(crate) use dispatch::{global_runner_error, run, run_markdown};
+pub(crate) use dispatch::{global_runner_error, run, run_markdown, RunsMarkdown};
 pub use handlers::list_runs;
 pub use types::{RunsArgs, RunsOutput, HOSTED_BLUEPRINT_VIEWER};
 #[cfg(test)]
