@@ -4,6 +4,12 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.488.3] - 2026-11-21
+
+### Fixed
+- terminate verified pre-provider owners on cancellation
+- daemon tick converges detached Lab handoffs and submits the Cook continuation
+
 ## [0.488.2] - 2026-11-21
 
 ### Changed
