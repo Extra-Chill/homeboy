@@ -236,6 +236,9 @@ fn system_hostname() -> Option<String> {
 }
 
 pub(crate) fn read_session(runner_id: &str) -> Result<Option<RunnerSession>> {
+    if runner_id == crate::host_runner::ID {
+        return Ok(crate::host_runner::session());
+    }
     read_session_for_controller(runner_id, &controller_id())
 }
 
@@ -252,6 +255,15 @@ pub(super) fn read_session_for_status_until(
     runner_id: &str,
     deadline: Instant,
 ) -> Result<(Option<RunnerSession>, RunnerSessionState)> {
+    if runner_id == crate::host_runner::ID {
+        let session = crate::host_runner::session();
+        let state = if session.is_some() {
+            RunnerSessionState::Connected
+        } else {
+            RunnerSessionState::Disconnected
+        };
+        return Ok((session, state));
+    }
     let config_root = &paths::homeboy()?;
     let controller_id = controller_id();
     let session = read_session_for_controller(runner_id, &controller_id)?;

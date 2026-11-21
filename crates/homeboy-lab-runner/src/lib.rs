@@ -26,6 +26,7 @@ mod availability_provider;
 mod broker_http;
 mod cancellable_sleep;
 pub mod dev_run;
+mod host_runner;
 pub use homeboy_core::broker_auth::{
     broker_submit_token_for_runner, broker_token_from_env, extract_bearer_token,
     store_path as broker_auth_store_path, BrokerAuthGrant, BrokerAuthStore, BrokerCredential,
@@ -806,7 +807,16 @@ pub fn load_in_roots(roots: &homeboy_core::paths::PathRoots, id: &str) -> Result
     }
 
     if let Some(runner_id) = resolve_reserved_runner_alias(id)? {
+        if runner_id == host_runner::ID {
+            return load_in_roots(roots, &runner_id);
+        }
         return load_server_runner_in_root(roots.config(), &runner_id);
+    }
+
+    if id == host_runner::ID {
+        if let Some(runner) = host_runner::runner() {
+            return Ok(runner);
+        }
     }
 
     if let Some(runner) = execution_context_runner(id) {
@@ -850,11 +860,7 @@ fn resolve_reserved_runner_alias(id: &str) -> Result<Option<String>> {
 }
 
 fn configured_lab_runner_ids() -> Result<Vec<String>> {
-    let mut ids: Vec<String> = list()?
-        .into_iter()
-        .filter(|runner| runner.kind == RunnerKind::Ssh)
-        .map(|runner| runner.id)
-        .collect();
+    let mut ids: Vec<String> = lab_runners()?.into_iter().map(|runner| runner.id).collect();
     ids.sort();
     Ok(ids)
 }
@@ -935,8 +941,34 @@ pub fn list() -> Result<Vec<Runner>> {
     {
         runners.push(runner);
     }
+    if let Some(runner) = host_runner::runner()
+        .filter(|runner| !runners.iter().any(|configured| configured.id == runner.id))
+    {
+        runners.push(runner);
+    }
     runners.sort_by(|a, b| a.id.cmp(&b.id));
     Ok(runners)
+}
+
+/// Whether `runner_id` names this host's own daemon, synthesized from its
+/// live lease. It is `Local` in kind but admits through daemon transport.
+pub fn is_host_daemon_runner(runner_id: &str) -> bool {
+    runner_id == host_runner::ID
+}
+
+/// Runners eligible for Lab placement. Configured SSH runners keep priority;
+/// a co-located controller falls back to this host's own daemon.
+fn lab_runners() -> Result<Vec<Runner>> {
+    let runners = list()?;
+    let ssh: Vec<Runner> = runners
+        .iter()
+        .filter(|runner| runner.kind == RunnerKind::Ssh)
+        .cloned()
+        .collect();
+    if !ssh.is_empty() {
+        return Ok(ssh);
+    }
+    Ok(runners.into_iter().filter(host_runner::is_host).collect())
 }
 
 pub fn resolve_default_lab_runner() -> Result<Option<String>> {
@@ -947,11 +979,7 @@ pub fn resolve_default_lab_runner() -> Result<Option<String>> {
 /// runner when one is configured, otherwise the only configured Lab runner.
 /// Readiness is not consulted; this names a runner, it does not admit one.
 pub fn lab_runner_wait_target() -> Result<Option<String>> {
-    let runners: Vec<String> = list()?
-        .into_iter()
-        .filter(|runner| runner.kind == RunnerKind::Ssh)
-        .map(|runner| runner.id)
-        .collect();
+    let runners: Vec<String> = lab_runners()?.into_iter().map(|runner| runner.id).collect();
     Ok(lab_runner_wait_target_from(
         defaults::load_config().lab.preferred_runner.as_deref(),
         runners,
@@ -1024,9 +1052,8 @@ impl LabRunnerReadinessState {
 
 pub fn lab_runner_readiness() -> Result<LabRunnerReadiness> {
     let preferred = defaults::load_config().lab.preferred_runner;
-    let candidates: Vec<_> = list()?
+    let candidates: Vec<_> = lab_runners()?
         .into_iter()
-        .filter(|runner| runner.kind == RunnerKind::Ssh)
         .filter_map(|runner| {
             let status = status(&runner.id).ok()?;
             let capabilities_ready = homeboy_runtime_ready(&runner.id, &status);
@@ -1547,12 +1574,9 @@ impl DefaultLabRunnerCandidate {
 }
 
 pub(crate) fn default_lab_runner_availability() -> Result<Vec<RunnerAvailability>> {
-    let mut availability: Vec<RunnerAvailability> = list()?
+    let mut availability: Vec<RunnerAvailability> = lab_runners()?
         .into_iter()
         .filter_map(|runner| {
-            if runner.kind != RunnerKind::Ssh {
-                return None;
-            }
             let status = status(&runner.id).ok()?;
             let capabilities_ready = homeboy_runtime_ready(&runner.id, &status);
             let candidate = lab_runner_admission_candidate(

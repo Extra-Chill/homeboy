@@ -9,6 +9,7 @@ use crate::RunnerLifecycleOwner;
 #[serde(rename_all = "snake_case")]
 pub enum RunnerTunnelMode {
     DirectSsh,
+    Loopback,
 }
 
 impl RunnerTunnelMode {
@@ -28,6 +29,7 @@ impl RunnerTunnelMode {
     fn labels(&self) -> (&'static str, &'static str) {
         match self {
             RunnerTunnelMode::DirectSsh => ("direct SSH", "direct_ssh"),
+            RunnerTunnelMode::Loopback => ("loopback", "loopback"),
         }
     }
 }
@@ -225,7 +227,10 @@ mod tests {
 
     #[test]
     fn session_enum_vocabulary_stays_canonical() {
-        for (mode, wire, label) in [(RunnerTunnelMode::DirectSsh, "direct_ssh", "direct SSH")] {
+        for (mode, wire, label) in [
+            (RunnerTunnelMode::DirectSsh, "direct_ssh", "direct SSH"),
+            (RunnerTunnelMode::Loopback, "loopback", "loopback"),
+        ] {
             assert_eq!(serde_json::to_value(&mode).expect("serialize"), wire);
             assert_eq!(mode.metadata_value(), wire);
             assert_eq!(mode.label(), label);

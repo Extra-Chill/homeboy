@@ -943,7 +943,7 @@ fn exec_with_status_snapshot_attempt(
     );
     let requested_setting_keys = requested_setting_keys_for_command(&options.command);
     let accepted_extension_settings = options.accepted_extension_settings.clone();
-    if runner.kind == RunnerKind::Local {
+    if runner.kind == RunnerKind::Local && !crate::host_runner::is_host(&runner) {
         let provider_secret_names = options
             .extension_env_providers
             .iter()

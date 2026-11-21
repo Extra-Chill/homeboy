@@ -194,6 +194,7 @@ fn is_controller_local_runner(runners: &[Runner], id: &str) -> bool {
     runners
         .iter()
         .any(|runner| runner.id == id && runner.kind == RunnerKind::Local)
+        && !homeboy::runner::runners::is_host_daemon_runner(id)
 }
 
 pub(super) fn non_local_sessions(
