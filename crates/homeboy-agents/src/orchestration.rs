@@ -4089,10 +4089,17 @@ fn project_summary_fields(
     resource.location = location(record);
     resource.placement = placement(record);
     resource.phase = phase(record);
+    // An execution step held by runner admission (host pressure, capacity) has
+    // not started: its phase is admission, whatever owner it already holds
+    // (#18638). Read once; the blocker below carries the same wait.
+    let step_wait = crate::agent_task_service::execution_step_wait(record);
+    if step_wait.is_some() {
+        resource.phase = Some(ADMISSION_PHASE.to_string());
+    }
     resource.blocker = if resource.state == ControlPlaneState::Succeeded {
         None
     } else {
-        blocker(record, delivery.as_ref())
+        blocker(record, delivery.as_ref(), step_wait)
     };
     resource.owner = Some(owner(record));
     resource.runtime = runtime(record);
@@ -4222,8 +4229,9 @@ fn project_live_gate_verification_in(
 
 /// The one recovery step (#15925) a Cook's durable state names, projected so
 /// `status`, `diagnose`, the Cook verdict and `review` read the decision
-/// [`plan_cook_recovery`] makes for `agent-task recover` instead of deciding
-/// again. A state with no step projects step `none` and the `diagnose`
+/// the recorded-evidence recovery planner makes, without live worktree or
+/// capacity probes. Execution admission may refine that observation. A state
+/// with no step projects step `none` and the `diagnose`
 /// command, which explains why, so no surface ever names a step `recover`
 /// would not perform. Runs that are not Cooks project nothing.
 fn projected_cook_recovery(record: &AgentTaskRunRecord) -> Option<ControlPlaneRecovery> {
@@ -4242,7 +4250,7 @@ fn projected_cook_recovery(record: &AgentTaskRunRecord) -> Option<ControlPlaneRe
     let quote = homeboy_core::engine::shell::quote_arg;
     // The step belongs to the Cook, not this attempt: a superseded attempt
     // names the same `recover <cook>` command, so it projects the Cook's plan.
-    let Ok(plan) = crate::agent_task_service::plan_cook_recovery(&cook_id) else {
+    let Ok(plan) = crate::agent_task_service::plan_cook_recovery_recorded(&cook_id) else {
         return Some(ControlPlaneRecovery {
             run: RunId::new(&record.run_id).ok()?,
             step: "none".to_string(),
@@ -4301,7 +4309,7 @@ fn project_dead_candidate_adoption(record: &AgentTaskRunRecord) -> AgentTaskRunR
     }
     adoption.state = "interrupted".to_string();
     adoption.phase = if adoption.gate_process_group.is_some_and(|pgid| {
-        homeboy_core::process::isolated_process_group_is_running(pgid).unwrap_or(false)
+        homeboy_engine_primitives::command::process_group_is_running(pgid).unwrap_or(false)
     }) {
         "gate_orphaned"
     } else {
@@ -4665,7 +4673,18 @@ fn phase(record: &AgentTaskRunRecord) -> Option<String> {
     {
         return Some("source_materialization".to_string());
     }
+    // A queued execution step, or one parked in `pending_resource_admission`,
+    // is waiting on admission, not running gates (#18638).
+    if !record.state().is_terminal()
+        && record.metadata["execution_scheduling"]["admission_wait"]["status"]
+            == "pending_resource_admission"
+    {
+        return Some(ADMISSION_PHASE.to_string());
+    }
     if record.has_live_execution_step_owner() {
+        if record.state() == RunExecutionState::Queued {
+            return Some(ADMISSION_PHASE.to_string());
+        }
         return Some("promotion_gates".to_string());
     }
     if has_running_provider_execution(record) {
@@ -4797,11 +4816,15 @@ fn missing_argument_details(details: &Value) -> Option<Value> {
     })
 }
 
+/// The projected phase of a Cook whose execution waits on admission.
+const ADMISSION_PHASE: &str = "admission";
+
 fn blocker(
     record: &AgentTaskRunRecord,
     delivery: Option<&CookDelivery>,
+    step_wait: Option<Value>,
 ) -> Option<ControlPlaneBlocker> {
-    if let Some(wait) = crate::agent_task_service::execution_step_wait(record) {
+    if let Some(wait) = step_wait {
         return Some(ControlPlaneBlocker {
             details: Some(wait.clone()),
             code: wait["reason"].as_str().map(str::to_string),
@@ -4871,7 +4894,7 @@ fn blocker(
             unmaterialized_admission_blocker(record, admission)
         {
             return Some(ControlPlaneBlocker {
-                details: None,
+                details: Some(crate::agent_task_service::cook_admission_wait(record)),
                 code: Some(state.clone()),
                 message: reason.clone(),
                 state: Some(state),
@@ -5046,8 +5069,11 @@ fn unmaterialized_admission_blocker(
         .as_u64()
         .unwrap_or_default();
     let max_attempts = 20;
-    // Deadlines belong to the immutable step request, not lifecycle status.
-    let next_attempt_at = None;
+    let next_attempt_at = admission["wait"]["not_before"]
+        .as_str()
+        .or_else(|| admission["next_attempt_at"].as_str())
+        .or_else(|| record.metadata["execution_scheduling"]["next_attempt_at"].as_str())
+        .map(str::to_string);
     let disposition = if state == "exhausted" || attempts >= max_attempts {
         ControlPlaneAdmissionRetryDisposition::Exhausted
     } else {
@@ -9850,6 +9876,7 @@ mod tests {
             "schema": "homeboy/unmaterialized-cook-admission/v1",
             "state": "queued",
             "reason": "Lab admission predicate controller_version != job_command_binary_version failed token=secret-value",
+            "wait": {"not_before": "2099-01-01T00:00:00Z"},
         });
         record.metadata["execution_scheduling"] =
             json!({"epoch": 1, "current_intent_id": "step", "recovery_failures": 3});
@@ -9870,9 +9897,9 @@ mod tests {
         assert_eq!(retry.policy, "bounded_exponential");
         assert_eq!(retry.attempts, 3);
         assert_eq!(retry.max_attempts, 20);
-        assert!(
-            retry.next_attempt_at.is_none(),
-            "deadlines belong to the exact step"
+        assert_eq!(
+            retry.next_attempt_at.as_deref(),
+            Some("2099-01-01T00:00:00Z")
         );
         assert_eq!(
             retry.disposition,
@@ -10244,6 +10271,30 @@ mod tests {
         assert_eq!(resource.state, ControlPlaneState::Succeeded);
         assert_eq!(resource.phase.as_deref(), Some("promotion_gates"));
         assert_eq!(resource.finished_at, record.updated_at);
+    }
+
+    #[test]
+    fn admission_pending_execution_step_projects_admission_not_promotion_gates() {
+        let mut queued = record(AGENT_TASK_RUN);
+        queued.set_state_for_test(RunExecutionState::Queued);
+        queued.metadata.as_object_mut().unwrap().extend(
+            crate::agent_task_lifecycle::execution_step_owner_fixture("cook"),
+        );
+        let resource = project_record(&queued, None).expect("project queued step");
+        assert_ne!(resource.state, ControlPlaneState::Succeeded);
+        assert_eq!(resource.phase.as_deref(), Some("admission"));
+
+        let mut parked = record(AGENT_TASK_RUN);
+        parked.set_state_for_test(RunExecutionState::Running);
+        parked.metadata.as_object_mut().unwrap().extend(
+            crate::agent_task_lifecycle::execution_step_owner_fixture("cook"),
+        );
+        parked.metadata["execution_scheduling"]["admission_wait"] = json!({
+            "status": "pending_resource_admission", "reason": "pressure",
+        });
+        let resource = project_record(&parked, None).expect("project parked step");
+        assert_ne!(resource.state, ControlPlaneState::Succeeded);
+        assert_eq!(resource.phase.as_deref(), Some("admission"));
     }
 
     #[test]

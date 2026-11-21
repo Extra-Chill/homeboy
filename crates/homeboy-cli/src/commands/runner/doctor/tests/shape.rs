@@ -78,6 +78,8 @@ fn compact_doctor_projection_bounds_evidence_and_renders_action() {
         })
         .collect();
 
+    // This test exercises projection, not the test host's readiness probes.
+    report.status = RunnerDoctorStatus::Warning;
     let mut compact = output_projection(report, false);
     // The observed environment is the test host's; pin it so the rendered
     // summary is deterministic on every platform.
@@ -92,9 +94,17 @@ fn compact_doctor_projection_bounds_evidence_and_renders_action() {
     );
     assert_eq!(compact["truncation"]["checks"]["omitted"], 5);
     assert!(rendered.len() < 16 * 1024, "{rendered}");
-    assert_eq!(
-        render_summary(&compact).as_deref(),
-        Some("Runner doctor\nEnvironment: linux / x86_64 / host\nStatus: degraded\nChecks shown: 12\nNext: homeboy runner doctor local --full")
+    let summary = render_summary(&compact).expect("summary");
+    assert!(summary.starts_with(
+        "Runner doctor\nEnvironment: linux / x86_64 / host\nStatus: degraded\nChecks needing attention: 12\n  [warn] check-0: "
+    ), "{summary}");
+    assert!(
+        summary.contains("    Fix: homeboy runner doctor local --repair"),
+        "{summary}"
+    );
+    assert!(
+        summary.ends_with("Next: homeboy runner doctor local --repair"),
+        "{summary}"
     );
     assert!(projection_envelope_bytes(&compact).unwrap() <= COMPACT_PROJECTION_BYTES);
 }
@@ -477,7 +487,7 @@ fn compact_doctor_falls_back_when_escaped_untrusted_fields_exceed_the_wire_budge
 
     let compact = output_projection(report, false);
     assert!(projection_envelope_bytes(&compact).unwrap() <= COMPACT_PROJECTION_BYTES);
-    assert!(compact["checks"].as_array().unwrap().is_empty());
+    assert!(!compact["checks"].as_array().unwrap().is_empty());
     assert_eq!(
         compact["truncation"]["checks"]["omitted"],
         "see_full_output"
@@ -508,7 +518,7 @@ fn compact_doctor_size_fallback_retains_failed_repair() {
 
     let compact = output_projection(report, false);
 
-    assert_eq!(compact["checks"].as_array().unwrap().len(), 0);
+    assert!(!compact["checks"].as_array().unwrap().is_empty());
     assert_eq!(compact["repairs"][0]["id"], "repair.daemon");
     assert_eq!(
         compact["repairs"][0]["message"],
@@ -564,7 +574,56 @@ fn compact_doctor_uses_pretty_stdout_bytes_at_the_boundary() {
 
     let bounded = output_projection(report, false);
     assert!(projection_envelope_bytes(&bounded).unwrap() <= COMPACT_PROJECTION_BYTES);
-    assert!(bounded["checks"].as_array().unwrap().is_empty());
+    let kept = bounded["checks"].as_array().unwrap();
+    assert!(!kept.is_empty(), "blocking checks survive the size cap");
+    assert!(kept.iter().all(|check| check["status"] == "error"));
+    assert_eq!(bounded["truncation"]["checks"]["shown"], kept.len());
+    assert!(bounded["operator_summary"]["next_action"]
+        .as_str()
+        .unwrap()
+        .starts_with("homeboy runner doctor local"));
+}
+
+#[test]
+fn human_summary_lists_blocking_checks_and_uses_first_error_remediation() {
+    let payload = serde_json::json!({
+        "operator_summary": { "state": "blocked", "next_action": "homeboy runner doctor homeboy-lab --full" },
+        "checks": [
+            { "id": "pressure", "status": "warn", "message": "Runner pressure could not be observed", "remediation": null },
+            { "id": "homeboy.controller_daemon", "status": "error", "message": "controller 0.482.3 vs daemon 0.482.0", "remediation": "homeboy runner refresh-homeboy homeboy-lab --ref v0.482.3" },
+            { "id": "lab_capacity", "status": "ok", "message": "Current Lab admission capacity" },
+        ],
+        "lab_capacity": { "runner_id": "homeboy-lab", "observation": { "capacity": {
+            "cpus": 16, "load_average_1m": 82.7, "concurrency_limit": 4, "effective_budget": 1,
+            "active_slots_by_owner": { "cook-a": 1 },
+        } } },
+    });
+    let rendered = render_summary(&payload).expect("summary");
+    assert!(rendered.contains("Status: blocked"), "{rendered}");
+    assert!(
+        rendered.contains("Checks needing attention: 2"),
+        "{rendered}"
+    );
+    assert!(rendered.contains("  [error] homeboy.controller_daemon: controller 0.482.3 vs daemon 0.482.0\n    Fix: homeboy runner refresh-homeboy homeboy-lab --ref v0.482.3"), "{rendered}");
+    assert!(
+        rendered.contains("  [warn] pressure: Runner pressure could not be observed"),
+        "{rendered}"
+    );
+    assert!(!rendered.contains("lab_capacity:"), "{rendered}");
+    assert!(
+        rendered
+            .contains("Pressure: cpu load over budget (load 82.7 vs 16 CPU(s), 1/1 slot(s) held)"),
+        "{rendered}"
+    );
+    assert!(rendered.contains("  Holders: cook-a (1)"), "{rendered}");
+    assert!(
+        rendered.contains("  Clears when: 1m load falls below 15 or a holder releases its slot"),
+        "{rendered}"
+    );
+    assert!(
+        rendered.ends_with("Next: homeboy runner refresh-homeboy homeboy-lab --ref v0.482.3"),
+        "{rendered}"
+    );
 }
 
 #[test]

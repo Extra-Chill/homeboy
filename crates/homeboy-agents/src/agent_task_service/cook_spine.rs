@@ -742,10 +742,19 @@ pub(super) fn run_cook_spine(
                 .as_str()
                 .map(str::to_string)
         }) {
-            let admission = super::cook_baseline::admit_base_gates(
-                &options,
-                &lifecycle_store.open_observation_initialized()?,
-                &base,
+            let admission = run_cook_startup_phase(
+                lifecycle_store,
+                durable_observer,
+                &options.identity.cook_id,
+                &options.identity.initial_run_id,
+                "baseline_gate_admission",
+                || {
+                    super::cook_baseline::admit_base_gates(
+                        &options,
+                        &lifecycle_store.open_observation_initialized()?,
+                        &base,
+                    )
+                },
             )?;
             lifecycle_store.record_metadata_value(
                 &options.identity.initial_run_id,
@@ -1360,6 +1369,7 @@ pub(super) fn run_cook_spine(
                                 if tick.stop_now {
                                     let outcome = match homeboy_core::process::terminate_process_tree(
                                         heartbeat_owner_pid,
+                                        homeboy_core::process::PROCESS_TREE_SIGTERM_GRACE,
                                     ) {
                                         Ok(termination) => serde_json::json!({
                                             "status": "terminated",
@@ -1410,6 +1420,7 @@ pub(super) fn run_cook_spine(
                                     deadline_stop_issued = true;
                                     let outcome = match homeboy_core::process::terminate_process_tree(
                                         heartbeat_owner_pid,
+                                        homeboy_core::process::PROCESS_TREE_SIGTERM_GRACE,
                                     ) {
                                         Ok(termination) => serde_json::json!({
                                             "status": "terminated",
@@ -2302,7 +2313,7 @@ pub(super) fn run_cook_spine(
                 None
             }
         };
-        let _terminal_phase = terminal_timing
+        let terminal_phase = terminal_timing
             .as_ref()
             .map(|store| store.run_phase_guard(&run_id, "terminal.decision"));
         let review_form = if review_form_unavailable {
@@ -2594,6 +2605,9 @@ pub(super) fn run_cook_spine(
                 let budget_limit = budget_limit
                     .as_ref()
                     .expect("budget is initialized from the loaded attempt plan");
+                // The decision is made. A local follow-up runs the next attempt
+                // inside this call, and that time belongs to the next attempt.
+                drop(terminal_phase);
                 match dispatch_cook_follow_up(
                     (store, lifecycle_store),
                     &options,

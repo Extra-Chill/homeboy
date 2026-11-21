@@ -17,28 +17,8 @@ pub struct RunnerArgs {
 }
 
 impl RunnerArgs {
-    pub(crate) fn compact_exec_stdout(&self) -> bool {
-        matches!(
-            &self.command,
-            RunnerCommand::Exec(RunnerExecArgs {
-                json: false,
-                raw: false,
-                ..
-            })
-        )
-    }
-
     pub(crate) fn compact_doctor_stdout(&self) -> bool {
         matches!(&self.command, RunnerCommand::Doctor { full: false, .. })
-    }
-
-    pub(crate) fn compact_job_list_stdout(&self) -> bool {
-        matches!(
-            &self.command,
-            RunnerCommand::Job {
-                command: RunnerJobCommand::List { json: false, .. }
-            }
-        )
     }
 }
 

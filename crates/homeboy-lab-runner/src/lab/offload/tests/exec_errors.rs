@@ -493,12 +493,18 @@ fn capability_fallback_persists_the_verified_local_outcome() {
             },
         );
 
-        automatic_capability_fallback(
+        automatic_capability_fallback_or_error(
             &request,
             base_lab_plan(Some(&portable_lab_command("trace"))),
-            "homeboy-lab",
+            &LabRunnerSelection {
+                runner_id: "homeboy-lab".to_string(),
+                source: LabRunnerSelectionSource::Default,
+                mode: RunnerTunnelMode::DirectSsh,
+            },
             &connected_status("homeboy-lab"),
             "runner capability preflight failed".to_string(),
+            Vec::new(),
+            &decision,
             &OffloadObservation::start(),
         )
         .expect("verified local fallback");

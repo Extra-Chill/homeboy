@@ -14,8 +14,8 @@ use std::collections::HashMap;
 
 use crate::error::{Error, Result};
 use crate::lab_contract::{
-    LabCommandContract, LabRigWorkloadArguments, LabRunnerWorkloadCapability, LabSourcePathMode,
-    LabWorkspaceModePolicy,
+    LabRigWorkloadArguments, LabRoutingPolicy, LabRunnerWorkloadCapability, LabSecretEnvSource,
+    LabSourcePathMode, LabWorkspaceModePolicy,
 };
 use crate::plan::{HomeboyPlan, PlanKind, PlanStep};
 
@@ -27,26 +27,33 @@ pub struct LabJobOverrides {
     pub workspace_root: Option<String>,
 }
 
-/// A resolved Lab command with its required extensions/capabilities/workload.
-#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+/// Owned, resolved command shared by offload execution and durable staging.
+///
+/// Field names retain the persisted v1 staging-command shape. Static routing
+/// declarations are resolved into this type once, before crossing that boundary.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct LabOffloadCommand {
-    pub command: LabCommandContract,
+    pub hot_label: String,
+    pub portable: bool,
+    /// Retain local-only diagnostics; portable v1 recipes omit this field.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub local_only_reason: Option<String>,
+    pub source_path_mode: LabSourcePathMode,
+    pub workspace_mode_policy: LabWorkspaceModePolicy,
+    pub capture_mutation_patch: bool,
+    pub mutation_flag: Option<String>,
+    pub extra_required_capabilities: Vec<String>,
+    pub secret_env_sources: Vec<LabSecretEnvSource>,
+    pub routing_policy: LabRoutingPolicy,
     pub required_extensions: Vec<String>,
     pub required_capabilities: Vec<LabRunnerWorkloadCapability>,
     pub workload: Option<LabRigWorkloadArguments>,
 }
 
-impl std::ops::Deref for LabOffloadCommand {
-    type Target = LabCommandContract;
-
-    fn deref(&self) -> &Self::Target {
-        &self.command
-    }
-}
-
-impl std::ops::DerefMut for LabOffloadCommand {
-    fn deref_mut(&mut self) -> &mut Self::Target {
-        &mut self.command
+impl LabOffloadCommand {
+    pub fn is_portable(&self) -> bool {
+        self.portable
     }
 }
 
@@ -141,6 +148,57 @@ pub(crate) fn execute_lab_offload(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn persisted_staging_command_remains_readable_without_conversion() {
+        let payload = serde_json::json!({
+            "hot_label": "bench",
+            "portable": true,
+            "source_path_mode": "CwdOrPathFlag",
+            "workspace_mode_policy": "GitCheckoutRequired",
+            "capture_mutation_patch": true,
+            "mutation_flag": "--apply",
+            "extra_required_capabilities": ["opaque"],
+            "secret_env_sources": ["AgentTask"],
+            "routing_policy": {
+                "default_lab_offload": true,
+                "infer_source_path_tools": true,
+                "release_gate": false,
+                "requires_extension_parity": true,
+                "read_only_polling": false,
+                "offload_only_when_hot": false,
+                "preserve_result_payload": false
+            },
+            "required_extensions": ["rust"],
+            "required_capabilities": [{"name": "opaque", "required": true}],
+            "workload": {
+                "kind": "Bench",
+                "rig_ids": ["fixture"],
+                "component": "homeboy",
+                "extension_overrides": ["rust"]
+            }
+        });
+        let command: LabOffloadCommand = serde_json::from_value(payload.clone()).unwrap();
+        assert_eq!(serde_json::to_value(&command).unwrap(), payload);
+        assert!(command.is_portable());
+        assert_eq!(command.workload.unwrap().rig_ids, ["fixture"]);
+    }
+
+    #[test]
+    fn resolved_local_only_command_retains_its_reason_after_persistence() {
+        let command = crate::lab_routing::lab_offload_command_from_contract(
+            crate::lab_contract::LabCommandContract::local_only("rig up", "controller-owned"),
+            Vec::new(),
+        );
+        let restored: LabOffloadCommand =
+            serde_json::from_value(serde_json::to_value(&command).unwrap()).unwrap();
+        assert_eq!(restored, command);
+        assert!(!restored.is_portable());
+        assert_eq!(
+            restored.local_only_reason.as_deref(),
+            Some("controller-owned")
+        );
+    }
 
     #[test]
     fn noop_provider_returns_local_outcome_for_uncontracted_local_decision() {

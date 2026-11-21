@@ -1808,6 +1808,7 @@ mod tests {
                 run_isolation_token: Some("candidate-retry".into()),
                 ..Default::default()
             },
+            &crate::WorkspaceControl::default(),
         )
         .unwrap();
         let runner = Path::new(&synced.0.remote_path);
@@ -2107,6 +2108,7 @@ mod tests {
                     mode: crate::workspace::RunnerWorkspaceSyncMode::SnapshotGit,
                     ..Default::default()
                 },
+                &crate::WorkspaceControl::default(),
             )
             .expect("materialize exclusion-aware snapshot-git");
             let remote = PathBuf::from(&synced.remote_path);

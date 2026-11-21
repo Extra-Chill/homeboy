@@ -228,10 +228,10 @@ fn workspace_context(
         validation_dependency_ids: None,
         run_isolation_token: None,
     };
-    let (synced, _) = crate::sync_workspace_before(
+    let (synced, _) = crate::sync_workspace(
         runner_id,
         options,
-        deadline.expect("workspace sync has a deadline"),
+        &crate::WorkspaceControl::before(Some(deadline.expect("workspace sync has a deadline"))),
     )?;
     let mut source_snapshot = homeboy_core::source_snapshot::collect_local(
         runner_id,

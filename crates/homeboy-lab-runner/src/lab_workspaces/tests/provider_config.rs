@@ -10,7 +10,7 @@ use super::super::{
     provider_config_candidate_paths, provider_config_extra_workspaces,
     resolve_path_setting_workspace_refs_in_args,
     rig_component_path_env_extra_workspaces_from_entries, runtime_refresh_source_extra_workspaces,
-    sync_extra_lab_workspaces, workspace_mapping_entries_for_git_dependency,
+    sync_lab_workspace_roots_controlled, workspace_mapping_entries_for_git_dependency,
     workspace_mapping_entry, workspace_ref_extra_workspaces, ExtraLabWorkspace,
     LAB_EXTRA_WORKSPACES_JSON_ENV,
 };
@@ -94,13 +94,15 @@ fn json_extra_workspace_input_materializes_delimiter_paths() {
         )
         .expect("local runner");
         let mut mapping = Vec::new();
-        let synced = sync_extra_lab_workspaces(
+        let (_, synced, extra_mapping) = sync_lab_workspace_roots_controlled(
             "json-extra-input",
             primary.path().to_str().expect("primary path"),
-            declared,
-            &mut mapping,
+            None,
+            &declared,
+            &crate::WorkspaceControl::default(),
         )
         .expect("materialize declared extra workspaces");
+        mapping.extend(extra_mapping);
         assert_eq!(synced.len(), 2);
         assert_eq!(mapping.len(), 2);
         for (index, (entry, source)) in mapping.iter().zip(&sources).enumerate() {
@@ -515,16 +517,19 @@ fn agent_task_plan_config_linked_worktree_remains_git_backed_for_provider_start(
                 validation_dependency_ids: None,
                 run_isolation_token: None,
             },
+            &crate::WorkspaceControl::default(),
         )
         .expect("materialize primary workspace");
         let mut workspace_mapping = vec![workspace_mapping_entry("primary", &primary_synced)];
-        sync_extra_lab_workspaces(
+        let (_, _, extra_mapping) = sync_lab_workspace_roots_controlled(
             "lab-plan-config-boundary",
             &primary_synced.local_path,
-            extra_workspaces,
-            &mut workspace_mapping,
+            None,
+            &extra_workspaces,
+            &crate::WorkspaceControl::default(),
         )
         .expect("materialize planned extra workspaces");
+        workspace_mapping.extend(extra_mapping);
 
         assert_eq!(workspace_mapping.len(), 2);
         for entry in &workspace_mapping {

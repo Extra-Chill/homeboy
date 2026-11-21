@@ -88,7 +88,7 @@ pub(crate) fn run_runner_resident_lab_offload(
         serde_json::to_value(&path_materialization_plan).unwrap_or(serde_json::json!(null));
     lab_metadata["job_scoped_overrides"] = job_scoped_overrides_metadata(&request.job_overrides);
     let secret_env_handoff = build_lab_secret_env_handoff_plan(
-        contract.secret_env_sources,
+        &contract.secret_env_sources,
         &remapped_args,
         Default::default(),
     )?;

@@ -901,6 +901,7 @@ fn applied_candidate_gate_verdicts_select_a_completing_recovery_step() {
                     matches_candidate_failure: true,
                     result: AgentTaskGateDifferentialResult::BaselineRed,
                     diagnostic: None,
+                    failure_attribution: None,
                 });
             }
             promotion.deterministic_gates.push(gate);
@@ -1141,6 +1142,7 @@ fn push_added_gate(
         matches_candidate_failure: true,
         result: AgentTaskGateDifferentialResult::BaselineRed,
         diagnostic: None,
+        failure_attribution: None,
     });
     promotion.deterministic_gates.push(gate);
     promotion.status = AgentTaskPromotionStatus::GateFailed;

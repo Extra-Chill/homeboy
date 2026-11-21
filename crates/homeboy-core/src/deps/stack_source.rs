@@ -30,6 +30,9 @@ fn http_json_with_timeout(url: &str, timeout: std::time::Duration) -> Result<ser
     })
 }
 
+/// GitHub's list-releases endpoint stops at 1000 results (10 pages of 100).
+const GITHUB_RELEASE_LIST_MAX_PAGES: usize = 10;
+
 pub(super) fn resolve_stack_source(
     source: &DependencyStackEdgeSource,
 ) -> Result<Option<RemoteReleaseCoordinate>> {
@@ -52,6 +55,7 @@ pub(super) fn resolve_stack_source(
     let (version, tag) = if let Some(repo) = &source.github_release {
         let mut url = format!("https://api.github.com/repos/{repo}/releases?per_page=100");
         let mut candidates = Vec::new();
+        let mut page = 1;
         let deadline = std::time::Instant::now() + STACK_OUTDATED_RESOLVE_TIMEOUT;
         loop {
             let remaining = deadline
@@ -79,17 +83,15 @@ pub(super) fn resolve_stack_source(
                     candidates.push((version, tag.to_string()));
                 }
             }
-            if releases.len() < 100 {
+            // GitHub serves only the first 1000 listed releases and answers
+            // page 11 with 422. The list is newest first, so that window
+            // always holds the newest release; stop at its end.
+            if releases.len() < 100 || page >= GITHUB_RELEASE_LIST_MAX_PAGES {
                 break;
             }
             // GitHub pages are traversed even when none of their tags are semver.
-            let next = url
-                .split("&page=")
-                .nth(1)
-                .and_then(|n| n.parse::<usize>().ok())
-                .unwrap_or(1)
-                + 1;
-            url = format!("https://api.github.com/repos/{repo}/releases?per_page=100&page={next}");
+            page += 1;
+            url = format!("https://api.github.com/repos/{repo}/releases?per_page=100&page={page}");
         }
         let Some((version, tag)) = candidates.into_iter().max_by(|a, b| a.0.cmp(&b.0)) else {
             return Ok(None);

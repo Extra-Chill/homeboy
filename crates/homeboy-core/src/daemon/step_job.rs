@@ -1003,7 +1003,10 @@ fn run_step(mut checkpoint: StepJobCheckpoint, job: &ControllerJobHandle) -> Res
     let start_identity = match crate::process::process_start_identity(process.id()) {
         Ok(Some(identity)) => identity,
         other => {
-            let _ = crate::process::terminate_process_tree(process.id());
+            let _ = crate::process::terminate_process_tree(
+                process.id(),
+                crate::process::PROCESS_TREE_SIGTERM_GRACE,
+            );
             let _ = process.wait();
             return Err(Error::internal_unexpected(format!(
                 "step child start identity is unavailable: {other:?}"
@@ -1017,7 +1020,10 @@ fn run_step(mut checkpoint: StepJobCheckpoint, job: &ControllerJobHandle) -> Res
     checkpoint.phase = StepPhase::Running;
     checkpoint.child = Some(child.clone());
     if let Err(mut error) = job.checkpoint(to_value(&checkpoint)?) {
-        let _ = crate::process::terminate_process_tree(child.pid);
+        let _ = crate::process::terminate_process_tree(
+            child.pid,
+            crate::process::PROCESS_TREE_SIGTERM_GRACE,
+        );
         let _ = process.wait();
         error.details["step_child"] = to_value(&child)?;
         return Err(error);
@@ -1264,6 +1270,10 @@ fn await_wait_with(
                             "queue_position": position,
                             "waiters_ahead": standing.map(|standing| standing.waiters_ahead),
                             "priority": step_priority(request),
+                            "next_attempt_at": (chrono::Utc::now()
+                                + chrono::Duration::from_std(backoff)
+                                    .expect("runner backoff fits chrono"))
+                            .to_rfc3339(),
                         }))?;
                     }
                 }
@@ -1423,7 +1433,10 @@ fn stop_finished_cgroup(job_id: &str, cgroup: Option<&JobCgroup>) {
 /// then wait until it is provably gone.
 fn stop_child_tree(child: &StepChild) -> Result<()> {
     if child_state(child) == ProcessIdentityState::Live {
-        crate::process::terminate_process_tree(child.pid)?;
+        crate::process::terminate_process_tree(
+            child.pid,
+            crate::process::PROCESS_TREE_SIGTERM_GRACE,
+        )?;
     }
     let deadline = Instant::now() + CANCEL_STOP_DEADLINE;
     loop {

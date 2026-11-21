@@ -11,7 +11,7 @@ use homeboy_engine_primitives::command::{self, ExecutionOwner};
 /// Invocation-owned control. No ambient cancellation state is consulted by
 /// filesystem traversal; ordinary reusable workspace callers remain unbounded.
 #[derive(Clone, Default)]
-pub(crate) struct WorkspaceControl {
+pub struct WorkspaceControl {
     control: Option<CooperativeControl>,
     on_checkpoint: Option<Arc<dyn Fn() -> Result<()> + Send + Sync>>,
 }
@@ -24,7 +24,7 @@ impl WorkspaceControl {
         }
     }
 
-    pub(crate) fn before(deadline: Option<Instant>) -> Self {
+    pub fn before(deadline: Option<Instant>) -> Self {
         Self {
             control: deadline.map(|deadline| CooperativeControl::new(deadline, Arc::new(|| false))),
             on_checkpoint: None,

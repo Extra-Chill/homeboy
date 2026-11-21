@@ -464,9 +464,8 @@ fn remote_pressure(
         })
         .and_then(|value| {
             serde_json::from_value::<homeboy::core::runner_inventory::PressureReport>(value)
-                .map_err(|_| {
-                    "runner daemon does not report pressure; refresh Homeboy on the runner"
-                        .to_string()
+                .map_err(|error| {
+                    format!("runner daemon pressure response is not a pressure report: {error}")
                 })
         });
     match observed {

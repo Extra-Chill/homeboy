@@ -182,6 +182,7 @@ fn empty_overlay_list_is_a_no_op_and_leaves_mapping_unchanged() {
         &mut mapping,
         false,
         &homeboy_core::server::RunnerSettings::default(),
+        &crate::WorkspaceControl::default(),
     )
     .expect("no-op overlay sync");
 
@@ -227,6 +228,7 @@ fn skips_declared_overlay_dependency_hydration_only_when_opted_out() {
             &mut mapping,
             true,
             &homeboy_core::server::RunnerSettings::default(),
+            &crate::WorkspaceControl::default(),
         )
         .expect("opt-out bypasses the declared dependency command");
         assert_eq!(synced[0].dependency_hydration["status"], "not_applied");
@@ -268,6 +270,7 @@ fn stale_overlay_refuses_the_sync_from_runner_configuration_alone() {
             require_fresh_runtime_overlay: Some(true),
             ..Default::default()
         },
+        &crate::WorkspaceControl::default(),
     )
     .expect_err("a runner configured strict refuses a stale overlay build");
 

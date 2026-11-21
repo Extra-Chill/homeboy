@@ -9,6 +9,7 @@ use serde_json::{Map, Value};
 use std::fmt::Write as _;
 use std::path::Path;
 
+use super::release_failure::ReleaseFailure;
 use crate::core::io::output_file::{write_output_file_atomically, OutputWriteOptions};
 
 const COMMAND_RESULT_SCHEMA: &str = "homeboy/command-result/v3";
@@ -680,7 +681,8 @@ fn envelope_for_data(
         operation: identity.operation.clone(),
         success,
         exit_code,
-        status: status_for_result(Some(&data), exit_code),
+        status: subject_envelope_status(subject_state.as_deref(), exit_code)
+            .unwrap_or_else(|| status_for_result(Some(&data), exit_code)),
         subject_state,
         run,
         refs,
@@ -710,6 +712,26 @@ fn subject_state_for_identity(identity: &CommandIdentity, data: &Value) -> Optio
             .map(str::to_string),
         _ => None,
     }
+}
+
+/// Envelope `status` for a successful subject-state read (#18638).
+///
+/// Polling scripts read the envelope `status`; reporting `succeeded` for a
+/// Cook still queued on admission told them the Cook was done. A read that
+/// completed reports the subject's own lifecycle state, normalized to the
+/// envelope vocabulary where one exists (`queued`, `running`, `succeeded`,
+/// `failed`, ...) and verbatim otherwise (`blocked`,
+/// `candidate_recoverable`). `success` / `exit_code` still describe the read.
+fn subject_envelope_status(subject_state: Option<&str>, exit_code: i32) -> Option<String> {
+    if exit_code != 0 {
+        return None;
+    }
+    let state = subject_state.filter(|state| !state.trim().is_empty())?;
+    Some(
+        normalize_status(state)
+            .map(str::to_string)
+            .unwrap_or_else(|| state.to_string()),
+    )
 }
 
 /// A failed operation must name its cause (#13702).
@@ -1811,258 +1833,38 @@ fn incomplete_release_digest(data: &Value) -> Option<CommandFailureDigest> {
     })
 }
 
-/// Lift the first failed release step into the bounded command envelope. The
-/// complete plan and step payload remain available under `data` for inspection.
+/// Render the release failure analysis into the bounded command envelope. The
+/// full payload is analysed directly; the bounded operator summary carries the
+/// same analysis already serialized under `failure`.
 fn release_failure_digest(data: &Value) -> Option<CommandFailureDigest> {
     if data.get("command").and_then(Value::as_str) != Some("release") {
         return None;
     }
 
-    if data.get("schema").and_then(Value::as_str) == Some("homeboy/release-operator-summary/v1") {
+    let failure = if data.get("schema").and_then(Value::as_str)
+        == Some("homeboy/release-operator-summary/v1")
+    {
         // A release can end incomplete without any step failing: `--recover`
         // finishes git state, then reports that publication still has to run.
         // `failure` is null there, and treating that as a failed step rendered
         // "release step unknown (unknown) failed: release step failed without a
         // reported error" over a release that knew its own next command (#14577).
-        let failure = match data.get("failure").filter(|failure| !failure.is_null()) {
-            Some(failure) => failure,
+        match data.get("failure").filter(|failure| !failure.is_null()) {
+            Some(failure) => serde_json::from_value::<ReleaseFailure>(failure.clone()).ok()?,
             None => return incomplete_release_digest(data),
-        };
-        let step = failure
-            .get("step")
-            .and_then(Value::as_str)
-            .unwrap_or("unknown");
-        let step_type = failure.get("type").and_then(Value::as_str).unwrap_or(step);
-        let cause = failure
-            .get("cause")
-            .and_then(Value::as_str)
-            .unwrap_or("release step failed without a reported error");
-        let next_actions = failure
-            .get("reproduction_commands")
-            .and_then(Value::as_array)
-            .into_iter()
-            .flatten()
-            .filter_map(Value::as_str)
-            .take(4)
-            .map(|command| {
-                CommandNextAction::new("reproduce the failed release step", command)
-                    .with_kind(CommandNextActionKind::Repair)
-            })
-            .collect();
-        return Some(CommandFailureDigest {
-            summary: format!(
-                "Release step {step} ({step_type}) failed: {}",
-                bounded_text(cause, 1000)
-            ),
-            stdout_tail: None,
-            stderr_tail: None,
-            artifact_refs: Vec::new(),
-            next_actions,
-            retryable: None,
-        });
-    }
-
-    let result = data.get("result")?;
-    let component_id = result.get("component_id").and_then(Value::as_str)?;
-    let steps = result.get("run")?.get("result")?.get("steps")?.as_array()?;
-    let failed_step = steps.iter().find(|step| {
-        matches!(
-            step.get("status").and_then(Value::as_str),
-            Some("failed") | Some("missing")
-        )
-    })?;
-    let step_id = failed_step
-        .get("id")
-        .and_then(Value::as_str)
-        .unwrap_or("unknown");
-    let step_type = failed_step
-        .get("type")
-        .and_then(Value::as_str)
-        .unwrap_or(step_id);
-    let cause = failed_step
-        .get("error")
-        .and_then(Value::as_str)
-        .or_else(|| {
-            failed_step
-                .get("missing")
-                .and_then(Value::as_array)
-                .and_then(|missing| missing.first())
-                .and_then(Value::as_str)
-        })
-        .or_else(|| {
-            failed_step
-                .get("warnings")
-                .and_then(Value::as_array)
-                .and_then(|warnings| warnings.first())
-                .and_then(Value::as_str)
-        })
-        .unwrap_or("release step failed without a reported error");
-
-    // The step already classified itself (`reason: "gh-upload-failed"`) and
-    // already computed the repair command. Dropping both here is what left CI
-    // printing `Release failed: Unknown error` while holding the exact fix
-    // (#10441), so lift the classification into the summary and the repair
-    // commands into next_actions.
-    let step_data = failed_step.get("data");
-    let cause = match step_data
-        .and_then(|data| data.get("reason"))
-        .and_then(Value::as_str)
-        .filter(|reason| !reason.trim().is_empty())
-    {
-        Some(reason) => format!("{reason} — {cause}"),
-        None => cause.to_string(),
+        }
+    } else {
+        ReleaseFailure::from_release_result(data.get("result")?)?
     };
 
-    let mut next_actions = release_error_actions(step_data);
-    next_actions.extend(release_repair_actions(step_data));
-    if next_actions.is_empty() {
-        next_actions.push(release_gate_repro_action(step_id, step_type, component_id));
-    }
-
     Some(CommandFailureDigest {
-        summary: format!(
-            "Release step {step_id} ({step_type}) failed: {}",
-            bounded_text(&cause, 1000)
-        ),
+        summary: failure.summary(),
         stdout_tail: None,
         stderr_tail: None,
         artifact_refs: Vec::new(),
-        next_actions,
+        next_actions: failure.next_actions,
         retryable: None,
     })
-}
-
-/// Preserve explicit typed-error actions emitted by a release step. These are
-/// more specific than the generic gate fallback and may declare that a command
-/// is a fresh diagnostic rather than an exact reproduction.
-fn release_error_actions(step_data: Option<&Value>) -> Vec<CommandNextAction> {
-    step_data
-        .and_then(|data| data.get("error_details"))
-        .and_then(|details| details.get(ACTIONS_DETAILS_KEY))
-        .and_then(Value::as_array)
-        .into_iter()
-        .flatten()
-        .filter_map(|value| serde_json::from_value::<ExecutableAction>(value.clone()).ok())
-        .map(CommandNextAction::from_action)
-        .collect()
-}
-
-/// Lift a failed release step's own `repair` block into executable next
-/// actions.
-///
-/// A publish failure is not a quality-gate failure: re-running a gate does
-/// nothing for it, and the plan-only `--dry-run` fallback actively misleads.
-/// The step already knows whether the GitHub Release object exists, which
-/// decides the repair: an existing Draft must be *finished* (upload + publish),
-/// never re-created, or the release ends up duplicated.
-fn release_repair_actions(step_data: Option<&Value>) -> Vec<CommandNextAction> {
-    let Some(repair) = step_data
-        .and_then(|data| data.get("repair"))
-        .and_then(Value::as_object)
-    else {
-        return Vec::new();
-    };
-
-    let command = |key: &str| {
-        repair
-            .get(key)
-            .and_then(Value::as_str)
-            .map(str::trim)
-            .filter(|value| !value.is_empty())
-    };
-
-    let release_created = step_data
-        .and_then(|data| data.get("release_created"))
-        .and_then(Value::as_bool)
-        .unwrap_or(false);
-
-    let mut actions = Vec::new();
-
-    if release_created {
-        if let Some(upload) = command("upload_command") {
-            actions.push(
-                CommandNextAction::new(
-                    "attach the built artifacts to the release that already exists",
-                    upload,
-                )
-                .with_kind(CommandNextActionKind::Repair),
-            );
-        }
-        if let Some(publish) = command("publish_command") {
-            actions.push(
-                CommandNextAction::new("publish that release once its assets verify", publish)
-                    .with_kind(CommandNextActionKind::Repair),
-            );
-        }
-    } else if let Some(create) = command("create_command") {
-        actions.push(
-            CommandNextAction::new(
-                "create the GitHub Release from the pushed tag and built artifacts (no new tag)",
-                create,
-            )
-            .with_kind(CommandNextActionKind::Repair),
-        );
-    }
-
-    if let Some(view) = command("view_command").filter(|_| !actions.is_empty()) {
-        actions.push(
-            CommandNextAction::new("verify the release and its assets", view)
-                .with_kind(CommandNextActionKind::Repair),
-        );
-    }
-
-    actions
-}
-
-/// Map a failed release step to a non-mutating command that actually executes
-/// that gate.
-///
-/// `release --dry-run` only renders a plan: it reports quality gates as `ready`
-/// without running them, so recommending it after a gate failure returns
-/// success while the blocker is untouched (#10114). Point each gate at the
-/// surface that can reproduce it instead, and when no such surface exists say
-/// plainly that the fallback only inspects the plan.
-fn release_gate_repro_action(
-    step_id: &str,
-    step_type: &str,
-    component_id: &str,
-) -> CommandNextAction {
-    let gate = |value: &str| {
-        value
-            .strip_prefix("preflight.")
-            .unwrap_or(value)
-            .to_string()
-    };
-    let gate_name = {
-        let by_id = gate(step_id);
-        if by_id == step_id && step_type != step_id {
-            gate(step_type)
-        } else {
-            by_id
-        }
-    };
-
-    let review_gate = match gate_name.as_str() {
-        "lint" => Some("lint"),
-        "test" => Some("test"),
-        // Package and build-structure validation are reproduced by the local
-        // build quality gate rather than by re-running the release.
-        "package" | "build" => Some("build"),
-        _ => None,
-    };
-
-    match review_gate {
-        Some(gate) => CommandNextAction::new(
-            format!("reproduce the failed {gate} gate"),
-            format!("homeboy review {gate} {component_id}"),
-        )
-        .with_kind(CommandNextActionKind::Repair),
-        None => CommandNextAction::new(
-            "inspect release plan (plan only — does not run quality gates)",
-            format!("homeboy release {component_id} --dry-run"),
-        )
-        .with_kind(CommandNextActionKind::Repair),
-    }
 }
 
 fn bounded_text(value: &str, max_chars: usize) -> String {
@@ -2946,8 +2748,15 @@ mod tests {
     }
 
     #[test]
-    fn agent_task_subject_state_is_distinct_from_successful_status_query() {
-        for subject_state in ["queued", "running", "failed", "succeeded"] {
+    fn agent_task_status_envelope_reports_the_subject_state_not_read_success() {
+        for subject_state in [
+            "queued",
+            "running",
+            "failed",
+            "succeeded",
+            "blocked",
+            "candidate_recoverable",
+        ] {
             let response = cli_response_for_json_result_for_identity(
                 &Ok(json!({
                     "schema": "homeboy/control-plane-run/v1",
@@ -2961,7 +2770,8 @@ mod tests {
             let value = serde_json::to_value(response).expect("serialize response");
 
             assert_eq!(value["success"], true, "{subject_state}");
-            assert_eq!(value["status"], "succeeded", "{subject_state}");
+            assert_eq!(value["exit_code"], 0, "{subject_state}");
+            assert_eq!(value["status"], subject_state, "{subject_state}");
             assert_eq!(value["subject_state"], subject_state, "{subject_state}");
             assert_eq!(value["data"]["state"], subject_state, "{subject_state}");
         }
@@ -3946,7 +3756,7 @@ mod tests {
             "step": "git.push",
             "type": "git.push",
             "cause": "push declined due to repository rule violations",
-            "reproduction_commands": ["homeboy release demo --dry-run"],
+            "next_actions": [{ "label": "inspect release plan", "command": "homeboy release demo --dry-run" }],
         });
 
         let digest = release_failure_digest(&payload).expect("digest");

@@ -136,6 +136,16 @@ Paged `runs list --kind agent-task` and `runs list --kind agent-task --active` i
 
 `agent-task status <run-id>` returns the canonical `ControlPlaneRun` resource (`homeboy/control-plane-run/v1`). Human summaries read that resource directly; they do not reconstruct `homeboy/agent-task-status-scope/v1` or wrap the run under `control_plane_run`. It is a bounded, non-reconciling read; use `runs logs <run-id> [--cursor <cursor>]` for canonical `ControlPlaneEventPage`s, `agent-task diagnose <run-id> --full` for detailed failure evidence, and `agent-task reconcile <run-id> --apply` for explicit state repair.
 
+Both `agent-task status <run> --json` and `agent-task diagnose <run> --json` include a top-level `failure` object for the first rejecting deterministic gate, or `null` when no gate rejected the candidate. It is projected from the retained gate report, including Lab receipts:
+
+```json
+{"failure":{"gate":"verify#1","command":"cargo test","exit_code":1,"termination":"completed","reason":"gate_failed","output_tail":"last 40 lines of combined stdout/stderr","artifact":"homeboy://run/<run>/artifact/<id>"}}
+```
+
+`gate` identifies the label and one-based gate index. `termination` is `completed`, `timed_out`, `no_progress`, `cancelled`, or `unavailable`; `reason` is the failure classification. `artifact` is the retained output reference, or `null` if none was recorded. `exit_code` is `null` when unavailable. Command and output are secret-redacted, and both are `null` for private gates whose reveal policy withholds full evidence. Compact status preserves the same failure schema and 40-line tail. Diagnose's summary names the gate, termination, exit code, and artifact.
+
+Gate recovery guidance depends only on the classification: candidate `gate_failed` suggests `homeboy agent-task recover <run>` for a new provider attempt with gate feedback, never cancel. Supervision stops (`timed_out` / `no_progress`), `baseline_red`, and `gate_environment_unavailable` suggest `homeboy agent-task recover <run> --regate`; adjust `--gate-timeout-seconds` / `--gate-no-progress-timeout-seconds` to change the supervision budget.
+
 Terminal non-success status uses the current delivery/controller blocker, or, when none exists, the first non-success aggregate outcome's recorded `failure_classification` and first diagnostic. The existing `blocker.message` carries that cause and `blocker.reason` carries its matching next action (timeout/route retry, credential repair, or candidate recovery); no parallel reason record is written. Missing diagnostics are reported explicitly rather than presented as a failure cause. Status reads the record and mirrored aggregate from one authoritative SQLite observation, never from an independently updated `aggregate.json` cache.
 
 A controller publication receipt proving `review_ready` or `draft_published` takes precedence over older terminal or promotion snapshots. Status reports success, the publication state and PR URL (number when no URL was recorded), with no stale failure blocker. Atomic Lab staging completion receipts and resolved-route credential admission are tracked separately in [#16326](https://github.com/Extra-Chill/homeboy/issues/16326).
@@ -1495,6 +1505,14 @@ failure classification, and the declared artifacts that were not produced. It
 projects that diagnosis into the shared `_homeboy_actionable` envelope (`run`,
 `refs`, `next_actions`, `artifacts`, `evidence`) instead of returning only
 prose. The existing `next_commands` field is unchanged.
+
+Diagnosis reads recorded gate reports and artifacts; it never reruns gate
+commands or contacts the runner. `gate_failure_outputs` retains the failed
+command, exit code, and bounded output tail even when the runner is unavailable.
+Recovery projections use recorded evidence rather than live capacity or
+worktree inspection. Replay admission has an independent 500 ms budget; an
+unavailable observation is listed in `probe_timed_out` without suppressing the
+rest of the diagnosis. Generic Lab workspace preflight is deferred to retry.
 
 The default diagnosis keeps bounded causal excerpts and artifact refs. Use
 `--full`, `runs evidence --kind <kind> --full`, or their `--output` forms

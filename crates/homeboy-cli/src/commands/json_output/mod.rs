@@ -5,6 +5,7 @@ use crate::command_contract::CommandSpec;
 
 use super::agent_task_summary::{agent_task_summary_kind, render_agent_task_summary};
 use super::output_runtime::{CommandPresentation, CommandRun};
+use super::utils::release_failure::ReleaseFailure;
 use super::{adapter, runner};
 
 type JsonRun = (homeboy::core::Result<Value>, i32);
@@ -489,19 +490,18 @@ fn bounded_release_projection(payload: &Value, exit_code: i32, output_file: Opti
     evidence_refs.sort();
     evidence_refs.dedup();
     evidence_refs.truncate(MAX_RELEASE_EVIDENCE_REFS);
-    let failed_step = steps.iter().find(|step| {
-        matches!(
-            step.get("status").and_then(Value::as_str),
-            Some("failed") | Some("missing")
-        )
-    });
-    let failure = failed_step.map(|step| {
-        serde_json::json!({
-            "step": step.get("id").and_then(Value::as_str).map(bounded_release_text),
-            "type": step.get("type").and_then(Value::as_str).map(bounded_release_text),
-            "cause": step.get("error").and_then(Value::as_str).map(bounded_release_text),
-            "reproduction_commands": release_reproduction_commands(step, result),
-        })
+    // The same analysis the envelope digest renders; bound its free text so a
+    // multi-megabyte tool transcript cannot swamp stdout.
+    let failure = ReleaseFailure::from_release_result(result).map(|mut failure| {
+        failure.step = bounded_release_text(&failure.step);
+        failure.step_type = bounded_release_text(&failure.step_type);
+        failure.cause = bounded_release_text(&failure.cause);
+        failure.next_actions.truncate(MAX_RELEASE_ACTIONS);
+        for action in &mut failure.next_actions {
+            action.label = bounded_release_text(&action.label);
+            action.command = bounded_release_text(&action.command);
+        }
+        failure
     });
     let projection = serde_json::json!({
         "schema": "homeboy/release-operator-summary/v1",
@@ -612,30 +612,6 @@ fn release_publication_url(data: &Value) -> Option<&str> {
 /// byte-sized bound; Unicode is limited by scalar values, not encoded bytes.
 fn bounded_release_text(value: &str) -> String {
     homeboy_engine_primitives::text::truncate_middle(value, MAX_RELEASE_TEXT_BYTES)
-}
-
-fn release_reproduction_commands(step: &Value, result: &Value) -> Vec<String> {
-    let component = result
-        .get("component_id")
-        .and_then(Value::as_str)
-        .map(bounded_release_text)
-        .unwrap_or_else(|| "<component>".to_string());
-    let gate = step
-        .get("id")
-        .and_then(Value::as_str)
-        .or_else(|| step.get("type").and_then(Value::as_str))
-        .and_then(|name| name.strip_prefix("preflight."));
-    let command = match gate {
-        Some("lint") | Some("test") => {
-            format!("homeboy review {} {component}", gate.unwrap())
-        }
-        Some("package") | Some("build") => format!("homeboy review build {component}"),
-        _ => format!("homeboy release {component} --dry-run"),
-    };
-    vec![command]
-        .into_iter()
-        .take(MAX_RELEASE_ACTIONS)
-        .collect()
 }
 
 fn refresh_homeboy_uses_bounded_output(args: &runner::RunnerArgs) -> bool {
@@ -877,6 +853,7 @@ fn agent_task_requests_full_output(args: &crate::commands::agent_task::AgentTask
     use crate::commands::agent_task::AgentTaskCommand;
 
     match &args.command {
+        command if command.is_exact_internal_adapter() => true,
         AgentTaskCommand::Cook(args) => args.full,
         AgentTaskCommand::Recover(args) => args.full,
         AgentTaskCommand::Diagnose(args) => args.full,
@@ -1598,6 +1575,64 @@ mod tests {
             "homeboy review lint fixture"
         );
         assert!(!String::from_utf8_lossy(&rendered).contains(&"x".repeat(512)));
+    }
+
+    /// #18620: the compact projection and the full payload render one release
+    /// failure analysis, so the compact output keeps the step's repair actions
+    /// instead of falling back to a plan-only dry run.
+    #[test]
+    fn failed_release_renders_the_same_failure_through_full_and_compact_output() {
+        let payload = serde_json::json!({
+            "command": "release", "variant": "single",
+            "result": {
+                "component_id": "homeboy", "status": "failed",
+                "run": { "result": { "steps": [{
+                    "id": "github.release", "type": "github.release", "status": "failed",
+                    "error": "`gh release upload` failed for v0.320.0",
+                    "data": {
+                        "reason": "gh-upload-failed",
+                        "release_created": true,
+                        "repair": {
+                            "upload_command": "gh release upload 'v0.320.0' 'a.tar.gz' --clobber",
+                            "publish_command": "gh release edit 'v0.320.0' --draft=false",
+                            "view_command": "gh release view 'v0.320.0'"
+                        }
+                    }
+                }] } }
+            }
+        });
+        let digest = |full: bool| {
+            let run = release_command_run((Ok(payload.clone()), 20), None, full);
+            crate::commands::utils::response::cli_response_for_json_result_for_command(
+                &run.stdout_result,
+                20,
+                "release",
+                None,
+            )
+            .diagnostics
+            .and_then(|diagnostics| diagnostics.failure_digest)
+            .expect("failure digest")
+        };
+        let (full, compact) = (digest(true), digest(false));
+        let commands = |digest: &crate::commands::utils::response::CommandFailureDigest| {
+            digest
+                .next_actions
+                .iter()
+                .map(|action| action.command.clone())
+                .collect::<Vec<_>>()
+        };
+
+        assert_eq!(
+            commands(&compact),
+            vec![
+                "gh release upload 'v0.320.0' 'a.tar.gz' --clobber",
+                "gh release edit 'v0.320.0' --draft=false",
+                "gh release view 'v0.320.0'",
+            ]
+        );
+        assert_eq!(commands(&compact), commands(&full));
+        assert_eq!(compact.summary, full.summary);
+        assert!(compact.summary.contains("gh-upload-failed"));
     }
 
     #[test]

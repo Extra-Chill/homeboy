@@ -182,11 +182,12 @@ pub mod lifecycle {
         register_acceptance_verifier_from_config,
         reserve_detached_cook_handoff_materialization_in_store,
         resolve_detached_cook_materializing_attempt_in_store, run_record_exists_resolved_in_store,
-        runner_diagnostic_probe, transition_execution_placement_for_continuation_in_store,
-        AgentTaskAcceptanceVerdict, AgentTaskArtifactRef, AgentTaskDurableReadUnavailable,
-        AgentTaskLifecycleStore, AgentTaskPreDispatchFailure, AgentTaskRemoteDispatchFailure,
-        AgentTaskRunRecord, AgentTaskRunnerDiagnosticProbe, AgentTaskRunnerProbe,
-        AgentTaskStatusOptions, ClaimOutcome, DetachedLabRunRecord, LabOffloadProxyPlan,
+        runner_diagnostic_probe, runner_diagnostic_probe_recorded,
+        transition_execution_placement_for_continuation_in_store, AgentTaskAcceptanceVerdict,
+        AgentTaskArtifactRef, AgentTaskDurableReadUnavailable, AgentTaskLifecycleStore,
+        AgentTaskPreDispatchFailure, AgentTaskRemoteDispatchFailure, AgentTaskRunRecord,
+        AgentTaskRunnerDiagnosticProbe, AgentTaskRunnerProbe, AgentTaskStatusOptions, ClaimOutcome,
+        DetachedLabRunRecord, LabOffloadProxyPlan,
     };
     pub use super::super::agent_task_lifecycle::{
         exact_record, interrupted_owner_stop_reason, load_controller_plan, record_detached_lab_run,

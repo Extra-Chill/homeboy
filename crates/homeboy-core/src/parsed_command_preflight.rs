@@ -316,16 +316,20 @@ pub fn resolve_parsed_command_preflight(
     // A busy, ineligible-for-now, or unobserved Lab is a wait, not a reason to
     // run on the controller or to refuse: the Cook keeps Lab placement and is
     // queued in pending resource admission until a runner admits it (#17705).
-    // Pinned split-placement work uses the same queue when its runner is at
-    // capacity; pinning chooses the runner, not whether it has room right now.
-    // Hard substrate failures (disconnected, stale) still refuse below.
+    // Pinned (`--runner`) and Lab-required (`--placement lab`) split-placement
+    // work uses the same queue: pinning chooses the runner, not whether it has
+    // room right now, and pressure, probe timeouts, and freshness gaps during
+    // a runner upgrade are wait conditions, not refusals (#17832). Hard
+    // substrate failures (disconnected, stale) still refuse below.
+    let lab_required_split = input.controller_execution
+        == ControllerExecution::SplitPlacementCoordinator
+        && (matches!(input.runner, RunnerIntent::Explicit(_))
+            || matches!(input.placement, PlacementIntent::Lab))
+        && !matches!(input.placement, PlacementIntent::Local);
     let split_awaits_lab_admission = !selected_runner_admitted
         && policy.lab_readiness.as_ref().is_some_and(|readiness| {
-            (auto_split_placement_requires_lab && lab_readiness_awaits_admission(readiness))
-                || (input.controller_execution == ControllerExecution::SplitPlacementCoordinator
-                    && matches!(input.runner, RunnerIntent::Explicit(_))
-                    && !matches!(input.placement, PlacementIntent::Local)
-                    && readiness.state == "capacity_blocked")
+            (auto_split_placement_requires_lab || lab_required_split)
+                && lab_readiness_awaits_admission(readiness)
         });
     let required = if matches!(input.placement, PlacementIntent::Lab)
         || matches!(

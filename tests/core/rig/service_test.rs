@@ -284,7 +284,8 @@ mod lifecycle {
                 .expect("stop command service");
             assert!(
                 !wait_until(Duration::from_secs(2), || {
-                    homeboy_core::process::process_group_is_running(pid as i32)
+                    homeboy_engine_primitives::command::process_group_is_running(pid)
+                        .unwrap_or(false)
                 }),
                 "stop should terminate the whole managed process group, not just the shell"
             );

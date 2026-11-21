@@ -1,6 +1,7 @@
 //! Workspace sync / remap staging for the standard (non-resident) offload path.
 
 use super::*;
+use crate::lab::args_util::flag_values;
 use crate::lab_args::verify_cook_workspace_attestations_in_args;
 use crate::lab_workspaces::workspace_mapping_entry_for_materialized_file;
 use crate::offload_changed_since::{
@@ -14,48 +15,6 @@ use homeboy_lab_contract::path_materialization::{
     PATH_MATERIALIZATION_OWNER_LAB_PROVIDER_CONFIG,
 };
 use std::path::{Path, PathBuf};
-
-/// Owned command facts consumed while materializing a workspace. This keeps the
-/// durable controller path bounded by the request lifetime rather than forcing
-/// persisted strings into a static command contract.
-pub(crate) struct LabWorkspaceStageCommand {
-    pub(crate) workspace_mode_policy: LabOffloadWorkspaceModePolicy,
-    pub(crate) requires_extension_parity: bool,
-    pub(crate) workload: Option<homeboy_core::lab_contract::LabRigWorkloadArguments>,
-    pub(crate) required_extensions: Vec<String>,
-    pub(crate) secret_env_sources: Vec<homeboy_core::lab_contract::LabSecretEnvSource>,
-}
-
-impl From<&LabOffloadCommand> for LabWorkspaceStageCommand {
-    fn from(command: &LabOffloadCommand) -> Self {
-        Self {
-            workspace_mode_policy: command.workspace_mode_policy,
-            requires_extension_parity: command.routing_policy.requires_extension_parity,
-            workload: command.workload.clone(),
-            required_extensions: command.required_extensions.clone(),
-            secret_env_sources: command.secret_env_sources.to_vec(),
-        }
-    }
-}
-
-impl From<&crate::lab_staging_controller::LabStagingCommand> for LabWorkspaceStageCommand {
-    fn from(command: &crate::lab_staging_controller::LabStagingCommand) -> Self {
-        Self {
-            workspace_mode_policy: command.workspace_mode_policy,
-            requires_extension_parity: command.routing_policy.requires_extension_parity,
-            workload: command.workload.as_ref().map(|workload| {
-                homeboy_core::lab_contract::LabRigWorkloadArguments {
-                    kind: workload.kind,
-                    rig_ids: workload.rig_ids.clone(),
-                    component: workload.component.clone(),
-                    extension_overrides: workload.extension_overrides.clone(),
-                }
-            }),
-            required_extensions: command.required_extensions.clone(),
-            secret_env_sources: command.secret_env_sources.clone(),
-        }
-    }
-}
 
 pub(crate) struct LabOffloadWorkspaceStage {
     pub(crate) plan: HomeboyPlan,
@@ -145,7 +104,7 @@ pub(crate) fn durable_workspace_stage_projection(
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn prepare_lab_offload_workspace_stage(
     request: &LabOffloadRequest<'_>,
-    contract: LabWorkspaceStageCommand,
+    contract: LabOffloadCommand,
     plan: HomeboyPlan,
     runner_id: &str,
     source_path: &Path,
@@ -177,7 +136,7 @@ pub(crate) fn prepare_lab_offload_workspace_stage(
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn prepare_lab_offload_workspace_stage_controlled(
     request: &LabOffloadRequest<'_>,
-    contract: LabWorkspaceStageCommand,
+    contract: LabOffloadCommand,
     plan: HomeboyPlan,
     runner_id: &str,
     source_path: &Path,
@@ -220,7 +179,7 @@ pub(crate) fn prepare_lab_offload_workspace_stage_controlled(
 #[allow(clippy::too_many_arguments)]
 fn prepare_lab_offload_workspace_stage_inner(
     request: &LabOffloadRequest<'_>,
-    contract: &LabWorkspaceStageCommand,
+    contract: &LabOffloadCommand,
     mut plan: HomeboyPlan,
     runner_id: &str,
     source_path: &Path,
@@ -337,17 +296,19 @@ fn prepare_lab_offload_workspace_stage_inner(
         || {
             control.checkpoint()?;
             if sync_mode != RunnerWorkspaceSyncMode::Git {
+                let primary_path = sync_options.path.clone();
                 let (primary, extras, mapping) =
                     crate::lab_workspaces::sync_lab_workspace_roots_controlled(
                         runner_id,
-                        sync_options,
+                        &primary_path,
+                        Some(sync_options),
                         &extra_workspaces,
                         control,
                     )?;
                 batched_extras = Some((extras, mapping));
-                return Ok((primary, 0));
+                return Ok((primary.expect("primary root"), 0));
             }
-            crate::workspace::sync_workspace_controlled(runner_id, sync_options, control)
+            crate::workspace::sync_workspace(runner_id, sync_options, control)
         },
     )?
     .0;
@@ -485,18 +446,21 @@ fn prepare_lab_offload_workspace_stage_inner(
             );
         }
 
-        let synced_extra_workspaces = if let Some((extras, mapping)) = batched_extras {
-            workspace_mapping.extend(mapping);
-            extras
-        } else {
-            crate::lab_workspaces::sync_extra_lab_workspaces_controlled(
-                runner_id,
-                &synced.local_path,
-                extra_workspaces,
-                &mut workspace_mapping,
-                control,
-            )?
+        let (synced_extra_workspaces, extra_mapping) = match batched_extras {
+            Some(batched) => batched,
+            None => {
+                let (_, extras, mapping) =
+                    crate::lab_workspaces::sync_lab_workspace_roots_controlled(
+                        runner_id,
+                        &synced.local_path,
+                        None,
+                        &extra_workspaces,
+                        control,
+                    )?;
+                (extras, mapping)
+            }
         };
+        workspace_mapping.extend(extra_mapping);
         completed_extras = serde_json::json!(synced_extra_workspaces);
         if !synced_extra_workspaces.is_empty() {
             plan = with_step(
@@ -517,7 +481,7 @@ fn prepare_lab_offload_workspace_stage_inner(
         // runtimes a deterministic way to install their deps remotely without
         // syncing huge dependency trees. No-overlay offload returns an empty list
         // here, leaving behavior unchanged (#3831).
-        let synced_runtime_overlays = crate::lab_workspaces::sync_lab_runtime_overlays_controlled(
+        let synced_runtime_overlays = crate::lab_workspaces::sync_lab_runtime_overlays(
             runner_id,
             &synced.local_path,
             lab_runtime_overlays()?,
@@ -583,7 +547,7 @@ fn prepare_lab_offload_workspace_stage_inner(
                 extra.current_workspace.synthetic_checkout_tree.clone();
             workspace_snapshots.push(snapshot);
         }
-        if contract.requires_extension_parity {
+        if contract.routing_policy.requires_extension_parity {
             plan = with_step(
                 plan,
                 PlanStep::ready("lab.extension_parity", "lab.extension_parity").build(),
@@ -1362,7 +1326,7 @@ pub(crate) fn path_remaps_from_materialization_plan(
 }
 
 fn preflight_agent_task_secret_env_before_workspace_stage(
-    contract: &LabWorkspaceStageCommand,
+    contract: &LabOffloadCommand,
     runner_id: &str,
     runner: &crate::Runner,
     args: &[String],
@@ -1455,7 +1419,7 @@ pub(crate) fn validate_lab_source_snapshot_handoff(
 }
 
 fn lab_path_materialization_mode(
-    contract: &LabWorkspaceStageCommand,
+    contract: &LabOffloadCommand,
     sync_mode: RunnerWorkspaceSyncMode,
 ) -> String {
     if matches!(
@@ -1598,32 +1562,10 @@ fn load_primary_rig_spec(
 }
 
 fn extension_overrides_from_args(args: &[String]) -> Vec<String> {
-    values_for_flag(args, "--extension")
-}
-
-fn values_for_flag(args: &[String], flag: &str) -> Vec<String> {
-    let mut values = Vec::new();
-    let mut passthrough = false;
-    let mut iter = args.iter().peekable();
-    while let Some(arg) = iter.next() {
-        if passthrough {
-            continue;
-        }
-        if arg == "--" {
-            passthrough = true;
-            continue;
-        }
-        if arg == flag {
-            if let Some(value) = iter.peek() {
-                values.push((*value).to_string());
-            }
-            continue;
-        }
-        if let Some(value) = arg.strip_prefix(&format!("{flag}=")) {
-            values.push(value.to_string());
-        }
-    }
-    values
+    flag_values(args, 0, "--extension")
+        .into_iter()
+        .map(str::to_string)
+        .collect()
 }
 
 fn inject_required_extension_args(
@@ -2205,19 +2147,22 @@ mod tests {
                 ..LabOffloadRequest::for_test(&args)
             };
             let contract = LabOffloadCommand {
-                command: homeboy_core::lab_contract::LabCommandContract::portable(
-                    "fuzz",
-                    None,
-                    true,
-                    &[],
-                ),
                 required_extensions: Vec::new(),
                 required_capabilities: Vec::new(),
                 workload: None,
+                ..homeboy_core::lab_routing::lab_offload_command_from_contract(
+                    homeboy_core::lab_contract::LabCommandContract::portable(
+                        "fuzz",
+                        None,
+                        true,
+                        &[],
+                    ),
+                    Vec::new(),
+                )
             };
             let stage = prepare_lab_offload_workspace_stage(
                 &request,
-                LabWorkspaceStageCommand::from(&contract),
+                contract.clone(),
                 crate::lab_plan::base_lab_plan(Some(&contract)),
                 "lab-rig-component-stage",
                 rig_package.path(),
@@ -2280,15 +2225,18 @@ mod tests {
                 ..LabOffloadRequest::for_test(&args)
             };
             let contract = LabOffloadCommand {
-                command: homeboy_core::lab_contract::LabCommandContract::portable(
-                    "fuzz",
-                    None,
-                    true,
-                    &[],
-                ),
                 required_extensions: Vec::new(),
                 required_capabilities: Vec::new(),
                 workload: None,
+                ..homeboy_core::lab_routing::lab_offload_command_from_contract(
+                    homeboy_core::lab_contract::LabCommandContract::portable(
+                        "fuzz",
+                        None,
+                        true,
+                        &[],
+                    ),
+                    Vec::new(),
+                )
             };
             std::env::set_var(
                 "HOMEBOY_LAB_EXTRA_WORKSPACES_JSON",
@@ -2297,7 +2245,7 @@ mod tests {
             let scope = phase_timing::for_run(&store, &run.id);
             let stage = prepare_lab_offload_workspace_stage(
                 &request,
-                LabWorkspaceStageCommand::from(&contract),
+                contract.clone(),
                 crate::lab_plan::base_lab_plan(Some(&contract)),
                 "hash-once",
                 source.path(),
@@ -3335,27 +3283,27 @@ mod tests {
         );
         let workspace_mapping = vec![workspace_mapping_entry("primary", &synced)];
         let contract = LabOffloadCommand {
-            command: homeboy_core::lab_contract::LabCommandContract {
-                workspace_mode_policy: LabOffloadWorkspaceModePolicy::GitCheckoutRequired,
-                ..homeboy_core::lab_contract::LabCommandContract::portable(
-                    "agent-task.run",
-                    None,
-                    false,
-                    &[],
-                )
-            },
             required_extensions: Vec::new(),
             required_capabilities: Vec::new(),
             workload: None,
+            ..homeboy_core::lab_routing::lab_offload_command_from_contract(
+                homeboy_core::lab_contract::LabCommandContract {
+                    workspace_mode_policy: LabOffloadWorkspaceModePolicy::GitCheckoutRequired,
+                    ..homeboy_core::lab_contract::LabCommandContract::portable(
+                        "agent-task.run",
+                        None,
+                        false,
+                        &[],
+                    )
+                },
+                Vec::new(),
+            )
         };
 
         let plan = workspace_path_materialization_plan(
             &workspace_mapping,
             PATH_MATERIALIZATION_OWNER_LAB_PROVIDER_CONFIG,
-            lab_path_materialization_mode(
-                &LabWorkspaceStageCommand::from(&contract),
-                RunnerWorkspaceSyncMode::Git,
-            ),
+            lab_path_materialization_mode(&contract.clone(), RunnerWorkspaceSyncMode::Git),
         );
 
         assert_eq!(plan.entries.len(), 1);
@@ -3433,27 +3381,27 @@ mod tests {
         );
         let workspace_mapping = vec![workspace_mapping_entry("primary", &synced)];
         let contract = LabOffloadCommand {
-            command: homeboy_core::lab_contract::LabCommandContract {
-                workspace_mode_policy: LabOffloadWorkspaceModePolicy::GitCheckoutRequired,
-                ..homeboy_core::lab_contract::LabCommandContract::portable(
-                    "agent-task promote",
-                    Some("--to-worktree"),
-                    false,
-                    &[],
-                )
-            },
             required_extensions: Vec::new(),
             required_capabilities: Vec::new(),
             workload: None,
+            ..homeboy_core::lab_routing::lab_offload_command_from_contract(
+                homeboy_core::lab_contract::LabCommandContract {
+                    workspace_mode_policy: LabOffloadWorkspaceModePolicy::GitCheckoutRequired,
+                    ..homeboy_core::lab_contract::LabCommandContract::portable(
+                        "agent-task promote",
+                        Some("--to-worktree"),
+                        false,
+                        &[],
+                    )
+                },
+                Vec::new(),
+            )
         };
 
         let plan = workspace_path_materialization_plan(
             &workspace_mapping,
             PATH_MATERIALIZATION_OWNER_LAB_EXECUTION_CONTEXT,
-            lab_path_materialization_mode(
-                &LabWorkspaceStageCommand::from(&contract),
-                RunnerWorkspaceSyncMode::Git,
-            ),
+            lab_path_materialization_mode(&contract.clone(), RunnerWorkspaceSyncMode::Git),
         );
 
         assert_eq!(plan.entries[0].materialization_mode, "git");
@@ -3476,7 +3424,7 @@ mod tests {
         ];
 
         let err = preflight_agent_task_secret_env_before_workspace_stage(
-            &LabWorkspaceStageCommand::from(&contract),
+            &contract.clone(),
             "lab",
             &runner,
             &args,
@@ -3490,19 +3438,24 @@ mod tests {
 
     fn test_lab_contract_with_agent_task_secrets() -> LabOffloadCommand {
         LabOffloadCommand {
-            command: homeboy_core::lab_contract::LabCommandContract {
-                workspace_mode_policy: LabOffloadWorkspaceModePolicy::GitCheckoutRequired,
-                secret_env_sources: &[homeboy_core::lab_contract::LabSecretEnvSource::AgentTask],
-                ..homeboy_core::lab_contract::LabCommandContract::portable(
-                    "agent-task.run",
-                    None,
-                    false,
-                    &[],
-                )
-            },
             required_extensions: Vec::new(),
             required_capabilities: Vec::new(),
             workload: None,
+            ..homeboy_core::lab_routing::lab_offload_command_from_contract(
+                homeboy_core::lab_contract::LabCommandContract {
+                    workspace_mode_policy: LabOffloadWorkspaceModePolicy::GitCheckoutRequired,
+                    secret_env_sources: &[
+                        homeboy_core::lab_contract::LabSecretEnvSource::AgentTask,
+                    ],
+                    ..homeboy_core::lab_contract::LabCommandContract::portable(
+                        "agent-task.run",
+                        None,
+                        false,
+                        &[],
+                    )
+                },
+                Vec::new(),
+            )
         }
     }
 
@@ -3603,23 +3556,26 @@ mod tests {
                 ..LabOffloadRequest::for_test(&args)
             };
             let contract = LabOffloadCommand {
-                command: homeboy_core::lab_contract::LabCommandContract {
-                    workspace_mode_policy: LabOffloadWorkspaceModePolicy::GitCheckoutRequired,
-                    ..homeboy_core::lab_contract::LabCommandContract::portable(
-                        "lint",
-                        None,
-                        false,
-                        &[],
-                    )
-                },
                 required_extensions: Vec::new(),
                 required_capabilities: Vec::new(),
                 workload: None,
+                ..homeboy_core::lab_routing::lab_offload_command_from_contract(
+                    homeboy_core::lab_contract::LabCommandContract {
+                        workspace_mode_policy: LabOffloadWorkspaceModePolicy::GitCheckoutRequired,
+                        ..homeboy_core::lab_contract::LabCommandContract::portable(
+                            "lint",
+                            None,
+                            false,
+                            &[],
+                        )
+                    },
+                    Vec::new(),
+                )
             };
             let runner_workspace_root = runner_root.path().display().to_string();
             let stage = prepare_lab_offload_workspace_stage(
                 &request,
-                LabWorkspaceStageCommand::from(&contract),
+                contract.clone(),
                 crate::lab_plan::base_lab_plan(Some(&contract)),
                 "lab-controller-bundle-stage",
                 source.path(),
@@ -3737,20 +3693,23 @@ mod tests {
                 ..LabOffloadRequest::for_test(&args)
             };
             let contract = LabOffloadCommand {
-                command: homeboy_core::lab_contract::LabCommandContract::portable(
-                    "review test",
-                    None,
-                    false,
-                    &[],
-                ),
                 required_extensions: Vec::new(),
                 required_capabilities: Vec::new(),
                 workload: None,
+                ..homeboy_core::lab_routing::lab_offload_command_from_contract(
+                    homeboy_core::lab_contract::LabCommandContract::portable(
+                        "review test",
+                        None,
+                        false,
+                        &[],
+                    ),
+                    Vec::new(),
+                )
             };
             let runner_workspace_root = runner_root.path().display().to_string();
             let stage = prepare_lab_offload_workspace_stage(
                 &request,
-                LabWorkspaceStageCommand::from(&contract),
+                contract.clone(),
                 crate::lab_plan::base_lab_plan(Some(&contract)),
                 "lab-review-test-snapshot",
                 source.path(),
@@ -3910,22 +3869,24 @@ mod tests {
                 ..LabOffloadRequest::for_test(&args)
             };
             let mut contract = LabOffloadCommand {
-                command: homeboy_core::lab_contract::LabCommandContract::portable(
-                    "agent-task",
-                    None,
-                    true,
-                    &[],
-                ),
                 required_extensions: Vec::new(),
                 required_capabilities: Vec::new(),
                 workload: None,
+                ..homeboy_core::lab_routing::lab_offload_command_from_contract(
+                    homeboy_core::lab_contract::LabCommandContract::portable(
+                        "agent-task",
+                        None,
+                        true,
+                        &[],
+                    ),
+                    Vec::new(),
+                )
             };
-            contract.command.workspace_mode_policy =
-                LabOffloadWorkspaceModePolicy::GitCheckoutRequired;
+            contract.workspace_mode_policy = LabOffloadWorkspaceModePolicy::GitCheckoutRequired;
             let runner_workspace_root = runner_root.path().display().to_string();
             let stage = prepare_lab_offload_workspace_stage(
                 &request,
-                LabWorkspaceStageCommand::from(&contract),
+                contract.clone(),
                 crate::lab_plan::base_lab_plan(Some(&contract)),
                 "lab-managed-worktree-stage",
                 &source,

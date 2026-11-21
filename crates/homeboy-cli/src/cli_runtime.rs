@@ -622,7 +622,7 @@ fn generic_route_policy_snapshot(
         automatic_authorized: command.as_ref().is_some_and(|command| {
             cli.runner.is_some()
                 || crate::core::lab_routing::authorizes_policy_lab_runner(
-                    &command.command,
+                    command,
                     cli.placement,
                     crate::core::lab_routing::captured_pressure_severity().as_deref(),
                 )
@@ -1638,38 +1638,24 @@ impl CliRuntime {
             }
         }
 
-        // These internal adapters carry their requests on process stdin. Execute
-        // them before generic routing or startup work can consume that stream.
-        if let Some(exit_code) =
-            run_promotion_provider_dispatch(&cli.command, output_file.as_deref(), &command_identity)
-        {
+        // Exact internal adapters run through the shared command executor
+        // before generic preflight, routing or startup work can consume their
+        // stdin request or capture a placement decision over a recorded one.
+        if matches!(
+            &cli.command,
+            Commands::AgentTask(agent_task) if agent_task.command.is_exact_internal_adapter()
+        ) {
+            let exit_code = commands::output_runtime::run_command(
+                cli.command,
+                command_spec,
+                output_file.as_deref(),
+                &command_identity,
+                command_provenance,
+                cli.placement,
+            );
             return std::process::ExitCode::from(exit_code_to_u8(exit_code));
         }
         if let Some(exit_code) = run_raw_agent_tool_dispatch(&cli.command) {
-            return std::process::ExitCode::from(exit_code_to_u8(exit_code));
-        }
-        if let Commands::AgentTask(crate::commands::agent_task::AgentTaskArgs {
-            command: crate::commands::agent_task::AgentTaskCommand::ExecutionStep { intent_id },
-        }) = &cli.command
-        {
-            // This parsing-only entry must not capture a placement decision
-            // that hides the recorded request from its normal transport adapter.
-            let result =
-                crate::commands::agent_task::run(crate::commands::agent_task::AgentTaskArgs {
-                    command: crate::commands::agent_task::AgentTaskCommand::ExecutionStep {
-                        intent_id: intent_id.clone(),
-                    },
-                });
-            let (value, exit_code) = match result {
-                Ok((value, exit_code)) => (Ok(value), exit_code),
-                Err(error) => (Err(error), 2),
-            };
-            output_runtime::emit_json_result_for_identity(
-                value,
-                output_file.as_deref(),
-                exit_code,
-                &command_identity,
-            );
             return std::process::ExitCode::from(exit_code_to_u8(exit_code));
         }
 
@@ -2175,28 +2161,6 @@ fn run_raw_agent_tool_dispatch(command: &Commands) -> Option<i32> {
             ))
         }
     }
-}
-
-fn run_promotion_provider_dispatch(
-    command: &Commands,
-    output_file: Option<&str>,
-    identity: &output::CommandIdentity,
-) -> Option<i32> {
-    let Commands::AgentTask(args) = command else {
-        return None;
-    };
-    let crate::commands::agent_task::AgentTaskCommand::PromotionProvider(args) = &args.command
-    else {
-        return None;
-    };
-
-    let (result, exit_code) =
-        match crate::commands::agent_task::run::promotion_provider(args.clone()) {
-            Ok((value, exit_code)) => (Ok(value), exit_code),
-            Err(error) => (Err(error), 2),
-        };
-    output_runtime::emit_json_result_for_identity(result, output_file, exit_code, identity);
-    Some(exit_code)
 }
 
 #[cfg(test)]
@@ -6590,6 +6554,65 @@ mod tests {
                 None => std::env::remove_var(name),
             }
         }
+    }
+
+    #[test]
+    fn exact_internal_adapters_emit_the_shared_command_envelope() {
+        // The child owns a closed stdin, so `promotion-provider` reads an empty
+        // request instead of the parent harness stream.
+        let name = homeboy::core::test_support::harness_test_name(
+            module_path!(),
+            "exact_internal_adapters_emit_the_shared_command_envelope_child",
+        );
+        let output = homeboy::core::test_support::run_child_test(
+            std::process::Command::new(std::env::current_exe().expect("test executable"))
+                .arg("--exact")
+                .arg(&name)
+                .arg("--ignored"),
+            &name,
+        );
+        assert!(output.status.success(), "adapter envelope: {output:?}");
+    }
+
+    #[test]
+    #[ignore = "reads process stdin; invoked by parent test"]
+    fn exact_internal_adapters_emit_the_shared_command_envelope_child() {
+        crate::test_support::with_isolated_home(|home| {
+            for (operation, args) in [
+                (
+                    "promotion-provider",
+                    vec!["--workspace", "missing-workspace"],
+                ),
+                (
+                    "execution-step",
+                    vec!["--intent-id", "agent-task-exec:missing:1:0"],
+                ),
+            ] {
+                let path = home.path().join(format!("{operation}.json"));
+                let mut command = vec![
+                    "homeboy",
+                    "--output",
+                    path.to_str().unwrap(),
+                    "agent-task",
+                    operation,
+                ];
+                command.extend(args);
+                let exit = CliRuntime::new().run_from_args(argv(&command));
+
+                let envelope: serde_json::Value =
+                    serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+                let exit_code = envelope["exit_code"].as_i64().unwrap();
+                assert_ne!(exit_code, 0, "{operation}: {envelope}");
+                assert_eq!(
+                    exit,
+                    std::process::ExitCode::from(exit_code as u8),
+                    "{operation}"
+                );
+                assert_eq!(envelope["success"], false, "{operation}: {envelope}");
+                assert_eq!(envelope["command"], "agent-task", "{operation}: {envelope}");
+                assert_eq!(envelope["operation"], operation, "{operation}: {envelope}");
+            }
+        });
     }
 
     #[test]

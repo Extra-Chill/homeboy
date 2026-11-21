@@ -15,8 +15,12 @@ fn prepared_workspace_update_applies_delta_retains_assets_and_rotates_lease() {
         let source = tempfile::tempdir().expect("source");
         fs::write(source.path().join("changed.txt"), "before\n").expect("source");
         fs::write(source.path().join("deleted.txt"), "delete\n").expect("source");
-        let (synced, _) =
-            sync_workspace("prepared-update", sync_options(source.path())).expect("sync");
+        let (synced, _) = sync_workspace(
+            "prepared-update",
+            sync_options(source.path()),
+            &crate::WorkspaceControl::default(),
+        )
+        .expect("sync");
         let lease = synced.prepared_workspace_lease.expect("prepared lease");
         let remote = Path::new(&synced.remote_path);
         fs::create_dir_all(remote.join("node_modules")).expect("prepared assets");
@@ -87,8 +91,12 @@ fn workspace_ref_resolution_is_exact_and_reports_typed_recovery() {
         create_local_runner("other-runner", runner_root.path());
         let source = tempfile::tempdir().expect("source");
         fs::write(source.path().join("file.txt"), "snapshot\n").expect("source");
-        let (synced, _) =
-            sync_workspace("workspace-ref", sync_options(source.path())).expect("sync");
+        let (synced, _) = sync_workspace(
+            "workspace-ref",
+            sync_options(source.path()),
+            &crate::WorkspaceControl::default(),
+        )
+        .expect("sync");
 
         let resolved = crate::resolve_workspace_ref("workspace-ref", &synced.workspace_ref)
             .expect("resolve exact workspace ref");
@@ -147,8 +155,12 @@ fn workspace_ref_resolution_accepts_macos_var_alias() {
         create_local_runner("workspace-ref-var-alias", &alias_root);
         let source = tempfile::tempdir().expect("source");
         fs::write(source.path().join("file.txt"), "snapshot\n").expect("source");
-        let (synced, _) = sync_workspace("workspace-ref-var-alias", sync_options(source.path()))
-            .expect("sync through /var alias");
+        let (synced, _) = sync_workspace(
+            "workspace-ref-var-alias",
+            sync_options(source.path()),
+            &crate::WorkspaceControl::default(),
+        )
+        .expect("sync through /var alias");
 
         let resolved =
             crate::resolve_workspace_ref("workspace-ref-var-alias", &synced.workspace_ref)
@@ -172,8 +184,12 @@ fn workspace_ref_resolution_does_not_follow_symlinked_snapshot() {
         create_local_runner("workspace-ref-symlink", runner_root.path());
         let source = tempfile::tempdir().expect("source");
         fs::write(source.path().join("file.txt"), "snapshot\n").expect("source");
-        let (synced, _) =
-            sync_workspace("workspace-ref-symlink", sync_options(source.path())).expect("sync");
+        let (synced, _) = sync_workspace(
+            "workspace-ref-symlink",
+            sync_options(source.path()),
+            &crate::WorkspaceControl::default(),
+        )
+        .expect("sync");
         let escaped_root = tempfile::tempdir().expect("escaped root");
         let escaped_snapshot = escaped_root.path().join("snapshot");
         fs::rename(&synced.remote_path, &escaped_snapshot).expect("move snapshot outside root");
@@ -194,8 +210,12 @@ fn workspace_ref_rejects_expired_source_drift_and_metadata_redirection() {
         create_local_runner("workspace-ref-safety", runner_root.path());
         let source = tempfile::tempdir().expect("source");
         fs::write(source.path().join("file.txt"), "snapshot\n").expect("source");
-        let (synced, _) =
-            sync_workspace("workspace-ref-safety", sync_options(source.path())).expect("sync");
+        let (synced, _) = sync_workspace(
+            "workspace-ref-safety",
+            sync_options(source.path()),
+            &crate::WorkspaceControl::default(),
+        )
+        .expect("sync");
         let resolved = crate::resolve_workspace_ref("workspace-ref-safety", &synced.workspace_ref)
             .expect("resolve workspace ref");
         fs::write(source.path().join("file.txt"), "drifted\n").expect("drift source");
@@ -247,8 +267,12 @@ fn ssh_prepared_workspace_update_resolves_fresh_lease_without_projecting_large_r
         create_ssh_runner("prepared-update-ssh", runner_root.path());
         let source = tempfile::tempdir().expect("source");
         fs::write(source.path().join("file.txt"), "before\n").expect("source");
-        let (synced, _) =
-            sync_workspace("prepared-update-ssh", sync_options(source.path())).expect("sync");
+        let (synced, _) = sync_workspace(
+            "prepared-update-ssh",
+            sync_options(source.path()),
+            &crate::WorkspaceControl::default(),
+        )
+        .expect("sync");
         let lease = synced.prepared_workspace_lease.expect("lease");
 
         let root = runner_root.path().join("_lab_workspaces");
@@ -325,10 +349,18 @@ fn duplicate_snapshot_identities_target_their_own_opaque_workspace_lease() {
         create_local_runner("duplicate-identities", runner_root.path());
         let source = tempfile::tempdir().expect("source");
         fs::write(source.path().join("file.txt"), "before\n").expect("source");
-        let (first, _) = sync_workspace("duplicate-identities", sync_options(source.path()))
-            .expect("first sync");
-        let (second, _) = sync_workspace("duplicate-identities", sync_options(source.path()))
-            .expect("second sync");
+        let (first, _) = sync_workspace(
+            "duplicate-identities",
+            sync_options(source.path()),
+            &crate::WorkspaceControl::default(),
+        )
+        .expect("first sync");
+        let (second, _) = sync_workspace(
+            "duplicate-identities",
+            sync_options(source.path()),
+            &crate::WorkspaceControl::default(),
+        )
+        .expect("second sync");
         assert_eq!(first.snapshot_identity, second.snapshot_identity);
         assert_ne!(
             first.prepared_workspace_lease,
@@ -369,8 +401,12 @@ fn prepared_workspace_update_rejects_changed_git_branch_lineage() {
         fs::write(source.path().join("file.txt"), "one\n").expect("source");
         super::git(source.path(), &["add", "."]);
         super::git(source.path(), &["commit", "-m", "one"]);
-        let (synced, _) =
-            sync_workspace("lineage-update", sync_options(source.path())).expect("sync");
+        let (synced, _) = sync_workspace(
+            "lineage-update",
+            sync_options(source.path()),
+            &crate::WorkspaceControl::default(),
+        )
+        .expect("sync");
         super::git(source.path(), &["checkout", "-b", "two"]);
         let error = update_workspace(
             "lineage-update",
@@ -393,8 +429,12 @@ fn competing_prepared_workspace_updates_allow_exactly_one_promotion() {
         create_local_runner("competing-update", runner_root.path());
         let source = tempfile::tempdir().expect("source");
         fs::write(source.path().join("file.txt"), "before\n").expect("source");
-        let (synced, _) =
-            sync_workspace("competing-update", sync_options(source.path())).expect("sync");
+        let (synced, _) = sync_workspace(
+            "competing-update",
+            sync_options(source.path()),
+            &crate::WorkspaceControl::default(),
+        )
+        .expect("sync");
         let lease = synced.prepared_workspace_lease.expect("lease");
         fs::write(source.path().join("file.txt"), "after\n").expect("update source");
         let barrier = Arc::new(Barrier::new(2));
@@ -442,8 +482,12 @@ fn locked_prepared_workspace_rejects_update_without_mutating_live_state() {
         create_local_runner("locked-update", runner_root.path());
         let source = tempfile::tempdir().expect("source");
         fs::write(source.path().join("file.txt"), "before\n").expect("source");
-        let (synced, _) =
-            sync_workspace("locked-update", sync_options(source.path())).expect("sync");
+        let (synced, _) = sync_workspace(
+            "locked-update",
+            sync_options(source.path()),
+            &crate::WorkspaceControl::default(),
+        )
+        .expect("sync");
         fs::write(source.path().join("file.txt"), "after\n").expect("update source");
         fs::create_dir(format!("{}.update-lock", synced.remote_path)).expect("hold update lock");
 
@@ -471,8 +515,12 @@ fn prepared_workspace_metadata_hydrates_execution_source_snapshot() {
         create_local_runner("execution-provenance", runner_root.path());
         let source = tempfile::tempdir().expect("source");
         fs::write(source.path().join("file.txt"), "before\n").expect("source");
-        let (synced, _) =
-            sync_workspace("execution-provenance", sync_options(source.path())).expect("sync");
+        let (synced, _) = sync_workspace(
+            "execution-provenance",
+            sync_options(source.path()),
+            &crate::WorkspaceControl::default(),
+        )
+        .expect("sync");
         let original = synced.snapshot_identity.clone();
         fs::write(source.path().join("file.txt"), "after\n").expect("update source");
         let (updated, _) = update_workspace(
@@ -571,8 +619,12 @@ fn prepared_workspace_update_quotes_runner_workspace_paths() {
         create_local_runner("quoted-update", &runner_root);
         let source = tempfile::tempdir().expect("source");
         fs::write(source.path().join("file.txt"), "before\n").expect("source");
-        let (synced, _) =
-            sync_workspace("quoted-update", sync_options(source.path())).expect("sync");
+        let (synced, _) = sync_workspace(
+            "quoted-update",
+            sync_options(source.path()),
+            &crate::WorkspaceControl::default(),
+        )
+        .expect("sync");
         fs::write(source.path().join("file.txt"), "after\n").expect("update source");
 
         update_workspace(

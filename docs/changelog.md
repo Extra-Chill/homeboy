@@ -4,6 +4,69 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.482.12] - 2026-11-21
+
+### Fixed
+- stop github_release resolution at GitHub's 1000-release window
+
+## [0.482.11] - 2026-11-21
+
+### Fixed
+- attribute candidate failures against the baseline
+- a runner host's upgrade reports its stale host runner service
+
+## [0.482.10] - 2026-11-21
+
+### Fixed
+- capacity reports the admission budget; Lab-required Cooks queue under pressure
+- doctor reads daemon pressure and lists blocking checks with fixes
+- status JSON reports the Cook's state and admission phase
+- an admitted Cook waits through a Lab outage instead of spending recovery budget
+
+## [0.482.9] - 2026-11-21
+
+### Fixed
+- diagnose reads recorded evidence instead of live probes
+
+## [0.482.8] - 2026-11-21
+
+### Changed
+- one serialisable offload command type
+- dispatch agent-task subcommands in one place
+- one typed release-failure analysis for JSON and compact output
+- collapse cancellation to one pipeline
+- one workspace sync entry with options
+- one builder for the run-locally fallback outcome
+
+### Fixed
+- simplify raw runner handling and stabilize gate tests
+
+## [0.482.7] - 2026-11-21
+
+### Fixed
+- retry transient GitHub server faults in gh invocations
+- diagnose names the recorded controller or gate failure, not the provider's stream tail
+- report queue position, retry time and pressure for admission waits
+- heartbeat baseline gate admission so live Cooks are not reconciled as dead
+
+## [0.482.6] - 2026-11-21
+
+### Fixed
+- stop treating URL routes like /media as host evidence paths
+- record a local dispatch pressure wait as durable Cook progress
+
+## [0.482.5] - 2026-11-21
+
+### Fixed
+- end terminal.decision before dispatching the next attempt
+- preserve completed verdicts when process-tree cleanup is incomplete
+
+## [0.482.4] - 2026-11-20
+
+### Fixed
+- create candidate checkout worktrees and clarify SHA identities
+- expose structured gate failures in status and diagnose
+
 ## [0.482.3] - 2026-11-20
 
 ### Changed

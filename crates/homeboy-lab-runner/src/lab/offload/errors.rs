@@ -272,32 +272,6 @@ pub(crate) fn in_flight_daemon_disconnect_outcome(
     })
 }
 
-pub(crate) fn automatic_capability_fallback(
-    request: &LabOffloadRequest<'_>,
-    plan: HomeboyPlan,
-    runner_id: &str,
-    runner_status: &RunnerStatusReport,
-    reason: String,
-    observation: &OffloadObservation,
-) -> Result<LabOffloadOutcome> {
-    let mut metadata = lab_offload_metadata(
-        &plan,
-        "automatic",
-        Some(runner_id),
-        Some(status_tunnel_mode(runner_status).metadata_value()),
-        "fallback",
-        None,
-        Some(&reason),
-    );
-    attach_offload_selection(&mut metadata, observation);
-    record_local_outcome(request)?;
-    Ok(LabOffloadOutcome::RunLocal {
-        metadata: Some(metadata),
-        plan,
-        messages: vec![format!("Lab offload: {reason}; running locally.")],
-    })
-}
-
 #[expect(
     clippy::too_many_arguments,
     reason = "The fallback boundary accepts independently-derived routing, capability, and lifecycle evidence; grouping it would weaken their ownership contract."
@@ -323,14 +297,17 @@ pub(crate) fn automatic_capability_fallback_or_error(
         ));
     }
 
-    automatic_capability_fallback(
-        request,
+    record_local_outcome(request)?;
+    Ok(run_local(
         plan,
-        &selection.runner_id,
-        runner_status,
-        reason,
-        observation,
-    )
+        LocalFallbackReason::CapabilityMissing(&reason),
+        LocalFallbackContext {
+            runner_id: Some(&selection.runner_id),
+            mode: Some(status_tunnel_mode(runner_status).metadata_value()),
+            observation: Some(observation),
+            ..Default::default()
+        },
+    ))
 }
 
 pub(crate) fn selected_runner_fallback_error(

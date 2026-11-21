@@ -51,7 +51,12 @@ fn cook_snapshot_git_reuses_dependency_published_by_review_git_sync() {
             validation_dependency_ids: None,
             run_isolation_token: None,
         };
-        let (review, _) = sync_workspace("dependency-paths", options.clone()).unwrap();
+        let (review, _) = sync_workspace(
+            "dependency-paths",
+            options.clone(),
+            &crate::WorkspaceControl::default(),
+        )
+        .unwrap();
         let dependency_path = &review.validation_dependencies[0].remote_path;
         // Exercise replacement as well as reuse of the review-created sibling.
         fs::write(Path::new(dependency_path).join("main.php"), "old output").unwrap();
@@ -63,6 +68,7 @@ fn cook_snapshot_git_reuses_dependency_published_by_review_git_sync() {
                     run_isolation_token: Some("lab-gate-regression".into()),
                     ..options.clone()
                 },
+                &crate::WorkspaceControl::default(),
             )
             .unwrap();
             assert_eq!(cook.validation_dependencies.len(), 1);

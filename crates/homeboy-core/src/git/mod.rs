@@ -60,7 +60,7 @@ pub use commits::{
     extract_version_from_tag, find_version_commit_with_prefix,
     find_version_release_commit_with_prefix, matches_release_subject, release_commit_subject,
 };
-pub use gh_client::{github_cli_env, GhClient};
+pub use gh_client::{github_cli_env, retry_transient_github_failures, GhClient};
 pub use github::publication_repository;
 pub use github::push_markdown_body_file_arg;
 pub use github::{

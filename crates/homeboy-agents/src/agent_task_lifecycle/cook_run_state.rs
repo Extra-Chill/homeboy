@@ -19,9 +19,9 @@
 //!
 //! The execution phase and replay ledger are persisted internally. The fenced
 //! store is the only write boundary. Evidence refinements, fences and liveness
-//! are classified on top, never cached as durable verdicts. Legacy records seed
-//! their execution phase from the record; remove that fallback once all retained
-//! records have been rewritten.
+//! are classified on top, never cached as durable verdicts. Rows written before
+//! the phase was persisted are migrated once at the store's decode boundary
+//! ([`migrate_stored_record`]), so every stored record carries its phase.
 
 use std::collections::BTreeSet;
 
@@ -594,16 +594,12 @@ impl CookRunState {
     /// Classify `record`. This is the only place a Cook run's phase,
     /// terminality and recoverability are decided.
     pub fn of(record: &AgentTaskRunRecord) -> Self {
-        let execution_phase = record
-            .persisted_cook_state()
-            .map(|state| state.phase)
-            .unwrap_or_else(|| CookRunPhase::of_execution(record.state()));
-        Self::classify(record, execution_phase)
+        Self::classify(record, execution_phase(record))
     }
 
-    /// Refine the transition-owned execution phase with current evidence. This
-    /// is shared by legacy and persisted records: delivery, fences and live
-    /// owners are observations, not durable phase-transition facts.
+    /// Refine the transition-owned execution phase with current evidence.
+    /// Delivery, fences and live owners are observations, not durable
+    /// phase-transition facts.
     fn classify(record: &AgentTaskRunRecord, execution_phase: CookRunPhase) -> Self {
         let liveness = classify_liveness(record, chrono::Utc::now(), &BTreeSet::new());
         let terminal = !matches!(
@@ -720,6 +716,32 @@ pub(crate) struct PersistedCookState {
     applied_events: Vec<(String, CookRunEvent)>,
 }
 
+/// The transition-owned execution phase. Stored records always carry it (see
+/// [`migrate_stored_record`]); only a record that was never committed lacks
+/// it, and its phase is its execution state.
+fn execution_phase(record: &AgentTaskRunRecord) -> CookRunPhase {
+    record
+        .persisted_cook_state()
+        .map(|state| state.phase)
+        .unwrap_or_else(|| CookRunPhase::of_execution(record.state()))
+}
+
+/// Migrate a stored row written before the Cook phase was persisted: its
+/// execution state is its phase. The store applies this when it decodes a row,
+/// and the row's next commit persists the migrated state.
+pub(crate) fn migrate_stored_record(record: &mut AgentTaskRunRecord) {
+    if record.persisted_cook_state().is_none() {
+        let phase = CookRunPhase::of_execution(record.state());
+        record.write_cook_state(
+            PersistedCookState {
+                phase,
+                applied_events: Vec::new(),
+            },
+            CookStateWriteAuthority(()),
+        );
+    }
+}
+
 /// Attach an evidence-only refinement to a read view, without touching the
 /// durable phase or replay receipts. Only this module owns Cook phase writes.
 pub(crate) fn observe_phase(record: &mut AgentTaskRunRecord, state: RunExecutionState) {
@@ -756,11 +778,7 @@ pub(crate) fn transition_record(
         .unwrap_or_else(|| facts.clone());
     // The transition source is the durable execution phase, not its current
     // evidence refinement (e.g. a live continuation).
-    source.phase = stored
-        .and_then(AgentTaskRunRecord::persisted_cook_state)
-        .map(|state| state.phase)
-        .or_else(|| stored.map(|record| CookRunPhase::of_execution(record.state())))
-        .unwrap_or(phase);
+    source.phase = stored.map(execution_phase).unwrap_or(phase);
     let event = if let Some(event) = handoff_event {
         event
     } else if delivery_changed {
@@ -974,17 +992,15 @@ mod tests {
     }
 
     #[test]
-    fn persisted_state_wins_over_legacy_derivation_and_is_not_public_json() {
-        let mut legacy = record(RunExecutionState::Running, serde_json::json!({}));
-        assert!(legacy.persisted_cook_state().is_none());
-        assert_eq!(CookRunState::of(&legacy).phase, P::Running);
-        legacy.revision = 1;
-        transition_record(&mut legacy, None).unwrap();
-        let mut internal = serde_json::to_value(&legacy).unwrap();
+    fn persisted_state_wins_over_record_state_and_is_not_public_json() {
+        let mut run = record(RunExecutionState::Running, serde_json::json!({}));
+        run.revision = 1;
+        transition_record(&mut run, None).unwrap();
+        let mut internal = serde_json::to_value(&run).unwrap();
         assert!(internal.get("cook_run_state").is_none());
-        persist_state(&legacy, &mut internal).unwrap();
+        persist_state(&run, &mut internal).unwrap();
         let mut restored: AgentTaskRunRecord = serde_json::from_value(internal).unwrap();
-        assert_eq!(CookRunState::of(&restored), CookRunState::of(&legacy));
+        assert_eq!(CookRunState::of(&restored), CookRunState::of(&run));
         let replayed = CookRunState::of(&restored)
             .apply(CookRunEvent::FactsUpdated, "record:1")
             .unwrap();
@@ -994,9 +1010,8 @@ mod tests {
     }
 
     #[test]
-    fn persisted_phase_and_legacy_records_share_evidence_refinements() {
-        let mut legacy = record(RunExecutionState::Succeeded, serde_json::json!({}));
-        let mut durable = legacy.clone();
+    fn evidence_refinements_and_fences_never_touch_the_persisted_phase() {
+        let mut durable = record(RunExecutionState::Succeeded, serde_json::json!({}));
         durable.revision = 1;
         transition_record(&mut durable, None).unwrap();
         let persisted = durable.persisted_cook_state().cloned().unwrap();
@@ -1005,24 +1020,17 @@ mod tests {
             RunExecutionState::PartialFailure,
             RunExecutionState::Succeeded,
         ] {
-            let legacy_view =
-                super::super::terminal_transition::observed_with_run_state(&legacy, refinement);
-            let durable_view =
+            let view =
                 super::super::terminal_transition::observed_with_run_state(&durable, refinement);
-            let mut expected = CookRunState::of(&legacy_view);
-            expected.applied_events = persisted.applied_events.clone();
-            let actual = CookRunState::of(&durable_view);
-            assert_eq!(actual, expected);
-            assert_eq!(actual.phase, P::of_execution(refinement));
-            assert_eq!(durable_view.persisted_cook_state(), Some(&persisted));
-            assert!(serde_json::to_value(&durable_view)
+            assert_eq!(CookRunState::of(&view).phase, P::of_execution(refinement));
+            assert_eq!(view.persisted_cook_state(), Some(&persisted));
+            assert!(serde_json::to_value(&view)
                 .unwrap()
                 .get("observed_cook_phase")
                 .is_none());
         }
         // Fence evidence is also fresh without a phase transition.
-        legacy.metadata["cancellation_fence"] = serde_json::json!({});
-        durable.metadata = legacy.metadata.clone();
+        durable.metadata["cancellation_fence"] = serde_json::json!({});
         assert!(CookRunState::of(&durable).fenced);
         assert_eq!(durable.persisted_cook_state(), Some(&persisted));
     }
@@ -1460,21 +1468,25 @@ mod tests {
     }
 
     #[test]
-    fn pre_transition_record_loads_without_cook_state() {
-        let legacy = record(RunExecutionState::Running, serde_json::json!({}));
-        let mut fixture = serde_json::to_value(&legacy).unwrap();
-        fixture["lab_handoff"] = serde_json::json!({
-            "state": "accepted", "authority": "runner_daemon", "runner_id": "lab",
-            "runner_job_id": "job", "accepted_at": "2026-06-01T00:00:00Z",
-            "workspace_lifecycle_revision": 0
-        });
-        let loaded: AgentTaskRunRecord = serde_json::from_value(fixture.clone()).unwrap();
-        assert!(loaded.persisted_cook_state().is_none());
-        assert_eq!(
-            serde_json::to_value(&loaded).unwrap()["lab_handoff"],
-            fixture["lab_handoff"]
+    fn stored_rows_without_cook_state_migrate_to_their_execution_phase() {
+        let mut stored = record(
+            RunExecutionState::CandidateRecoverable,
+            serde_json::json!({}),
         );
-        assert_eq!(CookRunState::of(&loaded).phase, P::Running);
+        assert!(stored.persisted_cook_state().is_none());
+        migrate_stored_record(&mut stored);
+        assert_eq!(
+            stored.persisted_cook_state(),
+            Some(&PersistedCookState {
+                phase: P::CandidateRecoverable,
+                applied_events: Vec::new(),
+            })
+        );
+        stored.set_state_for_test(RunExecutionState::Failed);
+        assert_eq!(CookRunState::of(&stored).phase, P::CandidateRecoverable);
+        let migrated = stored.persisted_cook_state().cloned();
+        migrate_stored_record(&mut stored);
+        assert_eq!(stored.persisted_cook_state().cloned(), migrated);
     }
 
     #[test]

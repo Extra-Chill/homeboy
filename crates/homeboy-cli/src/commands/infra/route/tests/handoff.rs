@@ -881,7 +881,7 @@ fn route_runner_for(args: &[&str], inferred: &Option<String>) -> Option<String> 
     inferred.as_deref().and_then(|runner| {
         (cli.runner.is_some()
             || lab_routing::authorizes_policy_lab_runner(
-                &lab_command.command,
+                &lab_command,
                 cli.placement,
                 lab_routing::captured_pressure_severity().as_deref(),
             ))

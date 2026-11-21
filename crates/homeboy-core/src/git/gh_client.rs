@@ -15,6 +15,25 @@ use std::collections::HashMap;
 
 const API_CAPTURE_LIMIT_BYTES: usize = 4 * 1024 * 1024;
 
+/// Pauses before each retry of a transient GitHub failure.
+#[cfg(not(test))]
+const TRANSIENT_RETRY_DELAYS: [Duration; 3] = [
+    Duration::from_secs(2),
+    Duration::from_secs(5),
+    Duration::from_secs(15),
+];
+#[cfg(test)]
+const TRANSIENT_RETRY_DELAYS: [Duration; 3] = [Duration::from_millis(1); 3];
+
+/// GitHub's own server faults, which a later identical request can succeed
+/// past. Client errors, auth, rate limits, and validation are not retried.
+fn is_transient_github_failure(stderr: &str) -> bool {
+    stderr.contains("Something went wrong while executing your query")
+        || ["HTTP 500", "HTTP 502", "HTTP 503", "HTTP 504"]
+            .iter()
+            .any(|status| stderr.contains(status))
+}
+
 #[derive(Clone)]
 pub struct GhClient {
     host: String,
@@ -159,9 +178,11 @@ impl GhClient {
     }
 
     pub fn output(&self, args: &[&str]) -> Result<Output> {
-        self.command(args)
-            .output()
-            .map_err(|e| Error::internal_io(format!("Failed to invoke gh: {e}"), Some("gh".into())))
+        retry_transient_github_failures(|| {
+            self.command(args).output().map_err(|e| {
+                Error::internal_io(format!("Failed to invoke gh: {e}"), Some("gh".into()))
+            })
+        })
     }
 
     pub fn api_json<T: DeserializeOwned>(&self, path: &str) -> Result<T> {
@@ -321,6 +342,27 @@ impl GhClient {
             }
         }
         Error::git_command_failed(format!("{action} failed: {combined}"))
+    }
+}
+
+/// Runs a gh invocation, retrying GitHub server faults with backoff. A retried
+/// write is safe: callers already reconcile "already exists" (PR publication
+/// adopts the open PR), and edits are idempotent.
+pub fn retry_transient_github_failures(
+    mut invoke: impl FnMut() -> Result<Output>,
+) -> Result<Output> {
+    let mut delays = TRANSIENT_RETRY_DELAYS.iter();
+    loop {
+        let output = invoke()?;
+        match delays.next() {
+            Some(delay)
+                if !output.status.success()
+                    && is_transient_github_failure(&String::from_utf8_lossy(&output.stderr)) =>
+            {
+                std::thread::sleep(*delay)
+            }
+            _ => return Ok(output),
+        }
     }
 }
 
@@ -792,6 +834,34 @@ mod tests {
         let evidence = format!("{error:?}");
         assert!(!evidence.contains("minted-secret"));
         assert!(evidence.contains("[REDACTED]"));
+    }
+
+    /// A GitHub server fault is retried; a client error fails at once.
+    #[test]
+    fn transient_github_failures_retry_and_client_errors_do_not() {
+        let fixture = tempfile::tempdir().unwrap();
+        let calls = fixture.path().join("calls");
+        homeboy_test_support::write_executable(
+            &fixture.path().join("gh"),
+            format!(
+                "#!/bin/sh\necho x >> {calls}\nn=0\nwhile read -r _; do n=$((n+1)); done < {calls}\ncase \"$1:$n\" in\n  flaky:1) echo 'GraphQL: Something went wrong while executing your query on 2026-11-20T23:58:21Z.' >&2; exit 1;;\n  flaky:2) echo 'HTTP 502: Bad Gateway' >&2; exit 1;;\n  flaky:*) echo https://github.com/o/r/pull/7;;\n  *) echo 'GraphQL: Could not resolve to a Repository' >&2; exit 1;;\nesac\n",
+                calls = homeboy_engine_primitives::shell::quote_path(&calls.to_string_lossy()),
+            ),
+            0o755,
+        )
+        .unwrap();
+        let client = GhClient::for_host("github.com").with_test_path(fixture.path());
+        let count = || std::fs::read_to_string(&calls).unwrap().lines().count();
+
+        assert_eq!(
+            client.run(&["flaky".into()]).unwrap().trim(),
+            "https://github.com/o/r/pull/7"
+        );
+        assert_eq!(count(), 3);
+        std::fs::remove_file(&calls).unwrap();
+        let error = client.run(&["missing".into()]).unwrap_err();
+        assert!(error.message.contains("Could not resolve"), "{error:?}");
+        assert_eq!(count(), 1);
     }
 
     #[test]

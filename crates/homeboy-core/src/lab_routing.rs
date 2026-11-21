@@ -104,7 +104,7 @@ pub fn compatibility_placement_decision(
 /// An operator-pinned `--runner` is a *different* authority and never passes
 /// through here: pinning names the runner directly.
 pub fn authorizes_policy_lab_runner(
-    contract: &LabCommandContract,
+    contract: &crate::lab_offload::LabOffloadCommand,
     placement: homeboy_lab_contract::Placement,
     pressure_severity: Option<&str>,
 ) -> bool {
@@ -326,7 +326,7 @@ pub fn dispatch_lab_offload(
     let preserve_result_payload = request
         .command
         .as_ref()
-        .is_some_and(|command| command.command.routing_policy.preserve_result_payload);
+        .is_some_and(|command| command.routing_policy.preserve_result_payload);
     lab_offload_outcome_to_route_outcome(
         route_lab_offload(request),
         runner_id,
@@ -1033,8 +1033,21 @@ pub fn lab_route_plan_from_contract(contract: LabCommandContract) -> LabRoutePla
 pub fn lab_offload_command_from_route_contract(
     route_contract: LabCommandRouteContract,
 ) -> crate::lab_offload::LabOffloadCommand {
+    let command = route_contract.command;
     crate::lab_offload::LabOffloadCommand {
-        command: route_contract.command,
+        hot_label: command.hot_label.to_string(),
+        portable: command.is_portable(),
+        local_only_reason: match command.portability {
+            LabCommandPortability::Portable => None,
+            LabCommandPortability::LocalOnly(reason) => Some(reason.to_string()),
+        },
+        source_path_mode: command.source_path_mode,
+        workspace_mode_policy: command.workspace_mode_policy,
+        capture_mutation_patch: command.capture_mutation_patch,
+        mutation_flag: command.mutation_flag.map(str::to_string),
+        extra_required_capabilities: command.extra_required_capabilities,
+        secret_env_sources: command.secret_env_sources.to_vec(),
+        routing_policy: command.routing_policy,
         required_extensions: route_contract.required_extensions,
         required_capabilities: route_contract.required_capabilities,
         workload: route_contract.workload,
@@ -1288,7 +1301,6 @@ mod tests {
             vec!["wordpress".to_string(), "playwright".to_string()],
         );
 
-        assert_eq!(command.command, lab_contract());
         assert_eq!(command.hot_label, "trace");
         assert!(command.is_portable());
         assert!(command.routing_policy.default_lab_offload);
@@ -1420,7 +1432,7 @@ mod tests {
         for severity in [None, Some("ok"), Some("warm"), Some("hot")] {
             assert!(
                 !authorizes_policy_lab_runner(
-                    &contract,
+                    &lab_offload_command_from_contract(contract.clone(), Vec::new()),
                     homeboy_lab_contract::Placement::Auto,
                     severity,
                 ),
@@ -1443,7 +1455,7 @@ mod tests {
             ),
         ] {
             assert!(!authorizes_policy_lab_runner(
-                &contract,
+                &lab_offload_command_from_contract(contract.clone(), Vec::new()),
                 homeboy_lab_contract::Placement::Local,
                 Some("hot"),
             ));
@@ -1460,12 +1472,18 @@ mod tests {
             homeboy_lab_contract::Placement::LabOrLocal,
         ] {
             assert!(authorizes_policy_lab_runner(
-                &runner_resident_read_contract(),
+                &lab_offload_command_from_contract(runner_resident_read_contract(), Vec::new()),
                 placement,
                 None,
             ));
             assert!(authorizes_policy_lab_runner(
-                &LabCommandContract::local_only("agent-task cook", "controller-owned coordinator"),
+                &lab_offload_command_from_contract(
+                    LabCommandContract::local_only(
+                        "agent-task cook",
+                        "controller-owned coordinator"
+                    ),
+                    Vec::new()
+                ),
                 placement,
                 None,
             ));
@@ -1475,11 +1493,14 @@ mod tests {
     #[test]
     fn a_default_offload_contract_still_authorizes_its_policy_runner() {
         assert!(authorizes_policy_lab_runner(
-            &LabCommandContract::portable(
-                "agent-task run",
-                None,
-                false,
-                crate::lab_contract::LAB_NO_EXTRA_CAPABILITIES,
+            &lab_offload_command_from_contract(
+                LabCommandContract::portable(
+                    "agent-task run",
+                    None,
+                    false,
+                    crate::lab_contract::LAB_NO_EXTRA_CAPABILITIES,
+                ),
+                Vec::new()
             ),
             homeboy_lab_contract::Placement::Auto,
             None,
@@ -1493,12 +1514,12 @@ mod tests {
         // Losing this would have traded one regression for another.
         let contract = LabCommandContract::explicit_runner_simple("runtime refresh");
         assert!(!authorizes_policy_lab_runner(
-            &contract,
+            &lab_offload_command_from_contract(contract.clone(), Vec::new()),
             homeboy_lab_contract::Placement::Auto,
             Some("ok"),
         ));
         assert!(authorizes_policy_lab_runner(
-            &contract,
+            &lab_offload_command_from_contract(contract.clone(), Vec::new()),
             homeboy_lab_contract::Placement::Auto,
             Some("warm"),
         ));
@@ -1507,7 +1528,10 @@ mod tests {
     #[test]
     fn a_local_only_contract_is_never_relocated_by_policy() {
         assert!(!authorizes_policy_lab_runner(
-            &LabCommandContract::local_only("agent-task cook", "controller-owned coordinator"),
+            &lab_offload_command_from_contract(
+                LabCommandContract::local_only("agent-task cook", "controller-owned coordinator"),
+                Vec::new()
+            ),
             homeboy_lab_contract::Placement::Auto,
             Some("hot"),
         ));

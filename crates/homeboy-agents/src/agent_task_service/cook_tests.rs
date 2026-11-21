@@ -8966,10 +8966,12 @@ fn verified_empty_attempt_dispatches_the_next_rotation_route() {
                 let phases = test_lifecycle_store()
                     .open_observation_initialized()?
                     .phase_spans(&self.source_run_id)?;
-                assert!(
-                    phases.spans.iter().any(|span| span.id == "terminal.schedule_next_attempt"),
-                    "scheduling must finish before receiver staging, capacity waits, or provider execution"
-                );
+                for phase in ["terminal.decision", "terminal.schedule_next_attempt"] {
+                    assert!(
+                        phases.spans.iter().any(|span| span.id == phase),
+                        "{phase} must finish before receiver staging, capacity waits, or provider execution"
+                    );
+                }
                 self.inner.dispatch_attempt(plan, run_id, baseline)
             }
         }
@@ -9187,6 +9189,7 @@ fn canonical_completion_accepts_green_and_proven_inherited_gate_evidence() {
             matches_candidate_failure: true,
             result: crate::agent_task_gate::AgentTaskGateDifferentialResult::BaselineRed,
             diagnostic: None,
+            failure_attribution: None,
         });
     // Accepted baseline evidence must not turn back into a rejection.
     use crate::agent_task_gate::{AgentTaskGateFailureClassification, AgentTaskGateStatus};
@@ -12604,7 +12607,7 @@ fn recover_retries_a_runner_cancelled_cook_but_not_an_operator_cancelled_one() {
                 .expect("materialize first attempt");
             let store = agent_task_lifecycle::AgentTaskLifecycleStore::from_environment()
                 .expect("lifecycle store");
-            agent_task_lifecycle::cancel_exact_run_in_store_with_provenance(
+            agent_task_lifecycle::cancel_exact_run_in_store(
                 &store,
                 &options.identity.initial_run_id,
                 Some("cancelled"),

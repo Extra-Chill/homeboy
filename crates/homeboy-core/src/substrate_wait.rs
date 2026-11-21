@@ -46,6 +46,18 @@ pub fn reasons_are_transient<'a>(reasons: impl IntoIterator<Item = &'a str>) -> 
     any
 }
 
+/// `RunnerAvailability` reasons for a configured runner that is down rather
+/// than busy. A fresh submission still refuses them at preflight, but work
+/// already admitted to the queue waits for the runner to return: an outage
+/// must not spend its recovery budget (#18549).
+pub const RUNNER_OUTAGE_REASONS: &[&str] = &["not_connected", "stale_daemon"];
+
+/// Whether admitted, queued work waits through this runner refusal instead
+/// of failing into recovery.
+pub fn admitted_work_waits_through(reason: &str) -> bool {
+    reasons_are_transient([reason]) || RUNNER_OUTAGE_REASONS.contains(&reason)
+}
+
 /// Classify a refusal by its error code and structured details.
 pub fn is_transient_refusal(code: &str, details: &serde_json::Value) -> bool {
     let reasons_transient = |value: &serde_json::Value| {

@@ -151,15 +151,18 @@ fn agent_task_workload() -> homeboy_core::lab_contract::LabRunnerWorkload {
     )
     .build();
     let command = crate::LabOffloadCommand {
-        command: homeboy_core::lab_contract::LabCommandContract::portable(
-            "agent-task cook",
-            None,
-            false,
-            &[],
-        ),
         required_extensions: Vec::new(),
         required_capabilities: Vec::new(),
         workload: None,
+        ..homeboy_core::lab_routing::lab_offload_command_from_contract(
+            homeboy_core::lab_contract::LabCommandContract::portable(
+                "agent-task cook",
+                None,
+                false,
+                &[],
+            ),
+            Vec::new(),
+        )
     };
     let mut workload =
         crate::workload::build_lab_runner_workload(crate::workload::LabRunnerWorkloadBuildInput {

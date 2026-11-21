@@ -731,6 +731,7 @@ mod tests {
                     validation_dependency_ids: Some(selected),
                     run_isolation_token: None,
                 },
+                &crate::WorkspaceControl::default(),
             )
             .unwrap();
             assert_eq!(code, 0);
@@ -805,6 +806,7 @@ mod tests {
                     validation_dependency_ids: None,
                     run_isolation_token: None,
                 },
+                &crate::WorkspaceControl::default(),
             )
             .expect("sync workspace");
 
@@ -902,6 +904,7 @@ mod tests {
                     validation_dependency_ids: None,
                     run_isolation_token: None,
                 },
+                &crate::WorkspaceControl::default(),
             )
             .expect("sync workspace");
 
@@ -983,6 +986,7 @@ mod tests {
                     validation_dependency_ids: None,
                     run_isolation_token: None,
                 },
+                &crate::WorkspaceControl::default(),
             )
             .expect("sync workspace");
 
@@ -1037,6 +1041,7 @@ mod tests {
                 validation_dependency_ids: None,
                 run_isolation_token: None,
             },
+            &crate::WorkspaceControl::default(),
         )
         .expect("sync workspace");
         assert_eq!(exit_code, 0);
@@ -1233,6 +1238,7 @@ mod tests {
                     validation_dependency_ids: None,
                     run_isolation_token: None,
                 },
+                &crate::WorkspaceControl::default(),
             )
             .expect_err("failed dependency build should fail sync");
 
@@ -1325,6 +1331,7 @@ mod tests {
                     validation_dependency_ids: None,
                     run_isolation_token: None,
                 },
+                &crate::WorkspaceControl::default(),
             )
             .expect("sync workspace");
 
@@ -1384,6 +1391,7 @@ mod tests {
                     validation_dependency_ids: None,
                     run_isolation_token: None,
                 },
+                &crate::WorkspaceControl::default(),
             )
             .expect_err("missing validation dependency should fail sync");
             assert!(err.message.contains("shared-runtime"));

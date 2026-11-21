@@ -13,6 +13,8 @@ use homeboy_core::error::{Error, Result};
 use semver::Version;
 use serde::Deserialize;
 
+use super::update_check::RuntimeCompatibility;
+
 use super::constants::{
     GITHUB_RELEASES_LIST_API, RELEASE_ASSET_DOWNLOAD_BASE, RELEASE_CATALOG_TIMEOUT,
 };
@@ -38,6 +40,9 @@ pub struct ReleaseEntry {
     pub prerelease: bool,
     #[serde(default)]
     pub assets: Vec<ReleaseAsset>,
+    /// Release notes; carries the runtime-compatibility declaration.
+    #[serde(default)]
+    pub body: String,
 }
 
 impl ReleaseEntry {
@@ -224,6 +229,52 @@ fn ordered_stable_releases(releases: &[ReleaseEntry]) -> Vec<(Version, &ReleaseE
         .collect();
     ordered.sort_by(|left, right| right.0.cmp(&left.0));
     ordered
+}
+
+/// Bare semver of the newest published stable release. An empty catalog is an
+/// error, not "no update": absence of evidence must not be cached as currency.
+pub fn newest_stable_version(releases: &[ReleaseEntry]) -> Result<String> {
+    ordered_stable_releases(releases)
+        .first()
+        .map(|(_, release)| release.version().to_string())
+        .ok_or_else(|| {
+            Error::internal_unexpected("GitHub release catalog lists no published stable release")
+        })
+}
+
+/// Runtime compatibility declared by the newest stable release, only when that
+/// release is `expected_version`; a declaration for another release says
+/// nothing about the one the verdict reported.
+pub fn latest_runtime_compatibility(
+    releases: &[ReleaseEntry],
+    expected_version: &str,
+) -> Result<Option<RuntimeCompatibility>> {
+    let ordered = ordered_stable_releases(releases);
+    let Some((_, newest)) = ordered.first() else {
+        return Ok(None);
+    };
+    if newest.version() != expected_version.trim_start_matches('v') {
+        return Ok(None);
+    }
+    runtime_compatibility_from_release_notes(&newest.body)
+}
+
+const RUNTIME_COMPATIBILITY_MARKER: &str = "<!-- homeboy-runtime-compatibility: ";
+
+fn runtime_compatibility_from_release_notes(body: &str) -> Result<Option<RuntimeCompatibility>> {
+    let Some(start) = body.find(RUNTIME_COMPATIBILITY_MARKER) else {
+        return Ok(None);
+    };
+    let value = &body[start + RUNTIME_COMPATIBILITY_MARKER.len()..];
+    let Some(json) = value.split_once(" -->").map(|(json, _)| json) else {
+        return Ok(None);
+    };
+    serde_json::from_str(json).map(Some).map_err(|error| {
+        Error::internal_json(
+            error.to_string(),
+            Some("parse release runtime compatibility".to_string()),
+        )
+    })
 }
 
 /// Select the newest release, and the newest release this target can install.
@@ -542,6 +593,7 @@ pub(super) mod tests {
             draft: false,
             prerelease: false,
             assets,
+            body: String::new(),
         }
     }
 
@@ -705,6 +757,30 @@ pub(super) mod tests {
             Some("v0.333.0".to_string())
         );
         assert!(selection.skipped.is_empty());
+    }
+
+    /// Runtime compatibility is read from the newest stable release's notes,
+    /// and only when that release is the version the verdict reported.
+    #[test]
+    fn runtime_compatibility_comes_from_the_newest_release_matching_the_verdict() {
+        let mut newest = release("v0.333.0", &[LINUX]);
+        newest.body = "release\n<!-- homeboy-runtime-compatibility: {\"schema\":\"homeboy/runtime-compatibility/v1\",\"required_contracts\":{\"snapshot\":2}} -->".to_string();
+        let releases = vec![newest, release("v0.332.0", &[LINUX])];
+
+        let compatibility = latest_runtime_compatibility(&releases, "0.333.0")
+            .expect("parse declaration")
+            .expect("declaration");
+        assert_eq!(compatibility.required_contracts["snapshot"], 2);
+        assert!(latest_runtime_compatibility(&releases, "0.332.0")
+            .unwrap()
+            .is_none());
+        assert!(
+            latest_runtime_compatibility(&[release("v0.333.0", &[LINUX])], "0.333.0")
+                .unwrap()
+                .is_none()
+        );
+        assert_eq!(newest_stable_version(&releases).unwrap(), "0.333.0");
+        assert!(newest_stable_version(&[]).is_err());
     }
 
     #[test]

@@ -32,16 +32,8 @@ pub(crate) use dispatch::{run, run_command_output};
 pub(crate) use status::reconciliation_outcome;
 pub use types::RunnerToolDiagnostics;
 
-pub(crate) fn is_compact_exec_stdout(args: &RunnerArgs) -> bool {
-    args.compact_exec_stdout()
-}
-
 pub(crate) fn is_compact_doctor_stdout(args: &RunnerArgs) -> bool {
     args.compact_doctor_stdout()
-}
-
-pub(crate) fn is_compact_job_list_stdout(args: &RunnerArgs) -> bool {
-    args.compact_job_list_stdout()
 }
 
 pub(crate) fn refresh_homeboy_uses_bounded_output(args: &RunnerArgs) -> bool {
@@ -51,50 +43,36 @@ pub(crate) fn refresh_homeboy_uses_bounded_output(args: &RunnerArgs) -> bool {
     ) && !homeboy::core::lab_routing::is_lab_offload_subprocess()
 }
 
-pub(crate) fn run_plain_text_raw(args: RunnerArgs) -> super::output_runtime::CommandRun {
+/// A runner invocation whose default stdout is compact plain text: `runner
+/// exec` without `--json`/`--raw`, and `runner job list` without `--json`.
+pub(crate) enum PlainTextRunner {
+    JobList(RunnerArgs),
+    Exec(exec_args::RunnerExecArgs),
+}
+
+/// Split compact plain-text runner invocations from every other runner
+/// invocation (JSON envelope).
+pub(crate) fn into_plain_text(args: RunnerArgs) -> Result<PlainTextRunner, RunnerArgs> {
     match args.command {
-        cli::RunnerCommand::Job {
-            command:
-                cli::RunnerJobCommand::List {
-                    runner_id,
-                    active,
-                    queued,
-                    terminal,
-                    all,
-                    correlation,
-                    ..
-                },
-        } => {
-            let args = RunnerArgs {
-                command: cli::RunnerCommand::Job {
-                    command: cli::RunnerJobCommand::List {
-                        runner_id,
-                        active,
-                        queued,
-                        terminal,
-                        all,
-                        correlation,
-                        json: false,
-                    },
-                },
-            };
-            let (stdout_result, exit_code) =
-                crate::commands::utils::response::map_cmd_result_to_json(dispatch::run(args));
-            jobs::compact_list_command_run(stdout_result, exit_code)
-        }
+        command @ cli::RunnerCommand::Job {
+            command: cli::RunnerJobCommand::List { json: false, .. },
+        } => Ok(PlainTextRunner::JobList(RunnerArgs { command })),
         cli::RunnerCommand::Exec(args) if !args.json && !args.raw => {
-            dispatch::run_exec_command(args.into(), false)
+            Ok(PlainTextRunner::Exec(args))
         }
-        _ => super::output_runtime::CommandRun::from_raw_stdout(
-            "runner",
-            Err(homeboy::core::Error::validation_invalid_argument(
-                "output_mode",
-                "runner command does not support plain text output",
-                None,
-                None,
-            )),
-            2,
-            None,
-        ),
+        command => Err(RunnerArgs { command }),
+    }
+}
+
+impl PlainTextRunner {
+    pub(crate) fn run(self) -> super::output_runtime::CommandRun {
+        match self {
+            Self::JobList(args) => {
+                let (stdout_result, exit_code) =
+                    crate::commands::utils::response::map_cmd_result_to_json(dispatch::run(args));
+                jobs::compact_list_command_run(stdout_result, exit_code)
+            }
+            Self::Exec(args) => dispatch::run_exec_command(args.into(), false),
+        }
     }
 }

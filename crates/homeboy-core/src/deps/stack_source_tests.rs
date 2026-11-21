@@ -75,6 +75,39 @@ fn version_file_github_refresh_inspects_commits_and_skips_all_commands() {
 }
 
 #[test]
+fn github_release_resolution_stops_at_githubs_1000_release_window() {
+    // A repo with more than 1000 releases: GitHub returns ten full pages and
+    // then 422 for page 11. The fixture serves exactly ten pages, so any
+    // eleventh request fails to connect and the edge turns unresolvable.
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(dir.path().join("pin"), "1.0.0\n").unwrap();
+    let component = consumer(
+        dir.path(),
+        serde_json::json!({"github_release":"org/tool"}),
+        false,
+    );
+    let pages: Vec<(&'static str, &'static str)> = (0..10)
+        .map(|page| {
+            let releases: Vec<String> = (0..100)
+                .map(|index| {
+                    let patch = 1000 - (page * 100 + index);
+                    format!(r#"{{"tag_name":"v1.0.{patch}","draft":false,"prerelease":false}}"#)
+                })
+                .collect();
+            let body: &'static str =
+                Box::leak(format!("[{}]", releases.join(",")).into_boxed_str());
+            ("200 OK", body)
+        })
+        .collect();
+    let server = fixture(pages);
+    let result = stack_outdated_for_component(&component, dir.path()).unwrap();
+    server.join().unwrap();
+    let edge = serde_json::to_value(&result.edges[0]).unwrap();
+    assert_eq!(edge["state"], "behind", "{edge}");
+    assert_eq!(edge["newest_version"], "1.0.1000");
+}
+
+#[test]
 fn version_file_npm_refresh_and_dry_run() {
     for dry_run in [true, false] {
         let dir = tempfile::tempdir().unwrap();

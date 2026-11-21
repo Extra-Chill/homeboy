@@ -2038,7 +2038,10 @@ fn recovered_terminal_work_waits_for_an_existing_claim_instead_of_reporting_comp
         };
         let worker = parse_terminal_cook_job(&spawned).unwrap().worker.unwrap();
         // The test executable is not the CLI; only admission/spawning is under test.
-        let _ = homeboy::core::process::terminate_process_tree(worker.pid);
+        let _ = homeboy::core::process::terminate_process_tree(
+            worker.pid,
+            homeboy::core::process::PROCESS_TREE_SIGTERM_GRACE,
+        );
         let _ = fs::remove_dir_all(worker.outcome_path.parent().unwrap());
         let claim = store
             .claim_continuation_for(cook_id, run_id)
@@ -4453,4 +4456,40 @@ pub(super) fn reserved_retry_transport_fixture(
     let record = retry_result.record;
     let plan = agent_task_lifecycle::load_plan(&record.run_id)?;
     retry_handoff_for_reserved_plan(&record, plan, normalized_args).map(Some)
+}
+
+#[test]
+fn admitted_cook_waits_through_busy_or_down_runner_but_fails_on_real_refusals() {
+    // #18549: a Lab outage (disconnected, stale daemon) must queue an admitted
+    // Cook on its runner exactly like a busy Lab (#18058), so it spends no
+    // recovery budget and resumes on its own once the runner returns.
+    for (reason, pinned, waits_on) in [
+        ("pressure", None, Some("homeboy-lab")),
+        ("not_connected", None, Some("homeboy-lab")),
+        ("stale_daemon", None, Some("homeboy-lab")),
+        (
+            "runner `homeboy-lab` does not satisfy required provider capabilities",
+            None,
+            None,
+        ),
+        ("not_connected", Some("pinned"), Some("pinned")),
+    ] {
+        let error = unmaterialized_selection_refusal(
+            reason.to_string(),
+            pinned.map(str::to_string),
+            || Some("homeboy-lab".to_string()),
+        );
+        assert_eq!(error.retryable, Some(true), "{reason}");
+        let disposition = error.details["execution_step_disposition"].as_str();
+        assert_eq!(
+            disposition,
+            waits_on.map(|_| "runner_ineligible"),
+            "{reason}"
+        );
+        assert_eq!(
+            error.details["runner_eligible"].as_str(),
+            waits_on,
+            "{reason}"
+        );
+    }
 }

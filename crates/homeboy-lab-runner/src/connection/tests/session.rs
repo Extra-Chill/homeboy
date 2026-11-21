@@ -1968,6 +1968,8 @@ fn status_admission_uses_one_runner_observation_of_the_current_session() {
         session.local_url = Some(format!("http://{address}"));
         session.local_port = Some(address.port());
         session.tunnel_pid = Some(std::process::id());
+        session.tunnel_process_start_identity =
+            capture_tunnel_process_start_identity(session.tunnel_pid).unwrap();
         write_session(&session).expect("write session");
 
         let report = status_until(

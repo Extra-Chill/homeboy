@@ -604,10 +604,3 @@ mod tests {
         assert_eq!(json["dirty_paths"][0], "package-lock.json");
     }
 }
-
-#[derive(Deserialize)]
-pub(super) struct GitHubRelease {
-    pub(super) tag_name: String,
-    #[serde(default)]
-    pub(super) body: String,
-}

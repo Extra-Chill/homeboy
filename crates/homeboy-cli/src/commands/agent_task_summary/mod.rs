@@ -226,11 +226,34 @@ fn render_capacity_summary(payload: &Value) -> Option<String> {
                 .map(|n| n.to_string())
                 .unwrap_or_else(|| "unknown".to_string())
         };
-        lines.push(format!(
+        let mut line = format!(
             "Lab/{runner}: {} active slots, {} free slots",
             slots("active_slots"),
             slots("free_slots")
-        ));
+        );
+        if let Some(budget) = route.get("effective_budget").and_then(Value::as_u64) {
+            line.push_str(&format!(" (effective budget {budget})"));
+        }
+        let next = route.get("next_admission").unwrap_or(&Value::Null);
+        if next.get("refused").and_then(Value::as_bool) == Some(true) {
+            let state = next
+                .get("readiness_state")
+                .and_then(Value::as_str)
+                .unwrap_or("unknown");
+            let reasons = next
+                .get("reasons")
+                .and_then(Value::as_array)
+                .into_iter()
+                .flatten()
+                .filter_map(Value::as_str)
+                .collect::<Vec<_>>();
+            line.push_str(&format!("; next admission waits ({state}"));
+            if !reasons.is_empty() {
+                line.push_str(&format!(": {}", reasons.join(", ")));
+            }
+            line.push(')');
+        }
+        lines.push(line);
     }
     render_lab_step_queue(&mut lines, payload);
     if routes.is_empty() {
@@ -737,6 +760,24 @@ fn agent_task_capacity_names_lab_runner_and_slots() {
 }
 
 #[test]
+fn agent_task_capacity_names_the_admission_refusal_reason() {
+    let payload = serde_json::json!({
+        "schema": "homeboy/agent-task-capacity/v1",
+        "routes": [],
+        "lab_routes": [{
+            "runner_id": "homeboy-lab", "active_slots": 11, "free_slots": 0,
+            "effective_budget": 1,
+            "next_admission": {"refused": true, "readiness_state": "capacity_blocked", "reasons": ["pressure"]}
+        }]
+    });
+    let summary = render_capacity_summary(&payload).unwrap();
+    assert!(
+        summary.contains("Lab/homeboy-lab: 11 active slots, 0 free slots (effective budget 1); next admission waits (capacity_blocked: pressure)"),
+        "{summary}"
+    );
+}
+
+#[test]
 fn agent_task_capacity_lists_lab_step_queue_with_eta() {
     let payload = serde_json::json!({
         "schema": "homeboy/agent-task-capacity/v1",
@@ -783,17 +824,25 @@ fn render_status_summary(payload: &Value) -> Option<String> {
     }
     let run_id = string_value(payload, &["run"])?;
     let state = string_value(payload, &["state"]).unwrap_or("unknown");
-    // The envelope's `status` reports the status command itself, so the
-    // headline names the task's own state (#17838).
+    // The headline and the JSON envelope's `status` both name the task's own
+    // state from this one projection, so they cannot disagree (#18638).
     let mut lines = vec![format!("Agent task {state}"), format!("Run: {run_id}")];
+    if let Some(phase) = string_value(payload, &["phase"]) {
+        lines.push(format!("Phase: {phase}"));
+    }
     if let Some(mission) = string_value(payload, &["mission"]) {
         lines.push(format!("Mission: {mission}"));
     }
     if let Some(reference) = string_value(payload, &["candidate_ref"]) {
         lines.push(format!("Candidate ref: {reference}"));
     }
-    if let Some(sha) = string_value(payload, &["candidate_sha"]) {
-        lines.push(format!("Candidate SHA: {sha}"));
+    for key in ["gated_sha", "publication_sha", "tree"] {
+        if let Some(value) = string_value(payload, &[key]) {
+            lines.push(format!("{key}: {value}"));
+        }
+    }
+    if let Some(note) = string_value(payload, &["identity_note"]) {
+        lines.push(note.to_string());
     }
     if let Some(candidate) = string_value(payload, &["candidate", "state"]) {
         lines.push(format!("Candidate: {candidate}"));
@@ -848,6 +897,23 @@ fn render_status_summary(payload: &Value) -> Option<String> {
             lines.extend(output.lines().map(|line| format!("  {line}")));
         }
     }
+    if let Some(details) = payload.pointer("/blocker/details") {
+        if let Some(position) = details["queue_position"].as_u64() {
+            lines.push(format!("Queue position: {position}"));
+        }
+        if let Some(time) = details["next_attempt_at"].as_str() {
+            lines.push(format!("Next attempt: {time}"));
+        }
+        for (field, label) in [
+            ("pressure", "Pressure"),
+            ("pressure_thresholds", "Pressure thresholds"),
+            ("pressure_holders", "Pressure holders"),
+        ] {
+            if let Some(value) = details.get(field).filter(|value| !value.is_null()) {
+                lines.push(format!("{label}: {value}"));
+            }
+        }
+    }
     if payload.get("blocker").is_none_or(Value::is_null) {
         if let Some(reason) = string_value(payload, &["reason"]) {
             lines.push(format!("Reason: {reason}"));
@@ -856,22 +922,21 @@ fn render_status_summary(payload: &Value) -> Option<String> {
     if string_value(payload, &["blocker", "retry", "disposition"])
         == Some("automatic_reconciliation_scheduled")
     {
-        let next_attempt_at = string_value(payload, &["blocker", "retry", "next_attempt_at"])
-            .unwrap_or("the recorded retry time");
+        let retry = string_value(payload, &["blocker", "retry", "next_attempt_at"])
+            .map(|time| format!("automatic reconciliation scheduled for {time}"))
+            .unwrap_or_else(|| "waiting for runner eligibility; no fixed retry time".to_string());
         // Waiting is only recommended when a live daemon will actually pick
         // the work up; a dead daemon is the blocker and gets its recovery
         // command below (#16181).
         if payload.pointer("/blocker/daemon/admits_work") == Some(&Value::Bool(false)) {
             lines.push(format!(
-                "Retry: automatic reconciliation scheduled for {next_attempt_at}; the local controller daemon is not admitting work"
+                "Retry: {retry}; the local controller daemon is not admitting work"
             ));
             if let Some(summary) = string_value(payload, &["blocker", "daemon", "summary"]) {
                 lines.push(format!("Daemon: {summary}"));
             }
         } else {
-            lines.push(format!(
-                "Retry: automatic reconciliation scheduled for {next_attempt_at}; waiting is recommended"
-            ));
+            lines.push(format!("Retry: {retry}; waiting is recommended"));
         }
     }
     lines.push(format!(
@@ -1380,6 +1445,47 @@ mod tests {
             control_plane_next_action(&payload, "attempt-1"),
             "homeboy agent-task status cook-1 --watch"
         );
+    }
+
+    /// #18638: an admission-pending Cook renders the same state and phase in
+    /// the human summary and the JSON envelope; neither reports `succeeded`.
+    #[test]
+    fn admission_pending_cook_renders_the_same_state_in_human_and_json() {
+        use crate::commands::utils::response::{
+            cli_response_for_json_result_for_identity, CommandIdentity,
+        };
+        let payload = json!({
+            "schema": "homeboy/control-plane-run/v1",
+            "run": "agent-task-1",
+            "state": "running",
+            "phase": "admission",
+            "gates": [],
+            "blocker": {
+                "code": "pressure",
+                "state": "waiting",
+                "message": "runner homeboy-lab: pressure; waiting since 2026-11-20T00:00:00Z",
+            },
+        });
+
+        let human = render_status_summary(&payload).expect("human summary");
+        assert!(human.starts_with("Agent task running\n"), "{human}");
+        assert!(human.contains("Phase: admission"), "{human}");
+        assert!(
+            human.contains("Blocker: runner homeboy-lab: pressure"),
+            "{human}"
+        );
+
+        let envelope = serde_json::to_value(cli_response_for_json_result_for_identity(
+            &Ok(payload),
+            0,
+            &CommandIdentity::with_operation("agent-task", "status"),
+            None,
+        ))
+        .expect("serialize envelope");
+        assert_eq!(envelope["status"], "running");
+        assert_eq!(envelope["subject_state"], "running");
+        assert_eq!(envelope["data"]["phase"], "admission");
+        assert_ne!(envelope["status"], "succeeded");
     }
 
     fn queued_status(daemon: Option<Value>) -> Value {
@@ -2647,6 +2753,30 @@ mod tests {
         assert!(summary.contains("Retry: automatic reconciliation scheduled"));
         assert!(summary.contains("Next: homeboy agent-task status unmaterialized-cook --watch\n"));
         assert!(!summary.contains("Next: homeboy agent-task recover unmaterialized-cook\n"));
+    }
+
+    #[test]
+    fn pressure_wait_summary_reports_evidence_without_inventing_a_deadline() {
+        let payload = json!({
+            "schema": "homeboy/control-plane-run/v1", "run": "pressure-cook", "state": "queued",
+            "blocker": {
+                "message": "pressure",
+                "retry": {"disposition": "automatic_reconciliation_scheduled"},
+                "details": {
+                    "queue_position": 3,
+                    "pressure": {"cpu": 9000},
+                    "pressure_thresholds": {"cpu": 80},
+                    "pressure_holders": [{"run_id": "holder-run"}]
+                }
+            }
+        });
+        let summary = render_agent_task_summary(AgentTaskSummaryKind::Status, &payload).unwrap();
+        assert!(summary.contains("no fixed retry time"));
+        assert!(!summary.contains("the recorded retry time"));
+        assert!(summary.contains("Queue position: 3"));
+        assert!(summary.contains("9000"));
+        assert!(summary.contains("Pressure thresholds:"));
+        assert!(summary.contains("holder-run"));
     }
 
     #[test]

@@ -2441,6 +2441,16 @@ impl JobStore {
             return Ok(None);
         };
         let mut wait = data.clone();
+        if !wait["next_attempt_at"].is_string() {
+            let inner = self.inner.lock().expect("job store mutex poisoned");
+            if let Some(controller) = inner
+                .jobs
+                .get(&job.id)
+                .and_then(|stored| stored.controller_job.as_ref())
+            {
+                wait["next_attempt_at"] = controller.request["wait"]["not_before"].clone();
+            }
+        }
         if !wait["waiting_since"].is_string() {
             wait["waiting_since"] = serde_json::json!(chrono::DateTime::from_timestamp_millis(
                 event.timestamp_ms as i64
@@ -4132,7 +4142,7 @@ pub(super) fn reap_cancelled_local_child(child: Option<&LocalChildProcessIdentit
             }
         }
     }
-    crate::process::terminate_isolated_process_group_with_grace(
+    crate::process::terminate_isolated_process_group(
         process_group_id,
         LOCAL_CHILD_CANCELLATION_GRACE,
     )?;
@@ -4406,7 +4416,7 @@ fn local_child_liveness(child: &LocalChildExecution) -> LocalChildLiveness {
             LocalChildLiveness::Dead | LocalChildLiveness::IdentityMismatch
         ) {
             if let Some(pgid) = process.process_group_id {
-                return match crate::process::isolated_process_group_is_running(pgid) {
+                return match homeboy_engine_primitives::command::process_group_is_running(pgid) {
                     Ok(true) => LocalChildLiveness::Live,
                     Ok(false) => root_liveness,
                     Err(evidence) => LocalChildLiveness::Unsupported(evidence),
