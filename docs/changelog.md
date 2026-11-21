@@ -4,6 +4,12 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.482.11] - 2026-11-21
+
+### Fixed
+- attribute candidate failures against the baseline
+- a runner host's upgrade reports its stale host runner service
+
 ## [0.482.10] - 2026-11-21
 
 ### Fixed
