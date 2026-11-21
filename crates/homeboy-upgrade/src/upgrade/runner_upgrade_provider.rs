@@ -8,7 +8,9 @@
 //! With no provider registered there are no runners to upgrade, so the
 //! [`NoopRunnerUpgradeProvider`] reports no upgrades.
 
-use crate::upgrade::{ExtensionUpgradeEntry, RunnerCheckEntry, RunnerUpgradeEntry};
+use crate::upgrade::{
+    ExtensionUpgradeEntry, RunnerCheckEntry, RunnerUpgradeEntry, ServiceRestartEntry,
+};
 use homeboy_core::error::Result;
 
 /// The runner-upgrade contract the core upgrade flow depends on. Implemented by
@@ -49,6 +51,19 @@ pub trait RunnerUpgradeProvider: Send + Sync {
         _target_version: &str,
     ) -> Result<Vec<RunnerCheckEntry>> {
         Ok(Vec::new())
+    }
+
+    /// Read-only view of the runner service hosted on this machine, when this
+    /// machine is a runner host: each host unit that does not run
+    /// `target_version`, with the command that converges it. That unit is
+    /// owned by its controller's runner convergence, so a runner-host
+    /// `homeboy upgrade` reports it pending instead of reporting success
+    /// (#18550).
+    fn host_runner_service_pending_restart(
+        &self,
+        _target_version: &str,
+    ) -> Vec<ServiceRestartEntry> {
+        Vec::new()
     }
 }
 

@@ -2878,7 +2878,7 @@ pub use service::{
     service_status as runner_service_status, RunnerServiceReport,
 };
 pub(crate) use service::{
-    observe_service_units, probe_runner_binary_version,
+    observe_local_service_units, observe_service_units, probe_runner_binary_version,
     service_unit_name as runner_service_unit_name, ServiceUnitObservation,
 };
 use session_store::*;
