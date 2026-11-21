@@ -282,7 +282,10 @@ impl ObservationStore {
         for event in self.durable_control_plane_events(&run, PHASE_SPANS_EVENT_KIND)? {
             let recorded: PhaseTimingReport = serde_json::from_value(event.data)
                 .map_err(|error| Error::internal_unexpected(error.to_string()))?;
-            for span in recorded.spans {
+            for mut span in recorded.spans {
+                if span.attempt_id.is_none() {
+                    span.attempt_id = event.attempt.as_ref().map(ToString::to_string);
+                }
                 if let Some(previous) = report.spans.iter_mut().find(|previous| {
                     event.source.instance.as_deref() == Some("whole-run")
                         && previous.id == span.id
