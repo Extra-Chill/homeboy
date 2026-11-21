@@ -104,6 +104,79 @@ fn write_executable_fixture(path: &Path, body: &str) {
     homeboy_test_support::write_executable(path, body, 0o755).expect("write executable fixture");
 }
 
+/// `homeboy upgrade` addresses the binary it was invoked as, not a newer
+/// `homeboy` earlier on `PATH` (#17241): the invoked symlink is the target,
+/// and its identity is read through the link.
+#[cfg(unix)]
+#[test]
+fn upgrade_targets_invoked_binary_not_earlier_path_binary() {
+    let root = tempfile::tempdir().unwrap();
+    let old_slot = root.path().join("_homeboy_binaries/homeboy-old/homeboy");
+    let path_slot = root.path().join("_homeboy_binaries/homeboy-new/homeboy");
+    for (slot, version) in [(&old_slot, "0.482.7"), (&path_slot, "0.484.0")] {
+        std::fs::create_dir_all(slot.parent().unwrap()).unwrap();
+        write_executable_fixture(
+            slot,
+            &format!("#!/bin/sh\necho 'homeboy {version}+abc1234'\n"),
+        );
+    }
+    let bin = root.path().join("bin");
+    std::fs::create_dir_all(&bin).unwrap();
+    let invoked = bin.join("homeboy");
+    std::os::unix::fs::symlink(&old_slot, &invoked).unwrap();
+    let exe = std::fs::canonicalize(&old_slot).unwrap();
+
+    let path_lookup = || Some(path_slot.clone());
+    let resolved = invoked_path_from(Some(invoked.as_os_str()), &exe, None, path_lookup);
+    assert_eq!(resolved.as_deref(), Some(invoked.as_path()));
+    let selected = select_controller_binary(resolved, path_lookup).unwrap();
+    assert_eq!(selected, invoked);
+    let identity = installed_target_build_identity_from_disk(&selected)
+        .unwrap()
+        .expect("invoked binary reports an identity");
+    assert_eq!(identity.version, "0.482.7");
+
+    // A relative argv[0] resolves against the working directory; a bare name
+    // was found on PATH; an argv[0] naming another image falls back to `exe`.
+    let relative = invoked_path_from(
+        Some(std::ffi::OsStr::new("bin/homeboy")),
+        &exe,
+        Some(root.path()),
+        || None,
+    );
+    assert_eq!(relative, Some(root.path().join("bin/homeboy")));
+    let bare = invoked_path_from(Some(std::ffi::OsStr::new("homeboy")), &exe, None, || {
+        Some(invoked.clone())
+    });
+    assert_eq!(bare, Some(invoked.clone()));
+    let spoofed = invoked_path_from(Some(path_slot.as_os_str()), &exe, None, || None);
+    assert_eq!(spoofed, Some(exe.clone()));
+}
+
+/// A source build candidate keeps bootstrapping over the PATH controller
+/// (#9371) instead of treating its own build output as the controller.
+#[cfg(unix)]
+#[test]
+fn source_build_candidate_still_targets_path_controller() {
+    let root = tempfile::tempdir().unwrap();
+    let candidate = root.path().join("checkout/target/release/homeboy");
+    std::fs::create_dir_all(candidate.parent().unwrap()).unwrap();
+    write_executable_fixture(&candidate, "#!/bin/sh\necho 'homeboy 9.9.9'\n");
+    let installed = root.path().join("bin/homeboy");
+    std::fs::create_dir_all(installed.parent().unwrap()).unwrap();
+    write_executable_fixture(&installed, "#!/bin/sh\necho 'homeboy 1.0.0'\n");
+
+    assert_eq!(
+        select_controller_binary(Some(candidate.clone()), || Some(installed.clone())),
+        Some(installed.clone())
+    );
+    // With no PATH controller the candidate is the only known image.
+    assert_eq!(
+        select_controller_binary(Some(candidate.clone()), || None),
+        Some(candidate)
+    );
+}
+
 /// A successful installer that staged nothing has proven nothing: the release
 /// path verifies the stage only, so a missing stage fails loudly instead of
 /// letting the unchanged live destination stand in for the candidate.

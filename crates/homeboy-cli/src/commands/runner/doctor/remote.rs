@@ -135,6 +135,17 @@ pub fn report(
             Some("Install Homeboy on the remote runner or configure runner.homeboy_path/server.env.PATH".to_string()),
         )
     });
+    // Lab scope reports this with the rest of its PATH checks below.
+    if options.scope != RunnerDoctorScope::LabOffload {
+        checks.extend(probes::homeboy_path_shadow_probe(
+            client,
+            runner_id,
+            &server.id,
+            homeboy_command,
+            local_homeboy_version,
+            &homeboy,
+        ));
+    }
 
     let system = if scoped {
         SystemProbe::default()

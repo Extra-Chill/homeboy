@@ -492,9 +492,9 @@ pub use homeboy_refresh::{
     controller_refresh_ref, refresh_homeboy_binary, refresh_live_progress, runner_dev_sync,
     HomeboyBinaryRefreshArtifacts, HomeboyBinaryRefreshFailure, HomeboyBinaryRefreshMode,
     HomeboyBinaryRefreshOptions, HomeboyBinaryRefreshOutput, HomeboyBinaryRefreshPlan,
-    HomeboyRefreshPhase, HomeboyRefreshReadiness, HomeboyRefreshReadinessState,
-    RefreshLiveProgress, RunnerDevSyncExtensionProvenance, RunnerDevSyncOptions,
-    RunnerDevSyncOutput, RunnerDevSyncPlan,
+    HomeboyPathBinarySync, HomeboyRefreshPhase, HomeboyRefreshReadiness,
+    HomeboyRefreshReadinessState, RefreshLiveProgress, RunnerDevSyncExtensionProvenance,
+    RunnerDevSyncOptions, RunnerDevSyncOutput, RunnerDevSyncPlan,
 };
 pub use job_preparation::register as register_runner_job_preparation_provider;
 pub use lab::offload::hydrate_runner_workspace_dependencies;

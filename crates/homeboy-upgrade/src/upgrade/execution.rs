@@ -1904,8 +1904,17 @@ fn staged_candidate_error(summary: &str, staged: &Path) -> Error {
     error
 }
 
+/// The controller binary `homeboy upgrade` inspects and replaces: the binary
+/// this process was invoked as (#17241). Reading the first `homeboy` on `PATH`
+/// instead let a current runner slot earlier on `PATH` stand in for the
+/// controller, so an older invoked binary concluded `controller_unchanged`.
+///
+/// A source build candidate (`<checkout>/target/{debug,release}/homeboy`) is
+/// not an installed controller; it still addresses the `PATH` controller it is
+/// bootstrapping over (#9371).
 pub(crate) fn active_binary_path() -> Result<PathBuf> {
-    if let Some(path) = resolve_binary_on_path().filter(|path| path.is_file()) {
+    let path_resolved = || resolve_binary_on_path().filter(|path| path.is_file());
+    if let Some(path) = select_controller_binary(invoked_binary_path(), path_resolved) {
         return Ok(path);
     }
 
@@ -1917,6 +1926,77 @@ pub(crate) fn active_binary_path() -> Result<PathBuf> {
                 Some("get current executable path".to_string()),
             )
         })
+}
+
+/// The pathname this process was invoked as, captured once so it stays stable
+/// after an upgrade replaces the running image.
+fn invoked_binary_path() -> Option<PathBuf> {
+    static INVOKED: std::sync::OnceLock<Option<PathBuf>> = std::sync::OnceLock::new();
+    INVOKED
+        .get_or_init(|| {
+            let exe = std::env::current_exe()
+                .ok()
+                .map(replaced_executable_pathname)?;
+            invoked_path_from(
+                std::env::args_os().next().as_deref(),
+                &exe,
+                std::env::current_dir().ok().as_deref(),
+                resolve_binary_on_path,
+            )
+        })
+        .clone()
+}
+
+/// Resolve `argv[0]` to the pathname that names the running image `exe`.
+///
+/// `argv[0]` keeps a symlinked install such as `~/.local/bin/homeboy`
+/// addressable as itself: replacing it renames over the link instead of
+/// rewriting the immutable slot it points into, while its identity is read
+/// through the link. A bare command name was found through `PATH`, so the
+/// `PATH` lookup recovers it. An `argv[0]` that does not resolve to the running
+/// image falls back to the image itself.
+pub(crate) fn invoked_path_from(
+    argv0: Option<&std::ffi::OsStr>,
+    exe: &Path,
+    cwd: Option<&Path>,
+    path_lookup: impl FnOnce() -> Option<PathBuf>,
+) -> Option<PathBuf> {
+    let candidate = argv0.map(Path::new).and_then(|arg| {
+        if arg.is_absolute() {
+            Some(arg.to_path_buf())
+        } else if arg.as_os_str().to_string_lossy().contains('/') {
+            cwd.map(|cwd| cwd.join(arg))
+        } else {
+            path_lookup()
+        }
+    });
+    Some(
+        candidate
+            .filter(|candidate| paths_identify_same_binary(candidate, exe))
+            .unwrap_or_else(|| exe.to_path_buf()),
+    )
+}
+
+/// Choose the invoked binary when it is an installed controller; otherwise
+/// (a source build candidate, a test harness, an unknown image) keep the
+/// `PATH` controller.
+pub(crate) fn select_controller_binary(
+    invoked: Option<PathBuf>,
+    path_resolved: impl FnOnce() -> Option<PathBuf>,
+) -> Option<PathBuf> {
+    match invoked {
+        Some(invoked) if is_installed_controller_binary(&invoked) => Some(invoked),
+        invoked => path_resolved().or(invoked),
+    }
+}
+
+fn is_installed_controller_binary(path: &Path) -> bool {
+    let named_homeboy = path.file_name().is_some_and(|name| name == "homeboy");
+    let resolved = std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
+    named_homeboy
+        && path.is_file()
+        && workspace_from_exe_path(path).is_none()
+        && workspace_from_exe_path(&resolved).is_none()
 }
 
 /// After an upgrade renames the new binary over the running one, Linux reports
