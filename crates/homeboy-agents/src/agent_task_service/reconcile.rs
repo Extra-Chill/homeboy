@@ -1,4 +1,4 @@
-//! Safe reconciliation of stale/suspect/unreconciled active agent-task runs.
+//! Safe reconciliation of stale runs and accepted detached Lab handoffs.
 //! Pure move out of the former `agent_task_service.rs` god-file.
 //!
 //! Also hosts the agent-task side of the daemon's orchestration tick. The
@@ -17,9 +17,8 @@ use super::discovery::{
     discover_runs, discover_runs_in_store, AgentTaskDiscoveryFilter, AgentTaskLiveness,
 };
 
-/// Report returned by [`reconcile_stale_active_runs`]. Lists every active run
-/// that was classified non-active, and for the reconcilable ones records the
-/// outcome of the safe cancel attempt.
+/// Report returned by [`reconcile_stale_active_runs`]. Records stale-run
+/// recovery outcomes and failures converging accepted detached Lab handoffs.
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct AgentTaskReconcileReport {
     pub schema: &'static str,
@@ -87,8 +86,8 @@ pub struct AgentTaskReconcileRun {
 /// the exact safe operation an operator would otherwise be tempted to do by
 /// hand-editing run JSON.
 ///
-/// Genuinely-active runs (live owner/runner with a fresh heartbeat, or queued
-/// work) are never touched. With `dry_run`, candidates are reported but no
+/// Fresh accepted detached Lab handoffs are also probed for terminal results;
+/// live runner work is retained. With `dry_run`, candidates are reported but no
 /// record is mutated so an operator can preview the blast radius first.
 /// [`agent_task_lifecycle::reconcile_status`] against an explicitly injected root.
 fn rooted_status(
@@ -304,6 +303,40 @@ pub fn reconcile_stale_active_runs(dry_run: bool) -> Result<AgentTaskReconcileRe
         let Some(liveness) = run.liveness else {
             continue;
         };
+        let record = agent_task_lifecycle::exact_record_in_store(&lifecycle_store, &run.run_id)?;
+        let in_flight_handoff = agent_task_lifecycle::CookRunState::accepted_lab_handoff(&record)
+            && record.metadata["runner_handoff"]["state"] == "in_flight";
+        if in_flight_handoff && !dry_run {
+            // Detached controllers have exited. Probe even a fresh/Active
+            // projection, and submit terminal Cook work from this tick rather
+            // than waiting for a controller or a later status read.
+            let result = rooted_status(&lifecycle_store, &run.run_id).and_then(|refreshed| {
+                if refreshed.state().is_terminal() {
+                    agent_task_lifecycle::reconcile_terminal_cook_provider_result(&run.run_id)
+                } else {
+                    Ok(refreshed)
+                }
+            });
+            match result {
+                Ok(refreshed) if refreshed.state().is_terminal() || !liveness.is_reconcilable() => {
+                    continue
+                }
+                Ok(_) => {}
+                Err(error) => {
+                    failed += 1;
+                    runs.push(AgentTaskReconcileRun {
+                        run_id: run.run_id,
+                        liveness,
+                        source: run.source,
+                        authoritative_state: record.state(),
+                        stale_reason: run.stale_reason,
+                        action: "failed",
+                        error: Some(error.message),
+                    });
+                    continue;
+                }
+            }
+        }
         if !liveness.is_reconcilable() {
             continue;
         }
@@ -1995,6 +2028,178 @@ mod tests {
                 "no daemon restart was evidenced"
             );
         });
+    }
+
+    struct DetachedRunnerProbe(homeboy_core::api_jobs::RunnerJobLogSnapshot);
+
+    impl agent_task_lifecycle::runner_continuation::RunnerContinuationProvider for DetachedRunnerProbe {
+        fn runner_job_log_snapshot(
+            &self,
+            _: &str,
+            _: &str,
+        ) -> Result<homeboy_core::api_jobs::RunnerJobLogSnapshot> {
+            Ok(self.0.clone())
+        }
+
+        fn is_runner_connected(&self, _: &str) -> bool {
+            true
+        }
+
+        fn run_continuation_exec(&self, _: &str, _: &str, _: &[String], _: &str) -> Result<i32> {
+            panic!("reconcile must not execute runner commands")
+        }
+    }
+
+    fn fresh_detached_handoff_tick(terminal: bool) {
+        with_isolated_home(|_| {
+            let run_id = "reconcile-fresh-detached";
+            let cook_id = "reconcile-fresh-cook";
+            let request = serde_json::from_value(serde_json::json!({
+                "schema": "homeboy/agent-task-request/v1",
+                "task_id": "task",
+                "executor": { "backend": "test" },
+                "instructions": "test"
+            }))
+            .expect("task request");
+            let plan = AgentTaskPlan::new("fresh-detached-plan", vec![request]);
+            let mut job = local_job_store().create("agent-task.run-plan");
+            job.status = if terminal {
+                homeboy_core::api_jobs::JobStatus::Succeeded
+            } else {
+                homeboy_core::api_jobs::JobStatus::Running
+            };
+            job.finished_at_ms = terminal.then_some(job.updated_at_ms);
+            agent_task_lifecycle::submit_plan(&plan, Some(run_id)).expect("submit");
+            agent_task_lifecycle::record_detached_lab_run(
+                agent_task_lifecycle::DetachedLabRunRecord {
+                    run_id,
+                    runner_id: "test-lab",
+                    runner_job_id: &job.id.to_string(),
+                    remote_workspace: "/runner/workspace",
+                    remote_command: &["homeboy".to_string()],
+                },
+            )
+            .expect("accept detached handoff");
+            let store = super::super::cook_recipe::CookRecipeStore::for_lifecycle_store(
+                &test_lifecycle_store(),
+            );
+            store
+                .persist_recipe(&super::super::cook_recipe::AgentTaskCookRecipe {
+                    schema: "homeboy/agent-task-cook-recipe/v1".to_string(),
+                    cook_id: cook_id.to_string(),
+                    attempts: vec![super::super::cook_recipe::AgentTaskCookRecipeAttempt {
+                        attempt: 1,
+                        run_id: run_id.to_string(),
+                        plan,
+                        lineage: None,
+                    }],
+                    promotion_transport: serde_json::json!({}),
+                    gate_policy: serde_json::json!({}),
+                    retry_budget: serde_json::json!({"max_attempts": 1}),
+                    finalization: serde_json::json!({}),
+                    source_refs: Vec::new(),
+                    runtime_generation: homeboy_core::build_identity::current().display,
+                    sensitive_mappings: Vec::new(),
+                    harvest_context: Default::default(),
+                })
+                .expect("persist Cook recipe");
+            let _probe = agent_task_lifecycle::RunnerContinuationTestGuard::install(Box::new(
+                DetachedRunnerProbe(homeboy_core::api_jobs::RunnerJobLogSnapshot {
+                    events: if terminal {
+                        vec![homeboy_core::api_jobs::JobEvent {
+                            sequence: 1,
+                            job_id: job.id,
+                            kind: homeboy_core::api_jobs::JobEventKind::Progress,
+                            timestamp_ms: job.updated_at_ms,
+                            message: None,
+                            data: Some(serde_json::json!({
+                                "schema": "homeboy/agent-task-run-plan-lifecycle-event/v1",
+                                "identity": {
+                                    "runner_id": "test-lab", "runner_job_id": job.id.to_string(),
+                                    "persisted_run_id": run_id, "run_id": run_id
+                                },
+                                "aggregate": crate::agent_task_scheduler::AgentTaskAggregate {
+                                    schema: "homeboy/agent-task-aggregate/v1".to_string(),
+                                    plan_id: "fresh-detached-plan".to_string(),
+                                    totals: crate::agent_task_scheduler::AgentTaskAggregateTotals::from_outcomes(1, &[crate::agent_task::AgentTaskOutcome {
+                                        task_id: "task".to_string(),
+                                        status: crate::agent_task::AgentTaskOutcomeStatus::Succeeded,
+                                        ..Default::default()
+                                    }]),
+                                    outcomes: vec![crate::agent_task::AgentTaskOutcome {
+                                        task_id: "task".to_string(),
+                                        status: crate::agent_task::AgentTaskOutcomeStatus::Succeeded,
+                                        ..Default::default()
+                                    }],
+                                    events: Vec::new(), artifact_lineage: Vec::new(), child_runs: Vec::new(), artifact_bindings: Vec::new(), queue: Default::default(),
+                                }
+                            })),
+                        }]
+                    } else {
+                        Vec::new()
+                    },
+                    job,
+                }),
+            ));
+            let before = agent_task_lifecycle::exact_record(run_id).expect("before tick");
+            assert_eq!(before.metadata["runner_handoff"]["state"], "in_flight");
+            assert!(!before.is_stale_running());
+            let preview = reconcile_stale_active_runs(true).expect("preview");
+            assert_eq!(preview.failed, 0);
+            assert_eq!(
+                agent_task_lifecycle::exact_record(run_id).expect("preview untouched"),
+                before
+            );
+            let report = reconcile_stale_active_runs(false).expect("daemon tick");
+            if terminal {
+                // This unit-test harness has no CLI scheduler registered. A
+                // failed submission must retain pending work, and the error
+                // proves the tick attempted submission, not only enqueueing.
+                assert_eq!(report.failed, 1, "{report:?}");
+                assert_eq!(
+                    report.runs[0].error.as_deref(),
+                    Some("terminal Cook scheduler is not registered")
+                );
+            } else {
+                assert_eq!(report.failed, 0, "{report:?}");
+            }
+            let after = agent_task_lifecycle::exact_record(run_id).expect("after tick");
+            if terminal {
+                assert_eq!(after.metadata["runner_handoff"]["state"], "terminal");
+                assert!(
+                    matches!(
+                        after.metadata["cook_continuation"]["state"].as_str(),
+                        Some("pending" | "submitted")
+                    ),
+                    "{:?}",
+                    after.metadata
+                );
+                assert!(after.metadata.get("cook_continuation_scheduler").is_some());
+                let continuation = after.metadata["cook_continuation"].clone();
+                reconcile_stale_active_runs(false).expect("repeat tick");
+                assert_eq!(
+                    agent_task_lifecycle::exact_record(run_id)
+                        .expect("replayed")
+                        .metadata["cook_continuation"],
+                    continuation
+                );
+            } else {
+                assert_eq!(after.metadata["runner_handoff"]["state"], "in_flight");
+                assert!(after.metadata.get("cook_continuation").is_none());
+                assert!(after.metadata.get("cancel_reason").is_none());
+                assert_eq!(after.state(), before.state());
+            }
+        });
+    }
+
+    #[test]
+    fn reconcile_fresh_terminal_detached_handoff_submits_cook_continuation() {
+        fresh_detached_handoff_tick(true);
+    }
+
+    #[test]
+    fn reconcile_fresh_running_detached_handoff_retains_runner_ownership() {
+        fresh_detached_handoff_tick(false);
     }
 
     #[test]

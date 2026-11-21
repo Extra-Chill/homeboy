@@ -129,6 +129,9 @@ pub(crate) fn project_terminal_runner_record(
             .remove("pre_execution_failure");
     }
     let aggregate = projected_runner_aggregate(record, &aggregate);
+    if let Some(handoff) = record.ensure_metadata_object().get_mut("runner_handoff") {
+        handoff["state"] = json!("terminal");
+    }
     record_verified_lab_placement_outcome(record)?;
     record.ensure_metadata_object().insert(
         "terminal_transport_recovery".to_string(),
@@ -778,6 +781,9 @@ pub(crate) fn project_persisted_terminal_runner_events_in_store(
             return Ok(false);
         }
         let projection_plan = aggregate_projection_plan_from_outcomes(&aggregate);
+        if let Some(handoff) = record.ensure_metadata_object().get_mut("runner_handoff") {
+            handoff["state"] = json!("terminal");
+        }
         record_verified_lab_placement_outcome(record)?;
         record.ensure_metadata_object().insert(
             "terminal_transport_recovery".to_string(),

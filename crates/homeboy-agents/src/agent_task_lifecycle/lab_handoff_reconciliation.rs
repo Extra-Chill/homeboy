@@ -437,6 +437,9 @@ pub(crate) fn record_runner_job_terminal_metadata(
     status: homeboy_core::api_jobs::JobStatus,
     events: &[homeboy_core::api_jobs::JobEvent],
 ) {
+    if let Some(handoff) = record.ensure_metadata_object().get_mut("runner_handoff") {
+        handoff["state"] = json!("terminal");
+    }
     let runner_identity = record
         .runner_id()
         .zip(record.runner_job_id())
