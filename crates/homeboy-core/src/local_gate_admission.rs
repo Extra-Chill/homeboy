@@ -344,56 +344,55 @@ pub fn snapshot() -> Result<serde_json::Value> {
 fn snapshot_for(registry: &Registry, load: Option<f64>) -> Result<serde_json::Value> {
     let limit = registry.limit;
     let pressure = registry.pressure(load);
-    registry.transaction(None, |entries| {
-        let now = now_ms();
-        let (order, cap) = ranked_waiters(entries, limit);
-        let holders = entries
-            .iter()
-            .filter(|entry| entry.started_at_ms.is_some())
-            .collect::<Vec<_>>();
-        let remaining = holders
-            .iter()
-            .map(|entry| entry.remaining(now))
-            .collect::<Vec<_>>();
-        let holder_values = holders
-            .iter()
-            .map(|entry| {
-                serde_json::json!({
-                    "owner": entry.owner(), "cook_id": entry.cook_id, "gate": entry.gate,
-                    "priority": entry.priority,
-                    "elapsed_seconds": now.saturating_sub(entry.started_at_ms.unwrap_or(now)) / 1000,
-                    "budget_seconds": entry.budget_seconds,
-                    "daemon_slot": entry.daemon_job.is_some(),
-                })
+    let entries = &live_entries(&registry.root);
+    let now = now_ms();
+    let (order, cap) = ranked_waiters(entries, limit);
+    let holders = entries
+        .iter()
+        .filter(|entry| entry.started_at_ms.is_some())
+        .collect::<Vec<_>>();
+    let remaining = holders
+        .iter()
+        .map(|entry| entry.remaining(now))
+        .collect::<Vec<_>>();
+    let holder_values = holders
+        .iter()
+        .map(|entry| {
+            serde_json::json!({
+                "owner": entry.owner(), "cook_id": entry.cook_id, "gate": entry.gate,
+                "priority": entry.priority,
+                "elapsed_seconds": now.saturating_sub(entry.started_at_ms.unwrap_or(now)) / 1000,
+                "budget_seconds": entry.budget_seconds,
+                "daemon_slot": entry.daemon_job.is_some(),
             })
-            .collect::<Vec<_>>();
-        let waiting = order
-            .iter()
-            .enumerate()
-            .map(|(index, ticket)| {
-                let entry = &entries[*ticket];
-                serde_json::json!({
-                    "queue_position": index + 1, "owner": entry.owner(), "cook_id": entry.cook_id,
-                    "gate": entry.gate, "priority": entry.priority,
-                    "waited_seconds": now.saturating_sub(entry.queued_at_ms) / 1000,
-                    "eta_seconds": eta_upper_bound_seconds(&remaining, index + 1, limit),
-                })
-            })
-            .collect::<Vec<_>>();
-        serde_json::json!({
-            "available": true,
-            "active_slots": holders.len(),
-            "free_slots": limit.saturating_sub(holders.len()),
-            "slot_limit": limit,
-            "owner_max_share_percent": owner_max_share_percent(),
-            "owner_slot_cap": cap,
-            "lab_charged_holders": count_charged(entries),
-            "holders": holder_values,
-            "waiting": waiting,
-            "eta_kind": "upper_bound_from_declared_budgets",
-            "pressure": pressure,
         })
-    })
+        .collect::<Vec<_>>();
+    let waiting = order
+        .iter()
+        .enumerate()
+        .map(|(index, ticket)| {
+            let entry = &entries[*ticket];
+            serde_json::json!({
+                "queue_position": index + 1, "owner": entry.owner(), "cook_id": entry.cook_id,
+                "gate": entry.gate, "priority": entry.priority,
+                "waited_seconds": now.saturating_sub(entry.queued_at_ms) / 1000,
+                "eta_seconds": eta_upper_bound_seconds(&remaining, index + 1, limit),
+            })
+        })
+        .collect::<Vec<_>>();
+    Ok(serde_json::json!({
+        "available": true,
+        "active_slots": holders.len(),
+        "free_slots": limit.saturating_sub(holders.len()),
+        "slot_limit": limit,
+        "owner_max_share_percent": owner_max_share_percent(),
+        "owner_slot_cap": cap,
+        "lab_charged_holders": count_charged(entries),
+        "holders": holder_values,
+        "waiting": waiting,
+        "eta_kind": "upper_bound_from_declared_budgets",
+        "pressure": pressure,
+    }))
 }
 
 fn count_charged(entries: &[Entry]) -> usize {
@@ -417,21 +416,26 @@ pub fn counted_holders() -> usize {
 }
 
 fn counted_holders_in(root: &std::path::Path) -> usize {
+    count_charged(&live_entries(root))
+}
+
+/// The registry's live entries, read without its lock or any write: the queue
+/// file is replaced atomically, and an entry whose lease this probe can take
+/// belongs to a dead process. Read-only views (`status`, `capacity`, the Lab
+/// daemon's charge) use this; only queue members prune through
+/// [`Registry::transaction`].
+fn live_entries(root: &std::path::Path) -> Vec<Entry> {
     let Ok(bytes) = fs::read(root.join("queue.json")) else {
-        return 0;
+        return Vec::new();
     };
-    let entries: Vec<Entry> = serde_json::from_slice(&bytes).unwrap_or_default();
+    let mut entries: Vec<Entry> = serde_json::from_slice(&bytes).unwrap_or_default();
+    entries.retain(
+        |entry| match File::open(root.join(format!("{}.lease", entry.ticket))) {
+            Ok(lease) => !matches!(FileExt::try_lock_shared(&lease), Ok(true)),
+            Err(_) => false,
+        },
+    );
     entries
-        .iter()
-        .filter(|entry| entry.started_at_ms.is_some() && entry.daemon_job.is_none())
-        .filter(|entry| {
-            // A lease this probe can take belongs to a dead holder.
-            match File::open(root.join(format!("{}.lease", entry.ticket))) {
-                Ok(lease) => !matches!(FileExt::try_lock_shared(&lease), Ok(true)),
-                Err(_) => false,
-            }
-        })
-        .count()
 }
 
 #[cfg(test)]
