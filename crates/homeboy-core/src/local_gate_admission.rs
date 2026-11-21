@@ -344,7 +344,21 @@ pub fn snapshot() -> Result<serde_json::Value> {
 fn snapshot_for(registry: &Registry, load: Option<f64>) -> Result<serde_json::Value> {
     let limit = registry.limit;
     let pressure = registry.pressure(load);
-    registry.transaction(None, |entries| {
+    // Writers atomically replace the queue. Inspection must not initialize the
+    // registry, prune dead leases, or rewrite the queue as a side effect.
+    let mut entries: Vec<Entry> = match fs::read(registry.root.join("queue.json")) {
+        Ok(bytes) => serde_json::from_slice(&bytes).unwrap_or_default(),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Vec::new(),
+        Err(error) => return Err(io(error)),
+    };
+    entries.retain(|entry| {
+        match File::open(registry.root.join(format!("{}.lease", entry.ticket))) {
+            Ok(lease) => !matches!(FileExt::try_lock_shared(&lease), Ok(true)),
+            Err(error) => error.kind() != std::io::ErrorKind::NotFound,
+        }
+    });
+    let entries = &entries;
+    Ok({
         let now = now_ms();
         let (order, cap) = ranked_waiters(entries, limit);
         let holders = entries
@@ -437,6 +451,22 @@ fn counted_holders_in(root: &std::path::Path) -> usize {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn snapshot_does_not_initialize_or_rewrite_registry() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().join("registry");
+        let registry = registry(&root, 2);
+        assert_eq!(snapshot_for(&registry, None).unwrap()["active_slots"], 0);
+        assert!(!root.exists());
+
+        fs::create_dir_all(&root).unwrap();
+        let queue = b"[ ]\n";
+        fs::write(root.join("queue.json"), queue).unwrap();
+        snapshot_for(&registry, None).unwrap();
+        assert_eq!(fs::read(root.join("queue.json")).unwrap(), queue);
+        assert!(!root.join("registry.lock").exists());
+    }
 
     fn claim(owner: &str, cook: &str, gate: &str) -> LocalGateClaim {
         LocalGateClaim {

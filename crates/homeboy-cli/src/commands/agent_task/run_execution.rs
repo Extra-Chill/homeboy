@@ -691,14 +691,6 @@ pub(super) fn run_preflight_cook_execution(
     let recipe_store = agent_task_service::CookRecipeStore::from_current_data_root()?;
     let lifecycle_store = agent_task_lifecycle::AgentTaskLifecycleStore::from_environment()?;
     let durable_observer = |event: &agent_task_service::CookProgressEvent<'_>| {
-        if event.phase == "durable_identity" && needs_local_admission {
-            let mut lease = local_dispatch_lease
-                .lock()
-                .expect("local dispatch lease lock");
-            if lease.is_none() {
-                *lease = admit_local_cook_dispatch(event.run_id, event.cook_id, &lifecycle_store)?;
-            }
-        }
         if no_progress && event.phase != "durable_identity" {
             return Ok(());
         }
@@ -729,7 +721,18 @@ pub(super) fn run_preflight_cook_execution(
                     event.terminal_retry_command,
                 )
             })
-            .unwrap_or(Ok(()))
+            .unwrap_or(Ok(()))?;
+        // Publish executable custody before capacity can block. In particular,
+        // the detached step must bind its handoff even if its launcher died.
+        if event.phase == "durable_identity" && needs_local_admission {
+            let mut lease = local_dispatch_lease
+                .lock()
+                .expect("local dispatch lease lock");
+            if lease.is_none() {
+                *lease = admit_local_cook_dispatch(event.run_id, event.cook_id, &lifecycle_store)?;
+            }
+        }
+        Ok(())
     };
     let request = agent_task_service::CookRequest {
         identity: homeboy::agents::agent_task_service::CookIdentity {
