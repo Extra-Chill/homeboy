@@ -4,6 +4,12 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.482.5] - 2026-11-21
+
+### Fixed
+- end terminal.decision before dispatching the next attempt
+- preserve completed verdicts when process-tree cleanup is incomplete
+
 ## [0.482.4] - 2026-11-20
 
 ### Fixed
