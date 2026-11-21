@@ -1391,7 +1391,6 @@ pub fn projection(state: &InstanceState, store: Option<&JobStore>) -> Value {
             .unwrap_or(Value::Null)
     };
     let mut view = json!({
-
         "instance": state.instance,
         "status": state.status.as_str(),
         "iteration": state.iteration,

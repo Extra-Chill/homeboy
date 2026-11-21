@@ -87,7 +87,7 @@ mod tests {
                 "steps": [
                     {"id": "light", "exec": {"program": "/bin/sh", "args": ["-c",
                         "if [ ! -f retried ]; then touch retried; exit 1; fi; i=0; while [ $i -lt 20000 ]; do i=$((i+1)); done"]},
-                        "retry": {"max": 1, "on": ["failed"]}}, 
+                        "retry": {"max": 1, "on": ["failed"]}},
                     {"id": "heavy", "needs": ["light"], "exec": burn(400_000)},
                 ]
             }))

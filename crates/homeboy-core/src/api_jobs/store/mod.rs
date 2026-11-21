@@ -2420,15 +2420,17 @@ impl JobStore {
             .collect::<Vec<_>>();
         let mut records = HashMap::new();
         if let Some(persistence) = &self.persistence {
-            if let Ok(connection) = persistence.connection() {
-                for stored in sql_store::read_jobs_with_events_readonly(
-                    connection.as_ref().expect("initialized store connection"),
-                    &persistence.path,
-                    &ids,
-                )
-                .unwrap_or_default()
-                {
-                    records.insert(stored.job.id, (stored.job, stored.events));
+            if let Ok(guard) = persistence.connection() {
+                if let Some(connection) = guard.as_ref() {
+                    for stored in sql_store::read_jobs_with_events_readonly(
+                        connection,
+                        &persistence.path,
+                        &ids,
+                    )
+                    .unwrap_or_default()
+                    {
+                        records.insert(stored.job.id, (stored.job, stored.events));
+                    }
                 }
             }
         }
