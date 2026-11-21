@@ -1785,10 +1785,33 @@ fn verify_replacement_gates_in_mode(
 
 /// Supervision for replacement gates, built from the declared gate options
 /// exactly as Cook promotion builds it (#15856).
+///
+/// A foreground client running them (`agent-task recover`) cancels them when
+/// it is signalled or outlives its admission bound (#18042). The scope is
+/// captured here because gate supervision may be polled off this thread.
 fn replacement_gate_supervision(
     gates: &crate::agent_task_gate::VerifyGateOptions,
 ) -> crate::agent_task_gate::GateSupervision {
-    gates.declared_supervision()
+    let mut supervision = gates.declared_supervision();
+    if let Some(scope) = homeboy_core::foreground_wait::current() {
+        let declared = supervision.is_cancelled.clone();
+        supervision.is_cancelled =
+            std::sync::Arc::new(move || declared() || scope.stop_requested().is_some());
+    }
+    supervision
+}
+
+/// A foreground client that was signalled or outlived its admission bound
+/// returns that stop instead of recording whatever the cancelled gates
+/// reported: they did not judge the candidate (#18042).
+fn foreground_gate_stop() -> Option<Error> {
+    let scope = homeboy_core::foreground_wait::current()?;
+    let stop = scope.stop_requested()?;
+    Some(stop.error(
+        "replacement gate execution",
+        scope.last_subject().as_ref(),
+        "any queued or running runner work was withdrawn, the operation lease was released and no start fence was kept",
+    ))
 }
 
 fn verify_replacement_gates_owned(
@@ -1929,7 +1952,7 @@ fn verify_replacement_gates_owned(
     // on the active scope for the declared budgets on a Lab runner (#15856).
     let supervision = replacement_gate_supervision(&gates);
     let repro = gates.repro.clone();
-    let mut replacement = crate::agent_task_promotion::with_gate_supervision(supervision, || {
+    let replacement = crate::agent_task_promotion::with_gate_supervision(supervision, || {
         let mut replacement = resume_promoted_patch_replacement_gates_in_observation_store(
             AgentTaskPromotionRequest {
                 source,
@@ -1979,7 +2002,11 @@ fn verify_replacement_gates_owned(
             |_, _| Ok(()),
         )?;
         Ok(replacement)
-    })?;
+    });
+    if let Some(stop) = foreground_gate_stop() {
+        return Err(stop);
+    }
+    let mut replacement = replacement?;
     // #11290's import boundary requires command evidence for each accepted gate.
     // The shared gate runner retains that evidence in detailed gate reports, so
     // project it into the typed promotion command-evidence view before recording.

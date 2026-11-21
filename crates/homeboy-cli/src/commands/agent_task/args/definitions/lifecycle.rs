@@ -375,6 +375,12 @@ pub struct RecoverArgs {
     /// Maximum wait; timing out never cancels daemon-owned work.
     #[arg(long, default_value = "30m", requires = "wait")]
     pub timeout: String,
+    /// Longest this client waits for Lab admission or runner capacity before
+    /// a gate it runs starts. Past it, queued gate work is withdrawn, no
+    /// start fence is kept, and recover exits non-zero. SIGINT/SIGTERM stop
+    /// the same way at any time.
+    #[arg(long, value_name = "SECONDS", conflicts_with = "preflight")]
+    pub wait_timeout_seconds: Option<u64>,
     /// Re-run deterministic gates on the newest candidate's existing SHA,
     /// without a provider attempt. Each regate executes fresh gate jobs. With
     /// `--verify`/`--verify-file`/`--private-verify`, those commands replace

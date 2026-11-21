@@ -26,7 +26,32 @@ pub(crate) fn recovery_preflight(id: &str, rearm: bool) -> homeboy::core::Result
 }
 
 pub(super) fn recover(args: RecoverArgs) -> CmdResult<Value> {
-    recover_action(args)
+    // Every wait this client performs reports what it waits for, honours
+    // SIGINT/SIGTERM and the optional admission bound, and withdraws queued
+    // gate work when it stops (#18042).
+    let policy = homeboy::core::foreground_wait::ForegroundWaitPolicy {
+        admission_timeout: args
+            .wait_timeout_seconds
+            .map(std::time::Duration::from_secs),
+    };
+    let (report, exit_code) =
+        homeboy::core::foreground_wait::with_foreground_wait(policy, || recover_action(args))?;
+    let exit_code = foreground_stop_exit_code(&report).unwrap_or(exit_code);
+    Ok((report, exit_code))
+}
+
+/// A recovery the client stopped exits with the stop's conventional status:
+/// 124 for `--wait-timeout-seconds`, 128+N for signal N (#18042).
+fn foreground_stop_exit_code(report: &Value) -> Option<i32> {
+    [
+        "/failure/details/foreground_wait/exit_code",
+        "/details/foreground_wait/exit_code",
+    ]
+    .iter()
+    .find_map(|pointer| report.pointer(pointer))
+    .and_then(Value::as_i64)
+    .and_then(|code| i32::try_from(code).ok())
+    .filter(|code| *code != 0)
 }
 
 fn recover_action(args: RecoverArgs) -> CmdResult<Value> {
@@ -112,6 +137,7 @@ fn recover_action(args: RecoverArgs) -> CmdResult<Value> {
             }
         };
     if wait && report["admission"].is_object() {
+        homeboy::core::foreground_wait::observe_signals();
         let run_id = report["run_id"].as_str().unwrap().to_string();
         let (status, exit_code) = super::status::wait_for_recovery_status(&run_id, full, duration)?;
         if status["terminal"] != true {
@@ -305,6 +331,19 @@ pub(super) fn continuation_args(
 
 /// Execute only the step frozen by the daemon intent; never admit recursively.
 pub(crate) fn execute_admitted_step(
+    run_id: &str,
+    step: &agent_task_service::CookRecoveryStep,
+    overrides: &CookRecoveryOverrides,
+    regate: &CookRegateInputs,
+) -> homeboy::core::Result<i32> {
+    // The daemon-owned step reports its waits to its log and stops on the
+    // daemon's SIGTERM, withdrawing queued gate work (#18042).
+    homeboy::core::foreground_wait::with_foreground_wait(Default::default(), || {
+        execute_admitted_step_in_scope(run_id, step, overrides, regate)
+    })
+}
+
+fn execute_admitted_step_in_scope(
     run_id: &str,
     step: &agent_task_service::CookRecoveryStep,
     overrides: &CookRecoveryOverrides,

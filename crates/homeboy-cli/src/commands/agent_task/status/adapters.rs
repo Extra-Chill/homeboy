@@ -14,6 +14,18 @@ impl WatchPoller for StatusPoller {
     type Item = (Value, i32);
 
     fn poll(&self, _id: &str) -> homeboy::core::Result<Self::Item> {
+        // A foreground `recover --wait` stops on SIGINT/SIGTERM; the step
+        // stays owned by the daemon (#18042).
+        if let Some(stop) = homeboy::core::foreground_wait::stop_requested() {
+            return Err(stop.error(
+                "agent-task recover --wait",
+                None,
+                &format!(
+                    "the step stays owned by the daemon; follow it with `homeboy agent-task status {} --watch`",
+                    self.args.run_id
+                ),
+            ));
+        }
         status_once(self.args.clone())
     }
 
@@ -128,7 +140,7 @@ pub(super) fn watch_status_until(
         &poller,
         &args.run_id,
         &WatchConfig { interval, timeout },
-        std::thread::sleep,
+        sleep_unless_stopped,
         || started.elapsed(),
         |(snapshot, _), poll| progress.observe(snapshot, poll, |line| eprintln!("{line}")),
         |(snapshot, _)| {
@@ -140,6 +152,18 @@ pub(super) fn watch_status_until(
         },
     )?;
     Ok(watch_status_output(&args, result, progress))
+}
+
+/// Sleep in short slices so a foreground stop (#18042) ends the wait promptly.
+fn sleep_unless_stopped(duration: Duration) {
+    let wake = Instant::now() + duration;
+    while homeboy::core::foreground_wait::stop_requested().is_none() {
+        let remaining = wake.saturating_duration_since(Instant::now());
+        if remaining.is_zero() {
+            return;
+        }
+        std::thread::sleep(remaining.min(Duration::from_millis(200)));
+    }
 }
 
 /// Unchanged durable status projections need progressively fewer reads.

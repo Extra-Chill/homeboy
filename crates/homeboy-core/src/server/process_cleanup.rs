@@ -1,5 +1,5 @@
 use std::process::Command;
-use std::sync::atomic::{AtomicI32, Ordering};
+use std::sync::atomic::{AtomicI32, AtomicUsize, Ordering};
 use std::time::Duration;
 
 /// How long a terminated process group gets to exit on SIGTERM before it is
@@ -9,6 +9,15 @@ const PROCESS_GROUP_CLEANUP_GRACE: Duration = Duration::from_millis(200);
 
 #[cfg(unix)]
 static ACTIVE_CLEANUP_SIGNAL: AtomicI32 = AtomicI32::new(0);
+
+/// Every SIGINT/SIGTERM the cleanup handler has observed. A child wait
+/// consumes [`ACTIVE_CLEANUP_SIGNAL`] (and a new child resets it), so a wait
+/// that is not inside a child wait, such as a foreground client polling a
+/// queued Lab job, never saw the request and kept waiting (#18042). This count
+/// is never consumed: [`crate::foreground_wait`] compares it with the count at
+/// scope entry.
+static TERMINATION_SIGNALS: AtomicUsize = AtomicUsize::new(0);
+static LAST_TERMINATION_SIGNAL: AtomicI32 = AtomicI32::new(0);
 
 #[cfg(unix)]
 static CLEANUP_SIGNALS_INSTALLED: std::sync::Once = std::sync::Once::new();
@@ -155,11 +164,29 @@ extern "C" fn cleanup_signal_handler(
     context: *mut libc::c_void,
 ) {
     ACTIVE_CLEANUP_SIGNAL.store(signal, Ordering::SeqCst);
+    LAST_TERMINATION_SIGNAL.store(signal, Ordering::SeqCst);
+    TERMINATION_SIGNALS.fetch_add(1, Ordering::SeqCst);
     match signal {
         libc::SIGINT => PREVIOUS_SIGINT.forward(signal, info, context),
         libc::SIGTERM => PREVIOUS_SIGTERM.forward(signal, info, context),
         _ => {}
     }
+}
+
+/// Route SIGINT/SIGTERM through the chained cleanup handler so they are
+/// counted in [`termination_signals`]. Installing it replaces the default
+/// terminate disposition, so only callers that poll the count may install it.
+pub(crate) fn install_termination_observer() {
+    #[cfg(unix)]
+    install_process_cleanup_signal_handlers();
+}
+
+/// `(count, last signal)` of every SIGINT/SIGTERM observed so far.
+pub(crate) fn termination_signals() -> (usize, i32) {
+    (
+        TERMINATION_SIGNALS.load(Ordering::SeqCst),
+        LAST_TERMINATION_SIGNAL.load(Ordering::SeqCst),
+    )
 }
 
 #[cfg(unix)]
@@ -250,6 +277,12 @@ fn cleanup_process_group_fallback_within(pgid: libc::pid_t, grace: Duration) {
     let _ = crate::engine::command::terminate_remaining_process_group(pgid as u32);
 }
 
+/// Serializes tests that raise SIGINT/SIGTERM in the test process with tests
+/// that read [`termination_signals`], so a raised signal cannot stop another
+/// test's foreground wait scope.
+#[cfg(test)]
+pub(crate) static SIGNAL_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -312,6 +345,9 @@ mod tests {
     /// the test process) and wait for both observers to see it.
     #[cfg(unix)]
     fn raise_sigterm_and_assert_both_observers(stop: &std::sync::atomic::AtomicBool) {
+        let _signals = super::SIGNAL_TEST_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         assert_eq!(unsafe { libc::raise(libc::SIGTERM) }, 0);
         let deadline = std::time::Instant::now() + Duration::from_secs(10);
         while !stop.load(Ordering::SeqCst) && std::time::Instant::now() < deadline {
