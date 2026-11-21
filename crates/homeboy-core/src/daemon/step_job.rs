@@ -1258,20 +1258,6 @@ fn await_wait_with(
     let runner_ticket = runner_probe
         .as_ref()
         .map(|(runner, _)| crate::lab_capacity::join_runner_wait(runner, step_priority(request)));
-    // The Lab ranks this waiter against its own steps and other controllers'
-    // waiters, and reports holder budgets for an ETA.
-    let lab_waiter = runner_probe.as_ref().and_then(|(runner, _)| {
-        LAB_WAITER.get().map(|hook| LabWaiterReservation {
-            hook: hook.clone(),
-            runner: runner.to_string(),
-            beat: crate::lab_capacity::RemoteWaiterHeartbeat {
-                waiter_id: request.key.clone(),
-                owner: step_owner(request).to_string(),
-                priority: step_priority(request),
-                release: false,
-            },
-        })
-    });
     let mut last_estimated_start: Option<chrono::DateTime<chrono::Utc>> = None;
     let wait_cap = if step_priority(request) == crate::lab_capacity::LabPriority::High {
         RUNNER_WAIT_HIGH_CAP
@@ -1297,6 +1283,22 @@ fn await_wait_with(
                 .ok()
         })
         .unwrap_or_default();
+    // The Lab ranks this waiter against its own steps and other controllers'
+    // waiters by lane, owner share, then the Cook's first-wait time (stable
+    // across controller restarts), and reports holder budgets for an ETA.
+    let lab_waiter = runner_probe.as_ref().and_then(|(runner, _)| {
+        LAB_WAITER.get().map(|hook| LabWaiterReservation {
+            hook: hook.clone(),
+            runner: runner.to_string(),
+            beat: crate::lab_capacity::RemoteWaiterHeartbeat {
+                waiter_id: request.key.clone(),
+                owner: step_owner(request).to_string(),
+                priority: step_priority(request),
+                first_waited_at: Some(waiting_since.clone()),
+                release: false,
+            },
+        })
+    });
     let mut next_probe = now();
     let mut backoff = RUNNER_WAIT_INITIAL;
     let mut last_observation: Option<std::result::Result<(), String>> = None;
@@ -1394,10 +1396,18 @@ fn await_wait_with(
                         }))?;
                     }
                 }
+                // The Lab says this waiter is next: re-probe within seconds so
+                // the slot it holds for us is claimed, not left idle.
+                let next_in_line = queue["queue_scope"] == "lab" && queue["may_proceed"] == true;
+                let cap = if next_in_line {
+                    wait_cap.min(RUNNER_WAIT_HIGH_CAP)
+                } else {
+                    wait_cap
+                };
                 last_position = position;
                 last_observation = Some(observation);
-                next_probe = now() + backoff;
-                backoff = (backoff * 2).min(wait_cap);
+                next_probe = now() + backoff.min(cap);
+                backoff = (backoff * 2).min(cap);
             }
         }
         let runner_ready = runner_probe.is_none()

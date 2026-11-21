@@ -470,6 +470,21 @@ pub(crate) fn exec_lab_context(
     if let Some(bundle) = context.lab_metadata.get("execution_bundle") {
         crate::execution_bundle::apply_authority_env(&mut env, bundle);
     }
+    // The Lab charges this Cook to its workflow/Cook owner's share, with the
+    // Cook's declared budget for queue ETAs. Explicit job env wins.
+    if let Some(run_id) = context.agent_task_run_id.as_deref() {
+        use homeboy_core::lab_capacity::{
+            declared_budget, runner_job_claim_env, LabPriority, LAB_BUDGET_ENV, LAB_PRIORITY_ENV,
+        };
+        let process_env = |name: &str| std::env::var(name).ok();
+        for (name, value) in runner_job_claim_env(
+            &homeboy_agents::agent_tasks::gate::lab_admission_owner(run_id),
+            LabPriority::from_env_value(process_env(LAB_PRIORITY_ENV).as_deref()),
+            declared_budget(process_env(LAB_BUDGET_ENV).as_deref()).map(|budget| budget.as_secs()),
+        ) {
+            env.entry(name).or_insert(value);
+        }
+    }
     let mut secret_env_names = context
         .secret_env_handoff
         .secret_env_plan

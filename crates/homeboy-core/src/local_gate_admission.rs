@@ -269,6 +269,8 @@ fn ranked_waiters(entries: &[Entry], limit: usize) -> (Vec<usize>, usize) {
             ticket: index,
             owner: entry.owner().to_string(),
             priority: entry.priority,
+            // Entries are already in enqueue order; the index breaks ties.
+            arrived_ms: 0,
         })
         .collect::<Vec<_>>();
     let cap = owner_slot_cap(limit, owner_max_share_percent());

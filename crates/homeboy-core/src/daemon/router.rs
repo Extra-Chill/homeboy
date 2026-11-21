@@ -111,8 +111,15 @@ where
                 "queued_steps": crate::lab_capacity::queued_steps(),
                 "step_queue": crate::lab_capacity::step_queue_snapshot(),
                 "gate_reserve": job_store.gate_capacity(),
+                // Capacity is readable by any controller: no commands or paths.
                 "queued_work": job_store.active_runner_jobs().into_iter()
-                    .filter(|job| job.status == JobStatus::Queued).collect::<Vec<_>>(),
+                    .filter(|job| job.status == JobStatus::Queued)
+                    .map(|job| crate::api_jobs::ActiveRunnerJobSummary {
+                        command: "[redacted]".to_string(),
+                        cwd: None,
+                        ..job
+                    })
+                    .collect::<Vec<_>>(),
                 // Owner silence per opted-in queued job; an entry past the
                 // deadline leaves the queue on the next maintenance pass.
                 "queued_owner_heartbeat_age_ms": job_store.queued_owner_heartbeat_ages(),

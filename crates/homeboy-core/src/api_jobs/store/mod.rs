@@ -3386,6 +3386,33 @@ impl JobStore {
         Ok(admitted)
     }
 
+    /// Direct runner jobs (Lab gate lane, Cook children) holding a child on
+    /// this daemon, charged to the owner their environment declares. Only
+    /// owner, lane, timing, and budget leave the store.
+    pub(crate) fn lab_runner_job_holders(&self) -> Vec<crate::lab_capacity::LabHolder> {
+        let inner = self.inner.lock().expect("job store mutex poisoned");
+        inner
+            .jobs
+            .values()
+            .filter(|stored| {
+                self.owns(stored)
+                    && !stored.job.status.is_terminal()
+                    && stored.local_child.is_some()
+            })
+            .filter_map(|stored| {
+                let dispatch = stored
+                    .pending_execution_envelope
+                    .as_ref()?
+                    .dispatch
+                    .as_ref()?;
+                crate::lab_capacity::runner_job_holder(
+                    |name| dispatch.env.get(name).map(String::as_str),
+                    stored.job.started_at_ms.unwrap_or(stored.job.created_at_ms),
+                )
+            })
+            .collect()
+    }
+
     pub(crate) fn gate_capacity(&self) -> Value {
         let inner = self.inner.lock().expect("job store mutex poisoned");
         let gates = inner

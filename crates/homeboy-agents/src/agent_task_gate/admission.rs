@@ -21,15 +21,26 @@ fn env(name: &str) -> Option<String> {
         .filter(|value| !value.is_empty())
 }
 
+fn current_cook_id() -> Option<String> {
+    homeboy_core::observation::phase_timing::current().map(|(_, id)| {
+        crate::agent_task_lifecycle::status(&id)
+            .ok()
+            .and_then(|record| record.metadata["cook_id"].as_str().map(str::to_string))
+            .unwrap_or(id)
+    })
+}
+
 fn cook_id(cwd: &std::path::Path) -> String {
-    homeboy_core::observation::phase_timing::current()
-        .map(|(_, id)| {
-            crate::agent_task_lifecycle::status(&id)
-                .ok()
-                .and_then(|record| record.metadata["cook_id"].as_str().map(str::to_string))
-                .unwrap_or(id)
-        })
-        .unwrap_or_else(|| cwd.display().to_string())
+    current_cook_id().unwrap_or_else(|| cwd.display().to_string())
+}
+
+/// The Lab fairness unit for work this process sends to a Lab runner: its
+/// workflow instance, else the current Cook, else `fallback`. The Lab charges
+/// that work to this owner in its share cap, as for local gates and steps.
+pub fn lab_admission_owner(fallback: &str) -> String {
+    env(homeboy_core::daemon::workflow_job::WORKFLOW_INSTANCE_ENV)
+        .or_else(current_cook_id)
+        .unwrap_or_else(|| fallback.to_string())
 }
 
 pub(super) fn acquire(
