@@ -443,9 +443,35 @@ pub(super) mod concurrency_tests {
 
     #[test]
     fn unrelated_declared_resources_remain_concurrent() {
-        let executor = RecordingExecutor::new(HashMap::new(), Duration::from_millis(25));
-        let max_seen = Arc::clone(&executor.max_seen);
-        let scheduler = crate::agent_task_scheduler::AgentTaskScheduler::new(Arc::new(executor));
+        #[derive(Default)]
+        struct RendezvousExecutor {
+            arrivals: std::sync::Mutex<usize>,
+            ready: std::sync::Condvar,
+        }
+
+        impl AgentTaskExecutorAdapter for RendezvousExecutor {
+            fn execute(
+                &self,
+                request: AgentTaskRequest,
+                _context: AgentTaskExecutionContext,
+            ) -> AgentTaskOutcome {
+                let mut arrivals = self.arrivals.lock().unwrap();
+                *arrivals += 1;
+                self.ready.notify_all();
+                let (arrivals, _) = self
+                    .ready
+                    .wait_timeout_while(arrivals, Duration::from_secs(30), |count| *count < 2)
+                    .unwrap();
+                assert_eq!(*arrivals, 2, "unrelated resources must run concurrently");
+                outcome(request.task_id, AgentTaskOutcomeStatus::Succeeded)
+            }
+        }
+
+        // A rendezvous proves overlap without relying on a 25 ms scheduling
+        // window on a loaded test runner. The timeout still bounds regressions.
+        let scheduler = crate::agent_task_scheduler::AgentTaskScheduler::new(Arc::new(
+            RendezvousExecutor::default(),
+        ));
         let mut plan = plan_with_tasks(2);
         plan.options.max_concurrency = 2;
         plan.tasks[0].limits.exclusive_resource_keys = vec!["cache:one".to_string()];
@@ -458,7 +484,7 @@ pub(super) mod concurrency_tests {
             RunExecutionState::Succeeded,
             "{aggregate:#?}"
         );
-        assert_eq!(max_seen.load(Ordering::SeqCst), 2);
+        assert_eq!(aggregate.totals.succeeded, 2);
         assert!(!aggregate.events.iter().any(|event| {
             event.state == ControlPlaneState::Blocked
                 && event

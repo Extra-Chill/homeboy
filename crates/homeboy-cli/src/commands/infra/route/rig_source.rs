@@ -22,6 +22,7 @@ pub(super) fn run_rig_source_management_on_runner(
                     mode: runners::RunnerWorkspaceSyncMode::Snapshot,
                     ..Default::default()
                 },
+                &runners::WorkspaceControl::default(),
             )?;
             if sync_exit_code == 0 {
                 command = translate_command_path_prefix(&command, local_cwd, &synced.remote_path);
@@ -47,6 +48,7 @@ pub(super) fn run_rig_source_management_on_runner(
                 mode: runners::RunnerWorkspaceSyncMode::Snapshot,
                 ..Default::default()
             },
+            &runners::WorkspaceControl::default(),
         )?;
         if sync_exit_code == 0 {
             command = translate_command_path_prefix(&command, source_root, &synced.remote_path);

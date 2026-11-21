@@ -690,8 +690,6 @@ pub(crate) use super::run_disclosure::durable_cook_identity_lines;
 #[cfg(test)]
 pub(super) use super::run_disclosure::format_resolved_execution_placement_line;
 pub(super) use super::run_disclosure::run_cook_explicit;
-#[cfg(test)]
-pub(super) use super::run_execution::admit_local_cook_dispatch_with_clock;
 pub(crate) use super::run_execution::compile_cook_plan;
 pub(super) use super::run_execution::default_cook_prompt_from_task_url;
 #[allow(unused_imports)] // Preserve the existing run module path.
@@ -715,6 +713,10 @@ pub(super) use super::run_execution::validate_cook_source_authority;
 #[cfg(test)]
 pub(super) use super::run_execution::validate_cook_subjects;
 pub(crate) use super::run_execution::{run_cook, CookEntryContext};
+#[cfg(test)]
+pub(super) use super::run_execution::{
+    admit_local_cook_dispatch_with_clock, record_local_dispatch_wait,
+};
 #[cfg(test)]
 pub(super) use super::run_preview::append_preview_lifecycle_replay_argv;
 #[cfg(test)]

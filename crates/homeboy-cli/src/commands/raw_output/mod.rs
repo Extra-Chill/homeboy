@@ -1,82 +1,85 @@
+//! Execution of raw (non-JSON-envelope) command output.
+//!
+//! [`Commands::route`](crate::cli_surface::Commands) decides once whether a
+//! command renders raw output and, when it does, hands over the bound
+//! [`RawHandler`]. This module only executes that handler; it never re-checks
+//! the command shape.
+
 use crate::cli_surface::Commands;
-use crate::command_contract::{CommandRawOutputMode, CommandResponseMode};
+use crate::command_contract::{CommandJsonFamily, CommandRawOutputMode};
 
 use super::output_runtime::{CommandPresentation, CommandRun};
 use super::utils::{response as output, tty};
-use super::{release, review, runner, runs, self_cmd, ssh, trace};
+use super::{component, docs, release, review, runner, runs, ssh, trace};
 
-pub enum RawExecution {
-    Handled(i32),
-    Continue(Box<Commands>),
+/// A command bound to the raw-output handler the routing decision selected.
+pub(crate) enum RawHandler {
+    /// `ssh <target>` with no command: requires a TTY, then runs the normal
+    /// command path.
+    SshInteractive(ssh::SshArgs),
+    SelfDocs(docs::DocsArgs),
+    ReleaseChangelog(release::changelog::ChangelogArgs),
+    Review(review::ReviewArgs),
+    Trace(trace::TraceArgs),
+    Runs(runs::RunsMarkdown),
+    ComponentChanged(component::ComponentChanged),
+    Runner(runner::PlainTextRunner),
+    Ssh(ssh::SshArgs),
 }
 
-pub enum CommandRunPreparation {
-    Handled(i32),
+impl RawHandler {
+    pub(crate) fn mode(&self) -> CommandRawOutputMode {
+        match self {
+            Self::SshInteractive(_) => CommandRawOutputMode::InteractivePassthrough,
+            Self::SelfDocs(_)
+            | Self::ReleaseChangelog(_)
+            | Self::Review(_)
+            | Self::Trace(_)
+            | Self::Runs(_) => CommandRawOutputMode::Markdown,
+            Self::ComponentChanged(_) | Self::Runner(_) | Self::Ssh(_) => {
+                CommandRawOutputMode::PlainText
+            }
+        }
+    }
+
+    pub(crate) fn json_family(&self) -> CommandJsonFamily {
+        match self {
+            Self::SelfDocs(_) | Self::ReleaseChangelog(_) | Self::Runs(_) => {
+                CommandJsonFamily::Workspace
+            }
+            Self::Review(_) | Self::Trace(_) => CommandJsonFamily::Quality,
+            Self::SshInteractive(_)
+            | Self::ComponentChanged(_)
+            | Self::Runner(_)
+            | Self::Ssh(_) => CommandJsonFamily::Ops,
+        }
+    }
+}
+
+pub(crate) enum RawOutcome {
+    /// The command finished without producing a run (exit code only).
+    Exit(i32),
+    /// The command continues on the JSON envelope path.
     Json(Box<Commands>),
-    Raw(Box<CommandRun>),
+    /// The raw output run to emit.
+    Run(Box<CommandRun>),
 }
 
-pub(crate) fn prepare_command_run(
-    command: Commands,
-    mode: CommandResponseMode,
-    retain_raw_evidence: bool,
-) -> CommandRunPreparation {
-    match mode {
-        CommandResponseMode::Json => CommandRunPreparation::Json(Box::new(command)),
-        CommandResponseMode::Raw(CommandRawOutputMode::InteractivePassthrough) => {
-            match validate_interactive_tty(command) {
-                RawExecution::Handled(exit_code) => CommandRunPreparation::Handled(exit_code),
-                RawExecution::Continue(command) => CommandRunPreparation::Json(command),
-            }
+pub(crate) fn run(handler: RawHandler, retain_raw_evidence: bool) -> RawOutcome {
+    let run = match handler {
+        RawHandler::SshInteractive(args) => return validate_interactive_tty(args),
+        RawHandler::SelfDocs(args) => raw_stdout_only(docs::run_markdown(args)),
+        RawHandler::ReleaseChangelog(args) => {
+            raw_stdout_only(release::changelog::run_markdown(args))
         }
-        CommandResponseMode::Raw(raw_mode) => {
-            let raw_run = run(command, raw_mode, retain_raw_evidence)
-                .expect("markdown and plain-text modes should return raw output");
-            CommandRunPreparation::Raw(Box::new(raw_run))
-        }
-    }
-}
-
-pub fn run(
-    command: Commands,
-    mode: CommandRawOutputMode,
-    retain_raw_evidence: bool,
-) -> Option<CommandRun> {
-    match mode {
-        CommandRawOutputMode::InteractivePassthrough => None,
-        CommandRawOutputMode::Markdown => Some(run_markdown(command)),
-        CommandRawOutputMode::PlainText => Some(run_plain_text(command, retain_raw_evidence)),
-    }
-}
-
-fn run_markdown(command: Commands) -> CommandRun {
-    match command {
-        Commands::SelfCmd(args) => raw_stdout_only(self_cmd::run_docs_markdown(args)),
-        Commands::Release(args) => match args.markdown_changelog_args() {
-            Some(changelog_args) => {
-                raw_stdout_only(release::changelog::run_markdown(changelog_args))
-            }
-            None => raw_stdout_only(unsupported_output("markdown")),
-        },
-        Commands::Review(args) => review::raw_output::run_markdown_with_json(args),
-        Commands::Trace(args) => trace::run_markdown_with_json_artifact(args),
-        Commands::Runs(args) => raw_stdout_only(runs::run_markdown(args)),
-        _ => raw_stdout_only(unsupported_output("markdown")),
-    }
-}
-
-fn run_plain_text(command: Commands, retain_raw_evidence: bool) -> CommandRun {
-    match command {
-        Commands::Component(args) => raw_stdout_only(super::component::run_changed(args)),
-        Commands::Runner(args)
-            if runner::is_compact_exec_stdout(&args)
-                || runner::is_compact_job_list_stdout(&args) =>
-        {
-            runner_compact_raw_output(args)
-        }
-        Commands::Ssh(args) => ssh_raw(args, retain_raw_evidence),
-        _ => raw_stdout_only(unsupported_output("plain text")),
-    }
+        RawHandler::Review(args) => review::raw_output::run_markdown_with_json(args),
+        RawHandler::Trace(args) => trace::run_markdown_with_json_artifact(args),
+        RawHandler::Runs(markdown) => raw_stdout_only(runs::run_markdown(markdown)),
+        RawHandler::ComponentChanged(changed) => raw_stdout_only(component::run_changed(changed)),
+        RawHandler::Runner(plain_text) => plain_text.run(),
+        RawHandler::Ssh(args) => ssh_raw(args, retain_raw_evidence),
+    };
+    RawOutcome::Run(Box::new(run))
 }
 
 /// Emit only the remote command's stdout to local stdout and its stderr to local
@@ -102,10 +105,6 @@ fn ssh_raw(args: ssh::SshArgs, retain_raw_evidence: bool) -> CommandRun {
     }
 }
 
-fn runner_compact_raw_output(args: crate::commands::runner::RunnerArgs) -> CommandRun {
-    runner::run_plain_text_raw(args)
-}
-
 fn raw_stdout_only(result: homeboy::core::Result<(String, i32)>) -> CommandRun {
     match result {
         Ok((content, exit_code)) => {
@@ -115,9 +114,9 @@ fn raw_stdout_only(result: homeboy::core::Result<(String, i32)>) -> CommandRun {
     }
 }
 
-fn validate_interactive_tty(command: Commands) -> RawExecution {
+fn validate_interactive_tty(args: ssh::SshArgs) -> RawOutcome {
     if tty::require_tty_for_interactive() {
-        return RawExecution::Continue(Box::new(command));
+        return RawOutcome::Json(Box::new(Commands::Ssh(args)));
     }
 
     let err = homeboy::core::Error::validation_invalid_argument(
@@ -127,34 +126,5 @@ fn validate_interactive_tty(command: Commands) -> RawExecution {
         None,
     );
     output::print_result::<serde_json::Value>(Err(err)).ok();
-    RawExecution::Handled(2)
-}
-
-fn unsupported_output(mode: &str) -> homeboy::core::Result<(String, i32)> {
-    Err(homeboy::core::Error::validation_invalid_argument(
-        "output_mode",
-        format!("Command does not support {mode} output"),
-        None,
-        None,
-    ))
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn interactive_passthrough_has_no_raw_text_result() {
-        let result = run(
-            Commands::Contract(crate::commands::contract::ContractArgs {
-                command: crate::commands::contract::ContractCommand::Manifest(
-                    crate::commands::manifest::ManifestArgs {},
-                ),
-            }),
-            CommandRawOutputMode::InteractivePassthrough,
-            false,
-        );
-
-        assert!(result.is_none());
-    }
+    RawOutcome::Exit(2)
 }

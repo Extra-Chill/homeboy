@@ -934,7 +934,7 @@ fn evaluate_lab_runner_capabilities(
 
     LabRunnerGateDecision::Missing {
         runner_id: runner_id.to_string(),
-        command: plan.command,
+        command: plan.command.clone(),
         missing_tools,
         reason,
         remediation,
@@ -1174,7 +1174,7 @@ mod tests {
     #[test]
     fn prepare_lab_runner_capability_detects_project_tool_needs() {
         let plan = prepare_lab_runner_capability(LabRunnerCapabilityContract {
-            command: "lint",
+            command: "lint".to_string(),
             required_tools: vec![
                 RunnerRequiredTool::new("runtime"),
                 RunnerRequiredTool::new("package-manager"),
@@ -1207,7 +1207,7 @@ mod tests {
     fn prepared_lab_runner_capability_converts_to_preflight() {
         let preflight: RunnerCapabilityPreflight =
             prepare_lab_runner_capability(LabRunnerCapabilityContract {
-                command: "test",
+                command: "test".to_string(),
                 required_tools: vec![
                     RunnerRequiredTool::new("runtime"),
                     RunnerRequiredTool::new("workspace-manager"),
@@ -1230,7 +1230,7 @@ mod tests {
     #[test]
     fn opaque_capability_blocks_then_admits_a_connected_fresh_runner() {
         let plan = prepare_lab_runner_capability(LabRunnerCapabilityContract {
-            command: "capability audit",
+            command: "capability audit".to_string(),
             required_tools: Vec::new(),
             required_capabilities: vec!["capability.alpha".to_string()],
         });
@@ -1335,7 +1335,7 @@ mod tests {
     #[test]
     fn lab_runner_gate_allows_capable_runner() {
         let plan = PreparedLabRunnerCapability {
-            command: "lint",
+            command: "lint".to_string(),
             required_tools: vec![
                 RunnerRequiredTool::git(),
                 RunnerRequiredTool::new("runtime"),
@@ -1372,7 +1372,7 @@ mod tests {
     #[test]
     fn lab_runner_gate_reports_missing_tool_for_explicit_runner() {
         let plan = PreparedLabRunnerCapability {
-            command: "test",
+            command: "test".to_string(),
             required_tools: vec![
                 RunnerRequiredTool::git(),
                 RunnerRequiredTool::new("workspace-manager"),
@@ -1418,7 +1418,7 @@ mod tests {
     #[test]
     fn lab_runner_gate_refuses_a_runner_missing_a_declared_capability() {
         let plan = PreparedLabRunnerCapability {
-            command: "agent-task",
+            command: "agent-task".to_string(),
             required_tools: vec![RunnerRequiredTool::git()],
             required_capabilities: vec!["browser".to_string()],
         };
@@ -1446,7 +1446,7 @@ mod tests {
         let result: HomeboyGateResult =
             gate_result_from_lab_decision(LabRunnerGateDecision::Missing {
                 runner_id: "lab".to_string(),
-                command: "test",
+                command: "test".to_string(),
                 missing_tools: vec![RunnerRequiredTool::new("workspace-manager")],
                 reason: "lab runner is missing workspace-manager".to_string(),
                 remediation: vec!["install workspace-manager".to_string()],
@@ -1479,7 +1479,7 @@ mod tests {
     #[test]
     fn lab_runner_gate_reports_local_fallback_for_auto_runner() {
         let plan = PreparedLabRunnerCapability {
-            command: "trace",
+            command: "trace".to_string(),
             required_tools: vec![
                 RunnerRequiredTool::git(),
                 RunnerRequiredTool::new("browser-runner"),
@@ -1570,18 +1570,16 @@ mod tests {
         )
         .build();
         let command = crate::LabOffloadCommand {
-            command: homeboy_core::lab_contract::LabCommandContract::portable(
-                "trace",
-                None,
-                false,
-                &[],
-            ),
             required_extensions: Vec::new(),
             required_capabilities: vec![homeboy_core::lab_contract::LabRunnerWorkloadCapability {
                 name: "playwright".to_string(),
                 required: true,
             }],
             workload: None,
+            ..homeboy_core::lab_routing::lab_offload_command_from_contract(
+                homeboy_core::lab_contract::LabCommandContract::portable("trace", None, false, &[]),
+                Vec::new(),
+            )
         };
         let workload = crate::workload::build_lab_runner_workload(
             crate::workload::LabRunnerWorkloadBuildInput {

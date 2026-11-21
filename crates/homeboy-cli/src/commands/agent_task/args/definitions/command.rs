@@ -31,6 +31,18 @@ impl AgentTaskCommand {
             _ => false,
         }
     }
+
+    /// Internal adapters whose request is already exact: `promotion-provider`
+    /// carries it on process stdin and `execution-step` names a recorded intent.
+    /// The runtime dispatches them before preflight, placement routing or
+    /// startup work can consume stdin or re-place the recorded request, and
+    /// their machine envelope is never operator-projected.
+    pub(crate) fn is_exact_internal_adapter(&self) -> bool {
+        matches!(
+            self,
+            Self::ExecutionStep { .. } | Self::PromotionProvider(_)
+        )
+    }
 }
 
 #[derive(Args, Debug)]

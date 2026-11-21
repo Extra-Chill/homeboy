@@ -379,6 +379,7 @@ fn sync_commit(runner: &str, repo: &Path, sha: &str) -> Result<(String, &'static
             validation_dependency_ids: None,
             run_isolation_token: None,
         },
+        &homeboy::runner::runners::WorkspaceControl::default(),
     );
     let _ = git(repo, &["worktree", "remove", "--force", &checkout_arg]);
     Ok((

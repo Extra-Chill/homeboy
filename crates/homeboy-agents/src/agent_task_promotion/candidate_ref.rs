@@ -76,6 +76,7 @@ fn try_pin_applied_candidate(
     };
     let published = homeboy_core::git::publication_candidate(path, sha, &title)?;
     git(&["update-ref", &reference, &published])?;
+    promotion["publication_sha"] = Value::String(published);
     promotion["candidate_ref"] = Value::String(reference);
     Ok(())
 }

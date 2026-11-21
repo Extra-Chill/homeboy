@@ -753,7 +753,7 @@ pub(crate) fn reconcile_run_in_store(
                         &refreshed,
                         runner_evidence.as_ref(),
                     );
-                    match agent_task_lifecycle::cancel_exact_run_in_store_with_provenance(
+                    match agent_task_lifecycle::cancel_exact_run_in_store(
                         &lifecycle_store,
                         resolved_run_id,
                         Some(&reason),

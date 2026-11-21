@@ -39,8 +39,12 @@ fn sync_local_workspace(runner_id: &str, runner_root: &Path) -> String {
     fs::create_dir_all(&source).expect("source dir");
     fs::write(source.join("file.txt"), "hello\n").expect("source file");
     create_local_runner(runner_id, runner_root);
-    let (synced, _) = sync_workspace(runner_id, sync_options(source.display().to_string()))
-        .expect("sync workspace");
+    let (synced, _) = sync_workspace(
+        runner_id,
+        sync_options(source.display().to_string()),
+        &crate::WorkspaceControl::default(),
+    )
+    .expect("sync workspace");
     synced.remote_path
 }
 
@@ -484,10 +488,18 @@ fn concurrent_same_ref_jobs_keep_the_remaining_job_workspace_after_peer_reap() {
         let mut second_options = sync_options(source.display().to_string());
         second_options.mode = RunnerWorkspaceSyncMode::Git;
         second_options.run_isolation_token = Some("job-test".to_string());
-        let (first, _) = sync_workspace("lab-local-concurrent-ownership", first_options)
-            .expect("materialize lint workspace");
-        let (second, _) = sync_workspace("lab-local-concurrent-ownership", second_options)
-            .expect("materialize test workspace");
+        let (first, _) = sync_workspace(
+            "lab-local-concurrent-ownership",
+            first_options,
+            &crate::WorkspaceControl::default(),
+        )
+        .expect("materialize lint workspace");
+        let (second, _) = sync_workspace(
+            "lab-local-concurrent-ownership",
+            second_options,
+            &crate::WorkspaceControl::default(),
+        )
+        .expect("materialize test workspace");
 
         assert_ne!(first.remote_path, second.remote_path);
         assert!(Path::new(&first.remote_path).join("file.txt").is_file());

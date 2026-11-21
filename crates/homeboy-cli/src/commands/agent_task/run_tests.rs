@@ -1114,6 +1114,37 @@ fn continuation_preflight_reports_a_read_only_rejection_without_creating_a_run()
     });
 }
 
+/// A pressure wait is durable Cook progress whose start survives every poll.
+#[test]
+fn local_dispatch_wait_is_durable_cook_progress() {
+    crate::test_support::with_isolated_home(|_| {
+        let store =
+            homeboy::agents::agent_task_lifecycle::AgentTaskLifecycleStore::from_environment()
+                .unwrap();
+        let plan = homeboy::agents::agent_tasks::scheduler::AgentTaskPlan::new("plan", vec![]);
+        homeboy::agents::agent_tasks::lifecycle::submit_plan(&plan, Some("cook-hot")).unwrap();
+        let progress = |reason: &str| {
+            super::record_local_dispatch_wait(&store, "cook-hot", reason);
+            store.read_record("cook-hot").unwrap().metadata["cook_progress"].clone()
+        };
+
+        let first = progress("machine is hot (load average 40.4 across 32 CPU(s))");
+        std::thread::sleep(std::time::Duration::from_millis(20));
+        let later = progress("machine is hot (load average 33.1 across 32 CPU(s))");
+
+        assert_eq!(later["phase"], "queued_local_pressure");
+        assert_eq!(later["wait_owner"], "cook_queue");
+        assert_eq!(
+            later["detail"],
+            "machine is hot (load average 33.1 across 32 CPU(s))"
+        );
+        assert_eq!(later["phase_started_at"], first["phase_started_at"]);
+        assert!(later["elapsed_ms"].as_u64().unwrap() >= 20);
+        super::record_local_dispatch_wait(&store, "foreground-cook", "machine is hot");
+        assert!(store.read_record("foreground-cook").is_err());
+    });
+}
+
 mod local_dispatch_admission {
     use super::super::admit_local_cook_dispatch_with_clock;
     use homeboy::core::local_dispatch_admission::{

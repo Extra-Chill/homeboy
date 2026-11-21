@@ -833,7 +833,9 @@ fn provider_timeout_persists_bounded_redacted_last_activity() {
         script("process.stderr.write('x'.repeat(20000) + process.env.HOMEBOY_TIMEOUT_TEST_SECRET); setInterval(() => {}, 1000);")
     );
     let (mut request, provider) = request("task-timeout-evidence", command);
-    request.limits.timeout_ms = Some(50);
+    // Include Node startup and the initial write in the budget. A 50 ms
+    // deadline can expire before the child emits anything on a loaded runner.
+    request.limits.timeout_ms = Some(3_000);
     request.executor.secret_env = vec![SECRET_ENV.to_string()];
 
     let outcome = run_provider_command(&request, &provider, Some("run-timeout-evidence"));

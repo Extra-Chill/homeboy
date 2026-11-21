@@ -60,7 +60,7 @@ pub(crate) fn build_lab_runner_workload_for_dispatched_command(
     dispatched_command: &[String],
 ) -> LabRunnerWorkload {
     let identity = dispatched_command_identity(dispatched_command)
-        .unwrap_or_else(|| LabRunnerWorkloadCommandIdentity::from_label(input.command.hot_label));
+        .unwrap_or_else(|| LabRunnerWorkloadCommandIdentity::from_label(&input.command.hot_label));
     build_lab_runner_workload_with_command_identity(input, identity)
 }
 
@@ -791,18 +791,16 @@ mod tests {
 
     fn command() -> LabOffloadCommand {
         LabOffloadCommand {
-            command: homeboy_core::lab_contract::LabCommandContract::portable(
-                "trace",
-                None,
-                true,
-                &[],
-            ),
             required_extensions: vec!["browser".to_string()],
             required_capabilities: vec![LabRunnerWorkloadCapability {
                 name: "playwright".to_string(),
                 required: true,
             }],
             workload: None,
+            ..homeboy_core::lab_routing::lab_offload_command_from_contract(
+                homeboy_core::lab_contract::LabCommandContract::portable("trace", None, true, &[]),
+                Vec::new(),
+            )
         }
     }
 
@@ -898,7 +896,7 @@ mod tests {
         for case in cases {
             let plan = plan();
             let mut command = command();
-            command.hot_label = "trace";
+            command.hot_label = "trace".to_string();
             let dispatched_command = case
                 .argv
                 .iter()
@@ -1415,7 +1413,7 @@ mod tests {
         for label in ["review lint", "review test", "review build", "review ci"] {
             let plan = plan();
             let mut command = command();
-            command.hot_label = label;
+            command.hot_label = label.to_string();
             command.required_extensions.clear();
             command.required_capabilities.clear();
             let workload = build_lab_runner_workload(LabRunnerWorkloadBuildInput {
@@ -1476,7 +1474,7 @@ mod tests {
     fn lab_runner_workload_validation_accepts_fanout_cook_batch_command_label() {
         let plan = plan();
         let mut command = command();
-        command.hot_label = "agent-task fanout cook-batch";
+        command.hot_label = "agent-task fanout cook-batch".to_string();
         let workload = build_lab_runner_workload(LabRunnerWorkloadBuildInput {
             plan: &plan,
             command: &command,
@@ -1576,7 +1574,7 @@ mod tests {
     fn lab_runner_workload_validation_rejects_wrong_agent_task_secret_handoff_name() {
         let plan = plan();
         let mut command = command();
-        command.hot_label = "agent-task dispatch";
+        command.hot_label = "agent-task dispatch".to_string();
         let mut workload = build_lab_runner_workload(LabRunnerWorkloadBuildInput {
             plan: &plan,
             command: &command,
@@ -1616,7 +1614,7 @@ mod tests {
     fn lab_runner_workload_validation_rejects_missing_tunnel_implicit_secret_handoff_name() {
         let plan = plan();
         let mut command = command();
-        command.hot_label = "tunnel preview-client start";
+        command.hot_label = "tunnel preview-client start".to_string();
         let mut workload = build_lab_runner_workload(LabRunnerWorkloadBuildInput {
             plan: &plan,
             command: &command,
@@ -1694,7 +1692,7 @@ mod tests {
     fn lab_runner_workload_validation_accepts_empty_secret_handoff_without_required_categories() {
         let plan = plan();
         let mut command = command();
-        command.hot_label = "lint";
+        command.hot_label = "lint".to_string();
         let workload = build_lab_runner_workload(LabRunnerWorkloadBuildInput {
             plan: &plan,
             command: &command,

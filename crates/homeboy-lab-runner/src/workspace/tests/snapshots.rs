@@ -174,6 +174,7 @@ fn workspace_snapshots_render_metadata_for_synced_workspace() {
                 source.display().to_string(),
                 Some("run-figma-1".to_string()),
             ),
+            &crate::WorkspaceControl::default(),
         )
         .expect("sync workspace");
 
@@ -234,6 +235,7 @@ fn stale_truncated_metadata_does_not_block_current_workspace_sync() {
                 source.path().display().to_string(),
                 Some("current-run".to_string()),
             ),
+            &crate::WorkspaceControl::default(),
         )
         .expect("current workspace sync ignores unrelated stale metadata");
 
@@ -271,6 +273,7 @@ fn ssh_snapshot_listing_preserves_entries_and_isolates_invalid_metadata() {
                 source.path().display().to_string(),
                 Some("ssh-run".to_string()),
             ),
+            &crate::WorkspaceControl::default(),
         )
         .expect("sync");
         let invalid_checkout = runner_root.path().join("_lab_workspaces/invalid");
@@ -318,6 +321,7 @@ fn workspace_snapshots_filters_by_repo_ref_commit_and_run() {
                 first.path().display().to_string(),
                 Some("run-one".to_string()),
             ),
+            &crate::WorkspaceControl::default(),
         )
         .expect("sync first");
         sync_workspace(
@@ -326,6 +330,7 @@ fn workspace_snapshots_filters_by_repo_ref_commit_and_run() {
                 second.path().display().to_string(),
                 Some("run-two".to_string()),
             ),
+            &crate::WorkspaceControl::default(),
         )
         .expect("sync second");
 
@@ -401,8 +406,12 @@ fn same_repository_and_commit_share_prepared_source_cache_across_worktrees() {
         );
         options.mode = RunnerWorkspaceSyncMode::Git;
         options.controller_routed_git = true;
-        let (first, _) = sync_workspace("lab-local-prepared-cache-worktree", options.clone())
-            .expect("first child materializes source");
+        let (first, _) = sync_workspace(
+            "lab-local-prepared-cache-worktree",
+            options.clone(),
+            &crate::WorkspaceControl::default(),
+        )
+        .expect("first child materializes source");
         std::fs::write(
             std::path::Path::new(&first.remote_path).join("dependency-marker"),
             "hydrated\n",
@@ -417,8 +426,12 @@ fn same_repository_and_commit_share_prepared_source_cache_across_worktrees() {
 
         options.path = second_attempt_path.display().to_string();
         options.run_isolation_token = Some("job-two".to_string());
-        let (second, _) = sync_workspace("lab-local-prepared-cache-worktree", options)
-            .expect("second child materializes from its own worktree");
+        let (second, _) = sync_workspace(
+            "lab-local-prepared-cache-worktree",
+            options,
+            &crate::WorkspaceControl::default(),
+        )
+        .expect("second child materializes from its own worktree");
 
         assert_ne!(first.remote_path, second.remote_path);
         assert_eq!(
@@ -461,8 +474,12 @@ fn same_commit_prepared_source_cache_creates_private_job_views() {
         );
         options.mode = RunnerWorkspaceSyncMode::Git;
         options.controller_routed_git = true;
-        let (first, _) = sync_workspace("lab-local-prepared-cache", options.clone())
-            .expect("first job materializes source");
+        let (first, _) = sync_workspace(
+            "lab-local-prepared-cache",
+            options.clone(),
+            &crate::WorkspaceControl::default(),
+        )
+        .expect("first job materializes source");
         std::fs::write(
             std::path::Path::new(&first.remote_path).join("dependency-marker"),
             "hydrated\n",
@@ -480,8 +497,12 @@ fn same_commit_prepared_source_cache_creates_private_job_views() {
             .any(|entry| entry.contains("event=created")));
 
         options.run_isolation_token = Some("job-two".to_string());
-        let (second, _) = sync_workspace("lab-local-prepared-cache", options)
-            .expect("same commit receives private cached view");
+        let (second, _) = sync_workspace(
+            "lab-local-prepared-cache",
+            options,
+            &crate::WorkspaceControl::default(),
+        )
+        .expect("same commit receives private cached view");
 
         assert_ne!(first.remote_path, second.remote_path);
         assert_eq!(
@@ -555,8 +576,12 @@ fn prepared_source_cache_retains_a_bounded_completed_working_set() {
             git(source.path(), &["add", "."]);
             git(source.path(), &["commit", "-m", &format!("source {index}")]);
             options.run_isolation_token = Some(format!("job-{index}"));
-            let (synced, _) = sync_workspace("lab-local-prepared-cache-retention", options.clone())
-                .expect("materialize source");
+            let (synced, _) = sync_workspace(
+                "lab-local-prepared-cache-retention",
+                options.clone(),
+                &crate::WorkspaceControl::default(),
+            )
+            .expect("materialize source");
             save_prepared_source_cache(
                 "lab-local-prepared-cache-retention",
                 &synced.local_path,

@@ -68,6 +68,29 @@ use crate::commands::utils::watch::{
 /// aggregate cannot flood recovery output. Overflow is reported as an
 /// `omitted` count rather than dropped silently.
 const COMPACT_REF_LIMIT: usize = 12;
+
+fn attach_gate_cleanup_warnings(value: &mut Value, record: &AgentTaskRunRecord) {
+    let Ok(Some(promotion)) =
+        agent_task_service_direct::recorded_promotion_report(&record.metadata)
+    else {
+        return;
+    };
+    let warnings: Vec<_> = promotion
+        .get("deterministic_gates")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(|gate| {
+            gate.get("cleanup_warning")
+                .filter(|warning| !warning.is_null())
+                .map(|warning| json!({"gate_id": gate.get("id"), "cleanup_warning": warning}))
+        })
+        .take(COMPACT_REF_LIMIT)
+        .collect();
+    if !warnings.is_empty() {
+        value["gate_cleanup_warnings"] = json!(warnings);
+    }
+}
 const COMPACT_TASK_LIMIT: usize = 12;
 const COMPACT_TEXT_LIMIT: usize = 512;
 /// A runnable command is the point of status; one that embeds durable input
@@ -167,6 +190,7 @@ fn status_without_feedback(args: StatusArgs) -> CmdResult<Value> {
     }
     // Status is a pure projection (#13697, #15718): every read below is
     // bounded and never initializes, migrates, or reconciles durable state.
+    value["failure"] = Value::Null;
     if let Ok(record) = bounded_exact_record(&target.run_id) {
         let outcome = cook_outcome_record(&args, &record);
         let outcome = outcome.as_ref().unwrap_or(&record);
@@ -205,6 +229,31 @@ fn status_without_feedback(args: StatusArgs) -> CmdResult<Value> {
                 .get("candidate_ref")
                 .cloned()
                 .unwrap_or(Value::Null);
+            value["gated_sha"] = promotion
+                .pointer("/candidate/candidate_sha")
+                .cloned()
+                .unwrap_or(Value::Null);
+            value["publication_sha"] = promotion
+                .get("publication_sha")
+                .cloned()
+                .unwrap_or(Value::Null);
+            value["tree"] = promotion
+                .pointer("/candidate/tree_sha")
+                .cloned()
+                .unwrap_or(Value::Null);
+            if value["publication_sha"].is_null() {
+                if let (Some(path), Some(reference)) = (
+                    promotion.pointer("/target/path").and_then(Value::as_str),
+                    promotion.get("candidate_ref").and_then(Value::as_str),
+                ) {
+                    value["publication_sha"] = json!(homeboy::core::git::rev_parse(
+                        std::path::Path::new(path),
+                        reference
+                    ));
+                }
+            }
+            value["identity_note"] =
+                json!("The publication commit carries the gated tree unchanged.");
             value["candidate_sha"] = promotion
                 .pointer("/candidate/candidate_sha")
                 .cloned()
@@ -213,9 +262,12 @@ fn status_without_feedback(args: StatusArgs) -> CmdResult<Value> {
         // The typed immutable candidate commit harvest recorded (#16303).
         if let Some(candidate) = &record.candidate {
             value["candidate_commit"] = json!(candidate);
+            value["gated_sha"] = json!(candidate.candidate_sha);
+            value["tree"] = json!(candidate.tree_sha);
         }
         // Provider response identity, distinct from the requested routing tier.
         value["served_models"] = json!(record.served_models);
+        attach_gate_cleanup_warnings(&mut value, outcome);
         attach_lab_snapshot_failure_projection(&mut value, &record);
         let admission = agent_task_service_direct::queued_admission(&record);
         attach_lab_admission_wait(&mut value, admission.as_ref());
@@ -239,6 +291,7 @@ fn status_without_feedback(args: StatusArgs) -> CmdResult<Value> {
             });
             value["lab_staging_diagnostic"] = collected_diagnostic_value(diagnostic);
         }
+        attach_gate_failure(&mut value, &record);
     }
     attach_promotion_replay(&mut value, &target.run_id, &args.run_id);
     if value["action_eligibility"]["actions"]
@@ -296,7 +349,9 @@ fn bounded_exact_record(run_id: &str) -> homeboy::core::Result<AgentTaskRunRecor
 }
 
 fn attach_promotion_replay(value: &mut Value, run_id: &str, requested_id: &str) {
-    if crate::commands::agent_task_summary::live_gate_verifying(value) {
+    if !value["failure"].is_null()
+        || crate::commands::agent_task_summary::live_gate_verifying(value)
+    {
         return;
     }
     let Ok(record) = bounded_exact_record(run_id) else {
@@ -1047,8 +1102,11 @@ fn preserve_controller_owner_placement_with_prefix(
             }
         }
         Value::Object(values) => {
-            for value in values.values_mut() {
-                preserve_controller_owner_placement_with_prefix(value, run_id, recovery_prefix);
+            for (key, value) in values.iter_mut() {
+                // Retained gate evidence is data, not a suggested lifecycle command.
+                if key != "failure" {
+                    preserve_controller_owner_placement_with_prefix(value, run_id, recovery_prefix);
+                }
             }
         }
         _ => {}
@@ -1143,3 +1201,83 @@ mod cancel_exit_code_tests;
 #[cfg(test)]
 #[path = "status/tests.rs"]
 mod tests;
+
+#[cfg(test)]
+mod gate_failure_projection_tests {
+    use super::*;
+
+    #[test]
+    fn status_and_diagnose_failure_table() {
+        for (status, private, termination, expected_action) in [
+            (
+                "failed",
+                false,
+                "completed",
+                "homeboy agent-task recover run",
+            ),
+            (
+                "failed",
+                true,
+                "completed",
+                "homeboy agent-task recover run",
+            ),
+            (
+                "failed",
+                false,
+                "no_progress",
+                "homeboy agent-task recover run --regate",
+            ),
+            ("succeeded", false, "completed", ""),
+        ] {
+            let stdout = (1..=50)
+                .map(|n| format!("line {n}"))
+                .collect::<Vec<_>>()
+                .join("\n");
+            let report = json!({"deterministic_gates": [{
+                "id": "verify", "status": status,
+                "visibility": if private { "private" } else { "public" },
+                "reveal_policy": "summary_only", "command": ["cargo", "test"],
+                "exit_code": 1, "termination": termination, "stdout": stdout,
+                "lab_receipt": {"artifact_ref": "homeboy://run/run/artifact/output"}
+            }]});
+            let failure = agent_task_service_direct::gate_failure_projection(&report);
+            let mut status_value = json!({"run": "run"});
+            let mut diagnose_value =
+                json!({"summary": "deterministic gates rejected the candidate"});
+            project_gate_failure(&mut status_value, failure.clone(), "run");
+            project_gate_failure(&mut diagnose_value, failure, "run");
+            let status_value = compact_control_plane_status(status_value);
+            assert_eq!(status_value["failure"], diagnose_value["failure"]);
+            if status == "succeeded" {
+                assert!(status_value["failure"].is_null());
+                continue;
+            }
+            let failure = &status_value["failure"];
+            assert_eq!(failure["gate"], "verify#1");
+            assert_eq!(failure["exit_code"], 1);
+            assert_eq!(failure["termination"], termination);
+            assert_eq!(failure["artifact"], "homeboy://run/run/artifact/output");
+            if private {
+                assert!(failure["command"].is_null());
+                assert!(failure["output_tail"].is_null());
+            } else {
+                assert_eq!(failure["command"], "cargo test");
+                let tail = failure["output_tail"].as_str().unwrap();
+                assert_eq!(tail.lines().count(), 40);
+                assert!(tail.starts_with("line 11\n"));
+            }
+            for value in [&status_value, &diagnose_value] {
+                assert_eq!(value["next_action"]["command"], expected_action);
+                if termination == "no_progress" {
+                    let suggestion = value["next_action"]["description"].as_str().unwrap();
+                    assert!(suggestion.contains("--gate-timeout-seconds"));
+                    assert!(suggestion.contains("--gate-no-progress-timeout-seconds"));
+                }
+            }
+            let summary = diagnose_value["summary"].as_str().unwrap();
+            assert!(summary.contains("verify#1"));
+            assert!(summary.contains("exit 1"));
+            assert!(summary.contains("homeboy://run/run/artifact/output"));
+        }
+    }
+}

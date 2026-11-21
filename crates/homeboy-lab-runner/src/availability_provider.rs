@@ -53,7 +53,13 @@ pub fn register() {
             let snapshot = crate::runner_status_admission_snapshot(runner).ok();
             serde_json::json!({
                 "controller_build": homeboy_core::build_identity::current(),
-                "runner_build": snapshot.and_then(|snapshot| snapshot.summary.daemon_build_identity),
+                "runner_build": snapshot.as_ref().and_then(|snapshot| snapshot.summary.daemon_build_identity.as_ref()),
+                "pressure": snapshot.as_ref().and_then(|snapshot| snapshot.summary.pressure.as_ref()),
+                "pressure_thresholds": snapshot.as_ref()
+                    .and_then(|snapshot| snapshot.status.daemon_freshness.as_ref())
+                    .and_then(|freshness| freshness.runtime_paths.as_ref())
+                    .map(|paths| &paths.pressure_thresholds),
+                "pressure_holders": snapshot.as_ref().map(|snapshot| &snapshot.status.active_jobs),
             })
         },
     ));

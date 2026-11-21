@@ -970,6 +970,9 @@ fn admit_unmaterialized_cook(
             "unmaterialized admission called for a non-Cook command",
         ));
     };
+    if !cook.no_progress {
+        eprintln!("Cook: checking runner resource admission; waiting for eligibility");
+    }
     let mut args = *cook.clone();
     let repository = crate::commands::agent_task::run::prepare_cook_request(&mut args, provenance)?;
     let resolved =
@@ -1152,6 +1155,7 @@ fn report_unmaterialized_cook_admission(
         "runner_readiness": readiness_state,
         "commands": admission["commands"],
         "execution_scheduling": record.metadata["execution_scheduling"],
+        "admission_wait": homeboy::agents::agent_task_service::cook_admission_wait(record),
     });
     if let Some(blocker) = blocker {
         output["waiting_for"] = blocker["waiting_for"].clone();

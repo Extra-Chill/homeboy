@@ -46,14 +46,72 @@ pub fn execution_step_wait(record: &agent_task_lifecycle::AgentTaskRunRecord) ->
         ),
         None => String::new(),
     };
+    let retry = wait["next_attempt_at"]
+        .as_str()
+        .map(|time| format!("next attempt {time}"))
+        .unwrap_or_else(|| "waiting for runner eligibility; no fixed retry time".to_string());
     let message = format!(
-        "runner {runner}: {reason}; waiting since {}{queue}{builds}; next action: {action}",
+        "runner {runner}: {reason}; waiting since {}{queue}{builds}; {retry}; next action: {action}",
         wait["waiting_since"].as_str().unwrap_or("unknown")
     );
+    for field in ["pressure", "pressure_thresholds", "pressure_holders"] {
+        wait[field] = context[field].clone();
+    }
     wait["builds"] = context;
     wait["next_action"] = json!(action);
     wait["message"] = json!(message);
     Some(wait)
+}
+
+/// Admission evidence shared by detached submission and status. Missing
+/// observations remain null rather than implying an idle runner or a deadline.
+pub fn cook_admission_wait(record: &agent_task_lifecycle::AgentTaskRunRecord) -> Value {
+    if let Some(wait) = execution_step_wait(record) {
+        return wait;
+    }
+    let admission = &record.metadata["unmaterialized_cook_admission"];
+    let runner = record.runner_id().or_else(|| {
+        record.metadata["unmaterialized_cook_admission"]["binding"]["placement"]["runner_ref"]
+            .as_str()
+    });
+    let context = runner
+        .map(homeboy_core::daemon::step_job::step_runner_wait_context)
+        .unwrap_or(Value::Null);
+    let position = agent_task_lifecycle::AgentTaskLifecycleStore::from_environment()
+        .ok()
+        .and_then(|store| agent_task_lifecycle::list_records_in_store(&store).ok())
+        .and_then(|records| {
+            let mut queued: Vec<_> = records
+                .iter()
+                .filter(|other| {
+                    !other.state().is_terminal()
+                        && other.runner_id().or_else(|| {
+                            other.metadata["unmaterialized_cook_admission"]["binding"]["placement"]
+                                ["runner_ref"]
+                                .as_str()
+                        }) == runner
+                        && other.metadata["unmaterialized_cook_admission"]["state"] == "queued"
+                        && other.metadata["unmaterialized_cook_admission"]["reason"]
+                            == admission["reason"]
+                })
+                .collect();
+            queued.sort_by(|a, b| (&a.submitted_at, &a.run_id).cmp(&(&b.submitted_at, &b.run_id)));
+            queued
+                .iter()
+                .position(|other| other.run_id == record.run_id)
+                .map(|index| index + 1)
+        });
+    json!({
+        "queue_position": position,
+        "queue_scope": "controller admissions for the same runner and reason",
+        "retry_note": "waiting for runner eligibility; no fixed retry time unless next_attempt_at is recorded",
+        "next_attempt_at": admission["wait"]["not_before"].as_str()
+            .or_else(|| admission["next_attempt_at"].as_str())
+            .or_else(|| record.metadata["execution_scheduling"]["next_attempt_at"].as_str()),
+        "pressure": context["pressure"],
+        "pressure_thresholds": context["pressure_thresholds"],
+        "pressure_holders": context["pressure_holders"],
+    })
 }
 
 #[derive(Debug, Clone)]

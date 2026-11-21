@@ -1814,10 +1814,13 @@ pub(crate) mod tests_support {
                 false,
             ),
             command: Some(crate::LabOffloadCommand {
-                command: LabCommandContract::portable("agent-task", None, false, &[]),
                 required_extensions: Vec::new(),
                 required_capabilities: Vec::new(),
                 workload: None,
+                ..homeboy_core::lab_routing::lab_offload_command_from_contract(
+                    LabCommandContract::portable("agent-task", None, false, &[]),
+                    Vec::new(),
+                )
             }),
             normalized_args: &args,
             placement: homeboy_lab_contract::Placement::Lab,

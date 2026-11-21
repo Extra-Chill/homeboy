@@ -308,6 +308,7 @@ pub(super) fn sync_lab_offload_rigs(
                         validation_dependency_ids: None,
                         run_isolation_token: None,
                     },
+                    &crate::WorkspaceControl::default(),
                 )?
                 .0;
                 let install_source = remote_package_path(

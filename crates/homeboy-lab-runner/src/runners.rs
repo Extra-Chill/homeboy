@@ -57,7 +57,7 @@ pub use crate::{
     runner_job_log_snapshot_for_session, runner_readiness_admission_snapshot,
     runner_readiness_for_status, runner_readiness_repair_admitted,
     runner_status_admission_snapshot, runner_status_admission_snapshot_for_status, status,
-    statuses, statuses_indexed, sync_workspace, sync_workspace_before, update_workspace,
+    statuses, statuses_indexed, sync_workspace, update_workspace,
     verify_workspace_ref_hydration_source, workspace_snapshots, HomeboyBinaryRefreshArtifacts,
     HomeboyBinaryRefreshFailure, HomeboyBinaryRefreshMode, HomeboyBinaryRefreshOptions,
     HomeboyBinaryRefreshOutput, HomeboyBinaryRefreshPlan, HomeboyRefreshPhase,
@@ -90,7 +90,7 @@ pub use crate::{
     RunnerWorkspaceSnapshotAppliedFilters, RunnerWorkspaceSnapshotEntry,
     RunnerWorkspaceSnapshotFilters, RunnerWorkspaceSnapshotsOutput, RunnerWorkspaceSyncMode,
     RunnerWorkspaceSyncOptions, RunnerWorkspaceSyncOutput, RunnerWorkspaceUpdateOptions,
-    RunnerWorkspaceUpdateOutput, RuntimeMaterializationStatus,
+    RunnerWorkspaceUpdateOutput, RuntimeMaterializationStatus, WorkspaceControl,
 };
 pub use crate::{
     observe_runner_capabilities, runner_capability_inventory, runner_capability_inventory_until,

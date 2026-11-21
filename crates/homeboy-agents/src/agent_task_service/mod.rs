@@ -47,9 +47,12 @@ mod cook_step;
 mod cook_supervision;
 mod discovery;
 mod lab_admission;
-pub use lab_admission::{execution_step_wait, queued_admission, QueuedAdmission};
+pub use lab_admission::{
+    cook_admission_wait, execution_step_wait, queued_admission, QueuedAdmission,
+};
 mod execution;
 mod execution_step;
+mod gate_failure;
 /// Read-only process-tree activity sampling for a running Cook.
 ///
 /// Lived in `homeboy-core` as a top-level module even though `cook_activity`
@@ -60,6 +63,7 @@ pub mod process_activity;
 mod promotion_service;
 mod reconcile;
 mod status_support;
+pub use gate_failure::{gate_failure_next_action, gate_failure_projection};
 /// Shared daemon lifecycle for newly submitted orchestration work.
 mod work_job;
 
@@ -90,8 +94,8 @@ pub use cook_promotion::*;
 pub use cook_recipe::*;
 pub use cook_recovery::{
     cook_recovery_delegation, is_store_contention, is_store_contention_message, plan_cook_recovery,
-    prepare_admitted_recovery_continuation, recover_cook, recovers_as_run,
-    with_store_contention_backoff, CookPublishRequest, CookRecoveryOverrides,
+    plan_cook_recovery_recorded, prepare_admitted_recovery_continuation, recover_cook,
+    recovers_as_run, with_store_contention_backoff, CookPublishRequest, CookRecoveryOverrides,
     CookRecoveryPerformer, CookRecoveryPlan, CookRecoveryReport, CookRecoveryRequest,
     CookRecoveryStep, CookRegateInputs, CookReplaceGatesRequest, CookReplacementProof,
     COOK_RECOVERY_SCHEMA, STORE_BUSY_CODE,

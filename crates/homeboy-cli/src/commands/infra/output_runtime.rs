@@ -548,32 +548,37 @@ pub fn run_command(
     provenance: CommandArgumentProvenance,
     placement: crate::cli_surface::Placement,
 ) -> i32 {
-    let plan = command.response_plan(spec, output_file.is_some());
+    let route = command.route(spec, output_file.is_some());
+    let output_file_mode = route.descriptor.output_file_mode;
     let output_service = OutputService::new(output_file);
 
-    let run = match crate::commands::raw_output::prepare_command_run(
-        command,
-        plan.stdout,
-        !matches!(plan.output_file, CommandOutputFileMode::None),
-    ) {
-        crate::commands::raw_output::CommandRunPreparation::Handled(exit_code) => return exit_code,
-        crate::commands::raw_output::CommandRunPreparation::Json(command) => {
-            return output_service.emit_run(
-                run_json(
-                    *command,
-                    spec,
-                    plan.output_file,
-                    output_file,
-                    &provenance,
-                    placement,
-                )
-                .with_identity(identity),
-                plan.output_file,
-            );
+    let command = match route.execution {
+        crate::commands::contract_output_routing::CommandExecution::Json(command) => command,
+        crate::commands::contract_output_routing::CommandExecution::Raw(handler) => {
+            match crate::commands::raw_output::run(
+                handler,
+                !matches!(output_file_mode, CommandOutputFileMode::None),
+            ) {
+                crate::commands::raw_output::RawOutcome::Exit(exit_code) => return exit_code,
+                crate::commands::raw_output::RawOutcome::Json(command) => command,
+                crate::commands::raw_output::RawOutcome::Run(run) => {
+                    return output_service.emit_run(run.with_identity(identity), output_file_mode);
+                }
+            }
         }
-        crate::commands::raw_output::CommandRunPreparation::Raw(run) => run,
     };
-    output_service.emit_run(run.with_identity(identity), plan.output_file)
+    output_service.emit_run(
+        run_json(
+            *command,
+            spec,
+            output_file_mode,
+            output_file,
+            &provenance,
+            placement,
+        )
+        .with_identity(identity),
+        output_file_mode,
+    )
 }
 
 pub(crate) fn emit_json_result_for_identity(

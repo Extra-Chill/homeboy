@@ -35,19 +35,25 @@ mod workspace_sync;
 
 pub(super) fn portable_lab_command(label: &'static str) -> LabOffloadCommand {
     LabOffloadCommand {
-        command: homeboy_core::lab_contract::LabCommandContract::portable(label, None, true, &[]),
         required_extensions: Vec::new(),
         required_capabilities: Vec::new(),
         workload: None,
+        ..homeboy_core::lab_routing::lab_offload_command_from_contract(
+            homeboy_core::lab_contract::LabCommandContract::portable(label, None, true, &[]),
+            Vec::new(),
+        )
     }
 }
 
 pub(super) fn local_only_lab_command(reason: &'static str) -> LabOffloadCommand {
     LabOffloadCommand {
-        command: homeboy_core::lab_contract::LabCommandContract::local_only("rig up", reason),
         required_extensions: Vec::new(),
         required_capabilities: Vec::new(),
         workload: None,
+        ..homeboy_core::lab_routing::lab_offload_command_from_contract(
+            homeboy_core::lab_contract::LabCommandContract::local_only("rig up", reason),
+            Vec::new(),
+        )
     }
 }
 

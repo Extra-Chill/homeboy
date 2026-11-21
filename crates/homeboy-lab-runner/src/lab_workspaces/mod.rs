@@ -166,36 +166,28 @@ pub(super) struct SyncedRuntimeOverlay {
     pub(super) build_provenance: super::runtime_overlay_freshness::RuntimeOverlayBuildProvenance,
 }
 
-#[cfg(test)]
-pub(super) fn sync_extra_lab_workspaces(
-    runner_id: &str,
-    primary_local_path: &str,
-    extra_workspaces: Vec<ExtraLabWorkspace>,
-    workspace_mapping: &mut Vec<LabWorkspaceMappingEntry>,
-) -> Result<Vec<RunnerWorkspaceSyncOutput>> {
-    sync_extra_lab_workspaces_controlled(
-        runner_id,
-        primary_local_path,
-        extra_workspaces,
-        workspace_mapping,
-        &crate::workspace::WorkspaceControl::default(),
-    )
-}
-
-/// Materialize a primary root and every declared extra with one plan/commit.
+/// Materialize every declared extra workspace, and the primary root when the
+/// caller has not already materialized it, with one plan/commit. Extras are
+/// always snapshots, so a Git-mode primary is synced separately and passed as
+/// `primary: None`; `primary_local_path` keeps extras from re-syncing it.
 pub(crate) fn sync_lab_workspace_roots_controlled(
     runner_id: &str,
-    primary: RunnerWorkspaceSyncOptions,
+    primary_local_path: &str,
+    primary: Option<RunnerWorkspaceSyncOptions>,
     extras: &[ExtraLabWorkspace],
     control: &crate::workspace::WorkspaceControl,
 ) -> Result<(
-    RunnerWorkspaceSyncOutput,
+    Option<RunnerWorkspaceSyncOutput>,
     Vec<RunnerWorkspaceSyncOutput>,
     Vec<LabWorkspaceMappingEntry>,
 )> {
-    let primary_path = canonical_existing_dir(&primary.path, "path")?;
+    let primary_path = canonical_existing_dir(primary_local_path, "path")?;
     let mut seen = HashSet::from([primary_path]);
-    let mut requests = vec![(primary, Vec::new())];
+    let has_primary = primary.is_some();
+    let mut requests: Vec<_> = primary
+        .map(|primary| (primary, Vec::new()))
+        .into_iter()
+        .collect();
     let mut entries = Vec::new();
     for extra in extras {
         let local_path = canonical_existing_dir(&extra.path.display().to_string(), "workspace")?;
@@ -207,6 +199,19 @@ pub(crate) fn sync_lab_workspace_roots_controlled(
         } else {
             None
         };
+        if let Some(receipt) = receipt.as_ref().filter(|r| r.omitted_count > 0) {
+            eprintln!(
+                "[lab] provider agent dir {}: omitted {} runner-unportable entr{} from staging: {}",
+                local_path.display(),
+                receipt.omitted_count,
+                if receipt.omitted_count == 1 {
+                    "y"
+                } else {
+                    "ies"
+                },
+                receipt.omitted.join(", ")
+            );
+        }
         let excludes = receipt
             .as_ref()
             .map(ProviderAgentDirStagingReceipt::snapshot_excludes)
@@ -214,6 +219,8 @@ pub(crate) fn sync_lab_workspace_roots_controlled(
         requests.push((
             RunnerWorkspaceSyncOptions {
                 path: local_path.display().to_string(),
+                // A runtime root is shipped as exactly that directory, even
+                // when it lives inside a larger Git checkout.
                 mode: if extra.role == "agent_task_plan_runtime" {
                     RunnerWorkspaceSyncMode::Snapshot
                 } else {
@@ -231,10 +238,13 @@ pub(crate) fn sync_lab_workspace_roots_controlled(
         ));
         entries.push((extra, receipt));
     }
+    if requests.is_empty() {
+        return Ok((None, Vec::new(), Vec::new()));
+    }
     let mut results =
         crate::workspace::sync_workspace_batch_controlled(runner_id, requests, control)?
             .into_iter();
-    let primary = results.next().expect("primary root");
+    let primary = if has_primary { results.next() } else { None };
     let extras = results.collect::<Vec<_>>();
     let mapping = entries
         .into_iter()
@@ -247,82 +257,6 @@ pub(crate) fn sync_lab_workspace_roots_controlled(
         })
         .collect();
     Ok((primary, extras, mapping))
-}
-
-pub(crate) fn sync_extra_lab_workspaces_controlled(
-    runner_id: &str,
-    primary_local_path: &str,
-    extra_workspaces: Vec<ExtraLabWorkspace>,
-    workspace_mapping: &mut Vec<LabWorkspaceMappingEntry>,
-    control: &crate::workspace::WorkspaceControl,
-) -> Result<Vec<RunnerWorkspaceSyncOutput>> {
-    let primary = canonical_existing_dir(primary_local_path, "path")?;
-    let mut seen = HashSet::from([primary]);
-    let mut synced_entries = Vec::new();
-
-    let result = (|| -> Result<()> {
-        for extra in extra_workspaces {
-            control.checkpoint()?;
-            let local_path =
-                canonical_existing_dir(&extra.path.display().to_string(), "workspace")?;
-            if !seen.insert(local_path.clone()) {
-                continue;
-            }
-            let staging_receipt = if is_provider_agent_dir(&extra, &local_path) {
-                Some(plan_provider_agent_dir_staging(&local_path)?)
-            } else {
-                None
-            };
-            let staging_excludes = staging_receipt
-                .as_ref()
-                .map(ProviderAgentDirStagingReceipt::snapshot_excludes)
-                .unwrap_or_default();
-            if let Some(receipt) = staging_receipt.as_ref().filter(|r| r.omitted_count > 0) {
-                eprintln!(
-                    "[lab] provider agent dir {}: omitted {} runner-unportable entr{} from staging: {}",
-                    local_path.display(),
-                    receipt.omitted_count,
-                    if receipt.omitted_count == 1 { "y" } else { "ies" },
-                    receipt.omitted.join(", ")
-                );
-            }
-            let synced = crate::workspace::sync_workspace_controlled_with_excludes(
-                runner_id,
-                RunnerWorkspaceSyncOptions {
-                    path: local_path.display().to_string(),
-                    // A runtime root is shipped as exactly that directory, even
-                    // when it lives inside a larger Git checkout.
-                    mode: if extra.role == "agent_task_plan_runtime" {
-                        RunnerWorkspaceSyncMode::Snapshot
-                    } else {
-                        extra_workspace_sync_mode(&local_path)
-                    },
-                    controller_routed_git: false,
-                    changed_since_base: None,
-                    git_fetch_refs: extra.git_fetch_refs.clone(),
-                    snapshot_includes: extra.snapshot_includes.clone(),
-                    allow_dirty_lab_workspace: extra.allow_dirty_lab_workspace,
-                    validation_dependency_ids: None,
-                    run_isolation_token: None,
-                },
-                &staging_excludes,
-                control,
-            )?
-            .0;
-            let mut entry = workspace_mapping_entry(&extra.role, &synced);
-            entry.source_provenance = extra.source_provenance.clone();
-            entry.staging_receipt = staging_receipt;
-            workspace_mapping.push(entry.clone());
-            synced_entries.push(synced);
-        }
-        Ok(())
-    })();
-    result.map_err(|mut error| {
-        error.details["completed_extra_workspaces"] = serde_json::json!(synced_entries);
-        error
-    })?;
-
-    Ok(synced_entries)
 }
 
 /// A provider agent dir is a provider-config path that is plain controller
@@ -623,27 +557,7 @@ pub(super) fn runtime_overlay_install_workdir(remote_path: &str, workdir: Option
 /// the synced overlays (with resolved remote paths) and folds their workspace
 /// mapping entries into `workspace_mapping`. An empty overlay list is a no-op,
 /// keeping non-overlay offload unchanged.
-#[cfg(test)]
-pub(super) fn sync_lab_runtime_overlays(
-    runner_id: &str,
-    primary_local_path: &str,
-    overlays: Vec<RuntimeOverlay>,
-    workspace_mapping: &mut Vec<LabWorkspaceMappingEntry>,
-    skip_deps_hydration: bool,
-    runner_settings: &homeboy_core::server::RunnerSettings,
-) -> Result<Vec<SyncedRuntimeOverlay>> {
-    sync_lab_runtime_overlays_controlled(
-        runner_id,
-        primary_local_path,
-        overlays,
-        workspace_mapping,
-        skip_deps_hydration,
-        runner_settings,
-        &crate::workspace::WorkspaceControl::default(),
-    )
-}
-
-pub(crate) fn sync_lab_runtime_overlays_controlled(
+pub(crate) fn sync_lab_runtime_overlays(
     runner_id: &str,
     primary_local_path: &str,
     overlays: Vec<RuntimeOverlay>,
@@ -697,7 +611,7 @@ pub(crate) fn sync_lab_runtime_overlays_controlled(
             eprintln!("{warning}");
         }
 
-        let synced = crate::workspace::sync_workspace_controlled(
+        let synced = crate::workspace::sync_workspace(
             runner_id,
             RunnerWorkspaceSyncOptions {
                 path: local_path.display().to_string(),

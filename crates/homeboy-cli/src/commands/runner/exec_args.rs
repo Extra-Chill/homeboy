@@ -1,7 +1,7 @@
 use clap::Args;
 
 #[derive(Args)]
-pub(super) struct RunnerExecArgs {
+pub(crate) struct RunnerExecArgs {
     /// Runner ID
     pub(super) id: String,
 

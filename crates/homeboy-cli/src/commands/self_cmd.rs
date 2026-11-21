@@ -261,19 +261,12 @@ pub fn run(args: SelfArgs) -> CmdResult<Value> {
     }
 }
 
-pub(crate) fn is_docs_markdown(args: &SelfArgs) -> bool {
-    matches!(&args.command, SelfCommand::Docs(_))
-}
-
-pub(crate) fn run_docs_markdown(args: SelfArgs) -> CmdResult<String> {
+/// Split `homeboy self docs` (rendered as raw markdown) from every other
+/// `self` subcommand (JSON envelope).
+pub(crate) fn into_docs_markdown(args: SelfArgs) -> Result<docs::DocsArgs, SelfArgs> {
     match args.command {
-        SelfCommand::Docs(docs_args) => docs::run_markdown(docs_args),
-        _ => Err(homeboy::core::Error::validation_invalid_argument(
-            "output_mode",
-            "Only `homeboy self docs` supports markdown output under `self`",
-            None,
-            None,
-        )),
+        SelfCommand::Docs(docs_args) => Ok(docs_args),
+        command => Err(SelfArgs { command }),
     }
 }
 

@@ -65,6 +65,14 @@ pub fn create(options: WorktreeCreateOptions) -> Result<WorktreeCreateOutput> {
     create_with_store(options, &metadata_dir()?)
 }
 
+/// Create a managed linked worktree at an explicit destination using the native lifecycle.
+pub fn create_at(
+    options: WorktreeCreateOptions,
+    destination: &Path,
+) -> Result<WorktreeCreateOutput> {
+    store_ops::create_at_with_store(options, &metadata_dir()?, Some(destination))
+}
+
 pub fn adopt(options: WorktreeAdoptOptions) -> Result<WorktreeAdoptOutput> {
     adopt_with_store(options, &adopted_metadata_dir()?)
 }

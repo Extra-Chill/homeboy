@@ -902,6 +902,15 @@ pub fn recovers_as_run(id: &str) -> Result<bool> {
 }
 
 pub fn plan_cook_recovery(id: &str) -> Result<CookRecoveryPlan> {
+    plan_cook_recovery_with_probe_policy(id, true)
+}
+
+/// Plan diagnosis from recorded evidence without inspecting live worktrees or capacity.
+pub fn plan_cook_recovery_recorded(id: &str) -> Result<CookRecoveryPlan> {
+    plan_cook_recovery_with_probe_policy(id, false)
+}
+
+fn plan_cook_recovery_with_probe_policy(id: &str, live_probes: bool) -> Result<CookRecoveryPlan> {
     let store = agent_task_lifecycle::AgentTaskLifecycleStore::from_environment()?;
     if let Ok(record) = store.read_record(id) {
         if agent_task_lifecycle::CookRunState::of(&record).fenced {
@@ -933,7 +942,7 @@ pub fn plan_cook_recovery(id: &str) -> Result<CookRecoveryPlan> {
             });
         }
     }
-    plan_cook_recovery_for_cook(id)
+    plan_cook_recovery_for_cook(id, live_probes)
 }
 
 /// A Cook that failed before materializing (its admission failed) has no
@@ -1010,7 +1019,7 @@ fn relaunch_unmaterialized_cook(source_id: &str) -> Result<(Value, i32)> {
     Ok((value, 0))
 }
 
-fn plan_cook_recovery_for_cook(id: &str) -> Result<CookRecoveryPlan> {
+fn plan_cook_recovery_for_cook(id: &str, live_probes: bool) -> Result<CookRecoveryPlan> {
     let key = resolve_cook_key(id)?;
     let recipe = super::load_recipe(&key)
         .or_else(|cook_error| super::load_recipe_for_attempt(&key)?.ok_or(cook_error))?;
@@ -1036,11 +1045,20 @@ fn plan_cook_recovery_for_cook(id: &str) -> Result<CookRecoveryPlan> {
     } else if super::cook_recipe::abandoned_cook_continuation(&record) {
         CookRecoveryStep::Continue
     } else {
-        super::cook_failure_context(&recipe.cook_id, Some(&run_id), &status)
-            .and_then(|context| context.recovery_step)
-            .unwrap_or_else(|| {
-                CookRecoveryStep::none("The Cook recipe or its recovery context could not be read.")
-            })
+        let store = agent_task_lifecycle::AgentTaskLifecycleStore::from_environment()?;
+        let recipe_store = super::cook_recipe::CookRecipeStore::for_lifecycle_store(&store);
+        super::cook_promotion::cook_failure_context_with_probe_policy(
+            &recipe_store,
+            &store,
+            &recipe.cook_id,
+            Some(&run_id),
+            &status,
+            live_probes,
+        )
+        .and_then(|context| context.recovery_step)
+        .unwrap_or_else(|| {
+            CookRecoveryStep::none("The Cook recipe or its recovery context could not be read.")
+        })
     };
     Ok(CookRecoveryPlan {
         cook_id: recipe.cook_id,

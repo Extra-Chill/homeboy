@@ -436,6 +436,8 @@ pub(super) const LOCAL_DISPATCH_QUEUE_POLL_INTERVAL: Duration = Duration::from_s
 /// open rather than guessing at evidence it does not have.
 pub(super) fn admit_local_cook_dispatch(
     run_id: &str,
+    cook_id: &str,
+    lifecycle_store: &agent_task_lifecycle::AgentTaskLifecycleStore,
 ) -> homeboy::core::Result<Option<homeboy::core::local_dispatch_admission::ActiveLocalDispatchLease>>
 {
     if homeboy::core::resource_policy_context::captured_context().is_none() {
@@ -466,9 +468,34 @@ pub(super) fn admit_local_cook_dispatch(
         std::thread::sleep,
         move |reason| {
             eprintln!("Local dispatch queued for {run_id_for_notice}: {reason}.");
+            record_local_dispatch_wait(lifecycle_store, cook_id, reason);
         },
     )
     .map(Some)
+}
+
+/// Phase a durable Cook reports while its local dispatch waits for pressure.
+pub(super) const LOCAL_DISPATCH_QUEUED_PHASE: &str = "queued_local_pressure";
+
+/// Make a pressure wait visible to `status` and `diagnose`. The phase keeps
+/// its first `phase_started_at`, so `elapsed_ms` is the whole wait. A
+/// foreground Cook has no durable record yet; its wait is the stderr notice.
+pub(super) fn record_local_dispatch_wait(
+    lifecycle_store: &agent_task_lifecycle::AgentTaskLifecycleStore,
+    cook_id: &str,
+    reason: &str,
+) {
+    if lifecycle_store.read_record(cook_id).is_ok() {
+        if let Err(error) = lifecycle_store.record_cook_progress_with_activity(
+            cook_id,
+            LOCAL_DISPATCH_QUEUED_PHASE,
+            0,
+            Some(reason),
+            None,
+        ) {
+            homeboy::core::log_status!("cook", "local dispatch wait not recorded: {}", error);
+        }
+    }
 }
 
 /// The testable core of [`admit_local_cook_dispatch`]: the clock and the queue
@@ -697,7 +724,7 @@ pub(super) fn run_preflight_cook_execution(
     // gates all run on this host) and released when the function returns,
     // whether by success or by an early `?` (#14732).
     let _local_dispatch_lease = (!args.preview && attempt_dispatcher.is_none())
-        .then(|| admit_local_cook_dispatch(&run_id))
+        .then(|| admit_local_cook_dispatch(&run_id, &cook_id, &lifecycle_store))
         .transpose()?
         .flatten();
     let result = agent_task_service::CookService::run(
