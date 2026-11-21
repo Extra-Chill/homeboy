@@ -1180,7 +1180,6 @@ fn await_wait_with(
     } else {
         RUNNER_WAIT_CAP
     };
-    let mut last_position = None;
     let budget = runner_wait_budget();
     let mut blocked_since = None;
     let prior_wait = job.job().store().step_runner_wait(&request.key)?;
@@ -1253,21 +1252,20 @@ fn await_wait_with(
                     backoff = RUNNER_WAIT_INITIAL;
                 }
                 let position = standing.map(|standing| standing.queue_position);
-                if last_observation.as_ref() != Some(&observation) || last_position != position {
-                    if let Err(reason) = &observation {
-                        job.progress(json!({
-                            "phase": "waiting",
-                            "runner_eligible": runner,
-                            "reason": reason,
-                            "waiting_since": waiting_since,
-                            "builds": step_runner_wait_context(runner),
-                            "queue_position": position,
-                            "waiters_ahead": standing.map(|standing| standing.waiters_ahead),
-                            "priority": step_priority(request),
-                        }))?;
-                    }
+                if let Err(reason) = &observation {
+                    job.progress(json!({
+                        "phase": "waiting",
+                        "runner_eligible": runner,
+                        "reason": reason,
+                        "waiting_since": waiting_since,
+                        "builds": step_runner_wait_context(runner),
+                        "queue_position": position,
+                        "waiters_ahead": standing.map(|standing| standing.waiters_ahead),
+                        "priority": step_priority(request),
+                        "next_attempt_at": (chrono::Utc::now() + chrono::Duration::from_std(backoff)
+                            .expect("runner backoff fits chrono")).to_rfc3339(),
+                    }))?;
                 }
-                last_position = position;
                 last_observation = Some(observation);
                 next_probe = now() + backoff;
                 backoff = (backoff * 2).min(wait_cap);

@@ -848,6 +848,23 @@ fn render_status_summary(payload: &Value) -> Option<String> {
             lines.extend(output.lines().map(|line| format!("  {line}")));
         }
     }
+    if let Some(details) = payload.pointer("/blocker/details") {
+        if let Some(position) = details["queue_position"].as_u64() {
+            lines.push(format!("Queue position: {position}"));
+        }
+        if let Some(time) = details["next_attempt_at"].as_str() {
+            lines.push(format!("Next attempt: {time}"));
+        }
+        for (field, label) in [
+            ("pressure", "Pressure"),
+            ("pressure_thresholds", "Pressure thresholds"),
+            ("pressure_holders", "Pressure holders"),
+        ] {
+            if let Some(value) = details.get(field).filter(|value| !value.is_null()) {
+                lines.push(format!("{label}: {value}"));
+            }
+        }
+    }
     if payload.get("blocker").is_none_or(Value::is_null) {
         if let Some(reason) = string_value(payload, &["reason"]) {
             lines.push(format!("Reason: {reason}"));
@@ -856,22 +873,21 @@ fn render_status_summary(payload: &Value) -> Option<String> {
     if string_value(payload, &["blocker", "retry", "disposition"])
         == Some("automatic_reconciliation_scheduled")
     {
-        let next_attempt_at = string_value(payload, &["blocker", "retry", "next_attempt_at"])
-            .unwrap_or("the recorded retry time");
+        let retry = string_value(payload, &["blocker", "retry", "next_attempt_at"])
+            .map(|time| format!("automatic reconciliation scheduled for {time}"))
+            .unwrap_or_else(|| "waiting for runner eligibility; no fixed retry time".to_string());
         // Waiting is only recommended when a live daemon will actually pick
         // the work up; a dead daemon is the blocker and gets its recovery
         // command below (#16181).
         if payload.pointer("/blocker/daemon/admits_work") == Some(&Value::Bool(false)) {
             lines.push(format!(
-                "Retry: automatic reconciliation scheduled for {next_attempt_at}; the local controller daemon is not admitting work"
+                "Retry: {retry}; the local controller daemon is not admitting work"
             ));
             if let Some(summary) = string_value(payload, &["blocker", "daemon", "summary"]) {
                 lines.push(format!("Daemon: {summary}"));
             }
         } else {
-            lines.push(format!(
-                "Retry: automatic reconciliation scheduled for {next_attempt_at}; waiting is recommended"
-            ));
+            lines.push(format!("Retry: {retry}; waiting is recommended"));
         }
     }
     lines.push(format!(
@@ -2647,6 +2663,30 @@ mod tests {
         assert!(summary.contains("Retry: automatic reconciliation scheduled"));
         assert!(summary.contains("Next: homeboy agent-task status unmaterialized-cook --watch\n"));
         assert!(!summary.contains("Next: homeboy agent-task recover unmaterialized-cook\n"));
+    }
+
+    #[test]
+    fn pressure_wait_summary_reports_evidence_without_inventing_a_deadline() {
+        let payload = json!({
+            "schema": "homeboy/control-plane-run/v1", "run": "pressure-cook", "state": "queued",
+            "blocker": {
+                "message": "pressure",
+                "retry": {"disposition": "automatic_reconciliation_scheduled"},
+                "details": {
+                    "queue_position": 3,
+                    "pressure": {"cpu": 9000},
+                    "pressure_thresholds": {"cpu": 80},
+                    "pressure_holders": [{"run_id": "holder-run"}]
+                }
+            }
+        });
+        let summary = render_agent_task_summary(AgentTaskSummaryKind::Status, &payload).unwrap();
+        assert!(summary.contains("no fixed retry time"));
+        assert!(!summary.contains("the recorded retry time"));
+        assert!(summary.contains("Queue position: 3"));
+        assert!(summary.contains("9000"));
+        assert!(summary.contains("Pressure thresholds:"));
+        assert!(summary.contains("holder-run"));
     }
 
     #[test]
