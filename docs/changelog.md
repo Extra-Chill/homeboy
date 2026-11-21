@@ -4,6 +4,14 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.482.10] - 2026-11-21
+
+### Fixed
+- capacity reports the admission budget; Lab-required Cooks queue under pressure
+- doctor reads daemon pressure and lists blocking checks with fixes
+- status JSON reports the Cook's state and admission phase
+- an admitted Cook waits through a Lab outage instead of spending recovery budget
+
 ## [0.482.9] - 2026-11-21
 
 ### Fixed
