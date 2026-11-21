@@ -916,7 +916,7 @@ fn candidate_adoption_reconciles_and_cancels_an_orphaned_gate_group() {
         "cancelled"
     );
     assert!(
-        !homeboy_core::process::isolated_process_group_is_running(gate_pid)
+        !homeboy_engine_primitives::command::process_group_is_running(gate_pid)
             .expect("inspect terminated gate group")
     );
     reaper.join().expect("join gate reaper").expect("reap gate");

@@ -303,7 +303,9 @@ impl InvocationChildRecord {
             libc::kill(-pgid, libc::SIGTERM);
         }
         std::thread::sleep(CHILD_CLEANUP_GRACE);
-        if crate::process::process_group_is_running(pgid) {
+        if homeboy_engine_primitives::command::process_group_is_running(pgid as u32)
+            .unwrap_or(false)
+        {
             unsafe {
                 libc::kill(-pgid, libc::SIGKILL);
             }

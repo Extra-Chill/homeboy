@@ -4142,7 +4142,7 @@ pub(super) fn reap_cancelled_local_child(child: Option<&LocalChildProcessIdentit
             }
         }
     }
-    crate::process::terminate_isolated_process_group_with_grace(
+    crate::process::terminate_isolated_process_group(
         process_group_id,
         LOCAL_CHILD_CANCELLATION_GRACE,
     )?;
@@ -4416,7 +4416,7 @@ fn local_child_liveness(child: &LocalChildExecution) -> LocalChildLiveness {
             LocalChildLiveness::Dead | LocalChildLiveness::IdentityMismatch
         ) {
             if let Some(pgid) = process.process_group_id {
-                return match crate::process::isolated_process_group_is_running(pgid) {
+                return match homeboy_engine_primitives::command::process_group_is_running(pgid) {
                     Ok(true) => LocalChildLiveness::Live,
                     Ok(false) => root_liveness,
                     Err(evidence) => LocalChildLiveness::Unsupported(evidence),

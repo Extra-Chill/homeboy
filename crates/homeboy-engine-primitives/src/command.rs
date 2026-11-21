@@ -454,6 +454,40 @@ pub const fn supports_process_tree_isolation() -> bool {
     cfg!(any(unix, windows))
 }
 
+/// Whether process group `pgid` still holds a member that can execute work.
+///
+/// `kill(-pgid, 0)` succeeds for a **zombie**. Reaping clears the zombies this
+/// process is the parent of, but not every zombie in the group is ours: a shell
+/// background job whose parent exits first is reparented to PID 1, and where
+/// PID 1 does not reap — the usual case inside a container — it stays a zombie
+/// until the container ends. Termination would otherwise burn both grace
+/// windows waiting for processes that already exited, then report a dead tree
+/// as alive after SIGKILL.
+///
+/// A zombie holds no descriptors, runs no code, and cannot be killed again, so
+/// Linux answers from process state and counts only non-zombie members. Where
+/// process state cannot be read, the group's existence is the answer. Invalid
+/// group IDs and platforms without process groups are errors, so durable
+/// callers can distinguish "gone" from "cannot tell".
+pub fn process_group_is_running(pgid: u32) -> std::result::Result<bool, String> {
+    if pgid == 0 || pgid > i32::MAX as u32 {
+        return Err(format!("invalid process group ID {pgid}"));
+    }
+
+    #[cfg(unix)]
+    {
+        if let Some(live) = process_group_live_member_count(pgid) {
+            return Ok(live > 0);
+        }
+        Ok(unsafe { libc::kill(-(pgid as libc::pid_t), 0) == 0 })
+    }
+
+    #[cfg(not(unix))]
+    {
+        Err("process-group liveness is unsupported on this platform".to_string())
+    }
+}
+
 /// Whether a PID still names a process that can execute work.
 ///
 /// Linux retains an exited process as a zombie until its parent reaps it, and
@@ -2221,7 +2255,7 @@ pub fn wait_with_bounded_output_supervised_with_progress_owned(
 /// workload process group.
 #[cfg(unix)]
 pub fn terminate_remaining_process_group(root_pid: u32) -> io::Result<()> {
-    if !process_group_has_live_member(root_pid) {
+    if !process_group_is_running(root_pid).unwrap_or(false) {
         return Ok(());
     }
     signal_process_group(root_pid, libc::SIGTERM)?;
@@ -3432,38 +3466,6 @@ fn signal_pids(pids: &[u32], signal: libc::c_int) {
     }
 }
 
-#[cfg(unix)]
-fn process_group_is_running(root_pid: u32) -> bool {
-    unsafe { libc::kill(-(root_pid as libc::pid_t), 0) == 0 }
-}
-
-/// Whether `root_pid`'s process group still holds a process that can run.
-///
-/// `process_group_is_running` asks `kill(-pgid, 0)`, which succeeds for a
-/// **zombie**. `reap_exited_process_group_children` clears the zombies we are
-/// the parent of, but not every zombie in the group is ours: a shell background
-/// job whose parent exits first is reparented to PID 1, and where PID 1 does not
-/// reap — the usual case inside a container — it stays a zombie until the
-/// container ends. `waitpid` cannot touch a process we did not spawn, so the
-/// group reads as alive forever.
-///
-/// The visible cost is not just a wrong error. Termination burns both the
-/// SIGTERM and SIGKILL grace windows (4s combined) waiting for processes that
-/// already exited, then reports "remained alive after SIGKILL" for a tree that
-/// is dead in every sense that matters.
-///
-/// A zombie holds no descriptors, runs no code, and cannot be killed again. For
-/// the question these wait loops ask — may this tree still act? — it is gone.
-#[cfg(unix)]
-fn process_group_has_live_member(root_pid: u32) -> bool {
-    if !process_group_is_running(root_pid) {
-        return false;
-    }
-    // Absent a way to inspect process state, keep the historical answer: the
-    // group exists, so treat it as alive.
-    process_group_live_member_count(root_pid).is_none_or(|live| live > 0)
-}
-
 /// Count non-zombie members of `root_pid`'s process group, or `None` where
 /// process state cannot be read.
 #[cfg(all(unix, target_os = "linux"))]
@@ -3515,8 +3517,7 @@ fn process_group_live_member_count(_root_pid: u32) -> Option<usize> {
 /// Reap any of our own already-exited children that belong to `root_pid`'s
 /// process group.
 ///
-/// `process_group_is_running` asks `kill(-pgid, 0)`, which succeeds for a
-/// **zombie**. The controller death guard installed by `ControllerChildGuard`
+/// `kill(-pgid, 0)` succeeds for a **zombie**. The controller death guard installed by `ControllerChildGuard`
 /// is a `fork()` child of this process that deliberately joins the supervised
 /// group (`setpgid(0, process_group)`), so terminating the group leaves the
 /// guard as an unreaped zombie inside it. The group then looks alive forever and
@@ -3551,7 +3552,7 @@ fn wait_for_process_group_exit(
     status: &mut Option<ExitStatus>,
 ) -> io::Result<bool> {
     let deadline = std::time::Instant::now() + grace;
-    while process_group_has_live_member(root_pid) {
+    while process_group_is_running(root_pid).unwrap_or(false) {
         if status.is_none() {
             *status = child.try_wait()?;
         }
@@ -3562,7 +3563,7 @@ fn wait_for_process_group_exit(
         if status.is_some() {
             reap_exited_process_group_children(root_pid);
         }
-        if !process_group_has_live_member(root_pid) {
+        if !process_group_is_running(root_pid).unwrap_or(false) {
             break;
         }
         if std::time::Instant::now() >= deadline {
@@ -3576,9 +3577,9 @@ fn wait_for_process_group_exit(
 #[cfg(unix)]
 fn wait_for_process_group_exit_without_child(root_pid: u32, grace: Duration) -> bool {
     let deadline = std::time::Instant::now() + grace;
-    while process_group_has_live_member(root_pid) {
+    while process_group_is_running(root_pid).unwrap_or(false) {
         reap_exited_process_group_children(root_pid);
-        if !process_group_has_live_member(root_pid) {
+        if !process_group_is_running(root_pid).unwrap_or(false) {
             return true;
         }
         if std::time::Instant::now() >= deadline {
@@ -3712,12 +3713,12 @@ mod process_group_liveness_tests {
         }
 
         assert!(
-            process_group_is_running(pid),
+            unsafe { libc::kill(-(pid as libc::pid_t), 0) == 0 },
             "precondition: kill(-pgid, 0) still succeeds for the zombie, which is \
              exactly why the naive probe is wrong"
         );
         assert!(
-            !process_group_has_live_member(pid),
+            !process_group_is_running(pid).expect("probe process group"),
             "a group holding only a zombie must not be reported as alive"
         );
 
@@ -3735,7 +3736,7 @@ mod process_group_liveness_tests {
         let pid = child.id();
 
         assert!(
-            process_group_has_live_member(pid),
+            process_group_is_running(pid).expect("probe process group"),
             "a group running `sleep 5` must be reported as alive"
         );
 
