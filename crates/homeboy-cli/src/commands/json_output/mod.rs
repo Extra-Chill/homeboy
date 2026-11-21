@@ -877,6 +877,7 @@ fn agent_task_requests_full_output(args: &crate::commands::agent_task::AgentTask
     use crate::commands::agent_task::AgentTaskCommand;
 
     match &args.command {
+        command if command.is_exact_internal_adapter() => true,
         AgentTaskCommand::Cook(args) => args.full,
         AgentTaskCommand::Recover(args) => args.full,
         AgentTaskCommand::Diagnose(args) => args.full,
