@@ -126,7 +126,28 @@ pub(in crate::commands::agent_task) fn diagnose(args: DiagnoseArgs) -> CmdResult
         .flatten()
         .and_then(|report| agent_task_service_direct::gate_failure_projection(&report));
     nested_reasons.extend(gate_failure.as_ref().map(gate_failure_diagnostic));
-    let ranked_reasons = ranked_diagnostics(nested_reasons);
+    let mut ranked_reasons = ranked_diagnostics(nested_reasons);
+    let recovery_attempt = agent_task_lifecycle::AgentTaskLifecycleStore::from_environment()
+        .ok()
+        .and_then(|store| agent_task_service_direct::recovery_step_projection(&store, &record));
+    // A failed regate may never have reached a gate. Its step job's failure
+    // is newer evidence than the candidate's original gate output (#18657).
+    if let Some(message) = recovery_attempt
+        .as_ref()
+        .filter(|step| step["state"] == "failed")
+        .and_then(|step| step["failure"]["message"].as_str())
+    {
+        ranked_reasons.insert(
+            0,
+            CollectedDiagnostic {
+                task_id: record.run_id.clone(),
+                class: "agent_task.recovery_step_failed".into(),
+                message: message.to_string(),
+                source: "recovery_step".into(),
+                data: recovery_attempt.clone().unwrap(),
+            },
+        );
+    }
     // The canonical Cook verdict, read exactly as `agent-task status --exact`
     // reads it (#15885). The raw lifecycle record can still say `succeeded`
     // for a Cook whose candidate was never verified or published; diagnose
@@ -327,6 +348,22 @@ pub(in crate::commands::agent_task) fn diagnose(args: DiagnoseArgs) -> CmdResult
             queued_runner_ownership.is_some(),
             current_lifecycle_diagnostic.is_some(),
         );
+    }
+    if let Some(step) = recovery_attempt {
+        if step["state"] == "failed" {
+            value["summary"] = json!(format!(
+                "Recovery step {} failed: {}",
+                step["step"].as_str().unwrap_or("recovery"),
+                step["failure"]["message"]
+                    .as_str()
+                    .unwrap_or("unknown failure")
+            ));
+            value["blocker"] = step["failure"].clone();
+            value["failure"] = step["failure"].clone();
+        }
+        // Keep the planner's `recovery_step` vocabulary separate from the
+        // actual admitted execution and its recorded outcome.
+        value["recovery_attempt"] = step;
     }
     preserve_controller_owner_placement_with_prefix(&mut value, run_id, &recovery_prefix);
     // Placement is an observation: an unreadable control-plane projection

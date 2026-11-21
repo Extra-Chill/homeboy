@@ -292,6 +292,7 @@ fn status_without_feedback(args: StatusArgs) -> CmdResult<Value> {
             value["lab_staging_diagnostic"] = collected_diagnostic_value(diagnostic);
         }
         attach_gate_failure(&mut value, &record);
+        attach_recovery_step(&mut value, &record);
     }
     attach_promotion_replay(&mut value, &target.run_id, &args.run_id);
     if value["action_eligibility"]["actions"]
@@ -339,6 +340,21 @@ fn cook_outcome_record(
     bounded_exact_record(&selected.run_id)
         .ok()
         .filter(|record| homeboy::agents::agent_task_lifecycle::CookRunState::of(record).terminal)
+}
+
+/// The latest admitted recovery step (for example `recover --regate`) and its
+/// recorded outcome, so an admitted step is never invisible (#18657).
+fn attach_recovery_step(value: &mut Value, record: &AgentTaskRunRecord) {
+    let Ok(store) = agent_task_lifecycle::AgentTaskLifecycleStore::from_environment() else {
+        return;
+    };
+    if let Some(step) = agent_task_service_direct::recovery_step_projection(&store, record) {
+        if step["state"] == "failed" {
+            value["blocker"] = step["failure"].clone();
+            value["failure"] = step["failure"].clone();
+        }
+        value["recovery_step"] = step;
+    }
 }
 
 fn bounded_exact_record(run_id: &str) -> homeboy::core::Result<AgentTaskRunRecord> {
