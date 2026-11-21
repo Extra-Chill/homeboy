@@ -72,6 +72,69 @@ fn initialize_git_repository(path: &Path) {
 }
 
 #[test]
+fn recorded_worktree_stash_rule_matches_branch_or_head_only() {
+    for (case, stash_branch, same_head, blocked) in [
+        ("unrelated", "other", false, false),
+        ("branch", "task", false, true),
+        ("head", "other", true, true),
+    ] {
+        let dir = tempfile::tempdir().unwrap();
+        let source = dir.path().join("source");
+        initialize_git_repository(&source);
+        run_git(&source, &["checkout", "-q", "-b", stash_branch]);
+        std::fs::write(source.join("tracked"), "stashed\n").unwrap();
+        run_git(&source, &["stash", "push", "-q", "-m", case]);
+        if !same_head {
+            std::fs::write(source.join("tracked"), "new head\n").unwrap();
+            run_git(&source, &["commit", "-q", "-am", "advance"]);
+        }
+        run_git(&source, &["checkout", "-q", "main"]);
+        let worktree = dir.path().join("linked");
+        if stash_branch == "task" {
+            run_git(
+                &source,
+                &["worktree", "add", "-q", worktree.to_str().unwrap(), "task"],
+            );
+        } else {
+            run_git(
+                &source,
+                &[
+                    "worktree",
+                    "add",
+                    "-q",
+                    "-b",
+                    "task",
+                    worktree.to_str().unwrap(),
+                    stash_branch,
+                ],
+            );
+        }
+        let mut record = fixture_record(&source, &worktree);
+        record.branch = "task".to_string();
+        record.base_ref = "HEAD".to_string();
+        let safety = safety_report(&record).unwrap();
+        assert_eq!(safety.safe, !blocked, "{case}: {:?}", safety.reasons);
+        let stash_reason = safety
+            .reasons
+            .iter()
+            .find(|reason| reason.starts_with("stash entry belongs to this worktree:"));
+        assert_eq!(stash_reason.is_some(), blocked, "{case}");
+        if let Some(reason) = stash_reason {
+            assert!(reason.contains("stash@{0}"), "{reason}");
+            assert!(reason.contains(case), "{reason}");
+        }
+        let branch_cleanup = branch_cleanup_unknown(&record, "test".to_string());
+        let reasons =
+            store_ops::cleanup_skip_reasons(&record, &safety, &branch_cleanup, false, false, &[]);
+        assert_eq!(
+            reasons.iter().any(|reason| reason.contains("stash@{0}")),
+            blocked,
+            "{case}"
+        );
+    }
+}
+
+#[test]
 fn linked_worktree_root_proof_rejects_untrusted_git_metadata() {
     let temporary = tempfile::tempdir().expect("temporary directory");
     let primary = temporary.path().join("primary");
@@ -2498,6 +2561,14 @@ fn cleanup_offers_missing_active_records_as_metadata_reconciliation_candidates()
     assert_eq!(output.counts.reconciliation_blockers, 0);
     assert_eq!(output.counts.skipped, 0);
     assert_eq!(output.candidates.len(), 4);
+    for candidate in &output.candidates {
+        assert!(!candidate.safety.source_checkout_missing);
+        assert!(!candidate
+            .safety
+            .reasons
+            .iter()
+            .any(|reason| reason.starts_with("source_checkout_missing:")));
+    }
 }
 
 #[test]
@@ -3639,7 +3710,28 @@ fn cleanup_page_paginates_real_candidates_and_preserves_page_options_in_continua
     rebind_handle(&mut second, "fixture@page-second".to_string());
     second.branch = "page-second".to_string();
     write_record(&store, &first).unwrap();
+    // Batched probes must return the same registry order on every plan.
     write_record(&store, &second).unwrap();
+    for _ in 0..3 {
+        let plan = cleanup_with_store(
+            WorktreeCleanupOptions {
+                force: false,
+                dry_run: true,
+                cleanup_branches: false,
+                allow_unmerged_branches: false,
+                reaper: None,
+            },
+            &store,
+        )
+        .unwrap();
+        assert_eq!(
+            plan.candidates
+                .iter()
+                .map(|candidate| candidate.record.id.as_str())
+                .collect::<Vec<_>>(),
+            vec![first.id.as_str(), second.id.as_str()]
+        );
+    }
 
     let first_page = cleanup_with_store_page(
         WorktreeCleanupPageOptions {

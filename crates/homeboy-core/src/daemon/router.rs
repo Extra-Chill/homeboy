@@ -119,6 +119,25 @@ where
                 "queued_owner_deadline_ms": crate::api_jobs::QUEUED_OWNER_DEADLINE_MS,
             }),
         ),
+        // A remote controller's Cook waiting on this Lab registers and renews
+        // its place here so lanes and the owner share cap rank it with local
+        // steps; it expires without heartbeats (#18601).
+        ("POST", "/capacity/waiters") => endpoint(
+            "daemon.capacity_waiter",
+            400,
+            serde_json::from_value::<crate::lab_capacity::RemoteWaiterHeartbeat>(
+                body.unwrap_or(serde_json::Value::Null),
+            )
+            .map_err(|error| {
+                Error::validation_invalid_argument(
+                    "body",
+                    format!("capacity waiter heartbeat is invalid: {error}"),
+                    None,
+                    None,
+                )
+            })
+            .map(|beat| crate::lab_capacity::heartbeat_remote_waiter(&beat)),
+        ),
         ("GET", "/capabilities") => daemon_endpoint_response(
             "daemon.capabilities",
             json!({

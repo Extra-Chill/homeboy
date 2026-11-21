@@ -2284,14 +2284,10 @@ pub(super) fn write_record_guarded(
         .cloned()
         .map(serde_json::from_value::<AgentTaskRunRecord>)
         .transpose()
-        .map_err(|error| Error::internal_json(error.to_string(), None))?
-        .map(|mut stored| {
-            super::cook_run_state::migrate_stored_record(&mut stored);
-            stored
-        });
+        .map_err(|error| Error::internal_json(error.to_string(), None))?;
     // Unfenced test fixtures seed a state, rather than taking an edge.
     super::cook_run_state::transition_record(
-        &mut record,
+        &record,
         stored_record.as_ref().filter(|_| guard.is_some()),
     )?;
     if let Some(owner) =
@@ -3024,13 +3020,12 @@ fn observation_metadata(
     record: &AgentTaskRunRecord,
     aggregate: Option<AgentTaskAggregate>,
 ) -> Result<Value> {
-    let mut record_json = serde_json::to_value(record).map_err(|error| {
+    let record_json = serde_json::to_value(record).map_err(|error| {
         Error::internal_json(
             error.to_string(),
             Some(format!("serialize agent-task run {}", record.run_id)),
         )
     })?;
-    super::cook_run_state::persist_state(record, &mut record_json)?;
     Ok(json!({
         "schema": "homeboy/agent-task-observation-record/v1",
         "agent_task_run": record_json,
@@ -3099,13 +3094,12 @@ fn parse_record_from_run(run: &RunRecord) -> Result<AgentTaskRunRecord> {
             json!({ "context": run.id }),
         )
     })?;
-    let mut record = serde_json::from_value(value.clone()).map_err(|error| {
+    let record = serde_json::from_value(value.clone()).map_err(|error| {
         Error::internal_json(
             error.to_string(),
             Some(format!("parse agent-task run {}; incompatible record shape: re-cook this work with the current binary", run.id)),
         )
     })?;
-    super::cook_run_state::migrate_stored_record(&mut record);
     Ok(record)
 }
 

@@ -1914,12 +1914,12 @@ fn record_recovery_progress(
     (run_id, status, step): (String, String, CookRecoveryStep),
     report: &CookRecoveryReport,
 ) {
-    // Contention is transient, not evidence that the step cannot progress.
-    if report
-        .failure
-        .as_ref()
-        .is_some_and(|failure| failure["code"] == STORE_BUSY_CODE)
-    {
+    // Contention is transient, not evidence that the step cannot progress;
+    // nor is a client that was signalled or outlived its admission bound
+    // before its gates ran (#18042).
+    if report.failure.as_ref().is_some_and(|failure| {
+        failure["code"] == STORE_BUSY_CODE || failure["details"]["foreground_wait"].is_object()
+    }) {
         return;
     }
     let Some(path) = no_progress_path(id) else {

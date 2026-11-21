@@ -67,6 +67,30 @@ pub fn register() {
     homeboy_core::daemon::step_job::register_step_runner_eligibility(std::sync::Arc::new(
         runner_accepts_jobs,
     ));
+    homeboy_core::daemon::step_job::register_step_runner_lab_waiter(std::sync::Arc::new(
+        lab_waiter_heartbeat,
+    ));
+}
+
+/// Register, renew, or release a waiting step's reservation on the runner's
+/// Lab daemon. Any failure (no session, older daemon, transport) is `None`:
+/// the wait then keeps its controller-local ranking.
+fn lab_waiter_heartbeat(
+    runner_id: &str,
+    beat: &homeboy_core::lab_capacity::RemoteWaiterHeartbeat,
+) -> Option<serde_json::Value> {
+    let session = crate::connection::read_session(runner_id).ok()??;
+    let data = crate::execution::daemon_api_post_json_for_session_with_timeout(
+        &session,
+        "/capacity/waiters",
+        &serde_json::to_value(beat).ok()?,
+        None,
+        std::time::Duration::from_secs(5),
+    )
+    .ok()?;
+    crate::execution::canonical_daemon_body(&data, "capacity waiter reply")
+        .ok()
+        .cloned()
 }
 
 #[cfg(test)]

@@ -611,6 +611,5 @@ pub(crate) fn observed_with_run_state(
 ) -> AgentTaskRunRecord {
     let mut observed = record.clone();
     observed.write_state(state, AUTHORITY);
-    super::cook_run_state::observe_phase(&mut observed, state);
     observed
 }

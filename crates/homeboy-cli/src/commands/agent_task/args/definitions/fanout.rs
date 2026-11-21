@@ -75,6 +75,11 @@ pub struct AgentTaskFanoutCookBatchArgs {
     pub issue_prompt_files: Vec<String>,
     #[command(flatten)]
     pub cook: CookOptions,
+    /// Lab admission lane every child Cook inherits, as `agent-task cook
+    /// --priority`: `high` waiters take a freed Lab slot before `normal` ones.
+    /// Defaults to `normal`, or to HOMEBOY_LAB_PRIORITY when set.
+    #[arg(long, value_name = "LANE", value_parser = ["normal", "high"])]
+    pub priority: Option<String>,
     /// Maximum number of child cooks to run at once. Defaults to the host's
     /// `/agent_task/max_batch_concurrency` config or 4.
     #[arg(
