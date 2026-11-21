@@ -1865,7 +1865,9 @@ fn verify_replacement_gates_owned(
     };
     // A gate job the daemon admitted after its controller died is a started
     // gate even though no local fence was written (#18709).
-    reconcile_admitted_replacement_gate_jobs(lifecycle_store, run_id)?;
+    // A finished one is offered to the gates below: a gate whose request its
+    // receipt is bound to adopts that verdict instead of running again (#18727).
+    let adoptable_gate_jobs = reconcile_admitted_replacement_gate_jobs(lifecycle_store, run_id)?;
     let recovering_interrupted_execution =
         match replacement_gate_execution_owner_live(&lifecycle_store.read_record(run_id)?.metadata)
         {
@@ -1955,57 +1957,71 @@ fn verify_replacement_gates_owned(
     // on the active scope for the declared budgets on a Lab runner (#15856).
     let supervision = replacement_gate_supervision(&gates);
     let repro = gates.repro.clone();
-    let job_submission: std::rc::Rc<dyn Fn(&str, &str) -> Result<()>> = {
+    let job_submission: std::rc::Rc<dyn Fn(&str, &str, &Value) -> Result<()>> = {
         let lifecycle_store = lifecycle_store.clone();
         let run_id = run_id.to_string();
-        std::rc::Rc::new(move |runner_id: &str, job_id: &str| {
-            mark_replacement_gate_job_submitted(&lifecycle_store, &run_id, runner_id, job_id)
+        std::rc::Rc::new(move |runner_id: &str, job_id: &str, submission: &Value| {
+            mark_replacement_gate_job_submitted(
+                &lifecycle_store,
+                &run_id,
+                runner_id,
+                job_id,
+                submission,
+            )
         })
     };
+    let mut gate_job_adoptions = Vec::new();
     let replacement = crate::agent_task_promotion::with_gate_supervision(supervision, || {
         // Each runner job is recorded as soon as its daemon accepts it, so
         // recovery reads the daemon's start record for it even if this
         // controller dies before it sees the job leave the queue (#18709).
-        let resumed =
-            crate::agent_task_gate::execution_start::with_job_submission(job_submission, || {
-                resume_promoted_patch_replacement_gates_in_observation_store(
-                    AgentTaskPromotionRequest {
-                        source,
-                        source_run_id: Some(run_id.to_string()),
-                        source_path,
-                        // Candidate identity remains rooted at the persisted promotion target.
-                        // The corrected gate workspace is passed separately below.
-                        source_worktree_path: None,
-                        base_ref: Some(verified_base.base.clone()),
-                        task_base_sha: inputs
-                            .and_then(|value| value.get("task_base_sha"))
-                            .and_then(Value::as_str)
-                            .map(str::to_string),
-                        candidate_ref: inputs
-                            .and_then(|value| value.get("candidate_ref"))
-                            .and_then(Value::as_str)
-                            .map(str::to_string),
-                        to_worktree: original.to_worktree.clone(),
-                        task_id: Some(original.source.task_id.clone()),
-                        artifact_id: None,
-                        dry_run: false,
-                        gates,
-                        provider_invocation: None,
-                        repository_integrity_evidence: original
-                            .repository_integrity_evidence
-                            .clone(),
-                    },
-                    &target_path,
-                    &original_value,
-                    replacement_gate_workspace.as_deref(),
-                    &observation_store,
-                    {
-                        let lifecycle_store = lifecycle_store.clone();
-                        let run_id = run_id.to_string();
-                        move || mark_replacement_gate_execution_started(&lifecycle_store, &run_id)
-                    },
-                )
-            });
+        let (resumed, adoptions) = crate::agent_task_gate::placement::with_adoptable_gate_jobs(
+            adoptable_gate_jobs,
+            || {
+                crate::agent_task_gate::execution_start::with_job_submission(job_submission, || {
+                    resume_promoted_patch_replacement_gates_in_observation_store(
+                        AgentTaskPromotionRequest {
+                            source,
+                            source_run_id: Some(run_id.to_string()),
+                            source_path,
+                            // Candidate identity remains rooted at the persisted promotion target.
+                            // The corrected gate workspace is passed separately below.
+                            source_worktree_path: None,
+                            base_ref: Some(verified_base.base.clone()),
+                            task_base_sha: inputs
+                                .and_then(|value| value.get("task_base_sha"))
+                                .and_then(Value::as_str)
+                                .map(str::to_string),
+                            candidate_ref: inputs
+                                .and_then(|value| value.get("candidate_ref"))
+                                .and_then(Value::as_str)
+                                .map(str::to_string),
+                            to_worktree: original.to_worktree.clone(),
+                            task_id: Some(original.source.task_id.clone()),
+                            artifact_id: None,
+                            dry_run: false,
+                            gates,
+                            provider_invocation: None,
+                            repository_integrity_evidence: original
+                                .repository_integrity_evidence
+                                .clone(),
+                        },
+                        &target_path,
+                        &original_value,
+                        replacement_gate_workspace.as_deref(),
+                        &observation_store,
+                        {
+                            let lifecycle_store = lifecycle_store.clone();
+                            let run_id = run_id.to_string();
+                            move || {
+                                mark_replacement_gate_execution_started(&lifecycle_store, &run_id)
+                            }
+                        },
+                    )
+                })
+            },
+        );
+        gate_job_adoptions = adoptions;
         let mut replacement = resumed?;
         super::cook_baseline::compare_gate_failures_to_verified_base(
             &observation_store,
@@ -2022,10 +2038,22 @@ fn verify_replacement_gates_owned(
         )?;
         Ok(replacement)
     });
+    record_replacement_gate_job_adoptions(lifecycle_store, run_id, &gate_job_adoptions)?;
     if let Some(stop) = foreground_gate_stop() {
         return Err(stop);
     }
     let mut replacement = replacement?;
+    let adopted_gate_jobs = gate_job_adoptions
+        .iter()
+        .filter(|outcome| outcome["adopted"] == true)
+        .cloned()
+        .collect::<Vec<_>>();
+    if !gate_job_adoptions.is_empty() {
+        replacement.provenance["replacement_gate_job_adoption"] = serde_json::json!({
+            "schema": "homeboy/agent-task-replacement-gate-job-adoption/v1",
+            "outcomes": gate_job_adoptions,
+        });
+    }
     // #11290's import boundary requires command evidence for each accepted gate.
     // The shared gate runner retains that evidence in detailed gate reports, so
     // project it into the typed promotion command-evidence view before recording.
@@ -2057,6 +2085,7 @@ fn verify_replacement_gates_owned(
             "reason": REGATE_SUPERSEDES_FENCE_REASON,
             "superseded_fence": fence,
             "automatic_rerun": false,
+            "adopted_gate_jobs": adopted_gate_jobs,
         });
     } else if recovering_interrupted_execution {
         let authorization = interrupted_rerun_authorization
@@ -2317,6 +2346,7 @@ pub(crate) fn mark_replacement_gate_job_submitted(
     run_id: &str,
     runner_id: &str,
     job_id: &str,
+    submission: &Value,
 ) -> Result<()> {
     lifecycle_store.mutate_record(run_id, |record| {
         let entries = record
@@ -2341,6 +2371,7 @@ pub(crate) fn mark_replacement_gate_job_submitted(
             .push(serde_json::json!({
                 "runner_id": runner_id,
                 "job_id": job_id,
+                "submission": submission,
                 "submitted_at": chrono::Utc::now().to_rfc3339(),
             }));
         true
@@ -2357,11 +2388,27 @@ struct AdmittedGateJob {
     job_id: String,
     owner_pid: Value,
     state: crate::agent_task_gate::placement::LabGateJobState,
+    submission: Value,
 }
 
 impl AdmittedGateJob {
     fn running(&self) -> bool {
         !self.state.status.is_terminal()
+    }
+
+    /// A finished job that ran its gate to a verdict: recovery offers its
+    /// receipt for adoption before running the gate again (#18727).
+    fn adoptable(&self) -> bool {
+        use homeboy_core::api_jobs::JobStatus;
+        matches!(self.state.status, JobStatus::Succeeded | JobStatus::Failed)
+    }
+
+    fn submitted(&self) -> crate::agent_task_gate::placement::LabGateSubmittedJob {
+        crate::agent_task_gate::placement::LabGateSubmittedJob {
+            runner_id: self.runner_id.clone(),
+            job_id: self.job_id.clone(),
+            submission: self.submission.clone(),
+        }
     }
 
     fn to_value(&self) -> Value {
@@ -2371,6 +2418,7 @@ impl AdmittedGateJob {
             "owner_pid": self.owner_pid,
             "status": self.state.status,
             "running": self.running(),
+            "adoptable": self.adoptable(),
             "logs_command": format!(
                 "homeboy runner job logs {} {}{}",
                 self.runner_id,
@@ -2412,6 +2460,7 @@ fn dead_owner_admitted_gate_jobs(metadata: &Value) -> Option<Vec<AdmittedGateJob
                     job_id: job_id.to_string(),
                     owner_pid: owner_pid.clone(),
                     state,
+                    submission: job.get("submission").cloned().unwrap_or(Value::Null),
                 })
             })
             .collect(),
@@ -2426,6 +2475,7 @@ pub(crate) fn admitted_replacement_gate_job(run_id: &str) -> Option<Value> {
     let jobs = dead_owner_admitted_gate_jobs(&record.metadata)?;
     jobs.iter()
         .find(|job| job.running())
+        .or_else(|| jobs.iter().find(|job| job.adoptable()))
         .or_else(|| jobs.first())
         .map(AdmittedGateJob::to_value)
 }
@@ -2433,14 +2483,15 @@ pub(crate) fn admitted_replacement_gate_job(run_id: &str) -> Option<Value> {
 /// Reconcile the local start fence with the daemon's start record of jobs a
 /// dead controller submitted: an admitted job becomes the fence it never
 /// wrote, and one still running vetoes a second execution. The submitted-job
-/// record is dropped once none of its jobs still runs.
+/// record is dropped once none of its jobs still runs; its finished jobs are
+/// returned so the gates can adopt their receipts (#18727).
 fn reconcile_admitted_replacement_gate_jobs(
     lifecycle_store: &agent_task_lifecycle::AgentTaskLifecycleStore,
     run_id: &str,
-) -> Result<()> {
+) -> Result<Vec<crate::agent_task_gate::placement::LabGateSubmittedJob>> {
     let record = lifecycle_store.read_record(run_id)?;
     let Some(jobs) = dead_owner_admitted_gate_jobs(&record.metadata) else {
-        return Ok(());
+        return Ok(Vec::new());
     };
     let running = jobs.iter().find(|job| job.running()).cloned();
     lifecycle_store.mutate_record(run_id, |record| {
@@ -2485,8 +2536,44 @@ fn reconcile_admitted_replacement_gate_jobs(
             }
             Err(error)
         }
-        None => Ok(()),
+        None => Ok(jobs
+            .iter()
+            .filter(|job| job.adoptable())
+            .map(AdmittedGateJob::submitted)
+            .collect()),
     }
+}
+
+/// Record what recovery did with each finished gate job it offered for
+/// adoption: adopted, or why the gate ran again instead (#18727).
+fn record_replacement_gate_job_adoptions(
+    lifecycle_store: &agent_task_lifecycle::AgentTaskLifecycleStore,
+    run_id: &str,
+    outcomes: &[Value],
+) -> Result<()> {
+    if outcomes.is_empty() {
+        return Ok(());
+    }
+    lifecycle_store.mutate_record(run_id, |record| {
+        let entries = record
+            .ensure_metadata_object()
+            .entry("replacement_gate_job_adoptions".to_string())
+            .or_insert_with(|| serde_json::json!([]));
+        if !entries.is_array() {
+            *entries = serde_json::json!([]);
+        }
+        let entries = entries.as_array_mut().expect("array");
+        let recorded_at = chrono::Utc::now().to_rfc3339();
+        entries.extend(outcomes.iter().map(|outcome| {
+            let mut outcome = outcome.clone();
+            outcome["recorded_at"] = Value::from(recorded_at.clone());
+            outcome
+        }));
+        let overflow = entries.len().saturating_sub(16);
+        entries.drain(..overflow);
+        true
+    })?;
+    Ok(())
 }
 
 fn interrupted_replacement_gate_execution_error(run_id: &str) -> Error {
