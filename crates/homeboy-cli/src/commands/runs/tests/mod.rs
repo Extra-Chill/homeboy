@@ -9,6 +9,7 @@ fn test_store() -> homeboy::core::observation::ObservationStore {
 }
 
 mod export_import;
+mod interventions;
 
 use super::bench::bench_compare;
 use super::dossier::runs_dossier_in_store;
@@ -590,6 +591,7 @@ fn runs_reconcile_explicitly_reconciles_owned_dead_running_runs() {
         let (output, _) = reconcile_runs(
             &test_store(),
             RunsReconcileArgs {
+                reason: None,
                 dry_run: false,
                 limit: 20,
             },
@@ -653,6 +655,7 @@ fn runs_reconcile_immediately_terminalizes_dead_deploy_observation_owner() {
         let (output, _) = reconcile_runs(
             &test_store(),
             RunsReconcileArgs {
+                reason: None,
                 dry_run: false,
                 limit: 20,
             },

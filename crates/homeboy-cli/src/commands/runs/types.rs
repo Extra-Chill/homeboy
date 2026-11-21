@@ -92,13 +92,24 @@ pub(super) enum RunsCommand {
     /// marked stale. Runner sessions and durable agent-task records have
     /// their own reconcilers.
     Reconcile(RunsReconcileArgs),
+    /// List durable operator interventions, newest first
+    Interventions {
+        #[arg(long)]
+        since: Option<String>,
+        #[arg(long, default_value_t = 100, value_parser = clap::value_parser!(i64).range(1..=1000))]
+        limit: i64,
+    },
     /// Block and stream a run's status until it reaches a terminal state,
     /// exiting with a code that reflects pass/fail. Works for attached and
     /// detached/offloaded runs.
     #[command(visible_aliases = ["follow", "tail"])]
     Watch(RunsWatchArgs),
     /// Cooperatively cancel a persisted foreground run before its next stage.
-    Cancel { run_id: String },
+    Cancel {
+        run_id: String,
+        #[arg(long)]
+        reason: Option<String>,
+    },
     /// Show one persisted run or workflow instance (wf- id)
     Show {
         run_id: String,

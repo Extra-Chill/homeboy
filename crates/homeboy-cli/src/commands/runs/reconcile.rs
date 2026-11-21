@@ -18,6 +18,9 @@ use crate::commands::CmdResult;
 
 #[derive(Args, Clone, Default)]
 pub struct RunsReconcileArgs {
+    /// Explanation for this operator intervention
+    #[arg(long)]
+    pub reason: Option<String>,
     /// Preview orphaned running observation records without mutation. Omit this
     /// flag to mark only the reported orphaned records stale.
     #[arg(long)]
@@ -50,6 +53,16 @@ pub(crate) fn reconcile_runs(
     let reconciled =
         reconcile_orphaned_running_runs(&store, running, args.dry_run, pid_is_running)?;
 
+    if !args.dry_run {
+        for run in &reconciled {
+            homeboy::core::observation::store::record_intervention(
+                store,
+                &run.id,
+                "runs reconcile",
+                args.reason.as_deref(),
+            )?;
+        }
+    }
     Ok((
         RunsOutput::Reconcile(RunsReconcileOutput {
             command: "runs.reconcile",

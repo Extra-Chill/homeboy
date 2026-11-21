@@ -46,6 +46,8 @@ enum WorkflowCommand {
     Run(RunArgs),
     /// Cancel an instance and every step it is running, or stop a registered cadence
     Cancel {
+        #[arg(long)]
+        reason: Option<String>,
         /// Instance id, or the workflow id of a registered cadence
         instance: String,
         /// Run even from inside a Cook attempt, where controller mutations
@@ -88,6 +90,9 @@ enum WorkflowCommand {
 
 #[derive(Args)]
 pub struct RunArgs {
+    /// Explanation when re-admission retries a failed instance
+    #[arg(long)]
+    reason: Option<String>,
     /// Definition file, registered workflow id, or `-` for stdin
     workflow: String,
     /// Workflow input as NAME=VALUE (repeatable)
@@ -160,6 +165,7 @@ pub fn run(args: WorkflowArgs) -> CmdResult<Value> {
         WorkflowCommand::Cancel {
             instance,
             allow_inside_cook,
+            reason,
         } => {
             crate::invocation::refuse_inside_cook_attempt("workflow cancel", allow_inside_cook)?;
             let client = LocalControllerJobClient::connect()?;
@@ -189,6 +195,10 @@ pub fn run(args: WorkflowArgs) -> CmdResult<Value> {
             let job_id = view["job"]["job_id"]
                 .as_str()
                 .ok_or_else(|| Error::internal_unexpected("runs show has no job id"))?;
+            let was_terminal = matches!(
+                view["status"].as_str(),
+                Some("succeeded" | "failed" | "cancelled" | "budget_exhausted")
+            );
             let job = client.cancel(
                 job_id,
                 &format!(
@@ -196,6 +206,14 @@ pub fn run(args: WorkflowArgs) -> CmdResult<Value> {
                     crate::invocation::requester()
                 ),
             )?;
+            if !was_terminal {
+                homeboy::core::observation::store::record_intervention(
+                    &homeboy::core::observation::ObservationStore::open_initialized()?,
+                    &instance,
+                    "workflow cancel",
+                    reason.as_deref(),
+                )?;
+            }
             // The cancel is durable once acknowledged; a failed follow-up read
             // must not report it as a failure.
             Ok((
@@ -256,14 +274,25 @@ fn run_workflow(args: RunArgs) -> CmdResult<Value> {
         .iter()
         .map(|(name, value)| (name.clone(), Value::String(value.clone())))
         .collect::<BTreeMap<_, _>>();
-    admit_with_resume(
+    let result = admit_with_resume(
         &definition,
         &provided,
         args.instance.as_deref(),
         args.wait,
         &source,
         args.resume_from.as_deref(),
-    )
+    )?;
+    if result.0["submission"]["disposition"] == "created" && result.0["resumed_from"].is_string() {
+        if let Some(instance) = result.0["instance"].as_str() {
+            homeboy::core::observation::store::record_intervention(
+                &homeboy::core::observation::ObservationStore::open_initialized()?,
+                instance,
+                "workflow run",
+                args.reason.as_deref(),
+            )?;
+        }
+    }
+    Ok(result)
 }
 
 /// A resume reuses each succeeded step whose rendered definition is unchanged,
@@ -617,6 +646,10 @@ fn run_on_runner(
     if let Some(instance) = &args.instance {
         remote.push("--instance".to_string());
         remote.push(instance.clone());
+    }
+    if let Some(reason) = &args.reason {
+        remote.push("--reason".to_string());
+        remote.push(reason.clone());
     }
     if let Some(source) = &args.resume_from {
         remote.push("--resume-from".to_string());

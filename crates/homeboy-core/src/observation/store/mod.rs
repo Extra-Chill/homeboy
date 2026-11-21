@@ -11,6 +11,10 @@ mod control_plane_events;
 pub mod coordination;
 mod findings;
 mod helpers;
+mod interventions;
+#[cfg(test)]
+mod interventions_tests;
+pub use interventions::record_intervention;
 mod invocations;
 pub use invocations::Invocation;
 pub mod metadata_payloads;
