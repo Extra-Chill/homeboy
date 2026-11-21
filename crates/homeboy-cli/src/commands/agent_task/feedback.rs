@@ -80,25 +80,35 @@ pub(crate) fn feedback(args: CookFeedbackArgs) -> CmdResult<Value> {
         &normalized_text,
         &idempotency_key,
     )?;
-    let recipe_store =
-        homeboy::agents::agent_task_service::CookRecipeStore::from_current_data_root()?;
-    let remediation_queued = if recipe_store.recipe_exists(&args.cook_id) {
-        let lifecycle_store = recipe_store.lifecycle_store();
-        let run_id =
-            homeboy::agents::agent_task_service::resolve_cook_continuation_run_id_in_store(
-                &recipe_store,
-                &lifecycle_store,
-                &args.cook_id,
-            )?;
-        recipe_store.enqueue_feedback_remediation(&args.cook_id, &run_id)?
+    use homeboy::agents::agent_task_service::{plan_cook_recovery, CookRecoveryStep};
+    let plan = plan_cook_recovery(&args.cook_id);
+    let remediation_queued = plan.as_ref().is_ok_and(|plan| {
+        matches!(
+            plan.step,
+            CookRecoveryStep::Retry | CookRecoveryStep::Continue | CookRecoveryStep::Rearm
+        )
+    });
+    let remediation_blocker = if remediation_queued {
+        None
     } else {
-        false
+        Some(match plan.as_ref().map(|plan| &plan.step) {
+            Err(error) => error.message.clone(),
+            Ok(step) => match step {
+                CookRecoveryStep::None { reason } => reason.clone(),
+                CookRecoveryStep::Blocked { blocker, .. } => blocker.clone(),
+                step => format!(
+                    "Pending operator feedback cannot be consumed by recovery step `{}`",
+                    step.action_name().unwrap_or("none")
+                ),
+            },
+        })
     };
     Ok((
         serde_json::json!({
             "schema": "homeboy/agent-task-cook-feedback-result/v1",
             "created": created,
             "remediation_queued": remediation_queued,
+            "remediation_blocker": remediation_blocker,
             "feedback": feedback,
         }),
         0,
