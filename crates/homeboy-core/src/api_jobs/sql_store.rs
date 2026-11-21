@@ -837,6 +837,24 @@ fn read_job_bodies<P: rusqlite::Params>(
     Ok(jobs)
 }
 
+/// One read-only batch of job records and their event histories.
+pub(super) fn read_jobs_with_events_readonly(
+    connection: &Connection,
+    path: &Path,
+    ids: &[Uuid],
+) -> Result<Vec<StoredJob>> {
+    read_job_bodies(
+        connection,
+        path,
+        "SELECT json_set(j.body, '$.events', json(COALESCE((
+            SELECT json_group_array(json(body)) FROM (
+                SELECT body FROM daemon_job_events WHERE job_id = j.job_id ORDER BY sequence
+            )
+        ), '[]'))) FROM daemon_jobs j WHERE j.job_id IN (SELECT value FROM json_each(?1))",
+        [serde_json::to_string(ids).expect("job ids serialize")],
+    )
+}
+
 /// One job row, with its events only when `with_events` asks for them.
 pub(super) fn read_job_readonly(
     connection: &Connection,

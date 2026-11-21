@@ -2400,6 +2400,83 @@ impl JobStore {
         .and_then(|tombstone| tombstone.terminal_job)
     }
 
+    /// Snapshot the requested step jobs once, including terminal event history.
+    /// Missing/compacted records retain their replay status where available.
+    pub(crate) fn controller_job_timings(&self, keys: &[String]) -> HashMap<String, Value> {
+        let inner = self.inner.lock().expect("job store mutex poisoned");
+        let submissions = keys
+            .iter()
+            .filter_map(|key| {
+                inner
+                    .controller_submissions
+                    .get(key)
+                    .or_else(|| inner.expired_controller_submissions.get(key))
+                    .map(|submission| (key, submission))
+            })
+            .collect::<Vec<_>>();
+        let ids = submissions
+            .iter()
+            .map(|(_, submission)| submission.job_id)
+            .collect::<Vec<_>>();
+        let mut records = HashMap::new();
+        if let Some(persistence) = &self.persistence {
+            if let Ok(guard) = persistence.connection() {
+                if let Some(connection) = guard.as_ref() {
+                    for stored in sql_store::read_jobs_with_events_readonly(
+                        connection,
+                        &persistence.path,
+                        &ids,
+                    )
+                    .unwrap_or_default()
+                    {
+                        records.insert(stored.job.id, (stored.job, stored.events));
+                    }
+                }
+            }
+        }
+        for id in &ids {
+            if let Some(stored) = inner.jobs.get(id) {
+                records.insert(*id, (stored.job.clone(), stored.events.clone()));
+            }
+        }
+        submissions
+            .into_iter()
+            .filter_map(|(key, submission)| {
+                let (job, events) = records
+                    .get(&submission.job_id)
+                    .cloned()
+                    .or_else(|| submission.terminal_job.clone().map(|job| (job, Vec::new())))?;
+                let mut value = serde_json::json!({"job_id": job.id, "status": job.status});
+                // Controller admission is not child execution: only the step's
+                // running progress event proves that the command actually started.
+                if let Some(started) = events
+                    .iter()
+                    .find(|event| {
+                        event
+                            .data
+                            .as_ref()
+                            .is_some_and(|data| data["phase"] == "running")
+                    })
+                    .map(|event| event.timestamp_ms)
+                {
+                    let timestamp = |ms: u64| {
+                        chrono::DateTime::from_timestamp_millis(ms as i64)
+                            .map(|time| time.to_rfc3339())
+                    };
+                    value["queued_at"] = serde_json::json!(timestamp(job.created_at_ms));
+                    value["started_at"] = serde_json::json!(timestamp(started));
+                    value["queued_ms"] =
+                        serde_json::json!(started.saturating_sub(job.created_at_ms));
+                    if let Some(finished) = job.finished_at_ms {
+                        value["finished_at"] = serde_json::json!(timestamp(finished));
+                        value["elapsed_ms"] = serde_json::json!(finished.saturating_sub(started));
+                    }
+                }
+                Some((key.clone(), value))
+            })
+            .collect()
+    }
+
     /// When the step job for an exact key spawned its child: the first
     /// progress event that reports the supervised child running.
     pub(crate) fn step_spawned_at_ms(&self, key: &str) -> Option<u64> {
