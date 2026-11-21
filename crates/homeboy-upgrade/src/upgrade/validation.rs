@@ -1,8 +1,6 @@
 use homeboy_core::error::Result;
 
-use super::helpers::{
-    current_version, detect_install_method, fetch_latest_version, version_is_newer,
-};
+use super::helpers::{current_version, detect_install_method, version_is_newer};
 use super::release_catalog::{self, InstallableSelection, ReleaseEntry};
 use super::types::{InstallMethod, VersionCheck};
 
@@ -15,25 +13,37 @@ pub(crate) fn selects_an_installable_release(method: InstallMethod) -> bool {
 }
 
 pub fn check_for_updates() -> Result<VersionCheck> {
+    check_for_updates_with_catalog().map(|(check, _)| check)
+}
+
+/// The update verdict together with the release catalog it was derived from,
+/// so callers that also need release metadata read GitHub once.
+pub(crate) fn check_for_updates_with_catalog() -> Result<(VersionCheck, Vec<ReleaseEntry>)> {
     let install_method = detect_install_method();
-    let current = current_version().to_string();
+    let current = current_version();
+    let releases = release_catalog::fetch_release_catalog()?;
+    let check = if selects_an_installable_release(install_method) {
+        installable_check(install_method, current, &releases)
+    } else {
+        newest_release_check(install_method, current, &releases)?
+    };
+    Ok((check, releases))
+}
 
-    if selects_an_installable_release(install_method) {
-        if let Ok(releases) = release_catalog::fetch_release_catalog() {
-            return Ok(installable_check(install_method, &current, &releases));
-        }
-        // The release list was unreachable. Fall through to the single-release
-        // fetch rather than reporting "no update": one failing endpoint is not
-        // evidence about the release train.
-    }
-
-    let latest = fetch_latest_version()?;
-    let update_available = version_is_newer(&latest, &current);
+/// Verdict for install methods that do not download a release asset: the
+/// newest stable release is the answer, with no asset verification.
+fn newest_release_check(
+    install_method: InstallMethod,
+    current: &str,
+    releases: &[ReleaseEntry],
+) -> Result<VersionCheck> {
+    let latest = release_catalog::newest_stable_version(releases)?;
+    let update_available = version_is_newer(&latest, current);
 
     Ok(VersionCheck {
         command: "upgrade.check".to_string(),
         token_source: crate::upgrade::github_api::token_source(),
-        current_version: current,
+        current_version: current.to_string(),
         latest_version: Some(latest.clone()),
         update_available,
         install_method,
@@ -264,11 +274,39 @@ mod tests {
 
     /// The release-asset method pins the selected installable release.
     #[test]
-    fn only_the_release_pinning_method_consults_the_release_catalog() {
+    fn only_the_release_pinning_method_selects_an_installable_release() {
         assert!(selects_an_installable_release(InstallMethod::Binary));
         assert!(!selects_an_installable_release(InstallMethod::Homebrew));
         assert!(!selects_an_installable_release(InstallMethod::Source));
         assert!(!selects_an_installable_release(InstallMethod::Unknown));
+    }
+
+    /// Non-binary installs read the same catalog and report its newest stable
+    /// release without verifying any asset.
+    #[test]
+    fn non_binary_check_reports_the_newest_catalog_release() {
+        use crate::upgrade::helpers::TEST_INSTALL_METHOD;
+        use crate::upgrade::release_catalog::tests::with_catalog_server;
+
+        let body = serde_json::json!([
+            {"tag_name": "v99.1.0", "draft": true},
+            {"tag_name": "v99.0.0", "assets": []},
+            {"tag_name": "v98.0.0", "assets": []}
+        ])
+        .to_string();
+        TEST_INSTALL_METHOD.set(Some(InstallMethod::Source));
+        let count = with_catalog_server("200 OK", &body, |_| {
+            let check = check_for_updates();
+            TEST_INSTALL_METHOD.set(None);
+            let check = check.expect("catalog answers the non-binary check");
+            assert_eq!(check.install_method, InstallMethod::Source);
+            assert_eq!(check.latest_version.as_deref(), Some("99.0.0"));
+            assert_eq!(check.newest_version.as_deref(), Some("99.0.0"));
+            assert!(check.update_available);
+            assert!(check.notice.is_none());
+            assert!(check.uninstallable_versions.is_empty());
+        });
+        assert_eq!(count, 1);
     }
 
     fn check(current: &str, latest: Option<&str>, update_available: bool) -> VersionCheck {
