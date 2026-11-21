@@ -564,12 +564,33 @@ pub trait LabGateTransport: Send + Sync {
     fn build_skew(&self, _runner_id: &str) -> Result<Option<RunnerBuildSkew>> {
         Ok(None)
     }
+    /// Read the executing daemon's record of a submitted gate job. The daemon
+    /// stamps a job's start when it admits it out of its capacity queue, so
+    /// recovery can tell a gate that ran from one that never left the queue
+    /// even when the controller died before it saw the start (#18709).
+    /// Transports without a daemon job record report none.
+    fn gate_job(&self, _runner_id: &str, _job_id: &str) -> Result<Option<LabGateJobState>> {
+        Ok(None)
+    }
     fn execute(
         &self,
         cwd: &Path,
         request: &LabGateRequest,
         supervision: Option<&GateSupervision>,
     ) -> Result<LabGateReceipt>;
+}
+
+/// The executing daemon's record of one submitted gate job (#18709).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct LabGateJobState {
+    pub status: homeboy_core::api_jobs::JobStatus,
+    /// The daemon admitted the job out of its capacity queue: a gate started.
+    pub started: bool,
+}
+
+/// Read a submitted gate job through the registered transport.
+pub(crate) fn gate_job(runner_id: &str, job_id: &str) -> Result<Option<LabGateJobState>> {
+    active_transport().gate_job(runner_id, job_id)
 }
 
 pub(crate) fn with_local_reserve_recovery(mut error: Error) -> Error {

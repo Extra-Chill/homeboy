@@ -5,8 +5,8 @@ use std::path::Path;
 use std::sync::Arc;
 
 use homeboy_agents::agent_tasks::gate::placement::{
-    LabGateAdmission, LabGateFreshness, LabGateReceipt, LabGateRequest, LabGateTransport,
-    RunnerBuildSkew,
+    LabGateAdmission, LabGateFreshness, LabGateJobState, LabGateReceipt, LabGateRequest,
+    LabGateTransport, RunnerBuildSkew,
 };
 use homeboy_agents::agent_tasks::gate::GateSupervision;
 use homeboy_core::{Error, Result};
@@ -26,6 +26,10 @@ impl LabGateTransport for NativeLabGateTransport {
     }
     fn admission(&self, runner_id: &str) -> Result<LabGateAdmission> {
         observe_gate_admission(runner_id).map(|(admission, _)| admission)
+    }
+    fn gate_job(&self, runner_id: &str, job_id: &str) -> Result<Option<LabGateJobState>> {
+        let job = crate::execution::read_daemon_job(runner_id, job_id)?;
+        Ok(Some(gate_job_state(&job)))
     }
     fn build_skew(&self, runner_id: &str) -> Result<Option<RunnerBuildSkew>> {
         let controller = crate::controller_identity::compatibility_controller_identity().version;
@@ -83,6 +87,16 @@ impl LabGateTransport for NativeLabGateTransport {
                 Err(public)
             }
         }
+    }
+}
+
+/// The daemon stamps `started_at_ms` when it admits a job out of its capacity
+/// queue; a job reaped or cancelled while queued never gets one (#18709).
+fn gate_job_state(job: &homeboy_core::api_jobs::Job) -> LabGateJobState {
+    LabGateJobState {
+        status: job.status,
+        started: job.started_at_ms.is_some()
+            || job.status == homeboy_core::api_jobs::JobStatus::Running,
     }
 }
 
@@ -810,6 +824,13 @@ fn execute_owned(
             if let Some(job) =
                 crate::lab::offload::accepted_runner_job_id(&request.runner_id, run_id)
             {
+                if !request.preflight_only {
+                    // Best effort: recovery can still read this job's start.
+                    let _ = homeboy_agents::agent_tasks::gate::execution_start::job_submitted(
+                        &request.runner_id,
+                        &job.id,
+                    );
+                }
                 for workspace in [&mut snapshot_workspace, &mut candidate_workspace] {
                     workspace.admitted(&job.id, job.daemon_generation.as_deref());
                 }
@@ -825,6 +846,23 @@ fn execute_owned(
     })?;
     for workspace in [&mut snapshot_workspace, &mut candidate_workspace] {
         workspace.admitted(job_id, daemon_generation.as_deref());
+    }
+    // Record the accepted job before waiting for the daemon to admit it, so a
+    // controller that dies before its next poll leaves recovery the job whose
+    // daemon start record stands in for the fence (#18709). A job that cannot
+    // be recorded is withdrawn rather than left to start untracked.
+    if !request.preflight_only {
+        if let Err(error) = homeboy_agents::agent_tasks::gate::execution_start::job_submitted(
+            &request.runner_id,
+            job_id,
+        ) {
+            let _ = crate::runner_job_cancel(
+                &request.runner_id,
+                job_id,
+                "gate controller could not record the submitted job",
+            );
+            return Err(error);
+        }
     }
     let started = std::time::Instant::now();
     let last_heartbeat = std::cell::Cell::new(started);

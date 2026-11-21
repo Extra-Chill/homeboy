@@ -1863,6 +1863,9 @@ fn verify_replacement_gates_owned(
         }
         ReplacementGateMode::Regate => None,
     };
+    // A gate job the daemon admitted after its controller died is a started
+    // gate even though no local fence was written (#18709).
+    reconcile_admitted_replacement_gate_jobs(lifecycle_store, run_id)?;
     let recovering_interrupted_execution =
         match replacement_gate_execution_owner_live(&lifecycle_store.read_record(run_id)?.metadata)
         {
@@ -1952,42 +1955,58 @@ fn verify_replacement_gates_owned(
     // on the active scope for the declared budgets on a Lab runner (#15856).
     let supervision = replacement_gate_supervision(&gates);
     let repro = gates.repro.clone();
+    let job_submission: std::rc::Rc<dyn Fn(&str, &str) -> Result<()>> = {
+        let lifecycle_store = lifecycle_store.clone();
+        let run_id = run_id.to_string();
+        std::rc::Rc::new(move |runner_id: &str, job_id: &str| {
+            mark_replacement_gate_job_submitted(&lifecycle_store, &run_id, runner_id, job_id)
+        })
+    };
     let replacement = crate::agent_task_promotion::with_gate_supervision(supervision, || {
-        let mut replacement = resume_promoted_patch_replacement_gates_in_observation_store(
-            AgentTaskPromotionRequest {
-                source,
-                source_run_id: Some(run_id.to_string()),
-                source_path,
-                // Candidate identity remains rooted at the persisted promotion target.
-                // The corrected gate workspace is passed separately below.
-                source_worktree_path: None,
-                base_ref: Some(verified_base.base.clone()),
-                task_base_sha: inputs
-                    .and_then(|value| value.get("task_base_sha"))
-                    .and_then(Value::as_str)
-                    .map(str::to_string),
-                candidate_ref: inputs
-                    .and_then(|value| value.get("candidate_ref"))
-                    .and_then(Value::as_str)
-                    .map(str::to_string),
-                to_worktree: original.to_worktree.clone(),
-                task_id: Some(original.source.task_id.clone()),
-                artifact_id: None,
-                dry_run: false,
-                gates,
-                provider_invocation: None,
-                repository_integrity_evidence: original.repository_integrity_evidence.clone(),
-            },
-            &target_path,
-            &original_value,
-            replacement_gate_workspace.as_deref(),
-            &observation_store,
-            {
-                let lifecycle_store = lifecycle_store.clone();
-                let run_id = run_id.to_string();
-                move || mark_replacement_gate_execution_started(&lifecycle_store, &run_id)
-            },
-        )?;
+        // Each runner job is recorded as soon as its daemon accepts it, so
+        // recovery reads the daemon's start record for it even if this
+        // controller dies before it sees the job leave the queue (#18709).
+        let resumed =
+            crate::agent_task_gate::execution_start::with_job_submission(job_submission, || {
+                resume_promoted_patch_replacement_gates_in_observation_store(
+                    AgentTaskPromotionRequest {
+                        source,
+                        source_run_id: Some(run_id.to_string()),
+                        source_path,
+                        // Candidate identity remains rooted at the persisted promotion target.
+                        // The corrected gate workspace is passed separately below.
+                        source_worktree_path: None,
+                        base_ref: Some(verified_base.base.clone()),
+                        task_base_sha: inputs
+                            .and_then(|value| value.get("task_base_sha"))
+                            .and_then(Value::as_str)
+                            .map(str::to_string),
+                        candidate_ref: inputs
+                            .and_then(|value| value.get("candidate_ref"))
+                            .and_then(Value::as_str)
+                            .map(str::to_string),
+                        to_worktree: original.to_worktree.clone(),
+                        task_id: Some(original.source.task_id.clone()),
+                        artifact_id: None,
+                        dry_run: false,
+                        gates,
+                        provider_invocation: None,
+                        repository_integrity_evidence: original
+                            .repository_integrity_evidence
+                            .clone(),
+                    },
+                    &target_path,
+                    &original_value,
+                    replacement_gate_workspace.as_deref(),
+                    &observation_store,
+                    {
+                        let lifecycle_store = lifecycle_store.clone();
+                        let run_id = run_id.to_string();
+                        move || mark_replacement_gate_execution_started(&lifecycle_store, &run_id)
+                    },
+                )
+            });
+        let mut replacement = resumed?;
         super::cook_baseline::compare_gate_failures_to_verified_base(
             &observation_store,
             &mut replacement,
@@ -2269,13 +2288,205 @@ pub(crate) fn mark_replacement_gate_execution_started(
     Ok(())
 }
 
-/// Lift this process's fence once its gate execution has returned.
+/// Lift this process's fence and submitted-job record once its gate
+/// execution has returned.
 fn finish_replacement_gate_execution(metadata: &mut Value) -> bool {
-    let fence = format!("/{REPLACEMENT_GATE_EXECUTION_FENCES_KEY}/verify-replacement/owner_pid");
-    metadata.pointer(&fence) == Some(&Value::from(std::process::id()))
-        && metadata[REPLACEMENT_GATE_EXECUTION_FENCES_KEY]
-            .as_object_mut()
-            .is_some_and(|fences| fences.remove("verify-replacement").is_some())
+    let mut changed = false;
+    for key in [
+        REPLACEMENT_GATE_EXECUTION_FENCES_KEY,
+        REPLACEMENT_GATE_EXECUTION_JOBS_KEY,
+    ] {
+        let owner = format!("/{key}/verify-replacement/owner_pid");
+        if metadata.pointer(&owner) == Some(&Value::from(std::process::id())) {
+            changed |= metadata[key]
+                .as_object_mut()
+                .is_some_and(|entries| entries.remove("verify-replacement").is_some());
+        }
+    }
+    changed
+}
+
+const REPLACEMENT_GATE_EXECUTION_JOBS_KEY: &str = "replacement_gate_execution_jobs";
+
+/// Record a runner job the replacement gates handed to a daemon, as soon as
+/// the daemon accepted it and before it may leave the daemon's queue. The
+/// daemon stamps the job's start itself; this job id is how recovery reads
+/// that start after a controller that died before seeing it (#18709).
+pub(crate) fn mark_replacement_gate_job_submitted(
+    lifecycle_store: &agent_task_lifecycle::AgentTaskLifecycleStore,
+    run_id: &str,
+    runner_id: &str,
+    job_id: &str,
+) -> Result<()> {
+    lifecycle_store.mutate_record(run_id, |record| {
+        let entries = record
+            .ensure_metadata_object()
+            .entry(REPLACEMENT_GATE_EXECUTION_JOBS_KEY.to_string())
+            .or_insert_with(|| serde_json::json!({}));
+        if !entries.is_object() {
+            *entries = serde_json::json!({});
+        }
+        let owner_pid = std::process::id();
+        let entry = &mut entries["verify-replacement"];
+        if entry["owner_pid"] != Value::from(owner_pid) || !entry["jobs"].is_array() {
+            *entry = serde_json::json!({
+                "schema": "homeboy/agent-task-replacement-gate-execution-jobs/v1",
+                "owner_pid": owner_pid,
+                "jobs": [],
+            });
+        }
+        entry["jobs"]
+            .as_array_mut()
+            .expect("array")
+            .push(serde_json::json!({
+                "runner_id": runner_id,
+                "job_id": job_id,
+                "submitted_at": chrono::Utc::now().to_rfc3339(),
+            }));
+        true
+    })?;
+    Ok(())
+}
+
+/// A replacement gate job the daemon admitted out of its queue, submitted by
+/// a controller that is gone. The daemon's start record stands in for the
+/// start fence that controller never wrote (#18709).
+#[derive(Debug, Clone)]
+struct AdmittedGateJob {
+    runner_id: String,
+    job_id: String,
+    owner_pid: Value,
+    state: crate::agent_task_gate::placement::LabGateJobState,
+}
+
+impl AdmittedGateJob {
+    fn running(&self) -> bool {
+        !self.state.status.is_terminal()
+    }
+
+    fn to_value(&self) -> Value {
+        serde_json::json!({
+            "runner_id": self.runner_id,
+            "job_id": self.job_id,
+            "owner_pid": self.owner_pid,
+            "status": self.state.status,
+            "running": self.running(),
+            "logs_command": format!(
+                "homeboy runner job logs {} {}{}",
+                self.runner_id,
+                self.job_id,
+                if self.running() { " --follow" } else { " --json" }
+            ),
+        })
+    }
+}
+
+/// Submitted jobs whose controller is gone, with the daemon's record of
+/// each: `None` when there is no such record. Jobs the daemon never admitted
+/// (still queued, or reaped from the queue) are not returned: no gate ran.
+fn dead_owner_admitted_gate_jobs(metadata: &Value) -> Option<Vec<AdmittedGateJob>> {
+    let entry = metadata
+        .get(REPLACEMENT_GATE_EXECUTION_JOBS_KEY)?
+        .get("verify-replacement")?;
+    let owner_pid = entry["owner_pid"].clone();
+    let owner_live = owner_pid
+        .as_u64()
+        .and_then(|pid| u32::try_from(pid).ok())
+        .is_some_and(homeboy_core::process::pid_is_running);
+    if owner_live {
+        return None;
+    }
+    let jobs = entry["jobs"].as_array()?;
+    Some(
+        jobs.iter()
+            .filter_map(|job| {
+                let runner_id = job["runner_id"].as_str()?;
+                let job_id = job["job_id"].as_str()?;
+                // An unreadable daemon cannot prove the gate started; the
+                // regate then goes through that runner's own admission.
+                let state = crate::agent_task_gate::placement::gate_job(runner_id, job_id)
+                    .ok()
+                    .flatten()?;
+                state.started.then(|| AdmittedGateJob {
+                    runner_id: runner_id.to_string(),
+                    job_id: job_id.to_string(),
+                    owner_pid: owner_pid.clone(),
+                    state,
+                })
+            })
+            .collect(),
+    )
+}
+
+/// The replacement gate job the daemon admitted for `run_id` after its
+/// controller died, preferring one still running (#18709). `recover` reports
+/// it instead of offering a fresh regate as if no gate had run.
+pub(crate) fn admitted_replacement_gate_job(run_id: &str) -> Option<Value> {
+    let record = agent_task_lifecycle::exact_record(run_id).ok()?;
+    let jobs = dead_owner_admitted_gate_jobs(&record.metadata)?;
+    jobs.iter()
+        .find(|job| job.running())
+        .or_else(|| jobs.first())
+        .map(AdmittedGateJob::to_value)
+}
+
+/// Reconcile the local start fence with the daemon's start record of jobs a
+/// dead controller submitted: an admitted job becomes the fence it never
+/// wrote, and one still running vetoes a second execution. The submitted-job
+/// record is dropped once none of its jobs still runs.
+fn reconcile_admitted_replacement_gate_jobs(
+    lifecycle_store: &agent_task_lifecycle::AgentTaskLifecycleStore,
+    run_id: &str,
+) -> Result<()> {
+    let record = lifecycle_store.read_record(run_id)?;
+    let Some(jobs) = dead_owner_admitted_gate_jobs(&record.metadata) else {
+        return Ok(());
+    };
+    let running = jobs.iter().find(|job| job.running()).cloned();
+    lifecycle_store.mutate_record(run_id, |record| {
+        let metadata = record.ensure_metadata_object();
+        let fenced = metadata
+            .get(REPLACEMENT_GATE_EXECUTION_FENCES_KEY)
+            .and_then(|fences| fences.get("verify-replacement"))
+            .is_some();
+        let admitted = running.as_ref().or_else(|| jobs.first());
+        if let Some(job) = admitted.filter(|_| !fenced) {
+            let fences = metadata
+                .entry(REPLACEMENT_GATE_EXECUTION_FENCES_KEY.to_string())
+                .or_insert_with(|| serde_json::json!({}));
+            if !fences.is_object() {
+                *fences = serde_json::json!({});
+            }
+            fences["verify-replacement"] = serde_json::json!({
+                "schema": "homeboy/agent-task-replacement-gate-execution-fence/v1",
+                "state": "started",
+                "owner_pid": job.owner_pid,
+                "reconciled_from": "daemon_job_start",
+                "runner_job": job.to_value(),
+            });
+        }
+        if running.is_none() {
+            if let Some(entries) = metadata
+                .get_mut(REPLACEMENT_GATE_EXECUTION_JOBS_KEY)
+                .and_then(Value::as_object_mut)
+            {
+                entries.remove("verify-replacement");
+            }
+        }
+        true
+    })?;
+    match running {
+        Some(job) => {
+            let mut error = live_replacement_gate_execution_error(run_id);
+            let logs = job.to_value()["logs_command"].clone();
+            error.details["recovery"]["runner_job"] = job.to_value();
+            if let Some(logs) = logs.as_str() {
+                error = error.with_hint(format!("Wait for the admitted gate job: {logs}"));
+            }
+            Err(error)
+        }
+        None => Ok(()),
+    }
 }
 
 fn interrupted_replacement_gate_execution_error(run_id: &str) -> Error {

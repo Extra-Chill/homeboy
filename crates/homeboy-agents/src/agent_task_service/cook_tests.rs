@@ -84,8 +84,9 @@ use super::super::cook_promotion::{
     canonical_cook_recovery_run_id, cook_finalization_options,
     cook_finalization_options_with_stores, cook_report, finalize_or_load_cook_pr_with_backend,
     finalize_or_load_cook_pr_with_backend_with_stores, mark_replacement_gate_execution_started,
-    persisted_promotion_for_attempt, persisted_promotion_for_attempt_in_store,
-    promote_attempt_in_store, promote_or_load_attempt_in_store, recover_cook_pr_with_backend,
+    mark_replacement_gate_job_submitted, persisted_promotion_for_attempt,
+    persisted_promotion_for_attempt_in_store, promote_attempt_in_store,
+    promote_or_load_attempt_in_store, recover_cook_pr_with_backend,
     recover_cook_pr_with_backend_and_review_form, verify_replacement_gates,
     AgentTaskSuppliedReviewForm, CookReportInput,
 };
@@ -10206,6 +10207,103 @@ fn regate_after_interrupted_regate_fence_runs_without_extra_authorization() {
     });
 }
 
+/// A Lab runner fake for replacement gates on `replacement-placement-runner`:
+/// it can refuse admission for capacity, reports a scripted daemon job record,
+/// and otherwise runs the gate locally.
+struct FakeLabRunner {
+    previous: Arc<dyn crate::agent_task_gate::placement::LabGateTransport>,
+    at_capacity: AtomicBool,
+    daemon_job: Mutex<Option<crate::agent_task_gate::placement::LabGateJobState>>,
+}
+
+impl FakeLabRunner {
+    fn register(at_capacity: bool) -> (Arc<Self>, RestoreLabTransport) {
+        use crate::agent_task_gate::placement;
+        let restore = RestoreLabTransport(placement::active_transport());
+        let transport = Arc::new(Self {
+            previous: placement::active_transport(),
+            at_capacity: AtomicBool::new(at_capacity),
+            daemon_job: Mutex::new(None),
+        });
+        placement::register_lab_gate_transport(transport.clone());
+        (transport, restore)
+    }
+}
+
+struct RestoreLabTransport(Arc<dyn crate::agent_task_gate::placement::LabGateTransport>);
+
+impl Drop for RestoreLabTransport {
+    fn drop(&mut self) {
+        crate::agent_task_gate::placement::register_lab_gate_transport(self.0.clone());
+    }
+}
+
+impl crate::agent_task_gate::placement::LabGateTransport for FakeLabRunner {
+    fn declared_runner(&self, command: &str) -> Result<Option<String>> {
+        self.previous.declared_runner(command)
+    }
+    fn gate_job(
+        &self,
+        runner_id: &str,
+        _job_id: &str,
+    ) -> Result<Option<crate::agent_task_gate::placement::LabGateJobState>> {
+        if runner_id != "replacement-placement-runner" {
+            return Ok(None);
+        }
+        Ok(*self.daemon_job.lock().unwrap())
+    }
+    fn execute(
+        &self,
+        cwd: &std::path::Path,
+        request: &crate::agent_task_gate::placement::LabGateRequest,
+        supervision: Option<&crate::agent_task_gate::GateSupervision>,
+    ) -> Result<crate::agent_task_gate::placement::LabGateReceipt> {
+        if request.runner_id != "replacement-placement-runner" {
+            return self.previous.execute(cwd, request, supervision);
+        }
+        if self.at_capacity.load(Ordering::SeqCst) {
+            return Err(crate::agent_task_gate::placement::LabGateAdmission {
+                accepts_jobs: false,
+                reasons: vec!["capacity_reached".to_string()],
+                freshness: crate::agent_task_gate::placement::LabGateFreshness::Fresh,
+                next_action: None,
+            }
+            .refusal(&request.runner_id, None));
+        }
+        let mut environment = request.environment.clone();
+        environment.lab_runner = None;
+        environment.shared_cargo_target = Some(false);
+        let mut report = crate::agent_task_gate::run_gate_command_with_supervision(
+            cwd,
+            request.index,
+            if request.preflight_only {
+                "true"
+            } else {
+                &request.label
+            },
+            request.visibility,
+            request.reveal_policy,
+            None,
+            supervision,
+            &environment,
+            &[],
+        )?;
+        report.environment.lab_runner = Some(request.runner_id.clone());
+        if request.preflight_only {
+            report.status = crate::agent_task_gate::AgentTaskGateStatus::Skipped;
+        }
+        Ok(crate::agent_task_gate::placement::LabGateReceipt {
+            schema: crate::agent_task_gate::placement::LAB_GATE_RECEIPT_SCHEMA.to_string(),
+            request_sha256: request.identity()?,
+            candidate: request.candidate.clone(),
+            execution_context: homeboy_core::runner_job_execution_context::RunnerJobExecutionContext::direct_daemon(
+                Some("controller-run"), &request.runner_id, "job", "homeboy", "reservation",
+            )?.evidence_record()?,
+            report, setup: vec![], readiness: request.preflight_only.then(|| serde_json::json!({"status":"ready"})), materialization: None, artifact_ref: None,
+        })
+    }
+}
+
 /// #18042: a regate whose Lab admission wait is stopped (here by the
 /// client's admission bound; SIGINT/SIGTERM stop it the same way) reports
 /// what it waited for, fails without a start fence, releases its operation
@@ -10213,73 +10311,7 @@ fn regate_after_interrupted_regate_fence_runs_without_extra_authorization() {
 /// follows runs its gates without any authorization.
 #[test]
 fn regate_whose_admission_wait_is_stopped_leaves_no_fence_and_regate_reruns() {
-    use crate::agent_task_gate::placement;
     use homeboy_core::foreground_wait;
-    struct CapacityRunner {
-        previous: Arc<dyn placement::LabGateTransport>,
-        at_capacity: AtomicBool,
-    }
-    impl placement::LabGateTransport for CapacityRunner {
-        fn declared_runner(&self, command: &str) -> Result<Option<String>> {
-            self.previous.declared_runner(command)
-        }
-        fn execute(
-            &self,
-            cwd: &std::path::Path,
-            request: &placement::LabGateRequest,
-            supervision: Option<&crate::agent_task_gate::GateSupervision>,
-        ) -> Result<placement::LabGateReceipt> {
-            if request.runner_id != "replacement-placement-runner" {
-                return self.previous.execute(cwd, request, supervision);
-            }
-            if self.at_capacity.load(Ordering::SeqCst) {
-                return Err(placement::LabGateAdmission {
-                    accepts_jobs: false,
-                    reasons: vec!["capacity_reached".to_string()],
-                    freshness: placement::LabGateFreshness::Fresh,
-                    next_action: None,
-                }
-                .refusal(&request.runner_id, None));
-            }
-            let mut environment = request.environment.clone();
-            environment.lab_runner = None;
-            environment.shared_cargo_target = Some(false);
-            let mut report = crate::agent_task_gate::run_gate_command_with_supervision(
-                cwd,
-                request.index,
-                if request.preflight_only {
-                    "true"
-                } else {
-                    &request.label
-                },
-                request.visibility,
-                request.reveal_policy,
-                None,
-                supervision,
-                &environment,
-                &[],
-            )?;
-            report.environment.lab_runner = Some(request.runner_id.clone());
-            if request.preflight_only {
-                report.status = crate::agent_task_gate::AgentTaskGateStatus::Skipped;
-            }
-            Ok(placement::LabGateReceipt {
-                schema: placement::LAB_GATE_RECEIPT_SCHEMA.to_string(),
-                request_sha256: request.identity()?,
-                candidate: request.candidate.clone(),
-                execution_context: homeboy_core::runner_job_execution_context::RunnerJobExecutionContext::direct_daemon(
-                    Some("controller-run"), &request.runner_id, "job", "homeboy", "reservation",
-                )?.evidence_record()?,
-                report, setup: vec![], readiness: request.preflight_only.then(|| serde_json::json!({"status":"ready"})), materialization: None, artifact_ref: None,
-            })
-        }
-    }
-    struct Restore(Arc<dyn placement::LabGateTransport>);
-    impl Drop for Restore {
-        fn drop(&mut self) {
-            placement::register_lab_gate_transport(self.0.clone());
-        }
-    }
     with_corrected_gate_failure(false, |mut options, _| {
         let run_id = options.identity.initial_run_id.clone();
         persist_deferred_fixture(&run_id);
@@ -10299,12 +10331,7 @@ fn regate_whose_admission_wait_is_stopped_leaves_no_fence_and_regate_reruns() {
         let mut recipe = recipes.load_recipe(&options.identity.cook_id).unwrap();
         recipe.gate_policy = serde_json::to_value(&options.gates).unwrap();
         recipes.persist_recipe(&recipe).unwrap();
-        let transport = Arc::new(CapacityRunner {
-            previous: placement::active_transport(),
-            at_capacity: AtomicBool::new(true),
-        });
-        let _restore = Restore(placement::active_transport());
-        placement::register_lab_gate_transport(transport.clone());
+        let (transport, _restore) = FakeLabRunner::register(true);
         let regate = || {
             crate::agent_task_service::recover_cook(
                 &run_id,
@@ -10374,6 +10401,161 @@ fn regate_whose_admission_wait_is_stopped_leaves_no_fence_and_regate_reruns() {
             crate::agent_task_service::CookRecoveryStep::Regate
         );
         assert_eq!(std::fs::read_to_string(&ledger).unwrap().lines().count(), 1);
+        assert!(replacement_gate_fence(&run_id).is_null());
+        let promotion = persisted_promotion_for_attempt(&run_id).unwrap().unwrap();
+        assert_eq!(promotion.status, AgentTaskPromotionStatus::Applied);
+    });
+}
+
+/// Persist a deferred candidate whose recipe gate runs on the fake Lab
+/// runner and appends to a gate-run ledger; returns the ledger path.
+fn lab_regate_fixture(options: &mut CookRequest, run_id: &str) -> (tempfile::TempDir, PathBuf) {
+    persist_deferred_fixture(run_id);
+    let runs = tempfile::tempdir().unwrap();
+    let ledger = runs.path().join("runs");
+    options
+        .gates
+        .gate_environment
+        .variables
+        .insert("GATE_RUN_LEDGER".to_string(), ledger.display().to_string());
+    options.gates.gate_environment.lab_runner = Some("replacement-placement-runner".to_string());
+    options.gates.verify = vec![
+        "echo run >> \"$GATE_RUN_LEDGER\"; test \"$(cat tracked.txt)\" = promoted".to_string(),
+    ];
+    let recipes = CookRecipeStore::from_current_data_root().unwrap();
+    let mut recipe = recipes.load_recipe(&options.identity.cook_id).unwrap();
+    recipe.gate_policy = serde_json::to_value(&options.gates).unwrap();
+    recipes.persist_recipe(&recipe).unwrap();
+    (runs, ledger)
+}
+
+/// A controller recorded its submitted gate job and died before its next
+/// poll, so it never wrote the start fence.
+fn submitted_gate_job_of_dead_controller(run_id: &str, job_id: &str) {
+    mark_replacement_gate_job_submitted(
+        &test_lifecycle_store(),
+        run_id,
+        "replacement-placement-runner",
+        job_id,
+    )
+    .unwrap();
+    agent_task_lifecycle::rewrite_record_for_test(run_id, |record| {
+        record.metadata["replacement_gate_execution_jobs"]["verify-replacement"]["owner_pid"] =
+            serde_json::json!(u32::MAX);
+    })
+    .unwrap();
+}
+
+fn recover_regate(
+    run_id: &str,
+    preflight: bool,
+) -> (crate::agent_task_service::CookRecoveryReport, i32) {
+    crate::agent_task_service::recover_cook(
+        run_id,
+        crate::agent_task_service::CookRecoveryRequest {
+            regate: true,
+            preflight,
+            ..Default::default()
+        },
+        &ReplacementOnlyRecoveryPerformer,
+    )
+    .unwrap()
+}
+
+/// #18709: the daemon admitted a queued gate job after the controller that
+/// submitted it died, before any controller poll wrote the start fence.
+/// `recover --preflight` reports that gate instead of a fresh regate: a
+/// running gate is waited for and never run twice; a finished gate becomes the
+/// fence it never wrote, so the regate supersedes it on the record.
+#[test]
+fn regate_reports_a_gate_the_daemon_admitted_after_its_controller_died() {
+    use crate::agent_task_gate::placement::LabGateJobState;
+    use homeboy_core::api_jobs::JobStatus;
+    with_corrected_gate_failure(false, |mut options, _| {
+        let run_id = options.identity.initial_run_id.clone();
+        let (_runs, ledger) = lab_regate_fixture(&mut options, &run_id);
+        let (transport, _restore) = FakeLabRunner::register(false);
+        submitted_gate_job_of_dead_controller(&run_id, "job-7");
+        let admitted = |status| {
+            *transport.daemon_job.lock().unwrap() = Some(LabGateJobState {
+                status,
+                started: true,
+            })
+        };
+
+        admitted(JobStatus::Running);
+        for preflight in [true, false] {
+            let (report, _) = recover_regate(&run_id, preflight);
+            let reason = match &report.step {
+                crate::agent_task_service::CookRecoveryStep::None { reason } => reason.clone(),
+                step => panic!("a running gate is not regated: {step:?}"),
+            };
+            assert!(reason.contains("job-7"), "{reason}");
+            let job = &report.result.as_ref().unwrap()["admitted_gate_job"];
+            assert_eq!(job["running"], true, "{report:#?}");
+        }
+        assert!(
+            !ledger.exists(),
+            "no second gate ran beside the admitted one"
+        );
+
+        admitted(JobStatus::Succeeded);
+        let (preview, exit) = recover_regate(&run_id, true);
+        assert_eq!(exit, 0, "{preview:#?}");
+        let job = &preview.result.as_ref().unwrap()["admitted_gate_job"];
+        assert_eq!(job["job_id"], "job-7");
+        assert_eq!(job["status"], "succeeded");
+        assert_eq!(job["running"], false);
+
+        let (report, exit) = recover_regate(&run_id, false);
+        assert_eq!(exit, 0, "{report:#?}");
+        assert_eq!(std::fs::read_to_string(&ledger).unwrap().lines().count(), 1);
+        let record = test_lifecycle_store().read_record(&run_id).unwrap();
+        let fence = &record.metadata["replacement_gate_execution_fence_supersessions"][0]["fence"];
+        assert_eq!(fence["reconciled_from"], "daemon_job_start", "{fence:#}");
+        assert_eq!(fence["runner_job"]["job_id"], "job-7");
+        assert!(record.metadata["replacement_gate_execution_jobs"]["verify-replacement"].is_null());
+        let promotion = persisted_promotion_for_attempt(&run_id).unwrap().unwrap();
+        assert_eq!(promotion.status, AgentTaskPromotionStatus::Applied);
+    });
+}
+
+/// #18709: a submitted gate job the daemon never admitted (reaped from its
+/// queue) started nothing, so the regate runs with no authorization and
+/// records no superseded fence.
+#[test]
+fn regate_after_a_reaped_queued_gate_job_needs_no_authorization() {
+    use crate::agent_task_gate::placement::LabGateJobState;
+    use homeboy_core::api_jobs::JobStatus;
+    with_corrected_gate_failure(false, |mut options, _| {
+        let run_id = options.identity.initial_run_id.clone();
+        let (_runs, ledger) = lab_regate_fixture(&mut options, &run_id);
+        let (transport, _restore) = FakeLabRunner::register(false);
+        submitted_gate_job_of_dead_controller(&run_id, "job-8");
+        *transport.daemon_job.lock().unwrap() = Some(LabGateJobState {
+            status: JobStatus::Cancelled,
+            started: false,
+        });
+
+        let (preview, exit) = recover_regate(&run_id, true);
+        assert_eq!(exit, 0, "{preview:#?}");
+        assert_eq!(
+            preview.step,
+            crate::agent_task_service::CookRecoveryStep::Regate
+        );
+        assert!(preview.result.is_none(), "{preview:#?}");
+        assert!(!preview
+            .step
+            .next_action("homeboy", &run_id)
+            .command
+            .contains("authorize"));
+
+        let (report, exit) = recover_regate(&run_id, false);
+        assert_eq!(exit, 0, "{report:#?}");
+        assert_eq!(std::fs::read_to_string(&ledger).unwrap().lines().count(), 1);
+        let record = test_lifecycle_store().read_record(&run_id).unwrap();
+        assert!(record.metadata["replacement_gate_execution_fence_supersessions"].is_null());
+        assert!(record.metadata["replacement_gate_execution_jobs"]["verify-replacement"].is_null());
         assert!(replacement_gate_fence(&run_id).is_null());
         let promotion = persisted_promotion_for_attempt(&run_id).unwrap().unwrap();
         assert_eq!(promotion.status, AgentTaskPromotionStatus::Applied);

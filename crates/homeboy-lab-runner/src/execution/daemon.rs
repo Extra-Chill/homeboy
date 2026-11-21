@@ -1976,6 +1976,25 @@ pub(crate) fn observe_daemon_job_until_terminal(
     observe_daemon_job_until_terminal_with(runner_id, runner_job_id, budget, cancelled, &|_| Ok(()))
 }
 
+/// Read one daemon job, once, through the runner's current transport. The
+/// daemon's record carries `started_at_ms` from the moment it admitted the job
+/// out of its capacity queue (#18709).
+pub(crate) fn read_daemon_job(runner_id: &str, runner_job_id: &str) -> Result<Job> {
+    let client = Client::builder()
+        .no_proxy()
+        .timeout(Duration::from_secs(10))
+        .build()
+        .map_err(|error| {
+            Error::internal_unexpected(format!("build daemon read client: {error}"))
+        })?;
+    let endpoint = refreshed_daemon_endpoint(runner_id)?.ok_or_else(|| {
+        Error::internal_unexpected(format!(
+            "runner `{runner_id}` exposes no daemon transport to read job `{runner_job_id}`"
+        ))
+    })?;
+    fetch_daemon_job(&client, &endpoint, runner_job_id)
+}
+
 /// [`observe_daemon_job_until_terminal`] that hands every observed job to
 /// `on_status` before the wait continues, so a caller can tell a job still
 /// queued for runner capacity from one the daemon admitted (#18042). An
