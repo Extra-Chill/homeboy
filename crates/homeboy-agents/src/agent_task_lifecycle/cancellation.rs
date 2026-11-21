@@ -810,14 +810,14 @@ fn cancel_resolved_run_in_store(
     // mutate the durable record, so we can record either a real termination or
     // deterministic operator recovery instructions (acceptance: never force
     // manual process spelunking; always surface pids + safe commands).
-    // A runner-backed proxy can have an accepted daemon job while it is still
-    // queued before the provider starts. Project cancellation to that job too.
+    // A queued pre-provider run can already have a local execution-step owner
+    // or an accepted runner job. Cancel that owner before settling the record.
     let cancellation = if controller_cancelled {
         LiveCancellationOutcome::NotRunning
     } else if record.state() == RunExecutionState::Running
         || (record.state() == RunExecutionState::Queued
-            && record.runner_id().is_some()
-            && record.runner_job_id().is_some())
+            && (!record.is_runner_backed()
+                || (record.runner_id().is_some() && record.runner_job_id().is_some())))
     {
         classify_live_cancellation(&record)?
     } else {
@@ -1288,14 +1288,12 @@ fn classify_live_cancellation(record: &AgentTaskRunRecord) -> Result<LiveCancell
 
     // Local, live owner process: terminate its tree directly (SIGTERM then
     // SIGKILL escalation handled inside terminate_process_tree).
-    if let Some(pid) = owner_pid {
-        if record.owner_process_is_running() {
-            let termination = homeboy_core::process::terminate_process_tree(
-                pid,
-                homeboy_core::process::PROCESS_TREE_SIGTERM_GRACE,
-            )?;
-            return Ok(LiveCancellationOutcome::Terminated(termination));
-        }
+    if let Some((pid, _identity)) = super::cook_run_state::local_cancellable_owner(record) {
+        let termination = homeboy_core::process::terminate_process_tree(
+            pid,
+            homeboy_core::process::PROCESS_TREE_SIGTERM_GRACE,
+        )?;
+        return Ok(LiveCancellationOutcome::Terminated(termination));
     }
 
     // No reachable live process (stale running record, or no recorded pid): the
@@ -1444,6 +1442,138 @@ mod tests {
             .expect("lifecycle store")
     }
     use super::*;
+
+    struct CancellationChild(std::process::Child);
+
+    impl CancellationChild {
+        fn spawn() -> Self {
+            Self(
+                std::process::Command::new("sleep")
+                    .arg("30")
+                    .spawn()
+                    .unwrap(),
+            )
+        }
+    }
+
+    impl Drop for CancellationChild {
+        fn drop(&mut self) {
+            let _ = self.0.kill();
+            let _ = self.0.wait();
+        }
+    }
+
+    fn queued_step_owner(
+        store: &AgentTaskLifecycleStore,
+        id: &str,
+        pid: u32,
+    ) -> AgentTaskRunRecord {
+        let identity = homeboy_core::process::process_start_identity(pid)
+            .unwrap()
+            .expect("live owner start identity");
+        submit_plan(&AgentTaskPlan::new(id, Vec::new()), Some(id)).unwrap();
+        store
+            .mutate_record(id, |record| {
+                set_run_state(record, RunExecutionState::Queued);
+                record.metadata["execution_scheduling"] = json!({"current_intent_id": "intent"});
+                record.metadata["execution_step_owner"] = json!({
+                    "pid": pid, "process_start_identity": identity,
+                    "job_id": "step-job", "intent_id": "intent",
+                });
+                true
+            })
+            .unwrap();
+        store.read_record(id).unwrap()
+    }
+
+    #[test]
+    fn cancellation_terminates_queued_pre_provider_step_owner() {
+        homeboy_core::test_support::with_isolated_home(|_| {
+            let store = test_lifecycle_store();
+            let child = CancellationChild::spawn();
+            let id = "queued-step-owner";
+            let record = queued_step_owner(&store, id, child.0.id());
+            assert!(record.metadata.get("runner_pid").is_none());
+            let cancelled = cancel_run_in_store(&store, id, None).unwrap();
+            assert_eq!(cancelled.state(), RunExecutionState::Cancelled);
+            assert_eq!(
+                homeboy_core::process::process_identity_state(child.0.id(), None),
+                homeboy_core::process::ProcessIdentityState::Dead,
+                "owner was terminated and reaped"
+            );
+        });
+    }
+
+    #[test]
+    fn cancellation_does_not_signal_unverified_step_owner() {
+        homeboy_core::test_support::with_isolated_home(|_| {
+            let store = test_lifecycle_store();
+            let mut child = CancellationChild::spawn();
+            for invalid in [
+                "intent",
+                "identity",
+                "missing_identity",
+                "unverifiable",
+                "runner",
+            ] {
+                let id = format!("unverified-step-owner-{invalid}");
+                queued_step_owner(&store, &id, child.0.id());
+                store
+                    .mutate_record(&id, |record| {
+                        let owner = &mut record.metadata["execution_step_owner"];
+                        match invalid {
+                            "intent" => owner["intent_id"] = json!("other-intent"),
+                            "identity" => {
+                                owner["process_start_identity"] =
+                                    json!({"platform": "linux", "starttime_ticks": 0})
+                            }
+                            "missing_identity" => {
+                                owner["process_start_identity"] = serde_json::Value::Null
+                            }
+                            "unverifiable" => owner["pid"] = json!(u32::MAX),
+                            // A runner without start evidence must not fall back to
+                            // the otherwise valid step owner or signal the runner.
+                            "runner" => record.metadata["runner_pid"] = json!(child.0.id()),
+                            _ => unreachable!(),
+                        }
+                        true
+                    })
+                    .unwrap();
+                let cancelled = cancel_run_in_store(&store, &id, None).unwrap();
+                assert_eq!(cancelled.state(), RunExecutionState::Cancelled);
+                assert!(
+                    child.0.try_wait().unwrap().is_none(),
+                    "{invalid} owner was signalled"
+                );
+            }
+        });
+    }
+
+    #[test]
+    fn cancellation_does_not_signal_self_pid_owner() {
+        homeboy_core::test_support::with_isolated_home(|_| {
+            let store = test_lifecycle_store();
+            for runner in [false, true] {
+                let id = format!("self-pid-owner-{runner}");
+                let record = queued_step_owner(&store, &id, std::process::id());
+                if runner {
+                    store
+                        .mutate_record(&id, |stored| {
+                            stored.metadata["runner_pid"] = json!(std::process::id());
+                            stored.metadata["runner_process_start_identity"] = record.metadata
+                                ["execution_step_owner"]["process_start_identity"]
+                                .clone();
+                            true
+                        })
+                        .unwrap();
+                }
+                let record = store.read_record(&id).unwrap();
+                assert!(super::super::cook_run_state::local_cancellable_owner(&record).is_none());
+                let cancelled = cancel_run_in_store(&store, &id, None).unwrap();
+                assert_eq!(cancelled.state(), RunExecutionState::Cancelled);
+            }
+        });
+    }
 
     #[test]
     fn cancellation_fence_rejects_a_cook_index_published_after_cancellation() {

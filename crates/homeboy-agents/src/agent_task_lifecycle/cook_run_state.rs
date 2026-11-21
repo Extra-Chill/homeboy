@@ -148,6 +148,32 @@ pub(crate) fn has_live_execution_step_owner(record: &AgentTaskRunRecord) -> bool
     )
 }
 
+/// Resolve a local cancellation target using verified process-start evidence.
+/// A recorded runner takes precedence; never fall back from an invalid runner
+/// identity to a different execution-step owner.
+pub(crate) fn local_cancellable_owner(
+    record: &AgentTaskRunRecord,
+) -> Option<(u32, homeboy_core::process::ProcessStartIdentity)> {
+    let (pid, identity) = if let Some(pid) = record.metadata.get("runner_pid") {
+        (pid, &record.metadata["runner_process_start_identity"])
+    } else {
+        let owner = &record.metadata["execution_step_owner"];
+        let intent = &record.metadata["execution_scheduling"]["current_intent_id"];
+        if !intent.is_string() || owner["intent_id"] != *intent {
+            return None;
+        }
+        (&owner["pid"], &owner["process_start_identity"])
+    };
+    let pid = u32::try_from(pid.as_u64()?).ok()?;
+    if pid == std::process::id() {
+        return None;
+    }
+    let identity = serde_json::from_value(identity.clone()).ok()?;
+    (homeboy_core::process::process_identity_state_with_start_identity(pid, None, Some(&identity))
+        == homeboy_core::process::ProcessIdentityState::Live)
+        .then_some((pid, identity))
+}
+
 pub(crate) fn local_owner_liveness(record: &AgentTaskRunRecord) -> super::LocalOwnerLiveness {
     use super::LocalOwnerLiveness;
     let Some(pid) = record
