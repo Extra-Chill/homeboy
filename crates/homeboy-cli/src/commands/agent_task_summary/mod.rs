@@ -783,9 +783,12 @@ fn render_status_summary(payload: &Value) -> Option<String> {
     }
     let run_id = string_value(payload, &["run"])?;
     let state = string_value(payload, &["state"]).unwrap_or("unknown");
-    // The envelope's `status` reports the status command itself, so the
-    // headline names the task's own state (#17838).
+    // The headline and the JSON envelope's `status` both name the task's own
+    // state from this one projection, so they cannot disagree (#18638).
     let mut lines = vec![format!("Agent task {state}"), format!("Run: {run_id}")];
+    if let Some(phase) = string_value(payload, &["phase"]) {
+        lines.push(format!("Phase: {phase}"));
+    }
     if let Some(mission) = string_value(payload, &["mission"]) {
         lines.push(format!("Mission: {mission}"));
     }
@@ -1401,6 +1404,47 @@ mod tests {
             control_plane_next_action(&payload, "attempt-1"),
             "homeboy agent-task status cook-1 --watch"
         );
+    }
+
+    /// #18638: an admission-pending Cook renders the same state and phase in
+    /// the human summary and the JSON envelope; neither reports `succeeded`.
+    #[test]
+    fn admission_pending_cook_renders_the_same_state_in_human_and_json() {
+        use crate::commands::utils::response::{
+            cli_response_for_json_result_for_identity, CommandIdentity,
+        };
+        let payload = json!({
+            "schema": "homeboy/control-plane-run/v1",
+            "run": "agent-task-1",
+            "state": "running",
+            "phase": "admission",
+            "gates": [],
+            "blocker": {
+                "code": "pressure",
+                "state": "waiting",
+                "message": "runner homeboy-lab: pressure; waiting since 2026-11-20T00:00:00Z",
+            },
+        });
+
+        let human = render_status_summary(&payload).expect("human summary");
+        assert!(human.starts_with("Agent task running\n"), "{human}");
+        assert!(human.contains("Phase: admission"), "{human}");
+        assert!(
+            human.contains("Blocker: runner homeboy-lab: pressure"),
+            "{human}"
+        );
+
+        let envelope = serde_json::to_value(cli_response_for_json_result_for_identity(
+            &Ok(payload),
+            0,
+            &CommandIdentity::with_operation("agent-task", "status"),
+            None,
+        ))
+        .expect("serialize envelope");
+        assert_eq!(envelope["status"], "running");
+        assert_eq!(envelope["subject_state"], "running");
+        assert_eq!(envelope["data"]["phase"], "admission");
+        assert_ne!(envelope["status"], "succeeded");
     }
 
     fn queued_status(daemon: Option<Value>) -> Value {

@@ -4089,10 +4089,17 @@ fn project_summary_fields(
     resource.location = location(record);
     resource.placement = placement(record);
     resource.phase = phase(record);
+    // An execution step held by runner admission (host pressure, capacity) has
+    // not started: its phase is admission, whatever owner it already holds
+    // (#18638). Read once; the blocker below carries the same wait.
+    let step_wait = crate::agent_task_service::execution_step_wait(record);
+    if step_wait.is_some() {
+        resource.phase = Some(ADMISSION_PHASE.to_string());
+    }
     resource.blocker = if resource.state == ControlPlaneState::Succeeded {
         None
     } else {
-        blocker(record, delivery.as_ref())
+        blocker(record, delivery.as_ref(), step_wait)
     };
     resource.owner = Some(owner(record));
     resource.runtime = runtime(record);
@@ -4665,7 +4672,18 @@ fn phase(record: &AgentTaskRunRecord) -> Option<String> {
     {
         return Some("source_materialization".to_string());
     }
+    // A queued execution step, or one parked in `pending_resource_admission`,
+    // is waiting on admission, not running gates (#18638).
+    if !record.state().is_terminal()
+        && record.metadata["execution_scheduling"]["admission_wait"]["status"]
+            == "pending_resource_admission"
+    {
+        return Some(ADMISSION_PHASE.to_string());
+    }
     if record.has_live_execution_step_owner() {
+        if record.state() == RunExecutionState::Queued {
+            return Some(ADMISSION_PHASE.to_string());
+        }
         return Some("promotion_gates".to_string());
     }
     if has_running_provider_execution(record) {
@@ -4797,11 +4815,15 @@ fn missing_argument_details(details: &Value) -> Option<Value> {
     })
 }
 
+/// The projected phase of a Cook whose execution waits on admission.
+const ADMISSION_PHASE: &str = "admission";
+
 fn blocker(
     record: &AgentTaskRunRecord,
     delivery: Option<&CookDelivery>,
+    step_wait: Option<Value>,
 ) -> Option<ControlPlaneBlocker> {
-    if let Some(wait) = crate::agent_task_service::execution_step_wait(record) {
+    if let Some(wait) = step_wait {
         return Some(ControlPlaneBlocker {
             details: Some(wait.clone()),
             code: wait["reason"].as_str().map(str::to_string),
@@ -10248,6 +10270,30 @@ mod tests {
         assert_eq!(resource.state, ControlPlaneState::Succeeded);
         assert_eq!(resource.phase.as_deref(), Some("promotion_gates"));
         assert_eq!(resource.finished_at, record.updated_at);
+    }
+
+    #[test]
+    fn admission_pending_execution_step_projects_admission_not_promotion_gates() {
+        let mut queued = record(AGENT_TASK_RUN);
+        queued.set_state_for_test(RunExecutionState::Queued);
+        queued.metadata.as_object_mut().unwrap().extend(
+            crate::agent_task_lifecycle::execution_step_owner_fixture("cook"),
+        );
+        let resource = project_record(&queued, None).expect("project queued step");
+        assert_ne!(resource.state, ControlPlaneState::Succeeded);
+        assert_eq!(resource.phase.as_deref(), Some("admission"));
+
+        let mut parked = record(AGENT_TASK_RUN);
+        parked.set_state_for_test(RunExecutionState::Running);
+        parked.metadata.as_object_mut().unwrap().extend(
+            crate::agent_task_lifecycle::execution_step_owner_fixture("cook"),
+        );
+        parked.metadata["execution_scheduling"]["admission_wait"] = json!({
+            "status": "pending_resource_admission", "reason": "pressure",
+        });
+        let resource = project_record(&parked, None).expect("project parked step");
+        assert_ne!(resource.state, ControlPlaneState::Succeeded);
+        assert_eq!(resource.phase.as_deref(), Some("admission"));
     }
 
     #[test]

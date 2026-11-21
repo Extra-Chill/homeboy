@@ -680,7 +680,8 @@ fn envelope_for_data(
         operation: identity.operation.clone(),
         success,
         exit_code,
-        status: status_for_result(Some(&data), exit_code),
+        status: subject_envelope_status(subject_state.as_deref(), exit_code)
+            .unwrap_or_else(|| status_for_result(Some(&data), exit_code)),
         subject_state,
         run,
         refs,
@@ -710,6 +711,26 @@ fn subject_state_for_identity(identity: &CommandIdentity, data: &Value) -> Optio
             .map(str::to_string),
         _ => None,
     }
+}
+
+/// Envelope `status` for a successful subject-state read (#18638).
+///
+/// Polling scripts read the envelope `status`; reporting `succeeded` for a
+/// Cook still queued on admission told them the Cook was done. A read that
+/// completed reports the subject's own lifecycle state, normalized to the
+/// envelope vocabulary where one exists (`queued`, `running`, `succeeded`,
+/// `failed`, ...) and verbatim otherwise (`blocked`,
+/// `candidate_recoverable`). `success` / `exit_code` still describe the read.
+fn subject_envelope_status(subject_state: Option<&str>, exit_code: i32) -> Option<String> {
+    if exit_code != 0 {
+        return None;
+    }
+    let state = subject_state.filter(|state| !state.trim().is_empty())?;
+    Some(
+        normalize_status(state)
+            .map(str::to_string)
+            .unwrap_or_else(|| state.to_string()),
+    )
 }
 
 /// A failed operation must name its cause (#13702).
@@ -2946,8 +2967,15 @@ mod tests {
     }
 
     #[test]
-    fn agent_task_subject_state_is_distinct_from_successful_status_query() {
-        for subject_state in ["queued", "running", "failed", "succeeded"] {
+    fn agent_task_status_envelope_reports_the_subject_state_not_read_success() {
+        for subject_state in [
+            "queued",
+            "running",
+            "failed",
+            "succeeded",
+            "blocked",
+            "candidate_recoverable",
+        ] {
             let response = cli_response_for_json_result_for_identity(
                 &Ok(json!({
                     "schema": "homeboy/control-plane-run/v1",
@@ -2961,7 +2989,8 @@ mod tests {
             let value = serde_json::to_value(response).expect("serialize response");
 
             assert_eq!(value["success"], true, "{subject_state}");
-            assert_eq!(value["status"], "succeeded", "{subject_state}");
+            assert_eq!(value["exit_code"], 0, "{subject_state}");
+            assert_eq!(value["status"], subject_state, "{subject_state}");
             assert_eq!(value["subject_state"], subject_state, "{subject_state}");
             assert_eq!(value["data"]["state"], subject_state, "{subject_state}");
         }
