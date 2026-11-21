@@ -10092,6 +10092,7 @@ fn failing_regate_is_the_latest_gate_run_not_the_stale_receipt() {
                         ..Default::default()
                     }),
                     gate_timeout_seconds: None,
+                    gate_no_progress_timeout_seconds: None,
                 },
                 ..Default::default()
             },
@@ -10314,6 +10315,103 @@ fn supervision_stopped_gate_is_regated_once_and_ends_as_unavailable_verification
         let reason = result.value.stop_reason.as_deref().unwrap_or_default();
         assert!(reason.contains("gate infrastructure timeout"), "{reason}");
         assert!(reason.contains("homeboy agent-task recover"), "{reason}");
+    });
+}
+
+/// #18556: a candidate whose gate supervision killed for no progress plans
+/// `regate` on a plain `recover`. `recover --regate` with the no-progress
+/// window disabled re-runs the same silent gate to green and publishes the
+/// candidate without a provider attempt; the budget override is recorded as
+/// operator authority on the replacement proof.
+#[cfg(unix)]
+#[test]
+fn no_progress_killed_candidate_regates_under_operator_budget_and_publishes() {
+    with_corrected_gate_failure(false, |mut options, _| {
+        let cook_id = options.identity.cook_id.clone();
+        let run_id = options.identity.initial_run_id.clone();
+        persist_deferred_fixture(&run_id);
+        let runs = tempfile::tempdir().unwrap();
+        let ledger = runs.path().join("runs");
+        // The machine-local ledger path travels as gate env so the visible
+        // gate stays reviewer-safe.
+        options
+            .gates
+            .gate_environment
+            .variables
+            .insert("GATE_RUN_LEDGER".to_string(), ledger.display().to_string());
+        // Silent and idle past the 1s window, then green on the candidate.
+        options.gates.verify = vec![
+            "echo run >> \"$GATE_RUN_LEDGER\"; sleep 3; test \"$(cat tracked.txt)\" = promoted"
+                .to_string(),
+        ];
+        options.gates.gate_timeout_seconds = 60;
+        options.gates.gate_no_progress_timeout_seconds = 1;
+        let recipes = CookRecipeStore::from_current_data_root().unwrap();
+        let mut recipe = recipes.load_recipe(&cook_id).unwrap();
+        recipe.gate_policy = serde_json::to_value(&options.gates).unwrap();
+        recipes.persist_recipe(&recipe).unwrap();
+        let store = test_lifecycle_store();
+        let recipe_store = CookRecipeStore::from_current_data_root().unwrap();
+        let runtime = CookRuntime::with_finalizer(
+            Arc::new(UnusedExecutor),
+            &recipe_store,
+            &store,
+            |_, _, _, _| panic!("a supervision-stopped gate must not publish"),
+            &noop_cook_progress_observer,
+        );
+        let result = CookService::run(options, runtime, CookMode::ContinueTerminal).unwrap();
+        assert_eq!(
+            result.value.status, "gate_environment_unavailable",
+            "{:#?}",
+            result.value
+        );
+        let gate_runs = || std::fs::read_to_string(&ledger).unwrap().lines().count();
+        let killed_runs = gate_runs();
+
+        let plan = crate::agent_task_service::plan_cook_recovery(&run_id).unwrap();
+        assert_eq!(
+            plan.step,
+            crate::agent_task_service::CookRecoveryStep::Regate,
+            "{plan:?}"
+        );
+        let (report, exit) = crate::agent_task_service::recover_cook(
+            &run_id,
+            crate::agent_task_service::CookRecoveryRequest {
+                regate: true,
+                regate_inputs: crate::agent_task_service::CookRegateInputs {
+                    gate_no_progress_timeout_seconds: Some(0),
+                    ..Default::default()
+                },
+                ..Default::default()
+            },
+            &ReplacementOnlyRecoveryPerformer,
+        )
+        .unwrap();
+        assert_eq!(exit, 0, "{report:#?}");
+        assert_eq!(
+            report.step,
+            crate::agent_task_service::CookRecoveryStep::Regate
+        );
+        assert_eq!(report.result.as_ref().unwrap()["status"], "review_ready");
+        assert_eq!(
+            report
+                .regate
+                .as_ref()
+                .unwrap()
+                .gate_no_progress_timeout_seconds,
+            Some(0)
+        );
+        assert!(gate_runs() > killed_runs, "the regate ran the gate again");
+        let promotion = persisted_promotion_for_attempt(&run_id).unwrap().unwrap();
+        assert!(promotion.finalization_eligible(), "{promotion:#?}");
+        let authorization = promotion.provenance["replacement_gate_proof"]
+            ["operator_authorization"]
+            .as_str()
+            .unwrap_or_default();
+        assert!(
+            authorization.contains("no-progress limit disabled"),
+            "{authorization}"
+        );
     });
 }
 
