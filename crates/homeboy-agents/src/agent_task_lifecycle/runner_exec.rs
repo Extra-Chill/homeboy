@@ -179,6 +179,16 @@ fn ensure_runner_exec_observation_run(
     if let Some(runner_job_id) = runner_job_id {
         metadata.insert("runner_job_id".to_string(), json!(runner_job_id));
     }
+    // The controller that creates or binds this run is the process polling its
+    // daemon job. Startup recovery treats a live owner as in flight and only
+    // reconciles runs whose owner died, so record it the way `start_run` does.
+    metadata.insert(
+        "homeboy_run_owner".to_string(),
+        json!({
+            "pid": std::process::id(),
+            "recorded_at": chrono::Utc::now().to_rfc3339(),
+        }),
+    );
     if let Some(cook_id) = hydration_cook_parent(lifecycle_store, &run.id) {
         metadata.insert("parent_run_id".to_string(), json!(cook_id));
     }
