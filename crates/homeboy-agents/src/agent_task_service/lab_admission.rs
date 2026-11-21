@@ -35,17 +35,7 @@ pub fn execution_step_wait(record: &agent_task_lifecycle::AgentTaskRunRecord) ->
     } else {
         String::new()
     };
-    // Position among this controller's waiters for the runner, by lane.
-    let queue = match wait["queue_position"].as_u64() {
-        Some(position) => format!(
-            "; queue position {position} ({} ahead, {} lane)",
-            wait["waiters_ahead"]
-                .as_u64()
-                .unwrap_or(position.saturating_sub(1)),
-            wait["priority"].as_str().unwrap_or("normal")
-        ),
-        None => String::new(),
-    };
+    let queue = runner_wait_queue_summary(&wait);
     let retry = wait["next_attempt_at"]
         .as_str()
         .map(|time| format!("next attempt {time}"))
@@ -61,6 +51,47 @@ pub fn execution_step_wait(record: &agent_task_lifecycle::AgentTaskRunRecord) ->
     wait["next_action"] = json!(action);
     wait["message"] = json!(message);
     Some(wait)
+}
+
+/// The queue clause of a runner wait message: position (Lab-wide when the Lab
+/// ranked it, else among this controller's waiters), lane, the Lab budget and
+/// load throttling it, and an upper-bound ETA from holders' declared budgets.
+fn runner_wait_queue_summary(wait: &Value) -> String {
+    let Some(position) = wait["queue_position"].as_u64() else {
+        return String::new();
+    };
+    let scope = match wait["queue_scope"].as_str() {
+        Some("lab") => "Lab-wide",
+        _ => "this controller",
+    };
+    let mut summary = format!(
+        "; queue position {position} ({} ahead, {} lane, {scope})",
+        wait["waiters_ahead"]
+            .as_u64()
+            .unwrap_or(position.saturating_sub(1)),
+        wait["priority"].as_str().unwrap_or("normal")
+    );
+    if let Some(budget) = wait["effective_budget"].as_u64() {
+        summary.push_str(&format!(
+            "; Lab budget {budget} slots, {} active",
+            wait["active_slots"].as_u64().unwrap_or(0)
+        ));
+        if let Some(load) = wait["load_average_1m"].as_f64() {
+            summary.push_str(&format!(", load {load:.1}"));
+        }
+    }
+    match wait["eta_seconds"].as_u64() {
+        Some(eta) => summary.push_str(&format!(
+            "; ETA <= {eta}s{} (estimate from declared budgets)",
+            wait["estimated_start_at"]
+                .as_str()
+                .map(|at| format!(", by {at}"))
+                .unwrap_or_default()
+        )),
+        None if scope == "Lab-wide" => summary.push_str("; ETA unknown"),
+        None => {}
+    }
+    summary
 }
 
 /// Admission evidence shared by detached submission and status. Missing
@@ -180,4 +211,35 @@ pub(crate) fn queued_admission_in_store(
             })
         }),
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::runner_wait_queue_summary;
+    use serde_json::json;
+
+    #[test]
+    fn runner_wait_queue_summary_table() {
+        for (wait, expected) in [
+            (json!({}), ""),
+            (
+                json!({"queue_position": 2, "waiters_ahead": 1, "priority": "high"}),
+                "; queue position 2 (1 ahead, high lane, this controller)",
+            ),
+            (
+                json!({
+                    "queue_position": 3, "waiters_ahead": 2, "queue_scope": "lab",
+                    "effective_budget": 4, "active_slots": 4, "load_average_1m": 30.3,
+                    "eta_seconds": 600, "estimated_start_at": "2026-11-20T12:00:00+00:00",
+                }),
+                "; queue position 3 (2 ahead, normal lane, Lab-wide); Lab budget 4 slots, 4 active, load 30.3; ETA <= 600s, by 2026-11-20T12:00:00+00:00 (estimate from declared budgets)",
+            ),
+            (
+                json!({"queue_position": 1, "queue_scope": "lab", "effective_budget": 1}),
+                "; queue position 1 (0 ahead, normal lane, Lab-wide); Lab budget 1 slots, 0 active; ETA unknown",
+            ),
+        ] {
+            assert_eq!(runner_wait_queue_summary(&wait), expected, "{wait}");
+        }
+    }
 }

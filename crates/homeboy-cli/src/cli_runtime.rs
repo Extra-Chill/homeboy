@@ -1547,7 +1547,7 @@ impl CliRuntime {
 
         if let Commands::AgentTask(agent_task) = &cli.command {
             if let crate::commands::agent_task::AgentTaskCommand::Cook(cook) = &agent_task.command {
-                cook.export_lab_priority();
+                cook.export_lab_admission();
                 if !cook.preview {
                     if let Err(err) =
                         crate::commands::agent_task::run::validate_cook_request_with_provenance(

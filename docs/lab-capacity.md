@@ -18,7 +18,8 @@ reservations keep their configured concurrency limit unchanged.
 
 A step declares its lane with `HOMEBOY_LAB_PRIORITY=high|normal` in its public
 environment (default `normal`). `homeboy agent-task cook --priority high` sets it
-for every step the Cook admits; any `HOMEBOY_*` value in the caller environment
+for every step the Cook admits; `agent-task fanout cook-batch --priority high`
+passes it to every child Cook. Any `HOMEBOY_*` value in the caller environment
 travels the same way. When a slot frees, `high` waiters are admitted before
 `normal` waiters. Within a lane, the existing least-occupied-owner then FIFO
 order applies. A Cook waiting on the controller for a runner (`capacity_reached`)
@@ -33,8 +34,27 @@ fan-out) cannot be admitted beyond `HOMEBOY_LAB_OWNER_MAX_SHARE` percent of the
 effective budget. Set this in the executing daemon environment (1-100, default
 50, never below one slot). An over-share owner is deferred behind every other
 waiter, even a higher-lane one. With nobody else waiting it can still fill idle
-slots. Running work is never preempted. Only waiters known to the same daemon
-count: Cooks queued on another controller are not visible to it.
+slots. Running work is never preempted. Cooks waiting on other controllers count
+too, through their waiter reservations (below).
+
+### Cooks waiting on other controllers
+
+A remote Cook waiting on a Lab runner (`capacity_reached`) registers a waiter
+reservation on the Lab daemon with `POST /capacity/waiters`
+(`{waiter_id, owner, priority}`; `release: true` leaves). It renews the
+reservation on every eligibility probe, at most 30 seconds apart. A reservation
+not renewed within 120 seconds expires, so a lost controller cannot leak queue
+entries. The Lab ranks remote waiters with its own step waiters by lane, owner
+share, and arrival. It replies with the waiter's Lab-wide position, whether it
+may proceed, the effective budget, load, and holders.
+
+Across the two queues, a waiter holds another back only through a higher lane or
+the owner share cap, never through arrival alone. A remote waiter is admitted by
+runner job capacity, not by a step slot. It holds back local steps only while
+some step holder is running, so a remote Cook blocked for another reason cannot
+leave the Lab idle. Among remote waiters, the same rule applies: a `high` waiter
+on one controller makes `normal` waiters on every controller wait. Older
+daemons without the route keep the controller-local ranking.
 
 ### Queue position and ETA
 
@@ -42,16 +62,22 @@ Waiting progress reports `waiting_for: lab_capacity`, `queue_position`,
 `waiters_ahead`, `active_slots`, `priority`, `owner_slot_cap`,
 `load_average_1m`, `effective_budget`, and `eta_seconds` with
 `eta_kind: upper_bound_from_declared_budgets`. A step declares its expected run
-time with `HOMEBOY_LAB_BUDGET_SECONDS`. `eta_seconds` is the time until enough
+time with `HOMEBOY_LAB_BUDGET_SECONDS`. When that is unset, `agent-task cook`
+declares one attempt's existing limits: the provider wall-clock ceiling
+(`--timeout-ms`, extended up to 3x) plus `--gate-timeout-seconds` for each gate
+command. `eta_seconds` is the time until enough
 holders reach their declared budgets to free a slot for this position. It is an
 estimate and an upper bound: it assumes the budget stays fixed and no
 higher-ranked waiter arrives. It is null when too few holders declared a budget.
 The daemon `/capacity` response includes `step_queue`, with holders (owner, lane,
-elapsed, budget) and ranked waiters (position, owner, lane, wait, ETA).
-`agent-task capacity` lists those waiters. A Cook waiting on runner eligibility
-reports `queue_position`, `waiters_ahead`, and `priority` in its step wait. The
-`agent-task status` message shows them. No ETA is available there, because the
-controller cannot see the Lab holders' budgets.
+`started_at`, elapsed, budget; no commands or environment) and ranked waiters
+(position, owner, lane, `remote`, wait, ETA). `agent-task capacity` lists those
+waiters and marks remote ones. A Cook waiting on runner eligibility reports
+`queue_position`, `waiters_ahead`, `queue_scope` (`lab` or `controller`), and
+`priority`. The controller computes `eta_seconds` and `estimated_start_at`
+from the holder budgets in the Lab's reply, and records the Lab's
+`effective_budget`, `active_slots`, and `load_average_1m`. `agent-task status`
+and `diagnose` show all of them in the wait message.
 
 `homeboy agent-task capacity` includes Lab observations alongside provider
 account capacity. `homeboy runner doctor` includes a `lab_capacity` check.

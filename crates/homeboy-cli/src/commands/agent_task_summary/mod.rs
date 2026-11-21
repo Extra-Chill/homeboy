@@ -381,8 +381,14 @@ fn render_queue_waiters(lines: &mut Vec<String>, label: &str, queue: &Value) {
             .as_u64()
             .map(|seconds| format!(", ETA <= {seconds}s (estimate from declared budgets)"))
             .unwrap_or_else(|| ", ETA unknown".to_string());
+        // Remote waiters are Cooks other controllers registered on this Lab.
+        let origin = if waiter["remote"] == true {
+            ", remote controller"
+        } else {
+            ""
+        };
         lines.push(format!(
-            "  {label} queued {position}: {} ({} lane, {} ahead, {} holders){eta}",
+            "  {label} queued {position}: {} ({} lane{origin}, {} ahead, {} holders){eta}",
             waiter["owner"].as_str().unwrap_or("unknown"),
             waiter["priority"].as_str().unwrap_or("normal"),
             position.saturating_sub(1),
@@ -834,7 +840,8 @@ fn agent_task_capacity_lists_lab_step_queue_with_eta() {
             "holders": [{"owner": "wf-1"}, {"owner": "wf-1"}],
             "waiting": [
                 {"queue_position": 1, "owner": "publish", "priority": "high", "eta_seconds": 90},
-                {"queue_position": 2, "owner": "wf-1", "priority": "normal", "eta_seconds": null}
+                {"queue_position": 2, "owner": "wf-1", "priority": "normal", "eta_seconds": null},
+                {"queue_position": 3, "owner": "run-b", "priority": "normal", "remote": true, "eta_seconds": 300}
             ]
         }}}]
     });
@@ -844,6 +851,10 @@ fn agent_task_capacity_lists_lab_step_queue_with_eta() {
     ), "{summary}");
     assert!(
         summary.contains("Lab/lab-a queued 2: wf-1 (normal lane, 1 ahead, 2 holders), ETA unknown"),
+        "{summary}"
+    );
+    assert!(
+        summary.contains("Lab/lab-a queued 3: run-b (normal lane, remote controller, 2 ahead, 2 holders), ETA <= 300s"),
         "{summary}"
     );
 }

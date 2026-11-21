@@ -218,6 +218,10 @@ pub(super) fn compile(
     if placement != Placement::Auto {
         cook.insert("placement".into(), json!(placement_name(placement)));
     }
+    // Each child exports its own lane, exactly as `agent-task cook --priority`.
+    if let Some(priority) = &args.priority {
+        cook.insert("priority".into(), json!(priority));
+    }
 
     let max_parallel = args
         .max_concurrency
@@ -1007,6 +1011,30 @@ mod tests {
             child["private-verify-file"],
             json!([cwd.join("private.sh").display().to_string()])
         );
+    }
+
+    #[test]
+    fn priority_flag_propagates_to_every_child_cook() {
+        for (flag, expected) in [
+            (None, None),
+            (Some("high"), Some("high")),
+            (Some("normal"), Some("normal")),
+        ] {
+            let mut argv = vec!["--repo", "scratch", "--verify", "true"];
+            if let Some(lane) = flag {
+                argv.extend(["--priority", lane]);
+            }
+            argv.extend(ISSUES);
+            let definition = compile(&parse(&argv), Placement::Auto, None).unwrap();
+            super::super::super::workflow::validate(&definition)
+                .expect("priority is a live cook flag");
+            let child = definition.steps[1].cook.as_ref().unwrap();
+            assert_eq!(
+                child.get("priority").and_then(|value| value.as_str()),
+                expected,
+                "{flag:?}"
+            );
+        }
     }
 
     #[test]
