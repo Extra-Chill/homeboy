@@ -2530,6 +2530,31 @@ pub(crate) fn register_execution_orchestration() {
     });
 }
 
+/// Refusal for an admitted Cook whose execution step found no eligible
+/// runner. A busy Lab (pressure, capacity) or a configured runner that is down
+/// (disconnected, stale daemon) is a wait, not a failure: the refusal names the
+/// runner to wait on, so the step waits in the daemon queue and spends no
+/// recovery budget (#18058, #18549). Agents owns the durable wait disposition;
+/// any other unpinned selection failure remains a genuine recovery failure.
+fn unmaterialized_selection_refusal(
+    reason: String,
+    pinned: Option<String>,
+    wait_target: impl FnOnce() -> Option<String>,
+) -> Error {
+    let wait_target = pinned.or_else(|| {
+        homeboy::core::substrate_wait::admitted_work_waits_through(&reason)
+            .then(wait_target)
+            .flatten()
+    });
+    let mut error = Error::validation_invalid_argument("runner", reason, None, None);
+    error.retryable = Some(true);
+    if let Some(runner) = wait_target {
+        error.details["execution_step_disposition"] = serde_json::json!("runner_ineligible");
+        error.details["runner_eligible"] = serde_json::json!(runner);
+    }
+    error
+}
+
 /// Parsing and Lab transport adapter for an agents-authorized exact admission.
 /// The agents executor has already checked the fence and input manifest. The
 /// recorded request keeps its own handoff mode: a detached Cook ends this step
@@ -2567,24 +2592,9 @@ pub(crate) fn execute_admitted_cook_arguments(
             &required,
         )?
         .map_err(|reason| {
-            // A busy Lab (pressure, capacity) is a wait, not a failure: name
-            // the runner to wait on so the step waits in the daemon queue
-            // instead of failing into recovery backoff (#18058). Agents owns
-            // the durable wait disposition and budget; any other unpinned
-            // selection failure remains a genuine recovery failure.
-            let wait_target = cli.runner.clone().or_else(|| {
-                homeboy::core::substrate_wait::reasons_are_transient([reason.as_str()])
-                    .then(|| homeboy::runner::lab_runner_wait_target().ok().flatten())
-                    .flatten()
-            });
-            let mut error = Error::validation_invalid_argument("runner", reason, None, None);
-            error.retryable = Some(true);
-            if let Some(runner) = wait_target {
-                error.details["execution_step_disposition"] =
-                    serde_json::json!("runner_ineligible");
-                error.details["runner_eligible"] = serde_json::json!(runner);
-            }
-            error
+            unmaterialized_selection_refusal(reason, cli.runner.clone(), || {
+                homeboy::runner::lab_runner_wait_target().ok().flatten()
+            })
         })?;
         cli.runner = Some(selection);
     }
