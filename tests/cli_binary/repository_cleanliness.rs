@@ -185,12 +185,7 @@ fn repository_cleanliness_fixture_cook_leaves_only_the_provider_edit() {
     .expect("fixture PATH");
     let mut command = context.command(TestBinary::HomeboyFixture);
     command.env("PATH", path);
-    // Pin a quiet load reading so local admission does not depend on how busy
-    // the host is (see cook_lab_handoff_test, homeboy#14984).
-    command
-        .env("GITHUB_ACTIONS", "true")
-        .env("HOMEBOY_TEST_LOAD_AVERAGES", "0,0,0")
-        .args(&cook);
+    command.env("GITHUB_ACTIONS", "true").args(&cook);
     let output = bounded_output(command);
     assert_eq!(
         output.status.code(),
