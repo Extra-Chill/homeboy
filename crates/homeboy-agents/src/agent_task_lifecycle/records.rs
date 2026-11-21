@@ -152,10 +152,6 @@ pub enum CookTerminalOutcome {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(remote = "Self")]
 pub struct AgentTaskRunRecord {
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub terminal_outcome: Option<CookTerminalOutcome>,
-    #[serde(default)]
-    pub recoverable: bool,
     pub schema: String,
     pub run_id: String,
     pub plan_id: String,
@@ -619,8 +615,6 @@ impl AgentTaskRunRecord {
         submitted_at: impl Into<String>,
     ) -> Self {
         Self {
-            terminal_outcome: None,
-            recoverable: false,
             schema: schemas::RUN.to_string(),
             run_id: run_id.into(),
             plan_id: plan_id.into(),
@@ -650,15 +644,11 @@ impl AgentTaskRunRecord {
         }
     }
 
-    /// Refresh the durable summary from the same facts status already exposes.
-    /// Also used when decoding older records that predate this summary.
-    pub(crate) fn refresh_terminal_outcome(&mut self) {
+    /// Derive the terminal outcome from the current execution and delivery facts.
+    pub fn terminal_outcome(&self) -> Option<CookTerminalOutcome> {
         use crate::agent_task_service::{CookDelivery, CookDeliveryBlockerCode};
-        self.recoverable =
-            self.lifecycle.execution.state == RunExecutionState::CandidateRecoverable;
-        self.terminal_outcome = None;
         if !self.lifecycle.execution.state.is_terminal() {
-            return;
+            return None;
         }
         let delivery = CookDelivery::from_run_metadata(&self.metadata);
         let refused_gate = delivery.as_ref().and_then(|delivery| {
@@ -679,7 +669,7 @@ impl AgentTaskRunRecord {
                         .map(|blocker| blocker.message.clone())
                 })
         });
-        self.terminal_outcome = Some(
+        Some(
             if let Some(owner) = self.metadata.get("superseded_by_active_cook") {
                 CookTerminalOutcome::SupersededByActiveCook {
                     owner: owner.clone(),
@@ -731,7 +721,7 @@ impl AgentTaskRunRecord {
                         .unwrap_or_else(|| "terminal_without_delivery".to_string()),
                 }
             },
-        );
+        )
     }
 
     /// Merge response identities without changing their first-use ordering.

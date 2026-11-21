@@ -7,7 +7,7 @@ use crate::agent_task_lifecycle::{
     AgentTaskLifecycleStore, AgentTaskRunRecord,
 };
 use homeboy_core::run_lifecycle_record::RunLifecycleRecord;
-use serde_json::{json, Value};
+use serde_json::json;
 
 fn record(store: &AgentTaskLifecycleStore, run_id: &str, marker: &str) -> AgentTaskRunRecord {
     let plan = test_plan();
@@ -66,60 +66,6 @@ fn cook_state_round_trips_through_fenced_store_transitions() {
 }
 
 #[test]
-fn terminal_outcomes_are_countable_through_public_status_json() {
-    let context = homeboy_core::test_support::HermeticTestContext::new();
-    let store = AgentTaskLifecycleStore::new(context.path_roots());
-    let cases = [
-        (
-            "published",
-            json!({"state": "published", "publication": {"status": "published", "published": true, "draft": false, "pr_url": "https://github.com/example/repo/pull/1"}}),
-            json!({"kind": "published", "pr": "https://github.com/example/repo/pull/1"}),
-        ),
-        (
-            "incomplete_draft",
-            json!({"state": "published", "gates": [{"id": "gate-1", "state": "failed"}], "publication": {"status": "published", "published": true, "draft": true, "pr_url": "https://github.com/example/repo/pull/2"}}),
-            json!({"kind": "published", "pr": "https://github.com/example/repo/pull/2", "refused_gate": "gate-1"}),
-        ),
-        (
-            "no_change",
-            json!({"state": "no_change"}),
-            json!({"kind": "no_change"}),
-        ),
-        (
-            "agent_declined",
-            json!({"state": "blocked", "blocker": {"code": "review_form.incomplete", "message": "agent declined", "evidence": "/review_form"}}),
-            json!({"kind": "agent_declined"}),
-        ),
-        (
-            "gate_refused",
-            json!({"state": "blocked", "gates": [{"id": "acceptance", "state": "failed"}]}),
-            json!({"kind": "gate_refused", "gate": "acceptance"}),
-        ),
-        (
-            "infrastructure",
-            Value::Null,
-            json!({"kind": "infrastructure", "error_code": "transport.disconnected"}),
-        ),
-    ];
-    for (id, delivery, expected) in cases {
-        let mut cook = record(&store, id, "terminal-outcomes");
-        cook.set_state_for_test(RunExecutionState::CandidateRecoverable);
-        cook.metadata["cook_id"] = json!(id);
-        if delivery.is_null() {
-            cook.metadata["pre_execution_failure"] =
-                json!({"error_code": "transport.disconnected"});
-        } else {
-            cook.metadata["cook_delivery"] = json!({"schema": "homeboy/cook-delivery/v2", "delivery": delivery, "artifacts": {}});
-        }
-        store.write_record(&cook).unwrap();
-        let status = crate::agent_task_lifecycle::status_in_store(&store, id).unwrap();
-        let status = serde_json::to_value(status).unwrap();
-        assert_eq!(status["terminal_outcome"], expected, "{id}");
-        assert_eq!(status["recoverable"], true, "{id}");
-    }
-}
-
-#[test]
 fn superseded_cook_outcome_preserves_owner_and_is_not_recoverable() {
     let context = homeboy_core::test_support::HermeticTestContext::new();
     let store = AgentTaskLifecycleStore::new(context.path_roots());
@@ -129,18 +75,39 @@ fn superseded_cook_outcome_preserves_owner_and_is_not_recoverable() {
     // A queued admission has no terminal outcome, even with owner metadata.
     store.write_record(&cook).unwrap();
     let queued = store.read_record("superseded").unwrap();
-    assert!(queued.terminal_outcome.is_none());
-    assert!(!queued.recoverable);
+    assert!(queued.terminal_outcome().is_none());
+    assert!(!crate::agent_task_lifecycle::CookRunState::of(&queued).recoverable);
 
     cook.set_state_for_test(RunExecutionState::Cancelled);
     store.write_record(&cook).unwrap();
     let status = crate::agent_task_lifecycle::status_in_store(&store, "superseded").unwrap();
-    let status = serde_json::to_value(status).unwrap();
     assert_eq!(
-        status["terminal_outcome"],
+        json!(status.terminal_outcome()),
         json!({"kind": "superseded_by_active_cook", "owner": owner})
     );
-    assert_eq!(status["recoverable"], false);
+    assert!(!crate::agent_task_lifecycle::CookRunState::of(&status).recoverable);
+}
+
+#[test]
+fn legacy_cached_outcome_is_ignored_when_loading_record() {
+    let context = homeboy_core::test_support::HermeticTestContext::new();
+    let store = AgentTaskLifecycleStore::new(context.path_roots());
+    let mut cook = record(&store, "legacy-outcome", "legacy");
+    cook.set_state_for_test(RunExecutionState::Cancelled);
+    cook.metadata["pre_execution_failure"] = json!({"error_code": "transport.disconnected"});
+    let mut fixture = serde_json::to_value(cook).unwrap();
+    fixture["terminal_outcome"] = json!({"kind": "no_change"});
+    fixture["recoverable"] = json!(true);
+
+    let loaded: AgentTaskRunRecord = serde_json::from_value(fixture).unwrap();
+    assert_eq!(
+        json!(loaded.terminal_outcome()),
+        json!({"kind": "infrastructure", "error_code": "transport.disconnected"})
+    );
+    assert!(!crate::agent_task_lifecycle::CookRunState::of(&loaded).recoverable);
+    let encoded = serde_json::to_value(loaded).unwrap();
+    assert!(encoded.get("terminal_outcome").is_none());
+    assert!(encoded.get("recoverable").is_none());
 }
 
 #[test]

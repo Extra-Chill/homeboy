@@ -217,7 +217,7 @@ fn status_without_feedback(args: StatusArgs) -> CmdResult<Value> {
     if let Ok(record) = bounded_exact_record(&target.run_id) {
         let outcome = cook_outcome_record(&args, &record);
         let outcome = outcome.as_ref().unwrap_or(&record);
-        value["terminal_outcome"] = json!(outcome.terminal_outcome);
+        value["terminal_outcome"] = json!(outcome.terminal_outcome());
         value["recoverable"] =
             json!(homeboy::agents::agent_task_lifecycle::CookRunState::of(outcome).recoverable);
         if record
