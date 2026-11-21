@@ -813,6 +813,9 @@ pub struct AgentTaskGateFailureAttribution {
     /// Candidate failures absent from the baseline. These block promotion.
     #[serde(default)]
     pub new_failures: Vec<String>,
+    /// Failures seen in only one of the two runs on either side.
+    #[serde(default)]
+    pub flaky_failures: Vec<String>,
 }
 
 /// The durable outcome of replaying a candidate gate against its immutable base.

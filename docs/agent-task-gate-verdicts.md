@@ -57,6 +57,16 @@ with the failing identities listed in `inherited_failures` and `new_failures`.
 Only new failures block; inherited failures keep their failed exit code and the
 gate is reported as an accepted inherited failure.
 
+When the initial comparison would blame the candidate, Cook performs one extra
+run on each side under the same timeout and recorded gate inputs. Only failures
+present in both candidate runs and absent from the union of baseline failures
+block promotion. `failure_attribution.flaky_failures` lists identities seen in
+only one run on either side; these never block on their own. For example, base
+`{a,b}` then `{a}` and candidate `{a,b,c}` then `{a,c}` produces inherited `{a}`,
+new `{c}`, and flaky `{b}`. An opaque candidate that passes its extra run is
+explicitly recorded as flaky-passing, with its original failure evidence retained.
+Replay errors or timeouts remain inconclusive and cannot excuse a failed gate.
+
 Subset acceptance requires comparable failure identities on both sides. If
 neither run names its failures, a red base and red candidate are reported as
 `baseline_red`. If only one side names failures, the runs are not comparable
