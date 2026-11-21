@@ -1568,9 +1568,12 @@ mod cook_deadline_tests {
     /// the failure mode that kills real work.
     #[test]
     fn a_live_budget_does_not_trip_a_boundary() {
-        with_current_cook_deadline(Some(CookDeadline::from_duration_seconds(3_600)), || {
-            assert_eq!(expired_cook_deadline(), None);
-        });
+        with_current_cook_deadline(
+            Some(CookDeadline::from_unix_ms(now_unix_ms() + 3_600_000)),
+            || {
+                assert_eq!(expired_cook_deadline(), None);
+            },
+        );
     }
 
     #[test]

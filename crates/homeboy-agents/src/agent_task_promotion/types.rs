@@ -319,20 +319,6 @@ impl AgentTaskPromotionStatus {
             Self::VerificationPending | Self::GateFailed | Self::GateDeferred
         )
     }
-
-    /// Stable handoff boundary identifier for this promotion status.
-    pub fn handoff_boundary(self) -> &'static str {
-        match self {
-            Self::VerificationPending => "patch_promoted_verification_pending",
-            Self::Applied => "patch_promoted_no_pr",
-            Self::GateFailed => "patch_promoted_gates_failed",
-            Self::GateDeferred => "patch_promoted_gates_deferred",
-            Self::VerifiedNoChanges => "no_patch_verified",
-            Self::NoChangesGateFailed => "no_patch_gates_failed",
-            Self::DryRun => "patch_not_promoted_dry_run",
-            Self::NoChanges => "patch_not_promoted_no_changes",
-        }
-    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]

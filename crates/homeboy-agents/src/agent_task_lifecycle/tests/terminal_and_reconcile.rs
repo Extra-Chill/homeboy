@@ -4066,14 +4066,16 @@ fn replaying_cancel_recovers_stale_released_and_orphaned_scratch_before_bounded_
         reserve_provider_execution_in_store(&test_lifecycle_store(), run_id, &plan.tasks[0], 1)
             .expect("provider execution reserved");
 
-        let released = crate::controller_scratch::allocate_attempt(
+        let released = crate::controller_scratch::allocate_attempt_at(
+            &homeboy_core::paths::homeboy_data().expect("data root"),
             run_id,
             &plan.plan_id,
             &plan.tasks[0].task_id,
             1,
         )
         .expect("released scratch");
-        let orphaned = crate::controller_scratch::allocate_attempt(
+        let orphaned = crate::controller_scratch::allocate_attempt_at(
+            &homeboy_core::paths::homeboy_data().expect("data root"),
             run_id,
             &plan.plan_id,
             &plan.tasks[0].task_id,

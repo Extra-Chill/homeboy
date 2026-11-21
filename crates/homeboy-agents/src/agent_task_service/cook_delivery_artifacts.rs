@@ -45,13 +45,6 @@ pub fn recorded_promotion_report(metadata: &Value) -> Result<Option<Value>> {
         .transpose()
 }
 
-/// [`recorded_promotion_report`] resolved against a store's own artifact root.
-pub fn recorded_promotion_report_at(metadata: &Value, root: &Path) -> Result<Option<Value>> {
-    recorded_artifact(metadata, "/promotion")
-        .map(|report| resolve_recorded(report, Some(root), "promotion"))
-        .transpose()
-}
-
 /// [`recorded_promotion_report`] parsed as the exact report a replay
 /// executes. `None` when absent; an error names why it cannot be read.
 pub fn recorded_promotion_report_typed(

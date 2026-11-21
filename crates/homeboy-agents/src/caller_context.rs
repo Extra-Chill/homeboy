@@ -22,10 +22,6 @@ pub fn inherit_ownership(target: &mut Value, source: &Value) {
     }
 }
 
-pub fn capture_with(context: Value, caller: Option<&str>) -> Result<Value> {
-    capture_with_requester(context, caller, None)
-}
-
 pub fn capture_with_requester(
     mut context: Value,
     caller: Option<&str>,
@@ -123,10 +119,16 @@ mod tests {
 
     #[test]
     fn active_scope_caller_capture_preserves_original_owner() {
-        let first = capture_with(json!({"other": true}), Some("source-A")).unwrap();
+        let first = capture_with_requester(json!({"other": true}), Some("source-A"), None).unwrap();
         assert_eq!(first["caller_context"], "source-A");
-        assert_eq!(capture_with(first.clone(), Some("retry-B")).unwrap(), first);
-        assert_eq!(capture_with(json!({}), None).unwrap(), json!({}));
-        assert!(capture_with(json!({"caller_context": 12}), None).is_err());
+        assert_eq!(
+            capture_with_requester(first.clone(), Some("retry-B"), None).unwrap(),
+            first
+        );
+        assert_eq!(
+            capture_with_requester(json!({}), None, None).unwrap(),
+            json!({})
+        );
+        assert!(capture_with_requester(json!({"caller_context": 12}), None, None).is_err());
     }
 }

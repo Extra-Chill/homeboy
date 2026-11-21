@@ -495,14 +495,6 @@ pub struct AgentTaskDispatchCommand {
     pub core: DispatchCoreInputs,
 }
 
-impl AgentTaskDispatchCommand {
-    /// The registered component this command names, if any.
-    pub fn declared_component(&self) -> Option<homeboy_core::component::Component> {
-        let id = self.component.as_deref().or(self.repo.as_deref())?;
-        homeboy_core::component::load(id).ok()
-    }
-}
-
 /// Resolve a dispatch request using CLI, Homeboy config, then built-in Pi.
 pub fn resolve_dispatch_request(
     command: AgentTaskDispatchCommand,

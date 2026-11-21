@@ -647,24 +647,6 @@ fn parse_run_id(run_id: &str) -> homeboy_core::Result<RunId> {
     })
 }
 
-pub fn control_plane_error_to_homeboy(error: ControlPlaneError) -> homeboy_core::Error {
-    match error.class {
-        ControlPlaneErrorClass::InvalidArgument | ControlPlaneErrorClass::CursorExpired => {
-            homeboy_core::Error::validation_invalid_argument(
-                "control_plane",
-                error.message,
-                None,
-                None,
-            )
-        }
-        ControlPlaneErrorClass::NotFound
-        | ControlPlaneErrorClass::Unavailable
-        | ControlPlaneErrorClass::Unknown => {
-            homeboy_core::Error::internal_unexpected(error.message)
-        }
-    }
-}
-
 /// Keep the run service boundary's validation context while sharing its policy.
 fn run_boundary_error_to_homeboy(
     error: ControlPlaneError,

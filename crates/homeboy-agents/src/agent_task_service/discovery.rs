@@ -612,48 +612,6 @@ pub(crate) fn discover_runs_in_store(
     discovery_report(filter, options, records, record_health)
 }
 
-/// Find the newest run matching list filters with a newest-first keyset walk.
-/// `global_record_health` counts the decoded rows read before stopping.
-pub fn discover_filtered_latest_run(
-    options: AgentTaskDiscoveryOptions,
-) -> Result<AgentTaskDiscoveryReport> {
-    let submitted_after = options
-        .submitted_after
-        .as_deref()
-        .map(parse_submitted_after)
-        .transpose()?;
-    let store = agent_task_lifecycle::AgentTaskLifecycleStore::from_environment()?;
-    let mut after = None;
-    let mut seen = BTreeSet::new();
-    let mut health = AgentTaskRecordHealthSummary::healthy();
-    let mut selected = Vec::new();
-    loop {
-        let (records, _, truncated, next) =
-            store.read_record_keyset_page(after, FILTERED_DISCOVERY_PHYSICAL_LIMIT)?;
-        health.healthy += records.len();
-        if let Some(row) = records.into_iter().find(|row| {
-            !is_fixture_runner_record(&row.record)
-                && seen.insert(row.record.run_id.clone())
-                && matches_discovery_options(&row.record, &options, submitted_after.as_ref())
-        }) {
-            selected.push(row.record);
-            break;
-        }
-        if !truncated {
-            break;
-        }
-        after = next;
-    }
-    let mut report = discovery_report(
-        AgentTaskDiscoveryFilter::All,
-        AgentTaskDiscoveryOptions::default(),
-        selected,
-        health,
-    )?;
-    report.filter = "latest";
-    Ok(report)
-}
-
 /// Scoped reconciliation must classify the lifecycle owner, not the scalar
 /// observation status: an observer may have marked that projection stale while
 /// the embedded lifecycle record still needs explicit cancellation.
