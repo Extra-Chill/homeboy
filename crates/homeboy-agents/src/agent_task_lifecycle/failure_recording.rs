@@ -1888,21 +1888,6 @@ pub fn terminal_artifact_projection_readiness_bounded_in_store(
     )
 }
 
-/// Read-only promotion-path counterpart that preserves execution's mirrored
-/// aggregate preference while avoiding observation-store initialization.
-pub fn terminal_artifact_projection_readiness_readonly_in_store(
-    lifecycle_store: &AgentTaskLifecycleStore,
-    run_id: &str,
-) -> Result<Option<String>> {
-    let (record, aggregate) =
-        lifecycle_store.read_record_with_aggregate_bounded(&super::sanitize_run_id(run_id))?;
-    terminal_artifact_projection_readiness_for_observation_readonly_in_store(
-        lifecycle_store,
-        &record,
-        aggregate.as_ref(),
-    )
-}
-
 pub fn terminal_artifact_projection_readiness_for_observation_readonly_in_store(
     lifecycle_store: &AgentTaskLifecycleStore,
     record: &AgentTaskRunRecord,
@@ -2781,108 +2766,6 @@ pub fn verified_controller_artifact_projection_path_in_store(
     Ok(Some(path))
 }
 
-/// Resolve a controller-retained artifact by its durable logical identity. This
-/// is intentionally independent of the runner-reported path: Lab workspaces
-/// are disposable after their aggregate has been mirrored.
-pub fn verified_controller_artifact_projection_in_store(
-    store: &homeboy_core::observation::ObservationStore,
-    run_id: &str,
-    task_id: &str,
-    logical_artifact_id: &str,
-    kind: &str,
-    expected_sha256: &str,
-    expected_record_id: Option<&str>,
-) -> Result<Option<(String, Vec<u8>)>> {
-    let artifact_root = store.artifact_root()?;
-    let candidates: Vec<_> = store
-        .list_artifacts(run_id)?
-        .into_iter()
-        .filter(|candidate| {
-            candidate.artifact_type == "file"
-                && candidate.kind == kind
-                && candidate
-                    .metadata_json
-                    .pointer("/agent_task/task_id")
-                    .and_then(serde_json::Value::as_str)
-                    == Some(task_id)
-                && candidate
-                    .metadata_json
-                    .pointer("/agent_task/logical_artifact_id")
-                    .and_then(serde_json::Value::as_str)
-                    == Some(logical_artifact_id)
-        })
-        .collect();
-    if candidates.is_empty() {
-        return Ok(None);
-    }
-    // An explicitly pinned record stays authoritative; selection only resolves
-    // equivalent projections the caller has not already chosen between.
-    let selected = match expected_record_id
-        .and_then(|id| candidates.iter().position(|candidate| candidate.id == id))
-    {
-        Some(index) => candidates.into_iter().nth(index).expect("located candidate"),
-        None => select_controller_artifact_projection(candidates).map_err(|conflicting| {
-            Error::validation_invalid_argument(
-                "artifact_id",
-                format!(
-                    "conflicting controller-side artifact projections match run '{run_id}', task '{task_id}', and artifact '{logical_artifact_id}': {}",
-                    conflicting.join(", ")
-                ),
-                Some(logical_artifact_id.to_string()),
-                None,
-            )
-        })?,
-    };
-    let candidate = &selected;
-    if expected_record_id.is_some_and(|id| id != candidate.id) {
-        return Err(Error::validation_invalid_argument(
-            "gate_feedback_candidate_baseline",
-            format!(
-                "controller artifact identity mismatch for run '{run_id}', task '{task_id}', and artifact '{logical_artifact_id}': expected record '{}', found '{}'",
-                expected_record_id.unwrap_or_default(), candidate.id
-            ),
-            Some(logical_artifact_id.to_string()),
-            None,
-        ));
-    }
-    let path = PathBuf::from(&candidate.path);
-    if !controller_owned_artifact_path_at(&path, &artifact_root) {
-        return Err(Error::validation_invalid_argument(
-            "gate_feedback_candidate_baseline",
-            "controller artifact mirror is outside the owning artifact root",
-            Some(path.display().to_string()),
-            None,
-        ));
-    }
-    let bytes = std::fs::read(&path).map_err(|error| {
-        Error::validation_invalid_argument(
-            "gate_feedback_candidate_baseline",
-            format!(
-                "controller artifact mirror is unavailable for run '{run_id}', task '{task_id}', and artifact '{logical_artifact_id}': {}",
-                error
-            ),
-            Some(logical_artifact_id.to_string()),
-            None,
-        )
-    })?;
-    let actual_sha256 = content_hash::sha256_hex(&bytes);
-    if candidate.sha256.as_deref() != Some(expected_sha256)
-        || candidate.size_bytes != Some(bytes.len() as i64)
-        || actual_sha256 != expected_sha256
-    {
-        return Err(Error::validation_invalid_argument(
-            "gate_feedback_candidate_baseline",
-            format!(
-                "controller artifact mirror hash mismatch for run '{run_id}', task '{task_id}', and artifact '{logical_artifact_id}': expected '{expected_sha256}', record '{:?}', bytes '{actual_sha256}'",
-                candidate.sha256
-            ),
-            Some(logical_artifact_id.to_string()),
-            None,
-        ));
-    }
-    Ok(Some((candidate.id.clone(), bytes)))
-}
-
 /// Runner artifact retrieval is keyed only by artifact id. Reject duplicates
 /// rather than inventing a controller-only alias that cannot be retried safely.
 fn validate_unique_terminal_artifact_ids(aggregate: &AgentTaskAggregate) -> Result<()> {
@@ -3398,20 +3281,6 @@ mod tests {
                 resolved.display()
             );
             assert_eq!(std::fs::read(&resolved).expect("resolved bytes"), bytes);
-
-            let (_, bytes_read) = verified_controller_artifact_projection_in_store(
-                &store,
-                &run.id,
-                "task",
-                "transcript",
-                "transcript",
-                &format!("{:x}", sha2::Sha256::digest(bytes)),
-                None,
-            )
-            .expect("equivalent duplicates resolve for byte reads")
-            .expect("a controller projection is available");
-
-            assert_eq!(bytes_read, bytes);
         });
     }
 

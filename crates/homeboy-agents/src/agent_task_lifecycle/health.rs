@@ -96,14 +96,3 @@ pub(crate) fn record_health_item(
         health.samples.push(item);
     }
 }
-
-/// `record_health_summary` against explicitly injected durable lifecycle
-/// roots.
-///
-/// The summary is the health half of the bounded registry snapshot, counted
-/// from the same injected home the records are read from (#7505).
-pub fn record_health_summary_in_store(
-    lifecycle_store: &AgentTaskLifecycleStore,
-) -> Result<AgentTaskRecordHealthSummary> {
-    Ok(lifecycle_store.read_records_with_health_bounded(1000)?.1)
-}

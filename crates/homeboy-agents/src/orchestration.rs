@@ -8225,6 +8225,7 @@ mod tests {
             );
             let mut latest = record(latest_id);
             latest.metadata["cook_id"] = json!(cook_id);
+            latest.metadata["cook_attempt"] = json!(2);
             crate::agent_task_service::set_cook_delivery_artifact_for_test(
                 &mut latest.metadata,
                 "/promotion",
@@ -8238,13 +8239,7 @@ mod tests {
             for (attempt, row) in [(1, &candidate), (2, &latest)] {
                 store.write_record(row).expect("rooted record");
                 store
-                    .write_cook_index_attempt(
-                        cook_id,
-                        attempt,
-                        &row.run_id,
-                        row.submitted_at.clone(),
-                        None,
-                    )
+                    .record_cook_attempt(cook_id, attempt, &row.run_id)
                     .expect("rooted index attempt");
             }
             // Colliding ambient IDs must never supply this service's evidence.
@@ -8761,22 +8756,10 @@ mod tests {
             )
             .expect("second attempt");
             store
-                .write_cook_index_attempt(
-                    cook_id,
-                    1,
-                    &first_id,
-                    "2026-01-01T00:00:00Z".to_string(),
-                    None,
-                )
+                .record_cook_attempt(cook_id, 1, &first_id)
                 .expect("index first");
             store
-                .write_cook_index_attempt(
-                    cook_id,
-                    2,
-                    &second_id,
-                    "2026-01-01T00:00:01Z".to_string(),
-                    None,
-                )
+                .record_cook_attempt(cook_id, 2, &second_id)
                 .expect("rebind alias");
             let service = OrchestrationService::new(LifecycleStoreLookup::new(store.clone()));
             let request = ControlPlaneActionRequest {
@@ -8844,13 +8827,7 @@ mod tests {
                     })
                     .expect("gate-failed candidate");
                 store
-                    .write_cook_index_attempt(
-                        &cook_id,
-                        1,
-                        &attempt_id,
-                        "2026-01-01T00:00:00Z".to_string(),
-                        None,
-                    )
+                    .record_cook_attempt(&cook_id, 1, &attempt_id)
                     .expect("index");
                 let service = OrchestrationService::new(LifecycleStoreLookup::new(store.clone()));
                 let request = ControlPlaneActionRequest {

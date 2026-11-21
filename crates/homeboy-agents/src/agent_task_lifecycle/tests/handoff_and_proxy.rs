@@ -3423,7 +3423,7 @@ fn legacy_wire_state_round_trip_and_active_discovery() {
 
 /// Rooted in an explicit store rather than a mutated process environment
 /// (#7505). The malformed rows are inserted through this store's own
-/// observation database — the same one `record_health_summary_in_store` counts
+/// observation database — the same one `list_records_with_health_in_store` counts
 /// — so `health.malformed == malformed_count` is an exact equality about one
 /// home. Counted ambiently it would be an equality against whichever
 /// observation DB the process environment pointed at, which on a developer or
@@ -3465,7 +3465,9 @@ fn record_health_summary_stays_bounded_with_many_malformed_records() {
             .expect("malformed record inserted");
     }
 
-    let health = record_health_summary_in_store(&lifecycle_store).expect("health summary");
+    let health = list_records_with_health_in_store(&lifecycle_store)
+        .expect("health summary")
+        .1;
 
     // Every malformed record is counted…
     assert_eq!(health.malformed, malformed_count);

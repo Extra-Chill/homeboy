@@ -92,7 +92,7 @@ pub use durable_state_probe::{
 };
 pub use failure_recording::canonical_runner_artifact_ref;
 pub use failure_recording::*;
-pub use health::*;
+pub(crate) use health::*;
 pub use lab_handoff_reconciliation::*;
 pub use lab_offload::*;
 pub use lifecycle_candidate_adoption::*;

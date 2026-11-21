@@ -4968,7 +4968,9 @@ fn record_health_reports_plan_backed_missing_metadata_without_repair() {
         .upsert_imported_run(&observation)
         .expect("malformed fixture stored");
 
-    let before = record_health_summary_in_store(&lifecycle_store).expect("health");
+    let before = list_records_with_health_in_store(&lifecycle_store)
+        .expect("health")
+        .1;
     assert_eq!(before.malformed, 1);
     assert_eq!(
         before.samples[0].reason,
@@ -4976,7 +4978,8 @@ fn record_health_reports_plan_backed_missing_metadata_without_repair() {
     );
     // Missing metadata is reported, never reconstructed from the plan (#15742).
     assert_eq!(
-        record_health_summary_in_store(&lifecycle_store)
+        list_records_with_health_in_store(&lifecycle_store)
+            .map(|(_, health)| health)
             .expect("unmodified health")
             .malformed,
         1

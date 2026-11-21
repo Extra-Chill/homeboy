@@ -606,96 +606,6 @@ fn only_the_claiming_launcher_can_publish_detached_child_supervision() {
 }
 
 #[test]
-fn daemon_terminalization_requires_its_projected_supervision_generation() {
-    let context = homeboy_core::test_support::HermeticTestContext::new();
-    let store = AgentTaskLifecycleStore::new(context.path_roots());
-    let cook_id = "cook-supervisor-terminal-fence";
-    let identity = homeboy_core::process::ProcessStartIdentity::Linux {
-        starttime_ticks: 42,
-    };
-    claim_detached_cook_handoff_parent_in_store(&store, cook_id, "active-launcher")
-        .expect("claim handoff parent");
-
-    let pending = fail_supervised_detached_cook_handoff_parent_in_store(
-        &store,
-        cook_id,
-        "active-launcher",
-        4242,
-        &identity,
-        "child exited",
-    )
-    .expect("an unprojected daemon is a no-op");
-    assert_eq!(pending.state(), RunExecutionState::Queued);
-    assert_eq!(
-        pending.metadata["detached_cook_handoff"]["admission_state"],
-        "pre_supervisor"
-    );
-
-    record_claimed_detached_cook_handoff_supervision_in_store(
-        &store,
-        cook_id,
-        "active-launcher",
-        4242,
-        identity.clone(),
-        "supervisor-active",
-    )
-    .expect("publish supervision");
-    let stale = fail_supervised_detached_cook_handoff_parent_in_store(
-        &store,
-        cook_id,
-        "stale-launcher",
-        4242,
-        &identity,
-        "stale child exited",
-    )
-    .expect("a stale daemon is a no-op");
-    assert_eq!(stale.state(), RunExecutionState::Queued);
-
-    store
-        .mutate_record(cook_id, |record| {
-            record.metadata["detached_cook_handoff"]["cancellation_fence"]["state"] =
-                json!("cancel_requested");
-            true
-        })
-        .expect("request cancellation");
-    let cancelling = fail_supervised_detached_cook_handoff_parent_in_store(
-        &store,
-        cook_id,
-        "active-launcher",
-        4242,
-        &identity,
-        "owned child exited during cancellation",
-    )
-    .expect("cancellation owns terminalization");
-    assert_eq!(cancelling.state(), RunExecutionState::Queued);
-    assert_eq!(
-        cancelling.metadata["detached_cook_handoff"]["admission_state"],
-        "supervising"
-    );
-    store
-        .mutate_record(cook_id, |record| {
-            record.metadata["detached_cook_handoff"]["cancellation_fence"]["state"] = json!("open");
-            true
-        })
-        .expect("reopen fixture fence");
-
-    let failed = fail_supervised_detached_cook_handoff_parent_in_store(
-        &store,
-        cook_id,
-        "active-launcher",
-        4242,
-        &identity,
-        "owned child exited",
-    )
-    .expect("the projected daemon terminalizes its parent");
-    assert_eq!(failed.state(), RunExecutionState::Failed);
-    assert_eq!(
-        failed.metadata["detached_cook_handoff"]["admission_state"],
-        "failed"
-    );
-}
-
-#[test]
 fn cancellation_request_closes_every_first_attempt_admission_gate() {
     let context = homeboy_core::test_support::HermeticTestContext::new();
     let store = AgentTaskLifecycleStore::new(context.path_roots());
@@ -1276,9 +1186,7 @@ fn terminal_cook_report_preserves_each_attempts_lifecycle_status() {
                 true
             })
             .unwrap();
-        store
-            .write_cook_index_attempt(cook_id, attempt, run_id, now_timestamp(), None)
-            .unwrap();
+        store.record_cook_attempt(cook_id, attempt, run_id).unwrap();
     }
     record_cook_finalization_in_store(
         &store,
@@ -1754,13 +1662,10 @@ fn detached_handoff_siblings_attach_supervision_and_enforce_admission_guards() {
         .expect("submit an unrelated run under the Cook id in the first root");
     // The alias guard's evidence, published in the first root only.
     seeded
-        .write_cook_index_attempt(
-            indexed_cook_id,
-            1,
-            indexed_attempt_run_id,
-            now_timestamp(),
-            None,
-        )
+        .submit_plan_with_runtime_admission(&plan, indexed_attempt_run_id, |_| Ok(json!({})))
+        .expect("submit the indexed attempt in the first root");
+    seeded
+        .record_cook_attempt(indexed_cook_id, 1, indexed_attempt_run_id)
         .expect("publish a Cook attempt alias in the first root only");
 
     // Re-recording a live handoff parent is the idempotent branch: it answers
@@ -2298,10 +2203,10 @@ fn lifecycle_read_siblings_resolve_cook_aliases_and_durable_evidence() {
         .submit_plan_with_runtime_admission(&plan, attempt_run_id, |_| Ok(json!({})))
         .expect("submit attempt into the seeded store");
     seeded
-        .write_cook_index_attempt(cook_id, 1, attempt_run_id, now_timestamp(), None)
+        .record_cook_attempt(cook_id, 1, attempt_run_id)
         .expect("register the Cook attempt in the seeded store");
     seeded
-        .write_aggregate_and_record(&record, &succeeded_aggregate(&plan))
+        .import_record_with_aggregate(&mut record.clone(), &succeeded_aggregate(&plan))
         .expect("persist the authoritative attempt pair in the seeded store");
 
     // Every read answers from the store it was handed.
