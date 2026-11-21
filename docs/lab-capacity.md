@@ -9,7 +9,8 @@ when load rises.
 
 Heavy execution and workflow steps take a slot before launching. A step's owner
 is its workflow instance (`root_durable_run_id`), else its linked run. Waiters are
-ordered by lane, then by the owner with the fewest active slots, then by arrival.
+ordered by lane, then by the owner with the fewest active slots, then by earliest
+arrival.
 A waiting step polls actively and releases its ticket on cancellation. Launcher
 steps do not hold a slot while waiting for children. By default, direct runner job
 reservations keep their configured concurrency limit unchanged.
@@ -37,24 +38,35 @@ waiter, even a higher-lane one. With nobody else waiting it can still fill idle
 slots. Running work is never preempted. Cooks waiting on other controllers count
 too, through their waiter reservations (below).
 
+Direct runner jobs count toward the share as well. A Lab gate a Cook sends to the
+runner and a Cook placed on the Lab carry `HOMEBOY_LAB_OWNER` (the workflow
+instance, else the Cook), their lane, and a declared budget in their job
+environment: the gate timeout for a gate, the Cook's declared budget for a Cook.
+The daemon charges each one holding a child to that owner.
+
 ### Cooks waiting on other controllers
 
 A remote Cook waiting on a Lab runner (`capacity_reached`) registers a waiter
 reservation on the Lab daemon with `POST /capacity/waiters`
-(`{waiter_id, owner, priority}`; `release: true` leaves). It renews the
+(`{waiter_id, owner, priority, first_waited_at}`; `release: true` leaves). It renews the
 reservation on every eligibility probe, at most 30 seconds apart. A reservation
 not renewed within 120 seconds expires, so a lost controller cannot leak queue
-entries. The Lab ranks remote waiters with its own step waiters by lane, owner
-share, and arrival. It replies with the waiter's Lab-wide position, whether it
-may proceed, the effective budget, load, and holders.
+entries. `first_waited_at` is when the Cook first started waiting. It sets the
+waiter's arrival when it registers, including after an expiry or a controller
+restart, and a renewal keeps the registered arrival. A time ahead of the Lab's
+clock counts as now. The Lab ranks remote waiters with its own step waiters as one
+queue: lane, owner share, then earliest arrival. It replies with the waiter's
+Lab-wide position, whether it may proceed, the effective budget, load, and
+holders.
 
-Across the two queues, a waiter holds another back only through a higher lane or
-the owner share cap, never through arrival alone. A remote waiter is admitted by
-runner job capacity, not by a step slot. It holds back local steps only while
-some step holder is running, so a remote Cook blocked for another reason cannot
-leave the Lab idle. Among remote waiters, the same rule applies: a `high` waiter
-on one controller makes `normal` waiters on every controller wait. Older
-daemons without the route keep the controller-local ranking.
+At equal lane, a waiter that arrived earlier holds back a later one, on this Lab
+or on any controller. The Lab never idles on a remote waiter: it holds back local
+steps only while some step holder runs. Once the Lab tells a waiter it may
+proceed, the controller re-probes within 5 seconds. A waiter still registered
+30 seconds after that (`remote_claim_grace_seconds`) is blocked for another
+reason and stops holding others back until it is outranked again. A waiter that
+stops heartbeating expires. Older daemons without the route keep the
+controller-local ranking.
 
 ### Queue position and ETA
 
@@ -70,7 +82,8 @@ holders reach their declared budgets to free a slot for this position. It is an
 estimate and an upper bound: it assumes the budget stays fixed and no
 higher-ranked waiter arrives. It is null when too few holders declared a budget.
 The daemon `/capacity` response includes `step_queue`, with holders (owner, lane,
-`started_at`, elapsed, budget; no commands or environment) and ranked waiters
+`kind` (`step` or `runner_job`), `started_at`, elapsed, budget; no commands or
+environment) and ranked waiters
 (position, owner, lane, `remote`, wait, ETA). `agent-task capacity` lists those
 waiters and marks remote ones. A Cook waiting on runner eligibility reports
 `queue_position`, `waiters_ahead`, `queue_scope` (`lab` or `controller`), and

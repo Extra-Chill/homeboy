@@ -807,6 +807,19 @@ fn execute_owned(
             .env
             .insert("HOMEBOY_GATE_INPUT_STORE".to_string(), root.clone());
     }
+    // The Lab charges this gate to its workflow/Cook owner's share, with the
+    // gate timeout as its declared budget for queue ETAs.
+    options
+        .env
+        .extend(homeboy_core::lab_capacity::runner_job_claim_env(
+            &homeboy_agents::agent_tasks::gate::lab_admission_owner(&cwd.display().to_string()),
+            homeboy_core::lab_capacity::LabPriority::from_env_value(
+                std::env::var(homeboy_core::lab_capacity::LAB_PRIORITY_ENV)
+                    .ok()
+                    .as_deref(),
+            ),
+            Some(request.timeout_seconds),
+        ));
     let mut execution = crate::RunnerExecRequest::new(&request.runner_id, options);
     execution.workspace_ref = Some(candidate.workspace_ref);
     let daemon_generation = status

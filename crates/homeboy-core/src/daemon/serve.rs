@@ -58,6 +58,11 @@ where
                 .with_daemon_scope(scope.clone())
         })?;
     recover_at_startup(&job_store, &state.lease_id)?;
+    // Direct runner jobs count toward their owner's share and queue ETAs.
+    let holders_store = job_store.clone();
+    crate::lab_capacity::register_runner_job_holders(std::sync::Arc::new(move || {
+        holders_store.lab_runner_job_holders()
+    }));
     let _ = daemon_runtime_snapshot();
     refresh_daemon_freshness_snapshot(&job_store);
 
