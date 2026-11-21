@@ -215,14 +215,7 @@ impl Source {
         let streamed = archive
             .append_data(&mut header, name, &mut reader)
             .materialization("archive", &self.path, "controller");
-        let changed = || {
-            super::super::snapshot::snapshot_construction_failure(
-                "content",
-                &self.path,
-                None,
-                "source file changed while streaming; refusing a mixed snapshot",
-            )
-        };
+        let changed = || super::super::snapshot::snapshot_source_changed(&self.path);
         let after =
             fs::metadata(&self.path).materialization("metadata", &self.path, "controller")?;
         let mut stable = self.metadata.len() == after.len()

@@ -1990,6 +1990,27 @@ pub(super) fn snapshot_construction_failure(
     error
 }
 
+/// A source file that changed while it streamed is a concurrent edit, not a
+/// bad input: the snapshot is refused and the substrate wait rebuilds it from
+/// the settled tree (#18705).
+pub(super) fn snapshot_source_changed(source: &Path) -> Error {
+    let mut error = snapshot_construction_failure(
+        "content",
+        source,
+        None,
+        "source file changed while streaming; refusing a mixed snapshot",
+    );
+    error.code = homeboy_core::ErrorCode::RunnerLabTransportFailure;
+    error.retryable = Some(true);
+    error.details["transient"] = serde_json::json!(true);
+    error.details["recovery"] = serde_json::json!({
+        "owner": "substrate_wait",
+        "action": "rebuild_snapshot",
+        "reason": "The source tree changed during streaming; a rebuilt snapshot reads the settled tree.",
+    });
+    error
+}
+
 pub(crate) fn effective_snapshot_excludes(
     excludes: Vec<String>,
     includes: &[String],

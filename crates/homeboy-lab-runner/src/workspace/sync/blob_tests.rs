@@ -232,6 +232,9 @@ fn streaming_refuses_same_size_mutation_and_has_no_commit_seal() {
         .unwrap_err();
     assert_eq!(error.details["classification"], "snapshot_construction");
     assert!(error.message.contains("refusing a mixed snapshot"));
+    // A concurrent edit is waited through and rebuilt, never invalid input.
+    assert!(!error.code.as_str().starts_with("validation."));
+    assert!(homeboy_core::substrate_wait::is_transient_error(&error));
     assert!(changed.load(Ordering::SeqCst) > 1);
     let incoming = tempfile::tempdir_in(root.path()).unwrap();
     fs::write(incoming.path().join("commit.json"), b"{}").unwrap();
