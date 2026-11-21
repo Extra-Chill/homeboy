@@ -321,6 +321,29 @@ fn prompt_path_classifier_separates_host_paths_from_urls_references_and_concepts
 }
 
 #[test]
+fn prompt_path_guard_allows_routes_and_urls_but_blocks_host_evidence() {
+    let evidence_dir = tempfile::tempdir().expect("temporary evidence directory");
+    let evidence = evidence_dir.path().join("evidence.json");
+    std::fs::write(&evidence, b"{}").expect("existing evidence file");
+    let existing_prompt = format!("Read {}", evidence.display());
+    for (prompt, blocked) in [
+        ("Use /media", false),
+        ("Visit /blog/post-1", false),
+        ("Visit /wp-json/wp/v2/posts", false),
+        ("Visit https://x.com/media", false),
+        ("Read /Users/x/file", true),
+        ("Read /tmp/evidence.json", true),
+        (existing_prompt.as_str(), true),
+    ] {
+        assert_eq!(
+            validate_provider_evidence_inputs(&[], Some(prompt)).is_err(),
+            blocked,
+            "{prompt}"
+        );
+    }
+}
+
+#[test]
 fn scans_a_recognized_single_segment_root_path() {
     assert_eq!(
         absolute_host_paths_in_provider_prompt("Read /tmp.").expect("scan real path"),
