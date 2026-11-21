@@ -9187,6 +9187,7 @@ fn canonical_completion_accepts_green_and_proven_inherited_gate_evidence() {
             matches_candidate_failure: true,
             result: crate::agent_task_gate::AgentTaskGateDifferentialResult::BaselineRed,
             diagnostic: None,
+            failure_attribution: None,
         });
     // Accepted baseline evidence must not turn back into a rejection.
     use crate::agent_task_gate::{AgentTaskGateFailureClassification, AgentTaskGateStatus};

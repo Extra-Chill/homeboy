@@ -21,7 +21,8 @@ use std::process::Command;
 
 use crate::agent_task_gate::{
     failure_fingerprint, run_declared_test_with_timeout, run_gate_command_with_timeout,
-    AgentTaskGateBaselineComparison, AgentTaskGateDifferentialResult, AgentTaskGateInvocation,
+    AgentTaskGateBaselineComparison, AgentTaskGateDifferentialResult,
+    AgentTaskGateFailureAttribution, AgentTaskGateFailureOrigin, AgentTaskGateInvocation,
     AgentTaskGateStatus,
 };
 use crate::agent_task_promotion::AgentTaskPromotionReport;
@@ -376,10 +377,16 @@ impl BaselineFacts {
             .collect();
         // Opaque gates have only an exit-status contract. Do not attribute an
         // already-red host or toolchain to the candidate based on output text.
-        let opaque = self.failure_records.is_empty() || candidate.failure_records.is_empty();
+        // That excuse applies only when neither run named its failures: a
+        // candidate that names failures the baseline cannot account for (or
+        // a baseline that names failures the candidate replaced with opaque
+        // output) is not a reproduction of the baseline breakage.
+        let opaque = self.failure_records.is_empty() && candidate.failure_records.is_empty();
+        let comparable_records =
+            !self.failure_records.is_empty() && !candidate.failure_records.is_empty();
         let matches = self.status == AgentTaskGateStatus::Failed
             && gate.status == AgentTaskGateStatus::Failed
-            && (opaque || new.is_empty());
+            && (opaque || (comparable_records && new.is_empty()));
         let diagnostic = Some(format!("{}; inherited failures: {:?}; new failures: {:?}; base failures: {:?}; base output tail: {}",
             diagnostic.unwrap_or_default(), inherited, new, self.failure_records, self.output_tail));
         gate.baseline_comparison = Some(AgentTaskGateBaselineComparison {
@@ -393,6 +400,17 @@ impl BaselineFacts {
                 AgentTaskGateDifferentialResult::CandidateRegression
             },
             diagnostic,
+            failure_attribution: (gate.status == AgentTaskGateStatus::Failed).then(|| {
+                AgentTaskGateFailureAttribution {
+                    classification: if matches {
+                        AgentTaskGateFailureOrigin::GateAlreadyRedOnBaseline
+                    } else {
+                        AgentTaskGateFailureOrigin::CandidateBrokeGate
+                    },
+                    inherited_failures: inherited,
+                    new_failures: new,
+                }
+            }),
         });
         if matches {
             gate.accept_inherited_failure();
@@ -700,6 +718,7 @@ pub(crate) fn compare_gate_failures_to_verified_base(
                             matches_candidate_failure: false,
                             result: AgentTaskGateDifferentialResult::Inconclusive,
                             diagnostic: Some(format!("baseline dependency setup failed: {error}")),
+                            failure_attribution: None,
                         });
                     }
                 }
@@ -726,6 +745,7 @@ pub(crate) fn compare_gate_failures_to_verified_base(
                         "candidate gate declares package artifacts without recorded digests, so the immutable base cannot reconstruct the same inputs"
                             .to_string(),
                     ),
+                    failure_attribution: None,
                 });
                     continue;
                 };
@@ -776,6 +796,7 @@ pub(crate) fn compare_gate_failures_to_verified_base(
                             "baseline replay uses a different shell invocation contract than the recorded candidate; recapture candidate evidence"
                                 .to_string(),
                         ),
+                        failure_attribution: None,
                     });
                         baseline_run_dir.finish(true);
                         continue;
@@ -792,6 +813,7 @@ pub(crate) fn compare_gate_failures_to_verified_base(
                             "baseline replay resolved different package artifacts than the candidate recorded, so the two runs are not comparable"
                                 .to_string(),
                         ),
+                        failure_attribution: None,
                     });
                         baseline_run_dir.finish(true);
                         continue;
@@ -818,6 +840,7 @@ pub(crate) fn compare_gate_failures_to_verified_base(
                             "baseline replay exceeded the gate timeout before producing a comparable result"
                                 .to_string(),
                         ),
+                        failure_attribution: None,
                     });
                         Ok(())
                     }
@@ -853,6 +876,7 @@ pub(crate) fn compare_gate_failures_to_verified_base(
                             matches_candidate_failure: false,
                             result: AgentTaskGateDifferentialResult::Inconclusive,
                             diagnostic: Some(format!("baseline replay failed: {error}")),
+                            failure_attribution: None,
                         });
                         // Preserve the inconclusive evidence and leave the candidate
                         // gate red. A baseline execution failure must never convert a
@@ -1278,6 +1302,17 @@ mod tests {
             inherited.status,
             AgentTaskGateStatus::AcceptedInheritedFailure
         );
+        let attribution = inherited
+            .baseline_comparison
+            .as_ref()
+            .and_then(|comparison| comparison.failure_attribution.clone())
+            .expect("inherited failure carries attribution");
+        assert_eq!(
+            attribution.classification,
+            AgentTaskGateFailureOrigin::GateAlreadyRedOnBaseline
+        );
+        assert_eq!(attribution.inherited_failures.len(), 1);
+        assert!(attribution.new_failures.is_empty());
         let mut regression = run("test A ... FAILED\\ntest B ... FAILED\\n");
         base.apply(&mut regression, "base", None);
         assert_eq!(regression.status, AgentTaskGateStatus::Failed);
@@ -1287,6 +1322,16 @@ mod tests {
             AgentTaskGateDifferentialResult::CandidateRegression
         );
         assert!(comparison.diagnostic.unwrap().contains("B"));
+        let attribution = comparison
+            .failure_attribution
+            .expect("regression attribution");
+        assert_eq!(
+            attribution.classification,
+            AgentTaskGateFailureOrigin::CandidateBrokeGate
+        );
+        assert_eq!(attribution.inherited_failures.len(), 1);
+        assert_eq!(attribution.new_failures.len(), 1);
+        assert!(attribution.new_failures[0].contains('B'));
         let opaque = BaselineFacts::from_gate(&run("host unavailable"));
         let mut candidate = run("different host error");
         opaque.apply(&mut candidate, "base", None);
@@ -1294,6 +1339,26 @@ mod tests {
             candidate.status,
             AgentTaskGateStatus::AcceptedInheritedFailure
         );
+        // An opaque baseline cannot excuse a candidate that names failures:
+        // nothing on the baseline accounts for them.
+        let mut named = run("test C ... FAILED\\n");
+        opaque.apply(&mut named, "base", None);
+        assert_eq!(named.status, AgentTaskGateStatus::Failed);
+        let attribution = named
+            .baseline_comparison
+            .unwrap()
+            .failure_attribution
+            .expect("named regression attribution");
+        assert_eq!(
+            attribution.classification,
+            AgentTaskGateFailureOrigin::CandidateBrokeGate
+        );
+        assert_eq!(attribution.new_failures.len(), 1);
+        // A baseline with named failures cannot excuse an opaque candidate
+        // failure, which may be a new compile or harness break.
+        let mut unnamed = run("compile error");
+        base.apply(&mut unnamed, "base", None);
+        assert_eq!(unnamed.status, AgentTaskGateStatus::Failed);
     }
 
     #[test]
