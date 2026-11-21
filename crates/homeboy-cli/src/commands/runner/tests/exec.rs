@@ -185,6 +185,7 @@ fn workspace_ref_inspects_hydrates_and_executes_one_physical_snapshot() {
                 mode: runner::RunnerWorkspaceSyncMode::Snapshot,
                 ..Default::default()
             },
+            &runner::WorkspaceControl::default(),
         )
         .expect("sync exact snapshot");
         assert_eq!(

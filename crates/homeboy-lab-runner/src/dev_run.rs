@@ -160,7 +160,9 @@ pub fn run_extension_dev_run(
         runner_id,
         source,
         command,
-        crate::runners::sync_workspace,
+        |runner_id, options| {
+            crate::runners::sync_workspace(runner_id, options, &crate::WorkspaceControl::default())
+        },
         crate::runners::exec,
     )
 }

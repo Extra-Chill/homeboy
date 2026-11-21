@@ -547,8 +547,8 @@ pub(crate) use transport::{select_runner_transport, RunnerFileTransfer, RunnerTr
 pub use upgrade_runners::register as register_runner_upgrade;
 pub use workspace::{
     hydrate_prepared_workspace_source_snapshot, list_workspaces, plan_workspace_pull,
-    prune_workspaces, pull_workspace, resolve_workspace_ref, sync_workspace, sync_workspace_before,
-    update_workspace, verify_workspace_ref_hydration_source, workspace_snapshots, ByteFileCounts,
+    prune_workspaces, pull_workspace, resolve_workspace_ref, sync_workspace, update_workspace,
+    verify_workspace_ref_hydration_source, workspace_snapshots, ByteFileCounts,
     RunnerWorkspaceCurrentSummary, RunnerWorkspaceListEntry, RunnerWorkspaceListOutput,
     RunnerWorkspaceMaterializationContract, RunnerWorkspaceMaterializationPlan,
     RunnerWorkspaceOutputPaths, RunnerWorkspacePruneEntry, RunnerWorkspacePruneOptions,
@@ -558,6 +558,7 @@ pub use workspace::{
     RunnerWorkspaceSnapshotFilters, RunnerWorkspaceSnapshotsOutput, RunnerWorkspaceSyncMode,
     RunnerWorkspaceSyncOptions, RunnerWorkspaceSyncOutput, RunnerWorkspaceUpdateOptions,
     RunnerWorkspaceUpdateOutput, WorkspaceContentManifest, WorkspaceContentManifestEntry,
+    WorkspaceControl,
 };
 pub use workspace::{
     materialization_commit, materialization_plan, prune_workspace_blobs, reap_run_workspace,

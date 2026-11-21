@@ -495,6 +495,7 @@ fn prepare_workspace_bundle(runner: &str, repository: &Path, base_sha: &str) -> 
             validation_dependency_ids: None,
             run_isolation_token: None,
         },
+        &homeboy::runner::runners::WorkspaceControl::default(),
     );
     let _ = git(
         repository,

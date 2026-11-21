@@ -399,6 +399,7 @@ fn materialize_gate_workspace(
             validation_dependency_ids: None,
             run_isolation_token: Some(run_id.to_string()),
         },
+        &crate::WorkspaceControl::default(),
     )?;
     let handle = crate::MaterializedWorkspace::new(
         runner_id.to_string(),

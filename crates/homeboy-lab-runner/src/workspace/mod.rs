@@ -7,7 +7,7 @@
 //! runner subsystem so the historical `workspace::*` paths keep resolving.
 
 mod control;
-pub(crate) use control::WorkspaceControl;
+pub use control::WorkspaceControl;
 mod git;
 mod materialized;
 mod materializer;
@@ -23,6 +23,7 @@ pub(crate) use util::ssh_client_for_runner;
 pub use pull::{plan_workspace_pull, pull_workspace};
 pub(crate) use sync::require_runner_workspace_disk_headroom;
 pub(crate) use sync::save_prepared_source_cache;
+pub(crate) use sync::sync_workspace_batch_controlled;
 pub(crate) use sync::update_workspace_resource_lifecycle;
 #[cfg(test)]
 pub(crate) use sync::workspace_resource_lifecycle;
@@ -36,11 +37,7 @@ pub use sync::{
 };
 pub use sync::{
     materialization_commit, materialization_plan, prune_workspace_blobs, sync_workspace,
-    sync_workspace_before, update_workspace,
-};
-pub(crate) use sync::{
-    sync_workspace_batch_controlled, sync_workspace_controlled,
-    sync_workspace_controlled_with_excludes,
+    update_workspace,
 };
 pub use types::{
     ByteFileCounts, RunnerWorkspaceCurrentSummary, RunnerWorkspaceListEntry,
