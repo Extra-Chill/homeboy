@@ -4,6 +4,19 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.482.8] - 2026-11-21
+
+### Changed
+- one serialisable offload command type
+- dispatch agent-task subcommands in one place
+- one typed release-failure analysis for JSON and compact output
+- collapse cancellation to one pipeline
+- one workspace sync entry with options
+- one builder for the run-locally fallback outcome
+
+### Fixed
+- simplify raw runner handling and stabilize gate tests
+
 ## [0.482.7] - 2026-11-21
 
 ### Fixed
