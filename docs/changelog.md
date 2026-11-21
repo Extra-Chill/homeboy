@@ -4,6 +4,15 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.488.2] - 2026-11-21
+
+### Changed
+- Lab share cap: don't double-charge gates sent by a Cook running on the Lab
+- Report PATH binary sync in bounded refresh and upgrade runner output
+
+### Fixed
+- adopt a finished daemon gate job's result instead of re-running it
+
 ## [0.488.1] - 2026-11-21
 
 ### Fixed
