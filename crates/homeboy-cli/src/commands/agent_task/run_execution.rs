@@ -732,56 +732,71 @@ pub(super) fn run_preflight_cook_execution(
         .then(|| admit_local_cook_dispatch(&run_id, &cook_id, &lifecycle_store))
         .transpose()?
         .flatten();
-    let result = agent_task_service::CookService::run(
-            agent_task_service::CookRequest {
-            identity: homeboy::agents::agent_task_service::CookIdentity {
-                cook_id,
-                initial_run_id: run_id,
-                initial_plan,
-            },
-            workspace: homeboy::agents::agent_task_service::CookWorkspace {
-                to_worktree: args.to_worktree.expect("Cook destination is resolved"),
-                source_worktree_path,
-                task_base_sha,
-                source_refs: args.dispatch.task_url.into_iter().collect(),
-            },
-            provider_transport: homeboy::agents::agent_task_service::CookProviderTransport {
-                provider_invocation: (!args.provider_argv.is_empty()).then(|| CommandInvocation {
-                    argv: args.provider_argv,
-                    ..Default::default()
-                }),
-                attempt_dispatcher,
-            },
-            gates: {
-                let mut gates = args.dispatch.cook.values.gates.into();
-                args.dispatch.cook.values.repro.apply_to(&mut gates);
-                gates
-            },
-            retry_policy: homeboy::agents::agent_task_service::CookRetryPolicy {
-                max_attempts: args.dispatch.cook.values.max_attempts,
-            },
-            finalization: homeboy::agents::agent_task_service::CookFinalization {
-                publish_incomplete_draft: args.dispatch.cook.values.publish_incomplete_draft,
-                tracker_note: !args.dispatch.cook.values.no_tracker_note,
-                no_finalize: args.no_finalize,
-                draft_pr: args.draft_pr,
-                base: args.base.expect("Cook base is resolved before execution"),
-                head: args.head,
-                title,
-                commit_message,
-                protected_branches: args.protected_branches,
-            },
-            harvest_context:
-                homeboy::agents::agent_task_scheduler::HarvestExecutionContext::from_current_process(
-                )?,
-            },
-            agent_task_service::CookRuntime::production_with_observer(
-                executor,
-                &recipe_store,
-                &lifecycle_store,
-                &durable_observer,
-            ),
-            agent_task_service::CookMode::Start,
+    let request = agent_task_service::CookRequest {
+        identity: homeboy::agents::agent_task_service::CookIdentity {
+            cook_id,
+            initial_run_id: run_id,
+            initial_plan,
+        },
+        workspace: homeboy::agents::agent_task_service::CookWorkspace {
+            to_worktree: args.to_worktree.expect("Cook destination is resolved"),
+            source_worktree_path,
+            task_base_sha,
+            source_refs: args.dispatch.task_url.into_iter().collect(),
+        },
+        provider_transport: homeboy::agents::agent_task_service::CookProviderTransport {
+            provider_invocation: (!args.provider_argv.is_empty()).then(|| CommandInvocation {
+                argv: args.provider_argv,
+                ..Default::default()
+            }),
+            attempt_dispatcher,
+        },
+        gates: {
+            let mut gates = args.dispatch.cook.values.gates.into();
+            args.dispatch.cook.values.repro.apply_to(&mut gates);
+            gates
+        },
+        retry_policy: homeboy::agents::agent_task_service::CookRetryPolicy {
+            max_attempts: args.dispatch.cook.values.max_attempts,
+        },
+        finalization: homeboy::agents::agent_task_service::CookFinalization {
+            publish_incomplete_draft: args.dispatch.cook.values.publish_incomplete_draft,
+            tracker_note: !args.dispatch.cook.values.no_tracker_note,
+            no_finalize: args.no_finalize,
+            draft_pr: args.draft_pr,
+            base: args.base.expect("Cook base is resolved before execution"),
+            head: args.head,
+            title,
+            commit_message,
+            protected_branches: args.protected_branches,
+        },
+        harvest_context:
+            homeboy::agents::agent_task_scheduler::HarvestExecutionContext::from_current_process()?,
+    };
+    // Keep the original step process alive while Cook is in flight. The
+    // workflow owns this process (including cancellation and its deadline),
+    // so waiting here neither submits another step nor admits another Cook.
+    let workflow_step =
+        std::env::var_os(homeboy::core::daemon::workflow_job::WORKFLOW_INSTANCE_ENV).is_some();
+    let result = wait_for_workflow_cook(
+        workflow_step,
+        |mode| {
+            agent_task_service::CookService::run(
+                request.clone(),
+                agent_task_service::CookRuntime::production_with_observer(
+                    executor.clone(),
+                    &recipe_store,
+                    &lifecycle_store,
+                    &durable_observer,
+                ),
+                mode,
+            )
+            .map(|result| {
+                let disposition = result.value.disposition;
+                (result, disposition)
+            })
+        },
+        || std::thread::sleep(LOCAL_DISPATCH_QUEUE_POLL_INTERVAL),
     )?;
     Ok((
         super::status::compact_cook_report(
@@ -792,6 +807,68 @@ pub(super) fn run_preflight_cook_execution(
         ),
         result.exit_code,
     ))
+}
+
+/// Re-drive only the already-admitted Cook. Non-workflow callers retain their
+/// one-report contract; workflow steps wait for a terminal disposition.
+fn wait_for_workflow_cook<T>(
+    workflow_step: bool,
+    mut drive: impl FnMut(
+        agent_task_service::CookMode,
+    )
+        -> homeboy::core::Result<(T, homeboy::core::cook_status::CookDisposition)>,
+    mut wait: impl FnMut(),
+) -> homeboy::core::Result<T> {
+    let mut mode = agent_task_service::CookMode::Start;
+    loop {
+        let (report, disposition) = drive(mode)?;
+        if !workflow_step || disposition.is_terminal() {
+            return Ok(report);
+        }
+        wait();
+        mode = agent_task_service::CookMode::Resume;
+    }
+}
+
+#[cfg(test)]
+mod workflow_cook_wait_tests {
+    use super::*;
+    use homeboy::core::cook_status::CookDisposition;
+
+    #[test]
+    fn queued_cook_step_waits_then_succeeds() {
+        let mut calls = 0;
+        let mut waits = 0;
+        let outcome = wait_for_workflow_cook(
+            true,
+            |mode| {
+                calls += 1;
+                if calls == 1 {
+                    assert!(matches!(mode, agent_task_service::CookMode::Start));
+                    Ok((("queued", 75), CookDisposition::InFlight))
+                } else {
+                    assert!(matches!(mode, agent_task_service::CookMode::Resume));
+                    Ok((("succeeded", 0), CookDisposition::Terminal))
+                }
+            },
+            || waits += 1,
+        )
+        .unwrap();
+        assert_eq!(outcome, ("succeeded", 0));
+        assert_eq!(calls, 2);
+        assert_eq!(waits, 1);
+    }
+
+    #[test]
+    fn foreground_cook_preserves_in_flight_report() {
+        let report = wait_for_workflow_cook(
+            false,
+            |_| Ok((("queued", 75), CookDisposition::InFlight)),
+            || panic!("foreground caller must not wait"),
+        )
+        .unwrap();
+        assert_eq!(report, ("queued", 75));
+    }
 }
 
 pub(crate) fn record_cook_argument_provenance(
