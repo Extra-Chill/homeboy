@@ -3,6 +3,8 @@
 //! These are intentionally minimal so that `secrets`, `agent_task_bridge`, and
 //! `offload` can answer "is subcommand X present?" or "is this arg
 //! placeholder-empty?" without each module redefining the same parser.
+//! [`flag_values`] / [`flag_value`] are the single owner of argv flag lookup
+//! (`--flag value`, `--flag=value`, repeated flags, `--` passthrough stop).
 
 pub(super) fn subcommand_index(args: &[String], subcommand: &str) -> Option<usize> {
     args.iter().position(|arg| arg == subcommand)
@@ -33,7 +35,8 @@ impl<'a> CommandInvocation<'a> {
     }
 
     pub(super) fn option_value_after(&self, start_index: usize, flag: &str) -> Option<&'a str> {
-        option_value(self.args, start_index + 1, flag)
+        flag_value(self.args, start_index + 1, flag)
+            .filter(|value| !value.trim().is_empty() && !value.starts_with('-'))
     }
 }
 
@@ -70,24 +73,38 @@ fn subcommand_index_before_passthrough(args: &[String], subcommand: &str) -> Opt
         .position(|arg| arg == subcommand)
 }
 
-fn option_value<'a>(args: &'a [String], start_index: usize, flag: &str) -> Option<&'a str> {
+/// Every value supplied for `flag` in `args[start_index..]`, in argv order.
+///
+/// Accepts both `--flag value` and `--flag=value`; repeated flags yield one
+/// entry each. The token after a bare `--flag` is consumed as its value
+/// verbatim, and scanning stops at the `--` passthrough separator.
+pub(super) fn flag_values<'a>(args: &'a [String], start_index: usize, flag: &str) -> Vec<&'a str> {
     let flag_eq = format!("{flag}=");
-    let iter = args.iter().enumerate().skip(start_index);
-    for (index, arg) in iter {
+    let mut values = Vec::new();
+    let mut iter = args.iter().skip(start_index);
+    while let Some(arg) = iter.next() {
         if arg == "--" {
-            return None;
-        }
-        if let Some(value) = arg.strip_prefix(&flag_eq) {
-            return (!value.is_empty()).then_some(value);
+            break;
         }
         if arg == flag {
-            return args
-                .get(index + 1)
-                .filter(|value| !value.trim().is_empty() && !value.starts_with('-'))
-                .map(String::as_str);
+            if let Some(value) = iter.next() {
+                values.push(value.as_str());
+            }
+        } else if let Some(value) = arg.strip_prefix(&flag_eq) {
+            values.push(value);
         }
     }
-    None
+    values
+}
+
+/// The first value supplied for `flag` in `args[start_index..]`, using the
+/// same forms and passthrough rules as [`flag_values`].
+pub(super) fn flag_value<'a>(
+    args: &'a [String],
+    start_index: usize,
+    flag: &str,
+) -> Option<&'a str> {
+    flag_values(args, start_index, flag).into_iter().next()
 }
 
 #[cfg(test)]
@@ -99,23 +116,42 @@ mod tests {
     }
 
     #[test]
-    fn command_invocation_reads_flag_value_forms() {
+    fn flag_values_reads_both_forms_and_repeated_flags() {
+        let cases: [(&[&str], usize, Vec<&str>); 7] = [
+            (&["cmd", "--ext", "a"], 0, vec!["a"]),
+            (&["cmd", "--ext=a"], 0, vec!["a"]),
+            (
+                &["cmd", "--ext", "a", "--ext=b", "--ext", "c"],
+                0,
+                vec!["a", "b", "c"],
+            ),
+            (&["cmd", "--ext", "a", "--", "--ext", "b"], 0, vec!["a"]),
+            (&["cmd", "--ext", "a", "--ext", "b"], 3, vec!["b"]),
+            (&["cmd", "--ext"], 0, vec![]),
+            (&["cmd", "--extension=a", "--ext-other", "b"], 0, vec![]),
+        ];
+
+        for (input, start, expected) in cases {
+            let input = args(input);
+            assert_eq!(flag_values(&input, start, "--ext"), expected, "{input:?}");
+            assert_eq!(
+                flag_value(&input, start, "--ext"),
+                expected.first().copied(),
+                "{input:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn command_invocation_rejects_missing_or_flag_like_values() {
         let cases = [
             (
                 args(&["homeboy", "agent-task", "cook", "--run-id", "abc"]),
                 Some("abc"),
             ),
-            (
-                args(&["homeboy", "agent-task", "cook", "--run-id=abc"]),
-                Some("abc"),
-            ),
             (args(&["homeboy", "agent-task", "cook", "--run-id"]), None),
             (
                 args(&["homeboy", "agent-task", "cook", "--run-id", "--other"]),
-                None,
-            ),
-            (
-                args(&["homeboy", "agent-task", "cook", "--", "--run-id", "abc"]),
                 None,
             ),
         ];

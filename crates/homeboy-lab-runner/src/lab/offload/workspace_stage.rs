@@ -1,6 +1,7 @@
 //! Workspace sync / remap staging for the standard (non-resident) offload path.
 
 use super::*;
+use crate::lab::args_util::flag_values;
 use crate::lab_args::verify_cook_workspace_attestations_in_args;
 use crate::lab_workspaces::workspace_mapping_entry_for_materialized_file;
 use crate::offload_changed_since::{
@@ -1561,32 +1562,10 @@ fn load_primary_rig_spec(
 }
 
 fn extension_overrides_from_args(args: &[String]) -> Vec<String> {
-    values_for_flag(args, "--extension")
-}
-
-fn values_for_flag(args: &[String], flag: &str) -> Vec<String> {
-    let mut values = Vec::new();
-    let mut passthrough = false;
-    let mut iter = args.iter().peekable();
-    while let Some(arg) = iter.next() {
-        if passthrough {
-            continue;
-        }
-        if arg == "--" {
-            passthrough = true;
-            continue;
-        }
-        if arg == flag {
-            if let Some(value) = iter.peek() {
-                values.push((*value).to_string());
-            }
-            continue;
-        }
-        if let Some(value) = arg.strip_prefix(&format!("{flag}=")) {
-            values.push(value.to_string());
-        }
-    }
-    values
+    flag_values(args, 0, "--extension")
+        .into_iter()
+        .map(str::to_string)
+        .collect()
 }
 
 fn inject_required_extension_args(
