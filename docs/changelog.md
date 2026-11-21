@@ -4,6 +4,14 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.484.0] - 2026-11-21
+
+### Added
+- cross-controller waiter reservations, remote queue ETA, fanout priority, derived Lab budget
+
+### Fixed
+- report, bound and interrupt the client's admission wait; fence Lab gates at admission
+
 ## [0.483.1] - 2026-11-21
 
 ### Changed
