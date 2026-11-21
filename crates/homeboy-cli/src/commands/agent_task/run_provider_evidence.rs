@@ -271,7 +271,6 @@ pub(super) fn classify_absolute_host_path(
             | "home"
             | "lib"
             | "lib64"
-            | "media"
             | "mnt"
             | "opt"
             | "private"
