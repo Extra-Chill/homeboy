@@ -90,6 +90,10 @@ pub fn is_transient_error(error: &Error) -> bool {
 /// transient, `cancelled` reports true, or `deadline` passes. Backoff starts
 /// at 2s and is capped at 30s; `on_wait` runs before each sleep (progress,
 /// heartbeats). The final error records how long it waited.
+///
+/// Inside a [`crate::foreground_wait`] scope each refusal is reported as what
+/// the client waits for, and the scope's signal or admission bound stops the
+/// wait like `cancelled` (#18042).
 pub fn wait_through<T>(
     label: &str,
     deadline: Duration,
@@ -97,15 +101,25 @@ pub fn wait_through<T>(
     mut on_wait: impl FnMut(&Error, Duration),
     mut attempt: impl FnMut() -> Result<T>,
 ) -> Result<T> {
+    let cancelled = || cancelled() || crate::foreground_wait::stop_requested().is_some();
     let started = Instant::now();
     let mut backoff = INITIAL_BACKOFF;
     loop {
         let error = match attempt() {
-            Ok(value) => return Ok(value),
+            Ok(value) => {
+                crate::foreground_wait::admitted();
+                return Ok(value);
+            }
             Err(error) => error,
         };
         let remaining = deadline.saturating_sub(started.elapsed());
         if !is_transient_error(&error) || remaining.is_zero() || cancelled() {
+            return Err(record_wait(error, started.elapsed()));
+        }
+        crate::foreground_wait::waiting(crate::foreground_wait::WaitSubject::from_refusal(
+            label, &error,
+        ));
+        if cancelled() {
             return Err(record_wait(error, started.elapsed()));
         }
         on_wait(&error, started.elapsed());

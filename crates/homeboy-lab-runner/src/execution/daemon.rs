@@ -1973,6 +1973,20 @@ pub(crate) fn observe_daemon_job_until_terminal(
     budget: Duration,
     cancelled: &dyn Fn() -> bool,
 ) -> Result<DaemonTerminalObservation> {
+    observe_daemon_job_until_terminal_with(runner_id, runner_job_id, budget, cancelled, &|_| Ok(()))
+}
+
+/// [`observe_daemon_job_until_terminal`] that hands every observed job to
+/// `on_status` before the wait continues, so a caller can tell a job still
+/// queued for runner capacity from one the daemon admitted (#18042). An
+/// `on_status` error ends the wait with that error.
+pub(crate) fn observe_daemon_job_until_terminal_with(
+    runner_id: &str,
+    runner_job_id: &str,
+    budget: Duration,
+    cancelled: &dyn Fn() -> bool,
+    on_status: &dyn Fn(&Job) -> Result<()>,
+) -> Result<DaemonTerminalObservation> {
     let client = Client::builder()
         .no_proxy()
         .timeout(Duration::from_secs(10))
@@ -2004,6 +2018,7 @@ pub(crate) fn observe_daemon_job_until_terminal(
             if job.status == JobStatus::Queued {
                 queued_owner_heartbeat.beat(&client, endpoint, runner_job_id);
             }
+            on_status(&job)?;
             if !job.status.is_terminal() {
                 if let Some(run_id) = job
                     .runner_job_projection

@@ -10206,6 +10206,180 @@ fn regate_after_interrupted_regate_fence_runs_without_extra_authorization() {
     });
 }
 
+/// #18042: a regate whose Lab admission wait is stopped (here by the
+/// client's admission bound; SIGINT/SIGTERM stop it the same way) reports
+/// what it waited for, fails without a start fence, releases its operation
+/// lease and records no "no progress" marker, so the `recover --regate` that
+/// follows runs its gates without any authorization.
+#[test]
+fn regate_whose_admission_wait_is_stopped_leaves_no_fence_and_regate_reruns() {
+    use crate::agent_task_gate::placement;
+    use homeboy_core::foreground_wait;
+    struct CapacityRunner {
+        previous: Arc<dyn placement::LabGateTransport>,
+        at_capacity: AtomicBool,
+    }
+    impl placement::LabGateTransport for CapacityRunner {
+        fn declared_runner(&self, command: &str) -> Result<Option<String>> {
+            self.previous.declared_runner(command)
+        }
+        fn execute(
+            &self,
+            cwd: &std::path::Path,
+            request: &placement::LabGateRequest,
+            supervision: Option<&crate::agent_task_gate::GateSupervision>,
+        ) -> Result<placement::LabGateReceipt> {
+            if request.runner_id != "replacement-placement-runner" {
+                return self.previous.execute(cwd, request, supervision);
+            }
+            if self.at_capacity.load(Ordering::SeqCst) {
+                return Err(placement::LabGateAdmission {
+                    accepts_jobs: false,
+                    reasons: vec!["capacity_reached".to_string()],
+                    freshness: placement::LabGateFreshness::Fresh,
+                    next_action: None,
+                }
+                .refusal(&request.runner_id, None));
+            }
+            let mut environment = request.environment.clone();
+            environment.lab_runner = None;
+            environment.shared_cargo_target = Some(false);
+            let mut report = crate::agent_task_gate::run_gate_command_with_supervision(
+                cwd,
+                request.index,
+                if request.preflight_only {
+                    "true"
+                } else {
+                    &request.label
+                },
+                request.visibility,
+                request.reveal_policy,
+                None,
+                supervision,
+                &environment,
+                &[],
+            )?;
+            report.environment.lab_runner = Some(request.runner_id.clone());
+            if request.preflight_only {
+                report.status = crate::agent_task_gate::AgentTaskGateStatus::Skipped;
+            }
+            Ok(placement::LabGateReceipt {
+                schema: placement::LAB_GATE_RECEIPT_SCHEMA.to_string(),
+                request_sha256: request.identity()?,
+                candidate: request.candidate.clone(),
+                execution_context: homeboy_core::runner_job_execution_context::RunnerJobExecutionContext::direct_daemon(
+                    Some("controller-run"), &request.runner_id, "job", "homeboy", "reservation",
+                )?.evidence_record()?,
+                report, setup: vec![], readiness: request.preflight_only.then(|| serde_json::json!({"status":"ready"})), materialization: None, artifact_ref: None,
+            })
+        }
+    }
+    struct Restore(Arc<dyn placement::LabGateTransport>);
+    impl Drop for Restore {
+        fn drop(&mut self) {
+            placement::register_lab_gate_transport(self.0.clone());
+        }
+    }
+    with_corrected_gate_failure(false, |mut options, _| {
+        let run_id = options.identity.initial_run_id.clone();
+        persist_deferred_fixture(&run_id);
+        let runs = tempfile::tempdir().unwrap();
+        let ledger = runs.path().join("runs");
+        options
+            .gates
+            .gate_environment
+            .variables
+            .insert("GATE_RUN_LEDGER".to_string(), ledger.display().to_string());
+        options.gates.gate_environment.lab_runner =
+            Some("replacement-placement-runner".to_string());
+        options.gates.verify = vec![
+            "echo run >> \"$GATE_RUN_LEDGER\"; test \"$(cat tracked.txt)\" = promoted".to_string(),
+        ];
+        let recipes = CookRecipeStore::from_current_data_root().unwrap();
+        let mut recipe = recipes.load_recipe(&options.identity.cook_id).unwrap();
+        recipe.gate_policy = serde_json::to_value(&options.gates).unwrap();
+        recipes.persist_recipe(&recipe).unwrap();
+        let transport = Arc::new(CapacityRunner {
+            previous: placement::active_transport(),
+            at_capacity: AtomicBool::new(true),
+        });
+        let _restore = Restore(placement::active_transport());
+        placement::register_lab_gate_transport(transport.clone());
+        let regate = || {
+            crate::agent_task_service::recover_cook(
+                &run_id,
+                crate::agent_task_service::CookRecoveryRequest {
+                    regate: true,
+                    ..Default::default()
+                },
+                &ReplacementOnlyRecoveryPerformer,
+            )
+            .unwrap()
+        };
+
+        let lines = Arc::new(Mutex::new(Vec::<String>::new()));
+        let sink = {
+            let lines = lines.clone();
+            Arc::new(move |line: &str| lines.lock().unwrap().push(line.to_string()))
+        };
+        let policy = foreground_wait::ForegroundWaitPolicy {
+            admission_timeout: Some(std::time::Duration::from_millis(50)),
+        };
+        let (stopped, exit) =
+            foreground_wait::with_foreground_wait_reporting(policy, sink, &regate);
+        assert_ne!(exit, 0, "{stopped:#?}");
+        let failure = stopped.failure.clone().expect("the stop is the failure");
+        let wait = &failure["details"]["foreground_wait"];
+        assert_eq!(wait["stop"], "admission_timeout", "{failure:#}");
+        assert_eq!(wait["subject"]["runner_id"], "replacement-placement-runner");
+        assert_eq!(wait["subject"]["reason"], "capacity_reached");
+        let line = lines.lock().unwrap().first().cloned().unwrap_or_default();
+        assert!(
+            line.contains("runner `replacement-placement-runner`"),
+            "{line}"
+        );
+        assert!(line.contains("capacity_reached"), "{line}");
+        assert!(
+            replacement_gate_fence(&run_id).is_null(),
+            "no gate ever started"
+        );
+        assert!(!ledger.exists(), "no gate ever ran");
+
+        // `recover --regate --preflight` still admits the regate it prints,
+        // needing no authority.
+        let (preview, preview_exit) = crate::agent_task_service::recover_cook(
+            &run_id,
+            crate::agent_task_service::CookRecoveryRequest {
+                regate: true,
+                preflight: true,
+                ..Default::default()
+            },
+            &ReplacementOnlyRecoveryPerformer,
+        )
+        .unwrap();
+        assert_eq!(
+            preview.step,
+            crate::agent_task_service::CookRecoveryStep::Regate
+        );
+        assert_eq!(preview_exit, 0, "{preview:#?}");
+        let next = preview.step.next_action("homeboy", &run_id).command;
+        assert!(!next.contains("authorize"), "{next}");
+
+        // Capacity clears: the printed `recover --regate` runs as printed.
+        transport.at_capacity.store(false, Ordering::SeqCst);
+        let (report, exit) = regate();
+        assert_eq!(exit, 0, "{report:#?}");
+        assert_eq!(
+            report.step,
+            crate::agent_task_service::CookRecoveryStep::Regate
+        );
+        assert_eq!(std::fs::read_to_string(&ledger).unwrap().lines().count(), 1);
+        assert!(replacement_gate_fence(&run_id).is_null());
+        let promotion = persisted_promotion_for_attempt(&run_id).unwrap().unwrap();
+        assert_eq!(promotion.status, AgentTaskPromotionStatus::Applied);
+    });
+}
+
 #[test]
 fn deferred_recovery_supervises_declared_gate_and_persists_unavailability() {
     with_corrected_gate_failure(false, |mut options, _| {

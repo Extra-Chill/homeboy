@@ -110,6 +110,7 @@ pub mod evidence_manifest;
 pub mod execution;
 pub mod execution_contract;
 pub mod expand;
+pub mod foreground_wait;
 pub mod extension;
 // finding moved to the internal `homeboy-finding` crate. Re-exported so existing
 // `crate::finding::*` call sites keep working unchanged.

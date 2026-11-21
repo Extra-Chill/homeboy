@@ -337,6 +337,61 @@ fn lab_gate_exec_options(
     }
 }
 
+/// One submitted gate job, from the daemon's capacity queue to admission.
+///
+/// A queued job has started nothing: the client reports what it waits for,
+/// and a stop withdraws the job without a start fence. The start fence is
+/// written once, when the daemon first reports the job out of its queue,
+/// rather than at submission, so a client that never got capacity leaves no
+/// fence behind (#18042, the Lab half of #16283).
+struct GateJobStart<'a> {
+    runner_id: &'a str,
+    job_id: &'a str,
+    admitted: std::cell::Cell<bool>,
+}
+
+impl<'a> GateJobStart<'a> {
+    fn new(runner_id: &'a str, job_id: &'a str) -> Self {
+        Self {
+            runner_id,
+            job_id,
+            admitted: std::cell::Cell::new(false),
+        }
+    }
+
+    fn observe(
+        &self,
+        status: homeboy_core::api_jobs::JobStatus,
+        fence: impl FnOnce() -> Result<()>,
+    ) -> Result<()> {
+        if status == homeboy_core::api_jobs::JobStatus::Queued {
+            homeboy_core::foreground_wait::waiting(
+                homeboy_core::foreground_wait::WaitSubject::runner_queue(
+                    self.runner_id,
+                    self.job_id,
+                ),
+            );
+            return Ok(());
+        }
+        if !self.admitted.replace(true) {
+            homeboy_core::foreground_wait::admitted();
+            fence()?;
+        }
+        Ok(())
+    }
+
+    fn admitted(&self) -> bool {
+        self.admitted.get()
+    }
+}
+
+/// The gate's supervisor cancelled it, or the foreground client running it
+/// was signalled or outlived its admission bound (#18042).
+fn gate_stop_requested(supervision: Option<&GateSupervision>) -> bool {
+    supervision.is_some_and(|policy| (policy.is_cancelled)())
+        || homeboy_core::foreground_wait::stop_requested().is_some()
+}
+
 /// Losing sight of an admitted gate job is not evidence against it: the job
 /// keeps running on the Lab, and cancelling it needs the same transport that
 /// was just lost. Cancel only for a supervisor cancellation, a heartbeat
@@ -578,7 +633,7 @@ fn execute_owned(
     supervision: Option<&GateSupervision>,
     run_id: &str,
 ) -> Result<LabGateReceipt> {
-    if supervision.is_some_and(|policy| (policy.is_cancelled)()) {
+    if gate_stop_requested(supervision) {
         let mut error =
             Error::invalid_argument("gate.placement", "Lab gate was cancelled before admission");
         error.details["gate_disposition"] = serde_json::json!("cancelled");
@@ -744,9 +799,9 @@ fn execute_owned(
         .session
         .as_ref()
         .and_then(|session| session.remote_daemon_lease_id.clone());
-    if !request.preflight_only {
-        homeboy_agents::agent_tasks::gate::execution_start::before_command_start()?;
-    }
+    // The start fence is not written here: the daemon may queue this job for
+    // capacity, and a queued job has started nothing. It is written once the
+    // daemon admits the job (see `on_status` below, #18042).
     let output = match crate::exec_request(execution) {
         Ok((output, _)) => output,
         Err(error) => {
@@ -796,27 +851,39 @@ fn execute_owned(
                     return true;
                 }
             }
-            let cancelled = (policy.is_cancelled)();
-            if cancelled {
-                stop_requested.set(true);
-            }
-            return cancelled;
         }
-        false
+        let cancelled = gate_stop_requested(supervision);
+        if cancelled {
+            stop_requested.set(true);
+        }
+        cancelled
     };
-    let terminal = crate::execution::observe_daemon_job_until_terminal(
+    let job_start = GateJobStart::new(&request.runner_id, job_id);
+    let on_status = |job: &homeboy_core::api_jobs::Job| -> Result<()> {
+        job_start.observe(job.status, || {
+            if request.preflight_only {
+                return Ok(());
+            }
+            // A fence that cannot be written must not leave the admitted job
+            // running unfenced: the stop cancels it.
+            homeboy_agents::agent_tasks::gate::execution_start::before_command_start()
+                .inspect_err(|_| stop_requested.set(true))
+        })
+    };
+    let terminal = crate::execution::observe_daemon_job_until_terminal_with(
         &request.runner_id,
         job_id,
         std::time::Duration::from_secs(request.timeout_seconds)
             .saturating_add(LAB_GATE_RECEIPT_MARGIN),
         &cancelled,
+        &on_status,
     );
     let terminal = match terminal {
         Ok(terminal) => terminal,
         Err(error)
             if !observation_failure_cancels_job(
                 &error,
-                supervision.is_some_and(|policy| (policy.is_cancelled)()),
+                gate_stop_requested(supervision),
                 heartbeat_error.borrow().is_some(),
             ) =>
         {
@@ -871,8 +938,12 @@ fn execute_owned(
             let mut error = heartbeat_error.borrow_mut().take().unwrap_or(error);
             error.details["job_id"] = serde_json::json!(job_id);
             error.details["stage"] = serde_json::json!("terminal_wait");
-            if supervision.is_some_and(|policy| (policy.is_cancelled)()) {
+            if gate_stop_requested(supervision) {
                 error.details["gate_disposition"] = serde_json::json!("cancelled");
+            }
+            if !job_start.admitted() {
+                // Withdrawn while still queued: no gate process ever started.
+                error.details["withdrawn_before_start"] = serde_json::json!(true);
             }
             return Err(error);
         }
@@ -1400,6 +1471,69 @@ mod observation_failure_tests {
                 "{name}"
             );
         }
+    }
+}
+
+#[cfg(test)]
+mod gate_job_start_tests {
+    use super::*;
+    use homeboy_core::api_jobs::JobStatus;
+    use homeboy_core::foreground_wait::{self, ForegroundWaitPolicy, WaitStop};
+    use std::sync::{Arc, Mutex};
+
+    /// #18042: a job still queued for runner capacity reports what the client
+    /// waits for and writes no start fence; the fence is written once, when
+    /// the daemon admits the job. A foreground stop cancels the gate, so the
+    /// queued job is withdrawn.
+    #[test]
+    fn queued_gate_job_reports_its_wait_and_is_fenced_only_once_admitted() {
+        let lines = Arc::new(Mutex::new(Vec::<String>::new()));
+        let sink = {
+            let lines = lines.clone();
+            Arc::new(move |line: &str| lines.lock().unwrap().push(line.to_string()))
+        };
+        foreground_wait::with_foreground_wait_reporting(
+            ForegroundWaitPolicy::default(),
+            sink,
+            || {
+                let fences = std::cell::Cell::new(0);
+                let fence = || {
+                    fences.set(fences.get() + 1);
+                    Ok(())
+                };
+                let start = GateJobStart::new("lab-a", "job-1");
+                start.observe(JobStatus::Queued, fence).unwrap();
+                start.observe(JobStatus::Queued, fence).unwrap();
+                assert_eq!(fences.get(), 0, "a queued job started nothing");
+                assert!(!start.admitted());
+                let line = lines.lock().unwrap()[0].clone();
+                assert!(line.contains("runner `lab-a`"), "{line}");
+                assert!(line.contains("job job-1"), "{line}");
+
+                start.observe(JobStatus::Running, fence).unwrap();
+                start.observe(JobStatus::Succeeded, fence).unwrap();
+                assert_eq!(fences.get(), 1, "fenced once, at admission");
+                assert!(start.admitted());
+
+                assert!(!gate_stop_requested(None));
+                foreground_wait::current()
+                    .unwrap()
+                    .request_stop(WaitStop::Signal(15));
+                assert!(
+                    gate_stop_requested(None),
+                    "a signalled client stops its gate"
+                );
+                assert!(observation_failure_cancels_job(
+                    &daemon_terminal_wait_cancelled(),
+                    gate_stop_requested(None),
+                    false,
+                ));
+            },
+        );
+    }
+
+    fn daemon_terminal_wait_cancelled() -> Error {
+        Error::internal_unexpected("cancelled while waiting for runner job `job-1`")
     }
 }
 
