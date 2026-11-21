@@ -6,15 +6,21 @@ use crate::{Runner, RunnerSession};
 
 pub(crate) const ID: &str = "host-daemon";
 
-pub(crate) fn session() -> Option<RunnerSession> {
-    let path = homeboy_core::paths::home_root()
-        .ok()?
-        .join(crate::connection::daemon_state_dir())
-        .join("state.json");
-    session_at(&path)
+fn lease_path() -> Option<std::path::PathBuf> {
+    Some(
+        homeboy_core::paths::home_root()
+            .ok()?
+            .join(crate::connection::daemon_state_dir())
+            .join("state.json"),
+    )
 }
 
-fn session_at(path: &std::path::Path) -> Option<RunnerSession> {
+pub(crate) fn session() -> Option<RunnerSession> {
+    session_at(&lease_path()?)
+}
+
+/// The lease of a daemon that is alive and answering on loopback.
+fn live_lease_at(path: &std::path::Path) -> Option<serde_json::Value> {
     let lease: serde_json::Value = serde_json::from_slice(&std::fs::read(path).ok()?).ok()?;
     if lease["schema"] != "homeboy.daemon.session_lease.v2" {
         return None;
@@ -28,13 +34,22 @@ fn session_at(path: &std::path::Path) -> Option<RunnerSession> {
         return None;
     }
     TcpStream::connect_timeout(&address, Duration::from_millis(200)).ok()?;
+    Some(lease)
+}
+
+fn session_at(path: &std::path::Path) -> Option<RunnerSession> {
+    session_from_lease(&live_lease_at(path)?)
+}
+
+fn session_from_lease(lease: &serde_json::Value) -> Option<RunnerSession> {
+    let address = lease["address"].as_str()?;
     serde_json::from_value(serde_json::json!({
         "runner_id": ID,
         "mode": "loopback",
         "role": "runner",
         "local_url": format!("http://{address}"),
-        "remote_daemon_address": address.to_string(),
-        "remote_daemon_pid": pid,
+        "remote_daemon_address": address,
+        "remote_daemon_pid": lease["pid"],
         "remote_daemon_lease_id": lease["lease_id"],
         "homeboy_version": lease["build_identity"]["version"].as_str().unwrap_or_default(),
         "homeboy_build_identity": lease["build_identity"]["display"],
@@ -44,11 +59,20 @@ fn session_at(path: &std::path::Path) -> Option<RunnerSession> {
 }
 
 pub(crate) fn runner() -> Option<Runner> {
-    session()?;
-    Some(Runner {
+    runner_at(&lease_path()?)
+}
+
+/// The host runner executes gates with the exact binary its daemon runs, as
+/// the lease records it; that is the pin an SSH runner gets from
+/// `refresh-homeboy`.
+fn runner_at(path: &std::path::Path) -> Option<Runner> {
+    let lease = live_lease_at(path)?;
+    let mut runner = Runner {
         id: ID.to_string(),
         ..crate::builtin_local_runner()
-    })
+    };
+    runner.settings.homeboy_path = lease["executable"]["path"].as_str().map(str::to_string);
+    Some(runner)
 }
 
 pub(crate) fn is_host(runner: &Runner) -> bool {
@@ -70,7 +94,8 @@ mod tests {
             "pid": pid,
             "started_at": "2026-01-01T00:00:00Z",
             "build_identity": { "version": "1.0.0", "display": "homeboy 1.0.0" },
-            "lab_contract_version": 1
+            "lab_contract_version": 1,
+            "executable": { "path": "/opt/homeboy/bin/homeboy-pinned", "dev": 1, "ino": 2 }
         });
         std::fs::write(dir.join("state.json"), lease.to_string()).expect("lease");
     }
@@ -96,6 +121,11 @@ mod tests {
             write_lease(home.path(), std::process::id(), &address);
             let runner = crate::load(ID).expect("host runner loads");
             assert!(is_host(&runner));
+            // Gates run the daemon's own binary (#18707 follow-up).
+            assert_eq!(
+                runner.settings.homeboy_path.as_deref(),
+                Some("/opt/homeboy/bin/homeboy-pinned")
+            );
             assert!(crate::list().unwrap().iter().any(|r| r.id == ID));
             assert_eq!(
                 crate::configured_lab_runner_ids().unwrap(),
