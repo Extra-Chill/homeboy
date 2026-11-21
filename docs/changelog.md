@@ -4,6 +4,16 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.485.1] - 2026-11-21
+
+### Changed
+- Lab capacity: equal-lane FIFO across controllers; charge runner jobs to owners
+- Converge upgrade and runner refresh on the invoked and PATH homeboy
+
+### Fixed
+- co-located controllers admit through the host daemon
+- treat a daemon-admitted gate job as the start fence when its controller died
+
 ## [0.485.0] - 2026-11-21
 
 ### Added
