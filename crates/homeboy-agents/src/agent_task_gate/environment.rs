@@ -70,7 +70,24 @@ impl SelectedGateEnvironment {
             .and_then(|raw| serde_json::from_slice::<serde_json::Value>(&raw).ok())
             .filter(serde_json::Value::is_object)
             .unwrap_or_else(|| json!({}));
-        registration["local_path"] = json!(cwd.to_string_lossy());
+        // Gates materialize the repository, not just the admitted package.
+        // Retain its repo-relative path before the isolated XDG root hides
+        // the host registration. Root components and synthetic registrations
+        // keep the existing checkout-root fallback.
+        let component_path = registration
+            .get("local_path")
+            .and_then(serde_json::Value::as_str)
+            .map(|path| PathBuf::from(shellexpand::tilde(path).into_owned()))
+            .and_then(|path| {
+                let path = path.canonicalize().ok()?;
+                let root = homeboy_core::git::repo_root(&path)?;
+                let relative = path.strip_prefix(root).ok()?;
+                let workspace_root =
+                    homeboy_core::git::repo_root(cwd).unwrap_or_else(|| cwd.to_path_buf());
+                Some(workspace_root.join(relative))
+            })
+            .unwrap_or_else(|| cwd.to_path_buf());
+        registration["local_path"] = json!(component_path.to_string_lossy());
         let components = homeboy_core::paths::components_in_root(&home.join(".config/homeboy"));
         let io_error = |error: std::io::Error| {
             Error::internal_io(

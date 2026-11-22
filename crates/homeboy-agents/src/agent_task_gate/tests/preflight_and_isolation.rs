@@ -1,5 +1,108 @@
 use super::*;
 
+/// #18733: isolated registrations retain monorepo package paths, while an
+/// unregistered sibling remains discoverable from its portable manifest.
+#[test]
+fn isolated_gate_resolves_monorepo_packages_by_id_and_cwd() {
+    let _guard = env_mutex();
+    if !rerun_alone_to_replace_path(
+        module_path!(),
+        "isolated_gate_resolves_monorepo_packages_by_id_and_cwd",
+    ) {
+        return;
+    }
+    let host_home = tempfile::tempdir().unwrap();
+    for name in homeboy_core::paths::HOMEBOY_ROOT_ENV_VARS {
+        std::env::remove_var(name);
+    }
+    std::env::set_var("HOME", host_home.path());
+    let host = tempfile::tempdir().unwrap();
+    let workspace = tempfile::tempdir().unwrap();
+    for repo in [host.path(), workspace.path()] {
+        assert!(Command::new("git")
+            .arg("init")
+            .arg(repo)
+            .status()
+            .unwrap()
+            .success());
+        for id in ["first", "second"] {
+            let package = repo.join("plugins").join(id);
+            fs::create_dir_all(&package).unwrap();
+            fs::write(
+                package.join("homeboy.json"),
+                json!({
+                    "id": id, "extensions": {"fixture-extension": {}}
+                })
+                .to_string(),
+            )
+            .unwrap();
+        }
+    }
+    let registry = homeboy_core::paths::components().unwrap();
+    fs::create_dir_all(&registry).unwrap();
+    for id in ["first", "second"] {
+        fs::write(
+            registry.join(format!("{id}.json")),
+            json!({
+                "local_path": host.path().join("plugins").join(id)
+            })
+            .to_string(),
+        )
+        .unwrap();
+    }
+    let mut selected = selected_gate_environment(
+        &AgentTaskGateEnvironmentPolicy {
+            isolate_home: true,
+            admitted_component_id: Some("first".to_string()),
+            ..AgentTaskGateEnvironmentPolicy::default()
+        },
+        None,
+    )
+    .unwrap();
+    selected
+        .register_admitted_component(workspace.path())
+        .unwrap();
+    let isolated_root = selected
+        .isolated_home
+        .as_ref()
+        .unwrap()
+        .join(".config/homeboy");
+    let registration: serde_json::Value =
+        serde_json::from_slice(&fs::read(isolated_root.join("components/first.json")).unwrap())
+            .unwrap();
+    assert_eq!(
+        registration["local_path"],
+        json!(workspace.path().join("plugins/first"))
+    );
+    assert!(!isolated_root.join("components/second.json").exists());
+
+    let previous = std::env::current_dir().unwrap();
+    for id in ["first", "second"] {
+        let package = workspace.path().join("plugins").join(id);
+        // ID lookup starts at the materialized repository root. The second
+        // package has no isolated registration, only its portable manifest.
+        std::env::set_current_dir(workspace.path()).unwrap();
+        let by_id = homeboy_core::component::resolve_effective_in_root(
+            &isolated_root,
+            Some(id),
+            None,
+            None,
+        );
+        std::env::set_current_dir(&package).unwrap();
+        let by_cwd =
+            homeboy_core::component::resolve_effective_in_root(&isolated_root, None, None, None);
+        std::env::set_current_dir(&previous).unwrap();
+        for component in [by_id.unwrap(), by_cwd.unwrap()] {
+            assert_eq!(component.id, id);
+            assert_eq!(Path::new(&component.local_path), package);
+            assert!(component
+                .extensions
+                .unwrap()
+                .contains_key("fixture-extension"));
+        }
+    }
+}
+
 /// #15882: a registry-only component (no portable `homeboy.json`) resolves
 /// inside the isolated gate HOME at the gate checkout, so the canonical
 /// `homeboy review test <component>` gate passes preflight as it does in the
