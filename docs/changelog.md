@@ -4,6 +4,14 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.488.11] - 2026-11-22
+
+### Changed
+- close the Cook status vocabulary
+
+### Fixed
+- admit gate-feedback Lab derived baselines
+
 ## [0.488.10] - 2026-11-22
 
 ### Fixed
