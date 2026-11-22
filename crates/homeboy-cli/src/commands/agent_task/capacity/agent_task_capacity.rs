@@ -223,33 +223,32 @@ fn lab_route_free_slots_follow_the_effective_admission_budget() {
         pressure: json!({"cpu": 1118}),
     };
     let route = lab_route_value("homeboy-lab", Some(32), Some(1), Some(&pressured));
-    assert_eq!(route["effective_budget"], 1);
-    assert_eq!(route["free_slots"], 0);
+    assert_eq!(route["effective_budget"], 32);
+    assert_eq!(route["free_slots"], 21);
     assert_eq!(route["next_admission"]["refused"], true);
     assert_eq!(
         route["next_admission"]["readiness_state"],
         "capacity_blocked"
     );
-    assert_eq!(
-        route["next_admission"]["reasons"],
-        json!(["pressure", "capacity_reached"])
-    );
+    assert_eq!(route["next_admission"]["reasons"], json!(["pressure"]));
     assert_eq!(route["next_admission"]["pressure"]["cpu"], 1118);
 
     let idle = LabAdmissionFacts {
-        active_slots: Some(1),
+        active_slots: Some(10),
         accepts_jobs: true,
         readiness_state: Some("connected_ready".into()),
         reasons: Vec::new(),
         pressure: Value::Null,
     };
-    let route = lab_route_value("homeboy-lab", Some(32), Some(30), Some(&idle));
-    assert_eq!(route["free_slots"], 29);
+    // High self-load must not turn a legacy reduced observation into a cap.
+    let route = lab_route_value("homeboy-lab", Some(24), Some(1), Some(&idle));
+    assert_eq!(route["effective_budget"], 24);
+    assert_eq!(route["free_slots"], 14);
     assert_eq!(route["next_admission"]["refused"], false);
 
     // Without a host observation the configured limit is the budget.
     let route = lab_route_value("homeboy-lab", Some(4), None, Some(&idle));
-    assert_eq!(route["free_slots"], 3);
+    assert_eq!(route["free_slots"], 0);
     let route = lab_route_value("homeboy-lab", Some(4), None, None);
     assert!(route["free_slots"].is_null());
     assert!(route["next_admission"].is_null());

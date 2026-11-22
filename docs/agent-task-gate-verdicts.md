@@ -20,11 +20,11 @@ execution and no-progress budgets. A Cook cancelled while queued records a
 their slots through OS file locks, reaped on the next admission or capacity read.
 
 On a Lab host, the daemon charges local gate holders against both of its
-admission pools: the step budget's slot ceiling (`HOMEBOY_LAB_CONCURRENCY_LIMIT`,
-or one per CPU) and the runner-child capacity that queues remote Cooks each drop
-by one per holder, never below one, so `--placement local` Cooks cannot take the
-last slot remote work waits on. Load is not charged twice; it already reflects
-those gates. A Cook the daemon already supervises (a workflow step or runner
+admission pools. Step admission counts local gates as occupied slots against
+`HOMEBOY_LAB_CONCURRENCY_LIMIT` (or one per CPU); the reported effective budget
+stays unchanged. Runner-child capacity retains its existing local-holder
+accounting. Load does not reduce the step budget. A Cook the daemon already
+supervises (a workflow step or runner
 child) holds a daemon slot, so its gates queue for host slots but are not charged
 again. Runner-admitted Lab gates keep the daemon gate lane and never enter the
 local queue. Charging requires the daemon and the local Cooks to share one

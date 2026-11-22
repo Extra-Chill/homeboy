@@ -227,7 +227,7 @@ struct LabAdmissionFacts {
 
 /// One Lab runner's slot report, computed from the same inputs Cook admission
 /// uses (#17832): free slots come from the effective admission budget (the
-/// configured concurrency limit clamped by host load), not the bare limit, and
+/// configured concurrency limit, or the host default when unset), not the bare limit, and
 /// `next_admission` carries the readiness verdict that would refuse or queue
 /// the next Cook, with its reasons and pressure evidence.
 fn lab_route_value(
@@ -237,10 +237,7 @@ fn lab_route_value(
     admission: Option<&LabAdmissionFacts>,
 ) -> Value {
     let active = admission.and_then(|facts| facts.active_slots);
-    let budget = match (concurrency_limit, effective_budget) {
-        (Some(limit), Some(budget)) => Some(limit.min(budget)),
-        (limit, budget) => budget.or(limit),
-    };
+    let budget = concurrency_limit.or(effective_budget);
     let free = budget
         .zip(active)
         .map(|(budget, active)| budget.saturating_sub(active));

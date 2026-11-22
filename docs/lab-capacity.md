@@ -1,11 +1,12 @@
 # Lab capacity admission
 
-Lab execution samples `available_parallelism` and the first `/proc/loadavg`
-value before admission. The policy is `min(limit, max(1, floor(cpus - load)))`:
-load can lower the configured runner concurrency limit, never raise it. A
-single slot remains available for forward progress on a saturated host. Missing
-or invalid load data falls back to the CPU bound. Existing work is not killed
-when load rises.
+A runner's `effective_budget` is its configured `concurrency_limit`. When unset,
+it defaults to one slot per logical CPU (`available_parallelism`, or one if
+unavailable). Capacity observations and the step queue report the same budget.
+The first `/proc/loadavg` value remains diagnostic only: the runner's own jobs
+already occupy slots and must not subtract from capacity a second time. Host
+overload refusal uses the existing PSI pressure thresholds (`admission_reason:
+pressure`), independently of slot capacity. Existing work is never preempted.
 
 Heavy execution and workflow steps take a slot before launching. A step's owner
 is its workflow instance (`root_durable_run_id`), else its linked run. Waiters are
