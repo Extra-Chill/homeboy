@@ -959,6 +959,19 @@ fn controller_job_outlives_tcp_client_after_durable_response_handoff() {
     assert_eq!(executions.load(Ordering::SeqCst), 1);
 
     release_tx.send(()).expect("release daemon-owned driver");
+    // Releasing the driver does not wait for the supervisor to persist its result.
+    // Observe the durable state without adding requests to the bounded server.
+    let path = crate::paths::observation_db().expect("jobs path");
+    let id = uuid::Uuid::parse_str(&job_id).expect("valid job ID");
+    wait_for("disconnected client's controller job to finish", || {
+        // Reopen to observe the serving store's writes rather than a cached job.
+        JobStore::open_without_reconciliation(&path)
+            .expect("durable store")
+            .get(id)
+            .expect("controller job")
+            .status
+            .is_terminal()
+    });
     let terminal: Value = reqwest::blocking::get(format!("http://{addr}/jobs/{job_id}"))
         .expect("poll terminal job")
         .json()
