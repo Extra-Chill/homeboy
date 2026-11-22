@@ -700,7 +700,11 @@ fn matches_discovery_options(
     submitted_after: Option<&chrono::DateTime<chrono::Utc>>,
 ) -> bool {
     if options.state.as_deref().is_some_and(|state| {
-        !format!("{:?}", discovery_outcome(record).state()).eq_ignore_ascii_case(state)
+        !format!(
+            "{:?}",
+            agent_task_lifecycle::CookRunState::of(&discovery_outcome(record)).execution_state
+        )
+        .eq_ignore_ascii_case(state)
     }) || submitted_after.is_some_and(|after| {
         chrono::DateTime::parse_from_rfc3339(&record.submitted_at)
             .map(|submitted| submitted.with_timezone(&chrono::Utc) <= *after)
@@ -1170,10 +1174,7 @@ fn age_minutes(timestamp: Option<&str>, now: chrono::DateTime<chrono::Utc>) -> O
 
 fn discovery_outcome(record: &AgentTaskRunRecord) -> AgentTaskRunRecord {
     agent_task_lifecycle::AgentTaskLifecycleStore::from_environment()
-        .and_then(|store| {
-            let selected = agent_task_lifecycle::status_in_store(&store, &record.run_id)?;
-            Ok(super::cook::project_cook_observation(&store, &selected))
-        })
+        .and_then(|store| agent_task_lifecycle::status_in_store(&store, &record.run_id))
         .unwrap_or_else(|_| record.clone())
 }
 
@@ -1233,7 +1234,7 @@ fn discovery_run(
         run_id: run_id.clone(),
         branch: metadata_string(&record.metadata, "branch")
             .or_else(|| metadata_string(&record.metadata, "worktree_branch")),
-        state: outcome.state(),
+        state: agent_task_lifecycle::CookRunState::of(&outcome).execution_state,
         repo: identity.repo,
         component,
         workspace: identity.workspace,

@@ -794,7 +794,7 @@ fn optional_gate_proof(
 ) -> Result<Option<AgentTaskPrDurableGateProof>> {
     let run_id = record.run_id.clone();
     Ok(
-        crate::agent_task_service::persisted_promotion_from_record(&run_id, record)?
+        crate::agent_task_service::persisted_promotion_from_record(&run_id, &record)?
             .map(|promotion| AgentTaskPrDurableGateProof { run_id, promotion }),
     )
 }

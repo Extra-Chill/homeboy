@@ -599,17 +599,3 @@ pub(crate) fn reset_for_requeue(record: &mut AgentTaskRunRecord) {
 pub(crate) fn project_task_state(task: &mut AgentTaskRunTask, state: ControlPlaneState) {
     task.write_state(state, AUTHORITY);
 }
-
-/// A read-time copy of `record` presented in `state`, for observation
-/// surfaces whose derived state differs from the stored one (for example a
-/// provider-succeeded Cook that never finished end to end). Only the
-/// top-level state is replaced, exactly as observed; the copy is a view and
-/// is never handed back to the store.
-pub(crate) fn observed_with_run_state(
-    record: &AgentTaskRunRecord,
-    state: RunExecutionState,
-) -> AgentTaskRunRecord {
-    let mut observed = record.clone();
-    observed.write_state(state, AUTHORITY);
-    observed
-}

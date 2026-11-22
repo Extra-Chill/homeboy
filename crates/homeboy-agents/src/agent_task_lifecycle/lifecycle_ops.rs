@@ -3697,17 +3697,17 @@ pub fn settle_cook_terminal_observations_in_store(
         })
     };
     let settled = |record: &AgentTaskRunRecord| {
-        observed(crate::agent_task_service::cook_observation_state(
-            lifecycle_store,
-            record,
-        ))
-        .or_else(|| reported(record))
+        observed(CookRunState::of(record).execution_state).or_else(|| reported(record))
     };
     // Each run settles to its own Cook-observed outcome. Runs without a
     // lifecycle record (invocation sources) take the Cook's outcome, and a
     // Cook root without its own report takes the reporting run's.
     let cook_status = observed(
-        crate::agent_task_service::cook_observation_in_store(lifecycle_store, cook_id)?.state(),
+        CookRunState::of(&crate::agent_task_service::cook_observation_in_store(
+            lifecycle_store,
+            cook_id,
+        )?)
+        .execution_state,
     )
     .or_else(|| {
         run_ids

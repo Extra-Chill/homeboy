@@ -1083,7 +1083,7 @@ fn verified_unchanged_attempt_ends_as_no_changes_with_the_provider_message() {
         let observed = cook_observation_in_store(&test_lifecycle_store(), cook_id)
             .expect("observe terminal Cook");
         assert_eq!(
-            observed.state(),
+            agent_task_lifecycle::CookRunState::of(&observed).execution_state,
             homeboy_lifecycle_contract::RunExecutionState::PartialFailure
         );
     });
@@ -1738,23 +1738,6 @@ fn terminal_cook_recovery_settles_rows_and_one_span_in_both_directions() {
             })
             .unwrap();
             assert_eq!(report.exit_code, exit_code, "{report:#?}");
-            if origin.is_none() {
-                assert_eq!(
-                    super::cook_observation_state(
-                        &lifecycle_store,
-                        &lifecycle_store.read_record(run_id).unwrap()
-                    ),
-                    homeboy_lifecycle_contract::RunExecutionState::CandidateRecoverable
-                );
-            } else if exit_code == 0 {
-                assert_eq!(
-                    super::cook_observation_state(
-                        &lifecycle_store,
-                        &lifecycle_store.read_record(run_id).unwrap()
-                    ),
-                    homeboy_lifecycle_contract::RunExecutionState::Succeeded
-                );
-            }
             let observation = lifecycle_store.open_observation_initialized().unwrap();
             let mut ids = report.value.history_run_ids.clone();
             ids.extend(report.value.invocation_run_ids.iter().cloned());
@@ -9279,6 +9262,7 @@ fn cook_observation_agrees_across_real_stores_without_mutation() {
                 false,
             ),
             ("failed", "failed", false, false, false, false),
+            ("no-changes", "succeeded", false, false, false, false),
             (
                 "missing-finalization",
                 "succeeded",
@@ -9330,6 +9314,13 @@ fn cook_observation_agrees_across_real_stores_without_mutation() {
                         record.metadata["cook_progress"] = serde_json::json!({
                             "phase": "terminal", "terminal_status": "intentional_no_change",
                             "terminal_success": true, "exit_code": 0,
+                        });
+                    }
+                    if no_finalize || name == "no-changes" {
+                        record.metadata["cook_progress"] = serde_json::json!({
+                            "phase": "terminal",
+                            "terminal_status": if no_finalize { "green_no_finalize" } else { "no_changes" },
+                            "terminal_success": no_finalize, "exit_code": if no_finalize { 0 } else { 2 },
                         });
                     }
                     if live_owner {
@@ -9400,13 +9391,25 @@ fn cook_observation_agrees_across_real_stores_without_mutation() {
                 assert_eq!(observed.run_id, *run_id);
                 assert_eq!(canonical.run.as_str(), run_id);
                 assert_eq!(
-                    observed.state() == homeboy_lifecycle_contract::RunExecutionState::Succeeded,
+                    agent_task_lifecycle::CookRunState::of(&observed).execution_state
+                        == homeboy_lifecycle_contract::RunExecutionState::Succeeded,
                     success,
                     "{name}"
                 );
                 assert_eq!(
                     canonical.state == homeboy_control_plane_contract::ControlPlaneState::Succeeded,
                     success,
+                    "{name}"
+                );
+                assert_eq!(
+                    canonical.state,
+                    if success {
+                        homeboy_control_plane_contract::ControlPlaneState::Succeeded
+                    } else if name == "no-changes" {
+                        homeboy_control_plane_contract::ControlPlaneState::PartialFailure
+                    } else {
+                        homeboy_control_plane_contract::ControlPlaneState::CandidateRecoverable
+                    },
                     "{name}"
                 );
                 if live_owner {
