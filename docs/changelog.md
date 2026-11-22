@@ -4,6 +4,14 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.490.0] - 2026-11-22
+
+### Added
+- release dependency lock refresh chores as patches
+
+### Fixed
+- select full crate + workspace dependents for Rust production changes
+
 ## [0.489.1] - 2026-11-22
 
 ### Changed
