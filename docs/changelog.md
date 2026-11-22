@@ -4,6 +4,17 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.488.13] - 2026-11-22
+
+### Changed
+- synchronize workflow completion notification assertions
+- synchronize in-flight restart chaos steps
+
+### Fixed
+- reap failed startup launchers through their owned child handle
+- renew recovery action leases during gate verification
+- publish durable handoff before local capacity admission
+
 ## [0.488.12] - 2026-11-22
 
 ### Fixed
