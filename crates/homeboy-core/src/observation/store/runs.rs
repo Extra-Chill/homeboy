@@ -1928,6 +1928,14 @@ impl ObservationStore {
     /// source given as `(run id, lease token)`. Eligibility applies before the
     /// limit so unrelated running rows cannot starve recovery. A child also
     /// accepts the unexpired lease the scheduler granted to its own token.
+    ///
+    /// A source whose recorded owner process is still alive is in flight, not
+    /// interrupted: its controller is still polling the daemon job and will
+    /// project the terminal result itself. Its foreground source lease can
+    /// lapse between polls, so the lease alone does not prove abandonment.
+    /// Excluding live owners here keeps the startup scheduler and the recovery
+    /// child on one definition of "interrupted"; a source whose owner died
+    /// (or that predates owner metadata) stays eligible.
     pub fn list_runner_exec_recovery_candidates(
         &self,
         source: Option<(&str, &str)>,
@@ -1946,10 +1954,9 @@ impl ObservationStore {
               AND cwd IS NOT NULL
               AND (json_type(metadata_json, '$.runner_exec_source_lease.expires_at_ms') IS NOT 'integer'
                    OR json_extract(metadata_json, '$.runner_exec_source_lease.expires_at_ms') < ?2
-                   OR json_extract(metadata_json, '$.runner_exec_source_lease.source_token') = ?4)
+                   OR json_extract(metadata_json, '$.runner_exec_source_lease.source_token') = ?3)
               AND COALESCE(json_extract(metadata_json, '$.runner_exec_recovery.phase'), '') != 'blocked'
             ORDER BY started_at DESC, id DESC
-            LIMIT ?3
             "#,
         ).map_err(sqlite_error("prepare runner-exec recovery candidates"))?;
         let rows = statement
@@ -1957,13 +1964,26 @@ impl ObservationStore {
                 params![
                     source.map(|(id, _)| id),
                     chrono::Utc::now().timestamp_millis(),
-                    limit,
                     source.map(|(_, token)| token)
                 ],
                 row_to_run_record,
             )
             .map_err(sqlite_error("query runner-exec recovery candidates"))?;
-        collect_rows(rows, "collect runner-exec recovery candidates")
+        // Owner liveness is a process check, so it filters the lazily stepped
+        // rows before the limit rather than in SQL after it.
+        let limit = usize::try_from(limit.max(0)).unwrap_or(usize::MAX);
+        let mut candidates = Vec::new();
+        for row in rows {
+            if candidates.len() >= limit {
+                break;
+            }
+            let run = row.map_err(sqlite_error("collect runner-exec recovery candidates"))?;
+            if crate::observation::run_owner_pid(&run).is_some_and(crate::process::pid_is_running) {
+                continue;
+            }
+            candidates.push(run);
+        }
+        Ok(candidates)
     }
 
     /// List every currently running run so callers can retain active work when

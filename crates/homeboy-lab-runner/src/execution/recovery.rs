@@ -972,6 +972,48 @@ mod tests {
         homeboy_core::paths::PathRoots::from_environment().expect("path roots")
     }
 
+    /// Fixtures are written by this live test process, which makes it their
+    /// recorded owner. Recovery only reconciles runs whose controller died, so
+    /// point the owner at a pid that cannot be running.
+    fn orphan(run_id: &str) {
+        let store = ObservationStore::open_initialized().expect("store");
+        let mut run = store.get_run(run_id).expect("read").expect("run");
+        run.metadata_json["homeboy_run_owner"] = json!({ "pid": u32::MAX });
+        store
+            .update_run_metadata(run_id, run.metadata_json)
+            .expect("orphan run");
+    }
+
+    #[test]
+    fn startup_recovery_skips_live_owner_and_takes_over_dead_owner() {
+        with_isolated_home(|_| {
+            // A runner exec whose controller is still polling it is in flight.
+            homeboy_agents::agent_task_lifecycle::record_runner_exec_job_identity(
+                "live",
+                "unavailable-runner",
+                "live-job",
+                "/workspace",
+                &[],
+            )
+            .expect("source");
+            assert!(schedule_terminal_runner_exec_recovery(&test_roots())
+                .expect("schedule")
+                .is_none());
+            let store = ObservationStore::open_initialized().expect("store");
+            assert!(store
+                .list_runner_exec_recovery_candidates(Some(("live", "child-token")), 1)
+                .expect("child view")
+                .is_empty());
+
+            // Once its owner is gone, the same record is interrupted work.
+            orphan("live");
+            let schedule = schedule_terminal_runner_exec_recovery(&test_roots())
+                .expect("schedule")
+                .expect("dead owner needs recovery");
+            assert_eq!(schedule.deferred_count, 1);
+        });
+    }
+
     #[test]
     fn startup_recovery_does_not_materialize_unrelated_active_payloads() {
         with_isolated_home(|_| {
@@ -1009,6 +1051,7 @@ mod tests {
                     .metadata(json!({"kind": "runner_exec", "runner_id": "runner", "runner_job_id": "job"}))
                     .build())
                 .expect("candidate");
+            orphan(&candidate.id);
             for _ in 0..=STARTUP_RUNNER_EXEC_RECOVERY_LIMIT {
                 store
                     .start_run(NewRunRecord::builder("runner_execution").build())
@@ -1089,6 +1132,7 @@ mod tests {
                     &["true".to_string()],
                 )
                 .expect("historical runner job");
+                orphan(&format!("stale-{index}"));
             }
 
             let schedule = schedule_terminal_runner_exec_recovery(&test_roots())
@@ -1128,6 +1172,7 @@ mod tests {
                 &[],
             )
             .expect("source");
+            orphan("foreground");
             let store = ObservationStore::open_initialized().expect("store");
             assert!(store
                 .claim_running_runner_exec_recovery_source(
@@ -1183,6 +1228,7 @@ mod tests {
                 &[],
             )
             .expect("source");
+            orphan(run_id);
             let store = ObservationStore::open_initialized().expect("store");
             let error = Error::validation_invalid_argument(
                 "runner",
@@ -1280,6 +1326,7 @@ mod tests {
                     &[],
                 )
                 .expect("source");
+                orphan(&format!("source-{index}"));
             }
             let owner = schedule_terminal_runner_exec_recovery(&test_roots())
                 .expect("schedule")
@@ -1323,6 +1370,7 @@ mod tests {
                 &[],
             )
             .expect("historical runner job");
+            orphan("stale");
             let barrier = Arc::new(Barrier::new(3));
             let mut workers = Vec::new();
             for _ in 0..2 {
@@ -1427,6 +1475,7 @@ mod tests {
                 &[],
             )
             .expect("historical runner job");
+            orphan("stale");
             let first = schedule_terminal_runner_exec_recovery(&test_roots())
                 .expect("schedule")
                 .expect("owner");

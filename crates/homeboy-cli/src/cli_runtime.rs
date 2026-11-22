@@ -1149,14 +1149,17 @@ impl CliRuntime {
             return std::process::ExitCode::SUCCESS;
         }
         if let Some(child_id) = std::env::var_os(RUNNER_EXEC_RECOVERY_CHILD_ENV) {
+            let child_id = child_id.to_string_lossy();
             let child_token =
                 std::env::var_os("HOMEBOY_RUNNER_EXEC_RECOVERY_CHILD_TOKEN").unwrap_or_default();
-            if let Ok(Some(diagnostic)) =
-                crate::runner::run_scheduled_terminal_runner_exec_recovery_child(
-                    &child_id.to_string_lossy(),
-                    &child_token.to_string_lossy(),
-                )
-            {
+            let result = crate::runner::run_scheduled_terminal_runner_exec_recovery_child(
+                &child_id,
+                &child_token.to_string_lossy(),
+            );
+            if let Some(notice) = runner_exec_recovery_reconciled_notice(&child_id) {
+                eprintln!("{notice}");
+            }
+            if let Ok(Some(diagnostic)) = result {
                 eprintln!("{}", format_runner_exec_recovery_diagnostic(&diagnostic));
             }
             return std::process::ExitCode::SUCCESS;
@@ -2066,10 +2069,10 @@ fn schedule_runner_exec_recovery() {
     if !schedule.is_new_owner {
         return;
     }
-    eprintln!(
-        "runner-exec recovery scheduled: owner_id={} deferred_count={} inspect=`{}`",
-        schedule.owner_id, schedule.deferred_count, schedule.inspection_action
-    );
+    // Scheduling is background housekeeping that runs at the start of every
+    // command, so it stays silent: announcing it on an unrelated command's
+    // stderr reads like that command failed. A child that reconciles records
+    // reports it, and one that needs an operator reports the action.
     let executable = match std::env::current_exe() {
         Ok(executable) => executable,
         Err(error) => {
@@ -2101,6 +2104,19 @@ fn schedule_runner_exec_recovery() {
             &roots,
         );
     }
+}
+
+/// Background recovery speaks only when it changed something: a child that
+/// reconciled interrupted records says so, with the record to inspect.
+fn runner_exec_recovery_reconciled_notice(child_id: &str) -> Option<String> {
+    let store = homeboy::core::observation::ObservationStore::open_initialized().ok()?;
+    let child = store.get_run(child_id).ok()??;
+    let reconciled = child.metadata_json["reconciled_count"].as_u64()?;
+    (reconciled > 0).then(|| {
+        format!(
+            "homeboy: reconciled {reconciled} interrupted runner exec record(s) in the background (inspect: homeboy runs show {child_id})"
+        )
+    })
 }
 
 fn format_runner_exec_recovery_diagnostic(
