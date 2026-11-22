@@ -4,6 +4,13 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.488.10] - 2026-11-22
+
+### Fixed
+- create checkout destination under the source's portable component id
+- reconnect disconnected runners during admitted Cook waits
+- settle cancellation of controller jobs whose worker is proven dead; provider_launch_lost
+
 ## [0.488.9] - 2026-11-22
 
 ### Fixed
