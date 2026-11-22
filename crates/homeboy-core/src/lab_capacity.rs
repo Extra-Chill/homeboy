@@ -1,15 +1,13 @@
-//! Small, admission-only CPU policy. Running work is never preempted.
+//! Admission-only slot policy. Running work is never preempted.
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::time::{Duration, Instant};
 
-/// Leave one logical CPU per admitted heavy job, with one slot for forward progress.
-/// Missing load data falls back to the CPU bound, never above the configured cap.
-pub fn admission_budget(cpus: usize, load: Option<f64>, limit: usize) -> usize {
-    let load = load
-        .filter(|load| load.is_finite() && *load >= 0.0)
-        .unwrap_or(0.0);
-    ((cpus as f64 - load).floor().max(1.0) as usize).min(limit)
+/// Configured slot capacity, defaulting to one slot per logical CPU.
+/// Load is diagnostic only: jobs already occupy slots, and host overload is
+/// handled separately by the runner's PSI pressure verdict.
+pub fn admission_budget(cpus: usize, limit: Option<usize>) -> usize {
+    limit.unwrap_or(cpus)
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -24,16 +22,6 @@ pub struct LabCapacity {
     pub active_slots_by_owner: BTreeMap<String, usize>,
 }
 
-/// Slot ceiling after local gate holders: the configured limit (or one slot per
-/// CPU when unset) less the holders, never below one so daemon work always
-/// progresses. Load is not reduced again: it already reflects those gates.
-pub fn slot_ceiling(cpus: usize, limit: Option<usize>, local_gate_holders: usize) -> usize {
-    limit
-        .unwrap_or(cpus)
-        .saturating_sub(local_gate_holders)
-        .max(1)
-}
-
 pub fn observe(limit: Option<usize>) -> LabCapacity {
     let cpus = std::thread::available_parallelism()
         .map(usize::from)
@@ -45,11 +33,7 @@ pub fn observe(limit: Option<usize>) -> LabCapacity {
         cpus,
         load_average_1m,
         concurrency_limit: limit,
-        effective_budget: admission_budget(
-            cpus,
-            load_average_1m,
-            slot_ceiling(cpus, limit, local_gate_holders),
-        ),
+        effective_budget: admission_budget(cpus, limit),
         local_gate_holders,
         active_slots_by_owner: held_by_owner(
             &STEP_STATE
@@ -630,7 +614,6 @@ struct StepState {
     slots: Vec<Option<LabHolder>>,
     queue: Vec<LabWaiter>,
     remote: RemoteWaiters,
-    last_budget: Option<usize>,
 }
 
 impl StepState {
@@ -653,7 +636,6 @@ static STEP_STATE: std::sync::Mutex<StepState> = std::sync::Mutex::new(StepState
     slots: Vec::new(),
     queue: Vec::new(),
     remote: RemoteWaiters::new(),
-    last_budget: None,
 });
 static NEXT_TICKET: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
 
@@ -666,7 +648,7 @@ pub fn step_queue_snapshot() -> serde_json::Value {
     let now = Instant::now();
     let now_ms = epoch_ms();
     state.remote.expire(now);
-    let budget = state.last_budget.unwrap_or(fallback);
+    let budget = fallback;
     let share = owner_max_share_percent();
     let cap = owner_slot_cap(budget, share);
     let holders = state.holders(&runners);
@@ -709,7 +691,7 @@ pub fn heartbeat_remote_waiter(beat: &RemoteWaiterHeartbeat) -> serde_json::Valu
     let Some(ticket) = state.remote.heartbeat(beat, now) else {
         return serde_json::json!({ "waiter_id": beat.waiter_id, "registered": false });
     };
-    let budget = state.last_budget.unwrap_or(observation.effective_budget);
+    let budget = observation.effective_budget;
     let cap = owner_slot_cap(budget, owner_max_share_percent());
     let holders = state.holders(&runners);
     let active = state.active_steps();
@@ -930,7 +912,6 @@ fn acquire_step_with_observation(
         let standing = {
             let mut state = STEP_STATE.lock().unwrap_or_else(|e| e.into_inner());
             let budget = observation.effective_budget;
-            state.last_budget = Some(budget);
             let holders = state.holders(&runners);
             let counts = held_by_owner(&holders);
             observation.active_slots_by_owner = counts.clone();
@@ -952,7 +933,9 @@ fn acquire_step_with_observation(
                 may_proceed: true,
             });
             let position = standing.queue_position;
-            if standing.may_proceed && active < budget {
+            if standing.may_proceed
+                && active.saturating_add(observation.local_gate_holders) < budget
+            {
                 let holder = LabHolder {
                     owner: claim.owner.to_owned(),
                     priority: claim.priority,
@@ -1701,37 +1684,62 @@ mod tests {
 
     #[test]
     fn budget_table() {
-        for (cpus, load, limit, expected) in [
-            (32, Some(0.0), 4, 4),
-            (32, Some(30.0), 4, 2),
-            (32, Some(31.5), 4, 1),
-            (32, Some(40.0), 4, 1),
-            (1, Some(0.0), 8, 1),
-            (8, None, 3, 3),
-            (8, Some(f64::NAN), 3, 3),
-            (8, Some(-1.0), 3, 3),
-            (8, Some(0.0), 0, 0),
+        for (cpus, limit, expected) in [
+            (32, Some(24), 24),
+            (1, Some(24), 24),
+            (8, None, 8),
+            (8, Some(0), 0),
         ] {
-            assert_eq!(
-                admission_budget(cpus, load, limit),
-                expected,
-                "cpus={cpus} load={load:?} limit={limit}"
-            );
+            assert_eq!(admission_budget(cpus, limit), expected);
         }
     }
 
     #[test]
-    fn local_gate_holders_reduce_the_slot_ceiling_but_never_starve_the_daemon() {
-        // Thirteen local Cook gates on a 32-slot Lab leave 19 daemon slots.
-        assert_eq!(slot_ceiling(64, Some(32), 13), 19);
-        assert_eq!(
-            admission_budget(64, Some(0.0), slot_ceiling(64, Some(32), 13)),
-            19
-        );
-        // Local holders filling the limit still leave one slot for remote work.
-        assert_eq!(slot_ceiling(64, Some(4), 13), 1);
-        // Unset limit: one slot per CPU, as the load term already caps it.
-        assert_eq!(slot_ceiling(8, None, 0), 8);
-        assert_eq!(slot_ceiling(8, None, 3), 5);
+    fn high_self_load_does_not_reduce_configured_slots() {
+        crate::test_support::with_isolated_home(|_| {
+            let observation = |limit| LabCapacity {
+                cpus: 32,
+                load_average_1m: Some(80.0),
+                concurrency_limit: limit,
+                effective_budget: admission_budget(32, limit),
+                local_gate_holders: 0,
+                active_slots_by_owner: BTreeMap::new(),
+            };
+            let mut pressure = crate::runner_pressure::RunnerPressure {
+                cpu: Some(65),
+                observed_load_per_cpu: Some(25_000),
+                ..Default::default()
+            };
+            let thresholds = crate::runner_pressure::PressureThresholds::default();
+            pressure.apply_thresholds(&thresholds);
+            assert!(pressure.admission_reason.is_none());
+            let mut permits = Vec::new();
+            for _ in 0..11 {
+                permits.push(
+                    acquire_step_with_observation(
+                        Some(24),
+                        StepClaim::owner("self"),
+                        |_, _| panic!("job 11 must not wait on its own load"),
+                        observation,
+                    )
+                    .unwrap()
+                    .unwrap(),
+                );
+            }
+            assert_eq!(observe(Some(24)).effective_budget, 24);
+            // Slot capacity stays 24 even when PSI independently refuses work.
+            pressure.cpu = Some(1250);
+            pressure.apply_thresholds(&thresholds);
+            assert_eq!(pressure.admission_reason.as_deref(), Some("pressure"));
+            assert_eq!(
+                pressure.admission_refusal().details["admission_reason"],
+                "pressure"
+            );
+            // A queue observation must not inherit the last caller's limit.
+            assert_eq!(
+                step_queue_snapshot()["effective_budget"],
+                observe(None).effective_budget
+            );
+        });
     }
 }
