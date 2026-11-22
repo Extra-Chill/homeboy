@@ -1240,6 +1240,23 @@ impl JobStore {
         })
     }
 
+    /// Read a job exactly as `get` does (any job in the shared ledger, from any
+    /// daemon scope) without changing ownership or cancelling work. A miss is
+    /// typed: `find_stored_job` returning `None` proves absence from the shared
+    /// durable ledger, which is the only evidence that may settle an accepted
+    /// handoff. Terminal jobs from other scopes are returned, not classified.
+    pub fn read_local_runner_job(&self, job_id: Uuid) -> Result<Job> {
+        let inner = self.inner.lock().expect("job store mutex poisoned");
+        match self.find_stored_job(&inner, job_id, false)? {
+            Some(stored) => Ok(stored.job.clone()),
+            None => {
+                let mut error = job_not_found(job_id);
+                error.details["runner_job_absence"] = serde_json::json!("ledger_absent");
+                Err(error)
+            }
+        }
+    }
+
     /// Cancel exactly one daemon-local runner job after proving its durable
     /// controller projection still belongs to the requesting run.
     pub fn cancel_local_runner_projection(

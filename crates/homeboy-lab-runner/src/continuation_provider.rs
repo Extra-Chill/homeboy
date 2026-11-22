@@ -142,30 +142,8 @@ impl RunnerContinuationProvider for RunnerContinuation {
 
     fn reconcile_runner_job(&self, runner_id: &str, job_id: &str) -> RunnerJobReconciliation {
         match self.runner_job_log_snapshot(runner_id, job_id) {
-            Ok(snapshot) => return RunnerJobReconciliation::Snapshot(Box::new(snapshot)),
-            Err(error) if !job_not_found(&error, job_id) => {
-                return RunnerJobReconciliation::UnconfirmedAbsence;
-            }
-            Err(_) => {}
-        }
-
-        let Ok(status) = super::connection::status(runner_id) else {
-            return RunnerJobReconciliation::UnconfirmedAbsence;
-        };
-        // The runner's one current session owns every job its daemon runs.
-        let Some(session) = status.session.filter(|_| status.connected) else {
-            return RunnerJobReconciliation::UnconfirmedAbsence;
-        };
-        if session.local_url.is_none() {
-            return RunnerJobReconciliation::UnconfirmedAbsence;
-        }
-        match super::evidence::runner_job_log_snapshot_for_session(&session, job_id) {
-            Ok(snapshot) => return RunnerJobReconciliation::Snapshot(Box::new(snapshot)),
-            Err(error) if job_not_found(&error, job_id) => {}
-            Err(_) => return RunnerJobReconciliation::UnconfirmedAbsence,
-        }
-        RunnerJobReconciliation::ConfirmedAbsent {
-            checked_generations: 1,
+            Ok(snapshot) => RunnerJobReconciliation::Snapshot(Box::new(snapshot)),
+            Err(error) => RunnerJobReconciliation::from_read_error(error),
         }
     }
 
@@ -426,19 +404,6 @@ fn workspace_claim_error(runner_id: &str, message: impl Into<String>) -> Error {
         Some(runner_id.to_string()),
         None,
     )
-}
-
-fn job_not_found(error: &homeboy_core::error::Error, job_id: &str) -> bool {
-    error
-        .details
-        .get("http_status")
-        .and_then(serde_json::Value::as_u64)
-        == Some(404)
-        && error
-            .details
-            .get("path")
-            .and_then(serde_json::Value::as_str)
-            == Some(&format!("/jobs/{job_id}"))
 }
 
 /// Register the runner continuation provider with core. Called once at startup.

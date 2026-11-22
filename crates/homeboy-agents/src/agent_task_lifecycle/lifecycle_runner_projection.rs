@@ -90,6 +90,31 @@ pub(crate) fn project_terminal_runner_record(
             None,
         ));
     }
+    if source
+        .metadata_json
+        .get("agent_task_aggregate")
+        .is_none_or(Value::is_null)
+        && remote.state() != RunExecutionState::Succeeded
+    {
+        let evidence = json!({"source": "durable_runner_run_record", "run_id": source.id,
+            "state": remote.state(), "source_finished_at": source.finished_at});
+        if persist {
+            super::lab_handoff_reconciliation::project_ledger_terminal_in_store(
+                lifecycle_store,
+                record,
+                remote.state(),
+                &evidence,
+            )?;
+        } else {
+            let task_state = if remote.state() == RunExecutionState::Cancelled {
+                ControlPlaneState::Cancelled
+            } else {
+                ControlPlaneState::Failed
+            };
+            settle_run(record, remote.state(), task_state);
+        }
+        return Ok(true);
+    }
     let aggregate: AgentTaskAggregate = serde_json::from_value(
         source
             .metadata_json

@@ -665,7 +665,7 @@ where
         }
         HttpEndpoint::Job { id } => json!({
             "command": "api.jobs.show",
-            "job": job_store.get(parse_job_id(id)?)?,
+            "job": job_store.read_local_runner_job(parse_job_id(id)?)?,
             "admission": job_store.pending_admission_report(parse_job_id(id)?)?,
         }),
         HttpEndpoint::JobEvents { id } => json!({

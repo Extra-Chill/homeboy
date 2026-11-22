@@ -234,7 +234,7 @@ pub(crate) fn reconcile_runner_job_state_in_store(
     lifecycle_store: &AgentTaskLifecycleStore,
     record: &mut AgentTaskRunRecord,
 ) -> Result<()> {
-    if record.state() != RunExecutionState::Running {
+    if record.state().is_terminal() || !is_accepted_runner_handoff(record) {
         return Ok(());
     }
     let (Some(runner_id), Some(job_id)) = (
@@ -252,10 +252,38 @@ pub(crate) fn reconcile_runner_job_state_in_store(
         super::runner_continuation::RunnerJobReconciliation::Snapshot(snapshot) => {
             reconcile_runner_job_snapshot_in_store(lifecycle_store, record, &snapshot)
         }
-        super::runner_continuation::RunnerJobReconciliation::ConfirmedAbsent {
-            checked_generations,
-        } => {
-            terminalize_lost_accepted_lab_job_in_store(lifecycle_store, record, checked_generations)
+        super::runner_continuation::RunnerJobReconciliation::LedgerAbsent(error) => {
+            let evidence = error.details.clone();
+            if record.metadata.get("cancellation_fence").is_some() {
+                project_ledger_terminal_in_store(
+                    lifecycle_store,
+                    record,
+                    RunExecutionState::Cancelled,
+                    &evidence,
+                )?;
+            } else {
+                terminalize_lost_accepted_lab_job_in_store(lifecycle_store, record, 1)?;
+            }
+            record.ensure_metadata_object().insert(
+                "reconciliation".into(),
+                json!({
+                    "reason": "runner_job_absent", "evidence": evidence,
+                }),
+            );
+            lifecycle_store.commit_record(record)?;
+            Ok(())
+        }
+        super::runner_continuation::RunnerJobReconciliation::LedgerTerminal(status, error) => {
+            let state = if record.metadata.get("cancellation_fence").is_some() {
+                RunExecutionState::Cancelled
+            } else {
+                match status {
+                    homeboy_core::api_jobs::JobStatus::Succeeded => RunExecutionState::Succeeded,
+                    homeboy_core::api_jobs::JobStatus::Cancelled => RunExecutionState::Cancelled,
+                    _ => RunExecutionState::Failed,
+                }
+            };
+            project_ledger_terminal_in_store(lifecycle_store, record, state, &error.details)
         }
         super::runner_continuation::RunnerJobReconciliation::UnconfirmedAbsence => {
             let disconnected = super::runner_continuation::with_runner_continuation(|p| {
@@ -267,6 +295,35 @@ pub(crate) fn reconcile_runner_job_state_in_store(
             Ok(())
         }
     }
+}
+
+/// Commit terminal read authority without issuing a cancellation to the runner.
+pub(crate) fn project_ledger_terminal_in_store(
+    lifecycle_store: &AgentTaskLifecycleStore,
+    record: &mut AgentTaskRunRecord,
+    state: RunExecutionState,
+    evidence: &Value,
+) -> Result<()> {
+    let task_state = match state {
+        RunExecutionState::Succeeded => ControlPlaneState::Succeeded,
+        RunExecutionState::Cancelled => ControlPlaneState::Cancelled,
+        _ => ControlPlaneState::Failed,
+    };
+    settle_run(record, state, task_state);
+    record.updated_at = Some(now_timestamp());
+    let metadata = record.ensure_metadata_object();
+    metadata.insert(
+        "reconciliation".into(),
+        json!({"reason": "runner_job_terminal", "evidence": evidence}),
+    );
+    if let Some(handoff) = metadata.get_mut("runner_handoff") {
+        handoff["state"] = json!("terminal");
+    }
+    *record = match lifecycle_store.commit_terminal_record(record)? {
+        super::terminal_transition::TerminalRecordCommit::Committed(record)
+        | super::terminal_transition::TerminalRecordCommit::Superseded(record) => record,
+    };
+    Ok(())
 }
 
 /// Observe retained runner authority without requiring a live transport job.

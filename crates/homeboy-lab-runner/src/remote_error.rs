@@ -88,6 +88,25 @@ mod tests {
     }
 
     #[test]
+    fn job_read_absence_keeps_ledger_classification_and_terminal_status() {
+        for absence in ["ledger_absent", "ledger_terminal"] {
+            let details = json!({
+                "runner_job_absence": absence,
+                "runner_job_status": "cancelled",
+            });
+            let error = from_wire(
+                json!({"error": "validation.invalid_argument", "message": "job not found", "details": details}),
+                "daemon job read failed",
+                Some(404),
+                "/jobs/missing",
+            );
+            assert_eq!(error.details, details);
+        }
+        let bare = from_wire(json!({}), "not found", Some(404), "/jobs/missing");
+        assert!(bare.details.get("runner_job_absence").is_none());
+    }
+
+    #[test]
     fn daemon_error_keeps_nested_json_error_typed() {
         let error = from_wire(
             serde_json::json!({
