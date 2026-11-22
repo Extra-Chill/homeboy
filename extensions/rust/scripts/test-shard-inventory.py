@@ -296,8 +296,8 @@ def matching_tests(current, package, target_kind, target, module):
     return [
         test for test in current["tests"]
         if test["package"] == package
-        and test["target_kind"] == target_kind
-        and test["target"] == target
+        and (target_kind is None or test["target_kind"] == target_kind)
+        and (target is None or test["target"] == target)
         and (module is None or test["name"] == module or test["name"].startswith(f"{module}::"))
     ]
 
@@ -325,11 +325,15 @@ def resolve_changed_selection(selection_path, current, project):
         target = candidate.get("target")
         module = candidate.get("module")
         path = candidate.get("path")
-        if not all(isinstance(value, str) and value for value in (package, target_kind, target)):
+        package_scope = target_kind is None and target is None and module is None
+        if not isinstance(package, str) or not package or (
+            not package_scope
+            and not all(isinstance(value, str) and value for value in (target_kind, target))
+        ):
             fail("changed test selection candidate has an invalid package or target identity")
         if module is not None and (not isinstance(module, str) or not module):
             fail("changed test selection candidate has an invalid module")
-        if isinstance(path, str) and path:
+        if not package_scope and isinstance(path, str) and path:
             source = (component_root / path).resolve()
             for metadata_package in metadata["packages"]:
                 manifest_parent = Path(metadata_package["manifest_path"]).resolve().parent
@@ -341,7 +345,7 @@ def resolve_changed_selection(selection_path, current, project):
         # their package/target fields may predate Cargo target renames or kind
         # changes. Rebind a failed candidate to Cargo's current target identity
         # by source path, preserving the exact current inventory record.
-        if not matches and isinstance(path, str) and path:
+        if not matches and not package_scope and isinstance(path, str) and path:
             for metadata_package in metadata["packages"]:
                 if metadata_package["name"] != package:
                     continue
@@ -368,10 +372,19 @@ def resolve_changed_selection(selection_path, current, project):
                         break
                 if matches:
                     break
+        # A workspace package can legitimately have no tests in this runner.
+        if not matches and package_scope and any(
+            p["name"] == package for p in metadata["packages"]
+        ):
+            continue
         if not matches:
             return {"fallback_reason": f"Changed test selection no longer matches {package}::{target_kind}::{target}."}
         selected.update({test["id"]: test for test in matches})
-    return {"selected": [selected[key] for key in sorted(selected)]}
+    return {
+        "selected": [selected[key] for key in sorted(selected)],
+        "selected_count": len(selected),
+        "total_count": len(current["tests"]),
+    }
 
 
 def main():
@@ -406,7 +419,11 @@ def main():
                 # widening is attributable to the candidate that stopped matching.
                 output = dict(current, fallback_reason=resolved["fallback_reason"])
             else:
-                output = project_inventory(current, resolved["selected"])
+                output = dict(
+                    project_inventory(current, resolved["selected"]),
+                    selected_count=resolved["selected_count"],
+                    total_count=resolved["total_count"],
+                )
         else:
             output = {"inventory": current, **resolved}
     Path(args.output).write_text(json.dumps(output, indent=2) + "\n")
