@@ -4,6 +4,11 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.488.9] - 2026-11-22
+
+### Fixed
+- resolve checkout sources through ordered fallbacks
+
 ## [0.488.8] - 2026-11-22
 
 ### Fixed
