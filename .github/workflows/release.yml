@@ -1530,6 +1530,35 @@ jobs:
           persist-credentials: false
           submodules: recursive
 
+      - name: Generate wp-coding-agents GitHub App token
+        id: wp-coding-agents-token
+        uses: actions/create-github-app-token@v3
+        continue-on-error: true
+        with:
+          client-id: ${{ secrets.HOMEBOY_APP_ID }}
+          private-key: ${{ secrets.HOMEBOY_APP_PRIVATE_KEY }}
+          owner: Extra-Chill
+          repositories: wp-coding-agents
+
+      - name: Warn if dependency refresh token could not be minted
+        if: steps.wp-coding-agents-token.outcome == 'failure'
+        run: echo "::warning::Could not mint wp-coding-agents token; dependency refresh dispatch skipped."
+
+      - name: Dispatch wp-coding-agents dependency refresh
+        if: steps.wp-coding-agents-token.outputs.token != ''
+        continue-on-error: true
+        env:
+          GH_TOKEN: ${{ steps.wp-coding-agents-token.outputs.token }}
+          VERSION: ${{ needs.plan.outputs.tag-flag }}
+        run: |
+          VERSION="${VERSION#--tag=}"
+          if ! gh api repos/Extra-Chill/wp-coding-agents/dispatches \
+            -f event_type=upstream-released \
+            -f 'client_payload[component]=homeboy' \
+            -f "client_payload[version]=${VERSION}"; then
+            echo "::warning::Failed to dispatch wp-coding-agents dependency refresh for ${VERSION}."
+          fi
+
   record-failure:
     name: Record failed release SHA
     needs:
