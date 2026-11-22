@@ -436,7 +436,6 @@ pub(super) const LOCAL_DISPATCH_QUEUE_POLL_INTERVAL: Duration = Duration::from_s
 /// open rather than guessing at evidence it does not have.
 pub(super) fn admit_local_cook_dispatch(
     run_id: &str,
-    cook_id: &str,
     lifecycle_store: &agent_task_lifecycle::AgentTaskLifecycleStore,
 ) -> homeboy::core::Result<Option<homeboy::core::local_dispatch_admission::ActiveLocalDispatchLease>>
 {
@@ -468,7 +467,7 @@ pub(super) fn admit_local_cook_dispatch(
         std::thread::sleep,
         move |reason| {
             eprintln!("Local dispatch queued for {run_id_for_notice}: {reason}.");
-            record_local_dispatch_wait(lifecycle_store, cook_id, reason);
+            record_local_dispatch_wait(lifecycle_store, run_id, reason);
         },
     )
     .map(Some)
@@ -478,16 +477,15 @@ pub(super) fn admit_local_cook_dispatch(
 pub(super) const LOCAL_DISPATCH_QUEUED_PHASE: &str = "queued_local_pressure";
 
 /// Make a pressure wait visible to `status` and `diagnose`. The phase keeps
-/// its first `phase_started_at`, so `elapsed_ms` is the whole wait. A
-/// foreground Cook has no durable record yet; its wait is the stderr notice.
+/// its first `phase_started_at`, so `elapsed_ms` is the whole wait.
 pub(super) fn record_local_dispatch_wait(
     lifecycle_store: &agent_task_lifecycle::AgentTaskLifecycleStore,
-    cook_id: &str,
+    run_id: &str,
     reason: &str,
 ) {
-    if lifecycle_store.read_record(cook_id).is_ok() {
+    if lifecycle_store.read_record(run_id).is_ok() {
         if let Err(error) = lifecycle_store.record_cook_progress_with_activity(
-            cook_id,
+            run_id,
             LOCAL_DISPATCH_QUEUED_PHASE,
             0,
             Some(reason),
@@ -683,6 +681,12 @@ pub(super) fn run_preflight_cook_execution(
     // finalization: a Cook PR has one commit, and GitHub squash-merges a
     // single-commit PR under that commit's subject (#16052).
     let commit_message = args.commit_message.clone().unwrap_or_default();
+    let recipe_store = agent_task_service::CookRecipeStore::from_current_data_root()?;
+    let lifecycle_store = agent_task_lifecycle::AgentTaskLifecycleStore::from_environment()?;
+    let local_dispatch = !args.preview && attempt_dispatcher.is_none();
+    // The outer Option tracks admission even when no resource snapshot exists.
+    // Keep the lease across every workflow resume, until this Cook returns.
+    let local_dispatch_lease = std::sync::Mutex::new(None);
     let durable_observer = |event: &agent_task_service::CookProgressEvent<'_>| {
         if no_progress && event.phase != "durable_identity" {
             return Ok(());
@@ -699,7 +703,7 @@ pub(super) fn run_preflight_cook_execution(
             event
                 .terminal_success
                 .map(|succeeded| if succeeded { "succeeded" } else { "failed" });
-        progress
+        let published = progress
             .map(|progress| {
                 progress(
                     event.phase,
@@ -714,19 +718,19 @@ pub(super) fn run_preflight_cook_execution(
                     event.terminal_retry_command,
                 )
             })
-            .unwrap_or(Ok(()))
+            .unwrap_or(Ok(()));
+        // Publish the materialized attempt to detached clients before capacity
+        // admission can block. Lab dispatch does not consume a local slot.
+        if local_dispatch && event.phase == "durable_identity" {
+            let mut lease = local_dispatch_lease
+                .lock()
+                .expect("local dispatch lease lock");
+            if lease.is_none() {
+                *lease = Some(admit_local_cook_dispatch(event.run_id, &lifecycle_store)?);
+            }
+        }
+        published
     };
-    let recipe_store = agent_task_service::CookRecipeStore::from_current_data_root()?;
-    let lifecycle_store = agent_task_lifecycle::AgentTaskLifecycleStore::from_environment()?;
-    // A local provider dispatch — not a Lab-routed one — is the workload that
-    // saturates this machine, so only local dispatch consults the concurrency
-    // ceiling. The lease is held for this whole cook (provider, promotion, and
-    // gates all run on this host) and released when the function returns,
-    // whether by success or by an early `?` (#14732).
-    let _local_dispatch_lease = (!args.preview && attempt_dispatcher.is_none())
-        .then(|| admit_local_cook_dispatch(&run_id, &cook_id, &lifecycle_store))
-        .transpose()?
-        .flatten();
     let request = agent_task_service::CookRequest {
         identity: homeboy::agents::agent_task_service::CookIdentity {
             cook_id,
