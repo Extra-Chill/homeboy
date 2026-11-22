@@ -7,6 +7,14 @@ on:
       action-ref:
         type: string
         default: 'v2'
+      dispatch-repo:
+        description: 'owner/repo to notify with a repository_dispatch after a successful release. Empty disables dispatch.'
+        type: string
+        default: ''
+      dispatch-event:
+        description: 'event_type for the post-release repository_dispatch.'
+        type: string
+        default: ''
       publisher-known-hosts:
         type: string
         default: ''
@@ -141,4 +149,6 @@ jobs:
     with:
       action-ref: ${{ needs.refresh.outputs.action-sha }}
       publisher-known-hosts: ${{ inputs.publisher-known-hosts }}
+      dispatch-repo: ${{ inputs.dispatch-repo }}
+      dispatch-event: ${{ inputs.dispatch-event || 'component-released' }}
     secrets: inherit

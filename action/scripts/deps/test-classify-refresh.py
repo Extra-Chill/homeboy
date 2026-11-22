@@ -53,6 +53,21 @@ class RefreshTests(unittest.TestCase):
             for text in ("example", "1.0.0", "2.0.0", "Major release"):
                 self.assertIn(text, body)
 
+    def test_dispatch_forwarding(self):
+        workflow = (ROOT / ".github/workflows/deps-refresh.yml").read_text()
+        release = (ROOT / ".github/workflows/release.yml").read_text()
+        for name in ("dispatch-repo", "dispatch-event"):
+            block = "\n".join(workflow.split(f"      {name}:\n", 1)[1].splitlines()[:3])
+            release_block = "\n".join(release.split(f"      {name}:\n", 1)[1].splitlines()[:3])
+            self.assertEqual(block.splitlines()[0], release_block.splitlines()[0])
+            self.assertIn("type: string", block)
+            self.assertIn("default: ''", block)
+        self.assertIn("      dispatch-repo: ${{ inputs.dispatch-repo }}", workflow)
+        event_block = release.split("      dispatch-event:\n", 1)[1].split("\n    secrets:", 1)[0]
+        event_default = event_block.split("default: '", 1)[1].split("'", 1)[0]
+        self.assertIn("      dispatch-event: ${{ inputs.dispatch-event || '" + event_default + "' }}", workflow)
+        self.assertIn("inputs.dispatch-repo != '' && inputs.dry-run != true", release)
+
     def test_workflow_contract(self):
         workflow = (ROOT / ".github/workflows/deps-refresh.yml").read_text()
         for text in ("workflow_call:", "group: release", "cancel-in-progress: false", "startsWith(github.event.head_commit.message, 'release:')", "actions/create-github-app-token@v3", "persist-credentials: false", "steps.app-token.outputs.token || github.token", "homeboy deps stack refresh --dry-run", "commands: review lint,review test", "uses: Extra-Chill/homeboy-action/.github/workflows/release.yml@v2", "secrets: inherit", "force-with-lease"):
