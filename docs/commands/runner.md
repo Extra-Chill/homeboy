@@ -171,7 +171,7 @@ homeboy config set /lab/preferred_runner '"<runner-id>"'
 
 ### Runner ID defaults
 
-`doctor`, `connect`, and `disconnect` accept an omitted runner ID when exactly
+`doctor`, `connect`, `disconnect`, and `restart` accept an omitted runner ID when exactly
 one non-local runner is configured. Local runners do not compete with that
 default. With several non-local runners, these commands list the IDs to choose
 from without probing or mutating any runner; with none, they request an explicit
@@ -589,6 +589,26 @@ Daemon and broker HTTP responses use one canonical envelope. The outer response
 reports transport success and the endpoint payload always lives under
 `data.body`; runner clients require that shape and do not parse legacy direct
 `data` payloads.
+
+### `restart`
+
+```sh
+homeboy runner restart [runner-id]
+homeboy runner restart [runner-id] --reason <text>
+```
+
+Disconnects the runner's persisted tunnel session, then reconnects it through the
+same lease-safe lifecycle as a plain `runner connect` (no lease-adoption flags),
+so every `connect` guard above still applies. The runner ID is optional and
+resolves like the other subcommands (see [Runner ID defaults](#runner-id-defaults)).
+If the disconnect fails, restart stops and returns the disconnect result without
+reconnecting; otherwise the JSON payload is the reconnect's `runner.connect`
+result.
+
+`--reason` is recorded with the `runner restart` operator intervention
+(target `runner:<id>`) when the disconnect actually tore down a session, or when
+no session existed and the reconnect succeeded. No-ops and failures record no
+event. See [Operator interventions](runs.md#operator-interventions).
 
 ### `lifecycle`
 
