@@ -1381,7 +1381,7 @@ pub(super) fn wait_for_path(path: &std::path::Path, description: &str) {
     }
 }
 
-fn wait_for_terminal_daemon_job(client: &Client, daemon_url: &str, job_id: &str) {
+pub(super) fn wait_for_terminal_daemon_job(client: &Client, daemon_url: &str, job_id: &str) {
     let deadline = std::time::Instant::now() + Duration::from_secs(2);
     loop {
         let job = fetch_daemon_job(client, daemon_url, job_id).expect("daemon job");
