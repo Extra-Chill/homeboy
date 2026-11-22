@@ -93,7 +93,11 @@ pub(super) fn run(command: CandidateCommand) -> crate::commands::CmdResult<Value
         )?;
         homeboy::core::worktree::create_at(
             homeboy::core::worktree::WorktreeCreateOptions {
-                component_id: source.to_string_lossy().into_owned(),
+                // A checkout declaring a portable component must be addressed
+                // by that id; `create_at` rejects a path that disagrees with it.
+                component_id: homeboy::core::component::discover_from_portable(&source)
+                    .map(|component| component.id)
+                    .unwrap_or_else(|| source.to_string_lossy().into_owned()),
                 source_path: Some(source.to_string_lossy().into_owned()),
                 branch: format!("homeboy-checkout/{}", target.run_id),
                 from: Some("HEAD".into()),
@@ -719,6 +723,13 @@ mod tests {
                 } else {
                     &source
                 };
+                // A real checkout declares its portable id; the destination
+                // must be created under that id, not the checkout path.
+                std::fs::write(
+                    source.join("homeboy.json"),
+                    r#"{"id":"checkout-component"}"#,
+                )
+                .unwrap();
                 let component: homeboy::core::component::Component =
                     serde_json::from_value(json!({
                         "id": "checkout-component", "local_path": registered,
