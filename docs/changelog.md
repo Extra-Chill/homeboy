@@ -4,6 +4,15 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.488.6] - 2026-11-22
+
+### Changed
+- Skip live-owned runner execs in startup recovery and silence scheduling
+- collapse execution entry into one explicit context
+
+### Fixed
+- verify controller-local tunnel after homeboy refresh
+
 ## [0.488.5] - 2026-11-21
 
 ### Fixed

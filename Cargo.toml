@@ -23,7 +23,7 @@ exclude = ["extensions"]
 
 [package]
 name = "homeboy"
-version = "0.488.5"
+version = "0.488.6"
 edition = "2021"
 default-run = "homeboy"
 license = "MIT"
