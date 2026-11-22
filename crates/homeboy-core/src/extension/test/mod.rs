@@ -472,7 +472,6 @@ fn changed_test_strategy_name(strategy: &TestChangedFileRoutingStrategy) -> &'st
 
 fn rust_cargo_changed_test_env(component: &Component, files: &[String]) -> Vec<(String, String)> {
     let mut candidates = BTreeSet::new();
-    let mut package_candidates = BTreeSet::new();
     let mut fallback_message = None;
     let mut metadata = None;
 
@@ -504,11 +503,21 @@ fn rust_cargo_changed_test_env(component: &Component, files: &[String]) -> Vec<(
 
         if routing_file.starts_with("src/") && !is_test_only_rust_path(&routing_file) {
             let graph = metadata.get_or_insert_with(|| workspace_cargo_metadata(component));
-            if let Some(packages) = graph
-                .as_ref()
-                .and_then(|graph| workspace_reverse_dependencies(graph, &package))
-            {
-                package_candidates.extend(packages);
+            let targets = graph.as_ref().and_then(|graph| {
+                let packages = workspace_reverse_dependencies(graph, &package)?;
+                Some(workspace_test_targets(
+                    graph,
+                    &packages,
+                    &component_source_path(component),
+                ))
+            });
+            if let Some(targets) = targets.filter(|targets| !targets.is_empty()) {
+                // Whole-target candidates (no module) use the same identity
+                // shape older runner scripts already accept, so a new binary
+                // stays compatible with an installed extension (#18772).
+                for (package, target_kind, target, path) in targets {
+                    candidates.insert((package, target_kind, target, None, path));
+                }
             } else {
                 fallback_message = Some(
                     "Could not resolve workspace reverse dependencies; running the full test command."
@@ -681,11 +690,11 @@ fn rust_cargo_changed_test_env(component: &Component, files: &[String]) -> Vec<(
         ];
     }
 
-    if candidates.is_empty() && package_candidates.is_empty() {
+    if candidates.is_empty() {
         return Vec::new();
     }
 
-    let mut candidates = candidates
+    let candidates = candidates
         .into_iter()
         .map(|(package, target_kind, target, module, path)| {
             serde_json::json!({
@@ -697,11 +706,6 @@ fn rust_cargo_changed_test_env(component: &Component, files: &[String]) -> Vec<(
             })
         })
         .collect::<Vec<_>>();
-    candidates.extend(
-        package_candidates
-            .into_iter()
-            .map(|package| serde_json::json!({ "package": package })),
-    );
     let selection = serde_json::json!({
         "schema": "homeboy/rust-changed-test-selection/v2",
         "candidates": candidates,
@@ -745,6 +749,64 @@ fn workspace_cargo_metadata(component: &Component) -> Option<serde_json::Value> 
         return None;
     }
     serde_json::from_slice(&output.stdout).ok()
+}
+
+/// Every test-bearing target of the selected workspace packages, named the
+/// way nextest reports suites: libraries and proc-macros as `lib`/`proc-macro`,
+/// integration tests as `test`, binaries as `bin`.
+fn workspace_test_targets(
+    metadata: &serde_json::Value,
+    packages: &BTreeSet<String>,
+    root: &Path,
+) -> Vec<(String, String, String, String)> {
+    let mut targets = Vec::new();
+    let Some(all) = metadata.get("packages").and_then(|p| p.as_array()) else {
+        return targets;
+    };
+    for package in all {
+        let Some(name) = package["name"].as_str().filter(|n| packages.contains(*n)) else {
+            continue;
+        };
+        for target in package["targets"].as_array().into_iter().flatten() {
+            if target["test"].as_bool() == Some(false) {
+                continue;
+            }
+            let kinds = target["kind"].as_array().into_iter().flatten();
+            let kinds = kinds.filter_map(|k| k.as_str()).collect::<Vec<_>>();
+            let kind = if kinds.contains(&"proc-macro") {
+                "proc-macro"
+            } else if kinds
+                .iter()
+                .any(|k| matches!(*k, "lib" | "rlib" | "dylib" | "cdylib" | "staticlib"))
+            {
+                "lib"
+            } else if kinds.contains(&"test") {
+                "test"
+            } else if kinds.contains(&"bin") {
+                "bin"
+            } else {
+                continue;
+            };
+            let (Some(target_name), Some(src)) =
+                (target["name"].as_str(), target["src_path"].as_str())
+            else {
+                continue;
+            };
+            let src = Path::new(src);
+            let path = src
+                .strip_prefix(root)
+                .unwrap_or(src)
+                .to_string_lossy()
+                .into_owned();
+            targets.push((
+                name.to_string(),
+                kind.to_string(),
+                target_name.to_string(),
+                path,
+            ));
+        }
+    }
+    targets
 }
 
 fn workspace_reverse_dependencies(
@@ -1864,7 +1926,11 @@ mod tests {
             rust_cargo_changed_test_env(&component, &["crates/homeboy-core/src/lib.rs".into()]);
         assert_union_candidates(
             &env,
-            &["dependent::::::", "homeboy-core::::::", "transitive::::::"],
+            &[
+                "dependent::lib::dependent::",
+                "homeboy-core::lib::homeboy_core::",
+                "transitive::lib::transitive::",
+            ],
         );
         let env = rust_cargo_changed_test_env(
             &component,
@@ -1938,7 +2004,7 @@ mod tests {
 
         let env = rust_cargo_changed_test_env(&component, &["src/core/daemon.rs".to_string()]);
 
-        assert_union_candidates(&env, &["fixture::::::"]);
+        assert_union_candidates(&env, &["fixture::lib::fixture::"]);
     }
 
     #[test]
@@ -1989,9 +2055,9 @@ mod tests {
         assert_union_candidates(
             &env,
             &[
+                "alpha-pkg::lib::alpha_pkg::",
                 "alpha-pkg::test::api::",
-                "alpha-pkg::::::",
-                "beta-pkg::::::",
+                "beta-pkg::lib::beta_pkg::",
             ],
         );
     }
@@ -2061,7 +2127,7 @@ mod tests {
             &["crates/homeboy-lab-runner/src/lab/offload/hydration.rs".to_string()],
         );
 
-        assert_union_candidates(&env, &["homeboy-lab-runner::::::"]);
+        assert_union_candidates(&env, &["homeboy-lab-runner::lib::homeboy_lab_runner::"]);
     }
 
     /// Regression for #14867: `worktree/store_ops.rs` declares no tests of
@@ -2108,7 +2174,7 @@ mod tests {
         let env =
             rust_cargo_changed_test_env(&component, &["src/worktree/store_ops.rs".to_string()]);
 
-        assert_union_candidates(&env, &["fixture::::::"]);
+        assert_union_candidates(&env, &["fixture::lib::fixture::"]);
     }
 
     /// A changed source module that declares its own inline
@@ -2151,7 +2217,7 @@ mod tests {
 
         let env = rust_cargo_changed_test_env(&component, &["src/worktree/reaping.rs".to_string()]);
 
-        assert_union_candidates(&env, &["fixture::::::"]);
+        assert_union_candidates(&env, &["fixture::lib::fixture::"]);
     }
 
     /// A changed source module with no tests of its own and no determinable
@@ -2184,7 +2250,7 @@ mod tests {
         );
 
         let env = rust_cargo_changed_test_env(&component, &["src/util/strings.rs".to_string()]);
-        assert_union_candidates(&env, &["fixture::::::"]);
+        assert_union_candidates(&env, &["fixture::lib::fixture::"]);
     }
 
     /// A changed integration test under `tests/` is unaffected by the
