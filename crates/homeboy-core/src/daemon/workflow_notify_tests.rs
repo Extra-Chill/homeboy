@@ -132,9 +132,11 @@ fn a_stopped_chain_notifies_once_and_a_successful_one_never() {
             let mut tracker = crate::daemon::completion_tracker::CompletionTracker::default();
             let deadline = Instant::now() + Duration::from_secs(15);
             loop {
-                crate::daemon::completion_notify_pass(&mut tracker, || false);
                 let observation = crate::observation::ObservationStore::open_initialized().unwrap();
                 if observation.get_run(&request.instance).unwrap().is_some() {
+                    // Seed only after the run exists, while the release barrier
+                    // still guarantees it is in flight.
+                    crate::daemon::completion_notify_pass(&mut tracker, || false);
                     break;
                 }
                 assert!(Instant::now() < deadline, "instance run never recorded");
@@ -142,9 +144,31 @@ fn a_stopped_chain_notifies_once_and_a_successful_one_never() {
             }
             std::fs::write(&release, "").unwrap();
             wait_terminal(&store, job_id, 15);
-            for _ in 0..3 {
+            // Job terminality precedes the observation projection. Poll the
+            // notifier until it has seen that projection (and delivered a stop),
+            // rather than assuming a fixed number of passes is enough.
+            let deadline = Instant::now() + Duration::from_secs(15);
+            loop {
+                let observation = crate::observation::ObservationStore::open_initialized().unwrap();
+                let terminal = observation
+                    .get_run(&request.instance)
+                    .unwrap()
+                    .and_then(|run| crate::observation::RunStatus::from_label(&run.status))
+                    .is_some_and(|status| status.is_terminal());
                 crate::daemon::completion_notify_pass(&mut tracker, || false);
+                let deliveries = std::fs::read_to_string(&delivered).unwrap_or_default();
+                if terminal && (expected == 0 || !deliveries.is_empty()) {
+                    break;
+                }
+                assert!(
+                    Instant::now() < deadline,
+                    "exit {exit}: completion never observed"
+                );
+                std::thread::sleep(Duration::from_millis(50));
             }
+            // Later passes must neither duplicate a stop nor announce success.
+            crate::daemon::completion_notify_pass(&mut tracker, || false);
+            crate::daemon::completion_notify_pass(&mut tracker, || false);
 
             let text = std::fs::read_to_string(&delivered).unwrap_or_default();
             assert_eq!(text.lines().count(), expected, "exit {exit}: {text}");
