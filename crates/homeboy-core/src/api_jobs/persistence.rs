@@ -90,11 +90,15 @@ pub(crate) fn open_ledger(path: &Path) -> Result<Connection> {
 
 /// Open the observation store at `path` read-only, without creating or
 /// initializing anything. `None` means there is no ledger yet: no jobs.
+/// Ledger reads authorize lifecycle decisions (including daemon startup), so
+/// they wait for recovery using the control-plane budget, not the short
+/// best-effort observation inspection budget.
 pub(crate) fn open_ledger_readonly(path: &Path) -> Result<Option<Connection>> {
     if !path.exists() {
         return Ok(None);
     }
     let connection = crate::observation::store::open_readonly_connection(path)?;
+    crate::observation::store::install_control_plane_busy_wait(&connection)?;
     // The baseline schema is created in one transaction, so one ledger table
     // stands for all of them.
     let started = std::time::Instant::now();
@@ -109,7 +113,10 @@ pub(crate) fn open_ledger_readonly(path: &Path) -> Result<Option<Connection>> {
             let evidence =
                 crate::observation::store::read_only_busy_evidence(path, started.elapsed(), &error);
             let mut error = tombstone_error(path, "inspect daemon job ledger", error);
-            if let Some(evidence) = evidence {
+            if let Some(mut evidence) = evidence {
+                evidence["budget_ms"] = serde_json::json!(
+                    crate::observation::store::control_plane_write_wait().as_millis() as u64
+                );
                 error.details["ledger_busy"] = evidence;
             }
             error
@@ -712,6 +719,35 @@ pub(super) fn validate_transition(current: JobStatus, next: JobStatus) -> Result
 
 pub(super) fn job_not_found(job_id: Uuid) -> Error {
     Error::validation_invalid_argument("job_id", "job not found", Some(job_id.to_string()), None)
+}
+
+#[cfg(test)]
+mod ledger_read_tests {
+    use super::*;
+
+    #[test]
+    fn readonly_ledger_uses_control_plane_contention_budget() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("ledger.sqlite");
+        // A rollback-journal exclusive transaction deterministically blocks
+        // readers, without depending on recovery timing or thread scheduling.
+        let writer = Connection::open(&path).unwrap();
+        writer
+            .execute_batch(
+                "CREATE TABLE daemon_store_state (id INTEGER PRIMARY KEY);
+                 BEGIN EXCLUSIVE;",
+            )
+            .unwrap();
+        let error = crate::observation::store::with_write_wait(std::time::Duration::ZERO, || {
+            open_ledger_readonly(&path).unwrap_err()
+        });
+        assert_eq!(error.details["ledger_busy"]["budget_ms"], 0);
+        assert_eq!(error.details["ledger_busy"]["journal_mode"], "rollback");
+
+        writer.execute_batch("ROLLBACK").unwrap();
+        let reader = open_ledger_readonly(&path).unwrap().unwrap();
+        assert!(reader.is_readonly(rusqlite::DatabaseName::Main).unwrap());
+    }
 }
 
 // Persistence timestamps are metadata, not a clock validity assertion. Use the
