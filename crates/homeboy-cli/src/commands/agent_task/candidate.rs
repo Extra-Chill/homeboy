@@ -78,29 +78,23 @@ pub(super) fn run(command: CandidateCommand) -> crate::commands::CmdResult<Value
             )
         })?;
     if !into.exists() {
-        let source = promotion
-            .pointer("/target/path")
-            .and_then(Value::as_str)
-            .or_else(|| {
-                recipe
-                    .as_ref()
-                    .and_then(|r| r.finalization["source_worktree_path"].as_str())
-            })
-            .ok_or_else(|| {
-                Error::validation_invalid_argument(
-                    "into",
-                    format!(
-                        "cannot create {}: Cook repository is unavailable",
-                        into.display()
-                    ),
-                    None,
-                    None,
-                )
-            })?;
+        let source = resolve_source_checkout(
+            &into,
+            &record.metadata,
+            recipe
+                .as_ref()
+                .and_then(|r| r.finalization["source_worktree_path"].as_str()),
+            recipe.as_ref().and_then(|r| {
+                r.attempts
+                    .iter()
+                    .find(|a| a.run_id == target.run_id)
+                    .and_then(|a| a.plan.metadata["repo"].as_str())
+            }),
+        )?;
         homeboy::core::worktree::create_at(
             homeboy::core::worktree::WorktreeCreateOptions {
-                component_id: source.into(),
-                source_path: Some(source.into()),
+                component_id: source.to_string_lossy().into_owned(),
+                source_path: Some(source.to_string_lossy().into_owned()),
                 branch: format!("homeboy-checkout/{}", target.run_id),
                 from: Some("HEAD".into()),
                 task_url: None,
@@ -191,6 +185,85 @@ pub(super) fn run(command: CandidateCommand) -> crate::commands::CmdResult<Value
         &title,
         gated_sha.or(Some(&sha)),
     )
+}
+
+/// Resolve only the repository used to create a destination; candidate fetching
+/// continues to use the canonical ref or retained bundle independently.
+fn resolve_source_checkout(
+    into: &Path,
+    metadata: &Value,
+    recipe_source: Option<&str>,
+    repo_component: Option<&str>,
+) -> Result<std::path::PathBuf> {
+    let mut tried = Vec::new();
+    let mut usable = |path: &Path| {
+        tried.push(path.display().to_string());
+        path.is_dir() && git(path, &["rev-parse", "--show-toplevel"]).is_ok()
+    };
+    for source in [
+        metadata
+            .pointer("/cook_delivery/artifacts/promotion/target/path")
+            .and_then(Value::as_str),
+        recipe_source,
+    ]
+    .into_iter()
+    .flatten()
+    {
+        let path = Path::new(source);
+        if usable(path) {
+            return Ok(path.to_path_buf());
+        }
+    }
+    if let Some(source) = metadata
+        .pointer("/source_checkout/local_path")
+        .and_then(Value::as_str)
+    {
+        let path = Path::new(source);
+        if usable(path) {
+            if let Ok(common) = git(
+                path,
+                &["rev-parse", "--path-format=absolute", "--git-common-dir"],
+            ) {
+                if let Some(main) = Path::new(&common).parent() {
+                    if usable(main) {
+                        return Ok(main.to_path_buf());
+                    }
+                }
+            }
+        }
+    }
+    let component_id = metadata
+        .pointer("/cook_repository_identity/component_id")
+        .and_then(Value::as_str)
+        .or_else(|| metadata["repo"].as_str())
+        .or(repo_component);
+    let mut registration_error = None;
+    if let Some(id) = component_id {
+        match homeboy::core::component::load(id) {
+            Ok(component) => {
+                let path = Path::new(&component.local_path);
+                if usable(path) {
+                    return Ok(path.to_path_buf());
+                }
+            }
+            Err(error) => registration_error = Some(format!("; component {id}: {error}")),
+        }
+    }
+    Err(Error::validation_invalid_argument(
+        "into",
+        format!(
+            "cannot create {}: Cook repository is unavailable; tried paths: {}{}",
+            into.display(),
+            if tried.is_empty() {
+                "(none)".into()
+            } else {
+                tried.join(", ")
+            },
+            registration_error.unwrap_or_default(),
+        ),
+        None,
+        None,
+    ))
 }
 
 fn ensure_clean(into: &Path) -> Result<()> {
@@ -499,15 +572,30 @@ mod tests {
 
     #[test]
     fn checkout_fetches_canonical_ref_and_refuses_dirty_worktree() {
-        checkout_fixture(false);
+        checkout_fixture(false, None);
     }
 
     #[test]
     fn checkout_fetches_bundle_using_candidate_metadata() {
-        checkout_fixture(true);
+        checkout_fixture(true, None);
     }
 
-    fn checkout_fixture(bundle: bool) {
+    #[test]
+    fn candidate_removed_recorded_worktree_falls_back_to_registered_checkout() {
+        checkout_fixture(true, Some("removed"));
+    }
+
+    #[test]
+    fn candidate_without_promotion_still_checks_out() {
+        checkout_fixture(true, Some("unpromoted"));
+    }
+
+    #[test]
+    fn candidate_no_usable_source_names_attempted_paths() {
+        checkout_fixture(true, Some("unavailable"));
+    }
+
+    fn checkout_fixture(bundle: bool, fallback: Option<&str>) {
         use crate::commands::agent_task::tests::support::{test_plan, with_isolated_home};
         with_isolated_home(|home| {
             let source = home.path().join("source");
@@ -615,6 +703,74 @@ mod tests {
                     &["update-ref", "refs/homeboy/candidates/checkout-cook", &sha],
                 )
                 .unwrap();
+            }
+            if let Some(case) = fallback {
+                let removed = home.path().join("removed-worktree");
+                git(
+                    &source,
+                    &["worktree", "add", "--detach", removed.to_str().unwrap()],
+                )
+                .unwrap();
+                git(&source, &["worktree", "remove", removed.to_str().unwrap()]).unwrap();
+                let invalid = home.path().join("not-a-checkout");
+                std::fs::create_dir(&invalid).unwrap();
+                let registered = if case == "unavailable" {
+                    &invalid
+                } else {
+                    &source
+                };
+                let component: homeboy::core::component::Component =
+                    serde_json::from_value(json!({
+                        "id": "checkout-component", "local_path": registered,
+                    }))
+                    .unwrap();
+                homeboy::core::component::inventory::write_standalone_registration(&component)
+                    .unwrap();
+                homeboy::agents::agent_task_lifecycle::rewrite_record_for_test(run_id, |record| {
+                    record.metadata["source_checkout"] = json!({"local_path": removed});
+                    record.metadata["cook_repository_identity"] =
+                        json!({"component_id": "checkout-component"});
+                    if case == "unpromoted" {
+                        record.set_state_for_test(
+                            homeboy_lifecycle_contract::RunExecutionState::Failed,
+                        );
+                        record.metadata["cook_delivery"]["artifacts"]
+                            .as_object_mut()
+                            .unwrap()
+                            .remove("promotion");
+                    } else {
+                        record.metadata["cook_delivery"]["artifacts"]["promotion"]["target"]
+                            ["path"] = json!(removed);
+                    }
+                })
+                .unwrap();
+                // Persist the removed path in the recipe as well.
+                let mut options = options.clone();
+                options.workspace.source_worktree_path = Some(removed.clone());
+                persist_initial_recipe(&options).unwrap();
+                let into = home.path().join("fallback-destination");
+                let result = run(CandidateCommand::Checkout {
+                    cook_or_attempt: "checkout-cook".into(),
+                    into: into.clone(),
+                });
+                if case == "unavailable" {
+                    let error = result.unwrap_err().to_string();
+                    for path in [&removed, &invalid, &into] {
+                        assert!(error.contains(path.to_str().unwrap()), "{error}");
+                    }
+                } else {
+                    let (value, _) = result.unwrap();
+                    assert_eq!(value["gated_sha"], sha);
+                    assert_eq!(
+                        std::fs::read_to_string(into.join("file")).unwrap(),
+                        "candidate"
+                    );
+                    assert_eq!(
+                        git(&into, &["rev-parse", "HEAD^{tree}"]).unwrap(),
+                        git(&source, &["rev-parse", "HEAD^{tree}"]).unwrap()
+                    );
+                }
+                return;
             }
             if !bundle {
                 for case in ["missing", "dirty", "non-git"] {
