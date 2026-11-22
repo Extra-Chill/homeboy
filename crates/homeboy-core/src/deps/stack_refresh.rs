@@ -13,7 +13,7 @@ use super::dependency_graph::{
     DependencyStackEdgeOutdatedState, DependencyStackEdgeOutdatedStatus, DependencyStackPlanStep,
     STACK_OUTDATED_RESOLVE_TIMEOUT,
 };
-use crate::component::{self, Component, DependencyStackEdge};
+use crate::component::{self, Component, DependencyStackBreakingPolicy, DependencyStackEdge};
 use crate::{Error, Result};
 use serde::Serialize;
 use std::collections::BTreeMap;
@@ -325,7 +325,11 @@ fn refresh_edge(
                 .and_then(|edge| edge.source.as_ref())
                 .and_then(|source| source.github_release.as_deref())
             {
-                github_range_breaking_verdict(github, &locked, &newest, newest_tag)
+                let breaking_policy = edge
+                    .and_then(|edge| edge.policy.as_ref())
+                    .and_then(|policy| policy.breaking)
+                    .unwrap_or_default();
+                github_range_breaking_verdict(github, &locked, &newest, newest_tag, breaking_policy)
             } else if edge
                 .and_then(|edge| edge.source.as_ref())
                 .and_then(|source| source.npm.as_ref())
@@ -504,6 +508,7 @@ fn github_range_breaking_verdict(
     locked: &semver::Version,
     newest: &semver::Version,
     newest_tag: &str,
+    breaking_policy: DependencyStackBreakingPolicy,
 ) -> DependencyStackBreakingVerdict {
     let base = newest_tag.strip_suffix(&newest.to_string()).unwrap_or("");
     let url = format!("https://api.github.com/repos/{repo}/compare/{base}{locked}...{newest_tag}");
@@ -511,6 +516,15 @@ fn github_range_breaking_verdict(
         Ok(value) => value,
         Err(error) => return DependencyStackBreakingVerdict::unknown(error.message),
     };
+    github_comparison_breaking_verdict(&value, locked, newest, breaking_policy)
+}
+
+fn github_comparison_breaking_verdict(
+    value: &serde_json::Value,
+    locked: &semver::Version,
+    newest: &semver::Version,
+    breaking_policy: DependencyStackBreakingPolicy,
+) -> DependencyStackBreakingVerdict {
     let Some(commits) = value["commits"].as_array() else {
         return DependencyStackBreakingVerdict::unknown(
             "invalid GitHub comparison response".into(),
@@ -523,7 +537,11 @@ fn github_range_breaking_verdict(
         );
     }
     let mut reasons = Vec::new();
-    if newest.major != locked.major || (newest.major == 0 && newest.minor != locked.minor) {
+    if newest.major != locked.major
+        || (breaking_policy == DependencyStackBreakingPolicy::Semver
+            && newest.major == 0
+            && newest.minor != locked.minor)
+    {
         reasons.push(format!("version boundary changes: {locked} -> {newest}"));
     }
     for commit in commits {
@@ -687,6 +705,119 @@ fn breaking_footer_line(message: &str) -> Option<&str> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn github_comparison_breaking_policies() {
+        use DependencyStackBreakingPolicy::{CommitMarkers, Semver};
+        let cases = [
+            (
+                "0.17.0",
+                "0.18.0",
+                CommitMarkers,
+                "feat: add API",
+                Some(false),
+            ),
+            (
+                "0.17.0",
+                "0.18.0",
+                CommitMarkers,
+                "feat!: drop API",
+                Some(true),
+            ),
+            ("0.17.0", "0.18.0", Semver, "feat: add API", Some(true)),
+            ("1.2.3", "2.0.0", CommitMarkers, "feat: add API", Some(true)),
+            (
+                "0.17.0",
+                "0.18.0",
+                CommitMarkers,
+                "feat: add API\n\nBREAKING CHANGE: drop API",
+                Some(true),
+            ),
+            (
+                "0.17.0",
+                "0.18.0",
+                CommitMarkers,
+                "fix: change API\n\nBREAKING-CHANGE: drop API",
+                Some(true),
+            ),
+        ];
+        for (from, to, policy, message, expected) in cases {
+            let response = serde_json::json!({
+                "total_commits": 1,
+                "commits": [{"commit": {"message": message}}]
+            });
+            let verdict = github_comparison_breaking_verdict(
+                &response,
+                &semver::Version::parse(from).unwrap(),
+                &semver::Version::parse(to).unwrap(),
+                policy,
+            );
+            assert_eq!(verdict.breaking, expected, "{from} -> {to}: {message}");
+            if policy == Semver {
+                assert_eq!(
+                    verdict.breaking_reasons,
+                    vec![format!("version boundary changes: {from} -> {to}")]
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn github_comparison_incomplete_or_invalid_stays_unknown() {
+        for response in [
+            serde_json::json!({"total_commits": 2, "commits": [{"commit": {"message": "feat!: drop API"}}]}),
+            serde_json::json!({"total_commits": 1, "commits": [{}]}),
+            serde_json::json!({"commits": []}),
+            serde_json::json!({}),
+        ] {
+            for policy in [
+                DependencyStackBreakingPolicy::Semver,
+                DependencyStackBreakingPolicy::CommitMarkers,
+            ] {
+                let verdict = github_comparison_breaking_verdict(
+                    &response,
+                    &semver::Version::parse("0.17.0").unwrap(),
+                    &semver::Version::parse("0.18.0").unwrap(),
+                    policy,
+                );
+                assert_eq!(verdict.breaking, None);
+                assert!(verdict.treated_as_breaking());
+            }
+        }
+    }
+
+    #[test]
+    fn breaking_policy_config_is_optional_and_validated() {
+        let mut value =
+            serde_json::json!({"upstream": "up", "downstream": "down", "package": "pkg"});
+        let edge: DependencyStackEdge = serde_json::from_value(value.clone()).unwrap();
+        assert!(edge.policy.is_none());
+        for breaking in ["semver", "commit-markers"] {
+            value["policy"] = serde_json::json!({"breaking": breaking});
+            let edge: DependencyStackEdge = serde_json::from_value(value.clone()).unwrap();
+            let policy = edge.policy.unwrap();
+            assert!(policy.max.is_none());
+            assert_eq!(serde_json::to_value(policy).unwrap(), value["policy"]);
+        }
+        value["policy"] = serde_json::json!({"max": "same-major"});
+        let edge: DependencyStackEdge = serde_json::from_value(value.clone()).unwrap();
+        let policy = edge.policy.unwrap();
+        assert!(policy.max.is_some());
+        assert_eq!(
+            policy.breaking.unwrap_or_default(),
+            DependencyStackBreakingPolicy::Semver
+        );
+        assert_eq!(serde_json::to_value(policy).unwrap(), value["policy"]);
+        value["policy"] = serde_json::json!({"breaking": "typo"});
+        let error = serde_json::from_value::<DependencyStackEdge>(value)
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("unknown variant `typo`"), "{error}");
+        assert!(
+            error.contains("semver") && error.contains("commit-markers"),
+            "{error}"
+        );
+    }
 
     #[test]
     fn subject_markers_follow_the_conventional_breaking_forms() {

@@ -640,7 +640,14 @@ fn outdated_edge_status(
         return status;
     };
 
-    if newest > locked && newest.major != locked.major && edge.policy.is_some() {
+    if newest > locked
+        && newest.major != locked.major
+        && edge
+            .policy
+            .as_ref()
+            .and_then(|policy| policy.max.as_ref())
+            .is_some()
+    {
         status.state = DependencyStackEdgeOutdatedState::Held;
         status.unresolvable_reason =
             Some(format!("newest {newest} is a new major; pinned {locked}"));

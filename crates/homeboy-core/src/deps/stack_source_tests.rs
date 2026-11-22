@@ -126,6 +126,28 @@ fn version_file_npm_refresh_and_dry_run() {
 }
 
 #[test]
+fn breaking_only_policy_does_not_hold_majors_and_npm_ignores_it() {
+    for (from, latest, breaking) in [
+        ("0.9.3", "0.10.0", Some(true)),
+        ("1.0.0", "2.0.0", Some(true)),
+        ("1.0.0", "1.0.1", None),
+    ] {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("pin"), from).unwrap();
+        let mut component = consumer(dir.path(), serde_json::json!({"npm":"@org/tool"}), false);
+        component.dependency_stack[0].policy =
+            Some(serde_json::from_value(serde_json::json!({"breaking":"commit-markers"})).unwrap());
+        let body: &'static str =
+            Box::leak(format!(r#"{{"dist-tags":{{"latest":"{latest}"}}}}"#).into_boxed_str());
+        let server = fixture(vec![("200 OK", body)]);
+        let result = stack_refresh_for_component(&component, dir.path(), true, true).unwrap();
+        server.join().unwrap();
+        assert_eq!(result.updated_count, 1);
+        assert_eq!(result.edges[0].breaking, breaking);
+    }
+}
+
+#[test]
 fn version_file_same_major_is_held_and_untouched() {
     let dir = tempfile::tempdir().unwrap();
     std::fs::write(dir.path().join("pin"), "0.9.3\n").unwrap();
