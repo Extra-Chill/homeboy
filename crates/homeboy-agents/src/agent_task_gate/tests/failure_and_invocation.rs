@@ -197,7 +197,9 @@ fn homeboy_gate_target_unresolved_is_a_gate_declaration_failure() {
         AgentTaskGateFailureClassification::GateDeclaration
     );
     assert!(
-        evidence.summary.contains("could not resolve"),
+        evidence
+            .summary
+            .contains("manifest(s) could not be read: wordpress"),
         "summary must name the environment failure: {}",
         evidence.summary
     );
@@ -254,7 +256,11 @@ fn homeboy_gate_with_unresolved_target_is_a_gate_declaration_failure() {
             "{stdout}"
         );
         assert!(
-            evidence.summary.contains("could not resolve"),
+            evidence.summary.contains(if stdout == component_not_found {
+                "component.not_found: Component not found"
+            } else {
+                "extension.unsupported: No extension provider configured"
+            }),
             "{}",
             evidence.summary
         );
@@ -263,6 +269,34 @@ fn homeboy_gate_with_unresolved_target_is_a_gate_declaration_failure() {
             "{}",
             evidence.agent_feedback
         );
+    }
+}
+
+#[test]
+fn homeboy_gate_capability_failure_summary_preserves_resolved_source_path() {
+    let stdout = json!({
+        "success": false,
+        "diagnostics": {
+            "code": "extension.unsupported",
+            "message": "No extension provider configured for component 'data-machine-events'",
+            "details": {"review_capability_preflight": {"effective_component": {
+                "source_path": "/lab/worktree/plugins/data-machine-events"
+            }}}
+        }
+    })
+    .to_string();
+    for (out, err) in [(stdout.as_str(), ""), ("", stdout.as_str())] {
+        let evidence =
+            gate_failure_evidence("homeboy review test data-machine-events", 2, out, err, None);
+        assert_eq!(
+            evidence.classification,
+            AgentTaskGateFailureClassification::GateDeclaration
+        );
+        assert!(evidence.summary.contains("extension.unsupported: No extension provider configured for component 'data-machine-events'"));
+        assert!(evidence
+            .summary
+            .contains("resolved source_path: /lab/worktree/plugins/data-machine-events"));
+        assert!(!evidence.summary.contains("could not resolve"));
     }
 }
 
