@@ -266,7 +266,7 @@ fn run_command_with_workspace_inner(
     let resolved_bump = if input.pipeline.head {
         None
     } else {
-        resolve_bump(&release_scope)?
+        resolve_bump(&component, &release_scope)?
     };
     let (auto_bump_type, releasable_count) = resolved_bump
         .clone()
@@ -923,14 +923,17 @@ fn prepared_release_pr_resume_intent(
     Ok(true)
 }
 
-fn resolve_bump(release_scope: &ReleaseScope) -> Result<Option<(String, usize)>> {
+fn resolve_bump(
+    component: &homeboy_core::component::Component,
+    release_scope: &ReleaseScope,
+) -> Result<Option<(String, usize)>> {
     let (_latest_tag, commits) = super::planning_semver::resolve_tag_and_commits(release_scope)?;
 
     if commits.is_empty() {
         return Ok(None);
     }
 
-    match git::recommended_bump_from_commits(&commits) {
+    match git::recommended_release_bump(component, &commits)? {
         Some(bump) => {
             let releasable = commits
                 .iter()
@@ -1004,7 +1007,7 @@ pub(super) fn refresh_auto_bump_type(
     release_scope: &ReleaseScope,
 ) -> Result<String> {
     let (bump_type, _releasable_count) =
-        resolve_bump(release_scope)?.unwrap_or_else(|| ("none".to_string(), 0));
+        resolve_bump(component, release_scope)?.unwrap_or_else(|| ("none".to_string(), 0));
     Ok(downgrade_major_pre_1_0(component, bump_type))
 }
 

@@ -21,7 +21,7 @@ pub(super) fn build_semver_recommendation(
     let is_explicit_version =
         requested_bump.contains('.') && requested_bump.split('.').all(|p| p.parse::<u32>().is_ok());
 
-    let recommended = git::recommended_bump_from_commits(&commits).map(|bump| {
+    let recommended = git::recommended_release_bump(component, &commits)?.map(|bump| {
         let is_pre_1_0 = super::version::read_component_version(component)
             .ok()
             .is_some_and(|version| version.version.starts_with("0."));
@@ -495,6 +495,36 @@ mod tests {
         assert_eq!(recommendation.commits.len(), 1);
         assert_eq!(recommendation.commits[0].commit_type, "feature");
         assert_eq!(recommendation.reasons.len(), 1);
+    }
+
+    #[test]
+    fn dependency_refresh_chore_recommends_patch() {
+        let temp = git_repo();
+        let dir = temp.path();
+        commit_file(dir, "README.md", "initial", "chore: initial");
+        run_git(dir, &["tag", "v1.0.0"]);
+        commit_file(
+            dir,
+            "deps.lock",
+            "updated",
+            "chore(deps): refresh dependency stack (#42)",
+        );
+        let component: Component = serde_json::from_value(serde_json::json!({
+            "id": "consumer", "local_path": dir,
+            "release": {"refresh_dependencies": true},
+            "dependency_stack": [{
+                "upstream": "engine", "downstream": "consumer", "package": "engine",
+                "lock": {"kind": "version-file", "path": "deps.lock"}
+            }]
+        }))
+        .expect("component");
+        let scope = ReleaseScope::resolve(&component, "consumer").unwrap();
+        let recommendation = build_semver_recommendation(&component, "none", &scope)
+            .unwrap()
+            .expect("lock refresh is releasable");
+        assert_eq!(recommendation.recommended_bump.as_deref(), Some("patch"));
+        assert_eq!(recommendation.requested_bump, "patch");
+        assert_eq!(recommendation.commits[0].commit_type, "chore");
     }
 
     #[test]

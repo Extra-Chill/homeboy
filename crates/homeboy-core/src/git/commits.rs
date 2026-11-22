@@ -998,6 +998,58 @@ pub fn recommended_bump_from_commits(commits: &[CommitInfo]) -> Option<SemverBum
     recommended
 }
 
+/// Apply the component's dependency-lock exception to conventional release bumps.
+/// `chore(deps)` is patch-level only when it changes a declared stack lock.
+/// Lock paths are relative to the component, including in monorepos.
+pub fn recommended_release_bump(
+    component: &crate::component::Component,
+    commits: &[CommitInfo],
+) -> Result<Option<SemverBump>> {
+    let conventional = recommended_bump_from_commits(commits);
+    if conventional.is_some() {
+        return Ok(conventional);
+    }
+    let locks: Vec<_> = component
+        .dependency_stack
+        .iter()
+        .filter_map(|edge| edge.lock.as_ref())
+        .map(|lock| Path::new(&lock.path))
+        .collect();
+    if locks.is_empty() {
+        return Ok(None);
+    }
+    for commit in commits {
+        if commit.category != CommitCategory::Chore || !commit.subject.starts_with("chore(deps):") {
+            continue;
+        }
+        // Include root commits and merge-parent diffs, and avoid Git's quoted
+        // filename output. --relative anchors matching at the component root.
+        let files = command::run_in(
+            &component.local_path,
+            "git",
+            &[
+                "diff-tree",
+                "--root",
+                "-m",
+                "--no-commit-id",
+                "--name-only",
+                "-z",
+                "--relative",
+                "-r",
+                &commit.hash,
+            ],
+            "git diff-tree dependency locks",
+        )?;
+        if files
+            .split('\0')
+            .any(|file| locks.contains(&Path::new(file)))
+        {
+            return Ok(Some(SemverBump::Patch));
+        }
+    }
+    Ok(None)
+}
+
 /// Commit types accepted for authored subjects such as Cook PR titles.
 pub const CONVENTIONAL_COMMIT_TYPES: &[&str] = &[
     "feat", "fix", "refactor", "docs", "chore", "test", "perf", "ci", "build",
@@ -1084,6 +1136,43 @@ mod tests {
         fs::write(dir.path().join(file_name), contents).expect("write fixture file");
         git(path, &["add", "."]);
         git(path, &["commit", "-q", "-m", message]);
+    }
+
+    #[test]
+    fn release_dependency_lock_chore_bump() {
+        for (subject, file, expected) in [
+            (
+                "chore(deps): refresh dependency stack (#42)",
+                "deps.lock",
+                Some(SemverBump::Patch),
+            ),
+            ("chore(deps): refresh dependency stack", "other.txt", None),
+            ("chore: refresh dependency stack", "deps.lock", None),
+        ] {
+            let (dir, path) = init_repo();
+            commit_file(&dir, &path, file, "updated", subject);
+            let component: crate::component::Component =
+                serde_json::from_value(serde_json::json!({
+                    "id": "consumer",
+                    "local_path": path,
+                    "release": {"refresh_dependencies": true},
+                    "dependency_stack": [{
+                        "upstream": "engine", "downstream": "consumer", "package": "engine",
+                        "lock": {"kind": "version-file", "path": "deps.lock"}
+                    }]
+                }))
+                .expect("component");
+            let commit = CommitInfo {
+                hash: "HEAD".to_string(),
+                subject: subject.to_string(),
+                category: parse_conventional_commit(subject),
+            };
+            assert_eq!(
+                recommended_release_bump(&component, &[commit]).unwrap(),
+                expected,
+                "{subject}: {file}"
+            );
+        }
     }
 
     #[test]
