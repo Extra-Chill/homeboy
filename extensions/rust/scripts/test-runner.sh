@@ -1119,6 +1119,9 @@ if [ -n "${HOMEBOY_TEST_SHARD_MANIFEST:-}${HOMEBOY_RUST_CHANGED_TEST_SELECTION_F
     fi
     SHARD_STARTED="$(date +%s)"
     SHARD_TOTAL="$(jq '.selected | length' "$SHARD_DATA")"
+    if [ -n "${HOMEBOY_RUST_CHANGED_TEST_SELECTION_FILE:-}" ]; then
+        echo "Rust changed-test selection: selected=${SHARD_TOTAL} total=$(jq '.total_count // (.inventory.tests | length)' "$SHARD_DATA")"
+    fi
     SHARD_PASSED=0
     SHARD_FAILED=0
     SHARD_SKIPPED=0

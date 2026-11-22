@@ -3,6 +3,10 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ROOT_DIR="$(cd "${SCRIPT_DIR}/../.." && pwd)"
+# Standalone smoke runs do not have Homeboy's projected runtime helpers.
+# Use the real settings accessor unless the caller supplied one, and export it
+# for every test-runner subprocess below.
+export HOMEBOY_RUNTIME_SETTINGS_HELPER="${HOMEBOY_RUNTIME_SETTINGS_HELPER:-$ROOT_DIR/../crates/homeboy-core/src/extension/runtime/settings.sh}"
 WORKDIR="$(mktemp -d)"
 trap 'rm -rf "$WORKDIR"' EXIT
 
@@ -117,7 +121,7 @@ OUTPUT=$(
     HOMEBOY_SKIP_LINT=1 \
     HOMEBOY_TEST_SCOPE_KIND='rust_integration' \
     HOMEBOY_TEST_SCOPE_MESSAGE='Scoped to changed integration tests: integration_scope' \
-    HOMEBOY_TEST_RUNNER_ARGS=$'--test\nintegration_scope' \
+    HOMEBOY_TEST_RUNNER_ARGS=$'--test\nrenamed_integration' \
     HOMEBOY_RUNTIME_RUNNER_PRELUDE="$RUNNER_PRELUDE_HELPER" \
     HOMEBOY_RUNTIME_COMMAND_CAPTURE="$COMMAND_CAPTURE_HELPER" \
     HOMEBOY_RUNTIME_RESOLVE_CONTEXT="$HELPER_DIR/resolve-context.sh" \
@@ -158,6 +162,29 @@ if [[ "$OUTPUT" != *"1 passed"* ]]; then
     printf 'Expected scoped inline test to run. Output:\n%s\n' "$OUTPUT" >&2
     exit 1
 fi
+
+# Package-level candidates select every target and report the full denominator.
+python3 - "$SCRIPT_DIR/test-shard-inventory.py" "$PROJECT_DIR" "$WORKDIR" <<'PY'
+import importlib.util
+import json
+import sys
+from pathlib import Path
+sys.path.insert(0, str(Path(sys.argv[1]).parent))
+spec = importlib.util.spec_from_file_location("inventory", sys.argv[1])
+module = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(module)
+current = module.inventory(sys.argv[2], "cargo", None)
+package = current["tests"][0]["package"]
+selection = Path(sys.argv[3]) / "package-selection.json"
+selection.write_text(json.dumps({"schema": module.CHANGED_SELECTION_SCHEMA,
+                                 "candidates": [{"package": package}]}))
+resolved = module.resolve_changed_selection(selection, current, sys.argv[2])
+expected = [test for test in current["tests"] if test["package"] == package]
+assert {test["id"] for test in resolved["selected"]} == {test["id"] for test in expected}
+assert resolved["selected_count"] == len(expected)
+assert resolved["total_count"] == len(current["tests"])
+assert len({test["target_kind"] for test in expected}) > 1
+PY
 
 cat > "$WORKDIR/changed-selection.json" <<'EOF'
 {"schema":"homeboy/rust-changed-test-selection/v2","candidates":[{"package":"stale-producer-name","target_kind":"lib","target":"rust_changed_scope_smoke","module":"core::daemon::daemon_test","path":"src/core/daemon.rs"},{"package":"stale-producer-name","target_kind":"test","target":"integration_scope","module":null,"path":"tests/integration_scope.rs"}]}
