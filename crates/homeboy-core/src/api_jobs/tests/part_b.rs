@@ -330,14 +330,43 @@ impl crate::daemon::controller_job_driver::ControllerJobDriver for UnavailableOw
     }
     fn execution_owner(
         &self,
-        _request: &serde_json::Value,
+        request: &serde_json::Value,
         _checkpoint: Option<&serde_json::Value>,
     ) -> crate::error::Result<
         Option<crate::daemon::controller_job_driver::ControllerJobExecutionOwner>,
     > {
-        Ok(Some(
-            crate::daemon::controller_job_driver::ControllerJobExecutionOwner::Unavailable,
-        ))
+        use crate::daemon::controller_job_driver::ControllerJobExecutionOwner as Owner;
+        Ok(Some(match request["owner"].as_str() {
+            // A recorded worker pid now carrying another process's start
+            // identity: proven gone. (`Owner::None` is in-process work, not death.)
+            Some("dead") => {
+                let identity = match crate::process::process_start_identity(std::process::id())
+                    .unwrap()
+                    .unwrap()
+                {
+                    crate::process::ProcessStartIdentity::Linux { starttime_ticks } => {
+                        crate::process::ProcessStartIdentity::Linux {
+                            starttime_ticks: starttime_ticks + 1,
+                        }
+                    }
+                    crate::process::ProcessStartIdentity::Macos {
+                        start_seconds,
+                        start_microseconds,
+                    } => crate::process::ProcessStartIdentity::Macos {
+                        start_seconds: start_seconds + 1,
+                        start_microseconds,
+                    },
+                };
+                Owner::supervised(std::process::id(), identity)
+            }
+            Some("live") => Owner::supervised(
+                std::process::id(),
+                crate::process::process_start_identity(std::process::id())
+                    .unwrap()
+                    .unwrap(),
+            ),
+            _ => Owner::Unavailable,
+        }))
     }
     fn public_request(&self, value: &serde_json::Value) -> crate::error::Result<serde_json::Value> {
         Ok(value.clone())
@@ -2119,4 +2148,89 @@ fn remote_runner_job_env_is_scoped_to_submitted_job() {
         Some(&"/tmp/sample-runtime".to_string())
     );
     assert!(!envelope_env(&second).contains_key("STUDIO_NATIVE_TRACE_SAMPLE_RUNTIME_PLUGIN_PATH"));
+}
+
+fn claimed_cancellation_fixture(store: &JobStore, owner: &str) -> Uuid {
+    let id = admitted_owner_fixture_job(store, "cancellation-fixture");
+    store.claim_controller_execution(id, false).unwrap();
+    let mut inner = store.inner.lock().unwrap();
+    inner
+        .jobs
+        .get_mut(&id)
+        .unwrap()
+        .controller_job
+        .as_mut()
+        .unwrap()
+        .request["owner"] = json!(owner);
+    id
+}
+
+#[test]
+fn controller_cancellation_settles_dead_claim_and_cascades_children() {
+    let store = JobStore::default();
+    let parent = claimed_cancellation_fixture(&store, "dead");
+    let child = claimed_cancellation_fixture(&store, "dead");
+    store
+        .inner
+        .lock()
+        .unwrap()
+        .jobs
+        .get_mut(&child)
+        .unwrap()
+        .controller_job
+        .as_mut()
+        .unwrap()
+        .parent_job_id = Some(parent);
+    assert_eq!(
+        store
+            .request_controller_cancellation(parent, "cancel".into())
+            .unwrap()
+            .status,
+        JobStatus::Cancelled
+    );
+    assert_eq!(store.get(child).unwrap().status, JobStatus::Cancelled);
+}
+
+#[test]
+fn controller_cancellation_live_or_unverifiable_claim_stays_request_only() {
+    for owner in ["live", "unavailable"] {
+        let store = JobStore::default();
+        let id = claimed_cancellation_fixture(&store, owner);
+        assert!(!store
+            .request_controller_cancellation(id, "cancel".into())
+            .unwrap()
+            .status
+            .is_terminal());
+        assert!(
+            store.inner.lock().unwrap().jobs[&id]
+                .controller_job
+                .as_ref()
+                .unwrap()
+                .cancellation_requested
+        );
+        store.reconcile_controller_cancellations().unwrap();
+        assert!(!store.get(id).unwrap().status.is_terminal());
+    }
+}
+
+#[test]
+fn controller_cancellation_tick_settles_preexisting_dead_claim_request() {
+    let store = JobStore::default();
+    let id = claimed_cancellation_fixture(&store, "unavailable");
+    store
+        .request_controller_cancellation(id, "cancel".into())
+        .unwrap();
+    store
+        .inner
+        .lock()
+        .unwrap()
+        .jobs
+        .get_mut(&id)
+        .unwrap()
+        .controller_job
+        .as_mut()
+        .unwrap()
+        .request["owner"] = json!("dead");
+    store.reconcile_controller_cancellations().unwrap();
+    assert_eq!(store.get(id).unwrap().status, JobStatus::Cancelled);
 }

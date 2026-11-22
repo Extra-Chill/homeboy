@@ -2244,6 +2244,15 @@ impl JobStore {
                 && ownership.pid.is_none()
                 && matches!(ownership.state, Some(LocalChildLiveness::Dead)))
                 || (!ownership.driver_owned && ownership.state.is_none());
+            // `ControllerJobExecutionOwner::None` reports `Dead` with no pid: it
+            // means in-process work with no external launcher, not a dead worker.
+            // Only a recorded owner process proven gone permits inline settlement.
+            let proven_dead = ownership.driver_owned
+                && ownership.pid.is_some()
+                && matches!(
+                    ownership.state,
+                    Some(LocalChildLiveness::Dead | LocalChildLiveness::IdentityMismatch)
+                );
             let stored = inner
                 .jobs
                 .get_mut(&job_id)
@@ -2256,7 +2265,9 @@ impl JobStore {
                     None,
                 )
             })?;
-            if stored.job.status == JobStatus::Cancelled || controller.cancellation_requested {
+            if stored.job.status == JobStatus::Cancelled
+                || (controller.cancellation_requested && !proven_dead)
+            {
                 return Ok(stored.job.clone());
             }
             if self.controller_completion_pending(job_id)? {
@@ -2278,15 +2289,34 @@ impl JobStore {
                 && controller.execution_claim_id.is_none()
                 && controller.checkpoint.is_none()
                 && no_external_work;
+            let settle_inline = claimless || proven_dead;
             let now = timestamp_ms();
             stored.job.updated_at_ms = now;
-            if claimless {
+            if settle_inline {
                 // Only proven absence permits inline cancellation. An admitted
                 // external launcher is owned even before a worker/checkpoint exists.
                 stored.job.status = JobStatus::Cancelled;
                 stored.job.finished_at_ms = Some(now);
             }
-            if claimless {
+            if settle_inline {
+                // No worker remains to advance its cancellation checkpoint. Fence
+                // the parent first, then request cancellation of every owned child.
+                let children: Vec<_> = inner
+                    .jobs
+                    .iter()
+                    .filter_map(|(id, child)| {
+                        (!child.job.status.is_terminal()
+                            && child
+                                .controller_job
+                                .as_ref()
+                                .and_then(|state| state.parent_job_id)
+                                == Some(job_id))
+                        .then_some(*id)
+                    })
+                    .collect();
+                for child in children {
+                    self.request_controller_cancellation_locked(inner, child, reason.clone())?;
+                }
                 Self::append_event_already_locked(
                     self,
                     inner,

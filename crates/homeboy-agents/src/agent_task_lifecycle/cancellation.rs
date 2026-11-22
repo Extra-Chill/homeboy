@@ -870,6 +870,23 @@ fn cancel_resolved_run_in_store(
                 return defer_cancellation_for_terminal_provider(record, reason);
             }
 
+            // Only settlement (never a request-only response) can classify a
+            // never-launched provider as lost. Operator cancellation keeps its
+            // existing semantics.
+            let provider_launch_lost = provenance
+                .as_ref()
+                .is_some_and(|value| value["cause"] == "reconcile")
+                && record.state() == RunExecutionState::Queued
+                && record.provider_handles.is_empty()
+                && record.metadata["provider_state"] == "pending"
+                && record.metadata["provider_run_ids"]
+                    .as_array()
+                    .is_some_and(Vec::is_empty);
+            let reason = if provider_launch_lost {
+                Some("provider_launch_lost")
+            } else {
+                reason
+            };
             let cancelled_at = now_timestamp();
             let was_stale_running = record.state() == RunExecutionState::Running;
             record.updated_at = Some(cancelled_at.clone());
@@ -884,6 +901,12 @@ fn cancel_resolved_run_in_store(
             let metadata = record.ensure_metadata_object();
             terminalize_running_provider_executions(metadata, &cancelled_at);
             metadata.insert("cancelled_at".to_string(), json!(cancelled_at));
+            if provider_launch_lost {
+                metadata.insert("retryable".to_string(), json!(true));
+                metadata
+                    .entry("reconciliation".to_string())
+                    .or_insert_with(|| json!({}))["reason"] = json!("provider_launch_lost");
+            }
             metadata.insert(
                 "cancel_reason".to_string(),
                 json!(reason.unwrap_or("cancel requested")),

@@ -2213,6 +2213,7 @@ fn spawn_local_child_reservation_reconciler(
             let _ = job_store.reconcile_expired_admissions();
             // A queued job whose waiting owner went silent leaves the queue
             // before admission can hand it a slot (#18601).
+            let _ = job_store.reconcile_controller_cancellations();
             let _ = job_store.reconcile_abandoned_queued_jobs();
             let _ = job_store.reconcile_direct_admissions();
             let _ = job_store.compact_retained_history();
