@@ -774,7 +774,7 @@ pub(crate) fn continuation_candidate_refusal(
     {
         return None;
     }
-    let promotion = persisted_promotion_from_record(&record.run_id, record.clone())
+    let promotion = persisted_promotion_from_record(&record.run_id, record)
         .ok()
         .flatten();
     if promotion.as_ref().is_some_and(|promotion| {
@@ -807,7 +807,7 @@ pub fn preflight_cook_promotion_for_observation_in_store(
     record: &agent_task_lifecycle::AgentTaskRunRecord,
     aggregate: Option<&AgentTaskAggregate>,
 ) -> Result<Value> {
-    if let Some(promotion) = persisted_promotion_from_record(run_id, record.clone())? {
+    if let Some(promotion) = persisted_promotion_from_record(run_id, record)? {
         let behavior = if promotion.status == AgentTaskPromotionStatus::GateDeferred {
             "resume_deferred_gates"
         } else if promotion.status == AgentTaskPromotionStatus::VerificationPending {
@@ -832,7 +832,7 @@ pub fn preflight_cook_promotion_for_observation_in_store(
         }
     }
     let (aggregate, outcome) = continuation_outcome(run_id, aggregate)?;
-    if let Some(promotion) = persisted_promotion_from_record(run_id, record.clone())? {
+    if let Some(promotion) = persisted_promotion_from_record(run_id, record)? {
         let behavior = if promotion.status == AgentTaskPromotionStatus::GateDeferred {
             "resume_deferred_gates"
         } else if promotion.status == AgentTaskPromotionStatus::VerificationPending {
@@ -1085,12 +1085,12 @@ pub(crate) fn persisted_promotion_for_attempt(
     run_id: &str,
 ) -> Result<Option<AgentTaskPromotionReport>> {
     let record = agent_task_lifecycle::reconcile_status(run_id)?;
-    persisted_promotion_from_record(run_id, record)
+    persisted_promotion_from_record(run_id, &record)
 }
 
 pub(crate) fn persisted_promotion_from_record(
     requested_run_id: &str,
-    record: agent_task_lifecycle::AgentTaskRunRecord,
+    record: &agent_task_lifecycle::AgentTaskRunRecord,
 ) -> Result<Option<AgentTaskPromotionReport>> {
     let Some(value) = recorded_promotion_report(&record.metadata)? else {
         return Ok(None);
@@ -1139,7 +1139,7 @@ pub(crate) fn persisted_promotion_for_attempt_in_store(
                 .artifact_root()?,
         )?;
     }
-    persisted_promotion_from_record(run_id, record)
+    persisted_promotion_from_record(run_id, &record)
 }
 
 /// Whether `promotion` is an already-applied candidate whose verification
@@ -6016,7 +6016,7 @@ fn delivered_candidate_facts(
     let Some(record) = record else {
         return DeliveredCandidateFacts::default();
     };
-    let Some(promotion) = persisted_promotion_from_record(&record.run_id, record.clone())
+    let Some(promotion) = persisted_promotion_from_record(&record.run_id, record)
         .ok()
         .flatten()
     else {

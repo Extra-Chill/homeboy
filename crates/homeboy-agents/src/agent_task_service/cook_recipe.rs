@@ -2008,7 +2008,7 @@ pub fn preflight_recipe_attempt_for_continuation_in_store(
     }
     let (record, aggregate) = lifecycle_store.read_record_with_aggregate_bounded(run_id)?;
     validate_recipe_attempt_record_in_store(lifecycle_store, recipe, run_id, &record)?;
-    if super::cook_promotion::persisted_promotion_from_record(run_id, record.clone())?.is_some() {
+    if super::cook_promotion::persisted_promotion_from_record(run_id, &record)?.is_some() {
         return Ok((record, aggregate));
     }
     if let Some(reason) =

@@ -115,8 +115,8 @@ pub use runner_continuation::{
 };
 pub use runner_exec::*;
 pub(crate) use terminal_transition::{
-    observed_with_run_state, project_task_state, reset_for_requeue, set_run_state, settle_run,
-    start_run, StateWriteAuthority,
+    project_task_state, reset_for_requeue, set_run_state, settle_run, start_run,
+    StateWriteAuthority,
 };
 pub use terminal_transition::{
     AgentTaskAdvance, AgentTaskTransition, AgentTaskTransitionConflict, AgentTaskTransitionError,

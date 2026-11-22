@@ -214,7 +214,6 @@ impl LifecycleStoreLookup {
         record: AgentTaskRunRecord,
         aggregate: Option<crate::agent_tasks::AgentTaskAggregate>,
     ) -> Result<RunSnapshot, ControlPlaneError> {
-        let record = crate::agent_task_service::project_cook_observation(&self.store, &record);
         let plan = self.plan(&record.run_id)?;
         Ok(RunSnapshot {
             record,

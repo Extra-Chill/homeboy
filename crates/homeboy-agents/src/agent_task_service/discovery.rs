@@ -1172,7 +1172,7 @@ fn discovery_outcome(record: &AgentTaskRunRecord) -> AgentTaskRunRecord {
     agent_task_lifecycle::AgentTaskLifecycleStore::from_environment()
         .and_then(|store| {
             let selected = agent_task_lifecycle::status_in_store(&store, &record.run_id)?;
-            Ok(super::cook::project_cook_observation(&store, &selected))
+            Ok(selected)
         })
         .unwrap_or_else(|_| record.clone())
 }

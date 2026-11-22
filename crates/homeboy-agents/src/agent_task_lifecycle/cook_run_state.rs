@@ -564,12 +564,65 @@ impl CookRunPhase {
     }
 }
 
+/// End-to-end outcome from durable Cook evidence, without recipe reads.
+fn observed_execution_state(record: &AgentTaskRunRecord) -> RunExecutionState {
+    let stored = record.state();
+    // Publication is the end-to-end receipt, not a second verdict derived
+    // from a possibly older promotion or terminal-progress snapshot.
+    if crate::agent_task_service::CookDelivery::from_run_metadata(&record.metadata)
+        .is_some_and(|d| d.published())
+    {
+        return RunExecutionState::Succeeded;
+    }
+    if stored != RunExecutionState::Succeeded {
+        return stored;
+    }
+    let Some(_) = record.metadata["cook_id"].as_str() else {
+        return stored;
+    };
+    let terminal = &record.metadata["cook_progress"];
+    if terminal["phase"] == "terminal"
+        && terminal["terminal_status"] == CookStatus::IntentionalNoChange.as_str()
+        && terminal["terminal_success"] == true
+        && terminal["exit_code"] == 0
+    {
+        return stored;
+    }
+    // The provider finished, but the Cook ended without a change. There is no
+    // candidate to recover, so it must not read as `candidate_recoverable`
+    // (#15294).
+    if terminal["phase"] == "terminal"
+        && terminal["terminal_status"] == CookStatus::NoChanges.as_str()
+    {
+        return RunExecutionState::PartialFailure;
+    }
+    let verified =
+        crate::agent_task_service::persisted_promotion_from_record(&record.run_id, record)
+            .ok()
+            .flatten()
+            .is_some_and(|promotion| {
+                matches!(
+                    promotion.status,
+                    crate::agent_task_promotion::AgentTaskPromotionStatus::Applied
+                        | crate::agent_task_promotion::AgentTaskPromotionStatus::GateFailed
+                        | crate::agent_task_promotion::AgentTaskPromotionStatus::VerifiedNoChanges
+                ) && promotion.finalization_eligible()
+            });
+    let no_finalize = terminal["terminal_status"] == "green_no_finalize";
+    if !(verified && no_finalize) {
+        return RunExecutionState::CandidateRecoverable;
+    }
+    stored
+}
+
 /// The one classification of a Cook run, read by every surface.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct CookRunState {
     #[serde(skip)]
     pub(crate) liveness: AgentTaskLiveness,
     pub phase: CookRunPhase,
+    /// End-to-end execution outcome, distinct from the stored provider outcome.
+    pub execution_state: RunExecutionState,
     /// The record's execution ended. A [`CookRunPhase::Continuing`] run is
     /// terminal but still in flight: its continuation owner carries it.
     pub terminal: bool,
@@ -598,7 +651,8 @@ impl CookRunState {
     /// Classify `record`. This is the only place a Cook run's phase,
     /// terminality and recoverability are decided.
     pub fn of(record: &AgentTaskRunRecord) -> Self {
-        let execution_phase = CookRunPhase::of_execution(record.state());
+        let execution_state = observed_execution_state(record);
+        let execution_phase = CookRunPhase::of_execution(execution_state);
         // Delivery, fences and live owners refine the execution phase; they
         // are observations, not durable phase-transition facts.
         let liveness = classify_liveness(record, chrono::Utc::now(), &BTreeSet::new());
@@ -623,6 +677,7 @@ impl CookRunState {
         Self {
             liveness,
             phase,
+            execution_state,
             terminal,
             retryable: matches!(
                 phase,
@@ -646,6 +701,19 @@ impl CookRunState {
                 })?;
         let mut next = self.clone();
         next.phase = phase;
+        next.execution_state = match phase {
+            CookRunPhase::Continuing => self.execution_state,
+            phase => match phase {
+                CookRunPhase::Queued => RunExecutionState::Queued,
+                CookRunPhase::Running => RunExecutionState::Running,
+                CookRunPhase::CandidateRecoverable => RunExecutionState::CandidateRecoverable,
+                CookRunPhase::Succeeded => RunExecutionState::Succeeded,
+                CookRunPhase::PartialFailure => RunExecutionState::PartialFailure,
+                CookRunPhase::Failed => RunExecutionState::Failed,
+                CookRunPhase::Cancelled => RunExecutionState::Cancelled,
+                _ => RunExecutionState::Unknown,
+            },
+        };
         next.terminal = !matches!(phase, CookRunPhase::Queued | CookRunPhase::Running);
         next.retryable = matches!(
             phase,
@@ -813,6 +881,7 @@ mod tests {
 
     fn state(phase: CookRunPhase, fenced: bool, live_owner: bool) -> CookRunState {
         CookRunState {
+            execution_state: RunExecutionState::Unknown,
             liveness: AgentTaskLiveness::Stale,
             phase,
             terminal: !matches!(phase, P::Queued | P::Running),

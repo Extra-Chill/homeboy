@@ -250,11 +250,11 @@ fn workflow_cook_record(
         .ok()
         .and_then(|recipe| recipe.attempts.last().map(|attempt| attempt.run_id.clone()));
     if let Some(attempt) = latest.and_then(|run_id| store.read_record(&run_id).ok()) {
-        return Ok(super::project_cook_observation(&store, &attempt));
+        return Ok(attempt);
     }
     match parent {
         _ if redirected => Err(WorkflowRunOutcome::Pending),
-        Some(parent) => Ok(super::project_cook_observation(&store, &parent)),
+        Some(parent) => Ok(parent),
         None => Err(WorkflowRunOutcome::Unknown),
     }
 }
