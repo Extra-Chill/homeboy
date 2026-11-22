@@ -159,6 +159,7 @@ pub(crate) fn converge_runner_service_binaries(
     let Some(target) = entry.new_version.clone() else {
         return entry;
     };
+    progress::begin_step(&runner.id, progress::ConvergenceStep::ServiceBinaries);
     let service_managed = runner.settings.service_managed;
     let observe_and_classify =
         |observe: &mut dyn FnMut(&str) -> Result<Vec<ServiceUnitObservation>>| {

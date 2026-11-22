@@ -12,6 +12,8 @@ use crate::upgrade::{
     ExtensionUpgradeEntry, RunnerCheckEntry, RunnerUpgradeEntry, ServiceRestartEntry,
 };
 use homeboy_core::error::Result;
+use serde::{Deserialize, Serialize};
+use std::sync::OnceLock;
 
 /// The runner-upgrade contract the core upgrade flow depends on. Implemented by
 /// the runner layer and registered at startup.
@@ -100,4 +102,42 @@ homeboy_engine_primitives::provider_registry! {
     /// Run `f` against the registered provider, or the no-op provider if none is
     /// registered.
     with: pub(crate) fn with_runner_upgrade,
+}
+
+/// Where configured-runner convergence currently is, sampled by the upgrade
+/// heartbeat so `upgrade status` names the step it is blocked on instead of a
+/// fixed label.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RunnerConvergenceProgress {
+    pub runner_id: String,
+    /// Convergence step: a `refresh-homeboy` sub-phase while the runner binary
+    /// converges (`materialize`, `promote`, `reconnect`, ...), then
+    /// `extension_sync` and `service_binaries`.
+    pub sub_phase: String,
+    /// The item within the step, e.g. the extension being synced.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub item: Option<String>,
+    /// What the step waits on, e.g. `Lab admission (pressure)`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub waiting_on: Option<String>,
+    /// Local run record of the runner job in flight (`homeboy runs show`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub run_id: Option<String>,
+}
+
+type RunnerConvergenceProgressSampler = fn() -> Option<RunnerConvergenceProgress>;
+
+static RUNNER_CONVERGENCE_PROGRESS: OnceLock<RunnerConvergenceProgressSampler> = OnceLock::new();
+
+/// Register the runner layer's live convergence-progress sampler. Kept apart
+/// from the provider registry: the heartbeat samples while
+/// `upgrade_configured_runners` holds the provider slot.
+pub fn register_runner_convergence_progress(sampler: RunnerConvergenceProgressSampler) {
+    let _ = RUNNER_CONVERGENCE_PROGRESS.set(sampler);
+}
+
+pub(crate) fn runner_convergence_progress() -> Option<RunnerConvergenceProgress> {
+    RUNNER_CONVERGENCE_PROGRESS
+        .get()
+        .and_then(|sample| sample())
 }

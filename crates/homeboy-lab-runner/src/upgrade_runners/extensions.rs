@@ -19,6 +19,14 @@ pub fn sync_runner_extensions(
     let mut synced = Vec::new();
     let mut skipped = Vec::new();
     let mut failed = Vec::new();
+    // Extension sync finishes converging the runner the upgrade just
+    // refreshed, so it is admitted as convergence like that refresh. As bulk
+    // workload it queued behind the saturated Lab's gates for minutes per
+    // job while the upgrade reported only that it was refreshing runners.
+    let exec = &mut |runner_id: &str, options: RunnerExecOptions| {
+        exec(runner_id, convergence_admission(options))
+    };
+    let total = extension_updates.len();
     let installed = extension_updates
         .iter()
         .any(|extension| {
@@ -27,6 +35,7 @@ pub fn sync_runner_extensions(
                 && runner_supports_extension_sync(runner, &extension.extension_id)
         })
         .then(|| {
+            progress::begin_item("inventory".to_string());
             let (output, code) = exec(
                 &runner.id,
                 RunnerExecOptions::raw_command(vec![
@@ -54,7 +63,12 @@ pub fn sync_runner_extensions(
                 .cloned()
                 .ok_or_else(|| "runner extension inventory omitted data.entities".to_string())
         });
-    for extension in extension_updates {
+    for (index, extension) in extension_updates.iter().enumerate() {
+        progress::begin_item(format!(
+            "{} ({}/{total})",
+            extension.extension_id,
+            index + 1
+        ));
         let (Some(source_url), Some(source_revision)) = (
             extension.source_url.as_deref(),
             extension.source_revision.as_deref(),
@@ -148,6 +162,16 @@ pub fn sync_runner_extensions(
     }
 
     (synced, skipped, failed)
+}
+
+/// Admit a runner job outside bulk pressure admission, as the daemon does for
+/// a Homeboy refresh (#18376). Process capacity is still reserved.
+pub(crate) fn convergence_admission(mut options: RunnerExecOptions) -> RunnerExecOptions {
+    options.env.insert(
+        homeboy_core::runner_pressure::ADMISSION_CLASS_ENV.to_string(),
+        homeboy_core::runner_pressure::CONVERGENCE_ADMISSION_CLASS.to_string(),
+    );
+    options
 }
 
 pub(crate) fn runner_supports_extension_sync(runner: &Runner, extension_id: &str) -> bool {

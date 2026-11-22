@@ -563,7 +563,9 @@ pub fn upgrade_configured_runners(
             );
             // A runner is converged only when its runner-service units
             // run the converged binary too (#15733).
-            converge_service_binaries_for_entries(&runners, updated, skipped)
+            let converged = converge_service_binaries_for_entries(&runners, updated, skipped);
+            progress::finish();
+            converged
         };
         Ok(crate::controller_identity::with_converging_controller(
             expected_controller_identity,
@@ -686,6 +688,7 @@ pub fn upgrade_runner_with_executor(
     status: &impl Fn(&str) -> Result<RunnerStatusReport>,
     converge: &mut impl FnMut(&Runner, &BuildIdentity) -> RunnerBinaryStep,
 ) -> RunnerUpgradeEntry {
+    progress::begin_step(&runner.id, progress::ConvergenceStep::Binary);
     let RunnerBinaryStep {
         mut convergence,
         homeboy_path,
@@ -744,6 +747,7 @@ pub fn upgrade_runner_with_executor(
         }
     };
 
+    progress::begin_step(&runner.id, progress::ConvergenceStep::ExtensionSync);
     let (extensions_synced, extensions_skipped, extensions_failed) =
         sync_runner_extensions(runner, &homeboy_path, extension_updates, exec);
     let stale_daemon = status(&runner.id)

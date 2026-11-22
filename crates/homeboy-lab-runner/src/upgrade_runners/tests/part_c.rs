@@ -77,3 +77,32 @@ fn runner_extension_sync_installs_only_changed_or_unknown_revisions() {
         assert_eq!(command.last().unwrap(), "--replace");
     }
 }
+
+#[test]
+fn runner_extension_sync_is_admitted_as_convergence_not_bulk_workload() {
+    let runner = ssh_runner("lab", Some("homeboy"));
+    let updates = vec![extension_update("wordpress", "123456abcdef")];
+    let mut admission_classes = Vec::new();
+    let (synced, _, failed) =
+        sync_runner_extensions(&runner, "homeboy", &updates, &mut |runner_id, options| {
+            admission_classes.push(
+                options
+                    .env
+                    .get(homeboy_core::runner_pressure::ADMISSION_CLASS_ENV)
+                    .cloned(),
+            );
+            let stdout = if admission_classes.len() == 1 {
+                r#"{"success":true,"data":{"entities":[]}}"#
+            } else {
+                ""
+            };
+            Ok((exec_output(runner_id, options.command, stdout, "", 0), 0))
+        });
+    assert!(failed.is_empty());
+    assert_eq!(synced.len(), 1);
+    // Inventory and install both bypass the saturated Lab's pressure queue.
+    assert_eq!(
+        admission_classes,
+        vec![Some(homeboy_core::runner_pressure::CONVERGENCE_ADMISSION_CLASS.to_string()); 2]
+    );
+}

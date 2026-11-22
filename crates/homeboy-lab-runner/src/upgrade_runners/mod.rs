@@ -9,6 +9,7 @@ mod commands;
 mod extensions;
 mod failure;
 mod orchestration;
+pub(crate) mod progress;
 mod reporting;
 mod service_binaries;
 mod version;
@@ -104,6 +105,7 @@ impl RunnerUpgradeProvider for RunnerUpgrade {
 /// startup.
 pub fn register() {
     homeboy_upgrade::upgrade::register_runner_upgrade_provider(Box::new(RunnerUpgrade));
+    homeboy_upgrade::upgrade::register_runner_convergence_progress(progress::sample);
     homeboy_upgrade::upgrade::register_runner_direct_active_jobs_provider(Box::new(
         RunnerDirectActiveJobs,
     ));
