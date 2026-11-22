@@ -413,6 +413,15 @@ fn cook_id_is_reserved_for_the_daemon_step() {
 /// an attempt that status can resolve, rather than merely its zero-task parent.
 #[test]
 fn cook_accepts_local_detachment_after_materializing_an_executable_attempt() {
+    assert_detached_cook_materializes_attempt(false);
+}
+
+#[test]
+fn detached_cook_materializes_attempt_before_waiting_for_local_pressure() {
+    assert_detached_cook_materializes_attempt(true);
+}
+
+fn assert_detached_cook_materializes_attempt(force_pressure: bool) {
     let context = HermeticTestContext::new();
     let (_checkout_guard, checkout) =
         homeboy_core::test_support::shared_committed_git_repo_fixture("local-detach-acceptance");
@@ -430,6 +439,9 @@ fn cook_accepts_local_detachment_after_materializing_an_executable_attempt() {
     let cook_id = "local-detach-materializes-attempt";
     let output_path = context.root().join("local-detach-handoff.json");
     let mut command = context.command(TestBinary::HomeboyFixture);
+    if force_pressure {
+        command.env("HOMEBOY_TEST_LOAD_AVERAGES", "1000000,1000000,1000000");
+    }
     command.args([
         "--placement",
         "local",
@@ -525,6 +537,31 @@ fn cook_accepts_local_detachment_after_materializing_an_executable_attempt() {
             })),
         "the Cook step admission must carry its durable Cook identity"
     );
+
+    if force_pressure {
+        // Acceptance and the queue record are separate publications. Wait for
+        // the latter without assuming the child has run since the handoff.
+        let deadline = Instant::now() + Duration::from_secs(30);
+        loop {
+            let record = lifecycle_store
+                .read_record(&attempt_id)
+                .expect("read queued Cook attempt");
+            if record.metadata["cook_progress"]["phase"] == "queued_local_pressure" {
+                break;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "Cook never recorded its pressure wait"
+            );
+            std::thread::yield_now();
+        }
+        let mut status = context.command(TestBinary::HomeboyFixture);
+        status.args(["agent-task", "status", cook_id]);
+        let status = bounded_output(status);
+        let stdout = String::from_utf8_lossy(&status.stdout);
+        assert!(status.status.success(), "{stdout}");
+        assert!(stdout.contains("queued_local_pressure"), "{stdout}");
+    }
 
     // Cancel through the durable Cook alias, then wait on the returned attempt.
     // The controller job owns process-tree termination and reaping; this keeps
