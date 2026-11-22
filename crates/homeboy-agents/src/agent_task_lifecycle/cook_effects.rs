@@ -35,15 +35,46 @@ pub struct CookEffectLease {
     store: AgentTaskLifecycleStore,
     effect: EffectId,
     fence: u64,
+    _heartbeat: EffectLeaseHeartbeat,
+}
+
+/// Keeps an owned outbox lease alive until its result has been persisted.
+#[derive(Debug)]
+pub(crate) struct EffectLeaseHeartbeat {
     stop: mpsc::Sender<()>,
     worker: Option<thread::JoinHandle<()>>,
 }
 
-impl Drop for CookEffectLease {
+impl Drop for EffectLeaseHeartbeat {
     fn drop(&mut self) {
         let _ = self.stop.send(());
         if let Some(worker) = self.worker.take() {
             let _ = worker.join();
+        }
+    }
+}
+
+impl EffectLeaseHeartbeat {
+    pub(crate) fn start(
+        store: AgentTaskLifecycleStore,
+        effect: EffectId,
+        fence: u64,
+        lease: Duration,
+    ) -> Self {
+        let (stop, receiver) = mpsc::channel();
+        let worker = thread::spawn(move || {
+            while receiver.recv_timeout(lease / 3) == Err(mpsc::RecvTimeoutError::Timeout) {
+                let renewed = store.open_observation_initialized().and_then(|db| {
+                    db.renew_control_plane_effect_lease(&effect, fence, &deadline(lease))
+                });
+                if !matches!(renewed, Ok(true)) {
+                    break;
+                }
+            }
+        });
+        Self {
+            stop,
+            worker: Some(worker),
         }
     }
 }
@@ -194,25 +225,12 @@ pub fn claim_operation_with_intent_in_store(
         return Ok(ClaimOutcome::LeaseHeld);
     };
     let fence = leased.lease_fence;
-    let (stop, receiver) = mpsc::channel();
-    let renewal_store = store.clone();
-    let renewal_effect = effect.clone();
-    let worker = thread::spawn(move || {
-        while receiver.recv_timeout(lease / 3) == Err(mpsc::RecvTimeoutError::Timeout) {
-            let renewed = renewal_store.open_observation_initialized().and_then(|db| {
-                db.renew_control_plane_effect_lease(&renewal_effect, fence, &deadline(lease))
-            });
-            if !matches!(renewed, Ok(true)) {
-                break;
-            }
-        }
-    });
+    let heartbeat = EffectLeaseHeartbeat::start(store.clone(), effect.clone(), fence, lease);
     Ok(ClaimOutcome::Acquired(CookEffectLease {
         store: store.clone(),
         effect,
         fence,
-        stop,
-        worker: Some(worker),
+        _heartbeat: heartbeat,
     }))
 }
 
