@@ -4,6 +4,16 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.489.1] - 2026-11-22
+
+### Changed
+- one Cook phase classifier
+- settle continuation claims from the pass disposition
+
+### Fixed
+- don't double-count libtest failures in baseline records
+- libtest slow-test warnings are not gate environment failures
+
 ## [0.489.0] - 2026-11-22
 
 ### Added
