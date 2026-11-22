@@ -2,6 +2,11 @@
 
 All notable changes to the **rust** extension will be documented in this file.
 
+## [1.37.13] - 2026-11-22
+
+### Fixed
+- select full crate + workspace dependents for Rust production changes
+
 ## [1.37.12] - 2026-11-17
 
 ### Fixed
