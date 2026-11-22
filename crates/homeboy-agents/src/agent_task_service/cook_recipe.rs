@@ -1066,6 +1066,15 @@ pub(super) fn admitted_gate_policy(
     options: &CookRequest,
 ) -> Result<crate::agent_task_gate::VerifyGateOptions> {
     let mut gates = options.gates.clone();
+    if gates.gate_environment.component_cwd.is_none() {
+        gates.gate_environment.component_cwd = options
+            .identity
+            .initial_plan
+            .metadata
+            .pointer("/cook_repository_identity/component_cwd")
+            .and_then(Value::as_str)
+            .map(str::to_owned);
+    }
     gates.include_repro_in_candidate_gates();
     default_gate_lab_runner_from_attempt_dispatch(&mut gates, &durable_attempt_dispatch(options)?);
     Ok(gates)
@@ -3101,6 +3110,14 @@ fn reconstruct_recipe_options(
         gates.gate_environment.admitted_component_id =
             super::cook::cook_repository_identity_component_id(&initial.plan);
     }
+    if gates.gate_environment.component_cwd.is_none() {
+        gates.gate_environment.component_cwd = initial
+            .plan
+            .metadata
+            .pointer("/cook_repository_identity/component_cwd")
+            .and_then(Value::as_str)
+            .map(str::to_owned);
+    }
     // Existing cooks pick up placement-following gates on continuation: a
     // recipe persisted before the default existed reconstructs with its
     // recorded Lab attempt runner (#15668).
@@ -4708,6 +4725,34 @@ mod tests {
             initial_recipe(&request)
                 .expect("admission recipe")
                 .gate_policy
+        );
+    }
+
+    #[test]
+    fn cook_component_cwd_survives_gate_admission_and_legacy_reconstruction() {
+        let mut request =
+            reconstruct_options_without_dispatcher(&recipe()).expect("reconstruct fixture");
+        request.identity.initial_plan.metadata["cook_repository_identity"] =
+            serde_json::json!({"component_cwd": "plugins/events"});
+        let admitted = admitted_gate_policy(&request).unwrap();
+        assert_eq!(
+            admitted.gate_environment.component_cwd.as_deref(),
+            Some("plugins/events")
+        );
+        let mut persisted = initial_recipe(&request).unwrap();
+        assert_eq!(
+            persisted.gate_policy["gate_environment"]["component_cwd"],
+            "plugins/events"
+        );
+        // Recipes written before #18791 have the path only in the plan.
+        persisted.gate_policy["gate_environment"]
+            .as_object_mut()
+            .unwrap()
+            .remove("component_cwd");
+        let restored = reconstruct_options_without_dispatcher(&persisted).unwrap();
+        assert_eq!(
+            restored.gates.gate_environment.component_cwd.as_deref(),
+            Some("plugins/events")
         );
     }
 

@@ -297,6 +297,10 @@ pub struct AgentTaskGateEnvironmentPolicy {
     /// instead of re-deriving a component from the worktree path.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub admitted_component_id: Option<String>,
+    /// Cook-admitted repository-relative package path, used when the gate host
+    /// has no component registration. Empty means the repository root.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub component_cwd: Option<String>,
     /// Selected extension sources are copied under the isolated HOME. Gates
     /// never receive a writable path to the controller-owned source.
     #[serde(default)]
@@ -423,6 +427,7 @@ impl Default for AgentTaskGateEnvironmentPolicy {
             hydrate_dependencies: true,
             shared_cargo_target: None,
             admitted_component_id: None,
+            component_cwd: None,
             extension_inputs: Vec::new(),
             extension_sources: Vec::new(),
             data_inputs: Vec::new(),
@@ -1052,6 +1057,7 @@ impl AgentTaskGateEnvironment {
             hydrate_dependencies: true,
             shared_cargo_target: self.cargo_target.as_ref().map(|_| true),
             admitted_component_id: None,
+            component_cwd: None,
             data_inputs: self.data_inputs.clone(),
             extension_inputs: self
                 .extension_inputs
