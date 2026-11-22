@@ -15,6 +15,9 @@ use homeboy_core::error::Result;
 use serde::{Deserialize, Serialize};
 use std::sync::OnceLock;
 
+/// Runner id to whether its release slot was already prefetched.
+pub type RunnerReleasePrefetch = std::collections::BTreeMap<String, bool>;
+
 /// The runner-upgrade contract the core upgrade flow depends on. Implemented by
 /// the runner layer and registered at startup.
 pub trait RunnerUpgradeProvider: Send + Sync {
@@ -30,8 +33,13 @@ pub trait RunnerUpgradeProvider: Send + Sync {
 
     /// Acquire `tag` into each managed runner's immutable binary slot without
     /// selecting it, so the later runner refresh reuses the acquired slot.
-    fn acquire_runner_release(&self, _tag: &str, _runner_targets: &[String]) -> Result<()> {
-        Ok(())
+    /// Reports, per runner, whether the slot was already acquired.
+    fn acquire_runner_release(
+        &self,
+        _tag: &str,
+        _runner_targets: &[String],
+    ) -> Result<RunnerReleasePrefetch> {
+        Ok(RunnerReleasePrefetch::new())
     }
 
     /// Refresh the configured runners into managed release slots,

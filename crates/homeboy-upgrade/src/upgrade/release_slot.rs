@@ -23,10 +23,19 @@ mkdir -p "$binaries"
   release_marker="$binaries/.release-$release_tag.sha256"
   cached_sha=$(cat "$release_marker" 2>/dev/null || true)
   cached_binary="$binaries/homeboy-$cached_sha/homeboy"
-  if [ -n "$cached_sha" ] && [ -x "$cached_binary" ] && [ "$(hash_binary "$cached_binary")" = "$cached_sha" ]; then
+  # The installer's own version probe: a prefetched slot must still be the
+  # release it is recorded as, not merely an intact file.
+  slot_version() { "$1" --version 2>/dev/null | awk '{print $NF}' | sed 's/^v//; s/+.*$//'; }
+  if [ -n "$cached_sha" ] && [ -x "$cached_binary" ] && [ "$(hash_binary "$cached_binary")" = "$cached_sha" ] && [ "$(slot_version "$cached_binary")" = "${release_tag#v}" ]; then
     binary="$cached_binary"
     echo "HOMEBOY_REFRESH_BINARY_ORIGIN=release-cache:$release_tag"
   else
+    # A recorded slot that no longer verifies is discarded so the fresh
+    # download can republish it instead of tripping the slot hash guard.
+    if printf '%s' "$cached_sha" | grep -Eq '^[0-9a-f]{64}$'; then
+      rm -rf "$binaries/homeboy-$cached_sha"
+    fi
+    rm -f "$release_marker"
     release_stage=$(mktemp -d "$binaries/.stage-XXXXXX")
     trap cleanup_release_stage EXIT HUP INT TERM
     HOMEBOY_INSTALL_STAGE_ONLY=1 HOMEBOY_INSTALL_PATH="$release_stage/homeboy" HOMEBOY_UPGRADE_RELEASE_TAG="$release_tag" HOMEBOY_UPGRADE_RELEASE_VERSION="${release_tag#v}" sh -c "$homeboy_installer"
@@ -138,26 +147,81 @@ pub fn binaries_dir() -> Result<PathBuf> {
 pub fn acquire_release_slot(tag: &str, binaries: &Path) -> Result<PathBuf> {
     semver::Version::parse(tag.trim_start_matches('v'))
         .map_err(|error| Error::internal_unexpected(format!("invalid release tag: {error}")))?;
-    let output = super::execution::supervise_installer_shell_command(
-        &materialize_script(tag, &binaries.to_string_lossy()),
-        std::time::Duration::from_secs(20 * 60),
-        "acquire release slot",
-        |_| Ok(()),
-        |_| {},
-    )?;
-    if !output.status.success() {
-        return Err(Error::internal_unexpected(format!(
-            "release acquisition failed: {}",
-            String::from_utf8_lossy(&output.stderr)
-        )));
-    }
-    let slot = String::from_utf8_lossy(&output.stdout)
+    with_acquisition_lock(binaries, "controller", || {
+        let output = super::execution::supervise_installer_shell_command(
+            &materialize_script(tag, &binaries.to_string_lossy()),
+            std::time::Duration::from_secs(20 * 60),
+            "acquire release slot",
+            |_| Ok(()),
+            |_| {},
+        )?;
+        if !output.status.success() {
+            return Err(Error::internal_unexpected(format!(
+                "release acquisition failed: {}",
+                String::from_utf8_lossy(&output.stderr)
+            )));
+        }
+        let slot = String::from_utf8_lossy(&output.stdout)
+            .lines()
+            .find_map(|line| line.strip_prefix("HOMEBOY_REFRESH_BINARY_PATH="))
+            .map(PathBuf::from)
+            .ok_or_else(|| Error::internal_unexpected("release acquisition returned no slot"))?;
+        prune_controller_slots(binaries, tag);
+        Ok(slot)
+    })
+}
+
+/// Serialize acquisitions for one slot store so `homeboy upgrade` waits for an
+/// in-flight daemon prefetch instead of starting a second download of the same
+/// asset. The OS releases the lock when the holder exits, even on a crash.
+pub fn with_acquisition_lock<T>(
+    binaries: &Path,
+    owner: &str,
+    operation: impl FnOnce() -> Result<T>,
+) -> Result<T> {
+    let io = |error: std::io::Error| {
+        Error::internal_io(error.to_string(), Some("lock release acquisition".into()))
+    };
+    std::fs::create_dir_all(binaries).map_err(io)?;
+    let owner: String = owner
+        .chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || c == '-' {
+                c
+            } else {
+                '_'
+            }
+        })
+        .collect();
+    let lock = std::fs::OpenOptions::new()
+        .create(true)
+        .truncate(false)
+        .write(true)
+        .open(binaries.join(format!(".acquire-{owner}.lock")))
+        .map_err(io)?;
+    lock.lock().map_err(io)?;
+    operation()
+}
+
+/// Whether `tag` already has a hash-verified slot, so promotion reuses a
+/// prefetched binary instead of downloading. Version admission still runs.
+pub fn is_release_staged(tag: &str, binaries: &Path) -> bool {
+    let Ok(sha) = std::fs::read_to_string(binaries.join(format!(".release-{tag}.sha256"))) else {
+        return false;
+    };
+    let sha = sha.trim();
+    !sha.is_empty()
+        && homeboy_engine_primitives::content_hash::sha256_file(
+            &binaries.join(format!("homeboy-{sha}")).join("homeboy"),
+        )
+        .is_ok_and(|actual| actual == sha)
+}
+
+/// Whether a materialize run reused an already acquired slot.
+pub fn reused_release_cache(stdout: &str) -> bool {
+    stdout
         .lines()
-        .find_map(|line| line.strip_prefix("HOMEBOY_REFRESH_BINARY_PATH="))
-        .map(PathBuf::from)
-        .ok_or_else(|| Error::internal_unexpected("release acquisition returned no slot"))?;
-    prune_controller_slots(binaries, tag);
-    Ok(slot)
+        .any(|line| line.starts_with("HOMEBOY_REFRESH_BINARY_ORIGIN=release-cache:"))
 }
 
 /// Keep only the running release and the release just acquired. Controller

@@ -40,6 +40,7 @@ fn selected_release_upgrade_downloads_once_cold_and_zero_when_prefetched() {
             if preacquired {
                 acquire_release_slot("v99.0.0", &binaries).unwrap();
             }
+            assert_eq!(is_release_staged("v99.0.0", &binaries), preacquired);
             let downloads = home.path().join("downloads");
             let before = std::fs::read_to_string(&downloads)
                 .unwrap_or_default()
@@ -72,6 +73,42 @@ fn selected_release_upgrade_downloads_once_cold_and_zero_when_prefetched() {
             );
             let after = std::fs::read_to_string(downloads).unwrap().lines().count();
             assert_eq!(after - before, usize::from(!preacquired));
+        });
+    }
+}
+
+#[test]
+fn unverifiable_prefetched_slot_is_discarded_and_reacquired() {
+    for corruption in ["bytes", "version"] {
+        with_isolated_home(|home| {
+            fixture(home.path());
+            let binaries = binaries_dir().unwrap();
+            let slot = acquire_release_slot("v99.0.0", &binaries).unwrap();
+            if corruption == "bytes" {
+                std::fs::write(&slot, "#!/bin/sh\necho 'homeboy 99.0.0'\n").unwrap();
+            } else {
+                // Intact bytes recorded under the wrong release.
+                let stale = home.path().join("stale");
+                homeboy_test_support::write_executable(
+                    &stale,
+                    "#!/bin/sh\necho 'homeboy 1.0.0'\n",
+                    0o755,
+                )
+                .unwrap();
+                let sha = homeboy_engine_primitives::content_hash::sha256_file(&stale).unwrap();
+                std::fs::create_dir_all(binaries.join(format!("homeboy-{sha}"))).unwrap();
+                std::fs::rename(&stale, binaries.join(format!("homeboy-{sha}/homeboy"))).unwrap();
+                std::fs::write(binaries.join(".release-v99.0.0.sha256"), sha).unwrap();
+            }
+            assert!(corruption == "version" || !is_release_staged("v99.0.0", &binaries));
+            assert_eq!(acquire_release_slot("v99.0.0", &binaries).unwrap(), slot);
+            assert!(is_release_staged("v99.0.0", &binaries));
+            let downloads = std::fs::read_to_string(home.path().join("downloads")).unwrap();
+            assert_eq!(
+                downloads.lines().count(),
+                2,
+                "{corruption}: falls back to download"
+            );
         });
     }
 }

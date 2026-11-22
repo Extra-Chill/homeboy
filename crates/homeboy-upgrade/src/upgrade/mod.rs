@@ -38,15 +38,16 @@ pub use runner_admission_provider::{
 };
 pub use runner_upgrade_provider::{
     register_runner_convergence_progress, register_runner_upgrade_provider,
-    RunnerConvergenceProgress, RunnerUpgradeProvider,
+    RunnerConvergenceProgress, RunnerReleasePrefetch, RunnerUpgradeProvider,
 };
 pub(crate) use runner_upgrade_provider::{runner_convergence_progress, with_runner_upgrade};
 pub use services::restart_extension_services;
 pub use types::{
     DaemonPendingRestart, ExtensionPreflightBlocker, ExtensionUpgradeEntry, ExtensionUpgradeSkip,
-    HomeboyPathBinarySync, InstallMethod, RunnerCheckEntry, RunnerConvergenceDisposition,
-    RunnerDaemonDriftEntry, RunnerExtensionSyncEntry, RunnerServiceBinaryEntry, RunnerUpgradeEntry,
-    ServiceRestartEntry, UpgradeComponentStatus, UpgradePreflight, UpgradeResult, VersionCheck,
+    HomeboyPathBinarySync, InstallMethod, ReleasePrefetch, RunnerCheckEntry,
+    RunnerConvergenceDisposition, RunnerDaemonDriftEntry, RunnerExtensionSyncEntry,
+    RunnerServiceBinaryEntry, RunnerUpgradeEntry, ServiceRestartEntry, UpgradeComponentStatus,
+    UpgradePreflight, UpgradeResult, VersionCheck,
 };
 pub use validation::{check_for_updates, check_for_updates_with_runners};
 

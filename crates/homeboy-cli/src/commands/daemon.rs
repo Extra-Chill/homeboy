@@ -1176,13 +1176,11 @@ fn serve(addr: &str) -> CmdResult<DaemonOutput> {
     if !is_runner_hosted_daemon() {
         if let Err(error) = std::thread::Builder::new()
             .name("release-prefetch".into())
-            .spawn(|| loop {
-                if let Err(error) = homeboy_upgrade::update_check::prefetch_release() {
-                    homeboy::core::log_status!("update", "Release prefetch failed: {}", error);
+            .spawn(|| {
+                let mut prefetcher = homeboy_upgrade::update_check::ReleasePrefetcher::default();
+                loop {
+                    std::thread::sleep(prefetcher.tick());
                 }
-                std::thread::sleep(std::time::Duration::from_secs(
-                    homeboy_upgrade::update_check::PREFETCH_INTERVAL_SECS,
-                ));
             })
         {
             homeboy::core::log_status!("update", "Could not start release prefetch: {}", error);
