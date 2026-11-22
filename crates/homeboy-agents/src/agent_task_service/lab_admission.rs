@@ -17,15 +17,7 @@ pub fn execution_step_wait(record: &agent_task_lifecycle::AgentTaskRunRecord) ->
     let mut wait = store.step_runner_wait(key).ok()??;
     let runner = wait["runner_eligible"].as_str()?;
     let reason = wait["reason"].as_str()?;
-    let action = match reason {
-        "daemon_incompatible" | "daemon_not_fresh" => {
-            format!("homeboy runner refresh-homeboy {runner} --reconnect")
-        }
-        "stale_jobs" => format!("homeboy runner reconcile {runner}"),
-        "capacity_reached" => "wait for runner capacity to become available".to_string(),
-        "pressure" => "wait for runner resource pressure to subside".to_string(),
-        _ => format!("inspect runner {runner} eligibility"),
-    };
+    let action = homeboy_core::substrate_wait::runner_wait_next_action(runner, reason);
     let context = wait["builds"].clone();
     let builds = if context["runner_build"].is_string() {
         format!(
