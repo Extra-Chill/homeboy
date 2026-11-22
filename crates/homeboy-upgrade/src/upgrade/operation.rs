@@ -18,6 +18,7 @@ use homeboy_core::observation::{
     RunListFilter, RunRecord, RunStatus,
 };
 
+use super::runner_upgrade_provider::RunnerConvergenceProgress;
 #[cfg(test)]
 use super::types::RunnerConvergenceDisposition;
 use super::types::{UpgradeComponentStatus, UpgradeResult};
@@ -654,7 +655,7 @@ pub fn load_upgrade_operation_status(id: Option<&str>) -> Result<UpgradeOperatio
             })?,
     };
     let run = reconcile_dead_upgrade_owner(&store, run)?;
-    status_from_run(&run)
+    status_from_run(&project_stale_upgrade(run))
 }
 
 /// A foreground upgrade has no detached worker: if its recorded owner has
@@ -672,26 +673,7 @@ fn reconcile_dead_upgrade_owner(store: &ObservationStore, run: RunRecord) -> Res
 
     let expected = run.metadata_json.clone();
     let mut metadata = expected.clone();
-    reconcile_replacement_projection(&mut metadata);
-    metadata["phase"] = json!("interrupted");
-    metadata["error"] = json!({
-        "code": "InternalUnexpected",
-        "message": "upgrade owner process exited before the operation completed",
-    });
-    metadata["terminal_intent_id"] = json!(format!("upgrade-owner-interrupted:{}", run.id));
-    if metadata["controller"]["status"] == "pending"
-        || metadata["controller"]["status"] == "running"
-    {
-        metadata["controller"] = component(
-            "interrupted",
-            "controller upgrade did not reach a durable completion checkpoint",
-        );
-    }
-    for key in ["extensions", "runners"] {
-        if metadata[key]["status"] == "pending" || metadata[key]["status"] == "running" {
-            metadata[key] = component("interrupted", "owner exited before refresh completed");
-        }
-    }
+    project_owner_interrupted(&mut metadata, &run.id);
     // Owner death before the operation's terminal checkpoint is always
     // non-success, even when the binary swap itself is proven. Preserve that
     // proof in `controller`, while marking unfinished convergence components
@@ -707,6 +689,57 @@ fn reconcile_dead_upgrade_owner(store: &ObservationStore, run: RunRecord) -> Res
             run.id
         ))
     })
+}
+
+/// Project an upgrade whose owner exited before its terminal checkpoint.
+/// Proven controller replacement is kept; unfinished components become
+/// `interrupted` with their last observed progress, so the convergence step
+/// and runner job run the owner was waiting on stay inspectable.
+fn project_owner_interrupted(metadata: &mut Value, run_id: &str) {
+    reconcile_replacement_projection(metadata);
+    metadata["phase"] = json!("interrupted");
+    metadata["error"] = json!({
+        "code": "InternalUnexpected",
+        "message": "upgrade owner process exited before the operation completed",
+    });
+    metadata["terminal_intent_id"] = json!(format!("upgrade-owner-interrupted:{run_id}"));
+    if metadata["controller"]["status"] == "pending"
+        || metadata["controller"]["status"] == "running"
+    {
+        metadata["controller"] = component(
+            "interrupted",
+            "controller upgrade did not reach a durable completion checkpoint",
+        );
+    }
+    for key in ["extensions", "runners"] {
+        let status = &metadata[key]["status"];
+        if status != "pending" && status != "running" {
+            continue;
+        }
+        let summary = match metadata[key]["summary"].as_str() {
+            Some(last) if status == "running" => {
+                format!("owner exited before refresh completed; last observed: {last}")
+            }
+            _ => "owner exited before refresh completed".to_string(),
+        };
+        let progress = metadata[key].get("progress").cloned();
+        metadata[key] = component("interrupted", summary);
+        if let Some(progress) = progress {
+            metadata[key]["progress"] = progress;
+        }
+    }
+}
+
+/// The generic run reconciler marks an exited owner's run `stale`, which is
+/// terminal for the record but carries the last running projection. Report it
+/// with the same terminal outcome as an owner-death reconciliation instead of
+/// a `stale` operation whose components claim to still be running.
+fn project_stale_upgrade(mut run: RunRecord) -> RunRecord {
+    if run.kind == UPGRADE_OPERATION_KIND && run.status == RunStatus::Stale.as_str() {
+        project_owner_interrupted(&mut run.metadata_json, &run.id);
+        run.status = RunStatus::Error.as_str().to_string();
+    }
+    run
 }
 
 pub fn persist_extension_progress(
@@ -791,25 +824,73 @@ pub(crate) fn emit_upgrade_phase(phase: &str) {
     let _ = std::io::Write::flush(&mut std::io::stderr());
 }
 
-pub(crate) fn upgrade_runner_progress_message(elapsed: Duration) -> String {
+pub(crate) fn upgrade_runner_progress_message(
+    elapsed: Duration,
+    progress: Option<&RunnerConvergenceProgress>,
+) -> String {
+    let Some(progress) = progress else {
+        return format!(
+            "phase=refreshing_configured_runners sub_phase=prepare elapsed={}s",
+            elapsed.as_secs()
+        );
+    };
+    let mut message = format!(
+        "phase=refreshing_configured_runners runner={} sub_phase={}",
+        progress.runner_id, progress.sub_phase
+    );
+    if let Some(item) = progress.item.as_deref() {
+        message.push_str(&format!(" item={item}"));
+    }
+    if let Some(waiting_on) = progress.waiting_on.as_deref() {
+        message.push_str(&format!(" waiting_on={waiting_on:?}"));
+    }
+    if let Some(run_id) = progress.run_id.as_deref() {
+        message.push_str(&format!(" run={run_id}"));
+    }
+    message.push_str(&format!(" elapsed={}s", elapsed.as_secs()));
+    message
+}
+
+/// Operator summary of where runner convergence is and what it waits on.
+fn runner_progress_summary(
+    elapsed: Duration,
+    progress: Option<&RunnerConvergenceProgress>,
+) -> String {
+    let Some(progress) = progress else {
+        return format!(
+            "refreshing configured runners (prepare) elapsed={}s",
+            elapsed.as_secs()
+        );
+    };
+    let mut step = format!("{}: {}", progress.runner_id, progress.sub_phase);
+    if let Some(item) = progress.item.as_deref() {
+        step.push_str(&format!(" {item}"));
+    }
+    if let Some(waiting_on) = progress.waiting_on.as_deref() {
+        step.push_str(&format!("; waiting for {waiting_on}"));
+    }
+    if let Some(run_id) = progress.run_id.as_deref() {
+        step.push_str(&format!("; inspect: homeboy runs show {run_id}"));
+    }
     format!(
-        "phase=refreshing_configured_runners sub_phase=build elapsed={}s",
+        "refreshing configured runners ({step}) elapsed={}s",
         elapsed.as_secs()
     )
 }
 
-pub(crate) fn persist_runner_progress(run_id: &str, elapsed: Duration) -> Result<()> {
-    emit_upgrade_phase(&upgrade_runner_progress_message(elapsed));
+pub(crate) fn persist_runner_progress(
+    run_id: &str,
+    elapsed: Duration,
+    progress: Option<&RunnerConvergenceProgress>,
+) -> Result<()> {
+    emit_upgrade_phase(&upgrade_runner_progress_message(elapsed, progress));
     patch_metadata(run_id, |metadata| {
         metadata["phase"] = json!("refreshing_configured_runners");
         merge_elapsed_seconds(metadata, elapsed.as_secs());
-        metadata["runners"] = component(
-            "running",
-            format!(
-                "refreshing configured runners (build) elapsed={}s",
-                elapsed.as_secs()
-            ),
-        );
+        metadata["runners"] = component("running", runner_progress_summary(elapsed, progress));
+        if let Some(progress) = progress {
+            metadata["runners"]["progress"] = json!(progress);
+        }
     })
 }
 
@@ -1263,6 +1344,83 @@ mod tests {
             upgrade_extension_progress_message("wordpress", 2, 3, Duration::from_secs(45)),
             "phase=refreshing_installed_extensions extension=wordpress item=2/3 elapsed=45s"
         );
+    }
+
+    fn lab_admission_wait() -> RunnerConvergenceProgress {
+        RunnerConvergenceProgress {
+            runner_id: "homeboy-lab".to_string(),
+            sub_phase: "extension_sync".to_string(),
+            item: Some("wordpress (4/8)".to_string()),
+            waiting_on: Some("Lab admission (pressure)".to_string()),
+            run_id: Some("run-1".to_string()),
+        }
+    }
+
+    #[test]
+    fn runner_progress_names_the_convergence_step_and_what_it_waits_on() {
+        assert_eq!(
+            upgrade_runner_progress_message(Duration::from_secs(30), Some(&lab_admission_wait())),
+            "phase=refreshing_configured_runners runner=homeboy-lab sub_phase=extension_sync item=wordpress (4/8) waiting_on=\"Lab admission (pressure)\" run=run-1 elapsed=30s"
+        );
+        assert_eq!(
+            upgrade_runner_progress_message(Duration::from_secs(5), None),
+            "phase=refreshing_configured_runners sub_phase=prepare elapsed=5s"
+        );
+        homeboy_core::test_support::with_isolated_home(|_| {
+            let operation = UpgradeOperation::start("homeboy upgrade");
+            let id = operation.id().expect("persisted operation").to_string();
+            persist_runner_progress(&id, Duration::from_secs(30), Some(&lab_admission_wait()))
+                .expect("persist runner progress");
+
+            let status = load_upgrade_operation_status(Some(&id)).expect("load status");
+            let runners = status.runners.expect("runner component");
+            assert_eq!(runners.status, "running");
+            assert_eq!(
+                runners.summary,
+                "refreshing configured runners (homeboy-lab: extension_sync wordpress (4/8); waiting for Lab admission (pressure); inspect: homeboy runs show run-1) elapsed=30s"
+            );
+            drop(operation);
+        });
+    }
+
+    #[test]
+    fn stale_upgrade_whose_owner_died_during_convergence_reports_a_terminal_outcome() {
+        homeboy_core::test_support::with_isolated_home(|_| {
+            let operation = UpgradeOperation::start("homeboy upgrade");
+            let id = operation.id().expect("persisted operation").to_string();
+            persist_runner_progress(&id, Duration::from_secs(859), Some(&lab_admission_wait()))
+                .expect("persist runner progress");
+            let store = ObservationStore::open_initialized().expect("observation store");
+            let run = store.get_run(&id).expect("read run").expect("run exists");
+            let mut metadata = run.metadata_json.clone();
+            metadata["controller"] = component("updated", "controller installation completed");
+            metadata["extensions"] = component("completed", "8 updated, 0 skipped");
+            // The generic run reconciler marks an exited owner `stale`.
+            store
+                .finish_running_run_if_metadata(&id, RunStatus::Stale, metadata, &run.metadata_json)
+                .expect("reconcile stale")
+                .expect("run was running");
+
+            let status = load_upgrade_operation_status(Some(&id)).expect("load status");
+            assert_eq!(status.status, RunStatus::Error.as_str());
+            assert!(status.failed);
+            assert_eq!(status.phase, "interrupted");
+            let component_status = |component: &Option<UpgradeComponentStatus>| {
+                component.as_ref().map(|component| component.status.clone())
+            };
+            assert_eq!(
+                component_status(&status.controller).as_deref(),
+                Some("updated")
+            );
+            assert_eq!(
+                component_status(&status.extensions).as_deref(),
+                Some("completed")
+            );
+            let runners = status.runners.expect("runner component");
+            assert_eq!(runners.status, "interrupted");
+            assert!(runners.summary.contains("inspect: homeboy runs show run-1"));
+            drop(operation);
+        });
     }
 
     #[test]
@@ -2005,7 +2163,7 @@ mod tests {
                 .unwrap();
             for error in [
                 persist_upgrade_heartbeat(&id, Duration::from_secs(1)).unwrap_err(),
-                persist_runner_progress(&id, Duration::from_secs(1)).unwrap_err(),
+                persist_runner_progress(&id, Duration::from_secs(1), None).unwrap_err(),
             ] {
                 assert!(error.message.contains("no longer running"));
                 assert_eq!(error.details["operation_id"], json!(id));

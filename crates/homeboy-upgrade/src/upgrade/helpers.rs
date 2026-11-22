@@ -1638,10 +1638,14 @@ fn refresh_configured_runners_with_progress<T>(
     let result = run_with_upgrade_heartbeats(
         UPGRADE_PROGRESS_HEARTBEAT_INTERVAL,
         |elapsed| {
+            let progress = super::runner_convergence_progress();
             let reported = if let Some(run_id) = operation_id.as_deref() {
-                persist_runner_progress(run_id, elapsed)
+                persist_runner_progress(run_id, elapsed, progress.as_ref())
             } else {
-                upgrade_phase(&super::operation::upgrade_runner_progress_message(elapsed));
+                upgrade_phase(&super::operation::upgrade_runner_progress_message(
+                    elapsed,
+                    progress.as_ref(),
+                ));
                 Ok(())
             };
             if let Err(error) = reported {

@@ -36,8 +36,11 @@ pub use runner_admission_provider::{
     register_runner_direct_active_jobs_provider, runner_direct_active_job_count,
     RunnerDirectActiveJobsProvider,
 };
-pub(crate) use runner_upgrade_provider::with_runner_upgrade;
-pub use runner_upgrade_provider::{register_runner_upgrade_provider, RunnerUpgradeProvider};
+pub use runner_upgrade_provider::{
+    register_runner_convergence_progress, register_runner_upgrade_provider,
+    RunnerConvergenceProgress, RunnerUpgradeProvider,
+};
+pub(crate) use runner_upgrade_provider::{runner_convergence_progress, with_runner_upgrade};
 pub use services::restart_extension_services;
 pub use types::{
     DaemonPendingRestart, ExtensionPreflightBlocker, ExtensionUpgradeEntry, ExtensionUpgradeSkip,

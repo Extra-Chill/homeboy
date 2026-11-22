@@ -282,6 +282,11 @@ where
         observed_terminal_daemon_job = job.status.is_terminal();
         if let Ok(events) = events(&job) {
             note_refresh_subphases(&events);
+            crate::upgrade_runners::progress::observe_runner_job(
+                persisted_run_id.as_deref().or(flow.run_id.as_deref()),
+                &job,
+                &events,
+            );
             let events =
                 redact_runner_job_events(&events, flow.redaction_env, flow.secret_env_names);
             record_and_report_promotion_progress_frames(
