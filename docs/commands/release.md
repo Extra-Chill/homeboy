@@ -16,6 +16,20 @@ homeboy release resolve <repository> --prefix <tag-prefix>
 
 By default Homeboy auto-detects the bump from commit history. Use `--bump <major|minor|patch|VERSION>` to force a bump type or explicit version.
 
+### Commit types
+
+Breaking commits recommend a major bump, `feat` a minor bump, and `fix` or
+other code commit types a patch. `docs`, `chore`, merge, and release commits do
+not normally trigger a release.
+
+Exception: `chore(deps): ...` recommends a patch when that commit changes a
+`dependency_stack` entry's declared `lock.path` (relative to the component).
+This lets merged dependency-refresh PRs ship, including consumers using
+`release.refresh_dependencies: true`. The exception does not require that flag:
+it describes an already-committed refresh, not an instruction to refresh again.
+A `chore(deps)` touching only other files, or a plain `chore` even when it changes
+a lock, remains non-releasable. Larger commit-derived bumps still take precedence.
+
 ## Dependency refresh
 
 Opt in per component in `homeboy.json`:

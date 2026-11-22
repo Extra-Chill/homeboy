@@ -52,9 +52,9 @@ pub use commits::{
     get_latest_remote_release_with_prefix, get_latest_tag, get_latest_tag_any_with_prefix,
     get_latest_tag_any_with_prefix_with_timeout, get_latest_tag_with_prefix,
     get_previous_tag_before_any_with_prefix, get_previous_tag_before_with_prefix,
-    is_conventional_subject, recommended_bump_from_commits, strip_conventional_prefix,
-    CommitCategory, CommitCounts, CommitInfo, MonorepoContext, RemoteReleaseCoordinate, SemverBump,
-    CONVENTIONAL_COMMIT_TYPES,
+    is_conventional_subject, recommended_bump_from_commits, recommended_release_bump,
+    strip_conventional_prefix, CommitCategory, CommitCounts, CommitInfo, MonorepoContext,
+    RemoteReleaseCoordinate, SemverBump, CONVENTIONAL_COMMIT_TYPES,
 };
 pub use commits::{
     extract_version_from_tag, find_version_commit_with_prefix,
