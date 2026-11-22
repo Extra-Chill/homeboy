@@ -33,7 +33,7 @@ fn report(status: &str, finalization: Option<serde_json::Value>) -> AgentTaskCoo
         latest_run_id: Some("run-1".to_string()),
         history_run_ids: Vec::new(),
         invocation_run_ids: Vec::new(),
-        status: status.to_string(),
+        status: homeboy_core::cook_status::CookStatus::from_status(status).unwrap(),
         // These tests all build terminal payloads; the notification only
         // fires for a terminal disposition in the first place.
         disposition: homeboy_core::cook_status::CookDisposition::Terminal,
@@ -87,7 +87,7 @@ fn terminal_outcomes_lead_with_work_and_offer_only_useful_actions() {
     homeboy_core::test_support::with_isolated_home(|_| {
         for (status, code, title, facts, actions) in [
             (
-                "succeeded",
+                "review_ready",
                 0,
                 "Fix notifications",
                 vec!["Model", "Gates"],
@@ -108,7 +108,7 @@ fn terminal_outcomes_lead_with_work_and_offer_only_useful_actions() {
                 vec![],
             ),
         ] {
-            let success = status == "succeeded";
+            let success = status == "review_ready";
             let mut report = report(status, success.then(|| json!({
             "status": "review_ready", "title": "Fix notifications",
             "pr_url": "https://github.com/Extra-Chill/homeboy/pull/42",
@@ -128,7 +128,7 @@ fn terminal_outcomes_lead_with_work_and_offer_only_useful_actions() {
             if status == "cancelled" {
                 // A stale failure context must not offer recovery before materialization.
                 report.latest_run_id = None;
-                report.status = "durable_failure".to_string();
+                report.status = homeboy_core::cook_status::CookStatus::DurableFailure;
                 seed_run_with_route("cook-abc", "cancel-thread");
                 crate::agent_task_lifecycle::cancel_run("cook-abc", Some("operator cancellation"))
                     .expect("cancel before materialization");
@@ -137,7 +137,7 @@ fn terminal_outcomes_lead_with_work_and_offer_only_useful_actions() {
             let payload = terminal_payload(&report, Some("homeboy"), code);
             assert_eq!(payload.title.as_deref(), Some(title));
             let expected_kind = match status {
-                "succeeded" => NotifyEventKind::Completed,
+                "review_ready" => NotifyEventKind::Completed,
                 "cancelled" => NotifyEventKind::Cancelled,
                 _ => NotifyEventKind::NeedsAttention,
             };
@@ -254,7 +254,7 @@ fn terminal_notification_names_skipped_provider_routes() {
     );
 
     // Without skips the notification gains no extra fact.
-    let plain = terminal_payload(&report("succeeded", None), None, 0);
+    let plain = terminal_payload(&report("review_ready", None), None, 0);
     assert!(!plain.render_body().contains("Skipped route:"),);
 }
 
@@ -349,7 +349,7 @@ fn failure_recommends_only_the_first_legal_next_action() {
 #[test]
 fn terminal_kind_requires_publication_evidence_even_with_zero_exit() {
     // A provider result cannot advertise publication without a PR receipt.
-    let unknown = report("moving_base", None);
+    let unknown = report("failed", None);
     assert_eq!(
         terminal_payload(&unknown, None, 1).kind,
         NotifyEventKind::NeedsAttention
@@ -359,7 +359,7 @@ fn terminal_kind_requires_publication_evidence_even_with_zero_exit() {
         NotifyEventKind::NeedsAttention
     );
     let published = report(
-        "succeeded",
+        "review_ready",
         Some(serde_json::json!({
             "status": "review_ready",
             "pr_url": "https://example.test/pull/43",
@@ -435,7 +435,7 @@ fn cook_lifecycle_emission_is_inert_without_a_configured_transport() {
             false,
         );
         cook_retrying("cook-abc", "run-1", None, 2, 3);
-        cook_terminal(&report("succeeded", None), None, 0);
+        cook_terminal(&report("review_ready", None), None, 0);
         // A distinct cook: the terminal event is now claimed once per cook,
         // so reusing `cook-abc` would exercise the dedupe rather than the
         // failure path.
@@ -704,7 +704,7 @@ fn pending_gate_fix_and_finalization_rejection_do_not_announce_success() {
     assert!(gate.render_body().contains("gate fix pending"));
 
     let mut rejected = report(
-        "publication_rejected",
+        "finalization_failed",
         Some(serde_json::json!({
             "status": "publication_rejected", "reason": "component finalization rejected"
         })),
@@ -724,7 +724,7 @@ fn terminal_delivery_records_success_and_confirms_the_once_marker() {
         install_transport("test.cook", vec!["true"]);
         set_default_transport("test.cook");
 
-        cook_terminal(&report("succeeded", None), None, 0);
+        cook_terminal(&report("review_ready", None), None, 0);
         let delivery = latest_delivery("cook-abc");
         assert_eq!(delivery["status"], "delivered");
         assert_eq!(delivery["transport"], "test.cook");
@@ -826,7 +826,7 @@ fn a_terminal_outcome_survives_a_transport_outage() {
     homeboy_core::test_support::with_isolated_home(|_| {
         install_transport("test.outage", vec!["false"]);
         set_default_transport("test.outage");
-        cook_terminal(&report("succeeded", None), None, 0);
+        cook_terminal(&report("review_ready", None), None, 0);
 
         let queued = homeboy_core::notify_outbox::pending_entries();
         assert_eq!(queued.len(), 1, "{queued:?}");
@@ -858,7 +858,7 @@ fn a_queued_terminal_event_consumes_its_once_claim() {
     homeboy_core::test_support::with_isolated_home(|_| {
         install_transport("test.hold", vec!["false"]);
         set_default_transport("test.hold");
-        cook_terminal(&report("succeeded", None), None, 0);
+        cook_terminal(&report("review_ready", None), None, 0);
         assert!(
             !crate::agent_task_lifecycle::claim_cook_terminal_notification_in_store(
                 &test_lifecycle_store(),
@@ -876,7 +876,7 @@ fn resumed_terminal_delivery_uses_the_durable_route_and_stays_deduplicated() {
     homeboy_core::test_support::with_isolated_home(|_| {
         install_transport("extension", vec!["true"]);
         seed_run_with_route("cook-resumed-attempt-1-aaaa", "secret-destination");
-        let mut resumed = report("succeeded", None);
+        let mut resumed = report("review_ready", None);
         resumed.cook_id = "cook-resumed".to_string();
         resumed.latest_run_id = Some("cook-resumed-attempt-1-aaaa".to_string());
 
@@ -1144,7 +1144,7 @@ fn success_is_announced_without_asking_the_tracker() {
             "pr_url": "https://github.com/o/r/pull/9",
             "pr_action": "created",
         });
-        cook_terminal_with(&report("succeeded", Some(finalization)), None, 0, |_| {
+        cook_terminal_with(&report("review_ready", Some(finalization)), None, 0, |_| {
             panic!("a success never consults the tracker")
         });
         assert_eq!(deliveries(&marker), 1);
@@ -1193,7 +1193,7 @@ fn pull_request_link_reads_every_tolerated_receipt_identity() {
     // The link reads the delivery read model's publication: a receipt that
     // spells its URL `pull_request_url` links it too (#16049).
     let report = report(
-        "succeeded",
+        "review_ready",
         Some(serde_json::json!({
             "status": "review_ready",
             "pull_request_url": "https://example.test/pull/44",
@@ -1239,7 +1239,7 @@ fn discord_notification_payload_fixtures() {
     homeboy_core::test_support::with_isolated_home(|_| {
         let mut cases = Vec::new();
         for (name, status, title) in [
-            ("success", "succeeded", "Fix notifications".to_string()),
+            ("success", "review_ready", "Fix notifications".to_string()),
             ("attention", "gate_failed", "Work on Studio draft PR and resolve all of the outstanding publication and validation concerns ".repeat(3)),
             ("cancelled", "cancelled", "Fix notifications".to_string()),
         ] {
@@ -1247,12 +1247,12 @@ fn discord_notification_payload_fixtures() {
                 "status": "review_ready", "title": title,
                 "pr_url": "https://github.example/Extra-Chill/homeboy/pull/123",
                 "pr_action": "created pull request", "ai_model": "gpt-6.1-sol",
-                "gate_results": [{"name": "lint", "status": if status == "succeeded" {"passed"} else {"failed"}}],
+                "gate_results": [{"name": "lint", "status": if status == "review_ready" {"passed"} else {"failed"}}],
                 "review_dossier": {"source_relationships": [{"kind": "closes", "reference": "#100"}]}
             })));
             report.stop_reason = Some("Lint failed. Internal detail follows.".to_string());
             report.failure_context = Some(failure_context());
-            cases.push(json!({"name": name, "payload": terminal_payload(&report, Some("studio"), if status == "succeeded" {0} else {1})}));
+            cases.push(json!({"name": name, "payload": terminal_payload(&report, Some("studio"), if status == "review_ready" {0} else {1})}));
         }
         let mut retry = NotifyPayload::new(
             NotifyEventKind::Progress,

@@ -951,7 +951,6 @@ impl From<&homeboy_lifecycle_contract::CookStatus> for ControlPlaneState {
             | FinalizationFailed => Self::Failed,
             Cancelled => Self::Cancelled,
             TimedOut => Self::TimedOut,
-            Unknown(_) => Self::Unknown,
         }
     }
 }

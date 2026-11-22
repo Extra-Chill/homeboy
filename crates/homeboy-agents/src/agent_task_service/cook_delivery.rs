@@ -433,7 +433,7 @@ impl CookDelivery {
     /// What this delivery contributes to its run state and Cook status.
     ///
     /// Decided from [`Self::state`] and the blocker code alone, so every
-    /// writer and reader agrees: an unverified (`applied`, `gates_deferred`)
+    /// writer and reader agrees: an unverified (`applied`, `gate_environment_unavailable`)
     /// or rejected (`gate_failed`) candidate leaves its run recoverable; a
     /// verified or published one lets it succeed. Gate failures with and
     /// without a patch both report `gate_failed`-family Cook statuses; the
@@ -765,7 +765,10 @@ fn read_publication(
     finalization: &Value,
     lease_receipt: Option<&Value>,
 ) -> CookDeliveryPublication {
+    // The receipt keeps its own status vocabulary; only a Cook publication
+    // label marks it published.
     let status = string_at(finalization, "/status").unwrap_or_default();
+    let cook_status = CookStatus::from_status(&status);
     // Receipts have recorded the PR identity at several paths. A malformed
     // field never hides a valid identity at another.
     let pr_number = ["/pr_number", "/pr/number"]
@@ -779,10 +782,13 @@ fn read_publication(
     let pr_url = ["/pr_url", "/pull_request_url", "/pr/url"]
         .into_iter()
         .find_map(|pointer| string_at(finalization, pointer));
-    let receipt = matches!(status.as_str(), "review_ready" | "draft_published");
+    let receipt = matches!(
+        cook_status,
+        Some(CookStatus::ReviewReady | CookStatus::DraftPublished)
+    );
     CookDeliveryPublication {
         published: receipt && (pr_number.is_some() || pr_url.is_some()),
-        draft: status == "draft_published",
+        draft: cook_status == Some(CookStatus::DraftPublished),
         commit: string_at(finalization, "/publication_proof/binding/candidate_sha")
             .or_else(|| string_at(finalization, "/publication_proof/git_identity/commit_sha")),
         pushed_sha: string_at(finalization, "/publication_proof/binding/remote_sha")
@@ -854,7 +860,7 @@ impl<'a> CookDeliveryContext<'a, '_> {
     /// End the Cook with this attempt's terminal report.
     fn report(
         &mut self,
-        status: &str,
+        status: CookStatus,
         finalization: Option<Value>,
         stop_reason: Option<&str>,
         exit_code: i32,
@@ -892,7 +898,7 @@ impl<'a> CookDeliveryContext<'a, '_> {
         (self.lifecycle_store).record_cook_delivery_blocker(self.run_id, blocker)?;
         let status = CookStatus::Blocked;
         Ok(ControlFlow::Break(self.report(
-            status.as_str(),
+            status,
             None,
             Some(&stop_reason),
             1,
@@ -901,10 +907,21 @@ impl<'a> CookDeliveryContext<'a, '_> {
 }
 
 /// A finalization's status, and whether it published the candidate.
-pub(super) fn publication_status(finalization: &Value) -> (String, bool) {
-    let status = finalization["status"].as_str().unwrap_or("unknown");
-    let published = matches!(status, "review_ready" | "draft_published");
-    (status.to_string(), published)
+pub(super) fn publication_status(finalization: &Value) -> (CookStatus, bool) {
+    let delivery = CookDelivery::project(
+        &CookDeliveryArtifacts {
+            finalization: Some(finalization.clone()),
+            ..Default::default()
+        },
+        None,
+    );
+    let status = finalization["status"]
+        .as_str()
+        .and_then(CookStatus::from_status)
+        .or_else(|| delivery.and_then(|delivery| delivery.lifecycle().cook_status))
+        .unwrap_or(CookStatus::FinalizationFailed);
+    let published = matches!(status, CookStatus::ReviewReady | CookStatus::DraftPublished);
+    (status, published)
 }
 
 fn to_json<T: Serialize>(value: &T) -> Result<Value> {
@@ -974,7 +991,7 @@ pub(super) fn ensure_verified(
             ctx.push_attempt(record, None);
             return Ok(ControlFlow::Break(ctx.stores().report(CookReportInput {
                 cook_id: cook_id.to_string(),
-                status: CookStatus::InFlight.as_str(),
+                status: CookStatus::InFlight,
                 disposition: CookDisposition::InFlight,
                 attempts: std::mem::take(ctx.attempts),
                 finalization: None,
@@ -1004,9 +1021,9 @@ pub(super) fn ensure_verified(
                 &bounded_error_diagnostic(&error),
             )?;
             let status = if selection_required {
-                "selection_required"
+                CookStatus::SelectionRequired
             } else {
-                "durable_failure"
+                CookStatus::DurableFailure
             };
             let report = ctx.report(status, None, Some(&recovery), 1);
             return Ok(ControlFlow::Break(report));
@@ -1099,7 +1116,7 @@ pub(super) fn ensure_published(
     let run_id = ctx.run_id;
     if options.finalization.no_finalize {
         return Ok(ctx.report(
-            "green_no_finalize",
+            CookStatus::GreenNoFinalize,
             None,
             Some(
                 "deterministic gates completed green; --no-finalize skipped \
@@ -1114,7 +1131,7 @@ pub(super) fn ensure_published(
             Ok(finalization) => finalization,
             Err(error) if error.message.contains("awaiting_acceptance") => {
                 return Ok(ctx.report(
-                    "awaiting_acceptance",
+                    CookStatus::AwaitingAcceptance,
                     Some(serde_json::json!({
                         "status": "awaiting_acceptance",
                         "reason": error.message,
@@ -1144,11 +1161,11 @@ pub(super) fn ensure_published(
             }
         };
     let (final_status, published) = publication_status(&finalization);
-    let stop_reason = (final_status == "no_changes").then_some(
+    let stop_reason = (final_status == CookStatus::NoChanges).then_some(
         "cook completed provider execution and gates, but finalization found no changed files; task likely still requires review or retry",
     );
     let exit_code = if published { 0 } else { 1 };
-    Ok(ctx.report(&final_status, Some(finalization), stop_reason, exit_code))
+    Ok(ctx.report(final_status, Some(finalization), stop_reason, exit_code))
 }
 
 /// Publish a candidate a loop policy accepted off the green path (an existing
@@ -1158,7 +1175,7 @@ pub(super) fn publish_accepted(
     ctx: &mut CookDeliveryContext<'_, '_>,
     promotion: &AgentTaskPromotionReport,
     detail: &str,
-    published_status: Option<&str>,
+    published_status: Option<CookStatus>,
     stop_reason: Option<&str>,
 ) -> Result<AgentTaskRunResult<AgentTaskCookReport>> {
     ctx.progress("finalization", Some(detail))?;
@@ -1167,7 +1184,7 @@ pub(super) fn publish_accepted(
     let (final_status, published) = publication_status(&finalization);
     let status = published_status
         .filter(|_| published)
-        .unwrap_or(&final_status);
+        .unwrap_or(final_status);
     let exit_code = if published { 0 } else { 1 };
     Ok(ctx.report(status, Some(finalization), stop_reason, exit_code))
 }
@@ -1178,6 +1195,13 @@ mod tests;
 
 #[cfg(test)]
 mod step_tests {
+    #[test]
+    fn unknown_receipt_status_is_an_unpublished_finalization_failure() {
+        assert_eq!(
+            super::publication_status(&serde_json::json!({"status": "future_label"})),
+            (super::CookStatus::FinalizationFailed, false)
+        );
+    }
 
     use super::super::cook::tests::{compile_options, promotion};
     use super::*;
@@ -1214,7 +1238,7 @@ mod step_tests {
             )
             .expect("no-finalize publication");
 
-            assert_eq!(report.value.status, "green_no_finalize");
+            assert_eq!(report.value.status.as_str(), "green_no_finalize");
             assert_eq!(report.exit_code, 0);
             assert!(report.value.finalization.is_none());
         });

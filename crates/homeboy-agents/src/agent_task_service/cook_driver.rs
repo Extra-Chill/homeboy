@@ -337,7 +337,7 @@ pub(super) fn finish_cook_terminal_with_report(
             fallback = crate::agent_task_notify::terminal_attempt_report(
                 cook_id,
                 &record.run_id,
-                super::cook_step::attempt_status_label(record.state()),
+                super::cook_projections::terminal_fallback_status(record.state()),
             );
             fallback.report_stores = Some((
                 CookRecipeStore::new(lifecycle.roots().clone()),
@@ -431,7 +431,10 @@ pub(super) fn run_cook_reported(
                 // and status instead of admitting another (#18450).
                 let mut report = stores.report(CookReportInput {
                     cook_id: admitted["cook_id"].as_str().unwrap_or_default().to_string(),
-                    status: admitted["status"].as_str().unwrap_or("in_flight"),
+                    status: admitted["status"]
+                        .as_str()
+                        .and_then(homeboy_core::cook_status::CookStatus::from_status)
+                        .unwrap_or(homeboy_core::cook_status::CookStatus::InFlight),
                     disposition: CookDisposition::InFlight,
                     attempts: Vec::new(),
                     finalization: None,
@@ -445,7 +448,7 @@ pub(super) fn run_cook_reported(
             if error.details["concurrent_cook_creation_loser"] == Value::Bool(true) {
                 let mut report = stores.report(CookReportInput {
                         cook_id: failure_options.identity.cook_id.clone(),
-                        status: "durable_failure",
+                        status: homeboy_core::cook_status::CookStatus::DurableFailure,
                         disposition: CookDisposition::Terminal,
                         attempts: Vec::new(),
                         finalization: None,
@@ -579,7 +582,7 @@ pub(super) fn run_cook_reported(
             run_id,
             phase,
             attempt,
-            Some(&result.value.status),
+            Some(result.value.status.as_str()),
             None,
             (phase == "terminal").then_some(result.exit_code == 0),
             (phase == "terminal")
@@ -605,7 +608,7 @@ pub(super) fn run_cook_reported(
             if let Err(error) = agent_task_lifecycle::record_cook_terminal_result_in_store(
                 lifecycle_store,
                 run_id,
-                &result.value.status,
+                result.value.status.as_str(),
                 result.exit_code == 0,
                 result.exit_code,
             )
@@ -687,7 +690,7 @@ pub(super) fn durable_cook_error_report_with_store(
             .collect();
         let mut report = stores.report(CookReportInput {
             cook_id: options.identity.cook_id.clone(),
-            status: "durable_failure",
+            status: homeboy_core::cook_status::CookStatus::DurableFailure,
             disposition: CookDisposition::Terminal,
             attempts,
             finalization: None,

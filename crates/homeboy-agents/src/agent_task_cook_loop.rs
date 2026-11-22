@@ -2708,7 +2708,8 @@ mod tests {
     /// never a request to spend provider execution budget "fixing" a gate
     /// that never actually ran.
     #[test]
-    fn a_deferred_gate_reports_gates_deferred_and_never_requests_provider_remediation() {
+    fn a_deferred_gate_reports_gate_environment_unavailable_and_never_requests_provider_remediation(
+    ) {
         let report = evaluate_cook_loop(AgentTaskCookLoopOptions {
             source_request: source_request(),
             promotion_report: promotion_report(
@@ -2742,7 +2743,7 @@ mod tests {
     /// projection failure) is not a red gate. Even on the last attempt it
     /// ends `GatesDeferred`, never `RetriesExhausted`, and spends no budget.
     #[test]
-    fn a_non_executed_lab_gate_is_gates_deferred_and_spends_no_retry_budget() {
+    fn a_non_executed_lab_gate_is_gate_environment_unavailable_and_spends_no_retry_budget() {
         let mut error = homeboy_core::Error::new(
             homeboy_core::ErrorCode::RunnerLabTransportFailure,
             "runner gate did not return terminal artifact evidence",

@@ -475,7 +475,7 @@ pub(super) fn run_cook_spine(
     else {
         return Ok(stores.report(CookReportInput {
             cook_id: options.identity.cook_id.clone(),
-            status: CookStatus::Queued.as_str(),
+            status: CookStatus::Queued,
             disposition: CookDisposition::InFlight,
             attempts: Vec::new(),
             finalization: None,
@@ -602,7 +602,7 @@ pub(super) fn run_cook_spine(
             {
                 return Ok(stores.report(CookReportInput {
                     cook_id: options.identity.cook_id.clone(),
-                    status: CookStatus::Cancelled.as_str(),
+                    status: CookStatus::Cancelled,
                     disposition: CookDisposition::Terminal,
                     attempts: Vec::new(),
                     finalization: None,
@@ -795,7 +795,7 @@ pub(super) fn run_cook_spine(
             {
                 return Ok(stores.report(CookReportInput {
                     cook_id: options.identity.cook_id.clone(),
-                    status: CookStatus::Failed.as_str(),
+                    status: CookStatus::Failed,
                     disposition: CookDisposition::Terminal,
                     attempts: Vec::new(),
                     finalization: None,
@@ -906,7 +906,7 @@ pub(super) fn run_cook_spine(
             )?;
             let mut report = stores.report(CookReportInput {
                 cook_id: options.identity.cook_id.clone(),
-                status: CookStatus::ReproPassesOnBase.as_str(),
+                status: CookStatus::ReproPassesOnBase,
                 disposition: CookDisposition::Terminal,
                 attempts: Vec::new(),
                 finalization: None,
@@ -1682,7 +1682,7 @@ pub(super) fn run_cook_spine(
             });
             return Ok(stores.report(CookReportInput {
                 cook_id,
-                status: CookStatus::Cancelled.as_str(),
+                status: CookStatus::Cancelled,
                 disposition: CookDisposition::Terminal,
                 attempts,
                 finalization: None,
@@ -1710,7 +1710,7 @@ pub(super) fn run_cook_spine(
             });
             return Ok(stores.report(CookReportInput {
                 cook_id,
-                status: "in_flight",
+                status: CookStatus::InFlight,
                 disposition: CookDisposition::InFlight,
                 attempts,
                 finalization: None,
@@ -1724,7 +1724,7 @@ pub(super) fn run_cook_spine(
         let Some(source_request) = plan.tasks.first().cloned() else {
             return Ok(stores.report(CookReportInput {
                 cook_id,
-                status: "policy_failure",
+                status: CookStatus::PolicyFailure,
                 disposition: CookDisposition::Terminal,
                 attempts,
                 finalization: None,
@@ -1755,7 +1755,7 @@ pub(super) fn run_cook_spine(
             });
             return Ok(stores.report(CookReportInput {
                 cook_id,
-                status: &status,
+                status,
                 disposition: CookDisposition::Terminal,
                 attempts,
                 finalization: Some(finalization),
@@ -1808,33 +1808,33 @@ pub(super) fn run_cook_spine(
                             if options.finalization.no_finalize =>
                         {
                             (
-                                "green_no_finalize",
+                                CookStatus::GreenNoFinalize,
                                 "loaded the terminal persisted promotion; --no-finalize skipped commit, push, and PR finalization",
                                 0,
                             )
                         }
                         AgentTaskCookLoopStatus::BaselineRed => (
-                            "baseline_red",
+                            CookStatus::BaselineRed,
                             "loaded the terminal persisted promotion with inherited baseline failures",
                             1,
                         ),
                         AgentTaskCookLoopStatus::NoChanges => (
-                            "no_changes",
+                            CookStatus::NoChanges,
                             "loaded the terminal persisted no-changes promotion",
                             1,
                         ),
                         AgentTaskCookLoopStatus::AgentReportedIncomplete => (
-                            "candidate_recoverable",
+                            CookStatus::CandidateRecoverable,
                             "loaded the terminal persisted promotion; the agent's review form declares the task incomplete, so it was not published",
                             1,
                         ),
                         AgentTaskCookLoopStatus::NoChangesGateFailed => (
-                            "no_changes_gate_failed",
+                            CookStatus::NoChangesGateFailed,
                             "loaded the terminal persisted no-changes gate failure",
                             1,
                         ),
                         _ => (
-                            "durable_failure",
+                            CookStatus::DurableFailure,
                             "loaded the terminal persisted promotion, but finalization evidence is absent from the authoritative source observation",
                             1,
                         ),
@@ -2095,6 +2095,11 @@ pub(super) fn run_cook_spine(
                 feedback: None,
             });
             let is_refusal = status == "no_candidate";
+            let status = if is_refusal {
+                CookStatus::NoCandidate
+            } else {
+                CookStatus::IntentionalNoChange
+            };
             let mut report = stores.report(CookReportInput {
                 cook_id,
                 status,
@@ -2151,7 +2156,7 @@ pub(super) fn run_cook_spine(
             }
             let mut report = stores.report(CookReportInput {
                 cook_id,
-                status: status.as_str(),
+                status,
                 disposition: CookDisposition::Terminal,
                 attempts,
                 finalization: None,
@@ -2266,9 +2271,9 @@ pub(super) fn run_cook_spine(
             let mut report = stores.report(CookReportInput {
                     cook_id,
                     status: if requires_candidate {
-                        "no_candidate"
+                        CookStatus::NoCandidate
                     } else {
-                        "intentional_no_change"
+                        CookStatus::IntentionalNoChange
                     },
                     disposition: CookDisposition::Terminal,
                     attempts,
@@ -2395,7 +2400,7 @@ pub(super) fn run_cook_spine(
                         &mut delivery,
                         &promotion,
                         "verified intentional no-change review accepted an existing candidate",
-                        Some("intentional_no_change_finalized_existing_candidate"),
+                        Some(CookStatus::IntentionalNoChange),
                         None,
                     )?;
                     report.value.intentional_no_change =
@@ -2407,7 +2412,7 @@ pub(super) fn run_cook_spine(
                 }
                 let mut report = stores.report(CookReportInput {
                     cook_id,
-                    status: "intentional_no_change",
+                    status: CookStatus::IntentionalNoChange,
                     disposition: CookDisposition::Terminal,
                     attempts,
                     finalization: None,
@@ -2454,7 +2459,7 @@ pub(super) fn run_cook_spine(
                 let stop_reason = super::cook_recovery::baseline_red_refusal(&cook_id);
                 return Ok(stores.report(CookReportInput {
                     cook_id,
-                    status: "baseline_red",
+                    status: CookStatus::BaselineRed,
                     disposition: CookDisposition::Terminal,
                     attempts,
                     finalization: None,
@@ -2469,7 +2474,7 @@ pub(super) fn run_cook_spine(
                 }
                 return Ok(stores.report(CookReportInput {
                     cook_id,
-                    status: "no_changes",
+                    status: CookStatus::NoChanges,
                     disposition: CookDisposition::Terminal,
                     attempts,
                     finalization: None,
@@ -2508,7 +2513,7 @@ pub(super) fn run_cook_spine(
                 )?;
                 return Ok(stores.report(CookReportInput {
                     cook_id,
-                    status: "candidate_recoverable",
+                    status: CookStatus::CandidateRecoverable,
                     disposition: CookDisposition::Terminal,
                     attempts,
                     finalization: None,
@@ -2525,7 +2530,7 @@ pub(super) fn run_cook_spine(
                 }
                 return Ok(stores.report(CookReportInput {
                     cook_id,
-                    status: "no_changes_gate_failed",
+                    status: CookStatus::NoChangesGateFailed,
                     disposition: CookDisposition::Terminal,
                     attempts,
                     finalization: None,
@@ -2546,10 +2551,10 @@ pub(super) fn run_cook_spine(
             // compare). Retry re-verifies from the existing candidate rather
             // than spending another provider execution.
             AgentTaskCookLoopStatus::GatesDeferred => {
-                let stop_reason = gates_deferred_stop_reason(&promotion, &cook_id);
+                let stop_reason = gate_environment_unavailable_stop_reason(&promotion, &cook_id);
                 return Ok(stores.report(CookReportInput {
                     cook_id,
-                    status: "gate_environment_unavailable",
+                    status: CookStatus::GateEnvironmentUnavailable,
                     disposition: CookDisposition::Terminal,
                     attempts,
                     finalization: None,
@@ -2573,7 +2578,7 @@ pub(super) fn run_cook_spine(
                 );
                 return Ok(stores.report(CookReportInput {
                     cook_id,
-                    status: "gate_environment_unavailable",
+                    status: CookStatus::GateEnvironmentUnavailable,
                     disposition: CookDisposition::Terminal,
                     attempts,
                     finalization: None,
@@ -2590,7 +2595,7 @@ pub(super) fn run_cook_spine(
                 let stop_reason = gate_budget_exceeded_stop_reason(&promotion, &cook_id);
                 return Ok(stores.report(CookReportInput {
                     cook_id,
-                    status: "gate_environment_unavailable",
+                    status: CookStatus::GateEnvironmentUnavailable,
                     disposition: CookDisposition::Terminal,
                     attempts,
                     finalization: None,
@@ -2602,7 +2607,7 @@ pub(super) fn run_cook_spine(
             AgentTaskCookLoopStatus::GateDeclarationInvalid => {
                 return Ok(stores.report(CookReportInput {
                     cook_id,
-                    status: "gate_declaration_invalid",
+                    status: CookStatus::GateDeclarationInvalid,
                     disposition: CookDisposition::Terminal,
                     attempts,
                     finalization: None,
@@ -2618,7 +2623,7 @@ pub(super) fn run_cook_spine(
                 let Some(follow_up_request) = follow_up_request else {
                     return Ok(stores.report(CookReportInput {
                         cook_id,
-                        status: "policy_failure",
+                        status: CookStatus::PolicyFailure,
                         disposition: CookDisposition::Terminal,
                         attempts,
                         finalization: None,
@@ -2661,7 +2666,7 @@ pub(super) fn run_cook_spine(
                     CookFollowUpDispatch::BudgetExhausted { reason } => {
                         return Ok(stores.report(CookReportInput {
                             cook_id,
-                            status: "execution_budget_exhausted",
+                            status: CookStatus::ExecutionBudgetExhausted,
                             disposition: CookDisposition::Terminal,
                             attempts,
                             finalization: None,
@@ -2677,7 +2682,7 @@ pub(super) fn run_cook_spine(
                     CookFollowUpDispatch::PolicyFailure { reason } => {
                         return Ok(stores.report(CookReportInput {
                             cook_id,
-                            status: "policy_failure",
+                            status: CookStatus::PolicyFailure,
                             disposition: CookDisposition::Terminal,
                             attempts,
                             finalization: None,
@@ -2692,7 +2697,7 @@ pub(super) fn run_cook_spine(
                 publish_latest_incomplete_draft(&options, lifecycle_store)?;
                 return Ok(stores.report(CookReportInput {
                     cook_id,
-                    status: "retries_exhausted",
+                    status: CookStatus::RetriesExhausted,
                     disposition: CookDisposition::Terminal,
                     attempts,
                     finalization: None,
@@ -2710,7 +2715,7 @@ pub(super) fn run_cook_spine(
     publish_latest_incomplete_draft(&options, lifecycle_store)?;
     Ok(stores.report(CookReportInput {
         cook_id,
-        status: "retries_exhausted",
+        status: CookStatus::RetriesExhausted,
         disposition: CookDisposition::Terminal,
         attempts,
         finalization: None,

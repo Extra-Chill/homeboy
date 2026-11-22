@@ -1419,8 +1419,8 @@ mod remote_base_tests {
             is_draft: false,
         });
         let second = super::super::finalize_pr_with_backend(options, &mut backend, &store).unwrap();
-        assert_eq!(first.status, "review_ready");
-        assert_eq!(second.status, "review_ready");
+        assert_eq!(first.status.as_str(), "review_ready");
+        assert_eq!(second.status.as_str(), "review_ready");
         assert_eq!(first.pr_number, second.pr_number);
         assert_eq!(first.pr_url, second.pr_url);
         let first_sha = first

@@ -1155,7 +1155,7 @@ pub(super) fn supersede_by_live_destination_owner(
     )?;
     Ok(Some(stores.report(CookReportInput {
         cook_id: options.identity.cook_id.clone(),
-        status: "superseded_by_active_cook",
+        status: homeboy_core::cook_status::CookStatus::SupersededByActiveCook,
         disposition: CookDisposition::Terminal,
         attempts: Vec::new(),
         finalization: None,

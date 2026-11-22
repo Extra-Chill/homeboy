@@ -752,7 +752,7 @@ fn terminal_status_label(record: &AgentTaskRunRecord, phase: CookRunPhase) -> St
         .metadata
         .pointer("/cook_progress/terminal_status")
         .and_then(Value::as_str)
-        .map(CookStatus::from_status)
+        .and_then(CookStatus::from_status)
         .and_then(settled)
     {
         return status.as_str().to_string();
@@ -1292,5 +1292,11 @@ mod tests {
             serde_json::json!({ "cook_progress": { "terminal_status": "gate_failed" } }),
         ));
         assert_eq!(settled.status, "gate_failed");
+
+        let unrecognized = CookRunState::of(&record(
+            RunExecutionState::CandidateRecoverable,
+            serde_json::json!({ "cook_progress": { "phase": "terminal", "terminal_status": "moving_base" } }),
+        ));
+        assert_eq!(unrecognized.status, "candidate_recoverable");
     }
 }

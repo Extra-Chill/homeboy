@@ -268,7 +268,12 @@ format!(
     if inputs.disconnected_runner && !inputs.pending_operator_feedback {
         return CookRecoveryStep::Continue;
     }
-    let status = CookStatus::from_status(inputs.status);
+    let status = CookStatus::from_status(inputs.status).or_else(|| {
+        inputs
+            .run_state
+            .as_ref()
+            .and_then(|state| CookStatus::from_status(&state.status))
+    });
     if inputs.run_state.as_ref().is_some_and(|state| {
         !state.allows(homeboy_control_plane_contract::ControlPlaneAction::Recover)
     }) {
@@ -282,9 +287,9 @@ format!(
         return CookRecoveryStep::Reconcile;
     }
     if inputs.pending_operator_feedback
-        && !matches!(status, CookStatus::DraftPublished)
+        && !matches!(status, Some(CookStatus::DraftPublished))
         && !matches!(inputs.status, "published" | "merged")
-        && (status != CookStatus::Cancelled || inputs.involuntary_cancellation_retry_admitted)
+        && (status != Some(CookStatus::Cancelled) || inputs.involuntary_cancellation_retry_admitted)
     {
         // Both a fresh attempt and a continuation dispatch the provider with
         // the pending findings; only a refusal of both blocks the revision.
@@ -306,9 +311,14 @@ format!(
     // A publishable candidate whose agent declared the task incomplete stops
     // here whatever the gate status: rearming would replay provider work only
     // to re-read the same verdict (#16772).
-    let publishable = inputs.verified_unpublished && !status_is_settled(&status);
+    let publishable =
+        inputs.verified_unpublished && !status.as_ref().is_some_and(status_is_settled);
     let recoverable = inputs.run_state.as_ref().map_or_else(
-        || agent_task_lifecycle::CookRunPhase::status_is_recoverable(&status),
+        || {
+            status
+                .as_ref()
+                .is_some_and(agent_task_lifecycle::CookRunPhase::status_is_recoverable)
+        },
         |state| state.recoverable,
     );
     if recoverable || publishable {
@@ -320,7 +330,7 @@ format!(
         if inputs.agent_incomplete_reason.is_some()
             && inputs.applied_gate_failure
             && !publishable
-            && !status_is_settled(&status)
+            && !status.as_ref().is_some_and(status_is_settled)
         {
             return CookRecoveryStep::Regate;
         }
@@ -333,14 +343,15 @@ format!(
     if publishable {
         return CookRecoveryStep::Publish;
     }
-    if inputs.regate_ready && !status_is_settled(&status) {
+    if inputs.regate_ready && !status.as_ref().is_some_and(status_is_settled) {
         return CookRecoveryStep::Regate;
     }
     // The applied candidate failed its gates. When no continuation can re-verify
     // it, re-gating that exact candidate is the step `recover` performs on its
     // own; the operator can change the gate budgets or commands on that regate
     // (#18556). Replacement proof stays an explicit operator input.
-    let regate_failed_candidate = inputs.applied_gate_failure && !status_is_settled(&status);
+    let regate_failed_candidate =
+        inputs.applied_gate_failure && !status.as_ref().is_some_and(status_is_settled);
     // A stale destination checkpoint cannot authorize replacing a verified
     // candidate. Publication validates and uses its immutable candidate commit.
     if inputs.exact_checkpoint_candidate_mismatch && inputs.retry_admitted {
@@ -356,14 +367,14 @@ format!(
             run = inputs.run_id
         ));
     }
-    if status == CookStatus::NoChanges {
+    if status == Some(CookStatus::NoChanges) {
         if let Some(candidate_ref) = inputs.adoptable_candidate_ref {
             return CookRecoveryStep::Adopt {
                 candidate_ref: candidate_ref.to_string(),
             };
         }
     }
-    if status == CookStatus::PreExecutionFailure
+    if status == Some(CookStatus::PreExecutionFailure)
         && inputs.continuation_rearm_required
         && inputs.continuation_refusal.is_none()
     {
@@ -372,13 +383,13 @@ format!(
         // authorizes replaying the failed terminal continuation.
         return continuation_step(inputs);
     }
-    if status == CookStatus::PreExecutionFailure && inputs.applied_gate_failure {
+    if status == Some(CookStatus::PreExecutionFailure) && inputs.applied_gate_failure {
         // Gate infrastructure can fail before a gate executes, after the
         // provider candidate was applied. Continue that candidate, not provider
         // execution; the recipe retains its admitted gate runner.
         return continuation_step(inputs);
     }
-    if status == CookStatus::PreExecutionFailure {
+    if status == Some(CookStatus::PreExecutionFailure) {
         if inputs.retry_admitted {
             return CookRecoveryStep::Retry;
         }
@@ -392,26 +403,26 @@ format!(
     // Only an operator's `agent-task cancel` settles a Cook. Any other cancel
     // left it without a result, and `agent-task retry` already admits a fresh
     // attempt, so `recover` performs that retry instead of reporting no step.
-    if status == CookStatus::Cancelled && inputs.involuntary_cancellation_retry_admitted {
+    if status == Some(CookStatus::Cancelled) && inputs.involuntary_cancellation_retry_admitted {
         return CookRecoveryStep::Retry;
     }
-    let continuation_eligible = match &status {
-        CookStatus::ReviewReady
-        | CookStatus::GreenNoFinalize
-        | CookStatus::IntentionalNoChange
-        | CookStatus::NoCandidate
-        | CookStatus::Cancelled
-        | CookStatus::ExecutionBudgetExhausted
-        | CookStatus::RetriesExhausted
-        | CookStatus::PreExecutionFailure => false,
+    let continuation_eligible = match status {
+        Some(CookStatus::ReviewReady)
+        | Some(CookStatus::GreenNoFinalize)
+        | Some(CookStatus::IntentionalNoChange)
+        | Some(CookStatus::NoCandidate)
+        | Some(CookStatus::Cancelled)
+        | Some(CookStatus::ExecutionBudgetExhausted)
+        | Some(CookStatus::RetriesExhausted)
+        | Some(CookStatus::PreExecutionFailure) => false,
         // Infrastructure deferral consumes neither a provider retry nor budget:
         // continuation re-verifies the already materialized candidate.
-        CookStatus::GateEnvironmentUnavailable => true,
-        status if status.is_gate_failure() => inputs.retry_admitted,
+        Some(CookStatus::GateEnvironmentUnavailable) => true,
+        status if status.is_some_and(|status| status.is_gate_failure()) => inputs.retry_admitted,
         _ => true,
     };
     if !continuation_eligible {
-        if status.is_gate_failure() && regate_failed_candidate {
+        if status.is_some_and(|status| status.is_gate_failure()) && regate_failed_candidate {
             return CookRecoveryStep::Regate;
         }
         return CookRecoveryStep::none(format!(
@@ -924,7 +935,9 @@ fn finish_without_step(mut report: CookRecoveryReport) -> (CookRecoveryReport, i
         }));
         return (report, 1);
     }
-    let exit_code = i32::from(!CookStatus::from_status(&report.status).is_success_exit());
+    let exit_code = i32::from(
+        !CookStatus::from_status(&report.status).is_some_and(|status| status.is_success_exit()),
+    );
     if exit_code != 0 {
         if let CookRecoveryStep::None { reason } = &report.step {
             report.failure = Some(serde_json::json!({

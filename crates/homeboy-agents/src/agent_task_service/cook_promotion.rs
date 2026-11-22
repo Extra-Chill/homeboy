@@ -4620,7 +4620,7 @@ fn review_form_for_finalization_in_store(
 #[non_exhaustive]
 pub(crate) struct CookReportInput<'a> {
     pub cook_id: String,
-    pub status: &'a str,
+    pub status: CookStatus,
     /// Whether this exit handed the work to a durable owner or stopped.
     ///
     /// Required, and deliberately not defaulted: this is the fact the
@@ -4680,7 +4680,11 @@ pub(crate) fn cook_report(
             .as_ref()
             .and_then(|value| value["pr_url"].as_str())
             .is_some();
-    let status = if awaiting_ci { "awaiting_ci" } else { status };
+    let status = if awaiting_ci {
+        CookStatus::AwaitingCi
+    } else {
+        status
+    };
     let disposition = if awaiting_ci {
         CookDisposition::InFlight
     } else {
@@ -4691,7 +4695,7 @@ pub(crate) fn cook_report(
     // declared disposition contradicts the status it reports, which is a
     // producer bug rather than a condition to recover from.
     debug_assert!(
-        !CookStatus::from_status(status).is_in_flight() || disposition == CookDisposition::InFlight,
+        !status.is_in_flight() || disposition == CookDisposition::InFlight,
         "cook exit reported in-flight status {status:?} but declared {disposition:?}"
     );
     let history_run_ids = lifecycle_store
@@ -4754,7 +4758,7 @@ pub(crate) fn cook_report(
                 lifecycle_store,
                 &cook_id,
                 latest_run_id.as_deref(),
-                status,
+                status.as_str(),
             )
         })
         .flatten();
@@ -4766,7 +4770,7 @@ pub(crate) fn cook_report(
             latest_run_id,
             history_run_ids,
             invocation_run_ids,
-            status: status.to_string(),
+            status,
             disposition,
             attempts,
             finalization,
@@ -4858,7 +4862,7 @@ pub(crate) fn bind_report_to_stores(
                 lifecycle_store,
                 &report.cook_id,
                 report.latest_run_id.as_deref(),
-                &report.status,
+                report.status.as_str(),
             )
         })
         .flatten();
@@ -5107,7 +5111,11 @@ pub(crate) fn cook_failure_context_with_probe_policy(
     let promotion_gate_failed = delivery.as_ref().is_some_and(|delivery| {
         delivery.blocker_code() == Some(super::CookDeliveryBlockerCode::GateFailed)
     });
-    let cook_status = CookStatus::from_status(status);
+    let cook_status = CookStatus::from_status(status).or_else(|| {
+        record.as_ref().and_then(|record| {
+            CookStatus::from_status(&agent_task_lifecycle::CookRunState::of(record).status)
+        })
+    });
     let progress_phase = record
         .as_ref()
         .and_then(|record| record.metadata.pointer("/cook_progress/phase"))
@@ -5202,7 +5210,7 @@ pub(crate) fn cook_failure_context_with_probe_policy(
             Some(diagnostic.clone()),
         )
     } else if promotion_gate_failed
-        || cook_status.is_gate_failure()
+        || cook_status.is_some_and(|status| status.is_gate_failure())
         || status == "deterministic_gate_failure"
     {
         let diagnostic = promotion
@@ -5325,7 +5333,7 @@ pub(crate) fn cook_failure_context_with_probe_policy(
                     .as_ref()
                     .and_then(|record| record.metadata.get("cook_continuation_admission")),
                 retry_admitted
-                    || (cook_status.is_gate_failure()
+                    || (cook_status.is_some_and(|status| status.is_gate_failure())
                         && settlement.as_ref().is_some_and(|s| s.pending())),
             );
             let involuntary_cancellation_retry_admitted = retry_admitted

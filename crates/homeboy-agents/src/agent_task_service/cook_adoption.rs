@@ -30,7 +30,7 @@ use crate::agent_task_promotion::{
 };
 use crate::agent_task_provider::ExtensionProviderAgentTaskExecutor;
 use crate::agent_task_scheduler::SharedAgentTaskExecutor;
-use homeboy_core::cook_status::CookDisposition;
+use homeboy_core::cook_status::{CookDisposition, CookStatus};
 use homeboy_core::{Error, Result};
 
 use super::cook::{
@@ -47,7 +47,7 @@ use super::AgentTaskRunResult;
 
 #[derive(serde::Serialize, serde::Deserialize)]
 struct CandidateAdoptionTerminalResult {
-    status: String,
+    status: CookStatus,
     stop_reason: Option<String>,
 }
 
@@ -396,7 +396,7 @@ pub(crate) fn adopt_cook_candidate_with_dispatcher_and_backend_for_attempt_with_
             // adopted record's run id; this one did not.
             return Ok(stores.report(CookReportInput {
                 cook_id: cook_id.to_string(),
-                status: &result.status,
+                status: result.status,
                 disposition: CookDisposition::Terminal,
                 attempts: vec![AgentTaskCookAttemptReport {
                     attempt: adopted_attempt,
@@ -438,12 +438,11 @@ pub(crate) fn adopt_cook_candidate_with_dispatcher_and_backend_for_attempt_with_
         let finalization = super::recorded_finalization_receipt(&record.metadata).cloned();
         let status = finalization
             .as_ref()
-            .and_then(|value| value["status"].as_str())
-            .unwrap_or("green_no_finalize")
-            .to_string();
+            .map(|value| super::cook_delivery::publication_status(value).0)
+            .unwrap_or(CookStatus::GreenNoFinalize);
         return Ok(stores.report(CookReportInput {
             cook_id: cook_id.to_string(),
-            status: &status,
+            status,
             disposition: CookDisposition::Terminal,
             attempts: vec![AgentTaskCookAttemptReport {
                 attempt: adopted_attempt,
@@ -717,7 +716,7 @@ pub(crate) fn adopt_cook_candidate_with_dispatcher_and_backend_for_attempt_with_
             )?;
             let report = stores.report(CookReportInput {
                 cook_id: cook_id.to_string(),
-                status: "policy_failure",
+                status: homeboy_core::cook_status::CookStatus::PolicyFailure,
                 disposition: CookDisposition::Terminal,
                 attempts: vec![attempt],
                 finalization: None,
@@ -834,7 +833,7 @@ pub(crate) fn adopt_cook_candidate_with_dispatcher_and_backend_for_attempt_with_
             CookFollowUpDispatch::BudgetExhausted { reason } => {
                 let report = stores.report(CookReportInput {
                     cook_id: cook_id.to_string(),
-                    status: "execution_budget_exhausted",
+                    status: homeboy_core::cook_status::CookStatus::ExecutionBudgetExhausted,
                     disposition: CookDisposition::Terminal,
                     attempts: vec![attempt],
                     finalization: None,
@@ -857,7 +856,7 @@ pub(crate) fn adopt_cook_candidate_with_dispatcher_and_backend_for_attempt_with_
             CookFollowUpDispatch::PolicyFailure { reason } => {
                 let report = stores.report(CookReportInput {
                     cook_id: cook_id.to_string(),
-                    status: "policy_failure",
+                    status: homeboy_core::cook_status::CookStatus::PolicyFailure,
                     disposition: CookDisposition::Terminal,
                     attempts: vec![attempt],
                     finalization: None,
@@ -884,7 +883,7 @@ pub(crate) fn adopt_cook_candidate_with_dispatcher_and_backend_for_attempt_with_
             )?;
             return Ok(stores.report(CookReportInput {
                 cook_id: cook_id.to_string(),
-                status: "baseline_red",
+                status: homeboy_core::cook_status::CookStatus::BaselineRed,
                 disposition: CookDisposition::Terminal,
                 attempts: vec![attempt],
                 finalization: None,
@@ -903,8 +902,8 @@ pub(crate) fn adopt_cook_candidate_with_dispatcher_and_backend_for_attempt_with_
         // must not be reported as failed verification (#9692).
         let (status, reason) = if feedback.status == AgentTaskCookLoopStatus::GatesDeferred {
             (
-                "gate_environment_unavailable".to_string(),
-                super::cook::gates_deferred_stop_reason(&promotion, cook_id),
+                CookStatus::GateEnvironmentUnavailable,
+                super::cook::gate_environment_unavailable_stop_reason(&promotion, cook_id),
             )
         } else if feedback.failed_gates.is_empty() {
             let status = serde_json::to_value(feedback.status)
@@ -912,17 +911,17 @@ pub(crate) fn adopt_cook_candidate_with_dispatcher_and_backend_for_attempt_with_
                 .and_then(|value| value.as_str().map(str::to_string))
                 .unwrap_or_else(|| format!("{:?}", feedback.status));
             let reason = adoption_incomplete_reason(feedback.status, &status);
-            (status, reason)
+            (CookStatus::CandidateRecoverable, reason)
         } else {
             (
-                "gate_failed".to_string(),
+                CookStatus::GateFailed,
                 "adopted candidate did not pass the original deterministic gates".to_string(),
             )
         };
         lifecycle_store.finish_candidate_adoption(&record.run_id, Some(reason.clone()), false)?;
         return Ok(stores.report(CookReportInput {
             cook_id: cook_id.to_string(),
-            status: &status,
+            status,
             disposition: CookDisposition::Terminal,
             attempts: vec![attempt],
             finalization: None,
@@ -935,7 +934,7 @@ pub(crate) fn adopt_cook_candidate_with_dispatcher_and_backend_for_attempt_with_
         lifecycle_store.finish_candidate_adoption(&record.run_id, None, true)?;
         return Ok(stores.report(CookReportInput {
             cook_id: cook_id.to_string(),
-            status: "green_no_finalize",
+            status: homeboy_core::cook_status::CookStatus::GreenNoFinalize,
             disposition: CookDisposition::Terminal,
             attempts: vec![attempt],
             finalization: None,
@@ -971,16 +970,12 @@ pub(crate) fn adopt_cook_candidate_with_dispatcher_and_backend_for_attempt_with_
         }
     };
     project_execution_placement(&mut finalization, &record.metadata);
-    let status = finalization["status"]
-        .as_str()
-        .unwrap_or("unknown")
-        .to_string();
-    let publication_succeeded = matches!(status.as_str(), "review_ready" | "draft_published");
+    let (status, publication_succeeded) = super::cook_delivery::publication_status(&finalization);
     lifecycle_store.finish_candidate_adoption(&record.run_id, None, publication_succeeded)?;
     let exit_code = if publication_succeeded { 0 } else { 1 };
     Ok(stores.report(CookReportInput {
         cook_id: cook_id.to_string(),
-        status: &status,
+        status,
         disposition: CookDisposition::Terminal,
         attempts: vec![attempt],
         stop_reason: (!publication_succeeded).then(|| {

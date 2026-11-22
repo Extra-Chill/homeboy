@@ -337,7 +337,7 @@ pub(super) fn pre_artifact_interruption_report(
 ) -> AgentTaskRunResult<AgentTaskCookReport> {
     let mut report = stores.report(CookReportInput {
         cook_id,
-        status: "pre_artifact_interruption",
+        status: homeboy_core::cook_status::CookStatus::PreArtifactInterruption,
         disposition: CookDisposition::Terminal,
         attempts,
         finalization: None,
@@ -373,7 +373,7 @@ pub(super) fn cook_deadline_report(
         // The existing vocabulary entry for "exceeded its wall-clock budget"
         // ([`CookStatus::TimedOut`]). Written as the literal every other exit
         // in this file uses; the linkage is pinned by test.
-        status: "timed_out",
+        status: homeboy_core::cook_status::CookStatus::TimedOut,
         disposition: CookDisposition::Terminal,
         attempts,
         finalization: None,

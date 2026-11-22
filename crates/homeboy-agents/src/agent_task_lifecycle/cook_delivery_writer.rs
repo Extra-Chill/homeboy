@@ -118,7 +118,7 @@ fn delivery_run_state(
     .then_some(state)
 }
 
-/// A `gates_deferred` Cook result describes deferred gates. Once a later gate
+/// A `gate_environment_unavailable` Cook result describes deferred gates. Once a later gate
 /// run executes, the delivery is verified or rejected and that result no
 /// longer holds: replace it with the status the delivery reports, or clear it
 /// so the Cook records its next result, instead of latching an unverified
@@ -139,7 +139,7 @@ fn retire_superseded_deferral(record: &mut AgentTaskRunRecord, delivery: Option<
     let deferred = progress
         .get("terminal_status")
         .and_then(Value::as_str)
-        .map(CookStatus::from_status)
+        .and_then(CookStatus::from_status)
         == Some(CookStatus::GateEnvironmentUnavailable);
     if !deferred {
         return;
