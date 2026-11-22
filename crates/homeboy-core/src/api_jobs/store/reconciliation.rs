@@ -24,6 +24,41 @@ use crate::api_jobs::types::DaemonLinkedDurableRunState;
 use crate::error::{Error, Result};
 
 impl JobStore {
+    /// Settle durable cancellation requests only when driver ownership is proven dead.
+    pub fn reconcile_controller_cancellations(&self) -> Result<()> {
+        self.durable_transaction(|inner| {
+            let pending: Vec<_> = inner
+                .jobs
+                .iter()
+                .filter_map(|(id, stored)| {
+                    let controller = stored.controller_job.as_ref()?;
+                    let ownership = stored_job_execution_liveness(stored, &local_child_liveness);
+                    (!stored.job.status.is_terminal()
+                        && controller.cancellation_requested
+                        && ownership.driver_owned
+                        && ownership.pid.is_some()
+                        && matches!(
+                            ownership.state,
+                            Some(LocalChildLiveness::Dead | LocalChildLiveness::IdentityMismatch)
+                        ))
+                    .then(|| {
+                        (
+                            *id,
+                            controller
+                                .cancellation_reason
+                                .clone()
+                                .unwrap_or_else(|| "controller job cancellation requested".into()),
+                        )
+                    })
+                })
+                .collect();
+            for (id, reason) in pending {
+                self.request_controller_cancellation_locked(inner, id, reason)?;
+            }
+            Ok(())
+        })
+    }
+
     /// Adopt every non-terminal pre-scope controller at startup.
     /// The caller holds the exclusive daemon owner lock: all current daemons
     /// stamp scopes, so no pre-scope owner can still be alive, regardless of lease.

@@ -452,6 +452,14 @@ fn cancel_through_staging_controller(
     statuses: &'static [&'static str],
     runner_child: bool,
 ) -> Vec<AgentTaskRunRecord> {
+    staging_controller_cancellation_fixture(statuses, runner_child, false)
+}
+
+fn staging_controller_cancellation_fixture(
+    statuses: &'static [&'static str],
+    runner_child: bool,
+    reconcile: bool,
+) -> Vec<AgentTaskRunRecord> {
     use std::io::{Read, Write};
     use std::net::TcpListener;
 
@@ -524,7 +532,7 @@ fn cancel_through_staging_controller(
     // state override outranks an injected root, and every parallel test's
     // isolated home sets it, so pin it absent under the env lock rather than
     // routing to whichever home is current (#14832).
-    let _env = homeboy_core::test_support::env_lock();
+    let _env = (!reconcile).then(homeboy_core::test_support::env_lock);
     let _daemon_state_dir =
         homeboy_core::test_support::EnvVarGuard::unset(homeboy_core::paths::DAEMON_STATE_DIR_ENV);
     let daemon_dir = lifecycle_store.roots().config().join("daemon");
@@ -561,6 +569,12 @@ fn cancel_through_staging_controller(
     lifecycle_store
         .mutate_record(run_id, |record| {
             record.metadata["lab_staging_controller_job_id"] = json!(controller_job_id);
+            if reconcile {
+                record.metadata["kind"] = json!("lab_offload_controller_proxy");
+                record.metadata["provider_state"] = json!("pending");
+                record.metadata["provider_run_ids"] = json!([]);
+                record.updated_at = Some("2020-01-01T00:00:00Z".into());
+            }
             true
         })
         .expect("bind staging job to exact run");
@@ -571,6 +585,17 @@ fn cancel_through_staging_controller(
     let records = statuses
         .iter()
         .map(|_| {
+            if reconcile {
+                let report = crate::agent_task_service::reconcile_run_in_store(
+                    &lifecycle_store,
+                    run_id,
+                    false,
+                )
+                .expect("reconcile apply settles inline-cancelled staging job");
+                assert_eq!(report.failed, 0);
+                assert_eq!(report.reconciled, 1);
+                return exact_record_in_store(&lifecycle_store, run_id).unwrap();
+            }
             cancel_exact_run_in_store(
                 &lifecycle_store,
                 run_id,
@@ -588,6 +613,21 @@ fn cancel_through_staging_controller(
         .any(|event| event.kind == "run.cancelled");
     assert_eq!(cancelled, statuses.last() != Some(&"queued"));
     records
+}
+
+#[test]
+fn reconcile_queued_never_launched_provider_after_inline_controller_cancellation() {
+    homeboy_core::test_support::with_isolated_home(|_| {
+        let records = staging_controller_cancellation_fixture(&["cancelled"], false, true);
+        let terminal = &records[0];
+        assert!(terminal.state().is_terminal());
+        assert_eq!(terminal.metadata["cancel_reason"], "provider_launch_lost");
+        assert_eq!(
+            terminal.metadata["reconciliation"]["reason"],
+            "provider_launch_lost"
+        );
+        assert_eq!(terminal.metadata["retryable"], true);
+    });
 }
 
 #[test]
