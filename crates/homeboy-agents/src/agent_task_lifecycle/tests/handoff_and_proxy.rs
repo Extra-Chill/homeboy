@@ -25,7 +25,7 @@ fn test_lifecycle_store() -> AgentTaskLifecycleStore {
 enum TestRunnerReconciliation {
     Snapshot(Box<homeboy_core::api_jobs::RunnerJobLogSnapshot>),
     Snapshots(Vec<homeboy_core::api_jobs::RunnerJobLogSnapshot>),
-    ConfirmedAbsent(usize),
+    ReadError(Value),
     Unconfirmed,
     Retained(homeboy_core::observation::RunRecord),
 }
@@ -67,10 +67,12 @@ impl RunnerContinuationProvider for ReconciliationProvider {
             Some(TestRunnerReconciliation::Snapshot(snapshot)) => {
                 RunnerJobReconciliation::Snapshot(snapshot)
             }
-            Some(TestRunnerReconciliation::ConfirmedAbsent(checked_generations)) => {
-                RunnerJobReconciliation::ConfirmedAbsent {
-                    checked_generations,
-                }
+            Some(TestRunnerReconciliation::ReadError(details)) => {
+                RunnerJobReconciliation::from_read_error(Error::new(
+                    homeboy_core::error::ErrorCode::InternalUnexpected,
+                    "job read failed",
+                    details,
+                ))
             }
             Some(
                 TestRunnerReconciliation::Unconfirmed
@@ -1172,7 +1174,7 @@ fn accepted_handoff_replays_idempotently_and_rejects_a_different_identity() {
 /// `ReconciliationProvider` whose result is a `Mutex<Option<..>>` that
 /// `reconcile_runner_job` `take()`s. A rooted form of this test would run
 /// concurrently with them and consume that single result — silently failing
-/// *those* tests, and taking a `ConfirmedAbsent` verdict that would terminalize
+/// *those* tests, and taking a typed ledger-absence verdict that would terminalize
 /// this run and break the `runner_job_id` assertion below. Migrating this one
 /// trades a hermetic-home mutation for a genuine cross-test race, so it stays
 /// until the continuation registry is serialized independently.
@@ -1532,16 +1534,23 @@ fn accepted_handoff_adopts_a_job_found_on_another_known_generation() {
 }
 
 #[test]
-fn accepted_handoff_fails_after_confirmed_absence_across_generations() {
+fn reconcile_accepted_handoff_fails_after_typed_ledger_absence() {
     with_isolated_home(|_| {
         let run_id = "generation-confirmed-absence";
         accepted_detached_handoff(run_id);
+        rewrite_record_for_test(run_id, |record| {
+            record.metadata["runner_pid"] = json!(999_999u32);
+        })
+        .unwrap();
         let _provider = RunnerContinuationTestGuard::install(Box::new(ReconciliationProvider {
-            result: Mutex::new(Some(TestRunnerReconciliation::ConfirmedAbsent(2))),
+            result: Mutex::new(Some(TestRunnerReconciliation::ReadError(
+                json!({"runner_job_absence": "ledger_absent"}),
+            ))),
             recovered_runner_job_id: Mutex::new(None),
         }));
 
-        let terminal = reconcile_status(run_id).expect("terminal lost accepted job");
+        crate::agent_task_service::reconcile_run(run_id, false).expect("apply reconcile");
+        let terminal = test_lifecycle_store().read_record(run_id).unwrap();
 
         assert_eq!(terminal.state(), RunExecutionState::Failed);
         assert_eq!(terminal.metadata["phase"], "accepted_lab_runner_job_lost");
@@ -1552,8 +1561,8 @@ fn accepted_handoff_fails_after_confirmed_absence_across_generations() {
         assert!(disconnected_runner_recovery_available(&terminal));
         assert_eq!(status(run_id).expect("pure status"), terminal);
         assert_eq!(
-            terminal.metadata["lost_accepted_runner_job"]["checked_generations"],
-            2
+            terminal.metadata["reconciliation"]["reason"],
+            "runner_job_absent"
         );
         assert_eq!(terminal.metadata["provider_executions_consumed"], 0);
         assert!(terminal.provider_handles.is_empty());
@@ -1563,6 +1572,91 @@ fn accepted_handoff_fails_after_confirmed_absence_across_generations() {
             .as_deref()
             .is_some_and(|summary| { summary.contains("accepted Lab runner job") }));
     });
+}
+
+#[test]
+fn reconcile_typed_absence_settles_fenced_handoff_as_cancelled() {
+    with_isolated_home(|_| {
+        let record = accepted_detached_handoff("ledger-absent-fenced");
+        rewrite_record_for_test(&record.run_id, |record| {
+            record.metadata["cancellation_fence"] = json!({"state": "cancelled"});
+            record.metadata["runner_pid"] = json!(999_999u32);
+        })
+        .unwrap();
+        let _provider = RunnerContinuationTestGuard::install(Box::new(ReconciliationProvider {
+            result: Mutex::new(Some(TestRunnerReconciliation::ReadError(json!({
+                "runner_job_absence": "ledger_absent"
+            })))),
+            recovered_runner_job_id: Mutex::new(None),
+        }));
+        crate::agent_task_service::reconcile_run(&record.run_id, false).unwrap();
+        let terminal = test_lifecycle_store().read_record(&record.run_id).unwrap();
+        assert_eq!(terminal.state(), RunExecutionState::Cancelled);
+        assert_eq!(
+            terminal.metadata["reconciliation"]["reason"],
+            "runner_job_absent"
+        );
+    });
+}
+
+#[test]
+fn reconcile_read_transport_error_and_bare_404_preserve_handoff() {
+    for details in [
+        json!({}),
+        json!({"http_status": 404, "path": "/jobs/missing"}),
+    ] {
+        with_isolated_home(|_| {
+            let record = accepted_detached_handoff("ledger-unconfirmed");
+            rewrite_record_for_test(&record.run_id, |record| {
+                record.metadata["runner_pid"] = json!(999_999u32);
+            })
+            .unwrap();
+            let record = test_lifecycle_store().read_record(&record.run_id).unwrap();
+            let _provider =
+                RunnerContinuationTestGuard::install(Box::new(ReconciliationProvider {
+                    result: Mutex::new(Some(TestRunnerReconciliation::ReadError(details))),
+                    recovered_runner_job_id: Mutex::new(None),
+                }));
+            crate::agent_task_service::reconcile_run(&record.run_id, false).unwrap();
+            assert_eq!(
+                test_lifecycle_store().read_record(&record.run_id).unwrap(),
+                record
+            );
+            assert_eq!(record.state(), RunExecutionState::Running);
+        });
+    }
+}
+
+#[test]
+fn reconcile_terminal_non_success_without_aggregate() {
+    for state in [RunExecutionState::Failed, RunExecutionState::Cancelled] {
+        for missing in [false, true] {
+            with_isolated_home(|_| {
+                let mut record = accepted_detached_handoff("terminal-no-aggregate");
+                let mut source = retained_terminal_run(&record);
+                source.metadata_json["agent_task_run"]["lifecycle"]["execution"]["state"] =
+                    json!(state);
+                source.metadata_json["agent_task_aggregate"] = Value::Null;
+                if missing {
+                    source
+                        .metadata_json
+                        .as_object_mut()
+                        .unwrap()
+                        .remove("agent_task_aggregate");
+                }
+                assert!(super::super::lifecycle_runner_projection::project_terminal_runner_record_in_store(
+                    &test_lifecycle_store(), &mut record, &source,
+                ).unwrap());
+                assert_eq!(
+                    test_lifecycle_store()
+                        .read_record(&record.run_id)
+                        .unwrap()
+                        .state(),
+                    state
+                );
+            });
+        }
+    }
 }
 
 #[test]

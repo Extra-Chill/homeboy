@@ -156,6 +156,34 @@ fn decision_status(
         {
             return Ok(record);
         }
+        if agent_task_lifecycle::CookRunState::accepted_lab_handoff(&record) {
+            // Read-only runner authority is the sole settlement boundary for
+            // accepted work. Inconclusive probes must not even annotate it.
+            let mut record = record;
+            if agent_task_lifecycle::observe_runner_job_in_store(lifecycle_store, &record)
+                .is_some_and(|evidence| {
+                    evidence.observation
+                        == agent_task_lifecycle::RunnerJobObservation::RunnerRemoved
+                })
+            {
+                agent_task_lifecycle::terminalize_lost_accepted_lab_job_in_store(
+                    lifecycle_store,
+                    &mut record,
+                    0,
+                )?;
+                return Ok(record);
+            }
+            agent_task_lifecycle::reconcile_runner_job_state_in_store(
+                lifecycle_store,
+                &mut record,
+            )?;
+            if record.state().is_terminal() {
+                return Ok(record);
+            }
+            // Persisted runner evidence (retained job events) is still projected
+            // by the rooted status read; it never cancels runner-owned work.
+            return rooted_exact_status(lifecycle_store, run_id);
+        }
         // Status convergence can itself record an interrupted-owner failure.
         // Retain the decision before that refresh, not only on cancellation.
         lifecycle_store.mutate_record(run_id, |record| {
@@ -172,17 +200,7 @@ fn decision_status(
             true
         })?;
         let mut record = agent_task_lifecycle::exact_record_in_store(lifecycle_store, run_id)?;
-        if agent_task_lifecycle::observe_runner_job_in_store(lifecycle_store, &record).is_some_and(
-            |evidence| {
-                evidence.observation == agent_task_lifecycle::RunnerJobObservation::RunnerRemoved
-            },
-        ) {
-            agent_task_lifecycle::terminalize_lost_accepted_lab_job_in_store(
-                lifecycle_store,
-                &mut record,
-                0,
-            )?;
-        }
+        agent_task_lifecycle::reconcile_runner_job_state_in_store(lifecycle_store, &mut record)?;
         rooted_exact_status(lifecycle_store, run_id)
     }
 }
@@ -310,7 +328,11 @@ pub fn reconcile_stale_active_runs(dry_run: bool) -> Result<AgentTaskReconcileRe
             // Detached controllers have exited. Probe even a fresh/Active
             // projection, and submit terminal Cook work from this tick rather
             // than waiting for a controller or a later status read.
-            let result = rooted_status(&lifecycle_store, &run.run_id).and_then(|refreshed| {
+            let result = rooted_status(&lifecycle_store, &run.run_id).and_then(|mut refreshed| {
+                agent_task_lifecycle::reconcile_runner_job_state_in_store(
+                    &lifecycle_store,
+                    &mut refreshed,
+                )?;
                 if refreshed.state().is_terminal() {
                     agent_task_lifecycle::reconcile_terminal_cook_provider_result(&run.run_id)
                 } else {
@@ -582,14 +604,10 @@ pub(crate) fn reconcile_run_in_store(
                     });
                 } else if refreshed.runner_id().is_some()
                     && refreshed.runner_job_id().is_some()
-                    && !locally_reconcilable_after_runner_idle
-                    && refreshed.runner_id().is_some_and(|runner_id| {
-                        agent_task_lifecycle::runner_authority(runner_id)
-                            != agent_task_lifecycle::RunnerAuthority::Removed
-                    })
+                    && agent_task_lifecycle::CookRunState::accepted_lab_handoff(&refreshed)
                 {
-                    // An accepted remote handoff remains runner-owned unless its
-                    // provider authoritatively confirms the runner was removed.
+                    // Accepted work is settled only by the read projection above,
+                    // never by this cancellation fallback (even after removal).
                     runs.push(AgentTaskReconcileRun {
                         run_id: resolved_run_id.clone(),
                         liveness,

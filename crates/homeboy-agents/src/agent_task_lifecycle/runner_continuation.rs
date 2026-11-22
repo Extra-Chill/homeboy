@@ -16,15 +16,33 @@ use homeboy_core::api_jobs::RunnerJobLogSnapshot;
 use homeboy_core::error::{Error, Result};
 use homeboy_runner_contract::{WorkspaceClaim, WorkspaceIdentity};
 
-/// Result of reconciling a runner job across its known daemon generations.
-///
-/// An accepted handoff is terminal only when every authoritative generation
-/// confirms the job is absent. Transport failures remain deliberately
-/// unconfirmed so a transient daemon error cannot discard runner-owned work.
+/// Read-only runner reconciliation evidence. Only the daemon's typed shared
+/// ledger classification can settle a missing accepted job. Transport failures
+/// and unclassified HTTP misses remain deliberately unconfirmed.
 pub enum RunnerJobReconciliation {
     Snapshot(Box<RunnerJobLogSnapshot>),
-    ConfirmedAbsent { checked_generations: usize },
+    LedgerAbsent(Error),
+    LedgerTerminal(homeboy_core::api_jobs::JobStatus, Error),
     UnconfirmedAbsence,
+}
+
+impl RunnerJobReconciliation {
+    /// Only explicit durable-ledger evidence is authority; HTTP status and
+    /// transport failures cannot establish that runner-owned work is gone.
+    pub fn from_read_error(error: Error) -> Self {
+        match error.details["runner_job_absence"].as_str() {
+            Some("ledger_absent") => Self::LedgerAbsent(error),
+            Some("ledger_terminal") => {
+                match serde_json::from_value::<homeboy_core::api_jobs::JobStatus>(
+                    error.details["runner_job_status"].clone(),
+                ) {
+                    Ok(status) if status.is_terminal() => Self::LedgerTerminal(status, error),
+                    _ => Self::UnconfirmedAbsence,
+                }
+            }
+            _ => Self::UnconfirmedAbsence,
+        }
+    }
 }
 
 /// What the current runner provider can authoritatively establish about a
@@ -137,13 +155,12 @@ pub trait RunnerContinuationProvider: Send + Sync {
         Ok(None)
     }
 
-    /// Reconcile a job against the daemon generation that owns it and, when
-    /// necessary, other known generations. Providers without generation
-    /// ownership support retain the conservative snapshot-only behavior.
+    /// Read job state or typed ledger absence without cancelling runner work.
+    /// Older daemons without classification retain conservative behavior.
     fn reconcile_runner_job(&self, runner_id: &str, job_id: &str) -> RunnerJobReconciliation {
         match self.runner_job_log_snapshot(runner_id, job_id) {
             Ok(snapshot) => RunnerJobReconciliation::Snapshot(Box::new(snapshot)),
-            Err(_) => RunnerJobReconciliation::UnconfirmedAbsence,
+            Err(error) => RunnerJobReconciliation::from_read_error(error),
         }
     }
 

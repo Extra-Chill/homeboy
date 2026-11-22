@@ -92,6 +92,39 @@ fn projection_cancel_checks_shared_ledger_after_scoped_mirror_miss() {
     });
 }
 
+#[test]
+fn remote_runner_read_classifies_shared_ledger_without_cancelling_live_job() {
+    with_isolated_home(|home| {
+        let path = ledger(home);
+        let owner = daemon(&path, "owner");
+        let active = owner.create("runner.exec").id;
+        let terminal = owner.create("runner.exec").id;
+        owner.cancel(terminal, "finished").unwrap();
+        let reader = daemon(&path, "reader");
+        assert_eq!(
+            reader
+                .read_local_runner_job(Uuid::new_v4())
+                .unwrap_err()
+                .details["runner_job_absence"],
+            "ledger_absent"
+        );
+        // Ledger-resident jobs from another scope read exactly as `get` does.
+        assert_eq!(
+            reader.read_local_runner_job(terminal).unwrap().status,
+            JobStatus::Cancelled
+        );
+        assert_eq!(
+            reader.read_local_runner_job(active).unwrap().status,
+            JobStatus::Queued
+        );
+        assert_eq!(
+            owner.read_local_runner_job(active).unwrap().status,
+            JobStatus::Queued
+        );
+        assert_eq!(owner.get(active).unwrap().status, JobStatus::Queued);
+    });
+}
+
 fn controller_state() -> ControllerJobState {
     ControllerJobState {
         job_type: "test.daemon-scope".to_string(),
