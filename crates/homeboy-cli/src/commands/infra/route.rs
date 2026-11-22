@@ -3719,14 +3719,14 @@ fn attach_verified_cook_baseline(
     plan: &mut homeboy::agents::agent_tasks::scheduler::AgentTaskPlan,
     baseline: &serde_json::Value,
 ) {
-    let Some(source_task_id) = baseline
-        .get("source_task_id")
+    let Some(bound_task_id) = baseline
+        .get("bound_task_id")
         .and_then(serde_json::Value::as_str)
     else {
         return;
     };
     for task in &mut plan.tasks {
-        if task.task_id == source_task_id {
+        if task.task_id == bound_task_id {
             if !task.metadata.is_object() {
                 task.metadata = serde_json::json!({});
             }

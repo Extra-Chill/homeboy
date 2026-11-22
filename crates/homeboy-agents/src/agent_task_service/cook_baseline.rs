@@ -174,6 +174,14 @@ pub(crate) fn materialize_initial_candidate_baseline(
             ]),
         ));
     }
+    let gate_feedback =
+        plan.tasks[0].metadata["cook_loop"]["kind"] == "deterministic-gate-feedback";
+    if gate_feedback {
+        crate::agent_task_candidate_tree::validate_gate_feedback_candidate_baseline(
+            source_root,
+            &plan.tasks[0].inputs["cook_loop"],
+        )?;
+    }
     let base = git_output(source_root, &["rev-parse", "HEAD"])?;
     let index = homeboy_core::git::private_index(source_root)?;
     let index_path = index.path().display().to_string();
@@ -244,7 +252,10 @@ pub(crate) fn materialize_initial_candidate_baseline(
             source_task_id: task_id.to_string(),
             bound_task_id: task_id.to_string(),
             parent_snapshot: None,
-            preexisting_candidate: true,
+            // A gate retry adopts an authenticated failed candidate, not an
+            // initial user-supplied dirty workspace. Lab uses this distinction
+            // to admit the clean derived checkout for the bound retry task.
+            preexisting_candidate: !gate_feedback,
             baseline_admission: None,
         },
     }))

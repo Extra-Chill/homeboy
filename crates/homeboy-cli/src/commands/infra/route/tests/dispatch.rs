@@ -1776,7 +1776,7 @@ fn cook_lab_source_uses_the_recorded_execution_worktree_not_controller_context()
 }
 
 #[test]
-fn lab_cook_attempt_preserves_authorized_dirty_baseline_in_the_run_plan() {
+fn lab_cook_attempt_attaches_baseline_to_bound_task_not_source_task() {
     let mut plan = homeboy::agents::agent_tasks::scheduler::AgentTaskPlan::new(
         "cook-dirty-baseline",
         vec![serde_json::from_value(serde_json::json!({
@@ -1789,7 +1789,8 @@ fn lab_cook_attempt_preserves_authorized_dirty_baseline_in_the_run_plan() {
     );
     let baseline = serde_json::json!({
         "source_run_id": "cook-dirty-baseline",
-        "source_task_id": "task",
+        "source_task_id": "prior-task",
+        "bound_task_id": "task",
         "baseline_tree": "0123456789012345678901234567890123456789",
         "preexisting_candidate": true,
     });

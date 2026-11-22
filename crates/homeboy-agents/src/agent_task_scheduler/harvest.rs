@@ -1235,6 +1235,94 @@ mod committed_harvest_tests {
     }
 
     #[test]
+    fn gate_feedback_lab_derived_baseline_resumes_staged_candidate() {
+        // Snapshot authentication is a runner responsibility; exercise the real
+        // scheduler preflight and controller evidence writer with real Git.
+        use homeboy_core::lab_workspace_provenance::*;
+        use homeboy_core::source_snapshot::SourceSnapshot;
+        struct VerifiedTransport;
+        impl LabWorkspaceProvenanceProvider for VerifiedTransport {
+            fn verify_lab_workspace(
+                &self,
+                _: &str,
+                _: &Path,
+                _: SourceSnapshot,
+                _: serde_json::Value,
+                require_git_root: bool,
+            ) -> Result<LabWorkspaceProvenanceInfo, String> {
+                assert!(require_git_root);
+                Ok(LabWorkspaceProvenanceInfo::default())
+            }
+            fn materialize_verified_lab_snapshot_git_baseline(
+                &self,
+                _: &str,
+                _: &Path,
+                _: SourceSnapshot,
+                _: serde_json::Value,
+            ) -> Result<String, String> {
+                panic!("already a Git checkout")
+            }
+            fn verify_lab_workspace_from_env(
+                &self,
+                _: &str,
+                _: &Path,
+            ) -> Result<LabWorkspaceProvenanceInfo, String> {
+                panic!("explicit transport")
+            }
+        }
+        homeboy_core::test_support::with_isolated_home(|_| {
+            let temp = tempfile::tempdir().unwrap();
+            let (workspace, base) = candidate_attempt_repo(temp.path());
+            std::fs::write(workspace.join("candidate.txt"), "candidate\n").unwrap();
+            git(&workspace, &["add", "."]);
+            git(&workspace, &["commit", "-m", "failed candidate"]);
+            let candidate = git(&workspace, &["rev-parse", "HEAD"]);
+            let tree = git(&workspace, &["rev-parse", "HEAD^{tree}"]);
+            let diff = git(&workspace, &["diff", &base, &candidate]);
+            git(&workspace, &["reset", "--soft", &base]);
+            let mut request = gate_feedback_request(&workspace, diff);
+            request.inputs["cook_loop"]["candidate_commit"] = serde_json::json!({
+                "base_sha": base, "candidate_sha": candidate, "tree_sha": tree,
+            });
+            let plan = AgentTaskPlan::new("gate-retry", vec![request.clone()]);
+            let baseline = crate::agent_task_service::materialize_initial_candidate_baseline(
+                &plan,
+                Some(&workspace),
+                "failed-run",
+            )
+            .unwrap()
+            .unwrap();
+            let evidence = baseline.capability().verified_baseline_provenance();
+            assert_eq!(git(&baseline.path, &["rev-parse", "HEAD^"]), base);
+            assert_eq!(git(&baseline.path, &["rev-parse", "HEAD^{tree}"]), tree);
+            assert_ne!(evidence["baseline_commit"], candidate);
+            request.workspace.root = Some(baseline.path.display().to_string());
+            // Only serialized evidence crosses the Lab boundary, not capability.
+            register_lab_workspace_provenance_provider(Box::new(VerifiedTransport));
+            let context = HarvestExecutionContext::from_lab_transport(
+                SourceSnapshot::default(),
+                serde_json::json!({"source_provenance": {"verified_cook_baseline": evidence}}),
+            )
+            .unwrap();
+            let preflight = prepare_committed_harvest(&request, None, &context).unwrap();
+            let scratch = tempfile::tempdir().unwrap();
+            let attempt = prepare_attempt_workspace(
+                &mut request,
+                preflight.base_sha.as_deref(),
+                preflight.candidate_baseline.as_ref(),
+                scratch.path(),
+            )
+            .unwrap()
+            .unwrap();
+            assert_eq!(git(attempt.root(), &["rev-parse", "HEAD^{tree}"]), tree);
+            assert_eq!(
+                std::fs::read_to_string(attempt.root().join("candidate.txt")).unwrap(),
+                "candidate\n"
+            );
+        });
+    }
+
+    #[test]
     fn gate_feedback_baseline_adopts_current_dirty_tree_after_pr_advances() {
         let temp = tempfile::tempdir().unwrap();
         let (workspace, _) = candidate_attempt_repo(temp.path());
