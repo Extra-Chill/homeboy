@@ -2800,6 +2800,13 @@ fn recover_regate_verify_replaces_gates_for_an_incomplete_unjudged_candidate() {
         let (preflight, exit) = recover_preflight_probe(run_id);
         assert_eq!(exit, 0, "{preflight:#}");
         assert_eq!(preflight["step"]["kind"], "regate", "{preflight:#}");
+        // Status reports `recoverable` exactly when `recover` has a step (#18740).
+        let (status_value, _) = status(StatusArgs {
+            run_id: run_id.to_string(),
+            ..Default::default()
+        })
+        .unwrap();
+        assert_eq!(status_value["recoverable"], true, "{status_value:#}");
 
         let captured = Arc::new(std::sync::Mutex::new(None));
         let capture = captured.clone();

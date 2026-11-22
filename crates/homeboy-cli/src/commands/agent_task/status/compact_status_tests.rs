@@ -100,7 +100,13 @@ fn terminal_cook_status_exposes_record_outcome_by_cook_and_run_id() {
         rewrite_record_for_test(run_id, |record| {
             record.metadata["cook_delivery"] = json!({
                 "schema": "homeboy/cook-delivery/v2",
-                "delivery": { "state": "no_change" },
+                "delivery": {
+                    "state": "published",
+                    "publication": {
+                        "status": "created", "published": true, "draft": true,
+                        "pr_url": "https://github.com/o/r/pull/7"
+                    }
+                },
                 "artifacts": {}
             });
         })
@@ -118,10 +124,11 @@ fn terminal_cook_status_exposes_record_outcome_by_cook_and_run_id() {
                 })
                 .unwrap();
                 assert_eq!(
-                    data["terminal_outcome"]["kind"], "no_change",
+                    data["terminal_outcome"]["kind"], "published",
                     "{id}, full={full}"
                 );
-                assert_eq!(data["recoverable"], true, "{id}, full={full}");
+                // A published Cook leaves `recover` nothing to do (#18740).
+                assert_eq!(data["recoverable"], false, "{id}, full={full}");
             }
         }
     });
@@ -152,7 +159,6 @@ fn cook_outcome_is_the_selected_attempts_gate_verdict() {
             json!({"kind": "gate_refused", "gate": "gate-1"}),
             "{cook}"
         );
-        assert_eq!(cook["recoverable"], true);
         let retry = status("purity-cook-gate-refused-retry", true);
         assert_eq!(retry["terminal_outcome"]["kind"], "no_change", "{retry}");
     });

@@ -199,6 +199,7 @@ fn status_without_feedback(args: StatusArgs) -> CmdResult<Value> {
     // The same verdict `runs show`, `runs evidence <id> --dossier` and `diagnose` report
     // (#15885): status names why a Cook has not completed, not just its state.
     let verdict = crate::commands::cook_verdict::cook_verdict(&run);
+    let recoverable = recover_has_step(&run);
     let mut value = serde_json::to_value(run).unwrap_or(Value::Null);
     if let Some(reason) = verdict.reason {
         value["reason"] = json!(reason);
@@ -218,8 +219,7 @@ fn status_without_feedback(args: StatusArgs) -> CmdResult<Value> {
         let outcome = cook_outcome_record(&args, &record);
         let outcome = outcome.as_ref().unwrap_or(&record);
         value["terminal_outcome"] = json!(outcome.terminal_outcome());
-        value["recoverable"] =
-            json!(homeboy::agents::agent_task_lifecycle::CookRunState::of(outcome).recoverable);
+        value["recoverable"] = json!(recoverable);
         if record
             .metadata
             .get("unmaterialized_cook_admission")
@@ -436,25 +436,38 @@ fn compact_recovery_preserves_selected_planner_eligibility() {
     assert_eq!(compact["action_eligibility"]["available_action_count"], 0);
 }
 
+/// `recoverable` means `agent-task recover` has a step: the projected Cook
+/// recovery plan, or `Recover` eligibility for runs that are not Cooks.
+fn recover_has_step(run: &homeboy_control_plane_contract::ControlPlaneRun) -> bool {
+    use homeboy_control_plane_contract::{ControlPlaneAction, ControlPlaneActionAvailability};
+
+    if let Some(recovery) = &run.recovery {
+        return recovery.step != "none";
+    }
+    run.action_eligibility.as_ref().is_some_and(|report| {
+        report.actions.iter().any(|action| {
+            action.action == ControlPlaneAction::Recover
+                && action.availability == ControlPlaneActionAvailability::Available
+        })
+    })
+}
+
 fn control_plane_run_requires_action(
     run: &homeboy_control_plane_contract::ControlPlaneRun,
 ) -> bool {
     use homeboy_control_plane_contract::{ControlPlaneAction, ControlPlaneActionAvailability};
 
     // A Cook requires action exactly when `agent-task recover` has a step.
-    if let Some(recovery) = &run.recovery {
-        return recovery.step != "none";
-    }
-    run.action_eligibility.as_ref().is_some_and(|report| {
-        report.actions.iter().any(|action| {
-            matches!(
-                action.action,
-                ControlPlaneAction::Recover
-                    | ControlPlaneAction::PlacementUpdate
-                    | ControlPlaneAction::Retry
-            ) && action.availability == ControlPlaneActionAvailability::Available
-        })
-    })
+    recover_has_step(run)
+        || (run.recovery.is_none()
+            && run.action_eligibility.as_ref().is_some_and(|report| {
+                report.actions.iter().any(|action| {
+                    matches!(
+                        action.action,
+                        ControlPlaneAction::PlacementUpdate | ControlPlaneAction::Retry
+                    ) && action.availability == ControlPlaneActionAvailability::Available
+                })
+            }))
 }
 
 fn compact_cook_candidate_projection(run_id: &str) -> Value {
