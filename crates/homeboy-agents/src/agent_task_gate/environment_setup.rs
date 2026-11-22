@@ -253,6 +253,7 @@ pub(super) fn selected_gate_environment(
         hydrate_rust_cache: policy.hydrate_rust_cache,
         isolate_download_cache: policy.isolate_home || policy.isolate_xdg,
         admitted_component_id: policy.admitted_component_id.clone(),
+        component_cwd: policy.component_cwd.clone(),
         isolated_home,
         extension_sources: policy.extension_sources.clone(),
         unprovisioned_extensions: Vec::new(),

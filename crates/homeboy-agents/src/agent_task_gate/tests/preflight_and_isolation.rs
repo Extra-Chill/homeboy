@@ -103,6 +103,92 @@ fn isolated_gate_resolves_monorepo_packages_by_id_and_cwd() {
     }
 }
 
+/// #18791: a Lab host without registrations uses the Cook's package path,
+/// not the checkout root, for both test and lint's component resolution.
+#[test]
+fn isolated_gate_resolves_unregistered_monorepo_package_from_cook_cwd() {
+    let _guard = env_mutex();
+    if !rerun_alone_to_replace_path(
+        module_path!(),
+        "isolated_gate_resolves_unregistered_monorepo_package_from_cook_cwd",
+    ) {
+        return;
+    }
+    let host_home = tempfile::tempdir().unwrap();
+    for name in homeboy_core::paths::HOMEBOY_ROOT_ENV_VARS {
+        std::env::remove_var(name);
+    }
+    std::env::set_var("HOME", host_home.path());
+    let registry = homeboy_core::paths::components().unwrap();
+    fs::create_dir_all(&registry).unwrap();
+    assert_eq!(fs::read_dir(&registry).unwrap().count(), 0);
+    let workspace = tempfile::tempdir().unwrap();
+    assert!(Command::new("git")
+        .arg("init")
+        .arg(workspace.path())
+        .status()
+        .unwrap()
+        .success());
+    let package = workspace.path().join("plugins/events");
+    fs::create_dir_all(&package).unwrap();
+    fs::write(
+        package.join("homeboy.json"),
+        json!({"id": "events", "extensions": {"fixture-extension": {}}}).to_string(),
+    )
+    .unwrap();
+    assert!(!workspace.path().join("homeboy.json").exists());
+
+    for component_cwd in [Some("plugins/events"), Some(""), None] {
+        // Round-trip the request policy as a remote Lab gate does.
+        let policy = AgentTaskGateEnvironmentPolicy {
+            isolate_home: true,
+            admitted_component_id: Some("events".to_string()),
+            component_cwd: component_cwd.map(str::to_owned),
+            ..AgentTaskGateEnvironmentPolicy::default()
+        };
+        let policy = serde_json::from_value(serde_json::to_value(policy).unwrap()).unwrap();
+        let mut selected = selected_gate_environment(&policy, None).unwrap();
+        selected
+            .register_admitted_component(workspace.path())
+            .unwrap();
+        let isolated_root = selected
+            .isolated_home
+            .as_ref()
+            .unwrap()
+            .join(".config/homeboy");
+        let registration: serde_json::Value = serde_json::from_slice(
+            &fs::read(isolated_root.join("components/events.json")).unwrap(),
+        )
+        .unwrap();
+        let expected = if component_cwd == Some("plugins/events") {
+            &package
+        } else {
+            workspace.path()
+        };
+        assert_eq!(registration["local_path"], json!(expected));
+        if component_cwd == Some("plugins/events") {
+            let previous = std::env::current_dir().unwrap();
+            std::env::set_current_dir(workspace.path()).unwrap();
+            // Both review test and review lint resolve their component by ID.
+            let resolved = homeboy_core::component::resolve_effective_in_root(
+                &isolated_root,
+                Some("events"),
+                None,
+                None,
+            );
+            std::env::set_current_dir(previous).unwrap();
+            let component = resolved.unwrap();
+            assert_eq!(component.id, "events");
+            assert_eq!(Path::new(&component.local_path), package);
+            assert!(component
+                .extensions
+                .unwrap()
+                .contains_key("fixture-extension"));
+        }
+    }
+    assert_eq!(fs::read_dir(&registry).unwrap().count(), 0);
+}
+
 /// #15882: a registry-only component (no portable `homeboy.json`) resolves
 /// inside the isolated gate HOME at the gate checkout, so the canonical
 /// `homeboy review test <component>` gate passes preflight as it does in the

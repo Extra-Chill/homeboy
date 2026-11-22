@@ -860,6 +860,7 @@ fn replacing_gate_environment_preserves_declared_variables_and_reports_policy() 
         hydrate_dependencies: true,
         shared_cargo_target: Some(false),
         admitted_component_id: None,
+        component_cwd: None,
         extension_inputs: Vec::new(),
         extension_sources: Vec::new(),
         data_inputs: Vec::new(),

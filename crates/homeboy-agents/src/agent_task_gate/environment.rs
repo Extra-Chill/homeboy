@@ -10,6 +10,7 @@ pub(super) struct SelectedGateEnvironment {
     pub(super) hydrate_rust_cache: bool,
     pub(super) isolate_download_cache: bool,
     pub(super) admitted_component_id: Option<String>,
+    pub(super) component_cwd: Option<String>,
     /// Isolated HOME, when the policy isolates it.
     pub(super) isolated_home: Option<PathBuf>,
     pub(super) extension_sources: Vec<AgentTaskGateExtensionSource>,
@@ -64,16 +65,17 @@ impl SelectedGateEnvironment {
             return Ok(());
         };
         let file = format!("{id}.json");
-        let mut registration = homeboy_core::paths::components()
+        let host_registration = homeboy_core::paths::components()
             .ok()
             .and_then(|host| fs::read(host.join(&file)).ok())
             .and_then(|raw| serde_json::from_slice::<serde_json::Value>(&raw).ok())
-            .filter(serde_json::Value::is_object)
-            .unwrap_or_else(|| json!({}));
+            .filter(serde_json::Value::is_object);
+        let has_host_registration = host_registration.is_some();
+        let mut registration = host_registration.unwrap_or_else(|| json!({}));
         // Gates materialize the repository, not just the admitted package.
         // Retain its repo-relative path before the isolated XDG root hides
-        // the host registration. Root components and synthetic registrations
-        // keep the existing checkout-root fallback.
+        // the host registration. Without a host registration, use the Cook's
+        // admitted package path; root components keep the checkout-root fallback.
         let component_path = registration
             .get("local_path")
             .and_then(serde_json::Value::as_str)
@@ -86,7 +88,15 @@ impl SelectedGateEnvironment {
                     homeboy_core::git::repo_root(cwd).unwrap_or_else(|| cwd.to_path_buf());
                 Some(workspace_root.join(relative))
             })
-            .unwrap_or_else(|| cwd.to_path_buf());
+            .map(Ok)
+            .unwrap_or_else(|| match self.component_cwd.as_deref() {
+                Some(relative) if !has_host_registration && !relative.is_empty() => {
+                    let root =
+                        homeboy_core::git::repo_root(cwd).unwrap_or_else(|| cwd.to_path_buf());
+                    homeboy_core::resolve_contained_local_path(&root, relative, "component_cwd")
+                }
+                _ => Ok(cwd.to_path_buf()),
+            })?;
         registration["local_path"] = json!(component_path.to_string_lossy());
         let components = homeboy_core::paths::components_in_root(&home.join(".config/homeboy"));
         let io_error = |error: std::io::Error| {
