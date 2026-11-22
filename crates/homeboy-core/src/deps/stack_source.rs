@@ -14,20 +14,129 @@ pub(super) fn http_json(url: &str) -> Result<serde_json::Value> {
 }
 
 fn http_json_with_timeout(url: &str, timeout: std::time::Duration) -> Result<serde_json::Value> {
+    let github = reqwest::Url::parse(url)
+        .map_err(release_io_error)?
+        .host_str()
+        == Some("api.github.com");
     #[cfg(test)]
     let url = TEST_BASE
         .with(|base| base.borrow().clone())
         .unwrap_or_else(|| url.to_string());
+    let headers = release_headers(url.as_ref(), |name| std::env::var(name).ok())?;
     let result = reqwest::blocking::Client::builder()
         .timeout(timeout)
         .user_agent("homeboy")
         .build()
-        .and_then(|client| client.get(url).send())
-        .and_then(|response| response.error_for_status())
-        .and_then(|response| response.json());
-    result.map_err(|error| {
-        Error::internal_io(error.to_string(), Some("resolve stack release".into()))
-    })
+        .and_then(|client| client.get(url).headers(headers).send());
+    let response = result.map_err(release_io_error)?;
+    let status = response.status();
+    if status.is_client_error() || status.is_server_error() {
+        let message = if github {
+            response
+                .json::<serde_json::Value>()
+                .ok()
+                .and_then(|body| body["message"].as_str().map(str::to_owned))
+        } else {
+            None
+        };
+        return Err(release_io_error(format!(
+            "HTTP {}: {}",
+            status.as_u16(),
+            message
+                .as_deref()
+                .unwrap_or_else(|| status.canonical_reason().unwrap_or("request failed"))
+        )));
+    }
+    response.json().map_err(release_io_error)
+}
+
+// Keep the actionable cause in the public message: callers often display only it.
+fn release_io_error(error: impl std::fmt::Display) -> Error {
+    let message = format!("resolve stack release: {error}");
+    let mut error = Error::internal_io(&message, Some("resolve stack release".into()));
+    error.message = message;
+    error
+}
+
+fn release_headers(
+    url: &str,
+    mut env: impl FnMut(&str) -> Option<String>,
+) -> Result<reqwest::header::HeaderMap> {
+    use reqwest::header::{HeaderMap, HeaderValue, ACCEPT, AUTHORIZATION};
+    let mut headers = HeaderMap::new();
+    let url = reqwest::Url::parse(url).map_err(release_io_error)?;
+    if url.host_str() == Some("api.github.com") {
+        headers.insert(
+            ACCEPT,
+            HeaderValue::from_static("application/vnd.github+json"),
+        );
+        headers.insert(
+            "X-GitHub-Api-Version",
+            HeaderValue::from_static("2022-11-28"),
+        );
+        if let Some(token) = ["GH_TOKEN", "GITHUB_TOKEN"]
+            .into_iter()
+            .find_map(|name| env(name).filter(|value| !value.trim().is_empty()))
+        {
+            let mut value = HeaderValue::from_str(&format!("Bearer {token}"))
+                .map_err(|_| release_io_error("invalid GitHub token header"))?;
+            value.set_sensitive(true);
+            headers.insert(AUTHORIZATION, value);
+        }
+    }
+    Ok(headers)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::release_headers;
+    use reqwest::header::{ACCEPT, AUTHORIZATION};
+
+    #[test]
+    fn github_headers_select_first_nonempty_token() {
+        for (gh, github, expected) in [
+            (Some("primary"), Some("fallback"), Some("primary")),
+            (Some(""), Some("fallback"), Some("fallback")),
+            (None, Some("fallback"), Some("fallback")),
+            (Some(" "), None, None),
+            (None, None, None),
+        ] {
+            let headers =
+                release_headers("https://api.github.com/repos/org/tool/releases", |name| {
+                    match name {
+                        "GH_TOKEN" => gh,
+                        "GITHUB_TOKEN" => github,
+                        _ => panic!("unexpected env lookup"),
+                    }
+                    .map(str::to_owned)
+                })
+                .unwrap();
+            assert_eq!(
+                headers
+                    .get(AUTHORIZATION)
+                    .map(|v| v.to_str().unwrap().to_owned()),
+                expected.map(|v| format!("Bearer {v}"))
+            );
+            assert_eq!(headers[ACCEPT], "application/vnd.github+json");
+            assert_eq!(headers["X-GitHub-Api-Version"], "2022-11-28");
+        }
+    }
+
+    #[test]
+    fn other_hosts_never_receive_github_headers_or_read_tokens() {
+        for url in [
+            "https://registry.npmjs.org/tool",
+            "https://api.github.com.evil.example/releases",
+            "https://api.github.com@evil.example/releases",
+            "http://127.0.0.1:1234/releases",
+        ] {
+            assert!(
+                release_headers(url, |_| panic!("must not read credentials"))
+                    .unwrap()
+                    .is_empty()
+            );
+        }
+    }
 }
 
 /// GitHub's list-releases endpoint stops at 1000 results (10 pages of 100).

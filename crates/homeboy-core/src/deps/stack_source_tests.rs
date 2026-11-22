@@ -25,6 +25,36 @@ fn fixture(responses: Vec<(&'static str, &'static str)>) -> std::thread::JoinHan
     })
 }
 
+#[test]
+fn http_errors_surface_status_and_github_message() {
+    for (url, status, body, expected) in [
+        (
+            "https://api.github.com/repos/org/tool/releases",
+            "403 Forbidden",
+            r#"{"message":"API rate limit exceeded"}"#,
+            "HTTP 403: API rate limit exceeded",
+        ),
+        (
+            "https://api.github.com/repos/org/tool/releases",
+            "502 Bad Gateway",
+            "not JSON",
+            "HTTP 502: Bad Gateway",
+        ),
+        (
+            "https://registry.npmjs.org/tool",
+            "404 Not Found",
+            r#"{"message":"not GitHub"}"#,
+            "HTTP 404: Not Found",
+        ),
+    ] {
+        let server = fixture(vec![(status, body)]);
+        let error = super::stack_source::http_json(url).unwrap_err();
+        assert!(error.message.contains(expected), "{}", error.message);
+        server.join().unwrap();
+    }
+    TEST_BASE.with(|base| *base.borrow_mut() = None);
+}
+
 fn consumer(path: &std::path::Path, source: serde_json::Value, policy: bool) -> Component {
     let mut component = Component::new(
         "consumer".into(),
