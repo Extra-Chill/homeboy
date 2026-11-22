@@ -43,15 +43,11 @@ fn failed_startup_guard_reaps_its_exact_launcher_even_with_a_corrupt_lease() {
             std::fs::create_dir_all(state_path.parent().unwrap()).unwrap();
             std::fs::write(&state_path, b"corrupt startup lease").unwrap();
             let child = Command::new("sh")
-                .args([
-                    "-c",
-                    "trap 'exit 0' TERM; while :; do sleep 0.1; done",
-                    "homeboy",
-                    "--startup-token",
-                    &token,
-                ])
-                .env(DAEMON_STARTUP_TOKEN_ENV, &token)
-                .stdin(Stdio::null())
+                .args(["-c", "read -r line"])
+                // Model cleanup before the token is inspectable. The owned
+                // Child, not /proc or argv, must suffice to reap the launcher.
+                .env_remove(DAEMON_STARTUP_TOKEN_ENV)
+                .stdin(Stdio::piped())
                 .stdout(Stdio::null())
                 .stderr(Stdio::null())
                 .spawn()
@@ -64,11 +60,22 @@ fn failed_startup_guard_reaps_its_exact_launcher_even_with_a_corrupt_lease() {
                     .unwrap_err();
                 assert!(error.to_string().contains("original startup failure"));
                 assert!(error.details["startup_cleanup"].is_array());
+                assert!(attempt.child.try_wait().unwrap().is_some());
             }
             drop(attempt);
             assert!(
                 !pid_is_running(pid),
                 "unpublished owned launcher must be reaped"
+            );
+            let mut status = 0;
+            assert_eq!(
+                unsafe { libc::waitpid(pid as libc::pid_t, &mut status, libc::WNOHANG) },
+                -1,
+                "launcher must already be reaped, not just a zombie"
+            );
+            assert_eq!(
+                std::io::Error::last_os_error().raw_os_error(),
+                Some(libc::ECHILD)
             );
             assert_eq!(
                 std::fs::read(&state_path).unwrap(),
@@ -830,12 +837,29 @@ impl StartupAttempt {
 
     fn cleanup(&mut self) -> Vec<String> {
         self.armed = false;
-        let evidence =
-            cleanup_startup_attempt_at_path(self.child.id(), &self.token, &self.state_path)
-                .unwrap_or_else(|error| {
-                    vec![format!("startup cleanup could not complete: {error}")]
-                });
-        let _ = self.child.try_wait();
+        let mut evidence = Vec::new();
+        // The unreaped Child is exact ownership proof, even before its token
+        // is inspectable. Stop and reap it before inspecting the lease; PID-
+        // based lease cleanup must not reap it behind the Child handle's back.
+        let pid = self.child.id();
+        let reaped = self.child.try_wait().and_then(|status| {
+            if let Some(status) = status {
+                Ok(status)
+            } else {
+                self.child.kill()?;
+                self.child.wait()
+            }
+        });
+        match reaped {
+            Ok(status) => evidence.push(format!("reaped owned launcher pid {pid}: {status}")),
+            Err(error) => {
+                evidence.push(format!("could not reap owned launcher pid {pid}: {error}"))
+            }
+        }
+        match cleanup_startup_lease_at_path(&self.token, &self.state_path) {
+            Ok(cleanup) => evidence.extend(cleanup),
+            Err(error) => evidence.push(format!("startup cleanup could not complete: {error}")),
+        }
         evidence
     }
 
@@ -863,11 +887,7 @@ impl Drop for StartupAttempt {
     }
 }
 
-fn cleanup_startup_attempt_at_path(
-    pid: u32,
-    startup_token: &str,
-    state_path: &Path,
-) -> Result<Vec<String>> {
+fn cleanup_startup_lease_at_path(startup_token: &str, state_path: &Path) -> Result<Vec<String>> {
     let mut cleanup = Vec::new();
     let state = match super::validate_lease_file(state_path) {
         Ok(validation) => validation.state,
@@ -912,32 +932,6 @@ fn cleanup_startup_attempt_at_path(
                 state.pid
             ));
         }
-    }
-    if pid_is_running(pid) {
-        if pid_has_ownership_token(pid, DAEMON_STARTUP_TOKEN_ENV, startup_token)? {
-            match terminate_token_owned_startup_process(pid, startup_token) {
-                Ok(StartupCleanupOutcome::Terminated(signal)) => cleanup.push(format!(
-                    "terminated token-owned launcher pid {pid} with {signal}"
-                )),
-                Ok(StartupCleanupOutcome::ExitedBeforeEscalation) => cleanup.push(format!(
-                    "startup cleanup observed an exit race for launcher pid {pid}; no SIGKILL sent"
-                )),
-                Ok(StartupCleanupOutcome::OwnershipLost) => cleanup.push(format!(
-                    "did not signal launcher pid {pid} after live token ownership was lost"
-                )),
-                Err(error) => cleanup.push(format!(
-                    "retained launcher pid {pid} after cleanup race: {error}"
-                )),
-            }
-        } else {
-            cleanup.push(format!(
-                "did not signal launcher pid {pid}: live token ownership could not be proven"
-            ));
-        }
-    } else {
-        cleanup.push(format!(
-            "startup cleanup observed an exit race for launcher pid {pid}; no signal sent"
-        ));
     }
     Ok(cleanup)
 }
