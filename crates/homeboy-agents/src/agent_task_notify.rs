@@ -477,13 +477,11 @@ fn terminal_payload(
                 .collect::<Vec<_>>();
             payload = payload.with_fact("Gates", gate_summary(&gates));
         }
-        let status = homeboy_core::cook_status::CookStatus::from_status(
-            metadata
-                .state
-                .as_ref()
-                .map(|state| state.status.as_str())
-                .unwrap_or(&report.status),
-        );
+        let status = metadata
+            .state
+            .as_ref()
+            .and_then(|state| homeboy_core::cook_status::CookStatus::from_status(&state.status))
+            .unwrap_or(report.status);
         if status.is_gate_failure() && !payload.facts.iter().any(|fact| fact.label == "Gates") {
             payload = payload.with_fact("Gates", "failed");
         } else if status == homeboy_core::cook_status::CookStatus::GateEnvironmentUnavailable {
@@ -653,7 +651,7 @@ fn cook_terminal_in_store_with(
     let status = if payload.kind == NotifyEventKind::Cancelled {
         "cancelled"
     } else {
-        &report.status
+        report.status.as_str()
     };
     let event = NotifyEvent::lifecycle(payload.kind, &report.cook_id, status)
         .with_title(payload.title.clone().unwrap_or_default())
@@ -714,7 +712,7 @@ fn cook_terminal_in_store_with(
 pub(crate) fn terminal_attempt_report(
     cook_id: &str,
     attempt_run_id: &str,
-    status: &str,
+    status: homeboy_core::cook_status::CookStatus,
 ) -> AgentTaskCookReport {
     AgentTaskCookReport {
         schema: "homeboy/agent-task-cook/v1",
@@ -722,7 +720,7 @@ pub(crate) fn terminal_attempt_report(
         latest_run_id: Some(attempt_run_id.to_string()),
         history_run_ids: Vec::new(),
         invocation_run_ids: Vec::new(),
-        status: status.to_string(),
+        status,
         disposition: homeboy_core::cook_status::CookDisposition::Terminal,
         attempts: Vec::new(),
         finalization: None,

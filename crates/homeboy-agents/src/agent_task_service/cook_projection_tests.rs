@@ -83,7 +83,7 @@ fn report(status: &str, disposition: CookDisposition) -> AgentTaskCookReport {
         latest_run_id: None,
         history_run_ids: Vec::new(),
         invocation_run_ids: Vec::new(),
-        status: status.to_string(),
+        status: homeboy_core::cook_status::CookStatus::from_status(status).unwrap(),
         disposition,
         attempts: Vec::new(),
         finalization: None,
@@ -234,24 +234,9 @@ fn terminality_follows_the_declared_disposition_not_the_status_string() {
     );
 }
 
-/// A status from a newer binary produces an explicit "unknown"
-/// classification, never a manufactured failure — while `terminal` still
-/// arrives, because the exit declared it.
-#[test]
-fn an_unreadable_status_classifies_unknown_but_retains_terminality() {
-    let report = report("moving_base", CookDisposition::Terminal);
-    let lifecycle = report.lifecycle();
-    let value = serde_json::to_value(report).expect("serialize");
-
-    assert_eq!(value["status"], "moving_base");
-    assert_eq!(lifecycle.lifecycle_status, ControlPlaneState::Unknown);
-    assert!(lifecycle.terminal);
-    assert!(!lifecycle.retryable);
-}
-
 #[test]
 fn candidate_without_canonical_finalization_evidence_is_not_recoverable() {
-    let mut candidate = report("completed", CookDisposition::Terminal);
+    let mut candidate = report("candidate_recoverable", CookDisposition::Terminal);
     candidate.selected_candidate = Some(serde_json::json!({
         "run_id": "cook-projection-attempt-1",
         "incomplete": false,
@@ -261,8 +246,8 @@ fn candidate_without_canonical_finalization_evidence_is_not_recoverable() {
 
     let serialized = serde_json::to_value(&candidate).expect("serialize");
     assert_eq!(
-        serialized["status"], "completed",
-        "legacy status is preserved"
+        serialized["status"], "candidate_recoverable",
+        "closed status is preserved"
     );
     assert_eq!(serialized["completion"]["state"], "candidate_produced");
     assert_eq!(serialized["completion"]["pr_finalized"], false);

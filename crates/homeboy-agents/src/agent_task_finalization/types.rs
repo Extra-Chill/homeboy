@@ -36,7 +36,7 @@ pub struct AgentTaskGateResult {
 pub struct AgentTaskPrFinalizationReport {
     pub schema: String,
     pub run_id: String,
-    pub status: String,
+    pub status: homeboy_core::cook_status::CookStatus,
     pub path: String,
     pub base: String,
     pub head: String,

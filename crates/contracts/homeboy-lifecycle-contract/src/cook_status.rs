@@ -1,15 +1,14 @@
-//! The open vocabulary of outcomes Cook produces.
-//!
-//! Unknown labels from persisted reports or newer binaries round-trip losslessly.
+//! The closed vocabulary of outcomes Cook produces.
 //! Known labels convert into canonical lifecycle state through `From`
 //! (`homeboy_core::run_lifecycle_status::RunLifecycleStatus::from`). Terminality inside Cook is instead declared
 //! by the producing exit's [`CookDisposition`].
 
-use serde::{Deserialize, Deserializer, Serialize, Serializer};
+use serde::{Deserialize, Serialize};
 use std::fmt;
 
 /// A reported Cook status, serialized as a bare snake_case string.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum CookStatus {
     Queued,
     InFlight,
@@ -25,6 +24,7 @@ pub enum CookStatus {
     NoChangesGateFailed,
     GateFailed,
     /// Verification could not execute; the candidate remains recoverable.
+    #[serde(alias = "gates_deferred")]
     GateEnvironmentUnavailable,
     /// Gates failed on the verified base as well as the candidate.
     BaselineRed,
@@ -46,14 +46,12 @@ pub enum CookStatus {
     PreExecutionFailure,
     PreArtifactInterruption,
     Failed,
-    /// An unrecognized label, preserved without inventing a verdict.
-    Unknown(String),
 }
 
 impl CookStatus {
-    /// Parse without failing. Retired and future labels become `Unknown`.
-    pub fn from_status(status: &str) -> Self {
-        match status {
+    /// Parse a recognized persisted label.
+    pub fn from_status(status: &str) -> Option<Self> {
+        Some(match status {
             "queued" => Self::Queued,
             "in_flight" => Self::InFlight,
             "review_ready" => Self::ReviewReady,
@@ -66,7 +64,7 @@ impl CookStatus {
             "no_changes" => Self::NoChanges,
             "no_changes_gate_failed" => Self::NoChangesGateFailed,
             "gate_failed" => Self::GateFailed,
-            // Stored by builds before the variant was renamed; 10 controller records carry it.
+            // Promotions still write the deferred-gate status as `gates_deferred`.
             "gate_environment_unavailable" | "gates_deferred" => Self::GateEnvironmentUnavailable,
             "baseline_red" => Self::BaselineRed,
             "finalization_failed" => Self::FinalizationFailed,
@@ -87,11 +85,11 @@ impl CookStatus {
             "pre_execution_failure" => Self::PreExecutionFailure,
             "pre_artifact_interruption" => Self::PreArtifactInterruption,
             "failed" => Self::Failed,
-            other => Self::Unknown(other.to_string()),
-        }
+            _ => return None,
+        })
     }
 
-    /// The wire representation, unchanged for unknown labels too.
+    /// The wire representation.
     pub fn as_str(&self) -> &str {
         match self {
             Self::Queued => "queued",
@@ -126,7 +124,6 @@ impl CookStatus {
             Self::PreExecutionFailure => "pre_execution_failure",
             Self::PreArtifactInterruption => "pre_artifact_interruption",
             Self::Failed => "failed",
-            Self::Unknown(raw) => raw,
         }
     }
 
@@ -182,25 +179,6 @@ impl CookDisposition {
             Self::InFlight => "in_flight",
             Self::Terminal => "terminal",
         }
-    }
-}
-
-impl From<&str> for CookStatus {
-    fn from(value: &str) -> Self {
-        Self::from_status(value)
-    }
-}
-
-impl Serialize for CookStatus {
-    fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
-        serializer.serialize_str(self.as_str())
-    }
-}
-
-impl<'de> Deserialize<'de> for CookStatus {
-    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
-        let raw = String::deserialize(deserializer)?;
-        Ok(Self::from_status(&raw))
     }
 }
 

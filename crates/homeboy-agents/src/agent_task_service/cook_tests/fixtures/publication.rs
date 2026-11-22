@@ -465,7 +465,8 @@ pub(super) fn exercise_real_git_base_advance(conflicting: bool, rewritten: bool)
         .unwrap();
         let case = format!("conflicting={conflicting} rewritten={rewritten}");
         assert_eq!(
-            report.value.status, "review_ready",
+            report.value.status.as_str(),
+            "review_ready",
             "{case}: {:#?}",
             report.value
         );

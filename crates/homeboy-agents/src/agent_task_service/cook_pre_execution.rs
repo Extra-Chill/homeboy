@@ -688,9 +688,9 @@ pub(crate) fn pre_execution_failure_report(
     let mut report = stores.report(CookReportInput {
         cook_id,
         status: if post_provider {
-            "failed"
+            homeboy_core::cook_status::CookStatus::Failed
         } else {
-            "pre_execution_failure"
+            homeboy_core::cook_status::CookStatus::PreExecutionFailure
         },
         disposition: CookDisposition::Terminal,
         attempts,
@@ -1022,7 +1022,7 @@ mod tests {
                 Error::internal_unexpected("terminal Cook continuation exited with status 1"),
                 Some(run_id),
             );
-            assert_eq!(report.value.status, "failed");
+            assert_eq!(report.value.status.as_str(), "failed");
             assert_eq!(report.value.terminal_phase.as_deref(), Some("controller"));
             assert_eq!(
                 report.value.terminal_failure_classification.as_deref(),

@@ -272,7 +272,7 @@ fn multi_attempt_substantive_adopt_uses_terminal_execution_lineage() {
         )
         .unwrap();
         assert_eq!(result.exit_code, 0, "{result:#?}");
-        assert_eq!(result.value.status, "review_ready");
+        assert_eq!(result.value.status.as_str(), "review_ready");
         assert!(backend.created);
         assert!(backend.body.contains("Pi"), "{}", backend.body);
         let stored = persisted_promotion_for_attempt(&options.identity.initial_run_id)
@@ -328,7 +328,7 @@ fn adoption_supersedes_deferred_and_pending_status_with_passing_candidate_proof(
             )
             .unwrap();
             assert_eq!(result.exit_code, 0, "{result:#?}");
-            assert_eq!(result.value.status, "review_ready");
+            assert_eq!(result.value.status.as_str(), "review_ready");
             assert!(backend.created);
             assert_eq!(
                 result.value.attempts[0].promotion.as_ref().unwrap().status,

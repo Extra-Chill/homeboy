@@ -97,7 +97,7 @@ mod tests {
             (Failed, "failed", State::Failed),
         ] {
             assert_eq!(status.as_str(), label);
-            assert_eq!(CookStatus::from_status(label), status);
+            assert_eq!(CookStatus::from_status(label), Some(status));
             let json = serde_json::to_string(&status).unwrap();
             assert_eq!(serde_json::from_str::<CookStatus>(&json).unwrap(), status);
             assert_eq!(RunLifecycleStatus::from(&status), expected, "{label}");
@@ -116,13 +116,13 @@ mod tests {
             serde_json::from_value(serde_json::json!("gates_deferred")).unwrap();
         assert_eq!(status, CookStatus::GateEnvironmentUnavailable);
         assert_eq!(
-            serde_json::to_value(&status).unwrap(),
+            serde_json::to_value(status).unwrap(),
             "gate_environment_unavailable"
         );
     }
 
     #[test]
-    fn retired_and_future_labels_remain_lossless_unknowns() {
+    fn retired_and_future_labels_are_rejected() {
         for label in [
             "running",
             "completed",
@@ -130,15 +130,8 @@ mod tests {
             "review_form_timeout",
             "moving_base_from_a_newer_binary",
         ] {
-            let status: CookStatus = serde_json::from_value(serde_json::json!(label)).unwrap();
-            assert_eq!(status, CookStatus::Unknown(label.to_string()));
-            assert_eq!(serde_json::to_value(&status).unwrap(), label);
-            assert_eq!(
-                RunLifecycleStatus::from(&status),
-                ControlPlaneState::Unknown
-            );
-            assert!(!status.is_in_flight());
-            assert!(!status.is_success_exit());
+            assert_eq!(CookStatus::from_status(label), None);
+            assert!(serde_json::from_value::<CookStatus>(serde_json::json!(label)).is_err());
         }
     }
 }

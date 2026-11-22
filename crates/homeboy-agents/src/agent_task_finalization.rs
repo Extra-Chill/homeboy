@@ -340,7 +340,7 @@ fn finalize_pr_with_backend_mode<B: AgentTaskPrFinalizationBackend>(
             &options,
             intent,
             &head,
-            "no_changes",
+            homeboy_core::cook_status::CookStatus::NoChanges,
             "none",
             None,
             None,
@@ -362,7 +362,7 @@ fn finalize_pr_with_backend_mode<B: AgentTaskPrFinalizationBackend>(
             &options,
             intent,
             &head,
-            "validated",
+            homeboy_core::cook_status::CookStatus::Validated,
             "none",
             None,
             None,
@@ -488,9 +488,9 @@ fn finalize_pr_with_backend_mode<B: AgentTaskPrFinalizationBackend>(
         intent,
         &head,
         if published_draft {
-            "draft_published"
+            homeboy_core::cook_status::CookStatus::DraftPublished
         } else {
-            "review_ready"
+            homeboy_core::cook_status::CookStatus::ReviewReady
         },
         action,
         Some(pr.number),
@@ -1130,7 +1130,7 @@ fn report(
     options: &AgentTaskPrFinalizationOptions,
     mut publication_intent: AgentTaskPublicationIntent,
     head: &str,
-    status: &str,
+    status: homeboy_core::cook_status::CookStatus,
     pr_action: &str,
     pr_number: Option<u64>,
     pr_url: Option<String>,
@@ -1149,7 +1149,7 @@ fn report(
     publication_intent.proof = proof.clone();
     let publication_proof = publication_proof(
         &publication_intent,
-        status,
+        status.as_str(),
         pr_action,
         pr_url.clone(),
         git_identity,
@@ -1159,7 +1159,7 @@ fn report(
     let finalization_outcome = finalization_outcome(
         &publication_intent,
         &publication_proof,
-        status,
+        status.as_str(),
         pr_action,
         pr_number,
         pr_url.clone(),
@@ -1170,7 +1170,7 @@ fn report(
     AgentTaskPrFinalizationReport {
         schema: AGENT_TASK_PR_FINALIZATION_SCHEMA.to_string(),
         run_id: options.run_id.clone(),
-        status: status.to_string(),
+        status,
         path: options.path.clone(),
         base: options.base.clone(),
         head: head.to_string(),

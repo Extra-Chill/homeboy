@@ -439,7 +439,7 @@ pub(crate) fn finalize_pull_request(args: FinalizePrArgs) -> CmdResult<Value> {
     };
 
     let mut value = serde_json::to_value(&report).unwrap_or(Value::Null);
-    value["handoff"] = finalization_handoff(&report.status, report.pr_url.as_deref());
+    value["handoff"] = finalization_handoff(report.status.as_str(), report.pr_url.as_deref());
 
     Ok((value, exit_code))
 }

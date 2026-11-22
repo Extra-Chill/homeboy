@@ -405,7 +405,7 @@ fn publishes_with_accepted_inherited_gate_without_policy_opt_in() {
     options.normalized_gate_results.push(inherited);
 
     let report = finalize_pr_with_backend(options, &mut backend).expect("publish non-regression");
-    assert_eq!(report.status, "review_ready");
+    assert_eq!(report.status.as_str(), "review_ready");
     assert!(backend.created);
     let inherited = report
         .normalized_gate_results
@@ -428,7 +428,7 @@ fn creates_new_pr_after_green_gates() {
 
     let report = finalize_pr_with_backend(options(), &mut backend).expect("finalized");
 
-    assert_eq!(report.status, "review_ready");
+    assert_eq!(report.status.as_str(), "review_ready");
     assert_eq!(report.pr_action, "created");
     assert_eq!(report.pr_number, Some(123));
     assert!(backend.committed);
@@ -549,7 +549,7 @@ fn adopts_a_pr_a_concurrent_publication_created_after_the_lookup() {
 
     let report = finalize_pr_with_backend(options(), &mut backend).expect("adopted");
 
-    assert_eq!(report.status, "review_ready");
+    assert_eq!(report.status.as_str(), "review_ready");
     assert_eq!(report.pr_action, "updated");
     assert_eq!(report.pr_number, Some(683));
     assert!(backend.updated);
@@ -634,7 +634,7 @@ fn preflight_validates_without_publishing_or_git_tracking() {
 
     let report = preflight_pr_with_backend(options(), &mut backend).expect("preflight validated");
 
-    assert_eq!(report.status, "validated");
+    assert_eq!(report.status.as_str(), "validated");
     assert_eq!(report.pr_action, "none");
     assert_eq!(report.pr_number, None);
     assert!(report.pr_url.is_none());
@@ -930,7 +930,7 @@ fn updates_existing_pr_for_same_branch() {
     finalization_options.component_id = Some("admitted-component".to_string());
     let report = finalize_pr_with_backend(finalization_options, &mut backend).expect("finalized");
 
-    assert_eq!(report.status, "review_ready");
+    assert_eq!(report.status.as_str(), "review_ready");
     assert_eq!(report.pr_action, "updated");
     assert_eq!(report.pr_number, Some(77));
     assert!(backend.updated);
@@ -956,7 +956,7 @@ fn draft_policy_creates_a_draft_pr_and_reports_draft_published() {
     let report = finalize_pr_with_backend(finalization, &mut backend).expect("finalized");
 
     assert!(backend.created_draft);
-    assert_eq!(report.status, "draft_published");
+    assert_eq!(report.status.as_str(), "draft_published");
     assert_eq!(report.finalization_outcome.status, "draft_published");
 }
 
@@ -978,7 +978,7 @@ fn draft_policy_preserves_an_existing_ready_pr() {
 
     assert!(!backend.created);
     assert!(backend.updated);
-    assert_eq!(report.status, "review_ready");
+    assert_eq!(report.status.as_str(), "review_ready");
 }
 
 #[test]
@@ -999,7 +999,7 @@ fn draft_policy_reconciles_an_existing_draft_pr() {
 
     assert!(!backend.created);
     assert!(backend.updated);
-    assert_eq!(report.status, "draft_published");
+    assert_eq!(report.status.as_str(), "draft_published");
 }
 
 #[test]
@@ -1008,7 +1008,7 @@ fn reports_no_changes_without_commit_push_or_pr() {
 
     let report = finalize_pr_with_backend(options(), &mut backend).expect("finalized");
 
-    assert_eq!(report.status, "no_changes");
+    assert_eq!(report.status.as_str(), "no_changes");
     assert_eq!(report.pr_action, "none");
     assert_eq!(report.finalization_outcome.status, "no_changes");
     assert_eq!(report.finalization_outcome.publication_action, "none");
@@ -1430,7 +1430,7 @@ fn durable_finalization_accepts_only_authenticated_pre_provider_candidate_adopti
     finalization_options.changed_files = vec!["src/lib.rs".to_string()];
     let report = finalize_pr_with_backend(finalization_options, &mut backend)
         .expect("authenticated recovery publishes");
-    assert_eq!(report.status, "review_ready");
+    assert_eq!(report.status.as_str(), "review_ready");
     assert_eq!(report.review_dossier.ai_assistance.model, "GPT-5.5");
     assert!(backend.committed && backend.pushed && backend.created);
 
@@ -1461,7 +1461,7 @@ fn durable_finalization_accepts_only_authenticated_pre_provider_candidate_adopti
     failed_finalization_options.changed_files = vec!["src/lib.rs".to_string()];
     let failed_report = finalize_pr_with_backend(failed_finalization_options, &mut failed_backend)
         .expect("authenticated failed transport recovery publishes");
-    assert_eq!(failed_report.status, "review_ready");
+    assert_eq!(failed_report.status.as_str(), "review_ready");
     assert!(failed_backend.committed && failed_backend.pushed && failed_backend.created);
 
     let rejected = |lifecycle: RunLifecycleRecord, gate_proof: AgentTaskPrDurableGateProof| {
@@ -1554,7 +1554,10 @@ fn durable_finalization_accepts_only_authenticated_external_candidate_adoption()
     accepted_proof.promotion.changed_files = vec!["src/lib.rs".to_string()];
     let (report, backend) = finalize(accepted_proof);
     assert_eq!(
-        report.expect("authenticated adoption publishes").status,
+        report
+            .expect("authenticated adoption publishes")
+            .status
+            .as_str(),
         "review_ready"
     );
     assert!(backend.committed && backend.pushed && backend.created);
@@ -1566,7 +1569,8 @@ fn durable_finalization_accepts_only_authenticated_external_candidate_adoption()
     assert_eq!(
         report
             .expect("fingerprinted abbreviated candidate publishes")
-            .status,
+            .status
+            .as_str(),
         "review_ready"
     );
     assert!(backend.committed && backend.pushed && backend.created);
@@ -1622,7 +1626,7 @@ fn durable_finalization_publishes_clean_synced_recovered_candidate() {
     let report = finalize_pr_with_backend(finalization_options, &mut backend)
         .expect("clean synced candidate publishes");
 
-    assert_eq!(report.status, "review_ready");
+    assert_eq!(report.status.as_str(), "review_ready");
     assert_eq!(report.changed_files, vec!["src/lib.rs"]);
     assert!(backend.committed && backend.pushed);
     assert!(backend.created);
@@ -1703,7 +1707,7 @@ fn durable_finalization_accepts_successful_retry_with_failed_attempt_history() {
     let report = finalize_pr_with_backend(finalization_options, &mut backend)
         .expect("successful canonical retry receipt admits publication");
 
-    assert_eq!(report.status, "review_ready");
+    assert_eq!(report.status.as_str(), "review_ready");
     assert!(backend.created);
 }
 
@@ -1844,7 +1848,7 @@ fn durable_finalization_preserves_authenticated_partial_provider_recovery() {
     let report = finalize_pr_with_backend(finalization_options, &mut backend)
         .expect("authenticated all-successful provider recovery remains eligible");
 
-    assert_eq!(report.status, "review_ready");
+    assert_eq!(report.status.as_str(), "review_ready");
     assert!(backend.created);
 }
 

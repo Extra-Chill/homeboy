@@ -669,7 +669,7 @@ fn startup_without_output_liveness_is_projected_without_becoming_a_timeout() {
     aggregate.outcomes.push(startup_outcome);
     let mut report = ambient_cook_report(CookReportInput {
         cook_id: "startup-without-output-report".to_string(),
-        status: "provider_failure",
+        status: CookStatus::ProviderFailure,
         disposition: CookDisposition::Terminal,
         attempts: Vec::new(),
         finalization: None,
@@ -718,7 +718,7 @@ fn startup_without_output_liveness_is_projected_without_becoming_a_timeout() {
         "startup-without-output-run",
     );
 
-    assert_eq!(report.value.status, "provider_failure");
+    assert_eq!(report.value.status.as_str(), "provider_failure");
     assert_eq!(
         report.value.terminal_failure_classification.as_deref(),
         Some("provider_startup_without_output")
@@ -778,7 +778,7 @@ fn earlier_startup_liveness_diagnostic_does_not_overwrite_later_terminal_failure
     aggregate.outcomes.push(later_failure);
     let mut report = ambient_cook_report(CookReportInput {
         cook_id: "later-terminal-failure".to_string(),
-        status: "provider_failure",
+        status: CookStatus::ProviderFailure,
         disposition: CookDisposition::Terminal,
         attempts: Vec::new(),
         finalization: None,
@@ -1070,7 +1070,7 @@ fn verified_unchanged_attempt_ends_as_no_changes_with_the_provider_message() {
         })
         .expect("terminal no-change Cook");
 
-        assert_eq!(result.value.status, "no_changes");
+        assert_eq!(result.value.status.as_str(), "no_changes");
         assert_eq!(result.exit_code, 1);
         assert_eq!(finalizations.load(Ordering::SeqCst), 0);
         let reason = result.value.stop_reason.as_deref().unwrap_or_default();
@@ -1133,7 +1133,7 @@ fn finalizing_cook_applies_intentional_no_change_policy() {
             let (result, run_id, options) =
                 run_intentional_no_change_cook(input.0, input.1, input.2);
             assert_eq!(result.exit_code, expected.0, "{case}");
-            assert_eq!(result.value.status, expected.1, "{case}");
+            assert_eq!(result.value.status.as_str(), expected.1, "{case}");
             assert_eq!(
                 agent_task_lifecycle::exact_record(&run_id).unwrap().state(),
                 expected.2,
@@ -1185,7 +1185,7 @@ fn promotion_owner_liveness_decides_terminal_disposition() {
     ] {
         homeboy_core::test_support::with_isolated_home(|_| {
             let (result, record) = resume_cook_behind_foreign_promotion_claim(live);
-            assert_eq!(result.value.status, expected.0, "{case}");
+            assert_eq!(result.value.status.as_str(), expected.0, "{case}");
             assert_eq!(result.value.disposition, expected.1, "{case}");
             assert_eq!(result.exit_code, expected.2, "{case}");
             assert_eq!(
@@ -1256,7 +1256,7 @@ fn a_succeeded_runner_result_without_an_aggregate_does_not_rerun_the_provider() 
             .expect("Cook reports the unprojected runner result");
 
         assert_eq!(result.exit_code, 1);
-        assert_eq!(result.value.status, "pre_artifact_interruption");
+        assert_eq!(result.value.status.as_str(), "pre_artifact_interruption");
         assert_eq!(
             result.value.terminal_phase.as_deref(),
             Some("runner_result_not_projected")
@@ -2096,7 +2096,7 @@ fn cook_delivery_review_timeout_publishes_gate_green_candidate_marked_review_una
             .result
             .expect("a review timeout must not end the Cook");
         assert_eq!(result.exit_code, 0, "{:?}", result.value);
-        assert_eq!(result.value.status, "draft_published");
+        assert_eq!(result.value.status.as_str(), "draft_published");
         assert!(fixture.backend.draft);
         assert!(
             fixture.backend.body.contains("Review form unavailable: missing review_form output; completion not assessed; deterministic gates passed"),
@@ -3231,7 +3231,7 @@ fn cook_through_failing_lab_preflight(
         ))
         .expect("Cook reports");
         (
-            report.value.status.clone(),
+            report.value.status.to_string(),
             provider_starts.load(Ordering::SeqCst),
         )
     })
@@ -3337,7 +3337,7 @@ fn controller_owned_evidence_admits_clean_worktree_through_provider_start_and_re
             }),
         ))
         .expect("clean destination with controller evidence reaches provider");
-        assert_ne!(report.value.status, "pre_execution_failure");
+        assert_ne!(report.value.status.as_str(), "pre_execution_failure");
         assert_eq!(provider_starts.load(Ordering::SeqCst), 1);
         assert!(porcelain_status(&destination).is_empty());
         assert!(!destination.join(".homeboy").exists());
@@ -3354,7 +3354,7 @@ fn controller_owned_evidence_admits_clean_worktree_through_provider_start_and_re
             }),
         ))
         .expect("retry reuses controller-owned evidence");
-        assert_ne!(retry_report.value.status, "pre_execution_failure");
+        assert_ne!(retry_report.value.status.as_str(), "pre_execution_failure");
         assert_eq!(retry_starts.load(Ordering::SeqCst), 1);
         assert!(porcelain_status(&destination).is_empty());
         assert!(!destination.join(".homeboy").exists());
@@ -3492,7 +3492,11 @@ fn dirty_explicit_cwd_blocks_detached_provider_dispatch() {
 
             let result = run_cook(CookContext::new(options, Arc::new(UnusedExecutor)))
                 .expect("Cook reports admission failure");
-            assert_eq!(result.value.status, "pre_execution_failure", "{case}");
+            assert_eq!(
+                result.value.status.as_str(),
+                "pre_execution_failure",
+                "{case}"
+            );
             assert_eq!(dispatches.load(Ordering::SeqCst), 0, "{case}");
             if !dirty {
                 return;
@@ -3576,7 +3580,7 @@ fn dirty_destination_recovery_actions_commit_review_and_adopt_through_publicatio
         );
         let context = ambient_cook_report(CookReportInput {
             cook_id: fixture.cook_id.clone(),
-            status: "pre_execution_failure",
+            status: CookStatus::PreExecutionFailure,
             disposition: CookDisposition::Terminal,
             attempts: Vec::new(),
             finalization: None,
@@ -3636,7 +3640,7 @@ fn dirty_destination_recovery_actions_commit_review_and_adopt_through_publicatio
             .expect("generated adopt action accepts the advertised recovery");
 
         assert_eq!(adopted.exit_code, 0, "{:#?}", adopted.value);
-        assert_eq!(adopted.value.status, "draft_published");
+        assert_eq!(adopted.value.status.as_str(), "draft_published");
         assert!(adopted.value.attempts[0]
             .promotion
             .as_ref()
@@ -3706,7 +3710,7 @@ fn cleared_reserve_pressure_cook_context_offers_retry() {
         .unwrap();
         let report = ambient_cook_report(CookReportInput {
             cook_id: fixture.cook_id.clone(),
-            status: "pre_execution_failure",
+            status: CookStatus::PreExecutionFailure,
             disposition: CookDisposition::Terminal,
             attempts: Vec::new(),
             finalization: None,
@@ -3776,7 +3780,7 @@ fn reserve_pressure_cook_context_forwards_only_the_scoped_inventory_action() {
 
         let report = ambient_cook_report(CookReportInput {
             cook_id: fixture.cook_id.clone(),
-            status: "pre_execution_failure",
+            status: CookStatus::PreExecutionFailure,
             disposition: CookDisposition::Terminal,
             attempts: Vec::new(),
             finalization: None,
@@ -3858,7 +3862,7 @@ fn reserve_pressure_cook_context_forwards_the_shared_cargo_target_inventory() {
 
         let report = ambient_cook_report(CookReportInput {
             cook_id: fixture.cook_id.clone(),
-            status: "pre_execution_failure",
+            status: CookStatus::PreExecutionFailure,
             disposition: CookDisposition::Terminal,
             attempts: Vec::new(),
             finalization: None,
@@ -3945,7 +3949,7 @@ fn run_concurrent_first_cooks_recipe_creator_fixture() -> String {
             .expect("one controller advances the Cook")
             .value
             .status,
-        "in_flight"
+        CookStatus::InFlight
     );
     let contention = loser_result.expect_err("another controller cannot advance the same Cook");
     assert_eq!(contention.retryable, Some(true));
@@ -4387,7 +4391,7 @@ fn adoption_compares_immutable_baseline_failures() {
                 .adopt(|_| Ok(None), Arc::new(UnusedExecutor), &mut backend)
                 .unwrap();
             assert_eq!(result.exit_code, exit_code, "{case}: {:#?}", result.value);
-            assert_eq!(result.value.status, status, "{case}");
+            assert_eq!(result.value.status.as_str(), status, "{case}");
             let gate = &result.value.attempts[0]
                 .promotion
                 .as_ref()
@@ -4401,7 +4405,11 @@ fn adoption_compares_immutable_baseline_failures() {
             let replay = fixture
                 .adopt(|_| Ok(None), Arc::new(UnusedExecutor), &mut backend)
                 .unwrap();
-            assert_eq!(replay.value.status, status, "{case}: durable replay");
+            assert_eq!(
+                replay.value.status.as_str(),
+                status,
+                "{case}: durable replay"
+            );
         });
     }
 }
@@ -4673,7 +4681,7 @@ fn adoption_blocks_inherited_failure_when_candidate_package_artifact_differs_fro
             .expect("package drift produces a blocking report");
 
         assert_eq!(result.exit_code, 1, "{:#?}", result.value);
-        assert_eq!(result.value.status, "gate_failed");
+        assert_eq!(result.value.status.as_str(), "gate_failed");
         let promotion = result.value.attempts[0].promotion.as_ref().unwrap();
         assert_eq!(
             promotion.deterministic_gates[0]
@@ -5051,7 +5059,7 @@ fn a_second_cook_provisioning_a_destination_a_live_cook_claimed_follows_it() {
         );
         let result = run_cook(CookContext::new(second, Arc::new(UnusedExecutor)))
             .expect("the second Cook follows the live owner");
-        assert_eq!(result.value.status, "superseded_by_active_cook");
+        assert_eq!(result.value.status.as_str(), "superseded_by_active_cook");
         assert_eq!(result.exit_code, 0);
         assert_eq!(dispatches.load(Ordering::SeqCst), 0);
         assert!(result.value.stop_reason.as_deref().unwrap().contains(owner));
@@ -6409,7 +6417,7 @@ fn replayed_materialized_attempt_terminalizes_when_canonicalization_fails() {
 
         let replay = run_cook(CookContext::new(options, Arc::new(UnusedExecutor)))
             .expect("replay returns durable canonicalization failure");
-        assert_eq!(replay.value.status, "pre_execution_failure");
+        assert_eq!(replay.value.status.as_str(), "pre_execution_failure");
         let record = lifecycle_store
             .read_record(run_id)
             .expect("terminal replay record");
@@ -6437,7 +6445,7 @@ fn normal_cook_repairs_a_transient_initial_lifecycle_write_before_reporting_fail
             .expect("normal Cook converges its durable admission");
 
         assert_eq!(report.exit_code, 1);
-        assert_eq!(report.value.status, "pre_execution_failure");
+        assert_eq!(report.value.status.as_str(), "pre_execution_failure");
         assert_eq!(report.value.latest_run_id.as_deref(), Some(run_id));
         assert_eq!(dispatches.load(Ordering::SeqCst), 0);
         assert!(agent_task_lifecycle::run_record_exists(run_id).expect("lifecycle exists"));
@@ -6484,7 +6492,7 @@ fn normal_cook_repairs_the_immutable_attempt_when_replay_uses_a_fresh_run_id() {
             .expect("normal Cook repairs the immutable attempt");
 
         assert_eq!(report.exit_code, 1);
-        assert_eq!(report.value.status, "pre_execution_failure");
+        assert_eq!(report.value.status.as_str(), "pre_execution_failure");
         assert_eq!(report.value.latest_run_id.as_deref(), Some(durable_run_id));
         assert_eq!(dispatches.load(Ordering::SeqCst), 0);
         assert!(agent_task_lifecycle::run_record_exists(durable_run_id)
@@ -7143,7 +7151,7 @@ fn cook_transport_preparation_failure_is_durable_and_resumes_after_runner_recove
         let failure = run_cook(CookContext::new(options.clone(), Arc::new(UnusedExecutor)))
             .expect("transport preparation failure is durably reported");
         assert_eq!(failure.exit_code, 1);
-        assert_eq!(failure.value.status, "pre_execution_failure");
+        assert_eq!(failure.value.status.as_str(), "pre_execution_failure");
         let blocked = agent_task_lifecycle::reconcile_status(cook_id)
             .expect("cook alias exposes the preflight-blocked attempt");
         assert_eq!(blocked.run_id, first_run_id);
@@ -7161,9 +7169,11 @@ fn cook_transport_preparation_failure_is_durable_and_resumes_after_runner_recove
         let resumed_record =
             agent_task_lifecycle::reconcile_status(cook_id).expect("resumed cook status");
         assert_eq!(
-            resumed.value.status, "in_flight",
+            resumed.value.status.as_str(),
+            "in_flight",
             "resumed cook report: {:#?}\nresumed lifecycle: {:#?}",
-            resumed.value, resumed_record
+            resumed.value,
+            resumed_record
         );
         assert_eq!(
             agent_task_lifecycle::reconcile_status(cook_id)
@@ -7196,7 +7206,7 @@ fn cook_transport_preparation_failure_does_not_exhaust_cook_retries() {
         let failure = run_cook(CookContext::new(options, Arc::new(UnusedExecutor)))
             .expect("transport preparation failure is durably reported");
         assert_eq!(failure.exit_code, 1);
-        assert_eq!(failure.value.status, "pre_execution_failure");
+        assert_eq!(failure.value.status.as_str(), "pre_execution_failure");
         let record = agent_task_lifecycle::reconcile_status("cook-runner-exhaustion")
             .expect("transport failure remains inspectable");
         assert_eq!(
@@ -7228,7 +7238,7 @@ fn cook_pins_runtime_generation_before_preparing_transport() {
         let result = run_cook(CookContext::new(options, Arc::new(UnusedExecutor)))
             .expect("cook accepts detached handoff");
 
-        assert_eq!(result.value.status, "in_flight");
+        assert_eq!(result.value.status.as_str(), "in_flight");
         assert!(
             observed_pin.load(Ordering::SeqCst),
             "the authoritative cook generation pin must protect transport preparation"
@@ -7295,7 +7305,7 @@ fn cook_ignores_untrusted_or_malformed_lab_runtime_recovery_metadata() {
             .expect("persist adversarial metadata");
             let report = ambient_cook_report(CookReportInput {
                 cook_id: cook_id.to_string(),
-                status: "pre_execution_failure",
+                status: CookStatus::PreExecutionFailure,
                 disposition: CookDisposition::Terminal,
                 attempts: Vec::new(),
                 finalization: None,
@@ -7380,7 +7390,8 @@ fn transient_pre_provider_failures_do_not_consume_the_retry_budget() {
                 .expect("cook reports");
 
             assert_eq!(
-                report.value.status, status,
+                report.value.status.as_str(),
+                status,
                 "{cook_id}: {:#?}",
                 report.value
             );
@@ -7519,14 +7530,18 @@ fn pre_provider_retry_replaces_only_runner_side_losses() {
             let base = format!("{cook_id}-attempt-1");
             let run_ids = dispatcher.dispatched_run_ids.lock().unwrap().clone();
             if expected == PreProviderRetry::Stop {
-                assert_eq!(report.value.status, "pre_execution_failure", "{name}");
+                assert_eq!(
+                    report.value.status.as_str(),
+                    "pre_execution_failure",
+                    "{name}"
+                );
                 assert_eq!(run_ids, vec![base.clone()], "{name}");
                 assert!(
                     agent_task_lifecycle::exact_record(&format!("{base}-transport-retry")).is_err(),
                     "{name}: no transport-retry run"
                 );
             } else {
-                assert_eq!(report.value.status, "in_flight", "{name}");
+                assert_eq!(report.value.status.as_str(), "in_flight", "{name}");
                 assert_eq!(
                     run_ids,
                     vec![base.clone(), format!("{base}-transport-retry")],
@@ -7722,7 +7737,7 @@ fn explicit_local_continuation_replaces_exhausted_auto_lab_transport_without_rep
 
         let exhausted = run_cook(CookContext::new(options.clone(), Arc::new(UnusedExecutor)))
             .expect("exhaust the bounded Lab transport retry");
-        assert_eq!(exhausted.value.status, "pre_execution_failure");
+        assert_eq!(exhausted.value.status.as_str(), "pre_execution_failure");
         assert_eq!(lab_dispatches.load(Ordering::SeqCst), 2);
         let exhausted_run_id = exhausted
             .value
@@ -7854,7 +7869,7 @@ fn terminal_report_classifies_real_incomplete_and_abnormal_provider_aggregates()
             )
             .unwrap();
             let report = run_cook(CookContext::new(options, Arc::new(UnusedExecutor))).unwrap();
-            assert_eq!(report.value.status, expected, "{name}");
+            assert_eq!(report.value.status.as_str(), expected, "{name}");
             assert_eq!(report.exit_code, 1, "{name}");
             if expected == "no_candidate" {
                 assert_eq!(
@@ -7950,7 +7965,7 @@ fn cook_returns_after_accepted_detached_attempt_without_waiting_for_daemon_compl
         .expect("accepted detached cook returns");
 
         assert_eq!(result.exit_code, 0);
-        assert_eq!(result.value.status, "in_flight");
+        assert_eq!(result.value.status.as_str(), "in_flight");
         assert_eq!(result.value.attempts.len(), 1);
         assert_eq!(result.value.attempts[0].run_id, run_id);
         let record =
@@ -7991,7 +8006,7 @@ fn orphaned_recipe_materializes_once_and_replays_from_durable_inputs() {
 
         let recovered = run_cook(CookContext::new(options.clone(), Arc::new(UnusedExecutor)))
             .expect("recover orphan");
-        assert_eq!(recovered.value.status, "in_flight");
+        assert_eq!(recovered.value.status.as_str(), "in_flight");
         assert_eq!(dispatches.load(Ordering::SeqCst), 1);
         let record =
             agent_task_lifecycle::reconcile_status(run_id).expect("materialized run record");
@@ -7999,7 +8014,7 @@ fn orphaned_recipe_materializes_once_and_replays_from_durable_inputs() {
 
         let replayed = run_cook(CookContext::new(options.clone(), Arc::new(UnusedExecutor)))
             .expect("idempotent replay");
-        assert_eq!(replayed.value.status, "in_flight");
+        assert_eq!(replayed.value.status.as_str(), "in_flight");
         assert_eq!(dispatches.load(Ordering::SeqCst), 1);
         let replayed_record = agent_task_lifecycle::reconcile_status(run_id).unwrap();
         assert_eq!(replayed_record.run_id, record.run_id);
@@ -8011,7 +8026,7 @@ fn orphaned_recipe_materializes_once_and_replays_from_durable_inputs() {
         changed.finalization.title = "changed immutable finalization title".to_string();
         let replayed = run_cook(CookContext::new(changed, Arc::new(UnusedExecutor)))
             .expect("durable recipe remains authoritative");
-        assert_eq!(replayed.value.status, "in_flight");
+        assert_eq!(replayed.value.status.as_str(), "in_flight");
         assert_eq!(dispatches.load(Ordering::SeqCst), 1);
     });
 }
@@ -8044,7 +8059,12 @@ fn cook_promotion_lists_remediation_out_of_scope_changes_in_dossier_and_pr_body(
                 Some(scope),
             );
             let result = fixture.result.expect("remediated candidate publishes");
-            assert_eq!(result.value.status, "draft_published", "{:?}", result.value);
+            assert_eq!(
+                result.value.status.as_str(),
+                "draft_published",
+                "{:?}",
+                result.value
+            );
             let finalization = result.value.finalization.as_ref().unwrap();
             assert_eq!(
                 finalization["review_dossier"]["out_of_scope_changes"],
@@ -8211,62 +8231,6 @@ fn adoption_by_cook_id_selects_the_latest_substantive_candidate_not_a_newer_empt
     });
 }
 
-/// Timed-out Cook whose selected attempt is `gate_failed` and whose newer
-/// attempt only submitted. Cook ID and that exact attempt must share one
-/// promotion source and the attempt's event history.
-/// Terminality must survive a status this binary has never seen.
-///
-/// The previous implementation inferred it from the status string, so a Cook
-/// reporting an unrecognized status — which is reachable, because several
-/// exits pass `finalization["status"]` straight through and fall back to
-/// `"unknown"` — was classified by whichever way that inference happened to
-/// guess. The declared disposition is what the orchestrator's completion
-/// depends on, so it must not consult the vocabulary at all.
-#[test]
-fn terminality_is_declared_by_the_exit_not_read_from_the_status_string() {
-    homeboy_core::test_support::with_isolated_home(|_| {
-        let cook_id = "cook-disposition-authority";
-        let unrecognized = "some_status_from_a_newer_binary";
-
-        let terminal = ambient_cook_report(CookReportInput {
-            cook_id: cook_id.to_string(),
-            status: unrecognized,
-            disposition: CookDisposition::Terminal,
-            attempts: Vec::new(),
-            finalization: None,
-            stop_reason: None,
-            exit_code: 1,
-            invocation_latest_run_id: None,
-        });
-        assert!(terminal.value.disposition.is_terminal());
-        assert_eq!(terminal.value.disposition.phase(), "terminal");
-        // The unrecognized status is reported verbatim, never rewritten.
-        assert_eq!(terminal.value.status, unrecognized);
-
-        // The one exit that hands work to a durable owner stays non-terminal,
-        // so no completion is announced while that owner is still working.
-        let in_flight = ambient_cook_report(CookReportInput {
-            cook_id: cook_id.to_string(),
-            status: "in_flight",
-            disposition: CookDisposition::InFlight,
-            attempts: Vec::new(),
-            finalization: None,
-            stop_reason: Some("provider attempt accepted by the runner daemon".to_string()),
-            exit_code: 0,
-            invocation_latest_run_id: None,
-        });
-        assert!(!in_flight.value.disposition.is_terminal());
-        assert_eq!(in_flight.value.disposition.phase(), "in_flight");
-
-        // Consumers reading the serialized report get the same answer without
-        // having to pattern-match the open status vocabulary.
-        let serialized = serde_json::to_value(&terminal.value).expect("serialize cook report");
-        assert_eq!(serialized["disposition"], "terminal");
-        let serialized = serde_json::to_value(&in_flight.value).expect("serialize cook report");
-        assert_eq!(serialized["disposition"], "in_flight");
-    });
-}
-
 #[test]
 fn cook_report_emits_selected_candidate_provenance_without_redefining_latest_run_id() {
     homeboy_core::test_support::with_isolated_home(|_| {
@@ -8319,7 +8283,7 @@ fn cook_report_emits_selected_candidate_provenance_without_redefining_latest_run
 
         let report = ambient_cook_report(CookReportInput {
             cook_id: cook_id.to_string(),
-            status: "completed",
+            status: CookStatus::ReviewReady,
             disposition: CookDisposition::Terminal,
             attempts: Vec::new(),
             finalization: None,
@@ -9134,7 +9098,8 @@ fn verified_empty_attempt_dispatches_the_next_rotation_route() {
         });
         let report = result.expect("run_cook report");
         assert_eq!(
-            report.value.status, "in_flight",
+            report.value.status.as_str(),
+            "in_flight",
             "the detached follow-up is accepted: {report:?}"
         );
 
@@ -9565,7 +9530,7 @@ fn production_cook_loop_loads_terminal_promotion_without_source_aggregate() {
             .any(|span| span.id == "cook"));
 
         assert_eq!(result.exit_code, 0, "{result:#?}");
-        assert_eq!(result.value.status, "green_no_finalize");
+        assert_eq!(result.value.status.as_str(), "green_no_finalize");
         assert_eq!(result.value.attempts.len(), 1);
         assert_eq!(
             result.value.attempts[0]
@@ -10076,7 +10041,12 @@ fn deferred_candidate_recovers_with_verify_file_and_publishes() {
             &noop_cook_progress_observer,
         );
         let result = CookService::run(options, runtime, CookMode::ContinueTerminal).unwrap();
-        assert_eq!(result.value.status, "review_ready", "{:#?}", result.value);
+        assert_eq!(
+            result.value.status.as_str(),
+            "review_ready",
+            "{:#?}",
+            result.value
+        );
         assert_eq!(backend.create_count, 1);
     });
 }
@@ -10758,7 +10728,8 @@ fn deferred_recovery_supervises_declared_gate_and_persists_unavailability() {
         );
         let result = CookService::run(options, runtime, CookMode::ContinueTerminal).unwrap();
         assert_eq!(
-            result.value.status, "gate_environment_unavailable",
+            result.value.status.as_str(),
+            "gate_environment_unavailable",
             "{:#?}",
             result.value
         );
@@ -10816,7 +10787,8 @@ fn supervision_stopped_gate_is_regated_once_and_ends_as_unavailable_verification
         );
         let result = CookService::run(options, runtime, CookMode::ContinueTerminal).unwrap();
         assert_eq!(
-            result.value.status, "gate_environment_unavailable",
+            result.value.status.as_str(),
+            "gate_environment_unavailable",
             "{:#?}",
             result.value
         );
@@ -10896,7 +10868,8 @@ fn no_progress_killed_candidate_regates_under_operator_budget_and_publishes() {
         );
         let result = CookService::run(options, runtime, CookMode::ContinueTerminal).unwrap();
         assert_eq!(
-            result.value.status, "gate_environment_unavailable",
+            result.value.status.as_str(),
+            "gate_environment_unavailable",
             "{:#?}",
             result.value
         );
@@ -11160,7 +11133,12 @@ fn corrected_gate_guided_continuation_publishes_without_provider_redispatch_and_
             );
             let result =
                 CookService::run(options.clone(), runtime, CookMode::ContinueTerminal).unwrap();
-            assert_eq!(result.value.status, "review_ready", "{:#?}", result.value);
+            assert_eq!(
+                result.value.status.as_str(),
+                "review_ready",
+                "{:#?}",
+                result.value
+            );
             assert_eq!(result.exit_code, 0);
         }
         assert_eq!(backend.create_count, 1);
@@ -12070,7 +12048,7 @@ fn exact_checkpoint_destination_mismatch_projects_a_fork_replacement_response() 
 
         let context = ambient_cook_report(CookReportInput {
             cook_id: cook_id.to_string(),
-            status: "durable_failure",
+            status: CookStatus::DurableFailure,
             disposition: CookDisposition::Terminal,
             attempts: Vec::new(),
             finalization: None,
@@ -12168,7 +12146,7 @@ fn selected_candidate_provenance_flags_cross_invocation_selection() {
 
         let cross_invocation = ambient_cook_report(CookReportInput {
             cook_id: cook_id.to_string(),
-            status: "pre_execution_failure",
+            status: CookStatus::PreExecutionFailure,
             disposition: CookDisposition::Terminal,
             attempts: Vec::new(),
             finalization: None,
@@ -12187,7 +12165,7 @@ fn selected_candidate_provenance_flags_cross_invocation_selection() {
         );
         let context = ambient_cook_report(CookReportInput {
             cook_id: cook_id.to_string(),
-            status: "pre_execution_failure",
+            status: CookStatus::PreExecutionFailure,
             disposition: CookDisposition::Terminal,
             attempts: Vec::new(),
             finalization: None,
@@ -12215,7 +12193,7 @@ fn selected_candidate_provenance_flags_cross_invocation_selection() {
 
         let in_invocation = ambient_cook_report(CookReportInput {
             cook_id: cook_id.to_string(),
-            status: "completed",
+            status: CookStatus::ReviewReady,
             disposition: CookDisposition::Terminal,
             attempts: Vec::new(),
             finalization: None,
@@ -12240,7 +12218,7 @@ fn cook_report_invocation_run_ids_populated_for_policy_failure() {
         let fresh_run_id = "agent-task-fresh-abc123".to_string();
         let report = ambient_cook_report(CookReportInput {
             cook_id: "cook-test".to_string(),
-            status: "policy_failure",
+            status: CookStatus::PolicyFailure,
             disposition: CookDisposition::Terminal,
             attempts: vec![AgentTaskCookAttemptReport {
                 attempt: 1,
@@ -12261,7 +12239,7 @@ fn cook_report_invocation_run_ids_populated_for_policy_failure() {
             report.value.latest_run_id.as_deref(),
             Some(fresh_run_id.as_str())
         );
-        assert_eq!(report.value.status, "policy_failure");
+        assert_eq!(report.value.status.as_str(), "policy_failure");
     });
 }
 
@@ -12914,12 +12892,9 @@ fn a_destination_whose_cook_is_still_driving_supersedes_another_cook_before_disp
         let result = run_cook(CookContext::new(options.clone(), Arc::new(UnusedExecutor)))
             .expect("a live owner supersedes admission without provider work");
         assert_eq!(result.exit_code, 0);
-        assert_eq!(result.value.status, "superseded_by_active_cook");
+        assert_eq!(result.value.status.as_str(), "superseded_by_active_cook");
         assert_eq!(dispatches.load(Ordering::SeqCst), 0);
-        assert!(
-            homeboy_core::cook_status::CookStatus::from_status(&result.value.status)
-                .is_success_exit()
-        );
+        assert!(result.value.status.is_success_exit());
         assert!(result.value.disposition.is_terminal());
         assert!(result
             .value
@@ -13266,10 +13241,10 @@ fn recover_retries_a_runner_cancelled_cook_but_not_an_operator_cancelled_one() {
     }
 }
 
-/// #16932: the `gates_deferred` stop reason names the typed cause of a Lab
+/// #16932: the `gate_environment_unavailable` stop reason names the typed cause of a Lab
 /// gate that never executed and the concrete recover command.
 #[test]
-fn gates_deferred_stop_reason_names_the_non_execution_cause_and_next_step() {
+fn gate_environment_unavailable_stop_reason_names_the_non_execution_cause_and_next_step() {
     let mut deferred = promotion("run-lab-transport");
     deferred.status = AgentTaskPromotionStatus::GateDeferred;
     let mut error = homeboy_core::Error::new(
@@ -13288,7 +13263,7 @@ fn gates_deferred_stop_reason_names_the_non_execution_cause_and_next_step() {
         ),
     ];
 
-    let reason = super::gates_deferred_stop_reason(&deferred, "cook-16932");
+    let reason = super::gate_environment_unavailable_stop_reason(&deferred, "cook-16932");
 
     assert!(
         reason.starts_with(
@@ -13568,7 +13543,11 @@ echo https://github.com/example/fixture/pull/1
             .unwrap();
             assert_ne!(report.exit_code, 0, "{report:#?}");
             if !timeout_after_failure {
-                assert_eq!(report.value.status, "retries_exhausted", "{report:#?}");
+                assert_eq!(
+                    report.value.status.as_str(),
+                    "retries_exhausted",
+                    "{report:#?}"
+                );
             }
             assert_eq!(
                 git(remote.path(), &["rev-parse", "refs/heads/candidate"]),
@@ -13672,7 +13651,11 @@ fn cook_repro_that_passes_on_base_stops_before_dispatch() {
         let report = run_cook(CookContext::new(options.clone(), Arc::new(UnusedExecutor)))
             .expect("a passing repro is a typed Cook outcome");
 
-        assert_eq!(report.value.status, "repro_passes_on_base", "{report:#?}");
+        assert_eq!(
+            report.value.status.as_str(),
+            "repro_passes_on_base",
+            "{report:#?}"
+        );
         assert_eq!(dispatches.load(Ordering::SeqCst), 0);
         let record = agent_task_lifecycle::reconcile_status(&options.identity.initial_run_id)
             .expect("the stopped Cook has a durable run");
@@ -13719,7 +13702,11 @@ fn cook_repro_that_fails_on_base_and_passes_on_candidate_is_verified() {
         let report = run_cook(CookContext::new(options.clone(), Arc::new(UnusedExecutor)))
             .expect("a reproducing repro admits the Cook");
 
-        assert_ne!(report.value.status, "repro_passes_on_base", "{report:#?}");
+        assert_ne!(
+            report.value.status.as_str(),
+            "repro_passes_on_base",
+            "{report:#?}"
+        );
         assert_eq!(dispatches.load(Ordering::SeqCst), 1);
         let record = agent_task_lifecycle::reconcile_status(&options.identity.initial_run_id)
             .expect("the dispatched Cook has a durable run");
@@ -13819,7 +13806,8 @@ fn materialized_cook_queues_same_attempt_then_dispatches_once_after_upgrade_rele
         let deferred = run_cook(CookContext::new(options, Arc::new(UnusedExecutor)))
             .expect("Cook defers without spending its provider attempt");
         assert_eq!(
-            deferred.value.status, "queued",
+            deferred.value.status.as_str(),
+            "queued",
             "deferred Cook result: {deferred:?}"
         );
         assert_eq!(deferred.value.disposition, CookDisposition::InFlight);
@@ -13940,7 +13928,7 @@ fn launch_exit_after_runtime_admission_deferral_keeps_attempt_queued_until_relea
 
         let deferred = run_cook(CookContext::new(options, Arc::new(UnusedExecutor)))
             .expect("Cook defers behind the runtime promotion");
-        assert_eq!(deferred.value.status, "queued", "{deferred:?}");
+        assert_eq!(deferred.value.status.as_str(), "queued", "{deferred:?}");
         assert_eq!(deferred.exit_code, 75);
 
         // The detached launcher exits with the deferral: deliver its step
@@ -14365,7 +14353,7 @@ fn workspace_snapshot_fence_invalidation_is_retryable_without_provider_execution
             std::fs::write(drift.join("fence-drift"), "drift\n").unwrap();
         });
         let report = run_cook(CookContext::new(options.clone(), Arc::new(UnusedExecutor))).unwrap();
-        assert_eq!(report.value.status, "pre_execution_failure");
+        assert_eq!(report.value.status.as_str(), "pre_execution_failure");
         let record =
             agent_task_lifecycle::reconcile_status(&options.identity.initial_run_id).unwrap();
         assert_eq!(
@@ -14527,7 +14515,7 @@ fn cook_lab_workspace_stage_failure_advertises_runtime_refresh_and_retry() {
             .expect("cook returns the persisted input failure");
 
         assert_eq!(result.exit_code, 1);
-        assert_eq!(result.value.status, "pre_execution_failure");
+        assert_eq!(result.value.status.as_str(), "pre_execution_failure");
         assert_eq!(result.value.attempts.len(), 1);
         assert_eq!(result.value.history_run_ids, vec![run_id]);
         let context = result

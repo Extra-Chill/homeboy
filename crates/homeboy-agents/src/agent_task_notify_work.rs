@@ -64,12 +64,13 @@ pub(super) fn metadata(report: &AgentTaskCookReport, component: Option<&str>) ->
     let state = record
         .as_ref()
         .map(crate::agent_task_lifecycle::CookRunState::of);
-    let cancelled = record
-        .as_ref()
-        .map_or(report.status == "cancelled", |record| {
+    let cancelled = record.as_ref().map_or(
+        report.status == homeboy_core::cook_status::CookStatus::Cancelled,
+        |record| {
             crate::agent_task_lifecycle::CookRunState::of(record).phase
                 == crate::agent_task_lifecycle::CookRunPhase::Cancelled
-        });
+        },
+    );
 
     let mut facts = Vec::new();
     let mut links = Vec::new();

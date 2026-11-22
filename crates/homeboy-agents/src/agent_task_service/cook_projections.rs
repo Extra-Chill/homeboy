@@ -2,25 +2,8 @@
 
 use super::cook::*;
 
-/// several exits feed it straight from finalization JSON. `exit_code` is the
-/// contract every *process* caller branches on, but a consumer reading a
-/// persisted report or an HTTP response has no exit code. Without this, such a
-/// consumer receiving `{"status": "moving_base"}` cannot decide success,
-/// completion, or retry from the Cook document. External consumers use the
-/// canonical control-plane run resource; this projection remains internal to
-/// Cook and batch aggregation.
-///
-/// # Where each field's authority comes from
-///
-/// - `lifecycle_status` is [`ControlPlaneState`], projected from
-///   [`CookStatus`]. Closed, so it is always decidable.
-/// - `terminal` is the *declared* [`CookDisposition`], never re-derived from
-///   the status string. The exit that produced the report already knew whether
-///   it handed the work to a durable owner; that answer is authoritative and
-///   this only forwards it.
-/// - `retryable` is [`ControlPlaneState::is_retryable`], gated on `terminal`.
-///   A Cook a durable owner is still carrying must never be advertised as
-///   retryable, whatever its status string reads.
+/// Cook lifecycle and terminality projected from the closed report vocabulary
+/// and the producing exit's declared disposition.
 #[derive(Debug, Clone, Copy, serde::Serialize)]
 pub struct RunLifecycleProjection {
     pub lifecycle_status: ControlPlaneState,
@@ -30,11 +13,9 @@ pub struct RunLifecycleProjection {
 
 impl RunLifecycleProjection {
     /// Classify a report whose exit declared a [`CookDisposition`].
-    pub fn from_status_and_disposition(status: &str, disposition: CookDisposition) -> Self {
+    pub fn from_status_and_disposition(status: CookStatus, disposition: CookDisposition) -> Self {
         Self::new(
-            homeboy_core::run_lifecycle_status::RunLifecycleStatus::from(CookStatus::from_status(
-                status,
-            )),
+            homeboy_core::run_lifecycle_status::RunLifecycleStatus::from(status),
             disposition.is_terminal(),
         )
     }
@@ -42,13 +23,10 @@ impl RunLifecycleProjection {
     /// Classify a report that has no declared disposition — a batch cell whose
     /// child never produced one, for instance.
     ///
-    /// Terminality then falls back to [`CookStatus::is_in_flight`], the
-    /// vocabulary's own closed reading of "still progressing". That is the
-    /// existing status-only answer documented in `cook_status`, not a new
-    /// opinion: an unrecognized status reads as not-in-flight there, and reads
-    /// as terminal here.
     pub fn from_status(status: &str) -> Self {
-        let status = CookStatus::from_status(status);
+        let Some(status) = CookStatus::from_status(status) else {
+            return Self::new(ControlPlaneState::Unknown, true);
+        };
         let terminal = !status.is_in_flight();
         Self::new(
             homeboy_core::run_lifecycle_status::RunLifecycleStatus::from(&status),
@@ -85,7 +63,7 @@ impl serde::Serialize for AgentTaskCookReport {
             history_run_ids: &'a [String],
             #[serde(skip_serializing_if = "slice_is_empty")]
             invocation_run_ids: &'a [String],
-            status: &'a str,
+            status: &'a CookStatus,
             disposition: CookDisposition,
             attempts: &'a [AgentTaskCookAttemptReport],
             #[serde(skip_serializing_if = "Option::is_none")]
@@ -229,10 +207,10 @@ pub(super) fn cook_success(
 impl AgentTaskCookReport {
     /// Successful Cook completion, rather than provider or launcher success.
     pub fn completed_successfully(&self) -> bool {
-        let status = CookStatus::from_status(&self.status);
+        let status = self.status;
         cook_success(
             self.disposition.is_terminal(),
-            !status.is_in_flight() && (status.is_success_exit() || self.status == "succeeded"),
+            !status.is_in_flight() && status.is_success_exit(),
             matches!(
                 self.status.as_str(),
                 "green_no_finalize" | "intentional_no_change"
@@ -244,7 +222,7 @@ impl AgentTaskCookReport {
 
     /// The closed-vocabulary classification of this report.
     pub fn lifecycle(&self) -> RunLifecycleProjection {
-        RunLifecycleProjection::from_status_and_disposition(&self.status, self.disposition)
+        RunLifecycleProjection::from_status_and_disposition(self.status, self.disposition)
     }
 
     /// Project the Cook's end-to-end PR completion separately from provider

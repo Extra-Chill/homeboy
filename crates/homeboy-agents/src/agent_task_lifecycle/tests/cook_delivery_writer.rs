@@ -246,7 +246,7 @@ fn concurrent_delivery_writers_do_not_lose_an_update() {
 /// A deferred gate leaves the run recoverable with an environment blocker;
 /// a later executed gate replaces it with its verdict.
 #[test]
-fn a_deferred_then_executed_gate_never_stays_gates_deferred() {
+fn a_deferred_then_executed_gate_never_stays_gate_environment_unavailable() {
     for (promoted, executed, state, blocker, run_state, cook_status) in [
         (
             "applied",
@@ -278,7 +278,7 @@ fn a_deferred_then_executed_gate_never_stays_gates_deferred() {
             })
             .expect("provider succeeded");
 
-        // Promotions and delivery use the canonical `gates_deferred` spelling.
+        // Promotions are written as `gates_deferred`.
         let deferred = record_promotion_in_store(
             &lifecycle_store,
             run_id,
@@ -324,7 +324,7 @@ fn a_deferred_then_executed_gate_never_stays_gates_deferred() {
             "{executed}"
         );
         assert_eq!(
-            terminal_status.map(CookStatus::from_status),
+            terminal_status.and_then(CookStatus::from_status),
             cook_status,
             "{executed}"
         );

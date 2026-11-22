@@ -861,12 +861,12 @@ pub struct AgentTaskCookReport {
     pub latest_run_id: Option<String>,
     pub history_run_ids: Vec<String>,
     pub invocation_run_ids: Vec<String>,
-    pub status: String,
+    pub status: CookStatus,
     /// Whether the Cook will advance on its own, declared by the exit that
     /// produced this report rather than inferred from `status`.
     ///
     /// Consumers waiting on completion should read this instead of
-    /// pattern-matching `status`, which is an open vocabulary.
+    /// pattern-matching the report status.
     pub disposition: CookDisposition,
     pub attempts: Vec<AgentTaskCookAttemptReport>,
     pub finalization: Option<Value>,
@@ -918,12 +918,6 @@ pub struct AgentTaskCookCompletion {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub next_action: Option<AgentTaskCookRecoveryAction>,
 }
-
-/// Internal closed-vocabulary classification of an open `status` string.
-///
-/// # Why a report carries this at all
-///
-/// `status` is an open vocabulary and stays that way — callers match on it and
 
 /// Compile a Cook with a caller-owned runtime-readiness cache. Batch callers
 /// share this cache so identical provider/runtime/model verdicts probe once.
@@ -1503,7 +1497,7 @@ pub(super) fn gate_budget_exceeded_stop_reason(
 
 /// A deferred gate never executed, so the stop reason names each typed cause
 /// and the concrete next step instead of a candidate verdict (#16932).
-pub(super) fn gates_deferred_stop_reason(
+pub(super) fn gate_environment_unavailable_stop_reason(
     promotion: &AgentTaskPromotionReport,
     cook_id: &str,
 ) -> String {
@@ -1771,7 +1765,7 @@ mod cook_deadline_tests {
         );
 
         assert_eq!(result.exit_code, 1, "expiry is not a success");
-        assert_eq!(result.value.status, "timed_out");
+        assert_eq!(result.value.status.as_str(), "timed_out");
         assert_eq!(result.value.disposition, CookDisposition::Terminal);
         assert_eq!(
             result.value.terminal_phase.as_deref(),
@@ -1796,7 +1790,7 @@ mod cook_deadline_tests {
     #[test]
     fn the_reported_status_reads_as_terminal_and_not_as_success() {
         assert_eq!(CookStatus::TimedOut.as_str(), "timed_out");
-        let status = CookStatus::from_status("timed_out");
+        let status = CookStatus::from_status("timed_out").unwrap();
         assert_eq!(status, CookStatus::TimedOut);
         assert!(!status.is_in_flight());
         assert!(!status.is_success_exit());
