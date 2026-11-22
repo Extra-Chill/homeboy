@@ -276,10 +276,7 @@ fn environment_error_line<'a>(
     require_diagnostic: bool,
 ) -> Option<&'a str> {
     stderr.lines().chain(stdout.lines()).find(|line| {
-        if libtest_result(line).is_some()
-            || line.trim().starts_with("test result:")
-            || (require_diagnostic && !explicit_environment_diagnostic(line))
-        {
+        if libtest_status(line) || (require_diagnostic && !explicit_environment_diagnostic(line)) {
             return false;
         }
         let text = line.to_ascii_lowercase();
@@ -303,9 +300,24 @@ fn environment_error_line<'a>(
     })
 }
 
-/// Libtest names and outcomes are metadata, never environment diagnostics.
+/// A libtest status line (outcome, slow-test warning or summary), after any
+/// quiet-mode progress marks. Its test names are metadata, never environment
+/// diagnostics.
+fn libtest_line(line: &str) -> Option<&str> {
+    line.trim()
+        .trim_start_matches(['.', 'i', 'F'])
+        .strip_prefix("test ")
+}
+
+fn libtest_status(line: &str) -> bool {
+    libtest_result(line).is_some()
+        || libtest_line(line).is_some_and(|rest| {
+            rest.starts_with("result:") || rest.contains(" has been running for over ")
+        })
+}
+
 fn libtest_result(line: &str) -> Option<(&str, &str)> {
-    let (id, outcome) = line.trim().strip_prefix("test ")?.split_once(" ... ")?;
+    let (id, outcome) = libtest_line(line)?.split_once(" ... ")?;
     let status = outcome.split_whitespace().next()?.trim_end_matches(',');
     (!id.is_empty() && matches!(status, "ok" | "ignored" | "FAILED")).then_some((id, status))
 }
