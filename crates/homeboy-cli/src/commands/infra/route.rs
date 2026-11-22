@@ -2370,7 +2370,7 @@ fn run_terminal_cook_continuation(
                 ),
                 crate::agents::agent_task_service::CookMode::ContinueTerminal,
             )
-            .map(|result| result.exit_code)
+            .map(|result| (result.exit_code, result.value.disposition))
         },
     );
     let failure = match outcome {

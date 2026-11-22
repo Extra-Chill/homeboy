@@ -113,86 +113,14 @@ impl serde::Serialize for AgentTaskCookReport {
     }
 }
 
-/// Pure Cook subject/outcome projection shared by operator observation surfaces.
+/// Resolve a Cook reader ID to its plain subject record.
+/// Callers classify its outcome with [`agent_task_lifecycle::CookRunState`].
 pub fn cook_observation_in_store(
     store: &AgentTaskLifecycleStore,
     id: &str,
 ) -> Result<agent_task_lifecycle::AgentTaskRunRecord> {
     let subject = agent_task_lifecycle::resolve_cook_reader_run_id_in_store(store, id)?;
-    let record = store.read_record_bounded(&subject)?;
-    Ok(project_cook_observation(store, &record))
-}
-
-/// Read-time Cook observation: the stored record, presented in the state
-/// [`cook_observation_state`] derives for it. The stored record is untouched.
-pub(crate) fn project_cook_observation(
-    store: &AgentTaskLifecycleStore,
-    record: &agent_task_lifecycle::AgentTaskRunRecord,
-) -> agent_task_lifecycle::AgentTaskRunRecord {
-    agent_task_lifecycle::observed_with_run_state(record, cook_observation_state(store, record))
-}
-
-/// The state an operator observation surface shows for `record`. Pure: it
-/// derives the state from the stored record and its Cook evidence and never
-/// writes. A provider-`Succeeded` Cook that did not finish end to end reads as
-/// `PartialFailure` (no change) or `CandidateRecoverable` (unverified or
-/// unfinalized candidate).
-pub(crate) fn cook_observation_state(
-    store: &AgentTaskLifecycleStore,
-    record: &agent_task_lifecycle::AgentTaskRunRecord,
-) -> homeboy_lifecycle_contract::RunExecutionState {
-    use homeboy_lifecycle_contract::RunExecutionState;
-    let stored = record.state();
-    // Publication is the end-to-end receipt, not a second verdict derived
-    // from a possibly older promotion or terminal-progress snapshot.
-    if super::CookDelivery::from_run_metadata(&record.metadata).is_some_and(|d| d.published()) {
-        return RunExecutionState::Succeeded;
-    }
-    if stored != RunExecutionState::Succeeded {
-        return stored;
-    }
-    let Some(cook_id) = record.metadata["cook_id"].as_str() else {
-        return stored;
-    };
-    let terminal = &record.metadata["cook_progress"];
-    if terminal["phase"] == "terminal"
-        && terminal["terminal_status"] == CookStatus::IntentionalNoChange.as_str()
-        && terminal["terminal_success"] == true
-        && terminal["exit_code"] == 0
-    {
-        return stored;
-    }
-    // The provider finished, but the Cook ended without a change. There is no
-    // candidate to recover, so it must not read as `candidate_recoverable`
-    // (#15294).
-    if terminal["phase"] == "terminal"
-        && terminal["terminal_status"] == CookStatus::NoChanges.as_str()
-    {
-        return RunExecutionState::PartialFailure;
-    }
-    let recipes = CookRecipeStore::new(store.roots().clone());
-    let recipe = recipes.load_recipe(cook_id).ok();
-    let verified =
-        super::cook_promotion::persisted_promotion_from_record(&record.run_id, record.clone())
-            .ok()
-            .flatten()
-            .is_some_and(|promotion| {
-                matches!(
-                    promotion.status,
-                    AgentTaskPromotionStatus::Applied
-                        | AgentTaskPromotionStatus::GateFailed
-                        | AgentTaskPromotionStatus::VerifiedNoChanges
-                ) && promotion.finalization_eligible()
-            });
-    let no_finalize = recipe
-        .as_ref()
-        .is_some_and(|recipe| recipe.finalization["no_finalize"] == true);
-    let finalized =
-        super::CookDelivery::from_run_metadata(&record.metadata).is_some_and(|d| d.published());
-    if !cook_success(true, verified, no_finalize, finalized) {
-        return RunExecutionState::CandidateRecoverable;
-    }
-    stored
+    store.read_record_bounded(&subject)
 }
 
 pub(super) fn cook_success(

@@ -266,23 +266,6 @@ pub(super) fn run_cook_with_runtime(
             lifecycle_store,
             result.exit_code != 0,
         );
-        // Persist the pass outcome on its source, even when the report's latest
-        // attempt is a detached review-form child. Exit zero can mean handoff.
-        if lifecycle_store.record_exists(&notification_options.identity.initial_run_id)? {
-            lifecycle_store.mutate_record(
-                &notification_options.identity.initial_run_id,
-                |record| {
-                    record.ensure_metadata_object().insert(
-                        "cook_pass_outcome".into(),
-                        serde_json::json!({
-                            "status": result.value.status,
-                            "terminal": result.value.disposition.is_terminal(),
-                        }),
-                    );
-                    true
-                },
-            )?;
-        }
         if result.value.disposition.is_terminal() {
             if let Err(error) = finish_cook_terminal_with_report(
                 lifecycle_store,
@@ -326,7 +309,8 @@ pub(super) fn finish_cook_terminal_with_report(
             let record = cook_observation_in_store(lifecycle, cook_id)?;
             use agent_task_lifecycle::cook_run_state::cook_settlement_in_store;
             let recipes = CookRecipeStore::new(lifecycle.roots().clone());
-            if !record.state().is_terminal() || recipes.cook_driver_held(cook_id)? {
+            let state = agent_task_lifecycle::CookRunState::of(&record);
+            if !state.terminal || recipes.cook_driver_held(cook_id)? {
                 return Ok(());
             }
             if !cook_settlement_in_store(&recipes, cook_id, &record.run_id)?
@@ -337,13 +321,14 @@ pub(super) fn finish_cook_terminal_with_report(
             fallback = crate::agent_task_notify::terminal_attempt_report(
                 cook_id,
                 &record.run_id,
-                super::cook_projections::terminal_fallback_status(record.state()),
+                super::cook_projections::terminal_fallback_status(state.execution_state),
             );
             fallback.report_stores = Some((
                 CookRecipeStore::new(lifecycle.roots().clone()),
                 lifecycle.clone(),
             ));
-            let failed = record.state() != homeboy_lifecycle_contract::RunExecutionState::Succeeded;
+            let failed =
+                state.execution_state != homeboy_lifecycle_contract::RunExecutionState::Succeeded;
             (&fallback, None, i32::from(failed))
         }
     };

@@ -337,7 +337,16 @@ impl BaselineFacts {
                 let mut records =
                     crate::agent_task_gate::failure_records(&gate.stdout, &gate.stderr);
                 if let Some(evidence) = &gate.failure_evidence {
-                    records.extend(evidence.failed_tests.iter().map(|test| format!("{test:?}")));
+                    // Output parsing already records libtest failures as
+                    // `test:<id>`; structured evidence for the same test must
+                    // not count it twice.
+                    let structured = evidence
+                        .failed_tests
+                        .iter()
+                        .filter(|test| !records.contains(&format!("test:{}", test.id)))
+                        .map(|test| format!("{test:?}"))
+                        .collect::<Vec<_>>();
+                    records.extend(structured);
                 }
                 records.sort();
                 records.dedup();

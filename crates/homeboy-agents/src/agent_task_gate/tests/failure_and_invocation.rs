@@ -312,9 +312,13 @@ fn libtest_environment_names_are_not_diagnostics() {
             "no space left on device",
             "gate_environment_unavailable",
         ] {
-            let output = format!("test {name} ... {status}\n");
-            assert_eq!(gate_environment_error(&output, ""), None, "{output}");
-            assert_eq!(gate_environment_error("", &output), None, "{output}");
+            for output in [
+                format!("test {name} ... {status}\n"),
+                format!("..test {name} has been running for over 60 seconds\n"),
+            ] {
+                assert_eq!(gate_environment_error(&output, ""), None, "{output}");
+                assert_eq!(gate_environment_error("", &output), None, "{output}");
+            }
         }
     }
     assert_eq!(

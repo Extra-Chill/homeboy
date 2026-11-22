@@ -250,11 +250,11 @@ fn workflow_cook_record(
         .ok()
         .and_then(|recipe| recipe.attempts.last().map(|attempt| attempt.run_id.clone()));
     if let Some(attempt) = latest.and_then(|run_id| store.read_record(&run_id).ok()) {
-        return Ok(super::project_cook_observation(&store, &attempt));
+        return Ok(attempt);
     }
     match parent {
         _ if redirected => Err(WorkflowRunOutcome::Pending),
-        Some(parent) => Ok(super::project_cook_observation(&store, &parent)),
+        Some(parent) => Ok(parent),
         None => Err(WorkflowRunOutcome::Unknown),
     }
 }
@@ -366,15 +366,16 @@ fn cook_terminal_reason(run: &homeboy_control_plane_contract::ControlPlaneRun) -
 /// durable record exists.
 fn workflow_cook_progress(cook_id: &str) -> Option<Value> {
     let record = workflow_cook_record(cook_id).ok()?;
+    let state = agent_task_lifecycle::CookRunState::of(&record).execution_state;
     Some(json!({
         "run_id": record.run_id,
-        "state": record.state(),
+        "state": state,
         "phase": record
             .metadata
             .get("phase")
             .or_else(|| record.metadata.get("current_phase"))
             .cloned()
-            .unwrap_or_else(|| json!(record.state())),
+            .unwrap_or_else(|| json!(state)),
         "updated_at": record.updated_at,
         "provider": record.provider_handles.last().map(|handle| &handle.backend),
     }))

@@ -491,7 +491,10 @@ fn lab_gate_terminal_continuation_records_runner_only_path_failure() {
         let result = crate::agent_task_service::consume_claimed_terminal_with_dispatcher(
             claim,
             |_| Ok(Some(Arc::new(AcceptedDetachedAttemptDispatcher))),
-            |options| continue_terminal(&options, &mut backend).map(|result| result.exit_code),
+            |options| {
+                continue_terminal(&options, &mut backend)
+                    .map(|result| (result.exit_code, result.value.disposition))
+            },
         );
         let record = store.read_record(run).unwrap();
         let cause = record.metadata["cook_controller_failure"]["message"]
@@ -580,7 +583,10 @@ fn refused_publication_ends_the_terminal_continuation_without_regating() {
         let exit = crate::agent_task_service::consume_claimed_terminal_with_dispatcher(
             claim,
             |_| Ok(Some(Arc::new(AcceptedDetachedAttemptDispatcher))),
-            |options| continue_terminal(&options, &mut backend).map(|result| result.exit_code),
+            |options| {
+                continue_terminal(&options, &mut backend)
+                    .map(|result| (result.exit_code, result.value.disposition))
+            },
         )
         .unwrap();
 

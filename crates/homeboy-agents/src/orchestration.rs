@@ -214,7 +214,6 @@ impl LifecycleStoreLookup {
         record: AgentTaskRunRecord,
         aggregate: Option<crate::agent_tasks::AgentTaskAggregate>,
     ) -> Result<RunSnapshot, ControlPlaneError> {
-        let record = crate::agent_task_service::project_cook_observation(&self.store, &record);
         let plan = self.plan(&record.run_id)?;
         Ok(RunSnapshot {
             record,
@@ -10331,8 +10330,10 @@ mod tests {
         );
 
         let resource = project_record(&record, None).expect("project active supervisor");
+        // A provider-succeeded Cook without verified, finalized evidence is a
+        // recoverable candidate to the classifier, owner or not.
         assert_eq!(resource.state, run_state(&record));
-        assert_eq!(resource.state, ControlPlaneState::Succeeded);
+        assert_eq!(resource.state, ControlPlaneState::CandidateRecoverable);
         assert_eq!(resource.phase.as_deref(), Some("promotion_gates"));
         assert_eq!(resource.finished_at, record.updated_at);
     }

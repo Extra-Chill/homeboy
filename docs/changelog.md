@@ -4,6 +4,20 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.489.0] - 2026-11-22
+
+### Added
+- support commit-marker breaking policy for GitHub edges
+
+### Changed
+- wait for terminal job before draining resumed watch
+- batch runner extension installs and shorten restart waits
+- promote background-prefetched release slots
+- wait for durable job completion after client disconnect
+
+### Fixed
+- use control-plane wait for ledger inspection
+
 ## [0.488.13] - 2026-11-22
 
 ### Changed
