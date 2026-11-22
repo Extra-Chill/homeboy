@@ -577,9 +577,9 @@ fn observed_execution_state(record: &AgentTaskRunRecord) -> RunExecutionState {
     if stored != RunExecutionState::Succeeded {
         return stored;
     }
-    let Some(_) = record.metadata["cook_id"].as_str() else {
+    if record.metadata["cook_id"].as_str().is_none() {
         return stored;
-    };
+    }
     let terminal = &record.metadata["cook_progress"];
     if terminal["phase"] == "terminal"
         && terminal["terminal_status"] == CookStatus::IntentionalNoChange.as_str()
@@ -703,16 +703,14 @@ impl CookRunState {
         next.phase = phase;
         next.execution_state = match phase {
             CookRunPhase::Continuing => self.execution_state,
-            phase => match phase {
-                CookRunPhase::Queued => RunExecutionState::Queued,
-                CookRunPhase::Running => RunExecutionState::Running,
-                CookRunPhase::CandidateRecoverable => RunExecutionState::CandidateRecoverable,
-                CookRunPhase::Succeeded => RunExecutionState::Succeeded,
-                CookRunPhase::PartialFailure => RunExecutionState::PartialFailure,
-                CookRunPhase::Failed => RunExecutionState::Failed,
-                CookRunPhase::Cancelled => RunExecutionState::Cancelled,
-                _ => RunExecutionState::Unknown,
-            },
+            CookRunPhase::Queued => RunExecutionState::Queued,
+            CookRunPhase::Running => RunExecutionState::Running,
+            CookRunPhase::CandidateRecoverable => RunExecutionState::CandidateRecoverable,
+            CookRunPhase::Succeeded => RunExecutionState::Succeeded,
+            CookRunPhase::PartialFailure => RunExecutionState::PartialFailure,
+            CookRunPhase::Failed => RunExecutionState::Failed,
+            CookRunPhase::Cancelled => RunExecutionState::Cancelled,
+            CookRunPhase::Unknown => RunExecutionState::Unknown,
         };
         next.terminal = !matches!(phase, CookRunPhase::Queued | CookRunPhase::Running);
         next.retryable = matches!(

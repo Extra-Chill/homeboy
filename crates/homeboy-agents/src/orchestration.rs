@@ -10330,8 +10330,10 @@ mod tests {
         );
 
         let resource = project_record(&record, None).expect("project active supervisor");
+        // A provider-succeeded Cook without verified, finalized evidence is a
+        // recoverable candidate to the classifier, owner or not.
         assert_eq!(resource.state, run_state(&record));
-        assert_eq!(resource.state, ControlPlaneState::Succeeded);
+        assert_eq!(resource.state, ControlPlaneState::CandidateRecoverable);
         assert_eq!(resource.phase.as_deref(), Some("promotion_gates"));
         assert_eq!(resource.finished_at, record.updated_at);
     }

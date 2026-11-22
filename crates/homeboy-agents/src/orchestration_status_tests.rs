@@ -91,11 +91,11 @@ fn status_current_delivery_blocker_outranks_provider_diagnostic_and_success_has_
     );
     let published = fixture("contradictory-publication");
     let resource = project_snapshot(&published, false).unwrap();
-    // A publication receipt does not rewrite the durable Cook execution
-    // state. This contradictory fixture must project the classifier rather
-    // than deriving success locally from publication artifacts.
+    // Publication is the end-to-end receipt (#16330): the Cook classifier
+    // reads it over the stored provider outcome, and the projection serves
+    // the classifier rather than deriving its own verdict.
     assert_eq!(resource.state, run_state(&published.record));
-    assert_eq!(resource.state, ControlPlaneState::Failed);
+    assert_eq!(resource.state, ControlPlaneState::Succeeded);
     assert!(resource.blocker.is_none());
     assert_eq!(resource.publication.unwrap().state, "review_ready");
 }

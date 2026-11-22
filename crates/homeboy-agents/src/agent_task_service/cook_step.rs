@@ -366,15 +366,16 @@ fn cook_terminal_reason(run: &homeboy_control_plane_contract::ControlPlaneRun) -
 /// durable record exists.
 fn workflow_cook_progress(cook_id: &str) -> Option<Value> {
     let record = workflow_cook_record(cook_id).ok()?;
+    let state = agent_task_lifecycle::CookRunState::of(&record).execution_state;
     Some(json!({
         "run_id": record.run_id,
-        "state": record.state(),
+        "state": state,
         "phase": record
             .metadata
             .get("phase")
             .or_else(|| record.metadata.get("current_phase"))
             .cloned()
-            .unwrap_or_else(|| json!(record.state())),
+            .unwrap_or_else(|| json!(state)),
         "updated_at": record.updated_at,
         "provider": record.provider_handles.last().map(|handle| &handle.backend),
     }))
