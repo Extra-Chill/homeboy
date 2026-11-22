@@ -562,6 +562,7 @@ mod tests {
             services_restarted: Vec::new(),
             services_pending_restart: Vec::new(),
             operation_id: None,
+            release_prefetch: None,
         }
     }
 }

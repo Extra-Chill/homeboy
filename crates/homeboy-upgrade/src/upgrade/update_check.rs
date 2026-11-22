@@ -26,9 +26,13 @@ use std::time::{Duration, Instant};
 
 const CACHE_FILENAME: &str = "update_check.json";
 const CHECK_INTERVAL_SECS: u64 = 86400;
-/// Releases ship several times a day; a prefetch must see each one before
-/// the operator runs `homeboy upgrade`.
-pub const PREFETCH_INTERVAL_SECS: u64 = 15 * 60;
+/// Releases ship several times a day and operators upgrade within minutes of
+/// publication, so the daemon must see each one before the asset download
+/// lands on the `homeboy upgrade` critical path.
+pub const PREFETCH_INTERVAL_SECS: u64 = 2 * 60;
+/// Anonymous GitHub API calls share a 60/hour budget; poll gently there.
+const ANONYMOUS_PREFETCH_INTERVAL_SECS: u64 = 15 * 60;
+const PREFETCH_MAX_BACKOFF_SECS: u64 = 60 * 60;
 const ENV_VAR_DISABLE: &str = "HOMEBOY_NO_UPDATE_CHECK";
 const VERSION_PROBE_TIMEOUT: Duration = Duration::from_millis(250);
 
@@ -405,9 +409,80 @@ fn refresh_verdict() -> homeboy_core::Result<super::VersionCheck> {
     Ok(check)
 }
 
-/// One daemon pass: refresh stale verdicts, then only materialize a newer release.
+/// One stateless prefetch pass; see [`ReleasePrefetcher`] for the daemon loop.
 /// This owns no promotion authority and cannot replace the controller.
 pub fn prefetch_release() -> homeboy_core::Result<Option<PathBuf>> {
+    Ok(ReleasePrefetcher::default()
+        .pass()?
+        .map(|(slot, _runners_ok)| slot))
+}
+
+/// Daemon-owned prefetch state: each release is staged at most once per
+/// daemon, and failures back off exponentially instead of re-downloading the
+/// asset every interval. Runs on its own thread, so it never blocks commands.
+#[derive(Debug, Default)]
+pub struct ReleasePrefetcher {
+    staged: Option<String>,
+    failures: u32,
+}
+
+impl ReleasePrefetcher {
+    /// Run one pass and return how long to wait before the next one.
+    pub fn tick(&mut self) -> Duration {
+        let ok = match self.pass() {
+            Ok(outcome) => outcome.is_none_or(|(_, runners_ok)| runners_ok),
+            Err(error) => {
+                homeboy_core::log_status!("update", "Release prefetch failed: {}", error);
+                false
+            }
+        };
+        self.failures = if ok { 0 } else { self.failures + 1 };
+        let interval = if super::github_api::token_source() == "none" {
+            ANONYMOUS_PREFETCH_INTERVAL_SECS
+        } else {
+            PREFETCH_INTERVAL_SECS
+        };
+        Duration::from_secs(
+            (interval << self.failures.min(6)).min(PREFETCH_MAX_BACKOFF_SECS.max(interval)),
+        )
+    }
+
+    /// Refresh a stale verdict, then materialize only a newer release: the
+    /// controller slot first, then every configured runner's slot. Returns the
+    /// controller slot and whether all runner slots were staged.
+    fn pass(&mut self) -> homeboy_core::Result<Option<(PathBuf, bool)>> {
+        let Some(tag) = newer_release_tag()? else {
+            return Ok(None);
+        };
+        if self.staged.as_deref() == Some(tag.as_str()) {
+            return Ok(None);
+        }
+        // Acquisition executes the slot binary for its identity, which also
+        // pays a fresh binary's macOS first-exec assessment off the upgrade path.
+        let slot =
+            super::release_slot::acquire_release_slot(&tag, &super::release_slot::binaries_dir()?)?;
+        let runners_ok = match super::runner_upgrade_provider::with_runner_upgrade(|provider| {
+            provider.acquire_runner_release(&tag, &[])
+        }) {
+            Ok(_) => true,
+            Err(error) => {
+                homeboy_core::log_status!(
+                    "update",
+                    "Runner release prefetch failed for {}: {}",
+                    tag,
+                    error
+                );
+                false
+            }
+        };
+        if runners_ok {
+            self.staged = Some(tag);
+        }
+        Ok(Some((slot, runners_ok)))
+    }
+}
+
+fn newer_release_tag() -> homeboy_core::Result<Option<String>> {
     if is_disabled() {
         return Ok(None);
     }
@@ -421,25 +496,9 @@ pub fn prefetch_release() -> homeboy_core::Result<Option<PathBuf>> {
             check.latest_version.filter(|_| check.update_available)
         }
     };
-    let Some(latest) = latest.filter(|latest| {
-        homeboy_core::build_identity::is_newer(latest, upgrade::current_version())
-    }) else {
-        return Ok(None);
-    };
-    let tag = format!("v{}", latest.trim_start_matches('v'));
-    let slot =
-        super::release_slot::acquire_release_slot(&tag, &super::release_slot::binaries_dir()?)?;
-    if let Err(error) = super::runner_upgrade_provider::with_runner_upgrade(|provider| {
-        provider.acquire_runner_release(&tag, &[])
-    }) {
-        homeboy_core::log_status!(
-            "update",
-            "Runner release prefetch failed for {}: {}",
-            tag,
-            error
-        );
-    }
-    Ok(Some(slot))
+    Ok(latest
+        .filter(|latest| homeboy_core::build_identity::is_newer(latest, upgrade::current_version()))
+        .map(|latest| format!("v{}", latest.trim_start_matches('v'))))
 }
 
 #[cfg(test)]
@@ -560,9 +619,9 @@ mod tests {
                 &self,
                 tag: &str,
                 targets: &[String],
-            ) -> homeboy_core::Result<()> {
+            ) -> homeboy_core::Result<super::super::RunnerReleasePrefetch> {
                 if self.acquisition.as_os_str().is_empty() {
-                    return Ok(());
+                    return Ok(Default::default());
                 }
                 let acquisition = std::fs::read_to_string(&self.acquisition)
                     .expect("controller slot must be acquired before runner slots");
@@ -575,7 +634,7 @@ mod tests {
                 if self.fail {
                     return Err(homeboy_core::Error::internal_io("runner unavailable", None));
                 }
-                Ok(())
+                Ok(Default::default())
             }
 
             fn upgrade_configured_runners(
@@ -602,12 +661,13 @@ mod tests {
                 let tools = home.path().join("tools");
                 std::fs::create_dir_all(&tools).unwrap();
                 let acquisition = home.path().join("acquisition");
+                let acquisitions = home.path().join("acquisitions");
                 let slot = home.path().join("slot");
                 homeboy_test_support::write_executable(
                     &tools.join("sh"),
                     &format!(
-                        "#!/bin/sh\nprintf '%s' \"$HOMEBOY_INSTALLER_SCRIPT\" > '{}'\necho 'HOMEBOY_REFRESH_BINARY_PATH={}'\n",
-                        acquisition.display(), slot.display()
+                        "#!/bin/sh\necho >> '{}'\nprintf '%s' \"$HOMEBOY_INSTALLER_SCRIPT\" > '{}'\necho 'HOMEBOY_REFRESH_BINARY_PATH={}'\n",
+                        acquisitions.display(), acquisition.display(), slot.display()
                     ),
                     0o755,
                 ).unwrap();
@@ -625,6 +685,23 @@ mod tests {
                 let _reset = ResetProvider;
                 assert_eq!(prefetch_release().unwrap(), Some(slot));
                 assert_eq!(*calls.lock().unwrap(), ["v99.0.0"]);
+
+                // The daemon loop stages a release once; failures back off and retry.
+                let mut prefetcher = ReleasePrefetcher::default();
+                let (first, second) = (prefetcher.tick(), prefetcher.tick());
+                let passes = if fail { 3 } else { 2 };
+                assert_eq!(calls.lock().unwrap().len(), passes);
+                let acquired = std::fs::read_to_string(&acquisitions).unwrap();
+                assert_eq!(
+                    acquired.lines().count(),
+                    passes,
+                    "already staged releases are skipped"
+                );
+                if fail {
+                    assert!(second > first, "{first:?} then {second:?}");
+                } else {
+                    assert_eq!(first, second);
+                }
             });
         }
     }

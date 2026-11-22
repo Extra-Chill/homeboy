@@ -260,6 +260,19 @@ pub struct UpgradeResult {
     /// `homeboy upgrade status <id>` after a client timeout.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub operation_id: Option<String>,
+    /// Which release binaries came from a background-prefetched slot.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub release_prefetch: Option<ReleasePrefetch>,
+}
+
+/// Whether each release binary was promoted from an already acquired,
+/// hash-verified slot (`true`) or downloaded by this upgrade (`false`).
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ReleasePrefetch {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub controller: Option<bool>,
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub runners: std::collections::BTreeMap<String, bool>,
 }
 
 impl UpgradeResult {
@@ -572,6 +585,7 @@ mod tests {
             services_restarted: Vec::new(),
             services_pending_restart: Vec::new(),
             operation_id: None,
+            release_prefetch: None,
         };
 
         let json = serde_json::to_value(&result).expect("upgrade result serializes");

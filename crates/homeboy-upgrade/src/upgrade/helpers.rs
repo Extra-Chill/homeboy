@@ -376,6 +376,7 @@ fn complete_without_controller_replacement(
         services_restarted: Vec::new(),
         services_pending_restart: Vec::new(),
         operation_id: None,
+        release_prefetch: None,
     };
     if !completion.superseded {
         result.extension_skips.extend(orphan_extension_warnings());
@@ -603,6 +604,21 @@ fn run_controller_upgrade_with_operation(
         .as_ref()
         .filter(|_| !skip_runners)
         .map(|release| release.tag.as_str());
+    // A background-prefetched slot turns controller installation into a
+    // hash check plus promotion; report whether this upgrade downloaded.
+    let controller_prefetched = selected_release
+        .as_ref()
+        .filter(|_| install_method == InstallMethod::Binary)
+        .map(|release| {
+            let prefetched = super::release_slot::binaries_dir()
+                .is_ok_and(|dir| super::release_slot::is_release_staged(&release.tag, &dir));
+            eprintln!(
+                "[upgrade] controller release {} prefetched={prefetched}",
+                release.tag
+            );
+            prefetched
+        });
+    let runner_prefetch = std::cell::RefCell::new(super::RunnerReleasePrefetch::new());
     std::thread::scope(|scope| {
         let mut runner_acquisition =
             overlap_runner_release_acquisition(scope, runner_release, |tag| {
@@ -612,8 +628,12 @@ fn run_controller_upgrade_with_operation(
             });
         let mut join_acquisition = |operation: &mut UpgradeOperation| {
             if let Some(job) = runner_acquisition.take() {
-                let (started_at, duration_ms, error) =
+                let (started_at, duration_ms, error, prefetched) =
                     job.join().expect("runner release acquisition panicked");
+                for (runner, prefetched) in &prefetched {
+                    eprintln!("[upgrade] runner {runner} release prefetched={prefetched}");
+                }
+                runner_prefetch.borrow_mut().extend(prefetched);
                 operation.record_concurrent_phase(
                     "acquiring runner release",
                     started_at,
@@ -969,6 +989,11 @@ fn run_controller_upgrade_with_operation(
                 services_restarted,
                 services_pending_restart,
                 operation_id: None,
+                release_prefetch: Some(ReleasePrefetch {
+                    controller: controller_prefetched,
+                    runners: runner_prefetch.borrow().clone(),
+                })
+                .filter(|prefetch| prefetch.controller.is_some() || !prefetch.runners.is_empty()),
             };
             if !completion_superseded {
                 result.extension_skips.extend(orphan_extension_warnings());
@@ -1025,23 +1050,34 @@ fn source_upgrade_noop_result(
         services_restarted: Vec::new(),
         services_pending_restart: Vec::new(),
         operation_id: None,
+        release_prefetch: None,
     }
 }
 
+type RunnerAcquisitionOutcome = (u64, u64, Option<String>, super::RunnerReleasePrefetch);
+
 /// Stage immutable runner slots through controller installation and extension refresh.
 /// The caller joins before runner convergence (or on an early return), recording
-/// `(started_at, duration_ms, error)` even when acquisition fails.
+/// `(started_at, duration_ms, error, prefetched)` even when acquisition fails.
 fn overlap_runner_release_acquisition<'scope, 'env>(
     scope: &'scope std::thread::Scope<'scope, 'env>,
     tag: Option<&'scope str>,
-    acquire: impl FnOnce(&str) -> Result<()> + Send + 'scope,
-) -> Option<std::thread::ScopedJoinHandle<'scope, (u64, u64, Option<String>)>> {
+    acquire: impl FnOnce(&str) -> Result<super::RunnerReleasePrefetch> + Send + 'scope,
+) -> Option<std::thread::ScopedJoinHandle<'scope, RunnerAcquisitionOutcome>> {
     tag.map(|tag| {
         scope.spawn(move || {
             let started_at = homeboy_core::daemon::workflow_cadence::now_ms();
             let clock = std::time::Instant::now();
-            let error = acquire(tag).err().map(|error| error.message);
-            (started_at, clock.elapsed().as_millis() as u64, error)
+            let (error, prefetched) = match acquire(tag) {
+                Ok(prefetched) => (None, prefetched),
+                Err(error) => (Some(error.message), Default::default()),
+            };
+            (
+                started_at,
+                clock.elapsed().as_millis() as u64,
+                error,
+                prefetched,
+            )
         })
     })
 }
@@ -1090,6 +1126,7 @@ fn runner_preflight_failure_result(
         services_restarted: Vec::new(),
         services_pending_restart: Vec::new(),
         operation_id: None,
+        release_prefetch: None,
     }
 }
 
@@ -1150,6 +1187,7 @@ fn extension_preflight_failure_result(
         services_restarted: Vec::new(),
         services_pending_restart: Vec::new(),
         operation_id: None,
+        release_prefetch: None,
     }
 }
 
@@ -1581,6 +1619,7 @@ fn run_targeted_runner_upgrade(
         services_restarted: Vec::new(),
         services_pending_restart: Vec::new(),
         operation_id: None,
+        release_prefetch: None,
     })
 }
 
@@ -4693,6 +4732,7 @@ mod convergence_tests {
             services_restarted: Vec::new(),
             services_pending_restart: Vec::new(),
             operation_id: None,
+            release_prefetch: None,
         };
 
         invalidate_superseded_evidence(&mut result);
@@ -4819,7 +4859,11 @@ mod convergence_tests {
                 *self.revalidated.lock().unwrap() = true;
                 Ok(vec![])
             }
-            fn acquire_runner_release(&self, _: &str, _: &[String]) -> Result<()> {
+            fn acquire_runner_release(
+                &self,
+                _: &str,
+                _: &[String],
+            ) -> Result<super::super::RunnerReleasePrefetch> {
                 assert!(
                     *self.revalidated.lock().unwrap(),
                     "revalidation must finish first"
@@ -4870,7 +4914,8 @@ mod convergence_tests {
                     "extension refresh precedes acquisition completion"
                 );
                 refreshed.send(()).unwrap();
-                let (started_at, _, error) = job.join().unwrap();
+                let (started_at, _, error, prefetched) = job.join().unwrap();
+                assert!(prefetched.is_empty());
                 assert!(started_at > 0);
                 assert!(error.unwrap().contains("download failed"));
                 assert!(

@@ -51,7 +51,11 @@ impl RunnerUpgradeProvider for RunnerUpgrade {
         preflight_configured_runners_for_upgrade(runner_targets, candidate_version)
     }
 
-    fn acquire_runner_release(&self, tag: &str, runner_targets: &[String]) -> Result<()> {
+    fn acquire_runner_release(
+        &self,
+        tag: &str,
+        runner_targets: &[String],
+    ) -> Result<homeboy_upgrade::RunnerReleasePrefetch> {
         let runners: Vec<_> = runner_upgrade_targets(runner_targets)?
             .into_iter()
             .collect();
@@ -59,11 +63,15 @@ impl RunnerUpgradeProvider for RunnerUpgrade {
             runners
                 .iter()
                 .map(|runner| {
-                    scope.spawn(|| crate::homeboy_refresh::acquire_release_slot(&runner.id, tag))
+                    scope.spawn(|| {
+                        crate::homeboy_refresh::acquire_release_slot(&runner.id, tag)
+                            .map(|prefetched| (runner.id.clone(), prefetched))
+                    })
                 })
                 .collect::<Vec<_>>()
                 .into_iter()
-                .try_for_each(|job| job.join().expect("runner release acquisition panicked"))
+                .map(|job| job.join().expect("runner release acquisition panicked"))
+                .collect()
         })
     }
 

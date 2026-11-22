@@ -2471,28 +2471,39 @@ fn installed_homeboy_env(
 
 /// Acquire `tag` into the runner's content-addressed binary slot without
 /// selecting it. A later refresh of the same release reuses the slot.
-pub(crate) fn acquire_release_slot(runner_id: &str, tag: &str) -> Result<()> {
+/// Returns whether the slot was already acquired (prefetched).
+pub(crate) fn acquire_release_slot(runner_id: &str, tag: &str) -> Result<bool> {
     release_version(tag)?;
     let runner = load(runner_id)?;
     let root = runner.workspace_root.as_deref().ok_or_else(|| {
         Error::internal_unexpected(format!("runner {runner_id} has no workspace_root"))
     })?;
     let script = materialize_script(tag, &release_binaries_dir(root));
-    let transport = refresh_transport_in_roots(&runner)?;
-    let options = refresh_execution_options(
-        &script,
-        vec!["bash".to_string()],
-        transport.diagnostic_ssh_bootstrap,
-    );
-    let (output, code) =
-        exec_with_status_snapshot(runner_id, options, transport.connection_status)?;
-    if code != 0 {
-        return Err(Error::internal_unexpected(format!(
-            "runner {runner_id} release acquisition exited {code}: {}",
-            output.stderr.trim()
-        )));
-    }
-    Ok(())
+    // The daemon prefetch and `homeboy upgrade` both acquire from this
+    // controller; serialize them so the upgrade reuses an in-flight download.
+    homeboy_upgrade::release_slot::with_acquisition_lock(
+        &homeboy_upgrade::release_slot::binaries_dir()?,
+        &format!("runner-{runner_id}"),
+        || {
+            let transport = refresh_transport_in_roots(&runner)?;
+            let options = refresh_execution_options(
+                &script,
+                vec!["bash".to_string()],
+                transport.diagnostic_ssh_bootstrap,
+            );
+            let (output, code) =
+                exec_with_status_snapshot(runner_id, options, transport.connection_status)?;
+            if code != 0 {
+                return Err(Error::internal_unexpected(format!(
+                    "runner {runner_id} release acquisition exited {code}: {}",
+                    output.stderr.trim()
+                )));
+            }
+            Ok(homeboy_upgrade::release_slot::reused_release_cache(
+                &output.stdout,
+            ))
+        },
+    )
 }
 
 fn source_sha_from_output(stdout: &str) -> Option<String> {
