@@ -1300,13 +1300,35 @@ pub fn status(runner_id: &str) -> Result<RunnerStatusReport> {
 /// deadline. Network observations must share this budget so diagnostic
 /// callers retain their envelope even when individual endpoints stall.
 pub(crate) fn status_until(runner_id: &str, deadline: Instant) -> Result<RunnerStatusReport> {
+    status_until_with_controller_scope(runner_id, deadline, false)
+}
+
+/// Refresh must prove this controller's transport, not borrow a peer's live
+/// session when its own tunnel was lost during restart or lease rebind.
+pub(crate) fn status_current_controller(runner_id: &str) -> Result<RunnerStatusReport> {
+    status_until_with_controller_scope(
+        runner_id,
+        Instant::now() + crate::readonly_probe::readonly_probe_timeout(),
+        true,
+    )
+}
+
+fn status_until_with_controller_scope(
+    runner_id: &str,
+    deadline: Instant,
+    current_controller_only: bool,
+) -> Result<RunnerStatusReport> {
     let runner = load(runner_id)?;
     let session_path = session_path(runner_id)?;
     // Status is an observation path. In particular, a stale direct-SSH record
     // must be reported as disconnected rather than triggering tunnel recovery.
     // Recovery can wait on shared control-plane state and may open a tunnel, so
     // it belongs to explicit connect/admission operations instead.
-    let (session, state) = read_session_for_status_until(runner_id, deadline)?;
+    let (session, state) = if current_controller_only {
+        session_store::read_current_session_for_status_until(runner_id, deadline)?
+    } else {
+        read_session_for_status_until(runner_id, deadline)?
+    };
     let connected = state == RunnerSessionState::Connected;
     let (stale_daemon, configured_job_binary_build_identity) =
         stale_daemon_warning_until(&runner, session.as_ref(), connected, deadline)?;

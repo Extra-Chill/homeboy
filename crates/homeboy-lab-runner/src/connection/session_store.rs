@@ -251,6 +251,26 @@ pub(crate) fn read_session(runner_id: &str) -> Result<Option<RunnerSession>> {
 /// `Connected` is exactly [`super::transport_is_live`]: the recorded tunnel
 /// reaches a daemon whose `/health` proves the session's lease and PID. The
 /// observation never opens a tunnel and never outlives the caller's deadline.
+/// Observe only the initiating controller's session. Peer sessions are useful
+/// for diagnostics, but cannot certify this controller's reconnect.
+pub(super) fn read_current_session_for_status_until(
+    runner_id: &str,
+    deadline: Instant,
+) -> Result<(Option<RunnerSession>, RunnerSessionState)> {
+    if runner_id == crate::host_runner::ID {
+        let session = crate::host_runner::session();
+        let state = if session.is_some() {
+            RunnerSessionState::Connected
+        } else {
+            RunnerSessionState::Disconnected
+        };
+        return Ok((session, state));
+    }
+    let session = read_session_for_controller(runner_id, &controller_id())?;
+    let state = status_session_state_until(session.as_ref(), deadline);
+    Ok((session, state))
+}
+
 pub(super) fn read_session_for_status_until(
     runner_id: &str,
     deadline: Instant,
@@ -1130,6 +1150,34 @@ mod tests {
         ));
         assert!(started.elapsed() < Duration::from_millis(500));
         server.join().expect("server");
+    }
+
+    #[test]
+    fn refresh_current_controller_status_does_not_borrow_a_live_peer_tunnel() {
+        crate::test_support::with_isolated_home(|_| {
+            let (port, server) = serve_health("lease-live", 42, Duration::ZERO);
+            let mut peer = session_for_health_endpoint(port, "lease-live", 42);
+            peer.controller_id = Some("other-controller".to_string());
+            write_session(&peer).expect("write peer session");
+
+            let (current, state) = read_current_session_for_status_until(
+                &peer.runner_id,
+                Instant::now() + Duration::from_secs(2),
+            )
+            .expect("current controller status");
+            assert!(current.is_none());
+            assert_eq!(state, RunnerSessionState::Disconnected);
+
+            // General diagnostics can still observe that same live peer.
+            let (selected, state) = read_session_for_status_until(
+                &peer.runner_id,
+                Instant::now() + Duration::from_secs(2),
+            )
+            .expect("peer status");
+            assert_eq!(selected, Some(peer));
+            assert_eq!(state, RunnerSessionState::Connected);
+            server.join().expect("server");
+        });
     }
 
     #[test]

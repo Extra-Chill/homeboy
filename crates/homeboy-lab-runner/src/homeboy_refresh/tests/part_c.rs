@@ -107,6 +107,24 @@ fn refresh_readiness_blocks_a_post_refresh_executable_replacement() {
 }
 
 #[test]
+fn refresh_readiness_requires_reconnect_when_controller_tunnel_dies_after_restart() {
+    let mut report = readiness_report(freshness(true, None));
+    // The daemon still answers remotely, but the initiating controller's
+    // session is disconnected. Neither the compatibility field nor fresh
+    // remote daemon evidence can certify its tunnel.
+    report.state = RunnerSessionState::Disconnected;
+    report.active_job_state = RunnerActiveJobState::NotQueried;
+    let readiness = refresh_readiness_from_status("homeboy-lab", &report);
+    assert_eq!(readiness.state, HomeboyRefreshReadinessState::Blocked);
+    assert!(!readiness.accepting_jobs);
+    assert!(refresh_requires_reconnect("homeboy-lab", &readiness));
+    assert_eq!(
+        readiness.continuation.as_deref(),
+        Some("homeboy runner connect homeboy-lab")
+    );
+}
+
+#[test]
 fn refresh_readiness_certifies_immediate_admission_only_when_ready() {
     let readiness =
         refresh_readiness_from_status("homeboy-lab", &readiness_report(freshness(true, None)));
@@ -114,6 +132,7 @@ fn refresh_readiness_certifies_immediate_admission_only_when_ready() {
     assert_eq!(readiness.state, HomeboyRefreshReadinessState::Ready);
     assert!(readiness.daemon_fresh);
     assert!(readiness.accepting_jobs);
+    assert!(!refresh_requires_reconnect("homeboy-lab", &readiness));
     assert!(readiness.continuation.is_none());
 }
 
