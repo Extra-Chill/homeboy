@@ -300,9 +300,9 @@ where
                 executor.clone(),
                 agent_task_service::CookMode::Resume,
             )?;
-            let exit_code = cook.exit_code;
+            let outcome = (cook.exit_code, cook.value.disposition);
             result = Some(cook.value);
-            Ok(exit_code)
+            Ok(outcome)
         };
         let exit_code =
             agent_task_service::consume_claimed_with_dispatcher(claim, dispatcher, execute)?;

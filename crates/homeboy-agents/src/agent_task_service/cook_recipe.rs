@@ -13,7 +13,7 @@ use uuid::Uuid;
 use crate::agent_task_lifecycle;
 use crate::agent_task_scheduler::{AgentTaskAggregate, AgentTaskPlan};
 use crate::agent_task_service::cook::{
-    AgentTaskCookAttemptDispatcher, CookFinalization, CookIdentity, CookMode,
+    AgentTaskCookAttemptDispatcher, CookDisposition, CookFinalization, CookIdentity, CookMode,
     CookProviderTransport, CookRequest, CookRetryPolicy, CookWorkspace,
 };
 use homeboy_core::command_invocation::CommandInvocation;
@@ -757,11 +757,13 @@ impl CookRecipeStore {
         claim_scheduled_lifecycle_continuation_for(self, cook_id, run_id)
     }
 
+    /// Execute a pass and settle its claim from the returned report disposition,
+    /// not from attempt-local progress or the process exit code alone.
     pub fn consume_claimed_with_dispatcher(
         &self,
         claim: ClaimedCookContinuation,
         dispatcher: impl FnOnce(&Value) -> Result<Option<Arc<dyn AgentTaskCookAttemptDispatcher>>>,
-        execute: impl FnOnce(CookRequest) -> Result<i32>,
+        execute: impl FnOnce(CookRequest) -> Result<(i32, CookDisposition)>,
     ) -> Result<i32> {
         if claim.data_root != self.data_root() {
             return Err(Error::validation_invalid_argument(
@@ -3238,7 +3240,7 @@ fn reconstruct_recipe_options(
 pub fn consume_claimed_with_dispatcher(
     claim: ClaimedCookContinuation,
     dispatcher: impl FnOnce(&Value) -> Result<Option<Arc<dyn AgentTaskCookAttemptDispatcher>>>,
-    execute: impl FnOnce(CookRequest) -> Result<i32>,
+    execute: impl FnOnce(CookRequest) -> Result<(i32, CookDisposition)>,
 ) -> Result<i32> {
     default_store()?.consume_claimed_with_dispatcher(claim, dispatcher, execute)
 }
@@ -3246,7 +3248,7 @@ pub fn consume_claimed_with_dispatcher(
 pub fn consume_claimed_terminal_with_dispatcher(
     claim: ClaimedCookContinuation,
     dispatcher: impl FnOnce(&Value) -> Result<Option<Arc<dyn AgentTaskCookAttemptDispatcher>>>,
-    execute: impl FnOnce(CookRequest) -> Result<i32>,
+    execute: impl FnOnce(CookRequest) -> Result<(i32, CookDisposition)>,
 ) -> Result<i32> {
     consume_claimed_with_dispatcher_policy(
         &default_store()?,
@@ -3261,7 +3263,7 @@ fn consume_claimed_with_dispatcher_policy(
     store: &CookRecipeStore,
     claim: ClaimedCookContinuation,
     dispatcher: impl FnOnce(&Value) -> Result<Option<Arc<dyn AgentTaskCookAttemptDispatcher>>>,
-    execute: impl FnOnce(CookRequest) -> Result<i32>,
+    execute: impl FnOnce(CookRequest) -> Result<(i32, CookDisposition)>,
     mode: CookMode,
 ) -> Result<i32> {
     let lifecycle_store = store.lifecycle_store();
@@ -3344,24 +3346,16 @@ fn consume_claimed_with_dispatcher_policy(
         return Err(error);
     }
     lifecycle_store.mutate_record(&claim.continuation().run_id, |record| {
-        let metadata = record.ensure_metadata_object();
-        let outcome = metadata.remove("cook_pass_outcome").is_some();
-        metadata.remove("cook_progress").is_some() || outcome
+        record
+            .ensure_metadata_object()
+            .remove("cook_progress")
+            .is_some()
     })?;
     let execution = execute(options);
     match execution {
-        Ok(0) => {
+        Ok((0, disposition)) => {
             let current = lifecycle_store.read_record(&claim.continuation().run_id)?;
-            let terminal = current
-                .metadata
-                .pointer("/cook_pass_outcome/terminal")
-                .and_then(Value::as_bool)
-                == Some(true)
-                || current
-                    .metadata
-                    .pointer("/cook_progress/phase")
-                    .and_then(Value::as_str)
-                    == Some("terminal")
+            let terminal = disposition.is_terminal()
                 || super::CookDelivery::from_run_metadata(&current.metadata)
                     .is_some_and(|delivery| delivery.blocker.is_some());
             if rearmable_promotion_refusal(&current) {
@@ -3376,7 +3370,7 @@ fn consume_claimed_with_dispatcher_policy(
             }
             Ok(0)
         }
-        Ok(exit_code) => {
+        Ok((exit_code, _)) => {
             // Cook reports controller errors as non-zero results. Preserve the
             // recorded cause rather than reducing it to an anonymous status.
             let diagnostic = lifecycle_store
@@ -4186,7 +4180,7 @@ mod tests {
     /// injected normal-cook boundary.
     fn consume_next_from(
         store: &CookRecipeStore,
-        execute: impl FnOnce(CookRequest) -> Result<i32>,
+        execute: impl FnOnce(CookRequest) -> Result<(i32, CookDisposition)>,
     ) -> Result<Option<i32>> {
         let Some(claim) = store.claim_continuation_with_budget(usize::MAX)?.claim else {
             return Ok(None);
@@ -4783,7 +4777,7 @@ mod tests {
                     assert_eq!(request.retry_policy.max_attempts, 2);
                     assert!(request.finalization.draft_pr);
                     assert_eq!(request.finalization.head.as_deref(), Some("lab-head"));
-                    Ok(0)
+                    Ok((0, CookDisposition::InFlight))
                 },
             )
             .expect("consume Lab continuation");
@@ -4951,11 +4945,7 @@ mod tests {
             |_| Ok(None),
             |options| {
                 observed = Some(options);
-                store.lifecycle_store().mutate_record("run", |record| {
-                    record.metadata["cook_progress"] = serde_json::json!({"phase": "terminal"});
-                    true
-                })?;
-                Ok(0)
+                Ok((0, CookDisposition::Terminal))
             },
             CookMode::ContinueTerminal,
         )
@@ -5256,7 +5246,7 @@ mod tests {
             &store,
             claim,
             |_| Ok(None),
-            |_| Ok(0),
+            |_| Ok((0, CookDisposition::InFlight)),
             CookMode::Resume,
         )
         .unwrap();
@@ -5383,7 +5373,7 @@ mod tests {
         assert_eq!(
             consume_next_from(&store, |options| {
                 observed = Some(options);
-                Ok(0)
+                Ok((0, CookDisposition::Terminal))
             })
             .unwrap(),
             Some(0)
@@ -5718,7 +5708,11 @@ mod tests {
             .expect("targeted continuation");
         assert_eq!(
             store
-                .consume_claimed_with_dispatcher(claim, |_| Ok(None), |_| Ok(7))
+                .consume_claimed_with_dispatcher(
+                    claim,
+                    |_| Ok(None),
+                    |_| Ok((7, CookDisposition::Terminal))
+                )
                 .unwrap(),
             7
         );
@@ -5789,7 +5783,7 @@ mod tests {
                         |_| Ok(None),
                         |_| {
                             assert!(!store.enqueue_terminal_continuation("cook", "run").unwrap());
-                            Ok(1)
+                            Ok((1, CookDisposition::Terminal))
                         },
                     )
                     .unwrap(),
@@ -5830,7 +5824,11 @@ mod tests {
             .unwrap()
             .unwrap();
         let exit_code = store
-            .consume_claimed_with_dispatcher(claim, |_| Ok(None), |_| Ok(0))
+            .consume_claimed_with_dispatcher(
+                claim,
+                |_| Ok(None),
+                |_| Ok((0, CookDisposition::InFlight)),
+            )
             .expect("the recorded runtime generation no longer pins continuation");
 
         assert_eq!(exit_code, 0);
@@ -5844,29 +5842,60 @@ mod tests {
     }
 
     #[test]
-    fn successful_pass_without_gates_or_publication_is_reclaimable() {
-        let context = homeboy_core::test_support::HermeticTestContext::new();
-        let (store, _) = rooted_stores(&context);
-        store.persist_recipe(&recipe()).unwrap();
-        store.enqueue_terminal_continuation("cook", "run").unwrap();
-        let claim = store
-            .claim_continuation_for("cook", "run")
-            .unwrap()
-            .unwrap();
-        assert_eq!(
-            store
-                .consume_claimed_with_dispatcher(claim, |_| Ok(None), |_| Ok(0))
-                .unwrap(),
-            0
-        );
-        assert_eq!(
-            continuation_state_in_store(&store, "cook", "run").unwrap(),
-            CookContinuationState::Pending
-        );
-        assert!(store
-            .claim_continuation_for("cook", "run")
-            .unwrap()
-            .is_some());
+    fn continuation_uses_pass_disposition_when_terminal_progress_is_on_detached_child() {
+        for disposition in [CookDisposition::Terminal, CookDisposition::InFlight] {
+            let context = homeboy_core::test_support::HermeticTestContext::new();
+            let (store, lifecycle_store) = rooted_stores(&context);
+            let (_, plan) = persist_recipe_run(&store, &lifecycle_store);
+            store.enqueue_terminal_continuation("cook", "run").unwrap();
+            let claim = store
+                .claim_continuation_for("cook", "run")
+                .unwrap()
+                .unwrap();
+            let exit_code = store
+                .consume_claimed_with_dispatcher(
+                    claim,
+                    |_| Ok(None),
+                    |options| {
+                        assert_eq!(options.identity.initial_run_id, "run");
+                        lifecycle_store.submit_plan_with_runtime_admission(
+                            &plan,
+                            "detached-child",
+                            |_| Ok(serde_json::json!({})),
+                        )?;
+                        lifecycle_store.mutate_record("detached-child", |record| {
+                            record.metadata["cook_progress"] =
+                                serde_json::json!({"phase": disposition.phase()});
+                            true
+                        })?;
+                        // Exit zero alone cannot distinguish settlement from handoff.
+                        Ok((0, disposition))
+                    },
+                )
+                .unwrap();
+            assert_eq!(exit_code, 0);
+            assert!(lifecycle_store
+                .read_record("run")
+                .unwrap()
+                .metadata
+                .get("cook_progress")
+                .is_none());
+            assert_eq!(
+                continuation_state_in_store(&store, "cook", "run").unwrap(),
+                if disposition.is_terminal() {
+                    CookContinuationState::Completed
+                } else {
+                    CookContinuationState::Pending
+                }
+            );
+            assert_eq!(
+                store
+                    .claim_continuation_for("cook", "run")
+                    .unwrap()
+                    .is_some(),
+                !disposition.is_terminal()
+            );
+        }
     }
 
     /// A record carrying an undecodable continuation is inert: it is neither
@@ -5942,7 +5971,7 @@ mod tests {
             assert_eq!(
                 consume_next_from(&store, |_| {
                     executions.fetch_add(1, Ordering::SeqCst);
-                    Ok(0)
+                    Ok((0, CookDisposition::Terminal))
                 })
                 .unwrap(),
                 Some(0)
@@ -6022,14 +6051,14 @@ mod tests {
             let first = scope.spawn(|| {
                 consume_next_from(&store, |_| {
                     executions.fetch_add(1, Ordering::SeqCst);
-                    Ok(0)
+                    Ok((0, CookDisposition::Terminal))
                 })
                 .unwrap()
             });
             let second = scope.spawn(|| {
                 consume_next_from(&store, |_| {
                     executions.fetch_add(1, Ordering::SeqCst);
-                    Ok(0)
+                    Ok((0, CookDisposition::Terminal))
                 })
                 .unwrap()
             });

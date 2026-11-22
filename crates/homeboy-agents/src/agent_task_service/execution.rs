@@ -1201,7 +1201,7 @@ fn consume_claimed_continuation(
                 super::CookRuntime::production(executor.clone(), &store, &lifecycle_store),
                 super::CookMode::Resume,
             )
-            .map(|result| result.exit_code)
+            .map(|result| (result.exit_code, result.value.disposition))
         },
     )?;
     let latest_run_id = agent_task_lifecycle::cook_index(&cook_id)
