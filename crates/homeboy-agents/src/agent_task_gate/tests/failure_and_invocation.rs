@@ -302,6 +302,57 @@ fn prose_about_capability_preflight_stays_candidate_code() {
 }
 
 #[test]
+fn libtest_environment_names_are_not_diagnostics() {
+    for status in ["ok", "ignored", "ignored, needs space", "FAILED"] {
+        for name in [
+            "staging_enospc_is_retryable",
+            "toolchain_not found",
+            "workspace staging failed",
+            "spawn_enoent",
+            "no space left on device",
+            "gate_environment_unavailable",
+        ] {
+            let output = format!("test {name} ... {status}\n");
+            assert_eq!(gate_environment_error(&output, ""), None, "{output}");
+            assert_eq!(gate_environment_error("", &output), None, "{output}");
+        }
+    }
+    assert_eq!(
+        gate_environment_error("test result: FAILED. enospc", ""),
+        None
+    );
+}
+
+#[test]
+fn libtest_failed_tests_outrank_environment_signature_mentions() {
+    let stdout = "test workspace::staging_enospc_is_retryable ... ok\ntest refresh_with_active_jobs ... FAILED\ntest result: FAILED. 1 passed; 1 failed\n";
+    for stderr in ["", "checking enospc recovery"] {
+        let evidence = gate_failure_evidence("cargo test --lib", 101, stdout, stderr, None);
+        assert_eq!(
+            evidence.classification,
+            AgentTaskGateFailureClassification::CandidateCode
+        );
+        assert_eq!(evidence.failed_tests[0].id, "refresh_with_active_jobs");
+        assert!(evidence.summary.contains("refresh_with_active_jobs"));
+        assert!(!evidence.summary.contains("staging_enospc"));
+        assert!(evidence.agent_feedback.contains("These tests failed"));
+    }
+    for diagnostic in [
+        "error: failed to write /tmp/output: No space left on device (os error 28)",
+        "Error: spawn cargo ENOENT",
+    ] {
+        // A bare signature must not hide a later genuine diagnostic either.
+        let stderr = format!("checking enospc recovery\n{diagnostic}");
+        let evidence = gate_failure_evidence("cargo test --lib", 101, stdout, &stderr, None);
+        assert_eq!(
+            evidence.classification,
+            AgentTaskGateFailureClassification::Environment
+        );
+        assert!(evidence.summary.contains(diagnostic));
+    }
+}
+
+#[test]
 fn infrastructure_output_is_not_a_candidate_verdict() {
     for output in [
         "Error: spawn /gate-home/.studio/php-bin/8.4.27-studio-1/php ENOENT",

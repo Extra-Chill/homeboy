@@ -61,7 +61,8 @@ pub(crate) fn gate_failure_evidence(
     let shell_rejection = gate_shell_rejection(exit_code, stderr);
     let target_unresolved = homeboy_gate_target_unresolved(stdout, stderr);
     let setup_failure = homeboy_gate_setup_failure(exit_code, stdout, stderr);
-    let environment_error = gate_environment_error(stdout, stderr);
+    // Concrete failures outrank bare signature mentions, but not diagnostics.
+    let environment_error = environment_error_line(stdout, stderr, !failed_tests.is_empty());
     let classification = match selection_problem {
         _ if environment_error.is_some() || missing_executable.is_some() => {
             AgentTaskGateFailureClassification::Environment
@@ -100,6 +101,10 @@ pub(crate) fn gate_failure_evidence(
             (None, None) if setup_failure => {
                 "Homeboy gate setup failed before a candidate verdict; inspect the captured failure digest".to_string()
             }
+            (None, None) if !failed_tests.is_empty() => format!(
+                "deterministic gate failed with exit code {exit_code}: {command}\n{}",
+                failed_tests_feedback(&failed_tests)
+            ),
             (None, None) => {
                 format!("deterministic gate failed with exit code {exit_code}: {command}")
             }
@@ -174,6 +179,31 @@ pub(super) fn gate_failed_tests(stdout: &str, stderr: &str) -> Vec<AgentTaskGate
     if !digest.is_empty() {
         return digest;
     }
+    let mut libtest_failures = Vec::new();
+    for line in stdout.lines().chain(stderr.lines()) {
+        let Some((id, outcome)) = libtest_result(line) else {
+            continue;
+        };
+        if outcome != "FAILED"
+            || libtest_failures
+                .iter()
+                .any(|test: &AgentTaskGateFailedTest| test.id == id)
+        {
+            continue;
+        }
+        libtest_failures.push(AgentTaskGateFailedTest {
+            id: id.to_string(),
+            file: String::new(),
+            message: String::new(),
+            output: String::new(),
+        });
+        if libtest_failures.len() == TEST_FAILURE_DIGEST_MAX_TESTS {
+            break;
+        }
+    }
+    if !libtest_failures.is_empty() {
+        return libtest_failures;
+    }
     let Ok(value) = serde_json::from_str::<serde_json::Value>(stdout.trim()) else {
         return Vec::new();
     };
@@ -237,7 +267,21 @@ pub(super) fn failed_tests_feedback(failed_tests: &[AgentTaskGateFailedTest]) ->
 /// Shared with feedback evaluation so older persisted candidate-code labels
 /// cannot authorize another provider attempt for a broken environment.
 pub(crate) fn gate_environment_error<'a>(stdout: &'a str, stderr: &'a str) -> Option<&'a str> {
+    environment_error_line(stdout, stderr, false)
+}
+
+fn environment_error_line<'a>(
+    stdout: &'a str,
+    stderr: &'a str,
+    require_diagnostic: bool,
+) -> Option<&'a str> {
     stderr.lines().chain(stdout.lines()).find(|line| {
+        if libtest_result(line).is_some()
+            || line.trim().starts_with("test result:")
+            || (require_diagnostic && !explicit_environment_diagnostic(line))
+        {
+            return false;
+        }
         let text = line.to_ascii_lowercase();
         (text.contains("spawn")
             && (text.contains("enoent") || text.contains("no such file or directory")))
@@ -257,6 +301,25 @@ pub(crate) fn gate_environment_error<'a>(stdout: &'a str, stderr: &'a str) -> Op
                 || text.contains("gate transport"))
                 && (text.contains("failed") || text.contains("error")))
     })
+}
+
+/// Libtest names and outcomes are metadata, never environment diagnostics.
+fn libtest_result(line: &str) -> Option<(&str, &str)> {
+    let (id, outcome) = line.trim().strip_prefix("test ")?.split_once(" ... ")?;
+    let status = outcome.split_whitespace().next()?.trim_end_matches(',');
+    (!id.is_empty() && matches!(status, "ok" | "ignored" | "FAILED")).then_some((id, status))
+}
+
+fn explicit_environment_diagnostic(line: &str) -> bool {
+    let text = line.trim().to_ascii_lowercase();
+    text.starts_with("error:")
+        || text.starts_with("error[")
+        || text.starts_with("error ")
+        || text.contains("no space left on device")
+        || text.contains("disk quota exceeded")
+        || text.contains("inode exhaustion")
+        || (text.contains("spawn")
+            && (text.contains("enoent") || text.contains("no such file or directory")))
 }
 
 /// Missing PATH executables are environment failures, not candidate

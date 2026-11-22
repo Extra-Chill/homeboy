@@ -1396,6 +1396,10 @@ mod tests {
             ("workspace staging failed: connection closed", true),
             ("assertion failed: left == right", false),
             (
+                "test workspace::staging_enospc ... ok\ntest actual_failure ... FAILED\ntest result: FAILED. 1 passed; 1 failed",
+                false,
+            ),
+            (
                 "failed to open fixture.json: No such file or directory",
                 false,
             ),
