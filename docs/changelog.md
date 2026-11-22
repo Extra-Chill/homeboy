@@ -4,6 +4,15 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.490.1] - 2026-11-22
+
+### Changed
+- dispatch wp-coding-agents dependency refresh on publish
+
+### Fixed
+- authenticate GitHub release resolution and surface HTTP status
+- use cook component_cwd for unregistered monorepo packages in Lab gates
+
 ## [0.490.0] - 2026-11-22
 
 ### Added
