@@ -122,7 +122,7 @@ const RECONNECT_VERIFICATION_RETRY_INTERVAL: Duration = Duration::from_millis(50
 /// readiness within a bounded window so the reconnect converges onto the exact
 /// lease the next handoff will use before declaring success.
 const ADMISSION_READINESS_WINDOW: Duration = Duration::from_secs(10);
-const ADMISSION_READINESS_RETRY_INTERVAL: Duration = Duration::from_millis(250);
+const ADMISSION_READINESS_RETRY_INTERVAL: Duration = Duration::from_millis(50);
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum HomeboyBinaryRefreshMode {

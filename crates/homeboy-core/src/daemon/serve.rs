@@ -10,6 +10,17 @@ use super::*;
 /// Workers that serve accepted connections. Dispatch never blocks on them.
 const CONNECTION_WORKERS: usize = 16;
 
+/// How long a requested stop lets in-flight requests and still-running step
+/// children finish before the process exits. Both are crash-safe: a request's
+/// durable state is already written, and a live step child is re-adopted by
+/// the successor. Waiting the whole drain deadline for them made every
+/// controller daemon restart with a long-running Cook step or a held
+/// long-poll request cost the full ten seconds (`homeboy upgrade` tail).
+const REQUESTED_STOP_GRACE: Duration = Duration::from_secs(1);
+
+/// Poll cadence for the bounded shutdown waits below.
+const SHUTDOWN_POLL: Duration = Duration::from_millis(20);
+
 pub(super) fn serve_locked<R>(
     listener: TcpListener,
     analysis_runner: R,
@@ -125,24 +136,27 @@ where
     // One budget covers the connection workers and the helpers, so a stop
     // never waits on back-to-back drains.
     let drain_deadline = Instant::now() + HELPER_DRAIN_DEADLINE;
+    let grace_deadline = || (Instant::now() + REQUESTED_STOP_GRACE).min(drain_deadline);
     // Another controller sharing this host daemon may restart it while a job
     // it admitted is between child reservation and spawn. Let that spawn land
     // so the successor re-adopts a running child instead of expiring the
     // reservation and failing the job (#18063).
     if shutdown_requested {
         while job_store.has_pending_local_child_spawn() && Instant::now() < drain_deadline {
-            std::thread::sleep(Duration::from_millis(50));
+            std::thread::sleep(SHUTDOWN_POLL);
         }
     }
     let connection_results = if shutdown_requested {
         // A requested stop must not wait on a request still in flight; it ends
         // with the process and durable state is already crash-safe (#15483).
+        // Responses already being written get a short grace, not the whole
+        // drain budget.
         join_with_deadline(
             connection_threads
                 .into_iter()
                 .map(|handle| ("connection-worker", handle))
                 .collect(),
-            drain_deadline,
+            grace_deadline(),
         )
     } else {
         // Bounded TCP fixtures need all responses drained before their server
@@ -170,18 +184,24 @@ where
     // publish that record before the process exits. Otherwise a short child
     // can finish during restart with no surviving observer of its exit status.
     // Do not wait on workflow drivers (which can wait indefinitely for input),
-    // and do not extend the shared shutdown deadline.
+    // and do not extend the shared shutdown deadline. A step whose child is
+    // still alive is re-adopted by the successor, so it only gets the short
+    // grace; a step whose child already exited is publishing its exit record
+    // and keeps the remaining drain budget.
     if shutdown_requested {
-        while Instant::now() < drain_deadline
-            && job_store.active_controller_jobs().iter().any(|(_, state)| {
-                state.job_type == "step"
-                    && state
-                        .checkpoint
-                        .as_ref()
-                        .is_some_and(|checkpoint| checkpoint["phase"] == "running")
-            })
-        {
-            std::thread::sleep(Duration::from_millis(50));
+        let grace_deadline = grace_deadline();
+        while let Some(wait) = step_exit_publication_wait(
+            job_store
+                .active_controller_jobs()
+                .iter()
+                .filter(|(_, state)| state.job_type == "step")
+                .filter_map(|(_, state)| state.checkpoint.as_ref()),
+            Instant::now(),
+            grace_deadline,
+            drain_deadline,
+            pid_is_running,
+        ) {
+            std::thread::sleep(wait);
         }
     }
     helpers.stop(drain_deadline);
@@ -200,6 +220,40 @@ where
         lifetime::handoff_pending_admissions(replacing, service_manager, true, launch_replacement)?;
     }
     serve_result.map(|()| state)
+}
+
+/// Whether a requested stop should keep waiting for running step jobs to
+/// publish their exit, returning the next poll interval when it should.
+///
+/// A running step whose supervised child has already exited is mid-publication
+/// and is waited for until `drain_deadline`. A running step whose child is
+/// alive is waited for only until `grace_deadline`: the successor re-adopts it.
+pub(super) fn step_exit_publication_wait<'a>(
+    checkpoints: impl IntoIterator<Item = &'a serde_json::Value>,
+    now: Instant,
+    grace_deadline: Instant,
+    drain_deadline: Instant,
+    child_alive: impl Fn(u32) -> bool,
+) -> Option<Duration> {
+    if now >= drain_deadline {
+        return None;
+    }
+    let mut live_child = false;
+    for checkpoint in checkpoints {
+        if checkpoint["phase"] != "running" {
+            continue;
+        }
+        match checkpoint
+            .pointer("/child/pid")
+            .and_then(serde_json::Value::as_u64)
+            .and_then(|pid| u32::try_from(pid).ok())
+        {
+            Some(pid) if child_alive(pid) => live_child = true,
+            // Exited (or unidentified) child: its exit record is pending.
+            _ => return Some(SHUTDOWN_POLL),
+        }
+    }
+    (live_child && now < grace_deadline).then_some(SHUTDOWN_POLL)
 }
 
 /// Background threads that live as long as `serve`, each stopped through its
@@ -471,4 +525,38 @@ fn launch_replacement() -> Result<()> {
             )
         })?;
     Ok(())
+}
+
+#[cfg(test)]
+mod shutdown_wait_tests {
+    use super::*;
+
+    #[test]
+    fn requested_stop_waits_only_for_steps_publishing_an_exit() {
+        let now = Instant::now();
+        let grace = now + REQUESTED_STOP_GRACE;
+        let drain = now + HELPER_DRAIN_DEADLINE;
+        let live = json!({"phase": "running", "child": {"pid": 11}});
+        let exited = json!({"phase": "running", "child": {"pid": 22}});
+        let waiting = json!({"phase": "waiting"});
+        let alive = |pid: u32| pid == 11;
+
+        // No running step: return at once.
+        assert_eq!(
+            step_exit_publication_wait([&waiting], now, grace, drain, alive),
+            None
+        );
+        // A live child gets only the grace, then the successor adopts it.
+        assert!(step_exit_publication_wait([&live], now, grace, drain, alive).is_some());
+        assert_eq!(
+            step_exit_publication_wait([&live], grace, grace, drain, alive),
+            None
+        );
+        // An exited child keeps the remaining drain budget, but never more.
+        assert!(step_exit_publication_wait([&live, &exited], grace, grace, drain, alive).is_some());
+        assert_eq!(
+            step_exit_publication_wait([&exited], drain, grace, drain, alive),
+            None
+        );
+    }
 }

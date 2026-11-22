@@ -66,12 +66,8 @@ fn replace_from_url(
     local_files::ensure_app_dirs()?;
     let extensions_dir = paths::extensions()?;
     let clone_dir = unique_replace_clone_temp(&extensions_dir, &extension_id)?;
-    let staged_dir = extensions_dir.join(format!(".replace-stage-tmp-{}", extension_id));
-    let backup_dir = extensions_dir.join(format!(".replace-backup-tmp-{}", extension_id));
 
     clean_stale_replace_clone_temps(&extensions_dir, &extension_id)?;
-    clean_replace_temp(&staged_dir)?;
-    clean_replace_temp(&backup_dir)?;
 
     if let Err(err) = super::sparse_clone::clone_extension(url, &clone_dir, revision, &extension_id)
     {
@@ -83,11 +79,33 @@ fn replace_from_url(
     }
     let source_revision = git::head_sha(&clone_dir);
 
-    let result = resolve_cloned_extension(&clone_dir, &extension_id, &staged_dir, url);
+    let result = replace_from_checkout(&clone_dir, &extension_id, url, revision, source_revision);
     if clone_dir.exists() {
         let _ = std::fs::remove_dir_all(&clone_dir);
     }
-    result?;
+    result
+}
+
+/// Swap an installed extension for the copy of `extension_id` in an already
+/// prepared checkout of `url`. The checkout may hold other extensions too.
+fn replace_from_checkout(
+    clone_dir: &Path,
+    extension_id: &str,
+    url: &str,
+    revision: Option<&str>,
+    source_revision: Option<String>,
+) -> Result<ReplaceResult> {
+    let extension_dir = paths::extension(extension_id)?;
+    let extensions_dir = paths::extensions()?;
+    let staged_dir = extensions_dir.join(format!(".replace-stage-tmp-{}", extension_id));
+    let backup_dir = extensions_dir.join(format!(".replace-backup-tmp-{}", extension_id));
+    clean_replace_temp(&staged_dir)?;
+    clean_replace_temp(&backup_dir)?;
+
+    if let Err(err) = resolve_cloned_extension(clone_dir, extension_id, &staged_dir, url) {
+        let _ = clean_replace_temp(&staged_dir);
+        return Err(err);
+    }
 
     write_source_metadata(&staged_dir, url, source_revision.clone());
     write_requested_source_ref(&staged_dir, revision);
@@ -99,16 +117,184 @@ fn replace_from_url(
         return Err(err);
     }
 
-    run_setup_or_restore(&extension_id, &extension_dir, &backup_dir)?;
+    run_setup_or_restore(extension_id, &extension_dir, &backup_dir)?;
     remove_existing_install(&backup_dir)?;
-    let manifest_path = paths::extension_manifest(&extension_id)?;
+    let manifest_path = paths::extension_manifest(extension_id)?;
 
     Ok(ReplaceResult {
-        extension_id,
+        extension_id: extension_id.to_string(),
         old_path,
         new_path: extension_dir,
         manifest_path,
         source: url.to_string(),
+        linked: false,
+        source_revision,
+    })
+}
+
+/// One extension installed by [`install_many_with_revision`].
+#[derive(Debug, Clone)]
+pub struct BatchInstallEntry {
+    pub extension_id: String,
+    pub path: PathBuf,
+    pub manifest_path: PathBuf,
+    /// An existing install was replaced (rather than freshly installed).
+    pub replaced: bool,
+    pub linked: bool,
+    pub source_revision: Option<String>,
+}
+
+/// Install several extensions from one source. With `replace`, each one is
+/// installed or, when already installed, replaced.
+///
+/// A git source is fetched once: every extension installs from that single
+/// checkout instead of one clone apiece. Installs run in order and stop at the
+/// first failure; extensions installed before it stay installed.
+pub fn install_many_with_revision(
+    source: &str,
+    extension_ids: &[String],
+    revision: Option<&str>,
+    replace: bool,
+) -> Result<Vec<BatchInstallEntry>> {
+    let mut ids: Vec<String> = Vec::with_capacity(extension_ids.len());
+    for id in extension_ids {
+        let id = slugify_id(id)?;
+        if !ids.contains(&id) {
+            ids.push(id);
+        }
+    }
+    if ids.is_empty() {
+        return Err(Error::validation_invalid_argument(
+            "id",
+            "at least one extension id is required",
+            None,
+            None,
+        ));
+    }
+    if !is_git_url(source) || ids.len() == 1 {
+        return ids
+            .iter()
+            .map(|id| install_or_replace_one(source, id, revision, replace))
+            .collect();
+    }
+
+    for id in &ids {
+        config::check_id_collision(id, "extension")?;
+        if !replace && path_exists_or_symlink(&paths::extension(id)?) {
+            return Err(Error::validation_invalid_argument(
+                "extension_id",
+                format!("Extension {} already exists", id),
+                Some(id.clone()),
+                None,
+            ));
+        }
+    }
+
+    local_files::ensure_app_dirs()?;
+    let extensions_dir = paths::extensions()?;
+    let clone_dir = unique_replace_clone_temp(&extensions_dir, &ids[0])?;
+    let id_refs: Vec<&str> = ids.iter().map(String::as_str).collect();
+    if let Err(err) = super::sparse_clone::clone_extensions(source, &clone_dir, revision, &id_refs)
+    {
+        let _ = clean_replace_temp(&clone_dir);
+        return Err(err);
+    }
+    let source_revision = git::head_sha(&clone_dir);
+
+    let result = ids
+        .iter()
+        .map(|id| {
+            // A root manifest means a single-extension repository: it owns the
+            // whole checkout and cannot share it with other extensions.
+            if clone_dir.join(format!("{id}.json")).exists() {
+                return Err(Error::validation_invalid_argument(
+                    "id",
+                    format!("Extension '{id}' is a single-extension repository; install it alone"),
+                    Some(id.clone()),
+                    None,
+                ));
+            }
+            install_or_replace_from_checkout(
+                &clone_dir,
+                id,
+                source,
+                revision,
+                source_revision.clone(),
+                replace,
+            )
+        })
+        .collect();
+    let _ = clean_replace_temp(&clone_dir);
+    result
+}
+
+fn install_or_replace_one(
+    source: &str,
+    extension_id: &str,
+    revision: Option<&str>,
+    replace: bool,
+) -> Result<BatchInstallEntry> {
+    if replace {
+        match replace_with_revision(source, Some(extension_id), revision) {
+            Ok(result) => {
+                return Ok(BatchInstallEntry {
+                    extension_id: result.extension_id,
+                    path: result.new_path,
+                    manifest_path: result.manifest_path,
+                    replaced: true,
+                    linked: result.linked,
+                    source_revision: result.source_revision,
+                })
+            }
+            Err(error) if error.code == homeboy_core::error::ErrorCode::ExtensionNotFound => {}
+            Err(error) => return Err(error),
+        }
+    }
+    let result = super::install_with_revision(source, Some(extension_id), revision)?;
+    Ok(BatchInstallEntry {
+        linked: result.path.is_symlink(),
+        extension_id: result.extension_id,
+        path: result.path,
+        manifest_path: result.manifest_path,
+        replaced: false,
+        source_revision: result.source_revision,
+    })
+}
+
+fn install_or_replace_from_checkout(
+    clone_dir: &Path,
+    extension_id: &str,
+    url: &str,
+    revision: Option<&str>,
+    source_revision: Option<String>,
+    replace: bool,
+) -> Result<BatchInstallEntry> {
+    let extension_dir = paths::extension(extension_id)?;
+    if replace && path_exists_or_symlink(&extension_dir) {
+        let result =
+            replace_from_checkout(clone_dir, extension_id, url, revision, source_revision)?;
+        return Ok(BatchInstallEntry {
+            extension_id: result.extension_id,
+            path: result.new_path,
+            manifest_path: result.manifest_path,
+            replaced: true,
+            linked: false,
+            source_revision: result.source_revision,
+        });
+    }
+
+    resolve_cloned_extension(clone_dir, extension_id, &extension_dir, url)?;
+    write_source_metadata(&extension_dir, url, source_revision.clone());
+    write_requested_source_ref(&extension_dir, revision);
+    if let Err(err) = run_setup(extension_id) {
+        let _ = remove_existing_install(&extension_dir);
+        return Err(err);
+    }
+    Ok(BatchInstallEntry {
+        extension_id: extension_id.to_string(),
+        manifest_path: paths::extension_manifest(extension_id)?,
+        path: extension_dir,
+        replaced: false,
         linked: false,
         source_revision,
     })

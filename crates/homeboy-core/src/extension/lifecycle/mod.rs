@@ -48,7 +48,10 @@ mod sparse_clone;
 mod sparse_clone_tests;
 
 pub use maintenance::update_all;
-pub use repair::{relink, replace, replace_with_revision, ReplaceResult};
+pub use repair::{
+    install_many_with_revision, relink, replace, replace_with_revision, BatchInstallEntry,
+    ReplaceResult,
+};
 pub use source::{
     check_update_available, check_update_available_until, is_generated_extension_metadata_path,
     is_git_url, is_local_source, read_source_cleanliness, read_source_cleanliness_at,

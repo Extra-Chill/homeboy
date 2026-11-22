@@ -29,6 +29,8 @@ homeboy-desktop's are `homeboy-desktop-v*`. Per-extension tags kept their names.
 `homeboy extension install https://github.com/Extra-Chill/homeboy --id wordpress`
 finds the extension under `extensions/` and clones only that path. The old
 `Extra-Chill/homeboy-extensions` URL keeps working for existing installs.
+Repeat `--id` (`--id wordpress --id rust`) to install several extensions from
+one fetch of the repository; `homeboy upgrade` does this on runners.
 
 ## Reusable workflows
 

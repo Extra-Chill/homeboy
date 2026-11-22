@@ -18,7 +18,9 @@ use super::*;
 /// How long the controller waits for the service daemon to publish a fresh,
 /// reachable lease after installing or restarting the unit.
 const SERVICE_READY_TIMEOUT: Duration = Duration::from_secs(60);
-const SERVICE_READY_POLL_INTERVAL: Duration = Duration::from_millis(500);
+/// Each poll is already an SSH round trip; the pause between polls only needs
+/// to keep a fast restart from being observed one long interval late.
+const SERVICE_READY_POLL_INTERVAL: Duration = Duration::from_millis(100);
 const SERVICE_SSH_TIMEOUT: Duration = Duration::from_secs(60);
 
 /// System directories every service PATH ends with. They are also the whole
@@ -347,10 +349,9 @@ fn wait_for_service_daemon(
         "starting the runner service",
     )
     .map_err(|error| with_unit_evidence(client, error.message))?;
-    let deadline = Instant::now() + SERVICE_READY_TIMEOUT;
-    let mut last: String;
-    loop {
-        match remote_daemon_status(client, homeboy, runner_id) {
+    poll_until_ready(
+        Instant::now() + SERVICE_READY_TIMEOUT,
+        || match remote_daemon_status(client, homeboy, runner_id) {
             Ok(status) => match status.daemon {
                 Some(daemon)
                     if status.fresh
@@ -359,24 +360,37 @@ fn wait_for_service_daemon(
                         && daemon.lease_id.as_deref().is_some_and(|id| !id.is_empty())
                         && parse_loopback_daemon_addr(&daemon.address).is_ok() =>
                 {
-                    return Ok(daemon)
+                    Ok(daemon)
                 }
-                Some(_) => {
-                    last = format!(
-                        "service daemon lease is not ready (fresh: {}, reachable: {}, stale reason: {})",
-                        status.fresh,
-                        status.reachable,
-                        status.stale_reason.as_deref().unwrap_or("none"),
-                    )
-                }
-                None => last = "service daemon has not published a lease".to_string(),
+                Some(_) => Err(format!(
+                    "service daemon lease is not ready (fresh: {}, reachable: {}, stale reason: {})",
+                    status.fresh,
+                    status.reachable,
+                    status.stale_reason.as_deref().unwrap_or("none"),
+                )),
+                None => Err("service daemon has not published a lease".to_string()),
             },
-            Err(error) => last = error,
+            Err(error) => Err(error),
+        },
+        || std::thread::sleep(SERVICE_READY_POLL_INTERVAL),
+    )
+    .map_err(|last| with_unit_evidence(client, format!("{last}.")))
+}
+
+/// Probe until `probe` succeeds or `deadline` passes, pausing with `pause`
+/// between failed probes. Returns the first success at once, else the last
+/// failure.
+fn poll_until_ready<T, E>(
+    deadline: Instant,
+    mut probe: impl FnMut() -> std::result::Result<T, E>,
+    mut pause: impl FnMut(),
+) -> std::result::Result<T, E> {
+    loop {
+        match probe() {
+            Ok(ready) => return Ok(ready),
+            Err(last) if Instant::now() >= deadline => return Err(last),
+            Err(_) => pause(),
         }
-        if Instant::now() >= deadline {
-            return Err(with_unit_evidence(client, format!("{last}.")));
-        }
-        std::thread::sleep(SERVICE_READY_POLL_INTERVAL);
     }
 }
 
@@ -901,6 +915,33 @@ mod tests {
         assert!(job_tree.contains("\nDelegate=yes\nDelegateSubgroup=holder\n"));
         assert!(unit.contains("WantedBy=default.target"));
         assert_eq!(service_unit_name(), "homeboy-runner.service");
+    }
+
+    #[test]
+    fn service_readiness_poll_returns_on_the_first_ready_probe() {
+        let mut probes = 0;
+        let mut pauses = 0;
+        let ready = poll_until_ready(
+            Instant::now() + Duration::from_secs(60),
+            || {
+                probes += 1;
+                if probes < 3 {
+                    Err("not ready")
+                } else {
+                    Ok("lease")
+                }
+            },
+            || pauses += 1,
+        );
+        assert_eq!(ready, Ok("lease"));
+        // Ready on the third probe: two pauses, no trailing wait.
+        assert_eq!((probes, pauses), (3, 2));
+
+        let mut pauses = 0;
+        let expired: std::result::Result<(), &str> =
+            poll_until_ready(Instant::now(), || Err("last"), || pauses += 1);
+        assert_eq!(expired, Err("last"));
+        assert_eq!(pauses, 0);
     }
 
     #[test]
