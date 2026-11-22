@@ -5,7 +5,9 @@
 use super::super::daemon::{
     fetch_daemon_events, fetch_daemon_watch_resilient_with_endpoint_reload, DaemonWatchFollow,
 };
-use super::handoff::{wait_for_path, ReleaseBlockedWorkload, BLOCKED_WORKLOAD_LOOP};
+use super::handoff::{
+    wait_for_path, wait_for_terminal_daemon_job, ReleaseBlockedWorkload, BLOCKED_WORKLOAD_LOOP,
+};
 use super::*;
 use reqwest::blocking::Client;
 use serde_json::Value;
@@ -302,8 +304,11 @@ fn watch_follow_resumes_a_dropped_connection_without_losing_events() {
             .absorb(job_uuid, &resumed)
             .expect("absorb resumed page");
 
-        // Finish the job, then assemble the terminal log from the cursor.
+        // Releasing the child does not mean the daemon has terminalized it.
+        // Like the production caller, wait for terminality before draining
+        // the remaining log pages from the cursor.
         std::fs::write(&release, "release").expect("release workload");
+        wait_for_terminal_daemon_job(&client, &daemon_url, &job_id);
         follow
             .drain_to_end(&client, &daemon_url, &job_id, || Ok(None))
             .expect("terminal event log");
