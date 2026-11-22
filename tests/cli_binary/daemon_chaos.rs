@@ -330,23 +330,51 @@ fn whole_daemon_process_group_killed_recovers_without_edits() {
 /// instead of refusing, and `ensure-running` restarts it in place. A workflow
 /// (an in-daemon driver) and its step children resume after every restart, not
 /// just the first, and all of it stays in the one store.
+#[cfg(unix)]
 #[test]
 fn stop_and_restart_in_place_resumes_in_flight_work_every_time() {
+    use std::io::Write;
+    use std::os::unix::ffi::OsStrExt;
+
     let home = tempfile::tempdir().expect("home");
     let bin = homeboy_bin();
     let mut reaper = Reaper::default();
     start_on_demand(&bin, home.path(), &mut reaper);
 
+    // Keep each step held until its restart has completed. Opening both ends
+    // here makes release independent of when the shell reaches `read`; dropping
+    // these handles on failure also gives the child's read EOF.
+    let mut gates = Vec::new();
+    let mut steps = Vec::new();
+    for id in ["a", "b"] {
+        let gate = home.path().join(format!("{id}.fifo"));
+        let ready = home.path().join(format!("{id}.ready"));
+        let path = std::ffi::CString::new(gate.as_os_str().as_bytes()).unwrap();
+        // SAFETY: path is a valid NUL-terminated path in this test's HOME.
+        assert_eq!(unsafe { libc::mkfifo(path.as_ptr(), 0o600) }, 0);
+        gates.push(
+            std::fs::OpenOptions::new()
+                .read(true)
+                .write(true)
+                .open(&gate)
+                .unwrap(),
+        );
+        steps.push(serde_json::json!({
+            "id": id,
+            "needs": if id == "b" { vec!["a"] } else { vec![] },
+            "exec": { "program": "sh", "args": [
+                "-c", ": > \"$2\"; IFS= read -r token < \"$1\"; echo \"$3\"",
+                "restart-proof", gate.to_str().unwrap(), ready.to_str().unwrap(), id
+            ] }
+        }));
+    }
     let definition = home.path().join("restart-proof.json");
     std::fs::write(
         &definition,
         serde_json::to_vec(&serde_json::json!({
             "schema": "homeboy/workflow/v1",
             "id": "restart-proof",
-            "steps": [
-                { "id": "a", "exec": { "program": "sh", "args": ["-c", "sleep 4; echo a"] } },
-                { "id": "b", "needs": ["a"], "exec": { "program": "sh", "args": ["-c", "sleep 4; echo b"] } }
-            ]
+            "steps": steps
         }))
         .unwrap(),
     )
@@ -364,7 +392,26 @@ fn stop_and_restart_in_place_resumes_in_flight_work_every_time() {
     // Stop mid step a, then mid step b: every stop interrupts, every restart
     // resumes in the same store. `daemon restart` is the same pair in one
     // verb and reports the jobs its replacement re-adopted.
-    std::thread::sleep(Duration::from_millis(1500));
+    let wait_step = |id: &str| {
+        let deadline = Instant::now() + Duration::from_secs(60);
+        loop {
+            let current = json_output(&bin, home.path(), &["runs", "show", &instance]);
+            if home.path().join(format!("{id}.ready")).exists()
+                && current["data"]["steps"][id]["phase"] == "running"
+                && current["data"]["steps"][id]["job"]["status"] == "running"
+            {
+                return current["data"]["steps"][id].clone();
+            }
+            assert!(Instant::now() < deadline, "step {id} held: {current}");
+            std::thread::sleep(Duration::from_millis(100));
+        }
+    };
+    let assert_readopted = |id: &str, before: &serde_json::Value| {
+        let after = wait_step(id);
+        assert_eq!(after["job"]["job_id"], before["job"]["job_id"]);
+        assert_eq!(after["attempt"], 1);
+    };
+    let first = wait_step("a");
     let restarted = json_output(&bin, home.path(), &["daemon", "restart"]);
     assert_eq!(restarted["success"], true, "daemon restart: {restarted}");
     assert!(
@@ -379,8 +426,10 @@ fn stop_and_restart_in_place_resumes_in_flight_work_every_time() {
             .as_i64()
             .unwrap_or_default(),
     );
-    for pause in [Duration::from_secs(4)] {
-        std::thread::sleep(pause);
+    assert_readopted("a", &first);
+    gates[0].write_all(b"release\n").unwrap();
+    let second = wait_step("b");
+    {
         // Upgrade uses this exact requested-stop primitive, even while busy.
         let resident = status(&bin, home.path());
         let lease = resident["data"]["daemon"]["lease_id"]
@@ -395,6 +444,8 @@ fn stop_and_restart_in_place_resumes_in_flight_work_every_time() {
         assert_eq!(restarted["success"], true, "restart in place: {restarted}");
         reaper.track(restarted["data"]["pid"].as_i64().unwrap_or_default());
     }
+    assert_readopted("b", &second);
+    gates[1].write_all(b"release\n").unwrap();
 
     let deadline = Instant::now() + Duration::from_secs(60);
     let mut last = serde_json::Value::Null;
