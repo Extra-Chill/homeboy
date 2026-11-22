@@ -232,7 +232,19 @@ pub enum DependencyStackLockKind {
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct DependencyStackPolicy {
-    pub max: DependencyStackPolicyMax,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max: Option<DependencyStackPolicyMax>,
+    /// GitHub release breaking detection; absent means semver boundaries apply.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub breaking: Option<DependencyStackBreakingPolicy>,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, Default, PartialEq, Eq)]
+#[serde(rename_all = "kebab-case")]
+pub enum DependencyStackBreakingPolicy {
+    #[default]
+    Semver,
+    CommitMarkers,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]

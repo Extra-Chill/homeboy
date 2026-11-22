@@ -134,6 +134,16 @@ tags; incomplete or unavailable comparisons yield `null` (treated as breaking).
 For npm, major and 0.x minor changes are breaking; otherwise the verdict is
 `null` because a registry version alone does not establish a commit range.
 
+For `github_release` edges, opt in to commit-marker detection with
+`"policy": { "breaking": "commit-markers" }` (independent of optional `max`).
+A 0.x minor boundary alone then does not make the range breaking: a complete
+commit scan with no markers is non-breaking, while any conventional `!`
+subject or `BREAKING CHANGE` / `BREAKING-CHANGE` footer makes it breaking.
+Major version changes remain breaking; incomplete, invalid, or unavailable
+comparisons remain `null`. Omit `breaking` or set it to `"semver"` to keep the
+default boundary rules. Unknown values are config errors. npm ignores
+`policy.breaking` because it has no commit range; its behavior is unchanged.
+
 ### Rolling edges forward (`stack refresh`)
 
 `homeboy deps stack refresh` is the verb a scheduled CI job calls from the
@@ -150,7 +160,8 @@ Each edge reports `from`, `to`, a `state` (`updated`, `current`,
 `null`) with `breaking_reasons`. A range is breaking when:
 
 - the major version changes;
-- the major is 0 and the minor changes (0.x minors carry behavior changes);
+- the major is 0 and the minor changes (except for `github_release` edges
+  with `policy.breaking: "commit-markers"`);
 - a commit in the release range carries a conventional breaking marker
   (`type!:` / `type(scope)!:` subject, or a `BREAKING CHANGE` /
   `BREAKING-CHANGE` footer), or the target release tag's notes do.

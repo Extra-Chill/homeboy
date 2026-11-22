@@ -74,7 +74,15 @@ and:
 |-------|-----------------|
 | `source` | Exactly one of `{ "repo": "git-url", "prefix": "tag-namespace" }`, `{ "github_release": "owner/repo" }`, or `{ "npm": "package-name" }` |
 | `lock` | `{ "kind": "version-file", "path": "relative/path" }`; trimmed contents supply the locked semver; refresh writes the version and newline without running providers, installs, or edge commands |
-| `policy` | `{ "max": "same-major" }`; newer majors are `held`, left untouched, and counted as unresolvable for exit status |
+| `policy` | Optional `max: "same-major"` holds newer majors untouched (unresolvable for exit status). Optional `breaking: "semver"` (default) or `"commit-markers"` controls GitHub release breaking detection; unknown values are config errors. |
+
+With `policy: { "breaking": "commit-markers" }` on a `github_release` edge,
+0.x minor changes alone are non-breaking: a complete commit scan determines
+whether conventional `!` subjects or `BREAKING CHANGE` / `BREAKING-CHANGE`
+footers declare a breaking change. Major changes remain breaking. Invalid,
+unavailable, or incomplete comparisons remain unknown (`null`, treated as
+breaking). npm ignores `policy.breaking`; its existing semver behavior stays
+unchanged. `max` and `breaking` may be declared independently or together.
 
 Without `lock`, existing provider-backed locked-version lookup and refresh
 behavior are unchanged. GitHub sources accept stable `v?<semver>` release

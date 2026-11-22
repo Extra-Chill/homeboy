@@ -23,12 +23,13 @@ pub use artifacts::{
 pub use config::{
     ArtifactInput, CleanupArtifactDeclaration, CommandScopeConfig, ComponentDeployConfig,
     ComponentGithubReleaseConfig, ComponentOverrideConfig, ComponentReleaseConfig,
-    ComponentScriptsConfig, DependencyStackEdge, DependencyStackEdgeSource, DependencyStackLock,
-    DependencyStackLockKind, DependencyStackPolicy, DependencyStackPolicyMax,
-    DeploymentProviderAttachment, GitDeployConfig, GithubConfig, GithubHostConfig,
-    GithubReleaseOwner, PackageArtifact, PackageCoverageArtifactMatch, PackageCoverageConfig,
-    ReleaseGateArtifactSelector, ReleaseGateConfig, ReleaseOwner, ScopeConfig,
-    ScopedExtensionConfig, SubtreeBranchPolicy, SubtreePublicationConfig, VersionTarget,
+    ComponentScriptsConfig, DependencyStackBreakingPolicy, DependencyStackEdge,
+    DependencyStackEdgeSource, DependencyStackLock, DependencyStackLockKind, DependencyStackPolicy,
+    DependencyStackPolicyMax, DeploymentProviderAttachment, GitDeployConfig, GithubConfig,
+    GithubHostConfig, GithubReleaseOwner, PackageArtifact, PackageCoverageArtifactMatch,
+    PackageCoverageConfig, ReleaseGateArtifactSelector, ReleaseGateConfig, ReleaseOwner,
+    ScopeConfig, ScopedExtensionConfig, SubtreeBranchPolicy, SubtreePublicationConfig,
+    VersionTarget,
 };
 pub use inventory::{
     exists, extension_provides_artifact_pattern, inventory, list, list_ids, load, load_in_root,
