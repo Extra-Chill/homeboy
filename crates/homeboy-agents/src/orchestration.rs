@@ -354,11 +354,15 @@ impl EventLookup for LifecycleStoreLookup {
 /// Public typed orchestration facade.
 pub struct OrchestrationService<L> {
     lookup: L,
+    action_lease: std::time::Duration,
 }
 
 impl<L: RunLookup> OrchestrationService<L> {
     pub fn new(lookup: L) -> Self {
-        Self { lookup }
+        Self {
+            lookup,
+            action_lease: ACTION_LEASE,
+        }
     }
 
     /// Operations available to a read-only injected lookup.
@@ -1902,8 +1906,9 @@ impl OrchestrationService<LifecycleStoreLookup> {
         }
         let owner = format!("agent-task:{}", std::process::id());
         let now = Utc::now();
-        let expires_at =
-            (now + chrono::Duration::seconds(ACTION_LEASE.as_secs() as i64)).to_rfc3339();
+        let expires_at = (now
+            + chrono::Duration::from_std(self.action_lease).expect("bounded lease"))
+        .to_rfc3339_opts(chrono::SecondsFormat::Nanos, true);
         let normal_lease = observation
             .lease_control_plane_effect_by_id(
                 &request.effect_id,
@@ -1929,6 +1934,15 @@ impl OrchestrationService<LifecycleStoreLookup> {
                 true,
             ),
         };
+        // Recovery can wait for Lab admission and execute gates for much longer
+        // than ACTION_LEASE. Keep the outer action owned through terminalization,
+        // independently of the inner Cook operation's lease.
+        let _heartbeat = crate::agent_task_lifecycle::EffectLeaseHeartbeat::start(
+            self.lookup.store.clone(),
+            request.effect_id.clone(),
+            lease.lease_fence,
+            self.action_lease,
+        );
         let accepted_at = lease.intent.accepted_at.clone();
         if recovering {
             let recovered = recover_interrupted_action_acknowledgement(
@@ -9235,6 +9249,97 @@ mod tests {
                 .events
                 .iter()
                 .all(|event| !event.kind.starts_with("action.")));
+        });
+    }
+
+    #[test]
+    fn recovery_renews_action_lease_while_verification_is_held() {
+        with_isolated_home(|_| {
+            let store = AgentTaskLifecycleStore::from_environment().unwrap();
+            let mut candidate = record(AGENT_TASK_RUN);
+            candidate.set_state_for_test(RunExecutionState::Running);
+            candidate.metadata = json!({});
+            candidate.artifact_refs.clear();
+            candidate.provider_handles.clear();
+            store.write_record(&candidate).unwrap();
+            let aggregate = serde_json::from_value(json!({
+                "schema": "homeboy/agent-task-aggregate/v1",
+                "plan_id": "plan",
+                "status": "succeeded",
+                "totals": { "skipped": 0, "succeeded": 0, "failed": 0 },
+                "outcomes": [],
+            }))
+            .unwrap();
+            store.write_aggregate(AGENT_TASK_RUN, &aggregate).unwrap();
+            let mut service = OrchestrationService::new(LifecycleStoreLookup::new(store.clone()));
+            let ttl = std::time::Duration::from_millis(60);
+            service.action_lease = ttl;
+            let request = ControlPlaneActionRequest {
+                schema: CONTROL_PLANE_ACTION_REQUEST_SCHEMA.to_string(),
+                effect_id: EffectId("test:long-recovery-verification".into()),
+                action: ControlPlaneAction::Recover,
+                idempotency_key: "long-recovery-verification".into(),
+                actor: "test".into(),
+                expected_updated_at: None,
+                parameters: ControlPlaneActionPayload::recover(),
+                confirmed: true,
+            };
+            let result = service
+                .execute_action_with_delegates(
+                    &RunId::new(AGENT_TASK_RUN).unwrap(),
+                    &request,
+                    |_, _, _| panic!("retry must not run"),
+                    |_, _| {
+                        let db = store.open_observation_initialized()?;
+                        let initial = db
+                            .control_plane_effect_status(&request.effect_id)?
+                            .unwrap()
+                            .lease_expires_at
+                            .unwrap();
+                        let initial_time = chrono::DateTime::parse_from_rfc3339(&initial).unwrap();
+                        let timeout =
+                            std::time::Instant::now() + std::time::Duration::from_secs(10);
+                        // Hold the verifier until renewal has crossed the initial TTL,
+                        // without assuming that a sleep schedules the heartbeat thread.
+                        loop {
+                            let status =
+                                db.control_plane_effect_status(&request.effect_id)?.unwrap();
+                            let deadline = chrono::DateTime::parse_from_rfc3339(
+                                status.lease_expires_at.as_deref().unwrap(),
+                            )
+                            .unwrap();
+                            if deadline > initial_time + chrono::Duration::from_std(ttl).unwrap() {
+                                break;
+                            }
+                            assert!(
+                                std::time::Instant::now() < timeout,
+                                "action lease was not renewed"
+                            );
+                            std::thread::yield_now();
+                        }
+                        db.expire_control_plane_effect_leases(&initial)?;
+                        assert!(
+                            !db.control_plane_effect_status(&request.effect_id)?
+                                .unwrap()
+                                .recovery_required
+                        );
+                        Ok(crate::agent_task_service::AgentTaskRunResult {
+                            value: aggregate,
+                            exit_code: 0,
+                        })
+                    },
+                )
+                .unwrap();
+            assert_eq!(result.outcome, ControlPlaneActionOutcome::Succeeded);
+            let terminal = store
+                .open_observation_initialized()
+                .unwrap()
+                .control_plane_effect_status(&request.effect_id)
+                .unwrap()
+                .unwrap()
+                .terminal
+                .unwrap();
+            assert_eq!(terminal.acknowledgement, result);
         });
     }
 
