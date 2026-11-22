@@ -1,4 +1,4 @@
-use super::sparse_clone::{clone_extension, clone_with_runner};
+use super::sparse_clone::{clone_extension, clone_ids_with_runner, clone_with_runner};
 use homeboy_core::{error::Error, git};
 use std::path::Path;
 
@@ -101,6 +101,46 @@ fn sparse_clone_uses_exact_shallow_clone_args() {
         .unwrap();
         assert_eq!(call, expected.len());
     }
+}
+
+#[test]
+fn batch_sparse_clone_fetches_once_for_every_requested_extension() {
+    let temp = tempfile::tempdir().unwrap();
+    let target = temp.path().join("clone");
+    let sha = "b".repeat(40);
+    let mut calls = Vec::new();
+    clone_ids_with_runner(
+        "https://example.com/repo.git",
+        &target,
+        Some(&sha),
+        &["wordpress", "other"],
+        |_, args| {
+            calls.push(args.iter().map(|arg| arg.to_string()).collect::<Vec<_>>());
+            Ok(match args[0] {
+                "rev-parse" => format!("{sha}\n"),
+                "ls-tree" => "extensions/homeboy-extension-root.json\0extensions/wordpress/wordpress.json\0extensions/other/other.json\0".to_string(),
+                "show" => r#"{"shared_assets":["shared"]}"#.to_string(),
+                _ => String::new(),
+            })
+        },
+    )
+    .unwrap();
+    let fetches = calls.iter().filter(|call| call[0] == "fetch").count();
+    assert_eq!(fetches, 1);
+    // The shared root manifest is read once, not once per extension.
+    assert_eq!(calls.iter().filter(|call| call[0] == "show").count(), 1);
+    let sparse = calls
+        .iter()
+        .find(|call| call[0] == "sparse-checkout")
+        .unwrap();
+    assert_eq!(
+        sparse[4..],
+        [
+            "extensions/wordpress",
+            "extensions/shared",
+            "extensions/other"
+        ]
+    );
 }
 
 #[test]

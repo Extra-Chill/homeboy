@@ -13,7 +13,18 @@ pub(super) fn clone_extension(
     revision: Option<&str>,
     id: &str,
 ) -> Result<()> {
-    clone_with_runner(url, target, revision, id, |cwd, args| {
+    clone_extensions(url, target, revision, &[id])
+}
+
+/// Prepare one checkout holding every requested extension (and the shared
+/// assets their roots declare), so a batch fetches the source only once.
+pub(super) fn clone_extensions(
+    url: &str,
+    target: &Path,
+    revision: Option<&str>,
+    ids: &[&str],
+) -> Result<()> {
+    clone_ids_with_runner(url, target, revision, ids, |cwd, args| {
         git::run_git_with_env_timeout(
             cwd,
             args,
@@ -24,11 +35,22 @@ pub(super) fn clone_extension(
     })
 }
 
+#[cfg(test)]
 pub(super) fn clone_with_runner(
     url: &str,
     target: &Path,
     revision: Option<&str>,
     id: &str,
+    run: impl FnMut(&Path, &[&str]) -> Result<String>,
+) -> Result<()> {
+    clone_ids_with_runner(url, target, revision, &[id], run)
+}
+
+pub(super) fn clone_ids_with_runner(
+    url: &str,
+    target: &Path,
+    revision: Option<&str>,
+    ids: &[&str],
     mut run: impl FnMut(&Path, &[&str]) -> Result<String>,
 ) -> Result<()> {
     let sparse = (|| {
@@ -68,51 +90,70 @@ pub(super) fn clone_with_runner(
         let revision = resolved.trim();
         let tree = run(target, &["ls-tree", "-r", "--name-only", "-z", revision])?;
         let files: Vec<_> = tree.split('\0').filter(|s| !s.is_empty()).collect();
-        if files.contains(&format!("{id}.json").as_str()) {
-            // A root extension owns its whole repository (including runtime files).
-            run(target, &["sparse-checkout", "disable"])?;
-        } else {
-            let mut roots = vec![String::new()];
-            let mut nested: Vec<_> = files
-                .iter()
-                .filter_map(|path| path.strip_suffix(&format!("/{ROOT_MANIFEST}")))
-                .filter(|root| !root.split('/').any(|part| part.starts_with('.')))
-                .collect();
-            nested.sort();
-            roots.extend(nested.into_iter().map(|root| format!("{root}/")));
+        if let [id] = ids {
+            if files.contains(&format!("{id}.json").as_str()) {
+                // A root extension owns its whole repository (including runtime files).
+                run(target, &["sparse-checkout", "disable"])?;
+                run(target, &["checkout", "--quiet", revision])?;
+                return Ok(());
+            }
+        }
+        let mut roots = vec![String::new()];
+        let mut nested: Vec<_> = files
+            .iter()
+            .filter_map(|path| path.strip_suffix(&format!("/{ROOT_MANIFEST}")))
+            .filter(|root| !root.split('/').any(|part| part.starts_with('.')))
+            .collect();
+        nested.sort();
+        roots.extend(nested.into_iter().map(|root| format!("{root}/")));
+        let mut paths: Vec<String> = Vec::new();
+        let mut seen_roots: Vec<&String> = Vec::new();
+        for id in ids {
             let root = roots
                 .iter()
                 .find(|root| files.contains(&format!("{root}{id}/{id}.json").as_str()))
                 .ok_or_else(|| Error::internal_io("No sparse extension layout found", None))?;
-            let mut paths = vec![format!("{root}{id}")];
+            let extension_path = format!("{root}{id}");
+            if !paths.contains(&extension_path) {
+                paths.push(extension_path);
+            }
+            if seen_roots.contains(&root) {
+                continue;
+            }
+            seen_roots.push(root);
             let manifest_path = format!("{root}{ROOT_MANIFEST}");
-            if files.contains(&manifest_path.as_str()) {
-                let raw = run(target, &["show", &format!("{revision}:{manifest_path}")])?;
-                // Match the resolver's treatment of invalid root declarations.
-                if let Ok(manifest) = serde_json::from_str::<ExtensionRootManifest>(&raw) {
-                    for asset in manifest.shared_assets {
-                        let path = SharedAssetDeclaration::path(asset).trim().to_string();
-                        if path.is_empty() {
-                            continue;
-                        }
-                        // Never let a declaration become a sparse-checkout option or
-                        // escape the owning root. The normal resolver validates it too.
-                        if Path::new(&path)
-                            .components()
-                            .any(|part| !matches!(part, Component::Normal(_)))
-                        {
-                            return Err(Error::internal_io("Unsafe shared asset path", None));
-                        }
-                        paths.push(format!("{root}{path}"));
-                    }
+            if !files.contains(&manifest_path.as_str()) {
+                continue;
+            }
+            let raw = run(target, &["show", &format!("{revision}:{manifest_path}")])?;
+            // Match the resolver's treatment of invalid root declarations.
+            let Ok(manifest) = serde_json::from_str::<ExtensionRootManifest>(&raw) else {
+                continue;
+            };
+            for asset in manifest.shared_assets {
+                let path = SharedAssetDeclaration::path(asset).trim().to_string();
+                if path.is_empty() {
+                    continue;
+                }
+                // Never let a declaration become a sparse-checkout option or
+                // escape the owning root. The normal resolver validates it too.
+                if Path::new(&path)
+                    .components()
+                    .any(|part| !matches!(part, Component::Normal(_)))
+                {
+                    return Err(Error::internal_io("Unsafe shared asset path", None));
+                }
+                let asset_path = format!("{root}{path}");
+                if !paths.contains(&asset_path) {
+                    paths.push(asset_path);
                 }
             }
-            // Cone mode includes files in every ancestor, so the owning root
-            // manifest is included without selecting its entire directory.
-            let mut args = vec!["sparse-checkout", "set", "--cone", "--"];
-            args.extend(paths.iter().map(String::as_str));
-            run(target, &args)?;
         }
+        // Cone mode includes files in every ancestor, so the owning root
+        // manifest is included without selecting its entire directory.
+        let mut args = vec!["sparse-checkout", "set", "--cone", "--"];
+        args.extend(paths.iter().map(String::as_str));
+        run(target, &args)?;
         run(target, &["checkout", "--quiet", revision])?;
         Ok(())
     })();

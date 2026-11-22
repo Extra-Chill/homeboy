@@ -6498,8 +6498,9 @@ mod tests {
                 .expect("join daemon")
                 .expect("daemon stopped despite the busy worker");
             let elapsed = started.elapsed();
+            // The busy worker gets a short grace, not the whole drain budget.
             assert!(
-                elapsed < HELPER_DRAIN_DEADLINE + Duration::from_secs(5),
+                elapsed < HELPER_DRAIN_DEADLINE / 2,
                 "shutdown waited {elapsed:?} on a busy connection worker"
             );
             drop(stalled);

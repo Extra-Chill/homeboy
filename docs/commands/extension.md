@@ -114,6 +114,7 @@ Installs an extension into Homeboy's extensions directory.
 - For git URL installs, `--ref` checks out a branch, tag, or commit after cloning. The installed metadata still records the resolved `source_revision` SHA.
 - If `<source>` is a local path, Homeboy symlinks the directory into the extensions directory.
 - By default, install refuses to overwrite an existing extension. Use `--replace` to explicitly replace an existing install or link.
+- Repeat `--id` to install several extensions from one source. A git source is fetched once and every extension installs from that one checkout; the result is `extension.install_batch`.
 
 ### `install-for-component`
 
@@ -286,6 +287,7 @@ Top-level variants (`data.command`):
 - `extension.setup`: `{ extension_id }`
 - `extension.install`: `{ extension_id, source, path, linked }`
 - `extension.replace`: `{ extension_id, old_path, new_path, source, linked, source_revision? }`
+- `extension.install_batch`: `{ source, extensions: { extension_id, path, manifest_path, replaced, linked, source_revision? }[] }`
 - `extension.update`: `{ extension_id, url, path }`
 - `extension.update_all`: `{ updated: UpdateEntry[], skipped: string[] }`
 - `extension.uninstall`: `{ extension_id, path, was_linked }`

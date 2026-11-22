@@ -111,9 +111,10 @@ enum ExtensionCommand {
     Install {
         /// Git URL or local path to extension directory
         source: String,
-        /// Override extension id
+        /// Override extension id. Repeat to install several extensions from
+        /// one source; a git source is then fetched once for all of them.
         #[arg(long)]
-        id: Option<String>,
+        id: Vec<String>,
         /// Git ref to check out for URL installs (branch, tag, or commit)
         #[arg(long = "ref")]
         revision: Option<String>,
@@ -268,7 +269,13 @@ pub fn run(args: ExtensionArgs) -> CmdResult<ExtensionOutput> {
             id,
             revision,
             replace,
-        } => install_extension(&source, id, revision, replace),
+        } if id.len() > 1 => install_extensions(&source, &id, revision.as_deref(), replace),
+        ExtensionCommand::Install {
+            source,
+            id,
+            revision,
+            replace,
+        } => install_extension(&source, id.into_iter().next(), revision, replace),
         ExtensionCommand::Refresh {
             source,
             id,
@@ -422,6 +429,11 @@ pub enum ExtensionOutput {
         linked: bool,
         #[serde(skip_serializing_if = "Option::is_none")]
         source_revision: Option<String>,
+    },
+    #[serde(rename = "extension.install_batch")]
+    InstallBatch {
+        source: String,
+        extensions: Vec<ExtensionBatchInstallEntry>,
     },
     #[serde(rename = "extension.refresh")]
     Refresh {
@@ -1452,6 +1464,45 @@ fn install_extension(
             manifest_path: result.manifest_path.to_string_lossy().to_string(),
             linked,
             source_revision: result.source_revision,
+        },
+        0,
+    ))
+}
+
+#[derive(Serialize)]
+pub struct ExtensionBatchInstallEntry {
+    extension_id: String,
+    path: String,
+    manifest_path: String,
+    replaced: bool,
+    linked: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    source_revision: Option<String>,
+}
+
+fn install_extensions(
+    source: &str,
+    ids: &[String],
+    revision: Option<&str>,
+    replace: bool,
+) -> CmdResult<ExtensionOutput> {
+    let extensions = homeboy_core::extension::lifecycle::install_many_with_revision(
+        source, ids, revision, replace,
+    )?
+    .into_iter()
+    .map(|entry| ExtensionBatchInstallEntry {
+        extension_id: entry.extension_id,
+        path: entry.path.to_string_lossy().to_string(),
+        manifest_path: entry.manifest_path.to_string_lossy().to_string(),
+        replaced: entry.replaced,
+        linked: entry.linked,
+        source_revision: entry.source_revision,
+    })
+    .collect();
+    Ok((
+        ExtensionOutput::InstallBatch {
+            source: source.to_string(),
+            extensions,
         },
         0,
     ))

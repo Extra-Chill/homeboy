@@ -65,17 +65,60 @@ fn runner_extension_sync_installs_only_changed_or_unknown_revisions() {
     assert_eq!(synced.len(), 4);
     assert!(skipped.is_empty());
     assert!(failed.is_empty());
-    assert_eq!(commands.len(), 4);
     assert!(synced[1..]
         .iter()
-        .all(|entry| entry.source_revision == full_sha));
-    for (command, id) in commands[1..].iter().zip(["changed", "unknown", "missing"]) {
-        assert_eq!(command[2], "install");
-        assert_eq!(command[5], id);
-        assert_eq!(command[6], "--ref");
-        assert_eq!(command[7], full_sha);
-        assert_eq!(command.last().unwrap(), "--replace");
-    }
+        .all(|entry| entry.source_revision == full_sha && entry.detail.is_none()));
+    // The unchanged extension costs no job; the three changed ones share one
+    // source and revision, so one runner job installs them from one checkout.
+    assert_eq!(
+        commands[1..],
+        [vec![
+            "homeboy",
+            "extension",
+            "install",
+            "https://github.com/Extra-Chill/homeboy-extensions.git",
+            "--id",
+            "changed",
+            "--id",
+            "unknown",
+            "--id",
+            "missing",
+            "--ref",
+            full_sha,
+            "--replace",
+        ]]
+    );
+}
+
+#[test]
+fn failed_batch_install_falls_back_to_exact_per_extension_installs() {
+    let runner = ssh_runner("lab", Some("homeboy"));
+    let updates = vec![
+        extension_update("a", "1111111"),
+        extension_update("b", "1111111"),
+    ];
+    let mut commands = Vec::new();
+    let (synced, _, failed) =
+        sync_runner_extensions(&runner, "homeboy", &updates, &mut |runner_id, options| {
+            commands.push(options.command.clone());
+            let ids = options.command.iter().filter(|arg| *arg == "--id").count();
+            let (stdout, code) = match (commands.len(), ids) {
+                (1, _) => (r#"{"success":true,"data":{"entities":[]}}"#, 0),
+                // An older runner rejects the batch; then `b` alone fails.
+                (_, 2) => ("", 2),
+                _ if options.command.contains(&"b".to_string()) => ("", 1),
+                _ => ("", 0),
+            };
+            Ok((
+                exec_output(runner_id, options.command, stdout, "", code),
+                code,
+            ))
+        });
+    assert_eq!(commands.len(), 4);
+    assert_eq!(synced.len(), 1);
+    assert_eq!(synced[0].extension_id, "a");
+    assert_eq!(failed.len(), 1);
+    assert_eq!(failed[0].extension_id, "b");
 }
 
 #[test]
