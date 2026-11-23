@@ -14,6 +14,9 @@ pub enum CookStatus {
     InFlight,
     ReviewReady,
     DraftPublished,
+    /// Published, but the agent reported at least one task item as not
+    /// delivered; the pull request stays or opens as a draft (#18884).
+    SucceededPartial,
     GreenNoFinalize,
     /// Read-only finalization validated publication without publishing.
     Validated,
@@ -57,6 +60,7 @@ impl CookStatus {
             "in_flight" => Self::InFlight,
             "review_ready" => Self::ReviewReady,
             "draft_published" => Self::DraftPublished,
+            "succeeded_partial" => Self::SucceededPartial,
             "green_no_finalize" => Self::GreenNoFinalize,
             "validated" => Self::Validated,
             "intentional_no_change" => Self::IntentionalNoChange,
@@ -97,6 +101,7 @@ impl CookStatus {
             Self::InFlight => "in_flight",
             Self::ReviewReady => "review_ready",
             Self::DraftPublished => "draft_published",
+            Self::SucceededPartial => "succeeded_partial",
             Self::GreenNoFinalize => "green_no_finalize",
             Self::Validated => "validated",
             Self::IntentionalNoChange => "intentional_no_change",
@@ -138,6 +143,14 @@ impl CookStatus {
         matches!(self, Self::GateFailed | Self::NoChangesGateFailed)
     }
 
+    /// Whether the status reports a published pull request for the candidate.
+    pub fn is_published(&self) -> bool {
+        matches!(
+            self,
+            Self::ReviewReady | Self::DraftPublished | Self::SucceededPartial
+        )
+    }
+
     /// Whether the status alone means the operator has nothing to act on.
     pub fn is_success_exit(&self) -> bool {
         matches!(
@@ -147,6 +160,7 @@ impl CookStatus {
                 | Self::AwaitingCi
                 | Self::ReviewReady
                 | Self::DraftPublished
+                | Self::SucceededPartial
                 | Self::GreenNoFinalize
                 | Self::IntentionalNoChange
                 | Self::SupersededByActiveCook

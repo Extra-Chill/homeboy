@@ -150,7 +150,7 @@ An admitted recovery (including `--regate`) names its controller daemon step job
 
 Terminal non-success status uses the current delivery/controller blocker, or, when none exists, the first non-success aggregate outcome's recorded `failure_classification` and first diagnostic. The existing `blocker.message` carries that cause and `blocker.reason` carries its matching next action (timeout/route retry, credential repair, or candidate recovery); no parallel reason record is written. Missing diagnostics are reported explicitly rather than presented as a failure cause. Status reads the record and mirrored aggregate from one authoritative SQLite observation, never from an independently updated `aggregate.json` cache.
 
-A controller publication receipt proving `review_ready` or `draft_published` takes precedence over older terminal or promotion snapshots. Status reports success, the publication state and PR URL (number when no URL was recorded), with no stale failure blocker. Atomic Lab staging completion receipts and resolved-route credential admission are tracked separately in [#16326](https://github.com/Extra-Chill/homeboy/issues/16326).
+A controller publication receipt proving `review_ready`, `draft_published` or `succeeded_partial` takes precedence over older terminal or promotion snapshots. Status reports success, the publication state and PR URL (number when no URL was recorded), with no stale failure blocker. Atomic Lab staging completion receipts and resolved-route credential admission are tracked separately in [#16326](https://github.com/Extra-Chill/homeboy/issues/16326).
 
 Each status `artifacts` entry has a control-plane reference `id`, distinct from an
 artifact-store byte ID. A producer-artifact `uri` retains the exact task and artifact,
@@ -957,6 +957,45 @@ Use `--draft-pr` to retain that verified commit/push/PR workflow while creating 
 draft PR. A retry updates an existing PR but preserves its observed draft or ready
 state; after acceptance evidence is attached, use `homeboy git pr ready <component>
 --number <number>` for the explicit ready-for-review transition.
+
+Finalization never marks an existing draft PR ready, with or without
+`--draft-pr`: reworking a draft PR leaves it draft. Draft to ready is an explicit
+operator action (`homeboy git pr ready`).
+
+### Task source snapshot
+
+When `--task-url` names a GitHub issue or pull request, Cook reads it once at
+admission and records what it read on every provider task as
+`inputs.homeboy.task_source` (schema `homeboy/task-source-snapshot/v1`). The
+agent-facing prompt is unchanged; operator prompt templates render the snapshot
+(see [prompt templates](../reference/prompt-templates.md)). The snapshot
+contains exactly:
+
+- **Issue:** `title`, `body` and every issue comment (`author`, `created_at`,
+  `body`, `url`), oldest first.
+- **Pull request rework:** `title`, `body`, `head_sha`, and only the issue-style
+  comments and review submissions (`author`, `created_at`, `body`, `state`)
+  posted after the PR's head commit timestamp (`since`). Earlier comments and
+  reviews are counted in `omitted_before_head`, not included. Inline review
+  thread comments are not included.
+- **Rework resolved from an issue:** the PR snapshot above, plus the issue
+  snapshot under `linked_issue`.
+
+Each body, comment and review is bounded to 32,000 characters. The snapshot's
+`sha256:` content digest is recorded as the `revision` of the request's `task`
+source ref and in plan metadata `cook_task_source`. When GitHub cannot serve the
+task, the Cook proceeds on its URL alone and `cook_task_source.error` records
+why.
+
+### Delivery accounting
+
+The review form accepts an optional `delivery` list: one entry per item of the
+task's checklist, each with `item`, `status` (`delivered` or `not_delivered`)
+and, for `not_delivered`, a required `reason`. The list renders as a
+`## Delivery` section in the PR body and is carried as `cook_summary.delivery`
+(undelivered items first, bounded to 16 entries of 160 characters). When any
+item is `not_delivered`, the Cook settles with status `succeeded_partial`: a new
+PR opens as a draft, and an existing PR keeps its current state.
 
 `--goal` is one-line Cook framing metadata, recorded on the durable plan and its
 single provider task. Pair explicit work with `--prompt`; `--goal` never creates

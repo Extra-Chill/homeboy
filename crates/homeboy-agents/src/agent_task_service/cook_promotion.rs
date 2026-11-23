@@ -3985,6 +3985,7 @@ fn cook_review_dossier_with_stores_and_review_form(
         overrides: Vec::new(),
         out_of_scope_changes,
         repro: Some(repro),
+        delivery: terminal_form.delivery.clone(),
     })
 }
 

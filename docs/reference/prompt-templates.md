@@ -39,7 +39,9 @@ replaces the previous attempt's template rather than accumulating.
 - `instructions` — the operator's prompt.
 - `task_id`
 - `inputs` — including `inputs.homeboy` (controller facts such as
-  `gates.verify`, `gates.private_verify_count`, `publication.owner`) and
+  `gates.verify`, `gates.private_verify_count`, `publication.owner`, and
+  `task_source`, the admission snapshot of a GitHub `--task-url`; see
+  [task source snapshot](../commands/agent-task.md#task-source-snapshot)) and
   `inputs.cook_loop` (follow-up facts above).
 - `policy`, `outputs` (the request's output declarations), `metadata`.
 
