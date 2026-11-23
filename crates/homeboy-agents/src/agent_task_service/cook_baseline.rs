@@ -619,8 +619,39 @@ fn refine_gate_comparison(
     );
 }
 
+/// Repository identity for base observation cache keys. The Cook's source
+/// worktree path is unique per Cook on a Lab host, so keying on it made every
+/// concurrent Cook on the same base pay for its own full base run (#18833).
+/// The admitted component, else the repository's origin, names the code under
+/// test; the component's repository-relative path keeps package roots apart.
+fn base_observation_identity(
+    root: &std::path::Path,
+    workspace: &std::path::Path,
+    component: Option<&str>,
+) -> Value {
+    let repository = match component {
+        Some(component) => serde_json::json!({ "component": component }),
+        None => match git_output(root, &["config", "--get", "remote.origin.url"]) {
+            Ok(origin) if !origin.is_empty() => serde_json::json!({ "origin": origin }),
+            _ => serde_json::json!({ "root": root }),
+        },
+    };
+    let relative = workspace
+        .strip_prefix(root)
+        .map(|path| path.display().to_string())
+        .unwrap_or_else(|_| workspace.display().to_string());
+    serde_json::json!({ "repository": repository, "workspace": relative })
+}
+
 /// Observe all declared gates before paid provider work. The cache includes
 /// placement and gate inputs, not just the SHA, so hosts never share verdicts.
+/// It keys on repository identity rather than the per-Cook worktree path, so
+/// concurrent Cooks on one component and base share a single base run under
+/// the admission lock.
+///
+/// Eager observation is an explicit policy choice: it reports a red base
+/// before paid provider work is dispatched, which lazy (failure-only)
+/// comparison cannot. Its cost is bounded by the shared cache above.
 pub(crate) fn admit_base_gates(
     options: &super::cook::CookRequest,
     store: &ObservationStore,
@@ -636,7 +667,8 @@ pub(crate) fn admit_base_gates(
     environment.admitted_component_id =
         super::cook::cook_repository_identity_component_id(&options.identity.initial_plan);
     let component = environment.admitted_component_id.clone();
-    let inputs = serde_json::json!([root, base_sha, gates]);
+    let identity = base_observation_identity(root, &workspace, component.as_deref());
+    let inputs = serde_json::json!([identity, base_sha, gates]);
     let key = format!(
         "admission-{:x}",
         Sha256::digest(inputs.to_string().as_bytes())
@@ -687,8 +719,7 @@ pub(crate) fn admit_base_gates(
                 for index in 0..(commands.len() + usize::from(gates.test_execution_plan.is_some()))
                 {
                     let input = serde_json::json!([
-                        root,
-                        workspace,
+                        identity,
                         base_sha,
                         commands.get(index),
                         if commands.get(index).is_none() {
@@ -2261,6 +2292,23 @@ mod tests {
                 );
             }
         });
+    }
+
+    /// Concurrent Cooks on one component and base have unique source worktree
+    /// paths; base admission must key on the repository, not the path (#18833).
+    #[test]
+    fn base_observation_identity_ignores_the_per_cook_worktree_path() {
+        let first = std::path::Path::new("/lab/_lab_workspaces/base-abc-1111");
+        let second = std::path::Path::new("/lab/_lab_workspaces/base-abc-2222");
+        let identity = |root: &std::path::Path, package: &str| {
+            base_observation_identity(root, &root.join(package), Some("blocks-engine"))
+        };
+        assert_eq!(identity(first, "php"), identity(second, "php"));
+        assert_ne!(identity(first, "php"), identity(second, "js"));
+        assert_ne!(
+            identity(first, "php"),
+            base_observation_identity(first, &first.join("php"), Some("other"))
+        );
     }
 
     /// Production gates each carry a unique Lab offload context; the record key
