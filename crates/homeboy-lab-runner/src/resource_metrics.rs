@@ -53,7 +53,8 @@ pub fn initialize_job_cgroups() -> std::result::Result<PathBuf, String> {
     #[cfg(target_os = "linux")]
     {
         let budget = resolved_rss_limit(
-            homeboy_core::resources::memory::probe_system_memory().map(|memory| memory.total_bytes),
+            homeboy_engine_primitives::host_telemetry::probe_system_memory()
+                .map(|memory| memory.total_bytes),
             daemon_policy_env(homeboy_runner_contract::RSS_LIMIT_ENV),
         );
         job_cgroup::initialize(budget.rss_limit_bytes).map(Path::to_path_buf)
@@ -993,8 +994,8 @@ fn sample(
     if let Some(job) = job {
         sample_job_cgroup(job, state, guard_violation, guard_limits);
     } else if let Some(snapshot) = process_tree_snapshot(root_pid) {
-        let host_available_bytes = homeboy_core::resources::memory::probe_system_memory()
-            .map(|memory| memory.available_bytes);
+        let host_available_bytes = homeboy_engine_primitives::host_telemetry::probe_system_memory()
+            .and_then(|memory| memory.available_bytes);
         let mut state = state.lock().expect("resource metrics mutex poisoned");
         state.sample_count += 1;
         state.peak_rss_bytes = state.peak_rss_bytes.max(snapshot.rss_bytes);
@@ -1253,8 +1254,8 @@ fn resolved_resource_guard_limits(
     concurrency_limit: Option<usize>,
 ) -> Option<RunnerResourceGuardLimits> {
     let concurrency = u64::try_from(concurrency_limit.unwrap_or(1).max(1)).unwrap_or(u64::MAX);
-    let memory_capacity_bytes =
-        homeboy_core::resources::memory::probe_system_memory().map(|memory| memory.total_bytes);
+    let memory_capacity_bytes = homeboy_engine_primitives::host_telemetry::probe_system_memory()
+        .map(|memory| memory.total_bytes);
     let rss_limit = resolved_rss_limit(
         memory_capacity_bytes,
         daemon_policy_env(homeboy_runner_contract::RSS_LIMIT_ENV),

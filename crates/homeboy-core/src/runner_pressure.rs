@@ -160,9 +160,8 @@ fn sample_host(thresholds: &PressureThresholds) -> RunnerPressure {
     pressure.logical_cpus = std::thread::available_parallelism()
         .ok()
         .map(|cpus| cpus.get());
-    pressure.observed_load_per_cpu = std::fs::read_to_string("/proc/loadavg")
-        .ok()
-        .and_then(|text| text.split_whitespace().nth(1)?.parse::<f64>().ok())
+    pressure.observed_load_per_cpu = homeboy_engine_primitives::host_telemetry::load_average()
+        .map(|load| load.five)
         .zip(std::thread::available_parallelism().ok())
         .map(|(load, cpus)| (load / cpus.get() as f64 * 10_000.0) as u32);
     if pressure.cpu.is_none() {
