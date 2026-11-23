@@ -38,10 +38,6 @@ pub struct AgentTaskReconcileReport {
     pub reconciled: usize,
     pub failed: usize,
     pub runs: Vec<AgentTaskReconcileRun>,
-    /// Fleet only: rows still `running` although their lifecycle ended and no
-    /// controller drives them, each with its class and proposed terminal status.
-    #[serde(skip_serializing_if = "Vec::is_empty")]
-    pub unsettled_rows: Vec<super::AgentTaskUnsettledRow>,
 }
 
 impl AgentTaskReconcileReport {
@@ -55,12 +51,6 @@ impl AgentTaskReconcileReport {
             .iter()
             .filter(|run| run.action == "failed")
             .filter_map(|run| run.error.as_deref())
-            .chain(
-                self.unsettled_rows
-                    .iter()
-                    .filter(|row| row.action == "failed")
-                    .filter_map(|row| row.error.as_deref()),
-            )
             .collect();
         Some(format!(
             "{} runs failed to reconcile: {}",
@@ -278,7 +268,7 @@ pub(super) fn verify_reconciled_postcondition(
 }
 
 /// Actor recorded on every cancellation reconciliation commits.
-pub(crate) const RECONCILER_ACTOR: &str = "fleet-reconciler";
+const RECONCILER_ACTOR: &str = "fleet-reconciler";
 /// Cancellation cause for reconciliation; operator commands keep
 /// `operator_requested`. A reconcile cancellation is retryable work loss, not
 /// an operator's decision to end the mission.
@@ -527,17 +517,9 @@ pub fn reconcile_stale_active_runs(dry_run: bool) -> Result<AgentTaskReconcileRe
         }
     }
 
-    // Rows whose lifecycle already ended never reach active discovery above,
-    // yet stay `running` when their Cook driver exited without settling them.
-    let unsettled_rows = super::unsettled_rows::sweep_unsettled_rows(&lifecycle_store, dry_run)?;
-    reconciled += unsettled_rows
-        .iter()
-        .filter(|row| row.action == "settled")
-        .count();
-    failed += unsettled_rows
-        .iter()
-        .filter(|row| row.action == "failed")
-        .count();
+    if !dry_run {
+        reproject_terminal_rows(&lifecycle_store)?;
+    }
 
     Ok(AgentTaskReconcileReport {
         schema: "homeboy/agent-task-reconcile/v1",
@@ -546,12 +528,59 @@ pub fn reconcile_stale_active_runs(dry_run: bool) -> Result<AgentTaskReconcileRe
         resolved_run_ids: Vec::new(),
         authorization: if dry_run { "preview" } else { "explicit-apply" },
         dry_run,
-        considered: runs.len() + unsettled_rows.len(),
+        considered: runs.len(),
         reconciled,
         failed,
         runs,
-        unsettled_rows,
     })
+}
+
+/// Rows whose lifecycle already ended never reach active discovery, yet a
+/// row left `running` by a Cook driver that exited, or by an older binary,
+/// re-projects once from its terminal record. A settled Cook that no driver
+/// holds records its outcome first, so its held rows follow it.
+fn reproject_terminal_rows(
+    lifecycle_store: &agent_task_lifecycle::AgentTaskLifecycleStore,
+) -> Result<()> {
+    for row in lifecycle_store
+        .open_observation_initialized()?
+        .list_active_runs()?
+        .into_iter()
+        .filter(|row| row.kind == "agent-task")
+    {
+        let Some(record) = row
+            .metadata_json
+            .get("agent_task_run")
+            .cloned()
+            .and_then(|value| {
+                serde_json::from_value::<agent_task_lifecycle::AgentTaskRunRecord>(value).ok()
+            })
+            .filter(|record| record.state().is_terminal())
+        else {
+            continue;
+        };
+        let cook_id = record.metadata["cook_id"]
+            .as_str()
+            .unwrap_or(&record.run_id);
+        let settled = if lifecycle_store
+            .cook_dir(cook_id)
+            .join("recipe.json")
+            .exists()
+        {
+            super::cook_driver::settle_undriven_cook(lifecycle_store, cook_id).map(|_| ())
+        } else {
+            Ok(())
+        };
+        if let Err(error) = settled.and_then(|()| lifecycle_store.reproject_record(&row.id)) {
+            homeboy_core::log_status!(
+                "agent-task",
+                "Run {} re-projection failed: {}",
+                row.id,
+                error
+            );
+        }
+    }
+    Ok(())
 }
 
 /// Reconcile one durable run after refreshing its authoritative lifecycle and
@@ -910,7 +939,6 @@ pub(crate) fn reconcile_run_in_store(
         reconciled,
         failed,
         runs,
-        unsettled_rows: Vec::new(),
     })
 }
 
@@ -1065,7 +1093,6 @@ mod tests {
                     error: Some("idempotency_key too long".to_string()),
                 })
                 .collect(),
-            unsettled_rows: Vec::new(),
         };
         assert_eq!(
             report.failure_summary().as_deref(),

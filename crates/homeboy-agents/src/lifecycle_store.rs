@@ -1548,6 +1548,14 @@ impl AgentTaskLifecycleStore {
         Ok(record)
     }
 
+    /// Rewrite a record unchanged so its observation row re-projects from it.
+    pub(crate) fn reproject_record(&self, run_id: &str) -> Result<()> {
+        self.with_store_lock(|| {
+            self.mutate_record_locked_without_terminal_projection(run_id, |_| true)
+        })
+        .map(|_| ())
+    }
+
     pub(crate) fn mutate_record_locked_without_terminal_projection(
         &self,
         run_id: &str,
@@ -2212,6 +2220,9 @@ pub(super) fn write_record_guarded(
     }
     let store = lifecycle_store.open_observation_initialized()?;
     let existing = store.get_run(&record.run_id)?;
+    let stored_row = existing
+        .as_ref()
+        .map(|run| (run.status.clone(), run.finished_at.clone()));
     let homeboy_version = existing
         .as_ref()
         .map(|run| run.homeboy_version.clone())
@@ -2361,23 +2372,22 @@ pub(super) fn write_record_guarded(
     if !preserve_terminal {
         metadata_json["agent_task_aggregate"] = Value::Null;
     }
-    let (status, finished_at) = if cook_owns_observation(lifecycle_store, &record) {
-        if preserve_terminal && record.state().is_terminal() {
-            store
-                .get_run(&record.run_id)?
-                .map(|run| (run.status, run.finished_at))
-                .unwrap_or_else(|| (RunStatus::Running.as_str().to_string(), None))
-        } else {
-            (RunStatus::Running.as_str().to_string(), None)
+    let authority = row_authority(lifecycle_store, &store, &record)?;
+    // A redirected Cook root's row is its latest attempt's, so a recovery
+    // attempt reopens it even though the root's own record ended (#16179).
+    let row_guard = preserve_terminal && !matches!(authority, RowAuthority::Redirected(_));
+    let (status, finished_at) =
+        observation_status(&record, authority, stored_row.as_ref(), preserve_terminal);
+    if let Some((stored_status, _)) = &stored_row {
+        // A changed terminal outcome re-arms the completion notification so
+        // the real outcome is announced (#15393).
+        if stored_status != &status && stored_status != RunStatus::Running.as_str() {
+            if let Some(object) = metadata_json.as_object_mut() {
+                object.remove("notification_delivered");
+                object.remove("notification_claimed");
+            }
         }
-    } else if is_redirected_cook(&record) {
-        redirected_cook_row_status(lifecycle_store, &store, &record.run_id)?
-    } else {
-        (
-            run_status(record.state()).to_string(),
-            terminal_finished_at(&record),
-        )
-    };
+    }
     if status == RunStatus::Running.as_str() {
         // A live owner write supersedes any stale verdict another process
         // stamped on the row; a `running` row cannot carry one (#15978).
@@ -2435,7 +2445,7 @@ pub(super) fn write_record_guarded(
     intents.extend(execution_intent);
     let applied = store.upsert_imported_run_with_events_intents_and_revision(
         &projected,
-        preserve_terminal,
+        row_guard,
         mission.as_ref().map(|mission| mission.as_str()),
         Some(&resource_projection),
         &events,
@@ -2499,7 +2509,7 @@ pub(super) fn write_record_guarded(
         .and_then(Value::as_str)
         .filter(|cook_id| !cook_id.is_empty() && *cook_id != record.run_id)
     {
-        mirror_cook_row_in_store(lifecycle_store, &store, cook_id)?;
+        reproject_redirected_cook_root(lifecycle_store, &store, cook_id)?;
     }
     snapshot_from_run(&resolve_run_payloads(&store, committed)?).map(GuardedRecordWrite::Committed)
 }
@@ -2511,59 +2521,156 @@ fn is_redirected_cook(record: &AgentTaskRunRecord) -> bool {
     handoff["cook_id"] == record.run_id && handoff["state"] == "redirected"
 }
 
-/// The row status a redirected Cook reports: its latest attempt's (#16179).
-/// Until an attempt row exists, the Cook is running.
-fn redirected_cook_row_status(
-    lifecycle_store: &AgentTaskLifecycleStore,
-    store: &homeboy_core::observation::ObservationStore,
-    cook_id: &str,
-) -> Result<(String, Option<String>)> {
-    let latest = projected_cook_index_in_store(lifecycle_store, cook_id)?
-        .map(|index| index.latest_run_id)
-        .filter(|latest| latest != cook_id);
-    Ok(
-        match latest
-            .map(|latest| store.get_run(&latest))
-            .transpose()?
-            .flatten()
-        {
-            Some(attempt) => (attempt.status, attempt.finished_at),
-            None => (RunStatus::Running.as_str().to_string(), None),
-        },
-    )
+/// The durable record a row's status follows, read before the pure
+/// [`observation_status`] projection runs.
+enum RowAuthority {
+    /// The record's own lifecycle state.
+    Own,
+    /// A Cook-owned row (#16520): `None` until the Cook's terminal outcome is
+    /// recorded, then the record whose outcome the row reports.
+    Cook(Option<AgentTaskRunRecord>),
+    /// A redirected Cook root reports its latest attempt, once one exists
+    /// (#16179).
+    Redirected(Option<AgentTaskRunRecord>),
 }
 
-/// Keep a redirected Cook's row on its latest attempt's status, so a Cook
-/// whose attempt ended stops reading `running`, and one whose recovery starts
-/// a new attempt reads `running` again (#16179). Called whenever an attempt
-/// row is written and when the Cook registers a new latest attempt.
-pub(crate) fn mirror_cook_row_in_store(
+fn stored_record(store: &ObservationStore, run_id: &str) -> Result<Option<AgentTaskRunRecord>> {
+    store
+        .get_run(run_id)?
+        .map(|run| snapshot_from_run(&resolve_run_payloads(store, run)?))
+        .transpose()
+}
+
+fn row_authority(
     lifecycle_store: &AgentTaskLifecycleStore,
-    store: &homeboy_core::observation::ObservationStore,
+    store: &ObservationStore,
+    record: &AgentTaskRunRecord,
+) -> Result<RowAuthority> {
+    let cook_id = record.metadata["cook_id"]
+        .as_str()
+        .unwrap_or(&record.run_id);
+    let latest_attempt = || -> Result<Option<AgentTaskRunRecord>> {
+        let latest = projected_cook_index_in_store(lifecycle_store, cook_id)?
+            .map(|index| index.latest_run_id)
+            .filter(|latest| latest != &record.run_id);
+        Ok(match latest {
+            Some(latest) => stored_record(store, &latest)?,
+            None => None,
+        })
+    };
+    if cook_owns_observation(lifecycle_store, record) {
+        // The Cook's outcome is recorded on its latest attempt when its
+        // terminal report lands; until then every Cook row is held.
+        let latest = latest_attempt()?.unwrap_or_else(|| record.clone());
+        let terminal = &latest.metadata["cook_progress"];
+        if !terminal["exit_code"].is_i64() {
+            return Ok(RowAuthority::Cook(None));
+        }
+        return Ok(RowAuthority::Cook(Some(if record.run_id == cook_id {
+            latest
+        } else {
+            record.clone()
+        })));
+    }
+    if is_redirected_cook(record) || cook_id == record.run_id {
+        if let Some(attempt) = latest_attempt()? {
+            return Ok(RowAuthority::Redirected(Some(attempt)));
+        }
+        if is_redirected_cook(record) {
+            return Ok(RowAuthority::Redirected(None));
+        }
+    }
+    Ok(RowAuthority::Own)
+}
+
+/// The row status of a Cook run once the Cook has ended: its own observed
+/// outcome, else its own Cook terminal report.
+fn cook_row_status(record: &AgentTaskRunRecord) -> Option<&'static str> {
+    // A queued attempt has not ended; a Cook outcome it still carries is a
+    // previous run's, kept across a pre-execution rearm.
+    if record.state() == RunExecutionState::Queued {
+        return None;
+    }
+    super::failure_recording::terminal_observation_status(
+        &super::CookRunState::of(record).execution_state,
+    )
+    .or_else(|| {
+        let terminal = &record.metadata["cook_progress"];
+        terminal["exit_code"].is_i64().then(|| {
+            if terminal["exit_code"] == 0 {
+                RunStatus::Pass.as_str()
+            } else {
+                RunStatus::Fail.as_str()
+            }
+        })
+    })
+}
+
+/// The one projection of an agent-task record onto its observation row's
+/// `status` and `finished_at`.
+fn observation_status(
+    record: &AgentTaskRunRecord,
+    authority: RowAuthority,
+    stored: Option<&(String, Option<String>)>,
+    preserve_terminal: bool,
+) -> (String, Option<String>) {
+    let running = || (RunStatus::Running.as_str().to_string(), None);
+    match authority {
+        RowAuthority::Own => (
+            run_status(record.state()).to_string(),
+            terminal_finished_at(record),
+        ),
+        RowAuthority::Redirected(attempt) => attempt
+            .map(|attempt| {
+                (
+                    run_status(attempt.state()).to_string(),
+                    terminal_finished_at(&attempt),
+                )
+            })
+            .unwrap_or_else(running),
+        RowAuthority::Cook(subject) => match subject
+            .as_ref()
+            .and_then(|subject| cook_row_status(subject).map(|status| (subject, status)))
+        {
+            Some((subject, status)) => (
+                status.to_string(),
+                subject
+                    .updated_at
+                    .clone()
+                    .or_else(|| Some(subject.submitted_at.clone())),
+            ),
+            // A held row a terminal record already settled keeps that status
+            // rather than having its write refused by the terminal-row guard.
+            None if preserve_terminal && record.state().is_terminal() => {
+                stored.cloned().unwrap_or_else(running)
+            }
+            None => running(),
+        },
+    }
+}
+
+/// A redirected Cook root's row follows its latest attempt, so rewriting an
+/// attempt re-projects the root through the normal record write.
+pub(crate) fn reproject_redirected_cook_root(
+    lifecycle_store: &AgentTaskLifecycleStore,
+    store: &ObservationStore,
     cook_id: &str,
 ) -> Result<()> {
     let cook_id = sanitize_run_id(cook_id);
-    if lifecycle_store
-        .cook_dir(&cook_id)
-        .join("recipe.json")
-        .exists()
+    let Some(root) = store.get_run(&cook_id)? else {
+        return Ok(());
+    };
+    let handoff = &root.metadata_json["agent_task_run"]["metadata"]["detached_cook_handoff"];
+    if handoff["cook_id"] != cook_id.as_str()
+        || handoff["state"] != "redirected"
+        || lifecycle_store
+            .cook_dir(&cook_id)
+            .join("recipe.json")
+            .exists()
     {
         return Ok(());
     }
-    let Some(cook) = store.get_run(&cook_id)? else {
-        return Ok(());
-    };
-    let handoff = &cook.metadata_json["agent_task_run"]["metadata"]["detached_cook_handoff"];
-    if handoff["cook_id"] != cook_id.as_str() || handoff["state"] != "redirected" {
-        return Ok(());
-    }
-    let Some(index) = projected_cook_index_in_store(lifecycle_store, &cook_id)? else {
-        return Ok(());
-    };
-    if index.latest_run_id != cook_id {
-        store.mirror_run_status(&cook_id, &index.latest_run_id)?;
-    }
-    Ok(())
+    lifecycle_store.reproject_record(&cook_id)
 }
 
 fn work_intents_for_record(
@@ -3185,10 +3292,7 @@ fn aggregate_from_run(run: &RunRecord) -> Result<Option<AgentTaskAggregate>> {
         })
 }
 
-pub(crate) fn cook_owns_observation(
-    store: &AgentTaskLifecycleStore,
-    record: &AgentTaskRunRecord,
-) -> bool {
+fn cook_owns_observation(store: &AgentTaskLifecycleStore, record: &AgentTaskRunRecord) -> bool {
     let cook_id = record.metadata["cook_id"]
         .as_str()
         .unwrap_or(&record.run_id);
