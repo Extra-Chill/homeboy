@@ -10,6 +10,7 @@
 pub mod action;
 pub mod capabilities;
 pub mod control_plane_ref;
+pub mod cook_summary;
 pub mod event;
 pub mod identity;
 pub mod resolve;
@@ -41,6 +42,10 @@ pub use capabilities::{
     ControlPlaneResource, CONTROL_PLANE_CAPABILITIES_SCHEMA,
 };
 pub use control_plane_ref::{ControlPlaneRef, ControlPlaneRefError};
+pub use cook_summary::{
+    CookSummary, CookSummaryGate, COOK_SUMMARY_FAILING_TEST_LIMIT, COOK_SUMMARY_GATE_LIMIT,
+    COOK_SUMMARY_KEY, COOK_SUMMARY_MAX_BYTES, COOK_SUMMARY_REASON_MAX_CHARS, COOK_SUMMARY_SCHEMA,
+};
 pub use event::{
     ControlPlaneEvent, ControlPlaneEventAppendRequest, ControlPlaneEventPage,
     ControlPlaneEventRetention, ControlPlaneEventSource, CONTROL_PLANE_EVENT_APPEND_REQUEST_SCHEMA,

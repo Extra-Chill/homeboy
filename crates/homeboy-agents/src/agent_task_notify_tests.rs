@@ -1326,3 +1326,39 @@ fn base_drift_fact_names_how_far_the_gated_base_is_behind() {
         None
     );
 }
+
+/// #18817: the terminal notification carries the same versioned
+/// `cook_summary` every Cook read surface emits, with `why_no_pr` whenever no
+/// pull request exists.
+#[test]
+fn terminal_notification_carries_the_cook_summary_contract() {
+    for (status, finalization) in [
+        ("durable_failure", None),
+        (
+            "review_ready",
+            Some(serde_json::json!({
+                "status": "review_ready",
+                "pr_number": 42,
+                "pr_url": "https://github.com/Extra-Chill/homeboy/pull/42",
+            })),
+        ),
+    ] {
+        let payload = terminal_payload(&report(status, finalization), None, 0);
+        let summary: homeboy_control_plane_contract::CookSummary = serde_json::from_value(
+            payload
+                .cook_summary
+                .clone()
+                .expect("terminal payload carries cook_summary"),
+        )
+        .expect("cook_summary contract");
+        summary.validate().expect("valid cook_summary");
+        assert_eq!(
+            summary.schema,
+            homeboy_control_plane_contract::COOK_SUMMARY_SCHEMA
+        );
+        assert!(
+            summary.pr_url.is_some() || summary.why_no_pr.is_some(),
+            "{status}"
+        );
+    }
+}

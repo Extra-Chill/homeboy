@@ -389,6 +389,13 @@ pub(super) fn compact_control_plane_status(value: Value) -> Value {
             .map(bounded_diagnostic_message)
             .unwrap_or_else(|| bounded_control_plane_value(blocker_summary));
     }
+    // The shared, self-bounded Cook summary is carried whole (#18817).
+    if let Some(summary) = value
+        .get(homeboy_control_plane_contract::COOK_SUMMARY_KEY)
+        .filter(|summary| summary.is_object())
+    {
+        compact[homeboy_control_plane_contract::COOK_SUMMARY_KEY] = summary.clone();
+    }
     enforce_control_plane_status_budget(compact)
 }
 
@@ -466,6 +473,7 @@ pub(super) fn enforce_control_plane_status_budget(mut value: Value) -> Value {
                     | "presentation"
                     | "terminal_outcome"
                     | "recoverable"
+                    | "cook_summary"
             )
         })
         .cloned()
@@ -879,6 +887,7 @@ pub(super) fn compact_mandatory_field(field: &str) -> bool {
             | "next_action"
             | "lab_staging_diagnostic"
             | "full_command"
+            | "cook_summary"
     )
 }
 
@@ -921,12 +930,33 @@ pub(super) fn compact_section_count(value: &Value) -> usize {
 /// diagnostic cause. Output only grows on the failure path: `failure_context` is `None`
 /// whenever `exit_code == 0`.
 pub(crate) fn compact_cook_report(value: Value, full: bool) -> Value {
-    let mut value = value;
-    let candidate_run_id = value
+    let summary = cook_report_run_id(&value)
+        .as_deref()
+        .and_then(crate::commands::agent_task::cook_summary::of_run);
+    compact_cook_report_with_summary(value, full, summary)
+}
+
+/// The run a Cook report's candidate (or latest attempt) lives on.
+fn cook_report_run_id(value: &Value) -> Option<String> {
+    value
         .pointer("/selected_candidate/run_id")
         .and_then(Value::as_str)
         .or_else(|| value.get("latest_run_id").and_then(Value::as_str))
-        .map(str::to_string);
+        .map(str::to_string)
+}
+
+/// The launch output, carrying the same `cook_summary` every Cook read
+/// surface emits (#18817). Without a readable record the report's own status
+/// and stop reason supply it.
+pub(crate) fn compact_cook_report_with_summary(
+    value: Value,
+    full: bool,
+    cook_summary: Option<homeboy_control_plane_contract::CookSummary>,
+) -> Value {
+    let mut value = value;
+    let cook_summary =
+        cook_summary.unwrap_or_else(|| crate::commands::agent_task::cook_summary::fallback(&value));
+    let candidate_run_id = cook_report_run_id(&value);
     let candidate_projection = candidate_run_id
         .as_deref()
         .map(compact_cook_candidate_projection)
@@ -935,6 +965,7 @@ pub(crate) fn compact_cook_report(value: Value, full: bool) -> Value {
         if let Some(candidate) = candidate_projection.as_ref() {
             value["durable_candidate"] = candidate.clone();
         }
+        crate::commands::agent_task::cook_summary::attach(&mut value, Some(cook_summary));
         return value;
     }
     let attempts = value
@@ -1019,6 +1050,7 @@ pub(crate) fn compact_cook_report(value: Value, full: bool) -> Value {
             summary[field] = bounded_value(value);
         }
     }
+    crate::commands::agent_task::cook_summary::attach(&mut summary, Some(cook_summary));
     enforce_compact_status_budget(summary)
 }
 
