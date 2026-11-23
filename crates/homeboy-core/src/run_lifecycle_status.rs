@@ -28,6 +28,7 @@ mod tests {
             (AwaitingCi, "awaiting_ci", State::Running),
             (ReviewReady, "review_ready", State::Succeeded),
             (DraftPublished, "draft_published", State::Succeeded),
+            (SucceededPartial, "succeeded_partial", State::Succeeded),
             (GreenNoFinalize, "green_no_finalize", State::Succeeded),
             (
                 IntentionalNoChange,

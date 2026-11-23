@@ -208,7 +208,6 @@ pub fn record_detached_cook_handoff_parent_in_store(
             + chrono::Duration::seconds(DETACHED_COOK_ADMISSION_LEASE_SECONDS))
             .to_rfc3339(),
         "cook_id": cook_id,
-        "cancellation_fence": { "state": "open" },
     });
     lifecycle_store.commit_record_without_events(&mut record)?;
     record_cook_progress_in_store(
@@ -241,7 +240,6 @@ pub fn claim_detached_cook_handoff_parent_in_store(
         let handoff = &existing.metadata["detached_cook_handoff"];
         if handoff["cook_id"] == cook_id
             && handoff["launcher_id"] == launcher_id
-            && handoff["cancellation_fence"]["state"] == "open"
             && !existing.state().is_terminal()
             && detached_cook_launcher_is_live(&existing, chrono::Utc::now())
         {
@@ -261,7 +259,6 @@ pub fn claim_detached_cook_handoff_parent_in_store(
             && !record.metadata["unmaterialized_cook_admission"].is_object()
             && !handoff["materializing_attempt_run_id"].is_string();
         if handoff["cook_id"] != cook_id
-            || handoff["cancellation_fence"]["state"] != "open"
             || (record.state().is_terminal() && !reclaimable_pre_projection_failure)
             || (!reclaimable_pre_projection_failure
                 && (handoff["state"] != "pending"
@@ -407,7 +404,6 @@ pub fn prepare_unmaterialized_cook_admission(
                 "state": "pending",
                 "admission_state": "unmaterialized",
                 "cook_id": cook_id,
-                "cancellation_fence": { "state": "open" },
             }),
         );
         submission_metadata.insert(
@@ -566,7 +562,6 @@ fn record_unmaterialized_cook_admission_locked(
                 "state": "pending",
                 "admission_state": "unmaterialized",
                 "cook_id": cook_id,
-                "cancellation_fence": { "state": "open" },
             }),
         );
         submission_metadata.insert(
@@ -595,10 +590,7 @@ fn record_unmaterialized_cook_admission_locked(
     let reason = homeboy_core::redaction::redact_string(reason);
     let binding_for_write = binding.clone();
     let record = mutate_with_execution_intent(lifecycle_store, &cook_id, |record| {
-        if record.state().is_terminal()
-            || record.metadata["detached_cook_handoff"]["cancellation_fence"]["state"]
-                == "cancelled"
-        {
+        if record.state().is_terminal() {
             return Ok(false);
         }
         let existing = &record.metadata["unmaterialized_cook_admission"];
@@ -1017,9 +1009,7 @@ pub fn require_detached_cook_handoff_fence_open_in_store(
     if record.metadata["detached_cook_handoff"]["cook_id"] != cook_id {
         return Ok(());
     }
-    if record.state() == RunExecutionState::Cancelled
-        || record.metadata["detached_cook_handoff"]["cancellation_fence"]["state"] != "open"
-    {
+    if record.state() == RunExecutionState::Cancelled {
         return Err(Error::validation_invalid_argument(
             "cook_id",
             "detached Cook handoff was cancelled before its attempt could materialize",
@@ -1049,13 +1039,9 @@ pub fn record_detached_cook_handoff_child_in_store(
         // A concurrent observer may have already terminalized the handoff
         // before this attachment write acquired the record lock. Keep that
         // classification intact for the launcher to report.
-        if record.state().is_terminal()
-            || record.metadata["detached_cook_handoff"]["cancellation_fence"]["state"] != "open"
-        {
+        if record.state().is_terminal() {
             return false;
         }
-        let cancellation_fence =
-            record.metadata["detached_cook_handoff"]["cancellation_fence"].clone();
         let metadata = record.ensure_metadata_object();
         metadata["detached_cook_handoff"] = json!({
             "state": "pending",
@@ -1066,7 +1052,6 @@ pub fn record_detached_cook_handoff_child_in_store(
             "cook_id": cook_id,
             "child_pid": pid,
             "child_start_identity": start_identity,
-            "cancellation_fence": cancellation_fence,
         });
         record.updated_at = Some(now_timestamp());
         true
@@ -1099,7 +1084,6 @@ pub fn record_claimed_detached_cook_handoff_supervision_in_store(
             || handoff["state"] != "pending"
             || handoff["admission_state"] != "pre_supervisor"
             || handoff["launcher_id"] != launcher_id
-            || handoff["cancellation_fence"]["state"] != "open"
         {
             return false;
         }
@@ -1192,7 +1176,6 @@ pub fn reserve_detached_cook_handoff_materialization_in_store(
             return true;
         }
         if record.state().is_terminal()
-            || record.metadata["detached_cook_handoff"]["cancellation_fence"]["state"] != "open"
             || record.metadata["detached_cook_handoff"]["state"] != "pending"
         {
             return false;
@@ -1274,7 +1257,24 @@ pub fn fail_detached_cook_handoff_parent_in_store(
     reason: &str,
 ) -> Result<AgentTaskRunRecord> {
     let cook_id = sanitize_run_id(cook_id);
-    let record = lifecycle_store.transition_when(&cook_id, |record| {
+    let record =
+        terminalize_detached_cook_handoff_parent_in_store(lifecycle_store, &cook_id, reason)?;
+    // Explicit handoff failures own the terminal announcement. Lease expiry
+    // only retires a parent anchor and must not consume its notification claim.
+    if record.is_some() {
+        crate::agent_task_service::finish_cook_terminal(lifecycle_store, &cook_id)?;
+    }
+    // A protected parent remains a successful no-op.
+    Ok(record.unwrap_or(lifecycle_store.read_record(&cook_id)?))
+}
+
+fn terminalize_detached_cook_handoff_parent_in_store(
+    lifecycle_store: &AgentTaskLifecycleStore,
+    cook_id: &str,
+    reason: &str,
+) -> Result<Option<AgentTaskRunRecord>> {
+    let cook_id = sanitize_run_id(cook_id);
+    lifecycle_store.transition_when(&cook_id, |record| {
         if record.metadata["detached_cook_handoff"]["cook_id"] != cook_id
             || record.state().is_terminal()
             || record.metadata["detached_cook_handoff"]["state"] != "pending"
@@ -1288,10 +1288,7 @@ pub fn fail_detached_cook_handoff_parent_in_store(
         // The guard above admits only a live parent, so this is always the
         // pre-handoff failure; a cancelled parent is already terminal.
         Some(fail_detached_cook_handoff_transition(record, reason))
-    })?;
-    // A protected parent is a successful no-op: it is the authoritative result
-    // of materialization or a prior terminal transition, not a missing parent.
-    Ok(record.unwrap_or(lifecycle_store.read_record(&cook_id)?))
+    })
 }
 
 /// Terminalize a pending parent only when the launcher that created its claim
@@ -1315,6 +1312,9 @@ pub fn fail_claimed_detached_cook_handoff_parent_in_store(
         }
         Some(fail_detached_cook_handoff_transition(record, reason))
     })?;
+    if record.is_some() {
+        crate::agent_task_service::finish_cook_terminal(lifecycle_store, &cook_id)?;
+    }
     Ok(record.unwrap_or(lifecycle_store.read_record(&cook_id)?))
 }
 
@@ -1553,11 +1553,14 @@ pub fn expire_detached_cook_admission_in_store(
     if !has_expired_detached_cook_admission(&record, chrono::Utc::now()) {
         return Ok(false);
     }
-    let terminal = fail_detached_cook_handoff_parent_in_store(
+    // Expiring a family parent is bookkeeping, not a failed launch owned by
+    // this observer. Do not settle or announce a separate Cook for the anchor.
+    let terminal = terminalize_detached_cook_handoff_parent_in_store(
         lifecycle_store,
         cook_id,
         "detached Cook admission lease expired before child or supervisor ownership attached",
-    )?;
+    )?
+    .unwrap_or(lifecycle_store.read_record(cook_id)?);
     Ok(terminal.state() == RunExecutionState::Failed
         && terminal.metadata["detached_cook_handoff"]["admission_state"] == "failed")
 }
@@ -6494,7 +6497,7 @@ pub(crate) fn record_cook_attempt_locked_in_store(
         if !lifecycle_store.cook_index_exists(&cook_id)
             && handoff["cook_id"] == cook_id
             && (((parent.state().is_terminal() && handoff["state"] != "redirected")
-                || handoff["cancellation_fence"]["state"] == "cancelled")
+                || parent.state() == RunExecutionState::Cancelled)
                 && !reserved_child
                 || (handoff["state"] != "pending" && handoff["state"] != "redirected"))
         {

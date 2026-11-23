@@ -888,7 +888,10 @@ pub(super) fn cook_finalization_receipt_preflight_report(
     finalization: &Value,
 ) -> (Value, i32) {
     let status = finalization["status"].as_str().unwrap_or("unknown");
-    let replay_succeeded = matches!(status, "review_ready" | "draft_published");
+    let replay_succeeded = matches!(
+        status,
+        "review_ready" | "draft_published" | "succeeded_partial"
+    );
     (
         serde_json::json!({
             "schema": "homeboy/agent-task-cook-continuation-preflight/v1",

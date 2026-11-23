@@ -800,6 +800,8 @@ fn locked_start_with_fake_operations(
                         state.daemon = Some(daemon.clone());
                         Ok(daemon)
                     },
+                    || {},
+                    0,
                 )
             },
         )
@@ -979,6 +981,8 @@ fn start_refuses_to_spawn_while_a_live_owner_holds_the_lock() {
         || -> crate::error::Result<super::DaemonStartResult> {
             panic!("a daemon was spawned beside a live owner")
         },
+        || {},
+        0,
     )
     .expect_err("a held owner lock refuses the start");
     assert!(
@@ -994,12 +998,14 @@ fn start_names_the_service_manager_that_owns_a_stale_daemon() {
     status.state.as_mut().unwrap().service_manager =
         Some(crate::daemon::DaemonServiceManager::Systemd);
     let error = super::start_or_return_live_with_operations(
-        move || Ok(status),
+        move || Ok(status.clone()),
         || Ok(None::<()>),
         || unreachable!("a managed daemon's lease is never cleaned up here"),
         || -> crate::error::Result<super::DaemonStartResult> {
             panic!("a daemon was spawned beside its service manager")
         },
+        || {},
+        0,
     )
     .expect_err("a service-managed owner refuses the start");
     assert!(
@@ -1014,10 +1020,12 @@ fn managed_dead_lease_never_spawns_even_when_owner_lock_is_available() {
     let mut status = managed_status(Some(fake_daemon(4242, "lease-dead")), false);
     status.running = false;
     let error = super::start_or_return_live_with_operations(
-        || Ok(status),
+        || Ok(status.clone()),
         || -> crate::error::Result<Option<()>> { panic!("ownership is checked before the lock") },
         || panic!("managed lease must not be cleaned up"),
         || panic!("must not spawn into the caller's cgroup"),
+        || {},
+        0,
     )
     .unwrap_err();
     assert!(error.message.contains("service manager systemd"));

@@ -14,15 +14,17 @@ pub fn lifecycle_action_eligibility(
     record: &AgentTaskRunRecord,
     plan: Option<&AgentTaskPlan>,
 ) -> ControlPlaneActionEligibilityReport {
-    lifecycle_action_eligibility_with_roots(record, plan, None)
+    lifecycle_action_eligibility_with_roots(record, plan, None, false)
 }
 
+/// `fenced` is the Cook index's mission fence ([`super::cook_cancellation_fence`]).
 pub(crate) fn lifecycle_action_eligibility_with_roots(
     record: &AgentTaskRunRecord,
     plan: Option<&AgentTaskPlan>,
     roots: Option<&homeboy_core::paths::PathRoots>,
+    fenced: bool,
 ) -> ControlPlaneActionEligibilityReport {
-    let state = CookRunState::of(record);
+    let state = CookRunState::of(record).with_cook_index_fence(fenced);
     if record.metadata.get("cook_id").is_some() && super::legal_actions(&state).is_empty() {
         return ControlPlaneActionEligibilityReport {
             schema: CONTROL_PLANE_ACTION_ELIGIBILITY_SCHEMA.to_string(),

@@ -3815,9 +3815,9 @@ mod tests {
                 };
                 let run = RunId::new(run_id).unwrap();
                 if case == "blocked" {
-                    let resource = crate::orchestration::project_record(
+                    let resource = crate::orchestration::project_in_store(
+                        &store,
                         &store.read_record(run_id).unwrap(),
-                        None,
                     )
                     .unwrap();
                     let entry = resource

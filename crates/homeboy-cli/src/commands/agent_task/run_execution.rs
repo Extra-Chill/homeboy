@@ -697,7 +697,8 @@ pub(super) fn run_preflight_cook_execution(
         })?;
         (run_id, agent_task_service::read_plan(attempt_plan)?)
     } else {
-        let plan = compile_cook_plan(&args, provision.clone(), None)?;
+        let mut plan = compile_cook_plan(&args, provision.clone(), None)?;
+        snapshot_cook_task_source(&args, &mut plan);
         (run_id, plan)
     };
     if args.attempt_plan.is_some() {
@@ -1174,6 +1175,57 @@ pub(super) fn default_cook_prompt_from_task_url(args: &mut AgentTaskCookArgs) {
     }
     if let Some(task_url) = args.dispatch.task_url.as_deref() {
         args.dispatch.prompt = Some(super::cook_batch::default_task_prompt(task_url));
+    }
+}
+
+/// Snapshot the GitHub task at admission (#18884): the issue's title, body
+/// and comments, or a reworked PR's body plus the comments and reviews posted
+/// since its head commit. Each task carries it as `inputs.homeboy.task_source`
+/// and its `task` source ref records the snapshot revision. A task GitHub
+/// cannot serve leaves the Cook on its URL alone, with the reason recorded.
+fn snapshot_cook_task_source(args: &AgentTaskCookArgs, plan: &mut AgentTaskPlan) {
+    use homeboy::agents::agent_task_source_snapshot as source;
+    let Some(task_url) = args.dispatch.task_url.as_deref() else {
+        return;
+    };
+    let linked_issue = args
+        .issue_resolution
+        .as_ref()
+        .filter(|resolution| resolution["route"] == "pr_rework")
+        .and_then(|resolution| resolution["issue_url"].as_str());
+    let snapshot = source::capture_task_source(task_url).and_then(|snapshot| {
+        let Some(snapshot) = snapshot else {
+            return Ok(None);
+        };
+        Ok(Some(match linked_issue {
+            Some(issue_url) => match source::capture_task_source(issue_url)? {
+                Some(issue) => source::with_linked_issue(snapshot, issue),
+                None => snapshot,
+            },
+            None => snapshot,
+        }))
+    });
+    match snapshot {
+        Ok(Some(snapshot)) => {
+            for task in &mut plan.tasks {
+                source::apply_task_source_snapshot(task, &snapshot);
+            }
+            plan.metadata["cook_task_source"] = serde_json::json!({
+                "url": snapshot.url,
+                "revision": snapshot.revision,
+            });
+        }
+        Ok(None) => {}
+        Err(error) => {
+            eprintln!(
+                "cook: could not snapshot task source {task_url}: {}",
+                error.message
+            );
+            plan.metadata["cook_task_source"] = serde_json::json!({
+                "url": task_url,
+                "error": error.message,
+            });
+        }
     }
 }
 
