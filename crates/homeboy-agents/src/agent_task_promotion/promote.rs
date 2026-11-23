@@ -2124,8 +2124,18 @@ fn run_promotion_gates_inner(
         .chain(&options.gates.private_verify)
         .any(|command| command.contains("__HOMEBOY_COOK_BASE_SHA__"))
     {
+        // A candidate rebased onto a newer target tip diffs from its current
+        // merge base, so picked-up trunk commits are not candidate edits
+        // (#18861).
         let base = committed_candidate
-            .map(|candidate| candidate.base_sha.clone())
+            .map(|candidate| {
+                crate::agent_task_service::rebased_gate_base(
+                    worktree_path,
+                    &candidate.base_sha,
+                    &candidate.candidate_sha,
+                    options.base_ref.as_deref(),
+                )
+            })
             .unwrap_or_else(|| "unresolved-cook-base".to_string());
         for command in bound_options
             .gates
