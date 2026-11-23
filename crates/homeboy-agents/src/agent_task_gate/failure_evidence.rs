@@ -60,28 +60,36 @@ pub(crate) fn gate_failure_evidence(
     let missing_executable = gate_missing_executable(command, exit_code, stdout, stderr);
     let shell_rejection = gate_shell_rejection(exit_code, stderr);
     let target_unresolved = homeboy_gate_target_unresolved(stdout, stderr);
-    let setup_failure = homeboy_gate_setup_failure(exit_code, stdout, stderr);
+    // An unresolved target is a broken declaration; any other structured
+    // Homeboy setup error is the gate environment failing before a verdict.
+    let setup_failure = if target_unresolved {
+        None
+    } else {
+        homeboy_gate_setup_failure(exit_code, stdout, stderr)
+    };
     // Concrete failures outrank bare signature mentions, but not diagnostics.
     let environment_error = environment_error_line(stdout, stderr, !failed_tests.is_empty());
     let classification = match selection_problem {
-        _ if environment_error.is_some() || missing_executable.is_some() => {
+        _ if environment_error.is_some()
+            || missing_executable.is_some()
+            || setup_failure.is_some() =>
+        {
             AgentTaskGateFailureClassification::Environment
         }
         Some((_, FocusedCargoSelectionProblem::NoTests)) => {
             AgentTaskGateFailureClassification::ZeroTestsSelected
         }
-        None if missing_script.is_some()
-            || missing_executable.is_some()
-            || shell_rejection.is_some()
-            || target_unresolved
-            || setup_failure =>
-        {
+        None if missing_script.is_some() || shell_rejection.is_some() || target_unresolved => {
             AgentTaskGateFailureClassification::GateDeclaration
         }
         None => AgentTaskGateFailureClassification::CandidateCode,
     };
     let summary = if let Some(line) = environment_error {
         format!("gate environment failed: {line}")
+    } else if let Some(setup_error) = setup_failure.as_deref() {
+        format!(
+            "gate environment unavailable: Homeboy gate setup failed before a candidate verdict: {setup_error}"
+        )
     } else if let Some((selection, FocusedCargoSelectionProblem::NoTests)) = selection_problem {
         let filter = selection.filter.as_deref().unwrap_or_default();
         format!("invalid_focused_cargo_selection: filter {filter:?} selected no tests")
@@ -98,9 +106,6 @@ pub(crate) fn gate_failure_evidence(
             (None, None) if target_unresolved => format!(
                 "gate environment cannot run `{command}`: Homeboy could not resolve the gate's target before checking the candidate"
             ),
-            (None, None) if setup_failure => {
-                "Homeboy gate setup failed before a candidate verdict; inspect the captured failure digest".to_string()
-            }
             (None, None) if !failed_tests.is_empty() => format!(
                 "deterministic gate failed with exit code {exit_code}: {command}\n{}",
                 failed_tests_feedback(&failed_tests)
@@ -110,7 +115,9 @@ pub(crate) fn gate_failure_evidence(
             }
         }
     };
-    let agent_feedback = if environment_error.is_some() {
+    let agent_feedback = if setup_failure.is_some() {
+        "Homeboy reported an infrastructure/setup error (exit 2), not a candidate verdict. Inspect the captured failure digest and repair the gate environment before resuming verification. Do not rewrite candidate code based on this failure.".to_string()
+    } else if environment_error.is_some() {
         "Environment failure, not candidate-code feedback. Preserve the candidate and re-gate after repairing the environment, or adopt locally.".to_string()
     } else if selection_problem.is_some() {
         cargo_selection
@@ -141,8 +148,6 @@ pub(crate) fn gate_failure_evidence(
             (None, None) if target_unresolved => format!(
                 "The gate is invalid, not candidate-code feedback. `{command}` could not resolve its target in the gate environment before it checked the candidate (for example the component is registered only in operator config that isolated gate XDG hides, no extension provides the capability, or an extension manifest could not be read). Declare a gate that runs from the repository itself (such as its own test script), or give the component a portable homeboy.json with the needed extension, then rerun Cook. Do not change repository code to satisfy this gate."
             ),
-            (None, None) if setup_failure =>
-                "Homeboy reported an infrastructure/setup error (exit 2), not a candidate verdict. Inspect the captured failure digest and repair the gate environment before resuming verification. Do not rewrite candidate code based on this failure.".to_string(),
             (None, None) if !failed_tests.is_empty() => format!(
                 "A deterministic verification gate failed after the candidate patch was applied. Fix the code so `{command}` passes. These tests failed; use their messages and output as the primary failure evidence, then the captured stdout/stderr tails.\n{}",
                 failed_tests_feedback(&failed_tests)
@@ -430,20 +435,39 @@ pub(super) fn homeboy_gate_target_unresolved(stdout: &str, stderr: &str) -> bool
 /// Exit 2 alone is not portable evidence of infrastructure failure (for
 /// example, test runners use it too). Require Homeboy's structured error
 /// envelope so an ordinary tool failure remains candidate feedback.
-pub(super) fn homeboy_gate_setup_failure(exit_code: i32, stdout: &str, stderr: &str) -> bool {
-    exit_code == 2
-        && [stdout, stderr].into_iter().any(|stream| {
-            let Ok(result) = serde_json::from_str::<serde_json::Value>(stream.trim()) else {
-                return false;
-            };
-            result.get("success") == Some(&serde_json::Value::Bool(false))
-                && result
-                    .get("diagnostics")
-                    .or_else(|| result.get("error"))
-                    .and_then(|error| error.get("code"))
-                    .and_then(serde_json::Value::as_str)
-                    .is_some()
-        })
+///
+/// Returns the setup error itself (the envelope's message, else its summary,
+/// else its failure digest, else its code) so the gate failure names what
+/// broke instead of pointing at a digest the operator has to dig out.
+pub(super) fn homeboy_gate_setup_failure(
+    exit_code: i32,
+    stdout: &str,
+    stderr: &str,
+) -> Option<String> {
+    if exit_code != 2 {
+        return None;
+    }
+    [stdout, stderr].into_iter().find_map(|stream| {
+        let result = serde_json::from_str::<serde_json::Value>(stream.trim()).ok()?;
+        if result.get("success") != Some(&serde_json::Value::Bool(false)) {
+            return None;
+        }
+        let error = result.get("diagnostics").or_else(|| result.get("error"))?;
+        let code = error.get("code").and_then(serde_json::Value::as_str)?;
+        let text = |value: Option<&serde_json::Value>| {
+            value
+                .and_then(serde_json::Value::as_str)
+                .map(str::trim)
+                .filter(|text| !text.is_empty())
+                .map(str::to_string)
+        };
+        Some(
+            text(error.get("message"))
+                .or_else(|| text(result.get("summary")))
+                .or_else(|| text(error.pointer("/failure_digest/summary")))
+                .unwrap_or_else(|| code.to_string()),
+        )
+    })
 }
 
 /// Detects a gate program rejected by the POSIX sh interpreter itself.
@@ -522,9 +546,14 @@ pub(super) fn cargo_selection(
         }
     };
     // `cargo test -q` prints no per-test lines; its summaries still count
-    // what the filter selected.
+    // what the filter selected, and each harness announces its population
+    // before running it (which survives a harness that dies before its
+    // summary). A failing quiet run is a selection, never an empty one.
     let selected_count = match selected_ids.len() {
-        0 => test_result.map_or(0, |result| result.total as usize),
+        0 => test_result
+            .map(|result| result.total as usize)
+            .filter(|total| *total > 0)
+            .unwrap_or_else(|| cargo_harness_population(stdout, stderr)),
         count => count,
     };
     let recovery = cargo_selection_recovery(
@@ -738,6 +767,21 @@ pub(super) fn cargo_test_ids(stdout: &str, stderr: &str) -> Vec<String> {
     ids
 }
 
+/// Sum of libtest's `running N tests` announcements.
+pub(super) fn cargo_harness_population(stdout: &str, stderr: &str) -> usize {
+    stdout
+        .lines()
+        .chain(stderr.lines())
+        .filter_map(|line| {
+            let rest = line.trim().strip_prefix("running ")?;
+            let count = rest
+                .strip_suffix(" tests")
+                .or_else(|| rest.strip_suffix(" test"))?;
+            count.parse::<usize>().ok()
+        })
+        .sum()
+}
+
 pub(super) fn cargo_test_list_ids(stdout: &str, stderr: &str) -> Vec<String> {
     let mut ids = stdout
         .lines()
@@ -859,7 +903,10 @@ pub(super) fn is_cargo_test_subcommand(tokens: &[String]) -> bool {
 
 pub(super) fn cargo_test_summary(line: &str) -> Option<(u64, u64, u64)> {
     let line = line.trim();
-    let rest = line.strip_prefix("test result: ok. ")?;
+    // A failing run still reports how many tests the filter selected.
+    let rest = line
+        .strip_prefix("test result: ok. ")
+        .or_else(|| line.strip_prefix("test result: FAILED. "))?;
     let (passed, rest) = cargo_summary_count(rest, " passed; ")?;
     let (failed, rest) = cargo_summary_count(rest, " failed; ")?;
     let (_, rest) = cargo_summary_count(rest, " ignored; ")?;

@@ -35,6 +35,12 @@ pub fn preflight_gate_toolchains(
 }
 
 pub(crate) fn preflight_verify_gate_options(cwd: &Path, gates: &VerifyGateOptions) -> Result<()> {
+    // A focused Cargo filter that names no test in the checkout can never
+    // pass; refuse it here instead of after a full provider run.
+    super::cargo_selection_admission::reject_unmatched_focused_cargo_filters(
+        cwd,
+        gates.verify.iter().chain(&gates.private_verify),
+    )?;
     let inferred: Vec<_> = gates
         .verify
         .iter()

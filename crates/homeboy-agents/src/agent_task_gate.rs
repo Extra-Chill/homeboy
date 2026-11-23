@@ -739,9 +739,9 @@ pub struct AgentTaskGateReport {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub flaky: Option<AgentTaskGateFailureEvidence>,
     /// The first run's evidence when supervision stopped this gate (wall-clock
-    /// or no-progress limit) and Homeboy re-ran it once on the same candidate
-    /// under the same budgets. Recorded alongside the re-run's own result
-    /// (#18554).
+    /// or no-progress limit), or its environment failed before a verdict, and
+    /// Homeboy re-ran it once on the same candidate under the same budgets.
+    /// Recorded alongside the re-run's own result (#18554).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub supervision_regate: Option<AgentTaskGateFailureEvidence>,
 }
@@ -1580,6 +1580,18 @@ impl AgentTaskGateReport {
             )
     }
 
+    /// Whether the gate environment failed before the command reached a
+    /// verdict (a structured Homeboy setup error, a missing tool, disk or
+    /// toolchain exhaustion). Like a supervision stop, this is infrastructure:
+    /// it is re-gated once, and a repeat stops the Cook at
+    /// `gate_environment_unavailable` instead of blaming the candidate.
+    pub fn environment_unavailable(&self) -> bool {
+        self.status == AgentTaskGateStatus::Failed
+            && self.failure_evidence.as_ref().is_some_and(|evidence| {
+                evidence.classification == AgentTaskGateFailureClassification::Environment
+            })
+    }
+
     /// Classify a supervision stop as unavailable verification: the candidate
     /// stays unverified, not rejected, and the Cook stops at
     /// `gate_environment_unavailable` with a re-gate next step instead of
@@ -1783,6 +1795,8 @@ use rust_cache::*;
 mod environment_setup;
 pub(crate) use environment_setup::GateHydrationEnvironment;
 use environment_setup::*;
+
+mod cargo_selection_admission;
 
 mod preflight;
 pub use preflight::preflight_gate_toolchains;
