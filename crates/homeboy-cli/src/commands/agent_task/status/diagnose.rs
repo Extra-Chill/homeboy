@@ -1,7 +1,7 @@
 //! Diagnosis handler, actionable recovery guidance, and stable run/evidence refs.
 
 use super::*;
-use homeboy::agents::agent_tasks::gate::phases as gate_phase_spans;
+use homeboy::agents::agent_task_gate::phases as gate_phase_spans;
 
 // Optional observations must never hold recorded failure evidence hostage. A
 // timed-out worker owns only read-only inputs and cannot mutate the run.
@@ -57,7 +57,7 @@ pub(in crate::commands::agent_task) fn diagnose(args: DiagnoseArgs) -> CmdResult
     let record = durable_read.record;
     let aggregate = durable_read.aggregate;
     let runner_diagnostic_probe = agent_task_lifecycle::runner_diagnostic_probe_recorded(&record);
-    let admission = agent_task_service_direct::queued_admission(&record);
+    let admission = agent_task_service::queued_admission(&record);
     let queued_runner_ownership = admission
         .as_ref()
         .filter(|wait| !wait.live_driver && wait.liveness.is_reconcilable())
@@ -122,15 +122,15 @@ pub(in crate::commands::agent_task) fn diagnose(args: DiagnoseArgs) -> CmdResult
     if let Some(diagnostic) = build_skew.clone() {
         nested_reasons.insert(0, diagnostic);
     }
-    let gate_failure = agent_task_service_direct::recorded_promotion_report(&record.metadata)
+    let gate_failure = agent_task_service::recorded_promotion_report(&record.metadata)
         .ok()
         .flatten()
-        .and_then(|report| agent_task_service_direct::gate_failure_projection(&report));
+        .and_then(|report| agent_task_service::gate_failure_projection(&report));
     nested_reasons.extend(gate_failure.as_ref().map(gate_failure_diagnostic));
     let mut ranked_reasons = ranked_diagnostics(nested_reasons);
     let recovery_attempt = agent_task_lifecycle::AgentTaskLifecycleStore::from_environment()
         .ok()
-        .and_then(|store| agent_task_service_direct::recovery_step_projection(&store, &record));
+        .and_then(|store| agent_task_service::recovery_step_projection(&store, &record));
     // A failed regate may never have reached a gate. Its step job's failure
     // is newer evidence than the candidate's original gate output (#18657).
     if let Some(message) = recovery_attempt
@@ -282,9 +282,7 @@ pub(in crate::commands::agent_task) fn diagnose(args: DiagnoseArgs) -> CmdResult
     attach_gate_cleanup_warnings(&mut value, &record);
     super::super::candidate_location::attach_candidate_location(&mut value, &record);
     let mut gate_phases = Vec::new();
-    if let Ok(Some(promotion)) =
-        agent_task_service_direct::recorded_promotion_report(&record.metadata)
-    {
+    if let Ok(Some(promotion)) = agent_task_service::recorded_promotion_report(&record.metadata) {
         gate_phases = gate_phase_spans::recorded_gate_phases(&promotion);
         if !gate_phases.is_empty() {
             value["gate_phases"] = json!(gate_phases);
@@ -337,12 +335,11 @@ pub(in crate::commands::agent_task) fn diagnose(args: DiagnoseArgs) -> CmdResult
                     && !persisted_cook_failure_diagnostic(&record)
                         .is_some_and(|cause| cause.class == "runner.capacity_busy"));
             plannable
-                .then(|| agent_task_service_direct::plan_cook_recovery_recorded(run_id).ok())
+                .then(|| agent_task_service::plan_cook_recovery_recorded(run_id).ok())
                 .flatten()
         })
         .flatten();
-    let recovery_prefix =
-        agent_task_service_direct::cook_recovery_command_prefix_for_record(&record);
+    let recovery_prefix = agent_task_service::cook_recovery_command_prefix_for_record(&record);
     if gate_failure.is_some() {
         project_gate_failure(&mut value, gate_failure, run_id);
     } else if let Some(plan) = recovery_plan {
@@ -416,17 +413,17 @@ pub(in crate::commands::agent_task) fn diagnose(args: DiagnoseArgs) -> CmdResult
 
 /// Status and diagnose use the same retained-report projection and action table.
 pub(super) fn attach_gate_failure(value: &mut Value, record: &AgentTaskRunRecord) {
-    let failure = agent_task_service_direct::recorded_promotion_report(&record.metadata)
+    let failure = agent_task_service::recorded_promotion_report(&record.metadata)
         .ok()
         .flatten()
-        .and_then(|report| agent_task_service_direct::gate_failure_projection(&report));
+        .and_then(|report| agent_task_service::gate_failure_projection(&report));
     project_gate_failure(value, failure, &record.run_id);
 }
 
 pub(super) fn project_gate_failure(value: &mut Value, failure: Option<Value>, run: &str) {
     value["failure"] = failure.clone().unwrap_or(Value::Null);
     let Some(failure) = failure else { return };
-    let (command, description) = agent_task_service_direct::gate_failure_next_action(
+    let (command, description) = agent_task_service::gate_failure_next_action(
         failure["reason"].as_str().unwrap_or("gate_failed"),
         &quote_arg(run),
     );
@@ -480,15 +477,15 @@ pub(super) fn attach_cook_completion(value: &mut Value, record: &AgentTaskRunRec
         .metadata
         .get("cook_id")
         .and_then(Value::as_str)
-        .and_then(|cook_id| agent_task_service_direct::select_cook_candidate(cook_id).ok())
+        .and_then(|cook_id| agent_task_service::select_cook_candidate(cook_id).ok())
         .and_then(|selection| serde_json::to_value(selection).ok());
     let finalization_requested = recipe.finalization["no_finalize"] != true;
-    if let Some(completion) = agent_task_service_direct::cook_completion(
+    if let Some(completion) = agent_task_service::cook_completion(
         selected_candidate.as_ref(),
         finalization_requested,
         // `cook_completion` resolves this receipt from the selected candidate
         // whenever selection exists. This fallback only serves pre-index reports.
-        agent_task_service_direct::recorded_finalization_receipt(&record.metadata),
+        agent_task_service::recorded_finalization_receipt(&record.metadata),
         Some(&record.run_id),
     ) {
         let mut completion = serde_json::to_value(completion).expect("completion serializes");
@@ -1082,7 +1079,7 @@ pub(super) fn current_lifecycle_next_actions(
         return actions;
     };
     let Some(recovery) =
-        agent_task_service_direct::cook_failure_context(cook_id, Some(run_id), status.as_str())
+        agent_task_service::cook_failure_context(cook_id, Some(run_id), status.as_str())
     else {
         return actions;
     };
@@ -1202,7 +1199,7 @@ impl RetryReplayAction {
 pub(super) fn retry_replay_action(record: &AgentTaskRunRecord) -> RetryReplayAction {
     // Candidate readers may be observing an older substantive attempt. Retry
     // eligibility and the advertised action must describe the mutation target.
-    if let Ok(latest) = agent_task_service_direct::resolve_retry_run_id(&record.run_id) {
+    if let Ok(latest) = agent_task_service::resolve_retry_run_id(&record.run_id) {
         if latest != record.run_id {
             if let Ok(store) = agent_task_lifecycle::AgentTaskLifecycleStore::from_environment() {
                 if let Ok(latest_record) = store.read_record_bounded(&latest) {
@@ -1240,13 +1237,10 @@ pub(super) fn retry_replay_action(record: &AgentTaskRunRecord) -> RetryReplayAct
         // Cook-derived retry plan that may no longer carry its workspace proof.
         crate::commands::infra::route::validate_generic_lab_command_replay_workspace(&plan)
             .and_then(|()| {
-                agent_task_service_direct::retry_admission_with_preflight(
-                    &record.run_id,
-                    |_| Ok(()),
-                )
+                agent_task_service::retry_admission_with_preflight(&record.run_id, |_| Ok(()))
             })
     } else {
-        agent_task_service_direct::retry_admission(&record.run_id)
+        agent_task_service::retry_admission(&record.run_id)
     };
     if let Err(error) = admission {
         return RetryReplayAction::unavailable(

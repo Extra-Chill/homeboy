@@ -4,11 +4,11 @@
 use std::path::Path;
 use std::sync::Arc;
 
-use homeboy_agents::agent_tasks::gate::placement::{
+use homeboy_agents::agent_task_gate::placement::{
     LabGateAdmission, LabGateFreshness, LabGateJobState, LabGateReceipt, LabGateRequest,
     LabGateSubmittedJob, LabGateTransport, RunnerBuildSkew,
 };
-use homeboy_agents::agent_tasks::gate::GateSupervision;
+use homeboy_agents::agent_task_gate::GateSupervision;
 use homeboy_core::{Error, Result};
 
 struct NativeLabGateTransport;
@@ -109,7 +109,7 @@ fn finished_gate_job_receipt(
 ) -> Result<Option<LabGateReceipt>> {
     let text = |key: &str| job.submission.get(key).and_then(serde_json::Value::as_str);
     if text("schema")
-        != Some(homeboy_agents::agent_tasks::gate::placement::LAB_GATE_JOB_SUBMISSION_SCHEMA)
+        != Some(homeboy_agents::agent_task_gate::placement::LAB_GATE_JOB_SUBMISSION_SCHEMA)
         || job.runner_id != request.runner_id
     {
         return Ok(None);
@@ -142,7 +142,7 @@ fn finished_gate_job_receipt(
     // Sealing the declared closure is deterministic: it reproduces the
     // provenance the submitting controller sealed before submission.
     let (_, sealed_provenance) =
-        homeboy_agents::agent_tasks::gate::placement::seal_extension_resources(
+        homeboy_agents::agent_task_gate::placement::seal_extension_resources(
             &tmp_dir.join("adopted-resources"),
             &request.environment.extension_inputs,
         )?;
@@ -366,7 +366,7 @@ fn terminal_receipt_stream<'a>(result: &'a serde_json::Value, job_id: &str) -> R
         result.clone(),
     ) {
         return Err(
-            homeboy_agents::agent_tasks::gate::placement::gate_job_never_spawned(job_id, &failure),
+            homeboy_agents::agent_task_gate::placement::gate_job_never_spawned(job_id, &failure),
         );
     }
     result
@@ -605,7 +605,7 @@ fn observe_gate_admission(
 /// Stage admitted data once per digest, independently of candidate workspaces.
 pub(crate) fn materialize_gate_inputs(
     runner: &crate::Runner,
-    inputs: &[homeboy_agents::agent_tasks::gate::data_inputs::GateInput],
+    inputs: &[homeboy_agents::agent_task_gate::data_inputs::GateInput],
 ) -> Result<Option<(String, Vec<serde_json::Value>)>> {
     if inputs.is_empty() {
         return Ok(None);
@@ -618,7 +618,7 @@ pub(crate) fn materialize_gate_inputs(
             .ok_or_else(|| Error::invalid_argument("gate_input", "runner needs workspace_root"))?
             .trim_end_matches('/')
     );
-    let local_root = homeboy_agents::agent_tasks::gate::data_inputs::store_root()?;
+    let local_root = homeboy_agents::agent_task_gate::data_inputs::store_root()?;
     if runner.kind == crate::RunnerKind::Local {
         let mut evidence = Vec::new();
         for input in inputs {
@@ -782,7 +782,7 @@ fn execute_owned(
     std::fs::create_dir_all(&resource_root)
         .map_err(|error| Error::internal_io(error.to_string(), None))?;
     let (sealed, sealed_provenance) =
-        homeboy_agents::agent_tasks::gate::placement::seal_extension_resources(
+        homeboy_agents::agent_task_gate::placement::seal_extension_resources(
             &resource_root,
             &request.environment.extension_inputs,
         )
@@ -825,7 +825,7 @@ fn execute_owned(
         &candidate_root,
         crate::RunnerWorkspaceSyncMode::SnapshotGit,
         run_id,
-        homeboy_agents::agent_tasks::gate::component_lint_base(&request.label),
+        homeboy_agents::agent_task_gate::component_lint_base(&request.label),
     )?;
     let candidate = candidate_workspace.sync.clone();
     let binary = runner.settings.homeboy_path.as_deref().ok_or_else(|| {
@@ -890,14 +890,14 @@ fn execute_owned(
     options
         .env
         .extend(homeboy_core::lab_capacity::runner_job_claim_env(
-            &homeboy_agents::agent_tasks::gate::lab_admission_owner(&cwd.display().to_string()),
+            &homeboy_agents::agent_task_gate::lab_admission_owner(&cwd.display().to_string()),
             homeboy_core::lab_capacity::LabPriority::from_env_value(
                 std::env::var(homeboy_core::lab_capacity::LAB_PRIORITY_ENV)
                     .ok()
                     .as_deref(),
             ),
             Some(request.timeout_seconds),
-            homeboy_agents::agent_tasks::gate::lab_parent_job_id().as_deref(),
+            homeboy_agents::agent_task_gate::lab_parent_job_id().as_deref(),
         ));
     // Materialization evidence for the receipt, known before the job exists,
     // so a later controller adopting the finished job records the same (#18727).
@@ -914,7 +914,7 @@ fn execute_owned(
     // it to the request it ran, recorded with the submitted job (#18727).
     let submission = |evidence_run_id: Option<&str>| -> Result<serde_json::Value> {
         Ok(serde_json::json!({
-            "schema": homeboy_agents::agent_tasks::gate::placement::LAB_GATE_JOB_SUBMISSION_SCHEMA,
+            "schema": homeboy_agents::agent_task_gate::placement::LAB_GATE_JOB_SUBMISSION_SCHEMA,
             "request_sha256": request.identity()?,
             "candidate": request.candidate,
             "gate_index": request.index,
@@ -944,7 +944,7 @@ fn execute_owned(
                 if !request.preflight_only {
                     // Best effort: recovery can still read this job's start.
                     if let Ok(submission) = submission(None) {
-                        let _ = homeboy_agents::agent_tasks::gate::execution_start::job_submitted(
+                        let _ = homeboy_agents::agent_task_gate::execution_start::job_submitted(
                             &request.runner_id,
                             &job.id,
                             &submission,
@@ -973,7 +973,7 @@ fn execute_owned(
     // be recorded is withdrawn rather than left to start untracked.
     if !request.preflight_only {
         if let Err(error) = submission(output.mirror_run_id.as_deref()).and_then(|submission| {
-            homeboy_agents::agent_tasks::gate::execution_start::job_submitted(
+            homeboy_agents::agent_task_gate::execution_start::job_submitted(
                 &request.runner_id,
                 job_id,
                 &submission,
@@ -995,7 +995,7 @@ fn execute_owned(
         if let Some(policy) = supervision {
             if last_heartbeat.get().elapsed() >= policy.heartbeat_interval {
                 last_heartbeat.set(std::time::Instant::now());
-                let status = homeboy_agents::agent_tasks::gate::AgentTaskGateLiveStatus {
+                let status = homeboy_agents::agent_task_gate::AgentTaskGateLiveStatus {
                     visibility: request.visibility,
                     reveal_policy: request.reveal_policy,
                     elapsed_ms: started.elapsed().as_millis(),
@@ -1027,7 +1027,7 @@ fn execute_owned(
             }
             // A fence that cannot be written must not leave the admitted job
             // running unfenced: the stop cancels it.
-            homeboy_agents::agent_tasks::gate::execution_start::before_command_start()
+            homeboy_agents::agent_task_gate::execution_start::before_command_start()
                 .inspect_err(|_| stop_requested.set(true))
         })
     };
@@ -1149,7 +1149,7 @@ struct TerminalGateJob<'a> {
     evidence_run_id: Option<&'a str>,
     receipt_file: &'a str,
     sealed_provenance:
-        &'a [homeboy_agents::agent_tasks::gate::AgentTaskGateExtensionInputProvenance],
+        &'a [homeboy_agents::agent_task_gate::AgentTaskGateExtensionInputProvenance],
     tmp_dir: &'a Path,
     /// Materialization evidence known at submission; the runner's extension
     /// sources are added from the receipt.
@@ -1177,7 +1177,7 @@ fn settle_terminal_gate_job(
     })?;
     let stdout = terminal_receipt_stream(&result, job_id)?;
     let private =
-        request.visibility == homeboy_agents::agent_tasks::gate::AgentTaskGateVisibility::Private;
+        request.visibility == homeboy_agents::agent_task_gate::AgentTaskGateVisibility::Private;
     let stderr = result
         .get("stderr")
         .and_then(serde_json::Value::as_str)
@@ -1235,7 +1235,7 @@ fn settle_terminal_gate_job(
     }
     let mut receipt: LabGateReceipt = decode_gate_json("gate_receipt", &bytes, private)?;
     request.verify_receipt(&receipt)?;
-    if (receipt.report.status == homeboy_agents::agent_tasks::gate::AgentTaskGateStatus::Succeeded
+    if (receipt.report.status == homeboy_agents::agent_task_gate::AgentTaskGateStatus::Succeeded
         || receipt
             .readiness
             .as_ref()
@@ -1250,10 +1250,10 @@ fn settle_terminal_gate_job(
             "passing gate artifact conflicts with the authoritative terminal job outcome",
         ));
     }
-    if receipt.report.status != homeboy_agents::agent_tasks::gate::AgentTaskGateStatus::Unavailable
+    if receipt.report.status != homeboy_agents::agent_task_gate::AgentTaskGateStatus::Unavailable
         && !request.preflight_only
     {
-        homeboy_agents::agent_tasks::gate::placement::verify_extension_resource_closure(
+        homeboy_agents::agent_task_gate::placement::verify_extension_resource_closure(
             job.sealed_provenance,
             &receipt.report.environment.extension_inputs,
         )?;
@@ -1277,11 +1277,11 @@ fn settle_terminal_gate_job(
     let actual_sources = serde_json::to_value(&receipt.report.environment.extension_inputs)
         .map_err(|error| Error::internal_json(error.to_string(), None))?;
     let (_, revalidated_provenance) =
-        homeboy_agents::agent_tasks::gate::placement::seal_extension_resources(
+        homeboy_agents::agent_task_gate::placement::seal_extension_resources(
             &job.tmp_dir.join("revalidated-resources"),
             &request.environment.extension_inputs,
         )?;
-    homeboy_agents::agent_tasks::gate::placement::verify_extension_resource_closure(
+    homeboy_agents::agent_task_gate::placement::verify_extension_resource_closure(
         job.sealed_provenance,
         &revalidated_provenance,
     )
@@ -1385,7 +1385,7 @@ pub(crate) fn download_gate_receipt(mut download: impl FnMut() -> Result<()>) ->
 #[cfg(test)]
 #[test]
 fn receipt_download_recovers_the_real_receipt_after_a_retryable_failure() {
-    use homeboy_agents::agent_tasks::gate::*;
+    use homeboy_agents::agent_task_gate::*;
     let root = tempfile::tempdir().unwrap();
     let report = run_gate_command_with_supervision(
         root.path(),
@@ -1540,10 +1540,10 @@ fn private_input_file(root: &Path, name: &str, bytes: &[u8]) -> Result<std::path
 }
 
 pub fn register() {
-    homeboy_agents::agent_tasks::gate::placement::register_lab_gate_transport(Arc::new(
+    homeboy_agents::agent_task_gate::placement::register_lab_gate_transport(Arc::new(
         NativeLabGateTransport,
     ));
-    homeboy_agents::agent_tasks::gate::placement::register_runner_identity_scope(|| {
+    homeboy_agents::agent_task_gate::placement::register_runner_identity_scope(|| {
         Box::new(crate::connection::StagingIdentityScope::enter())
     });
 }
@@ -1840,7 +1840,7 @@ mod public_error_tests {
         assert_eq!(public.details["job_id"], "job-expired");
         assert_eq!(
             public.details["stage"],
-            homeboy_agents::agent_tasks::gate::placement::LAB_GATE_PRE_SPAWN_STAGE
+            homeboy_agents::agent_task_gate::placement::LAB_GATE_PRE_SPAWN_STAGE
         );
         assert_eq!(
             public.details["pre_spawn_failure"]["reason"],
@@ -1908,9 +1908,7 @@ mod public_error_tests {
             assert_eq!(public.details["stage"], "terminal_projection");
             assert!(!is_pre_handoff_configuration_error(&public));
             assert!(
-                homeboy_agents::agent_tasks::gate::placement::is_lab_gate_transport_failure(
-                    &public
-                ),
+                homeboy_agents::agent_task_gate::placement::is_lab_gate_transport_failure(&public),
                 "{public:?}"
             );
             assert!(public.message.contains("runner job `job-artifact`"));
@@ -1958,7 +1956,7 @@ mod public_error_tests {
         );
         assert_eq!(public.details["gate_disposition"], "unavailable");
         assert!(
-            homeboy_agents::agent_tasks::gate::placement::is_lab_gate_transport_failure(&public),
+            homeboy_agents::agent_task_gate::placement::is_lab_gate_transport_failure(&public),
             "{public:?}"
         );
 

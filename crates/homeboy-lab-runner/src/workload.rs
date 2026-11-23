@@ -1,9 +1,9 @@
 use homeboy_agents::agent_task_dispatch_service::ResolvedAgentTaskProviderPolicy;
+use homeboy_agents::agent_task_gate::VerifyGateOptions;
 use homeboy_agents::agent_task_scheduler::AgentTaskPlan;
 use homeboy_agents::agent_task_timeout::{
     effective_provider_max_timeout_ms, effective_provider_timeout_ms,
 };
-use homeboy_agents::agent_tasks::gate::VerifyGateOptions;
 use homeboy_core::error::{Error, Result};
 use homeboy_core::lab_contract::{
     lab_capability_is_pipeline_enforced, LabRunnerWorkload, LabRunnerWorkloadAgentTask,

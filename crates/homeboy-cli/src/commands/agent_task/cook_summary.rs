@@ -6,18 +6,18 @@
 //! `jq '.cook_summary.status'` reads every surface the same way.
 
 use homeboy::agents::agent_task_lifecycle::AgentTaskRunRecord;
-use homeboy::agents::agent_task_service as agent_task_service_direct;
+use homeboy::agents::agent_task_service;
 use homeboy_control_plane_contract::{CookSummary, COOK_SUMMARY_KEY};
 use serde_json::Value;
 
 /// The summary projected from a durable run record.
 pub(crate) fn of_record(record: &AgentTaskRunRecord) -> CookSummary {
-    agent_task_service_direct::cook_summary(record)
+    agent_task_service::cook_summary(record)
 }
 
 /// The summary of the run `run_id` names, when its record is readable.
 pub(crate) fn of_run(run_id: &str) -> Option<CookSummary> {
-    agent_task_service_direct::cook_summary_for_run(run_id)
+    agent_task_service::cook_summary_for_run(run_id)
 }
 
 /// The summary a surface reports when it has no durable record to project:

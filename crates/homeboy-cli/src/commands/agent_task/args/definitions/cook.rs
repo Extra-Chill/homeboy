@@ -9,13 +9,13 @@ use std::os::unix::fs::MetadataExt;
 
 use sha2::{Digest, Sha256};
 
-use homeboy::agents::agent_task_scheduler::AgentTaskCandidateCompletionPolicy;
-use homeboy::agents::agent_tasks::gate::{
+use homeboy::agents::agent_task_gate::{
     AgentTaskGateEnvironmentMode, AgentTaskGateEnvironmentPolicy, AgentTaskGateExecutionPolicy,
     AgentTaskGateExtensionInput, AgentTaskGateInputSource, AgentTaskGatePackageArtifactRequirement,
     AgentTaskGateRevealPolicy, AgentTaskGateToolchainRequirement, AgentTaskGateVisibility,
     VerifyGateOptions,
 };
+use homeboy::agents::agent_task_scheduler::AgentTaskCandidateCompletionPolicy;
 
 use super::super::super::super::agent_task_dispatch::DispatchArgs;
 use super::super::super::review;
@@ -225,8 +225,8 @@ impl CookOptions {
                     .collect(),
                 ..Default::default()
             };
-            let root = homeboy::agents::agent_tasks::gate::data_inputs::store_root()?;
-            homeboy::agents::agent_tasks::gate::data_inputs::admit(&mut policy, &root)?;
+            let root = homeboy::agents::agent_task_gate::data_inputs::store_root()?;
+            homeboy::agents::agent_task_gate::data_inputs::admit(&mut policy, &root)?;
             let values = policy
                 .data_inputs
                 .iter()
@@ -435,7 +435,7 @@ pub struct VerifyGateArgs {
     /// extension gate_host_tools mappings; secrets name required host variables.
     /// Missing inputs refuse admission without recording secret values.
     #[arg(long = "gate-requirements", value_name = "JSON", value_parser = parse_gate_requirements)]
-    pub gate_requirements: Option<homeboy::agents::agent_tasks::gate::AgentTaskGateRequirements>,
+    pub gate_requirements: Option<homeboy::agents::agent_task_gate::AgentTaskGateRequirements>,
     /// Extra environment variable for gate commands, as `NAME=VALUE`. Repeatable.
     #[arg(long = "gate-env", value_name = "NAME=VALUE", value_parser = parse_gate_environment)]
     pub gate_environment: Vec<(String, String)>,
@@ -463,7 +463,7 @@ pub struct VerifyGateArgs {
 
     /// Snapshot caller-local data for every gate, on local or Lab placement. Repeat for multiple files or directories (up to 1 GiB each); gates read the immutable snapshot through the declared env variable. Example: --gate-input '{"id":"capture","source":"/abs/site","env":"IMPORT_CAPTURE"}'. Preview validates and reports digest, size and env; recovery replays the recorded digest.
     #[arg(long = "gate-input", value_name = "JSON", value_parser = parse_gate_data_input)]
-    pub gate_inputs: Vec<homeboy::agents::agent_tasks::gate::data_inputs::GateInput>,
+    pub gate_inputs: Vec<homeboy::agents::agent_task_gate::data_inputs::GateInput>,
     /// Run gates with an isolated `$HOME` so gate side effects do not touch the
     /// operator's home directory (default true).
     #[arg(
@@ -554,8 +554,8 @@ impl VerifyGateArgs {
                 preserve: self.gate_environment_preserve.iter().cloned().collect(),
                 ..Default::default()
             };
-            let root = homeboy::agents::agent_tasks::gate::data_inputs::store_root()?;
-            homeboy::agents::agent_tasks::gate::data_inputs::admit(&mut policy, &root)?;
+            let root = homeboy::agents::agent_task_gate::data_inputs::store_root()?;
+            homeboy::agents::agent_task_gate::data_inputs::admit(&mut policy, &root)?;
             self.gate_inputs = policy.data_inputs;
         }
         if !self.input_sources.is_empty() {
@@ -783,9 +783,9 @@ impl From<VerifyGateArgs> for VerifyGateOptions {
                 _ => AgentTaskGateExecutionPolicy::OrderedFailFast,
             },
             baseline_policy: if args.baseline_policy == "strict" {
-                homeboy::agents::agent_tasks::gate::BaselinePolicy::Strict
+                homeboy::agents::agent_task_gate::BaselinePolicy::Strict
             } else {
-                homeboy::agents::agent_tasks::gate::BaselinePolicy::NewFailuresOnly
+                homeboy::agents::agent_task_gate::BaselinePolicy::NewFailuresOnly
             },
             gate_timeout_seconds,
             gate_heartbeat_interval_seconds: args.gate_heartbeat_interval_seconds,
@@ -863,7 +863,7 @@ fn parse_gate_toolchain_requirement(
 
 fn parse_gate_data_input(
     value: &str,
-) -> Result<homeboy::agents::agent_tasks::gate::data_inputs::GateInput, String> {
+) -> Result<homeboy::agents::agent_task_gate::data_inputs::GateInput, String> {
     serde_json::from_str(value).map_err(|error| format!("invalid gate input: {error}"))
 }
 
@@ -874,7 +874,7 @@ fn parse_gate_extension_input(value: &str) -> Result<AgentTaskGateExtensionInput
 
 fn parse_gate_requirements(
     value: &str,
-) -> Result<homeboy::agents::agent_tasks::gate::AgentTaskGateRequirements, String> {
+) -> Result<homeboy::agents::agent_task_gate::AgentTaskGateRequirements, String> {
     serde_json::from_str(value).map_err(|error| error.to_string())
 }
 
@@ -1171,9 +1171,9 @@ mod tests {
                 data_inputs: expected.gates.gate_inputs.clone(),
                 ..Default::default()
             };
-            homeboy::agents::agent_tasks::gate::data_inputs::admit(
+            homeboy::agents::agent_task_gate::data_inputs::admit(
                 &mut input_policy,
-                &homeboy::agents::agent_tasks::gate::data_inputs::store_root().unwrap(),
+                &homeboy::agents::agent_task_gate::data_inputs::store_root().unwrap(),
             )
             .unwrap();
             expected.gates.gate_inputs = input_policy.data_inputs;

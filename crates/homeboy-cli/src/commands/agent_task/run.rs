@@ -9,17 +9,15 @@ pub(super) use std::process::Command;
 pub(super) use std::sync::Arc;
 pub(super) use std::time::Duration;
 
-pub(super) use homeboy::agents::agent_task_service as agent_task_service_direct;
+pub(super) use homeboy::agents::agent_task_lifecycle;
+pub(super) use homeboy::agents::agent_task_provider::ExtensionProviderAgentTaskExecutor;
+pub(super) use homeboy::agents::agent_task_review_dossier::PrTitlePolicy;
+pub(super) use homeboy::agents::agent_task_schedule::{AgentTaskAggregate, AgentTaskPlan};
+pub(super) use homeboy::agents::agent_task_scheduler::SharedAgentTaskExecutor;
+pub(super) use homeboy::agents::agent_task_service;
 pub(super) use homeboy::agents::agent_task_service::cook_registered_component_by_id;
 pub(super) use homeboy::agents::agent_task_timeout::effective_provider_timeout_ms;
-pub(super) use homeboy::agents::agent_tasks::dispatch_service;
-pub(super) use homeboy::agents::agent_tasks::lifecycle as agent_task_lifecycle;
-pub(super) use homeboy::agents::agent_tasks::provider::ExtensionProviderAgentTaskExecutor;
-pub(super) use homeboy::agents::agent_tasks::review_dossier::PrTitlePolicy;
-pub(super) use homeboy::agents::agent_tasks::scheduler::{
-    AgentTaskAggregate, AgentTaskPlan, SharedAgentTaskExecutor,
-};
-pub(super) use homeboy::agents::agent_tasks::service as agent_task_service;
+pub(super) use homeboy::agents::{agent_task_dispatch_plan, agent_task_dispatch_service};
 pub(super) use homeboy::core::command_invocation::CommandInvocation;
 pub(super) use homeboy::core::engine::shell::quote_args;
 pub(super) use homeboy::core::Error;
@@ -383,7 +381,7 @@ pub(super) fn run_submitted_with_executor(
 }
 
 pub(super) fn validate_plan(args: ValidatePlanArgs) -> CmdResult<Value> {
-    let report = agent_task_service_direct::validate_plan_spec(&args.plan);
+    let report = agent_task_service::validate_plan_spec(&args.plan);
     let valid = report.valid;
     Ok((
         serde_json::to_value(report).unwrap_or(Value::Null),
@@ -491,12 +489,12 @@ pub(super) fn run_recover_with_executor(
 /// Cook planner (#15925). Store contention is bounded: it retries with
 /// backoff and then reports `observation_store.busy`.
 pub(super) fn retry(args: RetryArgs) -> CmdResult<Value> {
-    agent_task_service_direct::with_store_contention_backoff(
+    agent_task_service::with_store_contention_backoff(
         "agent-task retry",
         |outcome: &CmdResult<Value>| {
             outcome
                 .as_ref()
-                .is_err_and(agent_task_service_direct::is_store_contention)
+                .is_err_and(agent_task_service::is_store_contention)
         },
         || retry_cook_or_run(args.clone()),
     )
@@ -506,7 +504,7 @@ pub(super) fn retry_cook_or_run(mut args: RetryArgs) -> CmdResult<Value> {
     if !explicit_retry(&args) {
         // A plain `retry <cook-id> --run` performs the Cook's one recovery
         // step through `recover` (#15925).
-        if agent_task_service_direct::cook_recovery_delegation(&args.run_id).is_some() {
+        if agent_task_service::cook_recovery_delegation(&args.run_id).is_some() {
             return super::recover::recover(super::RecoverArgs {
                 id: args.run_id,
                 ..Default::default()
@@ -515,7 +513,7 @@ pub(super) fn retry_cook_or_run(mut args: RetryArgs) -> CmdResult<Value> {
     }
     // An explicit retry of a mission ID or a superseded attempt targets the
     // Cook's latest durable attempt rather than refusing the ID (#17933).
-    let latest = agent_task_service_direct::resolve_retry_run_id(&args.run_id)?;
+    let latest = agent_task_service::resolve_retry_run_id(&args.run_id)?;
     if latest != args.run_id {
         eprintln!(
             "Retrying latest attempt {latest} (resolved from {})",

@@ -7,7 +7,7 @@
 
 use std::path::{Path, PathBuf};
 
-use homeboy::agents::agent_tasks::lifecycle::AgentTaskRunRecord;
+use homeboy::agents::agent_task_lifecycle::AgentTaskRunRecord;
 use homeboy::core::engine::shell::quote_arg;
 use serde_json::{json, Value};
 

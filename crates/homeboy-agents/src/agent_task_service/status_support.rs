@@ -4,6 +4,7 @@ use std::fs;
 use std::io::Read;
 use std::path::{Path, PathBuf};
 
+use crate::agent_task::AgentTaskEvidenceRef;
 use crate::agent_task_executor_evidence::{
     RUNTIME_STDERR_EVIDENCE_KIND, RUNTIME_STDOUT_EVIDENCE_KIND,
 };
@@ -12,7 +13,6 @@ use crate::agent_task_provider::structured_error::{
     RUNTIME_STREAM_TAIL_BYTES,
 };
 use crate::agent_task_scheduler::{AgentTaskAggregate, AgentTaskPlan};
-use crate::agent_tasks::AgentTaskEvidenceRef;
 use homeboy_core::redaction::{self, RedactionPolicy};
 use homeboy_core::Result;
 

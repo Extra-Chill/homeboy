@@ -1,7 +1,7 @@
 //! Regression reads of portable real-run directories from #16322.
 use super::*;
 use homeboy::agents::agent_task_lifecycle::{AgentTaskLifecycleStore, AgentTaskRunRecord};
-use homeboy::agents::agent_tasks::AgentTaskAggregate;
+use homeboy::agents::agent_task_schedule::AgentTaskAggregate;
 use homeboy::agents::orchestration::{LifecycleStoreLookup, OrchestrationService};
 use homeboy_control_plane_contract::{ControlPlaneRunListRequest, RunId};
 use serde_json::json;

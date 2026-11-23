@@ -95,7 +95,7 @@ pub struct RunSnapshot {
     pub record: AgentTaskRunRecord,
     pub plan: Option<AgentTaskPlan>,
     /// The aggregate paired atomically with this record, never a JSON cache.
-    pub aggregate: Option<crate::agent_tasks::AgentTaskAggregate>,
+    pub aggregate: Option<crate::agent_task_schedule::AgentTaskAggregate>,
     /// The Cook mission fence read from the Cook index, never the record.
     pub cancellation_fence: Option<Value>,
 }
@@ -215,7 +215,7 @@ impl LifecycleStoreLookup {
     fn snapshot_from_pair(
         &self,
         record: AgentTaskRunRecord,
-        aggregate: Option<crate::agent_tasks::AgentTaskAggregate>,
+        aggregate: Option<crate::agent_task_schedule::AgentTaskAggregate>,
     ) -> Result<RunSnapshot, ControlPlaneError> {
         let plan = self.plan(&record.run_id)?;
         Ok(RunSnapshot {
@@ -1389,8 +1389,8 @@ fn decode_run_cursor(
 fn review_promotion_candidates(
     run_id: &str,
     request: &ControlPlaneRunReviewRequest,
-    aggregate: &crate::agent_tasks::AgentTaskAggregate,
-    review: &crate::agent_tasks::AgentTaskAggregateReport,
+    aggregate: &crate::agent_task_schedule::AgentTaskAggregate,
+    review: &crate::agent_task_aggregate::AgentTaskAggregateReport,
     record: &AgentTaskRunRecord,
     cook_contract: Option<&(String, Value)>,
 ) -> Vec<Value> {
@@ -1404,7 +1404,7 @@ fn review_promotion_candidates(
                 .find(|outcome| outcome.task_id == candidate.task_id)
                 .is_some_and(|outcome| {
                     outcome.status
-                        == crate::agent_tasks::AgentTaskOutcomeStatus::CandidateRecoverable
+                        == crate::agent_task::AgentTaskOutcomeStatus::CandidateRecoverable
                 })
         }))
         .flat_map(|candidate| {
@@ -1569,7 +1569,7 @@ impl OrchestrationService<LifecycleStoreLookup> {
         let resource = project_snapshot(&snapshot, false)?;
         let aggregate = durable_read.aggregate;
         let aggregate_review = aggregate.as_ref().map(|aggregate| {
-            crate::agent_tasks::AgentTaskAggregateReport::from(aggregate.outcomes.clone())
+            crate::agent_task_aggregate::AgentTaskAggregateReport::from(aggregate.outcomes.clone())
         });
         let cook_contract = review_cook_contract(&self.lookup.store, run_id)?;
         let promotion_candidates = aggregate
@@ -3054,16 +3054,18 @@ fn review_cook_contract(
     Ok(Some((base, recipe.gate_policy)))
 }
 
-fn review_failure_reasons(aggregate: &crate::agent_tasks::AgentTaskAggregate) -> Vec<Value> {
+fn review_failure_reasons(
+    aggregate: &crate::agent_task_schedule::AgentTaskAggregate,
+) -> Vec<Value> {
     let mut diagnostics = Vec::new();
     for outcome in aggregate.outcomes.iter().filter(|outcome| {
         matches!(
             outcome.status,
-            crate::agent_tasks::AgentTaskOutcomeStatus::Failed
-                | crate::agent_tasks::AgentTaskOutcomeStatus::ProviderError
-                | crate::agent_tasks::AgentTaskOutcomeStatus::Timeout
-                | crate::agent_tasks::AgentTaskOutcomeStatus::UnableToRemediate
-                | crate::agent_tasks::AgentTaskOutcomeStatus::Cancelled
+            crate::agent_task::AgentTaskOutcomeStatus::Failed
+                | crate::agent_task::AgentTaskOutcomeStatus::ProviderError
+                | crate::agent_task::AgentTaskOutcomeStatus::Timeout
+                | crate::agent_task::AgentTaskOutcomeStatus::UnableToRemediate
+                | crate::agent_task::AgentTaskOutcomeStatus::Cancelled
         )
     }) {
         for diagnostic in &outcome.diagnostics {
@@ -3143,8 +3145,8 @@ fn collect_nested_diagnostics(value: &Value, task_id: &str, diagnostics: &mut Ve
 }
 
 fn review_execution_states(
-    aggregate: Option<&crate::agent_tasks::AgentTaskAggregate>,
-    review: Option<&crate::agent_tasks::AgentTaskAggregateReport>,
+    aggregate: Option<&crate::agent_task_schedule::AgentTaskAggregate>,
+    review: Option<&crate::agent_task_aggregate::AgentTaskAggregateReport>,
     canonical_candidate: &Value,
     delivery: Option<&CookDelivery>,
     resource: &ControlPlaneRun,
@@ -3159,24 +3161,24 @@ fn review_execution_states(
                 .iter()
                 .map(|task| {
                     let reason_code = if task.status
-                        == crate::agent_tasks::AgentTaskOutcomeStatus::NoOp
+                        == crate::agent_task::AgentTaskOutcomeStatus::NoOp
                     {
                         "no_changes_produced"
                     } else {
                         match task.decision {
-                            crate::agent_tasks::AgentTaskReconciliationDecision::NoOp => {
+                            crate::agent_task_aggregate::AgentTaskReconciliationDecision::NoOp => {
                                 "no_changes_produced"
                             }
-                            crate::agent_tasks::AgentTaskReconciliationDecision::ApplyCandidate => {
+                            crate::agent_task_aggregate::AgentTaskReconciliationDecision::ApplyCandidate => {
                                 candidate_state
                             }
-                            crate::agent_tasks::AgentTaskReconciliationDecision::RetryCandidate => {
+                            crate::agent_task_aggregate::AgentTaskReconciliationDecision::RetryCandidate => {
                                 "provider_retry_required"
                             }
-                            crate::agent_tasks::AgentTaskReconciliationDecision::IssueReportCandidate => {
+                            crate::agent_task_aggregate::AgentTaskReconciliationDecision::IssueReportCandidate => {
                                 "issue_report_required"
                             }
-                            crate::agent_tasks::AgentTaskReconciliationDecision::ReviewCandidate => {
+                            crate::agent_task_aggregate::AgentTaskReconciliationDecision::ReviewCandidate => {
                                 "review_required"
                             }
                         }
@@ -3227,7 +3229,7 @@ fn review_execution_states(
     serde_json::json!({
         "schema": "homeboy/agent-task-execution-states/v1",
         "provider": aggregate.map(|aggregate| aggregate.outcomes.iter().map(|outcome| {
-            let failed = matches!(outcome.status, crate::agent_tasks::AgentTaskOutcomeStatus::Failed | crate::agent_tasks::AgentTaskOutcomeStatus::ProviderError | crate::agent_tasks::AgentTaskOutcomeStatus::Timeout | crate::agent_tasks::AgentTaskOutcomeStatus::UnableToRemediate | crate::agent_tasks::AgentTaskOutcomeStatus::Cancelled);
+            let failed = matches!(outcome.status, crate::agent_task::AgentTaskOutcomeStatus::Failed | crate::agent_task::AgentTaskOutcomeStatus::ProviderError | crate::agent_task::AgentTaskOutcomeStatus::Timeout | crate::agent_task::AgentTaskOutcomeStatus::UnableToRemediate | crate::agent_task::AgentTaskOutcomeStatus::Cancelled);
             serde_json::json!({ "task_id": outcome.task_id, "state": if failed { "failed" } else { "succeeded" }, "outcome_status": outcome.status, "failure_classification": outcome.failure_classification })
         }).collect::<Vec<_>>()).unwrap_or_default(),
         "candidate": { "state": candidate_state, "tasks": candidate_tasks },
@@ -3256,7 +3258,7 @@ fn review_execution_states(
 
 fn review_canonical_candidate(
     delivery: Option<&CookDelivery>,
-    review: Option<&crate::agent_tasks::AgentTaskAggregateReport>,
+    review: Option<&crate::agent_task_aggregate::AgentTaskAggregateReport>,
     resource: &ControlPlaneRun,
 ) -> Value {
     let candidate = delivery.and_then(|delivery| delivery.candidate.as_ref());
@@ -3286,7 +3288,7 @@ fn review_canonical_candidate(
             && review
                 .tasks
                 .iter()
-                .all(|task| task.status == crate::agent_tasks::AgentTaskOutcomeStatus::NoOp)
+                .all(|task| task.status == crate::agent_task::AgentTaskOutcomeStatus::NoOp)
     }) {
         "no_changes_produced"
     } else {
@@ -3318,7 +3320,7 @@ fn promotion_label(status: AgentTaskPromotionStatus) -> String {
 
 fn review_next_actions(
     record: &AgentTaskRunRecord,
-    review: Option<&crate::agent_tasks::AgentTaskAggregateReport>,
+    review: Option<&crate::agent_task_aggregate::AgentTaskAggregateReport>,
     has_target: bool,
     recovery: Option<&ControlPlaneRecovery>,
 ) -> Vec<String> {
@@ -3788,7 +3790,7 @@ impl<L: EventLookup> OrchestrationService<L> {
 /// Project candidate evidence from the same durable record and aggregate used by status.
 pub fn canonical_candidate_from_durable_record(
     record: &AgentTaskRunRecord,
-    aggregate: Option<&crate::agent_tasks::AgentTaskAggregate>,
+    aggregate: Option<&crate::agent_task_schedule::AgentTaskAggregate>,
 ) -> homeboy_core::Result<Value> {
     let snapshot = RunSnapshot {
         record: record.clone(),
@@ -3800,7 +3802,7 @@ pub fn canonical_candidate_from_durable_record(
         .map_err(|error| homeboy_core::Error::internal_unexpected(error.message))?;
     let delivery = CookDelivery::from_run_metadata(&record.metadata);
     let review = aggregate.map(|aggregate| {
-        crate::agent_tasks::AgentTaskAggregateReport::from(aggregate.outcomes.clone())
+        crate::agent_task_aggregate::AgentTaskAggregateReport::from(aggregate.outcomes.clone())
     });
     Ok(review_canonical_candidate(
         delivery.as_ref(),
@@ -5149,9 +5151,9 @@ fn cancellation_blocker(metadata: &Value) -> Option<ControlPlaneBlocker> {
 /// Preserve the first non-success outcome's own classification and first
 /// diagnostic. No second reason is stored: this fills the shared blocker.
 fn recorded_failure_blocker(
-    aggregate: &crate::agent_tasks::AgentTaskAggregate,
+    aggregate: &crate::agent_task_schedule::AgentTaskAggregate,
 ) -> Option<ControlPlaneBlocker> {
-    use crate::agent_tasks::{
+    use crate::agent_task::{
         AgentTaskFailureClassification as Class, AgentTaskOutcomeStatus as Status,
     };
     let outcome = aggregate
@@ -8572,26 +8574,27 @@ mod tests {
 
     #[test]
     fn review_failure_diagnostics_are_redacted_bounded_and_failure_only() {
-        let mut aggregate: crate::agent_tasks::AgentTaskAggregate = serde_json::from_value(json!({
-            "schema": "homeboy/agent-task-aggregate/v1",
-            "plan_id": "plan",
-            "status": "failed",
-            "totals": { "skipped": 0 }
-        }))
-        .expect("aggregate");
+        let mut aggregate: crate::agent_task_schedule::AgentTaskAggregate =
+            serde_json::from_value(json!({
+                "schema": "homeboy/agent-task-aggregate/v1",
+                "plan_id": "plan",
+                "status": "failed",
+                "totals": { "skipped": 0 }
+            }))
+            .expect("aggregate");
         aggregate.outcomes = vec![
-            crate::agent_tasks::AgentTaskOutcome {
+            crate::agent_task::AgentTaskOutcome {
                 task_id: "failed".to_string(),
-                status: crate::agent_tasks::AgentTaskOutcomeStatus::Failed,
+                status: crate::agent_task::AgentTaskOutcomeStatus::Failed,
                 outputs: json!({ "diagnostics": [{
                     "class": "provider.error",
                     "message": format!("token=secret {}", "x".repeat(1_000))
                 }] }),
                 ..Default::default()
             },
-            crate::agent_tasks::AgentTaskOutcome {
+            crate::agent_task::AgentTaskOutcome {
                 task_id: "success".to_string(),
-                status: crate::agent_tasks::AgentTaskOutcomeStatus::Succeeded,
+                status: crate::agent_task::AgentTaskOutcomeStatus::Succeeded,
                 diagnostics: vec![serde_json::from_value(json!({
                     "class": "provider.success",
                     "message": "successful wrapper diagnostic"

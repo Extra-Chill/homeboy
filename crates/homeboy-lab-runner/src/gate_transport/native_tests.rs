@@ -1,7 +1,7 @@
 //! Real controller/receiver execution. The native verifier provisions an owned
 //! SSH daemon and candidate Homeboy runner before invoking this test explicitly.
 use super::*;
-use homeboy_agents::agent_tasks::gate::*;
+use homeboy_agents::agent_task_gate::*;
 use std::fs;
 use std::process::Command;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
@@ -69,9 +69,9 @@ fn gate_input_transfer_reuses_recorded_digest() {
             .unwrap()],
             ..Default::default()
         };
-        homeboy_agents::agent_tasks::gate::data_inputs::admit(
+        homeboy_agents::agent_task_gate::data_inputs::admit(
             &mut policy,
-            &homeboy_agents::agent_tasks::gate::data_inputs::store_root().unwrap(),
+            &homeboy_agents::agent_task_gate::data_inputs::store_root().unwrap(),
         )
         .unwrap();
         let (_, first) = materialize_gate_inputs(&runner, &policy.data_inputs)

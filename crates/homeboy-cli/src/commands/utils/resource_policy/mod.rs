@@ -2723,7 +2723,7 @@ mod tests {
     #[test]
     fn lab_gate_runner_hosted_exec_does_not_fail_non_interactive_preflight() {
         homeboy_core::test_support::with_isolated_home(|_| {
-            use crate::agents::agent_tasks::gate::{placement, AgentTaskGateEnvironmentPolicy};
+            use crate::agents::agent_task_gate::{placement, AgentTaskGateEnvironmentPolicy};
             let _hosted = EnvVarGuard::remove(crate::runner::RUNNER_HOSTED_EXEC_ENV);
             let _ci = EnvVarGuard::remove("GITHUB_ACTIONS");
             let temp = tempfile::tempdir().unwrap();
@@ -2786,7 +2786,7 @@ mod tests {
             let receipt = placement::execute_with_context(request, temp.path(), &context).unwrap();
             assert_eq!(
                 receipt.report.status,
-                crate::agents::agent_tasks::gate::AgentTaskGateStatus::Succeeded
+                crate::agents::agent_task_gate::AgentTaskGateStatus::Succeeded
             );
             assert_eq!(receipt.report.stdout, "1");
             // Evaluate the hot-machine policy with the marker actually emitted

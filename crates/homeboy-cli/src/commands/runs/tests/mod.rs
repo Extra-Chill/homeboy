@@ -2325,8 +2325,8 @@ fn bench_history_orders_and_filters_by_scenario() {
 #[test]
 fn runs_show_cook_id_follows_latest_attempt_not_admission_pass() {
     with_isolated_home(|_| {
-        use homeboy::agents::agent_tasks::lifecycle as agent_task_lifecycle;
-        use homeboy::agents::agent_tasks::scheduler::AgentTaskPlan;
+        use homeboy::agents::agent_task_lifecycle;
+        use homeboy::agents::agent_task_schedule::AgentTaskPlan;
 
         let cook_id = "agent-task-cook-watch";
         let lifecycle =
@@ -2376,8 +2376,8 @@ fn runs_show_cook_id_follows_latest_attempt_not_admission_pass() {
 #[test]
 fn cook_row_mirrors_latest_attempt_through_recovery() {
     with_isolated_home(|_| {
-        use homeboy::agents::agent_tasks::lifecycle as agent_task_lifecycle;
-        use homeboy::agents::agent_tasks::scheduler::AgentTaskPlan;
+        use homeboy::agents::agent_task_lifecycle;
+        use homeboy::agents::agent_task_schedule::AgentTaskPlan;
 
         let cook_id = "agent-task-cook-row";
         let lifecycle =
@@ -2455,8 +2455,8 @@ fn cook_row_mirrors_latest_attempt_through_recovery() {
 #[test]
 fn runs_list_groups_cook_sub_runs_under_the_cook() {
     with_isolated_home(|_| {
-        use homeboy::agents::agent_tasks::lifecycle as agent_task_lifecycle;
-        use homeboy::agents::agent_tasks::scheduler::AgentTaskPlan;
+        use homeboy::agents::agent_task_lifecycle;
+        use homeboy::agents::agent_task_schedule::AgentTaskPlan;
 
         let cook_id = "agent-task-cook-list";
         let lifecycle =

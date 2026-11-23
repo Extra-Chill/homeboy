@@ -38,18 +38,18 @@ fn cook_fixture(
     run_id: &str,
     terminalize: impl FnOnce(
         &homeboy::agents::agent_task_lifecycle::AgentTaskLifecycleStore,
-        &homeboy::agents::agent_tasks::scheduler::AgentTaskPlan,
+        &homeboy::agents::agent_task_schedule::AgentTaskPlan,
     ),
 ) -> (
     HermeticTestContext,
     homeboy::agents::agent_task_lifecycle::AgentTaskLifecycleStore,
 ) {
     use homeboy::agents::agent_task_lifecycle::AgentTaskLifecycleStore;
+    use homeboy::agents::agent_task_schedule::AgentTaskPlan;
     use homeboy::agents::agent_task_service::{
         CookFinalization, CookIdentity, CookProviderTransport, CookRecipeStore, CookRequest,
         CookRetryPolicy, CookWorkspace,
     };
-    use homeboy::agents::agent_tasks::scheduler::AgentTaskPlan;
 
     let context = HermeticTestContext::new();
     let plan = AgentTaskPlan::new(

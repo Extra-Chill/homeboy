@@ -1,8 +1,6 @@
 use clap::Args;
 
-use homeboy::agents::agent_tasks::dispatch_service::{
-    AgentTaskDispatchCommand, DispatchCoreInputs,
-};
+use homeboy::agents::agent_task_dispatch_service::{AgentTaskDispatchCommand, DispatchCoreInputs};
 
 /// Provider dispatch inputs: how the agent task is provisioned and how many
 /// times it may run. Controls the task prompts, provider/client context, and
@@ -225,14 +223,13 @@ mod tests {
     use super::*;
     use crate::test_support::with_isolated_home;
     use homeboy::agents::agent_task::AgentTaskRequest;
+    use homeboy::agents::agent_task::{AgentTaskOutcome, AgentTaskOutcomeStatus};
+    use homeboy::agents::agent_task_dispatch_service;
     use homeboy::agents::agent_task_dispatch_service::ResolvedAgentTaskProviderPolicy;
     use homeboy::agents::agent_task_prompts;
-    use homeboy::agents::agent_tasks::dispatch_service;
-    use homeboy::agents::agent_tasks::scheduler::AgentTaskPlan;
-    use homeboy::agents::agent_tasks::scheduler::{
-        AgentTaskExecutionContext, AgentTaskExecutorAdapter,
-    };
-    use homeboy::agents::agent_tasks::{AgentTaskOutcome, AgentTaskOutcomeStatus};
+    use homeboy::agents::agent_task_schedule::AgentTaskExecutionContext;
+    use homeboy::agents::agent_task_schedule::AgentTaskPlan;
+    use homeboy::agents::agent_task_scheduler::AgentTaskExecutorAdapter;
 
     use std::sync::Arc;
 
@@ -241,7 +238,7 @@ mod tests {
         with_isolated_home(|_| {
             let workspace = tempfile::tempdir().expect("workspace");
 
-            let (value, exit_code) = dispatch_service::run_dispatch_command(
+            let (value, exit_code) = agent_task_dispatch_service::run_dispatch_command(
                 dispatch_args(DispatchArgOverrides {
                     prompt: Some("Queue this minion.".to_string()),
                     cwd: Some(workspace.path().display().to_string()),
@@ -258,7 +255,10 @@ mod tests {
             .expect("dispatch queued");
 
             assert_eq!(exit_code, 0);
-            assert_eq!(value["schema"], dispatch_service::DISPATCH_RESULT_SCHEMA);
+            assert_eq!(
+                value["schema"],
+                agent_task_dispatch_service::DISPATCH_RESULT_SCHEMA
+            );
             assert_eq!(value["run_id"], "dispatch-queued");
             assert_eq!(value["queued"], true);
             assert_eq!(value["state"], "queued");
@@ -275,7 +275,7 @@ mod tests {
             agent_task_prompts::save_prompt("homeboy-7388", "Cook from stored prompt.")
                 .expect("save prompt");
 
-            let (value, exit_code) = dispatch_service::run_dispatch_command(
+            let (value, exit_code) = agent_task_dispatch_service::run_dispatch_command(
                 dispatch_args(DispatchArgOverrides {
                     prompt: Some("@prompt:homeboy-7388".to_string()),
                     run_id: Some("dispatch-stored-prompt".to_string()),
@@ -309,7 +309,7 @@ mod tests {
 
     #[test]
     fn dispatch_request_uses_declared_default_backend_when_backend_is_absent() {
-        let request = dispatch_service::resolve_dispatch_request_with_default(
+        let request = agent_task_dispatch_service::resolve_dispatch_request_with_default(
             DispatchArgs {
                 prompt: Some("run with default".to_string()),
                 prompt_is_literal: false,
@@ -360,10 +360,11 @@ mod tests {
             liveness_timeout_ms: None,
         });
 
-        let request = dispatch_service::resolve_dispatch_request_with_default(args.into(), || {
-            Some("runner-backend".to_string())
-        })
-        .expect("submitted policy request");
+        let request =
+            agent_task_dispatch_service::resolve_dispatch_request_with_default(args.into(), || {
+                Some("runner-backend".to_string())
+            })
+            .expect("submitted policy request");
 
         assert_eq!(request.backend, "controller-backend");
         assert_eq!(request.selector.as_deref(), Some("controller-selector"));

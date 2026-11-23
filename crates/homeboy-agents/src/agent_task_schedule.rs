@@ -905,7 +905,7 @@ mod managed_service_plan_tests {
 }
 
 pub(crate) fn for_execution_timing(
-    execution: &crate::agent_tasks::AgentTaskExecutionContext,
+    execution: &crate::agent_task_schedule::AgentTaskExecutionContext,
 ) -> Option<homeboy_core::observation::phase_timing::Scope> {
     let run_id = execution.run_id.as_deref()?;
     let store = execution

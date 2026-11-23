@@ -35,19 +35,18 @@ use serde_json::{json, Value};
 use std::collections::{HashMap, HashSet};
 use std::time::{Duration, Instant};
 
+use homeboy::agents::agent_task::{
+    AgentTaskEvidenceRef, AgentTaskFailureClassification, AgentTaskOutcomeStatus,
+};
+use homeboy::agents::agent_task_lifecycle::{self as agent_task_lifecycle, AgentTaskRunRecord};
 use homeboy::agents::agent_task_lifecycle::{
     resolve_cook_reader_target_in_store, AgentTaskCookReaderTarget,
 };
 use homeboy::agents::agent_task_provider::structured_error::normalized_structured_error;
-use homeboy::agents::agent_task_service as agent_task_service_direct;
+use homeboy::agents::agent_task_schedule::{AgentTaskAggregate, AgentTaskPlan};
+use homeboy::agents::agent_task_service;
 use homeboy::agents::agent_task_service::CookRecoveryStep;
 use homeboy::agents::agent_task_service::{CookDelivery, CookDeliveryBlockerCode};
-use homeboy::agents::agent_tasks::lifecycle::{self as agent_task_lifecycle, AgentTaskRunRecord};
-use homeboy::agents::agent_tasks::scheduler::{AgentTaskAggregate, AgentTaskPlan};
-use homeboy::agents::agent_tasks::service as agent_task_service;
-use homeboy::agents::agent_tasks::{
-    AgentTaskEvidenceRef, AgentTaskFailureClassification, AgentTaskOutcomeStatus,
-};
 use homeboy::core::engine::shell::quote_arg;
 use homeboy::core::error::{ActionSafety, ExecutableAction};
 use homeboy::core::output::{budget_json_values, OutputBudget};
@@ -72,8 +71,7 @@ use crate::commands::utils::watch::{
 const COMPACT_REF_LIMIT: usize = 12;
 
 fn attach_gate_cleanup_warnings(value: &mut Value, record: &AgentTaskRunRecord) {
-    let Ok(Some(promotion)) =
-        agent_task_service_direct::recorded_promotion_report(&record.metadata)
+    let Ok(Some(promotion)) = agent_task_service::recorded_promotion_report(&record.metadata)
     else {
         return;
     };
@@ -146,7 +144,7 @@ fn status_once(args: StatusArgs) -> CmdResult<Value> {
     value["cook_feedback"] = store.status_value(&cook_id)?;
     // Per-attempt wall time from recorded spans and gate reports (#17893).
     // An unreadable timeline is an absent observation, never a status error.
-    if let Ok(attempts) = agent_task_service_direct::cook_attempt_timeline(&cook_id) {
+    if let Ok(attempts) = agent_task_service::cook_attempt_timeline(&cook_id) {
         if !attempts.is_empty() {
             value["attempts"] = json!(attempts);
         }
@@ -180,7 +178,7 @@ fn status_once(args: StatusArgs) -> CmdResult<Value> {
 
 fn status_without_feedback(args: StatusArgs) -> CmdResult<Value> {
     if !args.exact {
-        if let Some(ci) = agent_task_service_direct::cook_ci_status(&args.run_id)? {
+        if let Some(ci) = agent_task_service::cook_ci_status(&args.run_id)? {
             return Ok((ci, 0));
         }
     }
@@ -189,9 +187,9 @@ fn status_without_feedback(args: StatusArgs) -> CmdResult<Value> {
     }
     // Status follows continuation authority, not promotion's candidate selection.
     // Exact attempts and non-Cook runs retain their existing read behavior.
-    let target = if !args.exact && agent_task_service_direct::recipe_exists(&args.run_id)? {
+    let target = if !args.exact && agent_task_service::recipe_exists(&args.run_id)? {
         AgentTaskCookReaderTarget {
-            run_id: agent_task_service_direct::resolve_cook_continuation_run_id(&args.run_id)?,
+            run_id: agent_task_service::resolve_cook_continuation_run_id(&args.run_id)?,
             selection: None,
         }
     } else {
@@ -307,7 +305,7 @@ fn status_without_feedback(args: StatusArgs) -> CmdResult<Value> {
         value["served_models"] = json!(record.served_models);
         attach_gate_cleanup_warnings(&mut value, outcome);
         attach_lab_snapshot_failure_projection(&mut value, &record);
-        let admission = agent_task_service_direct::queued_admission(&record);
+        let admission = agent_task_service::queued_admission(&record);
         attach_lab_admission_wait(&mut value, admission.as_ref());
         if let Some(wait) = admission
             .as_ref()
@@ -388,7 +386,7 @@ fn attach_recovery_step(value: &mut Value, record: &AgentTaskRunRecord) {
     let Ok(store) = agent_task_lifecycle::AgentTaskLifecycleStore::from_environment() else {
         return;
     };
-    if let Some(step) = agent_task_service_direct::recovery_step_projection(&store, record) {
+    if let Some(step) = agent_task_service::recovery_step_projection(&store, record) {
         if step["state"] == "failed" {
             value["blocker"] = step["failure"].clone();
             value["failure"] = step["failure"].clone();
@@ -426,7 +424,7 @@ fn attach_promotion_replay(value: &mut Value, run_id: &str, requested_id: &str) 
     {
         return;
     }
-    let guidance = agent_task_service_direct::promotion_replay_guidance(requested_id);
+    let guidance = agent_task_service::promotion_replay_guidance(requested_id);
     value["promotion_replay"] = guidance;
 }
 
@@ -538,9 +536,9 @@ fn compact_cook_candidate_projection(run_id: &str) -> Value {
 /// Status is a read-only diagnostic. A recipe-only Cook is recoverable through
 /// its exact attempt id, but only `agent-task recover` may materialize that attempt.
 fn recipe_only_status(run_or_cook_id: &str, exact: bool) -> homeboy::core::Result<Option<Value>> {
-    let recipe = match agent_task_service_direct::load_recipe(run_or_cook_id) {
+    let recipe = match agent_task_service::load_recipe(run_or_cook_id) {
         Ok(recipe) => recipe,
-        Err(_) => match agent_task_service_direct::load_recipe_for_attempt(run_or_cook_id)? {
+        Err(_) => match agent_task_service::load_recipe_for_attempt(run_or_cook_id)? {
             Some(recipe) => recipe,
             None => return Ok(None),
         },
@@ -564,14 +562,12 @@ fn recipe_only_status(run_or_cook_id: &str, exact: bool) -> homeboy::core::Resul
         return Ok(None);
     }
     // `recover` continues the exact attempt for this state (#15925).
-    let recover_command = agent_task_service_direct::cook_recovery_command(
-        &attempt.run_id,
-        &["recover", &attempt.run_id],
-    );
+    let recover_command =
+        agent_task_service::cook_recovery_command(&attempt.run_id, &["recover", &attempt.run_id]);
     // A recipe no controller has driven for longer than the heartbeat window
     // is an abandoned admission, not a Cook waiting to be resumed: its rows
     // are reconciliation work. Resuming it stays an explicit choice.
-    let guidance = if agent_task_service_direct::recipe_only_cook_is_abandoned(&recipe.cook_id)? {
+    let guidance = if agent_task_service::recipe_only_cook_is_abandoned(&recipe.cook_id)? {
         json!({
             "action": "reconcile",
             "command": "homeboy agent-task reconcile --all",
@@ -629,9 +625,9 @@ const OPERATOR_HEAVY_COLLECTIONS: &[&str] =
 
 pub(crate) fn list_runs(
     filter: agent_task_service::AgentTaskDiscoveryFilter,
-    options: agent_task_service_direct::AgentTaskDiscoveryOptions,
+    options: agent_task_service::AgentTaskDiscoveryOptions,
 ) -> CmdResult<Value> {
-    let report = agent_task_service_direct::discover_runs_with_options(filter, options)?;
+    let report = agent_task_service::discover_runs_with_options(filter, options)?;
     let mut value = serde_json::to_value(report).unwrap_or(Value::Null);
     attach_agent_task_discovery_actionable(&mut value, None, false);
     Ok((value, 0))
@@ -644,9 +640,9 @@ pub(crate) fn list_runs_page(
     let command = list_continuation_prefix(&args);
     let branch_scoped = args.branch.is_some();
     let limit = args.limit as usize;
-    let report = agent_task_service_direct::discover_runs_page(
+    let report = agent_task_service::discover_runs_page(
         filter,
-        agent_task_service_direct::AgentTaskDiscoveryPageOptions {
+        agent_task_service::AgentTaskDiscoveryPageOptions {
             limit,
             cursor: args.cursor,
             repo: args.repo,
@@ -673,10 +669,10 @@ pub(crate) fn list_runs_page(
 /// and a per-run safe reconcile command) is preserved under `report`, and a
 /// `buckets` view groups run ids by classification for an at-a-glance triage.
 pub(crate) fn list_active(
-    options: agent_task_service_direct::AgentTaskDiscoveryOptions,
+    options: agent_task_service::AgentTaskDiscoveryOptions,
 ) -> CmdResult<Value> {
     let branch_scoped = options.branch.is_some();
-    let report = agent_task_service_direct::discover_runs_with_options(
+    let report = agent_task_service::discover_runs_with_options(
         agent_task_service::AgentTaskDiscoveryFilter::Active,
         options,
     )?;
@@ -702,9 +698,9 @@ pub(crate) fn list_active_page(args: crate::commands::runs::RunsListArgs) -> Cmd
     let command = active_continuation_prefix(&args);
     let branch_scoped = args.branch.is_some();
     let limit = args.limit as usize;
-    let report = agent_task_service_direct::discover_runs_page(
+    let report = agent_task_service::discover_runs_page(
         agent_task_service::AgentTaskDiscoveryFilter::Active,
-        agent_task_service_direct::AgentTaskDiscoveryPageOptions {
+        agent_task_service::AgentTaskDiscoveryPageOptions {
             limit,
             cursor: args.cursor,
             branch: args.branch,
@@ -758,7 +754,7 @@ fn append_discovery_scope<const N: usize>(command: &mut String, fields: [(&str, 
 /// `agent-task reconcile --all`: preview stale/suspect/unreconciled records
 /// across the fleet. `--apply` is required to mutate the previewed set (#10001).
 pub(super) fn reconcile_active(dry_run: bool) -> CmdResult<Value> {
-    let report = agent_task_service_direct::reconcile_stale_active_runs(dry_run)?;
+    let report = agent_task_service::reconcile_stale_active_runs(dry_run)?;
     let exit = if report.failed > 0 { 1 } else { 0 };
     Ok((serde_json::to_value(report).unwrap_or(Value::Null), exit))
 }
@@ -835,7 +831,7 @@ pub(super) fn reconcile_run(args: ReconcileArgs) -> CmdResult<Value> {
         ));
     }
 
-    let report = agent_task_service_direct::reconcile_run(&run_id, true)?;
+    let report = agent_task_service::reconcile_run(&run_id, true)?;
     let exit = i32::from(report.failed > 0);
     let mut value = serde_json::to_value(report).unwrap_or(Value::Null);
     if let Value::Object(object) = &mut value {
@@ -860,8 +856,8 @@ pub(super) fn reconcile_run(args: ReconcileArgs) -> CmdResult<Value> {
 /// four-way mapping in the CLI, which is precisely the duplication #W3-4 is
 /// about: an orchestrator reading `liveness: "suspect"` had to reimplement the
 /// same table to know whether it was allowed to reconcile.
-fn active_liveness_buckets(runs: &[agent_task_service_direct::AgentTaskDiscoveryRun]) -> Value {
-    use agent_task_service_direct::AgentTaskLiveness;
+fn active_liveness_buckets(runs: &[agent_task_service::AgentTaskDiscoveryRun]) -> Value {
+    use agent_task_service::AgentTaskLiveness;
 
     let mut buckets = serde_json::Map::new();
     for liveness in AgentTaskLiveness::ALL {
@@ -1147,7 +1143,7 @@ fn attach_actionable_metadata(value: &mut Value, metadata: CommandActionableMeta
 /// Follow-up lifecycle commands retain the exact durable placement decision
 /// that authorized their owning Cook attempt.
 fn preserve_controller_owner_placement(value: &mut Value, run_id: &str) {
-    let recovery_prefix = agent_task_service_direct::cook_recovery_command_prefix(run_id);
+    let recovery_prefix = agent_task_service::cook_recovery_command_prefix(run_id);
     preserve_controller_owner_placement_with_prefix(value, run_id, &recovery_prefix);
 }
 
@@ -1327,7 +1323,7 @@ mod gate_failure_projection_tests {
                 "exit_code": 1, "termination": termination, "stdout": stdout,
                 "lab_receipt": {"artifact_ref": "homeboy://run/run/artifact/output"}
             }]});
-            let failure = agent_task_service_direct::gate_failure_projection(&report);
+            let failure = agent_task_service::gate_failure_projection(&report);
             let mut status_value = json!({"run": "run"});
             let mut diagnose_value =
                 json!({"summary": "deterministic gates rejected the candidate"});

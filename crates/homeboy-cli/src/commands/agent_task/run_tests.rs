@@ -983,10 +983,10 @@ fn in_flight_cook_report_keeps_provider_state_and_managed_continuation_separate(
 #[test]
 fn cook_continue_reports_runner_capacity_without_offering_a_duplicate_dispatch() {
     crate::test_support::with_isolated_home(|_| {
-        let plan = homeboy::agents::agent_tasks::scheduler::AgentTaskPlan::new("plan", vec![]);
-        homeboy::agents::agent_tasks::lifecycle::submit_plan(&plan, Some("cook-queue-attempt-1"))
+        let plan = homeboy::agents::agent_task_schedule::AgentTaskPlan::new("plan", vec![]);
+        homeboy::agents::agent_task_lifecycle::submit_plan(&plan, Some("cook-queue-attempt-1"))
             .expect("persist queued attempt");
-        homeboy::agents::agent_tasks::lifecycle::rewrite_record_for_test(
+        homeboy::agents::agent_task_lifecycle::rewrite_record_for_test(
             "cook-queue-attempt-1",
             |record| {
                 record.metadata = serde_json::json!({
@@ -1002,7 +1002,7 @@ fn cook_continue_reports_runner_capacity_without_offering_a_duplicate_dispatch()
             },
         )
         .expect("record accepted queue ownership");
-        let record = homeboy::agents::agent_tasks::lifecycle::status("cook-queue-attempt-1")
+        let record = homeboy::agents::agent_task_lifecycle::status("cook-queue-attempt-1")
             .expect("read queued attempt");
 
         let report = cook_continuation_status("cook-queue", &record);
@@ -1021,13 +1021,13 @@ fn cook_continue_reports_runner_capacity_without_offering_a_duplicate_dispatch()
 #[test]
 fn cook_continue_reports_a_queued_record_without_runner_as_unscheduled() {
     crate::test_support::with_isolated_home(|_| {
-        let plan = homeboy::agents::agent_tasks::scheduler::AgentTaskPlan::new("plan", vec![]);
-        homeboy::agents::agent_tasks::lifecycle::submit_plan(
+        let plan = homeboy::agents::agent_task_schedule::AgentTaskPlan::new("plan", vec![]);
+        homeboy::agents::agent_task_lifecycle::submit_plan(
             &plan,
             Some("cook-unassigned-attempt-1"),
         )
         .expect("persist queued attempt");
-        let record = homeboy::agents::agent_tasks::lifecycle::status("cook-unassigned-attempt-1")
+        let record = homeboy::agents::agent_task_lifecycle::status("cook-unassigned-attempt-1")
             .expect("read queued attempt without a runner boundary");
 
         let report = cook_continuation_status("cook-unassigned", &record);
@@ -1045,12 +1045,12 @@ fn cook_continue_reports_a_queued_record_without_runner_as_unscheduled() {
 #[test]
 fn cook_continue_reports_active_runner_work_with_a_watch_command() {
     crate::test_support::with_isolated_home(|_| {
-        let plan = homeboy::agents::agent_tasks::scheduler::AgentTaskPlan::new("plan", vec![]);
-        homeboy::agents::agent_tasks::lifecycle::submit_plan(&plan, Some("cook-active-attempt-1"))
+        let plan = homeboy::agents::agent_task_schedule::AgentTaskPlan::new("plan", vec![]);
+        homeboy::agents::agent_task_lifecycle::submit_plan(&plan, Some("cook-active-attempt-1"))
             .expect("persist active attempt");
-        homeboy::agents::agent_tasks::lifecycle::mark_running("cook-active-attempt-1")
+        homeboy::agents::agent_task_lifecycle::mark_running("cook-active-attempt-1")
             .expect("runner starts the provider attempt");
-        homeboy::agents::agent_tasks::lifecycle::rewrite_record_for_test(
+        homeboy::agents::agent_task_lifecycle::rewrite_record_for_test(
             "cook-active-attempt-1",
             |record| {
                 record.metadata = serde_json::json!({
@@ -1062,7 +1062,7 @@ fn cook_continue_reports_active_runner_work_with_a_watch_command() {
             },
         )
         .expect("record active runner and provider evidence");
-        let record = homeboy::agents::agent_tasks::lifecycle::status("cook-active-attempt-1")
+        let record = homeboy::agents::agent_task_lifecycle::status("cook-active-attempt-1")
             .expect("read active runner-backed provider attempt");
 
         let report = cook_continuation_status("cook-active", &record);
@@ -1121,8 +1121,8 @@ fn local_dispatch_wait_is_durable_cook_progress() {
         let store =
             homeboy::agents::agent_task_lifecycle::AgentTaskLifecycleStore::from_environment()
                 .unwrap();
-        let plan = homeboy::agents::agent_tasks::scheduler::AgentTaskPlan::new("plan", vec![]);
-        homeboy::agents::agent_tasks::lifecycle::submit_plan(&plan, Some("cook-hot")).unwrap();
+        let plan = homeboy::agents::agent_task_schedule::AgentTaskPlan::new("plan", vec![]);
+        homeboy::agents::agent_task_lifecycle::submit_plan(&plan, Some("cook-hot")).unwrap();
         let progress = |reason: &str| {
             super::record_local_dispatch_wait(&store, "cook-hot", reason);
             store.read_record("cook-hot").unwrap().metadata["cook_progress"].clone()
