@@ -144,6 +144,13 @@ fn status_once(args: StatusArgs) -> CmdResult<Value> {
         .unwrap_or_else(|| args.run_id.clone());
     let store = homeboy::agents::agent_task_feedback::CookFeedbackStore::from_current_data_root()?;
     value["cook_feedback"] = store.status_value(&cook_id)?;
+    // Per-attempt wall time from recorded spans and gate reports (#17893).
+    // An unreadable timeline is an absent observation, never a status error.
+    if let Ok(attempts) = agent_task_service_direct::cook_attempt_timeline(&cook_id) {
+        if !attempts.is_empty() {
+            value["attempts"] = json!(attempts);
+        }
+    }
     value["placement"] = crate::commands::run_placement::placement(&value);
     // A queued local gate names its host-wide queue standing (#18555), with
     // the same fields the Lab step queue publishes.

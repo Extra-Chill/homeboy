@@ -147,7 +147,7 @@ pub mod gate {
         AgentTaskGateTermination, GateSupervision, NO_REPRO_GATE_WARNING,
     };
     pub use super::super::agent_task_gate::{
-        data_inputs, execution_start, lab_admission_owner, lab_parent_job_id, placement,
+        data_inputs, execution_start, lab_admission_owner, lab_parent_job_id, phases, placement,
     };
     pub use super::super::agent_task_gate::{
         AgentTaskGateEnvironmentMode, AgentTaskGateEnvironmentPolicy, AgentTaskGateExecutionPolicy,
