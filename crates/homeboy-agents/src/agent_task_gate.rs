@@ -815,6 +815,11 @@ pub enum AgentTaskGateFailureOrigin {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct AgentTaskGateFailureAttribution {
     pub classification: AgentTaskGateFailureOrigin,
+    /// Complete failure identities on each side (fingerprints for opaque gates).
+    #[serde(default)]
+    pub base_failures: Vec<String>,
+    #[serde(default)]
+    pub head_failures: Vec<String>,
     /// Candidate failures that also fail on the baseline.
     #[serde(default)]
     pub inherited_failures: Vec<String>,
