@@ -489,6 +489,10 @@ fn gate_admission_failure_reaches_session_once_with_receipt() {
             .unwrap_or_else(|error| panic!("{error}: {:?}", latest_delivery("admission-cook")));
         assert_eq!(observed.matches("--thread").count(), 1);
         assert!(observed.contains("gate admission rejected: runner unavailable"));
+        assert!(
+            observed.contains("needs attention"),
+            "terminal failure status: {observed}"
+        );
         let delivery = latest_delivery("admission-cook");
         assert_eq!(delivery["status"], "delivered");
         assert_eq!(delivery["transport_result"]["delivery_mode"], "session");
