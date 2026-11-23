@@ -279,6 +279,7 @@ pub(in crate::commands::agent_task) fn diagnose(args: DiagnoseArgs) -> CmdResult
         )),
     );
     attach_gate_cleanup_warnings(&mut value, &record);
+    super::super::candidate_location::attach_candidate_location(&mut value, &record);
     if let Ok(Some(promotion)) =
         agent_task_service_direct::recorded_promotion_report(&record.metadata)
     {

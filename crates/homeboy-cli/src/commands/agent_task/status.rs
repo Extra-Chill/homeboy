@@ -294,6 +294,8 @@ fn status_without_feedback(args: StatusArgs) -> CmdResult<Value> {
             value["gated_sha"] = json!(candidate.candidate_sha);
             value["tree"] = json!(candidate.tree_sha);
         }
+        // Which repository holds the candidate, proven from any cwd (#18856).
+        super::candidate_location::attach_candidate_location(&mut value, outcome);
         // Provider response identity, distinct from the requested routing tier.
         value["served_models"] = json!(record.served_models);
         attach_gate_cleanup_warnings(&mut value, outcome);
