@@ -24,7 +24,7 @@
 //! the declared metrics and the findings key. Everything kind-specific stays
 //! in the extension and in the envelope's opaque `payload`.
 
-use homeboy_engine_primitives::metric_comparison::{Direction};
+use homeboy_engine_primitives::metric_comparison::Direction;
 use std::collections::BTreeSet;
 
 use serde::{Deserialize, Serialize};
@@ -149,8 +149,6 @@ pub struct WorkloadMetricPolicy {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub regression_threshold: Option<f64>,
 }
-
-
 
 /// The identity findings are matched by across runs.
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, Default, PartialEq, Eq)]

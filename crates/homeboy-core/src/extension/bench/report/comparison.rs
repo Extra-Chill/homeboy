@@ -8,8 +8,7 @@ pub use types::{
     BenchAxisComparison, BenchAxisComparisonSummary, BenchComparisonDiff, BenchComparisonFailure,
     BenchComparisonOutput, BenchComparisonReports, BenchComparisonRigSummary,
     BenchComparisonSummaryOutput, BenchDefaultBaselineExpansion, BenchDiagnosticClassSummary,
-    BenchPhaseGroups, BenchScenarioComparisonRow, BenchScenarioComparisonSummary,
-    RigBenchEntry,
+    BenchPhaseGroups, BenchScenarioComparisonRow, BenchScenarioComparisonSummary, RigBenchEntry,
 };
 
 use crate::extension::bench::diagnostic::BenchDiagnostic;
@@ -54,8 +53,15 @@ impl BenchComparisonDiff {
                     };
                     per_rig.insert(
                         (*other_id).to_string(),
-                        MetricPolicy { signed_percent: true, ..Default::default() }
-                            .compare(&metric_name, Some(ref_value), Some(current)),
+                        MetricPolicy {
+                            signed_percent: true,
+                            ..Default::default()
+                        }
+                        .compare(
+                            &metric_name,
+                            Some(ref_value),
+                            Some(current),
+                        ),
                     );
                 }
                 if !per_rig.is_empty() {
@@ -217,12 +223,19 @@ fn summary_distribution<'a>(
 }
 
 fn percent_delta(reference: f64, current: f64) -> f64 {
-    let comparison = MetricPolicy { signed_percent: true, ..Default::default() }
-        .compare("", Some(reference), Some(current));
+    let comparison = MetricPolicy {
+        signed_percent: true,
+        ..Default::default()
+    }
+    .compare("", Some(reference), Some(current));
     comparison.percent.unwrap_or_else(|| {
         // This summary's scalar contract renders an undefined percentage as
         // signed infinity (or zero for an unchanged zero).
-        if current == 0.0 { 0.0 } else { f64::INFINITY.copysign(current) }
+        if current == 0.0 {
+            0.0
+        } else {
+            f64::INFINITY.copysign(current)
+        }
     })
 }
 

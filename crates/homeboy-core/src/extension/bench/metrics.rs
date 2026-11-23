@@ -1,12 +1,12 @@
 //! Generic bench metric comparison policy.
 
-use homeboy_engine_primitives::metric_comparison::RegressionTest;
 use homeboy_engine_primitives::metric_comparison::Direction;
+use homeboy_engine_primitives::metric_comparison::RegressionTest;
 use std::collections::BTreeMap;
 
 use homeboy_engine_primitives::metric_comparison::{MetricDelta, MetricPolicy};
 
-use super::parsing::{BenchMetricPolicy};
+use super::parsing::BenchMetricPolicy;
 
 #[derive(Debug, Clone)]
 pub(crate) struct ResolvedMetricPolicy {
@@ -22,7 +22,8 @@ impl ResolvedMetricPolicy {
     }
 
     pub(crate) fn compare(&self, baseline_value: f64, current_value: f64) -> MetricDelta {
-        self.comparison_policy().compare(&self.name, Some(baseline_value), Some(current_value))
+        self.comparison_policy()
+            .compare(&self.name, Some(baseline_value), Some(current_value))
     }
 
     fn comparison_policy(&self) -> MetricPolicy {
@@ -36,12 +37,22 @@ impl ResolvedMetricPolicy {
         }
     }
 
-    pub(crate) fn compare_distribution(&self, baseline: &[f64], current: &[f64]) -> Option<MetricDelta> {
+    pub(crate) fn compare_distribution(
+        &self,
+        baseline: &[f64],
+        current: &[f64],
+    ) -> Option<MetricDelta> {
         // Distribution gates historically treat a zero baseline as comparable.
         let mut policy = self.comparison_policy();
         policy.zero_baseline_is_neutral = false;
-        policy.compare_distribution(&self.name, baseline, current,
-            self.policy.regression_test.unwrap_or(RegressionTest::MannWhitneyU))
+        policy.compare_distribution(
+            &self.name,
+            baseline,
+            current,
+            self.policy
+                .regression_test
+                .unwrap_or(RegressionTest::MannWhitneyU),
+        )
     }
 
     pub(crate) fn variance_aware(&self) -> bool {
@@ -164,10 +175,8 @@ mod tests {
 
     #[test]
     fn test_compare() {
-        let resolved = ResolvedMetricPolicy::custom(
-            "requests_per_second",
-            &policy(Direction::HigherIsBetter),
-        );
+        let resolved =
+            ResolvedMetricPolicy::custom("requests_per_second", &policy(Direction::HigherIsBetter));
         let delta = resolved.compare(100.0, 90.0);
 
         assert!(delta.regressed());

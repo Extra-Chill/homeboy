@@ -1,6 +1,6 @@
 use super::*;
-use homeboy_engine_primitives::metric_comparison::CohortStatus;
 use crate::notification_route::NotificationRoute;
+use homeboy_engine_primitives::metric_comparison::CohortStatus;
 
 fn comparison(verdict: CohortStatus, candidate: &str) -> RegressionComparison {
     RegressionComparison {

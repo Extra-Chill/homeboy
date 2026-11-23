@@ -1,6 +1,6 @@
 use super::*;
-use homeboy_engine_primitives::metric_comparison::CohortStatus;
 use crate::observation::{NewRunRecord, ObservationStore, RunStatus};
+use homeboy_engine_primitives::metric_comparison::CohortStatus;
 use homeboy_engine_primitives::phase_timing::PhaseTimer;
 use serde_json::json;
 use std::time::Duration;

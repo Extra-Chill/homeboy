@@ -12,11 +12,11 @@
 //! do not, Homeboy keeps the original p95 latency gate at the run's
 //! `--regression-threshold` (default 5%).
 
-use homeboy_engine_primitives::metric_comparison::Verdict;
-#[cfg(test)]
-use homeboy_engine_primitives::metric_comparison::RegressionTest;
 #[cfg(test)]
 use homeboy_engine_primitives::metric_comparison::Direction;
+#[cfg(test)]
+use homeboy_engine_primitives::metric_comparison::RegressionTest;
+use homeboy_engine_primitives::metric_comparison::Verdict;
 use std::collections::BTreeMap;
 
 use serde::{Deserialize, Serialize};
@@ -25,8 +25,8 @@ use homeboy_engine_primitives::baseline as generic;
 use homeboy_engine_primitives::workload_compare::{pair_by_key, KindAdapter};
 
 use super::metrics::resolve_metric_policies;
-use homeboy_engine_primitives::metric_comparison::MetricDelta;
 use super::parsing::{BenchMetricPolicy, BenchResults, BenchScenario};
+use homeboy_engine_primitives::metric_comparison::MetricDelta;
 
 /// Default regression threshold: 5% p95_ms slowdown flags a regression.
 pub const DEFAULT_REGRESSION_THRESHOLD_PERCENT: f64 = 5.0;
@@ -230,9 +230,7 @@ impl KindAdapter for BenchAdapter {
 
 #[cfg(test)]
 mod tests {
-    use super::super::parsing::{
-        BenchMetricPolicy, BenchMetrics, BenchResults, BenchScenario,
-        };
+    use super::super::parsing::{BenchMetricPolicy, BenchMetrics, BenchResults, BenchScenario};
     use super::*;
     use homeboy_engine_primitives::workload_compare::{self as engine, BaselineSlot};
     use std::path::{Path, PathBuf};
@@ -810,9 +808,7 @@ mod tests {
         let mut policies = BTreeMap::new();
         policies.insert(
             metric.to_string(),
-            variance_policy(
-                Direction::LowerIsBetter, RegressionTest::MannWhitneyU,
-            ),
+            variance_policy(Direction::LowerIsBetter, RegressionTest::MannWhitneyU),
         );
         let current = results_with_policies(
             vec![distribution_scenario(
@@ -847,9 +843,7 @@ mod tests {
         let mut policies = BTreeMap::new();
         policies.insert(
             metric.to_string(),
-            variance_policy(
-                Direction::HigherIsBetter, RegressionTest::KolmogorovSmirnov,
-            ),
+            variance_policy(Direction::HigherIsBetter, RegressionTest::KolmogorovSmirnov),
         );
         let current = results_with_policies(
             vec![distribution_scenario(

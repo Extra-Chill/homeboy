@@ -1,11 +1,11 @@
-use homeboy_engine_primitives::metric_comparison::{Direction};
 use homeboy_core::error::{Error, Result};
+use homeboy_engine_primitives::metric_comparison::Direction;
 pub use homeboy_extension_contract::bench_metric_preset::{
     BenchMetricPolicyPreset, BenchMetricPolicyPresetKind,
 };
 
 use super::gate::{BenchGate, BenchGateOp};
-use super::parsing::{BenchResults};
+use super::parsing::BenchResults;
 
 pub(crate) fn expand_metric_policy_presets(results: &mut BenchResults) -> Result<()> {
     for (metric, preset) in results.metric_policy_presets.clone() {

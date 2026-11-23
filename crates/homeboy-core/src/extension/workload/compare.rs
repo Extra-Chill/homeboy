@@ -4,15 +4,14 @@
 //! direction and an optional percent threshold, and the findings key. A kind
 //! adds compare semantics by declaring metrics, not by adding an adapter.
 
-use homeboy_engine_primitives::metric_comparison::{MetricDelta, MetricChange, MetricPolicy};
 use homeboy_engine_primitives::metric_comparison::Verdict;
+use homeboy_engine_primitives::metric_comparison::{MetricChange, MetricDelta, MetricPolicy};
 use std::collections::{BTreeMap, BTreeSet};
 
-use homeboy_engine_primitives::workload_compare::{KindAdapter};
+use homeboy_engine_primitives::workload_compare::KindAdapter;
 use homeboy_extension_contract::workload_result::finding_key;
 use homeboy_extension_contract::{
-    WorkloadCompareConfig, WorkloadFindingsKey, WorkloadResult,
-    WorkloadStatus,
+    WorkloadCompareConfig, WorkloadFindingsKey, WorkloadResult, WorkloadStatus,
 };
 use serde::{Deserialize, Serialize};
 
@@ -111,13 +110,18 @@ fn metric_deltas(
             let policy = declared.get(name).copied();
             let before = baseline.metrics.get(name).copied();
             let after = candidate.metrics.get(name).copied();
-            if before.is_none() && after.is_none() { return None; }
-            Some(MetricPolicy {
-                direction: policy.map(|p| p.direction),
-                percent: policy.and_then(|p| p.regression_threshold),
-                threshold_improvements: true,
-                ..Default::default()
-            }.compare(name, before, after))
+            if before.is_none() && after.is_none() {
+                return None;
+            }
+            Some(
+                MetricPolicy {
+                    direction: policy.map(|p| p.direction),
+                    percent: policy.and_then(|p| p.regression_threshold),
+                    threshold_improvements: true,
+                    ..Default::default()
+                }
+                .compare(name, before, after),
+            )
         })
         .collect()
 }

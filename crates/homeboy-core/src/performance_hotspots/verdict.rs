@@ -1,8 +1,10 @@
 //! Conservative regression policy for read-only version cohorts.
 use super::{PhaseHotspotQuery, PhaseHotspots};
 use crate::observation::{ObservationStore, RunListFilter};
+use homeboy_engine_primitives::metric_comparison::{
+    Boundary, CohortStatus, Direction, MetricPolicy, Verdict,
+};
 use serde::Serialize;
-use homeboy_engine_primitives::metric_comparison::{Boundary, CohortStatus, Direction, MetricPolicy, Verdict};
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct RegressionThresholds {
@@ -64,7 +66,10 @@ pub(super) fn evaluate(
                 absolute: t.phase_floor_ms,
                 boundary: Boundary::Inclusive,
                 ..Default::default()
-            }).compare(metric, Some(baseline), Some(candidate)).regressed() {
+            })
+            .compare(metric, Some(baseline), Some(candidate))
+            .regressed()
+            {
                 evidence.push(Regression {
                     metric: format!("phase.{}.{}", phase.phase, metric),
                     baseline,
@@ -110,7 +115,10 @@ pub(super) fn evaluate(
                 absolute: threshold,
                 boundary: Boundary::Rate,
                 ..Default::default()
-            }).compare(metric, Some(baseline), Some(candidate)).regressed() {
+            })
+            .compare(metric, Some(baseline), Some(candidate))
+            .regressed()
+            {
                 evidence.push(Regression {
                     metric: metric.into(),
                     baseline,
@@ -127,7 +135,8 @@ pub(super) fn evaluate(
         verdict: Verdict {
             regressions: evidence.iter().map(|r| r.metric.clone()).collect(),
             ..Default::default()
-        }.cohort_status(enough),
+        }
+        .cohort_status(enough),
         regressions: evidence,
     }
 }

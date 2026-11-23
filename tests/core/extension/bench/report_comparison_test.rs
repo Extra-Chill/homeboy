@@ -12,8 +12,8 @@ use crate::extension::bench::artifact::{
 use crate::extension::bench::diagnostic::{BenchDiagnostic, BenchDiagnosticSource};
 use crate::extension::bench::distribution::BenchRunDistribution;
 use crate::extension::bench::parsing::{
-    BenchMetricPhase, BenchMetricPolicy, BenchMetrics, BenchResults,
-    BenchRunSnapshot, BenchScenario,
+    BenchMetricPhase, BenchMetricPolicy, BenchMetrics, BenchResults, BenchRunSnapshot,
+    BenchScenario,
 };
 use crate::extension::bench::run::{BenchRunFailure, BenchRunWorkflowResult};
 use crate::extension::bench::side_by_side::BenchSideBySideMetric;

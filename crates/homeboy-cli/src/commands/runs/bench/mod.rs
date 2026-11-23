@@ -163,7 +163,8 @@ impl KindAdapter for BenchRunAdapter {
                     let delta = homeboy_engine_primitives::metric_comparison::MetricPolicy {
                         signed_percent: true,
                         ..Default::default()
-                    }.compare(&metric, Some(*from), Some(*to));
+                    }
+                    .compare(&metric, Some(*from), Some(*to));
                     comparisons.push(BenchMetricComparison {
                         scenario_id,
                         metric,
