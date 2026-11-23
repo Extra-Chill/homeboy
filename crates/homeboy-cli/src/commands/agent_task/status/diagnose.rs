@@ -310,13 +310,22 @@ pub(in crate::commands::agent_task) fn diagnose(args: DiagnoseArgs) -> CmdResult
     }
     // Gate classifications own their recovery guidance. Other diagnoses use
     // the Cook recovery planner, including its durable no-progress marker.
+    // An admission-failed Cook has no recipe, but `recover` still plans it
+    // (relaunch, or guidance when nothing is legal), so diagnose reads the
+    // same plan instead of suggesting a command `recover` refuses (#18845).
     let recovery_plan = gate_failure
         .is_none()
         .then(|| {
-            agent_task_service::load_recipe_for_attempt(run_id)
+            let plannable = agent_task_service::load_recipe_for_attempt(run_id)
                 .ok()
                 .flatten()
-                .and_then(|_| agent_task_service_direct::plan_cook_recovery_recorded(run_id).ok())
+                .is_some()
+                || (agent_task_lifecycle::is_unmaterialized_cook_admission(&record)
+                    && !persisted_cook_failure_diagnostic(&record)
+                        .is_some_and(|cause| cause.class == "runner.capacity_busy"));
+            plannable
+                .then(|| agent_task_service_direct::plan_cook_recovery_recorded(run_id).ok())
+                .flatten()
         })
         .flatten();
     let recovery_prefix =
