@@ -779,7 +779,7 @@ pub(super) fn run_preflight_cook_execution(
         std::env::var_os(homeboy::core::daemon::workflow_job::WORKFLOW_INSTANCE_ENV).is_some();
     let result = wait_for_workflow_cook(
         workflow_step,
-        |mode| {
+        || {
             agent_task_service::CookService::run(
                 request.clone(),
                 agent_task_service::CookRuntime::production_with_observer(
@@ -788,7 +788,6 @@ pub(super) fn run_preflight_cook_execution(
                     &lifecycle_store,
                     &durable_observer,
                 ),
-                mode,
             )
             .map(|result| {
                 let disposition = result.value.disposition;
@@ -812,20 +811,15 @@ pub(super) fn run_preflight_cook_execution(
 /// one-report contract; workflow steps wait for a terminal disposition.
 fn wait_for_workflow_cook<T>(
     workflow_step: bool,
-    mut drive: impl FnMut(
-        agent_task_service::CookMode,
-    )
-        -> homeboy::core::Result<(T, homeboy::core::cook_status::CookDisposition)>,
+    mut drive: impl FnMut() -> homeboy::core::Result<(T, homeboy::core::cook_status::CookDisposition)>,
     mut wait: impl FnMut(),
 ) -> homeboy::core::Result<T> {
-    let mut mode = agent_task_service::CookMode::Start;
     loop {
-        let (report, disposition) = drive(mode)?;
+        let (report, disposition) = drive()?;
         if !workflow_step || disposition.is_terminal() {
             return Ok(report);
         }
         wait();
-        mode = agent_task_service::CookMode::Resume;
     }
 }
 
@@ -840,13 +834,11 @@ mod workflow_cook_wait_tests {
         let mut waits = 0;
         let outcome = wait_for_workflow_cook(
             true,
-            |mode| {
+            || {
                 calls += 1;
                 if calls == 1 {
-                    assert!(matches!(mode, agent_task_service::CookMode::Start));
                     Ok((("queued", 75), CookDisposition::InFlight))
                 } else {
-                    assert!(matches!(mode, agent_task_service::CookMode::Resume));
                     Ok((("succeeded", 0), CookDisposition::Terminal))
                 }
             },
@@ -862,7 +854,7 @@ mod workflow_cook_wait_tests {
     fn foreground_cook_preserves_in_flight_report() {
         let report = wait_for_workflow_cook(
             false,
-            |_| Ok((("queued", 75), CookDisposition::InFlight)),
+            || Ok((("queued", 75), CookDisposition::InFlight)),
             || panic!("foreground caller must not wait"),
         )
         .unwrap();

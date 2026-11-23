@@ -440,7 +440,7 @@ fn continue_terminal(
         },
         &noop_cook_progress_observer,
     );
-    CookService::run(options.clone(), runtime, CookMode::ContinueTerminal)
+    CookService::run(options.clone(), runtime.replay_keeping_recorded_transport())
 }
 
 #[test]

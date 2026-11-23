@@ -295,11 +295,7 @@ where
             let mut options = options;
             apply_explicit_local_continuation(&run_id, &mut options)?;
             agent_task_service::authorize_cook_continue_route(&options)?;
-            let cook = run_cook_explicit(
-                options,
-                executor.clone(),
-                agent_task_service::CookMode::Resume,
-            )?;
+            let cook = run_cook_explicit(options, executor.clone())?;
             let outcome = (cook.exit_code, cook.value.disposition);
             result = Some(cook.value);
             Ok(outcome)
@@ -358,11 +354,7 @@ where
         apply_explicit_local_continuation(&run_id, &mut options)?;
     }
     agent_task_service::authorize_cook_continue_route(&options)?;
-    let result = run_cook_explicit(
-        options,
-        executor,
-        agent_task_service::CookMode::RecoverPreExecution,
-    )?;
+    let result = run_cook_explicit(options, executor)?;
     let value =
         cook_report_with_continuation(serde_json::to_value(result.value).unwrap_or(Value::Null));
     Ok((

@@ -303,8 +303,8 @@ pub mod service {
         AgentTaskCandidateAdoptionOptions, AgentTaskCookReport, AgentTaskDiscoveryFilter,
         AgentTaskDiscoveryReport, AgentTaskHydratedEvidence, AgentTaskLiveness,
         AgentTaskPromotionRequest, AgentTaskRunResult, AgentTaskSuppliedReviewForm,
-        CookContinuationState, CookMode, CookProgressEvent, CookProviderRouteOverride,
-        CookRecipeStore, CookRequest, CookRuntime, CookService,
+        CookContinuationState, CookProgressEvent, CookProviderRouteOverride, CookRecipeStore,
+        CookRequest, CookRuntime, CookService,
     };
     pub use super::super::agent_task_service::{
         artifacts, logs, persist_initial_recipe, reconcile_terminal_artifact_projection,

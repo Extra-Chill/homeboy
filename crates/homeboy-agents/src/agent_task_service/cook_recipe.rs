@@ -13,7 +13,7 @@ use uuid::Uuid;
 use crate::agent_task_lifecycle;
 use crate::agent_task_scheduler::{AgentTaskAggregate, AgentTaskPlan};
 use crate::agent_task_service::cook::{
-    AgentTaskCookAttemptDispatcher, CookDisposition, CookFinalization, CookIdentity, CookMode,
+    AgentTaskCookAttemptDispatcher, CookDisposition, CookFinalization, CookIdentity,
     CookProviderTransport, CookRequest, CookRetryPolicy, CookWorkspace,
 };
 use homeboy_core::command_invocation::CommandInvocation;
@@ -773,7 +773,7 @@ impl CookRecipeStore {
                 None,
             ));
         }
-        consume_claimed_with_dispatcher_policy(self, claim, dispatcher, execute, CookMode::Resume)
+        consume_claimed_with_dispatcher_policy(self, claim, dispatcher, execute, false)
     }
 }
 
@@ -3286,13 +3286,7 @@ pub fn consume_claimed_terminal_with_dispatcher(
     dispatcher: impl FnOnce(&Value) -> Result<Option<Arc<dyn AgentTaskCookAttemptDispatcher>>>,
     execute: impl FnOnce(CookRequest) -> Result<(i32, CookDisposition)>,
 ) -> Result<i32> {
-    consume_claimed_with_dispatcher_policy(
-        &default_store()?,
-        claim,
-        dispatcher,
-        execute,
-        CookMode::ContinueTerminal,
-    )
+    consume_claimed_with_dispatcher_policy(&default_store()?, claim, dispatcher, execute, true)
 }
 
 fn consume_claimed_with_dispatcher_policy(
@@ -3300,7 +3294,7 @@ fn consume_claimed_with_dispatcher_policy(
     claim: ClaimedCookContinuation,
     dispatcher: impl FnOnce(&Value) -> Result<Option<Arc<dyn AgentTaskCookAttemptDispatcher>>>,
     execute: impl FnOnce(CookRequest) -> Result<(i32, CookDisposition)>,
-    mode: CookMode,
+    terminal: bool,
 ) -> Result<i32> {
     let lifecycle_store = store.lifecycle_store();
     let recipe = match store.load_recipe(&claim.continuation().cook_id) {
@@ -3329,7 +3323,7 @@ fn consume_claimed_with_dispatcher_policy(
         }
     };
     let mut options = options;
-    if matches!(mode, CookMode::ContinueTerminal) {
+    if terminal {
         // A terminal continuation is the Cook loop of a detached attempt: it
         // gates the candidate, so it keeps the recipe's retry budget for
         // gate-feedback remediation (#18243). Operator feedback still pending
@@ -5011,7 +5005,7 @@ mod tests {
                 observed = Some(options);
                 Ok((0, CookDisposition::Terminal))
             },
-            CookMode::ContinueTerminal,
+            true,
         )
         .unwrap();
 
@@ -5311,7 +5305,7 @@ mod tests {
             claim,
             |_| Ok(None),
             |_| Ok((0, CookDisposition::InFlight)),
-            CookMode::Resume,
+            false,
         )
         .unwrap();
         assert_eq!(

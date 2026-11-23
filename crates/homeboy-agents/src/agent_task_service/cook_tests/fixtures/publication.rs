@@ -703,7 +703,7 @@ pub(super) fn resume_cook_behind_foreign_promotion_claim(
         Arc::new(UnusedExecutor),
         &mut side_effects,
         None,
-        CookMode::Resume,
+        false,
     )
     .expect("Cook reports the held promotion claim");
     drop(owner);
