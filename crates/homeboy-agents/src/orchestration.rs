@@ -2767,7 +2767,7 @@ fn recover_interrupted_action_acknowledgement(
             project_record(&current, None)?,
             ControlPlaneActionPayload {
                 schema: homeboy_control_plane_contract::CONTROL_PLANE_RECOVER_RESULT_SCHEMA.into(),
-                data: serde_json::json!({"report": {"run_id": current.run_id, "terminal": true, "terminal_state": current.state(), "recovered": true}, "exit_code": 2}),
+                data: serde_json::json!({"report": crate::agent_task_service::ensure_recover_failure_contract(serde_json::json!({"run_id": current.run_id, "terminal": true, "terminal_state": current.state(), "recovered": true, "failure": {"code": "agent_task.recover_interrupted", "message": "an earlier recover of this admission-failed Cook was interrupted; its outcome is recorded on the Cook, so no second relaunch was attempted. Re-run recover with a fresh idempotency key to requeue it.", "next_command": format!("homeboy agent-task recover {}", current.run_id)}}), 2, &current.run_id), "exit_code": 2}),
             },
             Some("recovered from the durable terminal admission state".into()),
         ),
@@ -4118,6 +4118,13 @@ fn project_summary_fields(
     }
     resource.candidate = candidate(record, delivery.as_ref());
     resource.gates = gates(record, delivery.as_ref());
+    resource.inherited_failures = delivery.as_ref().map_or(0, |delivery| {
+        delivery
+            .gates
+            .iter()
+            .filter(|gate| gate.state == AgentTaskGateStatus::AcceptedInheritedFailure)
+            .count()
+    });
     resource.publication = delivery.as_ref().and_then(publication);
     project_live_gate_verification(&mut resource, record);
     if crate::agent_task_lifecycle::CookRunState::of(record).phase

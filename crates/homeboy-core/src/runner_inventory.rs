@@ -57,12 +57,7 @@ pub struct VolumeUsage {
     pub free_bytes: Option<u64>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct MemoryUsage {
-    pub total_bytes: u64,
-    pub available_bytes: Option<u64>,
-    pub swap_used_bytes: Option<u64>,
-}
+use homeboy_engine_primitives::host_telemetry::{load_average, probe_system_memory, SystemMemory};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct LoadUsage {
@@ -76,7 +71,7 @@ pub struct LoadUsage {
 pub struct PressureReport {
     pub schema: String,
     pub disk: Option<VolumeUsage>,
-    pub memory: Option<MemoryUsage>,
+    pub memory: Option<SystemMemory>,
     pub load: Option<LoadUsage>,
     pub roots: Vec<RootUsage>,
     pub deadline_ms: u64,
@@ -138,7 +133,7 @@ pub fn pressure_report(
     Ok(PressureReport {
         schema: PRESSURE_SCHEMA.to_string(),
         disk: volume_usage(&data),
-        memory: memory_usage(),
+        memory: probe_system_memory(),
         load: load_usage(),
         roots: root_sizes(roots, budget, &RECORD),
         deadline_ms: budget.as_millis() as u64,
@@ -270,42 +265,16 @@ fn volume_usage(data: &Path) -> Option<VolumeUsage> {
     })
 }
 
-fn memory_usage() -> Option<MemoryUsage> {
-    let text = std::fs::read_to_string("/proc/meminfo").ok()?;
-    let field = |name: &str| {
-        text.lines()
-            .find_map(|line| line.strip_prefix(name)?.strip_prefix(':'))
-            .and_then(|value| value.split_whitespace().next()?.parse::<u64>().ok())
-            .map(|kib| kib * 1024)
-    };
-    Some(MemoryUsage {
-        total_bytes: field("MemTotal")?,
-        available_bytes: field("MemAvailable"),
-        swap_used_bytes: field("SwapTotal")
-            .zip(field("SwapFree"))
-            .map(|(total, free)| total.saturating_sub(free)),
-    })
-}
-
-#[cfg(unix)]
 fn load_usage() -> Option<LoadUsage> {
-    let mut values = [0.0_f64; 1];
-    if unsafe { libc::getloadavg(values.as_mut_ptr(), 1) } != 1 {
-        return None;
-    }
+    let load = load_average()?;
     let logical_cpus = std::thread::available_parallelism()
         .map(usize::from)
         .unwrap_or(1);
     Some(LoadUsage {
-        load_1m: values[0],
+        load_1m: load.one,
         logical_cpus,
-        load_per_cpu: values[0] / logical_cpus as f64,
+        load_per_cpu: load.one / logical_cpus as f64,
     })
-}
-
-#[cfg(not(unix))]
-fn load_usage() -> Option<LoadUsage> {
-    None
 }
 
 #[cfg(test)]

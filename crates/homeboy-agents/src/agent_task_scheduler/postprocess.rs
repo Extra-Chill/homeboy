@@ -271,7 +271,9 @@ fn postprocess_worker_executable() -> PathBuf {
     {
         return worker;
     }
-    configured.unwrap_or_else(|| std::env::current_exe().expect("current Homeboy executable"))
+    configured.unwrap_or_else(|| {
+        homeboy_core::daemon::daemon_launchable_executable().expect("current Homeboy executable")
+    })
 }
 
 /// A restarted scheduler must adopt the durable worker it finds. The worker owns

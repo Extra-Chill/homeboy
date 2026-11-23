@@ -93,6 +93,10 @@ impl CookRecoveryStep {
                 "adopt the preserved candidate".to_string(),
                 command(&["recover", run_id, "--candidate-ref", candidate_ref]),
             ),
+            Self::Relaunch => (
+                "requeue the Cook from its recorded admission inputs (same task and notification route, fresh run id)".to_string(),
+                command(&["recover", run_id]),
+            ),
             Self::Regate => (
                 "re-run the gates on the existing candidate; add `--regate --verify '<COMMAND>'` to replace its declared verify commands, or `--regate --gate-timeout-seconds <SECONDS> --gate-no-progress-timeout-seconds <SECONDS>` to change its gate budgets".to_string(),
                 command(&["recover", run_id]),
@@ -953,6 +957,99 @@ fn finish_without_step(mut report: CookRecoveryReport) -> (CookRecoveryReport, i
     (report, exit_code)
 }
 
+/// Failure code for a nonzero `recover` exit whose handler declared no cause.
+pub const RECOVER_UNDECLARED_FAILURE_CODE: &str = "agent_task.recover_refused";
+
+/// Enforce the `recover` output contract (#18845): a nonzero exit always
+/// carries a structured `failure` that names the run state, why recovery was
+/// refused, and the next command. A cause a handler already declared is kept;
+/// only missing fields are filled in. A zero exit is returned unchanged.
+pub fn ensure_recover_failure_contract(mut report: Value, exit_code: i32, id: &str) -> Value {
+    if exit_code == 0 {
+        return report;
+    }
+    if !report.is_object() {
+        report = serde_json::json!({ "result": report });
+    }
+    let run_id = report["run_id"]
+        .as_str()
+        .filter(|run_id| !run_id.trim().is_empty())
+        .unwrap_or(id)
+        .to_string();
+    if report["run_id"]
+        .as_str()
+        .is_none_or(|run_id| run_id.trim().is_empty())
+    {
+        report["run_id"] = Value::String(run_id.clone());
+    }
+    let run_state = report["status"]
+        .as_str()
+        .filter(|status| !status.trim().is_empty())
+        .map(str::to_string)
+        .or_else(|| {
+            agent_task_lifecycle::exact_record(&run_id)
+                .ok()
+                .map(|record| agent_task_lifecycle::CookRunState::of(&record).status)
+        })
+        .unwrap_or_else(|| "unknown".to_string());
+    if report["status"]
+        .as_str()
+        .is_none_or(|status| status.trim().is_empty())
+    {
+        report["status"] = Value::String(run_state.clone());
+    }
+    let step_reason = report
+        .pointer("/step/reason")
+        .or_else(|| report.pointer("/step/blocker"))
+        .and_then(Value::as_str)
+        .filter(|reason| !reason.trim().is_empty())
+        .map(str::to_string);
+    if !report["failure"].is_object() {
+        report["failure"] = serde_json::json!({});
+    }
+    let failure = &mut report["failure"];
+    if failure["code"]
+        .as_str()
+        .is_none_or(|code| code.trim().is_empty())
+    {
+        failure["code"] = Value::String(RECOVER_UNDECLARED_FAILURE_CODE.to_string());
+    }
+    if failure["message"]
+        .as_str()
+        .is_none_or(|message| message.trim().is_empty())
+    {
+        failure["message"] = Value::String(step_reason.unwrap_or_else(|| {
+            format!(
+                "`recover` refused Cook run `{run_id}` in state `{run_state}` without performing a step."
+            )
+        }));
+    }
+    if failure["run_state"].as_str().is_none() {
+        failure["run_state"] = Value::String(run_state);
+    }
+    if failure["run_id"].as_str().is_none() {
+        failure["run_id"] = Value::String(run_id.clone());
+    }
+    if failure["next_command"]
+        .as_str()
+        .is_none_or(|command| command.trim().is_empty())
+    {
+        let declared = failure
+            .pointer("/details/next_steps/0")
+            .or_else(|| failure.pointer("/details/next_command"))
+            .and_then(Value::as_str)
+            .filter(|command| !command.trim().is_empty())
+            .map(str::to_string);
+        failure["next_command"] = Value::String(declared.unwrap_or_else(|| {
+            format!(
+                "homeboy agent-task diagnose {}",
+                homeboy_core::engine::shell::quote_arg(&run_id)
+            )
+        }));
+    }
+    report
+}
+
 /// Status of a Cook attempt whose recipe is durable but whose lifecycle record
 /// was never written; the same name `agent-task status` reports.
 const RECIPE_ONLY_STATUS: &str = "recipe_only_recovery_required";
@@ -1214,6 +1311,16 @@ pub fn recover_cook(
         },
         || recover_cook_once(id, request.clone(), performer),
     )
+    .map(|(mut report, exit_code)| {
+        // A nonzero exit always declares its cause and next command (#18845).
+        if exit_code != 0 {
+            if let Ok(value) = serde_json::to_value(&report) {
+                let value = ensure_recover_failure_contract(value, exit_code, id);
+                report.failure = value.get("failure").cloned();
+            }
+        }
+        (report, exit_code)
+    })
 }
 
 fn recover_cook_once(
@@ -3230,5 +3337,214 @@ mod tests {
         );
         assert!(next.command.contains("recover"), "{}", next.command);
         assert_eq!(recover_step.action_name(), Some("resume"));
+    }
+
+    /// Record an admission-failed Cook: an unmaterialized admission that
+    /// reached `state` after its admission step failed with `code`.
+    fn admission_failed_cook(
+        store: &agent_task_lifecycle::AgentTaskLifecycleStore,
+        cook_id: &str,
+        binding: Value,
+        state: homeboy_lifecycle_contract::RunExecutionState,
+        code: &str,
+    ) {
+        agent_task_lifecycle::record_unmaterialized_cook_admission_in_store(
+            store,
+            cook_id,
+            binding,
+            "queued",
+            "queued for admission",
+        )
+        .unwrap();
+        store
+            .mutate_record(cook_id, |record| {
+                record.metadata["execution_step_failure"] = serde_json::json!({
+                    "message": "failed to read admission inputs after upgrade",
+                    "code": code,
+                    "classification": "failed",
+                });
+                record.set_state_for_test(state);
+                true
+            })
+            .unwrap();
+    }
+
+    /// `recover` exactly as the CLI performs it: through the control-plane
+    /// action for a run with a lifecycle record.
+    fn control_plane_recover(id: &str) -> (Value, i32) {
+        use homeboy_control_plane_contract::*;
+        let key = uuid::Uuid::new_v4().to_string();
+        let request = ControlPlaneActionRequest {
+            schema: CONTROL_PLANE_ACTION_REQUEST_SCHEMA.into(),
+            effect_id: action_effect_id("test", id, "recover", &key),
+            action: ControlPlaneAction::Recover,
+            idempotency_key: key,
+            actor: "test".into(),
+            expected_updated_at: None,
+            confirmed: true,
+            parameters: ControlPlaneActionPayload::recover(),
+        };
+        let ack = crate::orchestration::execute_action_from_current_environment(id, &request)
+            .expect("recover is acknowledged");
+        let code = ack.result.data["exit_code"].as_i64().unwrap_or(1) as i32;
+        let report = if ack.result.data["report"].is_object() {
+            ack.result.data["report"].clone()
+        } else {
+            serde_json::json!({"run_id": id, "failure": {"message": ack.message}})
+        };
+        (ensure_recover_failure_contract(report, code, id), code)
+    }
+
+    fn assert_recover_contract(context: &str, report: &Value, code: i32) {
+        if code == 0 {
+            return;
+        }
+        let failure = &report["failure"];
+        for field in ["code", "message", "run_state", "next_command"] {
+            assert!(
+                failure[field]
+                    .as_str()
+                    .is_some_and(|value| !value.trim().is_empty()),
+                "{context}: nonzero recover must name `{field}`: {report:#}"
+            );
+        }
+    }
+
+    /// #18845 contract: for every terminal state of an admission-failed Cook,
+    /// when diagnose's plan names `recover`, `recover` either succeeds or
+    /// returns a structured failure naming the next action; a nonzero exit
+    /// is never silent.
+    #[test]
+    fn regression_18845_every_recover_diagnose_names_is_accepted_or_refused_with_a_next_action() {
+        use homeboy_lifecycle_contract::RunExecutionState;
+        homeboy_core::test_support::with_isolated_home(|home| {
+            let store = agent_task_lifecycle::AgentTaskLifecycleStore::from_environment().unwrap();
+            for state in [
+                RunExecutionState::Succeeded,
+                RunExecutionState::CandidateRecoverable,
+                RunExecutionState::PartialFailure,
+                RunExecutionState::Failed,
+                RunExecutionState::Cancelled,
+            ] {
+                for with_inputs in [true, false] {
+                    let cook_id = format!(
+                        "cook-18845-{}-{}",
+                        serde_json::to_value(state).unwrap().as_str().unwrap(),
+                        if with_inputs { "inputs" } else { "bare" }
+                    );
+                    let binding = if with_inputs {
+                        super::super::execution_step::execution_step_fixtures::admission_binding(
+                            &home.path().join(&cook_id),
+                            &cook_id,
+                            Some("frozen prompt"),
+                        )
+                    } else {
+                        serde_json::json!({
+                            "schema": "homeboy/unmaterialized-cook-binding/v1",
+                            "request_ref": "sha256:request",
+                        })
+                    };
+                    admission_failed_cook(&store, &cook_id, binding, state, "internal.io_error");
+                    let context = format!("{cook_id}");
+                    let diagnosed = plan_cook_recovery_recorded(&cook_id).ok();
+                    let names_recover = diagnosed.as_ref().is_some_and(|plan| {
+                        plan.step
+                            .next_action("homeboy", &plan.cook_id)
+                            .command
+                            .contains(" recover ")
+                    });
+                    let (report, code) = control_plane_recover(&cook_id);
+                    assert_recover_contract(&context, &report, code);
+                    if names_recover {
+                        assert!(
+                            code == 0 || report["failure"]["next_command"].is_string(),
+                            "{context}: {report:#}"
+                        );
+                    }
+                    if state == RunExecutionState::Failed && with_inputs {
+                        assert!(names_recover, "{context}: {diagnosed:?}");
+                        assert_eq!(code, 0, "{context}: {report:#}");
+                    }
+                }
+            }
+        });
+    }
+
+    /// #18845 (`ffd47be1`): a Cook whose admission failed with
+    /// `internal.io_error` after an upgrade recovers by requeuing the same
+    /// Cook request (same task and notification route) through the same
+    /// `recover` command diagnose names.
+    #[test]
+    fn regression_18845_admission_io_error_cook_recovers_by_requeue() {
+        homeboy_core::test_support::with_isolated_home(|home| {
+            let cook_id = "agent-task-ffd47be1";
+            let mut binding =
+                super::super::execution_step::execution_step_fixtures::admission_binding(
+                    &home.path().join("inputs"),
+                    cook_id,
+                    Some("frozen prompt"),
+                );
+            binding["notification"] = serde_json::json!({"route": "github-issue:18845"});
+            let store = agent_task_lifecycle::AgentTaskLifecycleStore::from_environment().unwrap();
+            admission_failed_cook(
+                &store,
+                cook_id,
+                binding,
+                homeboy_lifecycle_contract::RunExecutionState::Failed,
+                "internal.io_error",
+            );
+
+            let plan = plan_cook_recovery_recorded(cook_id).unwrap();
+            assert_eq!(plan.step, CookRecoveryStep::Relaunch);
+            let next = plan.step.next_action("homeboy --placement local", cook_id);
+            assert_eq!(
+                next.command,
+                format!("homeboy --placement local agent-task recover {cook_id}")
+            );
+
+            let (report, code) = control_plane_recover(cook_id);
+            assert_eq!(code, 0, "{report:#}");
+            assert_eq!(report["step"]["kind"], "relaunch", "{report:#}");
+            let requeued_id = report["run_id"].as_str().unwrap().to_string();
+            assert_ne!(requeued_id, cook_id);
+            let requeued = store.read_record(&requeued_id).unwrap();
+            assert_eq!(
+                requeued.state(),
+                homeboy_lifecycle_contract::RunExecutionState::Queued
+            );
+            assert_eq!(requeued.metadata["recovered_from"]["run_id"], cook_id);
+            assert_eq!(
+                requeued.metadata["unmaterialized_cook_admission"]["binding"]["notification"],
+                serde_json::json!({"route": "github-issue:18845"}),
+                "the requeued Cook keeps the notification route"
+            );
+        });
+    }
+
+    #[test]
+    fn recover_failure_contract_fills_an_undeclared_cause() {
+        let report = ensure_recover_failure_contract(Value::Null, 1, "cook-silent");
+        assert_recover_contract("null report", &report, 1);
+        assert_eq!(report["run_id"], "cook-silent");
+        assert_eq!(
+            report["failure"]["next_command"],
+            "homeboy agent-task diagnose cook-silent"
+        );
+        let declared = ensure_recover_failure_contract(
+            serde_json::json!({
+                "run_id": "cook-1", "status": "failed",
+                "failure": {"code": "x.y", "message": "why", "details": {"next_steps": ["homeboy agent-task status cook-1"]}},
+            }),
+            1,
+            "cook-1",
+        );
+        assert_eq!(declared["failure"]["message"], "why");
+        assert_eq!(declared["failure"]["run_state"], "failed");
+        assert_eq!(
+            declared["failure"]["next_command"],
+            "homeboy agent-task status cook-1"
+        );
+        let ok = serde_json::json!({"run_id": "cook-2"});
+        assert_eq!(ensure_recover_failure_contract(ok.clone(), 0, "cook-2"), ok);
     }
 }

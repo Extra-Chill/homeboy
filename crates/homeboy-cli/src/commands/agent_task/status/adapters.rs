@@ -349,6 +349,18 @@ pub(super) fn watch_status_output(
         "continuation_command": continuation,
         "output_budget": budget,
     });
+    // The latest observation's summary, at the same top-level path as every
+    // other Cook read surface (#18817).
+    output[homeboy_control_plane_contract::COOK_SUMMARY_KEY] = observed_latest
+        .get(homeboy_control_plane_contract::COOK_SUMMARY_KEY)
+        .filter(|summary| !summary.is_null())
+        .cloned()
+        .unwrap_or_else(|| {
+            serde_json::to_value(crate::commands::agent_task::cook_summary::fallback(
+                &observed_latest,
+            ))
+            .expect("a Cook summary always serializes")
+        });
     enforce_watch_output_budget(&mut output, &continuation);
     let exit_code = if timed_out {
         TIMEOUT_EXIT_CODE

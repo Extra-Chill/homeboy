@@ -24,6 +24,7 @@ fn test_run_self_check_lint_workflow() {
         test: Vec::new(),
         build: Vec::new(),
         bench: Vec::new(),
+        bench_compare: Vec::new(),
         fuzz: Vec::new(),
         trace: Vec::new(),
         deps: Vec::new(),

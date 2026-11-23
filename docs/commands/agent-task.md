@@ -610,10 +610,20 @@ migration mode for a manually prepared candidate with no durable run.
 #### Single-Issue Cook
 
 With `agent-task cook --task-url <GitHub issue URL>`, Cook reworks the issue's
-single open linked PR on that PR's head branch. With no open linked PR, it
+single open linked PR on that PR's head branch and prints the resolution. Only
+an open PR in the issue's own repository that GitHub links as closing the issue
+qualifies; a PR that merely mentions the issue, or lives in another repository,
+is ignored. With no qualifying PR, it
 chooses a fresh issue-derived branch (adding `-2`, `-3`, … when an earlier
 attempt occupied the default name), rather than adopting closed or merged work.
-Several open linked PRs are refused; select one with `--task-url <PR URL>`.
+Several open linked PRs are refused with their URLs; select one with
+`--task-url <PR URL>`.
+
+`--repo` accepts a registered component slug (`blocks-engine`), a local
+checkout path (`~/Developer/blocks-engine`, or any clone whose remote matches a
+registered component), or a GitHub `owner/repo` (`Extra-Chill/blocks-engine`);
+all three resolve to the same component. An unmatched value fails with the
+accepted forms and the closest registered components.
 Output plan metadata `cook_issue_resolution` reports `pr_rework` or
 `fresh_branch` and the issue/PR URLs or chosen head. GitHub lookup failures
 stop resolution rather than guessing. Callers need not invent per-pass branch

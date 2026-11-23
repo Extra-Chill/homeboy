@@ -29,6 +29,7 @@ use crate::command_contract::{
     LabCommandContract, BENCH_LAB_LABEL,
 };
 
+mod compare;
 mod default_baseline;
 mod fanout;
 mod matrix;
@@ -147,7 +148,7 @@ impl BenchArgs {
         match &self.command {
             None => Some(&self.run),
             Some(BenchCommand::Matrix(args)) => Some(args.run_args()),
-            Some(BenchCommand::List(_)) => None,
+            Some(BenchCommand::List(_)) | Some(BenchCommand::Compare(_)) => None,
         }
     }
 
@@ -175,6 +176,11 @@ enum BenchCommand {
     Matrix(settings_matrix::BenchMatrixArgs),
     /// List declared benchmark scenarios without executing them
     List(BenchListArgs),
+    /// Compare a component's base and head revisions on a corpus: run the
+    /// component/extension-declared corpus workload once per side in a
+    /// run-owned checkout, tear down every process it started, and write a
+    /// durable artifact with per-route deltas and an aggregate summary
+    Compare(compare::BenchCompareArgs),
 }
 
 #[derive(Args)]
@@ -692,6 +698,7 @@ pub enum BenchOutput {
     MatrixFanout(Box<fanout::BenchMatrixFanoutOutput>),
     SettingsMatrix(settings_matrix::BenchSettingsMatrixOutput),
     List(BenchListWorkflowResult),
+    Compare(Box<homeboy_core::bench_compare::BenchCompareOutput>),
 }
 
 pub fn run(mut args: BenchArgs) -> CmdResult<BenchOutput> {
@@ -707,6 +714,10 @@ pub fn run(mut args: BenchArgs) -> CmdResult<BenchOutput> {
                 Ok((BenchOutput::SettingsMatrix(output), exit))
             }
             BenchCommand::List(list_args) => run_list(list_args),
+            BenchCommand::Compare(compare_args) => {
+                let (output, exit) = compare::run_compare(compare_args)?;
+                Ok((BenchOutput::Compare(Box::new(output)), exit))
+            }
         };
     }
 

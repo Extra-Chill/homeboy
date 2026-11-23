@@ -488,10 +488,129 @@ pub(super) fn record_local_dispatch_wait(
             LOCAL_DISPATCH_QUEUED_PHASE,
             0,
             Some(reason),
-            None,
+            Some(local_dispatch_wait_evidence()),
         ) {
             homeboy::core::log_status!("cook", "local dispatch wait not recorded: {}", error);
         }
+    }
+}
+
+/// Evidence is sampled only when admission refuses, not on every status read.
+fn local_dispatch_wait_evidence() -> Value {
+    let resources = crate::commands::resources::run_preflight()
+        .ok()
+        .map(|(r, _)| r);
+    let cpus = resources.as_ref().map_or(1, |r| r.load.cpu_count.max(1)) as f64;
+    let mut holders = homeboy::core::paths::homeboy_data()
+        .and_then(|root| homeboy::core::local_dispatch_admission::local_dispatch_holders(&root))
+        .unwrap_or_default();
+    let processes = std::process::Command::new("ps")
+        .args(["-axo", "pid=,user=,pcpu=,rss=,comm="])
+        .output();
+    let (groups, probe_error) = match processes {
+        Ok(output) if output.status.success() => (
+            group_pressure_processes(&String::from_utf8_lossy(&output.stdout)),
+            None,
+        ),
+        Ok(output) => (Vec::new(), Some(format!("ps exited {}", output.status))),
+        Err(error) => (Vec::new(), Some(error.to_string())),
+    };
+    holders.extend(groups);
+    json!({
+        "local_dispatch_wait": {
+            "pressure": resources.as_ref().map(|r| json!({"load1": r.load.one, "load5": r.load.five,
+                "memory": r.memory, "recommendation": r.recommendation})),
+            "pressure_thresholds": {"load1": cpus * 1.5, "load5": cpus * 1.25,
+                "available_memory_ratio": 0.10},
+            "pressure_holders": holders,
+            "process_probe_error": probe_error,
+            "next_attempt_at": (chrono::Utc::now() + chrono::Duration::seconds(15)).to_rfc3339(),
+            "queue_position": null,
+            "eta_seconds": null,
+            "queue_policy": "pressure polling; no ordered queue or admission ETA"
+        }
+    })
+}
+
+/// Group by executable and OS user, retaining PIDs and aggregate CPU/RSS.
+/// `comm` deliberately avoids arguments (which may contain credentials).
+fn group_pressure_processes(output: &str) -> Vec<Value> {
+    let mut groups = std::collections::BTreeMap::<(String, String), (Vec<u32>, f64, u64)>::new();
+    for line in output.lines() {
+        let mut fields = line.split_whitespace();
+        let (Some(pid), Some(user), Some(cpu), Some(rss)) =
+            (fields.next(), fields.next(), fields.next(), fields.next())
+        else {
+            continue;
+        };
+        let (Ok(pid), Ok(cpu), Ok(rss)) =
+            (pid.parse::<u32>(), cpu.parse::<f64>(), rss.parse::<u64>())
+        else {
+            continue;
+        };
+        let command = fields.collect::<Vec<_>>().join(" ");
+        if command.is_empty() {
+            continue;
+        }
+        let group = groups.entry((user.to_string(), command)).or_default();
+        group.0.push(pid);
+        group.1 += cpu;
+        group.2 = group.2.saturating_add(rss);
+    }
+    let mut groups: Vec<_> = groups.into_iter().collect();
+    groups.sort_by(|a, b| b.1 .1.total_cmp(&a.1 .1).then_with(|| b.1 .2.cmp(&a.1 .2)));
+    // Include memory-heavy groups even when they are currently sleeping.
+    let mut memory = groups.clone();
+    memory.sort_by_key(|entry| std::cmp::Reverse(entry.1 .2));
+    let selected: std::collections::BTreeSet<_> = groups
+        .iter()
+        .take(8)
+        .chain(memory.iter().take(8))
+        .map(|entry| entry.0.clone())
+        .collect();
+    groups
+        .into_iter()
+        .filter(|entry| selected.contains(&entry.0))
+        .map(|((user, command), (pids, cpu, rss))| {
+            json!({
+                "kind": "process_group", "user": user, "command": command,
+                "count": pids.len(), "pids": pids, "cpu_percent": cpu, "rss_kb": rss
+            })
+        })
+        .collect()
+}
+
+#[cfg(test)]
+mod pressure_evidence_tests {
+    use super::*;
+
+    #[test]
+    fn synthetic_php_servers_are_grouped_by_user_with_pids_and_usage() {
+        let groups = group_pressure_processes(
+            "101 chubes 50.0 1024 php\n102 chubes 25.0 2048 php\n103 other 1.0 512 php\nmalformed\n",
+        );
+        assert_eq!(groups[0]["command"], "php");
+        assert_eq!(groups[0]["user"], "chubes");
+        assert_eq!(groups[0]["count"], 2);
+        assert_eq!(groups[0]["pids"], json!([101, 102]));
+        assert_eq!(groups[0]["cpu_percent"], 75.0);
+        assert_eq!(groups[0]["rss_kb"], 3072);
+        assert_eq!(groups.len(), 2);
+    }
+
+    #[test]
+    fn wait_evidence_always_has_retry_and_explicit_queue_policy() {
+        let evidence = local_dispatch_wait_evidence();
+        let wait = &evidence["local_dispatch_wait"];
+        assert!(wait["pressure_holders"].is_array());
+        assert!(wait["pressure_thresholds"]["load1"].is_number());
+        assert!(
+            chrono::DateTime::parse_from_rfc3339(wait["next_attempt_at"].as_str().unwrap()).is_ok()
+        );
+        assert!(wait["queue_policy"]
+            .as_str()
+            .unwrap()
+            .contains("no ordered queue"));
     }
 }
 

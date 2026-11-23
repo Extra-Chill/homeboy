@@ -5,7 +5,10 @@ set -euo pipefail
 # wp-includes/html-api) without booting WordPress receive
 # HOMEBOY_WORDPRESS_CORE_ROOT from `wp-codebox wordpress-source --json`.
 # Resolution failure degrades to a warning: the smokes still run, without the
-# variable, and resolution alone never fails the suite.
+# variable, and resolution alone never fails the suite -- unless the component
+# declares standalone_php_requires_wordpress_core, in which case it fails the
+# step up front with the resolution reason. A structured `--json` error
+# envelope on stdout is preferred over the last stderr line for that reason.
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 EXTENSION_PATH="$(cd "${SCRIPT_DIR}/../.." && pwd)"
@@ -72,6 +75,11 @@ case "${1:-}" in
                 ;;
             offline)
                 echo "Error: could not download WordPress: getaddrinfo ENOTFOUND wordpress.org" >&2
+                exit 1
+                ;;
+            structured)
+                printf '{"schema":"wp-codebox/wordpress-source/v1","error":{"code":"wordpress_source.download_failed","message":"Could not download WordPress 9.9: HTTP 404","version":"9.9"}}\n'
+                echo "    at downloadWordPress (internal stack frame)" >&2
                 exit 1
                 ;;
             too-old)
@@ -197,5 +205,60 @@ assert_degraded ok "has no wp-includes/version.php"
 
 run_case missing "$core_root" absent '{}' "${TMPDIR}/bin/missing-wp-codebox" 0
 assert_degraded missing "configured WP Codebox binary is unavailable"
+
+# (c) A structured --json error envelope wins over the last stderr line.
+run_case structured "$core_root" absent '{}'
+assert_degraded structured "wp-codebox wordpress-source --json exited 1: wordpress_source.download_failed: Could not download WordPress 9.9: HTTP 404"
+if grep -Fq "internal stack frame" "${TMPDIR}/structured.err"; then
+    echo "FAIL: structured: reported the stderr line instead of the structured error" >&2
+    cat "${TMPDIR}/structured.err" >&2
+    exit 1
+fi
+
+# (d) A component that requires core fails the step clearly when the source
+# cannot be resolved, naming the reason, and does not run its smokes.
+for mode in structured offline; do
+    : > "${TMPDIR}/${mode}.log"
+    set +e
+    FAKE_MODE="$mode" \
+    FAKE_ROOT="$core_root" \
+    FAKE_LOG="${TMPDIR}/${mode}.log" \
+    EXPECTED_CORE_ROOT="absent" \
+    HOMEBOY_WP_CODEBOX_BIN="$fake_wp_codebox" \
+    HOMEBOY_EXTENSION_PATH="$EXTENSION_PATH" \
+    HOMEBOY_COMPONENT_ID="component" \
+    HOMEBOY_COMPONENT_PATH="$component" \
+    HOMEBOY_COMPONENT_SHAPE="plugin" \
+    HOMEBOY_RUNTIME_TEST_RUNNER_WP_CODEBOX="$runtime_stub" \
+    HOMEBOY_SETTINGS_JSON="$(jq -nc --argjson declared "$standalone_declaration" '{standalone_php_requires_wordpress_core: true} + $declared')" \
+        bash "${EXTENSION_PATH}/scripts/test/test-runner.sh" > "${TMPDIR}/${mode}-required.out" 2> "${TMPDIR}/${mode}-required.err"
+    status=$?
+    set -e
+    if [ "$status" -eq 0 ]; then
+        echo "FAIL: ${mode}-required: unresolved WordPress source did not fail the test step" >&2
+        cat "${TMPDIR}/${mode}-required.out" "${TMPDIR}/${mode}-required.err" >&2
+        exit 1
+    fi
+    grep -Fq "ERROR: WordPress core source could not be resolved, and standalone_php_requires_wordpress_core is set: wp-codebox wordpress-source --json exited 1: " "${TMPDIR}/${mode}-required.err" || {
+        echo "FAIL: ${mode}-required: missing clear resolution error" >&2
+        cat "${TMPDIR}/${mode}-required.err" >&2
+        exit 1
+    }
+    if grep -Fq "standalone smoke ran" "${TMPDIR}/${mode}-required.out"; then
+        echo "FAIL: ${mode}-required: smokes ran without the required core root" >&2
+        exit 1
+    fi
+    grep -Fq "PHP_SMOKE_SUMMARY:passed=0 failed=2" "${TMPDIR}/${mode}-required.out" || {
+        echo "FAIL: ${mode}-required: summary did not count the unrun smokes as failed" >&2
+        cat "${TMPDIR}/${mode}-required.out" >&2
+        exit 1
+    }
+done
+grep -Fq "wordpress_source.download_failed: Could not download WordPress 9.9: HTTP 404" "${TMPDIR}/structured-required.err"
+grep -Fq "ENOTFOUND wordpress.org" "${TMPDIR}/offline-required.err"
+
+# The requirement is satisfied by a resolved source: smokes run normally.
+run_case ok "$core_root" "$core_root" '{"standalone_php_requires_wordpress_core":true}'
+grep -Fq "standalone smoke received core root" "${TMPDIR}/ok.out"
 
 echo "Standalone WordPress core root smoke passed"

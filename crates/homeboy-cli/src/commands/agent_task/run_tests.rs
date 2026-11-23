@@ -1133,6 +1133,11 @@ fn local_dispatch_wait_is_durable_cook_progress() {
         let later = progress("machine is hot (load average 33.1 across 32 CPU(s))");
 
         assert_eq!(later["phase"], "queued_local_pressure");
+        let wait = &later["activity"]["local_dispatch_wait"];
+        assert!(wait["pressure_holders"].is_array());
+        assert!(wait["pressure"].is_object());
+        assert!(wait["pressure_thresholds"]["load1"].is_number());
+        assert!(wait["next_attempt_at"].is_string());
         assert_eq!(later["wait_owner"], "cook_queue");
         assert_eq!(
             later["detail"],

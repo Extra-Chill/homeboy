@@ -3105,7 +3105,7 @@ fn observation_row(run_id: &str) -> homeboy_core::observation::RunRecord {
 
 /// A detached Cook redirected to an attempt that never materialized, and no
 /// controller drives it: status points at reconcile, and `reconcile --all`
-/// previews then settles the row its lifecycle can no longer settle.
+/// never invents a row verdict its lifecycle did not record.
 #[test]
 fn abandoned_recipe_only_cook_is_reconciled_rather_than_recovered() {
     with_temp_home(|| {
@@ -3154,47 +3154,23 @@ fn abandoned_recipe_only_cook_is_reconciled_rather_than_recovered() {
             format!("homeboy agent-task recover {attempt_id}")
         );
 
-        let fleet = |apply: bool| {
-            reconcile_run(ReconcileArgs {
-                all: true,
-                run_id: None,
-                dry_run: !apply,
-                apply,
-                idempotency_key: None,
-            })
-            .expect("fleet reconcile")
-            .0
-        };
-        let row_entry = |report: &serde_json::Value| {
-            report["unsettled_rows"]
-                .as_array()
-                .into_iter()
-                .flatten()
-                .find(|row| row["run_id"] == cook_id)
-                .cloned()
-        };
-        let preview = fleet(false);
-        let entry = row_entry(&preview).expect("preview considers the recipe-only Cook");
-        assert_eq!(entry["class"], "redirected_attempt_absent");
-        assert_eq!(entry["proposed_status"], "stale");
-        assert_eq!(entry["action"], "would-settle");
-        assert!(preview["considered"].as_u64().unwrap() >= 1);
-        assert_eq!(observation_row(cook_id).status, "running");
-
-        let applied = fleet(true);
-        assert_eq!(row_entry(&applied).expect("applied")["action"], "settled");
-        let row = observation_row(cook_id);
-        assert_eq!(row.status, "stale");
-        assert_eq!(
-            row.metadata_json["homeboy_reconciled"]["reason"],
-            "redirected_attempt_absent"
-        );
-        assert!(row_entry(&fleet(false)).is_none());
+        let applied = reconcile_run(ReconcileArgs {
+            all: true,
+            run_id: None,
+            dry_run: false,
+            apply: true,
+            idempotency_key: None,
+        })
+        .expect("fleet reconcile")
+        .0;
+        assert_eq!(applied["failed"], 0);
+        assert!(applied.get("unsettled_rows").is_none());
     });
 }
 
 /// A Cook attempt that fails admission ends its lifecycle while its driver is
-/// exiting; the driver-error settlement leaves no `running` row behind.
+/// exiting; the driver-error settlement records the Cook's outcome, so no
+/// `running` row is left behind.
 #[test]
 fn admission_failure_driver_exit_leaves_no_running_row() {
     with_temp_home(|| {
@@ -3209,13 +3185,12 @@ fn admission_failure_driver_exit_leaves_no_running_row() {
         .expect("admission failure");
 
         let store = agent_task_lifecycle::AgentTaskLifecycleStore::from_environment().unwrap();
-        let settled =
-            homeboy::agents::agent_task_service::settle_unowned_cook_rows(&store, cook_id)
-                .expect("settle after driver error");
+        store
+            .record_cook_attempt(cook_id, 1, run_id)
+            .expect("index attempt");
+        homeboy::agents::agent_task_service::finish_cook_terminal(&store, cook_id)
+            .expect("settle after driver error");
 
-        assert!(settled
-            .iter()
-            .any(|row| row.run_id == run_id && row.class == "cook_attempt_unsettled"));
         assert_eq!(observation_row(run_id).status, "fail");
     });
 }
