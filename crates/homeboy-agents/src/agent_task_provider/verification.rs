@@ -90,7 +90,9 @@ mod tests {
         assert!(request.instructions.starts_with("Implement it."));
         assert!(request.instructions.contains("after this attempt"));
         assert!(request.instructions.contains("cargo check -p <crate>"));
-        assert!(request.instructions.contains("never makes the task incomplete"));
+        assert!(request
+            .instructions
+            .contains("never makes the task incomplete"));
         assert!(request.instructions.contains("custom-verify --exact 'a b'"));
         assert!(request.instructions.contains("1 private gates"));
     }
