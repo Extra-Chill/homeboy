@@ -105,8 +105,10 @@ pub(crate) fn gate_failure_evidence(
             }
             (None, None) if target_unresolved => format!(
                 "gate environment cannot run `{command}`: {}",
-                homeboy_gate_diagnostic(stdout, stderr)
-                    .unwrap_or_else(|| "Homeboy could not resolve the gate's target before checking the candidate".to_string())
+                homeboy_gate_diagnostic(stdout, stderr).unwrap_or_else(|| {
+                    "Homeboy could not resolve the gate's target before checking the candidate"
+                        .to_string()
+                })
             ),
             (None, None) if !failed_tests.is_empty() => format!(
                 "deterministic gate failed with exit code {exit_code}: {command}\n{}",
