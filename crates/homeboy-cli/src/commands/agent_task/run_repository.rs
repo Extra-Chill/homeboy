@@ -1032,12 +1032,17 @@ pub(super) fn fresh_derived_cook_branch(
     let source_checkout = source_checkout.or(registered_source.as_deref());
     // Start past every generation a branch or PR already used, so an issue
     // that has shipped many generations keeps deriving fresh destinations.
-    let first = match source_checkout {
-        Some(path) => {
-            homeboy::core::worktree::convergence::highest_used_branch_generation(path, base)? + 1
-        }
-        None => 1,
-    };
+    // No higher generation has a branch ref; PR search can lag, so each one
+    // still checks its exact PR history.
+    let generations = source_checkout
+        .map(|path| {
+            homeboy::core::worktree::convergence::branch_generations(path, base)
+                .map(|generations| (path, generations))
+        })
+        .transpose()?;
+    let first = generations
+        .as_ref()
+        .map_or(1, |(_, generations)| generations.highest_used + 1);
     let last = first + MAX_DERIVED_COOK_GENERATIONS - 1;
     for generation in first..=last {
         let branch = if generation == 1 {
@@ -1051,15 +1056,17 @@ pub(super) fn fresh_derived_cook_branch(
         if record.is_some() {
             continue;
         }
-        if let Some(path) = source_checkout {
-            if homeboy::core::worktree::stale_destination::adoptable_branch_ref(path, &branch)
-                .is_some()
-            {
-                continue;
-            }
-            // Remote PR history can outlive a deleted local branch.
+        if let Some((path, Some(github_repository))) = generations
+            .as_ref()
+            .map(|(path, generations)| (path, generations.github_repository.as_deref()))
+        {
+            // Remote PR history can outlive a deleted branch.
             if !matches!(
-                homeboy::core::worktree::convergence::pr_history(path, &branch, None)?,
+                homeboy::core::worktree::convergence::pr_history(
+                    path,
+                    &branch,
+                    Some(github_repository)
+                )?,
                 PrHistory::None
             ) {
                 continue;

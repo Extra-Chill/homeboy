@@ -53,31 +53,52 @@ pub fn pr_history(path: &Path, branch: &str, repository: Option<&str>) -> Result
     parse_pr_history(&output.stdout)
 }
 
-/// The highest generation of `base` (`base` is 1, `base-N` is N) that a local
-/// branch or any PR head, in any state, already uses; 0 when none does. One
-/// `gh pr list` search covers every generation, so a long-lived issue whose
-/// earlier generations all merged does not cost one PR lookup per generation.
-/// Search results can lag, so this is a starting floor, not proof that the
-/// next generation is free.
-pub fn highest_used_branch_generation(path: &Path, base: &str) -> Result<u32> {
-    let local = format!("refs/heads/{base}");
-    let suffixed = format!("refs/heads/{base}-*");
-    let mut heads: Vec<String> = git::output_optional(
-        path,
-        &[
-            "for-each-ref",
-            "--format=%(refname:short)",
-            &local,
-            &suffixed,
-        ],
-    )
-    .map(|output| output.lines().map(str::to_string).collect())
-    .unwrap_or_default();
-    if git::output_optional(path, &["remote", "get-url", "origin"])
-        .is_some_and(|origin| origin.contains("github.com"))
-    {
+/// What derivation needs to pick the next fresh generation of `base`
+/// (`base` is generation 1, `base-N` is N).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BranchGenerations {
+    /// Highest generation any local or origin branch, or any PR head in any
+    /// state, already uses; 0 when none does. Every higher generation has no
+    /// branch ref. Search results can lag, so a higher generation may still
+    /// have PR history: check it with [`pr_history`].
+    pub highest_used: u32,
+    /// `owner/repo` of a github.com origin, the repository to ask for PR
+    /// history; `None` when origin has no PR service.
+    pub github_repository: Option<String>,
+}
+
+/// One ref listing and one PR search cover every generation of `base`, so a
+/// long-lived issue whose earlier generations all merged costs neither a
+/// ref probe nor a PR lookup per generation.
+pub fn branch_generations(path: &Path, base: &str) -> Result<BranchGenerations> {
+    let prefixes = ["refs/heads/", "refs/remotes/origin/"];
+    let patterns: Vec<String> = prefixes
+        .iter()
+        .flat_map(|prefix| [format!("{prefix}{base}"), format!("{prefix}{base}-*")])
+        .collect();
+    let mut args = vec!["for-each-ref", "--format=%(refname)"];
+    args.extend(patterns.iter().map(String::as_str));
+    let mut heads: Vec<String> = git::output_optional(path, &args)
+        .map(|output| {
+            output
+                .lines()
+                .filter_map(|reference| {
+                    prefixes
+                        .iter()
+                        .find_map(|prefix| reference.strip_prefix(prefix))
+                })
+                .map(str::to_string)
+                .collect()
+        })
+        .unwrap_or_default();
+    let github_repository = git::output_optional(path, &["remote", "get-url", "origin"])
+        .and_then(|origin| git::release_download::parse_github_url(origin.trim()))
+        .filter(|repo| repo.host == "github.com")
+        .map(|repo| format!("{}/{}", repo.owner, repo.repo));
+    if let Some(repository) = &github_repository {
         let output = std::process::Command::new("gh")
             .args(["pr", "list", "--state", "all", "--limit", "1000"])
+            .args(["--repo", repository])
             .args(["--search", &format!("head:{base}"), "--json", "headRefName"])
             .current_dir(path)
             .output()
@@ -96,11 +117,14 @@ pub fn highest_used_branch_generation(path: &Path, base: &str) -> Result<u32> {
             .map_err(|error| infrastructure(error.to_string()))?;
         heads.extend(prs.into_iter().map(|pr| pr.head_ref_name));
     }
-    Ok(heads
-        .iter()
-        .filter_map(|head| branch_generation(base, head))
-        .max()
-        .unwrap_or(0))
+    Ok(BranchGenerations {
+        highest_used: heads
+            .iter()
+            .filter_map(|head| branch_generation(base, head))
+            .max()
+            .unwrap_or(0),
+        github_repository,
+    })
 }
 
 fn branch_generation(base: &str, branch: &str) -> Option<u32> {
