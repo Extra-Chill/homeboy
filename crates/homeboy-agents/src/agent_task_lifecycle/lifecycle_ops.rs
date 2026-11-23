@@ -1289,6 +1289,11 @@ pub fn fail_detached_cook_handoff_parent_in_store(
         // pre-handoff failure; a cancelled parent is already terminal.
         Some(fail_detached_cook_handoff_transition(record, reason))
     })?;
+    // Notify after releasing the transition lock. Repeated terminal observers
+    // use the Cook's durable notification claim to avoid duplicate delivery.
+    if record.is_some() {
+        crate::agent_task_service::finish_cook_terminal(lifecycle_store, &cook_id)?;
+    }
     // A protected parent is a successful no-op: it is the authoritative result
     // of materialization or a prior terminal transition, not a missing parent.
     Ok(record.unwrap_or(lifecycle_store.read_record(&cook_id)?))
@@ -1315,6 +1320,9 @@ pub fn fail_claimed_detached_cook_handoff_parent_in_store(
         }
         Some(fail_detached_cook_handoff_transition(record, reason))
     })?;
+    if record.is_some() {
+        crate::agent_task_service::finish_cook_terminal(lifecycle_store, &cook_id)?;
+    }
     Ok(record.unwrap_or(lifecycle_store.read_record(&cook_id)?))
 }
 
