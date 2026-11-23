@@ -1,4 +1,4 @@
-use std::process::Command;
+use homeboy_engine_primitives::process_table;
 use std::sync::{
     atomic::{AtomicBool, Ordering},
     Arc,
@@ -121,28 +121,28 @@ fn sample_child_until_stopped(root_pid: u32, stop: Arc<AtomicBool>) -> ChildProb
 fn probe_child_resources(
     root_pid: u32,
 ) -> std::result::Result<Option<ExtensionChildResourceSample>, String> {
-    let output = Command::new("ps")
-        .args(["-axo", "pid=,ppid=,rss=,%cpu=,comm="])
-        .output()
+    let snapshot = process_table::snapshot(false)
         .map_err(|_| "extension_child_probe_unsupported".to_string())?;
-
-    if !output.status.success() {
-        return Ok(None);
-    }
-
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    let rows = parse_process_rows(&stdout)?;
+    let rows: Vec<_> = snapshot
+        .iter()
+        .map(|row| ExtensionChildProcessSample {
+            pid: row.pid,
+            parent_pid: row.parent_pid,
+            rss_bytes: row.rss_kib.unwrap_or(0).saturating_mul(1024),
+            cpu_percent: row.cpu_percent.unwrap_or(0.0),
+            command: row.executable.clone(),
+        })
+        .collect();
     let Some(root) = rows.iter().find(|row| row.pid == root_pid) else {
         return Ok(None);
     };
     let mut selected = vec![root.clone()];
-    let mut index = 0;
-    while index < selected.len() {
-        let parent_pid = selected[index].pid;
-        for row in rows.iter().filter(|row| row.parent_pid == parent_pid) {
+    for (pid, _) in
+        process_table::descendants(root_pid, rows.iter().map(|row| (row.pid, row.parent_pid)))
+    {
+        if let Some(row) = rows.iter().find(|row| row.pid == pid) {
             selected.push(row.clone());
         }
-        index += 1;
     }
 
     selected.sort_by_key(|row| row.pid);
@@ -159,34 +159,4 @@ fn probe_child_resources(
         child_count: selected.len().saturating_sub(1),
         processes: selected,
     }))
-}
-
-fn parse_process_rows(
-    stdout: &str,
-) -> std::result::Result<Vec<ExtensionChildProcessSample>, String> {
-    let mut rows = Vec::new();
-    for line in stdout.lines().filter(|line| !line.trim().is_empty()) {
-        let mut parts = line.split_whitespace();
-        let Some(pid) = parts.next().and_then(|value| value.parse::<u32>().ok()) else {
-            return Err("extension_child_pid_probe_unsupported".to_string());
-        };
-        let Some(parent_pid) = parts.next().and_then(|value| value.parse::<u32>().ok()) else {
-            return Err("extension_child_ppid_probe_unsupported".to_string());
-        };
-        let Some(rss_kb) = parts.next().and_then(|value| value.parse::<u64>().ok()) else {
-            return Err("extension_child_rss_probe_unsupported".to_string());
-        };
-        let Some(cpu_percent) = parts.next().and_then(|value| value.parse::<f64>().ok()) else {
-            return Err("extension_child_cpu_probe_unsupported".to_string());
-        };
-        let command = parts.collect::<Vec<_>>().join(" ");
-        rows.push(ExtensionChildProcessSample {
-            pid,
-            parent_pid,
-            rss_bytes: rss_kb.saturating_mul(1024),
-            cpu_percent,
-            command,
-        });
-    }
-    Ok(rows)
 }

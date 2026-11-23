@@ -4,7 +4,7 @@ use clap::Parser;
 
 /// Configure a global rotation policy whose first entry pins
 /// `configured-model`, the same shape `configured_rotation_policy()`
-/// reads back in [`dispatch_service::require_model_override_acknowledgement`].
+/// reads back in [`agent_task_dispatch_service::require_model_override_acknowledgement`].
 fn configure_default_model_route() {
     let mut config = homeboy::core::defaults::load_config();
     config.agent_task.rotation = Some(serde_json::json!({

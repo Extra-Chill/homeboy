@@ -52,8 +52,6 @@ pub const AGENT_TASK_LAB_RUNTIME_RECOVERY_SCHEMA: &str =
 // staleness detection. (Step toward migrating these flags onto the typed
 // lifecycle state; for now this removes the string-drift hazard without
 // changing the on-disk format.)
-pub(crate) const METADATA_KEY_STALE_RUNNING: &str = "stale_running";
-pub(crate) const METADATA_KEY_STALE_RUNNING_REASON: &str = "stale_running_reason";
 pub(crate) const METADATA_KEY_RUNNER_LIVENESS: &str = "runner_liveness";
 pub(crate) const METADATA_KEY_RETRYABLE: &str = "retryable";
 pub(crate) const METADATA_KEY_RECLAIMED_STALE_RUNNING: &str = "reclaimed_stale_running";
@@ -852,43 +850,11 @@ impl AgentTaskRunRecord {
         } else {
             metadata.remove(METADATA_KEY_RECLAIMED_STALE_RUNNING);
         }
-        metadata.remove(METADATA_KEY_STALE_RUNNING);
-        metadata.remove(METADATA_KEY_STALE_RUNNING_REASON);
-    }
-
-    pub(crate) fn annotate_stale_running(&mut self) {
-        if self.lifecycle.execution.state != RunExecutionState::Running {
-            return;
-        }
-
-        if !super::cook_run_state::should_annotate_stale(self) {
-            return;
-        }
-
-        let reason = if self.runner_job_id().is_some() {
-            RunnerJobObservation::HeartbeatStale.reason()
-        } else if self.owner_pid().is_some() {
-            "owner_process_not_running"
-        } else {
-            "missing_runner_pid"
-        };
-        let provider_handle_count = self.provider_handles.len();
-        let metadata = self.ensure_metadata_object();
-        metadata.insert(METADATA_KEY_STALE_RUNNING.to_string(), json!(true));
-        metadata.insert(METADATA_KEY_STALE_RUNNING_REASON.to_string(), json!(reason));
-        metadata.insert(
-            "provider_boundary".to_string(),
-            json!({
-                "status": if provider_handle_count == 0 { "absent" } else { "recorded" },
-                "provider_handle_count": provider_handle_count,
-            }),
-        );
-        metadata.insert(METADATA_KEY_RETRYABLE.to_string(), json!(true));
     }
 
     /// A controller cannot infer progress from a runner connection that is no
-    /// longer available. Preserve the last confirmed heartbeat as evidence,
-    /// while making its liveness explicitly unknown.
+    /// longer available. Record the disconnect as evidence, keeping the last
+    /// confirmed heartbeat; staleness is derived from it on read.
     pub(crate) fn annotate_runner_disconnected(&mut self) {
         if self.lifecycle.execution.state != RunExecutionState::Running || !self.is_runner_backed()
         {
@@ -899,21 +865,14 @@ impl AgentTaskRunRecord {
             METADATA_KEY_RUNNER_LIVENESS.to_string(),
             json!("disconnected"),
         );
-        metadata.insert(METADATA_KEY_STALE_RUNNING.to_string(), json!(true));
-        metadata.insert(
-            METADATA_KEY_STALE_RUNNING_REASON.to_string(),
-            json!("runner_disconnected"),
-        );
         metadata.insert(METADATA_KEY_RETRYABLE.to_string(), json!(true));
     }
 
     /// A reachable runner job is authoritative liveness evidence. Clear only
-    /// the controller's disconnected/stale projection, not unrelated metadata.
+    /// the controller's disconnect evidence, not unrelated metadata.
     pub(crate) fn record_runner_reachable(&mut self) {
         let metadata = self.ensure_metadata_object();
         metadata.insert(METADATA_KEY_RUNNER_LIVENESS.to_string(), json!("reachable"));
-        metadata.remove(METADATA_KEY_STALE_RUNNING);
-        metadata.remove(METADATA_KEY_STALE_RUNNING_REASON);
         metadata.remove(METADATA_KEY_RETRYABLE);
     }
 
@@ -982,21 +941,36 @@ impl AgentTaskRunRecord {
             .filter(|value| !value.trim().is_empty())
     }
 
-    /// Whether the controller has projected this run as stale (its runner
-    /// backing can no longer be confirmed live). Reads the centralized untyped
-    /// metadata flag.
+    /// Whether this running record reads as stale, derived on read.
     pub(crate) fn is_stale_running(&self) -> bool {
-        self.metadata
-            .get(METADATA_KEY_STALE_RUNNING)
-            .and_then(Value::as_bool)
-            == Some(true)
+        self.stale_running_reason().is_some()
     }
 
-    /// The recorded reason a run was projected stale, if any.
-    pub(crate) fn stale_running_reason(&self) -> Option<&str> {
-        self.metadata
-            .get(METADATA_KEY_STALE_RUNNING_REASON)
-            .and_then(Value::as_str)
+    /// Why this running record reads as stale, derived from liveness evidence
+    /// on every read. A legacy persisted `stale_running` key is ignored.
+    pub(crate) fn stale_running_reason(&self) -> Option<&'static str> {
+        if self.lifecycle.execution.state != RunExecutionState::Running {
+            return None;
+        }
+        if self.runner_disconnected() {
+            return Some("runner_disconnected");
+        }
+        if !super::cook_run_state::reads_stale(self) {
+            return None;
+        }
+        Some(if self.runner_job_id().is_some() {
+            RunnerJobObservation::HeartbeatStale.reason()
+        } else if self.owner_pid().is_some() {
+            "owner_process_not_running"
+        } else {
+            "missing_runner_pid"
+        })
+    }
+
+    /// Whether the last runner probe recorded the runner as disconnected.
+    pub(crate) fn runner_disconnected(&self) -> bool {
+        self.is_runner_backed()
+            && self.metadata[METADATA_KEY_RUNNER_LIVENESS].as_str() == Some("disconnected")
     }
 
     /// Whether recorded heartbeat or runner progress is within the shared window.
@@ -1577,13 +1551,7 @@ mod tests {
         let mut record = legacy_record(Value::Object(execution_step_owner_fixture("cook")));
         record.lifecycle.execution.state = RunExecutionState::Running;
 
-        record.annotate_stale_running();
-
-        assert!(record.metadata.get(METADATA_KEY_STALE_RUNNING).is_none());
-        assert!(record
-            .metadata
-            .get(METADATA_KEY_STALE_RUNNING_REASON)
-            .is_none());
+        assert!(!record.is_stale_running());
         assert!(record.has_live_execution_step_owner());
         record.metadata["execution_step_owner"]["intent_id"] = json!("superseded-step");
         assert!(!record.has_live_execution_step_owner());

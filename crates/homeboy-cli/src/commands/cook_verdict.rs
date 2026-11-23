@@ -38,6 +38,7 @@ pub struct CookVerdict {
     pub candidate: Option<String>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub gates: Vec<CookVerdictGate>,
+    pub inherited_failures: usize,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub publication: Option<String>,
     /// Why the Cook has not completed, when it has not.
@@ -112,6 +113,7 @@ pub(crate) fn cook_verdict(run: &ControlPlaneRun) -> CookVerdict {
             .as_ref()
             .map(|publication| publication.state.clone()),
         reason: verdict_reason(run, &gates),
+        inherited_failures: run.inherited_failures,
         gates,
         next_action,
         status_command: format!("homeboy agent-task status {}", posix_quote_arg(&run_id)),
@@ -155,7 +157,7 @@ fn state_label(state: ControlPlaneState) -> String {
 /// A deterministic gate rejected the candidate: the gate status the promotion
 /// recorded is the gate contract's own `Failed`, not a re-derived string list.
 fn gate_failed(state: &str) -> bool {
-    use homeboy::agents::agent_tasks::gate::AgentTaskGateStatus;
+    use homeboy::agents::agent_task_gate::AgentTaskGateStatus;
     serde_json::from_value::<AgentTaskGateStatus>(Value::String(state.to_string()))
         .is_ok_and(|status| status == AgentTaskGateStatus::Failed)
 }

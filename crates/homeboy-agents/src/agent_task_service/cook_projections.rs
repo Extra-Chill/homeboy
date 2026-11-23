@@ -64,6 +64,7 @@ impl serde::Serialize for AgentTaskCookReport {
             #[serde(skip_serializing_if = "slice_is_empty")]
             invocation_run_ids: &'a [String],
             status: &'a CookStatus,
+            inherited_failures: usize,
             disposition: CookDisposition,
             attempts: &'a [AgentTaskCookAttemptReport],
             #[serde(skip_serializing_if = "Option::is_none")]
@@ -96,6 +97,7 @@ impl serde::Serialize for AgentTaskCookReport {
             history_run_ids: &self.history_run_ids,
             invocation_run_ids: &self.invocation_run_ids,
             status: &self.status,
+            inherited_failures: self.inherited_failure_count(),
             disposition: self.disposition,
             attempts: &self.attempts,
             finalization: self.finalization.as_ref(),
@@ -133,6 +135,33 @@ pub(super) fn cook_success(
 }
 
 impl AgentTaskCookReport {
+    /// Count only the latest promoted candidate's accepted red gates; failed
+    /// earlier attempts must not taint a repaired candidate's completion.
+    pub fn inherited_failure_count(&self) -> usize {
+        self.attempts
+            .iter()
+            .rev()
+            .find_map(|attempt| attempt.promotion.as_ref())
+            .map_or_else(
+                || {
+                    self.finalization
+                        .as_ref()
+                        .and_then(|value| value["gate_results"].as_array())
+                        .map_or(0, |gates| {
+                            gates
+                                .iter()
+                                .filter(|gate| gate["status"] == "accepted_inherited_failure")
+                                .count()
+                        })
+                },
+                |promotion| {
+                    promotion.deterministic_gates.iter().filter(|gate| {
+                gate.status == crate::agent_task_gate::AgentTaskGateStatus::AcceptedInheritedFailure
+            }).count()
+                },
+            )
+    }
+
     /// Successful Cook completion, rather than provider or launcher success.
     pub fn completed_successfully(&self) -> bool {
         let status = self.status;

@@ -3133,6 +3133,27 @@ fn parsed_command_runner_evidence(
         });
         return (None, selected);
     }
+    // Cook's coordinator cannot offload an attempt to a local runner. In
+    // particular, the discovered host daemon means we are already on the Lab,
+    // not that there is a remote SSH destination to wait for.
+    let split_cook = input.controller_execution
+        == crate::core::parsed_command_preflight::ControllerExecution::SplitPlacementCoordinator;
+    if split_cook {
+        if let Some(runner_id) = cli.runner.as_deref() {
+            if crate::runner::runners::load(runner_id)
+                .is_ok_and(|runner| runner.kind == homeboy_runner_contract::RunnerKind::Local)
+            {
+                return (Some(lab_readiness_refresh_failure(
+                    &crate::core::Error::validation_invalid_argument(
+                        "runner",
+                        "Lab offload requires a remote direct SSH runner; local runners would execute on this machine",
+                        Some(runner_id.to_string()),
+                        None,
+                    ),
+                )), Some(runner_id.to_string()));
+            }
+        }
+    }
     let readiness = match refresh(cli.runner.as_deref()) {
         Ok(readiness) => Some(readiness),
         // A split-placement Cook must never read a failed Lab observation as
@@ -3150,11 +3171,37 @@ fn parsed_command_runner_evidence(
         }
         Err(_) => None,
     };
+    if split_cook
+        && matches!(input.placement, PlacementIntent::Auto)
+        && cli.runner.is_none()
+        && readiness.as_ref().is_some_and(|value| {
+            value
+                .selected_runner_id
+                .as_deref()
+                .is_some_and(crate::runner::runners::is_host_daemon_runner)
+        })
+    {
+        return (None, None);
+    }
     let selected = cli.runner.clone().or_else(|| {
         readiness
             .as_ref()
             .and_then(|value| value.selected_runner_id.clone())
     });
+    if split_cook
+        && selected
+            .as_deref()
+            .is_some_and(crate::runner::runners::is_host_daemon_runner)
+    {
+        return (Some(lab_readiness_refresh_failure(
+            &crate::core::Error::validation_invalid_argument(
+                "placement",
+                "Lab offload requires a remote direct SSH runner; use --placement local on the Lab host",
+                selected.clone(),
+                None,
+            ),
+        )), selected);
+    }
     (readiness, selected)
 }
 
@@ -3350,7 +3397,7 @@ fn controller_owned_unmaterialized_resume(cli: &Cli) -> bool {
     else {
         return false;
     };
-    crate::agents::agent_tasks::lifecycle::exact_record(&args.id).is_ok_and(|record| {
+    crate::agents::agent_task_lifecycle::exact_record(&args.id).is_ok_and(|record| {
         !record.state().is_terminal()
             && record.metadata["unmaterialized_cook_admission"].is_object()
     })
@@ -4108,6 +4155,41 @@ mod tests {
             assert_eq!(result.selected_runner_id.as_deref(), Some("lab-a"));
         }
 
+        // A co-located host daemon is not a remote offload destination.
+        let (readiness, selected) = parsed_command_runner_evidence(
+            &cli,
+            &input,
+            |_| {
+                let mut ready =
+                    lab_readiness(crate::runner::runners::LabRunnerReadinessState::ConnectedReady);
+                ready.selected_runner_id = Some("host-daemon".to_string());
+                ready.available_runner_ids = vec!["host-daemon".to_string()];
+                Ok(ready)
+            },
+            || panic!("cook requires live evidence"),
+        );
+        let local = resolve(readiness, selected).expect("Cook on the Lab resolves locally");
+        assert_eq!(local.placement.selected, EffectiveExecutionPlacement::Local);
+        assert!(local.selected_runner_id.is_none());
+
+        let explicit_args: Vec<&str> = args.iter().copied().chain(["--placement", "lab"]).collect();
+        let explicit = Cli::parse_from(explicit_args);
+        let explicit_input =
+            resource_policy::parsed_command_preflight_input(&explicit, &normalized);
+        let (readiness, selected) = parsed_command_runner_evidence(
+            &explicit,
+            &explicit_input,
+            |_| {
+                let mut ready =
+                    lab_readiness(crate::runner::runners::LabRunnerReadinessState::ConnectedReady);
+                ready.selected_runner_id = Some("host-daemon".to_string());
+                Ok(ready)
+            },
+            || panic!("cook requires live evidence"),
+        );
+        let refusal = resolve(readiness, selected).expect_err("self-offload must fail at launch");
+        assert!(refusal.to_string().contains("remote direct SSH runner"));
+
         // The Lab admission refresh itself failed: this is not a Lab-less host.
         let (readiness, selected) = parsed_command_runner_evidence(
             &cli,
@@ -4593,7 +4675,7 @@ mod tests {
     fn unmaterialized_resume_bypasses_hot_noninteractive_resource_refusal() {
         crate::test_support::with_isolated_home(|_| {
             let run_id = "hot-unmaterialized-resume";
-            crate::agents::agent_tasks::lifecycle::record_unmaterialized_cook_admission_in_store(
+            crate::agents::agent_task_lifecycle::record_unmaterialized_cook_admission_in_store(
                 &test_lifecycle_store(),
                 run_id,
                 serde_json::json!({
@@ -4617,7 +4699,7 @@ mod tests {
                 ),
                 None
             );
-            let record = crate::agents::agent_tasks::lifecycle::exact_record(run_id)
+            let record = crate::agents::agent_task_lifecycle::exact_record(run_id)
                 .expect("controller-owned admission");
             assert_eq!(
                 record.metadata["unmaterialized_cook_admission"]["binding"]["placement"]

@@ -920,7 +920,7 @@ fn controller_local_lifecycle_reads_never_acquire_a_default_lab_runner() {
 fn controller_local_record_owns_lifecycle_reads_and_cook_retries_before_lab_selection() {
     crate::test_support::with_isolated_home(|_| {
         let inferred = connected_default_lab_runner();
-        let plan = homeboy::agents::agent_tasks::scheduler::AgentTaskPlan::new(
+        let plan = homeboy::agents::agent_task_schedule::AgentTaskPlan::new(
             "local-owner-routing",
             vec![serde_json::from_value(serde_json::json!({
                 "task_id": "local-owner-task",

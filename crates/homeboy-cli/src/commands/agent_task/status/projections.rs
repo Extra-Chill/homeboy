@@ -371,6 +371,14 @@ pub(super) fn compact_control_plane_status(value: Value) -> Value {
         "publication_sha",
         "tree",
         "identity_note",
+        "candidate_repo_path",
+        "candidate_repo_source",
+        "candidate_repo_note",
+        "candidate_repo_unavailable",
+        "candidate_git_common_dir",
+        "candidate_ref_resolves",
+        "candidate_inspect_command",
+        "candidate_ref_inspect_command",
         "lab_snapshot_failure",
         "lab_staging_diagnostic",
         "recovery_step",
@@ -389,6 +397,13 @@ pub(super) fn compact_control_plane_status(value: Value) -> Value {
             .as_str()
             .map(bounded_diagnostic_message)
             .unwrap_or_else(|| bounded_control_plane_value(blocker_summary));
+    }
+    // The shared, self-bounded Cook summary is carried whole (#18817).
+    if let Some(summary) = value
+        .get(homeboy_control_plane_contract::COOK_SUMMARY_KEY)
+        .filter(|summary| summary.is_object())
+    {
+        compact[homeboy_control_plane_contract::COOK_SUMMARY_KEY] = summary.clone();
     }
     enforce_control_plane_status_budget(compact)
 }
@@ -467,6 +482,7 @@ pub(super) fn enforce_control_plane_status_budget(mut value: Value) -> Value {
                     | "presentation"
                     | "terminal_outcome"
                     | "recoverable"
+                    | "cook_summary"
             )
         })
         .cloned()
@@ -880,6 +896,7 @@ pub(super) fn compact_mandatory_field(field: &str) -> bool {
             | "next_action"
             | "lab_staging_diagnostic"
             | "full_command"
+            | "cook_summary"
     )
 }
 
@@ -922,12 +939,33 @@ pub(super) fn compact_section_count(value: &Value) -> usize {
 /// diagnostic cause. Output only grows on the failure path: `failure_context` is `None`
 /// whenever `exit_code == 0`.
 pub(crate) fn compact_cook_report(value: Value, full: bool) -> Value {
-    let mut value = value;
-    let candidate_run_id = value
+    let summary = cook_report_run_id(&value)
+        .as_deref()
+        .and_then(crate::commands::agent_task::cook_summary::of_run);
+    compact_cook_report_with_summary(value, full, summary)
+}
+
+/// The run a Cook report's candidate (or latest attempt) lives on.
+fn cook_report_run_id(value: &Value) -> Option<String> {
+    value
         .pointer("/selected_candidate/run_id")
         .and_then(Value::as_str)
         .or_else(|| value.get("latest_run_id").and_then(Value::as_str))
-        .map(str::to_string);
+        .map(str::to_string)
+}
+
+/// The launch output, carrying the same `cook_summary` every Cook read
+/// surface emits (#18817). Without a readable record the report's own status
+/// and stop reason supply it.
+pub(crate) fn compact_cook_report_with_summary(
+    value: Value,
+    full: bool,
+    cook_summary: Option<homeboy_control_plane_contract::CookSummary>,
+) -> Value {
+    let mut value = value;
+    let cook_summary =
+        cook_summary.unwrap_or_else(|| crate::commands::agent_task::cook_summary::fallback(&value));
+    let candidate_run_id = cook_report_run_id(&value);
     let candidate_projection = candidate_run_id
         .as_deref()
         .map(compact_cook_candidate_projection)
@@ -936,6 +974,7 @@ pub(crate) fn compact_cook_report(value: Value, full: bool) -> Value {
         if let Some(candidate) = candidate_projection.as_ref() {
             value["durable_candidate"] = candidate.clone();
         }
+        crate::commands::agent_task::cook_summary::attach(&mut value, Some(cook_summary));
         return value;
     }
     let attempts = value
@@ -961,6 +1000,13 @@ pub(crate) fn compact_cook_report(value: Value, full: bool) -> Value {
     });
     if let Some(candidate) = candidate_projection {
         summary["durable_candidate"] = candidate.clone();
+    }
+    // #17610: a candidate published on a base the remote has since moved past
+    // carries the drift in the summary instead of leaving it for review to find.
+    if let Some(drift) = value.get("finalization").and_then(base_drift_projection) {
+        if summary["finalization"].is_object() {
+            summary["finalization"]["base_drift"] = drift;
+        }
     }
     // The run ids this invocation actually dispatched, so a caller can tell them
     // apart from the cross-invocation history `latest_run_id` may be drawn from.
@@ -1013,6 +1059,7 @@ pub(crate) fn compact_cook_report(value: Value, full: bool) -> Value {
             summary[field] = bounded_value(value);
         }
     }
+    crate::commands::agent_task::cook_summary::attach(&mut summary, Some(cook_summary));
     enforce_compact_status_budget(summary)
 }
 
@@ -1068,6 +1115,21 @@ pub(super) fn compact_identity(item: &Value) -> Option<String> {
                 .and_then(Value::as_str)
                 .map(|uri| format!("uri:{uri}"))
         })
+}
+
+/// Base drift recorded at publication: how many commits the live base held
+/// beyond the gated base, with both SHAs. `None` when unmeasured or zero.
+pub(super) fn base_drift_projection(finalization: &Value) -> Option<Value> {
+    let target = finalization.pointer("/publication_intent/target")?;
+    let behind_by = target["publication_base_behind_by"]
+        .as_u64()
+        .filter(|count| *count > 0)?;
+    Some(json!({
+        "base_behind_by": behind_by,
+        "base": target.get("base"),
+        "verified_base_sha": target.get("verified_base_sha"),
+        "base_tip_sha": target.get("publication_base_sha"),
+    }))
 }
 
 pub(super) fn compact_fields(value: &Value, fields: &[&str]) -> Value {

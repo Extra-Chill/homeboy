@@ -3,7 +3,7 @@ use serde_json::{json, Value};
 use sha2::Digest;
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 
-use homeboy_agents::agent_tasks::provider::{
+use homeboy_agents::agent_task_provider::{
     AgentTaskExecutorProvider, ExtensionProviderAgentTaskExecutor,
 };
 use homeboy_core::error::{Error, ErrorCode, Result};

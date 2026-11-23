@@ -509,7 +509,10 @@ fn remote_homeboy_version(client: &SshClient, command: &str) -> Option<String> {
 }
 
 pub(crate) fn local_memory_probe() -> Option<MemoryProbe> {
-    memory_from_proc_meminfo().or_else(memory_from_macos_sysctl)
+    homeboy_engine_primitives::host_telemetry::probe_system_memory().map(|memory| MemoryProbe {
+        total_mb: memory.total_bytes / 1024 / 1024,
+        available_mb: memory.available_bytes.map(|bytes| bytes / 1024 / 1024),
+    })
 }
 
 pub(crate) fn remote_memory_probe(client: &SshClient) -> Option<MemoryProbe> {
@@ -909,35 +912,6 @@ pub(super) fn daemon_exec_check_with_timeout(
         )),
         details,
     )
-}
-
-fn memory_from_proc_meminfo() -> Option<MemoryProbe> {
-    let raw = fs::read_to_string("/proc/meminfo").ok()?;
-    let total_kb = meminfo_value_kb(&raw, "MemTotal")?;
-    let available_kb = meminfo_value_kb(&raw, "MemAvailable");
-    Some(MemoryProbe {
-        total_mb: total_kb / 1024,
-        available_mb: available_kb.map(|kb| kb / 1024),
-    })
-}
-
-fn memory_from_macos_sysctl() -> Option<MemoryProbe> {
-    let total_bytes = common::local_command_line("sysctl", &["-n", "hw.memsize"])?;
-    let total_mb = total_bytes.parse::<u64>().ok()? / 1024 / 1024;
-    Some(MemoryProbe {
-        total_mb,
-        available_mb: None,
-    })
-}
-
-fn meminfo_value_kb(raw: &str, key: &str) -> Option<u64> {
-    raw.lines().find_map(|line| {
-        let (name, rest) = line.split_once(':')?;
-        if name != key {
-            return None;
-        }
-        rest.split_whitespace().next()?.parse::<u64>().ok()
-    })
 }
 
 fn browser_cache_candidates() -> Vec<PathBuf> {

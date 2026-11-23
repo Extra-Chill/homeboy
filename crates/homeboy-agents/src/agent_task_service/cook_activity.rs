@@ -31,7 +31,7 @@ use serde_json::Value;
 use std::path::{Path, PathBuf};
 use std::time::Instant;
 
-use super::process_activity::{self, DescendantActivity, ProviderActivitySample};
+use super::process_activity::{self, ProviderActivitySample, ProviderProcessActivity};
 
 /// A single sample of what a running Cook's provider is doing.
 ///
@@ -238,7 +238,7 @@ impl CookActivityProbe {
             activity.child_processes = Some(descendant_count);
         }
         activity.tree_rss_mib = tree_rss_kib.map(kib_to_mib);
-        if let Some(DescendantActivity {
+        if let Some(ProviderProcessActivity {
             pid,
             elapsed_seconds,
             rss_kib,

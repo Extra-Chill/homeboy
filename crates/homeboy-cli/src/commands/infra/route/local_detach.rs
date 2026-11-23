@@ -19,8 +19,8 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
+use homeboy::agents::agent_task_lifecycle;
 use homeboy::agents::agent_task_service;
-use homeboy::agents::agent_tasks::lifecycle as agent_task_lifecycle;
 use homeboy::cli_surface::{Cli, Commands};
 use homeboy::core::daemon::step_job;
 use homeboy::core::Error;
@@ -535,12 +535,7 @@ fn bind_cook_step_child(
 /// The program a step runs is this exact (pinned) runtime, from this exact
 /// working directory, so the step executes what the operator invoked.
 fn step_program_and_cwd() -> homeboy::core::Result<(PathBuf, PathBuf)> {
-    let program = std::env::current_exe().map_err(|error| {
-        Error::internal_io(
-            error.to_string(),
-            Some("resolve current executable for a Cook step".to_string()),
-        )
-    })?;
+    let program = step_job::durable_step_program()?;
     let cwd = std::env::current_dir().map_err(|error| {
         Error::internal_io(
             error.to_string(),
@@ -1844,7 +1839,7 @@ mod tests {
             )
             .expect("persist handoff parent");
             let attempt_id = "cook-materialized-attempt-1";
-            let plan = homeboy::agents::agent_tasks::scheduler::AgentTaskPlan::new(
+            let plan = homeboy::agents::agent_task_schedule::AgentTaskPlan::new(
                 "materialized-handoff-attempt",
                 Vec::new(),
             );
@@ -1984,7 +1979,7 @@ mod tests {
     fn an_explicit_cook_id_cannot_overwrite_a_non_handoff_run() {
         crate::test_support::with_isolated_home(|_| {
             let cook_id = "existing-non-handoff-run";
-            let plan = homeboy::agents::agent_tasks::scheduler::AgentTaskPlan::new(
+            let plan = homeboy::agents::agent_task_schedule::AgentTaskPlan::new(
                 "unrelated-run",
                 Vec::new(),
             );
@@ -2016,7 +2011,7 @@ mod tests {
                 cook_id,
             )
             .expect("persist pending handoff parent");
-            let plan = homeboy::agents::agent_tasks::scheduler::AgentTaskPlan::new(
+            let plan = homeboy::agents::agent_task_schedule::AgentTaskPlan::new(
                 "materialized-parent-preserved-attempt",
                 Vec::new(),
             );
@@ -2071,7 +2066,7 @@ mod tests {
                 attempt_id,
             )
             .expect("reserve materializing attempt identity");
-            let plan = homeboy::agents::agent_tasks::scheduler::AgentTaskPlan::new(
+            let plan = homeboy::agents::agent_task_schedule::AgentTaskPlan::new(
                 "exit-after-attempt-record",
                 Vec::new(),
             );
@@ -2132,7 +2127,7 @@ mod tests {
                 first_attempt,
             )
             .expect("reserve first materialization");
-            let plan = homeboy::agents::agent_tasks::scheduler::AgentTaskPlan::new(
+            let plan = homeboy::agents::agent_task_schedule::AgentTaskPlan::new(
                 "first-handoff-attempt",
                 Vec::new(),
             );
@@ -2174,7 +2169,7 @@ mod tests {
                 cook_id,
             )
             .expect("persist pending handoff parent");
-            let plan = homeboy::agents::agent_tasks::scheduler::AgentTaskPlan::new(
+            let plan = homeboy::agents::agent_task_schedule::AgentTaskPlan::new(
                 "cancel-before-materialization-attempt",
                 Vec::new(),
             );
@@ -2230,7 +2225,7 @@ mod tests {
                 cook_id,
             )
             .expect("persist pending handoff parent");
-            let plan = homeboy::agents::agent_tasks::scheduler::AgentTaskPlan::new(
+            let plan = homeboy::agents::agent_task_schedule::AgentTaskPlan::new(
                 "materialized-before-cancel-attempt",
                 Vec::new(),
             );

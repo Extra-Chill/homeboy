@@ -2,7 +2,7 @@
 
 use std::collections::BTreeSet;
 
-use crate::agents::agent_tasks::provider::{default_backend, provider_requires_cwd_git_checkout};
+use crate::agents::agent_task_provider::{default_backend, provider_requires_cwd_git_checkout};
 use crate::cli_surface::Commands;
 use crate::command_contract::{
     AGENT_TASK_AUTH_STATUS_LAB_LABEL, AGENT_TASK_FANOUT_COOK_BATCH_LAB_LABEL,

@@ -5,7 +5,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-use homeboy::agents::agent_tasks::provider::AgentTaskExecutorProvider;
+use homeboy::agents::agent_task_provider::AgentTaskExecutorProvider;
 use homeboy::core::server::{self, Server, SshClient};
 use homeboy::runner::runners::{
     self as runner, daemon_repair_codes, Runner, RunnerSession, RunnerToolRegistry, RunnerToolSpec,
@@ -145,7 +145,7 @@ pub(crate) fn run_with_options(
         runner::observe_runner_capabilities(runner_id);
     }
     if options.scope == RunnerDoctorScope::LabOffload {
-        let catalog = homeboy::agents::agent_tasks::provider::AgentTaskProviderCatalog::discover();
+        let catalog = homeboy::agents::agent_task_provider::AgentTaskProviderCatalog::discover();
         let eligible_provider_ids = probes::eligible_provider_ids(
             catalog.providers(),
             options.agent_backend.as_deref(),

@@ -121,6 +121,20 @@ process.stdout.write(JSON.stringify({
 NODE
 }
 
+# The npm install bridge is a shared asset (extensions/homeboy-extension-root.json
+# ships scripts/lib next to the installed extensions). An install source that
+# predates it, or overwrote the shared assets, leaves it missing; name the path
+# and the remedy instead of dying on a bare `source` error mid-install.
+SHARED_INSTALL_HELPER="$(cd "${DEPS_RUNNER_DIR}/../../.." && pwd)/scripts/lib/local-workspace-install.sh"
+
+require_shared_install_helper() {
+    [ -f "$SHARED_INSTALL_HELPER" ] && return 0
+    echo "ERROR: Homeboy shared extension helper is missing: ${SHARED_INSTALL_HELPER}" >&2
+    echo "  The shared scripts/lib assets installed next to the extensions are incomplete, usually because an older install source replaced them." >&2
+    echo "  Reinstall extensions from the Homeboy source, e.g.: homeboy extension install https://github.com/Extra-Chill/homeboy --id nodejs" >&2
+    exit 1
+}
+
 run_install() {
     local error_code
     error_code="$(lockfile_error_code)"
@@ -132,8 +146,10 @@ run_install() {
     local command
     command="$(dependency_command)"
     echo "Installing Node.js dependencies with ${HOMEBOY_PROJECT_PACKAGE_MANAGER}: ${command}" >&2
+    require_shared_install_helper
     cd "$HOMEBOY_PROJECT_DEPENDENCY_ROOT"
-    source "${DEPS_RUNNER_DIR}/../../../scripts/lib/local-workspace-install.sh"
+    # shellcheck source=/dev/null
+    source "$SHARED_INSTALL_HELPER"
     if [ "$HOMEBOY_PROJECT_PACKAGE_MANAGER" = npm ]; then
         # npm defers lifecycle scripts until declared overrides are installed
         # (homeboy#18302). Overrides resolve against the component, not a

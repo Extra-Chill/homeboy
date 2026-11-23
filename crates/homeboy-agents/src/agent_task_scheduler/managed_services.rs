@@ -510,7 +510,9 @@ impl ManagedServices {
             .map_err(|error| error.to_string())?;
         let worker = std::env::var_os("HOMEBOY_SERVICE_SUPERVISOR_WORKER")
             .map(PathBuf::from)
-            .unwrap_or_else(|| std::env::current_exe().expect("current Homeboy executable"));
+            .unwrap_or_else(|| {
+                homeboy_core::daemon::launchable_executable().expect("current Homeboy executable")
+            });
         let child = Command::new(worker)
             .args(["self", "service-supervisor-worker", "--request"])
             .arg(&request_path)

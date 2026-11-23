@@ -2,6 +2,17 @@
   {
     "name": "success",
     "payload": {
+      "cook_summary": {
+        "base_sha": null,
+        "gates": [],
+        "head_sha": null,
+        "phase": "unknown",
+        "pr_url": "https://github.example/Extra-Chill/homeboy/pull/123",
+        "schema": "homeboy/cook-summary/v1",
+        "status": "review_ready",
+        "terminal": true,
+        "why_no_pr": null
+      },
       "facts": [
         {
           "label": "Model",
@@ -43,6 +54,17 @@
           "label": "diagnose"
         }
       ],
+      "cook_summary": {
+        "base_sha": null,
+        "gates": [],
+        "head_sha": null,
+        "phase": "unknown",
+        "pr_url": "https://github.example/Extra-Chill/homeboy/pull/123",
+        "schema": "homeboy/cook-summary/v1",
+        "status": "gate_failed",
+        "terminal": true,
+        "why_no_pr": null
+      },
       "facts": [
         {
           "label": "Stop reason",
@@ -66,6 +88,17 @@
   {
     "name": "cancelled",
     "payload": {
+      "cook_summary": {
+        "base_sha": null,
+        "gates": [],
+        "head_sha": null,
+        "phase": "unknown",
+        "pr_url": "https://github.example/Extra-Chill/homeboy/pull/123",
+        "schema": "homeboy/cook-summary/v1",
+        "status": "cancelled",
+        "terminal": true,
+        "why_no_pr": null
+      },
       "facts": [
         {
           "label": "Stop reason",

@@ -1,5 +1,11 @@
 //! Command execution primitives with consistent error handling.
 
+#[cfg(all(test, target_os = "linux"))]
+use crate::process_table::parse_linux_proc_stat;
+#[cfg(all(unix, not(target_os = "linux")))]
+use crate::process_table::ProcessRow;
+#[cfg(target_os = "linux")]
+use crate::process_table::{linux_process_stat, supervisor_signal_children, LinuxProcStat};
 use std::io::{self, Read, Write};
 #[cfg(unix)]
 use std::os::fd::RawFd;
@@ -188,14 +194,10 @@ impl ExecutionOwner {
             if !root_identity_is_live(self.identity) {
                 return DescendantActivity::default();
             }
-            let processes: Vec<_> = std::fs::read_dir("/proc")
+            let processes: Vec<_> = crate::process_table::snapshot(false)
+                .unwrap_or_default()
                 .into_iter()
-                .flatten()
-                .flatten()
-                .filter_map(|entry| {
-                    let pid = entry.file_name().to_str()?.parse::<u32>().ok()?;
-                    Some((pid, linux_process_stat(pid)?))
-                })
+                .filter_map(|row| Some((row.pid, linux_process_stat(row.pid)?)))
                 .collect();
             fn record(activity: &mut DescendantActivity, pid: u32, stat: &LinuxProcStat) {
                 if stat.state == 'Z' {
@@ -229,18 +231,13 @@ impl ExecutionOwner {
                     record(&mut activity, *pid, stat);
                 }
             }
-            let mut owned = vec![root];
-            let mut cursor = 0;
-            while cursor < owned.len() {
-                let parent = owned[cursor];
-                for (pid, stat) in &processes {
-                    if stat.parent_pid != parent || owned.contains(pid) {
-                        continue;
-                    }
-                    owned.push(*pid);
-                    record(&mut activity, *pid, stat);
+            for (pid, _) in crate::process_table::descendants(
+                root,
+                processes.iter().map(|(pid, stat)| (*pid, stat.parent_pid)),
+            ) {
+                if let Some((_, stat)) = processes.iter().find(|(candidate, _)| *candidate == pid) {
+                    record(&mut activity, pid, stat);
                 }
-                cursor += 1;
             }
             activity
         }
@@ -249,7 +246,7 @@ impl ExecutionOwner {
             if !root_identity_is_live(self.identity) {
                 return DescendantActivity::default();
             }
-            let Ok(snapshot) = unix_process_snapshot() else {
+            let Ok(snapshot) = identity_snapshot() else {
                 return DescendantActivity::default();
             };
             unix_descendant_activity(self.identity.root_pid, &snapshot, include_root)
@@ -532,38 +529,6 @@ pub fn process_is_zombie(pid: u32) -> bool {
 }
 
 #[cfg(target_os = "linux")]
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-struct LinuxProcStat {
-    state: char,
-    parent_pid: u32,
-    starttime_ticks: u64,
-    cpu_ticks: u64,
-}
-
-#[cfg(target_os = "linux")]
-fn linux_process_stat(pid: u32) -> Option<LinuxProcStat> {
-    let stat = std::fs::read_to_string(format!("/proc/{pid}/stat")).ok()?;
-    parse_linux_proc_stat(&stat)
-}
-
-#[cfg(target_os = "linux")]
-fn parse_linux_proc_stat(stat: &str) -> Option<LinuxProcStat> {
-    let after_command = stat.rsplit_once(") ")?.1;
-    let mut fields = after_command.split_whitespace();
-    let state = fields.next()?.chars().next()?;
-    let parent_pid = fields.next()?.parse().ok()?;
-    let starttime_ticks = after_command.split_whitespace().nth(19)?.parse().ok()?;
-    let user_ticks: u64 = after_command.split_whitespace().nth(11)?.parse().ok()?;
-    let system_ticks: u64 = after_command.split_whitespace().nth(12)?.parse().ok()?;
-    Some(LinuxProcStat {
-        state,
-        parent_pid,
-        starttime_ticks,
-        cpu_ticks: user_ticks.saturating_add(system_ticks),
-    })
-}
-
-#[cfg(target_os = "linux")]
 fn linux_process_state(pid: u32) -> Option<char> {
     linux_process_stat(pid).map(|stat| stat.state)
 }
@@ -591,7 +556,7 @@ pub struct ControllerChildGuard {
     #[cfg(target_os = "linux")]
     root_identity: Mutex<Option<(u32, u32, Option<u64>)>>,
     #[cfg(all(unix, not(target_os = "linux")))]
-    owned_processes: Mutex<Vec<UnixProcessIdentity>>,
+    owned_processes: Mutex<Vec<ProcessRow>>,
     #[cfg(all(unix, not(target_os = "linux")))]
     death_watcher: Option<thread::JoinHandle<io::Result<libc::pid_t>>>,
     #[cfg(windows)]
@@ -975,7 +940,7 @@ impl ControllerChildGuard {
 
     #[cfg(all(unix, not(target_os = "linux")))]
     fn observe_owned_processes(&self, root_pid: u32) -> io::Result<()> {
-        let snapshot = unix_process_snapshot()?;
+        let snapshot = identity_snapshot()?;
         let mut owned = self
             .owned_processes
             .lock()
@@ -1220,7 +1185,7 @@ fn controller_death_guard_loop(
 }
 
 #[cfg(unix)]
-fn write_u32_nul(buf: &mut [u8; 12], mut value: u32) -> *const libc::c_char {
+pub(crate) fn write_u32_nul(buf: &mut [u8; 12], mut value: u32) -> *const libc::c_char {
     buf[11] = 0;
     if value == 0 {
         buf[10] = b'0';
@@ -2926,64 +2891,6 @@ fn supervisor_signal_remaining(root_pid: u32, signal: libc::c_int) {
 }
 
 #[cfg(target_os = "linux")]
-fn supervisor_signal_children(signal: libc::c_int) {
-    let mut path = [0u8; 64];
-    let prefix = b"/proc/self/task/";
-    path[..prefix.len()].copy_from_slice(prefix);
-    let mut pid_buf = [0u8; 12];
-    let pid = write_u32_nul(&mut pid_buf, unsafe { libc::getpid() } as u32);
-    let pid_bytes = unsafe { std::ffi::CStr::from_ptr(pid) }.to_bytes();
-    let mut offset = prefix.len();
-    path[offset..offset + pid_bytes.len()].copy_from_slice(pid_bytes);
-    offset += pid_bytes.len();
-    let suffix = b"/children";
-    path[offset..offset + suffix.len()].copy_from_slice(suffix);
-    path[offset + suffix.len()] = 0;
-    let fd = unsafe { libc::open(path.as_ptr().cast(), libc::O_RDONLY | libc::O_CLOEXEC) };
-    if fd < 0 {
-        return;
-    }
-    let self_pid = unsafe { libc::getpid() } as u32;
-    let mut buf = [0u8; 4096];
-    let mut pid = 0u32;
-    let mut in_pid = false;
-    loop {
-        let read = unsafe { libc::read(fd, buf.as_mut_ptr().cast(), buf.len()) };
-        if read == 0 {
-            break;
-        }
-        if read < 0 {
-            if io::Error::last_os_error().raw_os_error() == Some(libc::EINTR) {
-                continue;
-            }
-            break;
-        }
-        for &byte in &buf[..read as usize] {
-            if byte.is_ascii_digit() {
-                in_pid = true;
-                pid = pid.saturating_mul(10).saturating_add((byte - b'0') as u32);
-            } else if in_pid {
-                if pid != 0 && pid != self_pid {
-                    unsafe {
-                        libc::kill(pid as libc::pid_t, signal);
-                    }
-                }
-                pid = 0;
-                in_pid = false;
-            }
-        }
-    }
-    unsafe {
-        libc::close(fd);
-    }
-    if in_pid && pid != 0 && pid != self_pid {
-        unsafe {
-            libc::kill(pid as libc::pid_t, signal);
-        }
-    }
-}
-
-#[cfg(target_os = "linux")]
 fn supervisor_finish(protocol_fd: RawFd, tag: u8, wait_status: libc::c_int) -> ! {
     if protocol_fd >= 0 {
         let mut payload = [0_u8; EXECUTION_PROTOCOL_TERMINAL_LEN];
@@ -3112,39 +3019,17 @@ fn process_group_has_non_zombie_member(pgid: u32) -> io::Result<bool> {
 
 #[cfg(all(unix, not(target_os = "linux")))]
 fn descendant_pids(root_pid: u32) -> io::Result<Vec<u32>> {
-    let parents: Vec<(u32, u32)> = unix_process_snapshot()?
+    let parents: Vec<(u32, u32)> = identity_snapshot()?
         .iter()
         .map(|process| (process.pid, process.parent_pid))
         .collect();
-    Ok(walk_descendant_pids(root_pid, &parents))
-}
-
-/// Breadth-first walk of `(pid, ppid)` pairs from `root_pid`. The root is the
-/// first element of the result.
-#[cfg(all(unix, not(target_os = "linux")))]
-fn walk_descendant_pids(root_pid: u32, parents: &[(u32, u32)]) -> Vec<u32> {
-    let mut descendants = vec![root_pid];
-    let mut cursor = 0;
-    while cursor < descendants.len() {
-        let parent = descendants[cursor];
-        for (pid, ppid) in parents {
-            if *ppid == parent && !descendants.contains(pid) {
-                descendants.push(*pid);
-            }
-        }
-        cursor += 1;
-    }
-    descendants
-}
-
-#[cfg(all(unix, not(target_os = "linux")))]
-#[derive(Debug, Clone, PartialEq, Eq)]
-struct UnixProcessIdentity {
-    pid: u32,
-    parent_pid: u32,
-    started_at: (u64, u64), // Kernel start time: seconds and microseconds.
-    /// Cumulative CPU time in kernel clock units, when readable.
-    cpu_time: Option<u64>,
+    Ok(std::iter::once(root_pid)
+        .chain(
+            crate::process_table::descendants(root_pid, parents)
+                .into_iter()
+                .map(|(pid, _)| pid),
+        )
+        .collect())
 }
 
 /// Sample CPU progress of `root_pid`'s descendants (the root itself only when
@@ -3153,7 +3038,7 @@ struct UnixProcessIdentity {
 #[cfg(all(unix, not(target_os = "linux")))]
 fn unix_descendant_activity(
     root_pid: u32,
-    snapshot: &[UnixProcessIdentity],
+    snapshot: &[ProcessRow],
     include_root: bool,
 ) -> DescendantActivity {
     use std::hash::{Hash, Hasher};
@@ -3163,8 +3048,12 @@ fn unix_descendant_activity(
         .map(|process| (process.pid, process.parent_pid))
         .collect();
     let mut activity = DescendantActivity::default();
-    for pid in walk_descendant_pids(root_pid, &parents)
-        .into_iter()
+    for pid in std::iter::once(root_pid)
+        .chain(
+            crate::process_table::descendants(root_pid, parents)
+                .into_iter()
+                .map(|(pid, _)| pid),
+        )
         .skip(usize::from(!include_root))
     {
         let Some(process) = snapshot.iter().find(|process| process.pid == pid) else {
@@ -3182,79 +3071,20 @@ fn unix_descendant_activity(
     activity
 }
 
+/// Containment needs kernel start identity; rows libproc cannot identify are not owned.
 #[cfg(all(unix, not(target_os = "linux")))]
-fn unix_process_snapshot() -> io::Result<Vec<UnixProcessIdentity>> {
-    #[cfg(not(target_os = "macos"))]
-    return Err(io::Error::new(
-        io::ErrorKind::Unsupported,
-        "process snapshots require macOS libproc",
-    ));
-
-    #[cfg(target_os = "macos")]
-    unsafe {
-        let count = libc::proc_listallpids(std::ptr::null_mut(), 0);
-        if count <= 0 {
-            return Err(io::Error::last_os_error());
-        }
-        // Leave room for processes born between sizing and filling the list.
-        let mut pids = vec![0i32; count as usize + 128];
-        loop {
-            let read = libc::proc_listallpids(
-                pids.as_mut_ptr().cast(),
-                std::mem::size_of_val(pids.as_slice()) as i32,
-            );
-            if read <= 0 {
-                return Err(io::Error::last_os_error());
-            }
-            if (read as usize) < pids.len() {
-                pids.truncate(read as usize);
-                break;
-            }
-            pids.resize(pids.len() * 2, 0);
-        }
-        Ok(pids
-            .into_iter()
-            .filter(|pid| *pid > 0)
-            .filter_map(|pid| {
-                let mut bsd: libc::proc_bsdinfo = std::mem::zeroed();
-                let size = std::mem::size_of_val(&bsd) as i32;
-                if libc::proc_pidinfo(
-                    pid,
-                    libc::PROC_PIDTBSDINFO,
-                    0,
-                    (&mut bsd as *mut libc::proc_bsdinfo).cast(),
-                    size,
-                ) != size
-                {
-                    // A process may exit (or be inaccessible) during enumeration.
-                    return None;
-                }
-                let mut task: libc::proc_taskinfo = std::mem::zeroed();
-                let size = std::mem::size_of_val(&task) as i32;
-                let cpu_time = (libc::proc_pidinfo(
-                    pid,
-                    libc::PROC_PIDTASKINFO,
-                    0,
-                    (&mut task as *mut libc::proc_taskinfo).cast(),
-                    size,
-                ) == size)
-                    .then(|| task.pti_total_user.saturating_add(task.pti_total_system));
-                Some(UnixProcessIdentity {
-                    pid: pid as u32,
-                    parent_pid: bsd.pbi_ppid,
-                    started_at: (bsd.pbi_start_tvsec, bsd.pbi_start_tvusec),
-                    cpu_time,
-                })
-            })
-            .collect())
-    }
+fn identity_snapshot() -> io::Result<Vec<ProcessRow>> {
+    Ok(crate::process_table::snapshot(false)?
+        .into_iter()
+        .filter(|row| row.started_at != (0, 0))
+        .collect())
 }
 
 #[cfg(all(unix, not(target_os = "linux")))]
 fn extend_owned_processes(
-    owned: &mut Vec<UnixProcessIdentity>,
+    owned: &mut Vec<ProcessRow>,
     root_pid: u32,
-    snapshot: &[UnixProcessIdentity],
+    snapshot: &[ProcessRow],
     adopted: AdoptedGuard,
 ) -> io::Result<()> {
     let _ = adopted;
@@ -3282,14 +3112,14 @@ fn extend_owned_processes(
 }
 
 #[cfg(all(unix, not(target_os = "linux")))]
-fn owned_identity_matches(known: &UnixProcessIdentity, current: &UnixProcessIdentity) -> bool {
+fn owned_identity_matches(known: &ProcessRow, current: &ProcessRow) -> bool {
     known.pid == current.pid && known.started_at == current.started_at
 }
 
 #[cfg(all(unix, not(target_os = "linux")))]
 fn owned_contains_matching_parent(
-    owned: &[UnixProcessIdentity],
-    snapshot: &[UnixProcessIdentity],
+    owned: &[ProcessRow],
+    snapshot: &[ProcessRow],
     parent_pid: u32,
 ) -> bool {
     owned.iter().any(|known| {
@@ -3303,7 +3133,7 @@ fn owned_contains_matching_parent(
 #[cfg(all(unix, not(target_os = "linux")))]
 fn terminate_owned_processes_and_reap(
     child: &mut Child,
-    owned_processes: &Mutex<Vec<UnixProcessIdentity>>,
+    owned_processes: &Mutex<Vec<ProcessRow>>,
     adopted: AdoptedGuard,
 ) -> io::Result<ExitStatus> {
     let root_pid = child.id();
@@ -3336,7 +3166,7 @@ fn terminate_owned_processes_and_reap(
 #[cfg(all(unix, not(target_os = "linux")))]
 fn terminate_owned_processes_after_root_exit(
     root_pid: u32,
-    owned_processes: &Mutex<Vec<UnixProcessIdentity>>,
+    owned_processes: &Mutex<Vec<ProcessRow>>,
     adopted: AdoptedGuard,
 ) -> io::Result<()> {
     let mut owned = owned_processes
@@ -3370,7 +3200,7 @@ fn terminate_owned_processes_after_root_exit(
 fn wait_for_owned_process_exit(
     child: &mut Child,
     root_pid: u32,
-    owned: &mut Vec<UnixProcessIdentity>,
+    owned: &mut Vec<ProcessRow>,
     grace: Duration,
     signal: libc::c_int,
     status: &mut Option<ExitStatus>,
@@ -3397,7 +3227,7 @@ fn wait_for_owned_process_exit(
 #[cfg(all(unix, not(target_os = "linux")))]
 fn wait_for_owned_process_exit_without_child(
     root_pid: u32,
-    owned: &mut Vec<UnixProcessIdentity>,
+    owned: &mut Vec<ProcessRow>,
     grace: Duration,
     signal: libc::c_int,
     adopted: AdoptedGuard,
@@ -3417,31 +3247,31 @@ fn wait_for_owned_process_exit_without_child(
 
 #[cfg(all(unix, not(target_os = "linux")))]
 fn drain_owned_processes(
-    owned: &mut Vec<UnixProcessIdentity>,
+    owned: &mut Vec<ProcessRow>,
     root_pid: u32,
     signal: libc::c_int,
     adopted: AdoptedGuard,
 ) -> io::Result<bool> {
-    let snapshot = unix_process_snapshot()?;
+    let snapshot = identity_snapshot()?;
     extend_owned_processes(owned, root_pid, &snapshot, adopted)?;
     if signal_and_reap_owned(owned, root_pid, signal, adopted)? {
         return Ok(false);
     }
     let discovered = owned.len();
-    let refresh = unix_process_snapshot()?;
+    let refresh = identity_snapshot()?;
     extend_owned_processes(owned, root_pid, &refresh, adopted)?;
     Ok(owned.len() == discovered)
 }
 
 #[cfg(all(unix, not(target_os = "linux")))]
 fn signal_and_reap_owned(
-    owned: &[UnixProcessIdentity],
+    owned: &[ProcessRow],
     root_pid: u32,
     signal: libc::c_int,
     adopted: AdoptedGuard,
 ) -> io::Result<bool> {
     let mut remaining = false;
-    let snapshot = unix_process_snapshot()?;
+    let snapshot = identity_snapshot()?;
     for known in owned {
         let Some(current) = snapshot.iter().find(|process| process.pid == known.pid) else {
             continue;
@@ -4597,7 +4427,7 @@ mod tests {
             .spawn()
             .expect("spawn live child");
         let sample = || {
-            unix_process_snapshot()
+            identity_snapshot()
                 .expect("snapshot")
                 .into_iter()
                 .find(|process| process.pid == child.id())

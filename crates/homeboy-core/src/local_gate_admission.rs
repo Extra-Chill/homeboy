@@ -64,6 +64,9 @@ struct Entry {
     daemon_job: Option<String>,
     queued_at_ms: u64,
     started_at_ms: Option<u64>,
+    /// Host slot held once admitted; it selects the gate's CPU share.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    slot: Option<usize>,
 }
 
 impl Entry {
@@ -100,13 +103,6 @@ fn host_root() -> Result<Option<PathBuf>> {
         return Ok(None);
     }
     Ok(Some(crate::paths::homeboy_data()?.join(REGISTRY_DIR)))
-}
-
-/// One-minute load average, when the host publishes one.
-pub fn load_average_1m() -> Option<f64> {
-    std::fs::read_to_string("/proc/loadavg")
-        .ok()
-        .and_then(|text| text.split_whitespace().next()?.parse::<f64>().ok())
 }
 
 pub struct Registry {
@@ -245,11 +241,13 @@ impl Registry {
                 daemon_job: claim.daemon_job,
                 queued_at_ms: now_ms(),
                 started_at_ms: None,
+                slot: None,
             })
         })?;
         Ok(LocalGatePermit {
             registry: self,
             ticket,
+            slot: std::sync::OnceLock::new(),
             _lease: lease,
         })
     }
@@ -281,6 +279,7 @@ fn ranked_waiters(entries: &[Entry], limit: usize) -> (Vec<usize>, usize) {
 pub struct LocalGatePermit {
     registry: Registry,
     ticket: String,
+    slot: std::sync::OnceLock<usize>,
     _lease: File,
 }
 
@@ -291,22 +290,56 @@ impl LocalGatePermit {
     pub fn try_admit(&self, load: Option<f64>) -> Result<bool> {
         let blocked = load.is_some_and(|load| load >= self.registry.max_load);
         let limit = self.registry.limit;
-        self.registry.transaction(Some(&self.ticket), |entries| {
-            let active = entries
-                .iter()
-                .filter(|entry| entry.started_at_ms.is_some())
-                .count();
-            let own = entries.iter().position(|entry| entry.ticket == self.ticket);
-            let (order, _) = ranked_waiters(entries, limit);
-            let held_back = blocked && active > 0;
-            match own {
-                Some(index) if !held_back && active < limit && order.first() == Some(&index) => {
-                    entries[index].started_at_ms = Some(now_ms());
-                    true
+        self.registry
+            .transaction(Some(&self.ticket), |entries| {
+                let active = entries
+                    .iter()
+                    .filter(|entry| entry.started_at_ms.is_some())
+                    .count();
+                let own = entries.iter().position(|entry| entry.ticket == self.ticket);
+                let (order, _) = ranked_waiters(entries, limit);
+                let held_back = blocked && active > 0;
+                match own {
+                    Some(index)
+                        if !held_back && active < limit && order.first() == Some(&index) =>
+                    {
+                        let slot = (0..limit)
+                            .find(|slot| {
+                                !entries.iter().any(|entry| {
+                                    entry.started_at_ms.is_some() && entry.slot == Some(*slot)
+                                })
+                            })
+                            .unwrap_or(active);
+                        entries[index].started_at_ms = Some(now_ms());
+                        entries[index].slot = Some(slot);
+                        Some(slot)
+                    }
+                    _ => None,
                 }
-                _ => false,
-            }
-        })
+            })
+            .map(|slot| {
+                if let Some(slot) = slot {
+                    let _ = self.slot.set(slot);
+                }
+                slot.is_some()
+            })
+    }
+
+    /// The admitted host slot, once [`Self::try_admit`] succeeded.
+    pub fn slot(&self) -> Option<usize> {
+        self.slot.get().copied()
+    }
+
+    /// The CPUs this admitted gate is pinned to: its slot's disjoint share of
+    /// the CPUs this process may use, so `nproc` inside the gate reports the
+    /// share and aggregate gate parallelism stays within the slot budget.
+    /// `None` before admission or when the share would cover every CPU.
+    pub fn cpus(&self) -> Option<Vec<usize>> {
+        crate::lab_capacity::local_gate_cpu_slice(
+            &crate::lab_capacity::allowed_cpus(),
+            self.registry.limit,
+            self.slot()?,
+        )
     }
 
     /// Wait for admission, polling `cancelled`. Returns the time spent queued,
@@ -317,7 +350,9 @@ impl LocalGatePermit {
             if cancelled() {
                 return Ok(None);
             }
-            if self.try_admit(load_average_1m())? {
+            if self.try_admit(
+                homeboy_engine_primitives::host_telemetry::load_average().map(|load| load.one),
+            )? {
                 return Ok(Some(started.elapsed()));
             }
             std::thread::sleep(Duration::from_millis(250));
@@ -338,7 +373,10 @@ impl Drop for LocalGatePermit {
 /// needs no daemon transport. Field names follow the Lab step queue snapshot.
 pub fn snapshot() -> Result<serde_json::Value> {
     match Registry::host()? {
-        Some(registry) => snapshot_for(&registry, load_average_1m()),
+        Some(registry) => snapshot_for(
+            &registry,
+            homeboy_engine_primitives::host_telemetry::load_average().map(|load| load.one),
+        ),
         None => Ok(serde_json::json!({"available": false, "reason": "test isolation"})),
     }
 }
@@ -362,7 +400,7 @@ fn snapshot_for(registry: &Registry, load: Option<f64>) -> Result<serde_json::Va
         .map(|entry| {
             serde_json::json!({
                 "owner": entry.owner(), "cook_id": entry.cook_id, "gate": entry.gate,
-                "priority": entry.priority,
+                "priority": entry.priority, "slot": entry.slot,
                 "elapsed_seconds": now.saturating_sub(entry.started_at_ms.unwrap_or(now)) / 1000,
                 "budget_seconds": entry.budget_seconds,
                 "daemon_slot": entry.daemon_job.is_some(),
@@ -470,10 +508,12 @@ mod tests {
             .enqueue(claim("cook-a", "cook-a", "gate-1"))
             .unwrap();
         assert!(first.try_admit(None).unwrap());
+        assert_eq!(first.slot(), Some(0));
         let second = registry(root.path(), 1)
             .enqueue(claim("cook-b", "cook-b", "gate-2"))
             .unwrap();
         assert!(!second.try_admit(None).unwrap());
+        assert_eq!(second.slot(), None);
         let snapshot = snapshot_for(&registry(root.path(), 1), None).unwrap();
         assert_eq!(snapshot["active_slots"], 1);
         assert_eq!(snapshot["free_slots"], 0);
@@ -526,6 +566,26 @@ mod tests {
             "an owner at its share cap yields to another waiting owner"
         );
         assert!(other.try_admit(None).unwrap());
+    }
+
+    #[test]
+    fn local_capacity_admission_assigns_disjoint_reusable_slots() {
+        let root = tempfile::tempdir().unwrap();
+        let first = registry(root.path(), 2)
+            .enqueue(claim("a", "a", "gate-1"))
+            .unwrap();
+        assert!(first.try_admit(None).unwrap());
+        let second = registry(root.path(), 2)
+            .enqueue(claim("b", "b", "gate-1"))
+            .unwrap();
+        assert!(second.try_admit(None).unwrap());
+        assert_eq!((first.slot(), second.slot()), (Some(0), Some(1)));
+        drop(first);
+        let third = registry(root.path(), 2)
+            .enqueue(claim("c", "c", "gate-1"))
+            .unwrap();
+        assert!(third.try_admit(None).unwrap());
+        assert_eq!(third.slot(), Some(0), "a released slot is reused");
     }
 
     #[test]

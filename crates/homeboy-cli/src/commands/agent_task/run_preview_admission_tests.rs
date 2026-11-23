@@ -926,7 +926,7 @@ fn preview_provider_secrets_require_a_runner_ref_only_when_the_plan_declares_one
             "selected": "lab",
             "selected_runner": runner_id,
         });
-        let plan: homeboy::agents::agent_tasks::scheduler::AgentTaskPlan =
+        let plan: homeboy::agents::agent_task_schedule::AgentTaskPlan =
             serde_json::from_value(serde_json::json!({
                 "schema": "homeboy/agent-task-plan/v1",
                 "plan_id": "provider-secret-preview",

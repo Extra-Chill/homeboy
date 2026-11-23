@@ -4,8 +4,8 @@ use std::io::Read;
 
 use serde_json::Value;
 
-use homeboy::agents::agent_tasks::provider as agent_task_provider;
-use homeboy::agents::agent_tasks::secrets as agent_task_secrets;
+use homeboy::agents::agent_task_provider;
+use homeboy::agents::agent_task_secrets;
 
 use super::super::CmdResult;
 use super::args::{AgentTaskAuthArgs, AgentTaskAuthCommand, AgentTaskAuthStatusArgs};

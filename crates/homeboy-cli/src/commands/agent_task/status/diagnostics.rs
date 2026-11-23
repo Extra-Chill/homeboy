@@ -13,7 +13,7 @@ pub(super) fn collect_hydrated_evidence_diagnostics(
         return Some(budget.truncation(task_id, evidence, "evidence_refs"));
     }
     budget.evidence_refs += 1;
-    let Some(value) = agent_task_service_direct::hydrate_evidence_diagnostics(evidence) else {
+    let Some(value) = agent_task_service::hydrate_evidence_diagnostics(evidence) else {
         return None;
     };
     let count = value
@@ -148,12 +148,12 @@ pub(super) fn aggregate_failure_diagnostics(
                 | AgentTaskOutcomeStatus::Cancelled
         )
     });
-    let scan: Vec<&homeboy::agents::agent_tasks::AgentTaskOutcome> = failed_first.collect();
+    let scan: Vec<&homeboy::agents::agent_task::AgentTaskOutcome> = failed_first.collect();
 
     // An agent that declared its task incomplete already said why; its words
     // outrank whatever the provider stream happened to end with.
     for outcome in &aggregate.outcomes {
-        if let Some(reason) = agent_task_service_direct::agent_incomplete_reason(&outcome.outputs) {
+        if let Some(reason) = agent_task_service::agent_incomplete_reason(&outcome.outputs) {
             collected.push(CollectedDiagnostic {
                 task_id: outcome.task_id.clone(),
                 class: "agent.incomplete".to_string(),
@@ -807,9 +807,33 @@ pub(super) fn runner_cancellation_diagnostic(
 
 /// Admission is queueing, not a stalled provider execution. Preserve the same
 /// driver-lock observation used by the recovery planner.
+pub(super) fn attach_local_dispatch_wait(value: &mut Value, record: &AgentTaskRunRecord) {
+    if record
+        .metadata
+        .pointer("/cook_progress/phase")
+        .and_then(Value::as_str)
+        != Some("queued_local_pressure")
+    {
+        return;
+    }
+    if let Some(wait) = record
+        .metadata
+        .pointer("/cook_progress/activity/local_dispatch_wait")
+    {
+        value["local_dispatch_wait"] = wait.clone();
+        value["blocker"] = json!({
+            "code": "local_pressure",
+            "message": "Local dispatch waiting for host pressure to drop",
+            "details": wait,
+        });
+        value["next_attempt_at"] = wait["next_attempt_at"].clone();
+        value["waiting_for"] = json!("local_pressure");
+    }
+}
+
 pub(super) fn attach_lab_admission_wait(
     value: &mut Value,
-    admission: Option<&agent_task_service_direct::QueuedAdmission>,
+    admission: Option<&agent_task_service::QueuedAdmission>,
 ) {
     if let Some(wait) = admission
         .and_then(|admission| admission.wait.as_ref())

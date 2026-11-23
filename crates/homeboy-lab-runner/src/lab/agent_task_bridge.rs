@@ -18,9 +18,9 @@ use homeboy_agents::agent_task::AgentTaskEvidenceRef;
 use homeboy_agents::agent_task_lifecycle::{
     cook_attempt_run_id, AgentTaskArtifactRef, AgentTaskRunRecord,
 };
-use homeboy_agents::agent_tasks::scheduler::{AgentTaskAggregate, AgentTaskAggregateTotals};
+use homeboy_agents::agent_task_schedule::{AgentTaskAggregate, AgentTaskAggregateTotals};
 #[cfg(test)]
-use homeboy_agents::agent_tasks::{lifecycle as agent_task_lifecycle, scheduler::AgentTaskPlan};
+use homeboy_agents::{agent_task_lifecycle, agent_task_schedule::AgentTaskPlan};
 use homeboy_core::api_jobs::JobEvent;
 #[cfg(test)]
 use homeboy_core::api_jobs::JobEventKind;

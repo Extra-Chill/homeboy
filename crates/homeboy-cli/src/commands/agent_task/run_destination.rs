@@ -565,11 +565,23 @@ pub(super) fn issue_closing_pull_requests(
     }
     let nodes: Vec<Node> = serde_json::from_slice(&output.stdout)
         .map_err(|error| homeboy::core::Error::internal_json(error.to_string(), None))?;
+    // A PR from another repository is context, not the PR this Cook reworks
+    // (#17759): only one in the issue's own repository qualifies.
     Ok(nodes
         .into_iter()
         .filter(|node| node.state == "OPEN")
+        .filter(|node| pull_request_in_repository(&node.url, owner, repo))
         .map(|node| node.url)
         .collect())
+}
+
+/// Whether `url` is a pull request URL in GitHub repository `owner/repo`.
+pub(super) fn pull_request_in_repository(url: &str, owner: &str, repo: &str) -> bool {
+    let prefix = format!("https://github.com/{owner}/{repo}/pull/").to_ascii_lowercase();
+    url.to_ascii_lowercase()
+        .strip_prefix(&prefix)
+        .and_then(|rest| rest.split(['/', '?', '#']).next())
+        .is_some_and(|number| !number.is_empty() && number.bytes().all(|b| b.is_ascii_digit()))
 }
 
 /// Resolve linked PRs from the issue, not from a guessed branch name.
@@ -611,14 +623,19 @@ pub(super) fn resolve_cook_issue(args: &mut AgentTaskCookArgs) -> homeboy::core:
         return Err(homeboy::core::Error::validation_invalid_argument(
             "task_url",
             format!(
-                "issue has several open linked PRs; choose one with --task-url <PR URL>: {}",
-                prs.into_iter().collect::<Vec<_>>().join(", ")
+                "--task-url `{url}` has several open PRs in {owner}/{repo} that close it; pass one as --task-url <PR URL> to rework it: {}",
+                prs.iter().cloned().collect::<Vec<_>>().join(", ")
             ),
             Some(url),
-            None,
+            Some(
+                prs.iter()
+                    .map(|pr| format!("homeboy agent-task cook --task-url {pr} ..."))
+                    .collect(),
+            ),
         ));
     }
     if let Some(pr) = prs.into_iter().next() {
+        eprintln!("cook: --task-url {url} resolved to its open PR {pr}; running as pr_rework");
         args.issue_resolution = Some(json!({"route": "pr_rework", "issue_url": url, "pr_url": pr}));
         args.dispatch.task_url = Some(pr);
     } else {
@@ -880,5 +897,36 @@ pub(super) fn project_preview_dirty_admission(provision: &mut Value) {
             "recovery_command": "git stash push --include-untracked",
             "changes": { "tracked": tracked, "staged": staged, "untracked": untracked },
         });
+    }
+}
+
+#[cfg(test)]
+mod issue_pull_request_scope_tests {
+    use super::pull_request_in_repository;
+
+    #[test]
+    fn only_pull_requests_in_the_issue_repository_qualify() {
+        let url = "https://github.com/Extra-Chill/blocks-engine/pull/42";
+        assert!(pull_request_in_repository(
+            url,
+            "Extra-Chill",
+            "blocks-engine"
+        ));
+        assert!(pull_request_in_repository(
+            url,
+            "extra-chill",
+            "Blocks-Engine"
+        ));
+        assert!(!pull_request_in_repository(
+            url,
+            "fork-owner",
+            "blocks-engine"
+        ));
+        assert!(!pull_request_in_repository(url, "Extra-Chill", "blocks"));
+        assert!(!pull_request_in_repository(
+            "https://github.com/Extra-Chill/blocks-engine/issues/42",
+            "Extra-Chill",
+            "blocks-engine"
+        ));
     }
 }
