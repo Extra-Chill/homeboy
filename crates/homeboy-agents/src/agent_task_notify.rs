@@ -416,6 +416,7 @@ fn terminal_payload(
 
     let mut payload = NotifyPayload::new(kind, subject);
     payload.title = Some(metadata.title(kind));
+    payload.cook_summary = serde_json::to_value(&metadata.summary).ok();
     if kind == NotifyEventKind::Completed {
         payload.links.extend(metadata.links.clone());
     }

@@ -291,6 +291,11 @@ pub struct NotifyPayload {
     pub links: Vec<NotifyLink>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub attachments: Vec<NotifyAttachment>,
+    /// The versioned Cook summary (`homeboy/cook-summary/v1`) a Cook terminal
+    /// notification carries, identical to `cook_summary` on every Cook read
+    /// surface (#18817). Opaque here so this contract stays a leaf.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cook_summary: Option<serde_json::Value>,
 }
 
 fn notification_payload_schema() -> String {
@@ -308,6 +313,7 @@ impl Default for NotifyPayload {
             actions: Vec::new(),
             links: Vec::new(),
             attachments: Vec::new(),
+            cook_summary: None,
         }
     }
 }
@@ -459,7 +465,7 @@ impl NotifyPayload {
         // Last resort: identity and actions only. A consumer that can still
         // answer "what is this and what do I run next?" is strictly better
         // than a dropped payload.
-        let minimal = Self {
+        let mut minimal = Self {
             schema: bounded.schema,
             kind: bounded.kind,
             title: bounded.title,
@@ -468,7 +474,13 @@ impl NotifyPayload {
             actions: bounded.actions,
             links: Vec::new(),
             attachments: Vec::new(),
+            cook_summary: bounded.cook_summary,
         };
+        let json = serde_json::to_string(&minimal).ok()?;
+        if json.len() <= NOTIFY_PAYLOAD_MAX_BYTES {
+            return Some((json, true));
+        }
+        minimal.cook_summary = None;
         let json = serde_json::to_string(&minimal).ok()?;
         (json.len() <= NOTIFY_PAYLOAD_MAX_BYTES).then_some((json, true))
     }
