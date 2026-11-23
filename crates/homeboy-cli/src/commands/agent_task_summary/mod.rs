@@ -996,6 +996,12 @@ fn render_status_summary(payload: &Value) -> Option<String> {
     if let Some(note) = string_value(payload, &["identity_note"]) {
         lines.push(note.to_string());
     }
+    if let Some(path) = string_value(payload, &["candidate_repo_path"]) {
+        lines.push(format!("Candidate repo: {path}"));
+    }
+    if let Some(command) = string_value(payload, &["candidate_inspect_command"]) {
+        lines.push(format!("Inspect candidate: {command}"));
+    }
     if let Some(candidate) = string_value(payload, &["candidate", "state"]) {
         lines.push(format!("Candidate: {candidate}"));
     }
