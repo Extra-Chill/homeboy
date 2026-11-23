@@ -366,7 +366,13 @@ pub(super) fn pin_and_persist_initial_cook_workspace_base(
     let cook_id = options.identity.cook_id.clone();
     store.with_workspace_base_capture_lock(&cook_id, || {
         let mut recipe = store.load_recipe(&options.identity.cook_id)?;
-        if recipe.finalization["task_base_sha"].is_string() {
+        let captured = recipe
+            .attempts
+            .iter()
+            .any(|attempt| attempt.plan.metadata["cook_workspace_base"]["sha"].is_string());
+        if recipe.finalization["task_base_sha"].is_string()
+            && (captured || cook_has_provider_execution_in_store(lifecycle_store, &cook_id)?)
+        {
             apply_persisted_task_base(options, &recipe)?;
             return reconcile_persisted_task_base_plan(lifecycle_store, options, &recipe);
         }
@@ -505,25 +511,30 @@ pub(super) fn pin_cook_workspace_base_at(
             remote_freshness: "checked",
         },
         Ok(None) => return Ok(()),
-        // The controller's authenticated transport is not the only authority
-        // for a base that is already present locally. A previously fetched
-        // remote-tracking ref names the exact commit this run would have
-        // pinned, so admit it rather than terminalizing with zero provider
-        // executions. Its unverified freshness is recorded, not hidden.
-        Err(error) if error.retryable == Some(true) => {
-            match local_tracking_cook_base(workspace, declared) {
-                Some(pin) => pin,
-                None => return Err(error),
-            }
-        }
         Err(error) => return Err(error),
     };
-    // The destination's starting HEAD is a diff boundary, not the declared
-    // remote base. Preserve it while recording the base's independent identity.
-    options
-        .workspace
-        .task_base_sha
-        .get_or_insert_with(|| pinned.sha.clone());
+    // PR rework retains its candidate diff boundary. New issue work must use
+    // the freshly resolved target, not the destination HEAD observed before
+    // admission (which may belong to a stale runner checkout).
+    let pr_rework = options
+        .identity
+        .initial_plan
+        .tasks
+        .first()
+        .is_some_and(|task| {
+            task.workspace
+                .task_url
+                .as_deref()
+                .is_some_and(|url| url.contains("/pull/"))
+        });
+    if pr_rework {
+        options
+            .workspace
+            .task_base_sha
+            .get_or_insert_with(|| pinned.sha.clone());
+    } else {
+        options.workspace.task_base_sha = Some(pinned.sha.clone());
+    }
     options.identity.initial_plan.metadata["cook_workspace_base"] = serde_json::json!({
         "schema": "homeboy/cook-workspace-base/v1",
         "base": pinned.base,
@@ -539,29 +550,6 @@ pub(super) struct CookWorkspaceBasePin {
     sha: String,
     provenance: &'static str,
     remote_freshness: &'static str,
-}
-
-/// Resolve a declared base from the checkout's existing remote-tracking ref.
-/// This reads only local objects, so it stays available when the controller
-/// cannot authenticate to the remote.
-pub(super) fn local_tracking_cook_base(
-    workspace: &Path,
-    base: &str,
-) -> Option<CookWorkspaceBasePin> {
-    let reference = format!("refs/remotes/origin/{base}");
-    let sha = homeboy_core::git::output_optional(
-        workspace,
-        &["rev-parse", "--verify", &format!("{reference}^{{commit}}")],
-    )?;
-    let sha = sha.trim();
-    (sha.len() == 40 && sha.bytes().all(|byte| byte.is_ascii_hexdigit())).then(|| {
-        CookWorkspaceBasePin {
-            base: base.to_string(),
-            sha: sha.to_string(),
-            provenance: "local_remote_tracking_ref",
-            remote_freshness: "unverified",
-        }
-    })
 }
 
 pub(super) fn native_cook_destination_record(

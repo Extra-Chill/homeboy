@@ -14726,15 +14726,12 @@ fn concurrent_missing_task_base_capture_serializes_and_reuses_its_sha() {
             "-m",
             "base",
         ]);
-        let expected_sha = String::from_utf8(
-            Command::new("git")
-                .args(["rev-parse", "HEAD"])
-                .current_dir(&repository)
-                .output()
-                .expect("resolve base")
-                .stdout,
+        let stale_sha = homeboy_core::git::run_git(
+            &repository,
+            &["rev-parse", "HEAD"],
+            "resolve stale checkout HEAD",
         )
-        .expect("base is UTF-8")
+        .expect("stale HEAD")
         .trim()
         .to_string();
         git(&[
@@ -14753,12 +14750,35 @@ fn concurrent_missing_task_base_capture_serializes_and_reuses_its_sha() {
             "HEAD",
         ]);
 
+        // A merge lands after the destination was created. Neither its HEAD
+        // nor the recipe's pre-dispatch diff boundary may bypass admission.
+        std::fs::write(repository.join("merged.txt"), "landed before admission\n").unwrap();
+        git(&["add", "merged.txt"]);
+        git(&[
+            "-c",
+            "user.name=Homeboy Test",
+            "-c",
+            "user.email=test@example.com",
+            "commit",
+            "-m",
+            "merged change",
+        ]);
+        let expected_sha = homeboy_core::git::run_git(
+            &repository,
+            &["rev-parse", "HEAD"],
+            "resolve fresh remote tip",
+        )
+        .unwrap()
+        .trim()
+        .to_string();
+        assert_ne!(stale_sha, expected_sha);
         let roots = homeboy_core::paths::PathRoots::from_environment().expect("isolated roots");
         let store = CookRecipeStore::new(roots.clone());
         let lifecycle_store = AgentTaskLifecycleStore::new(roots);
         let cook_id = "cook-concurrent-task-base-capture";
         let mut options = batch_cook_options(cook_id, Arc::new(AcceptedDetachedAttemptDispatcher));
-        options.workspace.source_worktree_path = Some(repository.clone());
+        options.workspace.source_worktree_path = Some(destination.clone());
+        options.workspace.task_base_sha = Some(stale_sha);
         options.identity.initial_plan.tasks[0].workspace.root =
             Some(destination.display().to_string());
         options.identity.initial_plan.tasks[0].workspace.kind =
@@ -14785,7 +14805,7 @@ fn concurrent_missing_task_base_capture_serializes_and_reuses_its_sha() {
             .expect("materialize initial attempt");
 
         let capture_counter = Arc::new(WorkspaceBaseCaptureHook {
-            workspace: repository.clone(),
+            workspace: destination.clone(),
             count: AtomicUsize::new(0),
             fail_after_recipe_persistence: AtomicBool::new(false),
         });
@@ -14838,6 +14858,27 @@ fn concurrent_missing_task_base_capture_serializes_and_reuses_its_sha() {
             "only the recovered claim owner reaches origin"
         );
         let recipe = store.load_recipe(cook_id).expect("captured recipe");
+        let advertised = homeboy_core::git::run_git(
+            &destination,
+            &["ls-remote", "--heads", "origin", "main"],
+            "observe admission tip",
+        )
+        .expect("remote tip");
+        assert_eq!(
+            advertised.split_whitespace().next(),
+            Some(expected_sha.as_str())
+        );
+        let behind = homeboy_core::git::run_git(
+            &destination,
+            &[
+                "rev-list",
+                "--count",
+                &format!("{expected_sha}..refs/remotes/origin/main"),
+            ],
+            "count commits behind at admission",
+        )
+        .expect("admission freshness");
+        assert_eq!(behind.trim(), "0");
         assert_eq!(
             recipe.finalization["task_base_sha"],
             serde_json::json!(expected_sha)
@@ -14852,35 +14893,23 @@ fn concurrent_missing_task_base_capture_serializes_and_reuses_its_sha() {
     });
 }
 
-/// The controller's authenticated transport is not the only authority for a
-/// base that was already fetched. Terminalizing here consumed zero provider
-/// executions and produced no worktree, purely because one network call failed.
+/// An unreachable origin must not admit a potentially stale cached base.
 #[test]
-fn cook_base_pin_falls_back_to_the_fetched_tracking_ref_when_origin_is_unreachable() {
+fn cook_base_pin_rejects_cached_tracking_ref_when_origin_is_unreachable() {
     homeboy_core::test_support::with_isolated_home(|_| {
         let temp = tempfile::tempdir().expect("temporary repository");
-        let (repository, head) = unreachable_origin_repository(temp.path(), true);
+        let (repository, _) = unreachable_origin_repository(temp.path(), true);
 
         let mut options = batch_cook_options(
             "cook-base-transport-fallback",
             Arc::new(AcceptedDetachedAttemptDispatcher),
         );
         options.workspace.source_worktree_path = Some(repository.clone());
-        pin_cook_workspace_base_at(&mut options, &repository)
-            .expect("an already-fetched base admits the cook");
-
-        assert_eq!(
-            options.workspace.task_base_sha.as_deref(),
-            Some(head.as_str())
-        );
-        let recorded = &options.identity.initial_plan.metadata["cook_workspace_base"];
-        assert_eq!(recorded["sha"], head);
-        assert_eq!(recorded["base"], "main");
-        assert_eq!(
-            recorded["provenance"], "local_remote_tracking_ref",
-            "evidence must show the base was not verified against the remote"
-        );
-        assert_eq!(recorded["remote_freshness"], "unverified");
+        let error = pin_cook_workspace_base_at(&mut options, &repository)
+            .expect_err("cached tracking refs cannot prove freshness at admission");
+        assert_eq!(error.retryable, Some(true));
+        assert!(options.workspace.task_base_sha.is_none());
+        assert!(options.identity.initial_plan.metadata["cook_workspace_base"].is_null());
     });
 }
 
