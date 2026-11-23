@@ -96,7 +96,7 @@ pub fn launchable_step_program(program: &str) -> String {
 /// raw `std::env::current_exe()`, which names `<path> (deleted)` at that
 /// point; this resolves the launchable startup path instead.
 pub fn durable_step_program() -> Result<PathBuf> {
-    let program = crate::daemon::daemon_launchable_executable().map_err(|error| {
+    let program = crate::daemon::launchable_executable().map_err(|error| {
         Error::internal_io(
             error.to_string(),
             Some("resolve launchable Homeboy executable for a durable step".to_string()),
