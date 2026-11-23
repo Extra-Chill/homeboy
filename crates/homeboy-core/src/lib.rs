@@ -77,6 +77,7 @@ pub(crate) mod artifact_origin;
 pub mod artifact_postprocess;
 pub(crate) mod artifact_preview;
 pub mod artifact_ref;
+pub mod bench_compare;
 pub mod broker_auth;
 pub(crate) mod browser_evidence;
 pub mod build_identity;
