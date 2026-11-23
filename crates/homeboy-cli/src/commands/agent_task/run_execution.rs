@@ -686,8 +686,22 @@ pub(super) fn run_preflight_cook_execution(
     let local_dispatch = !args.preview && attempt_dispatcher.is_none();
     // The outer Option tracks admission even when no resource snapshot exists.
     // Keep the lease across every workflow resume, until this Cook returns.
-    let local_dispatch_lease = std::sync::Mutex::new(None);
+    let local_dispatch_lease: std::sync::Mutex<
+        Option<Option<homeboy::core::local_dispatch_admission::ActiveLocalDispatchLease>>,
+    > = std::sync::Mutex::new(None);
     let durable_observer = |event: &agent_task_service::CookProgressEvent<'_>| {
+        // Required checks run remotely; the local slot only bounds provider,
+        // promotion and gate work on this host. Keep the admitted marker so a
+        // workflow resume does not re-admit.
+        if event.phase == homeboy::agents::agent_task_service::AWAITING_CI_PHASE {
+            if let Some(held) = local_dispatch_lease
+                .lock()
+                .expect("local dispatch lease lock")
+                .as_mut()
+            {
+                held.take();
+            }
+        }
         if no_progress && event.phase != "durable_identity" {
             return Ok(());
         }

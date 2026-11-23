@@ -1280,7 +1280,7 @@ fn recover_cook_once(
         let status = ci["status"].as_str().unwrap_or("awaiting_ci").to_owned();
         let exit = i32::from(matches!(
             status.as_str(),
-            "ci_gate_failed" | "ci_infrastructure"
+            "ci_gate_failed" | "ci_infrastructure" | "pr_closed"
         ));
         return Ok((
             CookRecoveryReport {

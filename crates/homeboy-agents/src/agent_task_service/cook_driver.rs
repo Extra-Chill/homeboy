@@ -260,6 +260,41 @@ pub(super) fn run_cook_with_runtime(
         mode,
     );
     if let Ok(result) = &mut result {
+        // A CI-deferred Cook resolves here, without an operator `recover`:
+        // a settled receipt makes the report terminal and announced below.
+        // Announce the CI wait before polling, so the submitting client can
+        // release resources held only for provider work (the local dispatch
+        // slot) while required checks run remotely.
+        if result.value.status == homeboy_core::cook_status::CookStatus::AwaitingCi {
+            if let Some(run_id) = result.value.latest_run_id.clone() {
+                let attempt = result.value.attempts.len() as u32;
+                if let Err(error) = super::cook::report_cook_progress(
+                    lifecycle_store,
+                    Some(durable_observer),
+                    &result.value.cook_id,
+                    &run_id,
+                    super::cook_ci::AWAITING_CI_PHASE,
+                    attempt,
+                    Some("waiting for required PR checks"),
+                ) {
+                    homeboy_core::log_status!(
+                        "agent-task",
+                        "Cook CI wait progress failed: {}",
+                        error
+                    );
+                }
+            }
+        }
+        if let Err(error) = super::cook_ci::settle_awaiting_ci(
+            store,
+            &mut result.value,
+            &mut result.exit_code,
+            &homeboy_core::git::cook_ci::GithubCookCi,
+            super::cook_ci::CookCiPollCadence::DEFAULT,
+            &mut std::thread::sleep,
+        ) {
+            homeboy_core::log_status!("agent-task", "Cook CI polling failed: {}", error);
+        }
         super::cook_promotion::bind_report_to_stores(
             &mut result.value,
             store,

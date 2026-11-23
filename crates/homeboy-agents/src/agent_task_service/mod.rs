@@ -17,7 +17,7 @@ mod cook_projections;
 mod cook_spine;
 mod cook_timeout;
 mod cook_workspace;
-pub use cook_ci::{cook_ci_status, repoll_cook_ci};
+pub use cook_ci::{cook_ci_status, repoll_cook_ci, AWAITING_CI_PHASE};
 pub(crate) mod cook_activity;
 mod cook_admission_key;
 mod cook_adoption;
