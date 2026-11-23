@@ -4,6 +4,22 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.491.0] - 2026-11-23
+
+### Added
+- auto re-poll awaiting_ci and classify merged, closed and conflicting PRs
+
+### Changed
+- write gate_environment_unavailable everywhere
+- delete CookMode
+- Settle agent-task rows left running after their lifecycle ended
+
+### Fixed
+- resolve monorepo sub-component path inside gate worktrees
+- classify gate setup failures as infrastructure; check focused cargo filters at admission
+- record a typed cause for every silent nonzero exit
+- converge daemon lifecycle before taking the Cook's shared admission guard
+
 ## [0.490.1] - 2026-11-22
 
 ### Changed
