@@ -601,6 +601,61 @@ impl<'a> CookSideEffects<'a> {
     }
 }
 
+/// Bind a terminal Cook outcome to the native destination worktree this Cook
+/// provisioned (#18895). A published or nothing-to-deliver Cook finalizes it
+/// `succeeded`, so cleanup can reclaim it once safe; every other outcome keeps
+/// its evidence preserved. Caller-owned `--cwd` workspaces and destinations
+/// another run provisioned stay unfinalized.
+pub(super) fn finalize_cook_destination_worktree(
+    lifecycle_store: &AgentTaskLifecycleStore,
+    options: &CookRequest,
+    status: CookStatus,
+) -> Result<()> {
+    use homeboy_core::worktree_provider::{
+        WorktreeCleanupPolicy, WorktreeProvisionLifecycle, WorktreeTerminalDisposition,
+    };
+    if status.is_in_flight() || super::cook_workspace::cook_uses_explicit_cwd_workspace(options) {
+        return Ok(());
+    }
+    let Some(record) = super::cook_workspace::native_cook_destination_record(options)? else {
+        return Ok(());
+    };
+    let Some(owner) = record
+        .run_id
+        .clone()
+        .filter(|_| record.state == homeboy_core::worktree::TaskWorktreeState::Active)
+    else {
+        return Ok(());
+    };
+    let provisioned_by_this_cook = owner == options.identity.initial_run_id
+        || lifecycle_store
+            .read_cook_index(&options.identity.cook_id)
+            .is_ok_and(|index| index.attempts.iter().any(|attempt| attempt.run_id == owner));
+    if !provisioned_by_this_cook {
+        return Ok(());
+    }
+    let disposition = match status {
+        _ if status.is_published() => WorktreeTerminalDisposition::Succeeded,
+        CookStatus::NoChanges | CookStatus::IntentionalNoChange => {
+            WorktreeTerminalDisposition::Succeeded
+        }
+        CookStatus::Cancelled => WorktreeTerminalDisposition::Cancelled,
+        CookStatus::TimedOut => WorktreeTerminalDisposition::TimedOut,
+        _ => WorktreeTerminalDisposition::Failed,
+    };
+    let lifecycle = WorktreeProvisionLifecycle {
+        purpose: "agent_task_cook".to_string(),
+        owner_run_ref: owner,
+        cleanup_policy: if disposition == WorktreeTerminalDisposition::Succeeded {
+            WorktreeCleanupPolicy::RemoveOnSuccess
+        } else {
+            WorktreeCleanupPolicy::PreserveOnFailure
+        },
+    };
+    homeboy_core::worktree_provider::finalize_worktree(&record.id, &lifecycle, disposition)?;
+    Ok(())
+}
+
 /// The promotion checkpoint captures this before gates run, when it is the only
 /// complete authorization for reusing the dirty managed destination.
 pub(crate) fn gate_feedback_current_diff(promotion: &AgentTaskPromotionReport) -> String {
