@@ -4,6 +4,15 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.493.0] - 2026-11-23
+
+### Added
+- add homeboy bench compare base-vs-head corpus A/B with run-owned lifecycle
+
+### Changed
+- consolidate local host telemetry in engine primitives
+- use one process-table snapshot and descendant walk
+
 ## [0.492.3] - 2026-11-23
 
 ### Fixed
