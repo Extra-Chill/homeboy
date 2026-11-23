@@ -70,12 +70,12 @@ impl SelectedGateEnvironment {
             .and_then(|host| fs::read(host.join(&file)).ok())
             .and_then(|raw| serde_json::from_slice::<serde_json::Value>(&raw).ok())
             .filter(serde_json::Value::is_object);
-        let has_host_registration = host_registration.is_some();
         let mut registration = host_registration.unwrap_or_else(|| json!({}));
         // Gates materialize the repository, not just the admitted package.
         // Retain its repo-relative path before the isolated XDG root hides
-        // the host registration. Without a host registration, use the Cook's
-        // admitted package path; root components keep the checkout-root fallback.
+        // the host registration. If that path is unavailable on this host (as
+        // with controller registrations on Lab), use the Cook's admitted
+        // package path; root components keep the checkout-root fallback.
         let component_path = registration
             .get("local_path")
             .and_then(serde_json::Value::as_str)
@@ -90,7 +90,7 @@ impl SelectedGateEnvironment {
             })
             .map(Ok)
             .unwrap_or_else(|| match self.component_cwd.as_deref() {
-                Some(relative) if !has_host_registration && !relative.is_empty() => {
+                Some(relative) if !relative.is_empty() => {
                     let root =
                         homeboy_core::git::repo_root(cwd).unwrap_or_else(|| cwd.to_path_buf());
                     homeboy_core::resolve_contained_local_path(&root, relative, "component_cwd")

@@ -104,7 +104,9 @@ pub(crate) fn gate_failure_evidence(
                 format!("gate shell `sh -c` rejected the gate program itself: {line}")
             }
             (None, None) if target_unresolved => format!(
-                "gate environment cannot run `{command}`: Homeboy could not resolve the gate's target before checking the candidate"
+                "gate environment cannot run `{command}`: {}",
+                homeboy_gate_diagnostic(stdout, stderr)
+                    .unwrap_or_else(|| "Homeboy could not resolve the gate's target before checking the candidate".to_string())
             ),
             (None, None) if !failed_tests.is_empty() => format!(
                 "deterministic gate failed with exit code {exit_code}: {command}\n{}",
@@ -429,6 +431,33 @@ pub(super) fn homeboy_gate_target_unresolved(stdout: &str, stderr: &str) -> bool
                 .and_then(serde_json::Value::as_str)
                 .and_then(homeboy_error::ErrorCode::from_str)
                 .is_some_and(|code| code.is_unresolved_target())
+    })
+}
+
+/// Preserve the actual diagnostic and effective path rather than describing a
+/// resolved target with a missing capability as an unresolved component.
+fn homeboy_gate_diagnostic(stdout: &str, stderr: &str) -> Option<String> {
+    [stdout, stderr].into_iter().find_map(|stream| {
+        let result: serde_json::Value = serde_json::from_str(stream.trim()).ok()?;
+        if result.get("success")?.as_bool()? {
+            return None;
+        }
+        let error = result.get("diagnostics").or_else(|| result.get("error"))?;
+        let message = error
+            .get("message")
+            .and_then(serde_json::Value::as_str)
+            .or_else(|| result.get("summary").and_then(serde_json::Value::as_str))?;
+        let code = error
+            .get("code")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or("Homeboy");
+        let path = error
+            .pointer("/details/review_capability_preflight/effective_component/source_path")
+            .and_then(serde_json::Value::as_str);
+        Some(match path {
+            Some(path) => format!("{code}: {message} (resolved source_path: {path})"),
+            None => format!("{code}: {message}"),
+        })
     })
 }
 

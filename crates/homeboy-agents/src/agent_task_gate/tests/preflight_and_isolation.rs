@@ -138,55 +138,67 @@ fn isolated_gate_resolves_unregistered_monorepo_package_from_cook_cwd() {
     .unwrap();
     assert!(!workspace.path().join("homeboy.json").exists());
 
-    for component_cwd in [Some("plugins/events"), Some(""), None] {
-        // Round-trip the request policy as a remote Lab gate does.
-        let policy = AgentTaskGateEnvironmentPolicy {
-            isolate_home: true,
-            admitted_component_id: Some("events".to_string()),
-            component_cwd: component_cwd.map(str::to_owned),
-            ..AgentTaskGateEnvironmentPolicy::default()
-        };
-        let policy = serde_json::from_value(serde_json::to_value(policy).unwrap()).unwrap();
-        let mut selected = selected_gate_environment(&policy, None).unwrap();
-        selected
-            .register_admitted_component(workspace.path())
+    // Lab may have no registration, or a copied controller registration whose
+    // local_path cannot exist on the runner. Both must retain the admitted path.
+    for stale_registration in [false, true] {
+        if stale_registration {
+            fs::write(
+                registry.join("events.json"),
+                json!({"local_path": workspace.path().join("missing-controller-checkout/plugins/events")})
+                    .to_string(),
+            )
             .unwrap();
-        let isolated_root = selected
-            .isolated_home
-            .as_ref()
-            .unwrap()
-            .join(".config/homeboy");
-        let registration: serde_json::Value = serde_json::from_slice(
-            &fs::read(isolated_root.join("components/events.json")).unwrap(),
-        )
-        .unwrap();
-        let expected = if component_cwd == Some("plugins/events") {
-            &package
-        } else {
-            workspace.path()
-        };
-        assert_eq!(registration["local_path"], json!(expected));
-        if component_cwd == Some("plugins/events") {
-            let previous = std::env::current_dir().unwrap();
-            std::env::set_current_dir(workspace.path()).unwrap();
-            // Both review test and review lint resolve their component by ID.
-            let resolved = homeboy_core::component::resolve_effective_in_root(
-                &isolated_root,
-                Some("events"),
-                None,
-                None,
-            );
-            std::env::set_current_dir(previous).unwrap();
-            let component = resolved.unwrap();
-            assert_eq!(component.id, "events");
-            assert_eq!(Path::new(&component.local_path), package);
-            assert!(component
-                .extensions
+        }
+        for component_cwd in [Some("plugins/events"), Some(""), None] {
+            // Round-trip the request policy as a remote Lab gate does.
+            let policy = AgentTaskGateEnvironmentPolicy {
+                isolate_home: true,
+                admitted_component_id: Some("events".to_string()),
+                component_cwd: component_cwd.map(str::to_owned),
+                ..AgentTaskGateEnvironmentPolicy::default()
+            };
+            let policy = serde_json::from_value(serde_json::to_value(policy).unwrap()).unwrap();
+            let mut selected = selected_gate_environment(&policy, None).unwrap();
+            selected
+                .register_admitted_component(workspace.path())
+                .unwrap();
+            let isolated_root = selected
+                .isolated_home
+                .as_ref()
                 .unwrap()
-                .contains_key("fixture-extension"));
+                .join(".config/homeboy");
+            let registration: serde_json::Value = serde_json::from_slice(
+                &fs::read(isolated_root.join("components/events.json")).unwrap(),
+            )
+            .unwrap();
+            let expected = if component_cwd == Some("plugins/events") {
+                &package
+            } else {
+                workspace.path()
+            };
+            assert_eq!(registration["local_path"], json!(expected));
+            if component_cwd == Some("plugins/events") {
+                let previous = std::env::current_dir().unwrap();
+                std::env::set_current_dir(workspace.path()).unwrap();
+                // Both review test and review lint resolve their component by ID.
+                let resolved = homeboy_core::component::resolve_effective_in_root(
+                    &isolated_root,
+                    Some("events"),
+                    None,
+                    None,
+                );
+                std::env::set_current_dir(previous).unwrap();
+                let component = resolved.unwrap();
+                assert_eq!(component.id, "events");
+                assert_eq!(Path::new(&component.local_path), package);
+                assert!(component
+                    .extensions
+                    .unwrap()
+                    .contains_key("fixture-extension"));
+            }
         }
     }
-    assert_eq!(fs::read_dir(&registry).unwrap().count(), 0);
+    assert_eq!(fs::read_dir(&registry).unwrap().count(), 1);
 }
 
 /// #15882: a registry-only component (no portable `homeboy.json`) resolves
