@@ -165,6 +165,17 @@ pub fn active_local_dispatch_count(data_root: &Path) -> Result<usize> {
     ))
 }
 
+/// Live Homeboy runs holding local dispatch slots.
+pub fn local_dispatch_holders(data_root: &Path) -> Result<Vec<Value>> {
+    let store = open_store(data_root)?;
+    store.reap_coordination_leases(NAMESPACE)?;
+    Ok(store
+        .coordination_lease_holders(NAMESPACE, LEASE_KEY)?
+        .into_iter()
+        .map(|holder| holder.payload)
+        .collect())
+}
+
 /// Decide admission and take a slot in one store transaction.
 ///
 /// `decide` receives the slots held by live dispatches and returns the
