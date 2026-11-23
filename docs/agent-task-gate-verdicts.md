@@ -69,9 +69,9 @@ explicitly recorded as flaky-passing, with its original failure evidence retaine
 Replay errors or timeouts remain inconclusive and cannot excuse a failed gate.
 
 Subset acceptance requires comparable failure identities on both sides. If
-neither run names its failures, matching normalized failure fingerprints are
-required for `baseline_red`; exit status alone is not proof. The fingerprints
-are retained in the base/head lists. If only one side names failures, the runs are not comparable
+neither run names its failures, a red base and red candidate are reported as
+`baseline_red`; their normalized failure fingerprints are retained in the
+base/head lists as evidence. If only one side names failures, the runs are not comparable
 and the candidate failure blocks as `candidate_broke_gate`.
 `--baseline-policy=strict` stops before provider dispatch when a base gate is red.
 Repro gates retain their separate requirement to demonstrate the issue on base.

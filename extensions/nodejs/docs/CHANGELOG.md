@@ -2,6 +2,11 @@
 
 All notable changes to the **nodejs** extension will be documented in this file.
 
+## [3.9.14] - 2026-11-23
+
+### Fixed
+- fail clearly on missing shared helper, unresolved WordPress source, and zero-test suites
+
 ## [3.9.13] - 2026-11-18
 
 ### Changed

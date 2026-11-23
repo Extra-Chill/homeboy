@@ -392,6 +392,11 @@ pub(super) fn finish_cook_terminal_with_report(
                 &record.run_id,
                 super::cook_projections::terminal_fallback_status(state.execution_state),
             );
+            fallback.stop_reason = record.metadata["pre_execution_failure"]["message"]
+                .as_str()
+                .or_else(|| record.metadata["execution_step_failure"]["message"].as_str())
+                .or_else(|| record.metadata["unmaterialized_cook_admission"]["reason"].as_str())
+                .map(str::to_string);
             fallback.report_stores = Some((
                 CookRecipeStore::new(lifecycle.roots().clone()),
                 lifecycle.clone(),

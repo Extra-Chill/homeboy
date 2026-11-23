@@ -421,10 +421,14 @@ impl BaselineFacts {
             .filter(|record| !self.failure_records.contains(record))
             .cloned()
             .collect();
-        // Exit status alone cannot prove inheritance for opaque commands.
-        let opaque = self.failure_records.is_empty()
-            && candidate.failure_records.is_empty()
-            && self.failure_fingerprint == candidate.failure_fingerprint;
+        // Opaque gates have only an exit-status contract. Do not attribute an
+        // already-red host or toolchain to the candidate based on output text.
+        // That excuse applies only when neither run named its failures: a
+        // candidate that names failures the baseline cannot account for (or
+        // a baseline that names failures the candidate replaced with opaque
+        // output) is not a reproduction of the baseline breakage. The base
+        // and head fingerprints are still recorded as inheritance evidence.
+        let opaque = self.failure_records.is_empty() && candidate.failure_records.is_empty();
         let base_failures = self.failure_identities();
         let head_failures = candidate.failure_identities();
         let inherited = if opaque {
@@ -640,8 +644,39 @@ fn refine_gate_comparison(
     );
 }
 
+/// Repository identity for base observation cache keys. The Cook's source
+/// worktree path is unique per Cook on a Lab host, so keying on it made every
+/// concurrent Cook on the same base pay for its own full base run (#18833).
+/// The admitted component, else the repository's origin, names the code under
+/// test; the component's repository-relative path keeps package roots apart.
+fn base_observation_identity(
+    root: &std::path::Path,
+    workspace: &std::path::Path,
+    component: Option<&str>,
+) -> Value {
+    let repository = match component {
+        Some(component) => serde_json::json!({ "component": component }),
+        None => match git_output(root, &["config", "--get", "remote.origin.url"]) {
+            Ok(origin) if !origin.is_empty() => serde_json::json!({ "origin": origin }),
+            _ => serde_json::json!({ "root": root }),
+        },
+    };
+    let relative = workspace
+        .strip_prefix(root)
+        .map(|path| path.display().to_string())
+        .unwrap_or_else(|_| workspace.display().to_string());
+    serde_json::json!({ "repository": repository, "workspace": relative })
+}
+
 /// Observe all declared gates before paid provider work. The cache includes
 /// placement and gate inputs, not just the SHA, so hosts never share verdicts.
+/// It keys on repository identity rather than the per-Cook worktree path, so
+/// concurrent Cooks on one component and base share a single base run under
+/// the admission lock.
+///
+/// Eager observation is an explicit policy choice: it reports a red base
+/// before paid provider work is dispatched, which lazy (failure-only)
+/// comparison cannot. Its cost is bounded by the shared cache above.
 pub(crate) fn admit_base_gates(
     options: &super::cook::CookRequest,
     store: &ObservationStore,
@@ -657,7 +692,8 @@ pub(crate) fn admit_base_gates(
     environment.admitted_component_id =
         super::cook::cook_repository_identity_component_id(&options.identity.initial_plan);
     let component = environment.admitted_component_id.clone();
-    let inputs = serde_json::json!([root, base_sha, gates]);
+    let identity = base_observation_identity(root, &workspace, component.as_deref());
+    let inputs = serde_json::json!([identity, base_sha, gates]);
     let key = format!(
         "admission-{:x}",
         Sha256::digest(inputs.to_string().as_bytes())
@@ -708,8 +744,7 @@ pub(crate) fn admit_base_gates(
                 for index in 0..(commands.len() + usize::from(gates.test_execution_plan.is_some()))
                 {
                     let input = serde_json::json!([
-                        root,
-                        workspace,
+                        identity,
                         base_sha,
                         commands.get(index),
                         if commands.get(index).is_none() {
@@ -1628,20 +1663,21 @@ mod tests {
         let opaque = BaselineFacts::from_gate(&run("host unavailable"));
         let mut candidate = run("different host error");
         opaque.apply(&mut candidate, "base", None);
-        assert_eq!(candidate.status, AgentTaskGateStatus::Failed);
-        let mut identical = run("host unavailable");
-        opaque.apply(&mut identical, "base", None);
+        // Opaque gates keep an exit-status contract: differing output on a
+        // red base is still inherited, with both fingerprints as evidence.
         assert_eq!(
-            identical.status,
+            candidate.status,
             AgentTaskGateStatus::AcceptedInheritedFailure
         );
-        let proof = identical
+        let proof = candidate
             .baseline_comparison
             .unwrap()
             .failure_attribution
             .unwrap();
-        assert_eq!(proof.base_failures, proof.head_failures);
         assert!(proof.base_failures[0].starts_with("sha256:"));
+        assert!(proof.head_failures[0].starts_with("sha256:"));
+        assert_eq!(proof.inherited_failures, proof.head_failures);
+        assert!(proof.new_failures.is_empty());
         // An opaque baseline cannot excuse a candidate that names failures:
         // nothing on the baseline accounts for them.
         let mut named = run("test C ... FAILED\\n");
@@ -2009,8 +2045,8 @@ mod tests {
                 ),
                 (
                     "opaque_red",
-                    "printf 'base\\n' >&2; exit 1",
-                    "base\n",
+                    "cat state >&2; exit 1",
+                    "candidate\n",
                     std::time::Duration::from_secs(1),
                     AgentTaskGateDifferentialResult::BaselineRed,
                     true,
@@ -2152,6 +2188,30 @@ mod tests {
                         .as_ref()
                         .unwrap()
                         .contains("reused"));
+                    let mut different_failure = original.clone();
+                    different_failure.deterministic_gates[0].stderr =
+                        "different candidate failure\n".to_string();
+                    compare_gate_failures_to_verified_base(
+                        &store,
+                        &mut different_failure,
+                        &[],
+                        &replay_root,
+                        &replay_root,
+                        &base,
+                        timeout,
+                        None,
+                        |_, _| Ok(()),
+                    )
+                    .expect("reuse with different candidate failure");
+                    assert_eq!(
+                        different_failure.deterministic_gates[0]
+                            .baseline_comparison
+                            .as_ref()
+                            .unwrap()
+                            .result,
+                        AgentTaskGateDifferentialResult::BaselineRed
+                    );
+                    assert_eq!(runs(), 1);
                     let mut changed = original.clone();
                     changed.deterministic_gates[0].command =
                         crate::agent_task_gate::legacy_gate_argv(&format!("{command}; # changed"));
@@ -2272,6 +2332,23 @@ mod tests {
                 );
             }
         });
+    }
+
+    /// Concurrent Cooks on one component and base have unique source worktree
+    /// paths; base admission must key on the repository, not the path (#18833).
+    #[test]
+    fn base_observation_identity_ignores_the_per_cook_worktree_path() {
+        let first = std::path::Path::new("/lab/_lab_workspaces/base-abc-1111");
+        let second = std::path::Path::new("/lab/_lab_workspaces/base-abc-2222");
+        let identity = |root: &std::path::Path, package: &str| {
+            base_observation_identity(root, &root.join(package), Some("blocks-engine"))
+        };
+        assert_eq!(identity(first, "php"), identity(second, "php"));
+        assert_ne!(identity(first, "php"), identity(second, "js"));
+        assert_ne!(
+            identity(first, "php"),
+            base_observation_identity(first, &first.join("php"), Some("other"))
+        );
     }
 
     /// Production gates each carry a unique Lab offload context; the record key
@@ -2537,7 +2614,7 @@ mod tests {
             let bin = temp.path().join("bin");
             std::fs::create_dir(&bin).expect("bin");
             let homeboy = bin.join("homeboy");
-            homeboy_test_support::write_executable(&homeboy, "#!/bin/sh\ntest \"$1\" = review && test \"$2\" = test || exit 97\n/bin/cat marker >&2\necho 'test fixture ... FAILED' >&2\nexit 1\n", 0o755)
+            homeboy_test_support::write_executable(&homeboy, "#!/bin/sh\ntest \"$1\" = review && test \"$2\" = test || exit 97\n/bin/cat marker >&2\nexit 1\n", 0o755)
         .expect("homeboy adapter");
 
             let plan = homeboy_engine_primitives::test_execution::TestExecutionPlan::declared_homeboy_review_test(
@@ -2566,7 +2643,7 @@ mod tests {
                 ],
                 1,
                 "",
-                "candidate\ntest fixture ... FAILED\n",
+                "candidate\n",
                 None,
                 HomeboyGateVisibility::Visible,
                 AgentTaskGateRevealPolicy::FullEvidence,

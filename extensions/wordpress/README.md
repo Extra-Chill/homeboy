@@ -175,6 +175,7 @@ all. Its `homeboy.json` WordPress extension settings list only exceptions:
 | Setting | Default | Meaning |
 |---|---|---|
 | `standalone_php_test_paths` | `["tests/**/*-smoke.php"]` | Files run directly with PHP. Declaring it replaces the default; `[]` selects none. |
+| `standalone_php_requires_wordpress_core` | `false` | When `true`, an unresolved WordPress core source (`wp-codebox wordpress-source`) fails the step with its reason instead of only warning. |
 | `wordpress_test_paths` | `[]` | Files mounted with the component and executed via `wordpress.run-php` in booted WordPress. A file matched by both lists runs only here. |
 | `test_path_excludes` | `[]` | Fixtures/helpers removed from both lists. |
 
