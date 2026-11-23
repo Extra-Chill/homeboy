@@ -4,6 +4,13 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.494.2] - 2026-11-23
+
+### Fixed
+- replace wall-clock flakes with deterministic probes
+- isolate compare runs and fail closed on missing evaluation
+- wait for starting owners during Cook handoff
+
 ## [0.494.1] - 2026-11-23
 
 ### Fixed
