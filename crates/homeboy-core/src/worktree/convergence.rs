@@ -53,6 +53,68 @@ pub fn pr_history(path: &Path, branch: &str, repository: Option<&str>) -> Result
     parse_pr_history(&output.stdout)
 }
 
+/// The highest generation of `base` (`base` is 1, `base-N` is N) that a local
+/// branch or any PR head, in any state, already uses; 0 when none does. One
+/// `gh pr list` search covers every generation, so a long-lived issue whose
+/// earlier generations all merged does not cost one PR lookup per generation.
+/// Search results can lag, so this is a starting floor, not proof that the
+/// next generation is free.
+pub fn highest_used_branch_generation(path: &Path, base: &str) -> Result<u32> {
+    let local = format!("refs/heads/{base}");
+    let suffixed = format!("refs/heads/{base}-*");
+    let mut heads: Vec<String> = git::output_optional(
+        path,
+        &[
+            "for-each-ref",
+            "--format=%(refname:short)",
+            &local,
+            &suffixed,
+        ],
+    )
+    .map(|output| output.lines().map(str::to_string).collect())
+    .unwrap_or_default();
+    if git::output_optional(path, &["remote", "get-url", "origin"])
+        .is_some_and(|origin| origin.contains("github.com"))
+    {
+        let output = std::process::Command::new("gh")
+            .args(["pr", "list", "--state", "all", "--limit", "1000"])
+            .args(["--search", &format!("head:{base}"), "--json", "headRefName"])
+            .current_dir(path)
+            .output()
+            .map_err(|error| infrastructure(error.to_string()))?;
+        if !output.status.success() {
+            return Err(infrastructure(
+                String::from_utf8_lossy(&output.stderr).into_owned(),
+            ));
+        }
+        #[derive(serde::Deserialize)]
+        #[serde(rename_all = "camelCase")]
+        struct PullRequest {
+            head_ref_name: String,
+        }
+        let prs: Vec<PullRequest> = serde_json::from_slice(&output.stdout)
+            .map_err(|error| infrastructure(error.to_string()))?;
+        heads.extend(prs.into_iter().map(|pr| pr.head_ref_name));
+    }
+    Ok(heads
+        .iter()
+        .filter_map(|head| branch_generation(base, head))
+        .max()
+        .unwrap_or(0))
+}
+
+fn branch_generation(base: &str, branch: &str) -> Option<u32> {
+    if branch == base {
+        return Some(1);
+    }
+    let suffix = branch.strip_prefix(base)?.strip_prefix('-')?;
+    suffix
+        .bytes()
+        .all(|byte| byte.is_ascii_digit())
+        .then(|| suffix.parse().ok())
+        .flatten()
+}
+
 /// Preserve candidate history by routing it through PR rework, never reset it.
 pub fn require_issue_destination_without_pr(path: &Path, branch: &str) -> Result<()> {
     match pr_history(path, branch, None)? {
