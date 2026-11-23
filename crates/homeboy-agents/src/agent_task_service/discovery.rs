@@ -1198,13 +1198,10 @@ fn discovery_run(
     let last_update_age_minutes = age_minutes(last_update.as_deref(), now);
     let source = run_source(&record);
     let liveness = live.map(|live| classify_liveness(&record, now, live));
-    let stale_reason = metadata_string(
-        &record.metadata,
-        agent_task_lifecycle::METADATA_KEY_STALE_RUNNING_REASON,
-    )
-    .or_else(|| {
-        (liveness == Some(AgentTaskLiveness::Stale)).then(|| stale_reason_for_record(&record))
-    });
+    let stale_reason = (liveness == Some(AgentTaskLiveness::Stale))
+        .then(|| stale_reason_for_record(&record))
+        .or_else(|| record.stale_running_reason().map(str::to_string));
+    let stale = stale_reason.is_some().then_some(true);
 
     // Runner metadata describes execution placement, not necessarily lifecycle
     // record ownership. Controller handoff projections retain their durable
@@ -1245,13 +1242,10 @@ fn discovery_run(
         runner_id,
         runner_job_id,
         remote_run_id: metadata_string(&record.metadata, "remote_run_id"),
-        stale: (liveness == Some(AgentTaskLiveness::Stale))
-            .then_some(true)
-            .or_else(|| {
-                metadata_bool(&record.metadata, agent_task_lifecycle::METADATA_KEY_STALE_RUNNING)
-            }),
+        stale,
         stale_reason,
-        retryable: metadata_bool(&record.metadata, agent_task_lifecycle::METADATA_KEY_RETRYABLE),
+        retryable: metadata_bool(&record.metadata, agent_task_lifecycle::METADATA_KEY_RETRYABLE)
+            .or(stale),
         liveness,
         liveness_reconcilable: liveness.map(AgentTaskLiveness::is_reconcilable),
         source,
