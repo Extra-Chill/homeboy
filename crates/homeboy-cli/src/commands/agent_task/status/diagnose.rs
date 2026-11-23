@@ -1,6 +1,7 @@
 //! Diagnosis handler, actionable recovery guidance, and stable run/evidence refs.
 
 use super::*;
+use homeboy::agents::agent_task_gate::phases as gate_phase_spans;
 use homeboy::core::error::posix_quote_arg;
 
 // Optional observations must never hold recorded failure evidence hostage. A
@@ -281,7 +282,12 @@ pub(in crate::commands::agent_task) fn diagnose(args: DiagnoseArgs) -> CmdResult
     );
     attach_gate_cleanup_warnings(&mut value, &record);
     super::super::candidate_location::attach_candidate_location(&mut value, &record);
+    let mut gate_phases = Vec::new();
     if let Ok(Some(promotion)) = agent_task_service::recorded_promotion_report(&record.metadata) {
+        gate_phases = gate_phase_spans::recorded_gate_phases(&promotion);
+        if !gate_phases.is_empty() {
+            value["gate_phases"] = json!(gate_phases);
+        }
         let outputs: Vec<_> = promotion
             .get("deterministic_gates")
             .and_then(Value::as_array)
@@ -398,6 +404,13 @@ pub(in crate::commands::agent_task) fn diagnose(args: DiagnoseArgs) -> CmdResult
         if let Some(runner) = cause.data["runner_id"].as_str() {
             value["placement"] = json!({"kind": "lab", "runner_id": runner});
         }
+    }
+    // Whatever owns the summary, name where the gates spent their time.
+    if let (Some(summary), Some(slowest)) = (
+        value["summary"].as_str(),
+        gate_phase_spans::slowest_recorded_gate_phase_text(&gate_phases),
+    ) {
+        value["summary"] = json!(format!("{summary} (slowest gate phase: {slowest})"));
     }
     Ok((value, 0))
 }

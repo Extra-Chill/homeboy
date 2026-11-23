@@ -1252,6 +1252,8 @@ hydrates aggregate evidence and remains resource-managed.
 
 `agent-task status` assembles `ControlPlaneRun` from durable controller state and never contacts or reconciles a runner. This keeps inspection available while a Lab runner is unavailable. Use `agent-task reconcile` when the caller explicitly wants to refresh authoritative provider state.
 
+For a Cook, status also reports `attempts: [{attempt, queued_ms, agent_ms, gate_ms, slowest_gate_phase, finalize_ms, outcome}]`, and the human summary prints one line per attempt, for example `attempt 2: queued 0.4m · agent 3.6m · gate 4.8m (slowest: acceptance 3.6m) · finalize 1.1m → passed`. The values come from each attempt's recorded phase spans, classified by the same setup/agent/verify/finalize buckets `runs show` uses, and from its gate reports (`gate_ms` sums executed gate commands; reused verdicts cost nothing). A field without recorded data is absent, not zero.
+
 ## Deterministic Smoke Gate
 
 Issue #3392 is covered by a no-secret fixture plan at
@@ -1331,6 +1333,15 @@ add durable phase/current context to that liveness signal. It is separate from
 the wall-clock gate timeout. A nonzero command exit remains
 `termination: "completed"`, while controller deadline outcomes have distinct
 termination values.
+
+A gate that chains several stages may report how long each took by printing
+`homeboy-gate-phase name=<id> seconds=<n>` lines on stdout (`<id>` is
+`[A-Za-z0-9_.-]{1,64}`, `<n>` may be fractional). Homeboy reads them from the
+gate's whole stdout stream, not only the retained tail, and records them on the
+gate report as `phases: [{name, elapsed_ms}]` in printed order, capped at 64.
+Malformed lines stay ordinary output; a gate without markers has no `phases`
+field. `agent-task diagnose` lists them under `gate_phases` and names the
+slowest phase in its summary.
 
 Use `--private-verify <command>` for orchestrator-only completion gates that
 should decide completion without exposing hidden evaluator details to the next

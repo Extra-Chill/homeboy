@@ -1927,25 +1927,12 @@ fn terminal_artifact_projection_readiness_for_record_with(
     ))
 }
 
-/// Observation status comes only from the run's own terminal lifecycle state.
-pub(super) fn terminal_observation_status(state: &RunExecutionState) -> Option<&'static str> {
-    let status = match state {
-        RunExecutionState::Succeeded => "pass",
-        RunExecutionState::CandidateRecoverable
-        | RunExecutionState::PartialFailure
-        | RunExecutionState::Failed
-        | RunExecutionState::Cancelled => "fail",
-        _ => return None,
-    };
-    Some(status)
-}
-
 fn project_terminal_artifacts_in_store(
     store: &homeboy_core::observation::ObservationStore,
     record: &AgentTaskRunRecord,
     aggregate: &AgentTaskAggregate,
 ) -> Result<()> {
-    if terminal_observation_status(&record.state()).is_none() {
+    if !super::lifecycle_store::has_outcome(record.state()) {
         return Ok(());
     }
     // The row's status is the record write's projection; this only annotates.

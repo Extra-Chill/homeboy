@@ -6423,7 +6423,7 @@ pub fn record_cook_attempt_in_store(
         complete_detached_cook_handoff_parent_in_store(lifecycle_store, cook_id, run_id)?;
         inherit_cook_notification_route_locked_in_store(lifecycle_store, cook_id, run_id)?;
         // A new latest attempt moves a redirected Cook's row onto it (#16179).
-        super::lifecycle_store::reproject_redirected_cook_root(
+        super::lifecycle_store::reproject_cook_root(
             lifecycle_store,
             &lifecycle_store.open_observation_initialized()?,
             cook_id,

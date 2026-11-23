@@ -83,14 +83,15 @@ fn terminal_transition_settles_cook_observations_and_span() {
         // Runs settle to their own Cook-observed lifecycle outcome, never to
         // the report's exit code (#18366). Each case seeds the lifecycle state
         // its Cook actually ends in.
-        for (status, lifecycle, success) in [
+        for (status, lifecycle, success, row_status) in [
             // A verified intentional no-change keeps its provider success.
-            ("intentional_no_change", "succeeded", true),
+            ("intentional_no_change", "succeeded", true, "pass"),
             // Provider success without a verified, finalized candidate.
-            ("candidate_recoverable", "succeeded", false),
+            ("candidate_recoverable", "succeeded", false, "fail"),
             // Publication is the end-to-end receipt.
-            ("published", "running", true),
-            ("cancelled", "cancelled", false),
+            ("published", "running", true, "pass"),
+            // A cancelled run reads `skipped` on every row (#18868).
+            ("cancelled", "cancelled", false, "skipped"),
         ] {
             let cook = format!("terminal-{status}");
             let attempt = format!("{cook}-attempt-1");
@@ -134,7 +135,7 @@ fn terminal_transition_settles_cook_observations_and_span() {
             for id in [&cook, &attempt] {
                 assert_eq!(
                     observation.get_run(id).unwrap().unwrap().status,
-                    if success { "pass" } else { "fail" },
+                    row_status,
                     "{id}"
                 );
             }

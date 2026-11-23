@@ -2509,7 +2509,7 @@ pub(super) fn write_record_guarded(
         .and_then(Value::as_str)
         .filter(|cook_id| !cook_id.is_empty() && *cook_id != record.run_id)
     {
-        reproject_redirected_cook_root(lifecycle_store, &store, cook_id)?;
+        reproject_cook_root(lifecycle_store, &store, cook_id)?;
     }
     snapshot_from_run(&resolve_run_payloads(&store, committed)?).map(GuardedRecordWrite::Committed)
 }
@@ -2591,10 +2591,8 @@ fn cook_row_status(record: &AgentTaskRunRecord) -> Option<&'static str> {
     if record.state() == RunExecutionState::Queued {
         return None;
     }
-    super::failure_recording::terminal_observation_status(
-        &super::CookRunState::of(record).execution_state,
-    )
-    .or_else(|| {
+    let state = super::CookRunState::of(record).execution_state;
+    has_outcome(state).then(|| run_status(state)).or_else(|| {
         let terminal = &record.metadata["cook_progress"];
         terminal["exit_code"].is_i64().then(|| {
             if terminal["exit_code"] == 0 {
@@ -2649,9 +2647,9 @@ fn observation_status(
     }
 }
 
-/// A redirected Cook root's row follows its latest attempt, so rewriting an
-/// attempt re-projects the root through the normal record write.
-pub(crate) fn reproject_redirected_cook_root(
+/// A redirected or Cook-owned root's row follows its latest attempt, so
+/// rewriting an attempt re-projects the root through the normal record write.
+pub(crate) fn reproject_cook_root(
     lifecycle_store: &AgentTaskLifecycleStore,
     store: &ObservationStore,
     cook_id: &str,
@@ -2661,9 +2659,9 @@ pub(crate) fn reproject_redirected_cook_root(
         return Ok(());
     };
     let handoff = &root.metadata_json["agent_task_run"]["metadata"]["detached_cook_handoff"];
-    if handoff["cook_id"] != cook_id.as_str()
-        || handoff["state"] != "redirected"
-        || lifecycle_store
+    let redirected = handoff["cook_id"] == cook_id.as_str() && handoff["state"] == "redirected";
+    if !redirected
+        && !lifecycle_store
             .cook_dir(&cook_id)
             .join("recipe.json")
             .exists()
@@ -3311,6 +3309,13 @@ fn cook_owns_observation(store: &AgentTaskLifecycleStore, record: &AgentTaskRunR
             && !record.has_recorded_provider_progress())
 }
 
+/// Whether a run state is a terminal outcome a row can report, rather than
+/// a live state or an `Unknown` one.
+pub(super) fn has_outcome(state: RunExecutionState) -> bool {
+    state.is_terminal() && state != RunExecutionState::Unknown
+}
+
+/// The one mapping from a run state onto its observation row status.
 fn run_status(state: RunExecutionState) -> &'static str {
     match state {
         RunExecutionState::Queued | RunExecutionState::Running => RunStatus::Running.as_str(),

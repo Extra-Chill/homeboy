@@ -9646,6 +9646,45 @@ fn production_cook_terminal_failure_and_cancellation_record_mission_span() {
     });
 }
 
+/// A cancelled Cook's root and attempt rows report the same `skipped` status:
+/// the Cook-owned root follows its attempt's record through one state mapping.
+#[test]
+fn cancelled_cook_root_and_attempt_observation_rows_agree_on_skipped() {
+    homeboy_core::test_support::with_isolated_home(|_| {
+        let cook_id = "cook-cancelled-rows";
+        let run_id = format!("{cook_id}-attempt-1");
+        let mut options = batch_cook_options(cook_id, Arc::new(AcceptedDetachedAttemptDispatcher));
+        options.identity.initial_run_id = run_id.clone();
+        options.provider_transport.attempt_dispatcher = None;
+        super::super::persist_initial_recipe(&options).unwrap();
+        let lifecycle_store = test_lifecycle_store();
+        for id in [cook_id, run_id.as_str()] {
+            lifecycle_store
+                .submit_plan_with_runtime_admission(&options.identity.initial_plan, id, |_| {
+                    Ok(serde_json::json!({}))
+                })
+                .unwrap();
+        }
+        lifecycle_store
+            .record_cook_attempt(cook_id, 1, &run_id)
+            .unwrap();
+        agent_task_lifecycle::cancel_run(&run_id, Some("cancelled rows fixture")).unwrap();
+        let store = CookRecipeStore::from_current_data_root().unwrap();
+        let result = CookService::run(
+            options,
+            CookRuntime::production(Arc::new(UnusedExecutor), &store, &lifecycle_store),
+        )
+        .unwrap();
+        assert!(result.value.disposition.is_terminal(), "{result:#?}");
+        let observation = lifecycle_store.open_observation_initialized().unwrap();
+        for id in [cook_id, run_id.as_str()] {
+            let row = observation.get_run(id).unwrap().unwrap();
+            assert_eq!(row.status, "skipped", "{id}");
+            assert!(row.finished_at.is_some(), "{id}");
+        }
+    });
+}
+
 /// Performs only the replacement-gate and publication steps, through their
 /// default service handlers; every other step is a test failure.
 struct ReplacementOnlyRecoveryPerformer;

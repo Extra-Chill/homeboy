@@ -1061,6 +1061,20 @@ fn render_status_summary(payload: &Value) -> Option<String> {
             lines.push(format!("Gates: {rendered}"));
         }
     }
+    // One line per Cook attempt (#17893).
+    for attempt in payload
+        .get("attempts")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+    {
+        if let Ok(timing) = serde_json::from_value::<
+            homeboy::agents::agent_task_service::CookAttemptTiming,
+        >(attempt.clone())
+        {
+            lines.push(timing.summary_line());
+        }
+    }
     if let Some(progress) = string_value(payload, &["progress"]) {
         lines.push(format!("Progress: {progress}"));
     }
