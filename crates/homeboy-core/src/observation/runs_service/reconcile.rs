@@ -90,7 +90,7 @@ pub fn reconcile_owned_stale_running_run_with_snapshot(
     run: &RunRecord,
     job: Option<&crate::api_jobs::Job>,
 ) -> Result<Option<ReconciledRunSummary>> {
-    if run.status != RunStatus::Running.as_str() {
+    if run.status != RunStatus::Running.as_str() || agent_task_row(run) {
         return Ok(None);
     }
     if let Some(expired) = store.expire_running_run_handoff(&run.id)? {
@@ -127,6 +127,13 @@ pub fn reconcile_owned_stale_running_run_with_snapshot(
     )?
     .into_iter()
     .next())
+}
+
+/// Agent-task rows are projections of their typed lifecycle record, whose own
+/// reconciler is the single writer of their status (#18828). Core reconcile
+/// never selects them, on any branch.
+fn agent_task_row(run: &RunRecord) -> bool {
+    run.kind == "agent-task"
 }
 
 fn handoff_is_transferring(run: &RunRecord) -> bool {
@@ -168,7 +175,7 @@ where
     R: Fn(&RunRecord) -> Result<Option<String>>,
 {
     let mut reconciled = Vec::new();
-    for run in &running {
+    for run in running.iter().filter(|run| !agent_task_row(run)) {
         // Match focused watch reconciliation: a pending detached handoff owns
         // the row until it is accepted or its durable deadline settles it.
         if !dry_run && store.expire_running_run_handoff(&run.id)?.is_some() {
@@ -344,13 +351,8 @@ pub fn stale_running_reason<F>(run: &RunRecord, pid_is_alive: &F) -> Option<&'st
 where
     F: Fn(u32) -> bool,
 {
-    // A row carrying a typed agent-task lifecycle record is a projection of
-    // that record, whose own reconciler owns liveness. Its owner lives inside
-    // the record, not in the generic owner keys, so the ownerless age rule
-    // would stamp every agent-task run older than the threshold `stale` while
-    // it is still executing. The lifecycle's later `running` writes are then
-    // refused by the terminal-row guard, dropping its provider ledger.
-    if run.metadata_json.get("agent_task_run").is_some() {
+    // Keeps read-only stale summaries (`runs list`) consistent with reconcile.
+    if agent_task_row(run) {
         return None;
     }
 
@@ -570,12 +572,12 @@ mod tests {
     fn ownerless_running_run(id: &str, started_at: String) -> RunRecord {
         RunRecord {
             id: id.to_string(),
-            kind: "agent-task".to_string(),
+            kind: "bench".to_string(),
             component_id: Some("homeboy".to_string()),
             started_at,
             finished_at: None,
             status: RunStatus::Running.as_str().to_string(),
-            command: Some("homeboy agent-task cook".to_string()),
+            command: Some("homeboy bench homeboy".to_string()),
             cwd: Some("/tmp/homeboy-fixture".to_string()),
             homeboy_version: Some("test-version".to_string()),
             git_sha: Some("abc123".to_string()),
@@ -678,43 +680,72 @@ mod tests {
         });
     }
 
-    /// A live agent-task row records its owner inside its typed lifecycle
-    /// record. Past the ownerless threshold it must stay `running`: staling it
-    /// makes the terminal-row guard silently refuse the lifecycle's own later
-    /// writes, including its provider-execution terminal state.
+    /// Agent-task rows have exactly one status writer: their lifecycle
+    /// reconciler (#18828). Core reconcile must leave them untouched on every
+    /// branch — expired handoff, runner terminal, and no runner answer.
     #[test]
-    fn reconcile_leaves_typed_agent_task_lifecycle_rows_to_their_lifecycle() {
+    fn core_reconcile_never_writes_an_agent_task_row_on_any_branch() {
         with_isolated_home(|_home| {
             let _xdg = homeboy_core::test_support::EnvVarGuard::unset("XDG_DATA_HOME");
             let store = ObservationStore::open_initialized().expect("store");
-            store
-                .import_run(&RunRecord {
-                    metadata_json: serde_json::json!({
-                        "schema": "homeboy/agent-task-observation-record/v1",
-                        "agent_task_run": {
-                            "state": "running",
-                            "metadata": { "runner_pid": u32::MAX },
+            let rows = [
+                (
+                    "agent-task-expired-handoff",
+                    serde_json::json!({
+                        "homeboy_ownership_handoff": {
+                            "state": "transferring",
+                            "worker_pid": u32::MAX,
+                            "deadline_unix_ms": 1,
                         },
                     }),
-                    ..ownerless_running_run("long-agent-task-run", minutes_ago(45))
-                })
-                .expect("import agent-task run");
+                    Some("succeeded"),
+                ),
+                (
+                    "agent-task-runner-terminal",
+                    serde_json::json!({
+                        "lab": { "remote_job": { "id": "job-1" } },
+                    }),
+                    Some("failed"),
+                ),
+                (
+                    "agent-task-no-runner-answer",
+                    serde_json::json!({ "homeboy_run_owner": { "pid": u32::MAX } }),
+                    None,
+                ),
+            ];
+            for (id, metadata, remote) in rows {
+                let run = RunRecord {
+                    kind: "agent-task".to_string(),
+                    metadata_json: metadata,
+                    ..ownerless_running_run(id, minutes_ago(45 * 60))
+                };
+                store.import_run(&run).expect("import agent-task run");
+                let before = store.get_run(id).expect("get").expect("row");
+                let remote = remote.map(str::to_string);
 
-            let reconciled = reconcile_orphaned_running_runs(
+                let reconciled = reconcile_orphaned_running_runs_with_remote_status(
+                    &store,
+                    vec![run.clone()],
+                    false,
+                    |_| false,
+                    |_| Ok(remote.clone()),
+                )
+                .expect("reconcile");
+                let focused = reconcile_owned_stale_running_run_with_snapshot(&store, &run, None)
+                    .expect("focused reconcile");
+
+                assert!(reconciled.is_empty(), "{id} was reconciled");
+                assert!(focused.is_none(), "{id} was reconciled by focused path");
+                assert_eq!(store.get_run(id).expect("get").expect("row"), before);
+            }
+            let fleet = reconcile_orphaned_running_runs(
                 &store,
                 running_runs(&store, 1000).expect("runs"),
                 false,
                 |_| false,
             )
-            .expect("reconcile");
-            let unchanged = store
-                .get_run("long-agent-task-run")
-                .expect("get run")
-                .expect("run exists");
-
-            assert!(reconciled.is_empty());
-            assert_eq!(unchanged.status, "running");
-            assert!(unchanged.finished_at.is_none());
+            .expect("fleet reconcile");
+            assert!(fleet.is_empty());
         });
     }
 
