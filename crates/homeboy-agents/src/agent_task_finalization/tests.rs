@@ -56,6 +56,7 @@ pub(super) struct MockBackend {
     changed_files: Vec<String>,
     resolved_base: Option<AgentTaskPrResolvedBase>,
     publication_base_sha: Option<String>,
+    publication_base_behind_by: Option<u64>,
     candidate_base_sha: Option<String>,
     pr_lookup_complete: bool,
     publication_observed_after_pr_lookup: bool,
@@ -211,6 +212,16 @@ impl AgentTaskPrFinalizationBackend for MockBackend {
     fn publication_base_sha(&mut self, _path: &str, _base: &str) -> Result<Option<String>> {
         self.publication_observed_after_pr_lookup = self.pr_lookup_complete;
         Ok(self.publication_base_sha.clone())
+    }
+
+    fn publication_base_behind_by(
+        &mut self,
+        _path: &str,
+        _base: &str,
+        _verified_base_sha: &str,
+        _live_base_sha: &str,
+    ) -> Option<u64> {
+        self.publication_base_behind_by
     }
 
     fn validate_publication_identity(
@@ -681,6 +692,7 @@ fn finalization_pins_verified_base_when_base_advances_before_publication() {
             sha: "verified-base".to_string(),
         }),
         publication_base_sha: Some("advanced-base".to_string()),
+        publication_base_behind_by: Some(19),
         ..Default::default()
     };
 
@@ -705,10 +717,14 @@ fn finalization_pins_verified_base_when_base_advances_before_publication() {
             .as_deref(),
         Some("advanced-base")
     );
+    assert_eq!(
+        report.publication_intent.target.publication_base_behind_by,
+        Some(19)
+    );
     assert!(
-        backend
-            .last_body
-            .contains("Base `main`@`verified-base` advanced to `advanced-base`."),
+        backend.last_body.contains(
+            "Base `main`@`verified-base` advanced to `advanced-base` (base_behind_by: 19;"
+        ),
         "{}",
         backend.last_body
     );
