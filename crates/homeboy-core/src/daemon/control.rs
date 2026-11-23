@@ -679,6 +679,10 @@ fn configure_daemon_environment(
         "XDG_RUNTIME_DIR",
         "HOMEBOY_SESSION_SEND_COMMAND",
         "HOMEBOY_NO_UPDATE_CHECK",
+        // Runtime storage overrides belong to the serving daemon too. Dropping
+        // these makes isolated callers sweep the host-wide fallback temp root.
+        "HOMEBOY_RUNTIME_TMPDIR",
+        "HOMEBOY_INVOCATION_RUNTIME_DIR",
         // A fixed pressure sample configures the daemon's admission source.
         crate::runner_pressure::SAMPLE_ENV,
         "CARGO_HOME",
@@ -730,6 +734,27 @@ fn configure_daemon_environment(
             command.env(name, value);
         }
     }
+}
+
+#[test]
+fn daemon_environment_preserves_runtime_storage_overrides_not_caller_context() {
+    let mut command = Command::new("unused");
+    let runtime = ["HOMEBOY_RUNTIME_TMPDIR", "HOMEBOY_INVOCATION_RUNTIME_DIR"];
+    configure_daemon_environment(
+        &mut command,
+        runtime
+            .into_iter()
+            .chain(["HOMEBOY_ACTIVE_RUN_ID"])
+            .map(|name| (name.into(), "/isolated/runtime".into())),
+    );
+    let forwarded: std::collections::BTreeMap<_, _> = command.get_envs().collect();
+    for name in runtime {
+        assert_eq!(
+            forwarded.get(std::ffi::OsStr::new(name)),
+            Some(&Some(std::ffi::OsStr::new("/isolated/runtime")))
+        );
+    }
+    assert!(!forwarded.contains_key(std::ffi::OsStr::new("HOMEBOY_ACTIVE_RUN_ID")));
 }
 
 const STARTUP_LEASE_OBSERVATIONS: usize = 100;
