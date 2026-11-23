@@ -1,7 +1,8 @@
 use super::*;
 use crate::notification_route::NotificationRoute;
+use homeboy_engine_primitives::metric_comparison::CohortStatus;
 
-fn comparison(verdict: Verdict, candidate: &str) -> RegressionComparison {
+fn comparison(verdict: CohortStatus, candidate: &str) -> RegressionComparison {
     RegressionComparison {
         baseline_version: Some("0.1.0".into()),
         candidate_version: Some(candidate.into()),
@@ -26,7 +27,7 @@ fn clean_and_insufficient_do_not_notify_or_claim() {
     crate::test_support::with_isolated_home(|_| {
         install_transport("true");
         let route = NotificationRoute::new("regression.test", "destination").unwrap();
-        for verdict in [Verdict::Clean, Verdict::InsufficientSamples] {
+        for verdict in [CohortStatus::Clean, CohortStatus::InsufficientSamples] {
             notify_regression(&comparison(verdict, "0.2.0"), Some(&route));
         }
         assert!(!crate::paths::homeboy()
@@ -41,7 +42,7 @@ fn repeated_regression_claims_once_per_pair() {
     crate::test_support::with_isolated_home(|_| {
         install_transport("true");
         let route = NotificationRoute::new("regression.test", "destination").unwrap();
-        let first = comparison(Verdict::Regressed, "0.2.0");
+        let first = comparison(CohortStatus::Regressed, "0.2.0");
         notify_regression(&first, Some(&route));
         let claims = crate::paths::homeboy()
             .unwrap()
@@ -50,7 +51,7 @@ fn repeated_regression_claims_once_per_pair() {
         assert_eq!(count(), 1);
         notify_regression(&first, Some(&route));
         assert_eq!(count(), 1);
-        notify_regression(&comparison(Verdict::Regressed, "0.3.0"), Some(&route));
+        notify_regression(&comparison(CohortStatus::Regressed, "0.3.0"), Some(&route));
         assert_eq!(count(), 2);
     });
 }
@@ -59,7 +60,7 @@ fn queued_regression_is_not_enqueued_again() {
     crate::test_support::with_isolated_home(|_| {
         install_transport("false");
         let route = NotificationRoute::new("regression.test", "destination").unwrap();
-        let report = comparison(Verdict::Regressed, "0.2.0");
+        let report = comparison(CohortStatus::Regressed, "0.2.0");
         notify_regression(&report, Some(&route));
         assert_eq!(crate::notify_outbox::pending_entries().len(), 1);
         notify_regression(&report, Some(&route));
@@ -70,7 +71,7 @@ fn queued_regression_is_not_enqueued_again() {
 fn dropped_delivery_releases_pair_for_retry() {
     crate::test_support::with_isolated_home(|_| {
         let route = NotificationRoute::new("regression.test", "destination").unwrap();
-        notify_regression(&comparison(Verdict::Regressed, "0.2.0"), Some(&route));
+        notify_regression(&comparison(CohortStatus::Regressed, "0.2.0"), Some(&route));
         let claims = crate::paths::homeboy()
             .unwrap()
             .join("hotspot-notifications");

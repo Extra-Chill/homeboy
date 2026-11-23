@@ -22,38 +22,7 @@ use homeboy_error::Result;
 
 use crate::baseline::{self as store, Baseline, BaselineConfig, BaselineFlags};
 
-/// What a delta means for the gate.
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
-pub struct Verdict {
-    /// Blocking regressions. Any entry fails the gate.
-    pub regressions: Vec<String>,
-    /// Regressions reported without failing the gate.
-    pub advisories: Vec<String>,
-    /// Improvements. Any entry lets `--ratchet` move the baseline.
-    pub improvements: Vec<String>,
-}
-
-impl Verdict {
-    pub fn regressed(&self) -> bool {
-        !self.regressions.is_empty()
-    }
-
-    pub fn improved(&self) -> bool {
-        !self.improvements.is_empty()
-    }
-
-    /// `worse` when anything regressed, else `better` when anything improved,
-    /// else `same`.
-    pub fn status(&self) -> &'static str {
-        if self.regressed() {
-            "worse"
-        } else if self.improved() {
-            "better"
-        } else {
-            "same"
-        }
-    }
-}
+use crate::metric_comparison::Verdict;
 
 /// Everything a workload kind contributes to baseline, compare and gate.
 pub trait KindAdapter {

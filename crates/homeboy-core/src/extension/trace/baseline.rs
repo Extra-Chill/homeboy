@@ -6,10 +6,11 @@
 //! it slows by more than both the percent threshold and the minimum delta, an
 //! assertion when it stops passing or its metric grows.
 
+use homeboy_engine_primitives::metric_comparison::Verdict;
 use serde::{Deserialize, Serialize};
 
 use homeboy_engine_primitives::baseline as generic;
-use homeboy_engine_primitives::workload_compare::{pair_by_key, KindAdapter, Verdict};
+use homeboy_engine_primitives::workload_compare::{pair_by_key, KindAdapter};
 
 use super::parsing::{TraceAssertion, TraceAssertionStatus, TraceResults};
 

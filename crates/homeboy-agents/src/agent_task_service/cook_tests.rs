@@ -10117,7 +10117,7 @@ fn deferred_candidate_recovers_with_verify_file_and_publishes() {
             CookService::run(options, runtime.replay_keeping_recorded_transport()).unwrap();
         assert_eq!(
             result.value.status.as_str(),
-            "review_ready",
+            "draft_published",
             "{:#?}",
             result.value
         );
@@ -11222,13 +11222,14 @@ fn corrected_gate_guided_continuation_publishes_without_provider_redispatch_and_
                     .unwrap();
             assert_eq!(
                 result.value.status.as_str(),
-                "review_ready",
+                "draft_published",
                 "{:#?}",
                 result.value
             );
             assert_eq!(result.exit_code, 0);
         }
         assert_eq!(backend.create_count, 1);
+        assert!(backend.draft, "corrected gates do not verify a repro");
         assert!(backend
             .body
             .contains("test \"$(cat tracked.txt)\" = promoted"));
@@ -11529,7 +11530,7 @@ fn finalization_dossier_and_backend_hydration_use_explicit_lifecycle_store() {
         )
         .unwrap();
 
-        assert_eq!(finalization["status"], "review_ready");
+        assert_eq!(finalization["status"], "draft_published");
         assert!(backend.created);
         assert!(
             lifecycle_store.read_record(run_id).unwrap().metadata["cook_delivery"]["artifacts"]
@@ -11996,7 +11997,7 @@ fn malformed_agent_review_form_recovers_by_publishing_a_supplied_form() {
             crate::agent_task_service::CookRecoveryStep::Publish
         );
         let result = published.result.expect("publication report");
-        assert_eq!(result["status"], "review_ready");
+        assert_eq!(result["status"], "draft_published");
         assert_eq!(
             result["review_dossier"]["summary"],
             "Close the issue by guarding the reload path."
@@ -13922,6 +13923,27 @@ fn cook_repro_that_fails_on_base_and_passes_on_candidate_is_verified() {
         );
         let body = repro_pr_body(&options, &promotion);
         assert!(body.contains("- repro: verified"), "{body}");
+        let finalization = cook_finalization_options(
+            &options,
+            &options.identity.initial_run_id,
+            &promotion,
+            Vec::new(),
+        )
+        .expect("verified finalization");
+        assert!(!finalization.draft_pr, "verified repro permits a ready PR");
+
+        let mut forced_draft = options.clone();
+        forced_draft.finalization.draft_pr = true;
+        assert!(
+            cook_finalization_options(
+                &forced_draft,
+                &options.identity.initial_run_id,
+                &promotion,
+                Vec::new(),
+            )
+            .expect("forced draft finalization")
+            .draft_pr
+        );
     });
 }
 
@@ -13944,6 +13966,11 @@ fn cook_without_repro_records_repro_none_in_review_evidence() {
 
         assert!(body.contains("- repro: none"), "{body}");
         assert!(body.contains("do not prove the issue"), "{body}");
+        assert!(
+            cook_finalization_options(&options, run_id, &promotion, Vec::new())
+                .expect("unproven finalization")
+                .draft_pr
+        );
     });
 }
 

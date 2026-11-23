@@ -18,9 +18,7 @@ pub use resource_profile::{
     resource_profile, run_resources, CpuOverhead, PhaseProfileRow, PhaseUsageRow, ResourceProfile,
     ResourceProfileQuery, RunResources, UsagePercentiles,
 };
-pub use verdict::{
-    compare_phase_hotspots, Regression, RegressionComparison, RegressionThresholds, Verdict,
-};
+pub use verdict::{compare_phase_hotspots, Regression, RegressionComparison, RegressionThresholds};
 
 use std::collections::{BTreeMap, HashMap};
 

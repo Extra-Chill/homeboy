@@ -1,8 +1,9 @@
 //! Pure bench metric-policy-preset contract types.
 
+use homeboy_engine_primitives::metric_comparison::{Direction, RegressionTest};
 use serde::{Deserialize, Serialize};
 
-use crate::{BenchMetricDirection, BenchMetricPhase, BenchMetricPolicy, RegressionTest};
+use crate::{BenchMetricPhase, BenchMetricPolicy};
 
 fn is_false(value: &bool) -> bool {
     !*value
@@ -47,7 +48,7 @@ pub enum BenchMetricPolicyPresetKind {
 impl BenchMetricPolicyPreset {
     pub fn to_policy(
         &self,
-        direction: BenchMetricDirection,
+        direction: Direction,
         default_threshold_percent: f64,
     ) -> BenchMetricPolicy {
         BenchMetricPolicy {
