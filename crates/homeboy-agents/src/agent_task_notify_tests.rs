@@ -647,6 +647,30 @@ fn historical_cook_progress_seeds_start_marker_without_reannouncing() {
     });
 }
 
+#[test]
+fn terminal_detached_handoff_failure_announces_without_polling() {
+    homeboy_core::test_support::with_isolated_home(|_| {
+        install_transport("test.handoff", vec!["true"]);
+        set_default_transport("test.handoff");
+        let store = test_lifecycle_store();
+        let cook_id = "failed-starting-daemon-handoff";
+        crate::agent_task_lifecycle::record_detached_cook_handoff_parent_in_store(&store, cook_id)
+            .unwrap();
+        let failed = crate::agent_task_lifecycle::fail_detached_cook_handoff_parent_in_store(
+            &store,
+            cook_id,
+            "daemon never became reachable",
+        )
+        .unwrap();
+        assert!(failed.state().is_terminal());
+        assert!(
+            crate::agent_task_lifecycle::cook_terminal_notification_outcome(cook_id)
+                .unwrap()
+                .is_some()
+        );
+    });
+}
+
 fn install_transport(id: &str, command: Vec<&str>) {
     let mut manifest: homeboy_extension_contract::ExtensionManifest =
         serde_json::from_value(serde_json::json!({
