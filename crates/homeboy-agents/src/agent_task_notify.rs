@@ -416,6 +416,7 @@ fn terminal_payload(
 
     let mut payload = NotifyPayload::new(kind, subject);
     payload.title = Some(metadata.title(kind));
+    payload.cook_summary = serde_json::to_value(&metadata.summary).ok();
     if kind == NotifyEventKind::Completed {
         payload.links.extend(metadata.links.clone());
     }
@@ -435,6 +436,13 @@ fn terminal_payload(
         for (label, value) in metadata.facts {
             payload = payload.with_fact(label, value);
         }
+    }
+    let inherited_failures = report.inherited_failure_count();
+    if inherited_failures > 0 {
+        payload = payload.with_fact(
+            "Inherited failures",
+            format!("{inherited_failures} red gate(s) accepted from baseline; not passing"),
+        );
     }
     // A primary route skipped before dispatch is an operator-visible condition,
     // not just an event-log line (#15881): one bounded line per skipped route.

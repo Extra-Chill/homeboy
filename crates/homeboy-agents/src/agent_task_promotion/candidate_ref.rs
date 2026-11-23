@@ -76,8 +76,13 @@ fn try_pin_applied_candidate(
     };
     let published = homeboy_core::git::publication_candidate(path, sha, &title)?;
     git(&["update-ref", &reference, &published])?;
+    // The repository holding the ref, so status never has to search for it (#18856).
+    let repo_root = git(&["rev-parse", "--show-toplevel"]).ok();
     promotion["publication_sha"] = Value::String(published);
     promotion["candidate_ref"] = Value::String(reference);
+    if let Some(root) = repo_root {
+        promotion["candidate_repo_path"] = Value::String(root);
+    }
     Ok(())
 }
 

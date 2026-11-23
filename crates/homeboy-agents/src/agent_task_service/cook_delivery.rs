@@ -673,7 +673,7 @@ fn gate_status(status: &str) -> Option<AgentTaskGateStatus> {
 /// A production gate report is named by `id` and `command: Vec<String>`;
 /// normalized results and older reports carry `name` or a string command
 /// (#14735).
-fn gate_name(gate: &Value) -> Option<String> {
+pub(super) fn gate_name(gate: &Value) -> Option<String> {
     string_at(gate, "/id")
         .or_else(|| string_at(gate, "/name"))
         .or_else(|| string_at(gate, "/failure_evidence/command"))

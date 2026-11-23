@@ -333,7 +333,7 @@ pub fn reconcile_stale_active_runs(dry_run: bool) -> Result<AgentTaskReconcileRe
         };
         let record = agent_task_lifecycle::exact_record_in_store(&lifecycle_store, &run.run_id)?;
         let in_flight_handoff = agent_task_lifecycle::CookRunState::accepted_lab_handoff(&record)
-            && record.metadata["runner_handoff"]["state"] == "in_flight";
+            && !(record.state().is_terminal() && record.runner_job_id().is_some());
         if in_flight_handoff && !dry_run {
             // Detached controllers have exited. Probe even a fresh/Active
             // projection, and submit terminal Cook work from this tick rather
@@ -1128,7 +1128,7 @@ mod tests {
                 refreshed.state(),
                 homeboy_lifecycle_contract::RunExecutionState::Queued
             );
-            assert!(refreshed.metadata.get("stale_running").is_none());
+            assert!(!refreshed.is_stale_running());
             assert!(refreshed.metadata.get("cancel_reason").is_none());
 
             let accepted = agent_task_lifecycle::record_detached_lab_run(
@@ -1155,7 +1155,7 @@ mod tests {
             .expect("owner identity removed");
             let stale = agent_task_lifecycle::reconcile_status(orphan_run_id)
                 .expect("PID-less owner is projected stale before daemon reconciliation");
-            assert_eq!(stale.metadata["stale_running_reason"], "missing_runner_pid");
+            assert_eq!(stale.stale_running_reason(), Some("missing_runner_pid"));
 
             let report = homeboy_core::daemon::orchestration::reconcile_stale_active_runs()
                 .expect("ownerless tick pass");
@@ -1225,7 +1225,7 @@ mod tests {
                 live.metadata["runner_execution_record"]["status"],
                 "planned"
             );
-            assert!(live.metadata.get("stale_running").is_none());
+            assert!(!live.is_stale_running());
 
             let report = homeboy_core::daemon::orchestration::reconcile_stale_active_runs()
                 .expect("tick after initiating client exit");
@@ -1282,7 +1282,7 @@ mod tests {
                 status.has_fresh_controller_pre_provider_heartbeat(),
                 "{status:?}"
             );
-            assert!(status.metadata.get("stale_running").is_none());
+            assert!(!status.is_stale_running());
             assert_eq!(
                 status.metadata["cook_progress"]["phase"],
                 "worktree_provider_ensure"
@@ -1551,7 +1551,7 @@ mod tests {
 
             let stale =
                 agent_task_lifecycle::reconcile_status(run_id).expect("status after submission");
-            assert_eq!(stale.metadata["stale_running_reason"], "missing_runner_pid");
+            assert_eq!(stale.stale_running_reason(), Some("missing_runner_pid"));
 
             let report = homeboy_core::daemon::orchestration::reconcile_stale_active_runs()
                 .expect("watchdog pass");
@@ -1938,8 +1938,8 @@ mod tests {
             assert!(retained.metadata.get("cancel_reason").is_none());
             assert!(retained.metadata.get("cancellation_provenance").is_none());
             assert!(
-                !retained.is_stale_running(),
-                "a heartbeating runner job keeps its projection out of stale-running"
+                retained.metadata.get("stale_running").is_none(),
+                "reconcile never persists a stale-running latch"
             );
 
             // The scoped reconcile the daemon action performs is equally inert.
@@ -2185,7 +2185,10 @@ mod tests {
                 }),
             ));
             let before = agent_task_lifecycle::exact_record(run_id).expect("before tick");
-            assert_eq!(before.metadata["runner_handoff"]["state"], "in_flight");
+            assert!(
+                !before.state().is_terminal()
+                    && before.metadata["runner_handoff"].get("state").is_none()
+            );
             assert!(!before.is_stale_running());
             let preview = reconcile_stale_active_runs(true).expect("preview");
             assert_eq!(preview.failed, 0);
@@ -2208,7 +2211,10 @@ mod tests {
             }
             let after = agent_task_lifecycle::exact_record(run_id).expect("after tick");
             if terminal {
-                assert_eq!(after.metadata["runner_handoff"]["state"], "terminal");
+                assert!(
+                    after.state().is_terminal()
+                        && after.metadata["runner_handoff"].get("state").is_none()
+                );
                 assert!(
                     matches!(
                         after.metadata["cook_continuation"]["state"].as_str(),
@@ -2227,7 +2233,10 @@ mod tests {
                     continuation
                 );
             } else {
-                assert_eq!(after.metadata["runner_handoff"]["state"], "in_flight");
+                assert!(
+                    !after.state().is_terminal()
+                        && after.metadata["runner_handoff"].get("state").is_none()
+                );
                 assert!(after.metadata.get("cook_continuation").is_none());
                 assert!(after.metadata.get("cancel_reason").is_none());
                 assert_eq!(after.state(), before.state());

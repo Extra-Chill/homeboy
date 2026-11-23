@@ -3633,7 +3633,6 @@ pub fn record_cook_terminal_result_in_store(
     lifecycle_store: &AgentTaskLifecycleStore,
     run_id: &str,
     terminal_status: &str,
-    terminal_success: bool,
     exit_code: i32,
 ) -> Result<AgentTaskRunRecord> {
     let run_id = sanitize_run_id(run_id);
@@ -3649,7 +3648,6 @@ pub fn record_cook_terminal_result_in_store(
             return false;
         }
         progress.insert("terminal_status".to_string(), json!(terminal_status));
-        progress.insert("terminal_success".to_string(), json!(terminal_success));
         progress.insert("exit_code".to_string(), json!(exit_code));
         // A cancelled Cook keeps its cancellation: the provenance that minted
         // its `run.cancelled` receipt is valid only on a `Cancelled` record
@@ -5011,20 +5009,6 @@ fn converge_resolved_run_in_store(
     let before_liveness_reconciliation = record.clone();
     if runner_probe.performed {
         reconcile_runner_job_state_in_store(lifecycle_store, &mut record)?;
-    }
-    let before_stale_annotation = record.clone();
-    record.annotate_stale_running();
-    // An aged projection of a runner-backed run is not evidence that its job
-    // stopped. When the daemon job store this root owns shows the exact job
-    // still heartbeating, keep the run unmarked so nothing treats it as stale.
-    if record.is_stale_running()
-        && !before_stale_annotation.is_stale_running()
-        && observe_runner_job_in_store(lifecycle_store, &record).is_some_and(|evidence| {
-            evidence.source == "local_job_store"
-                && evidence.observation == RunnerJobObservation::Live
-        })
-    {
-        record = before_stale_annotation;
     }
     if record != before_liveness_reconciliation {
         lifecycle_store.commit_record(&mut record)?;

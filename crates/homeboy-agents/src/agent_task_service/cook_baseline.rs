@@ -373,6 +373,14 @@ impl BaselineFacts {
         }
     }
 
+    fn failure_identities(&self) -> Vec<String> {
+        if self.failure_records.is_empty() {
+            vec![self.failure_fingerprint.clone()]
+        } else {
+            self.failure_records.clone()
+        }
+    }
+
     fn comparable(&self) -> bool {
         self.exit_code != 124
             && matches!(
@@ -418,8 +426,21 @@ impl BaselineFacts {
         // That excuse applies only when neither run named its failures: a
         // candidate that names failures the baseline cannot account for (or
         // a baseline that names failures the candidate replaced with opaque
-        // output) is not a reproduction of the baseline breakage.
+        // output) is not a reproduction of the baseline breakage. The base
+        // and head fingerprints are still recorded as inheritance evidence.
         let opaque = self.failure_records.is_empty() && candidate.failure_records.is_empty();
+        let base_failures = self.failure_identities();
+        let head_failures = candidate.failure_identities();
+        let inherited = if opaque {
+            head_failures.clone()
+        } else {
+            inherited
+        };
+        let new = if candidate.failure_records.is_empty() && !opaque {
+            head_failures.clone()
+        } else {
+            new
+        };
         let comparable_records =
             !self.failure_records.is_empty() && !candidate.failure_records.is_empty();
         let matches = gate.status == AgentTaskGateStatus::Failed
@@ -446,6 +467,8 @@ impl BaselineFacts {
                     } else {
                         AgentTaskGateFailureOrigin::CandidateBrokeGate
                     },
+                    base_failures,
+                    head_failures,
                     inherited_failures: inherited,
                     new_failures: new,
                     flaky_failures: flaky,
@@ -574,6 +597,8 @@ fn refine_gate_comparison(
             ),
             failure_attribution: Some(AgentTaskGateFailureAttribution {
                 classification: AgentTaskGateFailureOrigin::GateAlreadyRedOnBaseline,
+                base_failures: baseline.failure_identities(),
+                head_failures: Vec::new(),
                 inherited_failures: Vec::new(),
                 new_failures: Vec::new(),
                 flaky_failures: flaky,
@@ -1610,6 +1635,8 @@ mod tests {
             attribution.classification,
             AgentTaskGateFailureOrigin::GateAlreadyRedOnBaseline
         );
+        assert_eq!(attribution.base_failures, vec!["test:A"]);
+        assert_eq!(attribution.head_failures, vec!["test:A"]);
         assert_eq!(attribution.inherited_failures.len(), 1);
         assert!(attribution.new_failures.is_empty());
         let mut regression = run("test A ... FAILED\\ntest B ... FAILED\\n");
@@ -1631,13 +1658,26 @@ mod tests {
         assert_eq!(attribution.inherited_failures.len(), 1);
         assert_eq!(attribution.new_failures.len(), 1);
         assert!(attribution.new_failures[0].contains('B'));
+        assert_eq!(attribution.base_failures, vec!["test:A"]);
+        assert_eq!(attribution.head_failures, vec!["test:A", "test:B"]);
         let opaque = BaselineFacts::from_gate(&run("host unavailable"));
         let mut candidate = run("different host error");
         opaque.apply(&mut candidate, "base", None);
+        // Opaque gates keep an exit-status contract: differing output on a
+        // red base is still inherited, with both fingerprints as evidence.
         assert_eq!(
             candidate.status,
             AgentTaskGateStatus::AcceptedInheritedFailure
         );
+        let proof = candidate
+            .baseline_comparison
+            .unwrap()
+            .failure_attribution
+            .unwrap();
+        assert!(proof.base_failures[0].starts_with("sha256:"));
+        assert!(proof.head_failures[0].starts_with("sha256:"));
+        assert_eq!(proof.inherited_failures, proof.head_failures);
+        assert!(proof.new_failures.is_empty());
         // An opaque baseline cannot excuse a candidate that names failures:
         // nothing on the baseline accounts for them.
         let mut named = run("test C ... FAILED\\n");

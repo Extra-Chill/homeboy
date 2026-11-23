@@ -1217,6 +1217,39 @@ fn candidate_group_preflight_rejects_ambiguous_plan_before_execution() {
     assert!(error.message.contains("explicit shared group"));
 }
 
+/// The runner job's terminal status is evidence, not a copy of run state: a
+/// job that succeeded can leave a run terminalized as failed when its result
+/// never projected. That run still had its provider execute.
+#[test]
+fn a_failed_run_whose_runner_job_succeeded_is_runner_result_not_projected() {
+    homeboy_core::test_support::with_isolated_home(|_| {
+        let options = batch_cook_options(
+            "cook-runner-succeeded-run-failed",
+            Arc::new(AcceptedDetachedAttemptDispatcher),
+        );
+        let run_id = options.identity.initial_run_id.clone();
+        persist_initial_recipe(&options).unwrap();
+        agent_task_lifecycle::submit_plan(&options.identity.initial_plan, Some(&run_id)).unwrap();
+        agent_task_lifecycle::cancel_run(&run_id, Some("runner result lost")).unwrap();
+        agent_task_lifecycle::rewrite_record_for_test(&run_id, |record| {
+            record.set_state_for_test(RunExecutionState::Failed);
+            if let Some(metadata) = record.metadata.as_object_mut() {
+                metadata.retain(|key, _| !key.starts_with("cancel"));
+            }
+            record.metadata["runner_job_status"] = serde_json::json!("succeeded");
+            record.metadata["runner_job_events"] = serde_json::json!([
+                {"kind": "result", "data": {"exit_code": 0, "stdout": "{unparseable"}},
+            ]);
+        })
+        .unwrap();
+        let record = agent_task_lifecycle::exact_record(&run_id).unwrap();
+        assert_eq!(
+            pre_artifact_interruption_phase(&record),
+            PreArtifactInterruptionPhase::RunnerResultNotProjected
+        );
+    });
+}
+
 /// A runner-placed attempt keeps its provider ledger on the runner. When its
 /// job succeeded but no aggregate could be projected from the result, the
 /// provider already ran: the Cook stops with the result retained instead of

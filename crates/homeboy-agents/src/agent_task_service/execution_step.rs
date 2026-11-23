@@ -179,11 +179,33 @@ fn deterministic_failure(
         metadata: serde_json::Map::from_iter([(
             "execution_step_failure".into(),
             homeboy_core::redaction::redact_json(&json!({
-                "message": error.message, "code": error.code.as_str(), "details": error.details,
+                "message": diagnostic_root_cause(&json!({"message": error.message, "details": error.details}))
+                    .unwrap_or_else(|| error.message.clone()),
+                "code": error.code.as_str(), "details": error.details,
                 "job_id": delivery.job_id, "step_key": delivery.key, "classification": "deterministic",
             })),
         )]),
     }
+}
+
+/// The operator-facing cause of a step error. A generic class message such as
+/// `IO error` is extended with its recorded context and OS error, so diagnose
+/// and summary name the real cause, e.g.
+/// `IO error: spawn step program /path: No such file or directory` (#18844).
+pub(crate) fn diagnostic_root_cause(diagnostic: &Value) -> Option<String> {
+    let message = diagnostic.get("message").and_then(Value::as_str)?;
+    let mut cause = message.to_string();
+    for detail in ["context", "error"] {
+        if let Some(text) = [&diagnostic["details"], &diagnostic["data"]]
+            .into_iter()
+            .find_map(|details| details[detail].as_str())
+            .map(str::trim)
+            .filter(|text| !text.is_empty() && !cause.contains(*text))
+        {
+            cause = format!("{cause}: {text}");
+        }
+    }
+    Some(cause)
 }
 
 fn invalid(message: impl Into<String>) -> Error {
@@ -284,13 +306,14 @@ pub(crate) fn prepare_execution_intent(
     });
     let (program, cwd, mut env) = if let Some(previous) = &previous {
         (
-            previous.step.program.clone(),
+            // Re-resolve: a program recorded by a replaced binary carries
+            // Linux's ` (deleted)` suffix and cannot be spawned (#18844).
+            homeboy_core::daemon::step_job::launchable_step_program(&previous.step.program),
             previous.step.cwd.clone(),
             previous.step.env.clone(),
         )
     } else {
-        let program =
-            std::env::current_exe().map_err(|error| Error::internal_io(error.to_string(), None))?;
+        let program = homeboy_core::daemon::step_job::durable_step_program()?;
         let cwd =
             std::env::current_dir().map_err(|error| Error::internal_io(error.to_string(), None))?;
         (
@@ -702,8 +725,7 @@ pub(super) fn consume_execution_terminal_in_store(
         });
     let reason = diagnostic
         .as_ref()
-        .and_then(|value| value.get("message").and_then(Value::as_str))
-        .map(str::to_string)
+        .and_then(diagnostic_root_cause)
         .unwrap_or_else(|| {
             format!(
                 "execution step {} ended before publication ({:?}, exit {:?})",
@@ -921,6 +943,9 @@ pub(super) fn consume_execution_terminal_in_store(
             .to_rfc3339(),
         );
         next.step.key = next.intent_id.clone();
+        // A requeue spawns the installed binary, never a recorded
+        // `<path> (deleted)` from before an upgrade (#18844).
+        next.step.program = step_job::launchable_step_program(&next.step.program);
         next.step.args[3] = next.intent_id.clone();
         next.step.wait.not_before = next.not_before.clone();
         let work = match next.work_intent().and_then(|work| {
@@ -1462,6 +1487,25 @@ pub(crate) mod execution_step_fixtures {
 mod input_tests {
     use super::execution_step_fixtures::admission_binding;
     use super::*;
+
+    /// #18844: diagnose and summary name the spawn context and OS error, not
+    /// only the `IO error` class.
+    #[test]
+    fn step_failure_reason_surfaces_the_diagnostic_context() {
+        let error = Error::internal_io(
+            "No such file or directory (os error 2)",
+            Some("spawn step program /home/u/.local/bin/homeboy (deleted)".to_string()),
+        );
+        let diagnostic = json!({"message": error.message, "details": error.details});
+        assert_eq!(
+            diagnostic_root_cause(&diagnostic).unwrap(),
+            "IO error: spawn step program /home/u/.local/bin/homeboy (deleted): No such file or directory (os error 2)"
+        );
+        assert_eq!(
+            diagnostic_root_cause(&json!({"message": "specific cause"})).unwrap(),
+            "specific cause"
+        );
+    }
 
     #[test]
     fn execution_step_inputs_reject_manifest_and_subject_substitution() {

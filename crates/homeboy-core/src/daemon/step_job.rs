@@ -72,6 +72,41 @@ const RUNNER_WAIT_CAP: Duration = Duration::from_secs(30);
 const RUNNER_WAIT_HIGH_CAP: Duration = Duration::from_secs(5);
 const RUNNER_WAIT_DEADLINE: Duration = Duration::from_secs(10 * 60);
 
+/// The suffix Linux appends to `/proc/self/exe` once the running binary has
+/// been unlinked or replaced (for example by a Homeboy self-upgrade).
+pub const DELETED_EXECUTABLE_SUFFIX: &str = " (deleted)";
+
+/// The path a durable step program must be launched from.
+///
+/// A program recorded by a process whose binary had already been replaced can
+/// carry Linux's ` (deleted)` suffix; spawning that string fails with ENOENT.
+/// The installed binary lives at the path without the suffix, so launching
+/// that path runs the upgraded build (#18844).
+pub fn launchable_step_program(program: &str) -> String {
+    program
+        .strip_suffix(DELETED_EXECUTABLE_SUFFIX)
+        .unwrap_or(program)
+        .to_string()
+}
+
+/// The Homeboy executable path to record as a durable step program.
+///
+/// Durable step programs outlive the recording process and are spawned later,
+/// possibly after an upgrade replaced the binary. They must never come from a
+/// raw `std::env::current_exe()`, which names `<path> (deleted)` at that
+/// point; this resolves the launchable startup path instead.
+pub fn durable_step_program() -> Result<PathBuf> {
+    let program = crate::daemon::daemon_launchable_executable().map_err(|error| {
+        Error::internal_io(
+            error.to_string(),
+            Some("resolve launchable Homeboy executable for a durable step".to_string()),
+        )
+    })?;
+    Ok(PathBuf::from(launchable_step_program(
+        &program.to_string_lossy(),
+    )))
+}
+
 /// Non-transient runner refusals have a bounded convergence budget.
 pub fn runner_wait_budget() -> Duration {
     Duration::from_secs(
@@ -193,7 +228,7 @@ impl StepJobRequest {
             schema: STEP_JOB_REQUEST_SCHEMA.to_string(),
             terminal_consumer: terminal_consumer.into(),
             key: key.into(),
-            program: program.into(),
+            program: launchable_step_program(&program.into()),
             waits_for_children: false,
             args,
             cwd: cwd.into(),
@@ -1072,12 +1107,13 @@ fn run_step(mut checkpoint: StepJobCheckpoint, job: &ControllerJobHandle) -> Res
     }
     // Preserve launch errors for a missing program rather than launching a
     // wrapper that can only report shell status 127.
-    let process = std::fs::metadata(&request.program)
+    let program = launchable_step_program(&request.program);
+    let process = std::fs::metadata(&program)
         .and_then(|_| command.spawn())
         .map_err(|error| {
             let mut error = Error::internal_io(
                 error.to_string(),
-                Some(format!("spawn step program {}", request.program)),
+                Some(format!("spawn step program {program}")),
             );
             error.details["classification"] = serde_json::json!("detached_launch_failed");
             write_launch_error(&log_path, &error);
@@ -1628,7 +1664,7 @@ pub fn step_command(request: &StepJobRequest, dir: &Path) -> Command {
         ))
         .arg("sh")
         .arg(dir.join(STEP_EXIT_FILE))
-        .arg(&request.program)
+        .arg(launchable_step_program(&request.program))
         .args(&request.args);
     command
 }
@@ -2195,6 +2231,123 @@ mod tests {
             assert_eq!(std::fs::read_to_string(marker).unwrap(), "ran");
             assert!(spawned_at().is_some(), "the spawn is observable");
         });
+    }
+
+    /// #18844: a step queued before an upgrade, whose program was recorded by
+    /// a process running the already-replaced binary (`<path> (deleted)`),
+    /// runs the binary installed at that path when it is admitted.
+    #[cfg(unix)]
+    #[test]
+    fn queued_step_runs_the_binary_installed_after_an_upgrade() {
+        use std::os::unix::fs::PermissionsExt;
+        with_isolated_home(|home| {
+            let bin = home.path().join("bin");
+            std::fs::create_dir_all(&bin).unwrap();
+            let program = bin.join("homeboy");
+            let marker = home.path().join("ran-build");
+            let install = |build: &str| {
+                let staged = bin.join(format!(".homeboy-{build}"));
+                std::fs::write(&staged, format!("#!/bin/sh\nprintf {build} > \"$1\"\n")).unwrap();
+                std::fs::set_permissions(&staged, std::fs::Permissions::from_mode(0o755)).unwrap();
+                // Installers rename the new build over the old path.
+                std::fs::rename(&staged, &program).unwrap();
+            };
+            install("old");
+
+            let deleted = format!("{}{DELETED_EXECUTABLE_SUFFIX}", program.display());
+            let normalized = StepJobRequest::new(
+                "normalized",
+                deleted.clone(),
+                Vec::new(),
+                "/",
+                Default::default(),
+                STEP_RECEIPT_CONSUMER,
+            );
+            assert_eq!(normalized.program, program.display().to_string());
+
+            let mut request = request("unused", Default::default());
+            // A row persisted before #18844 carries the deleted suffix.
+            request.program = deleted;
+            request.args = vec![marker.display().to_string()];
+            let harness = step_harness(&request, home.path());
+            install("new");
+            harness.start_via_controller_boundary().unwrap();
+            assert_eq!(
+                harness.wait_until_terminal().unwrap().status,
+                crate::api_jobs::JobStatus::Succeeded,
+                "{}",
+                job_log(&harness)
+            );
+            assert_eq!(std::fs::read_to_string(&marker).unwrap(), "new");
+        });
+    }
+
+    /// #18844 guard: production code that records a durable step program must
+    /// resolve it through [`durable_step_program`] (or the daemon's launchable
+    /// executable), never a raw `std::env::current_exe()`, which names
+    /// `<path> (deleted)` once an upgrade has replaced the running binary.
+    #[test]
+    fn durable_step_programs_never_come_from_raw_current_exe() {
+        fn rust_files(dir: &Path, out: &mut Vec<PathBuf>) {
+            for entry in std::fs::read_dir(dir).into_iter().flatten().flatten() {
+                let path = entry.path();
+                if path.is_dir() {
+                    if path.file_name().is_some_and(|name| name == "tests") {
+                        continue;
+                    }
+                    rust_files(&path, out);
+                } else if path.extension().is_some_and(|ext| ext == "rs")
+                    && !path.to_string_lossy().ends_with("tests.rs")
+                {
+                    out.push(path);
+                }
+            }
+        }
+        /// Production source: comment lines and a trailing inline test
+        /// module are excluded.
+        fn production_source(source: &str) -> String {
+            let lines: Vec<&str> = source.lines().collect();
+            let mut kept = Vec::new();
+            for (index, line) in lines.iter().enumerate() {
+                let trimmed = line.trim_start();
+                if trimmed == "#[cfg(test)]"
+                    && lines.get(index + 1).is_some_and(|next| {
+                        let next = next.trim();
+                        next.contains("mod ") && next.ends_with('{')
+                    })
+                {
+                    break;
+                }
+                if !trimmed.starts_with("//") {
+                    kept.push(*line);
+                }
+            }
+            kept.join("\n")
+        }
+
+        let workspace = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+        let mut files = Vec::new();
+        rust_files(&workspace.join("crates"), &mut files);
+        rust_files(&workspace.join("src"), &mut files);
+        let mut offenders = Vec::new();
+        let mut scanned = 0;
+        for file in files {
+            let Ok(source) = std::fs::read_to_string(&file) else {
+                continue;
+            };
+            if !source.contains("StepJobRequest::new(") && !source.contains("homeboy_program") {
+                continue;
+            }
+            scanned += 1;
+            if production_source(&source).contains("current_exe()") {
+                offenders.push(file.display().to_string());
+            }
+        }
+        assert!(scanned > 0, "guard found no durable step recorders");
+        assert!(
+            offenders.is_empty(),
+            "durable step programs must use step_job::durable_step_program(), not current_exe(): {offenders:?}"
+        );
     }
 
     #[test]

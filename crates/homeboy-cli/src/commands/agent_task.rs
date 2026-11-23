@@ -13,9 +13,11 @@ use super::CmdResult;
 pub mod args;
 pub mod auth;
 pub(crate) mod candidate;
+pub(crate) mod candidate_location;
 pub mod capacity;
 pub mod contract;
 pub mod cook_batch;
+pub(crate) mod cook_summary;
 pub(crate) mod default_branch;
 pub mod doctor;
 #[cfg(test)]

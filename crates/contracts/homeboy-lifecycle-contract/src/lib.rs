@@ -11,7 +11,7 @@
 //! Three distinct lifecycle vocabularies live here and do not overlap.
 //! `lifecycle` is the workload *phase* lifecycle (`LifecyclePhaseKind`).
 //! `run_lifecycle_record` is a run *state machine* (`RunExecutionState`,
-//! `CleanupState`, `FinalizationState`, `ArtifactRetentionStatus`). The latter
+//! `CleanupState`, `ArtifactRetentionStatus`). The latter
 //! was its own `homeboy-run-lifecycle-contract` crate until it was merged here;
 //! the two share no types, and `homeboy-core` already imported that crate under
 //! the module name `run_lifecycle_record`, which is the name it keeps.
@@ -37,9 +37,8 @@ pub use lifecycle::{
 pub use rig_snapshot::{ComponentSnapshot, RigStateSnapshot};
 pub use run_lifecycle_record::{
     ArtifactRetentionLifecycle, ArtifactRetentionStatus, CleanupLifecycle, CleanupState,
-    ExternalRuntimeId, FinalizationLifecycle, FinalizationState, ProviderRuntimeLifecycle,
-    ProviderRuntimeState, RunExecutionLifecycle, RunExecutionState, RunHeartbeat,
-    RunLifecycleRecord, RUN_LIFECYCLE_RECORD_SCHEMA,
+    ExternalRuntimeId, ProviderRuntimeLifecycle, ProviderRuntimeState, RunExecutionLifecycle,
+    RunExecutionState, RunHeartbeat, RunLifecycleRecord, RUN_LIFECYCLE_RECORD_SCHEMA,
 };
 pub use timeline::{
     event_matches_key, merge_span_definitions, parse_phase_milestone, parse_span_definition,

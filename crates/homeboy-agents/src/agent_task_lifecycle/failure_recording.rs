@@ -323,7 +323,6 @@ fn record_interrupted_local_owner_locked(
             "phase": "terminal",
             "attempt": 1,
             "detail": "interrupted_owner",
-            "terminal_success": harvested,
             "exit_code": if harvested { 0 } else { 1 },
             "updated_at": now,
         }),

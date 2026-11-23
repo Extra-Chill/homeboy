@@ -14,8 +14,7 @@ use crate::{
 use homeboy_control_plane_contract::ControlPlaneState;
 use homeboy_core::run_lifecycle_record::{
     ArtifactRetentionLifecycle, ArtifactRetentionStatus, CleanupLifecycle, CleanupState,
-    ExternalRuntimeId, FinalizationLifecycle, FinalizationState, ProviderRuntimeLifecycle,
-    ProviderRuntimeState, RunExecutionLifecycle,
+    ExternalRuntimeId, ProviderRuntimeLifecycle, ProviderRuntimeState, RunExecutionLifecycle,
 };
 use homeboy_lifecycle_contract::RunExecutionState;
 use std::process::Command;
@@ -911,10 +910,6 @@ fn pr_body_reports_run_lifecycle_evidence() {
         cleanup: CleanupLifecycle {
             state: CleanupState::Preserved,
             policy: Some("preserve".to_string()),
-            updated_at: None,
-        },
-        finalization: FinalizationLifecycle {
-            state: FinalizationState::Pending,
             updated_at: None,
         },
         artifact_retention: ArtifactRetentionLifecycle {

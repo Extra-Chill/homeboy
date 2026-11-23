@@ -83,6 +83,31 @@ fn failure_context() -> AgentTaskCookFailureContext {
 }
 
 #[test]
+fn inherited_red_is_visible_in_completion_and_report_summary() {
+    homeboy_core::test_support::with_isolated_home(|_| {
+        let report = report(
+            "review_ready",
+            Some(json!({
+                "status": "review_ready",
+                "pr_url": "https://github.com/Extra-Chill/homeboy/pull/42",
+                "gate_results": [{"name": "verify", "status": "accepted_inherited_failure"}]
+            })),
+        );
+        assert_eq!(report.inherited_failure_count(), 1);
+        assert_eq!(
+            serde_json::to_value(&report).unwrap()["inherited_failures"],
+            1
+        );
+        let payload = terminal_payload(&report, Some("homeboy"), 0);
+        assert_eq!(payload.kind, NotifyEventKind::Completed);
+        assert!(payload
+            .facts
+            .iter()
+            .any(|fact| fact.label == "Inherited failures" && fact.value.contains("1 red gate")));
+    });
+}
+
+#[test]
 fn terminal_outcomes_lead_with_work_and_offer_only_useful_actions() {
     homeboy_core::test_support::with_isolated_home(|_| {
         for (status, code, title, facts, actions) in [
@@ -1300,4 +1325,40 @@ fn base_drift_fact_names_how_far_the_gated_base_is_behind() {
         base_drift_fact(&finalization(serde_json::Value::Null)),
         None
     );
+}
+
+/// #18817: the terminal notification carries the same versioned
+/// `cook_summary` every Cook read surface emits, with `why_no_pr` whenever no
+/// pull request exists.
+#[test]
+fn terminal_notification_carries_the_cook_summary_contract() {
+    for (status, finalization) in [
+        ("durable_failure", None),
+        (
+            "review_ready",
+            Some(serde_json::json!({
+                "status": "review_ready",
+                "pr_number": 42,
+                "pr_url": "https://github.com/Extra-Chill/homeboy/pull/42",
+            })),
+        ),
+    ] {
+        let payload = terminal_payload(&report(status, finalization), None, 0);
+        let summary: homeboy_control_plane_contract::CookSummary = serde_json::from_value(
+            payload
+                .cook_summary
+                .clone()
+                .expect("terminal payload carries cook_summary"),
+        )
+        .expect("cook_summary contract");
+        summary.validate().expect("valid cook_summary");
+        assert_eq!(
+            summary.schema,
+            homeboy_control_plane_contract::COOK_SUMMARY_SCHEMA
+        );
+        assert!(
+            summary.pr_url.is_some() || summary.why_no_pr.is_some(),
+            "{status}"
+        );
+    }
 }
