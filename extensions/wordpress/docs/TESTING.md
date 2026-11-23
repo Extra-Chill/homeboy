@@ -136,7 +136,13 @@ predates `wordpress-source`, is offline, or returns invalid output, the runner
 prints one `WARNING: WordPress core source unavailable for standalone smokes:
 <reason>` line to stderr and runs the smokes without the variable; that alone
 does not fail the suite. Smokes that need core should check the variable and
-fail with their own message.
+fail with their own message, or the component can declare
+`standalone_php_requires_wordpress_core: true`: an unresolved source then fails
+the step up front with `ERROR: WordPress core source could not be resolved ...:
+<reason>` and the smokes are counted as failed rather than run without core.
+The reason prefers the structured `error.code: error.message` that
+`wp-codebox wordpress-source --json` prints on stdout when it fails, falling back
+to the last stderr line for older WP Codebox builds.
 
 ```bash
 homeboy test <component-id> -- --host-smoke-file tests/example-smoke.php
@@ -287,6 +293,13 @@ pass:
 
 The same classification prints to the runner transcript as
 `PHPUNIT_ZERO_TESTS cause=<cause>` with the detail and remediation lines.
+
+With `phpunit_no_tests` unset, a zero-test run is reported as skipped unless the
+sandbox suite's own PHPUnit config declares `<directory>` entries that hold test
+files on disk. That suite owns tests it did not run, so the run fails and prints
+`PHPUNIT_ZERO_TESTS_FAILED: suite "<name>" declares N test file(s) under <dirs>
+but PHPUnit executed 0 tests`. Set `phpunit_no_tests` to `skipped` explicitly to
+tolerate an empty run for such a suite, or `failed` to fail every zero-test run.
 
 Bench and trace scenarios preflight dependency plugin packages before WP
 Codebox dispatch. The dependency path must be the runnable WordPress plugin
