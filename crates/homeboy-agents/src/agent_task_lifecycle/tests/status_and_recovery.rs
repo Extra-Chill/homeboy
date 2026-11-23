@@ -1063,7 +1063,7 @@ fn detached_lab_handoff_persists_inspectable_running_record() {
             assert_eq!(loaded.tasks[0].state(), ControlPlaneState::Running);
             assert_eq!(loaded.metadata["runner_id"], "homeboy-lab");
             assert_eq!(loaded.metadata["runner_job_id"], "job-123");
-            assert!(loaded.metadata.get("stale_running").is_none());
+            assert!(!loaded.is_stale_running());
             assert!(loaded.lifecycle.heartbeat.is_some());
             assert_eq!(
                 loaded

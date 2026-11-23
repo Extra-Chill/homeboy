@@ -674,8 +674,6 @@ fn project_terminal_runner_job_snapshot(
         METADATA_KEY_RETRYABLE.to_string(),
         json!(run_state != RunExecutionState::Succeeded),
     );
-    metadata.remove(METADATA_KEY_STALE_RUNNING);
-    metadata.remove(METADATA_KEY_STALE_RUNNING_REASON);
 }
 
 /// Extracts the richer inner agent-task aggregate when the terminal daemon

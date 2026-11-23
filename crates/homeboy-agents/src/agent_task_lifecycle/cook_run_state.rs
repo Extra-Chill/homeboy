@@ -203,7 +203,7 @@ pub(crate) fn local_owner_liveness(record: &AgentTaskRunRecord) -> super::LocalO
     }
 }
 
-pub(crate) fn should_annotate_stale(record: &AgentTaskRunRecord) -> bool {
+pub(crate) fn reads_stale(record: &AgentTaskRunRecord) -> bool {
     if record.runner_job_id().is_some() && record.has_fresh_update() {
         return false;
     }
@@ -259,7 +259,7 @@ pub(crate) fn classify_liveness(
         crate::agent_task_lifecycle::LocalOwnerLiveness::Absent => {}
     }
 
-    if record.is_stale_running() {
+    if record.runner_disconnected() {
         return AgentTaskLiveness::Stale;
     }
 

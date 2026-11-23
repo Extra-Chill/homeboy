@@ -1442,10 +1442,6 @@ fn scoped_reconcile_repairs_authoritative_terminal_runner_projection_idempotentl
 
         // The controller process disappeared after acceptance and before it
         // received the aggregate. The local aggregate is intentionally absent.
-        rewrite_record_for_test(run_id, |record| {
-            record.annotate_stale_running();
-        })
-        .expect("persist stale local controller projection");
         assert!(store::read_aggregate(run_id).is_err());
 
         let report = reconcile_run(run_id, false).expect("reconcile stale projection");
@@ -2052,7 +2048,6 @@ fn stale_reconcile_keeps_an_accepted_runner_job_active_after_controller_owner_ex
 
         rewrite_record_for_test(run_id, |record| {
             record.metadata["runner_pid"] = json!(u32::MAX);
-            record.annotate_stale_running();
         })
         .expect("persist dead controller owner");
 
@@ -2067,7 +2062,7 @@ fn stale_reconcile_keeps_an_accepted_runner_job_active_after_controller_owner_ex
             active.runner_job_id(),
             Some("00000000-0000-0000-0000-000000009969")
         );
-        assert!(active.metadata.get(METADATA_KEY_STALE_RUNNING).is_none());
+        assert!(!active.is_stale_running());
     });
 }
 
@@ -4047,7 +4042,7 @@ fn cancel_run_reclaims_stale_running_record() {
         json!("cancelled")
     );
     assert!(cancelled.metadata["provider_executions"][0]["finished_at"].is_string());
-    assert!(cancelled.metadata.get("stale_running").is_none());
+    assert!(!cancelled.is_stale_running());
     let recovery = &cancelled.metadata["live_cancellation_unsupported"];
     assert_eq!(
         recovery["reason"],

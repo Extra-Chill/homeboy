@@ -386,14 +386,12 @@ mod tests {
     use super::*;
     use homeboy_lifecycle_contract::RunExecutionState;
 
-    fn record(state: RunExecutionState, stale: bool) -> AgentTaskRunRecord {
-        let mut record: AgentTaskRunRecord = serde_json::from_value(serde_json::json!({
+    fn record(state: RunExecutionState) -> AgentTaskRunRecord {
+        serde_json::from_value(serde_json::json!({
             "schema": "homeboy/agent-task-run/v1", "run_id": "run", "plan_id": "plan",
             "state": state, "submitted_at": "2026-01-01T00:00:00Z", "plan_path": "/plan"
         }))
-        .expect("record");
-        record.metadata["stale_running"] = serde_json::json!(stale);
-        record
+        .expect("record")
     }
 
     fn decision(
@@ -419,7 +417,7 @@ mod tests {
             RunExecutionState::Failed,
             RunExecutionState::Cancelled,
         ] {
-            let report = lifecycle_action_eligibility(&record(state, false), None);
+            let report = lifecycle_action_eligibility(&record(state), None);
             assert_eq!(report.schema, CONTROL_PLANE_ACTION_ELIGIBILITY_SCHEMA);
             // Naming the contract rather than counting it: a bare length made
             // every legitimate action addition look like a regression without
@@ -455,18 +453,18 @@ mod tests {
 
         // A runner-backed run with a fresh heartbeat: the reconciler leaves it
         // alone, so Reconcile must not be advertised (it used to be).
-        let mut runner_fresh = record(RunExecutionState::Running, false);
+        let mut runner_fresh = record(RunExecutionState::Running);
         runner_fresh.metadata["runner_id"] = serde_json::json!("homeboy-lab");
         runner_fresh.metadata["runner_job_id"] = serde_json::json!("accepted-job");
         runner_fresh.updated_at = Some(fresh);
 
         // A queued run with no owner and an old timestamp: the reconciler
         // cancels it, so Reconcile must be advertised (it used to be withheld).
-        let mut queued_orphan = record(RunExecutionState::Queued, false);
+        let mut queued_orphan = record(RunExecutionState::Queued);
         queued_orphan.updated_at = Some(old.clone());
 
-        // A running run flagged stale with no owner signal.
-        let mut running_stale = record(RunExecutionState::Running, true);
+        // A running run with an aged heartbeat and no owner signal.
+        let mut running_stale = record(RunExecutionState::Running);
         running_stale.updated_at = Some(old);
 
         for (label, fixture, expected) in [
@@ -507,7 +505,7 @@ mod tests {
 
     #[test]
     fn unmaterialized_cook_resume_is_projected_as_idempotent() {
-        let mut record = record(RunExecutionState::Queued, false);
+        let mut record = record(RunExecutionState::Queued);
         record.metadata["unmaterialized_cook_admission"] = serde_json::json!({
             "state": "blocked_runner_unavailable",
         });
@@ -531,7 +529,7 @@ mod tests {
 
     #[test]
     fn queued_runner_proxy_retry_is_not_resumable_but_local_queue_is() {
-        let mut proxy = record(RunExecutionState::Queued, false);
+        let mut proxy = record(RunExecutionState::Queued);
         proxy.metadata["kind"] = serde_json::json!("lab_offload_controller_proxy");
         proxy.metadata["runner_id"] = serde_json::json!("runner-7");
         proxy.metadata["phase"] = serde_json::json!("retry");
@@ -547,7 +545,7 @@ mod tests {
         );
         assert!(resume.reason.contains("owning runner"));
 
-        let local = lifecycle_action_eligibility(&record(RunExecutionState::Queued, false), None);
+        let local = lifecycle_action_eligibility(&record(RunExecutionState::Queued), None);
         assert_eq!(
             decision(&local, ControlPlaneAction::Recover),
             ControlPlaneActionAvailability::Available
@@ -556,7 +554,7 @@ mod tests {
 
     #[test]
     fn candidate_recoverable_cook_resume_names_recover() {
-        let mut record = record(RunExecutionState::CandidateRecoverable, false);
+        let mut record = record(RunExecutionState::CandidateRecoverable);
         record.metadata["runner_id"] = serde_json::json!("runner-7");
         record.metadata["runner_job_id"] = serde_json::json!("job-7");
         record.metadata["cook_id"] = serde_json::json!("cook-15732");
@@ -578,7 +576,7 @@ mod tests {
     #[test]
     fn unmaterialized_metadata_does_not_bypass_resume_safety_preconditions() {
         for state in [RunExecutionState::Cancelled, RunExecutionState::Succeeded] {
-            let mut record = record(state, false);
+            let mut record = record(state);
             record.metadata["unmaterialized_cook_admission"] = serde_json::json!({
                 "state": "blocked_runner_stale",
             });
@@ -591,7 +589,7 @@ mod tests {
             );
         }
 
-        let mut running = record(RunExecutionState::Running, false);
+        let mut running = record(RunExecutionState::Running);
         running.metadata["unmaterialized_cook_admission"] = serde_json::json!({
             "state": "blocked_runner_stale",
         });
@@ -604,7 +602,7 @@ mod tests {
             ControlPlaneActionAvailability::Unavailable
         );
 
-        let mut exhausted = record(RunExecutionState::Queued, false);
+        let mut exhausted = record(RunExecutionState::Queued);
         exhausted.metadata["unmaterialized_cook_admission"] = serde_json::json!({
             "state": "exhausted",
         });
@@ -619,7 +617,7 @@ mod tests {
 
     #[test]
     fn exhausted_unmaterialized_cook_retry_requires_a_fresh_cook() {
-        let mut record = record(RunExecutionState::Failed, false);
+        let mut record = record(RunExecutionState::Failed);
         record.metadata["unmaterialized_cook_admission"] = serde_json::json!({
             "state": "exhausted",
             "binding": {
@@ -641,7 +639,7 @@ mod tests {
 
     #[test]
     fn placement_update_is_available_only_before_execution_ownership() {
-        let mut record = record(RunExecutionState::Queued, false);
+        let mut record = record(RunExecutionState::Queued);
         record.metadata["unmaterialized_cook_admission"] = serde_json::json!({
             "state": "blocked_runner_unavailable",
             "binding": { "admission_inputs": { "argv": ["homeboy"] } },
@@ -665,7 +663,7 @@ mod tests {
 
     #[test]
     fn cancel_remains_available_for_a_live_owner_after_candidate_recovery() {
-        let mut record = record(RunExecutionState::CandidateRecoverable, false);
+        let mut record = record(RunExecutionState::CandidateRecoverable);
         record.metadata["runner_pid"] = serde_json::json!(std::process::id());
         assert_eq!(
             decision(
@@ -678,7 +676,7 @@ mod tests {
 
     #[test]
     fn cancel_eligibility_accepts_rooted_controller_staging_and_pending_runner_transport() {
-        let mut staging = record(RunExecutionState::Queued, false);
+        let mut staging = record(RunExecutionState::Queued);
         staging.metadata["lab_staging_controller_job_id"] = serde_json::json!("controller-job");
         assert_eq!(
             decision(
@@ -688,7 +686,7 @@ mod tests {
             ControlPlaneActionAvailability::Available
         );
 
-        let mut submission = record(RunExecutionState::Queued, false);
+        let mut submission = record(RunExecutionState::Queued);
         submission.metadata["runner_submission_intent"] = serde_json::json!({
             "state": "pending",
             "runner_id": "homeboy-lab",

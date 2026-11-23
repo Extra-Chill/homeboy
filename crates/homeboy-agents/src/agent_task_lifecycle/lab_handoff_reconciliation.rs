@@ -485,8 +485,6 @@ pub(crate) fn apply_runner_job_terminal_state(
         "retryable".to_string(),
         json!(run_state != RunExecutionState::Succeeded),
     );
-    metadata.remove(METADATA_KEY_STALE_RUNNING);
-    metadata.remove(METADATA_KEY_STALE_RUNNING_REASON);
 }
 
 pub(crate) fn record_runner_job_terminal_metadata(
