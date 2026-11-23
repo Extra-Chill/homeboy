@@ -376,8 +376,20 @@ homeboy_local_workspace_lock_acquire() {
     while ! mkdir "$lock" 2>/dev/null; do
         holder="$(cat "${lock}/pid" 2>/dev/null || true)"
         if [ -n "$holder" ] && ! kill -0 "$holder" 2>/dev/null; then
-            rm -rf "$lock"
-            continue
+            # Reclaim under a second mkdir mutex and re-read the holder, so
+            # two waiters that both saw the dead PID cannot delete the lock a
+            # third process acquired in between. A reclaim mutex abandoned by
+            # a killed waiter expires after a minute.
+            if mkdir "${lock}.reclaim" 2>/dev/null; then
+                if [ "$(cat "${lock}/pid" 2>/dev/null || true)" = "$holder" ]; then
+                    rm -rf "$lock"
+                fi
+                rmdir "${lock}.reclaim" 2>/dev/null || true
+                continue
+            fi
+            if [ -n "$(find "${lock}.reclaim" -maxdepth 0 -mmin +1 2>/dev/null)" ]; then
+                rmdir "${lock}.reclaim" 2>/dev/null || true
+            fi
         fi
         if [ -z "$announced" ]; then
             echo "[local-workspace-deps] waiting for another build in $dir" >&2
