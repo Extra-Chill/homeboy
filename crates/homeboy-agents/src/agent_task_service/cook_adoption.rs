@@ -824,8 +824,8 @@ pub(crate) fn adopt_cook_candidate_with_dispatcher_and_backend_for_attempt_with_
                             )
                         },
                         &|_| Ok(()),
-                    ),
-                    super::cook::CookMode::Adopt,
+                    )
+                    .replay_keeping_recorded_transport(),
                 )?;
                 result.value.attempts.insert(0, attempt);
                 Ok(result)

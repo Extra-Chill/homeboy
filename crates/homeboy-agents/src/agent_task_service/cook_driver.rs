@@ -2,16 +2,6 @@
 
 use super::cook::*;
 
-#[derive(Debug, Clone, Copy, Default)]
-pub enum CookMode {
-    #[default]
-    Start,
-    Resume,
-    Adopt,
-    ContinueTerminal,
-    RecoverPreExecution,
-}
-
 /// Process-local dependencies for one Cook invocation. Production callers must
 /// bind every dependency explicitly; there are no environment-derived stores or
 /// optional side-effect/observer fallbacks in the execution API.
@@ -21,6 +11,7 @@ pub struct CookRuntime<'a> {
     lifecycle_store: &'a AgentTaskLifecycleStore,
     side_effects: CookSideEffects<'a>,
     durable_observer: &'a CookProgressObserver<'a>,
+    replay_keeps_recorded_transport: bool,
 }
 
 impl<'a> CookRuntime<'a> {
@@ -37,7 +28,16 @@ impl<'a> CookRuntime<'a> {
             lifecycle_store,
             side_effects,
             durable_observer,
+            replay_keeps_recorded_transport: false,
         }
+    }
+
+    /// Replaying an existing attempt keeps the attempt transport recorded in
+    /// its recipe instead of resetting to a local placement override. Adoption
+    /// and terminal continuation drive a detached attempt and set this.
+    pub fn replay_keeping_recorded_transport(mut self) -> Self {
+        self.replay_keeps_recorded_transport = true;
+        self
     }
 
     /// Bind a caller-owned finalizer while retaining native promotion, recovery,
@@ -121,7 +121,7 @@ pub(crate) struct CookContext<'a> {
     pub lifecycle_store: Option<&'a AgentTaskLifecycleStore>,
     pub side_effects: Option<CookSideEffects<'a>>,
     pub durable_observer: Option<&'a CookProgressObserver<'a>>,
-    pub mode: CookMode,
+    pub replay_keeps_recorded_transport: bool,
 }
 
 #[cfg(test)]
@@ -134,7 +134,7 @@ impl<'a> CookContext<'a> {
             lifecycle_store: None,
             side_effects: None,
             durable_observer: None,
-            mode: CookMode::Start,
+            replay_keeps_recorded_transport: false,
         }
     }
 }
@@ -168,7 +168,7 @@ pub(crate) fn run_cook(ctx: CookContext<'_>) -> Result<AgentTaskRunResult<AgentT
         &lifecycle_store,
         &mut side_effects,
         observer,
-        ctx.mode,
+        ctx.replay_keeps_recorded_transport,
     )
 }
 
@@ -179,7 +179,6 @@ impl CookService {
     pub fn run(
         request: CookRequest,
         runtime: CookRuntime<'_>,
-        mode: CookMode,
     ) -> Result<AgentTaskRunResult<AgentTaskCookReport>> {
         let CookRuntime {
             executor,
@@ -187,6 +186,7 @@ impl CookService {
             lifecycle_store,
             mut side_effects,
             durable_observer,
+            replay_keeps_recorded_transport,
         } = runtime;
         run_cook_with_runtime(
             request,
@@ -195,7 +195,7 @@ impl CookService {
             lifecycle_store,
             &mut side_effects,
             durable_observer,
-            mode,
+            replay_keeps_recorded_transport,
         )
     }
 }
@@ -207,7 +207,7 @@ pub(super) fn run_cook_with_runtime(
     lifecycle_store: &AgentTaskLifecycleStore,
     side_effects: &mut CookSideEffects<'_>,
     durable_observer: &CookProgressObserver<'_>,
-    mode: CookMode,
+    replay_keeps_recorded_transport: bool,
 ) -> Result<AgentTaskRunResult<AgentTaskCookReport>> {
     // A repro also gates the candidate (#17653).
     options.gates.include_repro_in_candidate_gates();
@@ -257,7 +257,7 @@ pub(super) fn run_cook_with_runtime(
         executor,
         side_effects,
         Some(durable_observer),
-        mode,
+        replay_keeps_recorded_transport,
     );
     if let Ok(result) = &mut result {
         // A CI-deferred Cook resolves here, without an operator `recover`:
@@ -458,7 +458,7 @@ pub(super) fn run_cook_reported(
     executor: SharedAgentTaskExecutor,
     side_effects: &mut CookSideEffects<'_>,
     durable_observer: Option<&CookProgressObserver<'_>>,
-    mode: CookMode,
+    replay_keeps_recorded_transport: bool,
 ) -> Result<AgentTaskRunResult<AgentTaskCookReport>> {
     let stores = CookStores {
         recipe: store,
@@ -472,7 +472,7 @@ pub(super) fn run_cook_reported(
         executor,
         side_effects,
         durable_observer,
-        mode,
+        replay_keeps_recorded_transport,
     ) {
         Ok(result) => result,
         Err(mut error) => {

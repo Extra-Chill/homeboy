@@ -1459,7 +1459,7 @@ fn cook_spine_materializes_into_the_injected_stores_across_split_recipe_and_life
         Arc::new(UnusedExecutor),
         &mut CookSideEffects::new(|_, _, _, _| Ok(serde_json::json!({}))),
         None,
-        CookMode::Resume,
+        false,
     )
     .expect_err("the spine stops at its candidate-group preflight");
     assert_eq!(error.details["field"], "group_key");
@@ -9503,13 +9503,11 @@ fn production_cook_loop_loads_terminal_promotion_without_source_aggregate() {
         let result = CookService::run(
             options.clone(),
             CookRuntime::production(Arc::new(UnusedExecutor), &store, &lifecycle_store),
-            CookMode::Resume,
         )
         .expect("production Cook loop loads persisted promotion");
         CookService::run(
             options,
             CookRuntime::production(Arc::new(UnusedExecutor), &store, &lifecycle_store),
-            CookMode::Resume,
         )
         .expect("terminal retry is idempotent");
         let observation = lifecycle_store.open_observation_initialized().unwrap();
@@ -9590,7 +9588,6 @@ fn production_cook_terminal_failure_and_cancellation_record_mission_span() {
                 let result = CookService::run(
                     options.clone(),
                     CookRuntime::production(Arc::new(UnusedExecutor), &store, &lifecycle_store),
-                    CookMode::Resume,
                 )
                 .unwrap();
                 assert!(result.value.disposition.is_terminal(), "{result:#?}");
@@ -10043,7 +10040,8 @@ fn deferred_candidate_recovers_with_verify_file_and_publishes() {
             },
             &noop_cook_progress_observer,
         );
-        let result = CookService::run(options, runtime, CookMode::ContinueTerminal).unwrap();
+        let result =
+            CookService::run(options, runtime.replay_keeping_recorded_transport()).unwrap();
         assert_eq!(
             result.value.status.as_str(),
             "review_ready",
@@ -10729,7 +10727,8 @@ fn deferred_recovery_supervises_declared_gate_and_persists_unavailability() {
             |_, _, _, _| panic!("unavailable gate must not publish"),
             &noop_cook_progress_observer,
         );
-        let result = CookService::run(options, runtime, CookMode::ContinueTerminal).unwrap();
+        let result =
+            CookService::run(options, runtime.replay_keeping_recorded_transport()).unwrap();
         assert_eq!(
             result.value.status.as_str(),
             "gate_environment_unavailable",
@@ -10788,7 +10787,8 @@ fn supervision_stopped_gate_is_regated_once_and_ends_as_unavailable_verification
             |_, _, _, _| panic!("a supervision-stopped gate must not publish"),
             &noop_cook_progress_observer,
         );
-        let result = CookService::run(options, runtime, CookMode::ContinueTerminal).unwrap();
+        let result =
+            CookService::run(options, runtime.replay_keeping_recorded_transport()).unwrap();
         assert_eq!(
             result.value.status.as_str(),
             "gate_environment_unavailable",
@@ -10869,7 +10869,8 @@ fn no_progress_killed_candidate_regates_under_operator_budget_and_publishes() {
             |_, _, _, _| panic!("a supervision-stopped gate must not publish"),
             &noop_cook_progress_observer,
         );
-        let result = CookService::run(options, runtime, CookMode::ContinueTerminal).unwrap();
+        let result =
+            CookService::run(options, runtime.replay_keeping_recorded_transport()).unwrap();
         assert_eq!(
             result.value.status.as_str(),
             "gate_environment_unavailable",
@@ -11135,7 +11136,8 @@ fn corrected_gate_guided_continuation_publishes_without_provider_redispatch_and_
                 &noop_cook_progress_observer,
             );
             let result =
-                CookService::run(options.clone(), runtime, CookMode::ContinueTerminal).unwrap();
+                CookService::run(options.clone(), runtime.replay_keeping_recorded_transport())
+                    .unwrap();
             assert_eq!(
                 result.value.status.as_str(),
                 "review_ready",
@@ -13541,7 +13543,6 @@ echo https://github.com/example/fixture/pull/1
             let report = CookService::run(
                 options,
                 CookRuntime::production(Arc::new(UnusedExecutor), &recipes, &lifecycle),
-                CookMode::Resume,
             )
             .unwrap();
             assert_ne!(report.exit_code, 0, "{report:#?}");
@@ -14838,7 +14839,6 @@ fn concurrent_submits_with_one_admission_key_admit_exactly_one_cook() {
             CookService::run(
                 request,
                 CookRuntime::production(Arc::new(UnusedExecutor), &store, &lifecycle_store),
-                CookMode::Start,
             )
             .expect("submission returns a Cook")
             .value

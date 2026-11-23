@@ -903,7 +903,6 @@ fn execute_claimed_queue_record(
         let cook = super::CookService::run(
             options,
             super::CookRuntime::production(executor.clone(), &store, &lifecycle_store),
-            super::CookMode::RecoverPreExecution,
         )?;
         let aggregate = agent_task_lifecycle::read_aggregate(&record.run_id).ok();
         return Ok(AgentTaskRunNextResult {
@@ -1199,7 +1198,6 @@ fn consume_claimed_continuation(
             super::CookService::run(
                 options,
                 super::CookRuntime::production(executor.clone(), &store, &lifecycle_store),
-                super::CookMode::Resume,
             )
             .map(|result| (result.exit_code, result.value.disposition))
         },

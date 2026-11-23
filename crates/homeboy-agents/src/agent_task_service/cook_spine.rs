@@ -13,7 +13,7 @@ pub(super) fn run_cook_spine(
     executor: SharedAgentTaskExecutor,
     side_effects: &mut CookSideEffects<'_>,
     durable_observer: Option<&CookProgressObserver<'_>>,
-    mode: CookMode,
+    replay_keeps_recorded_transport: bool,
 ) -> Result<AgentTaskRunResult<AgentTaskCookReport>> {
     let stores = CookStores {
         recipe: store,
@@ -127,8 +127,7 @@ pub(super) fn run_cook_spine(
             .as_ref()
             .is_some_and(|record| transport_admission_reset_available(Some(record)));
     let mut options = if existing_recipe {
-        let adoption =
-            adopted_model.is_some() || matches!(mode, CookMode::Adopt | CookMode::ContinueTerminal);
+        let adoption = adopted_model.is_some() || replay_keeps_recorded_transport;
         let mut reconstructed = if local_placement_override && !adoption {
             super::reconstruct_options_without_dispatcher(&recipe)?
         } else {

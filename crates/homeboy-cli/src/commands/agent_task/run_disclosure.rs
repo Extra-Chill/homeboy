@@ -5,7 +5,6 @@ use super::run::*;
 pub(super) fn run_cook_explicit(
     request: agent_task_service::CookRequest,
     executor: SharedAgentTaskExecutor,
-    mode: agent_task_service::CookMode,
 ) -> homeboy::core::Result<
     agent_task_service::AgentTaskRunResult<agent_task_service::AgentTaskCookReport>,
 > {
@@ -14,7 +13,6 @@ pub(super) fn run_cook_explicit(
     agent_task_service::CookService::run(
         request,
         agent_task_service::CookRuntime::production(executor, &recipe_store, &lifecycle_store),
-        mode,
     )
 }
 

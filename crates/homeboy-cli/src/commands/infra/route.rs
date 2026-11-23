@@ -2387,8 +2387,8 @@ fn run_terminal_cook_continuation(
                     executor,
                     &store,
                     &agent_task_lifecycle::AgentTaskLifecycleStore::from_environment()?,
-                ),
-                crate::agents::agent_task_service::CookMode::ContinueTerminal,
+                )
+                .replay_keeping_recorded_transport(),
             )
             .map(|result| {
                 if result.exit_code != 0 {
