@@ -38,6 +38,10 @@ pub struct AgentTaskReconcileReport {
     pub reconciled: usize,
     pub failed: usize,
     pub runs: Vec<AgentTaskReconcileRun>,
+    /// Fleet only: rows still `running` although their lifecycle ended and no
+    /// controller drives them, each with its class and proposed terminal status.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub unsettled_rows: Vec<super::AgentTaskUnsettledRow>,
 }
 
 impl AgentTaskReconcileReport {
@@ -51,6 +55,12 @@ impl AgentTaskReconcileReport {
             .iter()
             .filter(|run| run.action == "failed")
             .filter_map(|run| run.error.as_deref())
+            .chain(
+                self.unsettled_rows
+                    .iter()
+                    .filter(|row| row.action == "failed")
+                    .filter_map(|row| row.error.as_deref()),
+            )
             .collect();
         Some(format!(
             "{} runs failed to reconcile: {}",
@@ -517,6 +527,18 @@ pub fn reconcile_stale_active_runs(dry_run: bool) -> Result<AgentTaskReconcileRe
         }
     }
 
+    // Rows whose lifecycle already ended never reach active discovery above,
+    // yet stay `running` when their Cook driver exited without settling them.
+    let unsettled_rows = super::unsettled_rows::sweep_unsettled_rows(&lifecycle_store, dry_run)?;
+    reconciled += unsettled_rows
+        .iter()
+        .filter(|row| row.action == "settled")
+        .count();
+    failed += unsettled_rows
+        .iter()
+        .filter(|row| row.action == "failed")
+        .count();
+
     Ok(AgentTaskReconcileReport {
         schema: "homeboy/agent-task-reconcile/v1",
         scope: "fleet".to_string(),
@@ -524,10 +546,11 @@ pub fn reconcile_stale_active_runs(dry_run: bool) -> Result<AgentTaskReconcileRe
         resolved_run_ids: Vec::new(),
         authorization: if dry_run { "preview" } else { "explicit-apply" },
         dry_run,
-        considered: runs.len(),
+        considered: runs.len() + unsettled_rows.len(),
         reconciled,
         failed,
         runs,
+        unsettled_rows,
     })
 }
 
@@ -887,6 +910,7 @@ pub(crate) fn reconcile_run_in_store(
         reconciled,
         failed,
         runs,
+        unsettled_rows: Vec::new(),
     })
 }
 
@@ -1041,6 +1065,7 @@ mod tests {
                     error: Some("idempotency_key too long".to_string()),
                 })
                 .collect(),
+            unsettled_rows: Vec::new(),
         };
         assert_eq!(
             report.failure_summary().as_deref(),

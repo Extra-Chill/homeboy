@@ -213,7 +213,7 @@ pub(super) fn run_cook_with_runtime(
     options.gates.include_repro_in_candidate_gates();
     // One controller drives a Cook at a time (#15566). Held for the whole
     // run, released when this returns or the process dies.
-    let Some(_driver) = store.try_acquire_cook_driver(&options.identity.cook_id)? else {
+    let Some(driver) = store.try_acquire_cook_driver(&options.identity.cook_id)? else {
         let driver = store
             .foreign_cook_driver(&options.identity.cook_id)?
             .unwrap_or_default();
@@ -285,7 +285,41 @@ pub(super) fn run_cook_with_runtime(
             }
         }
     }
+    if result.is_err() {
+        // This driver is the Cook's only settlement owner, and it is leaving
+        // on an admission or execution error without a terminal report.
+        // Release ownership first so settlement can observe that no
+        // controller drives the Cook any more, then settle whatever already
+        // ended. Without this, rows whose lifecycle terminated on the error
+        // path stayed `running` forever.
+        let cook_id = notification_options.identity.cook_id.clone();
+        drop(driver);
+        settle_after_driver_error(lifecycle_store, &cook_id);
+    }
     result
+}
+
+/// Settle a Cook whose driver failed without a terminal report. The Cook-level
+/// settlement acts only on a terminal, settled Cook observation; the per-row
+/// backstop then settles rows whose own lifecycle ended, leaving any Cook that
+/// still has live lifecycle work, or a new driver, untouched.
+fn settle_after_driver_error(lifecycle: &AgentTaskLifecycleStore, cook_id: &str) {
+    if let Err(error) = finish_cook_terminal(lifecycle, cook_id) {
+        homeboy_core::log_status!(
+            "agent-task",
+            "Cook {} settlement after driver error failed: {}",
+            cook_id,
+            error
+        );
+    }
+    if let Err(error) = super::unsettled_rows::settle_unowned_cook_rows(lifecycle, cook_id) {
+        homeboy_core::log_status!(
+            "agent-task",
+            "Cook {} row settlement after driver error failed: {}",
+            cook_id,
+            error
+        );
+    }
 }
 
 /// Settle and announce a Cook only once its end-to-end outcome is terminal.
