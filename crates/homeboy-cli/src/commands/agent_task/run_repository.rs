@@ -13,9 +13,176 @@ pub(super) struct CookRepositoryIdentity {
     component: Option<homeboy::core::component::Component>,
 }
 
+/// The forms `--repo` accepts, quoted verbatim by every `--repo` error.
+pub(crate) const COOK_REPO_ACCEPTED_FORMS: &str =
+    "--repo accepts a registered component slug (blocks-engine), a local checkout path (~/Developer/blocks-engine), or a GitHub owner/repo (Extra-Chill/blocks-engine)";
+
+/// Reduce any accepted `--repo` form to the selector the rest of Cook
+/// resolves: a component slug when one owns the input, otherwise the input.
+///
+/// - A registered component slug is returned unchanged.
+/// - A local checkout path resolves to the component registered at it, or to
+///   the single component whose remote matches the checkout's remote. A path
+///   that names no registered repository is kept (tilde-expanded) so an
+///   unregistered checkout can still be provisioned by path.
+/// - `owner/repo` resolves to the single component whose remote is that
+///   GitHub repository.
+pub(crate) fn resolve_cook_repo_selector(raw: &str) -> homeboy::core::Result<String> {
+    use homeboy::core::component::RegisteredPrimaryPathResolution as Resolution;
+    let value = raw.trim();
+    if value.is_empty() {
+        return Err(homeboy::core::Error::validation_invalid_argument(
+            "repo",
+            format!("--repo received an empty value; {COOK_REPO_ACCEPTED_FORMS}"),
+            Some(raw.to_string()),
+            None,
+        ));
+    }
+    // A bare slug needs no translation, and resolving it here would hydrate
+    // registered checkouts before Cook selects one.
+    if !value.starts_with(['.', '~']) && !value.contains(['/', '\\']) {
+        return Ok(value.to_string());
+    }
+    // A remote URL names its repository; name matching already handles it.
+    if !value.starts_with(['/', '.', '~']) && canonical_remote_identity(value).is_some() {
+        return Ok(value.to_string());
+    }
+    let owner_repo = cook_owner_repo_selector(value);
+    if let Some((owner, repo)) = owner_repo {
+        if let Some(id) = cook_component_for_owner_repo(owner, repo)? {
+            return Ok(id);
+        }
+    }
+    let path_like = value.starts_with(['/', '~', '.', '\\'])
+        || (value.contains(['/', '\\']) && owner_repo.is_none());
+    let expanded = homeboy::core::expand_tilde_path(value);
+    if !(path_like || (owner_repo.is_some() && expanded.is_dir())) {
+        return Ok(value.to_string());
+    }
+    let expanded_text = expanded.display().to_string();
+    let path_error = |problem: String, candidates: &[String]| {
+        cook_repo_selector_error(value, problem, candidates)
+    };
+    match homeboy::core::component::resolve_registered_primary_path(&expanded_text)? {
+        Resolution::Primary(id) => Ok(id),
+        Resolution::UnregisteredRepository(candidates)
+        | Resolution::StaleRegistry(candidates) => match candidates.components.as_slice() {
+            [] => Ok(expanded_text),
+            [id] => Ok(id.clone()),
+            ids => Err(path_error(
+                format!("--repo `{value}` is a checkout whose remote matches several registered components"),
+                ids,
+            )),
+        },
+        Resolution::AmbiguousNestedComponent(candidates) => Err(path_error(
+            format!("--repo `{value}` is a checkout that contains several registered components"),
+            &candidates.components,
+        )),
+        // `owner/repo` that is not a directory falls back to name matching.
+        Resolution::MissingPath if owner_repo.is_some() => Ok(value.to_string()),
+        Resolution::MissingPath => Err(path_error(
+            format!("--repo `{value}` looks like a local checkout path, but no directory exists at `{expanded_text}`"),
+            &cook_closest_component_ids(value)?,
+        )),
+        Resolution::NonGitPath => Err(path_error(
+            format!("--repo `{value}` is a directory but not a Git checkout"),
+            &cook_closest_component_ids(value)?,
+        )),
+    }
+}
+
+/// `owner/repo` with two non-empty GitHub name segments.
+fn cook_owner_repo_selector(value: &str) -> Option<(&str, &str)> {
+    let (owner, repo) = value.split_once('/')?;
+    let valid = |segment: &str| {
+        !segment.is_empty()
+            && segment != "."
+            && segment != ".."
+            && segment
+                .chars()
+                .all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.'))
+    };
+    (valid(owner) && valid(repo)).then_some((owner, repo.trim_end_matches(".git")))
+}
+
+/// The single registered component whose remote is `owner/repo`.
+fn cook_component_for_owner_repo(owner: &str, repo: &str) -> homeboy::core::Result<Option<String>> {
+    let suffix = format!(
+        "/{}/{}",
+        owner.to_ascii_lowercase(),
+        repo.to_ascii_lowercase()
+    );
+    let mut ids = homeboy::core::component::inventory::registered_primary()?
+        .into_iter()
+        .filter(|component| {
+            cook_component_repository_remote(component)
+                .as_deref()
+                .and_then(canonical_remote_identity)
+                .is_some_and(|identity| identity.ends_with(&suffix))
+        })
+        .map(|component| component.id)
+        .collect::<Vec<_>>();
+    ids.sort();
+    ids.dedup();
+    Ok((ids.len() == 1).then(|| ids.remove(0)))
+}
+
+/// Registered component IDs closest to an unmatched `--repo` value.
+pub(crate) fn cook_closest_component_ids(value: &str) -> homeboy::core::Result<Vec<String>> {
+    let components = homeboy::core::component::inventory::registered_base()?;
+    Ok(closest_component_ids(
+        value,
+        components.iter().map(|component| component.id.as_str()),
+    ))
+}
+
+fn closest_component_ids<'a>(value: &str, ids: impl Iterator<Item = &'a str>) -> Vec<String> {
+    let wanted = normalize_repository_name(value);
+    if wanted.is_empty() {
+        return Vec::new();
+    }
+    let mut scored = ids
+        .filter_map(|id| {
+            let candidate = id.to_ascii_lowercase();
+            let distance = homeboy_engine_primitives::text::levenshtein(&wanted, &candidate);
+            let threshold = (wanted.chars().count().max(candidate.chars().count()) / 3).max(2);
+            let related = candidate.contains(&wanted) || wanted.contains(&candidate);
+            (distance <= threshold || related).then(|| (distance, id.to_string()))
+        })
+        .collect::<Vec<_>>();
+    scored.sort();
+    scored.dedup();
+    scored.into_iter().take(5).map(|(_, id)| id).collect()
+}
+
+fn cook_repo_selector_error(
+    value: &str,
+    problem: String,
+    candidates: &[String],
+) -> homeboy::core::Error {
+    let mut message = format!("{problem}. {COOK_REPO_ACCEPTED_FORMS}.");
+    if !candidates.is_empty() {
+        message.push_str(&format!(" Closest components: {}.", candidates.join(", ")));
+    }
+    homeboy::core::Error::validation_invalid_argument(
+        "repo",
+        message,
+        Some(value.to_string()),
+        (!candidates.is_empty()).then(|| {
+            candidates
+                .iter()
+                .map(|id| format!("homeboy agent-task cook --repo {id} ..."))
+                .collect()
+        }),
+    )
+}
+
 pub(crate) fn resolve_cook_repository(
     args: &mut AgentTaskCookArgs,
 ) -> homeboy::core::Result<Option<ResolvedCookRepository>> {
+    if let Some(repo) = args.dispatch.repo.as_deref() {
+        args.dispatch.repo = Some(resolve_cook_repo_selector(repo)?);
+    }
     let selected = 'selection: {
         let configured = match args.component.as_deref().or(args.dispatch.repo.as_deref()) {
             Some(name) => cook_components_for_repository_name(name)?,
@@ -98,9 +265,11 @@ pub(crate) fn resolve_cook_repository(
                 } else {
                     "the supplied workspace is not a Git checkout"
                 };
-                return Err(homeboy::core::Error::validation_missing_argument(vec![format!(
-                "--repo <repo> is required because {reason}; provide --repo <repository-or-configured-component>"
-            )]));
+                return Err(homeboy::core::Error::validation_missing_argument(vec![
+                    format!(
+                        "--repo <repo> is required because {reason}; provide --repo <repository-or-configured-component>"
+                    ),
+                ]));
             }
             break 'selection bind_cook_repository_identity_from_config(args, configured)?;
         }
@@ -308,6 +477,8 @@ pub(super) fn durable_component_cwd(
 pub(crate) fn cook_repository_names_for_selection(
     repo: &str,
 ) -> homeboy::core::Result<(String, String)> {
+    let repo = resolve_cook_repo_selector(repo)?;
+    let repo = repo.as_str();
     let Some(component) = cook_components_for_repository_name(repo)?
         .into_iter()
         .next()
@@ -503,11 +674,25 @@ pub(super) fn cook_repository_not_registered_error(
             .collect::<Vec<_>>()
             .join("\n")
     };
+    let closest = closest_component_ids(
+        repository,
+        components.iter().map(|component| component.id.as_str()),
+    );
+    let closest_line = if closest.is_empty() {
+        String::new()
+    } else {
+        format!(" Closest components: {}.", closest.join(", "))
+    };
     Ok(homeboy::core::Error::validation_invalid_argument(
         "repo",
-        format!("--repo `{repository}` does not match a registered component. Registered components:\n{listing}"),
+        format!("--repo `{repository}` does not match a registered component. {COOK_REPO_ACCEPTED_FORMS}.{closest_line} Registered components:\n{listing}"),
         Some(repository.to_string()),
-        None,
+        (!closest.is_empty()).then(|| {
+            closest
+                .iter()
+                .map(|id| format!("homeboy agent-task cook --repo {id} ..."))
+                .collect()
+        }),
     ))
 }
 
@@ -876,7 +1061,7 @@ pub(super) fn fresh_derived_cook_branch(
     Err(homeboy::core::Error::validation_invalid_argument(
         "to_worktree",
         format!(
-            "every derived destination for `{base}` up to generation {MAX_DERIVED_COOK_GENERATIONS} is retired; pass --to-worktree and --head explicitly"
+            "every derived destination for `{base}` up to generation {MAX_DERIVED_COOK_GENERATIONS} is retired; to rework an existing branch pass its PR as --task-url https://github.com/<owner>/<repo>/pull/<n>, or pass --to-worktree and --head explicitly"
         ),
         Some(base.to_string()),
         None,
@@ -889,7 +1074,7 @@ pub(super) fn derived_cook_branch(task_url: &str) -> homeboy::core::Result<Strin
     let Some((repository, number)) = issue.rsplit_once("/issues/") else {
         return Err(homeboy::core::Error::validation_invalid_argument(
             "task_url",
-            "--task-url must be a GitHub issue URL when --to-worktree is omitted",
+            "--task-url must be a GitHub issue URL (https://github.com/<owner>/<repo>/issues/<n>) or PR URL (https://github.com/<owner>/<repo>/pull/<n>) when --to-worktree is omitted; otherwise pass --to-worktree and --head",
             Some(task_url.to_string()),
             None,
         ));
@@ -898,7 +1083,7 @@ pub(super) fn derived_cook_branch(task_url: &str) -> homeboy::core::Result<Strin
     if number.is_empty() || !number.chars().all(|character| character.is_ascii_digit()) {
         return Err(homeboy::core::Error::validation_invalid_argument(
             "task_url",
-            "--task-url must end in a numeric GitHub issue number when --to-worktree is omitted",
+            "--task-url must end in a numeric GitHub issue number (https://github.com/<owner>/<repo>/issues/<n>) when --to-worktree is omitted",
             Some(task_url.to_string()),
             None,
         ));
@@ -909,7 +1094,7 @@ pub(super) fn derived_cook_branch(task_url: &str) -> homeboy::core::Result<Strin
     if owner.is_empty() || repo.is_empty() {
         return Err(homeboy::core::Error::validation_invalid_argument(
             "task_url",
-            "--task-url must include a GitHub owner and repo when --to-worktree is omitted",
+            "--task-url must include a GitHub owner and repo (https://github.com/<owner>/<repo>/issues/<n>) when --to-worktree is omitted",
             Some(task_url.to_string()),
             None,
         ));
@@ -937,4 +1122,35 @@ pub(super) fn normalize_cook_task_url(task_url: &str) -> String {
         .unwrap_or_default()
         .trim_end_matches('/')
         .to_string()
+}
+
+#[cfg(test)]
+mod repo_selector_tests {
+    use super::{closest_component_ids, cook_owner_repo_selector};
+
+    #[test]
+    fn owner_repo_selector_requires_two_github_name_segments() {
+        assert_eq!(
+            cook_owner_repo_selector("Extra-Chill/blocks-engine"),
+            Some(("Extra-Chill", "blocks-engine"))
+        );
+        assert_eq!(cook_owner_repo_selector("blocks-engine"), None);
+        assert_eq!(cook_owner_repo_selector("./blocks-engine"), None);
+        assert_eq!(cook_owner_repo_selector("/abs/blocks-engine"), None);
+        assert_eq!(cook_owner_repo_selector("a/b/c"), None);
+    }
+
+    #[test]
+    fn closest_components_rank_near_misses_first() {
+        let ids = ["blocks-engine", "data-machine", "homeboy"];
+        assert_eq!(
+            closest_component_ids("blocks-engin", ids.into_iter()),
+            vec!["blocks-engine".to_string()]
+        );
+        assert_eq!(
+            closest_component_ids("Extra-Chill/blocks", ids.into_iter()),
+            vec!["blocks-engine".to_string()]
+        );
+        assert!(closest_component_ids("unrelated", ids.into_iter()).is_empty());
+    }
 }

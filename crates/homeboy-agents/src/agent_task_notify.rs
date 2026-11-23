@@ -494,6 +494,9 @@ fn terminal_payload(
     // can hand a reviewer, and it was previously discarded along with the rest
     // of the finalization report.
     if let Some(finalization) = &report.finalization {
+        if let Some(fact) = base_drift_fact(finalization).filter(|_| !cancelled) {
+            payload = payload.with_fact("Base", fact);
+        }
         let publication = crate::agent_task_service::publication_receipt(finalization);
         if publication.published {
             if let Some(url) = publication.pr_url.as_deref() {
@@ -554,6 +557,27 @@ fn terminal_payload(
     } else {
         payload
     }
+}
+
+/// `base_behind_by: N (gated <sha>, <base> tip <sha>)` when the candidate was
+/// published on a base the remote has since moved past (#17610).
+pub(crate) fn base_drift_fact(finalization: &Value) -> Option<String> {
+    let target = finalization.pointer("/publication_intent/target")?;
+    let behind_by = target["publication_base_behind_by"]
+        .as_u64()
+        .filter(|count| *count > 0)?;
+    let short = |key: &str| {
+        target[key]
+            .as_str()
+            .map(|sha| sha.chars().take(12).collect::<String>())
+            .unwrap_or_else(|| "unknown".to_string())
+    };
+    let base = target["base"].as_str().unwrap_or("base");
+    Some(format!(
+        "base_behind_by: {behind_by} (gated {}, {base} tip {})",
+        short("verified_base_sha"),
+        short("publication_base_sha"),
+    ))
 }
 
 fn gate_summary(gates: &[(&str, bool)]) -> String {

@@ -220,6 +220,7 @@ pub(super) fn run_gate_argv_with_supervision(
                         timeout: supervision.map(|supervision| supervision.timeout),
                         supervision,
                         baseline_timeout_diagnostic: false,
+                        cpus: None,
                         deadline: None,
                     },
                     gate_environment,
@@ -435,7 +436,7 @@ pub(super) fn run_gate_argv(
     // Local placement queues through the host-wide gate admission the Lab
     // daemon on this host also charges (#18555). Runner-admitted Lab gates
     // call `run_gate_argv_local` directly and are never queued twice.
-    let (_permit, wait) = match admission::acquire(cwd, index, || {
+    let (permit, wait) = match admission::acquire(cwd, index, || {
         execution
             .supervision
             .is_some_and(|policy| (policy.is_cancelled)())
@@ -460,8 +461,12 @@ pub(super) fn run_gate_argv(
             return Ok(report);
         }
     };
+    // The admitted host slot owns a disjoint CPU share; the gate tree is
+    // pinned to it so tooling that sizes itself by `nproc` fits the slot.
+    let cpus = permit.as_ref().and_then(|permit| permit.cpus());
     // Queue wait never spends the gate's execution budget.
     let execution = GateExecution {
+        cpus: cpus.as_deref().or(execution.cpus),
         deadline: execution
             .deadline
             .and_then(|deadline| deadline.checked_add(wait)),
@@ -532,6 +537,9 @@ pub(super) fn run_gate_argv_local(
         selected_gate_environment(&gate_environment, execution.runtime_tmpdir)?;
     selected_environment.report.package_artifacts = package_artifacts;
     selected_environment.apply(&mut process);
+    if let Some(cpus) = execution.cpus {
+        homeboy_core::lab_capacity::pin_command(&mut process, cpus);
+    }
     if let Some(plan) = declared_plan {
         let (name, value) = plan.suite_timeout_env();
         process.env(name, value);
@@ -857,6 +865,7 @@ pub(crate) fn run_gate_command_with_timeout(
             timeout: Some(timeout),
             supervision: None,
             baseline_timeout_diagnostic: true,
+            cpus: None,
             deadline: None,
         },
         gate_environment,
@@ -899,6 +908,7 @@ pub(crate) fn run_declared_test_with_timeout(
             timeout: Some(plan.suite_timeout()),
             supervision: None,
             baseline_timeout_diagnostic: true,
+            cpus: None,
             deadline: None,
         },
         gate_environment,

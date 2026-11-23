@@ -992,6 +992,13 @@ pub(crate) fn compact_cook_report_with_summary(
     if let Some(candidate) = candidate_projection {
         summary["durable_candidate"] = candidate.clone();
     }
+    // #17610: a candidate published on a base the remote has since moved past
+    // carries the drift in the summary instead of leaving it for review to find.
+    if let Some(drift) = value.get("finalization").and_then(base_drift_projection) {
+        if summary["finalization"].is_object() {
+            summary["finalization"]["base_drift"] = drift;
+        }
+    }
     // The run ids this invocation actually dispatched, so a caller can tell them
     // apart from the cross-invocation history `latest_run_id` may be drawn from.
     if let Some(invocation_run_ids) = value.get("invocation_run_ids") {
@@ -1099,6 +1106,21 @@ pub(super) fn compact_identity(item: &Value) -> Option<String> {
                 .and_then(Value::as_str)
                 .map(|uri| format!("uri:{uri}"))
         })
+}
+
+/// Base drift recorded at publication: how many commits the live base held
+/// beyond the gated base, with both SHAs. `None` when unmeasured or zero.
+pub(super) fn base_drift_projection(finalization: &Value) -> Option<Value> {
+    let target = finalization.pointer("/publication_intent/target")?;
+    let behind_by = target["publication_base_behind_by"]
+        .as_u64()
+        .filter(|count| *count > 0)?;
+    Some(json!({
+        "base_behind_by": behind_by,
+        "base": target.get("base"),
+        "verified_base_sha": target.get("verified_base_sha"),
+        "base_tip_sha": target.get("publication_base_sha"),
+    }))
 }
 
 pub(super) fn compact_fields(value: &Value, fields: &[&str]) -> Value {

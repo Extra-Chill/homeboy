@@ -1006,6 +1006,18 @@ pub(super) fn consume_execution_terminal_in_store(
             Some("execution step cancelled"),
         )?;
     }
+    // A failed admission/staging child can be the last owner of a Cook:
+    // no provider or Cook driver remains to publish its terminal verdict.
+    // Settlement checks for live owners and claims notification durably, so
+    // replayed terminal deliveries cannot announce the same Cook twice.
+    if let Err(error) = super::cook_driver::finish_cook_terminal(store, subject) {
+        homeboy_core::log_status!(
+            "agent-task",
+            "Cook {} settlement after execution step failed: {}",
+            subject,
+            error
+        );
+    }
     Ok(json!({"acknowledged": true, "job_id": delivery.job_id, "disposition": disposition}))
 }
 
