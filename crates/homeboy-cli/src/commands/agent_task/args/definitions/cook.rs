@@ -2013,7 +2013,8 @@ pub struct AgentTaskCookArgs {
     /// a later `agent-task review`/finalize.
     #[arg(long = "no-finalize")]
     pub no_finalize: bool,
-    /// Complete normal verified finalization but create a draft pull request.
+    /// Force a draft pull request even when the repro is verified.
+    /// Without a verified repro, new Cook pull requests are drafts by default.
     /// Existing pull requests retain their current draft or ready state.
     #[arg(long = "draft-pr", conflicts_with = "no_finalize")]
     pub draft_pr: bool,

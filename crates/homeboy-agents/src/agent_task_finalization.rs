@@ -110,7 +110,9 @@ fn update_existing_pr<B: AgentTaskPrFinalizationBackend>(
         &options.title,
         &body,
     )?;
-    if existing.is_draft && !options.draft_pr {
+    // Cook's repro policy governs creation, not transitions of existing PRs.
+    // Manual finalization retains its explicit ready-transition behavior.
+    if existing.is_draft && !options.draft_pr && options.review_dossier.repro.is_none() {
         *ready_transitioned = true;
         Ok(("ready", backend.mark_pr_ready(&options.path, &updated)?))
     } else {

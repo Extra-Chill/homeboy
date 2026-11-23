@@ -1014,6 +1014,29 @@ fn draft_policy_reconciles_an_existing_draft_pr() {
 }
 
 #[test]
+fn verified_cook_preserves_existing_draft_state() {
+    let mut backend = MockBackend {
+        changed_files: vec!["src/lib.rs".to_string()],
+        existing_pr: Some(AgentTaskPrRef {
+            number: 77,
+            url: "https://github.com/Extra-Chill/homeboy/pull/77".to_string(),
+            is_draft: true,
+        }),
+        ..Default::default()
+    };
+    let mut finalization = options();
+    finalization.draft_pr = false;
+    finalization.review_dossier.repro =
+        Some(crate::agent_task_review_dossier::AgentTaskReviewRepro::Verified);
+
+    let report = finalize_pr_with_backend(finalization, &mut backend).expect("finalized");
+
+    assert!(!backend.created);
+    assert!(backend.updated);
+    assert_eq!(report.status.as_str(), "draft_published");
+}
+
+#[test]
 fn reports_no_changes_without_commit_push_or_pr() {
     let mut backend = MockBackend::default();
 

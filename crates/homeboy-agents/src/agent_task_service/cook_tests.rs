@@ -13882,6 +13882,27 @@ fn cook_repro_that_fails_on_base_and_passes_on_candidate_is_verified() {
         );
         let body = repro_pr_body(&options, &promotion);
         assert!(body.contains("- repro: verified"), "{body}");
+        let finalization = cook_finalization_options(
+            &options,
+            &options.identity.initial_run_id,
+            &promotion,
+            Vec::new(),
+        )
+        .expect("verified finalization");
+        assert!(!finalization.draft_pr, "verified repro permits a ready PR");
+
+        let mut forced_draft = options.clone();
+        forced_draft.finalization.draft_pr = true;
+        assert!(
+            cook_finalization_options(
+                &forced_draft,
+                &options.identity.initial_run_id,
+                &promotion,
+                Vec::new(),
+            )
+            .expect("forced draft finalization")
+            .draft_pr
+        );
     });
 }
 
@@ -13904,6 +13925,11 @@ fn cook_without_repro_records_repro_none_in_review_evidence() {
 
         assert!(body.contains("- repro: none"), "{body}");
         assert!(body.contains("do not prove the issue"), "{body}");
+        assert!(
+            cook_finalization_options(&options, run_id, &promotion, Vec::new())
+                .expect("unproven finalization")
+                .draft_pr
+        );
     });
 }
 
