@@ -630,6 +630,21 @@ pub(super) fn run_gate_argv_local(
         }
         None => timeout,
     };
+    // Phase markers are read from the whole stdout stream, not the bounded
+    // tail the report retains (#17893).
+    let phase_collector = Arc::new(std::sync::Mutex::new(
+        super::phases::GatePhaseCollector::default(),
+    ));
+    let phase_observer: homeboy_engine_primitives::command::StreamChunkObserver = {
+        let phase_collector = Arc::clone(&phase_collector);
+        Arc::new(move |chunk: &[u8], is_stderr: bool| {
+            if !is_stderr {
+                if let Ok(mut collector) = phase_collector.lock() {
+                    collector.push(chunk);
+                }
+            }
+        })
+    };
     let (mut output, termination, progress_instrumented, cleanup_warning) = {
         let supervision = execution.supervision;
         if let Some(supervision) = supervision {
@@ -656,7 +671,7 @@ pub(super) fn run_gate_argv_local(
                 supervision
                     .map(|supervision| supervision.heartbeat_interval)
                     .unwrap_or(Duration::from_secs(5)),
-                None,
+                Some(phase_observer),
                 || supervision.is_some_and(|supervision| (supervision.is_cancelled)()),
                 |heartbeat| {
                     let Some(supervision) = supervision else {
@@ -812,6 +827,9 @@ pub(super) fn run_gate_argv_local(
     report.cargo_selection = cargo_selection;
     report.bench_compare = bench_compare;
     report.termination = termination;
+    if let Ok(mut collector) = phase_collector.lock() {
+        report.phases = std::mem::take(&mut *collector).finish();
+    }
     report.cleanup_warning = cleanup_warning;
     #[cfg(unix)]
     {

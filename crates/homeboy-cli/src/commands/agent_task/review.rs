@@ -4,24 +4,24 @@ use std::io::Write;
 use std::process::{Command, Stdio};
 
 use homeboy::agents::agent_task_builtin_backend::BUILTIN_DEFAULT_BACKEND;
-use homeboy::agents::agent_tasks::dispatch_service as agent_task_dispatch_service;
-use homeboy::agents::agent_tasks::finalization::{
+use homeboy::agents::agent_task_dispatch_service;
+use homeboy::agents::agent_task_finalization::{
     finalize_pr, AgentTaskGateResult, AgentTaskPrEvidence, AgentTaskPrFinalizationOptions,
     AgentTaskPrRuntimeGuardrails, AgentTaskPrSourceRelationship, AgentTaskPrVerification,
 };
-use homeboy::agents::agent_tasks::promotion::AgentTaskPromotionReport;
-use homeboy::agents::agent_tasks::provider::{
+use homeboy::agents::agent_task_promotion::AgentTaskPromotionReport;
+use homeboy::agents::agent_task_provider::{
     evaluate_provider_dispatchability, resolve_provider_for_backend, AgentTaskExecutorProvider,
     AgentTaskProviderCatalog, ProviderResolution, ProviderRuntimeReadinessCache,
 };
-use homeboy::agents::agent_tasks::review_dossier::{
+use homeboy::agents::agent_task_review_dossier::{
     resolve_review_profile, validate_issue_reference, AgentTaskExternalUsageEvidence,
     AgentTaskExternalUsageStatus, AgentTaskPublicContract, AgentTaskPublicContractEvidence,
     AgentTaskReviewAiAssistance, AgentTaskReviewDossier, AgentTaskReviewIssueRelationship,
     AgentTaskReviewIssueRelationshipKind, AgentTaskReviewOverride, AgentTaskReviewOverrideTarget,
     AgentTaskReviewTestStep, AiFilledReviewForm, AGENT_TASK_REVIEW_DOSSIER_SCHEMA,
 };
-use homeboy::agents::agent_tasks::service as agent_task_service;
+use homeboy::agents::agent_task_service;
 use homeboy::core::config;
 use homeboy::core::gate::HomeboyGateResult;
 use homeboy::core::Error;
@@ -426,7 +426,7 @@ pub(crate) fn finalize_pull_request(args: FinalizePrArgs) -> CmdResult<Value> {
     let preflight = args.preflight;
     let options = manual_finalization_options(args)?;
     let report = if preflight {
-        homeboy::agents::agent_tasks::finalization::preflight_pr(options)
+        homeboy::agents::agent_task_finalization::preflight_pr(options)
     } else {
         finalize_pr(options)
     }?;
@@ -639,8 +639,7 @@ fn validate_finalize_inputs(args: &FinalizePrArgs) -> homeboy::core::Result<()> 
 struct ManualVerification {
     commands: Vec<String>,
     candidate_tree: String,
-    dependency_hydration:
-        Vec<homeboy::agents::agent_tasks::finalization::AgentTaskGateSetupEvidence>,
+    dependency_hydration: Vec<homeboy::agents::agent_task_finalization::AgentTaskGateSetupEvidence>,
 }
 
 fn execute_manual_verification(
@@ -695,7 +694,7 @@ fn execute_manual_verification(
     }
     let verification = (|| {
         let setup =
-            homeboy::agents::agent_tasks::finalization::hydrate_manual_verification_dependencies(
+            homeboy::agents::agent_task_finalization::hydrate_manual_verification_dependencies(
                 checkout.path(),
                 commands,
             )?;
@@ -712,7 +711,7 @@ fn execute_manual_verification(
         let mut evidence = Vec::new();
         for command in commands {
             let command = command.trim();
-            let argv = homeboy::agents::agent_tasks::gate::legacy_gate_argv(command);
+            let argv = homeboy::agents::agent_task_gate::legacy_gate_argv(command);
             let mut child = Command::new("sh")
                 .args(&argv[1..])
                 .current_dir(&checkout_path)
@@ -738,7 +737,7 @@ fn execute_manual_verification(
             })?;
             let candidate_unchanged = !manual_checkout_has_tracked_changes(&checkout_path)?;
             evidence.push(serde_json::json!({
-                "command": homeboy::agents::agent_tasks::gate::legacy_gate_argv(&homeboy::core::redaction::redact_string(command)),
+                "command": homeboy::agents::agent_task_gate::legacy_gate_argv(&homeboy::core::redaction::redact_string(command)),
                 "exit_code": output.status.code().unwrap_or(1),
                 "stdout": bounded_manual_gate_output(&output.stdout),
                 "stderr": bounded_manual_gate_output(&output.stderr),
@@ -1399,7 +1398,7 @@ fn providers_with_catalog(
             // displayed entries. Requiring `--full` for identities made a ready
             // catalog look empty even while it listed selectable executors.
             "provider_identity_catalog": provider_identity_catalog(&shown_providers),
-            "capability_contract": homeboy::agents::agent_tasks::provider::provider_capability_contract(),
+            "capability_contract": homeboy::agents::agent_task_provider::provider_capability_contract(),
             "providers": if args.full { serde_json::to_value(shown_providers.clone()).unwrap_or(Value::Null) } else { Value::Array(shown_providers.iter().map(|provider| compact_provider(provider, &provider_dispatchability(&catalog, provider, &route, &dispatchability, &provider_config, args.validate_readiness))).collect()) },
             "dispatchability": serde_json::to_value(&dispatchability).unwrap_or(Value::Null),
             "readiness_validation": readiness_validation_projection(
@@ -1411,7 +1410,7 @@ fn providers_with_catalog(
                 declared_backends,
             ),
             // Task secret names are explicit, not provider declarations.
-            "secret_env": homeboy::agents::agent_tasks::secrets::secret_env_status(&args.secret_env),
+            "secret_env": homeboy::agents::agent_task_secrets::secret_env_status(&args.secret_env),
         }),
         0,
     ))
@@ -1422,7 +1421,7 @@ fn providers_with_catalog(
 /// Availability follows the dispatchability verdict, including live readiness.
 fn provider_status(
     provider: &AgentTaskExecutorProvider,
-    dispatchability: &homeboy::agents::agent_tasks::provider::AgentTaskProviderDispatchability,
+    dispatchability: &homeboy::agents::agent_task_provider::AgentTaskProviderDispatchability,
 ) -> &'static str {
     if !dispatchability.ready {
         return match dispatchability.state {
@@ -1447,7 +1446,7 @@ fn provider_status(
 
 fn provider_matches_status(
     provider: &AgentTaskExecutorProvider,
-    dispatchability: &homeboy::agents::agent_tasks::provider::AgentTaskProviderDispatchability,
+    dispatchability: &homeboy::agents::agent_task_provider::AgentTaskProviderDispatchability,
     status: &str,
 ) -> bool {
     if status.eq_ignore_ascii_case("unavailable") {
@@ -1458,7 +1457,7 @@ fn provider_matches_status(
 
 fn compact_provider(
     provider: &AgentTaskExecutorProvider,
-    dispatchability: &homeboy::agents::agent_tasks::provider::AgentTaskProviderDispatchability,
+    dispatchability: &homeboy::agents::agent_task_provider::AgentTaskProviderDispatchability,
 ) -> Value {
     let compact_check = |ready: bool, reason: Option<&str>| {
         serde_json::json!({
@@ -1583,7 +1582,7 @@ impl ProviderRoute {
 fn provider_next_command(
     route: Option<&ProviderRoute>,
     _dispatchability: Option<
-        &homeboy::agents::agent_tasks::provider::AgentTaskProviderDispatchability,
+        &homeboy::agents::agent_task_provider::AgentTaskProviderDispatchability,
     >,
 ) -> Option<String> {
     Some(route?.next_command())
@@ -1601,7 +1600,7 @@ struct ProviderReadinessNextAction {
 fn provider_readiness_next_action(
     route: Option<&ProviderRoute>,
     dispatchability: Option<
-        &homeboy::agents::agent_tasks::provider::AgentTaskProviderDispatchability,
+        &homeboy::agents::agent_task_provider::AgentTaskProviderDispatchability,
     >,
 ) -> ProviderReadinessNextAction {
     let command = provider_next_command(route, dispatchability);
@@ -1648,7 +1647,7 @@ fn resolved_provider_dispatchability(
     provider_config: &Value,
     probe_runtime: bool,
     cache: &mut ProviderRuntimeReadinessCache,
-) -> Option<homeboy::agents::agent_tasks::provider::AgentTaskProviderDispatchability> {
+) -> Option<homeboy::agents::agent_task_provider::AgentTaskProviderDispatchability> {
     let ProviderRoute::Resolved {
         backend,
         provider_id,
@@ -1680,10 +1679,10 @@ fn provider_dispatchability(
     catalog: &AgentTaskProviderCatalog,
     provider: &AgentTaskExecutorProvider,
     route: &Option<ProviderRoute>,
-    resolved_dispatchability: &homeboy::agents::agent_tasks::provider::AgentTaskProviderDispatchability,
+    resolved_dispatchability: &homeboy::agents::agent_task_provider::AgentTaskProviderDispatchability,
     provider_config: &Value,
     probe_runtime: bool,
-) -> homeboy::agents::agent_tasks::provider::AgentTaskProviderDispatchability {
+) -> homeboy::agents::agent_task_provider::AgentTaskProviderDispatchability {
     if matches!(
         route,
         Some(ProviderRoute::Resolved { provider_id, .. }) if provider.id == *provider_id
@@ -1832,7 +1831,7 @@ fn provider_report_state(
     route: Option<&ProviderRoute>,
     providers: &[AgentTaskExecutorProvider],
     dispatchability: Option<
-        &homeboy::agents::agent_tasks::provider::AgentTaskProviderDispatchability,
+        &homeboy::agents::agent_task_provider::AgentTaskProviderDispatchability,
     >,
 ) -> &'static str {
     // These routes identify the next operator decision. An empty backend passed
@@ -1852,7 +1851,7 @@ fn provider_report_state(
 fn validate_effective_provider_route(
     route: Option<&ProviderRoute>,
     dispatchability: Option<
-        &homeboy::agents::agent_tasks::provider::AgentTaskProviderDispatchability,
+        &homeboy::agents::agent_task_provider::AgentTaskProviderDispatchability,
     >,
 ) -> homeboy::core::Result<Option<(String, String)>> {
     let Some(route) = route else {
@@ -1994,7 +1993,7 @@ fn declared_backend_readiness(
 
 fn live_dispatch_readiness(
     dispatchability: Option<
-        &homeboy::agents::agent_tasks::provider::AgentTaskProviderDispatchability,
+        &homeboy::agents::agent_task_provider::AgentTaskProviderDispatchability,
     >,
 ) -> &'static str {
     dispatchability
@@ -2007,7 +2006,7 @@ fn readiness_validation_projection(
     _provider: Option<&AgentTaskExecutorProvider>,
     route: Option<&ProviderRoute>,
     dispatchability: Option<
-        &homeboy::agents::agent_tasks::provider::AgentTaskProviderDispatchability,
+        &homeboy::agents::agent_task_provider::AgentTaskProviderDispatchability,
     >,
     validation_requested: bool,
     declared_backends: Option<Vec<Value>>,
@@ -2287,11 +2286,11 @@ mod tests {
 
     use super::*;
     use crate::commands::agent_task::fake_pi_test::FakePi;
-    use homeboy::agents::agent_tasks::provider::evaluate_provider_dispatchability;
+    use homeboy::agents::agent_task_provider::evaluate_provider_dispatchability;
 
     use crate::commands::agent_task_summary::{render_agent_task_summary, AgentTaskSummaryKind};
     use clap::Parser;
-    use homeboy::agents::agent_tasks::lifecycle as agent_task_lifecycle;
+    use homeboy::agents::agent_task_lifecycle;
     use std::process::Command;
 
     #[test]

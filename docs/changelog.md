@@ -4,6 +4,17 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.494.5] - 2026-11-23
+
+### Fixed
+- map cancelled runs to skipped in one place and reproject Cook-owned roots on attempt writes
+- re-run a rate-limited provider once on the same route before it settles the task
+
+## [0.494.4] - 2026-11-23
+
+### Fixed
+- Rework Cooks: snapshot the PR spec (incl. new comments), account delivered vs not-delivered, and never flip a draft to ready
+
 ## [0.494.3] - 2026-11-23
 
 ### Changed

@@ -629,7 +629,7 @@ fn durable_placement_identity_survives_workspace_exception_retry_continuation_an
             Some(&workspace),
         )
         .expect("initial placement decision");
-        let template = homeboy::agents::agent_tasks::scheduler::AgentTaskPlan::new(
+        let template = homeboy::agents::agent_task_schedule::AgentTaskPlan::new(
             "placement-e2e",
             vec![serde_json::from_value(serde_json::json!({
                 "task_id": "provider-task",
@@ -837,7 +837,7 @@ fn lab_cook_child_invocation_consumes_controller_runner_placement() {
 fn cook_dispatch_stages_runner_identity_without_starting_handoff_lease() {
     crate::test_support::with_isolated_home(|_| {
         let materialized_workspace = tempfile::tempdir().expect("materialized workspace");
-        let plan = homeboy::agents::agent_tasks::scheduler::AgentTaskPlan::new(
+        let plan = homeboy::agents::agent_task_schedule::AgentTaskPlan::new(
             "cook-preacceptance-order",
             vec![serde_json::from_value(serde_json::json!({
                 "task_id": "task",
@@ -1726,7 +1726,7 @@ fn cook_lab_source_uses_the_recorded_execution_worktree_not_controller_context()
             Some(serde_json::json!({"workspace_snapshot_identity": "snapshot:parent"})),
         );
         let execution_workspace = tempfile::tempdir().expect("managed execution workspace");
-        let mut plan = homeboy::agents::agent_tasks::scheduler::AgentTaskPlan::new(
+        let mut plan = homeboy::agents::agent_task_schedule::AgentTaskPlan::new(
             "cook-derived-baseline",
             vec![serde_json::from_value(serde_json::json!({
                 "task_id": "task",
@@ -1777,7 +1777,7 @@ fn cook_lab_source_uses_the_recorded_execution_worktree_not_controller_context()
 
 #[test]
 fn lab_cook_attempt_attaches_baseline_to_bound_task_not_source_task() {
-    let mut plan = homeboy::agents::agent_tasks::scheduler::AgentTaskPlan::new(
+    let mut plan = homeboy::agents::agent_task_schedule::AgentTaskPlan::new(
         "cook-dirty-baseline",
         vec![serde_json::from_value(serde_json::json!({
             "task_id": "task",
@@ -1810,7 +1810,7 @@ fn lab_cook_attempt_attaches_baseline_to_bound_task_not_source_task() {
 #[test]
 fn recovered_retry_carries_its_task_bound_cook_baseline_to_lab() {
     let plan = |bound: &str| {
-        homeboy::agents::agent_tasks::scheduler::AgentTaskPlan::new(
+        homeboy::agents::agent_task_schedule::AgentTaskPlan::new(
             "retry",
             vec![serde_json::from_value(serde_json::json!({
                 "task_id": "cook-gate-fix-2",
@@ -1842,7 +1842,7 @@ fn lab_run_retry_leaves_a_cook_child_for_controller_lifecycle() {
         git_init(workspace.path());
         let run_id = "cook-lab-retry-attempt-1";
         let cook_id = "cook-lab-retry";
-        let plan = homeboy::agents::agent_tasks::scheduler::AgentTaskPlan::new(
+        let plan = homeboy::agents::agent_task_schedule::AgentTaskPlan::new(
             run_id,
             vec![serde_json::from_value(serde_json::json!({
                 "task_id": "cook-lab-retry-task",
@@ -1933,7 +1933,7 @@ fn recovered_terminal_work_waits_for_an_existing_claim_instead_of_reporting_comp
         git_init(workspace.path());
         let cook_id = "cook-shared-terminal-claim";
         let run_id = "cook-shared-terminal-claim-attempt-1";
-        let plan = homeboy::agents::agent_tasks::scheduler::AgentTaskPlan::new(
+        let plan = homeboy::agents::agent_task_schedule::AgentTaskPlan::new(
             run_id,
             vec![serde_json::from_value(serde_json::json!({
                 "task_id": "provider",
@@ -2266,7 +2266,7 @@ fn detached_retry_materializes_failed_plan_and_persists_bounded_preacceptance_fa
     crate::test_support::with_isolated_home(|_| {
         let workspace = tempfile::tempdir().expect("workspace");
         git_init(workspace.path());
-        let source_plan = homeboy::agents::agent_tasks::scheduler::AgentTaskPlan::new(
+        let source_plan = homeboy::agents::agent_task_schedule::AgentTaskPlan::new(
             "failed-retry-source",
             vec![serde_json::from_value(serde_json::json!({
                 "task_id": "retry-task",
@@ -2363,7 +2363,7 @@ fn detached_retry_materializes_failed_plan_and_persists_bounded_preacceptance_fa
             remote.record_run_id.as_deref(),
             Some(handoff.run_id.as_str())
         );
-        let remote_plan: homeboy::agents::agent_tasks::scheduler::AgentTaskPlan =
+        let remote_plan: homeboy::agents::agent_task_schedule::AgentTaskPlan =
             serde_json::from_str(&remote.plan).expect("serialized retry plan");
         assert_eq!(remote_plan, handoff.plan);
         assert_eq!(
@@ -2445,7 +2445,7 @@ fn detached_retry_materializes_failed_plan_and_persists_bounded_preacceptance_fa
 fn controller_owned_run_materializes_plan_for_lab_execution() {
     crate::test_support::with_isolated_home(|_| {
         let workspace = tempfile::tempdir().expect("workspace");
-        let plan = homeboy::agents::agent_tasks::scheduler::AgentTaskPlan::new(
+        let plan = homeboy::agents::agent_task_schedule::AgentTaskPlan::new(
             "queued-controller-run",
             vec![serde_json::from_value(serde_json::json!({
                 "task_id": "task",
@@ -2497,7 +2497,7 @@ fn controller_owned_run_materializes_plan_for_lab_execution() {
         assert_eq!(remote.record_run_id.as_deref(), Some("controller-queued"));
         assert_eq!(remote.timeout_ms, Some(1200));
         assert_eq!(
-            serde_json::from_str::<homeboy::agents::agent_tasks::scheduler::AgentTaskPlan>(
+            serde_json::from_str::<homeboy::agents::agent_task_schedule::AgentTaskPlan>(
                 &remote.plan
             )
             .expect("serialized plan"),
@@ -2513,7 +2513,7 @@ fn controller_owned_run_materializes_plan_for_lab_execution() {
 #[test]
 fn controller_owned_run_refuses_to_handoff_a_plan_without_a_workspace() {
     crate::test_support::with_isolated_home(|_| {
-        let plan = homeboy::agents::agent_tasks::scheduler::AgentTaskPlan::new(
+        let plan = homeboy::agents::agent_task_schedule::AgentTaskPlan::new(
             "queued-controller-run-without-workspace",
             vec![serde_json::from_value(serde_json::json!({
                 "task_id": "task",
@@ -2644,7 +2644,7 @@ fn unmaterialized_cook_run_stays_controller_local_before_lab_workspace_selection
 fn controller_owned_run_refuses_an_ambiguous_plan_workspace() {
     let first = tempfile::tempdir().expect("first workspace");
     let second = tempfile::tempdir().expect("second workspace");
-    let plan = homeboy::agents::agent_tasks::scheduler::AgentTaskPlan::new(
+    let plan = homeboy::agents::agent_task_schedule::AgentTaskPlan::new(
         "ambiguous-controller-run",
         vec![
             serde_json::from_value(serde_json::json!({
@@ -2893,7 +2893,7 @@ fn retry_handoff_refuses_multiple_task_workspaces() {
             }))
             .expect("task")
         };
-        let plan = homeboy::agents::agent_tasks::scheduler::AgentTaskPlan::new(
+        let plan = homeboy::agents::agent_task_schedule::AgentTaskPlan::new(
             "multiple-workspaces",
             vec![task("first", first.path()), task("second", second.path())],
         );
@@ -2932,7 +2932,7 @@ fn retry_handoff_restores_distinct_cook_candidate_source_after_baseline_cleanup(
         std::fs::create_dir(&baseline).expect("create temporary baseline");
         std::fs::remove_dir(&baseline).expect("clean temporary baseline");
 
-        let plan = homeboy::agents::agent_tasks::scheduler::AgentTaskPlan::new(
+        let plan = homeboy::agents::agent_task_schedule::AgentTaskPlan::new(
             "cook-distinct-source",
             vec![serde_json::from_value(serde_json::json!({
                 "task_id": "retry-task",
@@ -3029,7 +3029,7 @@ fn retry_prefers_managed_worktree_over_cleaned_up_ephemeral_baseline() {
 
         // The persisted task still carries both the dead ephemeral root and the
         // durable managed worktree handle (its slug).
-        let task: homeboy::agents::agent_tasks::AgentTaskRequest =
+        let task: homeboy::agents::agent_task::AgentTaskRequest =
             serde_json::from_value(serde_json::json!({
                 "task_id": "cook-task",
                 "executor": { "backend": "fixture" },
@@ -3037,7 +3037,7 @@ fn retry_prefers_managed_worktree_over_cleaned_up_ephemeral_baseline() {
                 "workspace": { "root": ephemeral_root, "slug": "fixture@cook" }
             }))
             .expect("task");
-        let plan = homeboy::agents::agent_tasks::scheduler::AgentTaskPlan::new(
+        let plan = homeboy::agents::agent_task_schedule::AgentTaskPlan::new(
             "cleaned-up-baseline",
             vec![task],
         );
@@ -3070,7 +3070,7 @@ fn retry_reports_recoverable_state_when_the_managed_worktree_is_gone() {
         drop(managed);
         assert!(!managed_path.exists());
 
-        let task: homeboy::agents::agent_tasks::AgentTaskRequest =
+        let task: homeboy::agents::agent_task::AgentTaskRequest =
             serde_json::from_value(serde_json::json!({
                 "task_id": "cook-task",
                 "executor": { "backend": "fixture" },
@@ -3078,7 +3078,7 @@ fn retry_reports_recoverable_state_when_the_managed_worktree_is_gone() {
                 "workspace": { "slug": "fixture@gone" }
             }))
             .expect("task");
-        let plan = homeboy::agents::agent_tasks::scheduler::AgentTaskPlan::new(
+        let plan = homeboy::agents::agent_task_schedule::AgentTaskPlan::new(
             "missing-worktree",
             vec![task],
         );
@@ -3096,7 +3096,7 @@ fn retry_reports_recoverable_state_when_the_managed_worktree_is_gone() {
 #[test]
 fn retry_handoff_identifies_an_original_plan_without_a_workspace() {
     crate::test_support::with_isolated_home(|_| {
-        let plan = homeboy::agents::agent_tasks::scheduler::AgentTaskPlan::new(
+        let plan = homeboy::agents::agent_task_schedule::AgentTaskPlan::new(
             "missing-workspace",
             vec![serde_json::from_value(serde_json::json!({
                 "task_id": "retry-task",

@@ -2,7 +2,7 @@
 
 use serde_json::{json, Value};
 
-use homeboy::agents::agent_tasks::provider::{
+use homeboy::agents::agent_task_provider::{
     resolve_provider_for_backend, ExtensionProviderAgentTaskExecutor, ProviderResolution,
 };
 
@@ -58,11 +58,11 @@ struct ProviderStage {
 fn provider_stage(args: &AgentTaskDoctorArgs) -> ProviderStage {
     let executor = ExtensionProviderAgentTaskExecutor::discover();
     let providers = executor.providers();
-    let secret_env = homeboy::agents::agent_tasks::secrets::secret_env_status(&args.secret_env);
+    let secret_env = homeboy::agents::agent_task_secrets::secret_env_status(&args.secret_env);
 
     // Resolve the backend the cook would use: explicit --backend, else the
     // extension/policy-declared default. Selector is operator-supplied only.
-    let default_backend = homeboy::agents::agent_tasks::provider::default_backend();
+    let default_backend = homeboy::agents::agent_task_provider::default_backend();
     let selected_backend = args.backend.clone().or_else(|| default_backend.clone());
 
     let (provider_ready, blocker, mapping_value) = match selected_backend.as_deref() {
@@ -131,7 +131,7 @@ fn provider_stage(args: &AgentTaskDoctorArgs) -> ProviderStage {
     let value = json!({
         "schema": "homeboy/agent-task-providers/v1",
         "ready": provider_ready,
-        "capability_contract": homeboy::agents::agent_tasks::provider::provider_capability_contract(),
+        "capability_contract": homeboy::agents::agent_task_provider::provider_capability_contract(),
         "providers": providers,
         "backend_mapping": mapping_value,
         "secret_env": secret_env,

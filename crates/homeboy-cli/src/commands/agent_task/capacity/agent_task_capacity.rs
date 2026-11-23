@@ -2,7 +2,7 @@
 use super::*;
 use crate::commands::agent_task::fake_pi_test::FakePi;
 use crate::commands::agent_task_summary::{render_agent_task_summary, AgentTaskSummaryKind};
-use homeboy::agents::agent_tasks::provider::AgentTaskExecutorProvider;
+use homeboy::agents::agent_task_provider::AgentTaskExecutorProvider;
 use serde_json::json;
 
 fn capacity_args() -> AgentTaskCapacityArgs {

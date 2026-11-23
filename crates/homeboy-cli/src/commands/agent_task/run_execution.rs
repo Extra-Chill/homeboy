@@ -152,10 +152,9 @@ fn validate_cook_request(
     // unrelated prompt, evidence, and gate inputs so Cook reports the blocker
     // an operator must fix first.
     let mut dispatch = dispatch_args_for_cook(args);
-    let request = dispatch_service::resolve_dispatch_request(dispatch_command_for_cook(
-        args,
-        dispatch.clone(),
-    ))?;
+    let request = agent_task_dispatch_service::resolve_dispatch_request(
+        dispatch_command_for_cook(args, dispatch.clone()),
+    )?;
     if args.goal.is_some() && !args.dispatch.tasks.is_empty() {
         return Err(homeboy::core::Error::validation_invalid_argument(
             "task",
@@ -180,7 +179,7 @@ fn validate_cook_request(
         resolve_dispatch_prompt(&mut dispatch)?;
     }
     validate_provider_evidence_inputs(&args.provider_evidence_inputs, dispatch.prompt.as_deref())?;
-    dispatch_service::validate_single_cook_prompt_source(
+    agent_task_dispatch_plan::validate_single_cook_prompt_source(
         dispatch.prompt.as_deref(),
         &dispatch.tasks,
         dispatch.core.tasks_json.as_deref(),
@@ -208,7 +207,7 @@ fn validate_cook_request(
         if args.dispatch.model.is_some() && args.dispatch.acknowledge_model_override {
             0
         } else {
-            dispatch_service::controller_resolved_execution_policy(&request)
+            agent_task_dispatch_service::controller_resolved_execution_policy(&request)
                 .rotation
                 .as_ref()
                 .map(|rotation| {
@@ -400,10 +399,10 @@ pub(crate) fn require_model_override_acknowledgement_for_cook(
     if args.dispatch.acknowledge_model_override {
         return Ok(());
     }
-    let dispatch: dispatch_service::AgentTaskDispatchCommand =
+    let dispatch: agent_task_dispatch_service::AgentTaskDispatchCommand =
         resolved_dispatch_args_for_cook(args)?.into();
-    let request = dispatch_service::resolve_dispatch_request(dispatch)?;
-    dispatch_service::require_model_override_acknowledgement(&request)
+    let request = agent_task_dispatch_service::resolve_dispatch_request(dispatch)?;
+    agent_task_dispatch_service::require_model_override_acknowledgement(&request)
 }
 
 pub(super) fn confirm_model_override(args: &mut AgentTaskCookArgs) -> homeboy::core::Result<()> {
@@ -729,7 +728,7 @@ pub(super) fn run_preflight_cook_execution(
         if !args.repro.is_declared() {
             eprintln!(
                 "cook: warning: {}",
-                homeboy::agents::agent_tasks::gate::NO_REPRO_GATE_WARNING
+                homeboy::agents::agent_task_gate::NO_REPRO_GATE_WARNING
             );
         }
     }
@@ -745,7 +744,7 @@ pub(super) fn run_preflight_cook_execution(
                 None,
             ));
         }
-        initial_plan.metadata[agent_task_service_direct::COOK_ADMISSION_KEY_METADATA] =
+        initial_plan.metadata[agent_task_service::COOK_ADMISSION_KEY_METADATA] =
             Value::String(key.clone());
     }
     // Admission itself reads the exported HOMEBOY_LAB_PRIORITY step environment.
@@ -1316,9 +1315,10 @@ pub(crate) fn compile_cook_plan(
         &evidence,
         &projected_paths,
     )?;
-    let mut request =
-        dispatch_service::resolve_dispatch_request(dispatch_command_for_cook(args, dispatch))?;
-    let mut plan = match dispatch_service::build_controller_dispatch_plan(&mut request) {
+    let mut request = agent_task_dispatch_service::resolve_dispatch_request(
+        dispatch_command_for_cook(args, dispatch),
+    )?;
+    let mut plan = match agent_task_dispatch_service::build_controller_dispatch_plan(&mut request) {
         Ok(plan) => plan,
         // A managed promotion handle may be intentionally unavailable until
         // after provider execution. Keep the compiled task durable and let
@@ -1330,7 +1330,7 @@ pub(crate) fn compile_cook_plan(
                 ) =>
         {
             request.workspace = None;
-            dispatch_service::build_controller_dispatch_plan(&mut request)?
+            agent_task_dispatch_service::build_controller_dispatch_plan(&mut request)?
         }
         Err(error) => return Err(error),
     };
@@ -1340,7 +1340,7 @@ pub(crate) fn compile_cook_plan(
         plan.metadata["cook_repository_identity"] = identity.clone();
     }
     if let Some(workspace) = requested_workspace.as_deref() {
-        agent_task_service_direct::bind_materialized_cook_component_workspace(
+        agent_task_service::bind_materialized_cook_component_workspace(
             &mut plan,
             Path::new(workspace),
             args.component.as_deref(),
@@ -1403,9 +1403,9 @@ pub(crate) fn compile_cook_plan(
 /// recorded on the task. Compile and preview share the process-local readiness
 /// cache, so preview reuses compile's probes instead of re-running them.
 pub(super) fn validate_cook_provider_execution_plan(
-    plan: &homeboy::agents::agent_tasks::AgentTaskPlan,
+    plan: &homeboy::agents::agent_task_schedule::AgentTaskPlan,
     catalog: &homeboy::agents::agent_task_provider::AgentTaskProviderCatalog,
-) -> homeboy::core::Result<homeboy::agents::agent_tasks::AgentTaskPlan> {
+) -> homeboy::core::Result<homeboy::agents::agent_task_schedule::AgentTaskPlan> {
     let mut readiness_cache =
         homeboy::agents::agent_task_provider::ProviderRuntimeReadinessCache::process_local();
     // A Lab-placed Cook proves provider readiness on the runner with the

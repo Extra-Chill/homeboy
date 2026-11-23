@@ -157,7 +157,7 @@ fn state_label(state: ControlPlaneState) -> String {
 /// A deterministic gate rejected the candidate: the gate status the promotion
 /// recorded is the gate contract's own `Failed`, not a re-derived string list.
 fn gate_failed(state: &str) -> bool {
-    use homeboy::agents::agent_tasks::gate::AgentTaskGateStatus;
+    use homeboy::agents::agent_task_gate::AgentTaskGateStatus;
     serde_json::from_value::<AgentTaskGateStatus>(Value::String(state.to_string()))
         .is_ok_and(|status| status == AgentTaskGateStatus::Failed)
 }

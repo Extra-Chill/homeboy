@@ -478,7 +478,7 @@ pub(crate) fn exec_lab_context(
         };
         let process_env = |name: &str| std::env::var(name).ok();
         for (name, value) in runner_job_claim_env(
-            &homeboy_agents::agent_tasks::gate::lab_admission_owner(run_id),
+            &homeboy_agents::agent_task_gate::lab_admission_owner(run_id),
             LabPriority::from_env_value(process_env(LAB_PRIORITY_ENV).as_deref()),
             declared_budget(process_env(LAB_BUDGET_ENV).as_deref()).map(|budget| budget.as_secs()),
             None,

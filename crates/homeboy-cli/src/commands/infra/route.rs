@@ -1,5 +1,5 @@
 use clap::Parser;
-use homeboy::agents::agent_tasks::lifecycle as agent_task_lifecycle;
+use homeboy::agents::agent_task_lifecycle;
 use homeboy::cli_surface::{Cli, Commands};
 use homeboy::core::command_execution_plan::CommandSourceMaterialization;
 use homeboy::core::component::{self, TargetSpec};
@@ -3222,7 +3222,7 @@ fn run_split_placement_cook_with_runtime(
             *controller,
             crate::commands::agent_task::run::CookEntryContext {
                 executor: executor_override.unwrap_or_else(|| std::sync::Arc::new(
-                    homeboy::agents::agent_tasks::provider::ExtensionProviderAgentTaskExecutor::discover(),
+                    homeboy::agents::agent_task_provider::ExtensionProviderAgentTaskExecutor::discover(),
                 )),
                 attempt_dispatcher: Some(dispatcher),
                 progress: Some(&progress),
@@ -3382,7 +3382,7 @@ impl crate::agents::agent_task_service::AgentTaskCookAttemptDispatcher
 
     fn dispatch_attempt(
         &self,
-        mut plan: homeboy::agents::agent_tasks::scheduler::AgentTaskPlan,
+        mut plan: homeboy::agents::agent_task_schedule::AgentTaskPlan,
         run_id: &str,
         derived_cook_baseline: Option<&DerivedCookBaselineCapability>,
     ) -> homeboy::core::Result<()> {
@@ -3649,7 +3649,7 @@ fn finalize_replacement_attempt(
 }
 
 fn resolve_cook_attempt_placement_decision(
-    plan: &mut homeboy::agents::agent_tasks::scheduler::AgentTaskPlan,
+    plan: &mut homeboy::agents::agent_task_schedule::AgentTaskPlan,
     run_id: &str,
     initial: &homeboy_lab_contract::ExecutionPlacementDecision,
     runner_id: &str,
@@ -3718,7 +3718,7 @@ fn stage_controller_lab_handoff_before_preacceptance(
     run_id: &str,
     runner_id: &str,
     remote_command: &[String],
-    plan: &homeboy::agents::agent_tasks::scheduler::AgentTaskPlan,
+    plan: &homeboy::agents::agent_task_schedule::AgentTaskPlan,
 ) -> homeboy::core::Result<()> {
     agent_task_lifecycle::record_lab_offload_planned(agent_task_lifecycle::LabOffloadProxyPlan {
         run_id,
@@ -3751,7 +3751,7 @@ fn stage_retry_lab_handoff_before_preacceptance(
 /// already bound to its task. Carry that evidence across the Lab boundary like
 /// the original Cook attempt does, so the runner admits the synced baseline.
 fn retry_verified_cook_baseline(
-    plan: &homeboy::agents::agent_tasks::scheduler::AgentTaskPlan,
+    plan: &homeboy::agents::agent_task_schedule::AgentTaskPlan,
 ) -> Option<&serde_json::Value> {
     plan.tasks.iter().find_map(|task| {
         let baseline = task.metadata.get("verified_cook_baseline")?;
@@ -3760,7 +3760,7 @@ fn retry_verified_cook_baseline(
 }
 
 fn attach_verified_cook_baseline(
-    plan: &mut homeboy::agents::agent_tasks::scheduler::AgentTaskPlan,
+    plan: &mut homeboy::agents::agent_task_schedule::AgentTaskPlan,
     baseline: &serde_json::Value,
 ) {
     let Some(bound_task_id) = baseline
@@ -3799,7 +3799,7 @@ fn lab_cook_attempt_args(serialized_plan: String, run_id: &str) -> Vec<String> {
 /// runner to rebuild it from command-line inputs after the durable handoff.
 fn inject_agent_task_cook_attempt_plan(
     args: &[String],
-    plan: Option<&homeboy::agents::agent_tasks::scheduler::AgentTaskPlan>,
+    plan: Option<&homeboy::agents::agent_task_schedule::AgentTaskPlan>,
 ) -> homeboy::core::Result<Vec<String>> {
     let Some(plan) = plan else {
         return Ok(args.to_vec());
@@ -3834,7 +3834,7 @@ fn inject_agent_task_cook_attempt_plan(
 fn materialize_agent_task_cook_plan(
     cli: &Cli,
     provenance: Option<&crate::cli_surface::CommandArgumentProvenance>,
-) -> homeboy::core::Result<Option<homeboy::agents::agent_tasks::scheduler::AgentTaskPlan>> {
+) -> homeboy::core::Result<Option<homeboy::agents::agent_task_schedule::AgentTaskPlan>> {
     let Commands::AgentTask(crate::commands::agent_task::AgentTaskArgs {
         command: crate::commands::agent_task::AgentTaskCommand::Cook(cook),
     }) = &cli.command
@@ -4033,7 +4033,7 @@ fn portable_route_args(args: &[String]) -> Vec<String> {
 
 struct GenericDetachedLabHandoff {
     run_id: String,
-    plan: homeboy::agents::agent_tasks::scheduler::AgentTaskPlan,
+    plan: homeboy::agents::agent_task_schedule::AgentTaskPlan,
 }
 
 const GENERIC_LAB_COMMAND_REPLAY_SCHEMA: &str = "homeboy/generic-lab-command-replay/v1";
@@ -4151,7 +4151,7 @@ fn materialize_generic_detached_lab_handoff(
             "revision": revision,
         },
     });
-    let mut plan = homeboy::agents::agent_tasks::scheduler::AgentTaskPlan::new(
+    let mut plan = homeboy::agents::agent_task_schedule::AgentTaskPlan::new(
         format!("lab-offload-{run_id}"),
         Vec::new(),
     );
@@ -4265,14 +4265,14 @@ fn lab_route_dispatch_timeout(command: &Commands) -> Option<std::time::Duration>
 struct AgentTaskRetryHandoff {
     args: Vec<String>,
     run_id: String,
-    plan: homeboy::agents::agent_tasks::scheduler::AgentTaskPlan,
+    plan: homeboy::agents::agent_task_schedule::AgentTaskPlan,
     primary_workspace: PathBuf,
     replays_generic_command: bool,
     expected_source_snapshot_identity: Option<String>,
 }
 
 fn generic_lab_command_replay(
-    plan: &homeboy::agents::agent_tasks::scheduler::AgentTaskPlan,
+    plan: &homeboy::agents::agent_task_schedule::AgentTaskPlan,
 ) -> homeboy::core::Result<Option<GenericLabCommandReplay>> {
     let Some(value) = plan.metadata.get("generic_lab_command_replay") else {
         return Ok(None);
@@ -4304,7 +4304,7 @@ fn generic_lab_command_replay(
 #[derive(Debug)]
 struct AgentTaskRunHandoff {
     args: Vec<String>,
-    plan: homeboy::agents::agent_tasks::scheduler::AgentTaskPlan,
+    plan: homeboy::agents::agent_task_schedule::AgentTaskPlan,
     primary_workspace: PathBuf,
 }
 
@@ -4373,9 +4373,7 @@ fn materialize_agent_task_run_handoff(
 /// order: `workspace.root`, then `executor.config.workspace_root`, then
 /// `metadata.workspace.root`. Both the run and retry handoff paths resolve the
 /// primary checkout from this one chain so they never drift apart.
-fn task_declared_source_root(
-    task: &homeboy::agents::agent_tasks::AgentTaskRequest,
-) -> Option<&str> {
+fn task_declared_source_root(task: &homeboy::agents::agent_task::AgentTaskRequest) -> Option<&str> {
     task.workspace
         .root
         .as_deref()
@@ -4395,7 +4393,7 @@ fn task_declared_source_root(
 }
 
 fn plan_primary_workspace(
-    plan: &homeboy::agents::agent_tasks::scheduler::AgentTaskPlan,
+    plan: &homeboy::agents::agent_task_schedule::AgentTaskPlan,
 ) -> homeboy::core::Result<PathBuf> {
     let mut roots = BTreeSet::new();
     for task in &plan.tasks {
@@ -4512,7 +4510,7 @@ fn retry_handoff_for_reserved_plan(
 }
 
 pub(crate) fn validate_generic_lab_command_replay_workspace(
-    plan: &homeboy::agents::agent_tasks::scheduler::AgentTaskPlan,
+    plan: &homeboy::agents::agent_task_schedule::AgentTaskPlan,
 ) -> homeboy::core::Result<()> {
     let Some(replay) = generic_lab_command_replay(plan)? else {
         return Ok(());
@@ -4559,7 +4557,7 @@ fn retry_handoff_prefix(args: &[String]) -> Vec<String> {
 /// what keeps a cleaned-up ephemeral initial-baseline directory from being
 /// mistaken for the canonical continuation workspace (#9195).
 fn retry_task_managed_worktree(
-    task: &homeboy::agents::agent_tasks::AgentTaskRequest,
+    task: &homeboy::agents::agent_task::AgentTaskRequest,
 ) -> homeboy::core::Result<Option<PathBuf>> {
     let Some(handle) = task
         .workspace
@@ -4611,7 +4609,7 @@ fn retry_task_managed_worktree(
 }
 
 fn retry_plan_primary_workspace(
-    plan: &homeboy::agents::agent_tasks::scheduler::AgentTaskPlan,
+    plan: &homeboy::agents::agent_task_schedule::AgentTaskPlan,
 ) -> homeboy::core::Result<PathBuf> {
     let mut roots = BTreeSet::new();
     for task in &plan.tasks {
