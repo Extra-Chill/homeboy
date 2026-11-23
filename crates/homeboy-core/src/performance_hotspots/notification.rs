@@ -1,12 +1,13 @@
 //! Opt-in regression delivery through the existing notification outbox.
-use super::{RegressionComparison, Verdict};
+use super::RegressionComparison;
 use crate::notification_route::NotificationRoute;
+use homeboy_engine_primitives::metric_comparison::CohortStatus;
 use sha2::{Digest, Sha256};
 
 /// The analytics query stays read-only. Only explicit notification delivery
 /// creates a claim, outside the observation ledger.
 pub fn notify_regression(comparison: &RegressionComparison, route: Option<&NotificationRoute>) {
-    if comparison.verdict != Verdict::Regressed {
+    if comparison.verdict != CohortStatus::Regressed {
         return;
     }
     let Some((baseline, candidate)) = comparison

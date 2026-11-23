@@ -1,5 +1,6 @@
 use super::*;
 use crate::observation::{NewRunRecord, ObservationStore, RunStatus};
+use homeboy_engine_primitives::metric_comparison::CohortStatus;
 use homeboy_engine_primitives::phase_timing::PhaseTimer;
 use serde_json::json;
 use std::time::Duration;
@@ -54,7 +55,7 @@ fn clearly_slower_synthetic_store_has_evidence() {
         .unwrap()
         .comparison
         .unwrap();
-    assert_eq!(comparison.verdict, Verdict::Regressed);
+    assert_eq!(comparison.verdict, CohortStatus::Regressed);
     assert_eq!(comparison.regressions.len(), 2);
     let evidence = &comparison.regressions[0];
     assert_eq!(evidence.metric, "phase.cook.p50_ms");
@@ -77,7 +78,7 @@ fn workload_noise_and_absolute_floor_are_clean() {
             .unwrap()
             .comparison
             .unwrap();
-        assert_eq!(comparison.verdict, Verdict::Clean);
+        assert_eq!(comparison.verdict, CohortStatus::Clean);
         assert!(comparison.regressions.is_empty());
     }
 }
@@ -92,7 +93,7 @@ fn small_or_missing_cohorts_are_insufficient() {
             .comparison
             .unwrap()
             .verdict,
-        Verdict::InsufficientSamples
+        CohortStatus::InsufficientSamples
     );
     let mut missing = query();
     missing.baseline_version = Some("absent".into());
@@ -102,7 +103,7 @@ fn small_or_missing_cohorts_are_insufficient() {
             .comparison
             .unwrap()
             .verdict,
-        Verdict::InsufficientSamples
+        CohortStatus::InsufficientSamples
     );
 }
 #[test]
@@ -114,7 +115,7 @@ fn reliability_rate_rise_at_boundary_is_detected() {
         .unwrap()
         .comparison
         .unwrap();
-    assert_eq!(comparison.verdict, Verdict::Regressed);
+    assert_eq!(comparison.verdict, CohortStatus::Regressed);
     assert_eq!(comparison.regressions.len(), 1);
     assert_eq!(
         comparison.regressions[0].metric,
@@ -144,11 +145,11 @@ fn current_previous_choose_newest_eligible_scoped_version() {
         comparison.candidate_version.as_deref(),
         Some(homeboy_product_identity::product_version())
     );
-    assert_eq!(comparison.verdict, Verdict::Regressed);
+    assert_eq!(comparison.verdict, CohortStatus::Regressed);
     q.component = Some("other-component".into());
     let comparison = phase_hotspots(&store, &q).unwrap().comparison.unwrap();
     assert_eq!(comparison.baseline_version, None);
-    assert_eq!(comparison.verdict, Verdict::InsufficientSamples);
+    assert_eq!(comparison.verdict, CohortStatus::InsufficientSamples);
 }
 #[test]
 fn malformed_phase_rows_are_logged_and_skipped_readonly() {
@@ -168,7 +169,7 @@ fn malformed_phase_rows_are_logged_and_skipped_readonly() {
         .unwrap()
         .comparison
         .unwrap();
-    assert_eq!(comparison.verdict, Verdict::Regressed);
+    assert_eq!(comparison.verdict, CohortStatus::Regressed);
     assert_eq!(comparison.regressions[0].candidate_samples, 10);
     let mut q = query();
     q.baseline_version = Some("previous".into());
@@ -198,7 +199,7 @@ fn policy_overrides_control_the_verdict() {
             .comparison
             .unwrap()
             .verdict,
-        Verdict::Clean
+        CohortStatus::Clean
     );
 }
 #[test]
@@ -219,7 +220,7 @@ fn unclassified_rate_increase_is_evidence_with_enough_missions() {
         .unwrap()
         .comparison
         .unwrap();
-    assert_eq!(comparison.verdict, Verdict::Regressed);
+    assert_eq!(comparison.verdict, CohortStatus::Regressed);
     assert_eq!(
         comparison.regressions[0].metric,
         "unclassified_failure_rate"
@@ -235,5 +236,5 @@ fn previous_never_selects_a_version_newer_than_the_candidate() {
     q.baseline_version = Some("previous".into());
     let comparison = phase_hotspots(&store, &q).unwrap().comparison.unwrap();
     assert_eq!(comparison.baseline_version.as_deref(), Some("0.1.0"));
-    assert_eq!(comparison.verdict, Verdict::Regressed);
+    assert_eq!(comparison.verdict, CohortStatus::Regressed);
 }

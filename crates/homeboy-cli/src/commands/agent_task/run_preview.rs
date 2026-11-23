@@ -562,7 +562,8 @@ pub(super) fn cook_preview_resolved_request(args: &AgentTaskCookArgs, placement:
         },
         "publication": {
             "finalize": !args.no_finalize,
-            "draft": args.draft_pr,
+            "draft": args.draft_pr || !args.repro.is_declared(),
+            "state_policy": "New PRs open as draft unless the repro is verified; --draft-pr forces draft. Existing PRs keep their state.",
         },
         "notification_resolution": homeboy::core::notification_route::current_resolution(),
     })

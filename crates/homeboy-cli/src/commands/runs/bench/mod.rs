@@ -4,11 +4,12 @@
 //! groups flattened as `group.metric`), provided they ran the same benchmark
 //! context. A run-to-run compare reports; it never gates.
 
+use homeboy_engine_primitives::metric_comparison::Verdict;
 use std::collections::{BTreeMap, BTreeSet};
 
 use homeboy::core::observation::{ObservationStore, RunRecord};
 use homeboy::core::Error;
-use homeboy_engine_primitives::workload_compare::{self, Compared, KindAdapter, Verdict};
+use homeboy_engine_primitives::workload_compare::{self, Compared, KindAdapter};
 use serde_json::Value;
 
 use crate::commands::escape_markdown_table_cell;
@@ -159,13 +160,18 @@ impl KindAdapter for BenchRunAdapter {
             let (scenario_id, metric) = key;
             let missing_from = match (from, to) {
                 (Some(from), Some(to)) => {
+                    let delta = homeboy_engine_primitives::metric_comparison::MetricPolicy {
+                        signed_percent: true,
+                        ..Default::default()
+                    }
+                    .compare(&metric, Some(*from), Some(*to));
                     comparisons.push(BenchMetricComparison {
                         scenario_id,
                         metric,
                         from_value: *from,
                         to_value: *to,
-                        delta: to - from,
-                        percent_change: (*from != 0.0).then(|| ((to - from) / from) * 100.0),
+                        delta: delta.delta.expect("paired metric"),
+                        percent_change: delta.percent,
                     });
                     continue;
                 }

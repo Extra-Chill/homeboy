@@ -145,7 +145,7 @@ pub use comparison::{
     BenchAxisComparisonSummary, BenchComparisonDiff, BenchComparisonFailure, BenchComparisonOutput,
     BenchComparisonReports, BenchComparisonRigSummary, BenchComparisonSummaryOutput,
     BenchDefaultBaselineExpansion, BenchDiagnosticClassSummary, BenchPhaseGroups,
-    BenchScenarioComparisonRow, BenchScenarioComparisonSummary, MetricDelta, RigBenchEntry,
+    BenchScenarioComparisonRow, BenchScenarioComparisonSummary, RigBenchEntry,
 };
 
 /// A compact, grep-friendly pointer to an artifact emitted by a bench
