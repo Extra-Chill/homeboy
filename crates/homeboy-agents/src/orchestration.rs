@@ -7450,6 +7450,17 @@ mod tests {
         assert_eq!(error.class, ControlPlaneErrorClass::InvalidArgument);
     }
 
+    /// A terminal record carrying none of the fixture's controller failure
+    /// or delivery history, so only the cause under test can explain it.
+    fn bare_terminal_snapshot(run_id: &str, state: RunExecutionState) -> RunSnapshot {
+        let mut snapshot = snapshot(run_id, None);
+        let metadata = snapshot.record.metadata.as_object_mut().expect("metadata");
+        metadata.remove("cook_controller_failure");
+        metadata.retain(|key, _| !key.starts_with("cook_delivery"));
+        snapshot.record.set_state_for_test(state);
+        snapshot
+    }
+
     fn snapshot(run_id: &str, plan: Option<AgentTaskPlan>) -> RunSnapshot {
         RunSnapshot {
             record: record(run_id),
@@ -7463,10 +7474,7 @@ mod tests {
     /// of the step that failed, not "no failure diagnostic was recorded".
     #[test]
     fn failed_runner_job_without_aggregate_projects_its_command_failure() {
-        let mut snapshot = snapshot("lab-offload-failed", None);
-        snapshot
-            .record
-            .set_state_for_test(RunExecutionState::Failed);
+        let mut snapshot = bare_terminal_snapshot("lab-offload-failed", RunExecutionState::Failed);
         let stdout = serde_json::to_string_pretty(&json!({
             "success": false,
             "summary": "Dependency step 'dependency.setup' failed for component 'demo'",
@@ -7519,10 +7527,8 @@ mod tests {
     /// A cancelled run names who cancelled it and why.
     #[test]
     fn cancelled_run_projects_its_cancellation_provenance() {
-        let mut snapshot = snapshot("superseded-attempt", None);
-        snapshot
-            .record
-            .set_state_for_test(RunExecutionState::Cancelled);
+        let mut snapshot =
+            bare_terminal_snapshot("superseded-attempt", RunExecutionState::Cancelled);
         snapshot.record.metadata["cancel_reason"] = json!("superseded_by_active_cook");
         snapshot.record.metadata["cancellation_provenance"] = json!({
             "actor": "controller",
