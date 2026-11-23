@@ -10077,7 +10077,7 @@ fn deferred_candidate_recovers_with_verify_file_and_publishes() {
             CookService::run(options, runtime.replay_keeping_recorded_transport()).unwrap();
         assert_eq!(
             result.value.status.as_str(),
-            "review_ready",
+            "draft_published",
             "{:#?}",
             result.value
         );
@@ -11489,7 +11489,7 @@ fn finalization_dossier_and_backend_hydration_use_explicit_lifecycle_store() {
         )
         .unwrap();
 
-        assert_eq!(finalization["status"], "review_ready");
+        assert_eq!(finalization["status"], "draft_published");
         assert!(backend.created);
         assert!(
             lifecycle_store.read_record(run_id).unwrap().metadata["cook_delivery"]["artifacts"]
@@ -11956,7 +11956,7 @@ fn malformed_agent_review_form_recovers_by_publishing_a_supplied_form() {
             crate::agent_task_service::CookRecoveryStep::Publish
         );
         let result = published.result.expect("publication report");
-        assert_eq!(result["status"], "review_ready");
+        assert_eq!(result["status"], "draft_published");
         assert_eq!(
             result["review_dossier"]["summary"],
             "Close the issue by guarding the reload path."
