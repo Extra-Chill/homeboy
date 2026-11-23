@@ -428,6 +428,19 @@ fn assert_dead_idle_lease_recovery(command: &[&str]) {
         !pids.is_empty(),
         "record daemon processes before termination"
     );
+    // Kill an idle daemon, not one midway through the short retention-lock
+    // transaction. A SIGKILL there abandons the mtime-only claim for 30s and
+    // tests cleanup-lock crash recovery instead of dead daemon recovery.
+    let cleanup_claim = homeboy_engine_primitives::fs_index_lock::FsIndexLock::acquire_in(
+        fixture.runtime_dir(),
+        homeboy_engine_primitives::fs_index_lock::FsIndexLockConfig {
+            name: ".cleanup.lock.claim",
+            ..homeboy_engine_primitives::fs_index_lock::FsIndexLockConfig::index(
+                "fixture idle cleanup",
+            )
+        },
+    )
+    .expect("wait for idle cleanup transaction");
     for pid in pids {
         assert_eq!(
             unsafe { libc::kill(pid as i32, libc::SIGKILL) },
@@ -446,6 +459,7 @@ fn assert_dead_idle_lease_recovery(command: &[&str]) {
         std::thread::sleep(Duration::from_millis(50));
     }
 
+    drop(cleanup_claim);
     let recovered = run_homeboy(&fixture, &invocation_dir, command, &path);
     assert_eq!(recovered["success"], true, "{recovered:#}");
     if command[0] == "cleanup" {
@@ -470,7 +484,22 @@ fn assert_dead_idle_lease_recovery(command: &[&str]) {
                     );
                     std::thread::sleep(Duration::from_millis(100));
                 }
-                _ => panic!("unexpected cleanup outcome: {job:#}"),
+                _ => {
+                    let evidence = run_homeboy(
+                        &fixture,
+                        &invocation_dir,
+                        &["cleanup", "status", job_id, "--full"],
+                        &path,
+                    );
+                    let store = homeboy_core::api_jobs::JobStore::open_without_reconciliation(
+                        &homeboy_core::paths::observation_db_in_root(&fixture.data_dir()),
+                    )
+                    .expect("job store");
+                    let details = store
+                        .inspection(job_id.parse().expect("job UUID"))
+                        .expect("job details");
+                    panic!("unexpected cleanup outcome: {job:#}\nevidence: {evidence:#}\ndetails: {details:#?}")
+                }
             }
         }
     } else {
