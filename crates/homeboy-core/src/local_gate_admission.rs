@@ -105,13 +105,6 @@ fn host_root() -> Result<Option<PathBuf>> {
     Ok(Some(crate::paths::homeboy_data()?.join(REGISTRY_DIR)))
 }
 
-/// One-minute load average, when the host publishes one.
-pub fn load_average_1m() -> Option<f64> {
-    std::fs::read_to_string("/proc/loadavg")
-        .ok()
-        .and_then(|text| text.split_whitespace().next()?.parse::<f64>().ok())
-}
-
 pub struct Registry {
     root: PathBuf,
     limit: usize,
@@ -357,7 +350,9 @@ impl LocalGatePermit {
             if cancelled() {
                 return Ok(None);
             }
-            if self.try_admit(load_average_1m())? {
+            if self.try_admit(
+                homeboy_engine_primitives::host_telemetry::load_average().map(|load| load.one),
+            )? {
                 return Ok(Some(started.elapsed()));
             }
             std::thread::sleep(Duration::from_millis(250));
@@ -378,7 +373,10 @@ impl Drop for LocalGatePermit {
 /// needs no daemon transport. Field names follow the Lab step queue snapshot.
 pub fn snapshot() -> Result<serde_json::Value> {
     match Registry::host()? {
-        Some(registry) => snapshot_for(&registry, load_average_1m()),
+        Some(registry) => snapshot_for(
+            &registry,
+            homeboy_engine_primitives::host_telemetry::load_average().map(|load| load.one),
+        ),
         None => Ok(serde_json::json!({"available": false, "reason": "test isolation"})),
     }
 }

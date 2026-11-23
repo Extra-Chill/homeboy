@@ -176,7 +176,6 @@ pub mod repository_integrity;
 pub mod resource_cleanup_intent;
 pub mod resource_lifecycle_index;
 pub mod resource_policy_context;
-pub mod resources;
 pub mod rig_provider;
 pub use homeboy_lifecycle_contract::run_lifecycle_record;
 pub mod run_lifecycle_status;

@@ -51,7 +51,7 @@ pub(crate) struct HostResourceSnapshot {
     /// Count of direct child processes of the controller, if readable
     /// (Linux `/proc/[pid]/stat` ppid scan). Used as the stale-child baseline.
     child_process_count: Option<u64>,
-    /// 1-minute load average, if readable (Linux `/proc/loadavg`). A cheap
+    /// 1-minute load average, if available on the host. A cheap
     /// proxy for CPU pressure where a per-process CPU sample is not available.
     load_average_1m: Option<f64>,
 }
@@ -69,7 +69,8 @@ impl HostResourceSnapshot {
             process_rss_bytes: self_rss_bytes(),
             host_process_count: host_process_count(),
             child_process_count: child_process_count(),
-            load_average_1m: load_average_1m(),
+            load_average_1m: homeboy_engine_primitives::host_telemetry::load_average()
+                .map(|load| load.one),
         }
     }
 }
@@ -373,13 +374,6 @@ fn parse_ppid_from_proc_stat(stat: &str) -> Option<u32> {
     let mut fields = rest.split_whitespace();
     let _state = fields.next()?;
     fields.next()?.parse().ok()
-}
-
-/// 1-minute load average from `/proc/loadavg` (Linux). `None` on non-Linux /
-/// unreadable hosts.
-fn load_average_1m() -> Option<f64> {
-    let loadavg = std::fs::read_to_string("/proc/loadavg").ok()?;
-    loadavg.split_whitespace().next()?.parse().ok()
 }
 
 #[cfg(test)]

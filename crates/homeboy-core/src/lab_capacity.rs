@@ -26,7 +26,8 @@ pub fn observe(limit: Option<usize>) -> LabCapacity {
     let cpus = std::thread::available_parallelism()
         .map(usize::from)
         .unwrap_or(1);
-    let load_average_1m = crate::local_gate_admission::load_average_1m();
+    let load_average_1m =
+        homeboy_engine_primitives::host_telemetry::load_average().map(|load| load.one);
     let local_gate_holders = crate::local_gate_admission::counted_holders();
     let runners = runner_job_holders();
     LabCapacity {

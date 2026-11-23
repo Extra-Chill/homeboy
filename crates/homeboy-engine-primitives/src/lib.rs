@@ -19,6 +19,7 @@ pub mod content_hash;
 pub mod detail_output;
 pub mod fs_index_lock;
 pub mod git_remote_tracking_authority;
+pub mod host_telemetry;
 pub mod identifier;
 pub mod local_files;
 pub mod measurement;
