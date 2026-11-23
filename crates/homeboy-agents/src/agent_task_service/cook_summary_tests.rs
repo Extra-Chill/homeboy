@@ -94,6 +94,40 @@ fn published_run_reports_pr_url_without_a_reason() {
 }
 
 #[test]
+fn undelivered_items_settle_succeeded_partial_with_the_list() {
+    let metadata = delivery(json!({
+        "promotion": promotion("applied", json!([{
+            "id": "cargo-test", "status": "succeeded", "command": ["cargo", "test"], "exit_code": 0
+        }])),
+        "finalization": {
+            "status": "succeeded_partial",
+            "pr_number": 43,
+            "pr_url": "https://github.com/Extra-Chill/homeboy/pull/43",
+            "pr_draft": true,
+            "review_dossier": { "delivery": [
+                { "item": "Parse the flag", "status": "delivered" },
+                { "item": "Migrate records", "status": "not_delivered", "reason": "needs a decision" }
+            ] },
+            "publication_proof": { "binding": { "candidate_sha": "commit-sha", "remote_sha": "remote-sha" } }
+        },
+    }));
+    let summary = cook_summary(&record(RunExecutionState::Succeeded, metadata));
+    summary.validate().expect("valid summary");
+    assert_eq!(summary.status, "succeeded_partial");
+    assert!(summary.has_undelivered_items());
+    assert_eq!(summary.delivery.len(), 2);
+    assert_eq!(summary.delivery[0].item, "Migrate records");
+    assert_eq!(
+        summary.delivery[0].reason.as_deref(),
+        Some("needs a decision")
+    );
+    assert_eq!(
+        summary.pr_url.as_deref(),
+        Some("https://github.com/Extra-Chill/homeboy/pull/43")
+    );
+}
+
+#[test]
 fn every_terminal_phase_without_a_pr_names_why() {
     for state in [
         RunExecutionState::CandidateRecoverable,

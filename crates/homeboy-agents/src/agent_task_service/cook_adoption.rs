@@ -383,7 +383,7 @@ pub(crate) fn adopt_cook_candidate_with_dispatcher_and_backend_for_attempt_with_
                 .map_err(|error| Error::internal_json(error.to_string(), None))?;
             let exit_code = if matches!(
                 result.status.as_str(),
-                "review_ready" | "draft_published" | "green_no_finalize"
+                "review_ready" | "draft_published" | "succeeded_partial" | "green_no_finalize"
             ) {
                 0
             } else {
@@ -460,7 +460,7 @@ pub(crate) fn adopt_cook_candidate_with_dispatcher_and_backend_for_attempt_with_
             ),
             exit_code: if matches!(
                 status.as_str(),
-                "review_ready" | "draft_published" | "green_no_finalize"
+                "review_ready" | "draft_published" | "succeeded_partial" | "green_no_finalize"
             ) {
                 0
             } else {

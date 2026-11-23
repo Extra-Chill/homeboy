@@ -3218,7 +3218,7 @@ fn review_execution_states(
     let finalization_state = publication
         .map(|publication| match publication.status.as_str() {
             _ if publication.published => "completed",
-            "review_ready" | "draft_published" | "completed" => "unknown",
+            "review_ready" | "draft_published" | "succeeded_partial" | "completed" => "unknown",
             "failed" | "finalization_failed" => "finalization_failed",
             "pending" | "finalization_pending" => "finalization_pending",
             other => other,

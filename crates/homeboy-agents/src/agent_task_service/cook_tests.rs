@@ -441,6 +441,7 @@ fn test_review_form() -> crate::agent_task_review_dossier::AiFilledReviewForm {
         verification: Vec::new(),
         completion: Some(crate::agent_task_review_dossier::AiReviewCompletion::Complete),
         incomplete_reason: String::new(),
+        delivery: Vec::new(),
     }
 }
 

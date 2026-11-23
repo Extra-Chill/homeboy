@@ -392,12 +392,6 @@ impl AgentTaskPrFinalizationBackend for MockBackend {
                 changed_files: changed_files.to_vec(),
             }))
     }
-
-    fn mark_pr_ready(&mut self, _path: &str, pr: &AgentTaskPrRef) -> Result<AgentTaskPrRef> {
-        let mut ready = pr.clone();
-        ready.is_draft = false;
-        Ok(ready)
-    }
 }
 
 #[test]
@@ -1014,26 +1008,78 @@ fn draft_policy_reconciles_an_existing_draft_pr() {
 }
 
 #[test]
-fn verified_cook_preserves_existing_draft_state() {
+fn reworking_an_existing_draft_pr_without_draft_policy_leaves_it_draft() {
     let mut backend = MockBackend {
         changed_files: vec!["src/lib.rs".to_string()],
         existing_pr: Some(AgentTaskPrRef {
-            number: 77,
-            url: "https://github.com/Extra-Chill/homeboy/pull/77".to_string(),
+            number: 78,
+            url: "https://github.com/Extra-Chill/homeboy/pull/78".to_string(),
             is_draft: true,
         }),
         ..Default::default()
     };
     let mut finalization = options();
     finalization.draft_pr = false;
-    finalization.review_dossier.repro =
-        Some(crate::agent_task_review_dossier::AgentTaskReviewRepro::Verified);
 
     let report = finalize_pr_with_backend(finalization, &mut backend).expect("finalized");
 
     assert!(!backend.created);
     assert!(backend.updated);
+    assert_eq!(report.pr_action, "updated");
     assert_eq!(report.status.as_str(), "draft_published");
+}
+
+fn partial_delivery() -> Vec<homeboy_control_plane_contract::CookDeliveryItem> {
+    use homeboy_control_plane_contract::{CookDeliveryItem, CookDeliveryItemStatus};
+    vec![
+        CookDeliveryItem {
+            item: "Parse the new flag".to_string(),
+            status: CookDeliveryItemStatus::Delivered,
+            reason: None,
+        },
+        CookDeliveryItem {
+            item: "Migrate stored records".to_string(),
+            status: CookDeliveryItemStatus::NotDelivered,
+            reason: Some("needs a schema decision".to_string()),
+        },
+    ]
+}
+
+#[test]
+fn undelivered_items_open_a_draft_pr_and_report_succeeded_partial() {
+    let mut backend = MockBackend {
+        changed_files: vec!["src/lib.rs".to_string()],
+        ..Default::default()
+    };
+    let mut finalization = options();
+    finalization.draft_pr = false;
+    finalization.review_dossier.delivery = partial_delivery();
+
+    let report = finalize_pr_with_backend(finalization, &mut backend).expect("finalized");
+
+    assert!(backend.created);
+    assert!(backend.created_draft, "partial delivery opens a draft");
+    assert_eq!(report.status.as_str(), "succeeded_partial");
+    assert_eq!(report.finalization_outcome.status, "succeeded_partial");
+    assert_eq!(report.pr_draft, Some(true));
+    assert_eq!(report.review_dossier.delivery.len(), 2);
+}
+
+#[test]
+fn fully_delivered_items_keep_the_ready_publication() {
+    let mut backend = MockBackend {
+        changed_files: vec!["src/lib.rs".to_string()],
+        ..Default::default()
+    };
+    let mut finalization = options();
+    finalization.review_dossier.delivery = partial_delivery();
+    finalization.review_dossier.delivery.truncate(1);
+
+    let report = finalize_pr_with_backend(finalization, &mut backend).expect("finalized");
+
+    assert!(!backend.created_draft);
+    assert_eq!(report.status.as_str(), "review_ready");
+    assert_eq!(report.pr_draft, Some(false));
 }
 
 #[test]
@@ -2413,6 +2459,7 @@ pub(super) fn options() -> AgentTaskPrFinalizationOptions {
             overrides: Vec::new(),
             out_of_scope_changes: Vec::new(),
             repro: None,
+            delivery: Vec::new(),
         },
         review_profile: crate::agent_task_review_dossier::default_profile(),
         manual_finalization: true,

@@ -76,6 +76,9 @@ pub fn cook_summary(record: &AgentTaskRunRecord) -> CookSummary {
         gates: summary_gates(record, delivery.as_ref()),
         pr_url,
         why_no_pr,
+        delivery: publication
+            .map(|publication| publication.delivery.clone())
+            .unwrap_or_default(),
     }
     .bounded()
 }
