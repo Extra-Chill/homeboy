@@ -629,10 +629,6 @@ pub fn reconcile_stale_active_runs(dry_run: bool) -> Result<AgentTaskReconcileRe
         }
     }
 
-    if !dry_run {
-        reproject_terminal_rows(&lifecycle_store)?;
-    }
-
     Ok(AgentTaskReconcileReport {
         schema: "homeboy/agent-task-reconcile/v1",
         scope: "fleet".to_string(),
@@ -645,50 +641,6 @@ pub fn reconcile_stale_active_runs(dry_run: bool) -> Result<AgentTaskReconcileRe
         failed,
         runs,
     })
-}
-
-/// Rows whose lifecycle already ended never reach active discovery, yet a
-/// row left `running` by a Cook driver that exited, or by an older binary,
-/// re-projects once from its terminal record. A settled Cook that no driver
-/// holds records its outcome first, so its held rows follow it.
-fn reproject_terminal_rows(lifecycle_store: &LifecycleStore) -> Result<()> {
-    for row in lifecycle_store
-        .open_observation_initialized()?
-        .list_active_runs()?
-        .into_iter()
-        .filter(|row| row.kind == "agent-task")
-    {
-        let Some(record) = row
-            .metadata_json
-            .get("agent_task_run")
-            .cloned()
-            .and_then(|value| serde_json::from_value::<AgentTaskRunRecord>(value).ok())
-            .filter(|record| record.state().is_terminal())
-        else {
-            continue;
-        };
-        let cook_id = record.metadata["cook_id"]
-            .as_str()
-            .unwrap_or(&record.run_id);
-        let settled = if lifecycle_store
-            .cook_dir(cook_id)
-            .join("recipe.json")
-            .exists()
-        {
-            super::cook_driver::settle_undriven_cook(lifecycle_store, cook_id).map(|_| ())
-        } else {
-            Ok(())
-        };
-        if let Err(error) = settled.and_then(|()| lifecycle_store.reproject_record(&row.id)) {
-            homeboy_core::log_status!(
-                "agent-task",
-                "Run {} re-projection failed: {}",
-                row.id,
-                error
-            );
-        }
-    }
-    Ok(())
 }
 
 /// Reconcile one durable run after refreshing its authoritative lifecycle and
