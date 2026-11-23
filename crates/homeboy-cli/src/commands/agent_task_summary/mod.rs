@@ -93,7 +93,53 @@ fn render_recover_summary(payload: &Value) -> String {
             .unwrap_or_else(|| format!("homeboy agent-task status {run_id} --watch"));
         lines.push(format!("Next: {watch}"));
     }
+    // A refused or failed recovery names why and what to run next, so the
+    // human summary is never silent about a nonzero exit (#18845).
+    if let Some(failure) = payload.get("failure").filter(|value| value.is_object()) {
+        if let Some(message) =
+            string_value(failure, &["message"]).filter(|message| !message.trim().is_empty())
+        {
+            lines.push(format!("Refused: {message}"));
+        }
+        if let Some(next) =
+            string_value(failure, &["next_command"]).filter(|next| !next.trim().is_empty())
+        {
+            lines.push(format!("Next: {next}"));
+        }
+    } else if let Some(reason) = payload
+        .pointer("/step/reason")
+        .and_then(Value::as_str)
+        .filter(|reason| !reason.trim().is_empty())
+    {
+        lines.push(format!("Reason: {reason}"));
+    }
     lines.join("\n")
+}
+
+#[cfg(test)]
+#[test]
+fn recover_summary_names_the_refusal_and_next_command() {
+    let summary = render_agent_task_summary(
+        AgentTaskSummaryKind::Recover,
+        &serde_json::json!({
+            "step": {"kind": "none", "reason": "no admission inputs"},
+            "run_id": "cook-1", "status": "failed",
+            "failure": {
+                "code": "agent_task.recover_no_step",
+                "message": "no admission inputs",
+                "next_command": "homeboy agent-task diagnose cook-1"
+            }
+        }),
+    )
+    .unwrap();
+    assert!(
+        summary.contains("Refused: no admission inputs"),
+        "{summary}"
+    );
+    assert!(
+        summary.contains("Next: homeboy agent-task diagnose cook-1"),
+        "{summary}"
+    );
 }
 
 #[cfg(test)]
