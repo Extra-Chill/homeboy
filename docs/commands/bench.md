@@ -9,6 +9,7 @@ deltas against a stored baseline.
 homeboy bench <component> [options] [-- <runner-args>]
 homeboy bench matrix [<component>] --setting-matrix <key=value[,value...]> [options] [-- <runner-args>]
 homeboy bench list <component> [options] [-- <runner-args>]
+homeboy bench compare --component <id> --base <rev> --head <rev> --corpus <dir> [options]
 ```
 
 ## Description
@@ -664,6 +665,50 @@ homeboy bench studio \
     --rig trunk,combined-fixes,combined-fixes-without-3120 \
     --iterations 20
 ```
+
+## Base-vs-head corpus compare
+
+`homeboy bench compare` evaluates a component change by running the same
+corpus workload against two revisions and diffing what each side published.
+
+```bash
+homeboy bench compare --component blocks-engine --base <sha> --head <sha> --corpus ./captures
+```
+
+- **Materialization.** Each committed revision is checked out as a detached
+  git worktree owned by the run and removed afterwards. `--head WORKTREE`
+  (the default) uses the checkout on disk, uncommitted changes included.
+- **Workload declaration.** Core never hardcodes how a corpus is imported or
+  evaluated. Commands come from `--workload-command` (or the spec's `runner`),
+  then the component's `scripts.bench_compare` in `homeboy.json`, then the
+  `workloads.bench-compare.script` declared by a linked extension. Each command
+  runs once per side inside that side's checkout with
+  `HOMEBOY_BENCH_COMPARE_{SIDE,REF,SHA,CORPUS,RESULTS,ARTIFACT_DIR,SOURCE,COMPONENT,ID}`
+  and writes a `homeboy/bench-compare-side/v1` document to
+  `$HOMEBOY_BENCH_COMPARE_RESULTS`:
+
+  ```json
+  {"routes": [{"route": "/about", "content": "...", "block_markup_sha256": "...",
+               "css": "...", "blockers": ["missing-block"], "findings": [{"id": "f1"}]}]}
+  ```
+- **Lifecycle.** Every command runs in a run-owned process containment
+  boundary. Servers, sites and browsers it backgrounds are torn down when the
+  command exits, fails, times out (`--timeout-seconds`, per side) or the
+  compare is cancelled. A process that survives teardown always fails the
+  compare (`lifecycle.leftover_process_scopes` must be `0`).
+- **Artifact.** `bench-compare.json` (schema `homeboy/bench-compare/v1`) is
+  written to `--output-dir` or `<homeboy data>/bench-compare/<compare-id>`,
+  with per-route content / block markup / CSS deltas, evaluator blocker and
+  finding deltas, an aggregate summary (routes improved / regressed /
+  unchanged / added / missing), per-step lifecycle evidence, and the policy
+  result. Per-side runner logs and results sit beside it.
+- **Policy.** `--fail-on new-blockers` (default) fails on new evaluator
+  blockers or routes missing on head; `regressions` fails on any regressed
+  route; `never` only reports. `--spec <file>` supplies any of these fields
+  as JSON; flags override it.
+
+Compare currently runs locally. Lab placement and Cook gate attachment are
+follow-ups.
 
 ## Cross-rig comparison
 

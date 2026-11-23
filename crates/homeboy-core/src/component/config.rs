@@ -118,6 +118,12 @@ pub struct ComponentScriptsConfig {
     pub build: Vec<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub bench: Vec<String>,
+    /// Corpus workload `homeboy bench compare` runs once per side (base and
+    /// head) inside that side's checkout. Each command reads
+    /// `HOMEBOY_BENCH_COMPARE_*` and writes a `homeboy/bench-compare-side/v1`
+    /// document to `$HOMEBOY_BENCH_COMPARE_RESULTS`.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub bench_compare: Vec<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub fuzz: Vec<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
