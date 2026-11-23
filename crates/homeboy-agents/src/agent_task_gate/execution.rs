@@ -251,21 +251,24 @@ pub(super) fn run_gate_argv_with_supervision(
     regate_after_supervision_stop(run, cancelled)
 }
 
-/// Run a gate, re-gating a supervision stop once and re-running a candidate
-/// failure once.
+/// Run a gate, re-gating a supervision stop or environment failure once and
+/// re-running a candidate failure once.
 ///
 /// A supervision stop (wall-clock or no-progress limit) never reached the
 /// command's verdict, so it is re-run once on the same candidate, under the
 /// same declared budgets, without spending a provider attempt. A stop that
 /// repeats is classified as unavailable verification, never a candidate
-/// failure (#17958, #18554).
+/// failure (#17958, #18554). A gate whose environment failed before a verdict
+/// (for example a nested Homeboy command whose setup failed) is re-gated once
+/// the same way; a repeat keeps its environment classification, which stops
+/// the Cook at `gate_environment_unavailable`.
 fn regate_after_supervision_stop(
     run: impl Fn() -> Result<AgentTaskGateReport>,
     cancelled: impl Fn() -> bool,
 ) -> Result<AgentTaskGateReport> {
     let mut report = run()?;
     let mut supervision_regate = None;
-    if report.stopped_by_supervision() && !cancelled() {
+    if (report.stopped_by_supervision() || report.environment_unavailable()) && !cancelled() {
         supervision_regate = report.failure_evidence.take();
         report = run()?;
     }

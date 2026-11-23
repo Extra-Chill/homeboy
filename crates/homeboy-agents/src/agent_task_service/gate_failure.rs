@@ -13,6 +13,10 @@ pub fn gate_failure_projection(promotion: &Value) -> Option<Value> {
     })?;
     let text = |path: &str| gate.pointer(path).and_then(Value::as_str);
     let unavailable = matches!(text("/status"), Some("unavailable" | "deferred"));
+    // A gate whose environment failed before a verdict (a Homeboy setup error,
+    // a missing tool, disk exhaustion) is infrastructure, not a candidate
+    // failure: its next step is a re-gate, not another provider attempt.
+    let environment = text("/failure_evidence/classification") == Some("environment");
     let termination = if text("/termination") == Some("cancelled") {
         "cancelled"
     } else if unavailable {
@@ -22,7 +26,7 @@ pub fn gate_failure_projection(promotion: &Value) -> Option<Value> {
             .or_else(|| text("/lab_receipt/termination"))
             .unwrap_or("completed")
     };
-    let reason = if unavailable {
+    let reason = if unavailable || (environment && termination == "completed") {
         "gate_environment_unavailable"
     } else if matches!(termination, "timed_out" | "no_progress" | "cancelled") {
         termination
@@ -109,5 +113,39 @@ pub fn gate_failure_next_action(reason: &str, run: &str) -> (String, String) {
             format!("homeboy agent-task recover {run}"),
             "Start a new provider attempt with the retained gate feedback.".into(),
         )
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A gate whose setup failed before a verdict projects as infrastructure
+    /// with a re-gate next step and keeps the setup error in its output.
+    #[test]
+    fn environment_gate_failure_projects_as_unavailable_infrastructure() {
+        let setup_error = "review test cannot wait for a Lab runner";
+        let report = json!({"deterministic_gates": [{
+            "id": "gate-2", "status": "failed", "exit_code": 2,
+            "command": "homeboy review test homeboy",
+            "failure_evidence": {
+                "classification": "environment",
+                "stdout_tail": format!("{{\"success\":false,\"diagnostics\":{{\"message\":\"{setup_error}\"}}}}"),
+            }
+        }]});
+        let failure = gate_failure_projection(&report).expect("failed gate");
+        assert_eq!(failure["reason"], "gate_environment_unavailable");
+        assert!(failure["output_tail"]
+            .as_str()
+            .unwrap()
+            .contains(setup_error));
+        let (command, _) = gate_failure_next_action("gate_environment_unavailable", "run");
+        assert_eq!(command, "homeboy agent-task recover run --regate");
+
+        let mut candidate = report.clone();
+        candidate["deterministic_gates"][0]["failure_evidence"]["classification"] =
+            json!("candidate_code");
+        let failure = gate_failure_projection(&candidate).expect("failed gate");
+        assert_eq!(failure["reason"], "gate_failed");
     }
 }

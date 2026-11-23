@@ -147,16 +147,24 @@ fn shell_syntax_errors_are_gate_declaration_failures() {
 
 /// A Homeboy setup/infrastructure error (structured envelope, exit 2)
 /// never produced a candidate verdict, so it must not ask the provider to
-/// rewrite code (Extra-Chill/homeboy#17585).
+/// rewrite code (Extra-Chill/homeboy#17585). It is the gate environment
+/// failing, so it is classified as infrastructure and names the setup error.
 #[test]
 fn homeboy_setup_errors_are_not_candidate_failures() {
     let stdout = r#"{"success":false,"diagnostics":{"code":"extension.execution_failed","failure_digest":{"summary":"dependency install failed"}}}"#;
     let evidence = gate_failure_evidence("homeboy review lint demo", 2, stdout, "", None);
     assert_eq!(
         evidence.classification,
-        AgentTaskGateFailureClassification::GateDeclaration
+        AgentTaskGateFailureClassification::Environment
     );
     assert!(evidence.stdout_tail.contains("dependency install failed"));
+    assert!(
+        evidence
+            .summary
+            .contains("gate environment unavailable: Homeboy gate setup failed before a candidate verdict: dependency install failed"),
+        "{}",
+        evidence.summary
+    );
     assert!(evidence
         .agent_feedback
         .contains("Do not rewrite candidate code"));
@@ -807,6 +815,86 @@ fn a_quiet_focused_gate_counts_tests_from_cargo_summaries() {
             let selection = cargo_selection(command, &[], stdout, "", result.as_ref()).unwrap();
             assert_eq!(effective_gate_exit_code(0, Some(&selection)), exit, "{stdout}");
         }
+
+    // A quiet substring filter whose selected tests fail is a candidate
+    // failure, not `invalid_focused_cargo_selection`: a FAILED summary, or
+    // a harness that died before its summary, still counts the selection.
+    let command = "cargo test -q -p homeboy-cli --lib status";
+    for stdout in [
+        "running 241 tests\n....F.F\nfailures:\n    commands::status::tests::a\n    commands::status::tests::b\n\ntest result: FAILED. 239 passed; 2 failed; 0 ignored; 0 measured; 2683 filtered out; finished in 15.98s\n",
+        "running 241 tests\n....\nthread 'main' has overflowed its stack\n",
+    ] {
+        let result = cargo_test_result(command, 101, stdout, "");
+        let selection = cargo_selection(command, &[], stdout, "", result.as_ref()).unwrap();
+        assert_eq!(selection.selected_count, 241, "{stdout}");
+        assert_eq!(effective_gate_exit_code(101, Some(&selection)), 101);
+        let evidence = gate_failure_evidence(command, 101, stdout, "", Some(&selection));
+        assert_eq!(
+            evidence.classification,
+            AgentTaskGateFailureClassification::CandidateCode,
+            "{}",
+            evidence.summary
+        );
+    }
+}
+
+/// A focused Cargo filter is refused at admission, before any provider
+/// runs, only when it cannot be part of any test path in the checkout.
+#[test]
+fn focused_cargo_filters_are_checked_against_the_checkout_at_admission() {
+    let workspace = tempfile::tempdir().unwrap();
+    let package = workspace.path().join("crates/demo");
+    fs::create_dir_all(package.join("src/status")).unwrap();
+    fs::write(
+        workspace.path().join("Cargo.toml"),
+        "[workspace]\nmembers = [\"crates/demo\"]\n",
+    )
+    .unwrap();
+    fs::write(package.join("Cargo.toml"), "[package]\nname = \"demo\"\n").unwrap();
+    fs::write(
+        package.join("src/lib.rs"),
+        "mod status;\n/// Untested: `projection` names no test path.\npub mod projection {}\n",
+    )
+    .unwrap();
+    fs::write(
+        package.join("src/status/mod.rs"),
+        "#[cfg(test)]\nmod tests {\n    #[test]\n    fn summary_bounds_hung_probe() {\n        let _ = \"#[test] fn projection_fixture\";\n    }\n}\n",
+    )
+    .unwrap();
+    let admit = |command: &str| {
+        super::super::cargo_selection_admission::reject_unmatched_focused_cargo_filters(
+            workspace.path(),
+            [&command.to_string()],
+        )
+    };
+
+    for accepted in [
+        "cargo test -q -p demo --lib status",
+        "cargo test -p demo --lib hung_probe",
+        "cargo test -p demo --lib status::tests::summary",
+        "cargo test --workspace --lib tests::summary_bounds_hung_probe",
+        // An exact name may be a test the provider is asked to add.
+        "cargo test -p demo --lib projection::tests::renders -- --exact",
+        // Unresolvable scope stays a runtime decision.
+        "cargo test -p unknown --lib projection",
+    ] {
+        admit(accepted).unwrap_or_else(|error| panic!("{accepted}: {error}"));
+    }
+
+    // Neither a module without tests nor a string fixture is a test path.
+    let gates = VerifyGateOptions {
+        verify: vec!["cargo test -p demo --lib projection".to_string()],
+        ..VerifyGateOptions::default()
+    };
+    let error = gates.preflight(workspace.path()).unwrap_err();
+    assert!(error.to_string().contains("selects no tests"), "{error}");
+    assert!(error.to_string().contains("-- --exact"), "{error}");
+    assert_eq!(
+        error.details["failure_classification"],
+        "zero_tests_selected"
+    );
+    assert_eq!(error.details["filter"], "projection");
+    assert_eq!(error.retryable, Some(false));
 }
 
 #[test]

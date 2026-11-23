@@ -49,7 +49,9 @@ fn declared_test_executor_reports_its_suite_deadline() {
 /// refuses. #18554: a supervision stop is not a candidate verdict: it is
 /// re-gated once on the same candidate under the same budgets, a re-gate that
 /// passes is green with the stop recorded alongside, and a repeated stop is
-/// unavailable verification, never `failed`.
+/// unavailable verification, never `failed`. A Homeboy setup failure is the
+/// gate environment, not the candidate: it is re-gated once and a repeat
+/// keeps its environment classification instead of a candidate rerun.
 #[test]
 fn a_failed_gate_is_rerun_once_and_a_recovered_failure_is_recorded_as_flaky() {
     let timeout = GateSupervision {
@@ -70,6 +72,14 @@ fn a_failed_gate_is_rerun_once_and_a_recovered_failure_is_recorded_as_flaky() {
             2,
         ),
         ("exit 1", None, AgentTaskGateStatus::Failed, false, false, 2),
+        (
+            "printf '%s' '{\"success\":false,\"diagnostics\":{\"code\":\"validation.invalid_argument\",\"message\":\"no Lab runner to wait for\"}}'; exit 2",
+            None,
+            AgentTaskGateStatus::Failed,
+            false,
+            true,
+            2,
+        ),
         (
             "true",
             None,
@@ -114,10 +124,20 @@ fn a_failed_gate_is_rerun_once_and_a_recovered_failure_is_recorded_as_flaky() {
         assert_eq!(report.flaky.is_some(), flaky, "{script}");
         assert_eq!(report.supervision_regate.is_some(), regated, "{script}");
         if let Some(first) = &report.supervision_regate {
-            assert!(
-                first.summary.contains("wall-clock limit of 200 ms"),
-                "{first:?}"
+            let expected = if supervision.is_some() {
+                "wall-clock limit of 200 ms"
+            } else {
+                "no Lab runner to wait for"
+            };
+            assert!(first.summary.contains(expected), "{first:?}");
+        }
+        if regated && supervision.is_none() {
+            let evidence = report.failure_evidence.as_ref().expect("evidence");
+            assert_eq!(
+                evidence.classification,
+                AgentTaskGateFailureClassification::Environment
             );
+            assert!(evidence.summary.contains("no Lab runner to wait for"));
         }
         if let Some(first) = &report.flaky {
             assert_eq!(first.exit_code, 1);

@@ -5512,7 +5512,7 @@ fn gate_failure_diagnostic(promotion: &Value, run_id: &str) -> Option<Value> {
         .and_then(Value::as_str);
     let infrastructure_failure = matches!(
         classification,
-        Some("gate_declaration" | "execution_budget" | "zero_tests_selected")
+        Some("gate_declaration" | "execution_budget" | "zero_tests_selected" | "environment")
     );
     Some(json!({
         "class": if infrastructure_failure {
