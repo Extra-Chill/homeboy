@@ -119,6 +119,20 @@ process.stdout.write(JSON.stringify({
 NODE
 }
 
+# The npm install bridge is a shared asset (extensions/homeboy-extension-root.json
+# ships scripts/lib next to the installed extensions). An install source that
+# predates it, or overwrote the shared assets, leaves it missing; name the path
+# and the remedy instead of dying on a bare `source` error mid-install.
+SHARED_INSTALL_HELPER="$(cd "${SCRIPT_DIR}/../../.." && pwd)/scripts/lib/local-workspace-install.sh"
+
+require_shared_install_helper() {
+    [ -f "$SHARED_INSTALL_HELPER" ] && return 0
+    echo "ERROR: Homeboy shared extension helper is missing: ${SHARED_INSTALL_HELPER}" >&2
+    echo "  The shared scripts/lib assets installed next to the extensions are incomplete, usually because an older install source replaced them." >&2
+    echo "  Reinstall extensions from the Homeboy source, e.g.: homeboy extension install https://github.com/Extra-Chill/homeboy --id wordpress" >&2
+    exit 1
+}
+
 run_install() {
     local ran=0
     if has_composer; then
@@ -130,7 +144,9 @@ run_install() {
         local command
         command="$(npm_install_command)"
         echo "Installing WordPress JavaScript dependencies: ${command}" >&2
-        source "${SCRIPT_DIR}/../../../scripts/lib/local-workspace-install.sh"
+        require_shared_install_helper
+        # shellcheck source=/dev/null
+        source "$SHARED_INSTALL_HELPER"
         # Declared local workspace overrides are installed before the
         # consumer's lifecycle (`prepare`) scripts run (homeboy#18302).
         # shellcheck disable=SC2086

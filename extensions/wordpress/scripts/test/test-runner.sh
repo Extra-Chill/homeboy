@@ -328,20 +328,36 @@ homeboy_wordpress_standalone_dependency_environment() {
 # Standalone smokes run with host PHP and no booted WordPress, but some load
 # core source files directly (for example wp-includes/html-api). Resolve the
 # core tree once per run through WP Codebox, matching the version query the
-# WP Codebox runners use. Resolution failure only warns: smokes that need core
-# fail with their own message, and smokes that do not are unaffected.
+# WP Codebox runners use. By default resolution failure only warns: smokes that
+# need core fail with their own message, and smokes that do not are unaffected.
+# A component whose standalone smokes cannot run without core declares
+# `standalone_php_requires_wordpress_core: true`; then an unresolved source fails
+# the step up front, naming the reason, instead of running every smoke without
+# the core tree it needs.
 homeboy_wordpress_standalone_core_root() {
     [ -z "${STANDALONE_WORDPRESS_CORE_ROOT_RESOLVED+x}" ] || return 0
     STANDALONE_WORDPRESS_CORE_ROOT_RESOLVED=1
     STANDALONE_WORDPRESS_CORE_ROOT=""
     STANDALONE_WORDPRESS_CORE_VERSION=""
+    STANDALONE_WORDPRESS_CORE_ERROR=""
 
     if homeboy_wp_codebox_wordpress_source "${HOMEBOY_SETTINGS_JSON:-}"; then
         STANDALONE_WORDPRESS_CORE_ROOT="$HOMEBOY_WP_CODEBOX_WORDPRESS_SOURCE_ROOT"
         STANDALONE_WORDPRESS_CORE_VERSION="${HOMEBOY_WP_CODEBOX_WORDPRESS_SOURCE_VERSION:-unknown}"
     else
-        echo "WARNING: WordPress core source unavailable for standalone smokes: ${HOMEBOY_WP_CODEBOX_WORDPRESS_SOURCE_ERROR}" >&2
+        STANDALONE_WORDPRESS_CORE_ERROR="${HOMEBOY_WP_CODEBOX_WORDPRESS_SOURCE_ERROR:-unknown error}"
+        if [ "$(homeboy_setting_bool standalone_php_requires_wordpress_core false)" != "true" ]; then
+            echo "WARNING: WordPress core source unavailable for standalone smokes: ${STANDALONE_WORDPRESS_CORE_ERROR}" >&2
+        fi
     fi
+}
+
+homeboy_wordpress_require_standalone_core_root() {
+    [ -z "$STANDALONE_WORDPRESS_CORE_ROOT" ] || return 0
+    [ "$(homeboy_setting_bool standalone_php_requires_wordpress_core false)" = "true" ] || return 0
+    echo "ERROR: WordPress core source could not be resolved, and standalone_php_requires_wordpress_core is set: ${STANDALONE_WORDPRESS_CORE_ERROR}" >&2
+    echo "  Standalone PHP smokes were not run: they need HOMEBOY_WORDPRESS_CORE_ROOT from 'wp-codebox wordpress-source --json'." >&2
+    return 1
 }
 
 homeboy_wordpress_record_standalone_php_failure() {
@@ -378,6 +394,14 @@ homeboy_wordpress_run_standalone_php_smoke_files() {
     # The runner owns HOMEBOY_WORDPRESS_CORE_ROOT: set it from the resolved
     # tree, otherwise keep an inherited value out of the smoke environment.
     homeboy_wordpress_standalone_core_root
+    if ! homeboy_wordpress_require_standalone_core_root; then
+        local unrun_count
+        unrun_count="$(printf '%s\n' "$smoke_files_raw" | grep -c . || true)"
+        echo "PHP_SMOKE_SUMMARY:passed=0 failed=${unrun_count}"
+        WORDPRESS_STANDALONE_PHP_SMOKE_PASSED=0
+        WORDPRESS_STANDALONE_PHP_SMOKE_FAILED="$unrun_count"
+        return 1
+    fi
     local core_env=(-u HOMEBOY_WORDPRESS_CORE_ROOT)
     if [ -n "$STANDALONE_WORDPRESS_CORE_ROOT" ]; then
         core_env=()
@@ -410,6 +434,11 @@ homeboy_wordpress_run_standalone_php_smoke_files() {
     done <<< "$smoke_files_raw"
 
     echo "PHP_SMOKE_SUMMARY:passed=${passed} failed=${failed}"
+    if [ "$failed" -gt 0 ] && [ -n "$STANDALONE_WORDPRESS_CORE_ERROR" ]; then
+        # A smoke that loads core files fails without the tree; keep the
+        # resolution failure next to the smoke failures, not only up top.
+        echo "NOTE: WordPress core source was unavailable for these smokes (HOMEBOY_WORDPRESS_CORE_ROOT unset): ${STANDALONE_WORDPRESS_CORE_ERROR}" >&2
+    fi
     WORDPRESS_STANDALONE_PHP_SMOKE_PASSED="$passed"
     WORDPRESS_STANDALONE_PHP_SMOKE_FAILED="$failed"
     [ "$failed" -eq 0 ] || return "$last_failure_exit"

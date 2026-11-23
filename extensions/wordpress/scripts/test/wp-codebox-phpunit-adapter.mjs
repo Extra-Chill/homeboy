@@ -150,6 +150,23 @@ for (const [suite, membership] of suiteMemberships) {
   }
 }
 const orphanedChangedTestFiles = changedTestFiles.filter((file) => !declaringSuitesByChangedFile.has(file));
+// Test files each sandbox suite's own config declares through <directory>
+// entries. A suite that declares test directories holding test files and then
+// executes zero tests did not run what it owns (for example a sandbox whose
+// WordPress source never resolved), so the default `phpunit_no_tests` skip must
+// not report it as an empty pass. Only an explicit `phpunit_no_tests` setting
+// opts back into tolerating that.
+const declaredDirectoryTestFilesBySuite = new Map();
+if (!discoveryOnly) {
+  for (const [suite, membership] of suiteMemberships) {
+    if (suite.runtime === 'sandbox' && membership.known && membership.directories.length > 0) {
+      declaredDirectoryTestFilesBySuite.set(suite, {
+        directories: membership.directories.map((directoryRule) => directoryRule.path),
+        files: await findDeclaredTestFiles(componentPath, membership),
+      });
+    }
+  }
+}
 if (!discoveryOnly) {
   for (const file of orphanedChangedTestFiles) {
     process.stdout.write(`PHPUNIT_ORPHANED_TEST_FILE:${file}\n`);
@@ -244,7 +261,7 @@ try {
       await rm(runArtifacts, { recursive: true, force: true });
     }
   } else {
-    const artifactStatus = await handoffArtifacts(runArtifacts, execution);
+    const artifactStatus = await handoffArtifacts(runArtifacts, execution, activeSuite);
     let failed = execution.status !== 0 || !['passed', 'skipped'].includes(artifactStatus);
     if (activeSuite.name) {
       process.stdout.write(`PHPUNIT_SUITE_RESULT:name=${activeSuite.name} status=${failed ? 'failed' : artifactStatus}\n`);
@@ -324,7 +341,7 @@ async function runAdditionalSuite(suite) {
       suiteArgs.push('--approve-external-service-writes', '--policy', JSON.stringify(databaseService.policy));
     }
     const suiteExecution = await runCaptured(suiteArgs, phpunitTimeoutSeconds, suiteArtifacts);
-    const suiteStatus = await handoffArtifacts(suiteArtifacts, suiteExecution);
+    const suiteStatus = await handoffArtifacts(suiteArtifacts, suiteExecution, suite);
     if (suiteExecution.status !== 0 || !['passed', 'skipped'].includes(suiteStatus)) {
       return { status: 'failed', exitCode: suiteExecution.timedOut ? 124 : (suiteExecution.status || 1) };
     }
@@ -1165,7 +1182,7 @@ async function requireHarness(source) {
     throw new Error(`WP Codebox PHPUnit harness is required at ${source}. Run composer install in ${extensionRoot}.`);
   }
 }
-async function handoffArtifacts(artifactRoot, execution) {
+async function handoffArtifacts(artifactRoot, execution, suite) {
   let pointer;
   try { pointer = json(await readFile(path.join(artifactRoot, 'latest-runtime.json'), 'utf8'), null); } catch {
     // A crashed workload may never write a runtime pointer. Preserve and parse
@@ -1173,21 +1190,21 @@ async function handoffArtifacts(artifactRoot, execution) {
     // a zero-test run.
     return parsePublishedArtifacts(await publishPhpunitArtifacts(
       artifactRoot,
-      await preservePhpunitOutput(artifactRoot, execution, []),
+      await preservePhpunitOutput(artifactRoot, execution, [], suite),
     ));
   }
   const runtime = pointer?.paths?.runtimeDirectory;
   if (typeof runtime !== 'string' || !/^runtime-[A-Za-z0-9][A-Za-z0-9-]*$/.test(runtime)) {
     return parsePublishedArtifacts(await publishPhpunitArtifacts(
       artifactRoot,
-      await preservePhpunitOutput(artifactRoot, execution, []),
+      await preservePhpunitOutput(artifactRoot, execution, [], suite),
     ));
   }
   const artifactDirectory = path.join(artifactRoot, runtime);
   const managedRuntimeServices = Array.isArray(pointer.managedRuntimeServices) ? pointer.managedRuntimeServices : [];
   return parsePublishedArtifacts(await publishPhpunitArtifacts(
     artifactDirectory,
-    await preservePhpunitOutput(artifactDirectory, execution, managedRuntimeServices),
+    await preservePhpunitOutput(artifactDirectory, execution, managedRuntimeServices, suite),
   ));
 }
 async function publishPhpunitArtifacts(artifactDirectory, status) {
@@ -1545,7 +1562,7 @@ async function atomicWrite(target, content) {
   await writeFile(temporary, content);
   await rename(temporary, target);
 }
-async function preservePhpunitOutput(artifactDirectory, execution, managedRuntimeServices) {
+async function preservePhpunitOutput(artifactDirectory, execution, managedRuntimeServices, suite) {
   const filesDirectory = path.join(artifactDirectory, 'files');
   const logsDirectory = path.join(artifactDirectory, 'logs');
   const testResultsPath = path.join(filesDirectory, 'test-results.json');
@@ -1628,7 +1645,7 @@ async function preservePhpunitOutput(artifactDirectory, execution, managedRuntim
     } else if (!structuredExecution && aggregate) {
       results.summary = { ...results.summary, ...aggregate };
     }
-    results.status = stageFailure ? 'failed' : normalizedTestStatus(results, aggregate, execution.status, validResults);
+    results.status = stageFailure ? 'failed' : normalizedTestStatus(results, aggregate, execution.status, validResults, suite);
     const references = Array.isArray(results.rawLogReferences) ? results.rawLogReferences : [];
     results.rawLogReferences = [
       ...references.filter((reference) => reference?.path !== 'files/phpunit-output.log'),
@@ -1684,6 +1701,10 @@ async function preservePhpunitOutput(artifactDirectory, execution, managedRuntim
     process.stdout.write(`PHPUNIT_ZERO_TESTS cause=${diagnosis.cause}\n`);
     process.stdout.write(`  ${diagnosis.detail}\n`);
     process.stdout.write(`  ${diagnosis.remediation}\n`);
+    const declared = declaredZeroTestFailure(suite, results?.summary?.total);
+    if (declared) {
+      process.stdout.write(`PHPUNIT_ZERO_TESTS_FAILED: suite "${suite.name || 'default'}" declares ${declared.files.length} test file(s) under ${declared.directories.join(', ')} but PHPUnit executed 0 tests; refusing to report this suite as passed. Set phpunit_no_tests to "skipped" only if an empty run is expected.\n`);
+    }
   }
   if (managedRuntimeServices.length > 0) {
     process.stdout.write('Managed runtime service evidence: artifact://files/managed-runtime-services.json\n');
@@ -1985,7 +2006,17 @@ function validTestResults(results) {
 function emptyTestSummary() {
   return { total: 0, passed: 0, failed: 0, skipped: 0, unknown: 0 };
 }
-function normalizedTestStatus(results, aggregate, executionStatus, validResults) {
+// The declared test directories of `suite` when a zero-test result must fail
+// despite the default `phpunit_no_tests` skip, else null. An explicit
+// `phpunit_no_tests` setting always wins.
+function declaredZeroTestFailure(suite, total) {
+  if (total !== 0 || (typeof settings.phpunit_no_tests === 'string' && settings.phpunit_no_tests !== '')) {
+    return null;
+  }
+  const declared = declaredDirectoryTestFilesBySuite.get(suite);
+  return declared && declared.files.length > 0 ? declared : null;
+}
+function normalizedTestStatus(results, aggregate, executionStatus, validResults, suite) {
   if (executionStatus !== 0 || (validResults && results.status === 'failed') || aggregate?.failed > 0) {
     return 'failed';
   }
@@ -1994,6 +2025,9 @@ function normalizedTestStatus(results, aggregate, executionStatus, validResults)
   }
   const total = aggregate?.total ?? results.summary.total;
   if (total === 0) {
+    if (declaredZeroTestFailure(suite, total)) {
+      return 'failed';
+    }
     return ['skip', 'skipped'].includes(settings.phpunit_no_tests || 'skipped') ? 'skipped' : 'failed';
   }
   if (results.status === 'unknown' && aggregate) {
