@@ -380,6 +380,7 @@ pub(crate) fn settle_undriven_cook(
         .as_str()
         .or_else(|| record.metadata["execution_step_failure"]["message"].as_str())
         .or_else(|| record.metadata["unmaterialized_cook_admission"]["reason"].as_str())
+        .or_else(|| record.metadata["detached_cook_handoff"]["reason"].as_str())
         .map(str::to_string);
     report.report_stores = Some((recipes, lifecycle.clone()));
     agent_task_lifecycle::settle_cook_terminal_observations_in_store(
