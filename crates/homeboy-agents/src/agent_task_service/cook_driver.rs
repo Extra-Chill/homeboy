@@ -302,6 +302,17 @@ pub(super) fn run_cook_with_runtime(
             result.exit_code != 0,
         );
         if result.value.disposition.is_terminal() {
+            if let Err(error) = super::cook::finalize_cook_destination_worktree(
+                lifecycle_store,
+                &notification_options,
+                result.value.status,
+            ) {
+                homeboy_core::log_status!(
+                    "agent-task",
+                    "Cook destination worktree finalization failed: {}",
+                    error
+                );
+            }
             if let Err(error) = finish_cook_terminal_with_report(
                 lifecycle_store,
                 &result.value.cook_id,
