@@ -2,8 +2,8 @@ use std::collections::HashMap;
 
 use homeboy_core::component::Component;
 use homeboy_core::error::Error;
-use homeboy_engine_primitives::phase_timing::PhaseTimer;
 use homeboy_core::project::Project;
+use homeboy_engine_primitives::phase_timing::PhaseTimer;
 
 use super::super::binding::bind_project_payloads;
 use super::super::execution::{prepare_component_deploy, PreparedComponentDeploy};

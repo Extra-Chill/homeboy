@@ -238,13 +238,16 @@ mod tests {
         // No such run: the append fails, but successful work still succeeds.
         assert_eq!(
             store
-                .phase_timer("missing-run").time::<_, crate::Error>("terminal.record", || Ok(42))
+                .phase_timer("missing-run")
+                .time::<_, crate::Error>("terminal.record", || Ok(42))
                 .unwrap(),
             42
         );
-        let result: Result<()> = store.phase_timer("missing-run").time::<_, crate::Error>("terminal.record", || {
-            Err(Error::internal_unexpected("original failure"))
-        });
+        let result: Result<()> = store
+            .phase_timer("missing-run")
+            .time::<_, crate::Error>("terminal.record", || {
+                Err(Error::internal_unexpected("original failure"))
+            });
         assert!(result.unwrap_err().message.contains("original failure"));
     }
 
@@ -255,12 +258,17 @@ mod tests {
         let run = store
             .start_run(NewRunRecord::builder("agent-task").build())
             .unwrap();
-        let result: Result<()> = store.phase_timer(&run.id).time::<_, crate::Error>("promote", || {
-            store.phase_timer(&run.id).time::<_, crate::Error>("gate", || {
-                std::thread::sleep(std::time::Duration::from_millis(10));
-                Err(Error::internal_unexpected("gate failure"))
-            })
-        });
+        let result: Result<()> =
+            store
+                .phase_timer(&run.id)
+                .time::<_, crate::Error>("promote", || {
+                    store
+                        .phase_timer(&run.id)
+                        .time::<_, crate::Error>("gate", || {
+                            std::thread::sleep(std::time::Duration::from_millis(10));
+                            Err(Error::internal_unexpected("gate failure"))
+                        })
+                });
         assert!(result.is_err());
         let coverage = store.phase_coverage(&run.id, 10).unwrap();
         assert!(coverage.covered_ms >= 9.0);

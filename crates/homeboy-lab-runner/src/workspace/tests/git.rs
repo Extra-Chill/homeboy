@@ -1813,7 +1813,10 @@ fn promisor_configured_transport_seals_local_lab_bundle_without_runner_transport
                 .find(|span| span.id == id)
                 .unwrap_or_else(|| panic!("missing {id}"));
             assert!(span.duration_ms.is_some());
-            assert_eq!(span.status, homeboy_engine_primitives::phase_timing::PhaseStatus::Ok);
+            assert_eq!(
+                span.status,
+                homeboy_engine_primitives::phase_timing::PhaseStatus::Ok
+            );
         }
         assert_eq!(status, 0);
         assert_eq!(output.sync_mode, RunnerWorkspaceSyncMode::Git);

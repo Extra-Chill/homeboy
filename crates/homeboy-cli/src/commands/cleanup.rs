@@ -669,11 +669,12 @@ struct RetainedStorageReconciliation {
 fn bounded_retained_storage_report(args: CleanupRetainedStorageArgs) -> CmdResult<Value> {
     observe_cleanup(
         || {
-            homeboy_engine_primitives::phase_timing::PhaseTimer::current().time_with_outcome::<_, homeboy::core::Error>(
-                "cleanup.retained_storage",
-                || retained_storage_child_report(args),
-                |(_, code)| *code != 0,
-            )
+            homeboy_engine_primitives::phase_timing::PhaseTimer::current()
+                .time_with_outcome::<_, homeboy::core::Error>(
+                    "cleanup.retained_storage",
+                    || retained_storage_child_report(args),
+                    |(_, code)| *code != 0,
+                )
         },
         |(_, code)| *code != 0,
     )
@@ -5435,7 +5436,10 @@ mod tests {
                 .iter()
                 .find(|span| span.id == "cleanup.runtime_tmp")
                 .unwrap();
-            assert_eq!(span.status, homeboy_engine_primitives::phase_timing::PhaseStatus::Ok);
+            assert_eq!(
+                span.status,
+                homeboy_engine_primitives::phase_timing::PhaseStatus::Ok
+            );
             assert!(span.duration_ms.is_some());
             let category = &result.output["categories"][0];
             assert_eq!(category["category"], "runtime_tmp");

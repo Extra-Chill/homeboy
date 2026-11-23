@@ -573,7 +573,8 @@ fn persist_aggregate(
 ) -> Result<AgentTaskRunRecord> {
     store
         .open_observation_initialized()?
-        .phase_timer(run_id).time::<_, homeboy_core::Error>("publish.aggregate", || {
+        .phase_timer(run_id)
+        .time::<_, homeboy_core::Error>("publish.aggregate", || {
             store.record_run_aggregate(run_id, plan, aggregate)
         })
 }
@@ -592,14 +593,17 @@ fn run_with_scheduler(
     // Each executor attempt records its own `provider` span inside the
     // scheduler; this span is the scheduler pass around them.
     let observation = store.open_observation_initialized()?;
-    observation.phase_timer(run_id).time_with_outcome::<_, homeboy_core::Error>("schedule",
-        || {
-            Ok(scheduler
-                .with_run_id(run_id.to_string())
-                .run_with_derived_cook_baseline(plan, derived_cook_baseline))
-        },
-        |aggregate| aggregate_exit_code(aggregate) != 0,
-    )
+    observation
+        .phase_timer(run_id)
+        .time_with_outcome::<_, homeboy_core::Error>(
+            "schedule",
+            || {
+                Ok(scheduler
+                    .with_run_id(run_id.to_string())
+                    .run_with_derived_cook_baseline(plan, derived_cook_baseline))
+            },
+            |aggregate| aggregate_exit_code(aggregate) != 0,
+        )
 }
 
 fn acknowledgement_outcome(

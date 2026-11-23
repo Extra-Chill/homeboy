@@ -170,7 +170,8 @@ pub(super) fn materialization_plan_controlled(
     }
     let mut tips = Vec::new();
     for root in request.roots {
-        let output = homeboy_engine_primitives::phase_timing::PhaseTimer::current().time::<_, homeboy_core::Error>(
+        let output = homeboy_engine_primitives::phase_timing::PhaseTimer::current()
+            .time::<_, homeboy_core::Error>(
             "stage.lab.source_materialization.runner_inventory",
             || {
                 control.output(

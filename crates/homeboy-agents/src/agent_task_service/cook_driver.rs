@@ -247,9 +247,11 @@ pub(super) fn run_cook_with_runtime(
             homeboy_core::log_status!("observe", "phase timing persistence failed: {}", error);
         })
         .ok();
-    let _execution = timing_store
-        .as_ref()
-        .map(|store| store.phase_timer(&options.identity.initial_run_id).into_guard("cook.execution"));
+    let _execution = timing_store.as_ref().map(|store| {
+        store
+            .phase_timer(&options.identity.initial_run_id)
+            .into_guard("cook.execution")
+    });
     let mut result = run_cook_reported(
         store,
         lifecycle_store,

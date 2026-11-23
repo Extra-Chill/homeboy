@@ -288,7 +288,8 @@ fn hydrate_lab_workspace_dependencies_with_policy(
         let component_root = dependency_root(remote_path, plan_step)?;
         let options =
             hydration_runner_exec_options(command.clone(), &component_root, parent_run_id, index);
-        let (output, exit_code) = homeboy_engine_primitives::phase_timing::PhaseTimer::current().time_with_outcome::<_, homeboy_core::Error>(
+        let (output, exit_code) = homeboy_engine_primitives::phase_timing::PhaseTimer::current()
+            .time_with_outcome::<_, homeboy_core::Error>(
             "stage.lab.dependency_hydration",
             || {
                 exec(
@@ -1329,7 +1330,10 @@ mod tests {
                 .iter()
                 .find(|span| span.id == "stage.lab.dependency_hydration")
                 .expect("persisted phase");
-            assert_eq!(span.status, homeboy_engine_primitives::phase_timing::PhaseStatus::Ok);
+            assert_eq!(
+                span.status,
+                homeboy_engine_primitives::phase_timing::PhaseStatus::Ok
+            );
             assert!(span.duration_ms.is_some());
             assert_eq!(
                 step.command,

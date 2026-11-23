@@ -146,7 +146,11 @@ impl ResourceSummaryRun {
     }
 
     fn finish_with_probe(&self, probe: &impl ResourceProbe) -> RunResourceSummary {
-        homeboy_engine_primitives::phase_timing::PhaseTimer::current().finish("resource.run", self.started_instant, false);
+        homeboy_engine_primitives::phase_timing::PhaseTimer::current().finish(
+            "resource.run",
+            self.started_instant,
+            false,
+        );
         let after = probe.snapshot();
         RunResourceSummary::from_snapshots(
             self.label.clone(),
@@ -407,7 +411,10 @@ mod tests {
             .iter()
             .find(|span| span.id == "resource.run")
             .expect("persisted phase");
-        assert_eq!(span.status, homeboy_engine_primitives::phase_timing::PhaseStatus::Ok);
+        assert_eq!(
+            span.status,
+            homeboy_engine_primitives::phase_timing::PhaseStatus::Ok
+        );
         assert!(span.duration_ms.is_some());
         assert_eq!(summary.load_average_before.unwrap().one, 3.0);
         assert!(summary.load_average_after.is_none());

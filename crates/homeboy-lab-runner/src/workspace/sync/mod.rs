@@ -2355,10 +2355,10 @@ fn write_metadata_and_sync_validation_dependencies(
     control: &WorkspaceControl,
 ) -> Result<Vec<RunnerValidationDependencySyncOutput>> {
     control.checkpoint()?;
-    homeboy_engine_primitives::phase_timing::PhaseTimer::current().time::<_, homeboy_core::Error>(
-        "stage.lab.source_materialization.record_writes",
-        || write_workspace_metadata(runner, metadata),
-    )?;
+    homeboy_engine_primitives::phase_timing::PhaseTimer::current()
+        .time::<_, homeboy_core::Error>("stage.lab.source_materialization.record_writes", || {
+            write_workspace_metadata(runner, metadata)
+        })?;
     control.checkpoint()?;
     sync_validation_dependency_workspaces(
         runner,

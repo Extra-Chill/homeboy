@@ -593,26 +593,29 @@ fn seed_worktree_cargo_target_until(
     private_dir: &Path,
     deadline: Option<Instant>,
 ) -> Result<()> {
-    homeboy_engine_primitives::phase_timing::PhaseTimer::current().time::<_, crate::Error>("cargo_target.seed", || {
-        optional_cargo_cache_transfer("seed skipped; using cold private target", || {
-            if base_dir.exists() {
-                with_base_store_publication_lock(
-                    base_dir,
-                    "warm-cache-seed",
-                    false,
-                    deadline,
-                    || {
-                        copy_cargo_cache(
-                            &cache_projection(base_dir),
-                            private_dir,
-                            CacheTransfer::Copy,
-                        )
-                    },
-                )?;
-            }
-            Ok(())
-        })
-    })
+    homeboy_engine_primitives::phase_timing::PhaseTimer::current().time::<_, crate::Error>(
+        "cargo_target.seed",
+        || {
+            optional_cargo_cache_transfer("seed skipped; using cold private target", || {
+                if base_dir.exists() {
+                    with_base_store_publication_lock(
+                        base_dir,
+                        "warm-cache-seed",
+                        false,
+                        deadline,
+                        || {
+                            copy_cargo_cache(
+                                &cache_projection(base_dir),
+                                private_dir,
+                                CacheTransfer::Copy,
+                            )
+                        },
+                    )?;
+                }
+                Ok(())
+            })
+        },
+    )
 }
 
 fn shared_store_dir(root: &Path, owner: &str) -> PathBuf {
@@ -652,86 +655,92 @@ fn cache_projection(base_dir: &Path) -> PathBuf {
 /// reader. The base directory remains a lifecycle/lock container; its current
 /// cache is a separately published directory.
 fn publish_cargo_cache(from: &Path, base_dir: &Path, deadline: Instant) -> Result<()> {
-    homeboy_engine_primitives::phase_timing::PhaseTimer::current().time::<_, crate::Error>("cargo_target.publish", || {
-        fs::create_dir_all(base_dir)
-            .map_err(|error| io_error(error, "create Cargo cache base store"))?;
-        let sequence = ISOLATED_TARGET_SEQUENCE.fetch_add(1, Ordering::Relaxed);
-        let staging = base_dir.join(format!(
-            "{CACHE_STAGING_PREFIX}{}-{sequence}",
-            std::process::id()
-        ));
-        fs::create_dir(&staging)
-            .map_err(|error| io_error(error, "create Cargo cache publication staging"))?;
-        let result = (|| {
-            loop {
-                // Pin the snapshot while linking; retry outside the exclusive lock
-                // if another publisher swaps it before us, preserving both runs.
-                #[cfg(unix)]
-                use std::os::unix::fs::MetadataExt;
-                let snapshot = with_base_store_publication_lock(
-                    base_dir,
-                    "warm-cache-snapshot",
-                    false,
-                    Some(deadline),
-                    || {
-                        copy_cargo_cache(
-                            &cache_projection(base_dir),
-                            &staging,
-                            CacheTransfer::Link,
-                        )?;
-                        Ok(fs::metadata(base_dir.join(CACHE_CURRENT)).ok())
-                    },
-                )?;
-                copy_cargo_cache(from, &staging, CacheTransfer::Replace)?;
-                let previous = staging.with_extension("previous");
-                let swapped = with_base_store_publication_lock(
-                    base_dir,
-                    "warm-cache-publication",
-                    true,
-                    Some(deadline),
-                    || {
-                        let current = fs::metadata(base_dir.join(CACHE_CURRENT)).ok();
-                        #[cfg(unix)]
-                        let unchanged = current.as_ref().map(|m| (m.dev(), m.ino()))
-                            == snapshot.as_ref().map(|m| (m.dev(), m.ino()));
-                        #[cfg(not(unix))]
-                        let unchanged = current.and_then(|m| m.created().ok())
-                            == snapshot.and_then(|m| m.created().ok());
-                        if !unchanged {
-                            return Ok(false);
-                        }
-                        let published = base_dir.join(CACHE_CURRENT);
-                        if published.exists() {
-                            fs::rename(&published, &previous).map_err(|error| {
-                                io_error(error, "stage previous Cargo cache publication")
+    homeboy_engine_primitives::phase_timing::PhaseTimer::current().time::<_, crate::Error>(
+        "cargo_target.publish",
+        || {
+            fs::create_dir_all(base_dir)
+                .map_err(|error| io_error(error, "create Cargo cache base store"))?;
+            let sequence = ISOLATED_TARGET_SEQUENCE.fetch_add(1, Ordering::Relaxed);
+            let staging = base_dir.join(format!(
+                "{CACHE_STAGING_PREFIX}{}-{sequence}",
+                std::process::id()
+            ));
+            fs::create_dir(&staging)
+                .map_err(|error| io_error(error, "create Cargo cache publication staging"))?;
+            let result = (|| {
+                loop {
+                    // Pin the snapshot while linking; retry outside the exclusive lock
+                    // if another publisher swaps it before us, preserving both runs.
+                    #[cfg(unix)]
+                    use std::os::unix::fs::MetadataExt;
+                    let snapshot = with_base_store_publication_lock(
+                        base_dir,
+                        "warm-cache-snapshot",
+                        false,
+                        Some(deadline),
+                        || {
+                            copy_cargo_cache(
+                                &cache_projection(base_dir),
+                                &staging,
+                                CacheTransfer::Link,
+                            )?;
+                            Ok(fs::metadata(base_dir.join(CACHE_CURRENT)).ok())
+                        },
+                    )?;
+                    copy_cargo_cache(from, &staging, CacheTransfer::Replace)?;
+                    let previous = staging.with_extension("previous");
+                    let swapped = with_base_store_publication_lock(
+                        base_dir,
+                        "warm-cache-publication",
+                        true,
+                        Some(deadline),
+                        || {
+                            let current = fs::metadata(base_dir.join(CACHE_CURRENT)).ok();
+                            #[cfg(unix)]
+                            let unchanged = current.as_ref().map(|m| (m.dev(), m.ino()))
+                                == snapshot.as_ref().map(|m| (m.dev(), m.ino()));
+                            #[cfg(not(unix))]
+                            let unchanged = current.and_then(|m| m.created().ok())
+                                == snapshot.and_then(|m| m.created().ok());
+                            if !unchanged {
+                                return Ok(false);
+                            }
+                            let published = base_dir.join(CACHE_CURRENT);
+                            if published.exists() {
+                                fs::rename(&published, &previous).map_err(|error| {
+                                    io_error(error, "stage previous Cargo cache publication")
+                                })?;
+                            }
+                            if let Err(error) = fs::rename(&staging, &published) {
+                                if previous.exists() {
+                                    let _ = fs::rename(&previous, &published);
+                                }
+                                return Err(io_error(
+                                    error,
+                                    "publish complete Cargo cache projection",
+                                ));
+                            }
+                            Ok(true)
+                        },
+                    )?;
+                    if swapped {
+                        // The superseded projection is unreachable; readers only
+                        // need the lock for the swap, not this potentially huge delete.
+                        if previous.exists() {
+                            fs::remove_dir_all(&previous).map_err(|error| {
+                                io_error(error, "remove superseded Cargo cache projection")
                             })?;
                         }
-                        if let Err(error) = fs::rename(&staging, &published) {
-                            if previous.exists() {
-                                let _ = fs::rename(&previous, &published);
-                            }
-                            return Err(io_error(error, "publish complete Cargo cache projection"));
-                        }
-                        Ok(true)
-                    },
-                )?;
-                if swapped {
-                    // The superseded projection is unreachable; readers only
-                    // need the lock for the swap, not this potentially huge delete.
-                    if previous.exists() {
-                        fs::remove_dir_all(&previous).map_err(|error| {
-                            io_error(error, "remove superseded Cargo cache projection")
-                        })?;
+                        return Ok(());
                     }
-                    return Ok(());
                 }
+            })();
+            if result.is_err() && staging.exists() {
+                let _ = fs::remove_dir_all(&staging);
             }
-        })();
-        if result.is_err() && staging.exists() {
-            let _ = fs::remove_dir_all(&staging);
-        }
-        result
-    })
+            result
+        },
+    )
 }
 
 #[derive(Clone, Copy)]

@@ -150,9 +150,9 @@ pub(crate) mod ownership;
 pub use homeboy_lab_contract::path_materialization;
 pub mod parsed_command_preflight;
 pub mod performance_hotspots;
-pub mod reaping;
 pub mod plan;
 pub mod process;
+pub mod reaping;
 // product_identity moved to the internal `homeboy-product-identity` crate.
 // Re-exported so `crate::product_identity::*` call sites keep working.
 pub use homeboy_product_identity as product_identity;

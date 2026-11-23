@@ -280,9 +280,11 @@ pub(crate) fn execute_exec(
         })
         .ok();
     let identity = execution_context.assertion();
-    let _execution = timing_store
-        .as_ref()
-        .map(|store| store.phase_timer(&identity.controller_run_id).into_guard("runner.execution"));
+    let _execution = timing_store.as_ref().map(|store| {
+        store
+            .phase_timer(&identity.controller_run_id)
+            .into_guard("runner.execution")
+    });
     active_driver().execute(
         prepared,
         execution_context,

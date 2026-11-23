@@ -11,27 +11,30 @@ pub fn preflight_gate_toolchains(
     runtime_tmpdir: Option<&Path>,
     timeout: Duration,
 ) -> Result<()> {
-    homeboy_engine_primitives::phase_timing::PhaseTimer::current().time::<_, homeboy_core::Error>("admit.gate_toolchains", || {
-        if let Some(runner_id) = policy.lab_runner.as_deref() {
-            return placement::preflight(
+    homeboy_engine_primitives::phase_timing::PhaseTimer::current().time::<_, homeboy_core::Error>(
+        "admit.gate_toolchains",
+        || {
+            if let Some(runner_id) = policy.lab_runner.as_deref() {
+                return placement::preflight(
+                    cwd,
+                    runner_id,
+                    policy,
+                    requirements,
+                    package_artifacts,
+                    timeout,
+                );
+            }
+            preflight_gate_toolchains_local(
                 cwd,
-                runner_id,
                 policy,
                 requirements,
                 package_artifacts,
+                runtime_tmpdir,
                 timeout,
-            );
-        }
-        preflight_gate_toolchains_local(
-            cwd,
-            policy,
-            requirements,
-            package_artifacts,
-            runtime_tmpdir,
-            timeout,
-            false,
-        )
-    })
+                false,
+            )
+        },
+    )
 }
 
 pub(crate) fn preflight_verify_gate_options(cwd: &Path, gates: &VerifyGateOptions) -> Result<()> {

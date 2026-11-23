@@ -258,7 +258,10 @@ mod tests {
             .iter()
             .find(|span| span.id == "resolve.readonly_probe.runner_homeboy_identity")
             .expect("persisted phase");
-        assert_eq!(span.status, homeboy_engine_primitives::phase_timing::PhaseStatus::Failed);
+        assert_eq!(
+            span.status,
+            homeboy_engine_primitives::phase_timing::PhaseStatus::Failed
+        );
         assert!(span.duration_ms.is_some());
     }
 

@@ -204,15 +204,24 @@ pub fn hydrate_declared_dependencies(
     package_root: &str,
     policy: &DependencyHydrationPolicy,
 ) -> Result<Vec<DependencyHydrationOutcome>> {
-    homeboy_engine_primitives::phase_timing::PhaseTimer::current().time_with_outcome::<_, crate::Error>(
-        "stage.dependency_hydration",
-        || hydrate_declared_dependencies_for_component(path, workspace, package_root, policy, None),
-        |outcomes| {
-            outcomes
-                .iter()
-                .any(|outcome| outcome.status == DependencyHydrationStatus::Failed)
-        },
-    )
+    homeboy_engine_primitives::phase_timing::PhaseTimer::current()
+        .time_with_outcome::<_, crate::Error>(
+            "stage.dependency_hydration",
+            || {
+                hydrate_declared_dependencies_for_component(
+                    path,
+                    workspace,
+                    package_root,
+                    policy,
+                    None,
+                )
+            },
+            |outcomes| {
+                outcomes
+                    .iter()
+                    .any(|outcome| outcome.status == DependencyHydrationStatus::Failed)
+            },
+        )
 }
 
 /// Hydrate declared dependencies using a component identity already recorded at
@@ -2699,7 +2708,10 @@ esac
                 .iter()
                 .find(|span| span.id == "stage.dependency_hydration")
                 .expect("persisted phase");
-            assert_eq!(span.status, homeboy_engine_primitives::phase_timing::PhaseStatus::Ok);
+            assert_eq!(
+                span.status,
+                homeboy_engine_primitives::phase_timing::PhaseStatus::Ok
+            );
             assert!(span.duration_ms.is_some());
         });
     }

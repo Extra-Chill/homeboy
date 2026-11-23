@@ -126,9 +126,8 @@ fn run_with_plan_inner(
     let time_phase = |phase: &str, operation: &mut dyn FnMut() -> Result<bool>| {
         if let Some(context) = &options.control_plane {
             homeboy_core::observation::ObservationStore::open_initialized_in_roots(roots)?
-                .phase_timer(&context.release_run_id).time_with_outcome::<_, homeboy_core::Error>(phase, operation, |stopped| {
-                    *stopped
-                })
+                .phase_timer(&context.release_run_id)
+                .time_with_outcome::<_, homeboy_core::Error>(phase, operation, |stopped| *stopped)
         } else {
             operation()
         }

@@ -37,9 +37,11 @@ pub fn record_pre_execution_failure_in_store(
             None
         }
     };
-    let _failure_phase = timing
-        .as_ref()
-        .map(|store| store.phase_timer(&run_id).into_guard("terminal.failure_recording"));
+    let _failure_phase = timing.as_ref().map(|store| {
+        store
+            .phase_timer(&run_id)
+            .into_guard("terminal.failure_recording")
+    });
     // Cancellation and aggregate projection both own a terminal transition.
     // Re-read and arbitrate while holding the record/aggregate transaction lock
     // so a retry launcher failure cannot overwrite a cancellation winner.

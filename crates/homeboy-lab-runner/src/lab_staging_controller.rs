@@ -1261,13 +1261,14 @@ fn materialize_deferred_source<T>(
     )));
     let control = deferred_source_control(store, run_id, runner_id, plan);
     let result: Result<T> =
-        homeboy_engine_primitives::phase_timing::PhaseTimer::current().time::<_, homeboy_core::Error>("stage.lab.source_materialization", || {
-            control.checkpoint()?;
-            let value = materialize(&control)?;
-            control.checkpoint()?;
-            ensure_deferred_source_active(store, run_id)?;
-            Ok(value)
-        });
+        homeboy_engine_primitives::phase_timing::PhaseTimer::current()
+            .time::<_, homeboy_core::Error>("stage.lab.source_materialization", || {
+                control.checkpoint()?;
+                let value = materialize(&control)?;
+                control.checkpoint()?;
+                ensure_deferred_source_active(store, run_id)?;
+                Ok(value)
+            });
     result.map_err(|mut error| {
         error.details["lab_source_materialization"] = json!({
             "phase": "source_materialization", "runner_job_accepted": false,
@@ -1321,23 +1322,24 @@ fn deferred_source_control(
         if last.is_some_and(|last| last.elapsed() < Duration::from_secs(5)) {
             return Ok(());
         }
-        homeboy_engine_primitives::phase_timing::PhaseTimer::current().time::<_, homeboy_core::Error>(
-            "stage.lab.source_materialization.checkpoint_record_writes",
-            || {
-                homeboy_agents::agent_task_lifecycle::record_lab_offload_phase_in_store(
-                    &progress_store,
-                    homeboy_agents::agent_task_lifecycle::LabOffloadPhaseRecord {
-                        requested_run_id: &progress_run,
-                        runner_id: &progress_runner,
-                        phase: "source_materialization",
-                        remote_workspace: None,
-                        source_checkout: None,
-                        provider_rotation: None,
-                        durable_plan: None,
-                    },
-                )
-            },
-        )?;
+        homeboy_engine_primitives::phase_timing::PhaseTimer::current()
+            .time::<_, homeboy_core::Error>(
+                "stage.lab.source_materialization.checkpoint_record_writes",
+                || {
+                    homeboy_agents::agent_task_lifecycle::record_lab_offload_phase_in_store(
+                        &progress_store,
+                        homeboy_agents::agent_task_lifecycle::LabOffloadPhaseRecord {
+                            requested_run_id: &progress_run,
+                            runner_id: &progress_runner,
+                            phase: "source_materialization",
+                            remote_workspace: None,
+                            source_checkout: None,
+                            provider_rotation: None,
+                            durable_plan: None,
+                        },
+                    )
+                },
+            )?;
         *last = Some(Instant::now());
         Ok(())
     }))
@@ -4329,10 +4331,12 @@ impl StageExecutionAdapter {
                     Some(effect) => effect,
                     None => match checkpoint.next_action() {
                         LabStagingPhase::AcceptedMaterializeWorkspace => {
-                            let handoff_identity = homeboy_engine_primitives::phase_timing::PhaseTimer::current().time::<_, homeboy_core::Error>(
-                                "stage.lab.source_materialization.handoff_validation",
-                                || self.operations.validate_handoff_identity(request),
-                            )?;
+                            let handoff_identity =
+                                homeboy_engine_primitives::phase_timing::PhaseTimer::current()
+                                    .time::<_, homeboy_core::Error>(
+                                    "stage.lab.source_materialization.handoff_validation",
+                                    || self.operations.validate_handoff_identity(request),
+                                )?;
                             let (source_snapshot_id, workspace_id) =
                                 self.operations.materialize_workspace(
                                     request,
@@ -5984,10 +5988,11 @@ mod tests {
             cancellation: &LabStagingCancellationToken,
         ) -> Result<(String, String)> {
             self.record("workspace");
-            homeboy_engine_primitives::phase_timing::PhaseTimer::current().time::<_, homeboy_core::Error>(
-                "stage.lab.source_materialization.fixture_probe",
-                || Ok(()),
-            )?;
+            homeboy_engine_primitives::phase_timing::PhaseTimer::current()
+                .time::<_, homeboy_core::Error>(
+                    "stage.lab.source_materialization.fixture_probe",
+                    || Ok(()),
+                )?;
             if self.cancel_during_workspace.swap(false, Ordering::SeqCst) {
                 cancellation.cancel();
                 let mut error = Error::internal_unexpected("workspace construction cancelled");
