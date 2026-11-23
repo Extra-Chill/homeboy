@@ -24,7 +24,9 @@ mod cook_adoption;
 pub use cook_admission_key::COOK_ADMISSION_KEY_METADATA;
 /// Fresh provider attempts start from a clean Cook base tree.
 mod cook_attempt_workspace;
-pub use cook_attempt_workspace::{gate_cook_base, AttemptWorkspaceNotAtBase};
+pub use cook_attempt_workspace::{
+    gate_cook_base, gate_cook_target_branch, rebased_gate_base, AttemptWorkspaceNotAtBase,
+};
 mod cook_baseline;
 pub(crate) use cook_baseline::compare_gate_failures_to_verified_base;
 mod cook_budget;

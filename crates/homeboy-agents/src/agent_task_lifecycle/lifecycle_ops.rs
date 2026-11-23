@@ -1274,7 +1274,24 @@ pub fn fail_detached_cook_handoff_parent_in_store(
     reason: &str,
 ) -> Result<AgentTaskRunRecord> {
     let cook_id = sanitize_run_id(cook_id);
-    let record = lifecycle_store.transition_when(&cook_id, |record| {
+    let record =
+        terminalize_detached_cook_handoff_parent_in_store(lifecycle_store, &cook_id, reason)?;
+    // Explicit handoff failures own the terminal announcement. Lease expiry
+    // only retires a parent anchor and must not consume its notification claim.
+    if record.is_some() {
+        crate::agent_task_service::finish_cook_terminal(lifecycle_store, &cook_id)?;
+    }
+    // A protected parent remains a successful no-op.
+    Ok(record.unwrap_or(lifecycle_store.read_record(&cook_id)?))
+}
+
+fn terminalize_detached_cook_handoff_parent_in_store(
+    lifecycle_store: &AgentTaskLifecycleStore,
+    cook_id: &str,
+    reason: &str,
+) -> Result<Option<AgentTaskRunRecord>> {
+    let cook_id = sanitize_run_id(cook_id);
+    lifecycle_store.transition_when(&cook_id, |record| {
         if record.metadata["detached_cook_handoff"]["cook_id"] != cook_id
             || record.state().is_terminal()
             || record.metadata["detached_cook_handoff"]["state"] != "pending"
@@ -1288,15 +1305,7 @@ pub fn fail_detached_cook_handoff_parent_in_store(
         // The guard above admits only a live parent, so this is always the
         // pre-handoff failure; a cancelled parent is already terminal.
         Some(fail_detached_cook_handoff_transition(record, reason))
-    })?;
-    // Notify after releasing the transition lock. Repeated terminal observers
-    // use the Cook's durable notification claim to avoid duplicate delivery.
-    if record.is_some() {
-        crate::agent_task_service::finish_cook_terminal(lifecycle_store, &cook_id)?;
-    }
-    // A protected parent is a successful no-op: it is the authoritative result
-    // of materialization or a prior terminal transition, not a missing parent.
-    Ok(record.unwrap_or(lifecycle_store.read_record(&cook_id)?))
+    })
 }
 
 /// Terminalize a pending parent only when the launcher that created its claim
@@ -1561,11 +1570,14 @@ pub fn expire_detached_cook_admission_in_store(
     if !has_expired_detached_cook_admission(&record, chrono::Utc::now()) {
         return Ok(false);
     }
-    let terminal = fail_detached_cook_handoff_parent_in_store(
+    // Expiring a family parent is bookkeeping, not a failed launch owned by
+    // this observer. Do not settle or announce a separate Cook for the anchor.
+    let terminal = terminalize_detached_cook_handoff_parent_in_store(
         lifecycle_store,
         cook_id,
         "detached Cook admission lease expired before child or supervisor ownership attached",
-    )?;
+    )?
+    .unwrap_or(lifecycle_store.read_record(cook_id)?);
     Ok(terminal.state() == RunExecutionState::Failed
         && terminal.metadata["detached_cook_handoff"]["admission_state"] == "failed")
 }

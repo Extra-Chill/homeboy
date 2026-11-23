@@ -216,6 +216,77 @@ pub fn gate_cook_base(recipe: &super::AgentTaskCookRecipe) -> Option<String> {
     })
 }
 
+/// The target branch a Cook's candidate is delivered onto (`--base`).
+pub fn gate_cook_target_branch(recipe: &super::AgentTaskCookRecipe) -> Option<String> {
+    recipe
+        .finalization
+        .get("base")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|base| !base.is_empty())
+        .map(str::to_string)
+}
+
+/// The base a candidate's changed-since gates must diff against (#18861).
+///
+/// Gates diff `base...head`, i.e. from `merge-base(base, head)`. When a
+/// candidate rebases (or merges) onto a newer target branch tip, that merge
+/// base is older than the candidate's current merge base with the target, so
+/// trunk commits the candidate merely picked up (release commits, the
+/// generated changelog) would count as candidate edits. In that case the
+/// candidate's current merge base with the target branch is returned instead.
+/// Otherwise — or when anything cannot be resolved — `base` is returned
+/// unchanged.
+pub fn rebased_gate_base(
+    workspace: &Path,
+    base: &str,
+    head: &str,
+    target_branch: Option<&str>,
+) -> String {
+    let resolve = || -> Option<String> {
+        let target = target_branch.map(str::trim).filter(|t| !t.is_empty())?;
+        let target_sha = resolve_target_branch(workspace, target)?;
+        let current = git(workspace, &["merge-base", &target_sha, head], None).ok()?;
+        let diffed = git(workspace, &["merge-base", base, head], None).ok()?;
+        if current == diffed {
+            return None;
+        }
+        let older = std::process::Command::new("git")
+            .arg("-C")
+            .arg(workspace)
+            .args(["merge-base", "--is-ancestor", &diffed, &current])
+            .status()
+            .ok()?
+            .success();
+        older.then_some(current)
+    };
+    resolve().unwrap_or_else(|| base.to_string())
+}
+
+/// Resolve a target branch name, preferring the authoritative remote-tracking
+/// ref over a possibly stale local branch.
+fn resolve_target_branch(workspace: &Path, target: &str) -> Option<String> {
+    let mut candidates = Vec::new();
+    if !target.starts_with("origin/") && !target.starts_with("refs/") {
+        candidates.push(format!("origin/{target}"));
+    }
+    candidates.push(target.to_string());
+    candidates.into_iter().find_map(|candidate| {
+        git(
+            workspace,
+            &[
+                "rev-parse",
+                "--verify",
+                "--quiet",
+                &format!("{candidate}^{{commit}}"),
+            ],
+            None,
+        )
+        .ok()
+        .filter(|sha| !sha.is_empty())
+    })
+}
+
 /// The Homeboy-owned destination worktree of a Cook. Caller-owned `--cwd`
 /// checkouts are never reset, so they resolve to `None`.
 fn owned_attempt_workspace(recipe: &super::AgentTaskCookRecipe) -> Option<PathBuf> {
@@ -297,6 +368,82 @@ mod tests {
             String::from_utf8(output.stdout).unwrap().trim().to_string()
         };
         (dir, run)
+    }
+
+    /// A PR branch cut from `main`, then `main` gains a release commit that
+    /// rewrites the changelog. Returns (dir, git, old_pr_head).
+    fn pr_repo_with_release_on_main() -> (tempfile::TempDir, impl Fn(&[&str]) -> String, String) {
+        let (dir, git) = repo();
+        git(&["init", "-q", "-b", "main"]);
+        std::fs::create_dir_all(dir.path().join("docs")).unwrap();
+        std::fs::write(dir.path().join("docs/changelog.md"), "# v1\n").unwrap();
+        std::fs::write(dir.path().join("lib.rs"), "fn a() {}\n").unwrap();
+        git(&["add", "."]);
+        git(&["commit", "-q", "-m", "base"]);
+        git(&["checkout", "-q", "-b", "pr"]);
+        std::fs::write(dir.path().join("feature.rs"), "fn f() {}\n").unwrap();
+        git(&["add", "."]);
+        git(&["commit", "-q", "-m", "feat: pr"]);
+        let old_pr_head = git(&["rev-parse", "HEAD"]);
+        git(&["checkout", "-q", "main"]);
+        std::fs::write(dir.path().join("docs/changelog.md"), "# v2\n# v1\n").unwrap();
+        git(&["commit", "-q", "-am", "release: v2"]);
+        git(&["checkout", "-q", "pr"]);
+        (dir, git, old_pr_head)
+    }
+
+    fn changed_since(git: &impl Fn(&[&str]) -> String, base: &str) -> Vec<String> {
+        git(&["diff", "--name-only", &format!("{base}...HEAD")])
+            .lines()
+            .map(str::to_string)
+            .collect()
+    }
+
+    #[test]
+    fn rework_rebased_over_a_release_commit_diffs_against_the_current_merge_base() {
+        let (dir, git, old_pr_head) = pr_repo_with_release_on_main();
+        git(&["rebase", "-q", "main"]);
+        std::fs::write(dir.path().join("feature.rs"), "fn g() {}\n").unwrap();
+        git(&["commit", "-q", "-am", "fix: rework"]);
+        let head = git(&["rev-parse", "HEAD"]);
+        assert!(changed_since(&git, &old_pr_head).contains(&"docs/changelog.md".to_string()));
+
+        let base = rebased_gate_base(dir.path(), &old_pr_head, &head, Some("main"));
+        assert_eq!(base, git(&["rev-parse", "main"]));
+        assert_eq!(changed_since(&git, &base), vec!["feature.rs".to_string()]);
+    }
+
+    #[test]
+    fn rework_that_edits_the_changelog_itself_still_reports_it() {
+        let (dir, git, old_pr_head) = pr_repo_with_release_on_main();
+        git(&["rebase", "-q", "main"]);
+        std::fs::write(dir.path().join("docs/changelog.md"), "# hand edit\n").unwrap();
+        git(&["commit", "-q", "-am", "docs: hand edit"]);
+        let head = git(&["rev-parse", "HEAD"]);
+
+        let base = rebased_gate_base(dir.path(), &old_pr_head, &head, Some("main"));
+        assert!(changed_since(&git, &base).contains(&"docs/changelog.md".to_string()));
+    }
+
+    #[test]
+    fn rework_without_rebase_keeps_the_recorded_base() {
+        let (dir, git, old_pr_head) = pr_repo_with_release_on_main();
+        std::fs::write(dir.path().join("feature.rs"), "fn g() {}\n").unwrap();
+        git(&["commit", "-q", "-am", "fix: rework"]);
+        let head = git(&["rev-parse", "HEAD"]);
+
+        assert_eq!(
+            rebased_gate_base(dir.path(), &old_pr_head, &head, Some("main")),
+            old_pr_head
+        );
+        assert_eq!(
+            rebased_gate_base(dir.path(), &old_pr_head, &head, None),
+            old_pr_head
+        );
+        assert_eq!(
+            rebased_gate_base(dir.path(), &old_pr_head, &head, Some("missing-branch")),
+            old_pr_head
+        );
     }
 
     #[test]

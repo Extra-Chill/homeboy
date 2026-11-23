@@ -1886,3 +1886,41 @@ exit 2
         error.message
     );
 }
+
+/// #18869: a bench gate's report carries the compare verdict and artifact it
+/// announced on stderr, and the base never explains its failure.
+#[test]
+fn bench_gate_report_carries_compare_evidence_and_is_not_base_explainable() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let evidence = homeboy_core::bench_compare::BenchCompareGateEvidence {
+        schema: homeboy_core::bench_compare::GATE_EVIDENCE_SCHEMA.to_string(),
+        compare_id: "bench-compare-1".to_string(),
+        passed: false,
+        fail_on: homeboy_core::bench_compare::BenchCompareFailOn::NewBlockers,
+        summary: homeboy_core::bench_compare::BenchCompareSummary {
+            routes: 1,
+            regressed: 1,
+            new_blockers: 1,
+            ..Default::default()
+        },
+        violations: vec!["head introduced 1 new evaluator blocker(s)".to_string()],
+        artifact_path: "/data/bench-compare/1/bench-compare.json".to_string(),
+    };
+    std::fs::write(
+        temp.path().join("evidence.txt"),
+        format!("{}\n", evidence.marker_line()),
+    )
+    .expect("evidence");
+    let command = "homeboy() { cat evidence.txt >&2; return 1; }; homeboy bench compare --cook-gate --base base --head WORKTREE --path .";
+
+    let report = run_gate_command(temp.path(), 1, command).expect("gate report");
+
+    assert_eq!(report.status, AgentTaskGateStatus::Failed);
+    assert_eq!(report.bench_compare, Some(evidence));
+    assert!(!base_explainable(command, &[]));
+    assert!(base_explainable("cargo test", &[]));
+    assert!(!base_explainable("cargo test", &["cargo test".to_string()]));
+
+    let plain = run_gate_command(temp.path(), 2, "cat evidence.txt >&2").expect("plain gate");
+    assert_eq!(plain.bench_compare, None, "only bench gates carry evidence");
+}

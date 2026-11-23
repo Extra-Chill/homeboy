@@ -66,6 +66,11 @@ pub struct BenchCompareArgs {
     /// `<homeboy data>/bench-compare/<compare-id>`.
     #[arg(long = "output-dir", value_name = "DIR")]
     pub output_dir: Option<PathBuf>,
+
+    /// Set by the program `agent-task cook --verify-bench` compiles: emit the
+    /// bench gate evidence line on stderr so the Cook can link the artifact.
+    #[arg(long = "cook-gate", hide = true)]
+    pub cook_gate: bool,
 }
 
 impl BenchCompareArgs {
@@ -192,6 +197,12 @@ pub fn run_compare(args: &BenchCompareArgs) -> homeboy::core::Result<(BenchCompa
         artifact_dir,
         stop: &stop,
     })?;
+    if args.cook_gate {
+        eprintln!(
+            "{}",
+            bench_compare::BenchCompareGateEvidence::from(&output).marker_line()
+        );
+    }
     let exit = if output.policy.passed { 0 } else { 1 };
     Ok((output, exit))
 }

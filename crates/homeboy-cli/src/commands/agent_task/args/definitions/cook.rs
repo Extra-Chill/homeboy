@@ -346,6 +346,17 @@ pub struct VerifyGateArgs {
     /// controller's invocation directory.
     #[arg(long = "private-verify-file", value_name = "PATH", value_hint = clap::ValueHint::FilePath)]
     pub private_verify_file: Vec<String>,
+    /// Attach `homeboy bench compare` as a visible gate. The file is a bench
+    /// compare spec (JSON: component, path, corpus, runner, fail_on,
+    /// timeout_seconds). The gate compares the Cook's immutable base with the
+    /// candidate checkout and passes or fails by the spec's `fail_on`
+    /// regression policy (`new-blockers`, `regressions`, or `never`). The
+    /// comparison runs both sides itself, so a red bench gate is never treated
+    /// as an inherited baseline failure. Its artifact and aggregate summary
+    /// appear in the gate result, the Cook summary, and the notification.
+    /// Relative paths use the controller's invocation directory. Repeatable.
+    #[arg(long = "verify-bench", value_name = "SPEC", value_hint = clap::ValueHint::FilePath)]
+    pub verify_bench: Vec<String>,
     /// Durable source metadata emitted by Homeboy-generated promotion commands.
     /// This preserves the immutable provenance of a previously snapshotted gate;
     /// private entries retain no source path.
@@ -507,6 +518,7 @@ impl VerifyGateArgs {
             || !self.verify_file.is_empty()
             || !self.private_verify.is_empty()
             || !self.private_verify_file.is_empty()
+            || !self.verify_bench.is_empty()
     }
 
     /// Whether this gate contract carries retained provenance from a
@@ -547,7 +559,10 @@ impl VerifyGateArgs {
             self.gate_inputs = policy.data_inputs;
         }
         if !self.input_sources.is_empty() {
-            if !self.verify_file.is_empty() || !self.private_verify_file.is_empty() {
+            if !self.verify_file.is_empty()
+                || !self.private_verify_file.is_empty()
+                || !self.verify_bench.is_empty()
+            {
                 return Err(homeboy::core::Error::validation_invalid_argument(
                     "gate-input-source",
                     "cannot combine retained gate provenance with file inputs",
@@ -556,6 +571,12 @@ impl VerifyGateArgs {
                 ));
             }
             return Ok(());
+        }
+        for spec in std::mem::take(&mut self.verify_bench) {
+            let program = bench_gate_program(&spec)?;
+            if !self.verify.contains(&program) {
+                self.verify.push(program);
+            }
         }
         self.input_sources.extend(self.verify.iter().map(|program| {
             inline_gate_source(
@@ -594,6 +615,22 @@ impl VerifyGateArgs {
         }
         Ok(())
     }
+}
+
+/// Compile one `--verify-bench` spec file into its Cook bench gate program.
+/// The spec is read now, while the controller invocation directory still owns
+/// relative-path semantics; the gate itself carries every field inline.
+fn bench_gate_program(path: &str) -> homeboy::core::Result<String> {
+    let json = fs::read_to_string(path).map_err(|error| {
+        homeboy::core::Error::validation_invalid_argument(
+            "--verify-bench",
+            format!("cannot read bench compare spec `{path}`: {error}"),
+            Some(path.to_string()),
+            None,
+        )
+    })?;
+    let spec = homeboy::core::bench_compare::BenchCompareSpec::parse(&json)?;
+    homeboy::core::bench_compare::cook_gate_program(&spec)
 }
 
 fn inline_gate_source(
@@ -1062,6 +1099,7 @@ mod tests {
             ("max-attempts", "7"),
             ("verify", "printf '%s' \"$VALUE\""), ("verify-file", "/public.sh"),
             ("private-verify", "private check"), ("private-verify-file", "/private.sh"),
+            ("verify-bench", "/bench-spec.json"),
             ("repro", "test -f FIXED"), ("repro-file", "/repro.sh"),
             ("gate-input-source", r#"{"visibility":"visible","source_kind":"inline","sha256":"sha256:abc","size_bytes":1,"redaction_policy":"full_evidence"}"#),
             ("private-gate-reveal", "full-evidence"),
@@ -1278,6 +1316,36 @@ mod tests {
         .into();
         assert!(!options.gate_environment.isolate_home);
         assert!(!options.gate_environment.isolate_xdg);
+    }
+
+    /// #18869: `--verify-bench` compiles its spec into one visible bench gate
+    /// bound to the Cook base and the candidate checkout.
+    #[test]
+    fn verify_bench_compiles_spec_into_a_visible_cook_bench_gate() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let spec = temp.path().join("bench.json");
+        fs::write(&spec, r#"{"corpus":"$CAPTURE","fail_on":"regressions"}"#).expect("write spec");
+        let parsed = TestCli::try_parse_from(["homeboy", "--verify-bench", spec.to_str().unwrap()])
+            .expect("parse --verify-bench");
+        let mut gates = parsed.gates;
+        assert!(gates.has_deterministic_gate());
+
+        gates.snapshot_file_inputs().expect("compile bench gate");
+
+        assert!(gates.verify_bench.is_empty());
+        assert_eq!(
+            gates.verify,
+            vec!["homeboy bench compare --cook-gate --base __HOMEBOY_COOK_BASE_SHA__ --head WORKTREE --path . --corpus '$CAPTURE' --fail-on regressions".to_string()]
+        );
+        assert_eq!(gates.input_sources.len(), 1);
+        assert_eq!(gates.input_sources[0].source_kind, "inline");
+
+        fs::write(&spec, r#"{"corpus":"/c","base":"main"}"#).expect("pin base");
+        let mut pinned =
+            TestCli::try_parse_from(["homeboy", "--verify-bench", spec.to_str().unwrap()])
+                .expect("parse")
+                .gates;
+        assert!(pinned.snapshot_file_inputs().is_err());
     }
 
     #[test]
@@ -2061,7 +2129,8 @@ impl AgentTaskCookArgs {
         let gate_commands = (gates.verify.len()
             + gates.verify_file.len()
             + gates.private_verify.len()
-            + gates.private_verify_file.len())
+            + gates.private_verify_file.len()
+            + gates.verify_bench.len())
         .max(1) as u64;
         provider_seconds
             .saturating_add(gate_commands.saturating_mul(gates.effective_gate_timeout_seconds()))
