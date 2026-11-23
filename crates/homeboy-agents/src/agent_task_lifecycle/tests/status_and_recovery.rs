@@ -1606,7 +1606,7 @@ fn transport_proxy_snapshot_reconciliation_advances_queued_lifecycle() {
 
     assert_eq!(record.state(), RunExecutionState::Succeeded);
     assert_eq!(record.tasks[0].state(), ControlPlaneState::Succeeded);
-    assert_eq!(record.metadata["runner_job_status"], "succeeded");
+    assert!(record.metadata.get("runner_job_status").is_none());
     assert_eq!(
         record.metadata["runner_execution_record"]["status"],
         "succeeded"

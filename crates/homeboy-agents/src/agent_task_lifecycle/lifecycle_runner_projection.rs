@@ -154,9 +154,6 @@ pub(crate) fn project_terminal_runner_record(
             .remove("pre_execution_failure");
     }
     let aggregate = projected_runner_aggregate(record, &aggregate);
-    if let Some(handoff) = record.ensure_metadata_object().get_mut("runner_handoff") {
-        handoff["state"] = json!("terminal");
-    }
     record_verified_lab_placement_outcome(record)?;
     record.ensure_metadata_object().insert(
         "terminal_transport_recovery".to_string(),
@@ -618,22 +615,16 @@ fn project_terminal_runner_job_snapshot(
     // Only the explicit foreground runner-exec path reaches this helper.
     // Detached reconciliation remains pending until its inner aggregate arrives.
     record.updated_at = Some(now_timestamp());
-    let (run_state, task_state, phase) = match snapshot.job.status {
-        homeboy_core::api_jobs::JobStatus::Succeeded => (
-            RunExecutionState::Succeeded,
-            ControlPlaneState::Succeeded,
-            "completed",
-        ),
-        homeboy_core::api_jobs::JobStatus::Failed => (
-            RunExecutionState::Failed,
-            ControlPlaneState::Failed,
-            "failed",
-        ),
-        homeboy_core::api_jobs::JobStatus::Cancelled => (
-            RunExecutionState::Cancelled,
-            ControlPlaneState::Cancelled,
-            "cancelled",
-        ),
+    let (run_state, task_state) = match snapshot.job.status {
+        homeboy_core::api_jobs::JobStatus::Succeeded => {
+            (RunExecutionState::Succeeded, ControlPlaneState::Succeeded)
+        }
+        homeboy_core::api_jobs::JobStatus::Failed => {
+            (RunExecutionState::Failed, ControlPlaneState::Failed)
+        }
+        homeboy_core::api_jobs::JobStatus::Cancelled => {
+            (RunExecutionState::Cancelled, ControlPlaneState::Cancelled)
+        }
         homeboy_core::api_jobs::JobStatus::Queued | homeboy_core::api_jobs::JobStatus::Running => {
             return
         }
@@ -654,22 +645,18 @@ fn project_terminal_runner_job_snapshot(
                 })
             });
     }
-    metadata.insert("phase".to_string(), json!(phase));
+    // The terminal phase and provider state are `record.state()`; drop the
+    // in-flight values rather than restating it.
+    metadata.remove("phase");
+    metadata.remove("provider_state");
     metadata.insert(
         "phase_activity".to_string(),
         json!("authoritative runner daemon result projected"),
     );
-    metadata.insert("provider_state".to_string(), json!(phase));
     metadata.insert(
         "runner_result_synchronization".to_string(),
-        json!({
-            "state": "projected",
-            "runner_job_status": snapshot.job.status,
-        }),
+        json!({"state": "projected"}),
     );
-    if let Some(handoff) = metadata.get_mut("runner_handoff") {
-        handoff["state"] = json!("terminal");
-    }
     metadata.insert(
         METADATA_KEY_RETRYABLE.to_string(),
         json!(run_state != RunExecutionState::Succeeded),
@@ -806,9 +793,6 @@ pub(crate) fn project_persisted_terminal_runner_events_in_store(
             return Ok(false);
         }
         let projection_plan = aggregate_projection_plan_from_outcomes(&aggregate);
-        if let Some(handoff) = record.ensure_metadata_object().get_mut("runner_handoff") {
-            handoff["state"] = json!("terminal");
-        }
         record_verified_lab_placement_outcome(record)?;
         record.ensure_metadata_object().insert(
             "terminal_transport_recovery".to_string(),
@@ -989,9 +973,6 @@ fn annotate_runner_pre_provider_failure(
             "reason": RUNNER_PRE_PROVIDER_FAILURE_PHASE,
         }),
     );
-    if let Some(handoff) = metadata.get_mut("runner_handoff") {
-        handoff["state"] = json!("terminal");
-    }
 }
 
 /// A detached runner reports its terminal result through reconciliation rather

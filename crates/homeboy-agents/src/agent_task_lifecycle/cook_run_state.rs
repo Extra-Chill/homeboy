@@ -583,7 +583,6 @@ fn observed_execution_state(record: &AgentTaskRunRecord) -> RunExecutionState {
     let terminal = &record.metadata["cook_progress"];
     if terminal["phase"] == "terminal"
         && terminal["terminal_status"] == CookStatus::IntentionalNoChange.as_str()
-        && terminal["terminal_success"] == true
         && terminal["exit_code"] == 0
     {
         return stored;

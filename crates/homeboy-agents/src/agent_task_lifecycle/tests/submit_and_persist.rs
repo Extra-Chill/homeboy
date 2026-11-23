@@ -1132,17 +1132,16 @@ fn cook_progress_is_durable_across_active_and_terminal_lifecycle_states() {
     assert_eq!(terminal.state(), RunExecutionState::Cancelled);
     assert_eq!(terminal.metadata["cook_progress"]["phase"], "terminal");
     let terminal =
-        record_cook_terminal_result_in_store(&lifecycle_store, run_id, "no_candidate", false, 1)
+        record_cook_terminal_result_in_store(&lifecycle_store, run_id, "no_candidate", 1)
             .expect("record terminal Cook result");
     assert_eq!(
         terminal.state(),
         RunExecutionState::Cancelled,
         "a no-candidate result does not erase the cancellation that caused it"
     );
-    assert_eq!(
-        terminal.metadata["cook_progress"]["terminal_success"],
-        false
-    );
+    assert!(terminal.metadata["cook_progress"]
+        .get("terminal_success")
+        .is_none());
     assert_eq!(terminal.metadata["cook_progress"]["exit_code"], 1);
 
     let repeated = record_cook_progress_in_store(
@@ -1195,7 +1194,7 @@ fn terminal_cook_report_preserves_each_attempts_lifecycle_status() {
     )
     .unwrap();
     record_cook_progress_in_store(&store, second, "terminal", 2, Some("published")).unwrap();
-    record_cook_terminal_result_in_store(&store, second, "review_ready", true, 1).unwrap();
+    record_cook_terminal_result_in_store(&store, second, "review_ready", 1).unwrap();
 
     let observations = store.open_observation_initialized().unwrap();
     for (run_id, expected) in [(first, "fail"), (second, "pass"), (cook_id, "pass")] {
@@ -1321,9 +1320,11 @@ fn cook_write_siblings_persist_progress_and_delivery_evidence() {
         .expect("record Cook progress into the injected store");
     assert_eq!(progress.metadata["cook_progress"]["phase"], "terminal");
     let terminal =
-        record_cook_terminal_result_in_store(&seeded, run_id, "intentional_no_change", true, 0)
+        record_cook_terminal_result_in_store(&seeded, run_id, "intentional_no_change", 0)
             .expect("record the terminal Cook result into the injected store");
-    assert_eq!(terminal.metadata["cook_progress"]["terminal_success"], true);
+    assert!(terminal.metadata["cook_progress"]
+        .get("terminal_success")
+        .is_none());
     record_cook_controller_failure_in_store(&seeded, run_id, &json!({ "reason": "rooted" }))
         .expect("record a controller failure into the injected store");
     record_cook_observer_event_in_store(&seeded, run_id, "terminal", json!({ "code": "rooted" }))
@@ -1363,10 +1364,6 @@ fn cook_write_siblings_persist_progress_and_delivery_evidence() {
         .read_record(run_id)
         .expect("read the seeded record back");
     assert_eq!(persisted.metadata["cook_progress"]["phase"], "terminal");
-    assert_eq!(
-        persisted.metadata["cook_progress"]["terminal_success"],
-        true
-    );
     assert_eq!(persisted.metadata["cook_progress"]["exit_code"], 0);
     assert_eq!(
         persisted.metadata["cook_controller_failure"]["reason"],
@@ -3111,7 +3108,7 @@ fn disconnected_proxy_projects_terminal_child_aggregate_once_reachable() {
     assert_eq!(record.state(), RunExecutionState::Succeeded);
     assert!(is_accepted_runner_handoff(&record));
     assert_eq!(record.artifact_refs[0].uri, "/runner/artifacts/patch.diff");
-    assert_eq!(record.metadata["runner_job_status"], "succeeded");
+    assert!(record.metadata.get("runner_job_status").is_none());
     assert_eq!(record.metadata["runner_liveness"], "reachable");
     let aggregate = lifecycle_store
         .read_aggregate("agent-task-disconnected-child")
@@ -3259,7 +3256,7 @@ fn accepted_handoff_projects_a_remote_timeout_aggregate_even_when_daemon_transpo
         record.totals.as_ref().map(|totals| totals.timed_out),
         Some(1)
     );
-    assert_eq!(record.metadata["runner_job_status"], "succeeded");
+    assert!(record.metadata.get("runner_job_status").is_none());
 }
 
 #[test]

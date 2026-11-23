@@ -15,8 +15,6 @@ pub struct RunLifecycleRecord {
     #[serde(default)]
     pub cleanup: CleanupLifecycle,
     #[serde(default)]
-    pub finalization: FinalizationLifecycle,
-    #[serde(default)]
     pub artifact_retention: ArtifactRetentionLifecycle,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub external_runtime_ids: Vec<ExternalRuntimeId>,
@@ -32,7 +30,6 @@ impl Default for RunLifecycleRecord {
             provider_runtime: Vec::new(),
             heartbeat: None,
             cleanup: CleanupLifecycle::default(),
-            finalization: FinalizationLifecycle::default(),
             artifact_retention: ArtifactRetentionLifecycle::default(),
             external_runtime_ids: Vec::new(),
             updated_at: None,
@@ -311,51 +308,6 @@ pub enum CleanupState {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub struct FinalizationLifecycle {
-    pub state: FinalizationState,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub updated_at: Option<String>,
-}
-
-impl Default for FinalizationLifecycle {
-    fn default() -> Self {
-        Self {
-            state: FinalizationState::NotRequested,
-            updated_at: None,
-        }
-    }
-}
-
-/// Finalization progress for a run.
-///
-/// # Nothing writes this
-///
-/// Every reference to this type is structural — the field, the re-export, and
-/// the `Default` above. No code assigns it, so `finalization.state` is
-/// `not_requested` in every record ever written and the remaining variants have
-/// never been observed on disk.
-///
-/// It is left in place because removing it changes the durable
-/// `RunLifecycleRecord` shape, which is a separate decision from deleting
-/// unreachable variants (#13398). The open question is whether finalization
-/// *should* be reporting progress here — in which case the missing writer is
-/// the defect — or whether this and [`FinalizationLifecycle`] should come out
-/// of the record entirely.
-///
-/// Unlike its two siblings this enum has no catch-all, so it cannot carry a
-/// `#[serde(other)]` hatch without first choosing which variant means "no
-/// verdict". Do not add variants here until the question above is answered.
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "snake_case")]
-pub enum FinalizationState {
-    NotRequested,
-    Pending,
-    Running,
-    Succeeded,
-    Failed,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct ArtifactRetentionLifecycle {
     pub status: ArtifactRetentionStatus,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -540,6 +492,8 @@ mod subsystem_state_tests {
             "execution": { "state": "running" },
             "cleanup": { "state": "a_future_cleanup_state" },
             "artifact_retention": { "status": "a_future_retention_status" },
+            // Retired, never-written field: old records still parse.
+            "finalization": { "state": "not_requested" },
         }))
         .expect("record carrying unknown subsystem states must still parse");
 
@@ -576,21 +530,6 @@ mod subsystem_state_tests {
         ] {
             assert_eq!(
                 serde_json::to_value(status).expect("serialize"),
-                serde_json::json!(label)
-            );
-        }
-
-        // FinalizationState has no catch-all, so its labels are pinned without
-        // a degradation case. `blocked` was removed with the others.
-        for (label, state) in [
-            ("not_requested", FinalizationState::NotRequested),
-            ("pending", FinalizationState::Pending),
-            ("running", FinalizationState::Running),
-            ("succeeded", FinalizationState::Succeeded),
-            ("failed", FinalizationState::Failed),
-        ] {
-            assert_eq!(
-                serde_json::to_value(state).expect("serialize"),
                 serde_json::json!(label)
             );
         }
