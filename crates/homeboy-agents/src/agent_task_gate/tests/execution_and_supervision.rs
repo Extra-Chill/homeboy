@@ -2066,3 +2066,39 @@ os._exit({code})
         assert_eq!(decoded.cleanup_warning, report.cleanup_warning);
     }
 }
+
+#[test]
+fn local_gate_records_phase_markers_from_its_whole_stdout() {
+    let workspace = tempfile::tempdir().expect("workspace");
+    // The first marker precedes more output than the report's bounded stdout
+    // tail retains, so only the streamed parse can still see it.
+    let command = "echo 'homeboy-gate-phase name=tests seconds=109'; \
+        head -c 100000 /dev/zero | tr '\\0' 'x'; echo; \
+        echo 'homeboy-gate-phase name=acceptance seconds=oops'; \
+        echo 'homeboy-gate-phase name=acceptance seconds=217.25'";
+    let report = run_gate_command(workspace.path(), 1, command).expect("gate report");
+
+    assert_eq!(report.status, AgentTaskGateStatus::Succeeded);
+    assert!(report.capture.stdout.truncated);
+    assert_eq!(
+        report.phases,
+        vec![
+            phases::AgentTaskGatePhase {
+                name: "tests".to_string(),
+                elapsed_ms: 109_000,
+            },
+            phases::AgentTaskGatePhase {
+                name: "acceptance".to_string(),
+                elapsed_ms: 217_250,
+            },
+        ]
+    );
+    let value = serde_json::to_value(&report).unwrap();
+    assert_eq!(value["phases"][1]["name"], "acceptance");
+
+    let quiet = run_gate_command(workspace.path(), 2, "echo no markers").expect("gate report");
+    assert!(serde_json::to_value(&quiet)
+        .unwrap()
+        .get("phases")
+        .is_none());
+}

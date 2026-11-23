@@ -3,6 +3,7 @@ pub use admission::{lab_admission_owner, lab_parent_job_id};
 pub mod data_inputs;
 pub mod execution_start;
 pub mod failure_excerpt;
+pub mod phases;
 pub mod placement;
 pub mod telemetry;
 pub mod verdict;
@@ -705,6 +706,10 @@ pub struct AgentTaskGateReport {
     pub stdout: String,
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub stderr: String,
+    /// Phases the gate reported with `homeboy-gate-phase` stdout markers,
+    /// in printed order (#17893). Absent for a gate that printed none.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub phases: Vec<phases::AgentTaskGatePhase>,
     #[serde(default)]
     pub capture: AgentTaskGateCapture,
     /// The workspace requested by Cook and the component workspace that
@@ -1506,6 +1511,7 @@ impl AgentTaskGateReport {
             termination: AgentTaskGateTermination::Completed,
             signal: None,
             test_execution_outcome: None,
+            phases: phases::gate_phases(&stdout),
             stdout,
             stderr: stderr.into(),
             capture: AgentTaskGateCapture::default(),
@@ -1575,6 +1581,7 @@ impl AgentTaskGateReport {
             test_execution_outcome: None,
             stdout: String::new(),
             stderr: String::new(),
+            phases: Vec::new(),
             capture: AgentTaskGateCapture::default(),
             cwd: None,
             failure_evidence: None,
