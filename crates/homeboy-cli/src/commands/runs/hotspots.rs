@@ -372,7 +372,7 @@ pub(crate) fn runs_hotspots(
         let regressed = phases
             .comparison
             .as_ref()
-            .is_some_and(|c| c.verdict == homeboy::core::performance_hotspots::Verdict::Regressed);
+            .is_some_and(|c| c.verdict == homeboy_engine_primitives::metric_comparison::CohortStatus::Regressed);
         if args.notify_regressions && regressed {
             if let Some(comparison) = &phases.comparison {
                 homeboy::core::performance_hotspots::notify_regression(comparison, route.as_ref());

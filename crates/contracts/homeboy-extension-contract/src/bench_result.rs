@@ -1,6 +1,7 @@
 //! Pure bench result contract types (provenance, metrics, rig-package
 //! evidence, workload/runner metadata).
 
+use homeboy_engine_primitives::metric_comparison::{Direction, RegressionTest};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 
@@ -170,7 +171,7 @@ impl BenchMetrics {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(deny_unknown_fields)]
 pub struct BenchMetricPolicy {
-    pub direction: BenchMetricDirection,
+    pub direction: Direction,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub regression_threshold_percent: Option<f64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -183,22 +184,6 @@ pub struct BenchMetricPolicy {
     pub regression_test: Option<RegressionTest>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub phase: Option<BenchMetricPhase>,
-}
-
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
-pub enum BenchMetricDirection {
-    #[serde(rename = "lower_is_better")]
-    LowerIsBetter,
-    #[serde(rename = "higher_is_better")]
-    HigherIsBetter,
-}
-
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "snake_case")]
-pub enum RegressionTest {
-    PointDelta,
-    MannWhitneyU,
-    KolmogorovSmirnov,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord)]

@@ -1,10 +1,11 @@
+use homeboy_engine_primitives::metric_comparison::{Direction};
 use homeboy_core::error::{Error, Result};
 pub use homeboy_extension_contract::bench_metric_preset::{
     BenchMetricPolicyPreset, BenchMetricPolicyPresetKind,
 };
 
 use super::gate::{BenchGate, BenchGateOp};
-use super::parsing::{BenchMetricDirection, BenchResults};
+use super::parsing::{BenchResults};
 
 pub(crate) fn expand_metric_policy_presets(results: &mut BenchResults) -> Result<()> {
     for (metric, preset) in results.metric_policy_presets.clone() {
@@ -15,13 +16,13 @@ pub(crate) fn expand_metric_policy_presets(results: &mut BenchResults) -> Result
                 results
                     .metric_policies
                     .entry(metric)
-                    .or_insert_with(|| preset.to_policy(BenchMetricDirection::LowerIsBetter, 5.0));
+                    .or_insert_with(|| preset.to_policy(Direction::LowerIsBetter, 5.0));
             }
             BenchMetricPolicyPresetKind::MemoryRegression => {
                 results
                     .metric_policies
                     .entry(metric)
-                    .or_insert_with(|| preset.to_policy(BenchMetricDirection::LowerIsBetter, 10.0));
+                    .or_insert_with(|| preset.to_policy(Direction::LowerIsBetter, 10.0));
             }
             BenchMetricPolicyPresetKind::AbsoluteBudget => {
                 expand_absolute_budget_preset(results, &metric, &preset)?;
@@ -31,7 +32,7 @@ pub(crate) fn expand_metric_policy_presets(results: &mut BenchResults) -> Result
                     results,
                     &metric,
                     &preset,
-                    BenchMetricDirection::HigherIsBetter,
+                    Direction::HigherIsBetter,
                     ThresholdBound::Min,
                 )?;
             }
@@ -42,7 +43,7 @@ pub(crate) fn expand_metric_policy_presets(results: &mut BenchResults) -> Result
                     results,
                     &metric,
                     &preset,
-                    BenchMetricDirection::LowerIsBetter,
+                    Direction::LowerIsBetter,
                     ThresholdBound::Max,
                 )?;
             }
@@ -61,7 +62,7 @@ fn expand_thresholded_policy_preset(
     results: &mut BenchResults,
     metric: &str,
     preset: &BenchMetricPolicyPreset,
-    direction: BenchMetricDirection,
+    direction: Direction,
     bound: ThresholdBound,
 ) -> Result<()> {
     results

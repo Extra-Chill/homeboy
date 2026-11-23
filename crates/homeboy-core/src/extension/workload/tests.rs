@@ -10,7 +10,8 @@ use homeboy_extension_contract::{
 use serde_json::{json, Value};
 
 use super::case::{self, CaseMode, CaseRequest};
-use super::compare::{MetricChange, WorkloadAdapter, WorkloadComparison};
+use super::compare::{WorkloadAdapter, WorkloadComparison};
+use homeboy_engine_primitives::metric_comparison::MetricChange;
 use super::list;
 use super::resolve::{resolve_kind, WorkloadTarget};
 use super::run::{self as workload_run, outcome_status, read_envelope, WorkloadRunRequest};

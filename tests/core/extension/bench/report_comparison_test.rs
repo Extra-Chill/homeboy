@@ -1,3 +1,4 @@
+use homeboy_engine_primitives::metric_comparison::Direction;
 use std::collections::BTreeMap;
 
 use super::super::{collect_artifacts, from_main_workflow, from_main_workflow_with_rig};
@@ -11,7 +12,7 @@ use crate::extension::bench::artifact::{
 use crate::extension::bench::diagnostic::{BenchDiagnostic, BenchDiagnosticSource};
 use crate::extension::bench::distribution::BenchRunDistribution;
 use crate::extension::bench::parsing::{
-    BenchMetricDirection, BenchMetricPhase, BenchMetricPolicy, BenchMetrics, BenchResults,
+    BenchMetricPhase, BenchMetricPolicy, BenchMetrics, BenchResults,
     BenchRunSnapshot, BenchScenario,
 };
 use crate::extension::bench::run::{BenchRunFailure, BenchRunWorkflowResult};
@@ -427,7 +428,7 @@ fn test_from_policies() {
     policies.insert(
         "boot_ms".to_string(),
         BenchMetricPolicy {
-            direction: BenchMetricDirection::LowerIsBetter,
+            direction: Direction::LowerIsBetter,
             regression_threshold_percent: None,
             regression_threshold_absolute: None,
             variance_aware: false,
@@ -562,9 +563,9 @@ fn axis_diffs_cover_two_by_two_rig_matrix() {
     let sdk_p95 = sdk_substrate.diff.by_scenario["site-build"]["p95_ms"]
         .get("studio-sdk-bfb")
         .expect("sdk bfb p95 delta");
-    assert_eq!(sdk_p95.reference, 120.0);
-    assert_eq!(sdk_p95.current, 96.0);
-    assert!((sdk_p95.delta_percent - -20.0).abs() < 1e-9);
+    assert_eq!(sdk_p95.baseline, Some(120.0));
+    assert_eq!(sdk_p95.candidate, Some(96.0));
+    assert!((sdk_p95.percent.unwrap() - -20.0).abs() < 1e-9);
 
     let bfb_runtime = out
         .axis_diffs
@@ -581,9 +582,9 @@ fn axis_diffs_cover_two_by_two_rig_matrix() {
     let bfb_p50 = bfb_runtime.diff.by_scenario["site-build"]["p50_ms"]
         .get("studio-pi-bfb")
         .expect("bfb pi p50 delta");
-    assert_eq!(bfb_p50.reference, 80.0);
-    assert_eq!(bfb_p50.current, 90.0);
-    assert!((bfb_p50.delta_percent - 12.5).abs() < 1e-9);
+    assert_eq!(bfb_p50.baseline, Some(80.0));
+    assert_eq!(bfb_p50.candidate, Some(90.0));
+    assert!((bfb_p50.percent.unwrap() - 12.5).abs() < 1e-9);
 }
 
 #[test]
@@ -839,9 +840,9 @@ fn diff_computes_percent_delta_lower_is_better() {
         .and_then(|m| m.get("p95_ms"))
         .and_then(|m| m.get("combined-fixes"))
         .unwrap();
-    assert_eq!(d.reference, 30000.0);
-    assert_eq!(d.current, 18000.0);
-    assert!((d.delta_percent - -40.0).abs() < 1e-9);
+    assert_eq!(d.baseline, Some(30000.0));
+    assert_eq!(d.candidate, Some(18000.0));
+    assert!((d.percent.unwrap() - -40.0).abs() < 1e-9);
 }
 
 #[test]
@@ -883,17 +884,17 @@ fn diff_flattens_grouped_metrics_for_cross_rig_comparison() {
         .get("phases.resolve_ai_environment_ms")
         .and_then(|m| m.get("next"))
         .expect("grouped phase metric diff");
-    assert_eq!(phase_delta.reference, 120.0);
-    assert_eq!(phase_delta.current, 100.0);
-    assert!((phase_delta.delta_percent - -16.666666666666664).abs() < 1e-9);
+    assert_eq!(phase_delta.baseline, Some(120.0));
+    assert_eq!(phase_delta.candidate, Some(100.0));
+    assert!((phase_delta.percent.unwrap() - -16.666666666666664).abs() < 1e-9);
 
     let tool_delta = metrics
         .get("tools.max_tool_duration_ms")
         .and_then(|m| m.get("next"))
         .expect("grouped tool metric diff");
-    assert_eq!(tool_delta.reference, 250.0);
-    assert_eq!(tool_delta.current, 200.0);
-    assert_eq!(tool_delta.delta_percent, -20.0);
+    assert_eq!(tool_delta.baseline, Some(250.0));
+    assert_eq!(tool_delta.candidate, Some(200.0));
+    assert_eq!(tool_delta.percent.unwrap(), -20.0);
 }
 
 #[test]
@@ -911,7 +912,7 @@ fn diff_skips_missing_scenarios_silently() {
 }
 
 #[test]
-fn diff_handles_zero_reference_with_signed_infinity() {
+fn diff_handles_zero_reference_without_percentage() {
     let ref_r = results(vec![scenario("a", &[("errors", 0.0)])]);
     let other_pos = results(vec![scenario("a", &[("errors", 5.0)])]);
     let other_neg = results(vec![scenario("a", &[("errors", -5.0)])]);
@@ -926,7 +927,7 @@ fn diff_handles_zero_reference_with_signed_infinity() {
         .unwrap()
         .get("other")
         .unwrap();
-    assert!(pos.delta_percent.is_infinite() && pos.delta_percent.is_sign_positive());
+    assert_eq!(pos.percent, None);
 
     let diff_neg = BenchComparisonDiff::build(("ref", &ref_r), &[("other", &other_neg)]);
     let neg = diff_neg
@@ -937,7 +938,7 @@ fn diff_handles_zero_reference_with_signed_infinity() {
         .unwrap()
         .get("other")
         .unwrap();
-    assert!(neg.delta_percent.is_infinite() && neg.delta_percent.is_sign_negative());
+    assert_eq!(neg.percent, None);
 
     let diff_zero = BenchComparisonDiff::build(("ref", &ref_r), &[("other", &other_zero)]);
     let zero = diff_zero
@@ -948,7 +949,7 @@ fn diff_handles_zero_reference_with_signed_infinity() {
         .unwrap()
         .get("other")
         .unwrap();
-    assert_eq!(zero.delta_percent, 0.0);
+    assert_eq!(zero.percent, None);
 }
 
 #[test]
@@ -996,8 +997,8 @@ fn aggregate_handles_more_than_two_rigs() {
         .unwrap();
     assert!(!metric.contains_key("a")); // reference excluded
     assert_eq!(metric.len(), 2);
-    assert!((metric.get("b").unwrap().delta_percent - -20.0).abs() < 1e-9);
-    assert!((metric.get("c").unwrap().delta_percent - 20.0).abs() < 1e-9);
+    assert!((metric.get("b").unwrap().percent.unwrap() - -20.0).abs() < 1e-9);
+    assert!((metric.get("c").unwrap().percent.unwrap() - 20.0).abs() < 1e-9);
 }
 
 #[test]

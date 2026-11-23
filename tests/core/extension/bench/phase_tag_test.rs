@@ -23,16 +23,17 @@
 //! phase-aware report consumers; the `by_scenario` map stays
 //! alphabetical for stability across runs.
 
+use homeboy_engine_primitives::metric_comparison::Direction;
 use std::collections::{BTreeMap, BTreeSet};
 
 use crate::extension::bench::parsing::{
-    parse_bench_results_str, BenchMetricDirection, BenchMetricPhase, BenchMetricPolicy,
+    parse_bench_results_str, BenchMetricPhase, BenchMetricPolicy,
     BenchResults, BenchScenario,
 };
 use crate::extension::bench::report::{BenchComparisonDiff, BenchPhaseGroups};
 use crate::extension::bench::test_support::scenario_with_iterations;
 
-fn policy(direction: BenchMetricDirection, phase: Option<BenchMetricPhase>) -> BenchMetricPolicy {
+fn policy(direction: Direction, phase: Option<BenchMetricPhase>) -> BenchMetricPolicy {
     BenchMetricPolicy {
         direction,
         regression_threshold_percent: None,
@@ -81,7 +82,7 @@ mod cases {
     #[test]
     fn phase_cold_serializes_lowercase() {
         let p = policy(
-            BenchMetricDirection::LowerIsBetter,
+            Direction::LowerIsBetter,
             Some(BenchMetricPhase::Cold),
         );
         let raw = serde_json::to_string(&p).unwrap();
@@ -99,7 +100,7 @@ mod cases {
     #[test]
     fn phase_warm_serializes_lowercase() {
         let p = policy(
-            BenchMetricDirection::LowerIsBetter,
+            Direction::LowerIsBetter,
             Some(BenchMetricPhase::Warm),
         );
         let raw = serde_json::to_string(&p).unwrap();
@@ -117,7 +118,7 @@ mod cases {
     #[test]
     fn phase_amortized_serializes_lowercase() {
         let p = policy(
-            BenchMetricDirection::LowerIsBetter,
+            Direction::LowerIsBetter,
             Some(BenchMetricPhase::Amortized),
         );
         let raw = serde_json::to_string(&p).unwrap();
@@ -157,7 +158,7 @@ mod cases {
             pol.phase, None,
             "missing phase field should deserialize as None"
         );
-        assert_eq!(pol.direction, BenchMetricDirection::LowerIsBetter);
+        assert_eq!(pol.direction, Direction::LowerIsBetter);
     }
 
     #[test]
@@ -192,7 +193,7 @@ mod cases {
     // for consumers that didn't expect a `phase` key).
     #[test]
     fn policy_serializes_without_phase_field_when_none() {
-        let p = policy(BenchMetricDirection::LowerIsBetter, None);
+        let p = policy(Direction::LowerIsBetter, None);
         let raw = serde_json::to_string(&p).unwrap();
         assert!(
             !raw.contains("phase"),
@@ -209,21 +210,21 @@ mod cases {
         policies.insert(
             "boot_ms".to_string(),
             policy(
-                BenchMetricDirection::LowerIsBetter,
+                Direction::LowerIsBetter,
                 Some(BenchMetricPhase::Cold),
             ),
         );
         policies.insert(
             "p95_ms".to_string(),
             policy(
-                BenchMetricDirection::LowerIsBetter,
+                Direction::LowerIsBetter,
                 Some(BenchMetricPhase::Warm),
             ),
         );
         policies.insert(
             "first_paint_ms".to_string(),
             policy(
-                BenchMetricDirection::LowerIsBetter,
+                Direction::LowerIsBetter,
                 Some(BenchMetricPhase::Amortized),
             ),
         );
@@ -277,14 +278,14 @@ mod cases {
         policies.insert(
             "load_deps_ms".to_string(),
             policy(
-                BenchMetricDirection::LowerIsBetter,
+                Direction::LowerIsBetter,
                 Some(BenchMetricPhase::Cold),
             ),
         );
         policies.insert(
             "boot_ms".to_string(),
             policy(
-                BenchMetricDirection::LowerIsBetter,
+                Direction::LowerIsBetter,
                 Some(BenchMetricPhase::Cold),
             ),
         );
@@ -320,7 +321,7 @@ mod cases {
         let mut policies = BTreeMap::new();
         policies.insert(
             "p95_ms".to_string(),
-            policy(BenchMetricDirection::LowerIsBetter, None),
+            policy(Direction::LowerIsBetter, None),
         );
 
         let ref_r = results_with(vec![scenario("scenario", &[("p95_ms", 100.0)])], policies);
@@ -374,7 +375,7 @@ mod cases {
         policies.insert(
             "boot_ms".to_string(),
             policy(
-                BenchMetricDirection::LowerIsBetter,
+                Direction::LowerIsBetter,
                 Some(BenchMetricPhase::Cold),
             ),
         );
@@ -414,14 +415,14 @@ mod cases {
         policies.insert(
             "boot_ms".to_string(),
             policy(
-                BenchMetricDirection::LowerIsBetter,
+                Direction::LowerIsBetter,
                 Some(BenchMetricPhase::Cold),
             ),
         );
         policies.insert(
             "p95_ms".to_string(),
             policy(
-                BenchMetricDirection::LowerIsBetter,
+                Direction::LowerIsBetter,
                 Some(BenchMetricPhase::Warm),
             ),
         );
@@ -451,14 +452,14 @@ mod cases {
         policies.insert(
             "boot_ms".to_string(),
             policy(
-                BenchMetricDirection::LowerIsBetter,
+                Direction::LowerIsBetter,
                 Some(BenchMetricPhase::Cold),
             ),
         );
         policies.insert(
             "z_warm_metric".to_string(),
             policy(
-                BenchMetricDirection::LowerIsBetter,
+                Direction::LowerIsBetter,
                 Some(BenchMetricPhase::Warm),
             ),
         );

@@ -26,9 +26,9 @@ fn provenance_is_empty(value: &BenchProvenance) -> bool {
     value.is_empty()
 }
 pub use crate::bench_result::{
-    BenchChildCommandFailure, BenchMemory, BenchMetricDirection, BenchMetricPhase,
+    BenchChildCommandFailure, BenchMemory, BenchMetricPhase,
     BenchMetricPolicy, BenchMetrics, BenchProvenance, BenchProvenanceLink, BenchRunExecution,
-    BenchRunnerMetadata, BenchWorkloadMetadata, RegressionTest, RigPackageEvidence,
+    BenchRunnerMetadata, BenchWorkloadMetadata, RigPackageEvidence,
     RigPackageFreshness,
 };
 

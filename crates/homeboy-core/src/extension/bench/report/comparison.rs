@@ -1,3 +1,4 @@
+use homeboy_engine_primitives::metric_comparison::{MetricDelta, MetricPolicy};
 use std::collections::BTreeMap;
 
 pub mod agent_task_matrix_provider;
@@ -7,7 +8,7 @@ pub use types::{
     BenchAxisComparison, BenchAxisComparisonSummary, BenchComparisonDiff, BenchComparisonFailure,
     BenchComparisonOutput, BenchComparisonReports, BenchComparisonRigSummary,
     BenchComparisonSummaryOutput, BenchDefaultBaselineExpansion, BenchDiagnosticClassSummary,
-    BenchPhaseGroups, BenchScenarioComparisonRow, BenchScenarioComparisonSummary, MetricDelta,
+    BenchPhaseGroups, BenchScenarioComparisonRow, BenchScenarioComparisonSummary,
     RigBenchEntry,
 };
 
@@ -51,28 +52,10 @@ impl BenchComparisonDiff {
                     else {
                         continue;
                     };
-                    let delta_percent = if ref_value == 0.0 {
-                        // Avoid divide-by-zero. Treat 0→nonzero as
-                        // unbounded (None would be more honest, but the
-                        // contract is f64; emit a deterministic +∞ /
-                        // -∞ via signum so consumers can detect it).
-                        if current == 0.0 {
-                            0.0
-                        } else if current > 0.0 {
-                            f64::INFINITY
-                        } else {
-                            f64::NEG_INFINITY
-                        }
-                    } else {
-                        (current - ref_value) / ref_value * 100.0
-                    };
                     per_rig.insert(
                         (*other_id).to_string(),
-                        MetricDelta {
-                            reference: ref_value,
-                            current,
-                            delta_percent,
-                        },
+                        MetricPolicy { signed_percent: true, ..Default::default() }
+                            .compare(&metric_name, Some(ref_value), Some(current)),
                     );
                 }
                 if !per_rig.is_empty() {
@@ -234,17 +217,13 @@ fn summary_distribution<'a>(
 }
 
 fn percent_delta(reference: f64, current: f64) -> f64 {
-    if reference == 0.0 {
-        if current == 0.0 {
-            0.0
-        } else if current > 0.0 {
-            f64::INFINITY
-        } else {
-            f64::NEG_INFINITY
-        }
-    } else {
-        (current - reference) / reference * 100.0
-    }
+    let comparison = MetricPolicy { signed_percent: true, ..Default::default() }
+        .compare("", Some(reference), Some(current));
+    comparison.percent.unwrap_or_else(|| {
+        // This summary's scalar contract renders an undefined percentage as
+        // signed infinity (or zero for an unchanged zero).
+        if current == 0.0 { 0.0 } else { f64::INFINITY.copysign(current) }
+    })
 }
 
 fn semantic_metrics(scenario: &BenchScenario, primary_metric: &str) -> BTreeMap<String, f64> {

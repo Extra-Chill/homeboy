@@ -24,6 +24,7 @@
 //! the declared metrics and the findings key. Everything kind-specific stays
 //! in the extension and in the envelope's opaque `payload`.
 
+use homeboy_engine_primitives::metric_comparison::{Direction};
 use std::collections::BTreeSet;
 
 use serde::{Deserialize, Serialize};
@@ -142,19 +143,14 @@ impl WorkloadCompareConfig {
 #[serde(deny_unknown_fields)]
 pub struct WorkloadMetricPolicy {
     pub name: String,
-    pub direction: WorkloadMetricDirection,
+    pub direction: Direction,
     /// Change, in percent of the baseline value, tolerated before the metric
     /// counts as regressed or improved. Absent means any change counts.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub regression_threshold: Option<f64>,
 }
 
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "snake_case")]
-pub enum WorkloadMetricDirection {
-    LowerIsBetter,
-    HigherIsBetter,
-}
+
 
 /// The identity findings are matched by across runs.
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, Default, PartialEq, Eq)]
@@ -346,7 +342,7 @@ mod tests {
         ));
         assert_eq!(
             config.compare.metrics[1].direction,
-            WorkloadMetricDirection::HigherIsBetter
+            Direction::HigherIsBetter
         );
         assert_eq!(config.compare.metrics[1].regression_threshold, Some(2.5));
         assert_eq!(config.safety_class, WorkloadSafetyClass::Destructive);

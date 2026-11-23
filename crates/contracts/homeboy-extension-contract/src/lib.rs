@@ -103,10 +103,9 @@ pub use bench_gate::{BenchGate, BenchGateOp, BenchGateResult};
 pub use bench_metric_preset::{BenchMetricPolicyPreset, BenchMetricPolicyPresetKind};
 pub use bench_responsiveness::{BenchFailureMemorySample, BenchResponsivenessSummary};
 pub use bench_result::{
-    BenchChildCommandFailure, BenchMemory, BenchMetricDirection, BenchMetricPhase,
+    BenchChildCommandFailure, BenchMemory, BenchMetricPhase,
     BenchMetricPolicy, BenchMetrics, BenchNodeRuntime, BenchProvenance, BenchProvenanceLink,
-    BenchRunExecution, BenchRunnerMetadata, BenchWorkloadMetadata, RegressionTest,
-    RigPackageEvidence, RigPackageFreshness,
+    BenchRunExecution, BenchRunnerMetadata, BenchWorkloadMetadata, RigPackageEvidence, RigPackageFreshness,
 };
 pub use bench_results::{BenchResults, BenchRunMetadata, BenchRunSnapshot, BenchScenario};
 pub use bench_stage::{
@@ -194,7 +193,7 @@ pub use manifest_artifact_cleanup::{
 };
 pub use workload_kind::{
     workload_capability_id, WorkloadCompareConfig, WorkloadDeclaration, WorkloadFindingsKey,
-    WorkloadKindConfig, WorkloadListProbe, WorkloadMetricDirection, WorkloadMetricPolicy,
+    WorkloadKindConfig, WorkloadListProbe, WorkloadMetricPolicy,
     WorkloadSafetyClass, WORKLOAD_CAPABILITY_PREFIX,
 };
 pub use workload_result::{

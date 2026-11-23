@@ -3,6 +3,7 @@
 //! `homeboy runs compare --kind fuzz --from-run .. --to-run ..` (envelopes
 //! resolved from persisted run artifacts).
 
+use homeboy_engine_primitives::metric_comparison::Verdict;
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
 
@@ -15,7 +16,7 @@ use homeboy::fuzz::{
     parse_fuzz_result_envelope_file, rank_fuzz_observation_set_hotspots, FuzzFindingStatus,
     FuzzHotspot, FuzzResultEnvelope, FUZZ_RESULT_ENVELOPE_SCHEMA,
 };
-use homeboy_engine_primitives::workload_compare::{self, Compared, KindAdapter, Verdict};
+use homeboy_engine_primitives::workload_compare::{self, Compared, KindAdapter};
 
 use super::report::{
     evaluate_fuzz_result_envelope_gates, fuzz_coverage_completeness, gate_status,

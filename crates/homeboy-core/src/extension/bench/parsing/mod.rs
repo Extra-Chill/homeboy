@@ -64,6 +64,8 @@
 mod normalize;
 mod validate;
 
+#[cfg(test)]
+use homeboy_engine_primitives::metric_comparison::{Direction, RegressionTest};
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 
@@ -82,10 +84,10 @@ use normalize::{
 use validate::{evaluate_spans, validate_unique_scenario_ids, validate_variance_policies};
 
 pub use super::result_types::{
-    BenchChildCommandFailure, BenchMemory, BenchMetricDirection, BenchMetricPhase,
+    BenchChildCommandFailure, BenchMemory, BenchMetricPhase,
     BenchMetricPolicy, BenchMetrics, BenchNodeRuntime, BenchProvenance, BenchProvenanceLink,
     BenchResults, BenchRunExecution, BenchRunMetadata, BenchRunSnapshot, BenchRunnerMetadata,
-    BenchScenario, BenchWorkloadMetadata, RegressionTest, RigPackageEvidence, RigPackageFreshness,
+    BenchScenario, BenchWorkloadMetadata, RigPackageEvidence, RigPackageFreshness,
 };
 
 /// Read and parse a `$HOMEBOY_BENCH_RESULTS_FILE` written by an extension.
@@ -1138,11 +1140,11 @@ mod tests {
         assert_eq!(scenario.metrics.get("requests_per_second"), Some(180.5));
         assert_eq!(
             parsed.metric_policies["error_rate"].direction,
-            BenchMetricDirection::LowerIsBetter
+            Direction::LowerIsBetter
         );
         assert_eq!(
             parsed.metric_policies["requests_per_second"].direction,
-            BenchMetricDirection::HigherIsBetter
+            Direction::HigherIsBetter
         );
     }
 
@@ -1703,7 +1705,7 @@ mod tests {
         let parsed = parse_bench_results_str(raw).unwrap();
         let policy = parsed.metric_policies.get("agent_loop_ms").unwrap();
 
-        assert_eq!(policy.direction, BenchMetricDirection::LowerIsBetter);
+        assert_eq!(policy.direction, Direction::LowerIsBetter);
         assert_eq!(policy.regression_threshold_percent, Some(7.5));
         assert_eq!(policy.phase, Some(BenchMetricPhase::Warm));
     }
@@ -1728,7 +1730,7 @@ mod tests {
         let parsed = parse_bench_results_str(raw).unwrap();
         let policy = parsed.metric_policies.get("peak_rss_bytes").unwrap();
 
-        assert_eq!(policy.direction, BenchMetricDirection::LowerIsBetter);
+        assert_eq!(policy.direction, Direction::LowerIsBetter);
         assert_eq!(policy.regression_threshold_percent, Some(10.0));
     }
 
@@ -1762,19 +1764,19 @@ mod tests {
 
         assert_eq!(
             parsed.metric_policies["coverage_ratio"].direction,
-            BenchMetricDirection::HigherIsBetter
+            Direction::HigherIsBetter
         );
         assert_eq!(
             parsed.metric_policies["failure_rate"].direction,
-            BenchMetricDirection::LowerIsBetter
+            Direction::LowerIsBetter
         );
         assert_eq!(
             parsed.metric_policies["blocked_rate"].direction,
-            BenchMetricDirection::LowerIsBetter
+            Direction::LowerIsBetter
         );
         assert_eq!(
             parsed.metric_policies["critical_findings"].direction,
-            BenchMetricDirection::LowerIsBetter
+            Direction::LowerIsBetter
         );
         assert_eq!(parsed.scenarios[0].gates.len(), 4);
         assert!(parsed.scenarios[0]

@@ -2,6 +2,7 @@
 use super::{PhaseHotspotQuery, PhaseHotspots};
 use crate::observation::{ObservationStore, RunListFilter};
 use serde::Serialize;
+use homeboy_engine_primitives::metric_comparison::{Boundary, CohortStatus, Direction, MetricPolicy, Verdict};
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct RegressionThresholds {
@@ -22,13 +23,6 @@ impl Default for RegressionThresholds {
         }
     }
 }
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
-#[serde(rename_all = "snake_case")]
-pub enum Verdict {
-    Regressed,
-    Clean,
-    InsufficientSamples,
-}
 #[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct Regression {
     pub metric: String,
@@ -41,7 +35,7 @@ pub struct Regression {
 pub struct RegressionComparison {
     pub baseline_version: Option<String>,
     pub candidate_version: Option<String>,
-    pub verdict: Verdict,
+    pub verdict: CohortStatus,
     pub regressions: Vec<Regression>,
 }
 
@@ -64,8 +58,13 @@ pub(super) fn evaluate(
             ("p50_ms", b.p50_ms, c.p50_ms),
             ("p95_ms", b.p95_ms, c.p95_ms),
         ] {
-            let delta = candidate - baseline;
-            if delta > 0.0 && delta >= t.phase_floor_ms && delta >= baseline * t.phase_relative {
+            if (MetricPolicy {
+                direction: Some(Direction::LowerIsBetter),
+                percent: Some(t.phase_relative * 100.0),
+                absolute: t.phase_floor_ms,
+                boundary: Boundary::Inclusive,
+                ..Default::default()
+            }).compare(metric, Some(baseline), Some(candidate)).regressed() {
                 evidence.push(Regression {
                     metric: format!("phase.{}.{}", phase.phase, metric),
                     baseline,
@@ -106,8 +105,12 @@ pub(super) fn evaluate(
                 t.failure_rate,
             ),
         ] {
-            let delta = candidate - baseline;
-            if delta > 0.0 && delta + f64::EPSILON >= threshold {
+            if (MetricPolicy {
+                direction: Some(Direction::LowerIsBetter),
+                absolute: threshold,
+                boundary: Boundary::Rate,
+                ..Default::default()
+            }).compare(metric, Some(baseline), Some(candidate)).regressed() {
                 evidence.push(Regression {
                     metric: metric.into(),
                     baseline,
@@ -121,13 +124,10 @@ pub(super) fn evaluate(
     RegressionComparison {
         baseline_version: query.baseline_version.clone(),
         candidate_version: query.candidate_version.clone(),
-        verdict: if !evidence.is_empty() {
-            Verdict::Regressed
-        } else if enough {
-            Verdict::Clean
-        } else {
-            Verdict::InsufficientSamples
-        },
+        verdict: Verdict {
+            regressions: evidence.iter().map(|r| r.metric.clone()).collect(),
+            ..Default::default()
+        }.cohort_status(enough),
         regressions: evidence,
     }
 }
