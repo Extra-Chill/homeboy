@@ -370,8 +370,16 @@ pub(super) fn pin_and_persist_initial_cook_workspace_base(
             .attempts
             .iter()
             .any(|attempt| attempt.plan.metadata["cook_workspace_base"]["sha"].is_string());
+        // A checkout without an `origin` remote has no remote tip to pin, so
+        // its persisted pre-dispatch boundary is the only base it will ever
+        // have. Re-entry (daemon restart, recovery) must reuse it rather than
+        // fail resolving a remote that does not exist.
+        let remote_pinnable =
+            cook_startup_workspace(options).is_some_and(workspace_has_origin_remote);
         if recipe.finalization["task_base_sha"].is_string()
-            && (captured || cook_has_provider_execution_in_store(lifecycle_store, &cook_id)?)
+            && (captured
+                || !remote_pinnable
+                || cook_has_provider_execution_in_store(lifecycle_store, &cook_id)?)
         {
             apply_persisted_task_base(options, &recipe)?;
             return reconcile_persisted_task_base_plan(lifecycle_store, options, &recipe);
@@ -491,6 +499,11 @@ pub(super) fn pin_cook_workspace_base_at(
     if options.identity.initial_plan.metadata["cook_workspace_base"]["sha"].is_string() {
         return Ok(());
     }
+    // No configured origin means there is no remote base to resolve (a purely
+    // local repository). An unreachable origin still fails closed below.
+    if !workspace_has_origin_remote(workspace) {
+        return Ok(());
+    }
     #[cfg(test)]
     if let Some(counter) = WORKSPACE_BASE_CAPTURE_HOOK
         .lock()
@@ -543,6 +556,13 @@ pub(super) fn pin_cook_workspace_base_at(
         "remote_freshness": pinned.remote_freshness,
     });
     Ok(())
+}
+
+/// Whether the checkout declares an `origin` remote. This reads local config
+/// only; reachability is proven by the subsequent `ls-remote`.
+pub(super) fn workspace_has_origin_remote(workspace: &Path) -> bool {
+    homeboy_core::git::output_optional(workspace, &["remote", "get-url", "origin"])
+        .is_some_and(|url| !url.trim().is_empty())
 }
 
 pub(super) struct CookWorkspaceBasePin {

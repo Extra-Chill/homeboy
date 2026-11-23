@@ -67,7 +67,10 @@ impl EffectLeaseHeartbeat {
                 let renewed = store.open_observation_initialized().and_then(|db| {
                     db.renew_control_plane_effect_lease(&effect, fence, &deadline(lease))
                 });
-                if !matches!(renewed, Ok(true)) {
+                // Only a lost fence ends ownership. A transient store error
+                // (for example a busy database) must not silently stop the
+                // heartbeat and let a live owner's lease expire.
+                if matches!(renewed, Ok(false)) {
                     break;
                 }
             }

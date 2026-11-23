@@ -14939,6 +14939,40 @@ fn cook_base_pin_rejects_cached_tracking_ref_when_origin_is_unreachable() {
     });
 }
 
+/// A purely local checkout has no remote tip to pin. Admission and every
+/// re-entry (daemon restart, recovery) keep its pre-dispatch boundary instead
+/// of failing to resolve an `origin` that was never configured (#18885).
+#[test]
+fn cook_base_pin_keeps_checkout_boundary_when_no_origin_is_configured() {
+    homeboy_core::test_support::with_isolated_home(|_| {
+        let temp = tempfile::tempdir().expect("temporary repository");
+        let (repository, head) = unreachable_origin_repository(temp.path(), false);
+        assert!(Command::new("git")
+            .args(["remote", "remove", "origin"])
+            .current_dir(&repository)
+            .status()
+            .expect("remove origin")
+            .success());
+        assert!(!workspace_has_origin_remote(&repository));
+
+        let mut options = batch_cook_options(
+            "cook-base-no-origin",
+            Arc::new(AcceptedDetachedAttemptDispatcher),
+        );
+        options.workspace.source_worktree_path = Some(repository.clone());
+        options.workspace.task_base_sha = Some(head.clone());
+        for _ in 0..2 {
+            pin_cook_workspace_base_at(&mut options, &repository)
+                .expect("a local-only checkout admits its own boundary");
+            assert_eq!(
+                options.workspace.task_base_sha.as_deref(),
+                Some(head.as_str())
+            );
+            assert!(options.identity.initial_plan.metadata["cook_workspace_base"].is_null());
+        }
+    });
+}
+
 /// Without a local base the run has nothing immutable to pin, so it must still
 /// fail before provider execution rather than invent a base.
 #[test]

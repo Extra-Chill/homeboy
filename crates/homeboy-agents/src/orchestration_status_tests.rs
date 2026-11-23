@@ -13,6 +13,7 @@ fn fixture(class: &str) -> RunSnapshot {
                 .unwrap(),
         ),
         plan: None,
+        cancellation_fence: None,
     }
 }
 
