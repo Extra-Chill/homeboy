@@ -147,8 +147,9 @@ pub struct DispatchArgs {
     #[arg(long, value_name = "ID_OR_PATH")]
     pub workspace: Option<String>,
 
-    /// Repository or configured component slug, e.g. sample-plugin. Cook accepts
-    /// configured component aliases, preserves the canonical owning repository
+    /// Repository or configured component slug, e.g. sample-plugin. Cook also
+    /// accepts a local checkout path or a GitHub owner/repo, configured
+    /// component aliases, preserves the canonical owning repository
     /// for provisioning and task grouping, and resolves the execution component
     /// separately. It infers both from an explicit --workspace or --cwd Git
     /// checkout when its configured remote mapping is unambiguous; an explicit

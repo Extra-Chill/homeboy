@@ -2043,6 +2043,7 @@ os._exit({code})
                 timeout: None,
                 supervision: None,
                 baseline_timeout_diagnostic: false,
+                cpus: None,
                 deadline: None,
             },
             &AgentTaskGateEnvironmentPolicy::default(),

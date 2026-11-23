@@ -124,6 +124,11 @@ pub struct AgentTaskPublicationTarget {
     /// Live base SHA observed immediately before publication, if available.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub publication_base_sha: Option<String>,
+    /// Commits the live base is ahead of the verified base at publication,
+    /// when both are observable (#17610). Non-zero means the candidate was
+    /// gated and published on a stale base.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub publication_base_behind_by: Option<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub head: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -409,6 +414,17 @@ pub trait AgentTaskPrFinalizationBackend {
     /// Observes the live base without updating the immutable finalization snapshot.
     fn publication_base_sha(&mut self, _path: &str, _base: &str) -> Result<Option<String>> {
         Ok(None)
+    }
+    /// Counts the commits `live_base_sha` holds beyond `verified_base_sha`.
+    /// Best effort: `None` when the count cannot be observed (#17610).
+    fn publication_base_behind_by(
+        &mut self,
+        _path: &str,
+        _base: &str,
+        _verified_base_sha: &str,
+        _live_base_sha: &str,
+    ) -> Option<u64> {
+        None
     }
     /// Validates the effective prospective identity before commit mutation.
     fn validate_publication_identity(&mut self, path: &str) -> Result<GitIdentityProof>;

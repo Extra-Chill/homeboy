@@ -489,6 +489,10 @@ fn gate_admission_failure_reaches_session_once_with_receipt() {
             .unwrap_or_else(|error| panic!("{error}: {:?}", latest_delivery("admission-cook")));
         assert_eq!(observed.matches("--thread").count(), 1);
         assert!(observed.contains("gate admission rejected: runner unavailable"));
+        assert!(
+            observed.contains("needs attention"),
+            "terminal failure status: {observed}"
+        );
         let delivery = latest_delivery("admission-cook");
         assert_eq!(delivery["status"], "delivered");
         assert_eq!(delivery["transport_result"]["delivery_mode"], "session");
@@ -1270,4 +1274,30 @@ fn discord_notification_payload_fixtures() {
         }
         assert_eq!(std::fs::read_to_string(path).unwrap(), json);
     });
+}
+
+/// #17610: a publication on a base the remote has since moved past names the
+/// drift and both SHAs; an unchanged or unmeasured base adds nothing.
+#[test]
+fn base_drift_fact_names_how_far_the_gated_base_is_behind() {
+    let finalization = |behind_by: serde_json::Value| {
+        serde_json::json!({
+            "publication_intent": {"target": {
+                "base": "main",
+                "verified_base_sha": "c8517ce14aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                "publication_base_sha": "1616ef534bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+                "publication_base_behind_by": behind_by,
+            }}
+        })
+    };
+
+    assert_eq!(
+        base_drift_fact(&finalization(serde_json::json!(19))).as_deref(),
+        Some("base_behind_by: 19 (gated c8517ce14aaa, main tip 1616ef534bbb)")
+    );
+    assert_eq!(base_drift_fact(&finalization(serde_json::json!(0))), None);
+    assert_eq!(
+        base_drift_fact(&finalization(serde_json::Value::Null)),
+        None
+    );
 }
