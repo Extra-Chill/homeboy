@@ -474,7 +474,7 @@ fn lab_secret_env_handoff_plan_carries_canonical_secret_env_plan() {
 fn managed_service_secrets_are_required_by_lab_preflight_and_handoff() {
     let mut handoff =
         build_lab_secret_env_handoff_plan(&[], &[], HashMap::new()).expect("empty handoff");
-    let plan: homeboy_agents::agent_tasks::scheduler::AgentTaskPlan =
+    let plan: homeboy_agents::agent_task_schedule::AgentTaskPlan =
         serde_json::from_value(serde_json::json!({
             "schema": "homeboy/agent-task-plan/v1",
             "plan_id": "service-secret-handoff",

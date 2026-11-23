@@ -1,6 +1,6 @@
+use crate::agent_task_lifecycle;
 use crate::agent_task_lifecycle::record_runner_job_identity;
-use crate::agent_tasks::lifecycle as agent_task_lifecycle;
-use crate::agent_tasks::scheduler::AgentTaskAggregate;
+use crate::agent_task_schedule::AgentTaskAggregate;
 use homeboy_core::lab_contract::AgentTaskDispatchIdentity;
 use homeboy_core::notification_route::NotificationRoute;
 use homeboy_core::{config, Error, Result};
@@ -50,7 +50,7 @@ pub fn mirror_agent_task_run_plan_aggregate(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::agent_tasks::scheduler::{AgentTaskAggregateTotals, AgentTaskPlan};
+    use crate::agent_task_schedule::{AgentTaskAggregateTotals, AgentTaskPlan};
 
     #[test]
     fn detached_projection_retries_from_controller_plan_after_runner_staging_is_removed() {

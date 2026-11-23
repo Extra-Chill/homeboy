@@ -3350,7 +3350,7 @@ fn controller_owned_unmaterialized_resume(cli: &Cli) -> bool {
     else {
         return false;
     };
-    crate::agents::agent_tasks::lifecycle::exact_record(&args.id).is_ok_and(|record| {
+    crate::agents::agent_task_lifecycle::exact_record(&args.id).is_ok_and(|record| {
         !record.state().is_terminal()
             && record.metadata["unmaterialized_cook_admission"].is_object()
     })
@@ -4593,7 +4593,7 @@ mod tests {
     fn unmaterialized_resume_bypasses_hot_noninteractive_resource_refusal() {
         crate::test_support::with_isolated_home(|_| {
             let run_id = "hot-unmaterialized-resume";
-            crate::agents::agent_tasks::lifecycle::record_unmaterialized_cook_admission_in_store(
+            crate::agents::agent_task_lifecycle::record_unmaterialized_cook_admission_in_store(
                 &test_lifecycle_store(),
                 run_id,
                 serde_json::json!({
@@ -4617,7 +4617,7 @@ mod tests {
                 ),
                 None
             );
-            let record = crate::agents::agent_tasks::lifecycle::exact_record(run_id)
+            let record = crate::agents::agent_task_lifecycle::exact_record(run_id)
                 .expect("controller-owned admission");
             assert_eq!(
                 record.metadata["unmaterialized_cook_admission"]["binding"]["placement"]

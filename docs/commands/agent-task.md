@@ -1108,7 +1108,7 @@ xai/grok-4.7: capacity not published
 
 `agent-task providers` returns `capability_contract` with Homeboy-owned schema ids
 for executor provider manifests, requests, and outcomes. Extensions should read
-that metadata, or import the matching `homeboy::core::agent_tasks::provider`
+that metadata, or import the matching `homeboy::agents::agent_task_provider`
 constants, instead of copying schema strings into downstream code. Provider
 manifests may omit `schema`, `request_schema`, and `outcome_schema`; Homeboy
 defaults them to the current core contract ids.

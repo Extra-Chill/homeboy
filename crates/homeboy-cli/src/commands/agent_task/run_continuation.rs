@@ -93,8 +93,8 @@ pub(super) fn apply_explicit_local_continuation(
         return Ok(());
     };
     let lifecycle_store =
-        homeboy::agents::agent_tasks::lifecycle::AgentTaskLifecycleStore::from_environment()?;
-    homeboy::agents::agent_tasks::lifecycle::transition_execution_placement_for_continuation_in_store(
+        homeboy::agents::agent_task_lifecycle::AgentTaskLifecycleStore::from_environment()?;
+    homeboy::agents::agent_task_lifecycle::transition_execution_placement_for_continuation_in_store(
         &lifecycle_store,
         run_id,
         decision.clone(),
@@ -221,8 +221,7 @@ where
         let recipe = agent_task_service::load_recipe(&recipe.cook_id)?;
         return Ok((cook_continuation_status(&recipe.cook_id, &retry.record), 0));
     }
-    if record.state().is_terminal()
-        && agent_task_service_direct::retryable_pre_execution_failure(&record)
+    if record.state().is_terminal() && agent_task_service::retryable_pre_execution_failure(&record)
     {
         if !args.rearm {
             return Err(homeboy::core::Error::validation_invalid_argument(
@@ -441,7 +440,7 @@ pub(crate) fn preflight_continue_cook(args: CookContinueArgs) -> CmdResult<Value
             Ok(observation) => {
                 let record = &observation.0;
                 candidate_fingerprint =
-                    agent_task_service_direct::recorded_promotion_report(&record.metadata)
+                    agent_task_service::recorded_promotion_report(&record.metadata)
                         .ok()
                         .flatten()
                         .and_then(|mut promotion| {
@@ -468,7 +467,7 @@ pub(crate) fn preflight_continue_cook(args: CookContinueArgs) -> CmdResult<Value
             }
         };
     let continuation_command =
-        || agent_task_service_direct::cook_recover_command_for_record(&record, &run_id);
+        || agent_task_service::cook_recover_command_for_record(&record, &run_id);
     if let Some(error) =
         agent_task_service::cook_continuation_owner_denial(&record, &recipe.cook_id)?
     {
@@ -484,16 +483,15 @@ pub(crate) fn preflight_continue_cook(args: CookContinueArgs) -> CmdResult<Value
         report["failure_context"]["next_action"]["command"] = Value::Null;
         return Ok((report, 1));
     }
-    if let Some(finalization) =
-        agent_task_service_direct::recorded_finalization_receipt(&record.metadata)
-            .filter(|finalization| !finalization.is_null())
-            .filter(|_| {
-                matches!(
-                    record.state(),
-                    homeboy_lifecycle_contract::RunExecutionState::Succeeded
-                        | homeboy_lifecycle_contract::RunExecutionState::CandidateRecoverable
-                )
-            })
+    if let Some(finalization) = agent_task_service::recorded_finalization_receipt(&record.metadata)
+        .filter(|finalization| !finalization.is_null())
+        .filter(|_| {
+            matches!(
+                record.state(),
+                homeboy_lifecycle_contract::RunExecutionState::Succeeded
+                    | homeboy_lifecycle_contract::RunExecutionState::CandidateRecoverable
+            )
+        })
     {
         phases.push(serde_json::json!({
             "phase": "finalization_receipt",
@@ -751,9 +749,8 @@ pub(crate) fn preflight_continue_cook(args: CookContinueArgs) -> CmdResult<Value
             ));
         }
     }
-    if let Some(finalization) =
-        agent_task_service_direct::recorded_finalization_receipt(&record.metadata)
-            .filter(|finalization| !finalization.is_null())
+    if let Some(finalization) = agent_task_service::recorded_finalization_receipt(&record.metadata)
+        .filter(|finalization| !finalization.is_null())
     {
         phases.push(serde_json::json!({
             "phase": "finalization_receipt",
@@ -940,7 +937,7 @@ pub(super) fn cook_continuation_preflight_report(
     let continuation_command = continuation_command.or_else(|| {
         run_id
             .as_deref()
-            .map(|run_id| agent_task_service_direct::cook_recover_command(None, run_id))
+            .map(|run_id| agent_task_service::cook_recover_command(None, run_id))
     });
     let evidence_refs = run_id
         .as_deref()
@@ -986,7 +983,7 @@ pub(super) fn cook_terminal_continuation_status(
             "continuation_pending",
             serde_json::json!({
                 "action": "await_continuation_claim",
-                "command": agent_task_service_direct::cook_recover_command(None, run_id),
+                "command": agent_task_service::cook_recover_command(None, run_id),
             }),
         ),
         agent_task_service::CookContinuationState::Claimed => (
@@ -1000,7 +997,7 @@ pub(super) fn cook_terminal_continuation_status(
             "continuation_recovery_required",
             serde_json::json!({
                 "action": "rearm_failed_continuation",
-                "command": agent_task_service_direct::cook_recover_command(None, run_id),
+                "command": agent_task_service::cook_recover_command(None, run_id),
             }),
         ),
         agent_task_service::CookContinuationState::Completed => (
@@ -1016,7 +1013,7 @@ pub(super) fn cook_terminal_continuation_status(
             "continuation_not_scheduled",
             serde_json::json!({
                 "action": "schedule_continuation",
-                "command": agent_task_service_direct::cook_recover_command(None, run_id),
+                "command": agent_task_service::cook_recover_command(None, run_id),
             }),
         ),
     };
@@ -1148,9 +1145,7 @@ pub(super) fn cook_report_with_continuation(mut value: Value) -> Value {
         );
         report.insert(
             "continuation_command".to_string(),
-            serde_json::json!(agent_task_service_direct::cook_recover_command(
-                None, &run_id
-            )),
+            serde_json::json!(agent_task_service::cook_recover_command(None, &run_id)),
         );
     }
     value

@@ -49,10 +49,9 @@ fn lab_preview_readiness_projection_defers_binding_to_the_runner() {
     );
     assert!(cook_provider_readiness_disclosure(&plan, false).is_none());
 }
-use homeboy::agents::agent_tasks::scheduler::AgentTaskExecutorAdapter;
-use homeboy::agents::agent_tasks::{
-    AgentTaskExecutionContext, AgentTaskOutcome, AgentTaskOutcomeStatus, AgentTaskRequest,
-};
+use homeboy::agents::agent_task::{AgentTaskOutcome, AgentTaskOutcomeStatus, AgentTaskRequest};
+use homeboy::agents::agent_task_schedule::AgentTaskExecutionContext;
+use homeboy::agents::agent_task_scheduler::AgentTaskExecutorAdapter;
 
 struct UnmaterializedPreviewExecutor;
 
@@ -501,17 +500,18 @@ fn preview_replay_echoes_explicit_run_id() {
 
 #[test]
 fn cook_validation_uses_valid_fallback_without_mutating_durable_primary() {
+    use homeboy::agents::agent_task::{
+        AgentTaskExecutor, AgentTaskLimits, AgentTaskPolicy, AgentTaskRequest, AgentTaskWorkspace,
+        AGENT_TASK_REQUEST_SCHEMA,
+    };
+    use homeboy::agents::agent_task_schedule::AgentTaskPlan;
     use homeboy::agents::agent_task_scheduler::{
         AgentTaskProviderRotationEntry, AgentTaskProviderRotationPolicy,
-    };
-    use homeboy::agents::agent_tasks::{
-        AgentTaskExecutor, AgentTaskLimits, AgentTaskPlan, AgentTaskPolicy, AgentTaskRequest,
-        AgentTaskWorkspace, AGENT_TASK_REQUEST_SCHEMA,
     };
 
     let fake = FakePi::with_probes("exit 99", "printf 'test fallback\\n'");
     let provider = fake.provider();
-    let catalog = homeboy::agents::agent_tasks::provider::AgentTaskProviderCatalog {
+    let catalog = homeboy::agents::agent_task_provider::AgentTaskProviderCatalog {
         providers: vec![provider],
         ..Default::default()
     };

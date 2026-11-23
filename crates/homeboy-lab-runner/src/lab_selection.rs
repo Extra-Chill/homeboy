@@ -382,7 +382,7 @@ struct PlacementReadinessObservation {
     capacity: Option<usize>,
     capability_runner: Option<Runner>,
     capability_inventory: Option<super::RunnerCapabilityInventory>,
-    provider_catalog: Option<Vec<homeboy_agents::agent_tasks::provider::AgentTaskExecutorProvider>>,
+    provider_catalog: Option<Vec<homeboy_agents::agent_task_provider::AgentTaskExecutorProvider>>,
     command_prefix_required_tools: Vec<super::RunnerRequiredTool>,
     require_exact_runner_version: bool,
 }
@@ -504,7 +504,7 @@ fn placement_readiness_from_status_with_catalog(
     status: &RunnerStatusReport,
     capacity: Option<usize>,
     capability: super::LabRunnerGateDecision,
-    provider_catalog: Option<&[homeboy_agents::agent_tasks::provider::AgentTaskExecutorProvider]>,
+    provider_catalog: Option<&[homeboy_agents::agent_task_provider::AgentTaskExecutorProvider]>,
     require_exact_runner_version: bool,
 ) -> PlacementReadiness {
     let (workload_family, command, provider, source_path_inputs) = admission_identity(request);
@@ -670,7 +670,7 @@ fn admission_identity(
 
 fn provider_admission_for_request(
     request: &PlacementReadinessRequest,
-    provider_catalog: Option<&[homeboy_agents::agent_tasks::provider::AgentTaskExecutorProvider]>,
+    provider_catalog: Option<&[homeboy_agents::agent_task_provider::AgentTaskExecutorProvider]>,
 ) -> Option<homeboy_agents::agent_task_provider::AgentTaskProviderAdmissionPlan> {
     let PlacementReadinessInvocation::AgentTaskCook {
         provider,
@@ -2011,7 +2011,7 @@ mod placement_readiness_tests {
         }
     }
 
-    fn provider(id: &str) -> homeboy_agents::agent_tasks::provider::AgentTaskExecutorProvider {
+    fn provider(id: &str) -> homeboy_agents::agent_task_provider::AgentTaskExecutorProvider {
         serde_json::from_value(serde_json::json!({ "id": id, "backend": "sol" })).expect("provider")
     }
 
@@ -2030,7 +2030,7 @@ mod placement_readiness_tests {
     }
 
     fn observed(
-        catalog: Vec<homeboy_agents::agent_tasks::provider::AgentTaskExecutorProvider>,
+        catalog: Vec<homeboy_agents::agent_task_provider::AgentTaskExecutorProvider>,
     ) -> PlacementReadinessObservation {
         PlacementReadinessObservation {
             status: status(),

@@ -3,7 +3,7 @@ use std::collections::BTreeMap;
 use clap::Args;
 use serde::Serialize;
 
-use homeboy::agents::agent_tasks::AgentTaskMatrixExecutionState;
+use homeboy::agents::agent_task::AgentTaskMatrixExecutionState;
 use homeboy::core::matrix_artifact_summary;
 use homeboy_core::extension::bench::{BenchCommandOutput, BenchErrorChain, BenchScenario};
 
