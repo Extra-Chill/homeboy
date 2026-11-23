@@ -1443,14 +1443,20 @@ impl AgentTaskScheduler {
                         result.attempt,
                         outcome.summary.clone(),
                     ));
-                    // A liveness stall before any candidate exists is
-                    // transient: re-run it once on the same route, outside the
-                    // execution budget, before it can settle the task.
+                    // A liveness stall or a rate limit before any candidate
+                    // exists is transient: re-run it once on the same route,
+                    // outside the execution budget, before it can settle the
+                    // task. Plans with another route rotate instead.
                     let stall_rerun = !retry_allowed
                         && !rotation_takes_over
                         && free_reruns == 0
-                        && outcome.failure_classification
-                            == Some(AgentTaskFailureClassification::Stalled)
+                        && matches!(
+                            outcome.failure_classification,
+                            Some(
+                                AgentTaskFailureClassification::Stalled
+                                    | AgentTaskFailureClassification::RateLimited
+                            )
+                        )
                         && outcome.outcome_candidate().is_none();
                     if (retry_allowed || stall_rerun)
                         && outcome.status != AgentTaskOutcomeStatus::CandidateRecoverable
@@ -2035,7 +2041,8 @@ pub(super) fn artifact_root_for_running(running: &RunningTask) -> Result<PathBuf
     }
 }
 
-/// Marks the retry evidence of the one free re-run a liveness stall gets.
+/// Marks the retry evidence of the one free re-run a liveness stall or rate
+/// limit gets.
 const STALL_RERUN: &str = "stall_rerun";
 
 fn stall_reruns(retry_attempts: &[serde_json::Value]) -> u32 {
