@@ -1804,6 +1804,75 @@ fn terminal_cook_recovery_settles_rows_and_one_span_in_both_directions() {
     });
 }
 
+/// #18895: the terminal Cook outcome finalizes the native destination it
+/// provisioned. A published Cook's worktree becomes a cleanup candidate; a
+/// failed Cook's worktree stays preserved.
+#[test]
+fn terminal_cook_finalizes_its_provisioned_destination_worktree() {
+    for (gate_green, disposition, reclaimable) in
+        [(true, "succeeded", true), (false, "failed", false)]
+    {
+        homeboy_core::test_support::with_isolated_home(|home| {
+            let handle = "fixture@fix-issue-15775-fixture";
+            let run_id = "cook-18895-attempt-1";
+            let (mut options, mut promotion) = seed_moving_base_attempt("cook-18895", run_id);
+            let (primary, target) = prior_candidate_destination(home.path(), handle, run_id);
+            homeboy_core::worktree::record_linked_active_for_test(
+                handle,
+                primary.path(),
+                &target,
+                Some(run_id),
+            );
+            options.workspace.to_worktree = handle.to_string();
+            if !gate_green {
+                promotion.status = AgentTaskPromotionStatus::GateFailed;
+                promotion.deterministic_gates[0].status =
+                    crate::agent_task_gate::AgentTaskGateStatus::Failed;
+                promotion.deterministic_gates[0].exit_code = 1;
+            }
+            let report = run_cook(CookContext {
+                side_effects: Some(CookSideEffects::for_test(
+                    move |_, _, _| Ok(promotion.clone()),
+                    |_, _, _, _| {
+                        let receipt = serde_json::json!({"status":"review_ready", "run_id":run_id, "pr_url":"https://github.com/example/repo/pull/1"});
+                        agent_task_lifecycle::record_cook_finalization_in_store(&agent_task_lifecycle::AgentTaskLifecycleStore::from_environment()?, run_id, receipt.clone())?;
+                        Ok(receipt)
+                    },
+                )),
+                ..CookContext::new(options, Arc::new(UnusedExecutor))
+            })
+            .unwrap();
+            assert_eq!(
+                report.value.status.is_published(),
+                gate_green,
+                "{report:#?}"
+            );
+
+            let record = homeboy_core::worktree::resolve_if_present(handle)
+                .unwrap()
+                .expect("destination record");
+            assert_eq!(record.terminal_disposition.as_deref(), Some(disposition));
+            let cleanup =
+                homeboy_core::worktree::cleanup(homeboy_core::worktree::WorktreeCleanupOptions {
+                    force: false,
+                    dry_run: true,
+                    cleanup_branches: false,
+                    allow_unmerged_branches: false,
+                    reaper: None,
+                })
+                .unwrap();
+            let candidate = cleanup.candidates.iter().any(|c| c.record.id == handle);
+            assert_eq!(candidate, reclaimable, "{:#?}", cleanup.skipped);
+            assert!(!cleanup.skipped.iter().any(|s| s.record.id == handle));
+            assert_eq!(
+                record.cleanup_policy == homeboy_core::worktree::CleanupPolicy::PreserveOnFailure,
+                !reclaimable
+            );
+            assert!(target.is_dir());
+        });
+    }
+}
+
 #[path = "cook_tests/fixtures/publication.rs"]
 mod publication;
 use publication::{

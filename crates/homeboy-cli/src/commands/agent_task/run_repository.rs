@@ -1011,7 +1011,7 @@ pub(super) fn repository_identity_error(
     )
 }
 
-/// Upper bound on branch-name collisions before derivation gives up.
+/// Upper bound on generations probed past the highest one already in use.
 pub(super) const MAX_DERIVED_COOK_GENERATIONS: u32 = 50;
 
 /// A new issue attempt never adopts an earlier branch or workspace.
@@ -1030,7 +1030,21 @@ pub(super) fn fresh_derived_cook_branch(
         None
     };
     let source_checkout = source_checkout.or(registered_source.as_deref());
-    for generation in 1..=MAX_DERIVED_COOK_GENERATIONS {
+    // Start past every generation a branch or PR already used, so an issue
+    // that has shipped many generations keeps deriving fresh destinations.
+    // No higher generation has a branch ref; PR search can lag, so each one
+    // still checks its exact PR history.
+    let generations = source_checkout
+        .map(|path| {
+            homeboy::core::worktree::convergence::branch_generations(path, base)
+                .map(|generations| (path, generations))
+        })
+        .transpose()?;
+    let first = generations
+        .as_ref()
+        .map_or(1, |(_, generations)| generations.highest_used + 1);
+    let last = first + MAX_DERIVED_COOK_GENERATIONS - 1;
+    for generation in first..=last {
         let branch = if generation == 1 {
             base.to_string()
         } else {
@@ -1042,15 +1056,17 @@ pub(super) fn fresh_derived_cook_branch(
         if record.is_some() {
             continue;
         }
-        if let Some(path) = source_checkout {
-            if homeboy::core::worktree::stale_destination::adoptable_branch_ref(path, &branch)
-                .is_some()
-            {
-                continue;
-            }
-            // Remote PR history can outlive a deleted local branch.
+        if let Some((path, Some(github_repository))) = generations
+            .as_ref()
+            .map(|(path, generations)| (path, generations.github_repository.as_deref()))
+        {
+            // Remote PR history can outlive a deleted branch.
             if !matches!(
-                homeboy::core::worktree::convergence::pr_history(path, &branch, None)?,
+                homeboy::core::worktree::convergence::pr_history(
+                    path,
+                    &branch,
+                    Some(github_repository)
+                )?,
                 PrHistory::None
             ) {
                 continue;
@@ -1061,7 +1077,7 @@ pub(super) fn fresh_derived_cook_branch(
     Err(homeboy::core::Error::validation_invalid_argument(
         "to_worktree",
         format!(
-            "every derived destination for `{base}` up to generation {MAX_DERIVED_COOK_GENERATIONS} is retired; to rework an existing branch pass its PR as --task-url https://github.com/<owner>/<repo>/pull/<n>, or pass --to-worktree and --head explicitly"
+            "every derived destination for `{base}` from generation {first} to {last} is retired; to rework an existing branch pass its PR as --task-url https://github.com/<owner>/<repo>/pull/<n>, or pass --to-worktree and --head explicitly"
         ),
         Some(base.to_string()),
         None,

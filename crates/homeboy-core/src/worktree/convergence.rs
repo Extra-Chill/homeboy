@@ -53,6 +53,92 @@ pub fn pr_history(path: &Path, branch: &str, repository: Option<&str>) -> Result
     parse_pr_history(&output.stdout)
 }
 
+/// What derivation needs to pick the next fresh generation of `base`
+/// (`base` is generation 1, `base-N` is N).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BranchGenerations {
+    /// Highest generation any local or origin branch, or any PR head in any
+    /// state, already uses; 0 when none does. Every higher generation has no
+    /// branch ref. Search results can lag, so a higher generation may still
+    /// have PR history: check it with [`pr_history`].
+    pub highest_used: u32,
+    /// `owner/repo` of a github.com origin, the repository to ask for PR
+    /// history; `None` when origin has no PR service.
+    pub github_repository: Option<String>,
+}
+
+/// One ref listing and one PR search cover every generation of `base`, so a
+/// long-lived issue whose earlier generations all merged costs neither a
+/// ref probe nor a PR lookup per generation.
+pub fn branch_generations(path: &Path, base: &str) -> Result<BranchGenerations> {
+    let prefixes = ["refs/heads/", "refs/remotes/origin/"];
+    let patterns: Vec<String> = prefixes
+        .iter()
+        .flat_map(|prefix| [format!("{prefix}{base}"), format!("{prefix}{base}-*")])
+        .collect();
+    let mut args = vec!["for-each-ref", "--format=%(refname)"];
+    args.extend(patterns.iter().map(String::as_str));
+    let mut heads: Vec<String> = git::output_optional(path, &args)
+        .map(|output| {
+            output
+                .lines()
+                .filter_map(|reference| {
+                    prefixes
+                        .iter()
+                        .find_map(|prefix| reference.strip_prefix(prefix))
+                })
+                .map(str::to_string)
+                .collect()
+        })
+        .unwrap_or_default();
+    let github_repository = git::output_optional(path, &["remote", "get-url", "origin"])
+        .and_then(|origin| git::release_download::parse_github_url(origin.trim()))
+        .filter(|repo| repo.host == "github.com")
+        .map(|repo| format!("{}/{}", repo.owner, repo.repo));
+    if let Some(repository) = &github_repository {
+        let output = std::process::Command::new("gh")
+            .args(["pr", "list", "--state", "all", "--limit", "1000"])
+            .args(["--repo", repository])
+            .args(["--search", &format!("head:{base}"), "--json", "headRefName"])
+            .current_dir(path)
+            .output()
+            .map_err(|error| infrastructure(error.to_string()))?;
+        if !output.status.success() {
+            return Err(infrastructure(
+                String::from_utf8_lossy(&output.stderr).into_owned(),
+            ));
+        }
+        #[derive(serde::Deserialize)]
+        #[serde(rename_all = "camelCase")]
+        struct PullRequest {
+            head_ref_name: String,
+        }
+        let prs: Vec<PullRequest> = serde_json::from_slice(&output.stdout)
+            .map_err(|error| infrastructure(error.to_string()))?;
+        heads.extend(prs.into_iter().map(|pr| pr.head_ref_name));
+    }
+    Ok(BranchGenerations {
+        highest_used: heads
+            .iter()
+            .filter_map(|head| branch_generation(base, head))
+            .max()
+            .unwrap_or(0),
+        github_repository,
+    })
+}
+
+fn branch_generation(base: &str, branch: &str) -> Option<u32> {
+    if branch == base {
+        return Some(1);
+    }
+    let suffix = branch.strip_prefix(base)?.strip_prefix('-')?;
+    suffix
+        .bytes()
+        .all(|byte| byte.is_ascii_digit())
+        .then(|| suffix.parse().ok())
+        .flatten()
+}
+
 /// Preserve candidate history by routing it through PR rework, never reset it.
 pub fn require_issue_destination_without_pr(path: &Path, branch: &str) -> Result<()> {
     match pr_history(path, branch, None)? {

@@ -3935,6 +3935,39 @@ fn derived_generation_skips_another_source_checkout_but_reuses_same_source() {
     });
 }
 
+/// A long-lived issue can ship more generations than one probe window: the
+/// next destination starts past the highest generation already in use.
+#[test]
+fn derived_generation_continues_past_more_used_generations_than_the_probe_window() {
+    with_isolated_home(|_| {
+        let primary = tempfile::tempdir().unwrap();
+        init_runtime_component_checkout(primary.path());
+        register_component(
+            "fixture",
+            primary.path(),
+            "https://github.com/example/fixture.git",
+        );
+        homeboy_test_support::git::run(primary.path(), &["branch", "fix/issue-1-fixture"]);
+        for generation in 2..=60 {
+            homeboy_test_support::git::run(
+                primary.path(),
+                &["branch", &format!("fix/issue-1-fixture-{generation}")],
+            );
+        }
+        // A longer issue number sharing the prefix is not a generation.
+        homeboy_test_support::git::run(primary.path(), &["branch", "fix/issue-1-fixture-99x"]);
+        assert_eq!(
+            super::super::run::fresh_derived_cook_branch(
+                "fixture",
+                "fix/issue-1-fixture",
+                Some(primary.path()),
+            )
+            .unwrap(),
+            "fix/issue-1-fixture-61"
+        );
+    });
+}
+
 #[test]
 fn derived_generation_separates_live_owners_but_reuses_same_run() {
     with_isolated_home(|_| {
