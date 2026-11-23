@@ -338,3 +338,24 @@ fn explicit_passthrough_preserves_a_runner_owned_format_flag() {
         vec!["--format".to_string(), "terse".to_string()]
     );
 }
+
+#[test]
+fn parses_hidden_bench_compare_cook_gate_flag() {
+    let cli = TestCli::try_parse_from([
+        "bench",
+        "compare",
+        "--cook-gate",
+        "--base",
+        "abc123",
+        "--head",
+        "WORKTREE",
+        "--path",
+        ".",
+    ])
+    .expect("bench compare --cook-gate should parse");
+
+    match cli.bench.command.expect("compare command") {
+        BenchCommand::Compare(args) => assert!(args.cook_gate),
+        _ => panic!("expected bench compare command"),
+    }
+}

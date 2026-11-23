@@ -128,3 +128,47 @@ fn in_flight_runs_have_no_reason_yet() {
         assert_eq!(summary.pr_url, None);
     }
 }
+
+/// #18869: a failed bench gate links its compare artifact and aggregate
+/// summary from the Cook summary.
+#[test]
+fn bench_gate_links_its_artifact_and_aggregate_summary() {
+    let metadata = delivery(json!({
+        "promotion": promotion("gate_failed", json!([{
+            "id": "bench",
+            "status": "failed",
+            "command": ["sh", "-c", "homeboy bench compare --cook-gate --base base-sha --head WORKTREE --path ."],
+            "exit_code": 1,
+            "bench_compare": {
+                "schema": homeboy_core::bench_compare::GATE_EVIDENCE_SCHEMA,
+                "compare_id": "bench-compare-1",
+                "passed": false,
+                "fail_on": "new-blockers",
+                "summary": {
+                    "routes": 4, "improved": 1, "regressed": 1, "unchanged": 2,
+                    "added_on_head": 0, "missing_on_head": 0, "output_changed": 2,
+                    "new_blockers": 1, "resolved_blockers": 0,
+                    "new_findings": 0, "resolved_findings": 0
+                },
+                "violations": ["head introduced 1 new evaluator blocker(s)"],
+                "artifact_path": "/data/bench-compare/bench-compare-1/bench-compare.json"
+            }
+        }])),
+    }));
+    let summary = cook_summary(&record(RunExecutionState::CandidateRecoverable, metadata));
+    summary.validate().expect("valid summary");
+    let bench = summary.gates[0]
+        .bench_compare
+        .as_ref()
+        .expect("bench summary");
+    assert!(!bench.passed);
+    assert_eq!(bench.fail_on, "new-blockers");
+    assert_eq!(
+        (bench.routes, bench.regressed, bench.new_blockers),
+        (4, 1, 1)
+    );
+    assert_eq!(
+        bench.artifact_path,
+        "/data/bench-compare/bench-compare-1/bench-compare.json"
+    );
+}

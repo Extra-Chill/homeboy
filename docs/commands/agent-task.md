@@ -235,6 +235,17 @@ A Cook-batch passes private gates to each child Cook as `--private-verify` flags
 in its workflow definition, which the daemon job store retains like any other
 admitted workflow; the same `--private-gate-reveal` policy applies to each child.
 
+### Bench compare gates
+
+`--verify-bench <spec.json>` (repeatable) attaches `homeboy bench compare` as a
+visible gate that compares the Cook's immutable base with the candidate on a
+corpus. The spec's `fail_on` (`new-blockers`, `regressions` or `never`) decides
+pass or fail. The compare runs both sides itself, so a red bench gate is never
+replayed on the base or accepted as an inherited failure. The compare artifact
+and its aggregate summary appear in the gate result, in
+`cook_summary.gates[].bench_compare`, and in the notification. See
+[`bench compare`](bench.md#as-a-cook-gate) for the spec fields.
+
 ### Repro gates
 
 Green gates show only that a candidate did not break them. Declare a repro to
@@ -730,7 +741,8 @@ steps and admits that workflow on the local daemon:
   least `N`.
 
 Every child needs a deterministic gate from `--verify`, `--verify-file`,
-`--private-verify`, `--private-verify-file`, `--repro`, or `--repro-file`.
+`--private-verify`, `--private-verify-file`, `--verify-bench`, `--repro`, or
+`--repro-file`.
 
 Cook and cook-batch share the same provider, model, evidence, attempt and gate
 options. Batch forwards explicitly supplied options unchanged to each child;

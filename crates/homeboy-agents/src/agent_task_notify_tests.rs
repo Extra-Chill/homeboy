@@ -1362,3 +1362,31 @@ fn terminal_notification_carries_the_cook_summary_contract() {
         );
     }
 }
+
+/// #18869: a bench gate's notification fact names its verdict, policy,
+/// aggregate deltas, and artifact.
+#[test]
+fn bench_compare_fact_names_verdict_policy_and_artifact() {
+    let evidence = homeboy_core::bench_compare::BenchCompareGateEvidence {
+        schema: homeboy_core::bench_compare::GATE_EVIDENCE_SCHEMA.to_string(),
+        compare_id: "bench-compare-1".to_string(),
+        passed: true,
+        fail_on: homeboy_core::bench_compare::BenchCompareFailOn::Regressions,
+        summary: homeboy_core::bench_compare::BenchCompareSummary {
+            routes: 3,
+            unchanged: 3,
+            ..Default::default()
+        },
+        violations: Vec::new(),
+        artifact_path: "/data/bench-compare/1/bench-compare.json".to_string(),
+    };
+    let fact = bench_compare_fact(&evidence);
+    assert!(
+        fact.starts_with("passed (regressions): 3 route(s), 0 regressed"),
+        "{fact}"
+    );
+    assert!(
+        fact.ends_with("artifact /data/bench-compare/1/bench-compare.json"),
+        "{fact}"
+    );
+}
