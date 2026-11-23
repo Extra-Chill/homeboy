@@ -670,6 +670,13 @@ fn shell_times_usec(raw: &str) -> Option<u64> {
     (seconds.is_finite() && seconds >= 0.0).then(|| (seconds * 1_000_000.0).round() as u64)
 }
 
+/// The step's combined child log, when it exists: the evidence behind a
+/// recorded step failure cause.
+pub fn recorded_step_log_path(job_id: &str) -> Option<PathBuf> {
+    let path = step_job_dir(job_id).ok()?.join(STEP_LOG_FILE);
+    path.is_file().then_some(path)
+}
+
 /// The cause a step's child reported in its log, if it failed with one.
 pub fn recorded_step_failure_cause(job_id: &str) -> Option<String> {
     let log = std::fs::read_to_string(step_job_dir(job_id).ok()?.join(STEP_LOG_FILE)).ok()?;
@@ -1168,28 +1175,43 @@ fn finish(job_id: &str, checkpoint: StepJobCheckpoint) -> Result<Value> {
 fn child_failure_cause(log: &str) -> Option<String> {
     const TAIL_LINES: usize = 3;
     const MAX_CHARS: usize = 600;
-    let envelope = log
+    let envelope_start = log
         .rfind("\n{\n")
         .map(|index| index + 1)
-        .or_else(|| log.starts_with("{\n").then_some(0))
-        .and_then(|start| serde_json::from_str::<Value>(&log[start..]).ok());
-    let cause = envelope
-        .as_ref()
-        .and_then(|value| {
-            value["summary"]
+        .or_else(|| log.starts_with("{\n").then_some(0));
+    let envelope =
+        envelope_start.and_then(|start| serde_json::from_str::<Value>(&log[start..]).ok());
+    let output_tail = |text: &str| {
+        let lines = text
+            .lines()
+            .map(str::trim)
+            .filter(|line| !line.is_empty())
+            .collect::<Vec<_>>();
+        let tail = &lines[lines.len().saturating_sub(TAIL_LINES)..];
+        (!tail.is_empty()).then(|| tail.join(" | "))
+    };
+    let cause = match envelope.as_ref() {
+        Some(value) => {
+            let summary = value["summary"]
                 .as_str()
                 .or_else(|| value["diagnostics"]["message"].as_str())
-        })
-        .map(str::to_string)
-        .or_else(|| {
-            let lines = log
-                .lines()
-                .map(str::trim)
-                .filter(|line| !line.is_empty())
-                .collect::<Vec<_>>();
-            let tail = &lines[lines.len().saturating_sub(TAIL_LINES)..];
-            (!tail.is_empty()).then(|| tail.join(" | "))
-        })?;
+                .map(str::to_string);
+            // A command that failed without naming a cause gets the generic
+            // "exited N without reporting a failure cause" fallback. That is
+            // not a cause: whatever the child wrote before its envelope (its
+            // stderr) is the evidence that explains the exit.
+            if envelope_declares_no_cause(value) {
+                let before = envelope_start.map_or("", |start| &log[..start]);
+                match (summary, output_tail(before)) {
+                    (Some(summary), Some(tail)) => Some(format!("{summary}; last output: {tail}")),
+                    (summary, tail) => summary.or(tail),
+                }
+            } else {
+                summary
+            }
+        }
+        None => output_tail(log),
+    }?;
     let cause = cause.trim();
     if cause.is_empty() {
         return None;
@@ -1200,6 +1222,16 @@ fn child_failure_cause(log: &str) -> Option<String> {
     } else {
         cause.to_string()
     })
+}
+
+/// The envelope carries only the shared generic fallback for an unnamed
+/// nonzero exit, not a cause the command declared.
+fn envelope_declares_no_cause(envelope: &Value) -> bool {
+    envelope["diagnostics"]["code"] == "command.failed"
+        && envelope["data"].get("failure").is_none()
+        && envelope["diagnostics"]["message"]
+            .as_str()
+            .is_some_and(|message| message.contains("without reporting a failure cause"))
 }
 
 /// Returns `false` when cancelled, or when a declared wait (time or runner)
@@ -2187,7 +2219,14 @@ mod tests {
     fn failed_step_names_the_cause_its_child_reported() {
         with_isolated_home(|home| {
             let envelope = r#"printf 'progress line\n{\n  "success": false,\n  "summary": "Invalid argument repo: not registered"\n}\n'; exit 2"#;
+            // A child whose envelope carries only the generic unnamed-exit
+            // fallback: the error it printed before the envelope is the cause.
+            let unnamed = r#"echo 'fatal: gate rejected the candidate' >&2; printf '{\n  "success": false,\n  "summary": "agent-task execution-step exited 1 without reporting a failure cause",\n  "data": {"exit_code": 1},\n  "diagnostics": {"code": "command.failed", "message": "agent-task execution-step exited 1 without reporting a failure cause"}\n}\n'; exit 1"#;
             for (script, expected) in [
+                (
+                    unnamed,
+                    "step child exited with status 1: agent-task execution-step exited 1 without reporting a failure cause; last output: fatal: gate rejected the candidate",
+                ),
                 (
                     envelope,
                     "step child exited with status 2: Invalid argument repo: not registered",

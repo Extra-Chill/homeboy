@@ -789,6 +789,32 @@ fn unnamed_failure_diagnostics(
     })
 }
 
+/// The failure a nested command report declares, in the `{code, message,
+/// details}` shape a parent payload carries under `failure`.
+///
+/// A command that runs another command in-process (an execution step running
+/// a recovery regate or continuation, a terminal continuation worker running
+/// a Cook pass) must publish the nested report's cause instead of its own bare
+/// nonzero exit. The derivation is the one the envelope itself uses, so the
+/// parent names exactly the cause the nested command would have printed.
+pub(crate) fn nested_report_failure(exit_code: i32, report: &Value) -> Option<Value> {
+    if !report.is_object() {
+        return None;
+    }
+    let diagnostics = failure_diagnostics_for_data(exit_code, &None, &[], report)?;
+    let mut details = diagnostics.details;
+    // The generic typed-result fallback embeds the whole report; the parent
+    // already keeps the report's evidence, so carry only the causal fields.
+    if let Some(object) = details.as_object_mut() {
+        object.remove("result");
+    }
+    Some(serde_json::json!({
+        "code": diagnostics.code,
+        "message": diagnostics.message,
+        "details": bounded_failure_detail(&details),
+    }))
+}
+
 fn failure_diagnostics_for_data(
     exit_code: i32,
     run: &Option<CommandRunRef>,
