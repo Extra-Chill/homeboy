@@ -28,9 +28,14 @@ use std::str::FromStr;
 
 mod diff;
 mod execute;
+mod gate;
 
 pub use diff::{diff_routes, summarize_routes};
 pub use execute::{run_bench_compare, BenchCompareRequest, WORKTREE_HEAD};
+pub use gate::{
+    cook_gate_program, is_cook_gate_command, parse_gate_evidence, BenchCompareGateEvidence,
+    COOK_GATE_FLAG, GATE_EVIDENCE_MARKER, GATE_EVIDENCE_SCHEMA,
+};
 
 #[cfg(test)]
 mod tests;
@@ -108,8 +113,9 @@ impl FromStr for BenchCompareFailOn {
 }
 
 /// A reusable compare declaration (`homeboy bench compare --spec <file>`).
-/// Command-line flags override spec fields. The same file is the intended
-/// input of a future Cook gate attachment.
+/// Command-line flags override spec fields. The same file declares a Cook
+/// bench gate (`homeboy agent-task cook --verify-bench <file>`), where the
+/// Cook owns `base` and `head`.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct BenchCompareSpec {
@@ -130,6 +136,9 @@ pub struct BenchCompareSpec {
     /// Runner commands overriding the component/extension declaration.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub runner: Vec<String>,
+    /// Executable names required before either side starts.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub required_tools: Vec<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub fail_on: Option<BenchCompareFailOn>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -307,8 +316,8 @@ pub struct BenchCompareSideReport {
     pub requested_ref: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub sha: Option<String>,
-    /// `git_worktree` (materialized and removed by Homeboy) or `worktree`
-    /// (the checkout on disk, possibly with uncommitted changes).
+    /// `git_clone` (a revision in an owned clone) or `worktree`
+    /// (an owned snapshot of the checkout, including uncommitted changes).
     pub source_kind: String,
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub dirty: bool,

@@ -226,7 +226,6 @@ fn seed_unmaterialized_admission_parent(store: &AgentTaskLifecycleStore, cook_id
                     + chrono::Duration::hours(1))
                     .to_rfc3339(),
                 "cook_id": cook_id,
-                "cancellation_fence": { "state": "open" },
             });
             true
         })
@@ -513,10 +512,6 @@ fn unmaterialized_cook_admission_refuses_identity_rebinding_and_cancels_without_
     )
     .expect("cancel admission");
     assert_eq!(cancelled.state(), RunExecutionState::Cancelled);
-    assert_eq!(
-        cancelled.metadata["detached_cook_handoff"]["cancellation_fence"]["state"],
-        "cancelled"
-    );
     assert!(cancelled.metadata["detached_cook_handoff"]["child_pid"].is_null());
 }
 
@@ -606,7 +601,7 @@ fn only_the_claiming_launcher_can_publish_detached_child_supervision() {
 }
 
 #[test]
-fn cancellation_request_closes_every_first_attempt_admission_gate() {
+fn cancelled_parent_closes_every_first_attempt_admission_gate() {
     let context = homeboy_core::test_support::HermeticTestContext::new();
     let store = AgentTaskLifecycleStore::new(context.path_roots());
     let cook_id = "cook-cancellation-request-fence";
@@ -614,11 +609,10 @@ fn cancellation_request_closes_every_first_attempt_admission_gate() {
         .expect("claim handoff parent");
     store
         .mutate_record(cook_id, |record| {
-            record.metadata["detached_cook_handoff"]["cancellation_fence"]["state"] =
-                json!("cancel_requested");
+            set_run_state(record, RunExecutionState::Cancelled);
             true
         })
-        .expect("close cancellation fence");
+        .expect("cancel the handoff parent");
     let identity = homeboy_core::process::ProcessStartIdentity::Linux {
         starttime_ticks: 42,
     };
@@ -1642,7 +1636,6 @@ fn detached_handoff_siblings_attach_supervision_and_enforce_admission_guards() {
                                 + chrono::Duration::seconds(3_600))
                             .to_rfc3339(),
                             "cook_id": cook_id,
-                            "cancellation_fence": { "state": "open" },
                         }),
                     );
                     true
@@ -1728,10 +1721,6 @@ fn detached_handoff_siblings_attach_supervision_and_enforce_admission_guards() {
         attached.metadata["detached_cook_handoff"]["child_pid"],
         child_pid
     );
-    assert_eq!(
-        attached.metadata["detached_cook_handoff"]["cancellation_fence"]["state"], "open",
-        "attaching a child carries the durable fence forward"
-    );
 
     record_detached_cook_supervisor_in_store(&seeded, handoff_cook_id, "daemon-job-rooted")
         .expect("attach the supervising daemon job in the injected store");
@@ -1759,11 +1748,10 @@ fn detached_handoff_siblings_attach_supervision_and_enforce_admission_guards() {
     assert!(detached_cook_admission_is_live(&supervised, now));
     assert!(!has_expired_detached_cook_admission(&supervised, now));
 
-    // Closing the fence prevents child materialization.
+    // Cancelling the parent prevents child materialization.
     seeded
         .mutate_record(handoff_cook_id, |record| {
-            record.metadata["detached_cook_handoff"]["cancellation_fence"]["state"] =
-                json!("cancelled");
+            set_run_state(record, RunExecutionState::Cancelled);
             true
         })
         .expect("close the injected store's cancellation fence");

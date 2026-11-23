@@ -1,6 +1,6 @@
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::process::Command;
+use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
 
 #[cfg(unix)]
@@ -72,16 +72,68 @@ fn invalid_help_subcommand_fails_locally_with_upgrade_suggestion() {
         .into_iter()
         .map(str::to_string)
         .collect::<Vec<_>>();
-    let started = Instant::now();
     let diagnostic = homeboy::cli_runtime::update_help_diagnostic(&args)
         .expect("update help has a local diagnostic");
     assert!(
-        started.elapsed() < Duration::from_millis(10),
-        "local help diagnostic exceeded 10ms"
-    );
-    assert!(
         diagnostic.contains("unrecognized subcommand 'update'") && diagnostic.contains("upgrade"),
         "missing upgrade suggestion: {diagnostic}"
+    );
+}
+
+/// The retired `update --help` spelling must be answered before Homeboy builds
+/// its command surface, because that discovers extensions and can block on a
+/// damaged installation. A manifest that is a FIFO with no writer blocks any
+/// read forever, so reaching extension discovery turns into a hang that the
+/// bounded wait reports. The bound only limits how long a regression takes to
+/// fail; a correct fast path never opens the FIFO and exits immediately.
+#[cfg(unix)]
+#[test]
+fn invalid_help_subcommand_never_discovers_extensions() {
+    use std::os::unix::ffi::OsStrExt;
+
+    let home = tempfile::tempdir().expect("temporary home");
+    let extension = home.path().join(".config/homeboy/extensions/stalled");
+    fs::create_dir_all(&extension).expect("extension directory");
+    let manifest = std::ffi::CString::new(extension.join("stalled.json").as_os_str().as_bytes())
+        .expect("FIFO path has no NUL");
+    assert_eq!(
+        unsafe { libc::mkfifo(manifest.as_ptr(), 0o600) },
+        0,
+        "create blocking extension manifest: {}",
+        std::io::Error::last_os_error()
+    );
+    let sentinel = home.path().join("runtime-initialized");
+
+    let mut child = Command::new(homeboy_bin())
+        .args(["update", "--help"])
+        .env_clear()
+        .env("HOME", home.path())
+        .env("HOMEBOY_NO_UPDATE_CHECK", "1")
+        .env("HOMEBOY_TEST_RUNTIME_INITIALIZATION_SENTINEL", &sentinel)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("run shipped Homeboy binary");
+    let deadline = Instant::now() + Duration::from_secs(30);
+    while child.try_wait().expect("poll Homeboy").is_none() {
+        if Instant::now() >= deadline {
+            let _ = child.kill();
+            let _ = child.wait();
+            panic!("update --help blocked reading extension manifests");
+        }
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    let output = child.wait_with_output().expect("collect Homeboy output");
+
+    assert_eq!(output.status.code(), Some(2), "update --help exit status");
+    let stderr = String::from_utf8(output.stderr).expect("diagnostic is UTF-8");
+    assert!(
+        stderr.contains("unrecognized subcommand 'update'") && stderr.contains("upgrade"),
+        "missing upgrade suggestion: {stderr}"
+    );
+    assert!(
+        !sentinel.exists(),
+        "update --help reached ordinary runtime initialization"
     );
 }
 

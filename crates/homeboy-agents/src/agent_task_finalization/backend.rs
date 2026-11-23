@@ -773,21 +773,6 @@ impl AgentTaskPrFinalizationBackend for RealAgentTaskPrFinalizationBackend {
         })
     }
 
-    fn mark_pr_ready(&mut self, path: &str, pr: &AgentTaskPrRef) -> Result<AgentTaskPrRef> {
-        let output = publication_gh_output(path, &["pr", "ready", &pr.number.to_string()])?;
-        if !output.status.success() {
-            return Err(Error::git_command_failed(format!(
-                "gh pr ready failed: {}",
-                String::from_utf8_lossy(&output.stderr).trim()
-            )));
-        }
-        Ok(AgentTaskPrRef {
-            number: pr.number,
-            url: pr.url.clone(),
-            is_draft: false,
-        })
-    }
-
     fn verify_publication_binding(
         &mut self,
         path: &str,

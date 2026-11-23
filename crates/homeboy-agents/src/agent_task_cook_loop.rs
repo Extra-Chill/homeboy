@@ -2598,6 +2598,7 @@ mod tests {
             verification: Vec::new(),
             completion: Some(crate::agent_task_review_dossier::AiReviewCompletion::Complete),
             incomplete_reason: String::new(),
+            delivery: Vec::new(),
         }
     }
 

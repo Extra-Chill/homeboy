@@ -722,10 +722,13 @@ pub(crate) fn admit_base_gates(
             with_detached_base_checkout(root, &workspace, base_sha, component.as_deref(), |base| {
                 // Repro gates already ran on this base before dispatch, and a
                 // base failure never excuses them, so admission skips them.
+                // Bench gates compare base and candidate themselves (#18869).
                 let verify: Vec<_> = gates
                     .verify
                     .iter()
-                    .filter(|command| !gates.repro.contains(command))
+                    .filter(|command| {
+                        crate::agent_task_gate::base_explainable(command, &gates.repro)
+                    })
                     .collect();
                 let commands: Vec<_> = verify
                     .iter()
@@ -891,13 +894,15 @@ fn baseline_record_key(
 /// A failed gate the immutable base may explain. A repro gate is declared to
 /// fail on base and pass on the fix, so a base failure never excuses it: a
 /// repro still red on the candidate is the candidate's failure, and the Cook
-/// retries with it as feedback.
+/// retries with it as feedback. A bench gate already compared the base with
+/// the candidate, so its verdict is never an inherited failure either.
 fn awaits_base_comparison(gate: &AgentTaskGateReport, repro: &[String]) -> bool {
     gate.status == AgentTaskGateStatus::Failed
         && gate.baseline_comparison.is_none()
-        && !gate
-            .invocation()
-            .is_ok_and(|invocation| repro.contains(&invocation.reviewer_command()))
+        && gate.bench_compare.is_none()
+        && !gate.invocation().is_ok_and(|invocation| {
+            !crate::agent_task_gate::base_explainable(&invocation.reviewer_command(), repro)
+        })
 }
 
 pub(crate) fn compare_gate_failures_to_verified_base(
@@ -2398,12 +2403,16 @@ mod tests {
     }
 
     /// An identical base failure excuses an ordinary gate, but never a repro
-    /// gate: a repro is declared red on base, so still failing on the
-    /// candidate means the fix did not land and the Cook must retry.
+    /// or bench gate. A missing feature on base cannot excuse a bench verdict.
     #[test]
-    fn differential_gate_comparison_accepts_an_identical_failure_except_for_a_repro() {
-        let command = "cd packages/missing-component && cargo test";
-        for repro in [Vec::new(), vec![command.to_string()]] {
+    fn differential_gate_comparison_accepts_an_identical_failure_except_for_comparison_gates() {
+        let ordinary = "cd packages/missing-component && cargo test";
+        let bench = "cd packages/missing-component && homeboy bench compare --cook-gate --base base --head WORKTREE";
+        for (command, repro, inherited) in [
+            (ordinary, Vec::new(), true),
+            (ordinary, vec![ordinary.to_string()], false),
+            (bench, Vec::new(), false),
+        ] {
             homeboy_core::test_support::with_isolated_home(|_| {
                 let temp = tempfile::tempdir().expect("repository");
                 git_output(temp.path(), &["init", "-b", "main"]).expect("init");
@@ -2475,7 +2484,7 @@ mod tests {
                 .expect("baseline comparison");
 
                 let gate = &promotion.deterministic_gates[0];
-                if repro.is_empty() {
+                if inherited {
                     assert_eq!(
                         gate.status,
                         AgentTaskGateStatus::AcceptedInheritedFailure,

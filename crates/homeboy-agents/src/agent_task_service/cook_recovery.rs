@@ -291,7 +291,10 @@ format!(
         return CookRecoveryStep::Reconcile;
     }
     if inputs.pending_operator_feedback
-        && !matches!(status, Some(CookStatus::DraftPublished))
+        && !matches!(
+            status,
+            Some(CookStatus::DraftPublished | CookStatus::SucceededPartial)
+        )
         && !matches!(inputs.status, "published" | "merged")
         && (status != Some(CookStatus::Cancelled) || inputs.involuntary_cancellation_retry_admitted)
     {
@@ -524,6 +527,7 @@ fn status_is_settled(status: &CookStatus) -> bool {
         status,
         CookStatus::ReviewReady
             | CookStatus::DraftPublished
+            | CookStatus::SucceededPartial
             | CookStatus::GreenNoFinalize
             | CookStatus::IntentionalNoChange
             | CookStatus::NoCandidate
@@ -889,7 +893,10 @@ pub trait CookRecoveryPerformer {
             .get("status")
             .and_then(Value::as_str)
             .is_some_and(|status| {
-                matches!(status, "review_ready" | "draft_published" | "validated")
+                matches!(
+                    status,
+                    "review_ready" | "draft_published" | "succeeded_partial" | "validated"
+                )
             });
         Ok((value, i32::from(!success)))
     }
@@ -1084,7 +1091,7 @@ pub fn plan_cook_recovery_recorded(id: &str) -> Result<CookRecoveryPlan> {
 fn plan_cook_recovery_with_probe_policy(id: &str, live_probes: bool) -> Result<CookRecoveryPlan> {
     let store = agent_task_lifecycle::AgentTaskLifecycleStore::from_environment()?;
     if let Ok(record) = store.read_record(id) {
-        if agent_task_lifecycle::CookRunState::of(&record).fenced {
+        if agent_task_lifecycle::cook_cancellation_fence(&store, &record).is_some() {
             return Ok(CookRecoveryPlan {
                 cook_id: record.metadata["cook_id"]
                     .as_str()

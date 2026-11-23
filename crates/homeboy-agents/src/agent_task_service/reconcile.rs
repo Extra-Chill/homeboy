@@ -6,15 +6,21 @@
 //! the tick dispatches through a registered driver — see
 //! [`register_orchestration_driver`].
 
-use crate::agent_task_lifecycle;
+use crate::agent_task_lifecycle::{
+    self, AgentTaskLifecycleStore as LifecycleStore, AgentTaskRunRecord,
+};
 use homeboy_control_plane_contract::{
     ControlPlaneAction, ControlPlaneActionOutcome, ControlPlaneActionPayload,
     ControlPlaneActionRequest, CONTROL_PLANE_ACTION_REQUEST_SCHEMA,
 };
 use homeboy_core::{Error, Result};
+use homeboy_lifecycle_contract::RunExecutionState;
+
+use crate::agent_task_lifecycle::cook_run_state::{classify_liveness, live_supervisor_jobs};
 
 use super::discovery::{
-    discover_runs, discover_runs_in_store, AgentTaskDiscoveryFilter, AgentTaskLiveness,
+    discover_runs, discover_runs_in_store, liveness_stale_reason, run_source,
+    AgentTaskDiscoveryFilter, AgentTaskLiveness,
 };
 
 /// Report returned by [`reconcile_stale_active_runs`]. Records stale-run
@@ -89,119 +95,233 @@ pub struct AgentTaskReconcileRun {
 /// Fresh accepted detached Lab handoffs are also probed for terminal results;
 /// live runner work is retained. With `dry_run`, candidates are reported but no
 /// record is mutated so an operator can preview the blast radius first.
-/// [`agent_task_lifecycle::reconcile_status`] against an explicitly injected root.
-fn rooted_status(
-    lifecycle_store: &agent_task_lifecycle::AgentTaskLifecycleStore,
-    run_id: &str,
-) -> Result<agent_task_lifecycle::AgentTaskRunRecord> {
+/// [`agent_task_lifecycle::reconcile_status`] (or, `exact`, its exact-record
+/// form) against an explicitly injected root.
+fn rooted_status(store: &LifecycleStore, run_id: &str, exact: bool) -> Result<AgentTaskRunRecord> {
     Ok(agent_task_lifecycle::reconcile_status_in_store(
-        lifecycle_store,
+        store,
         run_id,
         agent_task_lifecycle::AgentTaskStatusOptions::default(),
-        false,
+        exact,
     )?
     .record)
 }
 
-/// [`agent_task_lifecycle::exact_status`] against an explicitly injected root.
-fn rooted_exact_status(
-    lifecycle_store: &agent_task_lifecycle::AgentTaskLifecycleStore,
-    run_id: &str,
-) -> Result<agent_task_lifecycle::AgentTaskRunRecord> {
-    Ok(agent_task_lifecycle::reconcile_status_in_store(
-        lifecycle_store,
-        run_id,
-        agent_task_lifecycle::AgentTaskStatusOptions::default(),
-        true,
-    )?
-    .record)
-}
-
-/// The record a reconcile decision is taken from.
+/// Converge the record a reconcile decision is taken from.
 ///
-/// Apply refreshes through [`rooted_exact_status`], which persists the runner,
+/// Apply refreshes through [`rooted_status`], which persists the runner,
 /// candidate, and admission projections it observes. A preview must not write
 /// (#13697: reads never mutate; reconciliation is the explicit action), so it
 /// projects retained runner authority in memory using the same validated reader.
-/// Apply still re-reads authoritatively immediately before acting; preview
-/// never commits the projection or cancels a run.
-fn decision_status(
-    lifecycle_store: &agent_task_lifecycle::AgentTaskLifecycleStore,
+/// Preview never commits the projection or cancels a run.
+fn converge(
+    store: &LifecycleStore,
     run_id: &str,
+    mut record: AgentTaskRunRecord,
+    liveness: AgentTaskLiveness,
     dry_run: bool,
-) -> Result<agent_task_lifecycle::AgentTaskRunRecord> {
+) -> Result<AgentTaskRunRecord> {
     if dry_run {
-        let mut record = agent_task_lifecycle::exact_record_in_store(lifecycle_store, run_id)?;
-        if !record.state().is_terminal()
-            && super::discovery::discover_reconcile_run(record.clone())
-                .liveness
-                .is_some_and(AgentTaskLiveness::is_reconcilable)
-        {
+        if !record.state().is_terminal() && liveness.is_reconcilable() {
             agent_task_lifecycle::observe_terminal_runner_record_in_store(
-                lifecycle_store,
+                store,
                 &mut record,
                 false,
             )?;
         }
-        Ok(record)
-    } else {
-        let record = agent_task_lifecycle::exact_record_in_store(lifecycle_store, run_id)?;
-        let observed = super::discovery::discover_reconcile_run(record.clone());
-        if record.state().is_terminal() {
-            return rooted_exact_status(lifecycle_store, run_id);
-        }
-        if !observed
-            .liveness
-            .is_some_and(AgentTaskLiveness::is_reconcilable)
-        {
+        return Ok(record);
+    }
+    if record.state().is_terminal() {
+        return rooted_status(store, run_id, true);
+    }
+    if !liveness.is_reconcilable() {
+        return Ok(record);
+    }
+    // Runner synchronization below is explicit; do not probe it again during
+    // lifecycle convergence.
+    let converge_local = || {
+        Ok(agent_task_lifecycle::reconcile_status_in_store(
+            store,
+            run_id,
+            agent_task_lifecycle::AgentTaskStatusOptions {
+                runner_probe: agent_task_lifecycle::AgentTaskRunnerProbe::Never,
+            },
+            true,
+        )?
+        .record)
+    };
+    if agent_task_lifecycle::CookRunState::accepted_lab_handoff(&record) {
+        // Read-only runner authority is the sole settlement boundary for
+        // accepted work. Inconclusive probes must not even annotate it.
+        if agent_task_lifecycle::observe_runner_job_in_store(store, &record).is_some_and(
+            |evidence| {
+                evidence.observation == agent_task_lifecycle::RunnerJobObservation::RunnerRemoved
+            },
+        ) {
+            agent_task_lifecycle::terminalize_lost_accepted_lab_job_in_store(
+                store,
+                &mut record,
+                0,
+            )?;
             return Ok(record);
         }
-        if agent_task_lifecycle::CookRunState::accepted_lab_handoff(&record) {
-            // Read-only runner authority is the sole settlement boundary for
-            // accepted work. Inconclusive probes must not even annotate it.
-            let mut record = record;
-            if agent_task_lifecycle::observe_runner_job_in_store(lifecycle_store, &record)
-                .is_some_and(|evidence| {
-                    evidence.observation
-                        == agent_task_lifecycle::RunnerJobObservation::RunnerRemoved
-                })
-            {
-                agent_task_lifecycle::terminalize_lost_accepted_lab_job_in_store(
-                    lifecycle_store,
-                    &mut record,
-                    0,
-                )?;
-                return Ok(record);
-            }
-            agent_task_lifecycle::reconcile_runner_job_state_in_store(
-                lifecycle_store,
-                &mut record,
-            )?;
-            if record.state().is_terminal() {
-                return Ok(record);
-            }
-            // Persisted runner evidence (retained job events) is still projected
-            // by the rooted status read; it never cancels runner-owned work.
-            return rooted_exact_status(lifecycle_store, run_id);
+        agent_task_lifecycle::reconcile_runner_job_state_in_store(store, &mut record)?;
+        if record.state().is_terminal() {
+            return Ok(record);
         }
-        // Status convergence can itself record an interrupted-owner failure.
-        // Retain the decision before that refresh, not only on cancellation.
-        lifecycle_store.mutate_record(run_id, |record| {
-            let owner_pid = record.owner_pid();
-            record.ensure_metadata_object().insert(
-                "reconciliation".to_string(),
-                serde_json::json!({
-                    "actor": RECONCILER_ACTOR,
-                    "liveness": observed.liveness.map(AgentTaskLiveness::as_str),
-                    "reason": observed.stale_reason.unwrap_or_else(|| "controller_owner_not_live".to_string()),
-                    "owner_pid": owner_pid,
-                }),
-            );
-            true
-        })?;
-        let mut record = agent_task_lifecycle::exact_record_in_store(lifecycle_store, run_id)?;
-        agent_task_lifecycle::reconcile_runner_job_state_in_store(lifecycle_store, &mut record)?;
-        rooted_exact_status(lifecycle_store, run_id)
+        // Persisted runner evidence (retained job events) is still projected
+        // by the rooted status read; it never cancels runner-owned work.
+        return converge_local();
+    }
+    // Status convergence can itself record an interrupted-owner failure.
+    // Retain the decision before that refresh, not only on cancellation.
+    let reason = liveness_stale_reason(&record, Some(liveness))
+        .unwrap_or_else(|| "controller_owner_not_live".to_string());
+    store.mutate_record(run_id, |record| {
+        let owner_pid = record.owner_pid();
+        record.ensure_metadata_object().insert(
+            "reconciliation".to_string(),
+            serde_json::json!({
+                "actor": RECONCILER_ACTOR,
+                "liveness": liveness.as_str(),
+                "reason": reason,
+                "owner_pid": owner_pid,
+            }),
+        );
+        true
+    })?;
+    let mut record = agent_task_lifecycle::exact_record_in_store(store, run_id)?;
+    agent_task_lifecycle::reconcile_runner_job_state_in_store(store, &mut record)?;
+    converge_local()
+}
+
+/// What scoped reconciliation does with one converged record.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum ReconcileVerdict {
+    /// Terminal, or an owner is still live: nothing to do.
+    Live,
+    /// The runner settles this run. Carries the runner job evidence reason
+    /// when that evidence, rather than an accepted handoff, retained it.
+    RunnerOwned { reason: Option<&'static str> },
+    /// Return an orphaned unmaterialized Cook admission to the daemon queue.
+    Requeue,
+    /// Terminalize an expired detached Cook admission.
+    ExpireAdmission,
+    /// Cancel the run through the lifecycle cancel path.
+    Cancel { reason: String },
+    /// Runner ownership is not authoritatively released; refuse to act.
+    Refuse { reason: String },
+}
+
+/// Evidence a [`ReconcileVerdict`] is decided from, gathered once per record.
+#[derive(Debug, Clone)]
+pub(crate) struct ReconcileEvidence {
+    /// [`classify_liveness`] against the live supervisor jobs.
+    pub liveness: AgentTaskLiveness,
+    pub stale_reason: Option<String>,
+    pub runner_job: Option<agent_task_lifecycle::RunnerJobEvidence>,
+    /// A runner job no longer blocks local action: its runner is removed or
+    /// idle for an ownerless zero-artifact record.
+    pub runner_released: bool,
+    pub orphaned_admission: bool,
+    pub expired_admission: bool,
+}
+
+impl ReconcileEvidence {
+    pub(crate) fn gather(
+        store: &LifecycleStore,
+        record: &AgentTaskRunRecord,
+        live_supervisors: &std::collections::BTreeSet<uuid::Uuid>,
+        now: chrono::DateTime<chrono::Utc>,
+    ) -> Self {
+        let liveness = classify_liveness(record, now, live_supervisors);
+        let actionable = !record.state().is_terminal() && liveness.is_reconcilable();
+        Self {
+            liveness,
+            stale_reason: liveness_stale_reason(record, Some(liveness)),
+            orphaned_admission: agent_task_lifecycle::has_orphaned_unmaterialized_cook_admission(
+                record,
+            ),
+            expired_admission: agent_task_lifecycle::has_expired_detached_cook_admission(
+                record, now,
+            ),
+            runner_job: actionable
+                .then(|| agent_task_lifecycle::observe_runner_job_in_store(store, record))
+                .flatten(),
+            runner_released: !actionable
+                || record
+                    .runner_id()
+                    .filter(|_| record.runner_job_id().is_some())
+                    .is_none_or(|runner_id| {
+                        agent_task_lifecycle::runner_authority(runner_id)
+                            == agent_task_lifecycle::RunnerAuthority::Removed
+                            || record.is_locally_reconcilable_after_runner_idle()
+                    }),
+        }
+    }
+}
+
+/// Decide what scoped reconciliation does with `record`. Pure: every probe
+/// was taken by [`ReconcileEvidence::gather`]. The check order is the contract.
+pub(crate) fn reconcile_verdict(
+    record: &AgentTaskRunRecord,
+    evidence: &ReconcileEvidence,
+    _now: chrono::DateTime<chrono::Utc>,
+) -> ReconcileVerdict {
+    if record.state().is_terminal() || !evidence.liveness.is_reconcilable() {
+        return ReconcileVerdict::Live;
+    }
+    // Accepted work is settled only by convergence, never by cancellation
+    // (even after removal).
+    if record.runner_id().is_some()
+        && record.runner_job_id().is_some()
+        && agent_task_lifecycle::CookRunState::accepted_lab_handoff(record)
+    {
+        return ReconcileVerdict::RunnerOwned { reason: None };
+    }
+    // A stale projection never proves its runner job is gone. The job is live,
+    // heartbeating, or simply unverifiable, so its owning daemon settles it.
+    if let Some(runner_job) = evidence
+        .runner_job
+        .as_ref()
+        .filter(|runner_job| !runner_job.permits_cancellation())
+    {
+        return ReconcileVerdict::RunnerOwned {
+            reason: Some(runner_job.reason),
+        };
+    }
+    // This guard protects work a runner is actually executing. A submission
+    // that never produced a runner job identity has no remote owner to defer
+    // to, so refusing it would strand the record as permanently unreconcilable.
+    if let Some(runner_id) = record
+        .runner_id()
+        .filter(|_| record.runner_job_id().is_some() && !evidence.runner_released)
+    {
+        return ReconcileVerdict::Refuse {
+            reason: format!(
+                "runner `{runner_id}` ownership is not authoritatively removed; reconcile it through homeboy runner reconcile {runner_id}"
+            ),
+        };
+    }
+    // A queued Cook admission is durable daemon work. If the exact step that
+    // claimed it exited before materializing anything, return it to the
+    // daemon's admission queue rather than failing it as an ownerless handoff
+    // (#18377).
+    if evidence.orphaned_admission {
+        return ReconcileVerdict::Requeue;
+    }
+    if evidence.expired_admission {
+        return ReconcileVerdict::ExpireAdmission;
+    }
+    // The runner job, when there is one, was verified gone or terminal above.
+    // Name that evidence, not the projection.
+    ReconcileVerdict::Cancel {
+        reason: evidence
+            .runner_job
+            .as_ref()
+            .map(|runner_job| runner_job.reason.to_string())
+            .or_else(|| evidence.stale_reason.clone())
+            .unwrap_or_else(|| format!("reconciled stale-{} run", evidence.liveness.as_str())),
     }
 }
 
@@ -209,10 +329,10 @@ fn decision_status(
 /// apply. A successful reconcile must mean the selected record is no longer a
 /// blocking projection, not merely that its cancellation write returned.
 fn verified_reconciled_status(
-    lifecycle_store: &agent_task_lifecycle::AgentTaskLifecycleStore,
+    lifecycle_store: &LifecycleStore,
     run_id: &str,
-) -> Result<agent_task_lifecycle::AgentTaskRunRecord> {
-    let record = rooted_exact_status(lifecycle_store, run_id)?;
+) -> Result<AgentTaskRunRecord> {
+    let record = rooted_status(lifecycle_store, run_id, true)?;
     let remains_active = discover_runs_in_store(
         lifecycle_store,
         AgentTaskDiscoveryFilter::Active,
@@ -235,17 +355,8 @@ fn verified_reconciled_status(
     Ok(record)
 }
 
-#[cfg(test)]
-fn fenced_record_is_live(record: &agent_task_lifecycle::AgentTaskRunRecord) -> bool {
-    record.state().is_terminal()
-        || record.has_fresh_controller_pre_provider_heartbeat()
-        || (record.has_planned_runner_execution() && record.has_fresh_update())
-        || record.has_live_execution_step_owner()
-        || record.owner_process_is_running()
-}
-
 pub(super) fn verify_reconciled_postcondition(
-    record: &agent_task_lifecycle::AgentTaskRunRecord,
+    record: &AgentTaskRunRecord,
     remains_active: bool,
     runner_projection_resolved: bool,
 ) -> Result<()> {
@@ -279,7 +390,7 @@ pub(crate) const RECONCILE_CANCELLATION_CAUSE: &str = "reconcile";
 fn reconciler_cancellation_provenance(
     reason: &str,
     liveness: AgentTaskLiveness,
-    record: &agent_task_lifecycle::AgentTaskRunRecord,
+    record: &AgentTaskRunRecord,
     runner_evidence: Option<&agent_task_lifecycle::RunnerJobEvidence>,
 ) -> serde_json::Value {
     let mut evidence = serde_json::json!({
@@ -306,7 +417,7 @@ pub fn reconcile_stale_active_runs(dry_run: bool) -> Result<AgentTaskReconcileRe
     // cancels is decided from a record read here; a decision taken against one
     // installation and committed into another cancels a run it never saw
     // (#7505).
-    let lifecycle_store = agent_task_lifecycle::AgentTaskLifecycleStore::from_environment()?;
+    let lifecycle_store = LifecycleStore::from_environment()?;
     // Read the durable snapshot first so an expired controller handoff remains
     // visible to this managed recovery command. `status` also converges expiry,
     // but would otherwise terminalize it before this report can record the
@@ -328,17 +439,18 @@ pub fn reconcile_stale_active_runs(dry_run: bool) -> Result<AgentTaskReconcileRe
             // Detached controllers have exited. Probe even a fresh/Active
             // projection, and submit terminal Cook work from this tick rather
             // than waiting for a controller or a later status read.
-            let result = rooted_status(&lifecycle_store, &run.run_id).and_then(|mut refreshed| {
-                agent_task_lifecycle::reconcile_runner_job_state_in_store(
-                    &lifecycle_store,
-                    &mut refreshed,
-                )?;
-                if refreshed.state().is_terminal() {
-                    agent_task_lifecycle::reconcile_terminal_cook_provider_result(&run.run_id)
-                } else {
-                    Ok(refreshed)
-                }
-            });
+            let result =
+                rooted_status(&lifecycle_store, &run.run_id, false).and_then(|mut refreshed| {
+                    agent_task_lifecycle::reconcile_runner_job_state_in_store(
+                        &lifecycle_store,
+                        &mut refreshed,
+                    )?;
+                    if refreshed.state().is_terminal() {
+                        agent_task_lifecycle::reconcile_terminal_cook_provider_result(&run.run_id)
+                    } else {
+                        Ok(refreshed)
+                    }
+                });
             match result {
                 Ok(refreshed) if refreshed.state().is_terminal() || !liveness.is_reconcilable() => {
                     continue
@@ -377,7 +489,7 @@ pub fn reconcile_stale_active_runs(dry_run: bool) -> Result<AgentTaskReconcileRe
         // Preview leaves the runner-backed projection unrefreshed: refreshing
         // persists what it observes, and a preview must not write.
         if !dry_run && run.runner_id.is_some() && run.runner_job_id.is_some() {
-            match rooted_status(&lifecycle_store, &run.run_id) {
+            match rooted_status(&lifecycle_store, &run.run_id, false) {
                 Ok(refreshed) if refreshed.state().is_terminal() => continue,
                 Ok(refreshed) if !refreshed.is_stale_running() => continue,
                 Ok(refreshed) => authoritative_state = refreshed.state(),
@@ -470,7 +582,7 @@ pub fn reconcile_stale_active_runs(dry_run: bool) -> Result<AgentTaskReconcileRe
         };
         match crate::orchestration::execute_action_from_current_environment(&run.run_id, &request) {
             Ok(acknowledgement) if acknowledgement.outcome != ControlPlaneActionOutcome::Failed => {
-                let current = rooted_status(&lifecycle_store, &run.run_id)?;
+                let current = rooted_status(&lifecycle_store, &run.run_id, false)?;
                 let action =
                     if acknowledgement.outcome == ControlPlaneActionOutcome::AlreadySatisfied {
                         "no-op"
@@ -539,9 +651,7 @@ pub fn reconcile_stale_active_runs(dry_run: bool) -> Result<AgentTaskReconcileRe
 /// row left `running` by a Cook driver that exited, or by an older binary,
 /// re-projects once from its terminal record. A settled Cook that no driver
 /// holds records its outcome first, so its held rows follow it.
-fn reproject_terminal_rows(
-    lifecycle_store: &agent_task_lifecycle::AgentTaskLifecycleStore,
-) -> Result<()> {
+fn reproject_terminal_rows(lifecycle_store: &LifecycleStore) -> Result<()> {
     for row in lifecycle_store
         .open_observation_initialized()?
         .list_active_runs()?
@@ -552,9 +662,7 @@ fn reproject_terminal_rows(
             .metadata_json
             .get("agent_task_run")
             .cloned()
-            .and_then(|value| {
-                serde_json::from_value::<agent_task_lifecycle::AgentTaskRunRecord>(value).ok()
-            })
+            .and_then(|value| serde_json::from_value::<AgentTaskRunRecord>(value).ok())
             .filter(|record| record.state().is_terminal())
         else {
             continue;
@@ -588,357 +696,141 @@ fn reproject_terminal_rows(
 /// reconciliation: a state or ownership change becomes a no-op rather than a
 /// reason to inspect or mutate any other record (#10001).
 pub fn reconcile_run(run_id: &str, dry_run: bool) -> Result<AgentTaskReconcileReport> {
-    let lifecycle_store = agent_task_lifecycle::AgentTaskLifecycleStore::from_environment()?;
+    let lifecycle_store = LifecycleStore::from_environment()?;
     reconcile_run_in_store(&lifecycle_store, run_id, dry_run)
 }
 
 pub(crate) fn reconcile_run_in_store(
-    lifecycle_store: &agent_task_lifecycle::AgentTaskLifecycleStore,
+    store: &LifecycleStore,
     run_id: &str,
     dry_run: bool,
 ) -> Result<AgentTaskReconcileReport> {
     // One store for the whole reconciliation: the scope resolution, every
     // authoritative read, and the expiry or cancellation that follows are one
     // answer about one run.
-    let requested_run_id = run_id.to_string();
-    let resolved_run_ids =
-        agent_task_lifecycle::reconcile_scope_run_ids_in_store(&lifecycle_store, run_id)?;
-    let mut runs = Vec::new();
-    let mut reconciled = 0;
-    let mut failed = 0;
-    for resolved_run_id in &resolved_run_ids {
-        let before = agent_task_lifecycle::exact_record_in_store(lifecycle_store, resolved_run_id)?;
-        let authoritative = decision_status(lifecycle_store, resolved_run_id, dry_run)?;
-        if !dry_run && !before.state().is_terminal() && authoritative.state().is_terminal() {
-            reconciled += 1;
-            runs.push(AgentTaskReconcileRun {
-                run_id: resolved_run_id.clone(),
-                liveness: super::discovery::discover_reconcile_run(before)
-                    .liveness
-                    .unwrap_or(AgentTaskLiveness::Unreconciled),
-                source: "local".to_string(),
-                authoritative_state: authoritative.state(),
-                stale_reason: authoritative.metadata["reconciliation"]["reason"]
-                    .as_str()
-                    .map(str::to_owned),
-                action: "reconciled",
-                error: None,
-            });
-            continue;
-        }
-        let source = authoritative
-            .runner_id()
-            .map(|runner_id| format!("runner:{runner_id}"))
-            .unwrap_or_else(|| "local".to_string());
-        let candidate = (!authoritative.state().is_terminal())
-            .then(|| super::discovery::discover_reconcile_run(authoritative.clone()));
-        match candidate {
-            Some(run) if run.liveness.is_some_and(AgentTaskLiveness::is_reconcilable) => {
-                let liveness = run.liveness.expect("checked reconcilable liveness");
-                // Re-read immediately before apply. A newly-live runner or a changed
-                // owner is authoritative and turns this scoped request into a no-op.
-                let refreshed = decision_status(lifecycle_store, resolved_run_id, dry_run)?;
-                let locally_reconcilable_after_runner_idle =
-                    refreshed.is_locally_reconcilable_after_runner_idle();
-                let still_reconcilable =
-                    super::discovery::discover_reconcile_run(refreshed.clone())
-                        .liveness
-                        .is_some_and(AgentTaskLiveness::is_reconcilable);
-                if refreshed.state().is_terminal() || !still_reconcilable {
-                    runs.push(AgentTaskReconcileRun {
-                        run_id: resolved_run_id.clone(),
-                        liveness,
-                        source: run.source,
-                        authoritative_state: refreshed.state(),
-                        stale_reason: run.stale_reason,
-                        action: "no-op",
-                        error: None,
-                    });
-                } else if refreshed.runner_id().is_some()
-                    && refreshed.runner_job_id().is_some()
-                    && agent_task_lifecycle::CookRunState::accepted_lab_handoff(&refreshed)
-                {
-                    // Accepted work is settled only by the read projection above,
-                    // never by this cancellation fallback (even after removal).
-                    runs.push(AgentTaskReconcileRun {
-                        run_id: resolved_run_id.clone(),
-                        liveness,
-                        source: run.source,
-                        authoritative_state: refreshed.state(),
-                        stale_reason: run.stale_reason,
-                        action: "no-op",
-                        error: None,
-                    });
-                } else if let Some(evidence) =
-                    agent_task_lifecycle::observe_runner_job_in_store(lifecycle_store, &refreshed)
-                        .filter(|evidence| !evidence.permits_cancellation())
-                {
-                    // A stale projection never proves its runner job is gone.
-                    // The job is live, heartbeating, or simply unverifiable, so
-                    // the run is left for its owning daemon to settle.
-                    runs.push(AgentTaskReconcileRun {
-                        run_id: resolved_run_id.clone(),
-                        liveness,
-                        source: run.source,
-                        authoritative_state: refreshed.state(),
-                        stale_reason: Some(evidence.reason.to_string()),
-                        action: "no-op",
-                        error: None,
-                    });
-                } else if dry_run {
-                    let runner_evidence = agent_task_lifecycle::observe_runner_job_in_store(
-                        lifecycle_store,
-                        &refreshed,
-                    );
-                    runs.push(AgentTaskReconcileRun {
-                        run_id: resolved_run_id.clone(),
-                        liveness,
-                        source: run.source,
-                        authoritative_state: refreshed.state(),
-                        stale_reason: runner_evidence
-                            .map(|evidence| evidence.reason.to_string())
-                            .or(run.stale_reason),
-                        action: "would-reconcile",
-                        error: None,
-                    });
-                } else {
-                    if let Some(runner_id) = refreshed.runner_id() {
-                        // This guard protects work a runner is actually
-                        // executing. A submission that never produced a runner
-                        // job identity has no remote owner to defer to, so
-                        // refusing it would strand the record as permanently
-                        // unreconcilable.
-                        if refreshed.runner_job_id().is_some()
-                            && agent_task_lifecycle::runner_authority(runner_id)
-                                != agent_task_lifecycle::RunnerAuthority::Removed
-                            && !locally_reconcilable_after_runner_idle
-                        {
-                            failed += 1;
-                            runs.push(AgentTaskReconcileRun {
-                                run_id: resolved_run_id.clone(),
-                                liveness,
-                                source: run.source,
-                                authoritative_state: refreshed.state(),
-                                stale_reason: run.stale_reason,
-                                action: "failed",
-                                error: Some(format!(
-                                    "runner `{runner_id}` ownership is not authoritatively removed; reconcile it through homeboy runner reconcile {runner_id}"
-                                )),
-                            });
-                            continue;
-                        }
-                    }
-                    // A queued Cook admission is durable daemon work. If the
-                    // exact step that claimed it exited before materializing
-                    // anything, return it to the daemon's admission queue
-                    // rather than failing it as an ownerless handoff (#18377).
-                    if agent_task_lifecycle::has_orphaned_unmaterialized_cook_admission(&refreshed)
-                    {
-                        match agent_task_lifecycle::requeue_orphaned_unmaterialized_cook_admission_in_store(
-                            lifecycle_store,
-                            resolved_run_id,
-                        ) {
-                            Ok(requeued) => {
-                                if requeued {
-                                    reconciled += 1;
-                                }
-                                runs.push(AgentTaskReconcileRun {
-                                    run_id: resolved_run_id.clone(),
-                                    liveness,
-                                    source: run.source,
-                                    authoritative_state: rooted_status(
-                                        lifecycle_store,
-                                        resolved_run_id,
-                                    )?
-                                    .state(),
-                                    stale_reason: run.stale_reason,
-                                    action: if requeued { "requeued" } else { "no-op" },
-                                    error: None,
-                                });
-                            }
-                            Err(error) => {
-                                failed += 1;
-                                runs.push(AgentTaskReconcileRun {
-                                    run_id: resolved_run_id.clone(),
-                                    liveness,
-                                    source: run.source,
-                                    authoritative_state: refreshed.state(),
-                                    stale_reason: run.stale_reason,
-                                    action: "failed",
-                                    error: Some(error.message),
-                                });
-                            }
-                        }
-                        continue;
-                    }
-                    let expired_detached_admission =
-                        agent_task_lifecycle::has_expired_detached_cook_admission(
-                            &refreshed,
-                            chrono::Utc::now(),
-                        );
-                    if expired_detached_admission {
-                        match agent_task_lifecycle::expire_detached_cook_admission_in_store(
-                            &lifecycle_store,
-                            resolved_run_id,
-                        ) {
-                            Ok(true) => {
-                                let verified =
-                                    verified_reconciled_status(&lifecycle_store, resolved_run_id);
-                                let verified = match verified {
-                                    Ok(record) => record,
-                                    Err(error) => {
-                                        failed += 1;
-                                        runs.push(AgentTaskReconcileRun {
-                                            run_id: resolved_run_id.clone(),
-                                            liveness,
-                                            source: run.source,
-                                            authoritative_state: refreshed.state(),
-                                            stale_reason: run.stale_reason,
-                                            action: "failed",
-                                            error: Some(error.message),
-                                        });
-                                        continue;
-                                    }
-                                };
-                                reconciled += 1;
-                                runs.push(AgentTaskReconcileRun {
-                                    run_id: resolved_run_id.clone(),
-                                    liveness,
-                                    source: run.source,
-                                    authoritative_state: verified.state(),
-                                    stale_reason: run.stale_reason,
-                                    action: "reconciled",
-                                    error: None,
-                                });
-                            }
-                            Ok(false) => runs.push(AgentTaskReconcileRun {
-                                run_id: resolved_run_id.clone(),
-                                liveness,
-                                source: run.source,
-                                authoritative_state: rooted_status(
-                                    &lifecycle_store,
-                                    resolved_run_id,
-                                )?
-                                .state(),
-                                stale_reason: run.stale_reason,
-                                action: "no-op",
-                                error: None,
-                            }),
-                            Err(error) => {
-                                failed += 1;
-                                runs.push(AgentTaskReconcileRun {
-                                    run_id: resolved_run_id.clone(),
-                                    liveness,
-                                    source: run.source,
-                                    authoritative_state: refreshed.state(),
-                                    stale_reason: run.stale_reason,
-                                    action: "failed",
-                                    error: Some(error.message),
-                                });
-                            }
-                        }
-                        continue;
-                    }
-                    // The runner job, when there is one, was verified gone or
-                    // terminal above. Name that evidence, not the projection.
-                    let runner_evidence = agent_task_lifecycle::observe_runner_job_in_store(
-                        lifecycle_store,
-                        &refreshed,
-                    );
-                    let reason = runner_evidence
-                        .as_ref()
-                        .map(|evidence| evidence.reason.to_string())
-                        .or_else(|| run.stale_reason.clone())
-                        .unwrap_or_else(|| format!("reconciled stale-{} run", liveness.as_str()));
-                    let provenance = reconciler_cancellation_provenance(
-                        &reason,
-                        liveness,
-                        &refreshed,
-                        runner_evidence.as_ref(),
-                    );
-                    match agent_task_lifecycle::cancel_exact_run_in_store(
-                        &lifecycle_store,
-                        resolved_run_id,
-                        Some(&reason),
-                        Some(provenance),
-                    ) {
-                        Ok(record) => {
-                            let verified =
-                                match verified_reconciled_status(&lifecycle_store, resolved_run_id)
-                                {
-                                    Ok(record) => record,
-                                    Err(error) => {
-                                        failed += 1;
-                                        runs.push(AgentTaskReconcileRun {
-                                            run_id: resolved_run_id.clone(),
-                                            liveness,
-                                            source: run.source,
-                                            authoritative_state: record.state(),
-                                            stale_reason: run.stale_reason,
-                                            action: "failed",
-                                            error: Some(error.message),
-                                        });
-                                        continue;
-                                    }
-                                };
-                            reconciled += 1;
-                            runs.push(AgentTaskReconcileRun {
-                                run_id: resolved_run_id.clone(),
-                                liveness,
-                                source: run.source,
-                                authoritative_state: verified.state(),
-                                stale_reason: run.stale_reason,
-                                action: "reconciled",
-                                error: None,
-                            });
-                        }
-                        Err(error) => {
-                            failed += 1;
-                            runs.push(AgentTaskReconcileRun {
-                                run_id: resolved_run_id.clone(),
-                                liveness,
-                                source: run.source,
-                                authoritative_state: refreshed.state(),
-                                stale_reason: run.stale_reason,
-                                action: "failed",
-                                error: Some(error.message),
-                            });
-                        }
-                    }
-                }
-            }
-            Some(run) => runs.push(AgentTaskReconcileRun {
-                run_id: resolved_run_id.clone(),
-                liveness: run.liveness.unwrap_or(AgentTaskLiveness::Active),
-                source: run.source,
-                authoritative_state: authoritative.state(),
-                stale_reason: run.stale_reason,
-                action: "no-op",
-                error: None,
-            }),
-            None => runs.push(AgentTaskReconcileRun {
-                run_id: resolved_run_id.clone(),
-                liveness: AgentTaskLiveness::Active,
-                source,
-                authoritative_state: authoritative.state(),
-                stale_reason: None,
-                action: "no-op",
-                error: None,
-            }),
-        }
-    }
-
+    let resolved_run_ids = agent_task_lifecycle::reconcile_scope_run_ids_in_store(store, run_id)?;
+    let runs = resolved_run_ids
+        .iter()
+        .map(|resolved| reconcile_exact_run(store, resolved, dry_run))
+        .collect::<Result<Vec<_>>>()?;
+    let count = |actions: &[&str]| {
+        runs.iter()
+            .filter(|run| actions.contains(&run.action))
+            .count()
+    };
     Ok(AgentTaskReconcileReport {
         schema: "homeboy/agent-task-reconcile/v1",
-        scope: format!("run:{requested_run_id}"),
-        requested_run_id: Some(requested_run_id),
+        scope: format!("run:{run_id}"),
+        requested_run_id: Some(run_id.to_string()),
         resolved_run_ids,
         authorization: if dry_run { "preview" } else { "explicit-apply" },
         dry_run,
-        considered: runs.iter().filter(|run| run.action != "no-op").count(),
-        reconciled,
-        failed,
+        considered: runs.len() - count(&["no-op"]),
+        reconciled: count(&["reconciled", "requeued"]),
+        failed: count(&["failed"]),
         runs,
+    })
+}
+
+/// Converge once, gather evidence once, decide, apply one effect, and report.
+fn reconcile_exact_run(
+    store: &LifecycleStore,
+    run_id: &str,
+    dry_run: bool,
+) -> Result<AgentTaskReconcileRun> {
+    let live_supervisors = live_supervisor_jobs();
+    let before = agent_task_lifecycle::exact_record_in_store(store, run_id)?;
+    let before_liveness = classify_liveness(&before, chrono::Utc::now(), &live_supervisors);
+    let record = converge(store, run_id, before.clone(), before_liveness, dry_run)?;
+    let mut run = AgentTaskReconcileRun {
+        run_id: run_id.to_string(),
+        liveness: AgentTaskLiveness::Active,
+        source: record
+            .runner_id()
+            .map_or_else(|| "local".to_string(), |id| format!("runner:{id}")),
+        authoritative_state: record.state(),
+        stale_reason: None,
+        action: "no-op",
+        error: None,
+    };
+    if record.state().is_terminal() {
+        if !dry_run && !before.state().is_terminal() {
+            run.liveness = before_liveness;
+            run.source = "local".to_string();
+            run.stale_reason = record.metadata["reconciliation"]["reason"]
+                .as_str()
+                .map(str::to_owned);
+            run.action = "reconciled";
+        }
+        return Ok(run);
+    }
+    let now = chrono::Utc::now();
+    let evidence = ReconcileEvidence::gather(store, &record, &live_supervisors, now);
+    let verdict = reconcile_verdict(&record, &evidence, now);
+    (run.action, run.authoritative_state, run.error) =
+        apply_verdict(store, run_id, &record, &verdict, &evidence, dry_run)?;
+    run.liveness = evidence.liveness;
+    run.source = run_source(&record);
+    run.stale_reason = match verdict {
+        ReconcileVerdict::RunnerOwned { reason } => reason,
+        _ if run.action == "would-reconcile" => evidence.runner_job.as_ref().map(|job| job.reason),
+        _ => None,
+    }
+    .map(str::to_string)
+    .or(evidence.stale_reason);
+    Ok(run)
+}
+
+/// Apply the one effect `verdict` names and verify it took.
+fn apply_verdict(
+    store: &LifecycleStore,
+    run_id: &str,
+    record: &AgentTaskRunRecord,
+    verdict: &ReconcileVerdict,
+    evidence: &ReconcileEvidence,
+    dry_run: bool,
+) -> Result<(&'static str, RunExecutionState, Option<String>)> {
+    let state = record.state();
+    let failed = |error: Error| ("failed", state, Some(error.message));
+    let verified = |fallback| match verified_reconciled_status(store, run_id) {
+        Ok(verified) => ("reconciled", verified.state(), None),
+        Err(error) => ("failed", fallback, Some(error.message)),
+    };
+    let current = || Ok::<_, Error>(rooted_status(store, run_id, false)?.state());
+    Ok(match verdict {
+        ReconcileVerdict::Live | ReconcileVerdict::RunnerOwned { .. } => ("no-op", state, None),
+        _ if dry_run => ("would-reconcile", state, None),
+        ReconcileVerdict::Refuse { reason } => ("failed", state, Some(reason.clone())),
+        ReconcileVerdict::Requeue => {
+            match agent_task_lifecycle::requeue_orphaned_unmaterialized_cook_admission_in_store(
+                store, run_id,
+            ) {
+                Ok(true) => ("requeued", current()?, None),
+                Ok(false) => ("no-op", current()?, None),
+                Err(error) => failed(error),
+            }
+        }
+        ReconcileVerdict::ExpireAdmission => {
+            match agent_task_lifecycle::expire_detached_cook_admission_in_store(store, run_id) {
+                Ok(true) => verified(state),
+                Ok(false) => ("no-op", current()?, None),
+                Err(error) => failed(error),
+            }
+        }
+        ReconcileVerdict::Cancel { reason } => {
+            let job = evidence.runner_job.as_ref();
+            let provenance =
+                reconciler_cancellation_provenance(reason, evidence.liveness, record, job);
+            match agent_task_lifecycle::cancel_exact_run_in_store(
+                store,
+                run_id,
+                Some(reason),
+                Some(provenance),
+            ) {
+                Ok(cancelled) => verified(cancelled.state()),
+                Err(error) => failed(error),
+            }
+        }
     })
 }
 
@@ -1024,6 +916,217 @@ mod tests {
             record.metadata["runner_pid"] = serde_json::json!(999_999u32);
         })
         .expect("orphaned owner");
+    }
+
+    /// The scoped verdict for a record re-read after a stale discovery snapshot.
+    fn fenced_verdict(record: &agent_task_lifecycle::AgentTaskRunRecord) -> ReconcileVerdict {
+        let now = chrono::Utc::now();
+        let evidence = ReconcileEvidence::gather(
+            &test_lifecycle_store(),
+            record,
+            &live_supervisor_jobs(),
+            now,
+        );
+        reconcile_verdict(record, &evidence, now)
+    }
+
+    /// Evidence with the given liveness and no runner probe results.
+    fn verdict_evidence(liveness: AgentTaskLiveness) -> ReconcileEvidence {
+        ReconcileEvidence {
+            liveness,
+            stale_reason: Some("missing_runner_pid".to_string()),
+            runner_job: None,
+            runner_released: true,
+            orphaned_admission: false,
+            expired_admission: false,
+        }
+    }
+
+    fn runner_job_evidence(
+        observation: agent_task_lifecycle::RunnerJobObservation,
+    ) -> agent_task_lifecycle::RunnerJobEvidence {
+        agent_task_lifecycle::RunnerJobEvidence {
+            runner_job_id: "job-1".to_string(),
+            runner_id: Some("lab".to_string()),
+            source: "runner_live_job_inventory",
+            observation,
+            reason: observation.reason(),
+            job_status: None,
+            last_heartbeat_at_ms: None,
+            heartbeat_age_seconds: None,
+            daemon_lease_id: None,
+            job_stale_reason: None,
+            observed_at: "2000-01-01T00:00:00Z".to_string(),
+        }
+    }
+
+    /// A non-terminal record read back after `edit`.
+    fn verdict_record(
+        run_id: &str,
+        edit: impl FnMut(&mut agent_task_lifecycle::AgentTaskRunRecord),
+    ) -> agent_task_lifecycle::AgentTaskRunRecord {
+        let plan = AgentTaskPlan::new("reconcile-verdict-plan", Vec::new());
+        agent_task_lifecycle::submit_plan(&plan, Some(run_id)).expect("submitted");
+        agent_task_lifecycle::rewrite_record_for_test(run_id, edit).expect("edited");
+        agent_task_lifecycle::exact_record(run_id).expect("record")
+    }
+
+    #[test]
+    fn verdict_is_live_for_terminal_or_owned_records() {
+        with_isolated_home(|_| {
+            let now = chrono::Utc::now();
+            let record = verdict_record("verdict-live", |_| {});
+            assert_eq!(
+                reconcile_verdict(&record, &verdict_evidence(AgentTaskLiveness::Active), now),
+                ReconcileVerdict::Live
+            );
+            let cancelled = agent_task_lifecycle::cancel_exact_run_in_store(
+                &test_lifecycle_store(),
+                "verdict-live",
+                Some("done"),
+                None,
+            )
+            .expect("cancelled");
+            assert_eq!(
+                reconcile_verdict(&cancelled, &verdict_evidence(AgentTaskLiveness::Stale), now),
+                ReconcileVerdict::Live
+            );
+        });
+    }
+
+    #[test]
+    fn verdict_leaves_unverified_runner_jobs_to_their_runner() {
+        with_isolated_home(|_| {
+            let record = verdict_record("verdict-runner-owned", |record| {
+                record.metadata["runner_job_id"] = serde_json::json!("job-1");
+            });
+            let mut evidence = verdict_evidence(AgentTaskLiveness::Stale);
+            evidence.runner_job = Some(runner_job_evidence(
+                agent_task_lifecycle::RunnerJobObservation::Live,
+            ));
+            assert_eq!(
+                reconcile_verdict(&record, &evidence, chrono::Utc::now()),
+                ReconcileVerdict::RunnerOwned {
+                    reason: Some(agent_task_lifecycle::RunnerJobObservation::Live.reason())
+                }
+            );
+        });
+    }
+
+    #[test]
+    fn verdict_refuses_runner_jobs_whose_runner_is_not_released() {
+        with_isolated_home(|_| {
+            let record = verdict_record("verdict-refuse", |record| {
+                record.metadata["runner_id"] = serde_json::json!("lab");
+                record.metadata["runner_job_id"] = serde_json::json!("job-1");
+            });
+            let mut evidence = verdict_evidence(AgentTaskLiveness::Stale);
+            evidence.runner_job = Some(runner_job_evidence(
+                agent_task_lifecycle::RunnerJobObservation::Terminal,
+            ));
+            evidence.runner_released = false;
+            let verdict = reconcile_verdict(&record, &evidence, chrono::Utc::now());
+            assert!(
+                matches!(&verdict, ReconcileVerdict::Refuse { reason } if reason.contains("runner `lab`")),
+                "{verdict:?}"
+            );
+            evidence.runner_released = true;
+            assert_eq!(
+                reconcile_verdict(&record, &evidence, chrono::Utc::now()),
+                ReconcileVerdict::Cancel {
+                    reason: "runner_job_terminal".to_string()
+                }
+            );
+        });
+    }
+
+    #[test]
+    fn verdict_requeues_an_orphaned_unmaterialized_admission() {
+        with_isolated_home(|_| {
+            let run_id = "verdict-requeue";
+            let plan = AgentTaskPlan::new("reconcile-verdict-plan", Vec::new());
+            agent_task_lifecycle::submit_plan(&plan, Some(run_id)).expect("submitted");
+            agent_task_lifecycle::mark_running(run_id).expect("running");
+            agent_task_lifecycle::rewrite_record_for_test(run_id, |record| {
+                let metadata = record.metadata.as_object_mut().expect("metadata");
+                metadata.remove("runner_pid");
+                metadata.remove("runner_process_start_identity");
+                record.metadata["detached_cook_handoff"] = serde_json::json!({
+                    "cook_id": run_id,
+                    "state": "pending",
+                    "admission_state": "unmaterialized",
+                });
+                record.metadata["unmaterialized_cook_admission"] =
+                    serde_json::json!({ "state": "queued" });
+                record.metadata["execution_scheduling"] =
+                    serde_json::json!({ "current_intent_id": "intent-1" });
+            })
+            .expect("orphaned admission");
+            let record = agent_task_lifecycle::exact_record(run_id).expect("record");
+            assert!(agent_task_lifecycle::has_orphaned_unmaterialized_cook_admission(&record));
+            assert_eq!(
+                reconcile_verdict(
+                    &record,
+                    &ReconcileEvidence {
+                        orphaned_admission: true,
+                        ..verdict_evidence(AgentTaskLiveness::Stale)
+                    },
+                    chrono::Utc::now()
+                ),
+                ReconcileVerdict::Requeue
+            );
+        });
+    }
+
+    #[test]
+    fn verdict_expires_a_lapsed_detached_admission() {
+        with_isolated_home(|_| {
+            let cook_id = "verdict-expire";
+            agent_task_lifecycle::record_detached_cook_handoff_parent_in_store(
+                &test_lifecycle_store(),
+                cook_id,
+            )
+            .expect("persist detached admission");
+            agent_task_lifecycle::rewrite_record_for_test(cook_id, |record| {
+                record.metadata["detached_cook_handoff"]["admission_deadline_at"] =
+                    serde_json::json!("2000-01-01T00:00:00+00:00");
+            })
+            .expect("expire admission lease");
+            let record = agent_task_lifecycle::exact_record(cook_id).expect("record");
+            assert_eq!(
+                reconcile_verdict(
+                    &record,
+                    &ReconcileEvidence {
+                        expired_admission: true,
+                        ..verdict_evidence(AgentTaskLiveness::Unreconciled)
+                    },
+                    chrono::Utc::now()
+                ),
+                ReconcileVerdict::ExpireAdmission
+            );
+        });
+    }
+
+    #[test]
+    fn verdict_cancels_an_ownerless_run_naming_its_stale_reason() {
+        with_isolated_home(|_| {
+            let record = verdict_record("verdict-cancel", |_| {});
+            let now = chrono::Utc::now();
+            assert_eq!(
+                reconcile_verdict(&record, &verdict_evidence(AgentTaskLiveness::Stale), now),
+                ReconcileVerdict::Cancel {
+                    reason: "missing_runner_pid".to_string()
+                }
+            );
+            let mut evidence = verdict_evidence(AgentTaskLiveness::Suspect);
+            evidence.stale_reason = None;
+            assert_eq!(
+                reconcile_verdict(&record, &evidence, now),
+                ReconcileVerdict::Cancel {
+                    reason: "reconciled stale-suspect run".to_string()
+                }
+            );
+        });
     }
 
     #[test]
@@ -1359,7 +1462,7 @@ mod tests {
             let fenced =
                 agent_task_lifecycle::exact_record_in_store(&test_lifecycle_store(), run_id)
                     .expect("fenced record");
-            assert!(fenced_record_is_live(&fenced));
+            assert_eq!(fenced_verdict(&fenced), ReconcileVerdict::Live);
             assert_eq!(
                 fenced.state(),
                 homeboy_lifecycle_contract::RunExecutionState::Queued
@@ -1512,7 +1615,7 @@ mod tests {
             let fenced =
                 agent_task_lifecycle::exact_record_in_store(&test_lifecycle_store(), run_id)
                     .expect("fenced record");
-            assert!(fenced_record_is_live(&fenced));
+            assert_eq!(fenced_verdict(&fenced), ReconcileVerdict::Live);
             assert!(fenced.owner_process_is_running());
         });
     }
@@ -1546,7 +1649,7 @@ mod tests {
             let fenced =
                 agent_task_lifecycle::exact_record_in_store(&test_lifecycle_store(), run_id)
                     .expect("fenced record");
-            assert!(fenced_record_is_live(&fenced));
+            assert_eq!(fenced_verdict(&fenced), ReconcileVerdict::Live);
             assert_eq!(
                 fenced.state(),
                 homeboy_lifecycle_contract::RunExecutionState::Queued

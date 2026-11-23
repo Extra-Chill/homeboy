@@ -46,6 +46,9 @@ pub struct BenchCompareArgs {
     /// multiple sequential commands.
     #[arg(long = "workload-command", value_name = "COMMAND")]
     pub workload_command: Vec<String>,
+    /// Required workload executable; repeat for each tool (node, php, ...).
+    #[arg(long = "required-tool", value_name = "TOOL")]
+    pub required_tools: Vec<String>,
 
     /// Regression policy: `new-blockers` (default) fails on new evaluator
     /// blockers or routes missing on head; `regressions` fails on any
@@ -66,6 +69,11 @@ pub struct BenchCompareArgs {
     /// `<homeboy data>/bench-compare/<compare-id>`.
     #[arg(long = "output-dir", value_name = "DIR")]
     pub output_dir: Option<PathBuf>,
+
+    /// Set by the program `agent-task cook --verify-bench` compiles: emit the
+    /// bench gate evidence line on stderr so the Cook can link the artifact.
+    #[arg(long = "cook-gate", hide = true)]
+    pub cook_gate: bool,
 }
 
 impl BenchCompareArgs {
@@ -184,6 +192,11 @@ pub fn run_compare(args: &BenchCompareArgs) -> homeboy::core::Result<(BenchCompa
         head,
         corpus,
         runner,
+        required_tools: if args.required_tools.is_empty() {
+            spec.required_tools.clone()
+        } else {
+            args.required_tools.clone()
+        },
         fail_on: spec.fail_on.unwrap_or_default(),
         side_timeout: Duration::from_secs(
             spec.timeout_seconds
@@ -192,6 +205,12 @@ pub fn run_compare(args: &BenchCompareArgs) -> homeboy::core::Result<(BenchCompa
         artifact_dir,
         stop: &stop,
     })?;
+    if args.cook_gate {
+        eprintln!(
+            "{}",
+            bench_compare::BenchCompareGateEvidence::from(&output).marker_line()
+        );
+    }
     let exit = if output.policy.passed { 0 } else { 1 };
     Ok((output, exit))
 }

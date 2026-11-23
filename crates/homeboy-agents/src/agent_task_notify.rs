@@ -468,6 +468,13 @@ fn terminal_payload(
             })
             .collect::<Vec<_>>();
         payload = payload.with_fact("Gates", gate_summary(&gates));
+        for evidence in promotion
+            .deterministic_gates
+            .iter()
+            .filter_map(|gate| gate.bench_compare.as_ref())
+        {
+            payload = payload.with_fact("Bench compare", bench_compare_fact(evidence));
+        }
     } else if !cancelled {
         if let Some(gates) = report
             .finalization
@@ -585,6 +592,15 @@ pub(crate) fn base_drift_fact(finalization: &Value) -> Option<String> {
         short("verified_base_sha"),
         short("publication_base_sha"),
     ))
+}
+
+/// One bounded line per bench gate: verdict, policy, deltas, artifact (#18869).
+fn bench_compare_fact(evidence: &homeboy_core::bench_compare::BenchCompareGateEvidence) -> String {
+    format!(
+        "{}; artifact {}",
+        evidence.headline(),
+        evidence.artifact_path
+    )
 }
 
 fn gate_summary(gates: &[(&str, bool)]) -> String {
