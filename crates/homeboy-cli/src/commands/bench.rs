@@ -29,6 +29,7 @@ use crate::command_contract::{
     LabCommandContract, BENCH_LAB_LABEL,
 };
 
+mod compare;
 mod default_baseline;
 mod fanout;
 mod matrix;
@@ -120,13 +121,18 @@ impl BenchArgs {
 
     pub(crate) fn lab_contract(&self) -> Option<LabCommandContract> {
         self.is_lab_offload_command().then(|| {
-            LabCommandContract::portable(
+            let mut contract = LabCommandContract::portable(
                 BENCH_LAB_LABEL,
                 self.lab_offload_writes_local_state()
                     .then_some("--baseline/--ratchet"),
                 true,
                 &[],
-            )
+            );
+            if matches!(self.command, Some(BenchCommand::Compare(_))) {
+                contract.workspace_mode_policy =
+                    crate::command_contract::LabWorkspaceModePolicy::GitCheckoutRequired;
+            }
+            contract
         })
     }
 
@@ -135,7 +141,10 @@ impl BenchArgs {
     }
 
     pub(crate) fn is_lab_offload_command(&self) -> bool {
-        matches!(self.command, None | Some(BenchCommand::Matrix(_)))
+        matches!(
+            self.command,
+            None | Some(BenchCommand::Matrix(_)) | Some(BenchCommand::Compare(_))
+        )
     }
 
     pub(crate) fn lab_offload_writes_local_state(&self) -> bool {
@@ -147,7 +156,7 @@ impl BenchArgs {
         match &self.command {
             None => Some(&self.run),
             Some(BenchCommand::Matrix(args)) => Some(args.run_args()),
-            Some(BenchCommand::List(_)) => None,
+            Some(BenchCommand::List(_)) | Some(BenchCommand::Compare(_)) => None,
         }
     }
 
@@ -163,6 +172,32 @@ impl BenchArgs {
         })
     }
 
+    pub(crate) fn portable_compare_args(
+        &self,
+        args: &[String],
+    ) -> homeboy::core::Result<Option<Vec<String>>> {
+        let Some(BenchCommand::Compare(compare)) = &self.command else {
+            return Ok(None);
+        };
+        let mut spec = compare.effective_spec()?;
+        // Placement materializes the source checkout and rewrites --path.
+        // Do not retain a controller-local path inside the snapshotted spec.
+        spec.path = None;
+        let json = serde_json::to_string(&spec)
+            .map_err(|error| homeboy::core::Error::internal_unexpected(error.to_string()))?;
+        let mut rewritten = Vec::new();
+        let mut iter = args.iter();
+        while let Some(arg) = iter.next() {
+            if arg == "--spec" || arg == "--spec-json" {
+                iter.next();
+            } else if !arg.starts_with("--spec=") && !arg.starts_with("--spec-json=") {
+                rewritten.push(arg.clone());
+            }
+        }
+        rewritten.extend(["--spec-json".to_string(), json]);
+        Ok(Some(rewritten))
+    }
+
     pub(crate) fn portable_settings(&self) -> Option<&SettingArgs> {
         self.run_args_for_lab_offload().map(|run| &run.setting_args)
     }
@@ -175,6 +210,11 @@ enum BenchCommand {
     Matrix(settings_matrix::BenchMatrixArgs),
     /// List declared benchmark scenarios without executing them
     List(BenchListArgs),
+    /// Compare a component's base and head revisions on a corpus: run the
+    /// component/extension-declared corpus workload once per side in a
+    /// run-owned checkout, tear down every process it started, and write a
+    /// durable artifact with per-route deltas and an aggregate summary
+    Compare(compare::BenchCompareArgs),
 }
 
 #[derive(Args)]
@@ -692,6 +732,7 @@ pub enum BenchOutput {
     MatrixFanout(Box<fanout::BenchMatrixFanoutOutput>),
     SettingsMatrix(settings_matrix::BenchSettingsMatrixOutput),
     List(BenchListWorkflowResult),
+    Compare(Box<homeboy_core::bench_compare::BenchCompareOutput>),
 }
 
 pub fn run(mut args: BenchArgs) -> CmdResult<BenchOutput> {
@@ -707,6 +748,10 @@ pub fn run(mut args: BenchArgs) -> CmdResult<BenchOutput> {
                 Ok((BenchOutput::SettingsMatrix(output), exit))
             }
             BenchCommand::List(list_args) => run_list(list_args),
+            BenchCommand::Compare(compare_args) => {
+                let (output, exit) = compare::run_compare(compare_args)?;
+                Ok((BenchOutput::Compare(Box::new(output)), exit))
+            }
         };
     }
 

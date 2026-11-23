@@ -27,6 +27,41 @@ fn parses_bench_list_rig_flag() {
 }
 
 #[test]
+fn parses_bench_compare_with_lab_placement() {
+    let cli = TestCli::try_parse_from([
+        "bench",
+        "compare",
+        "--component",
+        "blocks-engine",
+        "--base",
+        "abc123",
+        "--head",
+        "def456",
+        "--corpus",
+        "/captures",
+    ])
+    .expect("bench compare should parse");
+
+    assert!(cli.bench.is_lab_offload_command());
+    let contract = cli.bench.lab_contract().unwrap();
+    assert!(contract.routing_policy.default_lab_offload);
+    assert_eq!(
+        contract.workspace_mode_policy,
+        crate::command_contract::LabWorkspaceModePolicy::GitCheckoutRequired
+    );
+    assert!(cli.bench.lab_rig_workload_arguments().is_none());
+    match cli.bench.command.expect("compare command") {
+        BenchCommand::Compare(args) => {
+            assert_eq!(args.component.as_deref(), Some("blocks-engine"));
+            assert_eq!(args.base.as_deref(), Some("abc123"));
+            assert_eq!(args.head.as_deref(), Some("def456"));
+            assert_eq!(args.corpus.as_deref(), Some("/captures"));
+        }
+        _ => panic!("expected bench compare command"),
+    }
+}
+
+#[test]
 fn lab_workload_arguments_use_clap_values() {
     let cli = TestCli::try_parse_from(
         "bench --iterations 3 component --rig=a,b --rig c --extension=x --extension y"

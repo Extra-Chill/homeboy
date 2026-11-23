@@ -3918,10 +3918,15 @@ fn inline_portable_settings_profiles(
             }
             _ => return Ok(args.to_vec()),
         },
-        Commands::Bench(bench) => match bench.portable_settings() {
-            Some(settings) => (settings, "bench"),
-            None => return Ok(args.to_vec()),
-        },
+        Commands::Bench(bench) => {
+            if let Some(args) = bench.portable_compare_args(args)? {
+                return Ok(args);
+            }
+            match bench.portable_settings() {
+                Some(settings) => (settings, "bench"),
+                None => return Ok(args.to_vec()),
+            }
+        }
         _ => return Ok(args.to_vec()),
     };
     if settings.settings_json_file.is_empty() {

@@ -320,6 +320,9 @@ pub struct VerifyGateArgs {
     /// gates; every one must pass. Its output is included in the review evidence.
     #[arg(long = "verify", value_name = "COMMAND")]
     pub verify: Vec<String>,
+    /// Attach a snapshotted bench compare JSON spec as a public candidate gate.
+    #[arg(long = "verify-bench", value_name = "SPEC")]
+    pub verify_bench: Vec<String>,
     /// Defer full verification to the PR's required CI checks. Cheap --verify
     /// gates still run before publication. Recover re-polls CI.
     #[arg(long)]
@@ -504,6 +507,7 @@ impl VerifyGateArgs {
 
     pub(crate) fn has_deterministic_gate(&self) -> bool {
         !self.verify.is_empty()
+            || !self.verify_bench.is_empty()
             || !self.verify_file.is_empty()
             || !self.private_verify.is_empty()
             || !self.private_verify_file.is_empty()
@@ -535,6 +539,27 @@ impl VerifyGateArgs {
     /// Resolve file inputs while the controller invocation directory still owns
     /// relative-path semantics, before Cook can provision or dispatch anything.
     pub(crate) fn snapshot_file_inputs(&mut self) -> homeboy::core::Result<()> {
+        for path in std::mem::take(&mut self.verify_bench) {
+            let json = std::fs::read_to_string(&path).map_err(|error| {
+                homeboy::core::Error::validation_invalid_argument(
+                    "--verify-bench",
+                    format!("cannot read {path}: {error}"),
+                    None,
+                    None,
+                )
+            })?;
+            let mut spec = homeboy::core::bench_compare::BenchCompareSpec::parse(&json)?;
+            // Always evaluate the harvested candidate, not a registered checkout.
+            spec.path = Some(".".to_string());
+            spec.base = Some("__HOMEBOY_COOK_BASE_SHA__".to_string());
+            spec.head = Some("WORKTREE".to_string());
+            let json = serde_json::to_string(&spec)
+                .map_err(|error| homeboy::core::Error::internal_unexpected(error.to_string()))?;
+            let quoted = homeboy_engine_primitives::shell::quote_path(&json);
+            self.verify.push(format!(
+                "homeboy --placement local bench compare --spec-json {quoted}"
+            ));
+        }
         if !self.gate_inputs.is_empty() {
             let mut policy = AgentTaskGateEnvironmentPolicy {
                 data_inputs: self.gate_inputs.clone(),
@@ -861,6 +886,26 @@ mod tests {
     struct TestCli {
         #[command(flatten)]
         gates: VerifyGateArgs,
+    }
+
+    #[test]
+    fn bench_gate_snapshots_spec_and_binds_candidate() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("compare.json");
+        std::fs::write(&path, r#"{"base":"wrong","head":"wrong","path":"/wrong","corpus":"$CAPTURES","tools":["node"]}"#).unwrap();
+        let mut cli =
+            TestCli::try_parse_from(["cook", "--verify-bench", path.to_str().unwrap()]).unwrap();
+        assert!(cli.gates.has_deterministic_gate());
+        cli.gates.snapshot_file_inputs().unwrap();
+        std::fs::remove_file(path).unwrap();
+        assert!(cli.gates.verify_bench.is_empty());
+        let program = &cli.gates.verify[0];
+        assert!(program.contains("bench compare --spec-json"));
+        assert!(program.contains("__HOMEBOY_COOK_BASE_SHA__"));
+        assert!(program.contains("WORKTREE"));
+        assert!(program.contains("$CAPTURES"));
+        assert!(!program.contains("wrong"));
+        assert_eq!(cli.gates.input_sources.len(), 1);
     }
 
     #[test]
