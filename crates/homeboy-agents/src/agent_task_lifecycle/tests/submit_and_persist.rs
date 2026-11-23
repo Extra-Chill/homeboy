@@ -3108,7 +3108,7 @@ fn disconnected_proxy_projects_terminal_child_aggregate_once_reachable() {
     assert_eq!(record.state(), RunExecutionState::Succeeded);
     assert!(is_accepted_runner_handoff(&record));
     assert_eq!(record.artifact_refs[0].uri, "/runner/artifacts/patch.diff");
-    assert!(record.metadata.get("runner_job_status").is_none());
+    assert_eq!(record.metadata["runner_job_status"], "succeeded");
     assert_eq!(record.metadata["runner_liveness"], "reachable");
     let aggregate = lifecycle_store
         .read_aggregate("agent-task-disconnected-child")
@@ -3256,7 +3256,7 @@ fn accepted_handoff_projects_a_remote_timeout_aggregate_even_when_daemon_transpo
         record.totals.as_ref().map(|totals| totals.timed_out),
         Some(1)
     );
-    assert!(record.metadata.get("runner_job_status").is_none());
+    assert_eq!(record.metadata["runner_job_status"], "succeeded");
 }
 
 #[test]

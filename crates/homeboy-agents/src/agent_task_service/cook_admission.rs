@@ -268,17 +268,14 @@ pub(super) fn pre_artifact_interruption_phase(
 /// Whether the runner job finished successfully and returned its remote
 /// command's terminal result with a zero exit code.
 pub(super) fn runner_reported_success(record: &agent_task_lifecycle::AgentTaskRunRecord) -> bool {
-    (if record.state().is_terminal() {
-        record.state() == homeboy_lifecycle_contract::RunExecutionState::Succeeded
-    } else {
-        record.metadata["runner_job_status"] == "succeeded"
-    }) && record.metadata["runner_job_events"]
-        .as_array()
-        .is_some_and(|events| {
-            events
-                .iter()
-                .any(|event| event["kind"] == "result" && event["data"]["exit_code"] == 0)
-        })
+    record.metadata["runner_job_status"] == "succeeded"
+        && record.metadata["runner_job_events"]
+            .as_array()
+            .is_some_and(|events| {
+                events
+                    .iter()
+                    .any(|event| event["kind"] == "result" && event["data"]["exit_code"] == 0)
+            })
 }
 
 pub(crate) fn intentional_no_change_from_aggregate(

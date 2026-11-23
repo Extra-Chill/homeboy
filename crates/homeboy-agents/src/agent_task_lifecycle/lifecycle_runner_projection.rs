@@ -655,7 +655,12 @@ fn project_terminal_runner_job_snapshot(
     );
     metadata.insert(
         "runner_result_synchronization".to_string(),
-        json!({"state": "projected"}),
+        // The runner job's own terminal status is evidence, not run state:
+        // a succeeded job can still leave a failed run.
+        json!({
+            "state": "projected",
+            "runner_job_status": snapshot.job.status,
+        }),
     );
     metadata.insert(
         METADATA_KEY_RETRYABLE.to_string(),

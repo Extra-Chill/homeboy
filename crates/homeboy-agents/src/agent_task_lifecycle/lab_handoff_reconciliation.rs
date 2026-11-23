@@ -454,7 +454,7 @@ pub(crate) fn apply_runner_job_terminal_state(
         .zip(record.runner_job_id())
         .map(|(runner_id, runner_job_id)| (runner_id.to_string(), runner_job_id.to_string()));
     let metadata = record.ensure_metadata_object();
-    metadata.remove("runner_job_status");
+    metadata.insert("runner_job_status".to_string(), json!(status));
     metadata.insert("runner_job_events".to_string(), json!(events));
     if let Some((runner_id, runner_job_id)) = runner_identity {
         metadata.insert(
@@ -493,7 +493,7 @@ pub(crate) fn record_runner_job_terminal_metadata(
         .zip(record.runner_job_id())
         .map(|(runner_id, runner_job_id)| (runner_id.to_string(), runner_job_id.to_string()));
     let metadata = record.ensure_metadata_object();
-    metadata.remove("runner_job_status");
+    metadata.insert("runner_job_status".to_string(), json!(status));
     metadata.insert("runner_job_events".to_string(), json!(events));
     if let Some((runner_id, runner_job_id)) = runner_identity {
         metadata.insert(

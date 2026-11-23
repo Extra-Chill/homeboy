@@ -1396,7 +1396,10 @@ fn foreground_terminal_daemon_projection_finishes_success_and_failure_runs_once(
         assert_eq!(projected.tasks[0].state(), expected_task);
         assert_eq!(projected.lifecycle.execution.state, expected_run.into());
         assert!(projected.lifecycle.execution.finished_at.is_some());
-        assert!(projected.metadata.get("runner_job_status").is_none());
+        assert_eq!(
+            projected.metadata["runner_job_status"],
+            json!(daemon_status)
+        );
         assert_eq!(
             projected.metadata["runner_execution_record"]["status"],
             expected_execution_status
@@ -1610,7 +1613,7 @@ fn verified_pre_provider_runner_cancellation_terminalizes_and_replays_idempotent
 
     assert_eq!(record.state(), RunExecutionState::Cancelled);
     assert_eq!(record.tasks[0].state(), ControlPlaneState::Cancelled);
-    assert!(record.metadata.get("runner_job_status").is_none());
+    assert_eq!(record.metadata["runner_job_status"], "cancelled");
     assert_eq!(
         record.metadata["runner_result_synchronization"]["state"],
         "projected"
@@ -1881,7 +1884,7 @@ fn typed_pre_provider_failure_outranks_stale_runner_status_and_terminalizes_once
             "pre_execution_failure"
         );
         assert_eq!(record.metadata["provider_executions_consumed"], 0);
-        assert!(record.metadata.get("runner_job_status").is_none());
+        assert_eq!(record.metadata["runner_job_status"], "failed");
         assert_eq!(
             record.metadata["runner_result_synchronization"]["source"],
             "typed_runner_job_error"
