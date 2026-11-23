@@ -75,7 +75,7 @@ fn admitted_missing_argument_blocker_retains_details() {
             "message": "Missing required argument",
             "details": {"args": ["prompt", "component"]}
         });
-        let run = crate::orchestration::project_record(&record, None).unwrap();
+        let run = crate::orchestration::project_record(&record, None, None).unwrap();
         let blocker = serde_json::to_value(run.blocker.unwrap()).unwrap();
         assert_eq!(
             blocker["details"]["args"],

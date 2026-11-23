@@ -199,44 +199,44 @@ pub fn fence_cook_mission_in_store(
         })?;
         // Retire every retained candidate, not just the latest alias target.
         // Keep delivery, aggregate and candidate artifacts intact for inspection.
-        let index = lifecycle_store.read_cook_index(&cook_id).ok();
-        if let Some(index) = index {
-            for attempt in &index.attempts {
-                retire_candidate_in_store(lifecycle_store, &attempt.run_id, reason)?;
-                lifecycle_store.mutate_record_locked_without_terminal_projection(
-                    &attempt.run_id,
-                    |record| {
-                        record.ensure_metadata_object().insert(
-                            "cancellation_fence".into(),
-                            index.cancellation_fence.clone().unwrap_or(Value::Null),
-                        );
-                        true
-                    },
-                )?;
-            }
+        // Attempts read the fence from the index; none carries a copy (#18827).
+        for attempt in lifecycle_store
+            .read_cook_index(&cook_id)
+            .map(|index| index.attempts)
+            .unwrap_or_default()
+        {
+            retire_candidate_in_store(lifecycle_store, &attempt.run_id)?;
         }
         Ok(fenced)
     })
 }
 
-fn retire_candidate_in_store(
+/// The only fence reader: the Cook index named by the record's `cook_id` (else
+/// its run id) owns the mission fence. A per-record copy is honored only on
+/// records persisted before the index became its single home (#18827).
+pub fn cook_cancellation_fence(
     store: &AgentTaskLifecycleStore,
-    run_id: &str,
-    reason: Option<&str>,
-) -> Result<bool> {
+    record: &AgentTaskRunRecord,
+) -> Option<Value> {
+    let cook_id = record.metadata["cook_id"]
+        .as_str()
+        .unwrap_or(&record.run_id);
+    store
+        .read_cook_index(cook_id)
+        .ok()
+        .and_then(|index| index.cancellation_fence)
+        .or_else(|| record.metadata.get("cancellation_fence").cloned())
+}
+
+/// A retired candidate is just a `Cancelled` record; the reason lives on the
+/// mission fence or the cancellation request, so nothing else is written.
+fn retire_candidate_in_store(store: &AgentTaskLifecycleStore, run_id: &str) -> Result<bool> {
     Ok(store
         .mutate_record_locked_without_terminal_projection(run_id, |record| {
             if record.state() != RunExecutionState::CandidateRecoverable {
                 return false;
             }
             set_run_state(record, RunExecutionState::Cancelled);
-            record.ensure_metadata_object().insert(
-                "candidate_retirement".into(),
-                json!({
-                    "cancelled_at": now_timestamp(),
-                    "reason": reason.unwrap_or("cancel requested"),
-                }),
-            );
             true
         })?
         .is_some())
@@ -264,9 +264,8 @@ pub fn cancel_run_in_store(
     let retired = if lifecycle_store.read_cook_index(&requested_run_id).is_ok() {
         false
     } else {
-        lifecycle_store.with_store_lock(|| {
-            retire_candidate_in_store(lifecycle_store, &requested_run_id, reason)
-        })?
+        lifecycle_store
+            .with_store_lock(|| retire_candidate_in_store(lifecycle_store, &requested_run_id))?
     };
     if retired {
         return lifecycle_store.read_record(&requested_run_id);
@@ -331,32 +330,11 @@ pub fn cancel_claimed_detached_cook_in_store(
     reason: Option<&str>,
 ) -> Result<Option<AgentTaskRunRecord>> {
     let cook_id = sanitize_run_id(cook_id);
-    let launcher_id = launcher_id.to_string();
-    let authorized = lifecycle_store.with_store_lock(|| {
-        let parent = lifecycle_store.read_record(&cook_id)?;
-        if parent.metadata["detached_cook_handoff"]["launcher_id"] != launcher_id {
-            return Ok(false);
-        }
-        if !parent.state().is_terminal() {
-            let _ = lifecycle_store.mutate_record_locked_without_terminal_projection(
-                &cook_id,
-                |record| {
-                    if record.metadata["detached_cook_handoff"]["launcher_id"] != launcher_id {
-                        return false;
-                    }
-                    record.metadata["detached_cook_handoff"]["cancellation_fence"] = json!({
-                        "state": "cancel_requested",
-                        "cancelled_at": now_timestamp(),
-                        "reason": reason.unwrap_or("cancel requested"),
-                    });
-                    record.updated_at = Some(now_timestamp());
-                    true
-                },
-            )?;
-        }
-        Ok(true)
-    })?;
-    if !authorized {
+    // The parent's `Cancelled` state is the handoff fence: the pipeline below
+    // kills an attached child and every later attach or materialization
+    // refuses a terminal parent.
+    let parent = lifecycle_store.read_record(&cook_id)?;
+    if parent.metadata["detached_cook_handoff"]["launcher_id"] != launcher_id {
         return Ok(None);
     }
     cancel_run_in_store(lifecycle_store, &cook_id, reason).map(Some)
@@ -896,8 +874,6 @@ fn cancel_resolved_run_in_store(
                 ControlPlaneState::Cancelled,
             );
 
-            let detached_handoff_parent =
-                record.metadata["detached_cook_handoff"]["cook_id"] == record.run_id;
             let metadata = record.ensure_metadata_object();
             terminalize_running_provider_executions(metadata, &cancelled_at);
             metadata.insert("cancelled_at".to_string(), json!(cancelled_at));
@@ -931,10 +907,6 @@ fn cancel_resolved_run_in_store(
                 "timestamp": cancelled_at,
                 "recovery_action": "inspect retained diagnostics with: homeboy runs logs <run-id>",
             }));
-            }
-            if detached_handoff_parent {
-                metadata["detached_cook_handoff"]["cancellation_fence"]["state"] =
-                    json!("cancelled");
             }
             metadata.remove("live_cancellation");
             metadata.remove("live_cancellation_unsupported");
@@ -1649,13 +1621,15 @@ mod tests {
             let retired = store.read_record("retire-old-attempt-1").unwrap();
             assert_eq!(retired.state(), RunExecutionState::Cancelled);
             assert_eq!(retired.metadata["candidate_evidence"], "preserved");
-            assert_eq!(
-                retired.metadata["candidate_retirement"]["reason"],
-                "shipped in https://example.test/pr/1"
-            );
-            assert!(retired.metadata["cancellation_fence"]["cancelled_at"].is_string());
+            // The fence lives once, on the Cook index; the attempt carries no copy.
+            assert!(retired.metadata.get("candidate_retirement").is_none());
+            assert!(retired.metadata.get("cancellation_fence").is_none());
+            let fence = cook_cancellation_fence(&store, &retired).expect("index fence");
+            assert_eq!(fence["reason"], "shipped in https://example.test/pr/1");
+            assert!(fence["cancelled_at"].is_string());
             assert!(!claim_cook_terminal_notification_in_store(&store, cook, "test").unwrap());
-            let projection = crate::orchestration::project_record(&retired, None).unwrap();
+            let projection =
+                crate::orchestration::project_record(&retired, None, Some(&fence)).unwrap();
             assert_eq!(projection.recovery.unwrap().step, "none");
             assert_eq!(
                 projection.state,

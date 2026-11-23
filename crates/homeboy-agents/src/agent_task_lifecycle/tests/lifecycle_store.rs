@@ -355,7 +355,6 @@ fn detached_handoff_fence_rejects_cancellation() {
     handoff.metadata["detached_cook_handoff"] = json!({
         "cook_id": cook_id,
         "state": "pending",
-        "cancellation_fence": { "state": "open" },
     });
     store.write_record(&handoff).unwrap();
     store
@@ -363,7 +362,6 @@ fn detached_handoff_fence_rejects_cancellation() {
         .expect("open fence admits the child");
 
     handoff.set_state_for_test(RunExecutionState::Cancelled);
-    handoff.metadata["detached_cook_handoff"]["cancellation_fence"]["state"] = json!("cancelled");
     store.write_record(&handoff).unwrap();
     let error = store
         .require_detached_cook_handoff_fence_open(cook_id)
