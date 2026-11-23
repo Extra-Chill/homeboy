@@ -95,7 +95,7 @@ fn recover_rearms_gate_feedback_promotion_refused_before_apply() {
             crate::agent_task_service::CookRecoveryStep::Rearm
         );
         let projected =
-            crate::orchestration::project_record(&store.read_record(&run).unwrap(), None)
+            crate::orchestration::project_record(&store.read_record(&run).unwrap(), None, None)
                 .unwrap()
                 .recovery
                 .unwrap();

@@ -549,7 +549,7 @@ where
     let _lock = acquire_lock()?;
     let status = read_status()?;
     if let Some(state) = status.state {
-        if pid_is_running(state.pid) {
+        if status.reachable && pid_is_running(state.pid) {
             return Ok(DaemonStartResult {
                 pid: state.pid,
                 address: state.address,
@@ -580,6 +580,8 @@ fn start_or_return_live_unlocked_with_startup_token(
         try_acquire_daemon_owner_lock,
         stop_stale_daemon_for_start,
         || spawn_and_wait_for_lease_attempt(addr, startup_token, idle_timeout, true, Vec::new()),
+        || thread::sleep(SERVICE_MANAGED_RESTART_POLL),
+        SERVICE_MANAGED_RESTART_POLLS,
     )
 }
 
@@ -590,45 +592,65 @@ fn stop_stale_daemon_for_start() -> Result<()> {
     stop_unlocked().map(|_| ())
 }
 
-fn start_or_return_live_with_operations<OwnerLock, ReadStatus, AcquireOwner, Cleanup, Spawn>(
-    read_status: ReadStatus,
-    acquire_owner: AcquireOwner,
+fn start_or_return_live_with_operations<
+    OwnerLock,
+    ReadStatus,
+    AcquireOwner,
+    Cleanup,
+    Spawn,
+    Sleep,
+>(
+    mut read_status: ReadStatus,
+    mut acquire_owner: AcquireOwner,
     cleanup: Cleanup,
     spawn_and_wait: Spawn,
+    mut sleep: Sleep,
+    polls: usize,
 ) -> Result<DaemonStartResult>
 where
-    ReadStatus: FnOnce() -> Result<super::DaemonStatus>,
-    AcquireOwner: FnOnce() -> Result<Option<OwnerLock>>,
+    ReadStatus: FnMut() -> Result<super::DaemonStatus>,
+    AcquireOwner: FnMut() -> Result<Option<OwnerLock>>,
     Cleanup: FnOnce() -> Result<()>,
     Spawn: FnOnce() -> Result<DaemonStartResult>,
+    Sleep: FnMut(),
 {
-    let existing = read_status()?;
-    // A live-but-stale daemon must not be returned as if it were usable:
-    // `running` is pure process liveness, so the start path gates on the
-    // full live/reachable/current-build predicate before attaching (#13621).
-    if existing.admits_work() {
-        if let Some(state) = existing.state {
-            return Ok(DaemonStartResult {
-                pid: state.pid,
-                address: state.address,
-                state_path: state.state_path,
-                lease_id: state.lease_id,
-            });
+    let mut existing = read_status()?;
+    let mut remaining = polls;
+    let owner_lock = loop {
+        // A live-but-stale daemon must not be returned as if it were usable:
+        // `running` is pure process liveness, so the start path gates on the
+        // full live/reachable/current-build predicate before attaching (#13621).
+        if existing.admits_work() {
+            if let Some(state) = existing.state {
+                return Ok(DaemonStartResult {
+                    pid: state.pid,
+                    address: state.address,
+                    state_path: state.state_path,
+                    lease_id: state.lease_id,
+                });
+            }
         }
-    }
-    // Ownership outlives process liveness and the owner lock. In particular,
-    // Restart= leaves a window with neither a live PID nor a held lock.
-    if existing
-        .state
-        .as_ref()
-        .is_some_and(|state| state.service_manager.is_some())
-    {
-        return Err(owner_held_error(&existing));
-    }
-    // A held owner lock is a live or starting daemon, whatever the lease says:
-    // for example a service manager restarting its own. Spawning beside it
-    // would only contend for the lock, so no path starts one (#17387).
-    let owner_lock = acquire_owner()?.ok_or_else(|| owner_held_error(&existing))?;
+        // Ownership outlives process liveness and the owner lock. In particular,
+        // Restart= leaves a window with neither a live PID nor a held lock.
+        let managed = existing
+            .state
+            .as_ref()
+            .is_some_and(|state| state.service_manager.is_some());
+        if !managed {
+            if let Some(owner_lock) = acquire_owner()? {
+                break owner_lock;
+            }
+        }
+        // A held owner lock is a live or starting daemon, whatever the lease says:
+        // for example a service manager restarting its own. Spawning beside it
+        // would only contend for the lock, so no path starts one (#17387).
+        if remaining == 0 {
+            return Err(owner_held_error(&existing));
+        }
+        remaining -= 1;
+        sleep();
+        existing = read_status()?;
+    };
     if existing.state.is_some() || existing.stale_reason.is_some() {
         cleanup()?;
     }
@@ -1507,6 +1529,99 @@ fn default_artifact_output_path(artifact_id: &str) -> PathBuf {
 #[cfg(test)]
 mod termination_tests {
     use super::*;
+
+    #[test]
+    fn starting_owner_is_polled_until_its_lease_is_ready() {
+        crate::test_support::with_isolated_home(|_| {
+            let ready = ready_status();
+            let mut starting = ready.clone();
+            starting.reachable = false;
+            starting.state = None;
+            let mut statuses = VecDeque::from([starting, ready]);
+            let mut sleeps = 0;
+            let result = start_or_return_live_with_operations(
+                || Ok(statuses.pop_front().expect("bounded status reads")),
+                || Ok(None::<()>),
+                || panic!("must not stop the starting owner"),
+                || panic!("must not spawn beside the starting owner"),
+                || sleeps += 1,
+                2,
+            )
+            .unwrap();
+            assert_eq!(result.lease_id, "test-lease");
+            assert_eq!(sleeps, 1);
+        });
+    }
+
+    #[test]
+    fn managed_restart_gap_waits_for_replacement_without_spawning() {
+        crate::test_support::with_isolated_home(|_| {
+            let mut ready = ready_status();
+            ready.state.as_mut().unwrap().service_manager =
+                Some(super::super::DaemonServiceManager::Systemd);
+            let mut stopped = ready.clone();
+            stopped.running = false;
+            stopped.reachable = false;
+            let mut statuses = VecDeque::from([stopped, ready]);
+            let result = start_or_return_live_with_operations(
+                || Ok(statuses.pop_front().unwrap()),
+                || -> Result<Option<()>> { panic!("must defer to manager even with free lock") },
+                || panic!("must not clean up managed lease"),
+                || panic!("must not spawn beside manager"),
+                || {},
+                1,
+            )
+            .unwrap();
+            assert_eq!(result.lease_id, "test-lease");
+        });
+    }
+
+    #[test]
+    fn unreachable_owner_times_out_without_spawning() {
+        crate::test_support::with_isolated_home(|_| {
+            let mut status = ready_status();
+            status.reachable = false;
+            let mut sleeps = 0;
+            let result = start_or_return_live_with_operations(
+                || Ok(status.clone()),
+                || Ok(None::<()>),
+                || panic!("must not stop the live owner"),
+                || panic!("must not spawn beside the live owner"),
+                || sleeps += 1,
+                3,
+            );
+            assert!(result.unwrap_err().to_string().contains("owner lock"));
+            assert_eq!(sleeps, 3);
+        });
+    }
+
+    fn ready_status() -> super::super::DaemonStatus {
+        let mut status = read_status().unwrap();
+        status.running = true;
+        status.reachable = true;
+        status.fresh = true;
+        status.state = Some(super::super::DaemonState {
+            schema: super::super::DAEMON_LEASE_SCHEMA.to_string(),
+            lease_id: "test-lease".into(),
+            startup_token: "test-token".into(),
+            address: "127.0.0.1:0".into(),
+            pid: 0,
+            state_path: String::new(),
+            started_at: String::new(),
+            last_seen_at: String::new(),
+            build_identity: crate::build_identity::current(),
+            lab_contract_version: homeboy_lab_contract::LAB_CONTRACT_VERSION,
+            executable: Default::default(),
+            runtime_paths: super::super::DaemonRuntimeSnapshot {
+                pressure: None,
+                pressure_thresholds: Default::default(),
+                loaded_at: String::new(),
+                paths: Vec::new(),
+            },
+            service_manager: None,
+        });
+        status
+    }
 
     #[test]
     fn submitting_cli_build_selects_reuse_restart_or_drain() {

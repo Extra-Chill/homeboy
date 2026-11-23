@@ -622,7 +622,7 @@ fn acknowledgement_outcome(
             None,
         )
     })?;
-    let resource = crate::orchestration::project_record(&record, None).map_err(|error| {
+    let resource = crate::orchestration::project_record(&record, None, None).map_err(|error| {
         Error::validation_invalid_argument("run", error.message, Some(record.run_id.clone()), None)
     })?;
     let acknowledgement = ControlPlaneSubmissionAcknowledgement {

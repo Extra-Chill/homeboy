@@ -53,8 +53,9 @@ use std::time::{Duration, Instant};
 
 use crate::agent_task_gate::AgentTaskGateStatus;
 use crate::agent_task_lifecycle::{
-    canonical_control_plane_identities, lifecycle_action_eligibility, now_timestamp,
-    AgentTaskLifecycleStore, AgentTaskRunRecord, CanonicalControlPlaneIdentities,
+    canonical_control_plane_identities, cook_cancellation_fence, lifecycle_action_eligibility,
+    lifecycle_action_eligibility_with_roots, now_timestamp, AgentTaskLifecycleStore,
+    AgentTaskRunRecord, CanonicalControlPlaneIdentities,
 };
 use crate::agent_task_promotion::AgentTaskPromotionStatus;
 use crate::agent_task_schedule::AgentTaskPlan;
@@ -95,6 +96,8 @@ pub struct RunSnapshot {
     pub plan: Option<AgentTaskPlan>,
     /// The aggregate paired atomically with this record, never a JSON cache.
     pub aggregate: Option<crate::agent_tasks::AgentTaskAggregate>,
+    /// The Cook mission fence read from the Cook index, never the record.
+    pub cancellation_fence: Option<Value>,
 }
 
 #[derive(Debug, Clone)]
@@ -216,6 +219,7 @@ impl LifecycleStoreLookup {
     ) -> Result<RunSnapshot, ControlPlaneError> {
         let plan = self.plan(&record.run_id)?;
         Ok(RunSnapshot {
+            cancellation_fence: cook_cancellation_fence(&self.store, &record),
             record,
             plan,
             aggregate,
@@ -1815,7 +1819,7 @@ impl OrchestrationService<LifecycleStoreLookup> {
                 } else {
                     ControlPlaneActionOutcome::Failed
                 },
-                resource: project_record(&record, None)?,
+                resource: project_in_store(&self.lookup.store, &record)?,
                 result: ControlPlaneActionPayload {
                     schema: homeboy_control_plane_contract::CONTROL_PLANE_RECOVER_RESULT_SCHEMA
                         .into(),
@@ -1852,12 +1856,15 @@ impl OrchestrationService<LifecycleStoreLookup> {
         };
         let idempotency_digest =
             homeboy_engine_primitives::content_hash::sha256_hex(request.idempotency_key.as_bytes());
+        let fenced = cook_cancellation_fence(&self.lookup.store, &record).is_some();
         let admission = observation
             .enqueue_control_plane_action_intent(
                 &intent,
                 "agent_task_run",
                 &idempotency_digest,
-                |projection, run| agent_task_admission_fence(projection, run, request.action),
+                |projection, run| {
+                    agent_task_admission_fence(projection, run, request.action, fenced)
+                },
             )
             .map_err(map_lifecycle_error)?;
         let effect = match admission {
@@ -1985,7 +1992,7 @@ impl OrchestrationService<LifecycleStoreLookup> {
             request.idempotency_key
         );
         if request.action == ControlPlaneAction::Cancel
-            && action_unavailability(&record, request.action).is_none()
+            && action_unavailability(&record, request.action, false).is_none()
         {
             // When the caller targets the Cook ID, the mission fence stops its
             // loop from admitting another attempt. Write it before the terminal check:
@@ -2004,11 +2011,11 @@ impl OrchestrationService<LifecycleStoreLookup> {
             .map_err(map_lifecycle_error)?;
         }
         let (outcome, resource, result, message) = if let Some(reason) =
-            action_unavailability(&record, request.action)
+            action_unavailability(&record, request.action, fenced)
         {
             (
                 ControlPlaneActionOutcome::Failed,
-                project_record(&record, None)?,
+                project_in_store(&self.lookup.store, &record)?,
                 ControlPlaneActionPayload::empty(),
                 Some(reason),
             )
@@ -2070,19 +2077,21 @@ impl OrchestrationService<LifecycleStoreLookup> {
                         .read_record(&resolved)
                         .map_err(map_lifecycle_error)?;
                     match recovered {
-                        Ok((report, code)) => (if code == 0 { ControlPlaneActionOutcome::Succeeded } else { ControlPlaneActionOutcome::Failed }, project_record(&current, None)?, ControlPlaneActionPayload { schema: homeboy_control_plane_contract::CONTROL_PLANE_RECOVER_RESULT_SCHEMA.into(), data: serde_json::json!({"report": report, "exit_code": code}) }, None),
-                        Err(error) => (ControlPlaneActionOutcome::Failed, project_record(&current, None)?, ControlPlaneActionPayload::empty(), Some(error.attributed_message())),
+                        Ok((report, code)) => (if code == 0 { ControlPlaneActionOutcome::Succeeded } else { ControlPlaneActionOutcome::Failed }, project_in_store(&self.lookup.store, &current)?, ControlPlaneActionPayload { schema: homeboy_control_plane_contract::CONTROL_PLANE_RECOVER_RESULT_SCHEMA.into(), data: serde_json::json!({"report": report, "exit_code": code}) }, None),
+                        Err(error) => (ControlPlaneActionOutcome::Failed, project_in_store(&self.lookup.store, &current)?, ControlPlaneActionPayload::empty(), Some(error.attributed_message())),
                     }
                 }
                 ControlPlaneAction::Cancel if record.state().is_terminal() => {
+                    let retired = record.state() == RunExecutionState::CandidateRecoverable;
                     let record = self
                         .lookup
                         .store
                         .read_record(&resolved)
                         .map_err(map_lifecycle_error)?;
-                    let fenced = record.metadata.get("cancellation_fence").is_some();
-                    let retired = record.metadata.get("candidate_retirement").is_some();
-                    let resource = project_record(&record, None)?;
+                    let fenced = cook_cancellation_fence(&self.lookup.store, &record).is_some();
+                    // A retired candidate is just this request's Cancelled record.
+                    let retired = retired && record.state() == RunExecutionState::Cancelled;
+                    let resource = project_in_store(&self.lookup.store, &record)?;
                     let verifying = resource.phase.as_deref() == Some(LIVE_GATE_VERIFYING_PHASE);
                     let mut result = cancel_result_for_record(&record, Duration::ZERO, 0, None);
                     if fenced || retired {
@@ -2164,7 +2173,7 @@ impl OrchestrationService<LifecycleStoreLookup> {
                             });
                             (
                                 outcome,
-                                project_record(&observed, None)?,
+                                project_in_store(&self.lookup.store, &observed)?,
                                 cancel_result_payload(result),
                                 message,
                             )
@@ -2181,7 +2190,7 @@ impl OrchestrationService<LifecycleStoreLookup> {
                                 .map_err(map_lifecycle_error)?;
                             (
                                 ControlPlaneActionOutcome::AlreadySatisfied,
-                                project_record(&current, None)?,
+                                project_in_store(&self.lookup.store, &current)?,
                                 cancel_result_payload(cancel_result_for_record(
                                     &current,
                                     Duration::ZERO,
@@ -2193,7 +2202,7 @@ impl OrchestrationService<LifecycleStoreLookup> {
                         }
                         Err(error) => (
                             ControlPlaneActionOutcome::Failed,
-                            project_record(&record, None)?,
+                            project_in_store(&self.lookup.store, &record)?,
                             ControlPlaneActionPayload::empty(),
                             Some(redacted_bounded(&error.attributed_message(), MESSAGE_BOUND)),
                         ),
@@ -2225,7 +2234,7 @@ impl OrchestrationService<LifecycleStoreLookup> {
                             let message = report.failure_summary();
                             (
                                 outcome,
-                                project_record(&current, None)?,
+                                project_in_store(&self.lookup.store, &current)?,
                                 ControlPlaneActionPayload {
                                     schema: report.schema.to_string(),
                                     data: serde_json::to_value(report).unwrap_or_default(),
@@ -2235,7 +2244,7 @@ impl OrchestrationService<LifecycleStoreLookup> {
                         }
                         Err(error) => (
                             ControlPlaneActionOutcome::Failed,
-                            project_record(&record, None)?,
+                            project_in_store(&self.lookup.store, &record)?,
                             ControlPlaneActionPayload::empty(),
                             Some(redacted_bounded(&error.attributed_message(), MESSAGE_BOUND)),
                         ),
@@ -2264,7 +2273,7 @@ impl OrchestrationService<LifecycleStoreLookup> {
                     match updated {
                         Ok((_updated, current, reconciliation)) => (
                             ControlPlaneActionOutcome::Succeeded,
-                            project_record(&current, None)?,
+                            project_in_store(&self.lookup.store, &current)?,
                             ControlPlaneActionPayload {
                                 schema: CONTROL_PLANE_PLACEMENT_UPDATE_RESULT_SCHEMA.to_string(),
                                 data: with_scheduling_blocker(serde_json::json!({
@@ -2279,7 +2288,7 @@ impl OrchestrationService<LifecycleStoreLookup> {
                         ),
                         Err(error) => (
                             ControlPlaneActionOutcome::Failed,
-                            project_record(&record, None)?,
+                            project_in_store(&self.lookup.store, &record)?,
                             ControlPlaneActionPayload::empty(),
                             Some(redacted_bounded(&error.attributed_message(), MESSAGE_BOUND)),
                         ),
@@ -2308,7 +2317,7 @@ impl OrchestrationService<LifecycleStoreLookup> {
                             };
                             (
                                 outcome,
-                                project_record(&retry.record, None)?,
+                                project_in_store(&self.lookup.store, &retry.record)?,
                                 ControlPlaneActionPayload {
                                     schema: CONTROL_PLANE_RETRY_RESULT_SCHEMA.to_string(),
                                     data: {
@@ -2340,7 +2349,7 @@ impl OrchestrationService<LifecycleStoreLookup> {
                         }
                         Err(error) => (
                             ControlPlaneActionOutcome::Failed,
-                            project_record(&record, None)?,
+                            project_in_store(&self.lookup.store, &record)?,
                             ControlPlaneActionPayload::empty(),
                             Some(redacted_bounded(&error.attributed_message(), MESSAGE_BOUND)),
                         ),
@@ -2423,10 +2432,13 @@ impl OrchestrationService<LifecycleStoreLookup> {
             && record.runner_id().is_some()
             && record.runner_job_id().is_some();
         if !terminal_reprojection {
-            if let Some(reason) = eligibility_unavailability(record, ControlPlaneAction::Recover) {
+            let fenced = cook_cancellation_fence(&self.lookup.store, record).is_some();
+            if let Some(reason) =
+                eligibility_unavailability(record, ControlPlaneAction::Recover, fenced)
+            {
                 return Ok((
                     ControlPlaneActionOutcome::Failed,
-                    project_record(record, None)?,
+                    project_in_store(&self.lookup.store, record)?,
                     ControlPlaneActionPayload::empty(),
                     Some(reason),
                 ));
@@ -2451,7 +2463,7 @@ impl OrchestrationService<LifecycleStoreLookup> {
                         });
                     (
                         ControlPlaneActionOutcome::AlreadySatisfied,
-                        project_record(&record, None)?,
+                        project_in_store(&self.lookup.store, &record)?,
                         ControlPlaneActionPayload {
                             schema: "homeboy/unmaterialized-cook-resume/v1".to_string(),
                             data: serde_json::json!({
@@ -2490,7 +2502,7 @@ impl OrchestrationService<LifecycleStoreLookup> {
                             }));
                             (
                                 ControlPlaneActionOutcome::Succeeded,
-                                project_record(&current, None)?,
+                                project_in_store(&self.lookup.store, &current)?,
                                 ControlPlaneActionPayload {
                                     schema: "homeboy/unmaterialized-cook-resume/v1".to_string(),
                                     data,
@@ -2500,7 +2512,7 @@ impl OrchestrationService<LifecycleStoreLookup> {
                         }
                         Err(error) => (
                             ControlPlaneActionOutcome::Failed,
-                            project_record(&record, None)?,
+                            project_in_store(&self.lookup.store, &record)?,
                             ControlPlaneActionPayload::empty(),
                             Some(redacted_bounded(&error.attributed_message(), MESSAGE_BOUND)),
                         ),
@@ -2552,7 +2564,7 @@ impl OrchestrationService<LifecycleStoreLookup> {
                 match resumed {
                         Ok((_, current)) if candidate_recoverable_continuation => (
                             ControlPlaneActionOutcome::Failed,
-                            project_record(&current, None)?,
+                            project_in_store(&self.lookup.store, &current)?,
                             ControlPlaneActionPayload::empty(),
                             Some(redacted_bounded(
                                 &format!(
@@ -2570,7 +2582,7 @@ impl OrchestrationService<LifecycleStoreLookup> {
                             } else {
                                 ControlPlaneActionOutcome::Succeeded
                             },
-                            project_record(&current, None)?,
+                            project_in_store(&self.lookup.store, &current)?,
                             ControlPlaneActionPayload {
                                 schema: CONTROL_PLANE_RESUME_RESULT_SCHEMA.to_string(),
                                 data: serde_json::json!({
@@ -2582,7 +2594,7 @@ impl OrchestrationService<LifecycleStoreLookup> {
                         ),
                         Err(error) => (
                             ControlPlaneActionOutcome::Failed,
-                            project_record(&record, None)?,
+                            project_in_store(&self.lookup.store, &record)?,
                             ControlPlaneActionPayload::empty(),
                             Some(redacted_bounded(&error.attributed_message(), MESSAGE_BOUND)),
                         ),
@@ -2610,11 +2622,13 @@ fn agent_task_admission_fence(
     projection: &homeboy_core::observation::ControlPlaneResourceProjection,
     run: Option<&homeboy_core::observation::RunRecord>,
     action: ControlPlaneAction,
+    fenced: bool,
 ) -> homeboy_core::Result<ControlPlaneActionFence> {
     let reason = match run {
         Some(run) => action_unavailability(
             &crate::agent_task_lifecycle::snapshot_from_run(run)?,
             action,
+            fenced,
         ),
         None => Some("canonical control-plane resource not found".to_string()),
     };
@@ -2624,6 +2638,15 @@ fn agent_task_admission_fence(
         eligible: reason.is_none(),
         reason,
     })
+}
+
+/// Project a record through its Cook index's mission fence.
+pub(crate) fn project_in_store(
+    store: &AgentTaskLifecycleStore,
+    record: &AgentTaskRunRecord,
+) -> Result<ControlPlaneRun, ControlPlaneError> {
+    let fence = cook_cancellation_fence(store, record);
+    project_record(record, None, fence.as_ref())
 }
 
 /// Only a Cook ID closes the mission. An exact attempt cancellation may retire
@@ -2650,6 +2673,7 @@ fn prepare_targeted_cancellation(
 fn action_unavailability(
     record: &AgentTaskRunRecord,
     action: ControlPlaneAction,
+    fenced: bool,
 ) -> Option<String> {
     // These actions have explicit idempotent terminal dispositions below.
     if matches!(
@@ -2658,7 +2682,7 @@ fn action_unavailability(
     ) {
         return None;
     }
-    eligibility_unavailability(record, action)
+    eligibility_unavailability(record, action, fenced)
 }
 
 /// The lifecycle eligibility verdict for `action`: fenced missions refuse every
@@ -2666,10 +2690,9 @@ fn action_unavailability(
 fn eligibility_unavailability(
     record: &AgentTaskRunRecord,
     action: ControlPlaneAction,
+    fenced: bool,
 ) -> Option<String> {
-    if record.metadata.get("cancellation_fence").is_some()
-        || record.metadata.get("candidate_retirement").is_some()
-    {
+    if fenced {
         return Some("Cook mission is fenced; its candidate is retired".into());
     }
     let report = lifecycle_action_eligibility(record, None);
@@ -2693,7 +2716,7 @@ fn recover_interrupted_action_acknowledgement(
     let failed = |message: &str| {
         Ok((
             ControlPlaneActionOutcome::Failed,
-            project_record(&current, None)?,
+            project_in_store(store, &current)?,
             ControlPlaneActionPayload::empty(),
             Some(message.to_string()),
         ))
@@ -2705,7 +2728,7 @@ fn recover_interrupted_action_acknowledgement(
             } else {
                 ControlPlaneActionOutcome::AlreadySatisfied
             },
-            project_record(&current, None)?,
+            project_in_store(store, &current)?,
             cancel_result_payload(cancel_result_for_record(
                 &current,
                 Duration::ZERO,
@@ -2739,7 +2762,7 @@ fn recover_interrupted_action_acknowledgement(
                 if successor.metadata["retry_of"] == original.run_id {
                     (
                         ControlPlaneActionOutcome::AlreadySatisfied,
-                        project_record(&successor, None)?,
+                        project_in_store(store, &successor)?,
                         ControlPlaneActionPayload {
                             schema: CONTROL_PLANE_RETRY_RESULT_SCHEMA.to_string(),
                             data: serde_json::json!({
@@ -2764,7 +2787,7 @@ fn recover_interrupted_action_acknowledgement(
         }
         ControlPlaneAction::Recover if current.state().is_terminal() && current.metadata["unmaterialized_cook_admission"].is_object() => (
             ControlPlaneActionOutcome::Failed,
-            project_record(&current, None)?,
+            project_in_store(store, &current)?,
             ControlPlaneActionPayload {
                 schema: homeboy_control_plane_contract::CONTROL_PLANE_RECOVER_RESULT_SCHEMA.into(),
                 data: serde_json::json!({"report": crate::agent_task_service::ensure_recover_failure_contract(serde_json::json!({"run_id": current.run_id, "terminal": true, "terminal_state": current.state(), "recovered": true, "failure": {"code": "agent_task.recover_interrupted", "message": "an earlier recover of this admission-failed Cook was interrupted; its outcome is recorded on the Cook, so no second relaunch was attempted. Re-run recover with a fresh idempotency key to requeue it.", "next_command": format!("homeboy agent-task recover {}", current.run_id)}}), 2, &current.run_id), "exit_code": 2}),
@@ -2779,7 +2802,7 @@ fn recover_interrupted_action_acknowledgement(
                         crate::agent_task_artifacts::reviewer_facing_aggregate(&aggregate);
                     (
                         if exit_code == 0 { ControlPlaneActionOutcome::Succeeded } else { ControlPlaneActionOutcome::Failed },
-                        project_record(&current, None)?,
+                        project_in_store(store, &current)?,
                         ControlPlaneActionPayload {
                             schema: homeboy_control_plane_contract::CONTROL_PLANE_RECOVER_RESULT_SCHEMA.to_string(),
                             data: serde_json::json!({"report": aggregate, "exit_code": exit_code}),
@@ -3771,6 +3794,7 @@ pub fn canonical_candidate_from_durable_record(
         record: record.clone(),
         plan: None,
         aggregate: aggregate.cloned(),
+        cancellation_fence: None,
     };
     let resource = project_snapshot(&snapshot, false)
         .map_err(|error| homeboy_core::Error::internal_unexpected(error.message))?;
@@ -3961,21 +3985,24 @@ fn default_resume(
 ///
 /// This is the single-run read shape: it carries `action_eligibility`, which
 /// run-list rows deliberately omit (see [`project_run_summary`]).
+/// `fence` is the Cook index's mission fence ([`cook_cancellation_fence`]).
 pub fn project_record(
     record: &AgentTaskRunRecord,
     plan: Option<&AgentTaskPlan>,
+    fence: Option<&Value>,
 ) -> Result<ControlPlaneRun, ControlPlaneError> {
     // Status reads must expose a dead adoption owner without persisting the
     // interruption; the reconcile action remains the mutating path.
     let record = &project_dead_candidate_adoption(record);
-    let mut resource = project_summary_fields(record, plan)?;
+    let mut resource = project_summary_fields(record, plan, fence)?;
     // Both the recovery step and the eligibility report project the one
     // `CookRunState` and its `legal_actions()`: the step is the
     // `CookRecoveryPlan` that `recover` executes, gated on `Recover` being
     // legal, and the report is empty exactly when no action is legal. So a
     // projected step other than `none` always comes with a non-empty report.
-    resource.recovery = projected_cook_recovery(record);
-    let mut eligibility = lifecycle_action_eligibility(record, plan);
+    resource.recovery = projected_cook_recovery(record, fence.is_some());
+    let mut eligibility =
+        lifecycle_action_eligibility_with_roots(record, plan, None, fence.is_some());
     // An empty report means no action is legal for this state; `recover`
     // joins a report only when the state admits some action.
     if !eligibility.actions.is_empty() {
@@ -3995,10 +4022,11 @@ fn project_snapshot(
     snapshot: &RunSnapshot,
     summary: bool,
 ) -> Result<ControlPlaneRun, ControlPlaneError> {
+    let fence = snapshot.cancellation_fence.as_ref();
     let mut resource = if summary {
-        project_run_summary(&snapshot.record, snapshot.plan.as_ref())?
+        project_run_summary(&snapshot.record, snapshot.plan.as_ref(), fence)?
     } else {
-        project_record(&snapshot.record, snapshot.plan.as_ref())?
+        project_record(&snapshot.record, snapshot.plan.as_ref(), fence)?
     };
     if resource.blocker.is_none()
         && resource.state.is_terminal()
@@ -4062,13 +4090,15 @@ fn project_snapshot(
 fn project_run_summary(
     record: &AgentTaskRunRecord,
     plan: Option<&AgentTaskPlan>,
+    fence: Option<&Value>,
 ) -> Result<ControlPlaneRun, ControlPlaneError> {
-    project_summary_fields(&project_dead_candidate_adoption(record), plan)
+    project_summary_fields(&project_dead_candidate_adoption(record), plan, fence)
 }
 
 fn project_summary_fields(
     record: &AgentTaskRunRecord,
     plan: Option<&AgentTaskPlan>,
+    fence: Option<&Value>,
 ) -> Result<ControlPlaneRun, ControlPlaneError> {
     let run = RunId::new(&record.run_id)
         .map_err(|error| ControlPlaneError::invalid_argument(format!("durable run id: {error}")))?;
@@ -4137,11 +4167,7 @@ fn project_summary_fields(
         });
         resource.blocker = None;
     }
-    if let Some(fence) = record
-        .metadata
-        .get("cancellation_fence")
-        .or_else(|| record.metadata.get("candidate_retirement"))
-    {
+    if let Some(fence) = fence {
         // The classifier's `fenced` fact; the public projection keeps its
         // historical `cancelled` label for a fenced mission.
         resource.state = ControlPlaneState::Cancelled;
@@ -4237,7 +4263,10 @@ fn project_live_gate_verification_in(
 /// with no step projects step `none` and the `diagnose`
 /// command, which explains why, so no surface ever names a step `recover`
 /// would not perform. Runs that are not Cooks project nothing.
-fn projected_cook_recovery(record: &AgentTaskRunRecord) -> Option<ControlPlaneRecovery> {
+fn projected_cook_recovery(
+    record: &AgentTaskRunRecord,
+    fenced: bool,
+) -> Option<ControlPlaneRecovery> {
     let cook_id = record
         .metadata
         .get("cook_id")
@@ -4262,8 +4291,9 @@ fn projected_cook_recovery(record: &AgentTaskRunRecord) -> Option<ControlPlaneRe
             cook_id,
         });
     };
-    let allowed =
-        crate::agent_task_lifecycle::CookRunState::of(record).allows(ControlPlaneAction::Recover);
+    let allowed = crate::agent_task_lifecycle::CookRunState::of(record)
+        .with_cook_index_fence(fenced)
+        .allows(ControlPlaneAction::Recover);
     let step = if allowed {
         plan.step.action_name().unwrap_or("none")
     } else {
@@ -6655,7 +6685,7 @@ mod tests {
                     request.idempotency_key.as_bytes(),
                 ),
                 |projection, run| {
-                    super::agent_task_admission_fence(projection, run, request.action)
+                    super::agent_task_admission_fence(projection, run, request.action, false)
                 },
             )
             .expect("enqueue action effect");
@@ -6826,7 +6856,7 @@ mod tests {
         );
 
         assert_eq!(run_state(&record), ControlPlaneState::CandidateRecoverable);
-        let projected = project_record(&record, None).expect("project run");
+        let projected = project_record(&record, None, None).expect("project run");
         assert_eq!(projected.state, ControlPlaneState::CandidateRecoverable);
         assert_ne!(projected.state, ControlPlaneState::Succeeded);
     }
@@ -6859,7 +6889,7 @@ mod tests {
         let projected = std::thread::scope(|scope| {
             scope
                 .spawn(|| {
-                    let mut resource = super::project_summary_fields(&record, None).unwrap();
+                    let mut resource = super::project_summary_fields(&record, None, None).unwrap();
                     assert_eq!(resource.state, ControlPlaneState::CandidateRecoverable);
                     super::project_live_gate_verification_in(&mut resource, &record, &store);
                     resource
@@ -6883,7 +6913,7 @@ mod tests {
         let store =
             crate::agent_task_service::CookRecipeStore::from_data_root(temp.path().to_path_buf());
         let record = live_gate_driver_candidate();
-        let mut resource = super::project_summary_fields(&record, None).unwrap();
+        let mut resource = super::project_summary_fields(&record, None, None).unwrap();
         super::project_live_gate_verification_in(&mut resource, &record, &store);
         assert_eq!(resource.state, ControlPlaneState::CandidateRecoverable);
         assert_ne!(
@@ -6903,7 +6933,7 @@ mod tests {
             "bound-model-provider-summary",
             Some("anthropic/claude-sonnet-5".to_string()),
         );
-        let projected = project_record(&bound, None).expect("project run");
+        let projected = project_record(&bound, None, None).expect("project run");
         let provider = projected.provider.as_ref().expect("provider summary");
         assert_eq!(provider.id, "anthropic");
         assert_eq!(provider.model, None);
@@ -6917,7 +6947,7 @@ mod tests {
             "model": "openai/gpt-6-luna",
             "state": "failed",
         }]);
-        let projected = project_record(&bound, None).expect("project run");
+        let projected = project_record(&bound, None, None).expect("project run");
         assert_eq!(
             projected.provider.as_ref().expect("provider summary").model,
             Some("openai/gpt-6-luna".to_string())
@@ -6934,7 +6964,7 @@ mod tests {
             "model": "openai/gpt-6-luna",
             "state": "running",
         }]);
-        let projected = project_record(&running, None).expect("project run");
+        let projected = project_record(&running, None, None).expect("project run");
         let provider = projected.provider.as_ref().expect("provider summary");
         assert_eq!(provider.state.as_deref(), Some("running"));
         assert_eq!(provider.model.as_deref(), Some("openai/gpt-6-luna"));
@@ -7109,7 +7139,7 @@ mod tests {
             .expect("liveness JSON")
             .contains("provider-secret-content"));
 
-        let resource = project_record(&record, None).expect("project running record");
+        let resource = project_record(&record, None, None).expect("project running record");
         assert_eq!(
             resource.updated_at.as_deref(),
             Some(observed_at.to_rfc3339().as_str())
@@ -7129,7 +7159,7 @@ mod tests {
             "details": {},
             "provider_executions_consumed": 0
         });
-        let resource = project_record(&record, None).expect("project failed attempt");
+        let resource = project_record(&record, None, None).expect("project failed attempt");
         assert_eq!(resource.phase.as_deref(), Some("pre_execution_failure"));
         let blocker = resource.blocker.expect("root cause");
         assert_eq!(blocker.code.as_deref(), Some("checkpoint.stage_intent"));
@@ -7141,7 +7171,7 @@ mod tests {
         let mut record = record(AGENT_TASK_RUN);
         record.set_state_for_test(RunExecutionState::Running);
         record.metadata["cook_progress"] = json!({"phase": "in_flight"});
-        let resource = project_record(&record, None).expect("project staging attempt");
+        let resource = project_record(&record, None, None).expect("project staging attempt");
         assert_eq!(resource.phase.as_deref(), Some("in_flight"));
     }
 
@@ -7197,7 +7227,7 @@ mod tests {
         .expect("record");
         record.metadata["aggregate_absent"] = json!(true);
         assert_eq!(
-            project_record(&record, None)
+            project_record(&record, None, None)
                 .expect("projected status")
                 .phase,
             Some("provider_execution".to_string())
@@ -7221,7 +7251,7 @@ mod tests {
             }
         }))
         .expect("pre-handoff record");
-        let projected = project_record(&record, None).expect("materializing status");
+        let projected = project_record(&record, None, None).expect("materializing status");
         assert_eq!(projected.phase.as_deref(), Some("source_materialization"));
         assert_eq!(
             projected.owner.as_ref().expect("controller owner").kind,
@@ -7473,6 +7503,7 @@ mod tests {
             record: record(run_id),
             plan,
             aggregate: None,
+            cancellation_fence: None,
         }
     }
 
@@ -9119,7 +9150,8 @@ mod tests {
                 }
                 assert!(cancelled.message.as_deref().unwrap().contains("retired"));
                 let projected =
-                    project_record(&store.read_record(&attempt_id).unwrap(), None).unwrap();
+                    super::project_in_store(&store, &store.read_record(&attempt_id).unwrap())
+                        .unwrap();
                 assert_eq!(projected.state, ControlPlaneState::Cancelled);
                 assert_eq!(projected.recovery.as_ref().unwrap().step, "none");
                 assert!(projected.blocker.unwrap().message.contains("operator stop"));
@@ -9865,7 +9897,7 @@ mod tests {
         );
         record.metadata["execution_placement_decision"] = serde_json::to_value(decision).unwrap();
 
-        let value = serde_json::to_value(project_record(&record, None).unwrap()).unwrap();
+        let value = serde_json::to_value(project_record(&record, None, None).unwrap()).unwrap();
         assert_eq!(value["placement"]["requested"], "controller");
         assert_eq!(value["placement"]["selected"], "controller");
         assert!(value["placement"].get("runner_id").is_none());
@@ -9897,7 +9929,7 @@ mod tests {
             }
         });
 
-        let value = serde_json::to_value(project_record(&record, None).unwrap()).unwrap();
+        let value = serde_json::to_value(project_record(&record, None, None).unwrap()).unwrap();
         assert_eq!(value["placement"]["requested"], "automatic");
         assert_eq!(value["placement"]["selected"], "runner");
         assert_eq!(value["placement"]["runner_id"], "homeboy-lab");
@@ -9910,7 +9942,7 @@ mod tests {
         let decision = runner_placement_decision(homeboy_lab_contract::Placement::LabOrLocal, true);
         record.metadata["execution_placement_decision"] = serde_json::to_value(decision).unwrap();
 
-        let value = serde_json::to_value(project_record(&record, None).unwrap()).unwrap();
+        let value = serde_json::to_value(project_record(&record, None, None).unwrap()).unwrap();
         assert_eq!(value["placement"]["requested"], "lab_or_local");
         assert_eq!(value["placement"]["selected"], "runner");
     }
@@ -9928,7 +9960,7 @@ mod tests {
         record.metadata["execution_placement_decision"] = serde_json::to_value(decision).unwrap();
         record.metadata["execution_placement_outcome"] = serde_json::to_value(outcome).unwrap();
 
-        let value = serde_json::to_value(project_record(&record, None).unwrap()).unwrap();
+        let value = serde_json::to_value(project_record(&record, None, None).unwrap()).unwrap();
         assert_eq!(value["placement"]["requested"], "runner");
         assert_eq!(value["placement"]["selected"], "runner");
         assert_eq!(value["placement"]["effective"], "runner");
@@ -9948,7 +9980,7 @@ mod tests {
         record.metadata["execution_placement_decision"] = serde_json::to_value(decision).unwrap();
         record.metadata["execution_placement_outcome"] = serde_json::to_value(outcome).unwrap();
 
-        let value = serde_json::to_value(project_record(&record, None).unwrap()).unwrap();
+        let value = serde_json::to_value(project_record(&record, None, None).unwrap()).unwrap();
         assert_eq!(value["placement"]["selected"], "runner");
         assert_eq!(value["placement"]["effective"], "controller");
     }
@@ -9967,14 +9999,17 @@ mod tests {
         record.metadata["execution_placement_decision"] = serde_json::to_value(decision).unwrap();
         record.metadata["execution_placement_outcome"] = serde_json::to_value(outcome).unwrap();
 
-        let value = serde_json::to_value(project_record(&record, None).unwrap()).unwrap();
+        let value = serde_json::to_value(project_record(&record, None, None).unwrap()).unwrap();
         assert!(value["placement"].get("effective").is_none());
     }
 
     #[test]
     fn placement_is_not_inferred_from_runner_id() {
         let record = record(AGENT_TASK_RUN);
-        assert!(project_record(&record, None).unwrap().placement.is_none());
+        assert!(project_record(&record, None, None)
+            .unwrap()
+            .placement
+            .is_none());
     }
 
     #[test]
@@ -9984,7 +10019,10 @@ mod tests {
         decision.decision_id = "forged-decision".to_string();
         record.metadata["execution_placement_decision"] = serde_json::to_value(decision).unwrap();
 
-        assert!(project_record(&record, None).unwrap().placement.is_none());
+        assert!(project_record(&record, None, None)
+            .unwrap()
+            .placement
+            .is_none());
     }
 
     #[test]
@@ -9995,7 +10033,10 @@ mod tests {
         decision.runner = None;
         record.metadata["execution_placement_decision"] = serde_json::to_value(decision).unwrap();
 
-        assert!(project_record(&record, None).unwrap().placement.is_none());
+        assert!(project_record(&record, None, None)
+            .unwrap()
+            .placement
+            .is_none());
     }
 
     #[test]
@@ -10008,7 +10049,8 @@ mod tests {
                 "plane": "isolated_tasks"
             }
         });
-        let legacy = project_record(&record, Some(&legacy_plan)).expect("unpersisted projection");
+        let legacy =
+            project_record(&record, Some(&legacy_plan), None).expect("unpersisted projection");
         assert_eq!(
             legacy.mission.as_ref().map(|mission| mission.as_str()),
             Some(AGENT_TASK_COOK)
@@ -10016,7 +10058,7 @@ mod tests {
 
         let mut durable_record = record;
         durable_record.metadata["fanout"] = legacy_plan.metadata["fanout"].clone();
-        let durable = project_record(&durable_record, None).expect("durable projection");
+        let durable = project_record(&durable_record, None, None).expect("durable projection");
         assert_eq!(
             durable.mission.as_ref().map(|mission| mission.as_str()),
             Some("fanout-portfolio-1")
@@ -10049,7 +10091,7 @@ mod tests {
             serde_json::Value::Null,
         );
 
-        let resource = project_record(&record, None).expect("project gate failure");
+        let resource = project_record(&record, None, None).expect("project gate failure");
 
         assert_eq!(resource.state, ControlPlaneState::CandidateRecoverable);
         assert_eq!(
@@ -10097,7 +10139,7 @@ mod tests {
             serde_json::Value::Null,
         );
 
-        let resource = project_record(&record, None).expect("project gate failure");
+        let resource = project_record(&record, None, None).expect("project gate failure");
         let blocker = resource.blocker.expect("delivery blocker");
         assert_eq!(blocker.code.as_deref(), Some("gate_failed"));
         let output = blocker.output.expect("gate failure output");
@@ -10128,7 +10170,7 @@ mod tests {
         );
         let before = record.clone();
 
-        let resource = project_record(&record, None).expect("project moving-base blocker");
+        let resource = project_record(&record, None, None).expect("project moving-base blocker");
 
         assert_eq!(record, before);
         assert_eq!(resource.state, ControlPlaneState::CandidateRecoverable);
@@ -10149,13 +10191,14 @@ mod tests {
     fn injected_plan_is_used_once_for_retry_eligibility() {
         let mut failed = record(AGENT_TASK_RUN);
         failed.set_state_for_test(homeboy_lifecycle_contract::RunExecutionState::Failed);
-        let without_plan = project_record(&failed, None).expect("project");
+        let without_plan = project_record(&failed, None, None).expect("project");
         assert_eq!(
             eligibility(&without_plan, ControlPlaneAction::Retry),
             ControlPlaneActionAvailability::Indeterminate
         );
-        let with_plan = project_record(&failed, Some(&AgentTaskPlan::new("plan", Vec::new())))
-            .expect("project");
+        let with_plan =
+            project_record(&failed, Some(&AgentTaskPlan::new("plan", Vec::new())), None)
+                .expect("project");
         assert_eq!(
             eligibility(&with_plan, ControlPlaneAction::Retry),
             ControlPlaneActionAvailability::Unavailable
@@ -10175,7 +10218,7 @@ mod tests {
         record.metadata["execution_scheduling"] =
             json!({"epoch": 1, "current_intent_id": "step", "recovery_failures": 3});
 
-        let resource = project_record(&record, None).expect("project admission");
+        let resource = project_record(&record, None, None).expect("project admission");
         let blocker = resource.blocker.expect("admission blocker");
         assert_eq!(blocker.code.as_deref(), Some("queued"));
         assert_eq!(blocker.state.as_deref(), Some("queued"));
@@ -10226,7 +10269,7 @@ mod tests {
         record.metadata["execution_scheduling"] =
             json!({"epoch": 1, "current_intent_id": "step", "recovery_failures": 20});
 
-        let resource = project_record(&record, None).expect("project exhausted admission");
+        let resource = project_record(&record, None, None).expect("project exhausted admission");
         let blocker = resource.blocker.expect("admission blocker");
         assert_eq!(blocker.code.as_deref(), Some("exhausted"));
         assert_eq!(
@@ -10400,7 +10443,7 @@ mod tests {
             }),
         );
 
-        let resource = project_record(&published, None).expect("project published run");
+        let resource = project_record(&published, None, None).expect("project published run");
         assert!(resource.publication.is_some());
         assert_eq!(resource.blocker, None);
     }
@@ -10435,7 +10478,7 @@ mod tests {
             }
         }]);
 
-        let resource = project_record(&failed, None).expect("project guard stop");
+        let resource = project_record(&failed, None, None).expect("project guard stop");
         let blocker = resource.blocker.expect("typed blocker");
         assert_eq!(
             blocker.code.as_deref(),
@@ -10478,14 +10521,7 @@ mod tests {
         });
         for (label, extra) in [
             ("plain", json!({})),
-            (
-                "fenced",
-                json!({"cancellation_fence": {"reason": "cancelled"}}),
-            ),
-            (
-                "retired",
-                json!({"candidate_retirement": {"reason": "retired"}}),
-            ),
+            ("fenced", json!({})),
             (
                 "continuing",
                 json!({"cook_continuation": live_continuation}),
@@ -10497,9 +10533,11 @@ mod tests {
             for (key, value) in extra.as_object().unwrap() {
                 record.metadata[key] = value.clone();
             }
-            let state = crate::agent_task_lifecycle::CookRunState::of(&record);
+            let fence = (label == "fenced").then(|| json!({"reason": "cancelled"}));
+            let state = crate::agent_task_lifecycle::CookRunState::of(&record)
+                .with_cook_index_fence(fence.is_some());
             let legal = crate::agent_task_lifecycle::legal_actions(&state);
-            let projected = project_record(&record, None).expect("projection");
+            let projected = project_record(&record, None, fence.as_ref()).expect("projection");
             let actions = projected.action_eligibility.expect("report").actions;
             let recovery = projected.recovery.expect("Cook recovery projection");
             assert_eq!(
@@ -10529,8 +10567,8 @@ mod tests {
         let mut record = record(AGENT_TASK_RUN);
         record.set_state_for_test(RunExecutionState::CandidateRecoverable);
         record.metadata["cook_id"] = json!("fenced-cook");
-        record.metadata["cancellation_fence"] = json!({"reason": "cancelled"});
-        let projected = project_record(&record, None).expect("projection");
+        let fence = json!({"reason": "cancelled"});
+        let projected = project_record(&record, None, Some(&fence)).expect("projection");
         assert_eq!(projected.state, ControlPlaneState::Cancelled);
         assert!(projected
             .action_eligibility
@@ -10547,7 +10585,7 @@ mod tests {
     fn project_record_matches_service_run() {
         let seeded = record(AGENT_TASK_RUN);
         let requested = RunId::new(AGENT_TASK_RUN).expect("run id");
-        let from_record = project_record(&seeded, None).expect("project");
+        let from_record = project_record(&seeded, None, None).expect("project");
         let from_service = service().run(&requested).expect("run");
         assert_eq!(from_record, from_service);
     }
@@ -10560,7 +10598,7 @@ mod tests {
             crate::agent_task_lifecycle::execution_step_owner_fixture("cook"),
         );
 
-        let resource = project_record(&record, None).expect("project active supervisor");
+        let resource = project_record(&record, None, None).expect("project active supervisor");
         // A provider-succeeded Cook without verified, finalized evidence is a
         // recoverable candidate to the classifier, owner or not.
         assert_eq!(resource.state, run_state(&record));
@@ -10576,7 +10614,7 @@ mod tests {
         queued.metadata.as_object_mut().unwrap().extend(
             crate::agent_task_lifecycle::execution_step_owner_fixture("cook"),
         );
-        let resource = project_record(&queued, None).expect("project queued step");
+        let resource = project_record(&queued, None, None).expect("project queued step");
         assert_ne!(resource.state, ControlPlaneState::Succeeded);
         assert_eq!(resource.phase.as_deref(), Some("admission"));
 
@@ -10588,7 +10626,7 @@ mod tests {
         parked.metadata["execution_scheduling"]["admission_wait"] = json!({
             "status": "pending_resource_admission", "reason": "pressure",
         });
-        let resource = project_record(&parked, None).expect("project parked step");
+        let resource = project_record(&parked, None, None).expect("project parked step");
         assert_ne!(resource.state, ControlPlaneState::Succeeded);
         assert_eq!(resource.phase.as_deref(), Some("admission"));
     }
@@ -10598,7 +10636,7 @@ mod tests {
         let mut record = record(AGENT_TASK_RUN);
         record.metadata["runner_pid"] = json!(std::process::id());
 
-        let resource = project_record(&record, None).expect("project completed run");
+        let resource = project_record(&record, None, None).expect("project completed run");
         assert_eq!(resource.state, ControlPlaneState::Succeeded);
         assert_eq!(resource.finished_at, record.updated_at);
     }
@@ -10621,7 +10659,7 @@ mod tests {
             .expect("candidate adoption"),
         );
 
-        let resource = project_record(&record, None).expect("project stale adoption");
+        let resource = project_record(&record, None, None).expect("project stale adoption");
         assert_eq!(resource.candidate.expect("candidate").state, "interrupted");
         assert_eq!(
             record.candidate_adoption.expect("durable adoption").state,

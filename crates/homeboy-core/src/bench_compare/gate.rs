@@ -160,6 +160,9 @@ pub fn cook_gate_program(spec: &BenchCompareSpec) -> crate::Result<String> {
     if let Some(corpus) = &spec.corpus {
         program.extend(["--corpus".to_string(), quote(corpus)]);
     }
+    for tool in &spec.required_tools {
+        program.extend(["--required-tool".to_string(), quote(tool)]);
+    }
     for command in &spec.runner {
         program.extend(["--workload-command".to_string(), quote(command)]);
     }

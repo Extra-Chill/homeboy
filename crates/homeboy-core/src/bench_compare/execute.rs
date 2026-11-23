@@ -34,6 +34,8 @@ pub struct BenchCompareRequest<'a> {
     pub head: String,
     pub corpus: PathBuf,
     pub runner: Vec<String>,
+    /// Executables required by the workload, checked before either side starts.
+    pub required_tools: Vec<String>,
     pub fail_on: BenchCompareFailOn,
     pub side_timeout: Duration,
     pub artifact_dir: PathBuf,
@@ -68,15 +70,54 @@ pub fn run_bench_compare(request: &BenchCompareRequest<'_>) -> Result<BenchCompa
     };
 
     let mut lifecycle = BenchCompareLifecycle::default();
-
-    let base = run_side(
-        request,
-        "base",
-        &request.base,
-        SideSource::Revision(base_sha),
-        &mut lifecycle,
+    // Use the same contained login shell for preflight and workload execution.
+    let preflight_dir = request.artifact_dir.join("preflight");
+    fs::create_dir_all(&preflight_dir).map_err(|e| {
+        Error::internal_io(e.to_string(), Some("create preflight logs".to_string()))
+    })?;
+    let tools = request.required_tools.iter().map(|tool| {
+        format!("command -v {} >/dev/null 2>&1 || {{ echo 'missing required tool:' {} >&2; exit 127; }}", shell_quote(tool), shell_quote(tool))
+    }).collect::<Vec<_>>().join("; ");
+    let preflight = run_contained_step(
+        if tools.is_empty() { ":" } else { &tools },
+        0,
+        &request.repo_root,
+        &preflight_dir,
+        &[],
+        Instant::now() + request.side_timeout,
+        request.stop,
     );
-    let head = if request.stop.load(Ordering::SeqCst) {
+    let preflight_error = if request.runner.is_empty() {
+        Some("missing evaluator: no runner commands declared".to_string())
+    } else if preflight.termination != "exited"
+        || preflight.exit_code != Some(0)
+        || preflight.leftover_processes
+    {
+        Some(format!(
+            "tool preflight failed for {:?}: {} {:?}; see {}",
+            request.required_tools,
+            preflight.termination,
+            preflight.exit_code,
+            preflight_dir.display()
+        ))
+    } else {
+        None
+    };
+
+    let base = if let Some(reason) = &preflight_error {
+        skipped_side(request, "base", &request.base, reason)
+    } else {
+        run_side(
+            request,
+            "base",
+            &request.base,
+            SideSource::Revision(base_sha),
+            &mut lifecycle,
+        )
+    };
+    let head = if let Some(reason) = &preflight_error {
+        skipped_side(request, "head", &request.head, reason)
+    } else if request.stop.load(Ordering::SeqCst) {
         lifecycle.cancelled = true;
         skipped_side(request, "head", &request.head, "cancelled before head ran")
     } else {
@@ -134,7 +175,7 @@ pub fn run_bench_compare(request: &BenchCompareRequest<'_>) -> Result<BenchCompa
 }
 
 enum SideSource {
-    /// Materialize this commit as a detached git worktree owned by the run.
+    /// Materialize this commit in a private clone owned by the run.
     Revision(String),
     /// Use the checkout on disk; the optional value is its `HEAD` commit.
     Worktree(Option<String>),
@@ -166,10 +207,8 @@ fn resolve_commit(repo_root: &Path, revision: &str) -> Result<String> {
     })
 }
 
-/// A detached worktree removed when dropped, so success, failure, and unwinding
-/// all leave the repository's worktree list clean.
+/// A private clone removed when dropped; no shared worktree/ref bookkeeping.
 struct MaterializedWorktree {
-    repo_root: PathBuf,
     path: PathBuf,
     _holder: tempfile::TempDir,
 }
@@ -184,32 +223,33 @@ impl MaterializedWorktree {
             })?;
         let path = holder.path().join("checkout");
         let path_arg = path.to_string_lossy().to_string();
+        // Never register worktrees or mutate refs in the component repository.
         crate::git::run_git(
             repo_root,
-            &["worktree", "add", "--detach", "--quiet", &path_arg, sha],
-            "materialize bench compare worktree",
+            &[
+                "clone",
+                "--no-hardlinks",
+                "--no-checkout",
+                "--quiet",
+                "--",
+                &repo_root.to_string_lossy(),
+                &path_arg,
+            ],
+            "clone bench compare repository",
+        )?;
+        crate::git::run_git(
+            &path,
+            &["checkout", "--detach", "--quiet", sha],
+            "checkout compare revision",
         )?;
         Ok(Self {
-            repo_root: repo_root.to_path_buf(),
             path,
             _holder: holder,
         })
     }
 
     fn remove(&self) -> bool {
-        let path_arg = self.path.to_string_lossy().to_string();
-        let removed = crate::git::run_git(
-            &self.repo_root,
-            &["worktree", "remove", "--force", &path_arg],
-            "remove bench compare worktree",
-        )
-        .is_ok();
-        let _ = crate::git::run_git(
-            &self.repo_root,
-            &["worktree", "prune"],
-            "prune bench compare worktrees",
-        );
-        removed
+        fs::remove_dir_all(&self.path).is_ok()
     }
 }
 
@@ -219,6 +259,50 @@ impl Drop for MaterializedWorktree {
             self.remove();
         }
     }
+}
+
+fn shell_quote(value: &str) -> String {
+    format!("'{}'", value.replace('\'', "'\\''"))
+}
+
+// Copy the candidate, including untracked files and deletions, but never its
+// git administration directory: commands must mutate only the owned clone.
+fn copy_worktree(source: &Path, target: &Path) -> std::io::Result<()> {
+    for entry in fs::read_dir(target)? {
+        let entry = entry?;
+        if entry.file_name() == ".git" {
+            continue;
+        }
+        if entry.file_type()?.is_dir() {
+            fs::remove_dir_all(entry.path())?;
+        } else {
+            fs::remove_file(entry.path())?;
+        }
+    }
+    copy_candidate_files(source, target)
+}
+
+fn copy_candidate_files(source: &Path, target: &Path) -> std::io::Result<()> {
+    for entry in fs::read_dir(source)? {
+        let entry = entry?;
+        if entry.file_name() == ".git" {
+            continue;
+        }
+        let destination = target.join(entry.file_name());
+        let kind = entry.file_type()?;
+        if kind.is_dir() {
+            fs::create_dir(&destination)?;
+            copy_candidate_files(&entry.path(), &destination)?;
+        } else if kind.is_symlink() {
+            #[cfg(unix)]
+            std::os::unix::fs::symlink(fs::read_link(entry.path())?, destination)?;
+            #[cfg(not(unix))]
+            fs::copy(entry.path(), destination)?;
+        } else {
+            fs::copy(entry.path(), destination)?;
+        }
+    }
+    Ok(())
 }
 
 fn side_dirs(request: &BenchCompareRequest<'_>, side: &str) -> (PathBuf, PathBuf) {
@@ -268,10 +352,10 @@ fn run_side(
         return (report, None);
     }
 
-    let mut worktree = None;
+    let mut worktree;
     let checkout_root = match source {
         SideSource::Revision(sha) => {
-            report.source_kind = "git_worktree".to_string();
+            report.source_kind = "git_clone".to_string();
             report.sha = Some(sha.clone());
             match MaterializedWorktree::create(&request.repo_root, &sha, side) {
                 Ok(materialized) => {
@@ -290,7 +374,26 @@ fn run_side(
             report.source_kind = "worktree".to_string();
             report.sha = sha;
             report.dirty = !crate::git::is_workdir_clean_or_not_git(&request.repo_root);
-            request.repo_root.clone()
+            match MaterializedWorktree::create(
+                &request.repo_root,
+                report.sha.as_deref().unwrap_or("HEAD"),
+                side,
+            ) {
+                Ok(materialized) => {
+                    if let Err(error) = copy_worktree(&request.repo_root, &materialized.path) {
+                        report.error = Some(format!("snapshot candidate: {error}"));
+                        return (report, None);
+                    }
+                    lifecycle.worktrees_materialized += 1;
+                    let root = materialized.path.clone();
+                    worktree = Some(materialized);
+                    root
+                }
+                Err(error) => {
+                    report.error = Some(error.message);
+                    return (report, None);
+                }
+            }
         }
     };
     let source_dir = checkout_root.join(&request.component_relative);
@@ -303,6 +406,13 @@ fn run_side(
         &artifact_dir,
         &results_path,
     );
+    // A reused output directory must not let stale evaluator output pass.
+    if results_path.exists() {
+        if let Err(error) = fs::remove_file(&results_path) {
+            report.error = Some(format!("remove stale results: {error}"));
+            return (report, None);
+        }
+    }
     let deadline = Instant::now() + request.side_timeout;
     let mut passed = true;
     for (index, command) in request.runner.iter().enumerate() {
@@ -401,7 +511,27 @@ pub(super) fn load_side_results(
             super::env::RESULTS
         )
     })?;
-    let results: BenchCompareSideResults = serde_json::from_slice(&bytes)
+    let document: serde_json::Value = serde_json::from_slice(&bytes)
+        .map_err(|error| format!("invalid results in {}: {error}", path.display()))?;
+    if document.get("passed").and_then(|v| v.as_bool()) == Some(false)
+        || document.get("skipped").and_then(|v| v.as_bool()) == Some(true)
+    {
+        return Err(format!(
+            "evaluator failed or skipped: {}",
+            document.get("reason").unwrap_or(&serde_json::Value::Null)
+        ));
+    }
+    for field in ["status", "evaluation_status"] {
+        if let Some(status) = document.get(field).and_then(|value| value.as_str()) {
+            if !matches!(status, "passed" | "success" | "completed") {
+                return Err(format!(
+                    "evaluator {field} is `{status}`: {}",
+                    document.get("reason").unwrap_or(&serde_json::Value::Null)
+                ));
+            }
+        }
+    }
+    let results: BenchCompareSideResults = serde_json::from_value(document)
         .map_err(|error| format!("invalid results in {}: {error}", path.display()))?;
     if let Some(schema) = results.schema.as_deref() {
         if schema != super::SIDE_RESULTS_SCHEMA {
@@ -411,6 +541,9 @@ pub(super) fn load_side_results(
                 super::SIDE_RESULTS_SCHEMA
             ));
         }
+    }
+    if results.routes.is_empty() {
+        return Err("missing evaluator output: results contain no routes".to_string());
     }
     if let Some(empty) = results
         .routes
@@ -454,10 +587,16 @@ pub(super) fn run_contained_step(
         }
     };
 
-    let mut command = Command::new("sh");
+    let mut command =
+        Command::new(std::env::var("SHELL").unwrap_or_else(|_| "/bin/sh".to_string()));
     command
-        .arg("-c")
-        .arg(command_text)
+        .arg("-lc")
+        // Profiles may cd; restore the owned checkout before running commands.
+        .arg(format!(
+            "cd {} && {{\n{}\n}}",
+            shell_quote(&source_dir.to_string_lossy()),
+            command_text
+        ))
         .current_dir(source_dir)
         .stdin(Stdio::null())
         .stdout(Stdio::from(stdout))

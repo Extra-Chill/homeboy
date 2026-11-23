@@ -136,6 +136,9 @@ pub struct BenchCompareSpec {
     /// Runner commands overriding the component/extension declaration.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub runner: Vec<String>,
+    /// Executable names required before either side starts.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub required_tools: Vec<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub fail_on: Option<BenchCompareFailOn>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -313,8 +316,8 @@ pub struct BenchCompareSideReport {
     pub requested_ref: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub sha: Option<String>,
-    /// `git_worktree` (materialized and removed by Homeboy) or `worktree`
-    /// (the checkout on disk, possibly with uncommitted changes).
+    /// `git_clone` (a revision in an owned clone) or `worktree`
+    /// (an owned snapshot of the checkout, including uncommitted changes).
     pub source_kind: String,
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub dirty: bool,
