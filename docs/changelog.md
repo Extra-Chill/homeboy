@@ -4,6 +4,14 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.493.1] - 2026-11-23
+
+### Changed
+- cover one-call recover of a gated candidate to a draft PR
+
+### Fixed
+- core reconciler cannot touch agent-task rows; drop proof's fleet sweep
+
 ## [0.493.0] - 2026-11-23
 
 ### Added
