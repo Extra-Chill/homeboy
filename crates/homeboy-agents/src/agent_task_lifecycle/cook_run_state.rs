@@ -203,7 +203,7 @@ pub(crate) fn local_owner_liveness(record: &AgentTaskRunRecord) -> super::LocalO
     }
 }
 
-pub(crate) fn should_annotate_stale(record: &AgentTaskRunRecord) -> bool {
+pub(crate) fn reads_stale(record: &AgentTaskRunRecord) -> bool {
     if record.runner_job_id().is_some() && record.has_fresh_update() {
         return false;
     }
@@ -259,7 +259,7 @@ pub(crate) fn classify_liveness(
         crate::agent_task_lifecycle::LocalOwnerLiveness::Absent => {}
     }
 
-    if record.is_stale_running() {
+    if record.runner_disconnected() {
         return AgentTaskLiveness::Stale;
     }
 
@@ -583,7 +583,6 @@ fn observed_execution_state(record: &AgentTaskRunRecord) -> RunExecutionState {
     let terminal = &record.metadata["cook_progress"];
     if terminal["phase"] == "terminal"
         && terminal["terminal_status"] == CookStatus::IntentionalNoChange.as_str()
-        && terminal["terminal_success"] == true
         && terminal["exit_code"] == 0
     {
         return stored;
@@ -743,6 +742,29 @@ impl CookRunState {
 
     pub fn allows(&self, action: homeboy_control_plane_contract::ControlPlaneAction) -> bool {
         legal_actions(self).contains(&action)
+    }
+
+    /// Why a run in this state has no pull request (#18817). Read surfaces
+    /// project this instead of re-deriving it from delivery facts. `None`
+    /// while an owner may still publish.
+    pub fn no_pull_request_reason(&self) -> Option<&'static str> {
+        if !self.terminal {
+            return None;
+        }
+        Some(match self.phase {
+            CookRunPhase::Continuing => "continuation owner is still delivering the candidate",
+            CookRunPhase::CandidateRecoverable if self.fenced => {
+                "candidate retained but fenced; publication not attempted"
+            }
+            CookRunPhase::CandidateRecoverable => "publication not attempted",
+            CookRunPhase::Succeeded => "candidate verified; publication not requested",
+            CookRunPhase::PartialFailure | CookRunPhase::Failed => {
+                "run ended before a candidate was published"
+            }
+            CookRunPhase::Cancelled => "run was cancelled before publication",
+            CookRunPhase::Unknown => "state written by a newer binary; publication unknown",
+            CookRunPhase::Queued | CookRunPhase::Running => "publication not reached",
+        })
     }
 }
 
@@ -1258,6 +1280,23 @@ mod tests {
             assert!(!production.contains("AgentTaskLabHandoffState::"));
             assert!(!production.contains("CookDeliveryState::"));
         }
+    }
+
+    #[test]
+    fn no_pull_request_reason_is_owned_by_the_run_state() {
+        for phase in CookRunPhase::ALL {
+            let reason = state(phase, false, false).no_pull_request_reason();
+            assert_eq!(
+                reason.is_some(),
+                !matches!(phase, P::Queued | P::Running),
+                "{phase:?}"
+            );
+            assert!(reason.is_none_or(|reason| !reason.is_empty()), "{phase:?}");
+        }
+        assert_ne!(
+            state(P::CandidateRecoverable, true, false).no_pull_request_reason(),
+            state(P::CandidateRecoverable, false, false).no_pull_request_reason()
+        );
     }
 
     #[test]

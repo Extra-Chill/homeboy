@@ -3350,15 +3350,24 @@ esac
                 repeated["publication_proof"]["git_identity"]["commit_sha"],
                 published["publication_proof"]["git_identity"]["commit_sha"]
             );
-            let error = dispatch_agent_task_error(&[
+            let cli = crate::cli_surface::Cli::try_parse_from([
                 "homeboy",
                 "agent-task",
                 "recover",
                 "missing-manual-finalization",
-            ]);
-            assert!(error
-                .message
+            ])
+            .unwrap();
+            let crate::cli_surface::Commands::AgentTask(args) = cli.command else {
+                panic!("expected agent-task");
+            };
+            let (report, code) = crate::commands::agent_task::run(args).unwrap();
+            assert_ne!(code, 0);
+            assert!(report["failure"]["message"]
+                .as_str()
+                .unwrap()
                 .contains("no durable Cook, Cook attempt or batch-child run has this ID"));
+            assert!(report["failure"]["next_command"].is_string());
+            assert_eq!(report["failure"]["run_state"], "unknown");
             let created = std::fs::read_to_string(&log)
                 .expect("fake gh log")
                 .lines()

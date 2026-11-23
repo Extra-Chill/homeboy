@@ -2,6 +2,11 @@
 
 All notable changes to the **wordpress** extension will be documented in this file.
 
+## [3.56.5] - 2026-11-23
+
+### Fixed
+- fail clearly on missing shared helper, unresolved WordPress source, and zero-test suites
+
 ## [3.56.4] - 2026-11-19
 
 ### Fixed

@@ -51,7 +51,7 @@ pub enum ControlPlaneEffectAdmission {
 /// are primary-key lookups. The former `LEFT JOIN ... (id = ? OR alias = ?)`
 /// walked every resource of the type, one per historical run, on each durable
 /// record read (#17760).
-pub(super) const RESOURCE_PROJECTION_QUERY: &str = "SELECT r.resource_id, r.version, r.state, r.eligibility_json, r.provenance_json FROM control_plane_resources r WHERE r.resource_type = ?1 AND r.resource_id = COALESCE((SELECT a.resource_id FROM control_plane_resource_aliases a WHERE a.resource_type = ?1 AND a.alias = ?2), ?2)";
+pub(super) const RESOURCE_PROJECTION_QUERY: &str = "SELECT r.resource_id, r.version, CASE WHEN r.resource_type = 'agent_task_run' THEN COALESCE((SELECT json_extract(metadata_json, '$.agent_task_run.lifecycle.execution.state') FROM runs WHERE id = r.resource_id), 'unknown') ELSE r.state END, r.eligibility_json, r.provenance_json FROM control_plane_resources r WHERE r.resource_type = ?1 AND r.resource_id = COALESCE((SELECT a.resource_id FROM control_plane_resource_aliases a WHERE a.resource_type = ?1 AND a.alias = ?2), ?2)";
 
 /// The aliases of one canonical resource. `INDEXED BY` is load-bearing: to
 /// satisfy `ORDER BY alias` the planner otherwise walks the primary key over
@@ -210,7 +210,7 @@ impl ObservationStore {
             return Ok(None);
         }
         let row: Option<(String, String, String, String)> = self.connection.query_row(
-            "SELECT version, state, eligibility_json, provenance_json FROM control_plane_resources WHERE resource_type = ?1 AND resource_id = ?2",
+            "SELECT version, CASE WHEN resource_type = 'agent_task_run' THEN COALESCE((SELECT json_extract(metadata_json, '$.agent_task_run.lifecycle.execution.state') FROM runs WHERE id = ?2), 'unknown') ELSE state END, eligibility_json, provenance_json FROM control_plane_resources WHERE resource_type = ?1 AND resource_id = ?2",
             params![resource_type, resource_id],
             |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
         ).optional().map_err(|error| self.read_error("read exact control-plane resource projection", error))?;

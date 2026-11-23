@@ -29,6 +29,15 @@ export function applyLocalWorkspaceDependenciesBeforePrepare({ settings, steps, 
     return false;
   }
   const bridge = path.join(collectionDirectory, 'scripts', 'lib', 'local-workspace-install.sh');
+  if (!existsSync(bridge)) {
+    // Shared asset shipped next to the installed extensions
+    // (extensions/homeboy-extension-root.json). Name it instead of letting
+    // bash fail with a bare "No such file or directory".
+    throw new Error(
+      `Homeboy shared extension helper is missing: ${bridge}. The shared scripts/lib assets installed next to the extensions are incomplete, usually because an older install source replaced them. `
+      + 'Reinstall extensions from the Homeboy source, e.g.: homeboy extension install https://github.com/Extra-Chill/homeboy --id wordpress',
+    );
+  }
   const result = spawnSync('bash', [
     '-c',
     'source "$1"; homeboy_apply_local_workspace_install "$2" "$3"',

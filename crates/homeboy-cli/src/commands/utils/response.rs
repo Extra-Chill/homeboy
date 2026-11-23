@@ -485,7 +485,7 @@ pub(crate) fn map_cmd_result_to_json<T: Serialize>(
     }
 }
 
-fn exit_code_for_error(code: ErrorCode) -> i32 {
+pub(crate) fn exit_code_for_error(code: ErrorCode) -> i32 {
     match code {
         ErrorCode::ConfigMissingKey
         | ErrorCode::ConfigInvalidJson
