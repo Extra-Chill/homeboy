@@ -24,6 +24,7 @@ pub mod local_files;
 pub mod measurement;
 pub mod output_parse;
 pub mod phase_timing;
+pub mod process_table;
 pub mod provider_registry;
 pub mod resource_usage;
 pub mod shell;
