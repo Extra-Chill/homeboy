@@ -8,19 +8,30 @@ fn renewing_cook_owner_blocks_until_expiry_and_replays_completion() {
     store
         .submit_plan_with_runtime_admission(&test_plan(), run, |_| Ok(json!({})))
         .unwrap();
-    let lease = std::time::Duration::from_millis(300);
+    // The heartbeat renews every lease/3, so each renewal has two thirds of
+    // the lease as scheduling slack. A sub-second lease left ~200ms of slack,
+    // which a loaded CI runner can exceed and expire a live owner.
+    let lease = std::time::Duration::from_secs(3);
     let ClaimOutcome::Acquired(owner) =
         claim_cook_operation_in_store(&store, run, "promote", lease).unwrap()
     else {
         panic!("first owner");
     };
-    std::thread::sleep(lease * 3);
+    let initial_deadline = recorded_lease_deadline(&store, run);
+    // Only renewal can keep the owner live once its initial deadline passes.
+    sleep_until_past(&initial_deadline);
     assert!(matches!(
         claim_cook_operation_in_store(&store, run, "promote", lease).unwrap(),
         ClaimOutcome::LeaseHeld
     ));
+    assert!(
+        recorded_lease_deadline(&store, run) > initial_deadline,
+        "heartbeat must extend the owner's lease"
+    );
+    // Dropping the owner joins its heartbeat, so the recorded deadline is
+    // final; waiting past it makes expiry independent of scheduling.
     drop(owner);
-    std::thread::sleep(lease * 2);
+    sleep_until_past(&recorded_lease_deadline(&store, run));
     let ClaimOutcome::Acquired(successor) =
         claim_cook_operation_in_store(&store, run, "promote", lease).unwrap()
     else {
@@ -35,6 +46,28 @@ fn renewing_cook_owner_blocks_until_expiry_and_replays_completion() {
     let recorded = store.operation_claim(run, "promote").unwrap().unwrap();
     assert_eq!(recorded.state, ClaimState::Completed);
     assert_eq!(recorded.result, Some(result));
+}
+
+fn recorded_lease_deadline(store: &AgentTaskLifecycleStore, run: &str) -> String {
+    store
+        .operation_claim(run, "promote")
+        .unwrap()
+        .and_then(|claim| claim.lease_deadline)
+        .expect("leased operation records its deadline")
+}
+
+fn sleep_until_past(deadline: &str) {
+    let deadline = chrono::DateTime::parse_from_rfc3339(deadline)
+        .expect("RFC 3339 lease deadline")
+        .with_timezone(&chrono::Utc);
+    loop {
+        let now = chrono::Utc::now();
+        if now > deadline {
+            return;
+        }
+        let remaining = (deadline - now).to_std().unwrap_or_default();
+        std::thread::sleep(remaining + std::time::Duration::from_millis(10));
+    }
 }
 
 #[test]
