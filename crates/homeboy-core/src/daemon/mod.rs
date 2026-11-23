@@ -243,13 +243,18 @@ impl LocalControllerJobClient {
     /// Connect to the serving lease. Admission is checked per request so that
     /// draining leases can still accept continuations of runs they own.
     pub fn connect_current_build() -> Result<Self> {
-        // Dead-lease cleanup needs exclusive admission. Recover before taking
-        // our shared guard, then retain the guarded validation below.
-        if !read_status()?.running {
-            ensure_running(DEFAULT_ADDR)?;
-        }
-        let admission_guard = acquire_daemon_admission_lock()?;
-        let mut client = Self::connect()?;
+        let (daemon, admission_guard) = converge_then_guard_admission(
+            || ensure_running(DEFAULT_ADDR),
+            acquire_daemon_admission_lock,
+            || {
+                let status = read_status()?;
+                Ok(status
+                    .state
+                    .filter(|_| status.running)
+                    .map(|state| state.lease_id))
+            },
+        )?;
+        let mut client = Self::at(&daemon.address, state_path()?)?;
         client.admission_guard = Mutex::new(Some(admission_guard));
         Ok(client)
     }
@@ -4753,6 +4758,53 @@ mod tests {
         });
     }
 
+    /// #18803: a Cook connecting behind a stale daemon while a sibling holds
+    /// shared admission must converge without holding its own shared guard,
+    /// so the replacement proceeds once the sibling releases, and it must
+    /// follow a sibling's replacement instead of attaching to a dead lease.
+    #[test]
+    fn current_build_connection_converges_before_taking_its_admission_guard() {
+        crate::test_support::with_isolated_home(|_| {
+            let mut sibling = Some(acquire_daemon_admission_lock().unwrap());
+            let mut converged = Vec::new();
+            let mut serving = vec![Some("sibling-replacement"); 2];
+            let (daemon, guard) = converge_then_guard_admission(
+                || {
+                    if let Some(sibling) = sibling.take() {
+                        // The stale replacement waits on the sibling's
+                        // in-flight admission, then proceeds once it lands.
+                        assert!(try_acquire_daemon_job_admission_fence().unwrap().is_none());
+                        drop(sibling);
+                    }
+                    let fence = acquire_daemon_job_admission_fence_with_wait(Duration::ZERO)
+                        .expect("convergence never waits on this Cook's own admission guard");
+                    drop(fence);
+                    let lease_id = if converged.is_empty() {
+                        "replacement"
+                    } else {
+                        "sibling-replacement"
+                    };
+                    converged.push(lease_id);
+                    Ok(DaemonStartResult {
+                        pid: 1,
+                        address: "127.0.0.1:1".to_string(),
+                        state_path: String::new(),
+                        lease_id: lease_id.to_string(),
+                    })
+                },
+                acquire_daemon_admission_lock,
+                || Ok(serving.pop().flatten().map(str::to_string)),
+            )
+            .expect("gate admission proceeds without operator action");
+
+            assert_eq!(converged, ["replacement", "sibling-replacement"]);
+            assert_eq!(daemon.lease_id, "sibling-replacement");
+            assert!(try_acquire_daemon_job_admission_fence().unwrap().is_none());
+            drop(guard);
+            assert!(try_acquire_daemon_job_admission_fence().unwrap().is_some());
+        });
+    }
+
     #[test]
     fn existing_job_connection_uses_the_serving_lease_for_status_and_cancellation() {
         crate::test_support::with_isolated_home(|_| {
@@ -8166,6 +8218,27 @@ pub fn drain_then_replace(lease_id: &str) -> Result<()> {
     std::fs::write(drain_path()?, lease_id).map_err(|error| {
         Error::internal_io(error.to_string(), Some("request daemon drain".to_string()))
     })
+}
+
+/// Every daemon lifecycle mutation (stale replacement, dead-lease cleanup)
+/// takes the exclusive admission fence, so convergence must run before this
+/// process takes its shared guard: converging while holding it waits on our
+/// own guard and times out (#18803). Once the guard is held no lifecycle
+/// mutation can run, so attach only when the converged lease still serves;
+/// a sibling that replaced it in between sends us back to converge on the
+/// replacement.
+fn converge_then_guard_admission<Guard>(
+    mut converge: impl FnMut() -> Result<DaemonStartResult>,
+    mut acquire_guard: impl FnMut() -> Result<Guard>,
+    mut serving_lease: impl FnMut() -> Result<Option<String>>,
+) -> Result<(DaemonStartResult, Guard)> {
+    loop {
+        let daemon = converge()?;
+        let guard = acquire_guard()?;
+        if serving_lease()?.as_deref() == Some(daemon.lease_id.as_str()) {
+            return Ok((daemon, guard));
+        }
+    }
 }
 
 pub(super) fn with_daemon_job_admission<T>(operation: impl FnOnce() -> Result<T>) -> Result<T> {
