@@ -3017,6 +3017,7 @@ fn live_verification_pending_promotion_heartbeat_is_visible_to_logs_and_status()
         let status = crate::orchestration::project_record(
             &lifecycle_store.read_record(run_id).expect("record"),
             None,
+            None,
         )
         .expect("status");
         assert_eq!(

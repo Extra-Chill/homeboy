@@ -128,10 +128,9 @@ impl ExecutionStepIntent {
             && record.metadata["execution_scheduling"]["epoch"].as_u64() == Some(self.epoch)
             && record.metadata["execution_scheduling"]["current_intent_id"].as_str()
                 == Some(self.intent_id.as_str())
-            && record.metadata["detached_cook_handoff"]["cancellation_fence"]["state"]
-                != "cancelled"
-            && record.metadata["detached_cook_handoff"]["cancellation_fence"]["state"]
-                != "cancel_requested"
+            // A cancelled detached handoff parent is fenced.
+            && !(record.state() == RunExecutionState::Cancelled
+                && record.metadata["detached_cook_handoff"]["cook_id"] == record.run_id.as_str())
     }
 
     pub fn work_intent(&self) -> Result<WorkIntent> {

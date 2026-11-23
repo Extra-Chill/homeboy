@@ -1579,6 +1579,7 @@ fn reconcile_typed_absence_settles_fenced_handoff_as_cancelled() {
     with_isolated_home(|_| {
         let record = accepted_detached_handoff("ledger-absent-fenced");
         rewrite_record_for_test(&record.run_id, |record| {
+            // A legacy per-record fence, written before #18827, still fences.
             record.metadata["cancellation_fence"] = json!({"state": "cancelled"});
             record.metadata["runner_pid"] = json!(999_999u32);
         })

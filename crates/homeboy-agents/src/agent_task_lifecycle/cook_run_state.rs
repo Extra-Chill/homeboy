@@ -630,7 +630,9 @@ pub struct CookRunState {
     pub retryable: bool,
     /// An unpublished candidate is retained for recovery.
     pub recoverable: bool,
-    /// The Cook mission was fenced or its candidate retired.
+    /// The Cook mission was fenced. The fence lives on the Cook index, so
+    /// [`CookRunState::of`] never sets it; a store-aware caller applies
+    /// [`super::cook_cancellation_fence`] through [`CookRunState::with_cook_index_fence`].
     pub fenced: bool,
     /// The recorded controller process is still alive, even after execution
     /// ended, so the run can still be cancelled.
@@ -666,8 +668,6 @@ impl CookRunState {
             } else {
                 execution_phase
             };
-        let fenced = record.metadata.get("cancellation_fence").is_some()
-            || record.metadata.get("candidate_retirement").is_some();
         let status = match phase {
             CookRunPhase::Queued => "queued".to_string(),
             CookRunPhase::Running => "running".to_string(),
@@ -683,8 +683,8 @@ impl CookRunState {
                 phase,
                 CookRunPhase::Failed | CookRunPhase::Cancelled | CookRunPhase::PartialFailure
             ),
-            recoverable: phase == CookRunPhase::CandidateRecoverable && !fenced,
-            fenced,
+            recoverable: phase == CookRunPhase::CandidateRecoverable,
+            fenced: false,
             live_owner: record.owner_process_is_running(),
             status,
         }
@@ -1165,15 +1165,11 @@ mod tests {
 
         let fenced = CookRunState::of(&record(
             RunExecutionState::CandidateRecoverable,
-            serde_json::json!({ "cancellation_fence": {} }),
-        ));
+            serde_json::json!({}),
+        ))
+        .with_cook_index_fence(true);
         assert!(fenced.fenced && !fenced.recoverable);
         assert!(legal_actions(&fenced).is_empty());
-        assert!(
-            CookRunState::of(&record(RunExecutionState::Failed, serde_json::json!({})))
-                .with_cook_index_fence(true)
-                .fenced
-        );
     }
 
     #[test]

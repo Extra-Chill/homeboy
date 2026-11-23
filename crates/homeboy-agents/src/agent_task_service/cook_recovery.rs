@@ -987,7 +987,7 @@ pub fn plan_cook_recovery_recorded(id: &str) -> Result<CookRecoveryPlan> {
 fn plan_cook_recovery_with_probe_policy(id: &str, live_probes: bool) -> Result<CookRecoveryPlan> {
     let store = agent_task_lifecycle::AgentTaskLifecycleStore::from_environment()?;
     if let Ok(record) = store.read_record(id) {
-        if agent_task_lifecycle::CookRunState::of(&record).fenced {
+        if agent_task_lifecycle::cook_cancellation_fence(&store, &record).is_some() {
             return Ok(CookRecoveryPlan {
                 cook_id: record.metadata["cook_id"]
                     .as_str()

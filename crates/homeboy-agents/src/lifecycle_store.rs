@@ -2660,6 +2660,13 @@ fn agent_task_resource_projection(
                 record,
                 None,
                 Some(lifecycle_store.roots()),
+                // An index being written is newer than the stored one.
+                cook_index.is_some_and(|index| index.cancellation_fence.is_some())
+                    || crate::agent_task_lifecycle::cook_cancellation_fence(
+                        lifecycle_store,
+                        record,
+                    )
+                    .is_some(),
             ),
         )
         .map_err(|error| Error::internal_json(error.to_string(), None))?,

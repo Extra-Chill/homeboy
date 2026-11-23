@@ -254,7 +254,7 @@ pub(crate) fn reconcile_runner_job_state_in_store(
         }
         super::runner_continuation::RunnerJobReconciliation::LedgerAbsent(error) => {
             let evidence = error.details.clone();
-            if record.metadata.get("cancellation_fence").is_some() {
+            if cook_cancellation_fence(lifecycle_store, record).is_some() {
                 project_ledger_terminal_in_store(
                     lifecycle_store,
                     record,
@@ -274,7 +274,7 @@ pub(crate) fn reconcile_runner_job_state_in_store(
             Ok(())
         }
         super::runner_continuation::RunnerJobReconciliation::LedgerTerminal(status, error) => {
-            let state = if record.metadata.get("cancellation_fence").is_some() {
+            let state = if cook_cancellation_fence(lifecycle_store, record).is_some() {
                 RunExecutionState::Cancelled
             } else {
                 match status {
