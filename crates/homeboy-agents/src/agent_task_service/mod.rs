@@ -63,7 +63,14 @@ pub mod process_activity;
 mod promotion_service;
 mod reconcile;
 mod status_support;
+/// Settlement of rows left `running` after their lifecycle ended.
+mod unsettled_rows;
 pub use gate_failure::{gate_failure_next_action, gate_failure_projection};
+pub use unsettled_rows::{
+    settle_unowned_cook_rows, AgentTaskUnsettledRow, UNSETTLED_COOK_ATTEMPT,
+    UNSETTLED_REDIRECTED_ATTEMPT_ABSENT, UNSETTLED_REDIRECTED_ROOT_UNMIRRORED,
+    UNSETTLED_TERMINAL_LIFECYCLE,
+};
 /// Shared daemon lifecycle for newly submitted orchestration work.
 mod work_job;
 

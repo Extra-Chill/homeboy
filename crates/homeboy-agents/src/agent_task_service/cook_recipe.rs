@@ -1703,6 +1703,25 @@ pub fn load_recipe(cook_id: &str) -> Result<AgentTaskCookRecipe> {
     default_store()?.load_recipe(cook_id)
 }
 
+/// Whether a recipe-only Cook has been abandoned: no controller drives it and
+/// its recipe has been untouched for longer than the heartbeat window. Such a
+/// Cook's `running` rows are reconciliation work; `recover` stays available to
+/// resume it deliberately. An unreadable recipe timestamp is never abandoned.
+pub fn recipe_only_cook_is_abandoned(cook_id: &str) -> Result<bool> {
+    let store = default_store()?;
+    if store.cook_driver_held(cook_id)? {
+        return Ok(false);
+    }
+    let Ok(modified) = fs::metadata(store.recipe_path(cook_id)).and_then(|meta| meta.modified())
+    else {
+        return Ok(false);
+    };
+    Ok(chrono::Utc::now()
+        .signed_duration_since(chrono::DateTime::<chrono::Utc>::from(modified))
+        .num_minutes()
+        >= homeboy_core::observation::RUNNING_HEARTBEAT_STALE_MINUTES)
+}
+
 fn load_recipe_at(path: PathBuf, cook_id: &str) -> Result<AgentTaskCookRecipe> {
     let raw = fs::read_to_string(&path)
         .map_err(|error| Error::internal_io(error.to_string(), Some(path.display().to_string())))?;
