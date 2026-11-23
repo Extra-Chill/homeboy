@@ -816,7 +816,6 @@ pub(crate) fn record_detached_lab_run_with_submission_locked_in_store(
     metadata.insert(
         "runner_handoff".to_string(),
         json!({
-            "state": "in_flight",
             "authority": "runner_daemon",
             "identity": {
                 "run_id": run_id,

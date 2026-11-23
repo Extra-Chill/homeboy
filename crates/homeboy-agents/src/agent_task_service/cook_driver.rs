@@ -668,7 +668,6 @@ pub(super) fn run_cook_reported(
                 lifecycle_store,
                 run_id,
                 result.value.status.as_str(),
-                result.exit_code == 0,
                 result.exit_code,
             )
             .and_then(|_| store.settle_continuations_driven_inline(&result.value.cook_id))

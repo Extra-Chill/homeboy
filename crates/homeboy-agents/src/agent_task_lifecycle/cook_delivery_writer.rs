@@ -148,11 +148,10 @@ fn retire_superseded_deferral(record: &mut AgentTaskRunRecord, delivery: Option<
         Some(status) => {
             let success = status.is_success_exit();
             progress.insert("terminal_status".to_string(), json!(status.as_str()));
-            progress.insert("terminal_success".to_string(), json!(success));
             progress.insert("exit_code".to_string(), json!(i32::from(!success)));
         }
         None => {
-            for key in ["terminal_status", "terminal_success", "exit_code"] {
+            for key in ["terminal_status", "exit_code"] {
                 progress.remove(key);
             }
         }

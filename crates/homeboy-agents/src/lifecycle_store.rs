@@ -2649,11 +2649,9 @@ fn agent_task_resource_projection(
             .updated_at
             .clone()
             .unwrap_or_else(|| record.submitted_at.clone()),
-        state: serde_json::to_value(record.state())
-            .map_err(|error| Error::internal_json(error.to_string(), None))?
-            .as_str()
-            .unwrap_or("unknown")
-            .to_string(),
+        // Execution state is read from the attempt's lifecycle record, never
+        // copied into the resource row.
+        state: "unknown".to_string(),
         aliases,
         eligibility: serde_json::to_value(
             crate::agent_task_lifecycle::lifecycle_action_eligibility_with_roots(
