@@ -54,7 +54,7 @@ pub(crate) fn reject_unmatched_focused_cargo_filters<'a>(
         let mut error = Error::validation_invalid_argument(
             "gate declaration",
             format!(
-                "declared Cargo gate `{command}` selects no tests: filter `{}` is not part of any test path in {scope_label}. Cargo matches a filter as a substring of full test paths such as `module::tests::test_name`, so a module without tests or a misspelled name selects nothing and the gate can never pass. Refused before provider dispatch.",
+                "declared Cargo gate `{command}` selects no tests: filter `{}` is not part of any test path in {scope_label}. Cargo matches a filter as a substring of full test paths such as `module::tests::test_name`, so a module without tests or a misspelled name selects nothing and the gate can never pass. To gate on a test the provider will add, name its full path with `-- --exact`. Refused before provider dispatch.",
                 selection.filter
             ),
             Some(command.clone()),
