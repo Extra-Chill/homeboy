@@ -33,6 +33,25 @@ pub struct CookSummaryGate {
     pub name: String,
     pub state: String,
     pub failing_tests: Vec<String>,
+    /// Present only on a bench compare gate (`--verify-bench`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub bench_compare: Option<CookSummaryBenchCompare>,
+}
+
+/// A bench compare gate's policy verdict, aggregate deltas, and artifact.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct CookSummaryBenchCompare {
+    pub passed: bool,
+    /// The declared regression policy (`new-blockers`, `regressions`, `never`).
+    pub fail_on: String,
+    pub routes: usize,
+    pub regressed: usize,
+    pub improved: usize,
+    pub new_blockers: usize,
+    pub missing_on_head: usize,
+    /// Durable compare artifact on the host that ran the gate.
+    pub artifact_path: String,
 }
 
 /// The stable summary of one Cook run. Every field is always serialized; an
@@ -174,6 +193,7 @@ mod tests {
                 name: "cargo test".to_string(),
                 state: "failed".to_string(),
                 failing_tests: vec!["a::b".to_string()],
+                bench_compare: None,
             }],
             pr_url: None,
             why_no_pr: Some("candidate_recoverable: publication not attempted".to_string()),
@@ -218,6 +238,7 @@ mod tests {
                 failing_tests: (0..COOK_SUMMARY_FAILING_TEST_LIMIT)
                     .map(|test| format!("suite::module::case_{test}_{}", "y".repeat(40)))
                     .collect(),
+                bench_compare: None,
             })
             .collect();
         assert!(many.validate().is_err());

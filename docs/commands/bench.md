@@ -707,8 +707,28 @@ homeboy bench compare --component blocks-engine --base <sha> --head <sha> --corp
   route; `never` only reports. `--spec <file>` supplies any of these fields
   as JSON; flags override it.
 
-Compare currently runs locally. Lab placement and Cook gate attachment are
-follow-ups.
+Compare currently runs locally. Lab placement is a follow-up.
+
+### As a Cook gate
+
+`homeboy agent-task cook --verify-bench <spec.json>` attaches a compare to a
+Cook as a visible gate. The spec declares `component`, `path` (relative to the
+candidate checkout, default `.`), `corpus`, `runner`, `fail_on` and
+`timeout_seconds`; it must not set `base` or `head`. The Cook owns both sides:
+base is its immutable base and head is the candidate checkout the gate runs in
+(`WORKTREE`). The spec's `fail_on` is the gate's regression policy.
+
+- The gate passes when the compare's policy passes and fails otherwise, so it
+  passes when head matches base and fails when head introduces a regression
+  the policy names.
+- The compare runs both sides itself, so Cook never replays a bench gate on
+  the base and a red bench gate never counts as an inherited failure. A base
+  without the feature is just the base side of the comparison.
+- The gate's result carries `bench_compare` (schema
+  `homeboy/bench-compare-gate/v1`): the policy verdict, violations, the
+  aggregate summary and the artifact path. The Cook summary
+  (`cook_summary.gates[].bench_compare`) and the terminal notification
+  (`Bench compare` fact) link the same artifact.
 
 ## Cross-rig comparison
 

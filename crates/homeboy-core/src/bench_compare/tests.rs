@@ -240,3 +240,117 @@ fn compare_runs_both_sides_and_leaves_no_processes_or_worktrees() {
     let listed = String::from_utf8_lossy(&worktrees.stdout);
     assert_eq!(listed.matches("worktree ").count(), 1, "{listed}");
 }
+
+#[test]
+fn cook_gate_program_binds_cook_base_and_candidate_worktree() {
+    let spec = BenchCompareSpec::parse(
+        r#"{"component":"blocks-engine","corpus":"$CAPTURE","runner":["./bench/compare.sh --all"],"fail_on":"regressions","timeout_seconds":90}"#,
+    )
+    .unwrap();
+    let program = cook_gate_program(&spec).unwrap();
+    assert_eq!(
+        program,
+        "homeboy bench compare --cook-gate --base __HOMEBOY_COOK_BASE_SHA__ --head WORKTREE --path . --component blocks-engine --corpus '$CAPTURE' --workload-command './bench/compare.sh --all' --fail-on regressions --timeout-seconds 90"
+    );
+    assert!(is_cook_gate_command(&program));
+    assert!(!is_cook_gate_command("homeboy bench compare --base main"));
+    assert!(!is_cook_gate_command("cargo test"));
+}
+
+#[test]
+fn cook_gate_program_rejects_pinned_revisions_absolute_paths_and_missing_corpus() {
+    for json in [
+        r#"{"corpus":"/c","base":"main"}"#,
+        r#"{"corpus":"/c","head":"HEAD"}"#,
+        r#"{"corpus":"/c","path":"/abs/checkout"}"#,
+        r#"{"corpus":"/c","path":"../another-checkout"}"#,
+        r#"{"component":"x"}"#,
+    ] {
+        let spec = BenchCompareSpec::parse(json).unwrap();
+        assert!(cook_gate_program(&spec).is_err(), "{json}");
+    }
+}
+
+#[test]
+fn gate_evidence_round_trips_through_its_marker_line() {
+    let evidence = BenchCompareGateEvidence {
+        schema: GATE_EVIDENCE_SCHEMA.to_string(),
+        compare_id: "bench-compare-x".to_string(),
+        passed: false,
+        fail_on: BenchCompareFailOn::NewBlockers,
+        summary: BenchCompareSummary {
+            routes: 3,
+            regressed: 1,
+            new_blockers: 1,
+            ..Default::default()
+        },
+        violations: vec!["head introduced 1 new evaluator blocker(s)".to_string()],
+        artifact_path: "/data/bench-compare/x/bench-compare.json".to_string(),
+    };
+    let stderr = format!("noise\n{}\ntrailing\n", evidence.marker_line());
+    assert_eq!(parse_gate_evidence(&stderr), Some(evidence.clone()));
+    assert!(evidence
+        .headline()
+        .starts_with("failed (new-blockers): 3 route(s), 1 regressed"));
+    assert_eq!(parse_gate_evidence("no marker here"), None);
+    assert_eq!(
+        parse_gate_evidence(&format!("{GATE_EVIDENCE_MARKER}{{bad")),
+        None
+    );
+}
+
+/// The Cook gate shape: base is a pinned commit, head is the candidate
+/// checkout on disk. Head equal to base passes; a head that introduces an
+/// evaluator blocker fails the declared policy, and the artifact exists.
+#[cfg(unix)]
+#[test]
+fn worktree_head_gate_passes_when_unchanged_and_fails_on_regression() {
+    let repo = tempfile::tempdir().unwrap();
+    let root = repo.path();
+    git(root, &["init", "--quiet"]);
+    std::fs::write(root.join("blocker.txt"), "").unwrap();
+    git(root, &["add", "."]);
+    git(root, &["commit", "--quiet", "-m", "base"]);
+
+    let corpus = tempfile::tempdir().unwrap();
+    let runner = r#"b=$(cat blocker.txt); if [ -n "$b" ]; then bl="[\"$b\"]"; else bl="[]"; fi; printf '{"routes":[{"route":"/home","content":"same","blockers":%s}]}' "$bl" > "$HOMEBOY_BENCH_COMPARE_RESULTS""#;
+    let compare = |id: &str| {
+        let artifacts = tempfile::tempdir().unwrap();
+        let stop = AtomicBool::new(false);
+        let output = run_bench_compare(&BenchCompareRequest {
+            compare_id: id.to_string(),
+            component_id: "fixture".to_string(),
+            repo_root: root.to_path_buf(),
+            component_relative: Default::default(),
+            base: "HEAD".to_string(),
+            head: WORKTREE_HEAD.to_string(),
+            corpus: corpus.path().to_path_buf(),
+            runner: vec![runner.to_string()],
+            fail_on: BenchCompareFailOn::NewBlockers,
+            side_timeout: Duration::from_secs(60),
+            artifact_dir: artifacts.path().to_path_buf(),
+            stop: &stop,
+        })
+        .unwrap();
+        assert!(Path::new(&output.artifact_path).is_file());
+        let evidence = BenchCompareGateEvidence::from(&output);
+        assert_eq!(evidence.artifact_path, output.artifact_path);
+        (output, evidence)
+    };
+
+    let (unchanged, evidence) = compare("unchanged");
+    assert!(unchanged.policy.passed, "{:?}", unchanged.policy);
+    assert_eq!(unchanged.summary.unchanged, 1);
+    assert!(evidence.passed);
+
+    // The candidate (uncommitted worktree) introduces a blocker.
+    std::fs::write(root.join("blocker.txt"), "invalid-markup\n").unwrap();
+    let (regressed, evidence) = compare("regressed");
+    assert!(!regressed.policy.passed);
+    assert_eq!(regressed.summary.new_blockers, 1);
+    assert!(!evidence.passed);
+    assert_eq!(
+        parse_gate_evidence(&evidence.marker_line()).map(|e| e.summary.new_blockers),
+        Some(1)
+    );
+}
