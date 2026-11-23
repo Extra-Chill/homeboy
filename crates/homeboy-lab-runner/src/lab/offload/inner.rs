@@ -1975,7 +1975,7 @@ pub(crate) fn run_lab_offload_inner(
     }
     workspace_resource_lifecycle.cleanup_command = Some(format!(
         "homeboy runner workspace prune {} --apply --min-age-hours 0",
-        homeboy_core::engine::shell::quote_arg(runner_id),
+        homeboy_core::error::posix_quote_arg(runner_id),
     ));
     crate::update_workspace_resource_lifecycle(
         runner_id,

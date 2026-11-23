@@ -1688,20 +1688,20 @@ impl PromisorTransportFixture {
     fn configure(&self, hang_on_call: usize) {
         use homeboy_core::component::GithubHostConfig;
         use homeboy_core::defaults::{save_config, HomeboyConfig};
-        use homeboy_core::engine::shell::quote_arg;
+        use homeboy_core::error::posix_quote_arg;
         use std::collections::HashMap;
 
         let script = self.transport.path().join("ssh");
         let log = self.transport.path().join("calls");
         let body = format!(
             "if [ {hang_on_call} -gt 0 ] && [ \"$(wc -l < {})\" -ge {hang_on_call} ]; then\ntrap '' TERM\nsleep 30 &\necho $! > {}\nwait\nelse\nexec git-upload-pack {}\nfi\n",
-            quote_arg(&log.display().to_string()),
-            quote_arg(&self.transport.path().join("descendant.pid").display().to_string()),
-            quote_arg(&self.origin.path().display().to_string()),
+            posix_quote_arg(&log.display().to_string()),
+            posix_quote_arg(&self.transport.path().join("descendant.pid").display().to_string()),
+            posix_quote_arg(&self.origin.path().display().to_string()),
         );
         homeboy_test_support::write_executable(&script, format!(
             "#!/bin/sh\n[ \"$HOMEBOY_PROMISOR_CONTROLLER\" = required ] || exit 91\n[ \"$HTTPS_PROXY\" = http://controller-proxy.example.test:8123 ] || exit 92\n[ \"$PWD\" = {} ] || exit 93\ncase \"$*\" in *promisor.example.test*) ;; *) exit 94 ;; esac\nprintf '%s\\n' \"$PWD $*\" >> {}\n{}",
-            quote_arg(&self.source.path().display().to_string()), quote_arg(&log.display().to_string()), body
+            posix_quote_arg(&self.source.path().display().to_string()), posix_quote_arg(&log.display().to_string()), body
         ), 0o755).unwrap();
 
         save_config(&HomeboyConfig {
@@ -1713,7 +1713,7 @@ impl PromisorTransportFixture {
                         env: HashMap::from([
                             (
                                 "GIT_SSH_COMMAND".to_string(),
-                                quote_arg(&script.display().to_string()),
+                                posix_quote_arg(&script.display().to_string()),
                             ),
                             ("GIT_SSH_VARIANT".to_string(), "ssh".to_string()),
                             (

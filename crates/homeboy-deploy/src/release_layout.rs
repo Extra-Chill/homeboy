@@ -26,7 +26,7 @@
 //! `use_release=1` only after the target points at the new release; otherwise
 //! `use_release=0` and `extracted` names the tree the in-place flow publishes.
 
-use homeboy_core::engine::shell;
+use homeboy_core::error::posix_quote_arg;
 use homeboy_extension_contract::DeployReleaseLayoutPolicy;
 
 use super::install_script::{LOG_MARKER, WARN_MARKER};
@@ -44,7 +44,7 @@ pub(crate) fn decide_and_install(layout: &DeployReleaseLayoutPolicy, exchange_py
     if let Err(error) = layout.validate() {
         return format!(
             "use_release=0\nrelease_dir=\nprintf '\\n{WARN_MARKER}%s\\n' {}\n",
-            shell::quote_arg(&format!(
+            posix_quote_arg(&format!(
                 "Release layout disabled: {error}; installing with the in-place exchange flow"
             ))
         );
@@ -59,7 +59,7 @@ pub(crate) fn decide_and_install(layout: &DeployReleaseLayoutPolicy, exchange_py
     script
         .replace("@ROOT@", &layout.release_root_dir)
         .replace("@EXCHANGE_PY@", exchange_py)
-        .replace("@REPLACE_PY@", &shell::quote_arg(PY_REPLACE))
+        .replace("@REPLACE_PY@", &posix_quote_arg(PY_REPLACE))
         .replace("@LOG@", LOG_MARKER)
         .replace("@WARN@", WARN_MARKER)
 }

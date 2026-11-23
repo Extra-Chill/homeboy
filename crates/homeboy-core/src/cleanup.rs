@@ -2238,13 +2238,16 @@ fn artifact_cleanup_apply_command(
     options: &ArtifactCleanupOptions,
     cursor: Option<&ArtifactCleanupCursor>,
 ) -> String {
-    use crate::engine::shell::quote_arg;
+    use crate::error::posix_quote_arg;
 
     let mut command = "homeboy cleanup artifacts".to_string();
     if options.self_artifacts {
         command.push_str(" --self");
     } else if let Some(path) = &options.path {
-        command.push_str(&format!(" --path {}", quote_arg(&path.to_string_lossy())));
+        command.push_str(&format!(
+            " --path {}",
+            posix_quote_arg(&path.to_string_lossy())
+        ));
     }
     if options.scope == ArtifactCleanupScope::RepositoryWorktrees {
         command.push_str(" --all-worktrees");
@@ -2252,7 +2255,7 @@ fn artifact_cleanup_apply_command(
     for temp_root in &options.temp_roots {
         command.push_str(&format!(
             " --temp-root {}",
-            quote_arg(&temp_root.to_string_lossy())
+            posix_quote_arg(&temp_root.to_string_lossy())
         ));
     }
     if options.sort == ArtifactCleanupSort::Size {
@@ -2272,7 +2275,7 @@ fn artifact_cleanup_apply_command(
     }
     if let Some(cursor) = cursor {
         if let Ok(cursor) = serde_json::to_string(cursor) {
-            command.push_str(&format!(" --cursor {}", quote_arg(&cursor)));
+            command.push_str(&format!(" --cursor {}", posix_quote_arg(&cursor)));
         }
     }
     if options.apply {

@@ -730,14 +730,14 @@ pub(super) fn render_cargo_recovery_command(argv: &[String]) -> String {
             let (name, value) = assignment.split_once('=')?;
             Some(format!(
                 "{name}={}",
-                homeboy_core::engine::shell::quote_arg(value)
+                homeboy_core::error::posix_quote_arg(value)
             ))
         })
         .collect::<Vec<_>>();
     rendered.extend(
         argv[assignment_count..]
             .iter()
-            .map(|argument| homeboy_core::engine::shell::quote_arg(argument)),
+            .map(|argument| homeboy_core::error::posix_quote_arg(argument)),
     );
     rendered.join(" ")
 }

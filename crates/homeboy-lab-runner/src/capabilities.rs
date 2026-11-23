@@ -1,3 +1,4 @@
+use homeboy_core::error::posix_quote_arg;
 use serde_json::{json, Value};
 use sha2::Digest;
 use std::collections::{BTreeMap, BTreeSet, HashMap};
@@ -5,7 +6,6 @@ use std::collections::{BTreeMap, BTreeSet, HashMap};
 use homeboy_agents::agent_tasks::provider::{
     AgentTaskExecutorProvider, ExtensionProviderAgentTaskExecutor,
 };
-use homeboy_core::engine::shell;
 use homeboy_core::error::{Error, ErrorCode, Result};
 use homeboy_core::gate::{HomeboyGateKind, HomeboyGateResult, HomeboyGateStatus};
 use homeboy_core::server::{
@@ -399,7 +399,7 @@ pub fn runner_agent_task_provider_catalog(
     let homeboy = remote_runner_homeboy_path(&runner, "runner provider catalog")?;
     let output = client.execute(&format!(
         "{} agent-task providers --machine-catalog",
-        shell::quote_arg(homeboy)
+        posix_quote_arg(homeboy)
     ));
     let value: Value = serde_json::from_str(&output.stdout).map_err(|error| {
         Error::validation_invalid_argument(
@@ -698,12 +698,12 @@ fn batch_probe_script(
         let command = if probe.version_args.is_empty() {
             format!(
                 "command -v {} >/dev/null 2>&1",
-                shell::quote_arg(&probe.command)
+                posix_quote_arg(&probe.command)
             )
         } else {
             std::iter::once(&probe.command)
                 .chain(probe.version_args.iter())
-                .map(|arg| shell::quote_arg(arg))
+                .map(|arg| posix_quote_arg(arg))
                 .collect::<Vec<_>>()
                 .join(" ")
         };
@@ -714,7 +714,7 @@ fn batch_probe_script(
     for (index, command) in command_names.iter().enumerate() {
         lines.push(format!(
             "if command -v {} >/dev/null 2>&1; then printf 'C\\t{index}\\t1\\n'; else printf 'C\\t{index}\\t0\\n'; fi",
-            shell::quote_arg(command)
+            posix_quote_arg(command)
         ));
     }
     for (index, probe) in capability_probes.iter().enumerate() {
@@ -723,7 +723,7 @@ fn batch_probe_script(
     for (index, probe) in toolchain_probes.iter().enumerate() {
         let argv = std::iter::once(&probe.program)
             .chain(probe.args.iter())
-            .map(|arg| shell::quote_arg(arg))
+            .map(|arg| posix_quote_arg(arg))
             .collect::<Vec<_>>()
             .join(" ");
         // A failure carries its exit status and a bounded, single-line tail of
@@ -731,7 +731,7 @@ fn batch_probe_script(
         // the environment variables that might be involved.
         lines.push(format!(
             "__homeboy_toolchain_output=$({{ {argv}; }} 2>&1); __homeboy_toolchain_status=$?; if [ \"$__homeboy_toolchain_status\" -eq 0 ]; then printf 'R\\t{index}\\t1\\n'; else printf 'R\\t{index}\\t0\\t%s (exit %s: %s)\\n' {} \"$__homeboy_toolchain_status\" \"$(printf '%s' \"$__homeboy_toolchain_output\" | tr '\\t\\r\\n' '   ' | tail -c 300)\"; fi",
-            shell::quote_arg(&probe.diagnostic_env.join(","))
+            posix_quote_arg(&probe.diagnostic_env.join(","))
         ));
     }
     lines.push("exit 0".to_string());
@@ -743,9 +743,9 @@ fn tool_capability_probe_script(index: usize, probe: &RunnerToolCapabilityProbe)
     for env in &probe.env {
         candidates.push(format!("\"${{{env}:-}}\""));
     }
-    candidates.push(shell::quote_arg(&probe.command));
+    candidates.push(posix_quote_arg(&probe.command));
     let assignments = candidates.join(" ");
-    let capability = shell::quote_arg(&probe.capability);
+    let capability = posix_quote_arg(&probe.capability);
     format!(
         "for c in {assignments}; do [ -n \"$c\" ] || continue; if [ -x \"$c\" ] || command -v \"$c\" >/dev/null 2>&1; then if \"$c\" {capability} --help >/dev/null 2>&1 || \"$c\" {capability} --version >/dev/null 2>&1; then printf 'P\\t{index}\\t1\\n'; break; fi; fi; done"
     )
@@ -838,11 +838,11 @@ fn parse_batch_probe_output(
 
 fn rendered_tool_probe_command(probe: &RunnerToolProbe) -> String {
     if probe.version_args.is_empty() {
-        return format!("command -v {}", shell::quote_arg(&probe.command));
+        return format!("command -v {}", posix_quote_arg(&probe.command));
     }
     std::iter::once(&probe.command)
         .chain(probe.version_args.iter())
-        .map(|arg| shell::quote_arg(arg))
+        .map(|arg| posix_quote_arg(arg))
         .collect::<Vec<_>>()
         .join(" ")
 }

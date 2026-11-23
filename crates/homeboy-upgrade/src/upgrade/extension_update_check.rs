@@ -105,7 +105,7 @@ pub fn run_startup_check() {
 
     write_cache(&ExtensionUpdateCache {
         extensions_behind: extensions_behind.clone(),
-        checked_at: update_check_cache::now_unix(),
+        checked_at: homeboy_engine_primitives::now_secs(),
     });
 
     if !already_printed && !extensions_behind.is_empty() {
@@ -142,7 +142,7 @@ mod tests {
     fn cache_freshness_within_24h() {
         let cache = ExtensionUpdateCache {
             extensions_behind: HashMap::new(),
-            checked_at: update_check_cache::now_unix() - 100,
+            checked_at: homeboy_engine_primitives::now_secs() - 100,
         };
         assert!(update_check_cache::is_cache_fresh(
             cache.checked_at,
@@ -154,7 +154,7 @@ mod tests {
     fn cache_stale_after_24h() {
         let cache = ExtensionUpdateCache {
             extensions_behind: HashMap::new(),
-            checked_at: update_check_cache::now_unix() - CHECK_INTERVAL_SECS - 1,
+            checked_at: homeboy_engine_primitives::now_secs() - CHECK_INTERVAL_SECS - 1,
         };
         assert!(!update_check_cache::is_cache_fresh(
             cache.checked_at,

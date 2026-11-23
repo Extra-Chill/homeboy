@@ -1,9 +1,9 @@
+use homeboy::core::error::posix_quote_arg;
 use std::collections::HashMap;
 use std::fs;
 use std::io::{self, Read};
 use std::time::Duration;
 
-use homeboy::core::engine::shell;
 use homeboy::core::secret_env_plan::SecretEnvPlan;
 use homeboy::core::stream_capture::StreamCaptureMetadata;
 use homeboy::core::Error;
@@ -392,7 +392,7 @@ chmod 500 "$script_path"
 export HOMEBOY_RUNNER_EXEC_SCRIPT="$script_path"
 export HOMEBOY_RUNNER_EXEC_SCRIPT_SHA256="sha256:{digest}"
 bash "$script_path""#,
-        shell::quote_arg(script),
+        posix_quote_arg(script),
     )
 }
 

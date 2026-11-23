@@ -49,7 +49,6 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use crate::resolve_lab_runner_hint;
 use homeboy_agents::agent_task_lifecycle;
-use homeboy_core::engine::shell;
 use homeboy_core::lab_contract::LabRunnerWorkload;
 use homeboy_core::plan::{HomeboyPlan, PlanStep, PlanStepStatus, PlanValues};
 use homeboy_core::redaction::{redact_argv, redact_argv_shell_display, RedactionPolicy};

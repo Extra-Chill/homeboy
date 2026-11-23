@@ -1,7 +1,7 @@
+use homeboy_core::error::posix_quote_arg;
 use std::path::Path;
 use std::process::Command;
 
-use homeboy_core::engine::shell;
 use homeboy_core::error::{Error, Result};
 
 use super::super::{Runner, RunnerKind};
@@ -393,7 +393,7 @@ fn cached_commits(
 ) -> Result<Vec<String>> {
     let list = format!(
         "git -C {cache} for-each-ref --sort=-committerdate --count={GIT_OBJECT_CACHE_REF_LIMIT} --format='%(objectname)' refs/homeboy/ 2>/dev/null || true",
-        cache = shell::quote_arg(object_cache),
+        cache = posix_quote_arg(object_cache),
     );
     let output = control.output(
         Command::new("sh").args(["-c", &super::util::shell_command_for_runner(runner, &list)?]),
@@ -496,7 +496,7 @@ fn transfer_git_bundle(
         || match runner.kind {
             RunnerKind::Local => materialize_git_bundle_piped_controlled(
                 bundle_path,
-                &format!("sh -c {}", shell::quote_arg(&install_command)),
+                &format!("sh -c {}", posix_quote_arg(&install_command)),
                 "materialize local git bundle workspace",
                 control,
             ),
@@ -505,7 +505,7 @@ fn transfer_git_bundle(
                 if client.is_local {
                     materialize_git_bundle_piped_controlled(
                         bundle_path,
-                        &format!("sh -c {}", shell::quote_arg(&install_command)),
+                        &format!("sh -c {}", posix_quote_arg(&install_command)),
                         "materialize local git bundle workspace",
                         control,
                     )
@@ -514,8 +514,8 @@ fn transfer_git_bundle(
                     let target = format!(
                         "ssh {ssh_args} {remote} {remote_command}",
                         ssh_args = ssh_args(&client),
-                        remote = shell::quote_arg(&remote),
-                        remote_command = shell::quote_arg(&install_command),
+                        remote = posix_quote_arg(&remote),
+                        remote_command = posix_quote_arg(&install_command),
                     );
                     materialize_git_bundle_piped_controlled(
                         bundle_path,
@@ -584,8 +584,8 @@ pub(super) fn hydrate_controller_bundle_objects_controlled(
     }
     let script = format!(
         "git -C {} cat-file --batch-check < {} >/dev/null",
-        shell::quote_arg(&local_path.display().to_string()),
-        shell::quote_arg(&objects.path().display().to_string())
+        posix_quote_arg(&local_path.display().to_string()),
+        posix_quote_arg(&objects.path().display().to_string())
     );
     let output = control.output(
         Command::new("bash").args(["-o", "pipefail", "-c", &script]),
@@ -943,10 +943,10 @@ fn controller_object_closure_error(
 ) -> Error {
     let repair_command = format!(
         "git -C {} fetch --no-tags --filter=blob:none {} {}",
-        shell::quote_arg(&local_path.display().to_string()),
-        shell::quote_arg(remote),
+        posix_quote_arg(&local_path.display().to_string()),
+        posix_quote_arg(remote),
         refs.iter()
-            .map(|git_ref| shell::quote_arg(git_ref))
+            .map(|git_ref| posix_quote_arg(git_ref))
             .collect::<Vec<_>>()
             .join(" "),
     );
@@ -1113,7 +1113,7 @@ pub(super) fn validate_controller_git_bundle_source(
         Some(vec![
             format!(
                 "Deepen the source checkout with `git -C {} fetch --unshallow` before retrying.",
-                shell::quote_arg(&local_path.display().to_string())
+                posix_quote_arg(&local_path.display().to_string())
             ),
             "Use a full clone for --source-path when upgrading runners with --method source."
                 .to_string(),
@@ -1131,7 +1131,7 @@ fn materialize_git_bundle_piped_controlled(
 ) -> Result<()> {
     let command = format!(
         "cat {bundle} | {target_command}",
-        bundle = shell::quote_arg(&bundle_path.display().to_string()),
+        bundle = posix_quote_arg(&bundle_path.display().to_string()),
         target_command = target_command,
     );
     control.shell(&command, action)

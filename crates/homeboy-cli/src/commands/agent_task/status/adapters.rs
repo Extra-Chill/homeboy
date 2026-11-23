@@ -1,6 +1,7 @@
 //! Watch polling and output, artifact/evidence reads, and cancellation adapters.
 
 use super::*;
+use homeboy::core::error::posix_quote_arg;
 
 pub(super) struct StatusPoller {
     pub(super) args: StatusArgs,
@@ -231,7 +232,7 @@ pub(super) fn emit_status_change_event(
         "change": status_watch_change(snapshot, poll),
         "retained_limit_reached": retained_limit_reached,
         "continuation_command": run_id.map(|run_id| format!(
-            "homeboy agent-task status {} --watch", quote_arg(run_id)
+            "homeboy agent-task status {} --watch", posix_quote_arg(run_id)
         )),
     });
     if serialized_len(&event) > STATUS_WATCH_EVENT_BYTE_LIMIT {
@@ -310,7 +311,7 @@ pub(super) fn watch_status_output(
     let (observed_latest, status_exit) = result.item;
     let continuation = format!(
         "homeboy agent-task status {} --watch --interval {} --timeout {}",
-        quote_arg(&args.run_id),
+        posix_quote_arg(&args.run_id),
         args.interval,
         args.timeout
     );
@@ -330,7 +331,7 @@ pub(super) fn watch_status_output(
         continuation.clone(),
         format!(
             "homeboy agent-task status {} --output <path>",
-            quote_arg(&args.run_id)
+            posix_quote_arg(&args.run_id)
         ),
     );
     let latest = status_watch_latest(&observed_latest);
@@ -383,7 +384,7 @@ pub(super) fn enforce_watch_output_budget(output: &mut Value, continuation: &str
                     "schema": "homeboy/agent-task-status-watch-terminal-ref/v2",
                     "run_id": output["run_id"],
                     "state": output["latest"]["state"],
-                    "command": format!("homeboy agent-task status {}", quote_arg(output["run_id"].as_str().unwrap_or_default())),
+                    "command": format!("homeboy agent-task status {}", posix_quote_arg(output["run_id"].as_str().unwrap_or_default())),
                 });
                 continue;
             }
@@ -394,7 +395,7 @@ pub(super) fn enforce_watch_output_budget(output: &mut Value, continuation: &str
                     "schema": "homeboy/agent-task-status-watch-latest-ref/v2",
                     "run_id": output["run_id"],
                     "state": output["latest"]["state"],
-                    "command": format!("homeboy agent-task status {}", quote_arg(output["run_id"].as_str().unwrap_or_default())),
+                    "command": format!("homeboy agent-task status {}", posix_quote_arg(output["run_id"].as_str().unwrap_or_default())),
                 });
                 continue;
             }
@@ -444,10 +445,13 @@ pub(crate) fn artifacts(mut args: LifecycleReadArgs) -> CmdResult<Value> {
         attach_collection_budget(
             &mut value,
             "artifacts",
-            &format!("homeboy runs artifacts {} --full", quote_arg(&args.run_id)),
+            &format!(
+                "homeboy runs artifacts {} --full",
+                posix_quote_arg(&args.run_id)
+            ),
             &format!(
                 "homeboy runs artifacts {} --full --output <path>",
-                quote_arg(&args.run_id)
+                posix_quote_arg(&args.run_id)
             ),
         );
     }
@@ -646,10 +650,13 @@ pub(crate) fn evidence(args: EvidenceArgs) -> CmdResult<Value> {
         attach_collection_budget(
             &mut value,
             "evidence",
-            &format!("homeboy runs evidence {} --full", quote_arg(&args.run_id)),
+            &format!(
+                "homeboy runs evidence {} --full",
+                posix_quote_arg(&args.run_id)
+            ),
             &format!(
                 "homeboy runs evidence {} --full --output <path>",
-                quote_arg(&args.run_id)
+                posix_quote_arg(&args.run_id)
             ),
         );
     }

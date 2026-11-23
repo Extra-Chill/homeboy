@@ -197,7 +197,7 @@ fn host_supports_atomic_exchange() -> bool {
     let script = format!(
         "cd {dir} && {{ mv -T --exchange link dir 2>/dev/null || python3 -c {py} link dir 2>/dev/null; }}",
         dir = homeboy_core::engine::shell::quote_path(temp.path().to_str().expect("probe")),
-        py = homeboy_core::engine::shell::quote_arg(crate::version_overrides::RENAMEAT2_EXCHANGE_PY),
+        py = homeboy_core::error::posix_quote_arg(crate::version_overrides::RENAMEAT2_EXCHANGE_PY),
     );
     std::process::Command::new("sh")
         .args(["-c", &script])

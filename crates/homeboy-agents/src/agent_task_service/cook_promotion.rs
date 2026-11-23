@@ -18,8 +18,9 @@ use std::sync::Arc;
 
 use homeboy_core::cook_status::{CookDisposition, CookStatus};
 use homeboy_core::engine::canonical_json::canonical_json_bytes;
+use homeboy_core::error::posix_quote_arg;
 use homeboy_engine_primitives::content_hash;
-use homeboy_engine_primitives::shell::{quote_arg, quote_args};
+use homeboy_engine_primitives::shell::quote_args;
 
 use crate::agent_task_finalization::{
     finalize_pr_with_backend, preflight_pr_with_backend, AgentTaskPrEvidence,
@@ -5783,9 +5784,9 @@ fn dirty_candidate_adoption_recovery_actions(
             action: "commit_candidate".to_string(),
             command: format!(
                 "git -C {} add -A && git -C {} commit -m {}",
-                quote_arg(workspace),
-                quote_arg(workspace),
-                quote_arg(&cook_commit_message(
+                posix_quote_arg(workspace),
+                posix_quote_arg(workspace),
+                posix_quote_arg(&cook_commit_message(
                     &options.finalization.commit_message,
                     &options.finalization.title,
                     None,
@@ -5794,14 +5795,14 @@ fn dirty_candidate_adoption_recovery_actions(
         },
         super::AgentTaskCookRecoveryAction {
             action: "review_candidate".to_string(),
-            command: format!("{prefix} agent-task review {}", quote_arg(run_id)),
+            command: format!("{prefix} agent-task review {}", posix_quote_arg(run_id)),
         },
         super::AgentTaskCookRecoveryAction {
             action: "adopt_candidate".to_string(),
             command: format!(
                 "{prefix} agent-task recover {} --candidate-ref HEAD --adoption-model {}",
-                quote_arg(cook_id),
-                quote_arg(model),
+                posix_quote_arg(cook_id),
+                posix_quote_arg(model),
             ),
         },
     ];
@@ -5844,7 +5845,7 @@ fn unfingerprinted_timeout_worktree_recovery(
     let command = |args: &[&str]| super::cook_recovery_command_with_prefix(&prefix, args);
     let inspect = super::AgentTaskCookRecoveryAction {
         action: "inspect_worktree".to_string(),
-        command: format!("git -C {} status", quote_arg(&worktree)),
+        command: format!("git -C {} status", posix_quote_arg(&worktree)),
     };
     Some(CookRecoveryActions {
         step: super::CookRecoveryStep::none(

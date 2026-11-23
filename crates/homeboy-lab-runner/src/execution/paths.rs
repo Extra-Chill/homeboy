@@ -1,6 +1,6 @@
+use homeboy_core::error::posix_quote_arg;
 use std::path::Path;
 
-use homeboy_core::engine::shell;
 use homeboy_core::error::{Error, Result};
 use homeboy_core::server::SshClient;
 
@@ -38,7 +38,7 @@ pub(super) fn validate_remote_required_paths(
     required_paths: &[String],
 ) -> Result<()> {
     for path in required_paths {
-        let output = client.execute(&format!("test -e {}", shell::quote_arg(path)));
+        let output = client.execute(&format!("test -e {}", posix_quote_arg(path)));
         if output.exit_code != 0 {
             return Err(Error::validation_invalid_argument(
                 "require_path",

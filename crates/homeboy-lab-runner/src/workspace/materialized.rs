@@ -138,16 +138,16 @@ impl MaterializedWorkspace {
             daemon_generation: daemon_generation.map(ToString::to_string),
             reconnect_command: format!(
                 "homeboy runner status {} --full",
-                homeboy_core::engine::shell::quote_arg(&self.runner_id),
+                homeboy_core::error::posix_quote_arg(&self.runner_id),
             ),
             reconcile_command: format!(
                 "homeboy runner job reconcile {}",
-                homeboy_core::engine::shell::quote_arg(&self.runner_id),
+                homeboy_core::error::posix_quote_arg(&self.runner_id),
             ),
             job_logs_command: format!(
                 "homeboy runner job logs {} {} --follow",
-                homeboy_core::engine::shell::quote_arg(&self.runner_id),
-                homeboy_core::engine::shell::quote_arg(job_id),
+                homeboy_core::error::posix_quote_arg(&self.runner_id),
+                homeboy_core::error::posix_quote_arg(job_id),
             ),
         });
     }
@@ -177,7 +177,7 @@ impl MaterializedWorkspace {
     fn reclaim_command(&self) -> String {
         format!(
             "homeboy runner workspace prune {} --apply --min-age-hours 0",
-            homeboy_core::engine::shell::quote_arg(&self.runner_id),
+            homeboy_core::error::posix_quote_arg(&self.runner_id),
         )
     }
 
@@ -234,7 +234,7 @@ impl Drop for MaterializedWorkspace {
                     self.runner_id,
                     self.policy.label(),
                     self.terminal_outcome().label(),
-                    homeboy_core::engine::shell::quote_arg(&self.runner_id),
+                    homeboy_core::error::posix_quote_arg(&self.runner_id),
                 );
             }
             return;

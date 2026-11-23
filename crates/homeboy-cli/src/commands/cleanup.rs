@@ -15,7 +15,7 @@ use homeboy::core::daemon::controller_job_driver::{
 use homeboy::core::daemon::{ControllerJobSubmission, LocalControllerJobClient};
 use homeboy::core::defaults;
 use homeboy::core::engine;
-use homeboy::core::engine::shell::quote_arg;
+use homeboy::core::error::posix_quote_arg;
 use homeboy::core::observation::runs_service::{
     self, OrphanedArtifactBytesCleanupOptions, PersistedArtifactCleanupOptions,
     RunnerDownloadCleanupOptions,
@@ -903,7 +903,7 @@ fn retained_storage_report(
     let runtime_tmp_continuation = runtime_tmp.next_cursor.as_ref().map(|cursor| {
         format!(
             "homeboy cleanup --include runtime-tmp --cursor {}",
-            quote_arg(cursor)
+            posix_quote_arg(cursor)
         )
     });
     records.extend(
@@ -1510,7 +1510,7 @@ fn build_retained_storage_report(
         format!(
             "homeboy cleanup retained-storage --limit {} --cursor {}",
             limit,
-            quote_arg(&cursor.reference)
+            posix_quote_arg(&cursor.reference)
         )
     });
     RetainedStorageReport {
@@ -2783,7 +2783,7 @@ fn run_cleanup_category(
                             category.continuation_command = format!(
                                 "{} --cursor {}",
                                 category.canonical_cleanup_command,
-                                quote_arg(&cursor)
+                                posix_quote_arg(&cursor)
                             );
                         }
                     }
@@ -3140,7 +3140,7 @@ fn cleanup_replay_command(args: &CleanupArgs, full: bool, include_cursor: bool) 
     }
     if include_cursor {
         if let Some(cursor) = &args.cursor {
-            command.push_str(&format!(" --cursor {}", quote_arg(cursor)));
+            command.push_str(&format!(" --cursor {}", posix_quote_arg(cursor)));
         }
     }
     if full {
@@ -3746,7 +3746,7 @@ fn cleanup_category_replay_command(
         command.push_str(&format!(" --limit {limit}"));
     }
     if let Some(cursor) = &args.cursor {
-        command.push_str(&format!(" --cursor {}", quote_arg(cursor)));
+        command.push_str(&format!(" --cursor {}", posix_quote_arg(cursor)));
     }
     if args.full {
         command.push_str(" --full");
@@ -4116,7 +4116,7 @@ fn repo_artifact_continuation_command(
     Some(format!(
         "{} --cursor {}",
         repo_artifacts_command(apply, command_limit),
-        quote_arg(&cursor)
+        posix_quote_arg(&cursor)
     ))
 }
 
@@ -4635,7 +4635,7 @@ fn remote_lab_workspace_categories(
                     .canonical_cleanup_command(apply),
                 specialist_command: format!(
                     "homeboy runner workspace prune {}",
-                    quote_arg(&status.runner_id)
+                    posix_quote_arg(&status.runner_id)
                 ),
                 included: true,
                 skipped: true,
@@ -4759,10 +4759,13 @@ fn runner_workspace_specialist_command(runner_id: &str, apply: bool) -> String {
     if apply {
         format!(
             "homeboy runner workspace prune {} --apply --passes 10",
-            quote_arg(runner_id)
+            posix_quote_arg(runner_id)
         )
     } else {
-        format!("homeboy runner workspace prune {}", quote_arg(runner_id))
+        format!(
+            "homeboy runner workspace prune {}",
+            posix_quote_arg(runner_id)
+        )
     }
 }
 
@@ -4783,7 +4786,7 @@ fn runner_binary_cache_category(
 ) -> homeboy::core::Result<CleanupInventoryCategory> {
     let specialist_command = format!(
         "homeboy runner cache-prune {}{}",
-        quote_arg(runner_id),
+        posix_quote_arg(runner_id),
         if apply { " --apply" } else { "" }
     );
     let output = match runner::prune_homeboy_binary_cache(
@@ -5452,7 +5455,7 @@ mod tests {
                 category["continuation_command"]
                     .as_str()
                     .is_some_and(|command| command.contains("--include runtime-tmp")
-                        && command.contains(&quote_arg(cursor))),
+                        && command.contains(&posix_quote_arg(cursor))),
                 "continuation must resume the runtime-tmp cursor: {category}"
             );
             assert_eq!(result.output["continuation_required"], true);

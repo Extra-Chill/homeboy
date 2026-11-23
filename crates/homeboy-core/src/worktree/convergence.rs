@@ -110,7 +110,7 @@ pub fn pr_route(branch: &str, url: Option<&str>) -> Error {
         .unwrap_or_else(|| {
             format!(
                 "gh pr create --head {}",
-                homeboy_engine_primitives::shell::quote_arg(branch)
+                homeboy_core::error::posix_quote_arg(branch)
             )
         });
     let mut error = Error::validation_invalid_argument(
@@ -148,7 +148,7 @@ pub fn diverged_route(branch: &str, task_url: Option<&str>) -> Error {
         Some(branch.to_string()),
         Some(vec![format!(
             "gh pr create --head {}",
-            homeboy_engine_primitives::shell::quote_arg(branch)
+            homeboy_core::error::posix_quote_arg(branch)
         )]),
     );
     error.details["destination_convergence"] = serde_json::json!({

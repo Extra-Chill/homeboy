@@ -46,7 +46,7 @@ use homeboy::agents::agent_tasks::service as agent_task_service;
 use homeboy::agents::agent_tasks::{
     AgentTaskEvidenceRef, AgentTaskFailureClassification, AgentTaskOutcomeStatus,
 };
-use homeboy::core::engine::shell::quote_arg;
+use homeboy::core::error::posix_quote_arg;
 use homeboy::core::error::{ActionSafety, ExecutableAction};
 use homeboy::core::output::{budget_json_values, OutputBudget};
 use homeboy_core::cook_status::CookStatus;
@@ -209,7 +209,7 @@ fn status_without_feedback(args: StatusArgs) -> CmdResult<Value> {
         && matches!(value["state"].as_str(), Some("running" | "queued"))
     {
         value["recovery"] = json!({
-            "command": format!("homeboy agent-task status {} --watch", quote_arg(&target.run_id)),
+            "command": format!("homeboy agent-task status {} --watch", posix_quote_arg(&target.run_id)),
         });
     }
     // Status is a pure projection (#13697, #15718): every read below is
@@ -310,7 +310,7 @@ fn status_without_feedback(args: StatusArgs) -> CmdResult<Value> {
             value["blocker_summary"] = json!(diagnostic.message);
             value["next_action"] = json!({
                 "description": "Repair or recreate the malformed private Lab staging recipe, then retry the run.",
-                "command": format!("homeboy agent-task retry {}", quote_arg(record.metadata["cook_id"].as_str().unwrap_or(&record.run_id))),
+                "command": format!("homeboy agent-task retry {}", posix_quote_arg(record.metadata["cook_id"].as_str().unwrap_or(&record.run_id))),
             });
             value["lab_staging_diagnostic"] = collected_diagnostic_value(diagnostic);
         }
@@ -330,7 +330,7 @@ fn status_without_feedback(args: StatusArgs) -> CmdResult<Value> {
             "action": "placement_update",
             "command": format!(
                 "homeboy --placement local agent-task placement-update {} --confirm",
-                quote_arg(&target.run_id)
+                posix_quote_arg(&target.run_id)
             ),
             "reason": "explicit local placement is legal before execution ownership begins",
         }]);
@@ -733,7 +733,7 @@ fn active_continuation_prefix(args: &crate::commands::runs::RunsListArgs) -> Str
 fn append_discovery_scope<const N: usize>(command: &mut String, fields: [(&str, Option<&str>); N]) {
     for (flag, value) in fields {
         if let Some(value) = value {
-            command.push_str(&format!(" --{flag} {}", quote_arg(value)));
+            command.push_str(&format!(" --{flag} {}", posix_quote_arg(value)));
         }
     }
 }
@@ -900,7 +900,7 @@ fn lab_transport_repair_action(record: &AgentTaskRunRecord) -> Option<CommandNex
 fn lab_transport_repair_action_for_receipt(
     receipt: &LabTransportAttemptReceipt,
 ) -> CommandNextAction {
-    let runner = quote_arg(&receipt.selected_runner);
+    let runner = posix_quote_arg(&receipt.selected_runner);
     CommandNextAction::new(
         format!(
             "diagnose and repair Lab transport for {}",
@@ -1044,7 +1044,10 @@ fn attach_agent_task_discovery_actionable(
         metadata.next_actions.push(
             CommandNextAction::new(
                 "show next page",
-                format!("{command} --limit {limit} --cursor {}", quote_arg(cursor)),
+                format!(
+                    "{command} --limit {limit} --cursor {}",
+                    posix_quote_arg(cursor)
+                ),
             )
             .with_kind(CommandNextActionKind::Show),
         );

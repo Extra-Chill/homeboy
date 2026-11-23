@@ -151,7 +151,7 @@ fn prepare_daemon_exec(
     // build-specific job store, so the child's Homeboy is this binary. If the
     // path cannot be resolved the child's build stamp check names the skew.
     let mut env = request.env;
-    if let Ok(daemon_executable) = homeboy_core::daemon::daemon_launchable_executable() {
+    if let Ok(daemon_executable) = homeboy_core::daemon::launchable_executable() {
         super::command_path::select_daemon_child_homeboy(&mut env, &daemon_executable);
     }
     let mut plan = prepare_daemon_local_process(RunnerProcessRequest {
@@ -175,7 +175,7 @@ fn prepare_daemon_exec(
     if let Some(program) = plan.command.first_mut().filter(|program| {
         std::path::Path::new(program.as_str()).file_name() == Some(std::ffi::OsStr::new("homeboy"))
     }) {
-        *program = homeboy_core::daemon::daemon_launchable_executable()
+        *program = homeboy_core::daemon::launchable_executable()
             .map_err(|error| homeboy_core::error::Error::internal_io(error.to_string(), None))?
             .display()
             .to_string();
@@ -355,7 +355,7 @@ mod tests {
     #[test]
     fn daemon_exec_spawns_the_recorded_daemon_runtime() {
         let workspace = tempfile::tempdir().unwrap();
-        let daemon_executable = homeboy_core::daemon::daemon_launchable_executable().unwrap();
+        let daemon_executable = homeboy_core::daemon::launchable_executable().unwrap();
         // This nonexistent controller slot must never be launched. The daemon
         // executable here is the test harness; an exact test acts as its probe.
         let controller_homeboy = workspace.path().join("controller-slot/homeboy");

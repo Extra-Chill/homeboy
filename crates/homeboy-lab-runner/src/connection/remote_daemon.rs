@@ -198,7 +198,7 @@ fn probe_remote_homeboy_identity_until(
 }
 
 fn remote_homeboy_identity_command(homeboy: &str) -> String {
-    format!("{} self identity", shell::quote_arg(homeboy))
+    format!("{} self identity", posix_quote_arg(homeboy))
 }
 
 pub(super) fn parse_self_identity_output(output: &str) -> Option<RemoteHomeboyIdentity> {
@@ -1488,7 +1488,7 @@ fn lease_reconciliation_failure(
         return format!(
             "explicit live lease adoption matched lease `{actual_lease}` and PID {}, but {blocker}; refusing to persist a session. No session state was changed. {action}, then verify it with `homeboy runner status {} --json` before retrying adoption.",
             daemon.pid.expect("matching expectation requires PID"),
-            shell::quote_arg(runner_id),
+            posix_quote_arg(runner_id),
         );
     }
     format!(
@@ -1498,10 +1498,10 @@ fn lease_reconciliation_failure(
         daemon.build_identity.as_deref().unwrap_or("unavailable"),
         expected_identity,
         status.endpoint_probe_error.as_deref().unwrap_or("verified"),
-        shell::quote_arg(runner_id),
-        shell::quote_arg(actual_lease),
+        posix_quote_arg(runner_id),
+        posix_quote_arg(actual_lease),
         daemon.pid.map(|pid| pid.to_string()).as_deref().unwrap_or("unavailable"),
-        shell::quote_arg(runner_id),
+        posix_quote_arg(runner_id),
     )
 }
 
@@ -1544,7 +1544,7 @@ fn remote_daemon_status_with_timeout(
         &format!(
             "HOMEBOY_DAEMON_STATE_DIR=\"{}\" {} daemon status --full",
             remote_daemon_state_dir(),
-            shell::quote_arg(homeboy),
+            posix_quote_arg(homeboy),
         ),
         timeout,
     )
@@ -1884,7 +1884,7 @@ pub(super) fn probe_remote_daemon_endpoint_until(
     }
     let command = format!(
         "curl --fail --silent --show-error --max-time 2 {}/version",
-        shell::quote_arg(&format!("http://{}", daemon.address))
+        posix_quote_arg(&format!("http://{}", daemon.address))
     );
     let timeout = deadline.saturating_duration_since(std::time::Instant::now());
     if timeout.is_zero() {
@@ -1940,7 +1940,7 @@ pub(super) fn probe_remote_daemon_endpoint_until(
     }
     let command = format!(
         "curl --fail --silent --show-error --max-time 2 {}/jobs",
-        shell::quote_arg(&format!("http://{}", daemon.address))
+        posix_quote_arg(&format!("http://{}", daemon.address))
     );
     let timeout = deadline.saturating_duration_since(std::time::Instant::now());
     if timeout.is_zero() {
@@ -2085,7 +2085,7 @@ fn remote_daemon_ensure_running(
                         "classification": "daemon_bootstrap_failure",
                         "safe_next_action": format!(
                             "homeboy runner doctor {} --scope lab-offload",
-                            shell::quote_arg(runner_id)
+                            posix_quote_arg(runner_id)
                         )
                     }
                 }),
@@ -2436,7 +2436,7 @@ pub(super) fn remote_daemon_ensure_running_command(
         &format!(
             "daemon ensure-running {} --addr 127.0.0.1:0",
             replacement_operation_id
-                .map(|id| format!("--replacement-operation-id {}", shell::quote_arg(id)))
+                .map(|id| format!("--replacement-operation-id {}", posix_quote_arg(id)))
                 .unwrap_or_default(),
         ),
     )
@@ -2446,7 +2446,7 @@ fn remote_daemon_command(homeboy: &str, args: &str) -> String {
     let state_dir = remote_daemon_state_dir();
     format!(
         "HOMEBOY_DAEMON_STATE_DIR=\"{state_dir}\" {} {args}",
-        shell::quote_arg(homeboy),
+        posix_quote_arg(homeboy),
     )
 }
 
@@ -2455,7 +2455,7 @@ fn remote_resident_daemon_command(homeboy: &str, args: &str) -> String {
     format!(
         "HOMEBOY_DAEMON_STATE_DIR=\"{state_dir}\" {}=0 {} {args}",
         homeboy_core::daemon::DAEMON_IDLE_TIMEOUT_ENV,
-        shell::quote_arg(homeboy),
+        posix_quote_arg(homeboy),
     )
 }
 
@@ -2527,8 +2527,8 @@ pub(crate) fn remote_state_dir_daemon_command(
 ) -> String {
     format!(
         "HOMEBOY_DAEMON_STATE_DIR={} {} {args}",
-        shell::quote_arg(state_dir),
-        shell::quote_arg(homeboy),
+        posix_quote_arg(state_dir),
+        posix_quote_arg(homeboy),
     )
 }
 
@@ -2552,7 +2552,7 @@ pub(crate) fn remote_daemon_attested_reconcile_command(
     args.extend(job_ids.iter().map(ToString::to_string));
     let rendered_args = args
         .iter()
-        .map(|arg| shell::quote_arg(arg))
+        .map(|arg| posix_quote_arg(arg))
         .collect::<Vec<_>>()
         .join(" ");
     remote_state_dir_daemon_command(homeboy, state_dir, &rendered_args)
@@ -2616,7 +2616,7 @@ pub(super) fn remote_daemon_force_stop(
 ) -> std::result::Result<(), String> {
     let command = remote_daemon_command(
         homeboy,
-        &format!("daemon stop --lease-id {}", shell::quote_arg(lease_id),),
+        &format!("daemon stop --lease-id {}", posix_quote_arg(lease_id),),
     );
     let output = client.execute_with_timeout(&command, REMOTE_DAEMON_STATUS_TIMEOUT);
     if !output.success {

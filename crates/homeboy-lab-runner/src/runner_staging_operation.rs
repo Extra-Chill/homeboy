@@ -289,7 +289,7 @@ fn source_package_limit_error(
     let limits = source_package_limits();
     let check_command = format!(
         "homeboy source package check --path {}",
-        homeboy_core::engine::shell::quote_arg(&root.display().to_string())
+        homeboy_core::error::posix_quote_arg(&root.display().to_string())
     );
     let retry = "Retry the original Lab command after reducing the source package or selecting a Git-capable Lab route.";
     let mut error = Error::validation_invalid_argument(

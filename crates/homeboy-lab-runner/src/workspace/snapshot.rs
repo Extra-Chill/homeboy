@@ -1,3 +1,4 @@
+use homeboy_core::error::posix_quote_arg;
 use homeboy_engine_primitives::content_hash;
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
@@ -8,7 +9,6 @@ use std::time::{Duration, Instant};
 use glob_match::glob_match;
 use sha2::{Digest, Sha256};
 
-use homeboy_core::engine::shell;
 use homeboy_core::error::{Error, Result};
 
 use super::super::{Runner, RunnerKind};
@@ -978,7 +978,7 @@ pub(crate) fn materialize_snapshot_with_scratch_controlled(
             local_path,
             &format!(
                 "sh -c {}",
-                shell::quote_arg(&snapshot_install_command(remote_path))
+                posix_quote_arg(&snapshot_install_command(remote_path))
             ),
             excludes,
             "materialize local workspace snapshot",
@@ -992,7 +992,7 @@ pub(crate) fn materialize_snapshot_with_scratch_controlled(
                     local_path,
                     &format!(
                         "sh -c {}",
-                        shell::quote_arg(&snapshot_install_command(remote_path))
+                        posix_quote_arg(&snapshot_install_command(remote_path))
                     ),
                     excludes,
                     "materialize local workspace snapshot",
@@ -1005,8 +1005,8 @@ pub(crate) fn materialize_snapshot_with_scratch_controlled(
                 let target = format!(
                     "ssh {ssh_args} {remote} {remote_command}",
                     ssh_args = ssh_args(&client),
-                    remote = shell::quote_arg(&remote),
-                    remote_command = shell::quote_arg(&remote_command),
+                    remote = posix_quote_arg(&remote),
+                    remote_command = posix_quote_arg(&remote_command),
                 );
                 stream_snapshot_controlled(
                     local_path,
@@ -1172,8 +1172,8 @@ pub(crate) fn materialize_prepared_workspace_update(
         RunnerKind::Local => true,
         RunnerKind::Ssh => ssh_client_for_runner(runner)?.1.is_local,
     };
-    let acquire_lock = format!("mkdir {}", shell::quote_arg(&lock));
-    let release_lock = format!("rmdir {}", shell::quote_arg(&lock));
+    let acquire_lock = format!("mkdir {}", posix_quote_arg(&lock));
+    let release_lock = format!("rmdir {}", posix_quote_arg(&lock));
     if local_lock {
         fs::create_dir(&lock).map_err(|error| {
             Error::internal_io(
@@ -1220,23 +1220,23 @@ pub(crate) fn materialize_prepared_workspace_update(
     let metadata_path = format!("{live_metadata_path}.update-{update_id}");
     let prepare = format!(
         "rm -rf {temporary} {backup} && mkdir -p {temporary} {state_dir} && {seed}",
-        temporary = shell::quote_arg(&temporary),
-        backup = shell::quote_arg(&backup),
-        state_dir = shell::quote_arg(&state_dir),
+        temporary = posix_quote_arg(&temporary),
+        backup = posix_quote_arg(&backup),
+        state_dir = posix_quote_arg(&state_dir),
         seed = seed_snapshot_command(remote_path, &temporary),
     );
     let finalize = format!(
         "tr -d '[:space:]' < {live_metadata} | grep -qF -- {lease} && mv {remote} {backup} && if mv {temporary} {remote}; then rm -rf {backup} || true; mv -f {staged_metadata} {live_metadata}; else if mv {backup} {remote}; then exit 1; else printf '%s\\n' 'prepared workspace promotion failed; original remains at {backup}' >&2; exit 2; fi; fi",
-        lease = shell::quote_arg(&format!("\"workspace_lease\":\"{expected_lease}\"")),
-        live_metadata = shell::quote_arg(&live_metadata_path),
-        staged_metadata = shell::quote_arg(&metadata_path),
-        remote = shell::quote_arg(remote_path), temporary = shell::quote_arg(&temporary), backup = shell::quote_arg(&backup),
+        lease = posix_quote_arg(&format!("\"workspace_lease\":\"{expected_lease}\"")),
+        live_metadata = posix_quote_arg(&live_metadata_path),
+        staged_metadata = posix_quote_arg(&metadata_path),
+        remote = posix_quote_arg(remote_path), temporary = posix_quote_arg(&temporary), backup = posix_quote_arg(&backup),
     );
     let remove = format!(
         "cd {} && xargs -0 -n 1 rm -rf -- < {} && rm -f {}",
-        shell::quote_arg(&temporary),
-        shell::quote_arg(&removal_path),
-        shell::quote_arg(&removal_path),
+        posix_quote_arg(&temporary),
+        posix_quote_arg(&removal_path),
+        posix_quote_arg(&removal_path),
     );
     let result = match runner.kind {
         RunnerKind::Local => {
@@ -1309,8 +1309,8 @@ pub(crate) fn materialize_prepared_workspace_update(
                     format!(
                         "ssh {} {} {}",
                         ssh_args(&client),
-                        shell::quote_arg(&remote),
-                        shell::quote_arg(script)
+                        posix_quote_arg(&remote),
+                        posix_quote_arg(script)
                     )
                 };
                 run_shell_command(&remote_shell(&prepare), "update prepared SSH workspace")
@@ -1383,7 +1383,7 @@ pub(crate) fn materialize_prepared_workspace_update(
 }
 
 fn cleanup_incremental_temporary(runner: &Runner, temporary: &str, bounded: bool) {
-    let command = format!("rm -rf -- {}", shell::quote_arg(temporary));
+    let command = format!("rm -rf -- {}", posix_quote_arg(temporary));
     let deadline = bounded.then(|| Instant::now() + Duration::from_secs(5));
     match runner.kind {
         RunnerKind::Local => {
@@ -1406,8 +1406,8 @@ fn cleanup_incremental_temporary(runner: &Runner, temporary: &str, bounded: bool
                     let command = format!(
                         "ssh {} {} {}",
                         ssh_args(&client),
-                        shell::quote_arg(&remote),
-                        shell::quote_arg(&command),
+                        posix_quote_arg(&remote),
+                        posix_quote_arg(&command),
                     );
                     let _ = run_shell_command_before(
                         &command,
@@ -1427,8 +1427,8 @@ fn seed_snapshot_command(seed_path: &str, destination: &str) -> String {
     // transfer metrics continue to report controller-to-runner content only.
     format!(
         "(cp -al {seed}/. {destination}/ 2>/dev/null || cp -a {seed}/. {destination}/)",
-        seed = shell::quote_arg(seed_path),
-        destination = shell::quote_arg(destination),
+        seed = posix_quote_arg(seed_path),
+        destination = posix_quote_arg(destination),
     )
 }
 
@@ -1479,15 +1479,15 @@ fn materialize_changed_paths_controlled(
     let command = format!(
         "{} -h --no-recursion -C {} --null -T {} -cf - | {}",
         super::util::PORTABLE_TAR_CREATE,
-        shell::quote_arg(&local_path.display().to_string()),
-        shell::quote_arg(&list.path().display().to_string()),
+        posix_quote_arg(&local_path.display().to_string()),
+        posix_quote_arg(&list.path().display().to_string()),
         target_command,
     );
     control.shell(&command, action)
 }
 
 fn local_extract_command(destination: &str) -> String {
-    format!("tar --no-xattrs -xf - -C {}", shell::quote_arg(destination))
+    format!("tar --no-xattrs -xf - -C {}", posix_quote_arg(destination))
 }
 
 fn remote_extract_command(
@@ -1498,8 +1498,8 @@ fn remote_extract_command(
     format!(
         "ssh {} {} {}",
         ssh_args(client),
-        shell::quote_arg(remote),
-        shell::quote_arg(&local_extract_command(destination)),
+        posix_quote_arg(remote),
+        posix_quote_arg(&local_extract_command(destination)),
     )
 }
 
@@ -1592,8 +1592,8 @@ fn initialize_synthetic_git_checkout(
                 let ssh_command = format!(
                     "ssh {ssh_args} {remote} {command}",
                     ssh_args = ssh_args(&client),
-                    remote = shell::quote_arg(&remote),
-                    command = shell::quote_arg(&command),
+                    remote = posix_quote_arg(&remote),
+                    command = posix_quote_arg(&command),
                 );
                 control.shell(
                     &ssh_command,
@@ -1624,26 +1624,26 @@ pub(super) fn synthetic_checkout_value(
     let value = match runner.kind {
         RunnerKind::Local => run_shell_capture(&format!(
             "git -C {} {command}",
-            shell::quote_arg(remote_path)
+            posix_quote_arg(remote_path)
         )),
         RunnerKind::Ssh => {
             let (_server, client) = ssh_client_for_runner(runner)?;
             if client.is_local {
                 run_shell_capture(&format!(
                     "git -C {} {command}",
-                    shell::quote_arg(remote_path)
+                    posix_quote_arg(remote_path)
                 ))
             } else {
                 let remote = format!("{}@{}", client.user, client.host);
                 let remote_command = format!(
                     "git -C {remote_path} {command}",
-                    remote_path = shell::quote_arg(remote_path),
+                    remote_path = posix_quote_arg(remote_path),
                 );
                 let ssh_command = format!(
                     "ssh {ssh_args} {remote} {remote_command}",
                     ssh_args = ssh_args(&client),
-                    remote = shell::quote_arg(&remote),
-                    remote_command = shell::quote_arg(&remote_command),
+                    remote = posix_quote_arg(&remote),
+                    remote_command = posix_quote_arg(&remote_command),
                 );
                 run_shell_capture(&ssh_command)
             }
@@ -1668,23 +1668,23 @@ pub(super) fn synthetic_git_checkout_command(
     source_head: Option<&str>,
     source_dirty: bool,
 ) -> String {
-    let remote_path = shell::quote_arg(remote_path);
-    let snapshot = shell::quote_arg(snapshot);
-    let source_head = shell::quote_arg(source_head.unwrap_or("unknown"));
+    let remote_path = posix_quote_arg(remote_path);
+    let snapshot = posix_quote_arg(snapshot);
+    let source_head = posix_quote_arg(source_head.unwrap_or("unknown"));
     let set_remote = remote_url
         .filter(|value| !value.trim().is_empty())
         .map(|value| {
             format!(
                 " && git -C {remote_path} remote add origin {remote_url}",
-                remote_url = shell::quote_arg(value)
+                remote_url = posix_quote_arg(value)
             )
         })
         .unwrap_or_default();
 
     format!(
         "git -C {remote_path} init && git -C {remote_path} config user.email homeboy-snapshot@localhost && git -C {remote_path} config user.name 'Homeboy Snapshot' && git -C {remote_path} add -A -- . && env GIT_AUTHOR_NAME='Homeboy Snapshot' GIT_AUTHOR_EMAIL=homeboy-snapshot@localhost GIT_COMMITTER_NAME='Homeboy Snapshot' GIT_COMMITTER_EMAIL=homeboy-snapshot@localhost GIT_AUTHOR_DATE='1970-01-01T00:00:00Z' GIT_COMMITTER_DATE='1970-01-01T00:00:00Z' git -C {remote_path} commit --allow-empty -m {message} --no-gpg-sign && git -C {remote_path} notes --ref=homeboy-snapshot add -m {note} HEAD{set_remote}",
-        message = shell::quote_arg(&format!("Homeboy snapshot {snapshot}")),
-        note = shell::quote_arg(&format!("snapshot_identity={snapshot}\nsource_head={source_head}\nsource_dirty={source_dirty}")),
+        message = posix_quote_arg(&format!("Homeboy snapshot {snapshot}")),
+        note = posix_quote_arg(&format!("snapshot_identity={snapshot}\nsource_head={source_head}\nsource_dirty={source_dirty}")),
     )
 }
 
@@ -1697,7 +1697,7 @@ pub(crate) fn copy_snapshot_to_directory(
         local_path,
         &format!(
             "sh -c {}",
-            shell::quote_arg(&snapshot_install_command(
+            posix_quote_arg(&snapshot_install_command(
                 &destination.display().to_string()
             ))
         ),

@@ -1,4 +1,4 @@
-use homeboy_core::engine::shell;
+use homeboy_core::error::posix_quote_arg;
 
 use super::util::{owner_capture_shell, owner_restore_shell, parent_remote_path};
 
@@ -109,12 +109,12 @@ impl WorkspaceMaterializer {
         let parent = parent_remote_path(&self.remote_path);
         let mut prefix = format!(
             "parent={parent}; dest={dest}; tmp=\"${{dest}}.tmp.$$\"",
-            parent = shell::quote_arg(parent.as_str()),
-            dest = shell::quote_arg(&self.remote_path),
+            parent = posix_quote_arg(parent.as_str()),
+            dest = posix_quote_arg(&self.remote_path),
         );
         if let Some(object_cache) = &self.bundle {
             prefix.push_str("; bundle=\"${dest}.bundle.$$\"");
-            prefix.push_str(&format!("; cache={}", shell::quote_arg(object_cache)));
+            prefix.push_str(&format!("; cache={}", posix_quote_arg(object_cache)));
             // Bundles are controller-complete transfers. A runner must not
             // lazily recover a missing object from the source remote.
             prefix.push_str("; export GIT_NO_LAZY_FETCH=1");
@@ -130,8 +130,8 @@ impl WorkspaceMaterializer {
                 match operation {
                     WorkspaceMaterializationOperation::CheckoutGitRef { head, branch } => {
                         let target = branch.as_ref().map_or_else(
-                            || format!("git -C \"$tmp\" update-ref --no-deref HEAD {}", shell::quote_arg(head)),
-                            |branch| format!("git -C \"$tmp\" update-ref {reference} {head} && git -C \"$tmp\" symbolic-ref HEAD {reference}", reference = shell::quote_arg(&format!("refs/heads/{branch}")), head = shell::quote_arg(head)),
+                            || format!("git -C \"$tmp\" update-ref --no-deref HEAD {}", posix_quote_arg(head)),
+                            |branch| format!("git -C \"$tmp\" update-ref {reference} {head} && git -C \"$tmp\" symbolic-ref HEAD {reference}", reference = posix_quote_arg(&format!("refs/heads/{branch}")), head = posix_quote_arg(head)),
                         );
                         commands.push(target);
                         continue;
@@ -174,7 +174,7 @@ impl WorkspaceMaterializationOperation {
             }
             Self::VerifyBundleDigest(expected) => format!(
                 "test \"$(shasum -a 256 \"$bundle\" | awk '{{print $1}}')\" = {expected}",
-                expected = shell::quote_arg(expected)
+                expected = posix_quote_arg(expected)
             ),
             // Record the verified transfer for later thin bundles. The cache is an
             // optimization: failing to update it never fails materialization.
@@ -184,7 +184,7 @@ impl WorkspaceMaterializationOperation {
             // for one ref lock; only the newest `ref_limit` refs are retained.
             Self::RecordBundleInObjectCache { head, ref_limit } => format!(
                 "{{ {{ mkdir -p \"$(dirname \"$cache\")\" && {{ [ -d \"$cache\" ] || git init -q --bare \"$cache\"; }} && git -C \"$cache\" fetch -q --no-tags \"$bundle\" {refspec} && git -C \"$cache\" for-each-ref --sort=-committerdate --format='%(refname)' refs/homeboy/ | tail -n +{first_evicted} | while IFS= read -r ref; do git -C \"$cache\" update-ref -d \"$ref\"; done; }} >/dev/null 2>&1 || true; }}",
-                refspec = shell::quote_arg(&format!("+HEAD:refs/homeboy/{head}")),
+                refspec = posix_quote_arg(&format!("+HEAD:refs/homeboy/{head}")),
                 first_evicted = ref_limit + 1,
             ),
             // Complete bundles never borrow from a possibly damaged cache.
@@ -200,7 +200,7 @@ impl WorkspaceMaterializationOperation {
                     .map(|(index, commit)| {
                         format!(
                             " && git -C \"$tmp\" update-ref refs/homeboy-retain/{index} {commit}",
-                            commit = shell::quote_arg(commit)
+                            commit = posix_quote_arg(commit)
                         )
                     })
                     .collect::<String>();
@@ -210,17 +210,17 @@ impl WorkspaceMaterializationOperation {
             }
             Self::CloneObjectCacheToTemp { head } => format!(
                 "rm -rf \"$tmp\" && git init -q \"$tmp\" && git -C \"$tmp\" remote add origin \"$cache\" && git -C \"$tmp\" fetch -q --no-tags origin {refspec} && git -C \"$tmp\" rev-list --objects {head} >/dev/null",
-                refspec = shell::quote_arg(&format!("refs/homeboy/{head}")),
-                head = shell::quote_arg(head),
+                refspec = posix_quote_arg(&format!("refs/homeboy/{head}")),
+                head = posix_quote_arg(head),
             ),
             Self::SetGitOrigin(remote_url) => format!(
                 "git -C \"$tmp\" remote set-url origin {remote_url}",
-                remote_url = shell::quote_arg(remote_url)
+                remote_url = posix_quote_arg(remote_url)
             ),
             Self::CheckoutGitRef { head, branch } => git_checkout_command(head, branch.as_deref()),
             Self::ResetAndCleanGit { head } => format!(
                 "git -C \"$tmp\" reset --hard {head} && git -C \"$tmp\" clean -ffdqx",
-                head = shell::quote_arg(head)
+                head = posix_quote_arg(head)
             ),
             Self::GuardCleanGitWorkspace { allow_dirty } => {
                 dirty_git_workspace_guard("$dest", *allow_dirty)
@@ -268,14 +268,14 @@ fn verify_git_baseline_command(
     let changed_since = changed_since_base.map_or_else(String::new, |base| {
         format!(
             " && git -C {dest} rev-parse --verify -q {base}^{{commit}} >/dev/null && test \"$(git -C {dest} merge-base {base} HEAD)\" = {base}",
-            base = shell::quote_arg(base),
+            base = posix_quote_arg(base),
         )
     });
     format!(
         "test -d {dest}/.git && test \"$(git -C {dest} rev-parse HEAD)\" = {head} && test \"$(git -C {dest} config --get remote.origin.url)\" = {remote_url}{changed_since} && test -z \"$({status})\"",
         dest = dest,
-        head = shell::quote_arg(head),
-        remote_url = shell::quote_arg(remote_url),
+        head = posix_quote_arg(head),
+        remote_url = posix_quote_arg(remote_url),
         changed_since = changed_since,
         status = status,
     )
@@ -285,13 +285,13 @@ fn git_checkout_command(head: &str, branch: Option<&str>) -> String {
     if let Some(branch) = branch {
         format!(
             "git -C \"$tmp\" checkout -B {branch} {head}",
-            branch = shell::quote_arg(branch),
-            head = shell::quote_arg(head),
+            branch = posix_quote_arg(branch),
+            head = posix_quote_arg(head),
         )
     } else {
         format!(
             "git -C \"$tmp\" checkout --detach {head}",
-            head = shell::quote_arg(head)
+            head = posix_quote_arg(head)
         )
     }
 }
@@ -332,8 +332,8 @@ fn sync_git_checkout_command(
         .map(|base| {
             format!(
                 " && (git -C \"$dest\" rev-parse --verify -q {} >/dev/null || git -C \"$dest\" fetch origin {})",
-                shell::quote_arg(&format!("{base}^{{commit}}")),
-                shell::quote_arg(base)
+                posix_quote_arg(&format!("{base}^{{commit}}")),
+                posix_quote_arg(base)
             )
         })
         .unwrap_or_default();
@@ -342,7 +342,7 @@ fn sync_git_checkout_command(
         .map(|git_ref| {
             format!(
                 " && git -C \"$dest\" fetch origin {}",
-                shell::quote_arg(git_ref)
+                posix_quote_arg(git_ref)
             )
         })
         .collect::<String>();
@@ -352,21 +352,21 @@ fn sync_git_checkout_command(
         || {
             format!(
                 "git -C \"$dest\" checkout --detach {head}",
-                head = shell::quote_arg(head)
+                head = posix_quote_arg(head)
             )
         },
         |branch| {
             format!(
                 "git -C \"$dest\" checkout -B {branch} {head}",
-                branch = shell::quote_arg(branch),
-                head = shell::quote_arg(head),
+                branch = posix_quote_arg(branch),
+                head = posix_quote_arg(head),
             )
         },
     );
     format!(
         "if [ -d \"$dest\"/.git ]; then {dirty_guard} && git -C \"$dest\" reset --hard && git -C \"$dest\" clean -ffdqx && git -C \"$dest\" fetch --prune origin '+refs/heads/*:refs/remotes/origin/*'; else rm -rf \"$dest\" && git clone {remote_url} \"$dest\" && git -C \"$dest\" fetch --prune origin '+refs/heads/*:refs/remotes/origin/*'; fi{fetch_extra_refs}{fetch_changed_since} && {checkout} && git -C \"$dest\" reset --hard {head} && git -C \"$dest\" clean -ffdqx",
-        remote_url = shell::quote_arg(remote_url),
-        head = shell::quote_arg(head),
+        remote_url = posix_quote_arg(remote_url),
+        head = posix_quote_arg(head),
         checkout = checkout,
     )
 }
@@ -383,14 +383,14 @@ fn fresh_exact_git_checkout_command(
         || {
             format!(
                 "git -C \"$dest\" checkout --detach {head}",
-                head = shell::quote_arg(head)
+                head = posix_quote_arg(head)
             )
         },
         |branch| {
             format!(
                 "git -C \"$dest\" checkout -B {branch} {head}",
-                branch = shell::quote_arg(branch),
-                head = shell::quote_arg(head),
+                branch = posix_quote_arg(branch),
+                head = posix_quote_arg(head),
             )
         },
     );
@@ -402,14 +402,14 @@ fn fresh_exact_git_checkout_command(
         || {
             format!(
                 "git -C \"$tmp\" checkout --detach {head}",
-                head = shell::quote_arg(head)
+                head = posix_quote_arg(head)
             )
         },
         |branch| {
             format!(
                 "git -C \"$tmp\" checkout -B {branch} {head}",
-                branch = shell::quote_arg(branch),
-                head = shell::quote_arg(head),
+                branch = posix_quote_arg(branch),
+                head = posix_quote_arg(head),
             )
         },
     );
@@ -417,12 +417,12 @@ fn fresh_exact_git_checkout_command(
         "{dirty_guard} && git -C \"$dest\" reset --hard && git -C \"$dest\" clean -ffdqx && git -C \"$dest\" fetch --prune origin '+refs/heads/*:refs/remotes/origin/*' && {reuse_checkout} && git -C \"$dest\" reset --hard {head} && git -C \"$dest\" clean -ffdqx",
         dirty_guard = dirty_git_workspace_guard("$dest", allow_dirty),
         reuse_checkout = reuse_checkout,
-        head = shell::quote_arg(head),
+        head = posix_quote_arg(head),
     );
     let fresh = format!(
         "rm -rf \"$tmp\" && git init \"$tmp\" && git -C \"$tmp\" remote add origin {remote_url} && git -C \"$tmp\" fetch --filter=blob:none origin {head} && {tmp_checkout} && git -C \"$tmp\" reset --hard {head} && git -C \"$tmp\" clean -ffdqx && git -C \"$tmp\" rev-parse --verify -q HEAD >/dev/null && rm -rf \"$dest\" && mv \"$tmp\" \"$dest\"",
-        remote_url = shell::quote_arg(remote_url),
-        head = shell::quote_arg(head),
+        remote_url = posix_quote_arg(remote_url),
+        head = posix_quote_arg(head),
         tmp_checkout = tmp_checkout,
     );
     format!("if [ -d \"$dest\"/.git ]; then {reuse}; else {fresh}; fi")

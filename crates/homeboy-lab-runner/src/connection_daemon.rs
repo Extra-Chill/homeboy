@@ -1,3 +1,4 @@
+use homeboy_core::error::posix_quote_arg;
 use std::path::Path;
 use std::time::Duration;
 
@@ -7,7 +8,6 @@ use serde::Deserialize;
 use serde_json::Value;
 
 use homeboy_core::daemon::{DaemonFreshnessReport, DaemonStaleReasonCode};
-use homeboy_core::engine::shell;
 use homeboy_core::server::{Server, SshClient};
 
 use super::super::session::{RunnerStaleRuntimePath, RunnerTunnelProcessStartIdentity};
@@ -218,7 +218,7 @@ fn probe_host_health(client: &SshClient, daemon: &RemoteDaemon) -> HostHealth {
     let command = format!(
         "curl --fail --silent --show-error --max-time {} {}/health",
         HEALTH_PROBE_TIMEOUT.as_secs(),
-        shell::quote_arg(&format!("http://{}", daemon.address))
+        posix_quote_arg(&format!("http://{}", daemon.address))
     );
     let output =
         client.execute_with_timeout(&command, HEALTH_PROBE_TIMEOUT + Duration::from_secs(5));
@@ -327,11 +327,11 @@ fn attach_remote_daemon(
                 message,
             );
             report.failure_evidence = Some(RunnerConnectFailureEvidence {
-                recovery_command: format!("homeboy runner connect {}", shell::quote_arg(runner_id)),
+                recovery_command: format!("homeboy runner connect {}", posix_quote_arg(runner_id)),
                 classification: "daemon_health".to_string(),
                 remote_start_command: Some(format!(
                     "{} daemon ensure-running --addr 127.0.0.1:0",
-                    shell::quote_arg(homeboy)
+                    posix_quote_arg(homeboy)
                 )),
                 known_remote_pid: daemon.pid,
                 known_remote_lease_id: daemon.lease_id.clone(),

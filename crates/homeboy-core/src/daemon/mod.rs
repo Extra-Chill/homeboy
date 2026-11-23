@@ -82,7 +82,7 @@ use daemon_lease::{
 /// The daemon's own executable. A direct daemon child shares the daemon's
 /// build-specific durable store, so runner drivers launch Homeboy children
 /// from this path rather than from configuration or `PATH`.
-pub use lifetime::launchable_executable as daemon_launchable_executable;
+pub use lifetime::launchable_executable;
 pub use lifetime::ExecutableIdentity;
 /// Idle window, in seconds, for automatically launched daemons; `0` selects a
 /// resident launch. See `lifetime::launch_idle_timeout`.

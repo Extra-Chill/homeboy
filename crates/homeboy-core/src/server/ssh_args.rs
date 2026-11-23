@@ -1,4 +1,4 @@
-use crate::engine::shell;
+use crate::error::posix_quote_arg;
 
 use super::{ManagedSshSession, Server, SshClient};
 
@@ -68,7 +68,7 @@ pub fn server_option_args(server: &Server, options: SshArgOptions<'_>) -> Vec<St
 
 pub fn shell_join_args(args: &[String]) -> String {
     args.iter()
-        .map(|arg| shell::quote_arg(arg))
+        .map(|arg| posix_quote_arg(arg))
         .collect::<Vec<_>>()
         .join(" ")
 }

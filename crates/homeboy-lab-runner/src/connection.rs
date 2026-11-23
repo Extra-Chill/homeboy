@@ -1,3 +1,4 @@
+use homeboy_core::error::posix_quote_arg;
 use std::collections::BTreeMap;
 use std::net::{IpAddr, SocketAddr, TcpListener, TcpStream};
 use std::path::PathBuf;
@@ -13,7 +14,6 @@ use homeboy_core::api_jobs::{
     ActiveRunnerJobSummary, JobClaimMetadata, JobStatus, RunnerJobSource,
 };
 use homeboy_core::daemon::{DaemonFreshnessReport, DaemonStaleReasonCode, DaemonStartResult};
-use homeboy_core::engine::shell;
 use homeboy_core::error::{Error, Result};
 use homeboy_core::http_api::RunSummary;
 use homeboy_core::paths;
@@ -2685,7 +2685,7 @@ fn daemon_runtime_is_current(
 fn unverifiable_configured_identity_message(homeboy: &str) -> String {
     format!(
         "configured runner executable `{homeboy}` did not report an immutable build identity; run `{} self identity` on the runner and ensure it reports `git_commit` or an exact `display`, then retry. If the binary is stale, run `homeboy runner refresh-homeboy <runner-id>`",
-        shell::quote_arg(homeboy),
+        posix_quote_arg(homeboy),
     )
 }
 

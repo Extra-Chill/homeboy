@@ -2,7 +2,7 @@
 
 use crate::release::types::ReleaseState;
 use homeboy_core::component::GithubConfig;
-use homeboy_core::engine::shell::quote_arg;
+use homeboy_core::error::posix_quote_arg;
 use homeboy_core::error::CommandEvidence;
 use homeboy_core::git::release_download::GitHubRepo;
 use homeboy_core::redaction::RedactionPolicy;
@@ -1854,7 +1854,7 @@ pub(super) fn gh_env_prefix(env: &[(String, String)]) -> String {
     let parts = env
         .iter()
         .filter(|(key, value)| !key.is_empty() && !value.is_empty())
-        .map(|(key, value)| format!("{}={}", key, quote_arg(value)))
+        .map(|(key, value)| format!("{}={}", key, posix_quote_arg(value)))
         .collect::<Vec<_>>();
     if parts.is_empty() {
         String::new()
@@ -2846,7 +2846,7 @@ mod tests {
         let descendant_pid = temp.path().join("descendant.pid");
         let script = format!(
             "setsid sleep 30 & echo $! > {}; exit 0",
-            quote_arg(&descendant_pid.display().to_string())
+            posix_quote_arg(&descendant_pid.display().to_string())
         );
         let (result_tx, result_rx) = mpsc::channel();
         let worker = std::thread::spawn(move || {
@@ -2934,8 +2934,8 @@ mod tests {
         let descendant_pid = temp.path().join("descendant.pid");
         let script = format!(
             "echo $$ > {}; {descendant_command} & echo $! > {}; {command_tail}",
-            quote_arg(&leader_pid.display().to_string()),
-            quote_arg(&descendant_pid.display().to_string())
+            posix_quote_arg(&leader_pid.display().to_string()),
+            posix_quote_arg(&descendant_pid.display().to_string())
         );
         let (result_tx, result_rx) = mpsc::channel();
         let worker = std::thread::spawn(move || {

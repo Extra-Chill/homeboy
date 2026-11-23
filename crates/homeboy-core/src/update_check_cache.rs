@@ -11,13 +11,10 @@
 //! changed here so existing user caches keep working.
 
 use crate::paths;
+use homeboy_engine_primitives::now_secs;
 use serde::de::DeserializeOwned;
 use serde::Serialize;
 use std::path::{Path, PathBuf};
-
-/// Current unix timestamp in seconds. Returns `0` if the system clock is
-/// before the epoch (matching the prior per-module behavior).
-pub use homeboy_engine_primitives::now_secs as now_unix;
 
 /// Resolve the cache file under the homeboy data directory. Returns
 /// `None` when the homeboy directory cannot be resolved (matching the
@@ -73,17 +70,12 @@ fn write_cache_at<T: Serialize>(path: &Path, payload: &T) {
 /// Pure time-based freshness check: `now - checked_at < interval_secs`.
 /// Saturating subtraction protects against clocks moving backwards.
 pub fn is_cache_fresh(checked_at: u64, interval_secs: u64) -> bool {
-    now_unix().saturating_sub(checked_at) < interval_secs
+    now_secs().saturating_sub(checked_at) < interval_secs
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn test_now_unix() {
-        assert!(now_unix() > 0);
-    }
 
     #[test]
     fn test_cache_path() {
@@ -97,17 +89,17 @@ mod tests {
 
     #[test]
     fn fresh_when_recent() {
-        assert!(is_cache_fresh(now_unix().saturating_sub(10), 100));
+        assert!(is_cache_fresh(now_secs().saturating_sub(10), 100));
     }
 
     #[test]
     fn stale_when_outside_interval() {
-        assert!(!is_cache_fresh(now_unix().saturating_sub(200), 100));
+        assert!(!is_cache_fresh(now_secs().saturating_sub(200), 100));
     }
 
     #[test]
     fn stale_when_clock_skew() {
         // checked_at in the future — saturating_sub yields 0, treated as fresh.
-        assert!(is_cache_fresh(now_unix() + 1_000, 100));
+        assert!(is_cache_fresh(now_secs() + 1_000, 100));
     }
 }

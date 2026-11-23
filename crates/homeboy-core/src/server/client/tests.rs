@@ -1284,7 +1284,7 @@ fn owned_remote_wrapper_embeds_its_payload_once() {
     let payload_body = "x".repeat(64 * 1024);
     let command = format!(
         "printf '%s' {}",
-        crate::engine::shell::quote_arg(&payload_body)
+        crate::error::posix_quote_arg(&payload_body)
     );
     let wrapped = wrap_owned_remote_command(&command);
 

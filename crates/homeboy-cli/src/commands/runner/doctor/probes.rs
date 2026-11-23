@@ -1,4 +1,5 @@
 use super::*;
+use homeboy::core::error::posix_quote_arg;
 use homeboy_core;
 use homeboy_extension_contract::api::v1::{
     ExtensionApiCatalogEntryStatus, ExtensionApiCatalogRequest,
@@ -351,7 +352,7 @@ pub(super) fn homeboy_path_shadow_check(
             ),
             Some(format!(
                 "Upgrade the controller, then converge the daemon with `homeboy runner refresh-homeboy {} --ref v{bare_release}`",
-                shell::quote_arg(runner_id),
+                posix_quote_arg(runner_id),
             )),
             details,
         ));
@@ -381,7 +382,7 @@ pub(super) fn homeboy_path_shadow_check(
         ),
         Some(format!(
             "Converge the host PATH binary onto the daemon's managed slot with `homeboy runner refresh-homeboy {} --ref v{local_version}`; it repoints Homeboy-managed symlinks and replaces older user-owned copies. Otherwise update or remove `{bare_path}` on server `{server_id}`.",
-            shell::quote_arg(runner_id),
+            posix_quote_arg(runner_id),
         )),
         details,
     );

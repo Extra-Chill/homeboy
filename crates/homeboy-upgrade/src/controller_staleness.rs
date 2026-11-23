@@ -36,7 +36,6 @@ use serde::{Deserialize, Serialize};
 
 use crate::upgrade::update_check;
 use homeboy_core::build_identity::{self, BuildIdentity};
-use homeboy_core::update_check_cache;
 
 /// Minor-release distance at or beyond which staleness is escalated from a note
 /// to a warning.
@@ -150,7 +149,7 @@ pub fn current() -> ControllerStaleness {
         );
     }
 
-    let now = update_check_cache::now_unix();
+    let now = homeboy_engine_primitives::now_secs();
     let cached = update_check::cached_latest_release();
     if let Some(cached) = cached.as_ref() {
         if !update_check::cached_latest_release_is_fresh(cached.checked_at) {

@@ -311,7 +311,7 @@ fn reserve_projected_capacity_in(
         error.details["dominant_reclaimable_categories"] = serde_json::json!(["build_output"]);
         let command = format!(
             "homeboy cleanup artifacts --path {} --sort size --limit 100 --apply",
-            crate::engine::shell::quote_arg(&input.root.display().to_string())
+            crate::error::posix_quote_arg(&input.root.display().to_string())
         );
         error.details["cleanup_commands"] = serde_json::json!([command.clone()]);
         error = error.with_hint(format!(

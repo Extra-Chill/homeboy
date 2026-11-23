@@ -507,7 +507,7 @@ fn handoff_identity_error(
 
 fn preserved_invocation() -> String {
     std::env::args()
-        .map(|arg| homeboy_core::engine::shell::quote_arg(&arg))
+        .map(|arg| homeboy_core::error::posix_quote_arg(&arg))
         .collect::<Vec<_>>()
         .join(" ")
 }
@@ -5081,7 +5081,7 @@ mod tests {
             let git = bin.join("git");
             homeboy_test_support::write_executable(&git, format!(
                     "#!/bin/sh\npid_file={}\nprintf '%s' \"$$\" > \"$pid_file.tmp\"\n/bin/mv \"$pid_file.tmp\" \"$pid_file\"\nexec /bin/sleep 30\n",
-                    homeboy_engine_primitives::shell::quote_arg(&started.to_string_lossy())
+                    homeboy_core::error::posix_quote_arg(&started.to_string_lossy())
                 ), 0o755)
             .expect("blocked Git fixture");
 

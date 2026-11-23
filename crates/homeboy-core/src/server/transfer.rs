@@ -272,10 +272,7 @@ fn plan_push(
     }
 
     let (prepare, sources) = if config.directory_contents && local.is_dir() {
-        let command = format!(
-            "mkdir -p -- {}",
-            crate::engine::shell::quote_arg(remote_path)
-        );
+        let command = format!("mkdir -p -- {}", crate::error::posix_quote_arg(remote_path));
         let prepare = client_ssh_args(
             &client,
             SshArgOptions {
@@ -1198,7 +1195,7 @@ mod tests {
                 &scp_transport,
                 format!(
                     "#!/bin/sh\nexec scp -t {}\n",
-                    crate::engine::shell::quote_arg(&remote_destination.to_string_lossy())
+                    crate::error::posix_quote_arg(&remote_destination.to_string_lossy())
                 ),
                 0o755,
             )

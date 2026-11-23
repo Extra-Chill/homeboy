@@ -9,6 +9,7 @@
 //! job is active. The daemon's own startup recovers anything a previous owner
 //! left behind, so a restart needs nothing from the controller.
 
+use homeboy_core::error::posix_quote_arg;
 use std::time::{Duration, Instant};
 
 use serde::Serialize;
@@ -168,7 +169,7 @@ mkdir -p "$(dirname "$link")"
 ln -sfn {binary} "$link.next"
 mv -f "$link.next" "$link""#,
         link = service_binary_link(),
-        binary = shell::quote_arg(binary),
+        binary = posix_quote_arg(binary),
     )
 }
 
@@ -526,15 +527,15 @@ fn delegated_repoint_script(
 ) -> String {
     let env: String = daemon_env
         .iter()
-        .map(|(key, value)| format!(" --env {}", shell::quote_arg(&format!("{key}={value}"))))
+        .map(|(key, value)| format!(" --env {}", posix_quote_arg(&format!("{key}={value}"))))
         .collect();
     format!(
         r#"if {binary} runner service repoint --help >/dev/null 2>&1; then
   exec {binary} runner service repoint --binary {binary} --startup-token {token}{env} >/dev/null
 fi
 {fallback}"#,
-        binary = shell::quote_arg(binary),
-        token = shell::quote_arg(startup_token),
+        binary = posix_quote_arg(binary),
+        token = posix_quote_arg(startup_token),
         fallback = repoint_script(binary, startup_token, daemon_env),
     )
 }
@@ -678,7 +679,7 @@ pub(crate) fn probe_runner_binary_version(
     };
     let stdout = run_remote(
         &client,
-        &format!("{} --version </dev/null", shell::quote_arg(homeboy_path)),
+        &format!("{} --version </dev/null", posix_quote_arg(homeboy_path)),
         "probing the runner's selected homeboy",
     )?;
     Ok(stdout

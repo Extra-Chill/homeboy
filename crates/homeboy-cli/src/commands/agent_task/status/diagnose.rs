@@ -1,6 +1,7 @@
 //! Diagnosis handler, actionable recovery guidance, and stable run/evidence refs.
 
 use super::*;
+use homeboy::core::error::posix_quote_arg;
 
 // Optional observations must never hold recorded failure evidence hostage. A
 // timed-out worker owns only read-only inputs and cannot mutate the run.
@@ -242,7 +243,7 @@ pub(in crate::commands::agent_task) fn diagnose(args: DiagnoseArgs) -> CmdResult
     } else if lab_staging_root_cause(&record).is_some() {
         vec![format!(
             "homeboy agent-task retry {}",
-            quote_arg(record.metadata["cook_id"].as_str().unwrap_or(run_id))
+            posix_quote_arg(record.metadata["cook_id"].as_str().unwrap_or(run_id))
         )]
     } else {
         next_commands
@@ -300,10 +301,13 @@ pub(in crate::commands::agent_task) fn diagnose(args: DiagnoseArgs) -> CmdResult
         attach_collection_budget(
             &mut value,
             "hydrated_evidence",
-            &format!("homeboy agent-task diagnose {} --full", quote_arg(run_id)),
+            &format!(
+                "homeboy agent-task diagnose {} --full",
+                posix_quote_arg(run_id)
+            ),
             &format!(
                 "homeboy agent-task diagnose {} --full --output <path>",
-                quote_arg(run_id)
+                posix_quote_arg(run_id)
             ),
         );
     }
@@ -398,7 +402,7 @@ pub(super) fn project_gate_failure(value: &mut Value, failure: Option<Value>, ru
     let Some(failure) = failure else { return };
     let (command, description) = agent_task_service_direct::gate_failure_next_action(
         failure["reason"].as_str().unwrap_or("gate_failed"),
-        &quote_arg(run),
+        &posix_quote_arg(run),
     );
     let action = CommandNextAction::new(description.clone(), command.clone());
     value["next_action"] = json!({"command": command, "description": description});
@@ -558,7 +562,7 @@ pub(super) fn attach_diagnose_actionable(
     {
         let runner = cause.data["runner_id"].as_str();
         let command = runner
-            .map(|runner| format!("homeboy runner status {} --full", quote_arg(runner)))
+            .map(|runner| format!("homeboy runner status {} --full", posix_quote_arg(runner)))
             .unwrap_or_else(|| "homeboy runner list".to_string());
         value["next_action_basis"] = json!(DIAGNOSE_ACTION_BASIS_DIAGNOSIS);
         attach_actionable_metadata(
@@ -616,7 +620,7 @@ pub(super) fn attach_diagnose_actionable(
         (
             vec![CommandNextAction::new(
                 "review the canonical candidate",
-                format!("homeboy agent-task review {}", quote_arg(run_id)),
+                format!("homeboy agent-task review {}", posix_quote_arg(run_id)),
             )
             .with_kind(CommandNextActionKind::Show)],
             DIAGNOSE_ACTION_BASIS_CANDIDATE,
@@ -684,8 +688,8 @@ pub(super) fn diagnose_next_actions(
                 "inspect the queued runner-owned execution",
                 format!(
                     "homeboy --runner {} agent-task diagnose {} --full",
-                    quote_arg(runner_id.unwrap_or("<runner>")),
-                    quote_arg(run_id)
+                    posix_quote_arg(runner_id.unwrap_or("<runner>")),
+                    posix_quote_arg(run_id)
                 ),
             )
             .with_kind(CommandNextActionKind::Show),
@@ -708,7 +712,7 @@ pub(super) fn runner_cancellation_next_actions(
     runner_id: Option<&str>,
     retry_action: Option<&CommandNextAction>,
 ) -> Vec<CommandNextAction> {
-    let run = quote_arg(run_id);
+    let run = posix_quote_arg(run_id);
     let mut actions = vec![CommandNextAction::new(
         "show the durable runner cancellation evidence",
         format!("homeboy agent-task status {run}"),
@@ -741,8 +745,8 @@ pub(super) fn classification_next_actions(
     runner_id: Option<&str>,
     retry_action: Option<&CommandNextAction>,
 ) -> Vec<CommandNextAction> {
-    let run = quote_arg(run_id);
-    let task = quote_arg(&failure.task_id);
+    let run = posix_quote_arg(run_id);
+    let task = posix_quote_arg(&failure.task_id);
     let failure_evidence = CommandNextAction::new(
         format!("show failure evidence for {}", failure.task_id),
         format!("homeboy runs evidence {run} --task {task} --failure-only"),
@@ -921,7 +925,7 @@ pub(super) fn provider_readiness_actions(runner_id: Option<&str>) -> Vec<Command
     let Some(runner_id) = runner_id else {
         return Vec::new();
     };
-    let runner = quote_arg(runner_id);
+    let runner = posix_quote_arg(runner_id);
     vec![
         CommandNextAction::new(
             format!("check provider and runner readiness on {runner_id}"),
@@ -941,7 +945,7 @@ pub(super) fn lost_runner_actions(runner_id: Option<&str>) -> Vec<CommandNextAct
     let Some(runner_id) = runner_id else {
         return Vec::new();
     };
-    let runner = quote_arg(runner_id);
+    let runner = posix_quote_arg(runner_id);
     vec![
         CommandNextAction::new(
             format!("show runner session state for {runner_id}"),
@@ -964,7 +968,7 @@ pub(super) fn missing_artifact_next_actions(
     if missing_artifacts.is_empty() {
         return Vec::new();
     }
-    let run = quote_arg(run_id);
+    let run = posix_quote_arg(run_id);
     let mut actions = vec![CommandNextAction::new(
         "list the artifacts the run actually produced",
         format!("homeboy runs artifacts {run} --full"),
@@ -988,7 +992,7 @@ pub(super) fn missing_artifact_next_actions(
         if names.is_empty() {
             continue;
         }
-        let task = quote_arg(task_id);
+        let task = posix_quote_arg(task_id);
         actions.push(
             CommandNextAction::new(
                 format!("show failure evidence for {task_id} (missing {names})"),
@@ -1006,7 +1010,7 @@ pub(super) fn generic_diagnose_next_actions(
     run_id: &str,
     retry_action: Option<&CommandNextAction>,
 ) -> Vec<CommandNextAction> {
-    let run = quote_arg(run_id);
+    let run = posix_quote_arg(run_id);
     let mut actions = vec![
         CommandNextAction::new(
             "show the full run record",
@@ -1032,7 +1036,7 @@ pub(super) fn current_lifecycle_next_actions(
     record: &AgentTaskRunRecord,
 ) -> Vec<CommandNextAction> {
     let run_id = &record.run_id;
-    let run = quote_arg(run_id);
+    let run = posix_quote_arg(run_id);
     let mut actions = vec![
         CommandNextAction::new(
             "show the current promotion, gate, or finalization denial",
@@ -1076,7 +1080,7 @@ pub(super) fn diagnose_run_ref(
     record: &AgentTaskRunRecord,
     runner_id: Option<&str>,
 ) -> CommandRunRef {
-    let run = quote_arg(&record.run_id);
+    let run = posix_quote_arg(&record.run_id);
     CommandRunRef {
         id: record.run_id.clone(),
         kind: "agent_task".to_string(),

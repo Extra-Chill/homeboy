@@ -1,3 +1,4 @@
+use crate::error::posix_quote_arg;
 use serde::Serialize;
 use std::collections::HashMap;
 
@@ -253,7 +254,7 @@ fn build_project_command(
                 .get(setting_key)
                 .and_then(|v| v.as_str())
                 .filter(|s| !s.is_empty())
-                .map(|value_str| flag_template.replace("{{value}}", &shell::quote_arg(value_str)))
+                .map(|value_str| flag_template.replace("{{value}}", &posix_quote_arg(value_str)))
             {
                 rendered.push(' ');
                 rendered.push_str(&flag);

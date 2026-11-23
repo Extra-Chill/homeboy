@@ -220,7 +220,7 @@ pub(super) fn execute_file_deploy(input: FileDeployInput<'_>) -> ComponentDeploy
             if let Some(owner) = component.remote_owner.as_deref() {
                 let chown_cmd = format!(
                     "chown {} {}",
-                    homeboy_core::engine::shell::quote_arg(owner),
+                    homeboy_core::error::posix_quote_arg(owner),
                     homeboy_core::engine::shell::quote_path(install_dir)
                 );
                 let chown_output = ctx.client.execute(&chown_cmd);

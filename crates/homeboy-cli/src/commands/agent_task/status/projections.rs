@@ -1,6 +1,7 @@
 //! Bounded operator projections, redaction, and control-plane evidence deduplication.
 
 use super::*;
+use homeboy::core::error::posix_quote_arg;
 
 /// Default terminal projection for cancellation. The complete, redacted action
 /// acknowledgement remains available through `--full` and `--output`.
@@ -15,7 +16,7 @@ pub(crate) fn bounded_cancel_report(value: Value) -> Value {
         .and_then(Value::as_str)
         .filter(|run_id| run_id.len() <= COMPACT_TEXT_LIMIT)
         .unwrap_or("<oversized-run-id>");
-    let status_command = format!("homeboy agent-task status {}", quote_arg(run_id));
+    let status_command = format!("homeboy agent-task status {}", posix_quote_arg(run_id));
     let projection = json!({
         "schema": homeboy_control_plane_contract::CONTROL_PLANE_ACTION_ACKNOWLEDGEMENT_SCHEMA,
         "presentation": "bounded_operator_projection",
@@ -87,7 +88,7 @@ pub(crate) fn bounded_full_operation_report(value: Value, operation: &str) -> Va
         .or_else(|| value.pointer("/failure_context/next_actions/0/command"))
         .and_then(Value::as_str)
         .map(str::to_string)
-        .unwrap_or_else(|| format!("homeboy agent-task status {}", quote_arg(run_id)));
+        .unwrap_or_else(|| format!("homeboy agent-task status {}", posix_quote_arg(run_id)));
     let blocker = value
         .pointer("/failure_context/diagnostic/message")
         .or_else(|| value.pointer("/blocking_claim/message"))
@@ -103,7 +104,7 @@ pub(crate) fn bounded_full_operation_report(value: Value, operation: &str) -> Va
         })
         .cloned()
         .unwrap_or(Value::Null);
-    let evidence_command = format!("homeboy runs evidence {} --full", quote_arg(run_id));
+    let evidence_command = format!("homeboy runs evidence {} --full", posix_quote_arg(run_id));
     let mut evidence_refs = stable_evidence_refs(&value);
     if evidence_refs.is_empty() {
         evidence_refs.push(json!({
@@ -154,7 +155,7 @@ pub(crate) fn bounded_full_operation_report(value: Value, operation: &str) -> Va
             "actionable": {
                 "operation": operation,
                 "terminal_state": bounded_value(&status),
-                "next_action": { "command": format!("homeboy agent-task status {}", quote_arg(run_id)) },
+                "next_action": { "command": format!("homeboy agent-task status {}", posix_quote_arg(run_id)) },
             },
             "schema": source_schema,
             "output_budget": { "max_bytes": BOUNDED_FULL_STATUS_BYTE_LIMIT, "truncated": true },
