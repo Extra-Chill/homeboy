@@ -33,7 +33,7 @@ fn real_offload_persists_selection_and_failed_preflight_spans() {
         let preflight = report.span("stage.lab.preflight").expect("preflight");
         assert_eq!(
             preflight.status,
-            homeboy_core::phase_timing::PhaseStatus::Failed
+            homeboy_engine_primitives::phase_timing::PhaseStatus::Failed
         );
         assert!(preflight.duration_ms.is_some());
         assert!(report.span("provider").is_none());

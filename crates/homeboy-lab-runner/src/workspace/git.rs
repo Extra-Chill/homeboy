@@ -174,7 +174,8 @@ pub(super) fn materialize_git_bundle_controlled(
     // resolved SHA is recorded separately in provenance and verified on Lab.
     let refs = controller_bundle_refs("HEAD", request.changed_since_base, request.git_fetch_refs);
     let object_cache = git_object_cache_path(request.remote_path, request.remote_url);
-    let cached = homeboy_core::observation::phase_timing::time(
+    let cached = homeboy_engine_primitives::phase_timing::PhaseTimer::current()
+        .time::<_, homeboy_core::Error>(
         "stage.lab.source_materialization.runner_inventory",
         || cached_commits(runner, &object_cache, control),
     )?;
@@ -190,7 +191,7 @@ pub(super) fn materialize_git_bundle_controlled(
             Err(_) => {}
         }
     }
-    homeboy_core::observation::phase_timing::time(
+    homeboy_engine_primitives::phase_timing::PhaseTimer::current().time::<_, homeboy_core::Error>(
         "stage.lab.source_materialization.bundle_object_closure",
         || hydrate_controller_bundle_objects_controlled(request.local_path, &refs, control),
     )?;
@@ -199,7 +200,8 @@ pub(super) fn materialize_git_bundle_controlled(
     // A thin transfer that cannot be installed (the cache lost objects between
     // the query and the install) falls back to the complete closure, which
     // never depends on runner state.
-    let prerequisites = homeboy_core::observation::phase_timing::time(
+    let prerequisites = homeboy_engine_primitives::phase_timing::PhaseTimer::current()
+        .time::<_, homeboy_core::Error>(
         "stage.lab.source_materialization.delta_computation",
         || bundle_prerequisites(request.local_path, request.head, &cached, control),
     )?;
@@ -260,7 +262,7 @@ fn install_from_object_cache(
         object_cache,
         request.metadata_only,
     );
-    homeboy_core::observation::phase_timing::time(
+    homeboy_engine_primitives::phase_timing::PhaseTimer::current().time::<_, homeboy_core::Error>(
         "stage.lab.source_materialization.runner_apply_verify",
         || {
             control.shell(
@@ -446,7 +448,8 @@ fn transfer_git_bundle(
     object_cache: &str,
     control: &WorkspaceControl,
 ) -> Result<String> {
-    let output = homeboy_core::observation::phase_timing::time(
+    let output = homeboy_engine_primitives::phase_timing::PhaseTimer::current()
+        .time::<_, homeboy_core::Error>(
         "stage.lab.source_materialization.bundle_build",
         || {
             control.output(
@@ -468,7 +471,8 @@ fn transfer_git_bundle(
             String::from_utf8_lossy(&output.stderr)
         )));
     }
-    let sha256 = homeboy_core::observation::phase_timing::time(
+    let sha256 = homeboy_engine_primitives::phase_timing::PhaseTimer::current()
+        .time::<_, homeboy_core::Error>(
         "stage.lab.source_materialization.bundle_hash",
         || super::snapshot::snapshot_file_sha256(bundle_path, control),
     )?;
@@ -491,7 +495,7 @@ fn transfer_git_bundle(
     );
     // Installation consumes the stream and verifies its digest on the runner;
     // these overlap and cannot honestly be reported as separate wall times.
-    homeboy_core::observation::phase_timing::time(
+    homeboy_engine_primitives::phase_timing::PhaseTimer::current().time::<_, homeboy_core::Error>(
         "stage.lab.source_materialization.transfer_apply_verify",
         || match runner.kind {
             RunnerKind::Local => materialize_git_bundle_piped_controlled(

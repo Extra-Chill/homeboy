@@ -1165,7 +1165,8 @@ mod tests {
             .start_run_in_mission(NewRunRecord::builder("agent-task").build(), &mission.id)
             .unwrap();
         store
-            .time_run_phase(&run.id, "terminal.record", || {
+            .phase_timer(&run.id)
+            .time::<_, homeboy::core::Error>("terminal.record", || {
                 std::thread::sleep(std::time::Duration::from_millis(5));
                 Ok(())
             })

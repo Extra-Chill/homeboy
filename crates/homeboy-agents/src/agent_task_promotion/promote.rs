@@ -175,18 +175,19 @@ pub(crate) fn promote_with_checkpoint_in_observation_store(
     mut checkpoint: impl FnMut(&AgentTaskPromotionReport) -> Result<()>,
 ) -> Result<AgentTaskPromotionReport> {
     let mut report = if let Some(run_id) = options.source_run_id.clone() {
-        observation_store.time_run_phase_with_outcome(
-            &run_id,
-            "promote",
-            || {
-                promote_with_provider_and_checkpoint_internal(
-                    options,
-                    &mut checkpoint,
-                    observation_store,
-                )
-            },
-            |report| report.status.gate_failed(),
-        )?
+        observation_store
+            .phase_timer(&run_id)
+            .time_with_outcome::<_, homeboy_core::Error>(
+                "promote",
+                || {
+                    promote_with_provider_and_checkpoint_internal(
+                        options,
+                        &mut checkpoint,
+                        observation_store,
+                    )
+                },
+                |report| report.status.gate_failed(),
+            )?
     } else {
         promote_with_provider_and_checkpoint_internal(options, &mut checkpoint, observation_store)?
     };
@@ -243,9 +244,11 @@ pub(crate) fn resume_promoted_patch_in_observation_store(
         )
     };
     if let Some(run_id) = run_id {
-        observation_store.time_run_phase_with_outcome(&run_id, "gate.replay", operation, |report| {
-            report.status.gate_failed()
-        })
+        observation_store
+            .phase_timer(&run_id)
+            .time_with_outcome::<_, homeboy_core::Error>("gate.replay", operation, |report| {
+                report.status.gate_failed()
+            })
     } else {
         operation()
     }
@@ -262,7 +265,9 @@ pub(crate) fn resume_promoted_patch_replacement_gates_in_observation_store(
     before_gates: impl FnOnce() -> Result<()> + 'static,
 ) -> Result<AgentTaskPromotionReport> {
     let _timing = options.source_run_id.as_deref().map(|run_id| {
-        observation_store.run_phase_guard(run_id, "promote.recover.replacement_gates")
+        observation_store
+            .phase_timer(run_id)
+            .into_guard("promote.recover.replacement_gates")
     });
     resume_promoted_patch_internal(
         options,
@@ -1447,7 +1452,7 @@ if [ \"$1\" = ls-remote ] && [ $(wc -c < {failures} 2>/dev/null || echo 0) -lt 3
             .start_run(homeboy_core::observation::NewRunRecord::builder("agent-task").build())
             .unwrap()
             .id;
-        let _timing = homeboy_core::observation::phase_timing::for_run(&store, &run_id);
+        let _timing = homeboy_core::observation::phase_context::for_run(&store, &run_id);
         git(repo.path(), &["init", "-b", "main"]);
         git(
             repo.path(),
@@ -2024,9 +2029,11 @@ fn run_promotion_gates(
         result
     };
     if let Some(run_id) = options.source_run_id.as_deref() {
-        observation_store.time_run_phase_with_outcome(run_id, "gate", operation, |gates| {
-            gates.status.gate_failed()
-        })
+        observation_store
+            .phase_timer(run_id)
+            .time_with_outcome::<_, homeboy_core::Error>("gate", operation, |gates| {
+                gates.status.gate_failed()
+            })
     } else {
         operation()
     }
@@ -2260,99 +2267,102 @@ fn run_promotion_gates_inner(
     let lab_placement = options.gates.gate_environment.lab_runner.is_some();
     let mut setup_attempts = Vec::new();
     let mut run_setup = || {
-        homeboy_core::observation::phase_timing::time("gate.destination_setup", || {
-            Ok(if lab_placement {
-                // A Lab gate runs in the runner's materialized workspace, so the
-                // controller checkout is never hydrated for Lab placement: the runner
-                // hydrates that workspace before the gate command, and its receipts
-                // carry the setup evidence that this report projects (#16262).
-                Vec::new()
-            } else if gate_workspace.is_dir() {
-                // Local setup runs under the gates' environment (#16024).
-                let gate_hydration =
-                    Some(crate::agent_task_gate::GateHydrationEnvironment::prepare(
-                        &options.gates.gate_environment,
-                    ))
-                    .transpose()?;
-                let hydration_policy = homeboy_core::deps::DependencyHydrationPolicy {
-                    timeout: options.gates.gate_timeout(),
-                    no_progress_timeout: options.gates.gate_no_progress_timeout(),
-                    heartbeat_interval: options.gates.gate_heartbeat_interval(),
-                    is_cancelled: promotion_cancellation(),
-                    on_progress: Arc::new(|progress| {
-                        emit_promotion_progress(
-                            "hydration",
-                            None,
-                            Some(format!(
-                                "provider={} phase={} last-progress={}ms",
-                                progress.provider_id,
-                                progress.phase,
-                                progress.last_progress_ms_ago.unwrap_or_default(),
-                            )),
-                        );
-                    }),
-                    environment: gate_hydration
-                        .as_ref()
-                        .map(|hydration| hydration.environment())
-                        .unwrap_or_default(),
-                };
-                // Detached gate workspaces have no submodules until initialized
-                // (#15355). Recorded with the setup evidence; a failure here does not
-                // fail setup on its own, since gates that need a missing submodule
-                // fail with their own diagnostics.
-                let submodule_setup = options
-                    .gates
-                    .hydrate_dependencies
-                    .then(|| {
-                        homeboy_core::deps::hydrate_git_submodules(
-                            &gate_workspace,
-                            None,
-                            "destination_gate_workspace",
-                            homeboy_core::deps::SUBMODULE_HYDRATION_TIMEOUT,
-                        )
-                    })
-                    .flatten();
-                let setup = crate::agent_task_gate::hydrate_gate_dependency_roots_for_component(
-                    &gate_workspace,
-                    options.gates.hydrate_dependencies,
-                    "destination_gate_workspace",
-                    &hydration_policy,
-                    options
+        homeboy_engine_primitives::phase_timing::PhaseTimer::current()
+            .time::<_, homeboy_core::Error>("gate.destination_setup", || {
+                Ok(if lab_placement {
+                    // A Lab gate runs in the runner's materialized workspace, so the
+                    // controller checkout is never hydrated for Lab placement: the runner
+                    // hydrates that workspace before the gate command, and its receipts
+                    // carry the setup evidence that this report projects (#16262).
+                    Vec::new()
+                } else if gate_workspace.is_dir() {
+                    // Local setup runs under the gates' environment (#16024).
+                    let gate_hydration =
+                        Some(crate::agent_task_gate::GateHydrationEnvironment::prepare(
+                            &options.gates.gate_environment,
+                        ))
+                        .transpose()?;
+                    let hydration_policy = homeboy_core::deps::DependencyHydrationPolicy {
+                        timeout: options.gates.gate_timeout(),
+                        no_progress_timeout: options.gates.gate_no_progress_timeout(),
+                        heartbeat_interval: options.gates.gate_heartbeat_interval(),
+                        is_cancelled: promotion_cancellation(),
+                        on_progress: Arc::new(|progress| {
+                            emit_promotion_progress(
+                                "hydration",
+                                None,
+                                Some(format!(
+                                    "provider={} phase={} last-progress={}ms",
+                                    progress.provider_id,
+                                    progress.phase,
+                                    progress.last_progress_ms_ago.unwrap_or_default(),
+                                )),
+                            );
+                        }),
+                        environment: gate_hydration
+                            .as_ref()
+                            .map(|hydration| hydration.environment())
+                            .unwrap_or_default(),
+                    };
+                    // Detached gate workspaces have no submodules until initialized
+                    // (#15355). Recorded with the setup evidence; a failure here does not
+                    // fail setup on its own, since gates that need a missing submodule
+                    // fail with their own diagnostics.
+                    let submodule_setup = options
                         .gates
-                        .gate_environment
-                        .admitted_component_id
-                        .as_deref(),
-                    Some(&setup_commands),
-                )
-                .map_err(|error| {
-                    gate_setup_failure(
-                        "destination_gate_setup",
-                        "destination_gate_workspace",
-                        error,
-                    )
-                });
-                if let Some(gate_hydration) = gate_hydration {
-                    gate_hydration.finish(setup.as_ref().is_ok_and(|setup| {
-                        setup.iter().all(|outcome| {
-                            outcome.status != homeboy_core::deps::DependencyHydrationStatus::Failed
+                        .hydrate_dependencies
+                        .then(|| {
+                            homeboy_core::deps::hydrate_git_submodules(
+                                &gate_workspace,
+                                None,
+                                "destination_gate_workspace",
+                                homeboy_core::deps::SUBMODULE_HYDRATION_TIMEOUT,
+                            )
                         })
-                    }));
-                }
-                let setup = setup?;
-                setup_attempts.extend(setup.iter().cloned());
-                if let Some(failed) = setup.iter().find(|outcome| {
-                    outcome.status == homeboy_core::deps::DependencyHydrationStatus::Failed
-                }) {
-                    return Err(gate_setup_outcome_failure("destination_gate_setup", failed));
-                }
-                submodule_setup.into_iter().chain(setup).collect()
-            } else {
-                // An opaque provider destination cannot be hydrated locally. Its gate
-                // provider remains the authority, and the report makes no local
-                // materialization claim.
-                Vec::new()
+                        .flatten();
+                    let setup =
+                        crate::agent_task_gate::hydrate_gate_dependency_roots_for_component(
+                            &gate_workspace,
+                            options.gates.hydrate_dependencies,
+                            "destination_gate_workspace",
+                            &hydration_policy,
+                            options
+                                .gates
+                                .gate_environment
+                                .admitted_component_id
+                                .as_deref(),
+                            Some(&setup_commands),
+                        )
+                        .map_err(|error| {
+                            gate_setup_failure(
+                                "destination_gate_setup",
+                                "destination_gate_workspace",
+                                error,
+                            )
+                        });
+                    if let Some(gate_hydration) = gate_hydration {
+                        gate_hydration.finish(setup.as_ref().is_ok_and(|setup| {
+                            setup.iter().all(|outcome| {
+                                outcome.status
+                                    != homeboy_core::deps::DependencyHydrationStatus::Failed
+                            })
+                        }));
+                    }
+                    let setup = setup?;
+                    setup_attempts.extend(setup.iter().cloned());
+                    if let Some(failed) = setup.iter().find(|outcome| {
+                        outcome.status == homeboy_core::deps::DependencyHydrationStatus::Failed
+                    }) {
+                        return Err(gate_setup_outcome_failure("destination_gate_setup", failed));
+                    }
+                    submodule_setup.into_iter().chain(setup).collect()
+                } else {
+                    // An opaque provider destination cannot be hydrated locally. Its gate
+                    // provider remains the authority, and the report makes no local
+                    // materialization claim.
+                    Vec::new()
+                })
             })
-        })
     };
     // Setup has no candidate verdict. Give transient infrastructure one warm
     // retry in this attempt, then project non-execution through the same gate
@@ -2365,11 +2375,13 @@ fn run_promotion_gates_inner(
         Ok(setup) => (setup, None),
         Err(error) => (setup_attempts, Some(error)),
     };
-    let _execution = homeboy_core::observation::phase_timing::guard(if lab_placement {
-        "gate.lab_wait"
-    } else {
-        "gate.destination_execute"
-    });
+    let _execution = homeboy_engine_primitives::phase_timing::PhaseTimer::current().into_guard(
+        if lab_placement {
+            "gate.lab_wait"
+        } else {
+            "gate.destination_execute"
+        },
+    );
     let declared_gates = options
         .gates
         .verify
@@ -3105,7 +3117,7 @@ mod lab_gate_binding_tests {
                 cached
             });
             if !cached {
-                homeboy_core::observation::phase_timing::finish(
+                homeboy_engine_primitives::phase_timing::PhaseTimer::current().finish(
                     IDENTITY_PROBE,
                     std::time::Instant::now(),
                     false,
@@ -3193,7 +3205,7 @@ mod lab_gate_binding_tests {
                         homeboy_core::observation::NewRunRecord::builder("agent-task").build(),
                     )
                     .unwrap();
-                let _timing = homeboy_core::observation::phase_timing::for_run(store, &run.id);
+                let _timing = homeboy_core::observation::phase_context::for_run(store, &run.id);
                 let options: AgentTaskPromotionRequest = serde_json::from_value(json!({
                     "source":"{}", "source_run_id":run.id, "to_worktree":"fixture", "gates":{
                         "verify":["true", "true", "true"], "hydrate_dependencies":false,
@@ -4314,79 +4326,81 @@ fn run_declared_base_git_once(
     phase: &str,
     timeout: Duration,
 ) -> Result<Output> {
-    homeboy_core::observation::phase_timing::time_with_outcome(
-        &format!("resolve.git_base.{phase}"),
-        || {
-            let subphase = args.first().copied().unwrap_or(phase);
-            let mut command = Command::new(git);
-            command
-                .args(args)
-                .current_dir(worktree_path)
-                .stdin(Stdio::null())
-                .stdout(Stdio::piped())
-                .stderr(Stdio::piped())
-                .envs(environment.iter().map(|(key, value)| (key, value)));
-            homeboy_core::engine::command::isolate_process_tree(&mut command);
-            let mut child = command.spawn().map_err(|error| {
-                declared_base_transport_error(
-                    worktree_path,
-                    base_ref,
-                    phase,
-                    subphase,
-                    format!("could not start Git base preflight: {error}"),
-                    environment,
-                    timeout,
-                    None,
-                )
-            })?;
-            let supervised = homeboy_core::engine::command::wait_with_bounded_output_supervised(
-                &mut child,
-                homeboy_core::engine::command::DEFAULT_CAPTURE_LIMIT_BYTES,
-                timeout,
-                DECLARED_BASE_GIT_HEARTBEAT,
-                || false,
-                |_, _| Ok(()),
-            )
-            .map_err(|error| {
-                declared_base_transport_error(
-                    worktree_path,
-                    base_ref,
-                    phase,
-                    subphase,
-                    format!("could not supervise Git base preflight: {error}"),
-                    environment,
-                    timeout,
-                    None,
-                )
-            })?;
-            if supervised.termination
-                != homeboy_core::engine::command::SupervisedCommandTermination::Completed
-            {
-                let stderr = redact_declared_base_git_diagnostic(&String::from_utf8_lossy(
-                    &supervised.output.stderr,
-                ));
-                let mut problem = format!(
-                    "Git base preflight `{subphase}` exceeded its deadline (budget {}ms)",
-                    timeout.as_millis()
-                );
-                if !stderr.is_empty() {
-                    problem = format!("{problem}: {stderr}");
+    homeboy_engine_primitives::phase_timing::PhaseTimer::current()
+        .time_with_outcome::<_, homeboy_core::Error>(
+            &format!("resolve.git_base.{phase}"),
+            || {
+                let subphase = args.first().copied().unwrap_or(phase);
+                let mut command = Command::new(git);
+                command
+                    .args(args)
+                    .current_dir(worktree_path)
+                    .stdin(Stdio::null())
+                    .stdout(Stdio::piped())
+                    .stderr(Stdio::piped())
+                    .envs(environment.iter().map(|(key, value)| (key, value)));
+                homeboy_core::engine::command::isolate_process_tree(&mut command);
+                let mut child = command.spawn().map_err(|error| {
+                    declared_base_transport_error(
+                        worktree_path,
+                        base_ref,
+                        phase,
+                        subphase,
+                        format!("could not start Git base preflight: {error}"),
+                        environment,
+                        timeout,
+                        None,
+                    )
+                })?;
+                let supervised =
+                    homeboy_core::engine::command::wait_with_bounded_output_supervised(
+                        &mut child,
+                        homeboy_core::engine::command::DEFAULT_CAPTURE_LIMIT_BYTES,
+                        timeout,
+                        DECLARED_BASE_GIT_HEARTBEAT,
+                        || false,
+                        |_, _| Ok(()),
+                    )
+                    .map_err(|error| {
+                        declared_base_transport_error(
+                            worktree_path,
+                            base_ref,
+                            phase,
+                            subphase,
+                            format!("could not supervise Git base preflight: {error}"),
+                            environment,
+                            timeout,
+                            None,
+                        )
+                    })?;
+                if supervised.termination
+                    != homeboy_core::engine::command::SupervisedCommandTermination::Completed
+                {
+                    let stderr = redact_declared_base_git_diagnostic(&String::from_utf8_lossy(
+                        &supervised.output.stderr,
+                    ));
+                    let mut problem = format!(
+                        "Git base preflight `{subphase}` exceeded its deadline (budget {}ms)",
+                        timeout.as_millis()
+                    );
+                    if !stderr.is_empty() {
+                        problem = format!("{problem}: {stderr}");
+                    }
+                    return Err(declared_base_transport_error(
+                        worktree_path,
+                        base_ref,
+                        phase,
+                        subphase,
+                        problem,
+                        environment,
+                        timeout,
+                        Some(stderr.as_str()).filter(|value| !value.is_empty()),
+                    ));
                 }
-                return Err(declared_base_transport_error(
-                    worktree_path,
-                    base_ref,
-                    phase,
-                    subphase,
-                    problem,
-                    environment,
-                    timeout,
-                    Some(stderr.as_str()).filter(|value| !value.is_empty()),
-                ));
-            }
-            Ok(supervised.output.into_output())
-        },
-        |output| !output.status.success(),
-    )
+                Ok(supervised.output.into_output())
+            },
+            |output| !output.status.success(),
+        )
 }
 
 fn declared_base_git_failure(

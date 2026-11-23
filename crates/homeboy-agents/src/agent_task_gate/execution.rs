@@ -205,41 +205,42 @@ pub(super) fn run_gate_argv_with_supervision(
     declared_plan: Option<&homeboy_engine_primitives::test_execution::TestExecutionPlan>,
 ) -> Result<AgentTaskGateReport> {
     let run = || {
-        homeboy_core::observation::phase_timing::time_with_outcome(
-            &gate_phase_name(None, command, index),
-            || {
-                run_gate_argv(
-                    cwd,
-                    index,
-                    command_vec.clone(),
-                    command,
-                    visibility,
-                    reveal_policy,
-                    GateExecution {
-                        runtime_tmpdir,
-                        timeout: supervision.map(|supervision| supervision.timeout),
-                        supervision,
-                        baseline_timeout_diagnostic: false,
-                        cpus: None,
-                        deadline: None,
-                    },
-                    gate_environment,
-                    package_artifacts,
-                    declared_plan,
-                )
-                .inspect(|report| {
-                    telemetry::record(&report.environment);
-                })
-            },
-            |report| {
-                matches!(
-                    report.status,
-                    AgentTaskGateStatus::Failed
-                        | AgentTaskGateStatus::Unavailable
-                        | AgentTaskGateStatus::Deferred
-                )
-            },
-        )
+        homeboy_engine_primitives::phase_timing::PhaseTimer::current()
+            .time_with_outcome::<_, homeboy_core::Error>(
+                &gate_phase_name(None, command, index),
+                || {
+                    run_gate_argv(
+                        cwd,
+                        index,
+                        command_vec.clone(),
+                        command,
+                        visibility,
+                        reveal_policy,
+                        GateExecution {
+                            runtime_tmpdir,
+                            timeout: supervision.map(|supervision| supervision.timeout),
+                            supervision,
+                            baseline_timeout_diagnostic: false,
+                            cpus: None,
+                            deadline: None,
+                        },
+                        gate_environment,
+                        package_artifacts,
+                        declared_plan,
+                    )
+                    .inspect(|report| {
+                        telemetry::record(&report.environment);
+                    })
+                },
+                |report| {
+                    matches!(
+                        report.status,
+                        AgentTaskGateStatus::Failed
+                            | AgentTaskGateStatus::Unavailable
+                            | AgentTaskGateStatus::Deferred
+                    )
+                },
+            )
     };
     // Call sites that thread no explicit supervision still run inside the
     // declared scope a Lab request reads.
@@ -803,9 +804,10 @@ pub(super) fn run_gate_argv_local(
     selected_environment.report.resources =
         telemetry::delta(resources_before, telemetry::children());
     selected_environment.report.host_pressure_end = Some(telemetry::host_pressure());
-    homeboy_core::observation::phase_timing::time("publish.gate_cargo_target", || {
-        selected_environment.finish_cargo_target()
-    })?;
+    homeboy_engine_primitives::phase_timing::PhaseTimer::current()
+        .time::<_, homeboy_core::Error>("publish.gate_cargo_target", || {
+            selected_environment.finish_cargo_target()
+        })?;
     let bench_compare = homeboy_core::bench_compare::is_cook_gate_command(command)
         .then(|| {
             homeboy_core::bench_compare::parse_gate_evidence(&stderr)

@@ -1,6 +1,6 @@
 //! Lab phase spans and non-timing selection metadata.
 use homeboy_core::observation::ObservationStore;
-use homeboy_core::phase_timing::PhaseTimer;
+use homeboy_engine_primitives::phase_timing::PhaseTimer;
 
 #[derive(Debug)]
 pub(crate) struct OffloadObservation {

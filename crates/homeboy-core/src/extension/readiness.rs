@@ -169,19 +169,20 @@ pub fn extension_ready_status_with(
     let timeout = ready_check_timeout();
     // Mark the child (and anything it spawns) as running inside a ready_check so
     // a re-entrant `homeboy` invocation trips the guard above.
-    let output = crate::observation::phase_timing::time_with_outcome(
-        "admit.extension_readiness",
-        || {
-            Ok(execute_local_command_in_dir_with_timeout(
-                &command,
-                Some(extension_path),
-                Some(&[(READY_CHECK_ACTIVE_ENV, "1")]),
-                timeout,
-            ))
-        },
-        |output| !output.success,
-    )
-    .expect("readiness operation is infallible");
+    let output = homeboy_engine_primitives::phase_timing::PhaseTimer::current()
+        .time_with_outcome::<_, crate::Error>(
+            "admit.extension_readiness",
+            || {
+                Ok(execute_local_command_in_dir_with_timeout(
+                    &command,
+                    Some(extension_path),
+                    Some(&[(READY_CHECK_ACTIVE_ENV, "1")]),
+                    timeout,
+                ))
+            },
+            |output| !output.success,
+        )
+        .expect("readiness operation is infallible");
 
     let status = if output.success {
         ExtensionReadyStatus {
@@ -462,7 +463,7 @@ mod tests {
         let timing_run = timing_store
             .start_run(crate::observation::NewRunRecord::builder("test").build())
             .unwrap();
-        let _timing = crate::observation::phase_timing::for_run(&timing_store, &timing_run.id);
+        let _timing = crate::observation::phase_context::for_run(&timing_store, &timing_run.id);
 
         let manifest = manifest_with_ready_check("/tmp", "exit 7");
         let _environment = ReadinessEnvironment::new(None, None);
@@ -478,7 +479,10 @@ mod tests {
             .iter()
             .find(|span| span.id == "admit.extension_readiness")
             .expect("persisted phase");
-        assert_eq!(span.status, crate::phase_timing::PhaseStatus::Failed);
+        assert_eq!(
+            span.status,
+            homeboy_engine_primitives::phase_timing::PhaseStatus::Failed
+        );
         assert!(span.duration_ms.is_some());
     }
 

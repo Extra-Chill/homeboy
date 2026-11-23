@@ -984,9 +984,11 @@ pub(crate) fn promote_or_load_attempt_in_store(
             homeboy_core::log_status!("observe", "phase timing persistence failed: {}", error);
         })
         .ok();
-    let _recovery = timing_store
-        .as_ref()
-        .map(|store| store.run_phase_guard(run_id, "promote.recover.candidate"));
+    let _recovery = timing_store.as_ref().map(|store| {
+        store
+            .phase_timer(run_id)
+            .into_guard("promote.recover.candidate")
+    });
     let _identities = crate::agent_task_gate::placement::runner_identity_scope();
     if let Some(promotion) = persisted_promotion_for_attempt_in_store(lifecycle_store, run_id)? {
         // Infrastructure deferral has no verdict to replay. Reverify the
@@ -3284,9 +3286,11 @@ pub(crate) fn recover_cook_pr_with_backend_and_review_form<B: AgentTaskPrFinaliz
             homeboy_core::log_status!("observe", "phase timing persistence failed: {}", error);
         })
         .ok();
-    let _execution = timing_store
-        .as_ref()
-        .map(|store| store.run_phase_guard(&run_id, "promote.recover.finalization"));
+    let _execution = timing_store.as_ref().map(|store| {
+        store
+            .phase_timer(&run_id)
+            .into_guard("promote.recover.finalization")
+    });
     if persisted_promotion_for_attempt(&run_id)?.is_some_and(|promotion| {
         promotion.status == AgentTaskPromotionStatus::VerifiedNoChanges
             && promotion.changed_files.is_empty()
@@ -4671,7 +4675,8 @@ pub(crate) fn cook_report(
     lifecycle_store: &agent_task_lifecycle::AgentTaskLifecycleStore,
     input: CookReportInput<'_>,
 ) -> AgentTaskRunResult<AgentTaskCookReport> {
-    let _finalization = homeboy_core::observation::phase_timing::guard("mission.finalization");
+    let _finalization = homeboy_engine_primitives::phase_timing::PhaseTimer::current()
+        .into_guard("mission.finalization");
     let CookReportInput {
         cook_id,
         status,

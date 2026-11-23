@@ -1781,7 +1781,7 @@ fn promisor_configured_transport_seals_local_lab_bundle_without_runner_transport
             .start_run(homeboy_core::observation::NewRunRecord::builder("test").build())
             .unwrap();
         let _timing =
-            homeboy_core::observation::phase_timing::for_run(&timing_store, &timing_run.id);
+            homeboy_core::observation::phase_context::for_run(&timing_store, &timing_run.id);
         let (output, status) = sync_workspace(
             "lab-promisor-transport",
             RunnerWorkspaceSyncOptions {
@@ -1813,7 +1813,10 @@ fn promisor_configured_transport_seals_local_lab_bundle_without_runner_transport
                 .find(|span| span.id == id)
                 .unwrap_or_else(|| panic!("missing {id}"));
             assert!(span.duration_ms.is_some());
-            assert_eq!(span.status, homeboy_core::phase_timing::PhaseStatus::Ok);
+            assert_eq!(
+                span.status,
+                homeboy_engine_primitives::phase_timing::PhaseStatus::Ok
+            );
         }
         assert_eq!(status, 0);
         assert_eq!(output.sync_mode, RunnerWorkspaceSyncMode::Git);

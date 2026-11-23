@@ -308,7 +308,9 @@ pub(crate) fn fetch_run_candidates(
             if let Err(error) = wait {
                 homeboy_core::log_status!("observe", "pickup timing persistence failed: {}", error);
             }
-            store.time_run_phase(&record.run_id, "promote.acquire", operation)
+            store
+                .phase_timer(&record.run_id)
+                .time::<_, homeboy_core::Error>("promote.acquire", operation)
         }
         None => operation(),
     }
@@ -557,7 +559,8 @@ mod tests {
             let store = lifecycle::AgentTaskLifecycleStore::from_environment().unwrap();
             let observation = store.open_observation_initialized().unwrap();
             observation
-                .time_run_phase(&record.run_id, "stage.lab.observe", || Ok(()))
+                .phase_timer(&record.run_id)
+                .time::<_, homeboy_core::Error>("stage.lab.observe", || Ok(()))
                 .unwrap();
             std::thread::sleep(std::time::Duration::from_millis(5));
             // Use the authoritative transition, as detached terminal events do.

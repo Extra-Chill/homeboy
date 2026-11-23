@@ -4,8 +4,8 @@ use std::time::Instant;
 use homeboy_core::component::{resolve_component_scope, Component, ScopeCommand};
 use homeboy_core::context::RemoteProjectContext;
 use homeboy_core::error::{Error, Result};
-use homeboy_core::phase_timing::{PhaseTimer, PhaseTimingReport};
 use homeboy_core::project::Project;
+use homeboy_engine_primitives::phase_timing::{PhaseTimer, PhaseTimingReport};
 use homeboy_version::version;
 
 use super::execution::{

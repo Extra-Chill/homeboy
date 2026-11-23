@@ -11,31 +11,6 @@ use homeboy_engine_primitives::phase_timing::{
 use super::ObservationStore;
 use crate::{Error, Result};
 
-/// Best-effort scope timing, including early returns. Never changes domain results.
-pub struct RunPhaseGuard<'a> {
-    store: &'a ObservationStore,
-    run_id: String,
-    phase: String,
-    started_at: String,
-    usage: Option<homeboy_engine_primitives::resource_usage::UsageScope>,
-    _context: super::phase_timing::Scope,
-}
-
-impl Drop for RunPhaseGuard<'_> {
-    fn drop(&mut self) {
-        let usage = self.usage.take().and_then(|usage| usage.finish());
-        if let Err(error) = self.store.finish_run_phase_with_usage(
-            &self.run_id,
-            &self.phase,
-            &self.started_at,
-            std::thread::panicking(),
-            usage,
-        ) {
-            crate::log_status!("observe", "phase timing persistence failed: {}", error);
-        }
-    }
-}
-
 impl ObservationStore {
     /// Import runner timing evidence onto the controller owner timeline. Event
     /// identities make replay idempotent; callers validate the accepted job
@@ -61,56 +36,10 @@ impl ObservationStore {
         Ok(())
     }
 
-    pub fn run_phase_guard(&self, run_id: &str, phase: &str) -> RunPhaseGuard<'_> {
-        RunPhaseGuard {
-            _context: super::phase_timing::for_run(self, run_id),
-            store: self,
-            run_id: run_id.into(),
-            phase: phase.into(),
-            started_at: chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true),
-            usage: Some(homeboy_engine_primitives::resource_usage::usage_scope()),
-        }
-    }
-
-    /// Time an operation and append its outcome even when the operation fails.
-    /// Persistence failure is reported separately and never masks a workflow
-    /// error. Absolute timestamps share a timeline across controller and workers.
-    pub fn time_run_phase<T>(
-        &self,
-        run_id: &str,
-        phase: &str,
-        operation: impl FnOnce() -> Result<T>,
-    ) -> Result<T> {
-        self.time_run_phase_with_outcome(run_id, phase, operation, |_| false)
-    }
-
-    /// As `time_run_phase`, for domain results that encode failure in `Ok`.
-    pub fn time_run_phase_with_outcome<T>(
-        &self,
-        run_id: &str,
-        phase: &str,
-        operation: impl FnOnce() -> Result<T>,
-        failed: impl FnOnce(&T) -> bool,
-    ) -> Result<T> {
-        // A run-aware execution boundary also owns the context of all leaves.
-        let _context = super::phase_timing::for_run(self, run_id);
-        let started = chrono::Utc::now();
-        let mut timer = homeboy_engine_primitives::phase_timing::PhaseTimer::with_version(
-            crate::build_identity::current().version,
-        );
-        let result = timer.time(phase, operation);
-        let mut report = timer.into_report();
-        if result.as_ref().is_ok_and(failed) {
-            report.spans[0].status = homeboy_engine_primitives::phase_timing::PhaseStatus::Failed;
-        }
-        report.spans[0].started_at = started.to_rfc3339_opts(chrono::SecondsFormat::Millis, true);
-        // Distinct executions are distinct samples; exactly-once delivery uses
-        // the stable report identity below rather than a phase name alone.
-        let identity = format!("{phase}:{}:{}", std::process::id(), started.to_rfc3339());
-        if let Err(error) = self.record_phase_spans(run_id, &identity, &report) {
-            crate::log_status!("observe", "phase timing persistence failed: {}", error);
-        }
-        result
+    /// Bind the shared timer to a run, propagating its context to nested work.
+    pub fn phase_timer(&self, run_id: &str) -> homeboy_engine_primitives::phase_timing::PhaseTimer {
+        let scope = super::phase_context::for_run(self, run_id);
+        homeboy_engine_primitives::phase_timing::PhaseTimer::current().with_scope(scope)
     }
 
     /// Finish a phase whose start must survive process restarts. The owner keeps
@@ -121,18 +50,6 @@ impl ObservationStore {
         phase: &str,
         started_at: &str,
         failed: bool,
-    ) -> Result<()> {
-        self.finish_run_phase_with_usage(run_id, phase, started_at, failed, None)
-    }
-
-    /// As `finish_run_phase`, recording what the phase consumed (#18461).
-    pub fn finish_run_phase_with_usage(
-        &self,
-        run_id: &str,
-        phase: &str,
-        started_at: &str,
-        failed: bool,
-        usage: Option<homeboy_engine_primitives::resource_usage::ResourceUsage>,
     ) -> Result<()> {
         let parse = |value: &str| {
             chrono::DateTime::parse_from_rfc3339(value)
@@ -162,7 +79,6 @@ impl ObservationStore {
         }
         let mut report = timer.into_report();
         report.spans[0].started_at = timestamp;
-        report.spans[0].usage = usage;
         self.record_phase_spans(run_id, &format!("{phase}:{started_at}"), &report)
     }
 

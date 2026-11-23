@@ -22,7 +22,7 @@ fn env(name: &str) -> Option<String> {
 }
 
 fn current_cook_id() -> Option<String> {
-    homeboy_core::observation::phase_timing::current().map(|(_, id)| {
+    homeboy_core::observation::phase_context::current().map(|(_, id)| {
         crate::agent_task_lifecycle::status(&id)
             .ok()
             .and_then(|record| record.metadata["cook_id"].as_str().map(str::to_string))
