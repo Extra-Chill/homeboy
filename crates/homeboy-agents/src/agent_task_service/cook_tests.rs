@@ -11799,6 +11799,21 @@ fn green_retry_after_verified_no_change_attempt_finalizes_its_contribution_chain
 struct CapturePublishRecoveryPerformer {
     gate_proof: AgentTaskPromotionReport,
     created: std::cell::Cell<bool>,
+    pushed: std::cell::Cell<bool>,
+    draft: std::cell::Cell<bool>,
+    create_count: std::cell::Cell<usize>,
+}
+
+impl CapturePublishRecoveryPerformer {
+    fn new(gate_proof: AgentTaskPromotionReport) -> Self {
+        Self {
+            gate_proof,
+            created: Default::default(),
+            pushed: Default::default(),
+            draft: Default::default(),
+            create_count: Default::default(),
+        }
+    }
 }
 
 impl crate::agent_task_service::CookRecoveryPerformer for CapturePublishRecoveryPerformer {
@@ -11850,6 +11865,10 @@ impl crate::agent_task_service::CookRecoveryPerformer for CapturePublishRecovery
             &mut backend,
         )?;
         self.created.set(self.created.get() || backend.created);
+        self.pushed.set(self.pushed.get() || backend.pushed);
+        self.draft.set(self.draft.get() || backend.draft);
+        self.create_count
+            .set(self.create_count.get() + backend.create_count);
         Ok((value, 0))
     }
 }
@@ -11891,10 +11910,7 @@ fn malformed_agent_review_form_recovers_by_publishing_a_supplied_form() {
         let applied = promotion_with_existing_path(run_id, target.path());
         agent_task_lifecycle::record_promotion(run_id, serde_json::to_value(&applied).unwrap())
             .expect("record verified promotion");
-        let performer = CapturePublishRecoveryPerformer {
-            gate_proof: applied,
-            created: std::cell::Cell::new(false),
-        };
+        let performer = CapturePublishRecoveryPerformer::new(applied);
 
         // An unusable agent form never dispatches a review-only follow-up:
         // recovery publishes, as a draft without an operator form (#17671).
@@ -11946,6 +11962,88 @@ fn malformed_agent_review_form_recovers_by_publishing_a_supplied_form() {
             "Close the issue by guarding the reload path."
         );
         assert!(performer.created.get());
+    });
+}
+
+/// #17775: a gated candidate stopped at `candidate_recoverable` without a pull
+/// request finalizes in one `recover` call: the destination branch is pushed
+/// and a draft PR opened, with no provider dispatch and no manual git.
+#[test]
+fn gated_candidate_recovers_to_a_draft_pull_request_in_one_call() {
+    homeboy_core::test_support::with_isolated_home(|_| {
+        let cook_id = "cook-17775";
+        let run_id = "cook-17775-attempt-1";
+        let target = tempfile::tempdir().expect("fixture target");
+        let mut options = batch_cook_options(cook_id, Arc::new(AcceptedDetachedAttemptDispatcher));
+        options.identity.initial_run_id = run_id.to_string();
+        options.identity.initial_plan.tasks[0].executor.model = Some("fixture-model".to_string());
+        persist_initial_recipe(&options).expect("persist recipe");
+        agent_task_lifecycle::submit_plan(&options.identity.initial_plan, Some(run_id))
+            .expect("submit run");
+        agent_task_lifecycle::record_cook_attempt_in_store(
+            &test_lifecycle_store(),
+            cook_id,
+            1,
+            run_id,
+        )
+        .expect("link recipe attempt");
+        // The provider left no review form; the candidate passed its gates.
+        seed_substantive_candidate_aggregate(
+            run_id,
+            &options.identity.initial_plan,
+            &target.path().join("candidate.patch"),
+            "diff --git a/src/lib.rs b/src/lib.rs\n--- a/src/lib.rs\n+++ b/src/lib.rs\n@@ -1 +1 @@\n-old\n+new\n",
+        );
+        let applied = promotion_with_existing_path(run_id, target.path());
+        agent_task_lifecycle::record_promotion(run_id, serde_json::to_value(&applied).unwrap())
+            .expect("record verified promotion");
+        let performer = CapturePublishRecoveryPerformer::new(applied);
+
+        assert_eq!(
+            crate::agent_task_service::plan_cook_recovery(cook_id)
+                .expect("plan the gated candidate")
+                .step,
+            crate::agent_task_service::CookRecoveryStep::Publish
+        );
+
+        let (published, exit_code) = crate::agent_task_service::recover_cook(
+            cook_id,
+            crate::agent_task_service::CookRecoveryRequest::default(),
+            &performer,
+        )
+        .expect("one recover call finalizes the candidate");
+        assert_eq!(exit_code, 0, "{:?}", published.failure);
+        assert_eq!(
+            published.step,
+            crate::agent_task_service::CookRecoveryStep::Publish
+        );
+        let result = published.result.expect("publication report");
+        assert_eq!(result["status"], "draft_published", "{result}");
+        assert!(
+            performer.pushed.get(),
+            "recover pushes the destination branch"
+        );
+        assert!(performer.created.get(), "recover opens the pull request");
+        assert!(
+            performer.draft.get(),
+            "a candidate without a form opens a draft"
+        );
+        assert_eq!(performer.create_count.get(), 1);
+
+        // Recovering the published Cook again opens no second pull request.
+        let replan = crate::agent_task_service::plan_cook_recovery(cook_id)
+            .expect("plan the published Cook");
+        assert_ne!(
+            replan.step,
+            crate::agent_task_service::CookRecoveryStep::Publish,
+            "a published candidate is not published again"
+        );
+        let _ = crate::agent_task_service::recover_cook(
+            cook_id,
+            crate::agent_task_service::CookRecoveryRequest::default(),
+            &performer,
+        );
+        assert_eq!(performer.create_count.get(), 1);
     });
 }
 
