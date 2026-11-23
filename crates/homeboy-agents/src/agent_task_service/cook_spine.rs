@@ -502,7 +502,7 @@ pub(super) fn run_cook_spine(
         // capture the store itself by value rather than this borrow.
         let lookup_lifecycle_store = &lifecycle_store;
         let lookup_result = std::thread::scope(|scope| {
-            scope.spawn(homeboy_core::observation::phase_timing::inherit(
+            scope.spawn(homeboy_core::observation::phase_context::inherit(
                 move || {
                     let mut next_heartbeat = Instant::now() + COOK_HEARTBEAT_INTERVAL;
                     loop {
@@ -1313,7 +1313,7 @@ pub(super) fn run_cook_spine(
                     // this borrow.
                     let heartbeat_lifecycle_store = &lifecycle_store;
                     std::thread::scope(|scope| {
-                        scope.spawn(homeboy_core::observation::phase_timing::inherit(move || {
+                        scope.spawn(homeboy_core::observation::phase_context::inherit(move || {
                             let mut supervisor =
                                 CookSupervisor::new(supervision_policy, supervision_backend);
                             let provider_started_at = Instant::now();
@@ -2346,7 +2346,7 @@ pub(super) fn run_cook_spine(
         };
         let terminal_phase = terminal_timing
             .as_ref()
-            .map(|store| store.run_phase_guard(&run_id, "terminal.decision"));
+            .map(|store| store.phase_timer(&run_id).into_guard("terminal.decision"));
         let review_form = if review_form_unavailable {
             None
         } else {

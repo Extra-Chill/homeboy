@@ -9,7 +9,7 @@ use homeboy_core::config;
 use homeboy_core::error::Result;
 use homeboy_core::git::output_optional;
 use homeboy_core::paths as base_path;
-use homeboy_core::phase_timing::{PhaseTimer, PhaseTimingReport};
+use homeboy_engine_primitives::phase_timing::{PhaseTimer, PhaseTimingReport};
 use homeboy_core::project::Project;
 
 use super::path_roots::resolve_effective_remote_path;

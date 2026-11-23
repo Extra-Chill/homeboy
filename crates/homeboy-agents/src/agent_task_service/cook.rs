@@ -393,10 +393,10 @@ pub(super) fn run_cook_startup_phase<T>(
         .ok();
     let _phase = timing_store
         .as_ref()
-        .map(|store| store.run_phase_guard(run_id, &format!("stage.{phase}")));
+        .map(|store| store.phase_timer(run_id).into_guard(&format!("stage.{phase}")));
     {
         std::thread::scope(|scope| {
-            scope.spawn(homeboy_core::observation::phase_timing::inherit(
+            scope.spawn(homeboy_core::observation::phase_context::inherit(
                 move || loop {
                     match wait.recv_timeout(COOK_HEARTBEAT_INTERVAL) {
                         Ok(()) | Err(mpsc::RecvTimeoutError::Disconnected) => break,
@@ -458,7 +458,7 @@ pub(super) fn finalize_with_operation_claim_in_store(
     finalize: &mut dyn FnMut(&CookRequest, &str, &AgentTaskPromotionReport) -> Result<Value>,
 ) -> Result<Value> {
     let observation = lifecycle_store.open_observation_initialized()?;
-    let result = observation.time_run_phase(run_id, "publish", || {
+    let result = observation.phase_timer(run_id).time::<_, homeboy_core::Error>("publish", || {
         let operation_key = finalization_operation_key(run_id, promotion);
         match lifecycle_store.claim_cook_operation(
             run_id,

@@ -175,9 +175,7 @@ pub(crate) fn promote_with_checkpoint_in_observation_store(
     mut checkpoint: impl FnMut(&AgentTaskPromotionReport) -> Result<()>,
 ) -> Result<AgentTaskPromotionReport> {
     let mut report = if let Some(run_id) = options.source_run_id.clone() {
-        observation_store.time_run_phase_with_outcome(
-            &run_id,
-            "promote",
+        observation_store.phase_timer(&run_id).time_with_outcome::<_, homeboy_core::Error>("promote",
             || {
                 promote_with_provider_and_checkpoint_internal(
                     options,
@@ -243,7 +241,7 @@ pub(crate) fn resume_promoted_patch_in_observation_store(
         )
     };
     if let Some(run_id) = run_id {
-        observation_store.time_run_phase_with_outcome(&run_id, "gate.replay", operation, |report| {
+        observation_store.phase_timer(&run_id).time_with_outcome::<_, homeboy_core::Error>("gate.replay", operation, |report| {
             report.status.gate_failed()
         })
     } else {
@@ -262,7 +260,7 @@ pub(crate) fn resume_promoted_patch_replacement_gates_in_observation_store(
     before_gates: impl FnOnce() -> Result<()> + 'static,
 ) -> Result<AgentTaskPromotionReport> {
     let _timing = options.source_run_id.as_deref().map(|run_id| {
-        observation_store.run_phase_guard(run_id, "promote.recover.replacement_gates")
+        observation_store.phase_timer(run_id).into_guard("promote.recover.replacement_gates")
     });
     resume_promoted_patch_internal(
         options,
@@ -1447,7 +1445,7 @@ if [ \"$1\" = ls-remote ] && [ $(wc -c < {failures} 2>/dev/null || echo 0) -lt 3
             .start_run(homeboy_core::observation::NewRunRecord::builder("agent-task").build())
             .unwrap()
             .id;
-        let _timing = homeboy_core::observation::phase_timing::for_run(&store, &run_id);
+        let _timing = homeboy_core::observation::phase_context::for_run(&store, &run_id);
         git(repo.path(), &["init", "-b", "main"]);
         git(
             repo.path(),
@@ -2024,7 +2022,7 @@ fn run_promotion_gates(
         result
     };
     if let Some(run_id) = options.source_run_id.as_deref() {
-        observation_store.time_run_phase_with_outcome(run_id, "gate", operation, |gates| {
+        observation_store.phase_timer(run_id).time_with_outcome::<_, homeboy_core::Error>("gate", operation, |gates| {
             gates.status.gate_failed()
         })
     } else {
@@ -2250,7 +2248,7 @@ fn run_promotion_gates_inner(
     let lab_placement = options.gates.gate_environment.lab_runner.is_some();
     let mut setup_attempts = Vec::new();
     let mut run_setup = || {
-        homeboy_core::observation::phase_timing::time("gate.destination_setup", || {
+        homeboy_engine_primitives::phase_timing::PhaseTimer::current().time::<_, homeboy_core::Error>("gate.destination_setup", || {
             Ok(if lab_placement {
                 // A Lab gate runs in the runner's materialized workspace, so the
                 // controller checkout is never hydrated for Lab placement: the runner
@@ -2355,7 +2353,7 @@ fn run_promotion_gates_inner(
         Ok(setup) => (setup, None),
         Err(error) => (setup_attempts, Some(error)),
     };
-    let _execution = homeboy_core::observation::phase_timing::guard(if lab_placement {
+    let _execution = homeboy_engine_primitives::phase_timing::PhaseTimer::current().into_guard(if lab_placement {
         "gate.lab_wait"
     } else {
         "gate.destination_execute"
@@ -3095,7 +3093,7 @@ mod lab_gate_binding_tests {
                 cached
             });
             if !cached {
-                homeboy_core::observation::phase_timing::finish(
+                homeboy_engine_primitives::phase_timing::PhaseTimer::current().finish(
                     IDENTITY_PROBE,
                     std::time::Instant::now(),
                     false,
@@ -3183,7 +3181,7 @@ mod lab_gate_binding_tests {
                         homeboy_core::observation::NewRunRecord::builder("agent-task").build(),
                     )
                     .unwrap();
-                let _timing = homeboy_core::observation::phase_timing::for_run(store, &run.id);
+                let _timing = homeboy_core::observation::phase_context::for_run(store, &run.id);
                 let options: AgentTaskPromotionRequest = serde_json::from_value(json!({
                     "source":"{}", "source_run_id":run.id, "to_worktree":"fixture", "gates":{
                         "verify":["true", "true", "true"], "hydrate_dependencies":false,
@@ -4304,7 +4302,7 @@ fn run_declared_base_git_once(
     phase: &str,
     timeout: Duration,
 ) -> Result<Output> {
-    homeboy_core::observation::phase_timing::time_with_outcome(
+    homeboy_engine_primitives::phase_timing::PhaseTimer::current().time_with_outcome::<_, homeboy_core::Error>(
         &format!("resolve.git_base.{phase}"),
         || {
             let subphase = args.first().copied().unwrap_or(phase);

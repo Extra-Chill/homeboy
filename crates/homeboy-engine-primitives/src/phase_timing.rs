@@ -5,7 +5,7 @@
 //! attributed to a phase — core orchestration, extension execution, runner
 //! sync, or report rendering — rather than a single wall-clock number.
 //!
-//! Boundary: core owns the *contract* (a `PhaseTimer` that captures named
+//! Boundary: this module owns the *contract* (a `PhaseTimer` that captures named
 //! phases with durations and finalizes on success or failure), not the phase
 //! vocabulary. Callers supply their own phase labels; the recommended generic
 //! labels at the core boundary are `admit`, `resolve`, `stage`, `provider`,
@@ -147,10 +147,31 @@ impl PhaseTimingReport {
 /// return or a hard failure mid-workflow — call `record_failed` so timing is
 /// still finalized on the error path, or use a [`PhaseGuard`] to finalize an
 /// `ok` span automatically on scope exit.
-#[derive(Debug, Clone)]
+pub type SpanSink = std::sync::Arc<dyn Fn(&PhaseSpan) + Send + Sync>;
+
+thread_local! {
+    static SINK: std::cell::RefCell<Option<SpanSink>> = const { std::cell::RefCell::new(None) };
+}
+
+/// Install the run's persistence sink, returning the previous sink for restoration.
+pub fn replace_sink(sink: Option<SpanSink>) -> Option<SpanSink> {
+    SINK.with(|slot| std::mem::replace(&mut *slot.borrow_mut(), sink))
+}
+
+#[derive(Clone)]
 pub struct PhaseTimer {
     spans: Vec<PhaseSpan>,
     homeboy_version: String,
+    sink: Option<SpanSink>,
+    scope: Option<std::sync::Arc<dyn std::any::Any + Send + Sync>>,
+}
+
+impl std::fmt::Debug for PhaseTimer {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("PhaseTimer")
+            .field("spans", &self.spans)
+            .finish_non_exhaustive()
+    }
 }
 
 impl Default for PhaseTimer {
@@ -158,6 +179,8 @@ impl Default for PhaseTimer {
         Self {
             spans: Vec::new(),
             homeboy_version: homeboy_product_identity::product_version().to_string(),
+            sink: None,
+            scope: None,
         }
     }
 }
@@ -165,6 +188,55 @@ impl Default for PhaseTimer {
 impl PhaseTimer {
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// Record into the active run instead of collecting a buffered report.
+    pub fn current() -> Self {
+        Self {
+            sink: SINK.with(|slot| slot.borrow().clone()),
+            ..Self::default()
+        }
+    }
+
+    /// Keep a run context alive for the lifetime of this timer and its guard.
+    pub fn with_scope(mut self, scope: impl std::any::Any + Send + Sync) -> Self {
+        self.scope = Some(std::sync::Arc::new(scope));
+        self
+    }
+
+    pub fn into_guard(self, id: impl Into<String>) -> PhaseGuard<'static> {
+        PhaseGuard {
+            timer: GuardTimer::Owned(self),
+            id: id.into(),
+            started: Instant::now(),
+            usage: Some(super::resource_usage::usage_scope()),
+        }
+    }
+
+    /// Record work measured outside a closure.
+    pub fn finish(&mut self, id: impl Into<String>, started: Instant, failed: bool) {
+        self.record(
+            id,
+            if failed {
+                PhaseStatus::Failed
+            } else {
+                PhaseStatus::Ok
+            },
+            Some(started.elapsed()),
+        );
+    }
+
+    /// Time a result whose successful value may encode a domain failure.
+    pub fn time_with_outcome<T, E>(
+        &mut self,
+        id: impl Into<String>,
+        run: impl FnOnce() -> Result<T, E>,
+        failed: impl FnOnce(&T) -> bool,
+    ) -> Result<T, E> {
+        let mut guard = self.start(id);
+        let result = run();
+        guard.complete(result.as_ref().map(failed).unwrap_or(true));
+        result
     }
 
     /// Create a timer attributed to the recording executable's version.
@@ -192,7 +264,11 @@ impl PhaseTimer {
             - chrono::Duration::from_std(duration.unwrap_or_default()).unwrap_or_default())
         .to_rfc3339_opts(SecondsFormat::Millis, true);
         span.homeboy_version = self.homeboy_version.clone();
-        self.spans.push(span);
+        if let Some(sink) = &self.sink {
+            sink(&span);
+        } else {
+            self.spans.push(span);
+        }
     }
 
     /// Record a completed phase that ran successfully.
@@ -218,25 +294,13 @@ impl PhaseTimer {
         id: impl Into<String>,
         run: impl FnOnce() -> Result<T, E>,
     ) -> Result<T, E> {
-        let started = Instant::now();
-        let usage = super::resource_usage::usage_scope();
-        let outcome = run();
-        let elapsed = started.elapsed();
-        let status = match &outcome {
-            Ok(_) => PhaseStatus::Ok,
-            Err(_) => PhaseStatus::Failed,
-        };
-        self.record_with_usage(id, status, Some(elapsed), usage.finish());
-        outcome
+        self.time_with_outcome(id, run, |_| false)
     }
 
     /// Time an infallible closure as a single phase.
     pub fn time_ok<T>(&mut self, id: impl Into<String>, run: impl FnOnce() -> T) -> T {
-        let started = Instant::now();
-        let usage = super::resource_usage::usage_scope();
-        let value = run();
-        self.record_with_usage(id, PhaseStatus::Ok, Some(started.elapsed()), usage.finish());
-        value
+        let _guard = self.start(id);
+        run()
     }
 
     /// Start a scoped phase guard. The guard records the phase on drop, so an
@@ -245,7 +309,7 @@ impl PhaseTimer {
     /// recording via [`PhaseGuard::disarm`].
     pub fn start(&mut self, id: impl Into<String>) -> PhaseGuard<'_> {
         PhaseGuard {
-            timer: self,
+            timer: GuardTimer::Borrowed(self),
             id: id.into(),
             started: Instant::now(),
             usage: Some(super::resource_usage::usage_scope()),
@@ -277,12 +341,17 @@ impl PhaseTimer {
 /// RAII scope that records a phase span when dropped.
 ///
 /// Guarantees timing is finalized even on an early return or a panic — the key
-/// requirement for the error path. Records the phase as `ok` on drop, or
+/// requirement for the error path. Records `ok` on drop, `failed` during unwinding, or
 /// drops without recording via [`disarm`].
 ///
 /// [`disarm`]: PhaseGuard::disarm
+enum GuardTimer<'a> {
+    Borrowed(&'a mut PhaseTimer),
+    Owned(PhaseTimer),
+}
+
 pub struct PhaseGuard<'a> {
-    timer: &'a mut PhaseTimer,
+    timer: GuardTimer<'a>,
     id: String,
     started: Instant,
     /// `None` once disarmed.
@@ -290,6 +359,26 @@ pub struct PhaseGuard<'a> {
 }
 
 impl PhaseGuard<'_> {
+    fn complete(&mut self, failed: bool) {
+        let Some(usage) = self.usage.take() else {
+            return;
+        };
+        let timer = match &mut self.timer {
+            GuardTimer::Borrowed(timer) => &mut **timer,
+            GuardTimer::Owned(timer) => timer,
+        };
+        timer.record_with_usage(
+            std::mem::take(&mut self.id),
+            if failed {
+                PhaseStatus::Failed
+            } else {
+                PhaseStatus::Ok
+            },
+            Some(self.started.elapsed()),
+            usage.finish(),
+        );
+    }
+
     /// Drop the guard without recording a span (e.g. the phase was skipped
     /// after the guard was created).
     pub fn disarm(mut self) {
@@ -301,14 +390,7 @@ impl PhaseGuard<'_> {
 
 impl Drop for PhaseGuard<'_> {
     fn drop(&mut self) {
-        let Some(usage) = self.usage.take() else {
-            return;
-        };
-        let elapsed = self.started.elapsed();
-        let id = std::mem::take(&mut self.id);
-        // A guard always timed work, so it records an `ok` span on drop.
-        self.timer
-            .record_with_usage(id, PhaseStatus::Ok, Some(elapsed), usage.finish());
+        self.complete(std::thread::panicking());
     }
 }
 

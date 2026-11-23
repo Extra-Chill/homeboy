@@ -906,7 +906,7 @@ mod managed_service_plan_tests {
 
 pub(crate) fn for_execution_timing(
     execution: &crate::agent_tasks::AgentTaskExecutionContext,
-) -> Option<homeboy_core::observation::phase_timing::Scope> {
+) -> Option<homeboy_core::observation::phase_context::Scope> {
     let run_id = execution.run_id.as_deref()?;
     let store = execution
         .lifecycle_store()?
@@ -915,7 +915,7 @@ pub(crate) fn for_execution_timing(
             homeboy_core::log_status!("observe", "phase timing persistence failed: {}", error)
         })
         .ok()?;
-    Some(homeboy_core::observation::phase_timing::for_run(
+    Some(homeboy_core::observation::phase_context::for_run(
         &store, run_id,
     ))
 }

@@ -286,7 +286,7 @@ pub(crate) fn dispatch_cook_follow_up(
     };
     let schedule_phase = timing
         .as_ref()
-        .map(|store| store.run_phase_guard(source_run_id, "terminal.schedule_next_attempt"));
+        .map(|store| store.phase_timer(source_run_id).into_guard("terminal.schedule_next_attempt"));
     validate_cook_follow_up_stores(recipe_store, lifecycle_store)?;
     let _driver = recipe_store
         .try_acquire_cook_driver(cook_id)?

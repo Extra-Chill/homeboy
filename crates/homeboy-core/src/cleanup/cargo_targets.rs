@@ -10,7 +10,6 @@ use homeboy_engine_primitives::shell::quote_path;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 
-use crate::observation::phase_timing;
 use crate::{Error, Result};
 
 pub const HOMEBOY_CARGO_TARGET_ROOT_ENV: &str = "HOMEBOY_CARGO_TARGET_ROOT";
@@ -594,7 +593,7 @@ fn seed_worktree_cargo_target_until(
     private_dir: &Path,
     deadline: Option<Instant>,
 ) -> Result<()> {
-    phase_timing::time("cargo_target.seed", || {
+    homeboy_engine_primitives::phase_timing::PhaseTimer::current().time::<_, crate::Error>("cargo_target.seed", || {
         optional_cargo_cache_transfer("seed skipped; using cold private target", || {
             if base_dir.exists() {
                 with_base_store_publication_lock(
@@ -653,7 +652,7 @@ fn cache_projection(base_dir: &Path) -> PathBuf {
 /// reader. The base directory remains a lifecycle/lock container; its current
 /// cache is a separately published directory.
 fn publish_cargo_cache(from: &Path, base_dir: &Path, deadline: Instant) -> Result<()> {
-    phase_timing::time("cargo_target.publish", || {
+    homeboy_engine_primitives::phase_timing::PhaseTimer::current().time::<_, crate::Error>("cargo_target.publish", || {
         fs::create_dir_all(base_dir)
             .map_err(|error| io_error(error, "create Cargo cache base store"))?;
         let sequence = ISOLATED_TARGET_SEQUENCE.fetch_add(1, Ordering::Relaxed);

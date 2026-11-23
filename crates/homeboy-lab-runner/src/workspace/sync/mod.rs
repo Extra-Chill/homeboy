@@ -2355,7 +2355,7 @@ fn write_metadata_and_sync_validation_dependencies(
     control: &WorkspaceControl,
 ) -> Result<Vec<RunnerValidationDependencySyncOutput>> {
     control.checkpoint()?;
-    homeboy_core::observation::phase_timing::time(
+    homeboy_engine_primitives::phase_timing::PhaseTimer::current().time::<_, homeboy_core::Error>(
         "stage.lab.source_materialization.record_writes",
         || write_workspace_metadata(runner, metadata),
     )?;
@@ -4536,7 +4536,7 @@ mod tests {
         use crate::workspace::{RunnerWorkspaceSyncMode, RunnerWorkspaceSyncOptions};
         use homeboy_core::{
             config::ConfigEntity,
-            observation::{phase_timing, NewRunRecord, ObservationStore},
+            observation::{phase_context, NewRunRecord, ObservationStore},
         };
         crate::test_support::with_isolated_home(|_| {
             let roots = homeboy_core::paths::PathRoots::from_environment().expect("roots");
@@ -4562,7 +4562,7 @@ mod tests {
             let run = store
                 .start_run(NewRunRecord::builder("test").build())
                 .unwrap();
-            let _scope = phase_timing::for_run(&store, &run.id);
+            let _scope = phase_context::for_run(&store, &run.id);
             for _ in 0..2 {
                 super::sync_workspace(
                     "timed",
@@ -4617,7 +4617,7 @@ mod tests {
                 assert!(span.duration_ms.is_some(), "{id}");
                 assert_eq!(
                     span.status,
-                    homeboy_core::phase_timing::PhaseStatus::Ok,
+                    homeboy_engine_primitives::phase_timing::PhaseStatus::Ok,
                     "{id}"
                 );
             }

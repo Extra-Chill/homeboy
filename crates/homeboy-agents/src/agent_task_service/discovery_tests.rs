@@ -147,7 +147,7 @@ fn terminal_transition_settles_cook_observations_and_span() {
                 .collect();
             assert_eq!(spans.len(), 1);
             assert_eq!(
-                spans[0].status == homeboy_core::phase_timing::PhaseStatus::Failed,
+                spans[0].status == homeboy_engine_primitives::phase_timing::PhaseStatus::Failed,
                 !success
             );
         }

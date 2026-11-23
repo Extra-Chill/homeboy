@@ -335,7 +335,7 @@ fn materialize_cook_attempt_with_stores_and_runtime(
             None
         };
         let observation = lifecycle_store.open_observation_initialized()?;
-        let submission = observation.time_run_phase(run_id, "admit", || {
+        let submission = observation.phase_timer(run_id).time::<_, homeboy_core::Error>("admit", || {
             agent_task_lifecycle::submit_plan_with_runtime_admission_in_store(
                 lifecycle_store,
                 plan,
@@ -1205,7 +1205,7 @@ mod tests {
                     .as_deref(),
                 Some("x")
             );
-            let _phase = observation.run_phase_guard(id, "admit");
+            let _phase = observation.phase_timer(id).into_guard("admit");
         }
         let query = |component: &str| PhaseHotspotQuery {
             kind: Some("agent-task".into()),

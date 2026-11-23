@@ -261,7 +261,7 @@ mod tests {
             .start_run(NewRunRecord::builder("agent-task").build())
             .unwrap();
         std::thread::sleep(Duration::from_millis(2));
-        let result: crate::Result<()> = store.time_run_phase(&run.id, "stage.transfer", || {
+        let result: crate::Result<()> = store.phase_timer(&run.id).time::<_, crate::Error>("stage.transfer", || {
             Err(crate::Error::internal_unexpected("transfer fixture failed"))
         });
         assert!(result.is_err());
@@ -273,7 +273,7 @@ mod tests {
                 >= chrono::DateTime::parse_from_rfc3339(&run.started_at).unwrap()
         );
         store
-            .time_run_phase_with_outcome(&run.id, "gate", || Ok(false), |success| !success)
+            .phase_timer(&run.id).time_with_outcome::<_, crate::Error>("gate", || Ok(false), |success| !success)
             .unwrap();
         let summary = phase_hotspots(
             &store,

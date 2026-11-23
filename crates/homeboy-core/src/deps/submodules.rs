@@ -342,7 +342,7 @@ fn outcome(
     stdout: String,
     stderr: String,
 ) -> DependencyHydrationOutcome {
-    crate::observation::phase_timing::finish(
+    homeboy_engine_primitives::phase_timing::PhaseTimer::current().finish(
         "stage.git_submodules",
         started,
         status == DependencyHydrationStatus::Failed,

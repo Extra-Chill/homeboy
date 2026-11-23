@@ -1282,7 +1282,7 @@ fn gate_dependency_hydration_records_one_phase_for_multiple_candidates() {
     let timing_run = timing_store
         .start_run(homeboy_core::observation::NewRunRecord::builder("test").build())
         .unwrap();
-    let _timing = homeboy_core::observation::phase_timing::for_run(&timing_store, &timing_run.id);
+    let _timing = homeboy_core::observation::phase_context::for_run(&timing_store, &timing_run.id);
 
     homeboy_core::test_support::with_isolated_home(|_| {
         let checkout = tempfile::tempdir().unwrap();

@@ -21,7 +21,7 @@ pub(crate) fn hydrate_gate_dependency_roots_for_component(
     }
     // One timing report covers the whole walk; per-root outcomes stay in the
     // returned setup evidence (#18027).
-    homeboy_core::observation::phase_timing::time_with_outcome(
+    homeboy_engine_primitives::phase_timing::PhaseTimer::current().time_with_outcome::<_, homeboy_core::Error>(
         "stage.dependency_hydration",
         || walk_gate_dependency_roots(checkout, workspace, policy, component_id, gate_commands),
         |outcomes| {

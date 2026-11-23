@@ -138,7 +138,7 @@ pub fn record_probe_outcome(
     timeout: Duration,
     output: &homeboy_core::server::CommandOutput,
 ) -> bool {
-    homeboy_core::observation::phase_timing::finish(
+    homeboy_engine_primitives::phase_timing::PhaseTimer::current().finish(
         &format!("resolve.readonly_probe.{probe}"),
         started,
         output.timed_out || !output.success,
@@ -228,7 +228,7 @@ mod tests {
             .start_run(homeboy_core::observation::NewRunRecord::builder("test").build())
             .unwrap();
         let _timing =
-            homeboy_core::observation::phase_timing::for_run(&timing_store, &timing_run.id);
+            homeboy_core::observation::phase_context::for_run(&timing_store, &timing_run.id);
 
         clear_degradations();
 
@@ -258,7 +258,7 @@ mod tests {
             .iter()
             .find(|span| span.id == "resolve.readonly_probe.runner_homeboy_identity")
             .expect("persisted phase");
-        assert_eq!(span.status, homeboy_core::phase_timing::PhaseStatus::Failed);
+        assert_eq!(span.status, homeboy_engine_primitives::phase_timing::PhaseStatus::Failed);
         assert!(span.duration_ms.is_some());
     }
 

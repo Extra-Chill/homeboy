@@ -123,7 +123,7 @@ pub fn preflight_exact_refs(
 use homeboy_core::component;
 use homeboy_core::context::{require_project_base_path, resolve_project_ssh_with_base_path};
 use homeboy_core::error::{Error, Result};
-use homeboy_core::phase_timing::PhaseTimer;
+use homeboy_engine_primitives::phase_timing::PhaseTimer;
 use homeboy_core::project;
 use uuid::Uuid;
 
@@ -394,7 +394,7 @@ struct PreparedTargetJob {
 struct TargetOutcome {
     project_id: String,
     result: Result<DeployOrchestrationResult>,
-    timings: homeboy_core::phase_timing::PhaseTimingReport,
+    timings: homeboy_engine_primitives::phase_timing::PhaseTimingReport,
 }
 
 /// A multi-target deploy's checkpoint together with the run row that stores it.
@@ -404,7 +404,7 @@ fn persist_target_outcome(
     lifecycle_run: &std::sync::Mutex<Option<CheckpointedRun>>,
     project_id: &str,
     result: &Result<DeployOrchestrationResult>,
-    timings: &homeboy_core::phase_timing::PhaseTimingReport,
+    timings: &homeboy_engine_primitives::phase_timing::PhaseTimingReport,
 ) -> Result<()> {
     let mut lifecycle_run = lifecycle_run
         .lock()

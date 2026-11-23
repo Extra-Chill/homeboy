@@ -5,7 +5,7 @@ use serde_json::json;
 
 use homeboy_core::error::{Error, Result};
 use homeboy_core::observation::{NewRunRecord, ObservationStore, RunStatus};
-use homeboy_core::phase_timing::PhaseTimingReport;
+use homeboy_engine_primitives::phase_timing::PhaseTimingReport;
 
 const SCHEMA_VERSION: u32 = 1;
 
@@ -286,7 +286,7 @@ impl DeployObservation {
 
     fn record_current_phase(&mut self, failed: bool) -> Result<()> {
         let phase = self.metadata["phase"].as_str().expect("deploy phase");
-        let mut timer = homeboy_core::phase_timing::PhaseTimer::with_version(
+        let mut timer = homeboy_engine_primitives::phase_timing::PhaseTimer::with_version(
             homeboy_core::build_identity::current().version,
         );
         if failed {
@@ -630,7 +630,7 @@ mod tests {
                 DeployObservation::start_checkpointed_in_roots(&roots, &run, "multi", None, None)
                     .expect("admit checkpointed run");
             assert_eq!(observation.run_id(), "deploy-checkpoint-run");
-            let mut timer = homeboy_core::phase_timing::PhaseTimer::new();
+            let mut timer = homeboy_engine_primitives::phase_timing::PhaseTimer::new();
             timer.record_failed("transfer", std::time::Duration::from_millis(1));
             run.update_target("a", DeployTargetStatus::Running, None, None);
             run.update_target(
@@ -672,7 +672,7 @@ mod tests {
                 .as_ref()
                 .and_then(|report| report.span("transfer"))
                 .map(|span| span.status),
-            Some(homeboy_core::phase_timing::PhaseStatus::Failed)
+            Some(homeboy_engine_primitives::phase_timing::PhaseStatus::Failed)
         );
         let (row, stored) = checkpoint_on_row(&roots, "deploy-checkpoint-run");
         assert_eq!(row.status, RunStatus::Running.as_str());

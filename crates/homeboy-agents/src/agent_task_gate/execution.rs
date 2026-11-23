@@ -205,7 +205,7 @@ pub(super) fn run_gate_argv_with_supervision(
     declared_plan: Option<&homeboy_engine_primitives::test_execution::TestExecutionPlan>,
 ) -> Result<AgentTaskGateReport> {
     let run = || {
-        homeboy_core::observation::phase_timing::time_with_outcome(
+        homeboy_engine_primitives::phase_timing::PhaseTimer::current().time_with_outcome::<_, homeboy_core::Error>(
             &gate_phase_name(None, command, index),
             || {
                 run_gate_argv(
@@ -780,7 +780,7 @@ pub(super) fn run_gate_argv_local(
     selected_environment.report.resources =
         telemetry::delta(resources_before, telemetry::children());
     selected_environment.report.host_pressure_end = Some(telemetry::host_pressure());
-    homeboy_core::observation::phase_timing::time("publish.gate_cargo_target", || {
+    homeboy_engine_primitives::phase_timing::PhaseTimer::current().time::<_, homeboy_core::Error>("publish.gate_cargo_target", || {
         selected_environment.finish_cargo_target()
     })?;
     let mut report = AgentTaskGateReport::new(

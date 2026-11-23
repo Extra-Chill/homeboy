@@ -556,7 +556,7 @@ fn toolchain_preflight_honors_a_100ms_limit() {
         .start_run(homeboy_core::observation::NewRunRecord::builder("agent-task").build())
         .unwrap()
         .id;
-    let _timing = homeboy_core::observation::phase_timing::for_run(&store, &run_id);
+    let _timing = homeboy_core::observation::phase_context::for_run(&store, &run_id);
     let tool = workspace.path().join("hung-tool");
     homeboy_test_support::write_executable(&tool, "#!/bin/sh\n/bin/sleep 30\n", 0o755)
         .expect("tool");

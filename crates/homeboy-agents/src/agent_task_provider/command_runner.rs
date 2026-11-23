@@ -813,7 +813,7 @@ pub(super) fn run_materialized_provider_command_once(
     credential_env: Option<&[(String, String)]>,
 ) -> AgentTaskOutcome {
     let mut containment_report = ProviderContainmentReport::default();
-    let mut outcome = homeboy_core::observation::phase_timing::time_with_outcome(
+    let mut outcome = homeboy_engine_primitives::phase_timing::PhaseTimer::current().time_with_outcome::<_, homeboy_core::Error>(
         "provider.command",
         || {
             let mut attempt = || {

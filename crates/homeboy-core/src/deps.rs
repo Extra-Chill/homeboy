@@ -204,7 +204,7 @@ pub fn hydrate_declared_dependencies(
     package_root: &str,
     policy: &DependencyHydrationPolicy,
 ) -> Result<Vec<DependencyHydrationOutcome>> {
-    crate::observation::phase_timing::time_with_outcome(
+    homeboy_engine_primitives::phase_timing::PhaseTimer::current().time_with_outcome::<_, crate::Error>(
         "stage.dependency_hydration",
         || hydrate_declared_dependencies_for_component(path, workspace, package_root, policy, None),
         |outcomes| {
@@ -2656,7 +2656,7 @@ esac
         let timing_run = timing_store
             .start_run(crate::observation::NewRunRecord::builder("test").build())
             .unwrap();
-        let _timing = crate::observation::phase_timing::for_run(&timing_store, &timing_run.id);
+        let _timing = crate::observation::phase_context::for_run(&timing_store, &timing_run.id);
 
         crate::test_support::with_isolated_home(|_| {
             let root = tempfile::tempdir().expect("provider workspace");
@@ -2699,7 +2699,7 @@ esac
                 .iter()
                 .find(|span| span.id == "stage.dependency_hydration")
                 .expect("persisted phase");
-            assert_eq!(span.status, crate::phase_timing::PhaseStatus::Ok);
+            assert_eq!(span.status, homeboy_engine_primitives::phase_timing::PhaseStatus::Ok);
             assert!(span.duration_ms.is_some());
         });
     }

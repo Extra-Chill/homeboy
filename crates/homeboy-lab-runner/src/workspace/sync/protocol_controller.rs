@@ -287,7 +287,7 @@ fn sync_workspace_batch_once(
         roots: summaries,
     };
     write_json(&transfer.path().join("plan.json"), &plan)?;
-    let response = homeboy_core::observation::phase_timing::time(
+    let response = homeboy_engine_primitives::phase_timing::PhaseTimer::current().time::<_, homeboy_core::Error>(
         "stage.lab.source_materialization.plan",
         || invoke(runner, transfer.path(), None, control),
     )?;
@@ -381,7 +381,7 @@ fn sync_workspace_batch_once(
             &options.git_fetch_refs,
         );
         super::super::git::validate_controller_git_bundle_source(local_path, control)?;
-        homeboy_core::observation::phase_timing::time(
+        homeboy_engine_primitives::phase_timing::PhaseTimer::current().time::<_, homeboy_core::Error>(
             "stage.lab.source_materialization.bundle_object_closure",
             || {
                 super::super::git::hydrate_controller_bundle_objects_controlled(
@@ -393,7 +393,7 @@ fn sync_workspace_batch_once(
             .tips
             .get(index)
             .ok_or_else(|| io("plan root count mismatch"))?;
-        let prerequisites = homeboy_core::observation::phase_timing::time(
+        let prerequisites = homeboy_engine_primitives::phase_timing::PhaseTimer::current().time::<_, homeboy_core::Error>(
             "stage.lab.source_materialization.delta_computation",
             || super::super::git::bundle_prerequisites(local_path, &head, cached, control),
         )?;
@@ -401,7 +401,7 @@ fn sync_workspace_batch_once(
             .path()
             .join(index.to_string())
             .join("workspace.bundle");
-        let output = homeboy_core::observation::phase_timing::time(
+        let output = homeboy_engine_primitives::phase_timing::PhaseTimer::current().time::<_, homeboy_core::Error>(
             "stage.lab.source_materialization.bundle_build",
             || {
                 control.output(
@@ -419,7 +419,7 @@ fn sync_workspace_batch_once(
         if !output.status.success() {
             return Err(io(String::from_utf8_lossy(&output.stderr)));
         }
-        let digest = homeboy_core::observation::phase_timing::time(
+        let digest = homeboy_engine_primitives::phase_timing::PhaseTimer::current().time::<_, homeboy_core::Error>(
             "stage.lab.source_materialization.bundle_hash",
             || super::super::snapshot::snapshot_file_sha256(&bundle, control),
         )?;
@@ -454,10 +454,10 @@ fn sync_workspace_batch_once(
             roots: commit_roots,
         },
     )?;
-    let committed = homeboy_core::observation::phase_timing::time(
+    let committed = homeboy_engine_primitives::phase_timing::PhaseTimer::current().time::<_, homeboy_core::Error>(
         "stage.lab.source_materialization.commit",
         || {
-            homeboy_core::observation::phase_timing::time(
+            homeboy_engine_primitives::phase_timing::PhaseTimer::current().time::<_, homeboy_core::Error>(
                 "stage.lab.source_materialization.transfer_apply_verify",
                 || {
                     invoke(

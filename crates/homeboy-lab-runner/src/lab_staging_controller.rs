@@ -1255,13 +1255,13 @@ fn materialize_deferred_source<T>(
 ) -> Result<T> {
     // Detached controller workers do not inherit thread-local timing. Bind to
     // the lifecycle store's roots, not the worker's ambient installation.
-    let _timing = homeboy_core::observation::phase_timing::enter(Some((
+    let _timing = homeboy_core::observation::phase_context::enter(Some((
         store.observation_db_path(),
         run_id.to_string(),
     )));
     let control = deferred_source_control(store, run_id, runner_id, plan);
     let result: Result<T> =
-        homeboy_core::observation::phase_timing::time("stage.lab.source_materialization", || {
+        homeboy_engine_primitives::phase_timing::PhaseTimer::current().time::<_, homeboy_core::Error>("stage.lab.source_materialization", || {
             control.checkpoint()?;
             let value = materialize(&control)?;
             control.checkpoint()?;
@@ -1321,7 +1321,7 @@ fn deferred_source_control(
         if last.is_some_and(|last| last.elapsed() < Duration::from_secs(5)) {
             return Ok(());
         }
-        homeboy_core::observation::phase_timing::time(
+        homeboy_engine_primitives::phase_timing::PhaseTimer::current().time::<_, homeboy_core::Error>(
             "stage.lab.source_materialization.checkpoint_record_writes",
             || {
                 homeboy_agents::agent_task_lifecycle::record_lab_offload_phase_in_store(
@@ -4255,7 +4255,7 @@ impl StageExecutionAdapter {
             })
             .ok()
             .map(|path| {
-                homeboy_core::observation::phase_timing::enter(Some((
+                homeboy_core::observation::phase_context::enter(Some((
                     path,
                     request.recipe.run_id.clone(),
                 )))
@@ -4329,7 +4329,7 @@ impl StageExecutionAdapter {
                     Some(effect) => effect,
                     None => match checkpoint.next_action() {
                         LabStagingPhase::AcceptedMaterializeWorkspace => {
-                            let handoff_identity = homeboy_core::observation::phase_timing::time(
+                            let handoff_identity = homeboy_engine_primitives::phase_timing::PhaseTimer::current().time::<_, homeboy_core::Error>(
                                 "stage.lab.source_materialization.handoff_validation",
                                 || self.operations.validate_handoff_identity(request),
                             )?;
@@ -5142,7 +5142,7 @@ mod tests {
                 .expect("source timing");
             assert_eq!(
                 source_span.status,
-                homeboy_core::phase_timing::PhaseStatus::Failed
+                homeboy_engine_primitives::phase_timing::PhaseStatus::Failed
             );
             assert!(source_span.duration_ms.is_some());
             assert!(spans.iter().any(|span| span.id
@@ -5984,7 +5984,7 @@ mod tests {
             cancellation: &LabStagingCancellationToken,
         ) -> Result<(String, String)> {
             self.record("workspace");
-            homeboy_core::observation::phase_timing::time(
+            homeboy_engine_primitives::phase_timing::PhaseTimer::current().time::<_, homeboy_core::Error>(
                 "stage.lab.source_materialization.fixture_probe",
                 || Ok(()),
             )?;

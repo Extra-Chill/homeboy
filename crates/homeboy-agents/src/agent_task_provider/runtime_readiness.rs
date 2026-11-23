@@ -209,7 +209,7 @@ fn run_readiness_probe_with_gate(
     probe_timeout_ms: u64,
     mode: Option<&str>,
 ) -> std::result::Result<ProviderReadinessInvocationResult, String> {
-    homeboy_core::observation::phase_timing::time_with_outcome(
+    homeboy_engine_primitives::phase_timing::PhaseTimer::current().time_with_outcome::<_, homeboy_core::Error>(
         "provider.readiness_probe",
         || {
             let _permit = acquire_probe_permit(gate, probe_deadline, probe_timeout_ms)
@@ -371,7 +371,7 @@ pub(crate) fn readiness_verdict(
     deadline_unix_ms: Option<u64>,
     mode: Option<&str>,
 ) -> Result<ProviderReadinessInvocationResult> {
-    homeboy_core::observation::phase_timing::time_with_outcome(
+    homeboy_engine_primitives::phase_timing::PhaseTimer::current().time_with_outcome::<_, homeboy_core::Error>(
         "admit.provider_readiness",
         || {
             ensure_readiness_deadline("probe", deadline_unix_ms)?;
@@ -524,7 +524,7 @@ pub(crate) fn readiness_verdict(
                 drop(state);
                 let spawn_result = std::thread::Builder::new()
                     .name("provider-readiness-probe".to_string())
-                    .spawn(homeboy_core::observation::phase_timing::inherit(
+                    .spawn(homeboy_core::observation::phase_context::inherit(
                         move || {
                             let result =
                                 std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
@@ -765,7 +765,7 @@ mod tests {
             .start_run(homeboy_core::observation::NewRunRecord::builder("agent-task").build())
             .unwrap()
             .id;
-        let _timing = homeboy_core::observation::phase_timing::for_run(&store, &run_id);
+        let _timing = homeboy_core::observation::phase_context::for_run(&store, &run_id);
         let (_fake, provider, mut config, _) = pi_fixture("printf 'test model\\n'");
         for (model, classification, ready) in [
             ("test/model", "ready", true),
@@ -820,7 +820,7 @@ mod tests {
             );
         }
         // An unopenable timing store cannot change the actual readiness result.
-        let _broken = homeboy_core::observation::phase_timing::enter(Some((
+        let _broken = homeboy_core::observation::phase_context::enter(Some((
             root.path().to_path_buf(),
             run_id,
         )));

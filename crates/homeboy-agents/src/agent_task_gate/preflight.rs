@@ -11,7 +11,7 @@ pub fn preflight_gate_toolchains(
     runtime_tmpdir: Option<&Path>,
     timeout: Duration,
 ) -> Result<()> {
-    homeboy_core::observation::phase_timing::time("admit.gate_toolchains", || {
+    homeboy_engine_primitives::phase_timing::PhaseTimer::current().time::<_, homeboy_core::Error>("admit.gate_toolchains", || {
         if let Some(runner_id) = policy.lab_runner.as_deref() {
             return placement::preflight(
                 cwd,
