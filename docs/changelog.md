@@ -4,6 +4,19 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.492.1] - 2026-11-23
+
+### Changed
+- stop writing duplicated terminal Cook run state
+- derive stale_running on read instead of persisting a self-reinforcing latch
+
+### Fixed
+- report candidate_repo_path and an inspect command for Cook candidates
+- Stable top-level Cook summary schema across status/watch/diagnose/notify, with why_no_pr
+- surface inherited gate failures and retain base/head proof
+- expose local pressure wait evidence and retry timing
+- launch queued steps from the installed binary after an upgrade
+
 ## [0.492.0] - 2026-11-23
 
 ### Added
