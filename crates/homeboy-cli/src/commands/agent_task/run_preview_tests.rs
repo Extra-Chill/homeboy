@@ -994,6 +994,9 @@ fn preview_warns_when_no_repro_gate_is_declared() {
                 "--verify",
                 "true",
             ];
+            if extra.contains(&"--draft-pr") {
+                argv.retain(|arg| *arg != "--no-finalize");
+            }
             argv.extend_from_slice(extra);
             let cli = Cli::try_parse_from(argv).expect("parse preview");
             let Commands::AgentTask(agent_task) = cli.command else {
@@ -1012,6 +1015,7 @@ fn preview_warns_when_no_repro_gate_is_declared() {
         };
 
         let unproven = preview(&[]);
+        assert_eq!(unproven["resolved"]["publication"]["draft"], true);
         let gates = &unproven["resolved"]["gates"];
         assert_eq!(gates["repro"], serde_json::json!([]), "{gates}");
         let warning = gates["repro_warning"].as_str().unwrap_or_default();
@@ -1021,6 +1025,13 @@ fn preview_warns_when_no_repro_gate_is_declared() {
         );
 
         let proven = preview(&["--repro", "test -f FIXED"]);
+        assert_eq!(proven["resolved"]["publication"]["draft"], false);
+        assert!(proven["resolved"]["publication"]["state_policy"]
+            .as_str()
+            .unwrap()
+            .contains("unless the repro is verified"));
+        let forced = preview(&["--repro", "test -f FIXED", "--draft-pr"]);
+        assert_eq!(forced["resolved"]["publication"]["draft"], true);
         let gates = &proven["resolved"]["gates"];
         assert_eq!(
             gates["repro"],

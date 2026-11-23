@@ -726,6 +726,14 @@ pub(super) fn run_preflight_cook_execution(
         );
         eprintln!("{}", cook_rotation_disclosure(&initial_plan));
         eprintln!("{}", cook_provider_timeout_disclosure(&initial_plan));
+        if !args.no_finalize {
+            let state = if args.draft_pr || !args.repro.is_declared() {
+                "draft"
+            } else {
+                "ready only if the repro is verified (otherwise draft)"
+            };
+            eprintln!("cook: new PR state: {state}; existing PRs keep their state");
+        }
         if !args.repro.is_declared() {
             eprintln!(
                 "cook: warning: {}",
