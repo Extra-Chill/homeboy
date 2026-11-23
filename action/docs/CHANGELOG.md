@@ -2,6 +2,11 @@
 
 All notable changes to Homeboy Action will be documented in this file.
 
+## [2.28.0] - 2026-11-23
+
+### Added
+- forward dispatch-repo/dispatch-event from deps-refresh to release
+
 ## [2.27.5] - 2026-11-19
 
 ### Fixed
