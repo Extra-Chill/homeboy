@@ -23,6 +23,7 @@ pub mod host_telemetry;
 pub mod identifier;
 pub mod local_files;
 pub mod measurement;
+pub mod metric_comparison;
 pub mod output_parse;
 pub mod phase_timing;
 pub mod process_table;

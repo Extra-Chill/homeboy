@@ -67,7 +67,6 @@ pub use homeboy_extension_contract::bench_stage::{
     BenchStageReuse,
 };
 pub use metric_policy_preset::{BenchMetricPolicyPreset, BenchMetricPolicyPresetKind};
-pub use metrics::MetricDelta;
 pub use parsing::{
     parse_bench_results_file, parse_bench_results_str, BenchMemory, BenchMetrics, BenchResults,
     BenchRunExecution, BenchScenario,
@@ -77,8 +76,7 @@ pub use report::{
     aggregate_comparison, aggregate_comparison_with_axes, from_main_workflow,
     from_main_workflow_with_rig, from_main_workflow_with_rig_and_ci_context, BenchArtifactRef,
     BenchCommandOutput, BenchComparisonDiff, BenchComparisonOutput, BenchComparisonRigSummary,
-    BenchComparisonSummaryOutput, BenchDefaultBaselineExpansion, BenchPersistedRun,
-    MetricDelta as ReportMetricDelta, RigBenchEntry,
+    BenchComparisonSummaryOutput, BenchDefaultBaselineExpansion, BenchPersistedRun, RigBenchEntry,
 };
 pub use run::{
     run_bench_list_workflow, run_main_bench_workflow, BenchListProfile, BenchListWorkflowArgs,

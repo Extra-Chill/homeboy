@@ -4,13 +4,14 @@
 //! direction and an optional percent threshold, and the findings key. A kind
 //! adds compare semantics by declaring metrics, not by adding an adapter.
 
+use homeboy_engine_primitives::metric_comparison::Verdict;
+use homeboy_engine_primitives::metric_comparison::{MetricChange, MetricDelta, MetricPolicy};
 use std::collections::{BTreeMap, BTreeSet};
 
-use homeboy_engine_primitives::workload_compare::{KindAdapter, Verdict};
+use homeboy_engine_primitives::workload_compare::KindAdapter;
 use homeboy_extension_contract::workload_result::finding_key;
 use homeboy_extension_contract::{
-    WorkloadCompareConfig, WorkloadFindingsKey, WorkloadMetricDirection, WorkloadResult,
-    WorkloadStatus,
+    WorkloadCompareConfig, WorkloadFindingsKey, WorkloadResult, WorkloadStatus,
 };
 use serde::{Deserialize, Serialize};
 
@@ -35,40 +36,6 @@ pub struct WorkloadSnapshot {
     /// Case id -> status.
     #[serde(default)]
     pub cases: BTreeMap<String, WorkloadStatus>,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
-#[serde(rename_all = "snake_case")]
-pub enum MetricChange {
-    Regressed,
-    Improved,
-    Unchanged,
-    /// Candidate reports the metric, baseline does not.
-    Added,
-    /// Baseline reports the metric, candidate does not.
-    Missing,
-}
-
-#[derive(Debug, Clone, PartialEq, Serialize)]
-pub struct MetricDelta {
-    pub name: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub baseline: Option<f64>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub candidate: Option<f64>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub delta: Option<f64>,
-    /// Change in percent of the baseline; absent when the baseline is zero.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub percent: Option<f64>,
-    /// Declared direction; absent for undeclared (report-only) metrics.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub direction: Option<WorkloadMetricDirection>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub regression_threshold: Option<f64>,
-    pub change: MetricChange,
-    /// Whether this metric is declared and so participates in the gate.
-    pub gated: bool,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Serialize)]
@@ -120,37 +87,6 @@ pub fn snapshot_with_key(result: &WorkloadResult, key: WorkloadFindingsKey) -> W
     }
 }
 
-fn metric_change(
-    direction: WorkloadMetricDirection,
-    threshold: Option<f64>,
-    baseline: f64,
-    candidate: f64,
-) -> MetricChange {
-    let delta = candidate - baseline;
-    if delta == 0.0 {
-        return MetricChange::Unchanged;
-    }
-    if let Some(threshold) = threshold {
-        let beyond = if baseline == 0.0 {
-            true
-        } else {
-            (delta / baseline.abs()).abs() * 100.0 > threshold
-        };
-        if !beyond {
-            return MetricChange::Unchanged;
-        }
-    }
-    let worse = match direction {
-        WorkloadMetricDirection::LowerIsBetter => delta > 0.0,
-        WorkloadMetricDirection::HigherIsBetter => delta < 0.0,
-    };
-    if worse {
-        MetricChange::Regressed
-    } else {
-        MetricChange::Improved
-    }
-}
-
 fn metric_deltas(
     baseline: &WorkloadSnapshot,
     candidate: &WorkloadSnapshot,
@@ -174,33 +110,18 @@ fn metric_deltas(
             let policy = declared.get(name).copied();
             let before = baseline.metrics.get(name).copied();
             let after = candidate.metrics.get(name).copied();
-            let change = match (before, after) {
-                (None, None) => return None,
-                (None, Some(_)) => MetricChange::Added,
-                (Some(_), None) => MetricChange::Missing,
-                (Some(before), Some(after)) => match policy {
-                    Some(policy) => {
-                        metric_change(policy.direction, policy.regression_threshold, before, after)
-                    }
-                    // Undeclared metrics are reported, never judged.
-                    None => MetricChange::Unchanged,
-                },
-            };
-            let delta = before.zip(after).map(|(before, after)| after - before);
-            Some(MetricDelta {
-                name: name.to_string(),
-                baseline: before,
-                candidate: after,
-                delta,
-                percent: before
-                    .zip(delta)
-                    .filter(|(before, _)| *before != 0.0)
-                    .map(|(before, delta)| delta / before.abs() * 100.0),
-                direction: policy.map(|policy| policy.direction),
-                regression_threshold: policy.and_then(|policy| policy.regression_threshold),
-                change,
-                gated: policy.is_some(),
-            })
+            if before.is_none() && after.is_none() {
+                return None;
+            }
+            Some(
+                MetricPolicy {
+                    direction: policy.map(|p| p.direction),
+                    percent: policy.and_then(|p| p.regression_threshold),
+                    threshold_improvements: true,
+                    ..Default::default()
+                }
+                .compare(name, before, after),
+            )
         })
         .collect()
 }

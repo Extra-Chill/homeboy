@@ -12,15 +12,21 @@
 //! do not, Homeboy keeps the original p95 latency gate at the run's
 //! `--regression-threshold` (default 5%).
 
+#[cfg(test)]
+use homeboy_engine_primitives::metric_comparison::Direction;
+#[cfg(test)]
+use homeboy_engine_primitives::metric_comparison::RegressionTest;
+use homeboy_engine_primitives::metric_comparison::Verdict;
 use std::collections::BTreeMap;
 
 use serde::{Deserialize, Serialize};
 
 use homeboy_engine_primitives::baseline as generic;
-use homeboy_engine_primitives::workload_compare::{pair_by_key, KindAdapter, Verdict};
+use homeboy_engine_primitives::workload_compare::{pair_by_key, KindAdapter};
 
-use super::metrics::{resolve_metric_policies, MetricDelta};
+use super::metrics::resolve_metric_policies;
 use super::parsing::{BenchMetricPolicy, BenchResults, BenchScenario};
+use homeboy_engine_primitives::metric_comparison::MetricDelta;
 
 /// Default regression threshold: 5% p95_ms slowdown flags a regression.
 pub const DEFAULT_REGRESSION_THRESHOLD_PERCENT: f64 = 5.0;
@@ -174,7 +180,7 @@ impl KindAdapter for BenchAdapter {
             reasons.extend(
                 metric_deltas
                     .iter()
-                    .filter(|d| d.regression)
+                    .filter(|d| d.regressed())
                     .map(|d| d.reason(&scenario.id)),
             );
 
@@ -191,8 +197,8 @@ impl KindAdapter for BenchAdapter {
                 current_p95_ms: current_p95,
                 p95_delta_ms: baseline_p95.zip(current_p95).map(|(b, c)| c - b),
                 p95_delta_pct,
-                regression: metric_deltas.iter().any(|d| d.regression),
-                improvement: metric_deltas.iter().any(|d| d.improvement),
+                regression: metric_deltas.iter().any(|d| d.regressed()),
+                improvement: metric_deltas.iter().any(|d| d.improved()),
                 metric_deltas,
             });
         }
@@ -224,10 +230,7 @@ impl KindAdapter for BenchAdapter {
 
 #[cfg(test)]
 mod tests {
-    use super::super::parsing::{
-        BenchMetricDirection, BenchMetricPolicy, BenchMetrics, BenchResults, BenchScenario,
-        RegressionTest,
-    };
+    use super::super::parsing::{BenchMetricPolicy, BenchMetrics, BenchResults, BenchScenario};
     use super::*;
     use homeboy_engine_primitives::workload_compare::{self as engine, BaselineSlot};
     use std::path::{Path, PathBuf};
@@ -338,7 +341,7 @@ mod tests {
         }
     }
 
-    fn variance_policy(direction: BenchMetricDirection, test: RegressionTest) -> BenchMetricPolicy {
+    fn variance_policy(direction: Direction, test: RegressionTest) -> BenchMetricPolicy {
         BenchMetricPolicy {
             direction,
             regression_threshold_percent: Some(5.0),
@@ -633,7 +636,7 @@ mod tests {
         policies.insert(
             "error_rate".to_string(),
             BenchMetricPolicy {
-                direction: BenchMetricDirection::LowerIsBetter,
+                direction: Direction::LowerIsBetter,
                 regression_threshold_percent: None,
                 regression_threshold_absolute: Some(0.01),
                 variance_aware: false,
@@ -649,7 +652,7 @@ mod tests {
 
         assert!(comparison.regression);
         assert_eq!(comparison.scenarios[0].metric_deltas[0].name, "error_rate");
-        assert!(comparison.scenarios[0].metric_deltas[0].regression);
+        assert!(comparison.scenarios[0].metric_deltas[0].regressed());
         assert!(comparison.reasons[0].contains("error_rate"));
     }
 
@@ -668,7 +671,7 @@ mod tests {
         policies.insert(
             "requests_per_second".to_string(),
             BenchMetricPolicy {
-                direction: BenchMetricDirection::HigherIsBetter,
+                direction: Direction::HigherIsBetter,
                 regression_threshold_percent: Some(5.0),
                 regression_threshold_absolute: None,
                 variance_aware: false,
@@ -685,8 +688,8 @@ mod tests {
         let comparison = compare(&current, &baseline, 5.0);
 
         assert!(comparison.regression);
-        assert_eq!(comparison.scenarios[0].metric_deltas[0].delta, -10.0);
-        assert!(comparison.scenarios[0].metric_deltas[0].regression);
+        assert_eq!(comparison.scenarios[0].metric_deltas[0].delta, Some(-10.0));
+        assert!(comparison.scenarios[0].metric_deltas[0].regressed());
     }
 
     #[test]
@@ -713,10 +716,10 @@ mod tests {
         current_metrics.insert("critical_findings".to_string(), 1.0);
         let mut policies = BTreeMap::new();
         for (metric, direction) in [
-            ("coverage_ratio", BenchMetricDirection::HigherIsBetter),
-            ("failure_rate", BenchMetricDirection::LowerIsBetter),
-            ("blocked_rate", BenchMetricDirection::LowerIsBetter),
-            ("critical_findings", BenchMetricDirection::LowerIsBetter),
+            ("coverage_ratio", Direction::HigherIsBetter),
+            ("failure_rate", Direction::LowerIsBetter),
+            ("blocked_rate", Direction::LowerIsBetter),
+            ("critical_findings", Direction::LowerIsBetter),
         ] {
             policies.insert(
                 metric.to_string(),
@@ -742,7 +745,7 @@ mod tests {
         let regressions: Vec<_> = comparison.scenarios[0]
             .metric_deltas
             .iter()
-            .filter(|delta| delta.regression)
+            .filter(|delta| delta.regressed())
             .map(|delta| delta.name.as_str())
             .collect();
         assert_eq!(
@@ -769,7 +772,7 @@ mod tests {
         policies.insert(
             "error_rate".to_string(),
             BenchMetricPolicy {
-                direction: BenchMetricDirection::LowerIsBetter,
+                direction: Direction::LowerIsBetter,
                 regression_threshold_percent: None,
                 regression_threshold_absolute: Some(0.0),
                 variance_aware: false,
@@ -805,10 +808,7 @@ mod tests {
         let mut policies = BTreeMap::new();
         policies.insert(
             metric.to_string(),
-            variance_policy(
-                BenchMetricDirection::LowerIsBetter,
-                RegressionTest::MannWhitneyU,
-            ),
+            variance_policy(Direction::LowerIsBetter, RegressionTest::MannWhitneyU),
         );
         let current = results_with_policies(
             vec![distribution_scenario(
@@ -843,10 +843,7 @@ mod tests {
         let mut policies = BTreeMap::new();
         policies.insert(
             metric.to_string(),
-            variance_policy(
-                BenchMetricDirection::HigherIsBetter,
-                RegressionTest::KolmogorovSmirnov,
-            ),
+            variance_policy(Direction::HigherIsBetter, RegressionTest::KolmogorovSmirnov),
         );
         let current = results_with_policies(
             vec![distribution_scenario(

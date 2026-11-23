@@ -1,3 +1,4 @@
+use homeboy_engine_primitives::metric_comparison::MetricDelta;
 use std::collections::BTreeMap;
 
 use serde::Serialize;
@@ -372,12 +373,4 @@ impl BenchPhaseGroups {
     pub(in crate::extension::bench::report) fn is_phaseless(&self) -> bool {
         self.cold.is_empty() && self.warm.is_empty() && self.amortized.is_empty()
     }
-}
-
-/// One rig's delta for one metric in one scenario.
-#[derive(Serialize, Clone, Copy)]
-pub struct MetricDelta {
-    pub reference: f64,
-    pub current: f64,
-    pub delta_percent: f64,
 }

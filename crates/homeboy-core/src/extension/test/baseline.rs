@@ -5,7 +5,8 @@
 //! baseline / compare / gate engine. The gate regresses when
 //! `passed < baseline.passed` or `failed > baseline.failed`.
 
-use homeboy_engine_primitives::workload_compare::{KindAdapter, Verdict};
+use homeboy_engine_primitives::metric_comparison::Verdict;
+use homeboy_engine_primitives::workload_compare::KindAdapter;
 pub use homeboy_extension_contract::test_result::TestCounts;
 pub use homeboy_extension_contract::test_workflow::TestBaselineComparison;
 
