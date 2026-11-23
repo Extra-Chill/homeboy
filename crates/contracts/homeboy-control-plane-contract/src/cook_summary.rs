@@ -22,6 +22,12 @@ pub const COOK_SUMMARY_GATE_LIMIT: usize = 32;
 /// Bound on the characters of `why_no_pr`.
 pub const COOK_SUMMARY_REASON_MAX_CHARS: usize = 512;
 
+/// Bound on the task items the summary's delivery accounting reports.
+pub const COOK_SUMMARY_DELIVERY_LIMIT: usize = 16;
+
+/// Bound on the characters of one delivery item's text and of its reason.
+pub const COOK_SUMMARY_DELIVERY_TEXT_MAX_CHARS: usize = 160;
+
 /// Bound on the serialized summary, so every surface can carry it whole
 /// inside its own output budget.
 pub const COOK_SUMMARY_MAX_BYTES: usize = 4 * 1024;
@@ -33,6 +39,50 @@ pub struct CookSummaryGate {
     pub name: String,
     pub state: String,
     pub failing_tests: Vec<String>,
+    /// Present only on a bench compare gate (`--verify-bench`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub bench_compare: Option<CookSummaryBenchCompare>,
+}
+
+/// A bench compare gate's policy verdict, aggregate deltas, and artifact.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct CookSummaryBenchCompare {
+    pub passed: bool,
+    /// The declared regression policy (`new-blockers`, `regressions`, `never`).
+    pub fail_on: String,
+    pub routes: usize,
+    pub regressed: usize,
+    pub improved: usize,
+    pub new_blockers: usize,
+    pub missing_on_head: usize,
+    /// Durable compare artifact on the host that ran the gate.
+    pub artifact_path: String,
+}
+
+/// Whether the agent delivered one item of the task's checklist (#18884).
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum CookDeliveryItemStatus {
+    Delivered,
+    NotDelivered,
+}
+
+/// One item of the task's checklist and the agent's delivery verdict on it.
+/// A `not_delivered` item carries the agent's reason.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct CookDeliveryItem {
+    pub item: String,
+    pub status: CookDeliveryItemStatus,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
+}
+
+impl CookDeliveryItem {
+    pub fn is_delivered(&self) -> bool {
+        self.status == CookDeliveryItemStatus::Delivered
+    }
 }
 
 /// The stable summary of one Cook run. Every field is always serialized; an
@@ -60,6 +110,11 @@ pub struct CookSummary {
     /// Why no pull request exists, as `<status>: <reason>`. Non-null whenever
     /// `pr_url` is null on a terminal run; null whenever `pr_url` is set.
     pub why_no_pr: Option<String>,
+    /// The agent's per-item delivery accounting against the task's checklist,
+    /// from its review form. Empty when the agent reported none. Any
+    /// `not_delivered` item makes the Cook status `succeeded_partial`.
+    #[serde(default)]
+    pub delivery: Vec<CookDeliveryItem>,
 }
 
 impl CookSummary {
@@ -84,6 +139,7 @@ impl CookSummary {
             gates: Vec::new(),
             pr_url,
             why_no_pr,
+            delivery: Vec::new(),
         }
         .bounded()
     }
@@ -104,6 +160,13 @@ impl CookSummary {
         for gate in &mut self.gates {
             gate.failing_tests.truncate(COOK_SUMMARY_FAILING_TEST_LIMIT);
         }
+        // Undelivered items are the accounting's point: keep them first.
+        self.delivery.sort_by_key(CookDeliveryItem::is_delivered);
+        self.delivery.truncate(COOK_SUMMARY_DELIVERY_LIMIT);
+        for item in &mut self.delivery {
+            item.item = bounded_text(&item.item);
+            item.reason = item.reason.as_deref().map(bounded_text);
+        }
         while self.serialized_len() > COOK_SUMMARY_MAX_BYTES {
             if let Some(gate) = self
                 .gates
@@ -112,11 +175,22 @@ impl CookSummary {
                 .max_by_key(|gate| gate.failing_tests.len())
             {
                 gate.failing_tests.pop();
-            } else if self.gates.pop().is_none() {
+            } else if self
+                .delivery
+                .last()
+                .is_some_and(CookDeliveryItem::is_delivered)
+            {
+                self.delivery.pop();
+            } else if self.gates.pop().is_none() && self.delivery.pop().is_none() {
                 break;
             }
         }
         self
+    }
+
+    /// Whether the agent reported any task item as not delivered.
+    pub fn has_undelivered_items(&self) -> bool {
+        self.delivery.iter().any(|item| !item.is_delivered())
     }
 
     fn serialized_len(&self) -> usize {
@@ -136,6 +210,16 @@ impl CookSummary {
         }
         if self.pr_url.is_some() && self.why_no_pr.is_some() {
             return Err("a cook summary with pr_url must not name why_no_pr".to_string());
+        }
+        if self.delivery.len() > COOK_SUMMARY_DELIVERY_LIMIT
+            || self.delivery.iter().any(|item| {
+                item.item.chars().count() > COOK_SUMMARY_DELIVERY_TEXT_MAX_CHARS
+                    || item.reason.as_ref().is_some_and(|reason| {
+                        reason.chars().count() > COOK_SUMMARY_DELIVERY_TEXT_MAX_CHARS
+                    })
+            })
+        {
+            return Err("cook summary exceeds its delivery bounds".to_string());
         }
         if self.gates.len() > COOK_SUMMARY_GATE_LIMIT
             || self
@@ -157,6 +241,17 @@ impl CookSummary {
     }
 }
 
+fn bounded_text(text: &str) -> String {
+    if text.chars().count() <= COOK_SUMMARY_DELIVERY_TEXT_MAX_CHARS {
+        return text.to_string();
+    }
+    let kept: String = text
+        .chars()
+        .take(COOK_SUMMARY_DELIVERY_TEXT_MAX_CHARS - 3)
+        .collect();
+    format!("{kept}...")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -174,9 +269,15 @@ mod tests {
                 name: "cargo test".to_string(),
                 state: "failed".to_string(),
                 failing_tests: vec!["a::b".to_string()],
+                bench_compare: None,
             }],
             pr_url: None,
             why_no_pr: Some("candidate_recoverable: publication not attempted".to_string()),
+            delivery: vec![CookDeliveryItem {
+                item: "Handle empty input".to_string(),
+                status: CookDeliveryItemStatus::NotDelivered,
+                reason: Some("out of scope".to_string()),
+            }],
         };
         summary.validate().expect("valid");
         let value = serde_json::to_value(&summary).expect("serialize");
@@ -190,6 +291,7 @@ mod tests {
             "gates",
             "pr_url",
             "why_no_pr",
+            "delivery",
         ] {
             assert!(value.get(key).is_some(), "{key} is always present");
         }
@@ -218,6 +320,7 @@ mod tests {
                 failing_tests: (0..COOK_SUMMARY_FAILING_TEST_LIMIT)
                     .map(|test| format!("suite::module::case_{test}_{}", "y".repeat(40)))
                     .collect(),
+                bench_compare: None,
             })
             .collect();
         assert!(many.validate().is_err());
@@ -236,5 +339,40 @@ mod tests {
         );
         assert_eq!(published.why_no_pr, None);
         published.validate().expect("valid");
+    }
+
+    #[test]
+    fn delivery_accounting_is_bounded_and_keeps_undelivered_items() {
+        let mut summary = CookSummary::unobserved(
+            "succeeded_partial",
+            true,
+            Some("https://github.com/o/r/pull/1".to_string()),
+            "unused",
+        );
+        summary.delivery = (0..40)
+            .map(|index| CookDeliveryItem {
+                item: format!("item {index} {}", "z".repeat(400)),
+                status: if index % 10 == 9 {
+                    CookDeliveryItemStatus::NotDelivered
+                } else {
+                    CookDeliveryItemStatus::Delivered
+                },
+                reason: (index % 10 == 9).then(|| "r".repeat(400)),
+            })
+            .collect();
+        assert!(summary.validate().is_err());
+        let summary = summary.bounded();
+        summary.validate().expect("bounded delivery fits");
+        assert!(summary.has_undelivered_items());
+        assert!(!summary.delivery[0].is_delivered());
+        assert_eq!(
+            summary
+                .delivery
+                .iter()
+                .filter(|item| !item.is_delivered())
+                .count(),
+            4,
+            "every undelivered item survives the bound"
+        );
     }
 }

@@ -2132,10 +2132,13 @@ fn force_stop_escalates_when_a_token_owned_daemon_ignores_sigterm() {
 /// launches, a token-owned `daemon serve` with nothing above it to signal.
 #[cfg(unix)]
 fn spawn_term_resistant_daemon(startup_token: &str) -> u32 {
-    Command::new("sh")
+    use std::io::BufRead;
+    use std::process::Stdio;
+
+    let mut child = Command::new("sh")
         .args([
             "-c",
-            "trap '' TERM; while :; do sleep 1; done",
+            "trap '' TERM; printf 'ready\\n'; while :; do sleep 1; done",
             "homeboy",
             "daemon",
             "serve",
@@ -2143,9 +2146,17 @@ fn spawn_term_resistant_daemon(startup_token: &str) -> u32 {
             startup_token,
         ])
         .env(DAEMON_STARTUP_TOKEN_ENV, startup_token)
+        .stdout(Stdio::piped())
         .spawn()
-        .expect("start TERM-resistant daemon fixture")
-        .id()
+        .expect("start TERM-resistant daemon fixture");
+    // A spawned shell is not ready until its trap is installed. SIGTERM before
+    // this acknowledgement would exercise ordinary termination, not escalation.
+    let mut ready = String::new();
+    std::io::BufReader::new(child.stdout.take().expect("readiness pipe"))
+        .read_line(&mut ready)
+        .expect("read TERM trap acknowledgement");
+    assert_eq!(ready, "ready\n");
+    child.id()
 }
 
 #[cfg(unix)]

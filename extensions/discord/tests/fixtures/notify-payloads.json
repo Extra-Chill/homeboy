@@ -4,6 +4,7 @@
     "payload": {
       "cook_summary": {
         "base_sha": null,
+        "delivery": [],
         "gates": [],
         "head_sha": null,
         "phase": "unknown",
@@ -56,6 +57,7 @@
       ],
       "cook_summary": {
         "base_sha": null,
+        "delivery": [],
         "gates": [],
         "head_sha": null,
         "phase": "unknown",
@@ -90,6 +92,7 @@
     "payload": {
       "cook_summary": {
         "base_sha": null,
+        "delivery": [],
         "gates": [],
         "head_sha": null,
         "phase": "unknown",

@@ -933,6 +933,7 @@ impl From<&homeboy_lifecycle_contract::CookStatus> for ControlPlaneState {
             InFlight | AwaitingCi => Self::Running,
             ReviewReady
             | DraftPublished
+            | SucceededPartial
             | GreenNoFinalize
             | IntentionalNoChange
             | SupersededByActiveCook => Self::Succeeded,

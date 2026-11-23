@@ -793,6 +793,12 @@ pub(super) fn run_gate_argv_local(
         .time::<_, homeboy_core::Error>("publish.gate_cargo_target", || {
             selected_environment.finish_cargo_target()
         })?;
+    let bench_compare = homeboy_core::bench_compare::is_cook_gate_command(command)
+        .then(|| {
+            homeboy_core::bench_compare::parse_gate_evidence(&stderr)
+                .or_else(|| homeboy_core::bench_compare::parse_gate_evidence(&stdout))
+        })
+        .flatten();
     let mut report = AgentTaskGateReport::new(
         format!("gate-{index}"),
         command_vec,
@@ -806,6 +812,7 @@ pub(super) fn run_gate_argv_local(
     );
     report.test_result = test_result;
     report.cargo_selection = cargo_selection;
+    report.bench_compare = bench_compare;
     report.termination = termination;
     report.cleanup_warning = cleanup_warning;
     #[cfg(unix)]

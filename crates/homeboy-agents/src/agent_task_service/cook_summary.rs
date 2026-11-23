@@ -4,8 +4,8 @@
 //! [`legal_actions`]; this module never classifies the run itself (#18499).
 
 use homeboy_control_plane_contract::{
-    ControlPlaneAction, CookSummary, CookSummaryGate, COOK_SUMMARY_FAILING_TEST_LIMIT,
-    COOK_SUMMARY_GATE_LIMIT, COOK_SUMMARY_SCHEMA,
+    ControlPlaneAction, CookSummary, CookSummaryBenchCompare, CookSummaryGate,
+    COOK_SUMMARY_FAILING_TEST_LIMIT, COOK_SUMMARY_GATE_LIMIT, COOK_SUMMARY_SCHEMA,
 };
 use serde_json::Value;
 
@@ -76,6 +76,9 @@ pub fn cook_summary(record: &AgentTaskRunRecord) -> CookSummary {
         gates: summary_gates(record, delivery.as_ref()),
         pr_url,
         why_no_pr,
+        delivery: publication
+            .map(|publication| publication.delivery.clone())
+            .unwrap_or_default(),
     }
     .bounded()
 }
@@ -148,10 +151,28 @@ fn summary_gates(
                     .and_then(|state| state.as_str().map(str::to_string))
                     .unwrap_or_else(|| "unknown".to_string()),
                 failing_tests: raw.map(|raw| failing_tests(raw)).unwrap_or_default(),
+                bench_compare: raw.and_then(|raw| bench_compare(raw)),
                 name,
             }
         })
         .collect()
+}
+
+/// A bench gate's verdict and artifact, from the evidence its gate report
+/// carries (#18869).
+fn bench_compare(gate: &Value) -> Option<CookSummaryBenchCompare> {
+    let evidence: homeboy_core::bench_compare::BenchCompareGateEvidence =
+        serde_json::from_value(gate.get("bench_compare")?.clone()).ok()?;
+    Some(CookSummaryBenchCompare {
+        passed: evidence.passed,
+        fail_on: evidence.fail_on.as_str().to_string(),
+        routes: evidence.summary.routes,
+        regressed: evidence.summary.regressed,
+        improved: evidence.summary.improved,
+        new_blockers: evidence.summary.new_blockers,
+        missing_on_head: evidence.summary.missing_on_head,
+        artifact_path: evidence.artifact_path,
+    })
 }
 
 fn failing_tests(gate: &Value) -> Vec<String> {

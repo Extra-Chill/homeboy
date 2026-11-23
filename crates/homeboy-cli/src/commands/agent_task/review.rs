@@ -388,6 +388,7 @@ fn manual_finalization_options(
             .collect::<homeboy::core::Result<Vec<_>>>()?,
         out_of_scope_changes: Vec::new(),
         repro: None,
+        delivery: Vec::new(),
     };
     review_dossier.apply_overrides()?;
     let review_profile = resolve_review_profile(args.component.as_deref(), &path)?;
@@ -431,7 +432,7 @@ pub(crate) fn finalize_pull_request(args: FinalizePrArgs) -> CmdResult<Value> {
     }?;
     let exit_code = if matches!(
         report.status.as_str(),
-        "review_ready" | "draft_published" | "validated"
+        "review_ready" | "draft_published" | "succeeded_partial" | "validated"
     ) {
         0
     } else {

@@ -84,7 +84,7 @@ fn cook_batch(mut args: AgentTaskFanoutCookBatchArgs, placement: Placement) -> C
     if !args.cook.gates.has_deterministic_gate() && !args.cook.repro.is_declared() {
         return Err(Error::validation_invalid_argument(
             "verify",
-            "every cook-batch child needs a deterministic gate: pass --verify, --verify-file, --private-verify, --private-verify-file, --repro, or --repro-file",
+            "every cook-batch child needs a deterministic gate: pass --verify, --verify-file, --private-verify, --private-verify-file, --verify-bench, --repro, or --repro-file",
             None,
             None,
         ));

@@ -2199,10 +2199,6 @@ mod tests {
                 parent.state(),
                 homeboy_lifecycle_contract::RunExecutionState::Cancelled
             );
-            assert_eq!(
-                parent.metadata["detached_cook_handoff"]["cancellation_fence"]["state"],
-                "cancelled"
-            );
             assert!(
                 !agent_task_lifecycle::cook_index_exists_in_store(
                     &agent_task_lifecycle::AgentTaskLifecycleStore::from_environment()

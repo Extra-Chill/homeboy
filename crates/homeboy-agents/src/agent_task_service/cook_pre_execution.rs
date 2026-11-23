@@ -1390,7 +1390,6 @@ mod tests {
                     record.metadata["detached_cook_handoff"] = serde_json::json!({
                         "state": "pending",
                         "cook_id": cook_id,
-                        "cancellation_fence": { "state": "open" },
                     });
                     true
                 })
@@ -1404,8 +1403,6 @@ mod tests {
                     record.set_state_for_test(
                         homeboy_lifecycle_contract::RunExecutionState::Cancelled,
                     );
-                    record.metadata["detached_cook_handoff"]["cancellation_fence"]["state"] =
-                        serde_json::json!("cancelled");
                     true
                 })
                 .unwrap();
