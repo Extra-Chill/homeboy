@@ -186,9 +186,10 @@ fn multi_attempt_candidate_recoverable_recover_publishes_candidate_sha() {
             report.step,
             crate::agent_task_service::CookRecoveryStep::Publish
         );
-        assert_eq!(report.result.unwrap()["status"], "review_ready");
+        assert_eq!(report.result.unwrap()["status"], "draft_published");
         let backend = performer.0.lock().unwrap();
         assert!(backend.created);
+        assert!(backend.draft, "passing gates do not verify a repro");
         assert!(backend.body.contains("Pi"), "{}", backend.body);
     });
 }
@@ -273,8 +274,9 @@ fn multi_attempt_substantive_adopt_uses_terminal_execution_lineage() {
         )
         .unwrap();
         assert_eq!(result.exit_code, 0, "{result:#?}");
-        assert_eq!(result.value.status.as_str(), "review_ready");
+        assert_eq!(result.value.status.as_str(), "draft_published");
         assert!(backend.created);
+        assert!(backend.draft, "candidate adoption does not verify a repro");
         assert!(backend.body.contains("Pi"), "{}", backend.body);
         let stored = persisted_promotion_for_attempt(&options.identity.initial_run_id)
             .unwrap()
@@ -332,8 +334,12 @@ fn adoption_supersedes_deferred_and_pending_status_with_passing_candidate_proof(
             )
             .unwrap();
             assert_eq!(result.exit_code, 0, "{result:#?}");
-            assert_eq!(result.value.status.as_str(), "review_ready");
+            assert_eq!(result.value.status.as_str(), "draft_published");
             assert!(backend.created);
+            assert!(
+                backend.draft,
+                "passing candidate proof is not a verified repro"
+            );
             assert_eq!(
                 result.value.attempts[0].promotion.as_ref().unwrap().status,
                 AgentTaskPromotionStatus::Applied
@@ -467,7 +473,11 @@ fn candidate_recoverable_with_own_green_bound_gates_publishes() {
             report.step,
             crate::agent_task_service::CookRecoveryStep::Publish
         );
-        assert_eq!(report.result.unwrap()["status"], "review_ready");
+        assert_eq!(report.result.unwrap()["status"], "draft_published");
+        assert!(
+            performer.0.lock().unwrap().draft,
+            "green bound gates do not verify a repro"
+        );
         let after = persisted_promotion_for_attempt(run).unwrap().unwrap();
         assert_eq!(before.deterministic_gates, after.deterministic_gates);
         assert_eq!(performer.0.lock().unwrap().create_count, 1);
@@ -966,10 +976,12 @@ fn applied_candidate_gate_verdicts_select_a_completing_recovery_step() {
             assert_eq!(report.step, CookRecoveryStep::Publish, "{second:?}");
             assert_eq!(
                 report.result.unwrap()["status"],
-                "review_ready",
+                "draft_published",
                 "{second:?}"
             );
-            assert!(performer.0.lock().unwrap().created, "{second:?}");
+            let backend = performer.0.lock().unwrap();
+            assert!(backend.created, "{second:?}");
+            assert!(backend.draft, "no verified repro: {second:?}");
             // The inherited failure stays recorded as evidence, not erased.
             let stored = persisted_promotion_for_attempt(run).unwrap().unwrap();
             assert_eq!(stored.deterministic_gates[1].status, second);

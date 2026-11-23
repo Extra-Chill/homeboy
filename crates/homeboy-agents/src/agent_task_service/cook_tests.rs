@@ -11182,13 +11182,14 @@ fn corrected_gate_guided_continuation_publishes_without_provider_redispatch_and_
                     .unwrap();
             assert_eq!(
                 result.value.status.as_str(),
-                "review_ready",
+                "draft_published",
                 "{:#?}",
                 result.value
             );
             assert_eq!(result.exit_code, 0);
         }
         assert_eq!(backend.create_count, 1);
+        assert!(backend.draft, "corrected gates do not verify a repro");
         assert!(backend
             .body
             .contains("test \"$(cat tracked.txt)\" = promoted"));
