@@ -83,6 +83,31 @@ fn failure_context() -> AgentTaskCookFailureContext {
 }
 
 #[test]
+fn inherited_red_is_visible_in_completion_and_report_summary() {
+    homeboy_core::test_support::with_isolated_home(|_| {
+        let report = report(
+            "review_ready",
+            Some(json!({
+                "status": "review_ready",
+                "pr_url": "https://github.com/Extra-Chill/homeboy/pull/42",
+                "gate_results": [{"name": "verify", "status": "accepted_inherited_failure"}]
+            })),
+        );
+        assert_eq!(report.inherited_failure_count(), 1);
+        assert_eq!(
+            serde_json::to_value(&report).unwrap()["inherited_failures"],
+            1
+        );
+        let payload = terminal_payload(&report, Some("homeboy"), 0);
+        assert_eq!(payload.kind, NotifyEventKind::Completed);
+        assert!(payload
+            .facts
+            .iter()
+            .any(|fact| fact.label == "Inherited failures" && fact.value.contains("1 red gate")));
+    });
+}
+
+#[test]
 fn terminal_outcomes_lead_with_work_and_offer_only_useful_actions() {
     homeboy_core::test_support::with_isolated_home(|_| {
         for (status, code, title, facts, actions) in [
