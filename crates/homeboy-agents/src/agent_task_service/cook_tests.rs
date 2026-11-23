@@ -9834,7 +9834,7 @@ fn corrected_replacement_gates(run_id: &str, verify: &str) -> Result<AgentTaskPr
 
 fn persist_deferred_fixture(run_id: &str) {
     let mut promotion = persisted_promotion_for_attempt(run_id).unwrap().unwrap();
-    promotion.status = AgentTaskPromotionStatus::GateDeferred;
+    promotion.status = AgentTaskPromotionStatus::GateEnvironmentUnavailable;
     for gate in &mut promotion.deterministic_gates {
         gate.status = crate::agent_task_gate::AgentTaskGateStatus::Unavailable;
         gate.failure_evidence = None;
@@ -10102,7 +10102,10 @@ fn failing_regate_is_the_latest_gate_run_not_the_stale_receipt() {
         assert_ne!(latest.deterministic_gates, stale.deterministic_gates);
         let run = &latest.provenance["regate_gate_run"];
         assert_eq!(run["commands"][0], command);
-        assert_eq!(run["superseded_gate_run"]["status"], "gates_deferred");
+        assert_eq!(
+            run["superseded_gate_run"]["status"],
+            "gate_environment_unavailable"
+        );
         assert!(latest.provenance.get("replacement_gate_proof").is_none());
         let record = test_lifecycle_store().read_record(run_id).unwrap();
         let history = crate::agent_task_service::recorded_promotion_history(&record.metadata)
@@ -10110,7 +10113,7 @@ fn failing_regate_is_the_latest_gate_run_not_the_stale_receipt() {
             .unwrap();
         assert!(history
             .iter()
-            .any(|promotion| promotion["status"] == "gates_deferred"));
+            .any(|promotion| promotion["status"] == "gate_environment_unavailable"));
         assert!(replacement_gate_fence(run_id).is_null());
     });
 }
@@ -10742,7 +10745,10 @@ fn deferred_recovery_supervises_declared_gate_and_persists_unavailability() {
         let promotion = persisted_promotion_for_attempt_in_store(&store, &run_id)
             .unwrap()
             .unwrap();
-        assert_eq!(promotion.status, AgentTaskPromotionStatus::GateDeferred);
+        assert_eq!(
+            promotion.status,
+            AgentTaskPromotionStatus::GateEnvironmentUnavailable
+        );
         assert!(result
             .value
             .stop_reason
@@ -10801,7 +10807,10 @@ fn supervision_stopped_gate_is_regated_once_and_ends_as_unavailable_verification
         let promotion = persisted_promotion_for_attempt_in_store(&store, &run_id)
             .unwrap()
             .unwrap();
-        assert_eq!(promotion.status, AgentTaskPromotionStatus::GateDeferred);
+        assert_eq!(
+            promotion.status,
+            AgentTaskPromotionStatus::GateEnvironmentUnavailable
+        );
         let gate = &promotion.deterministic_gates[0];
         assert_eq!(
             gate.status,
@@ -13251,7 +13260,7 @@ fn recover_retries_a_runner_cancelled_cook_but_not_an_operator_cancelled_one() {
 #[test]
 fn gate_environment_unavailable_stop_reason_names_the_non_execution_cause_and_next_step() {
     let mut deferred = promotion("run-lab-transport");
-    deferred.status = AgentTaskPromotionStatus::GateDeferred;
+    deferred.status = AgentTaskPromotionStatus::GateEnvironmentUnavailable;
     let mut error = homeboy_core::Error::new(
         homeboy_core::ErrorCode::RunnerLabTransportFailure,
         "runner gate did not return terminal artifact evidence",

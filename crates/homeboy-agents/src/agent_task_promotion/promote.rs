@@ -600,7 +600,13 @@ pub fn promotion_is_resumable(previous: &Value, rerun_completed_gates: bool) -> 
     let status = previous.get("status").and_then(Value::as_str);
     matches!(
         status,
-        Some("gate_failed" | "verification_pending" | "gates_deferred")
+        Some(
+            "gate_failed"
+                | "verification_pending"
+                | "gate_environment_unavailable"
+                // Accepts `gates_deferred` for records written before #18802.
+                | "gates_deferred"
+        )
     ) || (rerun_completed_gates && status == Some("applied"))
 }
 
@@ -2615,7 +2621,10 @@ mod lab_gate_binding_tests {
                 store,
             )
             .expect("non-execution is retained, not a fabricated candidate mismatch");
-            assert_eq!(report.status, AgentTaskPromotionStatus::GateDeferred);
+            assert_eq!(
+                report.status,
+                AgentTaskPromotionStatus::GateEnvironmentUnavailable
+            );
             assert_eq!(report.deterministic_gates.len(), 2);
             let unavailable = &report.deterministic_gates[0];
             assert_eq!(unavailable.status, AgentTaskGateStatus::Unavailable);
@@ -2700,7 +2709,10 @@ mod lab_gate_binding_tests {
             )
             .expect("an absent runner defers the gate; it is not a setup error");
 
-            assert_eq!(report.status, AgentTaskPromotionStatus::GateDeferred);
+            assert_eq!(
+                report.status,
+                AgentTaskPromotionStatus::GateEnvironmentUnavailable
+            );
             assert!(
                 !repo.join("hydration-count").exists(),
                 "controller-side dependency setup must not touch the controller checkout for Lab placement"
@@ -4472,7 +4484,7 @@ fn status_for_report(
         // the candidate is rejected regardless of what else could not run.
         AgentTaskPromotionStatus::GateFailed
     } else if has_gate_deferral {
-        AgentTaskPromotionStatus::GateDeferred
+        AgentTaskPromotionStatus::GateEnvironmentUnavailable
     } else {
         AgentTaskPromotionStatus::Applied
     }
@@ -4507,7 +4519,7 @@ fn promotion_notification(
             ),
             next_command: None,
         },
-        AgentTaskPromotionStatus::GateDeferred => AgentTaskPromotionNotification {
+        AgentTaskPromotionStatus::GateEnvironmentUnavailable => AgentTaskPromotionNotification {
             status: "blocked".to_string(),
             message: "patch promoted, but at least one deterministic gate did not execute (deferred, runner unavailable or Lab transport failure; see each gate result for its cause); the candidate is unverified, not rejected".to_string(),
             resumable_blocker: Some(
@@ -4547,7 +4559,7 @@ fn attach_setup_retry_command(
     status: AgentTaskPromotionStatus,
     run_id: Option<&str>,
 ) {
-    if status == AgentTaskPromotionStatus::GateDeferred {
+    if status == AgentTaskPromotionStatus::GateEnvironmentUnavailable {
         if let Some(run_id) = run_id {
             notification.next_command = Some(format!("homeboy agent-task recover {run_id}"));
         }
@@ -4583,7 +4595,8 @@ pub(super) fn promotion_notification_with_gate_summary(
         notification.message.push_str(&format!(
             "; deterministic gates: passed=[{passed}], failed=[{failed}], skipped=[{skipped}], deferred=[{deferred}], unavailable=[{unavailable}], inherited=[{inherited}]"
         ));
-        if status == AgentTaskPromotionStatus::GateDeferred && !unavailable.is_empty() {
+        if status == AgentTaskPromotionStatus::GateEnvironmentUnavailable && !unavailable.is_empty()
+        {
             if let Some(gate) = gates
                 .iter()
                 .find(|gate| gate.status == AgentTaskGateStatus::Unavailable)
@@ -4899,7 +4912,7 @@ mod gate_setup_message_tests {
             repository_integrity_evidence: None,
         };
         let previous = serde_json::json!({
-            "status": "gates_deferred",
+            "status": "gate_environment_unavailable",
             "to_worktree": "repo@fix-issue",
             "target": { "worktree": "repo@fix-issue", "path": "/work/repo@fix-issue" },
         });

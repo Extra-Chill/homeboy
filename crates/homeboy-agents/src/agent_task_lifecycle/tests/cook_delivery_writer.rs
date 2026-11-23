@@ -81,7 +81,11 @@ fn gate_environment_failure_retains_candidate_and_diagnostic() {
         let record = record_promotion_in_store(
             &store,
             "environment-gate",
-            promotion("environment-gate", "gates_deferred", json!([gate])),
+            promotion(
+                "environment-gate",
+                "gate_environment_unavailable",
+                json!([gate]),
+            ),
         )
         .expect("record environment failure");
         let delivery = persisted_delivery(&record);
@@ -278,17 +282,16 @@ fn a_deferred_then_executed_gate_never_stays_gate_environment_unavailable() {
             })
             .expect("provider succeeded");
 
-        // Promotions are written as `gates_deferred`.
         let deferred = record_promotion_in_store(
             &lifecycle_store,
             run_id,
-            promotion(run_id, "gates_deferred", gate("deferred")),
+            promotion(run_id, "gate_environment_unavailable", gate("deferred")),
         )
         .expect("deferred promotion recorded");
         let delivery = persisted_delivery(&deferred);
         assert_eq!(
             delivery.blocker_code(),
-            Some(CookDeliveryBlockerCode::GatesDeferred)
+            Some(CookDeliveryBlockerCode::GateEnvironmentUnavailable)
         );
         assert_eq!(
             deferred.metadata["cook_delivery"]["delivery"]["blocker"]["code"],

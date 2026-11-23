@@ -103,11 +103,11 @@ fn from_run_metadata_reads_every_persisted_delivery_shape() {
         Case {
             name: "gates deferred",
             metadata: json!({ "promotion": promotion(
-                "gates_deferred",
+                "gate_environment_unavailable",
                 json!([{ "id": "lab-test", "status": "deferred" }]),
             ) }),
             state: State::Blocked,
-            blocker: Some(Code::GatesDeferred),
+            blocker: Some(Code::GateEnvironmentUnavailable),
         },
         Case {
             name: "intentional no change",
@@ -219,11 +219,14 @@ fn a_non_executed_lab_gate_blocker_names_its_typed_cause() {
         }
     }]);
     let delivery = CookDelivery::from_run_metadata(&delivery_metadata(
-        json!({ "promotion": promotion("gates_deferred", gate) }),
+        json!({ "promotion": promotion("gate_environment_unavailable", gate) }),
     ))
     .expect("gates deferred delivery");
     let blocker = delivery.blocker.expect("deferred blocker");
-    assert_eq!(blocker.code, CookDeliveryBlockerCode::GatesDeferred);
+    assert_eq!(
+        blocker.code,
+        CookDeliveryBlockerCode::GateEnvironmentUnavailable
+    );
     assert!(
         blocker.message.starts_with(
             "deterministic gate `gate-1` deferred: Lab gate did not execute: [runner.lab_transport_failure] stage terminal_projection, job job-9; retryable"
@@ -438,4 +441,31 @@ fn every_tolerated_pr_identity_path_reads_through_the_publication_receipt() {
         assert!(delivery.published(), "{receipt}");
         assert_eq!(delivery.pr_url(), url, "{receipt}");
     }
+}
+
+#[test]
+fn stored_gates_deferred_reads_as_gate_environment_unavailable() {
+    use crate::agent_task_cook_loop::AgentTaskCookLoopStatus;
+    use crate::agent_task_promotion::AgentTaskPromotionStatus;
+
+    let stored = json!("gates_deferred");
+    let current = json!("gate_environment_unavailable");
+
+    let promotion: AgentTaskPromotionStatus = serde_json::from_value(stored.clone()).unwrap();
+    assert_eq!(
+        promotion,
+        AgentTaskPromotionStatus::GateEnvironmentUnavailable
+    );
+    assert_eq!(serde_json::to_value(promotion).unwrap(), current);
+
+    let cook_loop: AgentTaskCookLoopStatus = serde_json::from_value(stored.clone()).unwrap();
+    assert_eq!(
+        cook_loop,
+        AgentTaskCookLoopStatus::GateEnvironmentUnavailable
+    );
+    assert_eq!(serde_json::to_value(cook_loop).unwrap(), current);
+
+    let blocker: CookDeliveryBlockerCode = serde_json::from_value(stored).unwrap();
+    assert_eq!(blocker, CookDeliveryBlockerCode::GateEnvironmentUnavailable);
+    assert_eq!(serde_json::to_value(blocker).unwrap(), current);
 }

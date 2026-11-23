@@ -1308,7 +1308,7 @@ fn non_execution_report(request: &LabGateRequest, error: &Error) -> AgentTaskGat
 }
 
 /// A Lab gate that never executed has no verdict on the candidate: it is
-/// `Unavailable` (promotion `GateDeferred`), carries no exit code and no
+/// `Unavailable` (promotion `GateEnvironmentUnavailable`), carries no exit code and no
 /// candidate-code failure evidence, and names its typed cause (#16932).
 pub(crate) fn gate_non_execution_report(
     index: usize,

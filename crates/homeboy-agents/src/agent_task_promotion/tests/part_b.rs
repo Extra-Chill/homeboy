@@ -964,7 +964,7 @@ fn resume_promoted_patch_rebuilds_green_proof_from_pending_post_apply_checkpoint
         true
     ));
     let mut deferred = previous.clone();
-    deferred["status"] = serde_json::json!("gates_deferred");
+    deferred["status"] = serde_json::json!("gate_environment_unavailable");
     let resumed = resume_promoted_patch(options.clone(), &target, &deferred)
         .expect("deferred candidate re-executes gates");
     assert_eq!(resumed.status, AgentTaskPromotionStatus::Applied);
@@ -1844,7 +1844,10 @@ fn promotion_setup_failure_is_bounded_and_never_dispatches_a_gate() {
         )
         .expect("failed setup remains a recoverable promotion");
 
-        assert_eq!(report.status, AgentTaskPromotionStatus::GateDeferred);
+        assert_eq!(
+            report.status,
+            AgentTaskPromotionStatus::GateEnvironmentUnavailable
+        );
         let gate = &report.deterministic_gates[0];
         assert_eq!(
             gate.status,

@@ -125,7 +125,7 @@ fn delivery_run_state(
 /// status over an executed gate.
 fn retire_superseded_deferral(record: &mut AgentTaskRunRecord, delivery: Option<&CookDelivery>) {
     if delivery.is_some_and(|delivery| {
-        delivery.blocker_code() == Some(CookDeliveryBlockerCode::GatesDeferred)
+        delivery.blocker_code() == Some(CookDeliveryBlockerCode::GateEnvironmentUnavailable)
     }) {
         return;
     }
