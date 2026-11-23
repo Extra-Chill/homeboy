@@ -176,6 +176,9 @@ pub struct ControlPlaneRun {
     pub candidate: Option<ControlPlaneStateSummary>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub gates: Vec<ControlPlaneStateSummary>,
+    /// Red gates accepted with baseline inheritance evidence, not passing gates.
+    #[serde(default)]
+    pub inherited_failures: usize,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub publication: Option<ControlPlaneStateSummary>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -217,6 +220,7 @@ impl ControlPlaneRun {
             liveness: None,
             candidate: None,
             gates: Vec::new(),
+            inherited_failures: 0,
             publication: None,
             action_eligibility: None,
             recovery: None,

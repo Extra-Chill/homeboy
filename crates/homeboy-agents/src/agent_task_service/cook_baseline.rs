@@ -373,6 +373,14 @@ impl BaselineFacts {
         }
     }
 
+    fn failure_identities(&self) -> Vec<String> {
+        if self.failure_records.is_empty() {
+            vec![self.failure_fingerprint.clone()]
+        } else {
+            self.failure_records.clone()
+        }
+    }
+
     fn comparable(&self) -> bool {
         self.exit_code != 124
             && matches!(
@@ -413,13 +421,22 @@ impl BaselineFacts {
             .filter(|record| !self.failure_records.contains(record))
             .cloned()
             .collect();
-        // Opaque gates have only an exit-status contract. Do not attribute an
-        // already-red host or toolchain to the candidate based on output text.
-        // That excuse applies only when neither run named its failures: a
-        // candidate that names failures the baseline cannot account for (or
-        // a baseline that names failures the candidate replaced with opaque
-        // output) is not a reproduction of the baseline breakage.
-        let opaque = self.failure_records.is_empty() && candidate.failure_records.is_empty();
+        // Exit status alone cannot prove inheritance for opaque commands.
+        let opaque = self.failure_records.is_empty()
+            && candidate.failure_records.is_empty()
+            && self.failure_fingerprint == candidate.failure_fingerprint;
+        let base_failures = self.failure_identities();
+        let head_failures = candidate.failure_identities();
+        let inherited = if opaque {
+            head_failures.clone()
+        } else {
+            inherited
+        };
+        let new = if candidate.failure_records.is_empty() && !opaque {
+            head_failures.clone()
+        } else {
+            new
+        };
         let comparable_records =
             !self.failure_records.is_empty() && !candidate.failure_records.is_empty();
         let matches = gate.status == AgentTaskGateStatus::Failed
@@ -446,6 +463,8 @@ impl BaselineFacts {
                     } else {
                         AgentTaskGateFailureOrigin::CandidateBrokeGate
                     },
+                    base_failures,
+                    head_failures,
                     inherited_failures: inherited,
                     new_failures: new,
                     flaky_failures: flaky,
@@ -574,6 +593,8 @@ fn refine_gate_comparison(
             ),
             failure_attribution: Some(AgentTaskGateFailureAttribution {
                 classification: AgentTaskGateFailureOrigin::GateAlreadyRedOnBaseline,
+                base_failures: baseline.failure_identities(),
+                head_failures: Vec::new(),
                 inherited_failures: Vec::new(),
                 new_failures: Vec::new(),
                 flaky_failures: flaky,
@@ -1610,6 +1631,8 @@ mod tests {
             attribution.classification,
             AgentTaskGateFailureOrigin::GateAlreadyRedOnBaseline
         );
+        assert_eq!(attribution.base_failures, vec!["test:A"]);
+        assert_eq!(attribution.head_failures, vec!["test:A"]);
         assert_eq!(attribution.inherited_failures.len(), 1);
         assert!(attribution.new_failures.is_empty());
         let mut regression = run("test A ... FAILED\\ntest B ... FAILED\\n");
@@ -1631,13 +1654,25 @@ mod tests {
         assert_eq!(attribution.inherited_failures.len(), 1);
         assert_eq!(attribution.new_failures.len(), 1);
         assert!(attribution.new_failures[0].contains('B'));
+        assert_eq!(attribution.base_failures, vec!["test:A"]);
+        assert_eq!(attribution.head_failures, vec!["test:A", "test:B"]);
         let opaque = BaselineFacts::from_gate(&run("host unavailable"));
         let mut candidate = run("different host error");
         opaque.apply(&mut candidate, "base", None);
+        assert_eq!(candidate.status, AgentTaskGateStatus::Failed);
+        let mut identical = run("host unavailable");
+        opaque.apply(&mut identical, "base", None);
         assert_eq!(
-            candidate.status,
+            identical.status,
             AgentTaskGateStatus::AcceptedInheritedFailure
         );
+        let proof = identical
+            .baseline_comparison
+            .unwrap()
+            .failure_attribution
+            .unwrap();
+        assert_eq!(proof.base_failures, proof.head_failures);
+        assert!(proof.base_failures[0].starts_with("sha256:"));
         // An opaque baseline cannot excuse a candidate that names failures:
         // nothing on the baseline accounts for them.
         let mut named = run("test C ... FAILED\\n");
@@ -2005,8 +2040,8 @@ mod tests {
                 ),
                 (
                     "opaque_red",
-                    "cat state >&2; exit 1",
-                    "candidate\n",
+                    "printf 'base\\n' >&2; exit 1",
+                    "base\n",
                     std::time::Duration::from_secs(1),
                     AgentTaskGateDifferentialResult::BaselineRed,
                     true,
@@ -2148,30 +2183,6 @@ mod tests {
                         .as_ref()
                         .unwrap()
                         .contains("reused"));
-                    let mut different_failure = original.clone();
-                    different_failure.deterministic_gates[0].stderr =
-                        "different candidate failure\n".to_string();
-                    compare_gate_failures_to_verified_base(
-                        &store,
-                        &mut different_failure,
-                        &[],
-                        &replay_root,
-                        &replay_root,
-                        &base,
-                        timeout,
-                        None,
-                        |_, _| Ok(()),
-                    )
-                    .expect("reuse with different candidate failure");
-                    assert_eq!(
-                        different_failure.deterministic_gates[0]
-                            .baseline_comparison
-                            .as_ref()
-                            .unwrap()
-                            .result,
-                        AgentTaskGateDifferentialResult::BaselineRed
-                    );
-                    assert_eq!(runs(), 1);
                     let mut changed = original.clone();
                     changed.deterministic_gates[0].command =
                         crate::agent_task_gate::legacy_gate_argv(&format!("{command}; # changed"));
@@ -2574,7 +2585,7 @@ mod tests {
             let bin = temp.path().join("bin");
             std::fs::create_dir(&bin).expect("bin");
             let homeboy = bin.join("homeboy");
-            homeboy_test_support::write_executable(&homeboy, "#!/bin/sh\ntest \"$1\" = review && test \"$2\" = test || exit 97\n/bin/cat marker >&2\nexit 1\n", 0o755)
+            homeboy_test_support::write_executable(&homeboy, "#!/bin/sh\ntest \"$1\" = review && test \"$2\" = test || exit 97\n/bin/cat marker >&2\necho 'test fixture ... FAILED' >&2\nexit 1\n", 0o755)
         .expect("homeboy adapter");
 
             let plan = homeboy_engine_primitives::test_execution::TestExecutionPlan::declared_homeboy_review_test(
@@ -2603,7 +2614,7 @@ mod tests {
                 ],
                 1,
                 "",
-                "candidate\n",
+                "candidate\ntest fixture ... FAILED\n",
                 None,
                 HomeboyGateVisibility::Visible,
                 AgentTaskGateRevealPolicy::FullEvidence,

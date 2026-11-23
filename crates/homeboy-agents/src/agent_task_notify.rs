@@ -436,6 +436,13 @@ fn terminal_payload(
             payload = payload.with_fact(label, value);
         }
     }
+    let inherited_failures = report.inherited_failure_count();
+    if inherited_failures > 0 {
+        payload = payload.with_fact(
+            "Inherited failures",
+            format!("{inherited_failures} red gate(s) accepted from baseline; not passing"),
+        );
+    }
     // A primary route skipped before dispatch is an operator-visible condition,
     // not just an event-log line (#15881): one bounded line per skipped route.
     for note in &report.provider_route_notes {

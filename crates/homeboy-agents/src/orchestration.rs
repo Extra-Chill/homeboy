@@ -4116,6 +4116,13 @@ fn project_summary_fields(
     }
     resource.candidate = candidate(record, delivery.as_ref());
     resource.gates = gates(record, delivery.as_ref());
+    resource.inherited_failures = delivery.as_ref().map_or(0, |delivery| {
+        delivery
+            .gates
+            .iter()
+            .filter(|gate| gate.state == AgentTaskGateStatus::AcceptedInheritedFailure)
+            .count()
+    });
     resource.publication = delivery.as_ref().and_then(publication);
     project_live_gate_verification(&mut resource, record);
     if crate::agent_task_lifecycle::CookRunState::of(record).phase
