@@ -4,6 +4,18 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.494.0] - 2026-11-23
+
+### Added
+- attach bench compare gates with regression policies
+
+### Changed
+- consolidate scoped reconcile decisions and reporting
+
+### Fixed
+- preserve runtime isolation and synchronize signal fixtures
+- diff rebased PR-rework candidates against their current merge-base with the target branch
+
 ## [0.493.1] - 2026-11-23
 
 ### Changed
