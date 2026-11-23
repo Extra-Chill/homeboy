@@ -63,6 +63,7 @@ mod stall_rotation_tests {
     struct StallsExecutor {
         calls: Arc<AtomicUsize>,
         stalls: usize,
+        classification: AgentTaskFailureClassification,
     }
 
     impl AgentTaskExecutorAdapter for StallsExecutor {
@@ -75,7 +76,7 @@ mod stall_rotation_tests {
                 return outcome(request.task_id, AgentTaskOutcomeStatus::Succeeded);
             }
             let mut result = outcome(request.task_id, AgentTaskOutcomeStatus::ProviderError);
-            result.failure_classification = Some(AgentTaskFailureClassification::Stalled);
+            result.failure_classification = Some(self.classification);
             result.summary =
                 Some("provider produced no output before its liveness deadline".to_string());
             result
@@ -370,30 +371,36 @@ mod stall_rotation_tests {
     /// task as a stalled provider error instead of hanging.
     #[test]
     fn a_stall_with_no_partial_work_and_no_rotation_policy_is_rerun_once() {
-        for (stalls, status) in [
-            (1, AgentTaskOutcomeStatus::Succeeded),
-            (usize::MAX, AgentTaskOutcomeStatus::ProviderError),
+        // A liveness stall the runner refined to `rate_limited` is the same
+        // transient, candidate-less condition and gets the same free re-run.
+        for classification in [
+            AgentTaskFailureClassification::Stalled,
+            AgentTaskFailureClassification::RateLimited,
         ] {
-            let calls = Arc::new(AtomicUsize::new(0));
-            let scheduler = AgentTaskScheduler::new(Arc::new(StallsExecutor {
-                calls: Arc::clone(&calls),
-                stalls,
-            }));
-
-            let aggregate = scheduler.run(plan_with_tasks(1));
-
-            assert_eq!(calls.load(Ordering::SeqCst), 2, "stalls={stalls}");
-            let outcome = &aggregate.outcomes[0];
-            assert_eq!(outcome.status, status, "{aggregate:#?}");
-            if status == AgentTaskOutcomeStatus::ProviderError {
-                assert_eq!(
-                    outcome.failure_classification,
-                    Some(AgentTaskFailureClassification::Stalled)
-                );
-                assert!(outcome.diagnostics.iter().any(|diagnostic| {
-                    diagnostic.class == "agent_task.retry_attempt"
-                        && diagnostic.data["stall_rerun"] == true
+            for (stalls, status) in [
+                (1, AgentTaskOutcomeStatus::Succeeded),
+                (usize::MAX, AgentTaskOutcomeStatus::ProviderError),
+            ] {
+                let calls = Arc::new(AtomicUsize::new(0));
+                let scheduler = AgentTaskScheduler::new(Arc::new(StallsExecutor {
+                    calls: Arc::clone(&calls),
+                    stalls,
+                    classification,
                 }));
+
+                let aggregate = scheduler.run(plan_with_tasks(1));
+
+                let case = format!("{classification:?} stalls={stalls}");
+                assert_eq!(calls.load(Ordering::SeqCst), 2, "{case}");
+                let outcome = &aggregate.outcomes[0];
+                assert_eq!(outcome.status, status, "{case}: {aggregate:#?}");
+                if status == AgentTaskOutcomeStatus::ProviderError {
+                    assert_eq!(outcome.failure_classification, Some(classification));
+                    assert!(outcome.diagnostics.iter().any(|diagnostic| {
+                        diagnostic.class == "agent_task.retry_attempt"
+                            && diagnostic.data["stall_rerun"] == true
+                    }));
+                }
             }
         }
     }
