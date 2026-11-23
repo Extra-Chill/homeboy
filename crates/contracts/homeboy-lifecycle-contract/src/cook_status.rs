@@ -24,6 +24,7 @@ pub enum CookStatus {
     NoChangesGateFailed,
     GateFailed,
     /// Verification could not execute; the candidate remains recoverable.
+    // Accepts `gates_deferred` for records written before #18802.
     #[serde(alias = "gates_deferred")]
     GateEnvironmentUnavailable,
     /// Gates failed on the verified base as well as the candidate.
@@ -64,7 +65,7 @@ impl CookStatus {
             "no_changes" => Self::NoChanges,
             "no_changes_gate_failed" => Self::NoChangesGateFailed,
             "gate_failed" => Self::GateFailed,
-            // Promotions still write the deferred-gate status as `gates_deferred`.
+            // Accepts `gates_deferred` for records written before #18802.
             "gate_environment_unavailable" | "gates_deferred" => Self::GateEnvironmentUnavailable,
             "baseline_red" => Self::BaselineRed,
             "finalization_failed" => Self::FinalizationFailed,

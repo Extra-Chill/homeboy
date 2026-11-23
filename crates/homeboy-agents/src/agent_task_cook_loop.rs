@@ -91,15 +91,16 @@ pub enum AgentTaskCookLoopStatus {
     /// executing (no failure occurred). The candidate patch is promoted and
     /// durable but unverified; retry is a verification retry, not a provider
     /// remediation attempt, so it never spends provider execution budget
-    /// (#14731).
-    GatesDeferred,
+    /// (#14731). Also covers a gate whose infrastructure failed: the
+    /// candidate is kept for verification-only recovery.
+    // Accepts `gates_deferred` for records written before #18802.
+    #[serde(alias = "gates_deferred")]
+    GateEnvironmentUnavailable,
     /// The declared gate itself was invalid or selected an inadmissible test
     /// population. This is operator remediation, never candidate-code retry.
     GateDeclarationInvalid,
     /// Verification was stopped by its supervisor budget, without a code verdict.
     GateBudgetExceeded,
-    /// Infrastructure failed; keep the candidate for verification-only recovery.
-    GateEnvironmentUnavailable,
     RetryRequested,
     RetriesExhausted,
 }
@@ -401,12 +402,14 @@ pub fn evaluate_cook_loop(options: AgentTaskCookLoopOptions) -> AgentTaskCookLoo
         AgentTaskCookLoopStatus::GateDeclarationInvalid
     } else if options.promotion_report.status == AgentTaskPromotionStatus::NoChangesGateFailed {
         AgentTaskCookLoopStatus::NoChangesGateFailed
-    } else if options.promotion_report.status == AgentTaskPromotionStatus::GateDeferred {
+    } else if options.promotion_report.status
+        == AgentTaskPromotionStatus::GateEnvironmentUnavailable
+    {
         // No gate failed, so `follow_up_request`/`failed_gates` are both
         // empty and this would otherwise fall through to `GreenCompleted` —
         // reporting unexecuted verification as a verified green candidate
         // (#14731).
-        AgentTaskCookLoopStatus::GatesDeferred
+        AgentTaskCookLoopStatus::GateEnvironmentUnavailable
     } else if intentional_no_change.is_some() {
         AgentTaskCookLoopStatus::IntentionalNoChange
     } else if quality.classification == AgentTaskCookLoopQualityClassification::NoChanges {
@@ -2706,7 +2709,7 @@ mod tests {
     }
 
     /// #14731: a deferred gate is control-plane evidence, not a candidate
-    /// verdict. It must produce a distinct `GatesDeferred` outcome — never
+    /// verdict. It must produce a distinct `GateEnvironmentUnavailable` outcome — never
     /// `RetriesExhausted`/`RetryRequested` (both of which a caller maps
     /// toward `policy_failure` for an exhausted or malformed retry), and
     /// never a request to spend provider execution budget "fixing" a gate
@@ -2717,7 +2720,7 @@ mod tests {
         let report = evaluate_cook_loop(AgentTaskCookLoopOptions {
             source_request: source_request(),
             promotion_report: promotion_report(
-                AgentTaskPromotionStatus::GateDeferred,
+                AgentTaskPromotionStatus::GateEnvironmentUnavailable,
                 vec![deferred_gate()],
             ),
             attempt: 1,
@@ -2728,7 +2731,10 @@ mod tests {
             metadata: Value::Null,
         });
 
-        assert_eq!(report.status, AgentTaskCookLoopStatus::GatesDeferred);
+        assert_eq!(
+            report.status,
+            AgentTaskCookLoopStatus::GateEnvironmentUnavailable
+        );
         assert!(
             report.follow_up_request.is_none(),
             "a deferred gate must never spend a provider execution retrying remediation"
@@ -2739,13 +2745,13 @@ mod tests {
         );
         assert_eq!(
             report.promotion_status,
-            AgentTaskPromotionStatus::GateDeferred
+            AgentTaskPromotionStatus::GateEnvironmentUnavailable
         );
     }
 
     /// #16932: a Lab gate that never executed (transport or terminal
     /// projection failure) is not a red gate. Even on the last attempt it
-    /// ends `GatesDeferred`, never `RetriesExhausted`, and spends no budget.
+    /// ends `GateEnvironmentUnavailable`, never `RetriesExhausted`, and spends no budget.
     #[test]
     fn a_non_executed_lab_gate_is_gate_environment_unavailable_and_spends_no_retry_budget() {
         let mut error = homeboy_core::Error::new(
@@ -2765,7 +2771,7 @@ mod tests {
             let report = evaluate_cook_loop(AgentTaskCookLoopOptions {
                 source_request: source_request(),
                 promotion_report: promotion_report(
-                    AgentTaskPromotionStatus::GateDeferred,
+                    AgentTaskPromotionStatus::GateEnvironmentUnavailable,
                     vec![green_gate(), gate.clone()],
                 ),
                 attempt,
@@ -2776,7 +2782,10 @@ mod tests {
                 metadata: Value::Null,
             });
 
-            assert_eq!(report.status, AgentTaskCookLoopStatus::GatesDeferred);
+            assert_eq!(
+                report.status,
+                AgentTaskCookLoopStatus::GateEnvironmentUnavailable
+            );
             assert!(report.follow_up_request.is_none());
             assert!(report.failed_gates.is_empty());
             assert!(report.failed_gate_results.is_empty());

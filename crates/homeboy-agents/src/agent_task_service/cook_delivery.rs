@@ -196,8 +196,9 @@ pub(crate) enum CookDeliveryState {
 #[serde(rename_all = "snake_case")]
 pub enum CookDeliveryBlockerCode {
     GateFailed,
-    #[serde(rename = "gate_environment_unavailable", alias = "gates_deferred")]
-    GatesDeferred,
+    // Accepts `gates_deferred` for records written before #18802.
+    #[serde(alias = "gates_deferred")]
+    GateEnvironmentUnavailable,
     BaseConflict,
     ForeignCommits,
     PublishRefused,
@@ -211,7 +212,7 @@ impl CookDeliveryBlockerCode {
     pub fn as_str(self) -> &'static str {
         match self {
             Self::GateFailed => "gate_failed",
-            Self::GatesDeferred => "gate_environment_unavailable",
+            Self::GateEnvironmentUnavailable => "gate_environment_unavailable",
             Self::BaseConflict => "base_conflict",
             Self::ForeignCommits => "foreign_commits",
             Self::PublishRefused => "publish_refused",
@@ -397,8 +398,11 @@ impl CookDelivery {
             )
         ) {
             blocked(gate_blocker(CookDeliveryBlockerCode::GateFailed, &gates))
-        } else if promotion_status == Some(AgentTaskPromotionStatus::GateDeferred) {
-            blocked(gate_blocker(CookDeliveryBlockerCode::GatesDeferred, &gates))
+        } else if promotion_status == Some(AgentTaskPromotionStatus::GateEnvironmentUnavailable) {
+            blocked(gate_blocker(
+                CookDeliveryBlockerCode::GateEnvironmentUnavailable,
+                &gates,
+            ))
         } else if let Some(blocker) = recorded
             .and_then(|recorded| recorded.blocker.clone())
             .or_else(|| manual_failure.map(manual_failure_blocker))
@@ -462,7 +466,7 @@ impl CookDelivery {
                     },
                 ),
             ),
-            (CookDeliveryState::Blocked, Some(Code::GatesDeferred)) => {
+            (CookDeliveryState::Blocked, Some(Code::GateEnvironmentUnavailable)) => {
                 (recoverable, Some(CookStatus::GateEnvironmentUnavailable))
             }
             (CookDeliveryState::Blocked, Some(Code::ReviewFormIncomplete)) => {
@@ -487,7 +491,7 @@ impl CookDelivery {
 
     pub fn is_unverified(&self) -> bool {
         self.state == CookDeliveryState::Applied
-            || self.blocker_code() == Some(CookDeliveryBlockerCode::GatesDeferred)
+            || self.blocker_code() == Some(CookDeliveryBlockerCode::GateEnvironmentUnavailable)
     }
 
     pub fn blocker_code(&self) -> Option<CookDeliveryBlockerCode> {
@@ -689,7 +693,9 @@ fn gate_name(gate: &Value) -> Option<String> {
 
 fn gate_blocker(code: CookDeliveryBlockerCode, gates: &[CookDeliveryGate]) -> CookDeliveryBlocker {
     let (gate_state, verb) = match code {
-        CookDeliveryBlockerCode::GatesDeferred => (AgentTaskGateStatus::Deferred, "deferred"),
+        CookDeliveryBlockerCode::GateEnvironmentUnavailable => {
+            (AgentTaskGateStatus::Deferred, "deferred")
+        }
         _ => (AgentTaskGateStatus::Failed, "failed"),
     };
     // A gate that never executed reads `unavailable`; it is deferred too.
@@ -702,12 +708,12 @@ fn gate_blocker(code: CookDeliveryBlockerCode, gates: &[CookDeliveryGate]) -> Co
     let summary = gate.and_then(|gate| gate.summary.as_deref());
     let message = match (named, summary, code) {
         (Some(id), Some(summary), _) => format!("deterministic gate `{id}` {verb}: {summary}"),
-        (Some(id), None, CookDeliveryBlockerCode::GatesDeferred) => format!(
+        (Some(id), None, CookDeliveryBlockerCode::GateEnvironmentUnavailable) => format!(
             "deterministic gate `{id}` deferred because no runner could execute it; the candidate is unverified"
         ),
         (Some(id), None, _) => format!("deterministic gate `{id}` failed"),
         (None, Some(summary), _) => summary.to_string(),
-        (None, None, CookDeliveryBlockerCode::GatesDeferred) => {
+        (None, None, CookDeliveryBlockerCode::GateEnvironmentUnavailable) => {
             "deterministic gates deferred; the candidate is unverified".to_string()
         }
         (None, None, _) => "deterministic gates rejected the candidate".to_string(),

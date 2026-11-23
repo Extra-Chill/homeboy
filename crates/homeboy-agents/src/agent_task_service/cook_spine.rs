@@ -2550,32 +2550,20 @@ pub(super) fn run_cook_spine(
             // differential-baseline comparison (no failure exists to
             // compare). Retry re-verifies from the existing candidate rather
             // than spending another provider execution.
-            AgentTaskCookLoopStatus::GatesDeferred => {
-                let stop_reason = gate_environment_unavailable_stop_reason(&promotion, &cook_id);
-                return Ok(stores.report(CookReportInput {
-                    cook_id,
-                    status: CookStatus::GateEnvironmentUnavailable,
-                    disposition: CookDisposition::Terminal,
-                    attempts,
-                    finalization: None,
-                    stop_reason: Some(stop_reason),
-                    exit_code: 1,
-                    invocation_latest_run_id: Some(&run_id),
-                }));
-            }
+            // A gate that ran but failed for environment reasons names that
+            // gate and the recovery commands instead.
             AgentTaskCookLoopStatus::GateEnvironmentUnavailable => {
-                let failure = feedback
-                    .failed_gates
-                    .iter()
-                    .find(|gate| {
-                        gate.classification
+                let environment_failure = feedback.failed_gates.iter().find(|gate| {
+                    gate.classification
                         == crate::agent_task_gate::AgentTaskGateFailureClassification::Environment
-                    })
-                    .expect("environment stop carries a failed gate");
-                let stop_reason = format!(
-                    "stop: environment; gate `{}`: {}. Candidate preserved. After fixing the environment run `homeboy agent-task recover {cook_id}` to re-gate, or `homeboy agent-task recover {cook_id} --candidate-ref HEAD` from the local candidate worktree.",
-                    failure.gate_id, failure.summary
-                );
+                });
+                let stop_reason = match environment_failure {
+                    Some(failure) => format!(
+                        "stop: environment; gate `{}`: {}. Candidate preserved. After fixing the environment run `homeboy agent-task recover {cook_id}` to re-gate, or `homeboy agent-task recover {cook_id} --candidate-ref HEAD` from the local candidate worktree.",
+                        failure.gate_id, failure.summary
+                    ),
+                    None => gate_environment_unavailable_stop_reason(&promotion, &cook_id),
+                };
                 return Ok(stores.report(CookReportInput {
                     cook_id,
                     status: CookStatus::GateEnvironmentUnavailable,

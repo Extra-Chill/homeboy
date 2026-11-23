@@ -138,14 +138,14 @@ impl AgentTaskPromotionReport {
         });
         let status = match self.status {
             AgentTaskPromotionStatus::GateFailed
-            | AgentTaskPromotionStatus::GateDeferred
+            | AgentTaskPromotionStatus::GateEnvironmentUnavailable
             | AgentTaskPromotionStatus::VerificationPending
                 if all_gates_passed =>
             {
                 AgentTaskPromotionStatus::Applied
             }
             AgentTaskPromotionStatus::GateFailed if only_unexecuted_gates_block => {
-                AgentTaskPromotionStatus::GateDeferred
+                AgentTaskPromotionStatus::GateEnvironmentUnavailable
             }
             AgentTaskPromotionStatus::NoChangesGateFailed if all_gates_passed => {
                 AgentTaskPromotionStatus::VerifiedNoChanges
@@ -270,10 +270,11 @@ pub enum AgentTaskPromotionStatus {
     /// Distinct from `GateFailed` so a run whose gates could not execute is
     /// never classified as rejected (#14731).
     ///
-    /// Written as `gates_deferred`, the spelling shared with Cook status and
-    /// the delivery blocker (#16049).
-    #[serde(rename = "gates_deferred")]
-    GateDeferred,
+    /// Written as `gate_environment_unavailable`, the spelling shared with
+    /// Cook status and the delivery blocker.
+    // Accepts `gates_deferred` for records written before #18802.
+    #[serde(alias = "gates_deferred")]
+    GateEnvironmentUnavailable,
     /// A provider produced no patch, but the pinned candidate workspace passed
     /// every declared deterministic verification gate.
     VerifiedNoChanges,
@@ -290,12 +291,15 @@ impl AgentTaskPromotionStatus {
     pub fn patch_promoted(self) -> bool {
         matches!(
             self,
-            Self::VerificationPending | Self::Applied | Self::GateFailed | Self::GateDeferred
+            Self::VerificationPending
+                | Self::Applied
+                | Self::GateFailed
+                | Self::GateEnvironmentUnavailable
         )
     }
 
     /// Whether deterministic gates failed after the patch was promoted.
-    /// `GateDeferred` is deliberately excluded: a gate that could not execute
+    /// `GateEnvironmentUnavailable` is deliberately excluded: a gate that could not execute
     /// did not fail, and callers that gate retry/differential-baseline
     /// behavior on "did a gate fail" must not run that behavior for evidence
     /// that was never produced (#14731).
@@ -306,7 +310,7 @@ impl AgentTaskPromotionStatus {
     /// Whether at least one declared gate deferred instead of executing, with
     /// no gate failure alongside it.
     pub fn gate_deferred(self) -> bool {
-        matches!(self, Self::GateDeferred)
+        matches!(self, Self::GateEnvironmentUnavailable)
     }
 
     /// Whether the patch reached its destination without a passing verdict:
@@ -316,7 +320,7 @@ impl AgentTaskPromotionStatus {
     pub fn applied_without_passing_verdict(self) -> bool {
         matches!(
             self,
-            Self::VerificationPending | Self::GateFailed | Self::GateDeferred
+            Self::VerificationPending | Self::GateFailed | Self::GateEnvironmentUnavailable
         )
     }
 }

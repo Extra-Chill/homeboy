@@ -780,7 +780,8 @@ pub(crate) fn continuation_candidate_refusal(
     if promotion.as_ref().is_some_and(|promotion| {
         !matches!(
             promotion.status,
-            AgentTaskPromotionStatus::VerificationPending | AgentTaskPromotionStatus::GateDeferred
+            AgentTaskPromotionStatus::VerificationPending
+                | AgentTaskPromotionStatus::GateEnvironmentUnavailable
         )
     }) {
         return None;
@@ -808,7 +809,7 @@ pub fn preflight_cook_promotion_for_observation_in_store(
     aggregate: Option<&AgentTaskAggregate>,
 ) -> Result<Value> {
     if let Some(promotion) = persisted_promotion_from_record(run_id, record)? {
-        let behavior = if promotion.status == AgentTaskPromotionStatus::GateDeferred {
+        let behavior = if promotion.status == AgentTaskPromotionStatus::GateEnvironmentUnavailable {
             "resume_deferred_gates"
         } else if promotion.status == AgentTaskPromotionStatus::VerificationPending {
             "resume_verification_pending"
@@ -817,7 +818,8 @@ pub fn preflight_cook_promotion_for_observation_in_store(
         };
         if !matches!(
             promotion.status,
-            AgentTaskPromotionStatus::VerificationPending | AgentTaskPromotionStatus::GateDeferred
+            AgentTaskPromotionStatus::VerificationPending
+                | AgentTaskPromotionStatus::GateEnvironmentUnavailable
         ) {
             return Ok(json!({
                 "behavior": behavior,
@@ -833,7 +835,7 @@ pub fn preflight_cook_promotion_for_observation_in_store(
     }
     let (aggregate, outcome) = continuation_outcome(run_id, aggregate)?;
     if let Some(promotion) = persisted_promotion_from_record(run_id, record)? {
-        let behavior = if promotion.status == AgentTaskPromotionStatus::GateDeferred {
+        let behavior = if promotion.status == AgentTaskPromotionStatus::GateEnvironmentUnavailable {
             "resume_deferred_gates"
         } else if promotion.status == AgentTaskPromotionStatus::VerificationPending {
             "resume_verification_pending"
@@ -991,7 +993,8 @@ pub(crate) fn promote_or_load_attempt_in_store(
         // fingerprint-bound candidate without invoking the provider again.
         if !matches!(
             promotion.status,
-            AgentTaskPromotionStatus::VerificationPending | AgentTaskPromotionStatus::GateDeferred
+            AgentTaskPromotionStatus::VerificationPending
+                | AgentTaskPromotionStatus::GateEnvironmentUnavailable
         ) {
             if promotion.provenance.get("replacement_gate_proof").is_some() {
                 validate_replacement_promotion_in_store(lifecycle_store, &promotion)?;
@@ -1002,7 +1005,8 @@ pub(crate) fn promote_or_load_attempt_in_store(
     if let Some(promotion) = persisted_promotion_for_attempt_in_store(lifecycle_store, run_id)? {
         if matches!(
             promotion.status,
-            AgentTaskPromotionStatus::VerificationPending | AgentTaskPromotionStatus::GateDeferred
+            AgentTaskPromotionStatus::VerificationPending
+                | AgentTaskPromotionStatus::GateEnvironmentUnavailable
         ) {
             let target_path = promotion.target.path.as_deref().or_else(|| {
                 promotion.provenance.get("worktree_path").and_then(Value::as_str)

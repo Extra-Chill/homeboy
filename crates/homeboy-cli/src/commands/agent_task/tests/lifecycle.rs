@@ -2650,10 +2650,10 @@ fn recover_public_entry_returns_before_blocking_gate_and_records_daemon_result()
         let started = root.path().join("started");
         let gate = json!({"id": "gate-1", "status": "deferred", "command": ["sh", "-c", "true"], "exit_code": 1});
         let promotion = json!({
-            "status": "gates_deferred", "source": {"kind": "run", "task_id": "provider", "run_id": run_id},
+            "status": "gate_environment_unavailable", "source": {"kind": "run", "task_id": "provider", "run_id": run_id},
             "to_worktree": "fixture@recover", "target": {"worktree": "fixture@recover"},
             "candidate": null, "deterministic_gates": [gate],
-            "operator_notification": {"status": "blocked", "message": "gates_deferred"}
+            "operator_notification": {"status": "blocked", "message": "gate_environment_unavailable"}
         });
         let _: homeboy::agents::agent_tasks::promotion::AgentTaskPromotionReport =
             serde_json::from_value(promotion.clone()).unwrap();
@@ -2787,12 +2787,12 @@ fn recover_regate_verify_replaces_gates_for_an_incomplete_unjudged_candidate() {
             .record_promotion(
                 run_id,
                 json!({
-                    "status": "gates_deferred",
+                    "status": "gate_environment_unavailable",
                     "source": {"kind": "run", "task_id": "provider", "run_id": run_id},
                     "to_worktree": "fixture@recover", "target": {"worktree": "fixture@recover"},
                     "candidate": {"base_sha": "a".repeat(40), "candidate_sha": "b".repeat(40), "tree_sha": "c".repeat(40)},
                     "deterministic_gates": [gate],
-                    "operator_notification": {"status": "blocked", "message": "gates_deferred"}
+                    "operator_notification": {"status": "blocked", "message": "gate_environment_unavailable"}
                 }),
             )
             .unwrap();
@@ -2885,12 +2885,12 @@ fn recover_regate_carries_explicit_gate_budgets_for_a_no_progress_candidate() {
             .record_promotion(
                 run_id,
                 json!({
-                    "status": "gates_deferred",
+                    "status": "gate_environment_unavailable",
                     "source": {"kind": "run", "task_id": "provider", "run_id": run_id},
                     "to_worktree": "fixture@recover", "target": {"worktree": "fixture@recover"},
                     "candidate": {"base_sha": "a".repeat(40), "candidate_sha": "b".repeat(40), "tree_sha": "c".repeat(40)},
                     "deterministic_gates": [gate],
-                    "operator_notification": {"status": "blocked", "message": "gates_deferred"}
+                    "operator_notification": {"status": "blocked", "message": "gate_environment_unavailable"}
                 }),
             )
             .unwrap();

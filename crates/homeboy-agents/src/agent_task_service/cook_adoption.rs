@@ -900,7 +900,10 @@ pub(crate) fn adopt_cook_candidate_with_dispatcher_and_backend_for_attempt_with_
         // Name the verdict the feedback actually reached. Only a red declared
         // gate is a gate failure; green gates with another unmet requirement
         // must not be reported as failed verification (#9692).
-        let (status, reason) = if feedback.status == AgentTaskCookLoopStatus::GatesDeferred {
+        let (status, reason) = if feedback.status
+            == AgentTaskCookLoopStatus::GateEnvironmentUnavailable
+            && feedback.failed_gates.is_empty()
+        {
             (
                 CookStatus::GateEnvironmentUnavailable,
                 super::cook::gate_environment_unavailable_stop_reason(&promotion, cook_id),
@@ -990,7 +993,7 @@ pub(crate) fn adopt_cook_candidate_with_dispatcher_and_backend_for_attempt_with_
 }
 
 fn adoption_incomplete_reason(status: AgentTaskCookLoopStatus, label: &str) -> String {
-    if status == AgentTaskCookLoopStatus::GatesDeferred {
+    if status == AgentTaskCookLoopStatus::GateEnvironmentUnavailable {
         "adopted candidate verification was deferred; the candidate was not judged".to_string()
     } else {
         format!(
@@ -1005,8 +1008,10 @@ mod outcome_tests {
 
     #[test]
     fn deferred_verification_does_not_claim_a_pass() {
-        let reason =
-            adoption_incomplete_reason(AgentTaskCookLoopStatus::GatesDeferred, "gates_deferred");
+        let reason = adoption_incomplete_reason(
+            AgentTaskCookLoopStatus::GateEnvironmentUnavailable,
+            "gate_environment_unavailable",
+        );
         assert!(reason.contains("not judged"));
         assert!(!reason.contains("passed"));
     }
