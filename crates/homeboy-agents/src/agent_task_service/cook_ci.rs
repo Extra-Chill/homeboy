@@ -7,6 +7,9 @@ use serde_json::{json, Value};
 use std::time::Duration;
 
 /// Bounded cadence for the Cook driver's automatic CI re-poll.
+/// Progress phase a Cook reports while it waits for required PR checks.
+pub const AWAITING_CI_PHASE: &str = "awaiting_ci";
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct CookCiPollCadence {
     pub interval: Duration,

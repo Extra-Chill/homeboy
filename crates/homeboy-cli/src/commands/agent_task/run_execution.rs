@@ -688,6 +688,18 @@ pub(super) fn run_preflight_cook_execution(
     // Keep the lease across every workflow resume, until this Cook returns.
     let local_dispatch_lease = std::sync::Mutex::new(None);
     let durable_observer = |event: &agent_task_service::CookProgressEvent<'_>| {
+        // Required checks run remotely; the local slot only bounds provider,
+        // promotion and gate work on this host. Keep the admitted marker so a
+        // workflow resume does not re-admit.
+        if event.phase == agent_task_service::AWAITING_CI_PHASE {
+            if let Some(held) = local_dispatch_lease
+                .lock()
+                .expect("local dispatch lease lock")
+                .as_mut()
+            {
+                held.take();
+            }
+        }
         if no_progress && event.phase != "durable_identity" {
             return Ok(());
         }
