@@ -1050,7 +1050,7 @@ pub fn ensure_recover_failure_contract(mut report: Value, exit_code: i32, id: &s
         failure["next_command"] = Value::String(declared.unwrap_or_else(|| {
             format!(
                 "homeboy agent-task diagnose {}",
-                homeboy_core::engine::shell::quote_arg(&run_id)
+                homeboy_core::error::posix_quote_arg(&run_id)
             )
         }));
     }
