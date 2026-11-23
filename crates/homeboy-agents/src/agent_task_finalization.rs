@@ -315,6 +315,7 @@ fn finalize_pr_with_backend_mode<B: AgentTaskPrFinalizationBackend>(
             branch: options.base.clone(),
             sha: base.sha.clone(),
             publication_sha: None,
+            behind_by: None,
         },
     );
     options.review_dossier.evidence.sort_by(|left, right| {
@@ -413,10 +414,21 @@ fn finalize_pr_with_backend_mode<B: AgentTaskPrFinalizationBackend>(
             }
         }
     }
+    // The candidate publishes on its gated base (#17675); a base that moved
+    // since is measured and surfaced, never hidden (#17610).
     let publication_base_sha = backend.publication_base_sha(&options.path, &options.base)?;
+    let behind_by = match publication_base_sha.as_deref() {
+        Some(live) if live == base.sha => Some(0),
+        Some(live) if !base.sha.is_empty() => {
+            backend.publication_base_behind_by(&options.path, &options.base, &base.sha, live)
+        }
+        _ => None,
+    };
     intent.target.publication_base_sha = publication_base_sha.clone();
+    intent.target.publication_base_behind_by = behind_by;
     if let Some(verified_base) = options.review_dossier.verified_base.as_mut() {
         verified_base.publication_sha = publication_base_sha;
+        verified_base.behind_by = behind_by;
     }
     let body = render_review_dossier_for_worktree(
         &options.review_dossier,
@@ -1086,6 +1098,7 @@ fn build_pr_publication_intent(
             base: Some(options.base.clone()),
             verified_base_sha: Some(base.sha.clone()),
             publication_base_sha: None,
+            publication_base_behind_by: None,
             head: Some(head.to_string()),
             url: None,
         },

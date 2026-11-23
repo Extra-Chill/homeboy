@@ -71,6 +71,14 @@ pub fn gate_cpu_slice(reserve: &[usize], slot: usize) -> Vec<usize> {
     cpu_share(reserve, Some(gate_slots(reserve)), slot, true).unwrap_or_default()
 }
 
+/// The CPUs a host-wide local gate in `slot` may use: one of `slots` equal,
+/// disjoint shares of `allowed`. Gates of Cooks run with `--placement local`
+/// on a Lab host otherwise inherit every CPU and size their tooling to the
+/// whole machine (#18833). `None` when the share would already be every CPU.
+pub fn local_gate_cpu_slice(allowed: &[usize], slots: usize, slot: usize) -> Option<Vec<usize>> {
+    cpu_share(allowed, Some(slots.max(1)), slot, false)
+}
+
 /// Direct runner executions are the gate lane; workflow steps use step permits.
 pub fn is_gate(job: &crate::api_jobs::Job) -> bool {
     job.runner_job_projection
@@ -1625,6 +1633,22 @@ mod tests {
         });
     }
 
+    #[test]
+    fn local_gate_cpu_slices_are_disjoint_slot_shares() {
+        let cpus = (0..32).collect::<Vec<_>>();
+        assert_eq!(
+            local_gate_cpu_slice(&cpus, 16, 0),
+            Some(vec![0, 1]),
+            "default host slots give each gate a two-CPU share"
+        );
+        assert_eq!(local_gate_cpu_slice(&cpus, 4, 3), Some((24..32).collect()));
+        assert_eq!(local_gate_cpu_slice(&cpus, 1, 0), None);
+        assert_eq!(local_gate_cpu_slice(&[], 4, 0), None);
+        let first = local_gate_cpu_slice(&cpus, 3, 0).unwrap();
+        let second = local_gate_cpu_slice(&cpus, 3, 1).unwrap();
+        assert!(first.iter().all(|cpu| !second.contains(cpu)));
+    }
+
     /// A pinned step's tree sees only its share: `nproc` sizes to the slice.
     #[test]
     #[cfg(target_os = "linux")]
@@ -1633,6 +1657,7 @@ mod tests {
             let allowed = allowed_cpus();
             let mut slices = cpu_slice(&allowed, Some(2), 1)
                 .into_iter()
+                .chain(local_gate_cpu_slice(&allowed, 2, 1))
                 .collect::<Vec<_>>();
             if allowed.len() >= 5 {
                 std::env::set_var("HOMEBOY_LAB_GATE_RESERVE", "4");

@@ -90,6 +90,9 @@ struct GateExecution<'a> {
     /// command share one budget, so the command's wall-clock limit (even a
     /// declared plan's own suite timeout) never runs past it (#16938).
     deadline: Option<Instant>,
+    /// Host-slot CPU share the gate process tree is pinned to, so `nproc`
+    /// inside the gate reports the share rather than every host CPU (#18833).
+    cpus: Option<&'a [usize]>,
 }
 
 /// Shared deterministic-gate verification fields used by every agent-task

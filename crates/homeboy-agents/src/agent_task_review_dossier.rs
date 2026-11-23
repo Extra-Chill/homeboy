@@ -218,6 +218,9 @@ pub struct AgentTaskReviewVerifiedBase {
     /// The live base observed immediately before publication, when observable.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub publication_sha: Option<String>,
+    /// Commits the live base holds beyond `sha` at publication (#17610).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub behind_by: Option<u64>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -1437,9 +1440,13 @@ fn render_verification(dossier: &AgentTaskReviewDossier) -> Option<String> {
         .as_ref()
         .map(|base| {
             let advanced = match base.publication_sha.as_deref() {
-                Some(observed) if observed != base.sha => {
-                    format!(" advanced to `{}`", short_sha(observed))
-                }
+                Some(observed) if observed != base.sha => match base.behind_by {
+                    Some(count) => format!(
+                        " advanced to `{}` (base_behind_by: {count}; rebase onto the current base before merging)",
+                        short_sha(observed)
+                    ),
+                    None => format!(" advanced to `{}`", short_sha(observed)),
+                },
                 Some(_) => " unchanged".to_string(),
                 None => " (publication state not recorded)".to_string(),
             };
@@ -3179,6 +3186,7 @@ mod tests {
             branch: "main".into(),
             sha: "6229120662bb1f753d8e8657c391d4875a31273f".into(),
             publication_sha: Some("6229120662bb1f753d8e8657c391d4875a31273f".into()),
+            behind_by: None,
         });
         value
             .validate(&default_profile())
@@ -3446,6 +3454,7 @@ mod tests {
             branch: "main".into(),
             sha: "6229120662bb1f753d8e8657c391d4875a31273f".into(),
             publication_sha: Some("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".into()),
+            behind_by: None,
         });
         let body = render_review_dossier(&value, &default_profile());
         assert!(
@@ -3453,6 +3462,18 @@ mod tests {
             "{body}"
         );
         assert_eq!(body.matches("6229120").count(), 1, "{body}");
+
+        // #17610: a measured drift names how far behind the gated base is.
+        if let Some(base) = value.verified_base.as_mut() {
+            base.behind_by = Some(19);
+        }
+        let body = render_review_dossier(&value, &default_profile());
+        assert!(
+            body.contains(
+                "Base `main`@`6229120` advanced to `aaaaaaa` (base_behind_by: 19; rebase onto the current base before merging)."
+            ),
+            "{body}"
+        );
     }
 
     #[test]
