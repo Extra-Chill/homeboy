@@ -691,7 +691,7 @@ pub(super) fn run_preflight_cook_execution(
         // Required checks run remotely; the local slot only bounds provider,
         // promotion and gate work on this host. Keep the admitted marker so a
         // workflow resume does not re-admit.
-        if event.phase == agent_task_service::AWAITING_CI_PHASE {
+        if event.phase == homeboy::agents::agent_task_service::AWAITING_CI_PHASE {
             if let Some(held) = local_dispatch_lease
                 .lock()
                 .expect("local dispatch lease lock")
