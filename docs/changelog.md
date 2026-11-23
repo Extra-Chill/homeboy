@@ -4,6 +4,17 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.495.1] - 2026-11-23
+
+### Changed
+- unify metric comparison ownership in engine primitives
+- delete the agent_tasks re-export façade so each API has one import path
+
+### Fixed
+- derive the next issue Cook generation past the highest one already used
+- finalize the Cook destination worktree at its terminal outcome
+- require verified repro before opening ready PRs
+
 ## [0.495.0] - 2026-11-23
 
 ### Added
