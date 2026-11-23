@@ -167,6 +167,95 @@ fn spec_rejects_unknown_fields_and_parses_policy() {
     assert!(BenchCompareSpec::parse(r#"{"corpsu":"x"}"#).is_err());
 }
 
+#[test]
+fn results_reject_missing_empty_and_skipped_evaluation() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("results.json");
+    assert!(super::execute::load_side_results(&path).is_err());
+    for json in [
+        r#"{}"#,
+        r#"{"routes":[]}"#,
+        r#"{"status":"skipped","reason":"no evaluator","routes":[{"route":"/"}]}"#,
+        r#"{"evaluation_status":"failed","routes":[{"route":"/"}]}"#,
+    ] {
+        std::fs::write(&path, json).unwrap();
+        assert!(super::execute::load_side_results(&path).is_err(), "{json}");
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn concurrent_compares_own_refs_and_candidate_files_and_fail_closed() {
+    let repo = tempfile::tempdir().unwrap();
+    git(repo.path(), &["init", "--quiet"]);
+    std::fs::write(repo.path().join("candidate"), "committed").unwrap();
+    git(repo.path(), &["add", "."]);
+    git(repo.path(), &["commit", "--quiet", "-m", "fixture"]);
+    std::fs::write(repo.path().join("candidate"), "dirty").unwrap();
+    let run = |id: usize, tools: Vec<String>, runner: &str| {
+        let artifacts = tempfile::tempdir().unwrap();
+        let stop = AtomicBool::new(false);
+        let output = run_bench_compare(&BenchCompareRequest {
+            compare_id: format!("concurrent-{id}"),
+            component_id: "fixture".into(),
+            repo_root: repo.path().into(),
+            component_relative: Default::default(),
+            base: "HEAD".into(),
+            head: WORKTREE_HEAD.into(),
+            corpus: repo.path().into(),
+            runner: vec![runner.into()],
+            required_tools: tools,
+            fail_on: BenchCompareFailOn::Never,
+            side_timeout: Duration::from_secs(10),
+            artifact_dir: artifacts.path().into(),
+            stop: &stop,
+        })
+        .unwrap();
+        output
+    };
+    // The login shell is used for every step, not just for preflight. Bash
+    // exposes this directly; other user shells need not implement shopt.
+    let login = run(
+        0,
+        vec![],
+        r#"if [ -n "$BASH_VERSION" ]; then shopt -q login_shell || exit 8; fi; printf '{"routes":[{"route":"/"}]}' > "$HOMEBOY_BENCH_COMPARE_RESULTS""#,
+    );
+    assert!(login.policy.passed, "{:?}", login.policy);
+    // A shared clone would race on this ref; direct WORKTREE execution would
+    // change the component's dirty candidate and leak the ref into its repo.
+    let runner = r#"git update-ref refs/heads/owned HEAD '' && if [ "$HOMEBOY_BENCH_COMPARE_SIDE" = head ]; then test "$(cat candidate)" = dirty || exit 9; fi; echo changed > candidate; sleep 0.1; printf '{"routes":[{"route":"/"}]}' > "$HOMEBOY_BENCH_COMPARE_RESULTS""#;
+    std::thread::scope(|scope| {
+        let a = scope.spawn(|| run(1, vec!["git".into()], runner));
+        let b = scope.spawn(|| run(2, vec!["git".into()], runner));
+        for result in [a.join().unwrap(), b.join().unwrap()] {
+            assert!(result.policy.passed, "{:?}", result.policy);
+            assert_eq!(result.summary.unchanged, 1);
+        }
+    });
+    assert_eq!(
+        std::fs::read_to_string(repo.path().join("candidate")).unwrap(),
+        "dirty"
+    );
+    let missing = run(
+        3,
+        vec!["homeboy-nonexistent-evaluator-18818".into()],
+        runner,
+    );
+    assert!(!missing.policy.passed);
+    assert!(missing.base.error.unwrap().contains("preflight"));
+    assert!(missing.head.steps.is_empty());
+    for command in [
+        "true",
+        "exit 7",
+        r#"printf '{"routes":[]}' > "$HOMEBOY_BENCH_COMPARE_RESULTS""#,
+    ] {
+        let failed = run(4, vec![], command);
+        assert!(!failed.policy.passed);
+        assert!(!failed.policy.violations.is_empty());
+        assert!(failed.routes.is_empty());
+    }
+}
+
 fn git(root: &Path, args: &[&str]) {
     let status = Command::new("git")
         .args(args)
@@ -208,6 +297,7 @@ fn compare_runs_both_sides_and_leaves_no_processes_or_worktrees() {
         base: "HEAD~1".to_string(),
         head: "HEAD".to_string(),
         corpus: corpus.path().to_path_buf(),
+        required_tools: vec![],
         runner: vec![runner.to_string()],
         fail_on: BenchCompareFailOn::NewBlockers,
         side_timeout: Duration::from_secs(60),
@@ -325,6 +415,7 @@ fn worktree_head_gate_passes_when_unchanged_and_fails_on_regression() {
             base: "HEAD".to_string(),
             head: WORKTREE_HEAD.to_string(),
             corpus: corpus.path().to_path_buf(),
+            required_tools: vec![],
             runner: vec![runner.to_string()],
             fail_on: BenchCompareFailOn::NewBlockers,
             side_timeout: Duration::from_secs(60),
