@@ -316,6 +316,7 @@ fn status_without_feedback(args: StatusArgs) -> CmdResult<Value> {
         }
         attach_gate_failure(&mut value, &record);
         attach_recovery_step(&mut value, &record);
+        attach_local_dispatch_wait(&mut value, &record);
     }
     attach_promotion_replay(&mut value, &target.run_id, &args.run_id);
     if value["action_eligibility"]["actions"]

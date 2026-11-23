@@ -293,6 +293,7 @@ pub(in crate::commands::agent_task) fn diagnose(args: DiagnoseArgs) -> CmdResult
     attach_durable_read_availability(&mut value, &durable_read.unavailable_sources);
     attach_cook_completion(&mut value, &record);
     attach_lab_admission_wait(&mut value, admission.as_ref());
+    attach_local_dispatch_wait(&mut value, &record);
     if let Some(selection) = target.selection {
         value["candidate_selection"] = json!(selection);
     }

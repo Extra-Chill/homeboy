@@ -2949,12 +2949,7 @@ fn defer_until_runner_eligible(
             ]),
         )
     })?;
-    let program = std::env::current_exe().map_err(|error| {
-        Error::internal_io(
-            error.to_string(),
-            Some("resolve current executable for a runner-wait step".to_string()),
-        )
-    })?;
+    let program = homeboy::core::daemon::step_job::durable_step_program()?;
     let portable_args = portable_route_args(normalized_args);
     let source = authoritative_lab_source_path(&portable_args)?;
     let cwd = source.canonicalize().map_err(|error| {

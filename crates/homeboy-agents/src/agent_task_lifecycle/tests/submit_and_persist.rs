@@ -824,8 +824,7 @@ fn accepted_daemon_context_keeps_a_pidless_runner_submission_live() {
     .record;
     assert_eq!(status.runner_job_id(), Some(context.runner_job_id()));
     assert!(status.metadata.get("runner_execution_context").is_some());
-    assert!(status.metadata.get("stale_running").is_none());
-    assert!(status.metadata.get("stale_running_reason").is_none());
+    assert!(!status.is_stale_running());
 }
 
 /// Stays on `with_isolated_home` because the retry API still resolves its store
@@ -3077,10 +3076,7 @@ fn disconnected_proxy_projects_terminal_child_aggregate_once_reachable() {
 
     record.annotate_runner_disconnected();
     assert_eq!(record.metadata["runner_liveness"], "disconnected");
-    assert_eq!(
-        record.metadata["stale_running_reason"],
-        "runner_disconnected"
-    );
+    assert_eq!(record.stale_running_reason(), Some("runner_disconnected"));
     assert_eq!(record.lifecycle.heartbeat, Some(heartbeat));
 
     let child_plan = test_plan();

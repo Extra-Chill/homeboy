@@ -4,6 +4,19 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.492.0] - 2026-11-23
+
+### Added
+- accept checkout path or owner/repo for cook --repo and scope issue→PR rework to the issue's repo
+- report base_behind_by when a Cook publishes on a stale base
+
+### Changed
+- Tell providers a pending Homeboy gate never makes a task incomplete
+
+### Fixed
+- pin local Cook gates to their slot CPU share and share base admission across worktrees
+- resolve Lab-host placement locally and announce admission failures
+
 ## [0.491.1] - 2026-11-23
 
 ### Changed

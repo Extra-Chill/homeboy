@@ -1731,8 +1731,7 @@ fn reserved_lab_admission_recovers_runner_job_after_client_loss() {
             recovered.lab_handoff.as_ref().map(|handoff| handoff.state),
             Some(AgentTaskLabHandoffState::Accepted)
         );
-        assert!(recovered.metadata.get("stale_running").is_none());
-        assert!(recovered.metadata.get("stale_running_reason").is_none());
+        assert!(!recovered.is_stale_running());
     });
 }
 
@@ -2349,8 +2348,7 @@ fn reachable_running_child_clears_disconnected_liveness_and_refreshes_heartbeat(
 
     assert_eq!(record.state(), RunExecutionState::Running);
     assert_eq!(record.metadata["runner_liveness"], "reachable");
-    assert!(record.metadata.get("stale_running").is_none());
-    assert!(record.metadata.get("stale_running_reason").is_none());
+    assert!(!record.is_stale_running());
     assert!(record.metadata.get("retryable").is_none());
     assert_ne!(record.lifecycle.heartbeat, disconnected_heartbeat);
 }
@@ -2497,11 +2495,8 @@ fn disconnected_runner_marks_nonterminal_proxy_stale_without_advancing_heartbeat
     assert_eq!(record.state(), RunExecutionState::Running);
     assert_eq!(record.lifecycle.heartbeat, heartbeat);
     assert_eq!(record.metadata["runner_liveness"], "disconnected");
-    assert_eq!(record.metadata["stale_running"], true);
-    assert_eq!(
-        record.metadata["stale_running_reason"],
-        "runner_disconnected"
-    );
+    assert!(record.metadata.get("stale_running").is_none());
+    assert_eq!(record.stale_running_reason(), Some("runner_disconnected"));
 }
 
 #[test]
@@ -3177,19 +3172,15 @@ fn status_marks_running_run_without_owner_as_stale() {
     .record;
 
     assert_eq!(loaded.state(), RunExecutionState::Running);
-    assert_eq!(loaded.metadata["stale_running"], json!(true));
-    assert_eq!(
-        loaded.metadata["stale_running_reason"],
-        "missing_runner_pid"
-    );
-    assert_eq!(loaded.metadata["provider_boundary"]["status"], "absent");
+    assert_eq!(loaded.stale_running_reason(), Some("missing_runner_pid"));
 
-    // Read-side reconciliation persists the classification, so repeated
-    // status reads converge instead of reviving a ghost run as active.
+    // Staleness is derived on every read, never persisted, so repeated status
+    // reads converge instead of reviving a ghost run as active.
     let persisted = lifecycle_store
         .read_record("run-stale-missing-owner")
         .expect("persisted record");
-    assert_eq!(persisted.metadata["stale_running"], json!(true));
+    assert!(persisted.metadata.get("stale_running").is_none());
+    assert!(persisted.is_stale_running());
     let repeated = reconcile_status_in_store(
         &lifecycle_store,
         "run-stale-missing-owner",
@@ -3198,7 +3189,7 @@ fn status_marks_running_run_without_owner_as_stale() {
     )
     .expect("repeated status loaded")
     .record;
-    assert_eq!(repeated.metadata["stale_running"], json!(true));
+    assert!(repeated.is_stale_running());
 }
 
 #[test]
@@ -3217,7 +3208,7 @@ fn status_keeps_fresh_planned_runner_submission_live() {
         })
         .expect("controller owner removed");
         let stale = reconcile_status(run_id).expect("pre-planning status loaded");
-        assert_eq!(stale.metadata["stale_running"], true);
+        assert!(stale.is_stale_running());
 
         record_lab_offload_phase(
             run_id,
@@ -3237,7 +3228,7 @@ fn status_keeps_fresh_planned_runner_submission_live() {
             loaded.metadata["runner_execution_record"]["status"],
             "planned"
         );
-        assert!(loaded.metadata.get("stale_running").is_none());
+        assert!(!loaded.is_stale_running());
 
         rewrite_record_for_test(run_id, |record| {
             record.updated_at = Some(
@@ -3250,8 +3241,8 @@ fn status_keeps_fresh_planned_runner_submission_live() {
         })
         .expect("planned submission aged past heartbeat threshold");
         let stale = reconcile_status(run_id).expect("stale status loaded");
-        assert_eq!(stale.metadata["stale_running"], true);
-        assert_eq!(stale.metadata["stale_running_reason"], "missing_runner_pid");
+        assert!(stale.is_stale_running());
+        assert_eq!(stale.stale_running_reason(), Some("missing_runner_pid"));
     });
 }
 
@@ -3284,7 +3275,7 @@ fn planned_lab_retry_uses_only_fresh_pre_provider_heartbeats() {
         let fresh = reconcile_status(run_id).unwrap();
         assert!(fresh.is_controller_pre_provider_phase());
         assert!(fresh.has_fresh_controller_pre_provider_heartbeat());
-        assert!(fresh.metadata.get("stale_running").is_none());
+        assert!(!fresh.is_stale_running());
 
         rewrite_record_for_test(run_id, |record| {
             let expired = (chrono::Utc::now()
@@ -3298,8 +3289,8 @@ fn planned_lab_retry_uses_only_fresh_pre_provider_heartbeats() {
         .unwrap();
         let stale = reconcile_status(run_id).unwrap();
         assert!(!stale.has_fresh_controller_pre_provider_heartbeat());
-        assert_eq!(stale.metadata["stale_running"], true);
-        assert_eq!(stale.metadata["stale_running_reason"], "missing_runner_pid");
+        assert!(stale.is_stale_running());
+        assert_eq!(stale.stale_running_reason(), Some("missing_runner_pid"));
     });
 }
 
@@ -3336,7 +3327,7 @@ fn planned_lab_proxy_stamps_heartbeat_without_a_runner_pid() {
         let loaded = reconcile_status(run_id).expect("status loaded");
         assert!(loaded.has_fresh_update(), "{loaded:?}");
         assert!(loaded.has_fresh_controller_pre_provider_heartbeat());
-        assert!(loaded.metadata.get("stale_running").is_none());
+        assert!(!loaded.is_stale_running());
         assert_eq!(
             loaded.metadata["runner_execution_record"]["status"],
             "planned"

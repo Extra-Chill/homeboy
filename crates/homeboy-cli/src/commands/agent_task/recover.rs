@@ -39,17 +39,22 @@ pub(super) fn recover(args: RecoverArgs) -> CmdResult<Value> {
         match homeboy::core::foreground_wait::with_foreground_wait(policy, || recover_action(args))
         {
             Ok(result) => result,
-            Err(error) => (
-                serde_json::json!({
-                    "run_id": id,
-                    "failure": {
-                        "code": error.code.as_str(),
-                        "message": error.message,
-                        "details": error.details,
-                    },
-                }),
-                1,
-            ),
+            // Keep the error's exit-code class (2 for an unknown or invalid
+            // ID) while still answering with a structured failure report.
+            Err(error) => {
+                let exit_code = crate::commands::utils::response::exit_code_for_error(error.code);
+                (
+                    serde_json::json!({
+                        "run_id": id,
+                        "failure": {
+                            "code": error.code.as_str(),
+                            "message": error.message,
+                            "details": error.details,
+                        },
+                    }),
+                    exit_code,
+                )
+            }
         };
     let exit_code = foreground_stop_exit_code(&report).unwrap_or(exit_code);
     Ok((

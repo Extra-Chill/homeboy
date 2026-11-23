@@ -806,6 +806,30 @@ pub(super) fn runner_cancellation_diagnostic(
 
 /// Admission is queueing, not a stalled provider execution. Preserve the same
 /// driver-lock observation used by the recovery planner.
+pub(super) fn attach_local_dispatch_wait(value: &mut Value, record: &AgentTaskRunRecord) {
+    if record
+        .metadata
+        .pointer("/cook_progress/phase")
+        .and_then(Value::as_str)
+        != Some("queued_local_pressure")
+    {
+        return;
+    }
+    if let Some(wait) = record
+        .metadata
+        .pointer("/cook_progress/activity/local_dispatch_wait")
+    {
+        value["local_dispatch_wait"] = wait.clone();
+        value["blocker"] = json!({
+            "code": "local_pressure",
+            "message": "Local dispatch waiting for host pressure to drop",
+            "details": wait,
+        });
+        value["next_attempt_at"] = wait["next_attempt_at"].clone();
+        value["waiting_for"] = json!("local_pressure");
+    }
+}
+
 pub(super) fn attach_lab_admission_wait(
     value: &mut Value,
     admission: Option<&agent_task_service_direct::QueuedAdmission>,

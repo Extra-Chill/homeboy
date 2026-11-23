@@ -1099,6 +1099,9 @@ fn render_status_summary(payload: &Value) -> Option<String> {
         if let Some(position) = details["queue_position"].as_u64() {
             lines.push(format!("Queue position: {position}"));
         }
+        if let Some(policy) = details["queue_policy"].as_str() {
+            lines.push(format!("Queue position / ETA: unknown ({policy})"));
+        }
         if let Some(time) = details["next_attempt_at"].as_str() {
             lines.push(format!("Next attempt: {time}"));
         }
@@ -3011,6 +3014,33 @@ mod tests {
         assert!(summary.contains("Retry: automatic reconciliation scheduled"));
         assert!(summary.contains("Next: homeboy agent-task status unmaterialized-cook --watch\n"));
         assert!(!summary.contains("Next: homeboy agent-task recover unmaterialized-cook\n"));
+    }
+
+    #[test]
+    fn local_pressure_summary_reports_process_owners_thresholds_and_retry() {
+        let payload = json!({
+            "schema": "homeboy/control-plane-run/v1", "run": "local-cook", "state": "queued",
+            "blocker": {"code": "local_pressure", "message": "Local dispatch waiting for host pressure to drop",
+                "details": {
+                    "pressure": {"load1": 134}, "pressure_thresholds": {"load1": 48},
+                    "pressure_holders": [{"user": "chubes", "command": "php", "count": 440, "pids": [101]}],
+                    "next_attempt_at": "2026-11-21T00:00:15Z",
+                    "queue_policy": "pressure polling; no ordered queue or admission ETA"
+                }}
+        });
+        let summary = render_agent_task_summary(AgentTaskSummaryKind::Status, &payload).unwrap();
+        for expected in [
+            "134",
+            "48",
+            "chubes",
+            "php",
+            "440",
+            "101",
+            "Next attempt: 2026-11-21T00:00:15Z",
+            "Queue position / ETA: unknown",
+        ] {
+            assert!(summary.contains(expected), "{summary}");
+        }
     }
 
     #[test]
