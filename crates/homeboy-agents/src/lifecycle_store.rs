@@ -2649,11 +2649,8 @@ fn agent_task_resource_projection(
             .updated_at
             .clone()
             .unwrap_or_else(|| record.submitted_at.clone()),
-        state: serde_json::to_value(record.state())
-            .map_err(|error| Error::internal_json(error.to_string(), None))?
-            .as_str()
-            .unwrap_or("unknown")
-            .to_string(),
+        // Run state is derived from the lifecycle record on read, never stored here.
+        state: String::new(),
         aliases,
         eligibility: serde_json::to_value(
             crate::agent_task_lifecycle::lifecycle_action_eligibility_with_roots(
@@ -2729,7 +2726,7 @@ pub(super) fn persist_cook_index_in_store(
                     .last()
                     .map(|entry| entry.recorded_at.clone())
                     .unwrap_or_default(),
-                state: "unknown".to_string(),
+                state: String::new(),
                 aliases: vec![cook_id.clone()],
                 eligibility: json!({}),
                 provenance: json!({
@@ -2777,7 +2774,7 @@ pub(super) fn write_cook_index_for_test(index: &AgentTaskCookIndex) -> Result<()
                 .last()
                 .map(|attempt| attempt.recorded_at.clone())
                 .unwrap_or_else(|| "fixture".to_string()),
-            state: "unknown".to_string(),
+            state: String::new(),
             aliases: vec![cook_id.clone()],
             eligibility: json!({}),
             provenance: json!({

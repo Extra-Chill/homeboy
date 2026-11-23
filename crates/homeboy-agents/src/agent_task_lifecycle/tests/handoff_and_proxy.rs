@@ -1492,7 +1492,7 @@ fn detached_cook_attempt_proxy_advances_after_daemon_acceptance() {
         accepted.metadata["phase_activity"],
         "controller handoff complete; awaiting authoritative runner daemon result"
     );
-    assert_eq!(accepted.metadata["runner_handoff"]["state"], "in_flight");
+    assert!(!accepted.state().is_terminal());
     assert!(accepted.metadata.get("runner_queue").is_none());
     assert_eq!(
         accepted.metadata["runner_handoff"]["continuation"]["intent"],

@@ -127,7 +127,6 @@ fn terminal_transition_settles_cook_observations_and_span() {
                 &store,
                 &attempt,
                 status,
-                success,
                 i32::from(!success),
             )
             .unwrap();

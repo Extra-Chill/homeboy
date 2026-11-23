@@ -3633,7 +3633,6 @@ pub fn record_cook_terminal_result_in_store(
     lifecycle_store: &AgentTaskLifecycleStore,
     run_id: &str,
     terminal_status: &str,
-    terminal_success: bool,
     exit_code: i32,
 ) -> Result<AgentTaskRunRecord> {
     let run_id = sanitize_run_id(run_id);
@@ -3649,7 +3648,6 @@ pub fn record_cook_terminal_result_in_store(
             return false;
         }
         progress.insert("terminal_status".to_string(), json!(terminal_status));
-        progress.insert("terminal_success".to_string(), json!(terminal_success));
         progress.insert("exit_code".to_string(), json!(exit_code));
         // A cancelled Cook keeps its cancellation: the provenance that minted
         // its `run.cancelled` receipt is valid only on a `Cancelled` record

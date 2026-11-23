@@ -1404,7 +1404,7 @@ fn foreground_terminal_daemon_projection_finishes_success_and_failure_runs_once(
             projected.metadata["runner_execution_record"]["status"],
             expected_execution_status
         );
-        assert_eq!(projected.metadata["runner_handoff"]["state"], "terminal");
+        assert!(projected.state().is_terminal() && projected.runner_job_id().is_some());
         assert_eq!(
             projected.metadata["runner_result_synchronization"]["state"],
             "projected"
@@ -1615,7 +1615,7 @@ fn verified_pre_provider_runner_cancellation_terminalizes_and_replays_idempotent
         record.metadata["runner_result_synchronization"]["state"],
         "projected"
     );
-    assert_eq!(record.metadata["runner_handoff"]["state"], "terminal");
+    assert!(record.runner_job_id().is_some());
     assert_eq!(record.metadata["runner_job_events"], json!(snapshot.events));
     assert_eq!(
         record.metadata["cancellation_provenance"]["cause"],
