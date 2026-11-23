@@ -1144,7 +1144,7 @@ pub fn register_controller_upgrade_admission_provider() {
 }
 
 /// Label where a run executes so an operator can trace the runner process.
-fn run_source(record: &AgentTaskRunRecord) -> String {
+pub(super) fn run_source(record: &AgentTaskRunRecord) -> String {
     if let Some(runner_id) = record.runner_id() {
         return format!("runner:{runner_id}");
     }
@@ -1198,13 +1198,8 @@ fn discovery_run(
     let last_update_age_minutes = age_minutes(last_update.as_deref(), now);
     let source = run_source(&record);
     let liveness = live.map(|live| classify_liveness(&record, now, live));
-    let stale_reason = metadata_string(
-        &record.metadata,
-        agent_task_lifecycle::METADATA_KEY_STALE_RUNNING_REASON,
-    )
-    .or_else(|| {
-        (liveness == Some(AgentTaskLiveness::Stale)).then(|| stale_reason_for_record(&record))
-    });
+    let stale_reason = liveness_stale_reason(&record, liveness);
+    let stale = stale_reason.is_some().then_some(true);
 
     // Runner metadata describes execution placement, not necessarily lifecycle
     // record ownership. Controller handoff projections retain their durable
@@ -1245,13 +1240,10 @@ fn discovery_run(
         runner_id,
         runner_job_id,
         remote_run_id: metadata_string(&record.metadata, "remote_run_id"),
-        stale: (liveness == Some(AgentTaskLiveness::Stale))
-            .then_some(true)
-            .or_else(|| {
-                metadata_bool(&record.metadata, agent_task_lifecycle::METADATA_KEY_STALE_RUNNING)
-            }),
+        stale,
         stale_reason,
-        retryable: metadata_bool(&record.metadata, agent_task_lifecycle::METADATA_KEY_RETRYABLE),
+        retryable: metadata_bool(&record.metadata, agent_task_lifecycle::METADATA_KEY_RETRYABLE)
+            .or(stale),
         liveness,
         liveness_reconcilable: liveness.map(AgentTaskLiveness::is_reconcilable),
         source,
@@ -1286,6 +1278,16 @@ fn owns_terminal_cook_parent(
 
 /// Explain every stale read projection, including a pure discovery read that
 /// deliberately leaves the durable record untouched.
+/// The stale reason a discovery row names for `record` classified at `liveness`.
+pub(super) fn liveness_stale_reason(
+    record: &AgentTaskRunRecord,
+    liveness: Option<AgentTaskLiveness>,
+) -> Option<String> {
+    (liveness == Some(AgentTaskLiveness::Stale))
+        .then(|| stale_reason_for_record(record))
+        .or_else(|| record.stale_running_reason().map(str::to_string))
+}
+
 fn stale_reason_for_record(record: &AgentTaskRunRecord) -> String {
     if record.owner_pid().is_some() && !record.owner_process_is_running() {
         return "owner_process_not_running".to_string();

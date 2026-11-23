@@ -23,89 +23,47 @@ fn environ_matches(bytes: &[u8], run: &str) -> bool {
         .any(|entry| entry == expected.as_bytes())
 }
 
-// comm can contain spaces and parentheses. Fields after its final ')' start at 3.
-#[cfg(target_os = "linux")]
-fn parse_stat(stat: &str) -> Option<(u32, String)> {
-    let fields: Vec<_> = stat.rsplit_once(')')?.1.split_whitespace().collect();
-    Some((fields.get(1)?.parse().ok()?, fields.get(19)?.to_string()))
-}
-
-#[cfg(target_os = "linux")]
-fn inspect(pid: u32, run: &str) -> Option<Process> {
-    use std::os::unix::fs::MetadataExt;
-    let root = std::path::PathBuf::from(format!("/proc/{pid}"));
-    let uid = root.metadata().ok()?.uid();
-    let (parent, start) = parse_stat(&std::fs::read_to_string(root.join("stat")).ok()?)?;
-    let args = std::fs::read(root.join("cmdline")).ok()?;
-    let command = String::from_utf8_lossy(&args).replace('\0', " ");
-    let attributed =
-        std::fs::read(root.join("environ")).is_ok_and(|bytes| environ_matches(&bytes, run));
-    if parse_stat(&std::fs::read_to_string(root.join("stat")).ok()?)?.1 != start {
-        return None;
-    }
+fn observed(
+    row: homeboy_engine_primitives::process_table::ProcessRow,
+    run: &str,
+) -> Option<Process> {
+    #[cfg(target_os = "linux")]
+    let attributed = std::fs::read(format!("/proc/{}/environ", row.pid))
+        .is_ok_and(|bytes| environ_matches(&bytes, run));
+    #[cfg(not(target_os = "linux"))]
+    let attributed = row
+        .command
+        .split_whitespace()
+        .any(|entry| entry == format!("HOMEBOY_RUN_ID={run}"));
+    #[cfg(target_os = "linux")]
+    let (parent, start, uid) = homeboy_engine_primitives::process_table::linux_identity(row.pid)?;
+    #[cfg(not(target_os = "linux"))]
+    let (parent, start, uid) = (row.parent_pid, row.start, row.uid);
     Some(Process {
-        pid,
+        pid: row.pid,
         parent,
         uid,
         start,
-        command,
+        command: row.command,
         attributed,
     })
 }
 
-// ps emits uid, ppid, pid, five lstart fields, then command and environment.
-#[cfg(any(target_os = "macos", test))]
-fn parse_ps(line: &str, run: &str) -> Option<Process> {
-    let fields: Vec<_> = line.split_whitespace().collect();
-    let command = fields.get(8..)?.join(" ");
-    let expected = format!("HOMEBOY_RUN_ID={run}");
-    Some(Process {
-        uid: fields.first()?.parse().ok()?,
-        parent: fields.get(1)?.parse().ok()?,
-        pid: fields.get(2)?.parse().ok()?,
-        start: fields.get(3..8)?.join(" "),
-        attributed: command.split_whitespace().any(|entry| entry == expected),
-        command,
-    })
-}
-
-#[cfg(target_os = "macos")]
-fn ps(args: &[&str], run: &str) -> Vec<Process> {
-    let Ok(output) = std::process::Command::new("/bin/ps")
-        .args(args)
-        .args(["-ww", "-o", "uid=,ppid=,pid=,lstart=,command="])
-        .output()
-    else {
-        return Vec::new();
-    };
-    if !output.status.success() {
-        return Vec::new();
-    }
-    String::from_utf8_lossy(&output.stdout)
-        .lines()
-        .filter_map(|line| parse_ps(line, run))
-        .collect()
-}
-
-#[cfg(target_os = "macos")]
 fn inspect(pid: u32, run: &str) -> Option<Process> {
-    ps(&["-E", "-p", &pid.to_string()], run)
+    let row = homeboy_engine_primitives::process_table::snapshot(cfg!(target_os = "macos"))
+        .ok()?
         .into_iter()
-        .find(|p| p.pid == pid)
+        .find(|row| row.pid == pid)?;
+    observed(row, run)
 }
 
 fn snapshot(run: &str) -> HashMap<u32, Process> {
-    #[cfg(target_os = "linux")]
-    let processes: Vec<_> = std::fs::read_dir("/proc")
+    homeboy_engine_primitives::process_table::snapshot(cfg!(target_os = "macos"))
+        .unwrap_or_default()
         .into_iter()
-        .flatten()
-        .filter_map(|entry| entry.ok()?.file_name().to_str()?.parse().ok())
-        .filter_map(|pid| inspect(pid, run))
-        .collect();
-    // One bulk scan, not one ps spawn per system PID.
-    #[cfg(target_os = "macos")]
-    let processes = ps(&["-axE"], run);
-    processes.into_iter().map(|p| (p.pid, p)).collect()
+        .filter_map(|row| observed(row, run))
+        .map(|process| (process.pid, process))
+        .collect()
 }
 
 fn homeboy(command: &str) -> bool {
@@ -231,11 +189,14 @@ mod tests {
     use super::*;
 
     fn fixture() -> Process {
-        parse_ps(
-            "1000 1 42 Wed Nov 5 12:00:00 2026 /usr/bin/sleep 30 HOMEBOY_RUN_ID=run",
-            "run",
-        )
-        .unwrap()
+        Process {
+            pid: 42,
+            parent: 1,
+            uid: 1000,
+            start: "Wed Nov 5 12:00:00 2026".into(),
+            command: "/usr/bin/sleep 30".into(),
+            attributed: true,
+        }
     }
 
     #[test]
@@ -243,30 +204,6 @@ mod tests {
         assert!(environ_matches(b"X=1\0HOMEBOY_RUN_ID=run\0", "run"));
         assert!(!environ_matches(b"HOMEBOY_RUN_ID=run-extra\0", "run"));
         assert!(!environ_matches(b"X=HOMEBOY_RUN_ID=run\0", "run"));
-        let process = fixture();
-        assert_eq!(process.pid, 42);
-        assert_eq!(process.parent, 1);
-        assert_eq!(process.start, "Wed Nov 5 12:00:00 2026");
-        assert!(process.attributed);
-        assert!(
-            !parse_ps(
-                "1000 4 42 Wed Nov 5 12:00:00 2026 sleep HOMEBOY_RUN_ID=runner",
-                "run"
-            )
-            .unwrap()
-            .attributed
-        );
-        assert!(parse_ps("bad", "run").is_none());
-    }
-
-    #[cfg(target_os = "linux")]
-    #[test]
-    fn stat_fixture() {
-        assert_eq!(
-            parse_stat("42 (weird ) name) S 4 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 123 0"),
-            Some((4, "123".into()))
-        );
-        assert!(parse_stat("42 (truncated)").is_none());
     }
 
     #[test]

@@ -7,6 +7,8 @@
 
 // Keep the read/transition handlers here; isolate rendering and I/O adapters.
 mod adapters;
+#[cfg(test)]
+mod cook_summary_contract_tests;
 mod diagnose;
 mod diagnostics;
 mod projections;
@@ -22,7 +24,7 @@ use diagnostics::*;
 use projections::*;
 pub(crate) use projections::{
     bounded_cancel_report, bounded_full_operation_report, compact_aggregate_summary,
-    compact_cook_report, project_operator_output,
+    compact_cook_report, compact_cook_report_with_summary, project_operator_output,
 };
 
 use crate::commands::operator_projection::serialized_len;
@@ -134,6 +136,8 @@ pub(super) fn status(args: StatusArgs) -> CmdResult<Value> {
 
 fn status_once(args: StatusArgs) -> CmdResult<Value> {
     let (mut value, code) = status_without_feedback(args.clone())?;
+    // CI receipts and recipe-only Cooks have no record to project (#18817).
+    super::cook_summary::ensure(&mut value);
     let cook_id = bounded_exact_record(&args.run_id)
         .ok()
         .and_then(|record| record.metadata["cook_id"].as_str().map(str::to_string))
@@ -215,9 +219,11 @@ fn status_without_feedback(args: StatusArgs) -> CmdResult<Value> {
     // Status is a pure projection (#13697, #15718): every read below is
     // bounded and never initializes, migrates, or reconciles durable state.
     value["failure"] = Value::Null;
+    let mut summary = None;
     if let Ok(record) = bounded_exact_record(&target.run_id) {
         let outcome = cook_outcome_record(&args, &record);
         let outcome = outcome.as_ref().unwrap_or(&record);
+        summary = Some(super::cook_summary::of_record(outcome));
         value["terminal_outcome"] = json!(outcome.terminal_outcome());
         value["recoverable"] = json!(recoverable);
         if record
@@ -288,6 +294,8 @@ fn status_without_feedback(args: StatusArgs) -> CmdResult<Value> {
             value["gated_sha"] = json!(candidate.candidate_sha);
             value["tree"] = json!(candidate.tree_sha);
         }
+        // Which repository holds the candidate, proven from any cwd (#18856).
+        super::candidate_location::attach_candidate_location(&mut value, outcome);
         // Provider response identity, distinct from the requested routing tier.
         value["served_models"] = json!(record.served_models);
         attach_gate_cleanup_warnings(&mut value, outcome);
@@ -316,6 +324,7 @@ fn status_without_feedback(args: StatusArgs) -> CmdResult<Value> {
         }
         attach_gate_failure(&mut value, &record);
         attach_recovery_step(&mut value, &record);
+        attach_local_dispatch_wait(&mut value, &record);
     }
     attach_promotion_replay(&mut value, &target.run_id, &args.run_id);
     if value["action_eligibility"]["actions"]
@@ -335,6 +344,7 @@ fn status_without_feedback(args: StatusArgs) -> CmdResult<Value> {
             "reason": "explicit local placement is legal before execution ownership begins",
         }]);
     }
+    super::cook_summary::attach(&mut value, summary);
     if args.full {
         deduplicate_control_plane_evidence(&mut value);
     } else {

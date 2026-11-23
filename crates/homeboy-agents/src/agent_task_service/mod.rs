@@ -24,13 +24,17 @@ mod cook_adoption;
 pub use cook_admission_key::COOK_ADMISSION_KEY_METADATA;
 /// Fresh provider attempts start from a clean Cook base tree.
 mod cook_attempt_workspace;
-pub use cook_attempt_workspace::{gate_cook_base, AttemptWorkspaceNotAtBase};
+pub use cook_attempt_workspace::{
+    gate_cook_base, gate_cook_target_branch, rebased_gate_base, AttemptWorkspaceNotAtBase,
+};
 mod cook_baseline;
 pub(crate) use cook_baseline::compare_gate_failures_to_verified_base;
 mod cook_budget;
 mod cook_delivery;
 /// The named readers of the artifacts the `cook_delivery` record holds.
 mod cook_delivery_artifacts;
+mod cook_summary;
+pub use cook_summary::{cook_summary, cook_summary_for_run};
 mod cook_lineage;
 pub(crate) mod cook_pre_execution;
 mod cook_prior_candidate;
@@ -63,14 +67,7 @@ pub mod process_activity;
 mod promotion_service;
 mod reconcile;
 mod status_support;
-/// Settlement of rows left `running` after their lifecycle ended.
-mod unsettled_rows;
 pub use gate_failure::{gate_failure_next_action, gate_failure_projection};
-pub use unsettled_rows::{
-    settle_unowned_cook_rows, AgentTaskUnsettledRow, UNSETTLED_COOK_ATTEMPT,
-    UNSETTLED_REDIRECTED_ATTEMPT_ABSENT, UNSETTLED_REDIRECTED_ROOT_UNMIRRORED,
-    UNSETTLED_TERMINAL_LIFECYCLE,
-};
 /// Shared daemon lifecycle for newly submitted orchestration work.
 mod work_job;
 
@@ -100,12 +97,13 @@ pub use cook_pre_execution::{recover_recipe_attempt, retryable_pre_execution_fai
 pub use cook_promotion::*;
 pub use cook_recipe::*;
 pub use cook_recovery::{
-    cook_recovery_delegation, is_store_contention, is_store_contention_message, plan_cook_recovery,
-    plan_cook_recovery_recorded, prepare_admitted_recovery_continuation, recover_cook,
-    recovers_as_run, with_store_contention_backoff, CookPublishRequest, CookRecoveryOverrides,
+    cook_recovery_delegation, ensure_recover_failure_contract, is_store_contention,
+    is_store_contention_message, plan_cook_recovery, plan_cook_recovery_recorded,
+    prepare_admitted_recovery_continuation, recover_cook, recovers_as_run,
+    with_store_contention_backoff, CookPublishRequest, CookRecoveryOverrides,
     CookRecoveryPerformer, CookRecoveryPlan, CookRecoveryReport, CookRecoveryRequest,
     CookRecoveryStep, CookRegateInputs, CookReplaceGatesRequest, CookReplacementProof,
-    COOK_RECOVERY_SCHEMA, STORE_BUSY_CODE,
+    COOK_RECOVERY_SCHEMA, RECOVER_UNDECLARED_FAILURE_CODE, STORE_BUSY_CODE,
 };
 pub(crate) use cook_recovery::{incomplete_review_recovery_command, regate_recovery_command};
 

@@ -90,6 +90,9 @@ struct GateExecution<'a> {
     /// command share one budget, so the command's wall-clock limit (even a
     /// declared plan's own suite timeout) never runs past it (#16938).
     deadline: Option<Instant>,
+    /// Host-slot CPU share the gate process tree is pinned to, so `nproc`
+    /// inside the gate reports the share rather than every host CPU (#18833).
+    cpus: Option<&'a [usize]>,
 }
 
 /// Shared deterministic-gate verification fields used by every agent-task
@@ -450,6 +453,16 @@ fn default_gate_no_progress_timeout_seconds() -> u64 {
     5 * 60
 }
 
+/// Whether the immutable base can explain a failure of the declared gate
+/// `command`. Repro gates are declared red on base, and bench gates
+/// (`--verify-bench`) compare base with the candidate themselves, so neither
+/// is replayed on base nor ever accepted as an inherited failure (#18722,
+/// #18869).
+pub fn base_explainable(command: &str, repro: &[String]) -> bool {
+    !repro.iter().any(|declared| declared == command)
+        && !homeboy_core::bench_compare::is_cook_gate_command(command)
+}
+
 /// Warning for a Cook that declares no repro gate: nothing shows its gates
 /// fail on base, so a passing candidate does not prove the issue is fixed.
 pub const NO_REPRO_GATE_WARNING: &str = "no --repro gate declared: the declared gates are not shown to fail on base, so they do not prove this issue is fixed (repro: none). Add --repro <command> (or --repro-file <path>) that fails on base and passes once the issue is fixed";
@@ -744,6 +757,11 @@ pub struct AgentTaskGateReport {
     /// Recorded alongside the re-run's own result (#18554).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub supervision_regate: Option<AgentTaskGateFailureEvidence>,
+    /// Verdict, aggregate summary, and artifact path of a `--verify-bench`
+    /// gate, read from the evidence line `homeboy bench compare --cook-gate`
+    /// emits (#18869).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub bench_compare: Option<homeboy_core::bench_compare::BenchCompareGateEvidence>,
 }
 
 /// Difference between the admitted candidate tree and the gate workspace
@@ -812,6 +830,11 @@ pub enum AgentTaskGateFailureOrigin {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct AgentTaskGateFailureAttribution {
     pub classification: AgentTaskGateFailureOrigin,
+    /// Complete failure identities on each side (fingerprints for opaque gates).
+    #[serde(default)]
+    pub base_failures: Vec<String>,
+    #[serde(default)]
+    pub head_failures: Vec<String>,
     /// Candidate failures that also fail on the baseline.
     #[serde(default)]
     pub inherited_failures: Vec<String>,
@@ -1499,6 +1522,7 @@ impl AgentTaskGateReport {
             label: None,
             flaky: None,
             supervision_regate: None,
+            bench_compare: None,
             cleanup_warning: None,
         }
     }
@@ -1565,6 +1589,7 @@ impl AgentTaskGateReport {
             label: None,
             flaky: None,
             supervision_regate: None,
+            bench_compare: None,
             cleanup_warning: None,
         }
     }

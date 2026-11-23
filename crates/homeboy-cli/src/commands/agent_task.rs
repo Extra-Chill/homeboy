@@ -13,9 +13,11 @@ use super::CmdResult;
 pub mod args;
 pub mod auth;
 pub(crate) mod candidate;
+pub(crate) mod candidate_location;
 pub mod capacity;
 pub mod contract;
 pub mod cook_batch;
+pub(crate) mod cook_summary;
 pub(crate) mod default_branch;
 pub mod doctor;
 #[cfg(test)]
@@ -435,6 +437,8 @@ pub(crate) fn run_with_cook_progress_and_provenance(
             // Bind the generated lint gate to the recorded base, as the Cook's
             // own gate runs do (#18388).
             let cook_base = homeboy::agents::agent_tasks::service::gate_cook_base(&recipe);
+            let cook_target =
+                homeboy::agents::agent_tasks::service::gate_cook_target_branch(&recipe);
             let gates: gate::VerifyGateOptions = serde_json::from_value(recipe.gate_policy)
                 .map_err(|error| {
                     homeboy::core::Error::invalid_argument("gate_policy", error.to_string())
@@ -449,6 +453,18 @@ pub(crate) fn run_with_cook_progress_and_provenance(
                         "expected gate-1, gate-2, ...",
                     )
                 })?;
+            let cwd = std::env::current_dir()
+                .map_err(|error| homeboy::core::Error::internal_io(error.to_string(), None))?;
+            // A candidate rebased onto a newer target tip diffs from its
+            // current merge base (#18861).
+            let cook_base = cook_base.map(|base| {
+                homeboy::agents::agent_tasks::service::rebased_gate_base(
+                    &cwd,
+                    &base,
+                    "HEAD",
+                    cook_target.as_deref(),
+                )
+            });
             let offset = usize::from(gates.test_execution_plan.is_some());
             let command = index
                 .checked_sub(offset + 1)
@@ -463,8 +479,6 @@ pub(crate) fn run_with_cook_progress_and_provenance(
                     "not a declared public gate",
                 ));
             }
-            let cwd = std::env::current_dir()
-                .map_err(|error| homeboy::core::Error::internal_io(error.to_string(), None))?;
             let supervision = gate::GateSupervision {
                 timeout: gates.gate_timeout(),
                 no_progress_timeout: gates.gate_no_progress_timeout(),

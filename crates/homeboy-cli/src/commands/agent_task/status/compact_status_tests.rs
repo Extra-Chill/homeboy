@@ -345,3 +345,26 @@ fn compact_status_bounds_duplicate_evidence_and_uses_canonical_safe_action() {
 fn duplicate_artifacts_uri(index: usize) -> String {
     format!("homeboy://{}-{index}", "u".repeat(8 * 1024))
 }
+
+/// #17610: base drift recorded at publication reaches the status summary.
+#[test]
+fn base_drift_projection_reports_a_stale_gated_base() {
+    let finalization = |behind_by: serde_json::Value| {
+        json!({"publication_intent": {"target": {
+            "base": "main",
+            "verified_base_sha": "c8517ce14",
+            "publication_base_sha": "1616ef534",
+            "publication_base_behind_by": behind_by,
+        }}})
+    };
+    assert_eq!(
+        super::base_drift_projection(&finalization(json!(19))),
+        Some(json!({
+            "base_behind_by": 19,
+            "base": "main",
+            "verified_base_sha": "c8517ce14",
+            "base_tip_sha": "1616ef534",
+        }))
+    );
+    assert_eq!(super::base_drift_projection(&finalization(json!(0))), None);
+}

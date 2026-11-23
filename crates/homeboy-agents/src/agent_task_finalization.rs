@@ -80,13 +80,13 @@ pub fn preflight_pr_with_backend<B: AgentTaskPrFinalizationBackend>(
     finalize_pr_with_backend_mode(options, backend, false, lifecycle_store)
 }
 
-/// Update an open PR for this candidate, marking a draft ready when the
-/// publication is not itself a draft.
+/// Update an open PR for this candidate. Finalization never changes an
+/// existing PR's review state: a draft stays draft (#18884). Draft to ready is
+/// an explicit operator action.
 fn update_existing_pr<B: AgentTaskPrFinalizationBackend>(
     backend: &mut B,
     options: &mut AgentTaskPrFinalizationOptions,
     existing: &AgentTaskPrRef,
-    ready_transitioned: &mut bool,
 ) -> Result<(&'static str, AgentTaskPrRef)> {
     let existing_body = backend.open_pr_body(
         options.component_id.as_deref(),
@@ -110,12 +110,13 @@ fn update_existing_pr<B: AgentTaskPrFinalizationBackend>(
         &options.title,
         &body,
     )?;
-    if existing.is_draft && !options.draft_pr {
-        *ready_transitioned = true;
-        Ok(("ready", backend.mark_pr_ready(&options.path, &updated)?))
-    } else {
-        Ok(("updated", updated))
-    }
+    Ok((
+        "updated",
+        AgentTaskPrRef {
+            is_draft: existing.is_draft,
+            ..updated
+        },
+    ))
 }
 
 /// `gh pr create` refused because an open PR already exists for this head.
@@ -159,6 +160,12 @@ fn finalize_pr_with_backend_mode<B: AgentTaskPrFinalizationBackend>(
                 None,
             ));
         }
+        options.draft_pr = true;
+    }
+    // A candidate the agent reports as partly undelivered opens as a draft
+    // and settles `succeeded_partial` (#18884).
+    let partial_delivery = options.review_dossier.has_undelivered_items();
+    if partial_delivery {
         options.draft_pr = true;
     }
     // Authorization context belongs to durable run evidence, not PR prose.
@@ -315,6 +322,7 @@ fn finalize_pr_with_backend_mode<B: AgentTaskPrFinalizationBackend>(
             branch: options.base.clone(),
             sha: base.sha.clone(),
             publication_sha: None,
+            behind_by: None,
         },
     );
     options.review_dossier.evidence.sort_by(|left, right| {
@@ -413,10 +421,21 @@ fn finalize_pr_with_backend_mode<B: AgentTaskPrFinalizationBackend>(
             }
         }
     }
+    // The candidate publishes on its gated base (#17675); a base that moved
+    // since is measured and surfaced, never hidden (#17610).
     let publication_base_sha = backend.publication_base_sha(&options.path, &options.base)?;
+    let behind_by = match publication_base_sha.as_deref() {
+        Some(live) if live == base.sha => Some(0),
+        Some(live) if !base.sha.is_empty() => {
+            backend.publication_base_behind_by(&options.path, &options.base, &base.sha, live)
+        }
+        _ => None,
+    };
     intent.target.publication_base_sha = publication_base_sha.clone();
+    intent.target.publication_base_behind_by = behind_by;
     if let Some(verified_base) = options.review_dossier.verified_base.as_mut() {
         verified_base.publication_sha = publication_base_sha;
+        verified_base.behind_by = behind_by;
     }
     let body = render_review_dossier_for_worktree(
         &options.review_dossier,
@@ -425,11 +444,8 @@ fn finalize_pr_with_backend_mode<B: AgentTaskPrFinalizationBackend>(
     );
     let mut newly_created = existing.is_none();
     let mut draft = existing.as_ref().map_or(options.draft_pr, |pr| pr.is_draft);
-    let mut ready_transitioned = false;
     let (action, pr) = match existing {
-        Some(existing) => {
-            update_existing_pr(backend, &mut options, &existing, &mut ready_transitioned)?
-        }
+        Some(existing) => update_existing_pr(backend, &mut options, &existing)?,
         None => match backend.create_pr(
             options.component_id.as_deref(),
             &options.path,
@@ -459,14 +475,12 @@ fn finalize_pr_with_backend_mode<B: AgentTaskPrFinalizationBackend>(
                 };
                 newly_created = false;
                 draft = adopted.is_draft;
-                update_existing_pr(backend, &mut options, &adopted, &mut ready_transitioned)?
+                update_existing_pr(backend, &mut options, &adopted)?
             }
             Err(error) => return Err(error),
         },
     };
-    let published_draft = if ready_transitioned {
-        false
-    } else if newly_created {
+    let published_draft = if newly_created {
         options.draft_pr
     } else {
         draft
@@ -483,11 +497,13 @@ fn finalize_pr_with_backend_mode<B: AgentTaskPrFinalizationBackend>(
         )
     })?;
 
-    Ok(report(
+    let mut report = report(
         &options,
         intent,
         &head,
-        if published_draft {
+        if partial_delivery {
+            homeboy_core::cook_status::CookStatus::SucceededPartial
+        } else if published_draft {
             homeboy_core::cook_status::CookStatus::DraftPublished
         } else {
             homeboy_core::cook_status::CookStatus::ReviewReady
@@ -503,7 +519,9 @@ fn finalize_pr_with_backend_mode<B: AgentTaskPrFinalizationBackend>(
         git_tracking,
         Some(binding),
         durable_acceptance,
-    ))
+    );
+    report.pr_draft = Some(published_draft);
+    Ok(report)
 }
 
 /// Manual finalization deliberately has no promotion lineage. It still cannot
@@ -1086,6 +1104,7 @@ fn build_pr_publication_intent(
             base: Some(options.base.clone()),
             verified_base_sha: Some(base.sha.clone()),
             publication_base_sha: None,
+            publication_base_behind_by: None,
             head: Some(head.to_string()),
             url: None,
         },
@@ -1190,6 +1209,7 @@ fn report(
         review_dossier: options.review_dossier.clone(),
         manual_finalization: options.manual_finalization,
         inherited_gate_evidence: options.inherited_gate_evidence.clone(),
+        pr_draft: None,
         evidence: options.evidence.clone(),
     }
 }
@@ -1370,10 +1390,7 @@ fn finalization_outcome(
     committed: bool,
     pushed: bool,
 ) -> AgentTaskPrFinalizationOutcome {
-    let published = matches!(
-        pr_action,
-        "created" | "updated" | "ready" | "already_merged"
-    );
+    let published = matches!(pr_action, "created" | "updated" | "already_merged");
     AgentTaskPrFinalizationOutcome {
         schema: AGENT_TASK_PR_FINALIZATION_OUTCOME_SCHEMA.to_string(),
         run_id: intent.run_id.clone(),

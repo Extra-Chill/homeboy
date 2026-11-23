@@ -759,7 +759,7 @@ pub(super) fn run_cook_spine(
             .gates
             .verify
             .iter()
-            .any(|command| !options.gates.repro.contains(command))
+            .any(|command| crate::agent_task_gate::base_explainable(command, &options.gates.repro))
             || !options.gates.private_verify.is_empty()
             || options.gates.test_execution_plan.is_some())
     {

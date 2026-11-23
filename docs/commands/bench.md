@@ -9,6 +9,7 @@ deltas against a stored baseline.
 homeboy bench <component> [options] [-- <runner-args>]
 homeboy bench matrix [<component>] --setting-matrix <key=value[,value...]> [options] [-- <runner-args>]
 homeboy bench list <component> [options] [-- <runner-args>]
+homeboy bench compare --component <id> --base <rev> --head <rev> --corpus <dir> [options]
 ```
 
 ## Description
@@ -664,6 +665,70 @@ homeboy bench studio \
     --rig trunk,combined-fixes,combined-fixes-without-3120 \
     --iterations 20
 ```
+
+## Base-vs-head corpus compare
+
+`homeboy bench compare` evaluates a component change by running the same
+corpus workload against two revisions and diffing what each side published.
+
+```bash
+homeboy bench compare --component blocks-engine --base <sha> --head <sha> --corpus ./captures
+```
+
+- **Materialization.** Each committed revision is checked out as a detached
+  git worktree owned by the run and removed afterwards. `--head WORKTREE`
+  (the default) uses the checkout on disk, uncommitted changes included.
+- **Workload declaration.** Core never hardcodes how a corpus is imported or
+  evaluated. Commands come from `--workload-command` (or the spec's `runner`),
+  then the component's `scripts.bench_compare` in `homeboy.json`, then the
+  `workloads.bench-compare.script` declared by a linked extension. Each command
+  runs once per side inside that side's checkout with
+  `HOMEBOY_BENCH_COMPARE_{SIDE,REF,SHA,CORPUS,RESULTS,ARTIFACT_DIR,SOURCE,COMPONENT,ID}`
+  and writes a `homeboy/bench-compare-side/v1` document to
+  `$HOMEBOY_BENCH_COMPARE_RESULTS`:
+
+  ```json
+  {"routes": [{"route": "/about", "content": "...", "block_markup_sha256": "...",
+               "css": "...", "blockers": ["missing-block"], "findings": [{"id": "f1"}]}]}
+  ```
+- **Lifecycle.** Every command runs in a run-owned process containment
+  boundary. Servers, sites and browsers it backgrounds are torn down when the
+  command exits, fails, times out (`--timeout-seconds`, per side) or the
+  compare is cancelled. A process that survives teardown always fails the
+  compare (`lifecycle.leftover_process_scopes` must be `0`).
+- **Artifact.** `bench-compare.json` (schema `homeboy/bench-compare/v1`) is
+  written to `--output-dir` or `<homeboy data>/bench-compare/<compare-id>`,
+  with per-route content / block markup / CSS deltas, evaluator blocker and
+  finding deltas, an aggregate summary (routes improved / regressed /
+  unchanged / added / missing), per-step lifecycle evidence, and the policy
+  result. Per-side runner logs and results sit beside it.
+- **Policy.** `--fail-on new-blockers` (default) fails on new evaluator
+  blockers or routes missing on head; `regressions` fails on any regressed
+  route; `never` only reports. `--spec <file>` supplies any of these fields
+  as JSON; flags override it.
+
+Compare currently runs locally. Lab placement is a follow-up.
+
+### As a Cook gate
+
+`homeboy agent-task cook --verify-bench <spec.json>` attaches a compare to a
+Cook as a visible gate. The spec declares `component`, `path` (relative to the
+candidate checkout, default `.`), `corpus`, `runner`, `fail_on` and
+`timeout_seconds`; it must not set `base` or `head`. The Cook owns both sides:
+base is its immutable base and head is the candidate checkout the gate runs in
+(`WORKTREE`). The spec's `fail_on` is the gate's regression policy.
+
+- The gate passes when the compare's policy passes and fails otherwise, so it
+  passes when head matches base and fails when head introduces a regression
+  the policy names.
+- The compare runs both sides itself, so Cook never replays a bench gate on
+  the base and a red bench gate never counts as an inherited failure. A base
+  without the feature is just the base side of the comparison.
+- The gate's result carries `bench_compare` (schema
+  `homeboy/bench-compare-gate/v1`): the policy verdict, violations, the
+  aggregate summary and the artifact path. The Cook summary
+  (`cook_summary.gates[].bench_compare`) and the terminal notification
+  (`Bench compare` fact) link the same artifact.
 
 ## Cross-rig comparison
 

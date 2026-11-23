@@ -176,6 +176,11 @@ pub struct AgentTaskReviewDossier {
     /// the candidate. Cook always records it; manual finalization omits it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub repro: Option<AgentTaskReviewRepro>,
+    /// The agent's per-item delivery accounting against the task's checklist
+    /// (#18884). Any `not_delivered` item publishes the PR as a draft with the
+    /// Cook status `succeeded_partial`.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub delivery: Vec<homeboy_control_plane_contract::CookDeliveryItem>,
 }
 
 /// Repro evidence for a candidate. Only `verified` proves the issue.
@@ -218,6 +223,9 @@ pub struct AgentTaskReviewVerifiedBase {
     /// The live base observed immediately before publication, when observable.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub publication_sha: Option<String>,
+    /// Commits the live base holds beyond `sha` at publication (#17610).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub behind_by: Option<u64>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -293,6 +301,13 @@ pub fn review_form_output_declaration(
                 "pr_title": pr_title,
                 "completion": { "type": "string", "enum": ["complete", "incomplete"] },
                 "incomplete_reason": { "type": "string" },
+                "delivery": { "type": "array", "items": {
+                    "type": "object", "required": ["item", "status"], "properties": {
+                        "item": { "type": "string" },
+                        "status": { "type": "string", "enum": ["delivered", "not_delivered"] },
+                        "reason": { "type": "string" }
+                    }
+                } },
                 "used_for": { "type": "string" },
                 "evidence": { "type": "array", "items": {
                     "type": "object", "required": ["summary"], "properties": {
@@ -456,6 +471,10 @@ pub struct AiFilledReviewForm {
         skip_serializing_if = "String::is_empty"
     )]
     pub incomplete_reason: String,
+    /// Per-item `delivered` / `not_delivered` accounting against the task's
+    /// checklist; a `not_delivered` item names its reason (#18884).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub delivery: Vec<homeboy_control_plane_contract::CookDeliveryItem>,
 }
 
 /// Agent-declared completion of the requested task.
@@ -590,7 +609,8 @@ impl AiFilledReviewForm {
         // instructions: Homeboy authors no agent-facing prose (#15818).
         "A valid `review_form` has non-empty `pr_title` (single line, at most 256 characters, specific to the change), \
 `summary`, `what_changed` (a non-empty list), and `completion` \
-(`complete` or `incomplete`; `incomplete` requires a non-empty `incomplete_reason`). `pr_title` follows the declared `review_form` schema for the repository."
+(`complete` or `incomplete`; `incomplete` requires a non-empty `incomplete_reason`). Each optional `delivery` entry names a non-empty `item` \
+and a `status` of `delivered` or `not_delivered`; `not_delivered` requires a non-empty `reason`. `pr_title` follows the declared `review_form` schema for the repository."
     }
 
     /// The agent's title when it is a specific, bounded, single line, whether
@@ -651,6 +671,25 @@ impl AiFilledReviewForm {
                 ));
             }
             _ => {}
+        }
+        for item in &self.delivery {
+            if item.item.trim().is_empty() {
+                return Err(review_form_gap(
+                    "review_form.delivery",
+                    "a delivery entry has an empty item",
+                ));
+            }
+            if !item.is_delivered()
+                && item
+                    .reason
+                    .as_deref()
+                    .is_none_or(|reason| reason.trim().is_empty())
+            {
+                return Err(review_form_gap(
+                    "review_form.delivery",
+                    "a not_delivered entry must name its reason",
+                ));
+            }
         }
         Ok(())
     }
@@ -1241,6 +1280,12 @@ pub fn render_review_dossier(
             bullets(&files)
         ));
     }
+    if !dossier.delivery.is_empty() {
+        blocks.push(format!(
+            "## Delivery\n{}",
+            render_delivery(&dossier.delivery)
+        ));
+    }
     let evidence = render_evidence(&dossier.evidence);
     blocks.push(format!("## Evidence\n{}", if evidence.is_empty() {
         "Evidence is missing: no measurements, before/after observations or repro results were supplied.".to_string()
@@ -1254,6 +1299,29 @@ pub fn render_review_dossier(
         blocks.push(render_source_relationships(&dossier.source_relationships));
     }
     blocks.join("\n\n") + "\n"
+}
+
+fn render_delivery(items: &[homeboy_control_plane_contract::CookDeliveryItem]) -> String {
+    items
+        .iter()
+        .map(|item| match item.reason.as_deref().map(str::trim) {
+            _ if item.is_delivered() => format!("- Delivered: {}", prose(item.item.trim())),
+            Some(reason) if !reason.is_empty() => format!(
+                "- Not delivered: {} ({})",
+                prose(item.item.trim()),
+                prose(reason)
+            ),
+            _ => format!("- Not delivered: {}", prose(item.item.trim())),
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+impl AgentTaskReviewDossier {
+    /// Whether the agent reported any task item as not delivered (#18884).
+    pub fn has_undelivered_items(&self) -> bool {
+        self.delivery.iter().any(|item| !item.is_delivered())
+    }
 }
 
 pub(crate) fn render_source_relationships(
@@ -1437,9 +1505,13 @@ fn render_verification(dossier: &AgentTaskReviewDossier) -> Option<String> {
         .as_ref()
         .map(|base| {
             let advanced = match base.publication_sha.as_deref() {
-                Some(observed) if observed != base.sha => {
-                    format!(" advanced to `{}`", short_sha(observed))
-                }
+                Some(observed) if observed != base.sha => match base.behind_by {
+                    Some(count) => format!(
+                        " advanced to `{}` (base_behind_by: {count}; rebase onto the current base before merging)",
+                        short_sha(observed)
+                    ),
+                    None => format!(" advanced to `{}`", short_sha(observed)),
+                },
                 Some(_) => " unchanged".to_string(),
                 None => " (publication state not recorded)".to_string(),
             };
@@ -2602,6 +2674,7 @@ mod tests {
             overrides: Vec::new(),
             out_of_scope_changes: Vec::new(),
             repro: None,
+            delivery: Vec::new(),
         }
     }
 
@@ -2710,7 +2783,54 @@ mod tests {
             verification: Vec::new(),
             completion: Some(crate::agent_task_review_dossier::AiReviewCompletion::Complete),
             incomplete_reason: String::new(),
+            delivery: Vec::new(),
         }
+    }
+
+    #[test]
+    fn delivery_accounting_parses_validates_and_renders() {
+        let form = AiFilledReviewForm::from_outcome_outputs(&serde_json::json!({
+            "review_form": {
+                "pr_title": "fix(agent-task): guard the reload render path",
+                "summary": "Fix the widget.",
+                "what_changed": ["Guard render()."],
+                "completion": "complete",
+                "delivery": [
+                    { "item": "Guard render", "status": "delivered" },
+                    { "item": "Cover reload", "status": "not_delivered", "reason": "no fixture" }
+                ]
+            }
+        }))
+        .expect("parse")
+        .expect("form");
+        form.validate(PrTitlePolicy::ConventionalCommit)
+            .expect("valid delivery accounting");
+        assert_eq!(form.delivery.len(), 2);
+
+        let mut unexplained = form.clone();
+        unexplained.delivery[1].reason = None;
+        let error = unexplained
+            .validate(PrTitlePolicy::ConventionalCommit)
+            .expect_err("not_delivered needs a reason");
+        assert!(error.message.contains("reason"), "{}", error.message);
+
+        assert!(
+            review_form_output_declaration(PrTitlePolicy::Plain).structural_schema["properties"]
+                ["delivery"]
+                .is_object()
+        );
+
+        let mut dossier = dossier();
+        assert!(!dossier.has_undelivered_items());
+        dossier.delivery = form.delivery;
+        assert!(dossier.has_undelivered_items());
+        let body = render_review_dossier(&dossier, &AgentTaskReviewProfile::default());
+        assert!(
+            body.contains(
+                "## Delivery\n- Delivered: Guard render\n- Not delivered: Cover reload (no fixture)"
+            ),
+            "{body}"
+        );
     }
 
     fn promotion(
@@ -3179,6 +3299,7 @@ mod tests {
             branch: "main".into(),
             sha: "6229120662bb1f753d8e8657c391d4875a31273f".into(),
             publication_sha: Some("6229120662bb1f753d8e8657c391d4875a31273f".into()),
+            behind_by: None,
         });
         value
             .validate(&default_profile())
@@ -3446,6 +3567,7 @@ mod tests {
             branch: "main".into(),
             sha: "6229120662bb1f753d8e8657c391d4875a31273f".into(),
             publication_sha: Some("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".into()),
+            behind_by: None,
         });
         let body = render_review_dossier(&value, &default_profile());
         assert!(
@@ -3453,6 +3575,18 @@ mod tests {
             "{body}"
         );
         assert_eq!(body.matches("6229120").count(), 1, "{body}");
+
+        // #17610: a measured drift names how far behind the gated base is.
+        if let Some(base) = value.verified_base.as_mut() {
+            base.behind_by = Some(19);
+        }
+        let body = render_review_dossier(&value, &default_profile());
+        assert!(
+            body.contains(
+                "Base `main`@`6229120` advanced to `aaaaaaa` (base_behind_by: 19; rebase onto the current base before merging)."
+            ),
+            "{body}"
+        );
     }
 
     #[test]

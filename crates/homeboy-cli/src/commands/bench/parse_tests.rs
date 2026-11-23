@@ -27,6 +27,35 @@ fn parses_bench_list_rig_flag() {
 }
 
 #[test]
+fn parses_bench_compare_and_keeps_it_local() {
+    let cli = TestCli::try_parse_from([
+        "bench",
+        "compare",
+        "--component",
+        "blocks-engine",
+        "--base",
+        "abc123",
+        "--head",
+        "def456",
+        "--corpus",
+        "/captures",
+    ])
+    .expect("bench compare should parse");
+
+    assert!(!cli.bench.is_lab_offload_command());
+    assert!(cli.bench.lab_rig_workload_arguments().is_none());
+    match cli.bench.command.expect("compare command") {
+        BenchCommand::Compare(args) => {
+            assert_eq!(args.component.as_deref(), Some("blocks-engine"));
+            assert_eq!(args.base.as_deref(), Some("abc123"));
+            assert_eq!(args.head.as_deref(), Some("def456"));
+            assert_eq!(args.corpus.as_deref(), Some("/captures"));
+        }
+        _ => panic!("expected bench compare command"),
+    }
+}
+
+#[test]
 fn lab_workload_arguments_use_clap_values() {
     let cli = TestCli::try_parse_from(
         "bench --iterations 3 component --rig=a,b --rig c --extension=x --extension y"
@@ -308,4 +337,25 @@ fn explicit_passthrough_preserves_a_runner_owned_format_flag() {
         filter_homeboy_flags(&passthrough),
         vec!["--format".to_string(), "terse".to_string()]
     );
+}
+
+#[test]
+fn parses_hidden_bench_compare_cook_gate_flag() {
+    let cli = TestCli::try_parse_from([
+        "bench",
+        "compare",
+        "--cook-gate",
+        "--base",
+        "abc123",
+        "--head",
+        "WORKTREE",
+        "--path",
+        ".",
+    ])
+    .expect("bench compare --cook-gate should parse");
+
+    match cli.bench.command.expect("compare command") {
+        BenchCommand::Compare(args) => assert!(args.cook_gate),
+        _ => panic!("expected bench compare command"),
+    }
 }

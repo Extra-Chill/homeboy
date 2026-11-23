@@ -13,6 +13,8 @@ pub(super) struct Work {
     pub pr: Option<String>,
     pub links: Vec<homeboy_core::notification_payload::NotifyLink>,
     pub facts: Vec<(String, String)>,
+    /// The versioned Cook summary every read surface emits (#18817).
+    pub summary: homeboy_control_plane_contract::CookSummary,
 }
 
 impl Work {
@@ -129,6 +131,20 @@ pub(super) fn metadata(report: &AgentTaskCookReport, component: Option<&str>) ->
             ));
         }
     }
+    let summary = record
+        .as_ref()
+        .map(crate::agent_task_service::cook_summary)
+        .unwrap_or_else(|| {
+            homeboy_control_plane_contract::CookSummary::unobserved(
+                report.status.as_str(),
+                true,
+                pr_url.clone(),
+                report
+                    .stop_reason
+                    .as_deref()
+                    .unwrap_or("no durable run record to project"),
+            )
+        });
     Work {
         component,
         cancelled,
@@ -137,6 +153,7 @@ pub(super) fn metadata(report: &AgentTaskCookReport, component: Option<&str>) ->
         pr,
         links,
         facts,
+        summary,
     }
 }
 

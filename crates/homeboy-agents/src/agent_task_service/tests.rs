@@ -75,7 +75,7 @@ fn admitted_missing_argument_blocker_retains_details() {
             "message": "Missing required argument",
             "details": {"args": ["prompt", "component"]}
         });
-        let run = crate::orchestration::project_record(&record, None).unwrap();
+        let run = crate::orchestration::project_record(&record, None, None).unwrap();
         let blocker = serde_json::to_value(run.blocker.unwrap()).unwrap();
         assert_eq!(
             blocker["details"]["args"],
@@ -935,7 +935,7 @@ fn queued_cook_admission_survives_its_owner_exiting_and_dispatches_when_unblocke
             requeued.metadata["detached_cook_handoff"]["state"],
             "pending"
         );
-        assert!(requeued.metadata.get("stale_running").is_none());
+        assert!(!requeued.is_stale_running());
         let next = current_intent(&store, subject);
         assert_eq!(next.epoch, claimed.epoch + 1);
         assert!(agent_task_lifecycle::detached_cook_admission_is_live(
@@ -2880,7 +2880,7 @@ fn discovery_active_classifies_liveness_and_source() {
         agent_task_lifecycle::submit_plan(&discovery_plan(), Some("run-live-queued"))
             .expect("queued submitted");
 
-        // Stale runner-backed run: lifecycle flags it stale -> Stale.
+        // Stale runner-backed run: its runner is recorded disconnected -> Stale.
         agent_task_lifecycle::submit_plan(&discovery_plan(), Some("run-live-stale"))
             .expect("submitted");
         agent_task_lifecycle::rewrite_record_for_test("run-live-stale", |record| {
@@ -2889,7 +2889,7 @@ fn discovery_active_classifies_liveness_and_source() {
             record.metadata = serde_json::json!({
                 "runner_id": "homeboy-lab",
                 "runner_job_id": "job-xyz",
-                "stale_running": true,
+                "runner_liveness": "disconnected",
             });
         })
         .expect("stale runner-backed record stored");
@@ -3926,7 +3926,6 @@ fn active_reconcile_preview_writes_nothing() {
                 record.metadata["runner_pid"] = serde_json::json!(u32::MAX);
                 record.candidate_adoption =
                     Some(serde_json::from_value(orphaned_candidate_adoption()).expect("adoption"));
-                record.annotate_stale_running();
                 true
             })
             .expect("dead controller owner");
@@ -4982,8 +4981,8 @@ fn upgrade_admission_keeps_a_live_provider_owner_active_despite_heartbeat_lag() 
             // Simulate a lagging lifecycle heartbeat after the provider owner
             // refreshed its durable execution ownership.
             record.updated_at = Some("2000-01-01T00:00:00+00:00".to_string());
-            record.metadata[agent_task_lifecycle::METADATA_KEY_STALE_RUNNING] =
-                serde_json::json!(true);
+            // A legacy persisted latch is ignored; liveness is derived.
+            record.metadata["stale_running"] = serde_json::json!(true);
         })
         .expect("lagging heartbeat fixture");
 
@@ -5023,8 +5022,8 @@ fn upgrade_admission_keeps_ambiguous_controller_evidence_fail_closed_and_read_on
             // Zero is not a process identity and must not be treated as a dead
             // owner merely because the heartbeat is old.
             record.metadata["runner_pid"] = serde_json::json!(0);
-            record.metadata[agent_task_lifecycle::METADATA_KEY_STALE_RUNNING] =
-                serde_json::json!(true);
+            // A legacy persisted latch is ignored; liveness is derived.
+            record.metadata["stale_running"] = serde_json::json!(true);
         })
         .expect("ambiguous owner fixture");
 

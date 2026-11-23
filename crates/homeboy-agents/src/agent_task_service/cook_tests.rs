@@ -441,6 +441,7 @@ fn test_review_form() -> crate::agent_task_review_dossier::AiFilledReviewForm {
         verification: Vec::new(),
         completion: Some(crate::agent_task_review_dossier::AiReviewCompletion::Complete),
         incomplete_reason: String::new(),
+        delivery: Vec::new(),
     }
 }
 
@@ -1215,6 +1216,39 @@ fn candidate_group_preflight_rejects_ambiguous_plan_before_execution() {
 
     assert_eq!(error.details["field"], "group_key");
     assert!(error.message.contains("explicit shared group"));
+}
+
+/// The runner job's terminal status is evidence, not a copy of run state: a
+/// job that succeeded can leave a run terminalized as failed when its result
+/// never projected. That run still had its provider execute.
+#[test]
+fn a_failed_run_whose_runner_job_succeeded_is_runner_result_not_projected() {
+    homeboy_core::test_support::with_isolated_home(|_| {
+        let options = batch_cook_options(
+            "cook-runner-succeeded-run-failed",
+            Arc::new(AcceptedDetachedAttemptDispatcher),
+        );
+        let run_id = options.identity.initial_run_id.clone();
+        persist_initial_recipe(&options).unwrap();
+        agent_task_lifecycle::submit_plan(&options.identity.initial_plan, Some(&run_id)).unwrap();
+        agent_task_lifecycle::cancel_run(&run_id, Some("runner result lost")).unwrap();
+        agent_task_lifecycle::rewrite_record_for_test(&run_id, |record| {
+            record.set_state_for_test(RunExecutionState::Failed);
+            if let Some(metadata) = record.metadata.as_object_mut() {
+                metadata.retain(|key, _| !key.starts_with("cancel"));
+            }
+            record.metadata["runner_job_status"] = serde_json::json!("succeeded");
+            record.metadata["runner_job_events"] = serde_json::json!([
+                {"kind": "result", "data": {"exit_code": 0, "stdout": "{unparseable"}},
+            ]);
+        })
+        .unwrap();
+        let record = agent_task_lifecycle::exact_record(&run_id).unwrap();
+        assert_eq!(
+            pre_artifact_interruption_phase(&record),
+            PreArtifactInterruptionPhase::RunnerResultNotProjected
+        );
+    });
 }
 
 /// A runner-placed attempt keeps its provider ledger on the runner. When its
@@ -11766,6 +11800,21 @@ fn green_retry_after_verified_no_change_attempt_finalizes_its_contribution_chain
 struct CapturePublishRecoveryPerformer {
     gate_proof: AgentTaskPromotionReport,
     created: std::cell::Cell<bool>,
+    pushed: std::cell::Cell<bool>,
+    draft: std::cell::Cell<bool>,
+    create_count: std::cell::Cell<usize>,
+}
+
+impl CapturePublishRecoveryPerformer {
+    fn new(gate_proof: AgentTaskPromotionReport) -> Self {
+        Self {
+            gate_proof,
+            created: Default::default(),
+            pushed: Default::default(),
+            draft: Default::default(),
+            create_count: Default::default(),
+        }
+    }
 }
 
 impl crate::agent_task_service::CookRecoveryPerformer for CapturePublishRecoveryPerformer {
@@ -11817,6 +11866,10 @@ impl crate::agent_task_service::CookRecoveryPerformer for CapturePublishRecovery
             &mut backend,
         )?;
         self.created.set(self.created.get() || backend.created);
+        self.pushed.set(self.pushed.get() || backend.pushed);
+        self.draft.set(self.draft.get() || backend.draft);
+        self.create_count
+            .set(self.create_count.get() + backend.create_count);
         Ok((value, 0))
     }
 }
@@ -11858,10 +11911,7 @@ fn malformed_agent_review_form_recovers_by_publishing_a_supplied_form() {
         let applied = promotion_with_existing_path(run_id, target.path());
         agent_task_lifecycle::record_promotion(run_id, serde_json::to_value(&applied).unwrap())
             .expect("record verified promotion");
-        let performer = CapturePublishRecoveryPerformer {
-            gate_proof: applied,
-            created: std::cell::Cell::new(false),
-        };
+        let performer = CapturePublishRecoveryPerformer::new(applied);
 
         // An unusable agent form never dispatches a review-only follow-up:
         // recovery publishes, as a draft without an operator form (#17671).
@@ -11913,6 +11963,88 @@ fn malformed_agent_review_form_recovers_by_publishing_a_supplied_form() {
             "Close the issue by guarding the reload path."
         );
         assert!(performer.created.get());
+    });
+}
+
+/// #17775: a gated candidate stopped at `candidate_recoverable` without a pull
+/// request finalizes in one `recover` call: the destination branch is pushed
+/// and a draft PR opened, with no provider dispatch and no manual git.
+#[test]
+fn gated_candidate_recovers_to_a_draft_pull_request_in_one_call() {
+    homeboy_core::test_support::with_isolated_home(|_| {
+        let cook_id = "cook-17775";
+        let run_id = "cook-17775-attempt-1";
+        let target = tempfile::tempdir().expect("fixture target");
+        let mut options = batch_cook_options(cook_id, Arc::new(AcceptedDetachedAttemptDispatcher));
+        options.identity.initial_run_id = run_id.to_string();
+        options.identity.initial_plan.tasks[0].executor.model = Some("fixture-model".to_string());
+        persist_initial_recipe(&options).expect("persist recipe");
+        agent_task_lifecycle::submit_plan(&options.identity.initial_plan, Some(run_id))
+            .expect("submit run");
+        agent_task_lifecycle::record_cook_attempt_in_store(
+            &test_lifecycle_store(),
+            cook_id,
+            1,
+            run_id,
+        )
+        .expect("link recipe attempt");
+        // The provider left no review form; the candidate passed its gates.
+        seed_substantive_candidate_aggregate(
+            run_id,
+            &options.identity.initial_plan,
+            &target.path().join("candidate.patch"),
+            "diff --git a/src/lib.rs b/src/lib.rs\n--- a/src/lib.rs\n+++ b/src/lib.rs\n@@ -1 +1 @@\n-old\n+new\n",
+        );
+        let applied = promotion_with_existing_path(run_id, target.path());
+        agent_task_lifecycle::record_promotion(run_id, serde_json::to_value(&applied).unwrap())
+            .expect("record verified promotion");
+        let performer = CapturePublishRecoveryPerformer::new(applied);
+
+        assert_eq!(
+            crate::agent_task_service::plan_cook_recovery(cook_id)
+                .expect("plan the gated candidate")
+                .step,
+            crate::agent_task_service::CookRecoveryStep::Publish
+        );
+
+        let (published, exit_code) = crate::agent_task_service::recover_cook(
+            cook_id,
+            crate::agent_task_service::CookRecoveryRequest::default(),
+            &performer,
+        )
+        .expect("one recover call finalizes the candidate");
+        assert_eq!(exit_code, 0, "{:?}", published.failure);
+        assert_eq!(
+            published.step,
+            crate::agent_task_service::CookRecoveryStep::Publish
+        );
+        let result = published.result.expect("publication report");
+        assert_eq!(result["status"], "draft_published", "{result}");
+        assert!(
+            performer.pushed.get(),
+            "recover pushes the destination branch"
+        );
+        assert!(performer.created.get(), "recover opens the pull request");
+        assert!(
+            performer.draft.get(),
+            "a candidate without a form opens a draft"
+        );
+        assert_eq!(performer.create_count.get(), 1);
+
+        // Recovering the published Cook again opens no second pull request.
+        let replan = crate::agent_task_service::plan_cook_recovery(cook_id)
+            .expect("plan the published Cook");
+        assert_ne!(
+            replan.step,
+            crate::agent_task_service::CookRecoveryStep::Publish,
+            "a published candidate is not published again"
+        );
+        let _ = crate::agent_task_service::recover_cook(
+            cook_id,
+            crate::agent_task_service::CookRecoveryRequest::default(),
+            &performer,
+        );
+        assert_eq!(performer.create_count.get(), 1);
     });
 }
 
@@ -14595,15 +14727,12 @@ fn concurrent_missing_task_base_capture_serializes_and_reuses_its_sha() {
             "-m",
             "base",
         ]);
-        let expected_sha = String::from_utf8(
-            Command::new("git")
-                .args(["rev-parse", "HEAD"])
-                .current_dir(&repository)
-                .output()
-                .expect("resolve base")
-                .stdout,
+        let stale_sha = homeboy_core::git::run_git(
+            &repository,
+            &["rev-parse", "HEAD"],
+            "resolve stale checkout HEAD",
         )
-        .expect("base is UTF-8")
+        .expect("stale HEAD")
         .trim()
         .to_string();
         git(&[
@@ -14622,12 +14751,35 @@ fn concurrent_missing_task_base_capture_serializes_and_reuses_its_sha() {
             "HEAD",
         ]);
 
+        // A merge lands after the destination was created. Neither its HEAD
+        // nor the recipe's pre-dispatch diff boundary may bypass admission.
+        std::fs::write(repository.join("merged.txt"), "landed before admission\n").unwrap();
+        git(&["add", "merged.txt"]);
+        git(&[
+            "-c",
+            "user.name=Homeboy Test",
+            "-c",
+            "user.email=test@example.com",
+            "commit",
+            "-m",
+            "merged change",
+        ]);
+        let expected_sha = homeboy_core::git::run_git(
+            &repository,
+            &["rev-parse", "HEAD"],
+            "resolve fresh remote tip",
+        )
+        .unwrap()
+        .trim()
+        .to_string();
+        assert_ne!(stale_sha, expected_sha);
         let roots = homeboy_core::paths::PathRoots::from_environment().expect("isolated roots");
         let store = CookRecipeStore::new(roots.clone());
         let lifecycle_store = AgentTaskLifecycleStore::new(roots);
         let cook_id = "cook-concurrent-task-base-capture";
         let mut options = batch_cook_options(cook_id, Arc::new(AcceptedDetachedAttemptDispatcher));
-        options.workspace.source_worktree_path = Some(repository.clone());
+        options.workspace.source_worktree_path = Some(destination.clone());
+        options.workspace.task_base_sha = Some(stale_sha);
         options.identity.initial_plan.tasks[0].workspace.root =
             Some(destination.display().to_string());
         options.identity.initial_plan.tasks[0].workspace.kind =
@@ -14654,7 +14806,7 @@ fn concurrent_missing_task_base_capture_serializes_and_reuses_its_sha() {
             .expect("materialize initial attempt");
 
         let capture_counter = Arc::new(WorkspaceBaseCaptureHook {
-            workspace: repository.clone(),
+            workspace: destination.clone(),
             count: AtomicUsize::new(0),
             fail_after_recipe_persistence: AtomicBool::new(false),
         });
@@ -14707,6 +14859,27 @@ fn concurrent_missing_task_base_capture_serializes_and_reuses_its_sha() {
             "only the recovered claim owner reaches origin"
         );
         let recipe = store.load_recipe(cook_id).expect("captured recipe");
+        let advertised = homeboy_core::git::run_git(
+            &destination,
+            &["ls-remote", "--heads", "origin", "main"],
+            "observe admission tip",
+        )
+        .expect("remote tip");
+        assert_eq!(
+            advertised.split_whitespace().next(),
+            Some(expected_sha.as_str())
+        );
+        let behind = homeboy_core::git::run_git(
+            &destination,
+            &[
+                "rev-list",
+                "--count",
+                &format!("{expected_sha}..refs/remotes/origin/main"),
+            ],
+            "count commits behind at admission",
+        )
+        .expect("admission freshness");
+        assert_eq!(behind.trim(), "0");
         assert_eq!(
             recipe.finalization["task_base_sha"],
             serde_json::json!(expected_sha)
@@ -14721,35 +14894,57 @@ fn concurrent_missing_task_base_capture_serializes_and_reuses_its_sha() {
     });
 }
 
-/// The controller's authenticated transport is not the only authority for a
-/// base that was already fetched. Terminalizing here consumed zero provider
-/// executions and produced no worktree, purely because one network call failed.
+/// An unreachable origin must not admit a potentially stale cached base.
 #[test]
-fn cook_base_pin_falls_back_to_the_fetched_tracking_ref_when_origin_is_unreachable() {
+fn cook_base_pin_rejects_cached_tracking_ref_when_origin_is_unreachable() {
     homeboy_core::test_support::with_isolated_home(|_| {
         let temp = tempfile::tempdir().expect("temporary repository");
-        let (repository, head) = unreachable_origin_repository(temp.path(), true);
+        let (repository, _) = unreachable_origin_repository(temp.path(), true);
 
         let mut options = batch_cook_options(
             "cook-base-transport-fallback",
             Arc::new(AcceptedDetachedAttemptDispatcher),
         );
         options.workspace.source_worktree_path = Some(repository.clone());
-        pin_cook_workspace_base_at(&mut options, &repository)
-            .expect("an already-fetched base admits the cook");
+        let error = pin_cook_workspace_base_at(&mut options, &repository)
+            .expect_err("cached tracking refs cannot prove freshness at admission");
+        assert_eq!(error.retryable, Some(true));
+        assert!(options.workspace.task_base_sha.is_none());
+        assert!(options.identity.initial_plan.metadata["cook_workspace_base"].is_null());
+    });
+}
 
-        assert_eq!(
-            options.workspace.task_base_sha.as_deref(),
-            Some(head.as_str())
+/// A purely local checkout has no remote tip to pin. Admission and every
+/// re-entry (daemon restart, recovery) keep its pre-dispatch boundary instead
+/// of failing to resolve an `origin` that was never configured (#18885).
+#[test]
+fn cook_base_pin_keeps_checkout_boundary_when_no_origin_is_configured() {
+    homeboy_core::test_support::with_isolated_home(|_| {
+        let temp = tempfile::tempdir().expect("temporary repository");
+        let (repository, head) = unreachable_origin_repository(temp.path(), false);
+        assert!(Command::new("git")
+            .args(["remote", "remove", "origin"])
+            .current_dir(&repository)
+            .status()
+            .expect("remove origin")
+            .success());
+        assert!(!workspace_has_origin_remote(&repository));
+
+        let mut options = batch_cook_options(
+            "cook-base-no-origin",
+            Arc::new(AcceptedDetachedAttemptDispatcher),
         );
-        let recorded = &options.identity.initial_plan.metadata["cook_workspace_base"];
-        assert_eq!(recorded["sha"], head);
-        assert_eq!(recorded["base"], "main");
-        assert_eq!(
-            recorded["provenance"], "local_remote_tracking_ref",
-            "evidence must show the base was not verified against the remote"
-        );
-        assert_eq!(recorded["remote_freshness"], "unverified");
+        options.workspace.source_worktree_path = Some(repository.clone());
+        options.workspace.task_base_sha = Some(head.clone());
+        for _ in 0..2 {
+            pin_cook_workspace_base_at(&mut options, &repository)
+                .expect("a local-only checkout admits its own boundary");
+            assert_eq!(
+                options.workspace.task_base_sha.as_deref(),
+                Some(head.as_str())
+            );
+            assert!(options.identity.initial_plan.metadata["cook_workspace_base"].is_null());
+        }
     });
 }
 

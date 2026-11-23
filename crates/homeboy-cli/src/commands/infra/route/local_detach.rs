@@ -535,12 +535,7 @@ fn bind_cook_step_child(
 /// The program a step runs is this exact (pinned) runtime, from this exact
 /// working directory, so the step executes what the operator invoked.
 fn step_program_and_cwd() -> homeboy::core::Result<(PathBuf, PathBuf)> {
-    let program = std::env::current_exe().map_err(|error| {
-        Error::internal_io(
-            error.to_string(),
-            Some("resolve current executable for a Cook step".to_string()),
-        )
-    })?;
+    let program = step_job::durable_step_program()?;
     let cwd = std::env::current_dir().map_err(|error| {
         Error::internal_io(
             error.to_string(),
@@ -2203,10 +2198,6 @@ mod tests {
             assert_eq!(
                 parent.state(),
                 homeboy_lifecycle_contract::RunExecutionState::Cancelled
-            );
-            assert_eq!(
-                parent.metadata["detached_cook_handoff"]["cancellation_fence"]["state"],
-                "cancelled"
             );
             assert!(
                 !agent_task_lifecycle::cook_index_exists_in_store(

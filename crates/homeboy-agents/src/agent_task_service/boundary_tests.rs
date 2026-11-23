@@ -60,7 +60,7 @@ fn agent_task_execution_wait_blockers_and_budget() {
             } else {
                 assert!(!action.is_empty());
             }
-            let resource = crate::orchestration::project_record(&record, None).unwrap();
+            let resource = crate::orchestration::project_record(&record, None, None).unwrap();
             assert!(serde_json::to_value(resource)
                 .unwrap()
                 .to_string()

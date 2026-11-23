@@ -388,6 +388,7 @@ fn manual_finalization_options(
             .collect::<homeboy::core::Result<Vec<_>>>()?,
         out_of_scope_changes: Vec::new(),
         repro: None,
+        delivery: Vec::new(),
     };
     review_dossier.apply_overrides()?;
     let review_profile = resolve_review_profile(args.component.as_deref(), &path)?;
@@ -431,7 +432,7 @@ pub(crate) fn finalize_pull_request(args: FinalizePrArgs) -> CmdResult<Value> {
     }?;
     let exit_code = if matches!(
         report.status.as_str(),
-        "review_ready" | "draft_published" | "validated"
+        "review_ready" | "draft_published" | "succeeded_partial" | "validated"
     ) {
         0
     } else {
@@ -3350,15 +3351,24 @@ esac
                 repeated["publication_proof"]["git_identity"]["commit_sha"],
                 published["publication_proof"]["git_identity"]["commit_sha"]
             );
-            let error = dispatch_agent_task_error(&[
+            let cli = crate::cli_surface::Cli::try_parse_from([
                 "homeboy",
                 "agent-task",
                 "recover",
                 "missing-manual-finalization",
-            ]);
-            assert!(error
-                .message
+            ])
+            .unwrap();
+            let crate::cli_surface::Commands::AgentTask(args) = cli.command else {
+                panic!("expected agent-task");
+            };
+            let (report, code) = crate::commands::agent_task::run(args).unwrap();
+            assert_ne!(code, 0);
+            assert!(report["failure"]["message"]
+                .as_str()
+                .unwrap()
                 .contains("no durable Cook, Cook attempt or batch-child run has this ID"));
+            assert!(report["failure"]["next_command"].is_string());
+            assert_eq!(report["failure"]["run_state"], "unknown");
             let created = std::fs::read_to_string(&log)
                 .expect("fake gh log")
                 .lines()

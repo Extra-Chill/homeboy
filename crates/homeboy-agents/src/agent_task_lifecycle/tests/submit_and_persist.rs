@@ -226,7 +226,6 @@ fn seed_unmaterialized_admission_parent(store: &AgentTaskLifecycleStore, cook_id
                     + chrono::Duration::hours(1))
                     .to_rfc3339(),
                 "cook_id": cook_id,
-                "cancellation_fence": { "state": "open" },
             });
             true
         })
@@ -513,10 +512,6 @@ fn unmaterialized_cook_admission_refuses_identity_rebinding_and_cancels_without_
     )
     .expect("cancel admission");
     assert_eq!(cancelled.state(), RunExecutionState::Cancelled);
-    assert_eq!(
-        cancelled.metadata["detached_cook_handoff"]["cancellation_fence"]["state"],
-        "cancelled"
-    );
     assert!(cancelled.metadata["detached_cook_handoff"]["child_pid"].is_null());
 }
 
@@ -606,7 +601,7 @@ fn only_the_claiming_launcher_can_publish_detached_child_supervision() {
 }
 
 #[test]
-fn cancellation_request_closes_every_first_attempt_admission_gate() {
+fn cancelled_parent_closes_every_first_attempt_admission_gate() {
     let context = homeboy_core::test_support::HermeticTestContext::new();
     let store = AgentTaskLifecycleStore::new(context.path_roots());
     let cook_id = "cook-cancellation-request-fence";
@@ -614,11 +609,10 @@ fn cancellation_request_closes_every_first_attempt_admission_gate() {
         .expect("claim handoff parent");
     store
         .mutate_record(cook_id, |record| {
-            record.metadata["detached_cook_handoff"]["cancellation_fence"]["state"] =
-                json!("cancel_requested");
+            set_run_state(record, RunExecutionState::Cancelled);
             true
         })
-        .expect("close cancellation fence");
+        .expect("cancel the handoff parent");
     let identity = homeboy_core::process::ProcessStartIdentity::Linux {
         starttime_ticks: 42,
     };
@@ -824,8 +818,7 @@ fn accepted_daemon_context_keeps_a_pidless_runner_submission_live() {
     .record;
     assert_eq!(status.runner_job_id(), Some(context.runner_job_id()));
     assert!(status.metadata.get("runner_execution_context").is_some());
-    assert!(status.metadata.get("stale_running").is_none());
-    assert!(status.metadata.get("stale_running_reason").is_none());
+    assert!(!status.is_stale_running());
 }
 
 /// Stays on `with_isolated_home` because the retry API still resolves its store
@@ -1132,17 +1125,16 @@ fn cook_progress_is_durable_across_active_and_terminal_lifecycle_states() {
     assert_eq!(terminal.state(), RunExecutionState::Cancelled);
     assert_eq!(terminal.metadata["cook_progress"]["phase"], "terminal");
     let terminal =
-        record_cook_terminal_result_in_store(&lifecycle_store, run_id, "no_candidate", false, 1)
+        record_cook_terminal_result_in_store(&lifecycle_store, run_id, "no_candidate", 1)
             .expect("record terminal Cook result");
     assert_eq!(
         terminal.state(),
         RunExecutionState::Cancelled,
         "a no-candidate result does not erase the cancellation that caused it"
     );
-    assert_eq!(
-        terminal.metadata["cook_progress"]["terminal_success"],
-        false
-    );
+    assert!(terminal.metadata["cook_progress"]
+        .get("terminal_success")
+        .is_none());
     assert_eq!(terminal.metadata["cook_progress"]["exit_code"], 1);
 
     let repeated = record_cook_progress_in_store(
@@ -1195,7 +1187,7 @@ fn terminal_cook_report_preserves_each_attempts_lifecycle_status() {
     )
     .unwrap();
     record_cook_progress_in_store(&store, second, "terminal", 2, Some("published")).unwrap();
-    record_cook_terminal_result_in_store(&store, second, "review_ready", true, 1).unwrap();
+    record_cook_terminal_result_in_store(&store, second, "review_ready", 1).unwrap();
 
     let observations = store.open_observation_initialized().unwrap();
     for (run_id, expected) in [(first, "fail"), (second, "pass"), (cook_id, "pass")] {
@@ -1321,9 +1313,11 @@ fn cook_write_siblings_persist_progress_and_delivery_evidence() {
         .expect("record Cook progress into the injected store");
     assert_eq!(progress.metadata["cook_progress"]["phase"], "terminal");
     let terminal =
-        record_cook_terminal_result_in_store(&seeded, run_id, "intentional_no_change", true, 0)
+        record_cook_terminal_result_in_store(&seeded, run_id, "intentional_no_change", 0)
             .expect("record the terminal Cook result into the injected store");
-    assert_eq!(terminal.metadata["cook_progress"]["terminal_success"], true);
+    assert!(terminal.metadata["cook_progress"]
+        .get("terminal_success")
+        .is_none());
     record_cook_controller_failure_in_store(&seeded, run_id, &json!({ "reason": "rooted" }))
         .expect("record a controller failure into the injected store");
     record_cook_observer_event_in_store(&seeded, run_id, "terminal", json!({ "code": "rooted" }))
@@ -1363,10 +1357,6 @@ fn cook_write_siblings_persist_progress_and_delivery_evidence() {
         .read_record(run_id)
         .expect("read the seeded record back");
     assert_eq!(persisted.metadata["cook_progress"]["phase"], "terminal");
-    assert_eq!(
-        persisted.metadata["cook_progress"]["terminal_success"],
-        true
-    );
     assert_eq!(persisted.metadata["cook_progress"]["exit_code"], 0);
     assert_eq!(
         persisted.metadata["cook_controller_failure"]["reason"],
@@ -1646,7 +1636,6 @@ fn detached_handoff_siblings_attach_supervision_and_enforce_admission_guards() {
                                 + chrono::Duration::seconds(3_600))
                             .to_rfc3339(),
                             "cook_id": cook_id,
-                            "cancellation_fence": { "state": "open" },
                         }),
                     );
                     true
@@ -1732,10 +1721,6 @@ fn detached_handoff_siblings_attach_supervision_and_enforce_admission_guards() {
         attached.metadata["detached_cook_handoff"]["child_pid"],
         child_pid
     );
-    assert_eq!(
-        attached.metadata["detached_cook_handoff"]["cancellation_fence"]["state"], "open",
-        "attaching a child carries the durable fence forward"
-    );
 
     record_detached_cook_supervisor_in_store(&seeded, handoff_cook_id, "daemon-job-rooted")
         .expect("attach the supervising daemon job in the injected store");
@@ -1763,11 +1748,10 @@ fn detached_handoff_siblings_attach_supervision_and_enforce_admission_guards() {
     assert!(detached_cook_admission_is_live(&supervised, now));
     assert!(!has_expired_detached_cook_admission(&supervised, now));
 
-    // Closing the fence prevents child materialization.
+    // Cancelling the parent prevents child materialization.
     seeded
         .mutate_record(handoff_cook_id, |record| {
-            record.metadata["detached_cook_handoff"]["cancellation_fence"]["state"] =
-                json!("cancelled");
+            set_run_state(record, RunExecutionState::Cancelled);
             true
         })
         .expect("close the injected store's cancellation fence");
@@ -3077,10 +3061,7 @@ fn disconnected_proxy_projects_terminal_child_aggregate_once_reachable() {
 
     record.annotate_runner_disconnected();
     assert_eq!(record.metadata["runner_liveness"], "disconnected");
-    assert_eq!(
-        record.metadata["stale_running_reason"],
-        "runner_disconnected"
-    );
+    assert_eq!(record.stale_running_reason(), Some("runner_disconnected"));
     assert_eq!(record.lifecycle.heartbeat, Some(heartbeat));
 
     let child_plan = test_plan();

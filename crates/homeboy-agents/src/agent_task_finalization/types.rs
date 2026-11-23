@@ -65,6 +65,10 @@ pub struct AgentTaskPrFinalizationReport {
     /// A green promotion receipt inherited after exact candidate binding.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub inherited_gate_evidence: Option<AgentTaskInheritedGateEvidence>,
+    /// The published pull request's draft state, recorded when a PR was
+    /// created or updated.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pr_draft: Option<bool>,
     #[serde(flatten)]
     pub evidence: AgentTaskPrEvidence,
 }
@@ -124,6 +128,11 @@ pub struct AgentTaskPublicationTarget {
     /// Live base SHA observed immediately before publication, if available.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub publication_base_sha: Option<String>,
+    /// Commits the live base is ahead of the verified base at publication,
+    /// when both are observable (#17610). Non-zero means the candidate was
+    /// gated and published on a stale base.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub publication_base_behind_by: Option<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub head: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -410,6 +419,17 @@ pub trait AgentTaskPrFinalizationBackend {
     fn publication_base_sha(&mut self, _path: &str, _base: &str) -> Result<Option<String>> {
         Ok(None)
     }
+    /// Counts the commits `live_base_sha` holds beyond `verified_base_sha`.
+    /// Best effort: `None` when the count cannot be observed (#17610).
+    fn publication_base_behind_by(
+        &mut self,
+        _path: &str,
+        _base: &str,
+        _verified_base_sha: &str,
+        _live_base_sha: &str,
+    ) -> Option<u64> {
+        None
+    }
     /// Validates the effective prospective identity before commit mutation.
     fn validate_publication_identity(&mut self, path: &str) -> Result<GitIdentityProof>;
     /// Pushes the verified commit SHA to the candidate branch.
@@ -472,17 +492,6 @@ pub trait AgentTaskPrFinalizationBackend {
         title: &str,
         body: &str,
     ) -> Result<AgentTaskPrRef>;
-    /// Transition an already published draft candidate to ready-for-review.
-    /// The operation must be idempotent for an already-ready PR.
-    fn mark_pr_ready(&mut self, path: &str, pr: &AgentTaskPrRef) -> Result<AgentTaskPrRef> {
-        let _ = (path, pr);
-        Err(Error::validation_invalid_argument(
-            "pr",
-            "finalization backend does not support draft-to-ready transition",
-            None,
-            None,
-        ))
-    }
     fn verify_publication_binding(
         &mut self,
         path: &str,

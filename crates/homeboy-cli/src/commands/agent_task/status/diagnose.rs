@@ -272,7 +272,14 @@ pub(in crate::commands::agent_task) fn diagnose(args: DiagnoseArgs) -> CmdResult
         "lab_snapshot_failure": lab_snapshot_failure,
         "next_commands": next_commands,
     });
+    crate::commands::agent_task::cook_summary::attach(
+        &mut value,
+        Some(crate::commands::agent_task::cook_summary::of_record(
+            &record,
+        )),
+    );
     attach_gate_cleanup_warnings(&mut value, &record);
+    super::super::candidate_location::attach_candidate_location(&mut value, &record);
     if let Ok(Some(promotion)) =
         agent_task_service_direct::recorded_promotion_report(&record.metadata)
     {
@@ -293,6 +300,7 @@ pub(in crate::commands::agent_task) fn diagnose(args: DiagnoseArgs) -> CmdResult
     attach_durable_read_availability(&mut value, &durable_read.unavailable_sources);
     attach_cook_completion(&mut value, &record);
     attach_lab_admission_wait(&mut value, admission.as_ref());
+    attach_local_dispatch_wait(&mut value, &record);
     if let Some(selection) = target.selection {
         value["candidate_selection"] = json!(selection);
     }
@@ -309,13 +317,22 @@ pub(in crate::commands::agent_task) fn diagnose(args: DiagnoseArgs) -> CmdResult
     }
     // Gate classifications own their recovery guidance. Other diagnoses use
     // the Cook recovery planner, including its durable no-progress marker.
+    // An admission-failed Cook has no recipe, but `recover` still plans it
+    // (relaunch, or guidance when nothing is legal), so diagnose reads the
+    // same plan instead of suggesting a command `recover` refuses (#18845).
     let recovery_plan = gate_failure
         .is_none()
         .then(|| {
-            agent_task_service::load_recipe_for_attempt(run_id)
+            let plannable = agent_task_service::load_recipe_for_attempt(run_id)
                 .ok()
                 .flatten()
-                .and_then(|_| agent_task_service_direct::plan_cook_recovery_recorded(run_id).ok())
+                .is_some()
+                || (agent_task_lifecycle::is_unmaterialized_cook_admission(&record)
+                    && !persisted_cook_failure_diagnostic(&record)
+                        .is_some_and(|cause| cause.class == "runner.capacity_busy"));
+            plannable
+                .then(|| agent_task_service_direct::plan_cook_recovery_recorded(run_id).ok())
+                .flatten()
         })
         .flatten();
     let recovery_prefix =

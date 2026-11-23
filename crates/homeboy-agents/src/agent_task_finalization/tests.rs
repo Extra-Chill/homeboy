@@ -14,8 +14,7 @@ use crate::{
 use homeboy_control_plane_contract::ControlPlaneState;
 use homeboy_core::run_lifecycle_record::{
     ArtifactRetentionLifecycle, ArtifactRetentionStatus, CleanupLifecycle, CleanupState,
-    ExternalRuntimeId, FinalizationLifecycle, FinalizationState, ProviderRuntimeLifecycle,
-    ProviderRuntimeState, RunExecutionLifecycle,
+    ExternalRuntimeId, ProviderRuntimeLifecycle, ProviderRuntimeState, RunExecutionLifecycle,
 };
 use homeboy_lifecycle_contract::RunExecutionState;
 use std::process::Command;
@@ -56,6 +55,7 @@ pub(super) struct MockBackend {
     changed_files: Vec<String>,
     resolved_base: Option<AgentTaskPrResolvedBase>,
     publication_base_sha: Option<String>,
+    publication_base_behind_by: Option<u64>,
     candidate_base_sha: Option<String>,
     pr_lookup_complete: bool,
     publication_observed_after_pr_lookup: bool,
@@ -211,6 +211,16 @@ impl AgentTaskPrFinalizationBackend for MockBackend {
     fn publication_base_sha(&mut self, _path: &str, _base: &str) -> Result<Option<String>> {
         self.publication_observed_after_pr_lookup = self.pr_lookup_complete;
         Ok(self.publication_base_sha.clone())
+    }
+
+    fn publication_base_behind_by(
+        &mut self,
+        _path: &str,
+        _base: &str,
+        _verified_base_sha: &str,
+        _live_base_sha: &str,
+    ) -> Option<u64> {
+        self.publication_base_behind_by
     }
 
     fn validate_publication_identity(
@@ -381,12 +391,6 @@ impl AgentTaskPrFinalizationBackend for MockBackend {
                 head_repository: "Extra-Chill/homeboy".to_string(),
                 changed_files: changed_files.to_vec(),
             }))
-    }
-
-    fn mark_pr_ready(&mut self, _path: &str, pr: &AgentTaskPrRef) -> Result<AgentTaskPrRef> {
-        let mut ready = pr.clone();
-        ready.is_draft = false;
-        Ok(ready)
     }
 }
 
@@ -681,6 +685,7 @@ fn finalization_pins_verified_base_when_base_advances_before_publication() {
             sha: "verified-base".to_string(),
         }),
         publication_base_sha: Some("advanced-base".to_string()),
+        publication_base_behind_by: Some(19),
         ..Default::default()
     };
 
@@ -705,10 +710,14 @@ fn finalization_pins_verified_base_when_base_advances_before_publication() {
             .as_deref(),
         Some("advanced-base")
     );
+    assert_eq!(
+        report.publication_intent.target.publication_base_behind_by,
+        Some(19)
+    );
     assert!(
-        backend
-            .last_body
-            .contains("Base `main`@`verified-base` advanced to `advanced-base`."),
+        backend.last_body.contains(
+            "Base `main`@`verified-base` advanced to `advanced-base` (base_behind_by: 19;"
+        ),
         "{}",
         backend.last_body
     );
@@ -897,10 +906,6 @@ fn pr_body_reports_run_lifecycle_evidence() {
             policy: Some("preserve".to_string()),
             updated_at: None,
         },
-        finalization: FinalizationLifecycle {
-            state: FinalizationState::Pending,
-            updated_at: None,
-        },
         artifact_retention: ArtifactRetentionLifecycle {
             status: ArtifactRetentionStatus::Retained,
             policy: Some("retain".to_string()),
@@ -1000,6 +1005,81 @@ fn draft_policy_reconciles_an_existing_draft_pr() {
     assert!(!backend.created);
     assert!(backend.updated);
     assert_eq!(report.status.as_str(), "draft_published");
+}
+
+#[test]
+fn reworking_an_existing_draft_pr_without_draft_policy_leaves_it_draft() {
+    let mut backend = MockBackend {
+        changed_files: vec!["src/lib.rs".to_string()],
+        existing_pr: Some(AgentTaskPrRef {
+            number: 78,
+            url: "https://github.com/Extra-Chill/homeboy/pull/78".to_string(),
+            is_draft: true,
+        }),
+        ..Default::default()
+    };
+    let mut finalization = options();
+    finalization.draft_pr = false;
+
+    let report = finalize_pr_with_backend(finalization, &mut backend).expect("finalized");
+
+    assert!(!backend.created);
+    assert!(backend.updated);
+    assert_eq!(report.pr_action, "updated");
+    assert_eq!(report.status.as_str(), "draft_published");
+}
+
+fn partial_delivery() -> Vec<homeboy_control_plane_contract::CookDeliveryItem> {
+    use homeboy_control_plane_contract::{CookDeliveryItem, CookDeliveryItemStatus};
+    vec![
+        CookDeliveryItem {
+            item: "Parse the new flag".to_string(),
+            status: CookDeliveryItemStatus::Delivered,
+            reason: None,
+        },
+        CookDeliveryItem {
+            item: "Migrate stored records".to_string(),
+            status: CookDeliveryItemStatus::NotDelivered,
+            reason: Some("needs a schema decision".to_string()),
+        },
+    ]
+}
+
+#[test]
+fn undelivered_items_open_a_draft_pr_and_report_succeeded_partial() {
+    let mut backend = MockBackend {
+        changed_files: vec!["src/lib.rs".to_string()],
+        ..Default::default()
+    };
+    let mut finalization = options();
+    finalization.draft_pr = false;
+    finalization.review_dossier.delivery = partial_delivery();
+
+    let report = finalize_pr_with_backend(finalization, &mut backend).expect("finalized");
+
+    assert!(backend.created);
+    assert!(backend.created_draft, "partial delivery opens a draft");
+    assert_eq!(report.status.as_str(), "succeeded_partial");
+    assert_eq!(report.finalization_outcome.status, "succeeded_partial");
+    assert_eq!(report.pr_draft, Some(true));
+    assert_eq!(report.review_dossier.delivery.len(), 2);
+}
+
+#[test]
+fn fully_delivered_items_keep_the_ready_publication() {
+    let mut backend = MockBackend {
+        changed_files: vec!["src/lib.rs".to_string()],
+        ..Default::default()
+    };
+    let mut finalization = options();
+    finalization.review_dossier.delivery = partial_delivery();
+    finalization.review_dossier.delivery.truncate(1);
+
+    let report = finalize_pr_with_backend(finalization, &mut backend).expect("finalized");
+
+    assert!(!backend.created_draft);
+    assert_eq!(report.status.as_str(), "review_ready");
+    assert_eq!(report.pr_draft, Some(false));
 }
 
 #[test]
@@ -2379,6 +2459,7 @@ pub(super) fn options() -> AgentTaskPrFinalizationOptions {
             overrides: Vec::new(),
             out_of_scope_changes: Vec::new(),
             repro: None,
+            delivery: Vec::new(),
         },
         review_profile: crate::agent_task_review_dossier::default_profile(),
         manual_finalization: true,

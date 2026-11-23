@@ -138,6 +138,7 @@ fn multi_attempt_candidate_recoverable_recover_publishes_candidate_sha() {
             let projected = crate::orchestration::project_record(
                 &agent_task_lifecycle::exact_record(run).unwrap(),
                 None,
+                None,
             )
             .unwrap()
             .recovery
@@ -762,6 +763,7 @@ fn every_wedged_cook_state_has_one_progressing_recovery_step() {
             // names exactly the step `recover` performs, or none.
             let projected = crate::orchestration::project_record(
                 &agent_task_lifecycle::exact_record(run).unwrap(),
+                None,
                 None,
             )
             .unwrap()

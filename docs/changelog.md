@@ -4,6 +4,96 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.494.3] - 2026-11-23
+
+### Changed
+- store the Cook cancellation fence once, on the Cook index
+
+### Fixed
+- reuse checkout base when the workspace has no origin remote
+
+## [0.494.2] - 2026-11-23
+
+### Fixed
+- replace wall-clock flakes with deterministic probes
+- isolate compare runs and fail closed on missing evaluation
+- wait for starting owners during Cook handoff
+
+## [0.494.1] - 2026-11-23
+
+### Fixed
+- resolve fresh remote base before admitting new work
+
+## [0.494.0] - 2026-11-23
+
+### Added
+- attach bench compare gates with regression policies
+
+### Changed
+- consolidate scoped reconcile decisions and reporting
+
+### Fixed
+- preserve runtime isolation and synchronize signal fixtures
+- diff rebased PR-rework candidates against their current merge-base with the target branch
+
+## [0.493.1] - 2026-11-23
+
+### Changed
+- cover one-call recover of a gated candidate to a draft PR
+
+### Fixed
+- core reconciler cannot touch agent-task rows; drop proof's fleet sweep
+
+## [0.493.0] - 2026-11-23
+
+### Added
+- add homeboy bench compare base-vs-head corpus A/B with run-owned lifecycle
+
+### Changed
+- consolidate local host telemetry in engine primitives
+- use one process-table snapshot and descendant walk
+
+## [0.492.3] - 2026-11-23
+
+### Fixed
+- consolidate run state: runs.status for agent-task rows has exactly one writer
+
+## [0.492.2] - 2026-11-23
+
+### Fixed
+- make recover answer every diagnose suggestion and never fail silently
+
+## [0.492.1] - 2026-11-23
+
+### Changed
+- stop writing duplicated terminal Cook run state
+- derive stale_running on read instead of persisting a self-reinforcing latch
+
+### Fixed
+- report candidate_repo_path and an inspect command for Cook candidates
+- Stable top-level Cook summary schema across status/watch/diagnose/notify, with why_no_pr
+- surface inherited gate failures and retain base/head proof
+- expose local pressure wait evidence and retry timing
+- launch queued steps from the installed binary after an upgrade
+
+## [0.492.0] - 2026-11-23
+
+### Added
+- accept checkout path or owner/repo for cook --repo and scope issue→PR rework to the issue's repo
+- report base_behind_by when a Cook publishes on a stale base
+
+### Changed
+- Tell providers a pending Homeboy gate never makes a task incomplete
+
+### Fixed
+- pin local Cook gates to their slot CPU share and share base admission across worktrees
+- resolve Lab-host placement locally and announce admission failures
+
+## [0.491.1] - 2026-11-23
+
+### Changed
+- make SIGTERM graceful-exit test independent of foreground sleep
+
 ## [0.491.0] - 2026-11-23
 
 ### Added

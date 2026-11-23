@@ -291,6 +291,10 @@ pub struct CookDeliveryPublication {
     pub pr_number: Option<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub pr_url: Option<String>,
+    /// The agent's per-item delivery accounting the published dossier
+    /// carried (#18884).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub delivery: Vec<homeboy_control_plane_contract::CookDeliveryItem>,
 }
 
 impl CookDeliveryPublication {
@@ -451,9 +455,12 @@ impl CookDelivery {
             (CookDeliveryState::Verified, _) => (Some(RunExecutionState::Succeeded), None),
             (CookDeliveryState::Published, _) => (
                 Some(RunExecutionState::Succeeded),
-                Some(match self.publication.as_ref().is_some_and(|p| p.draft) {
-                    true => CookStatus::DraftPublished,
-                    false => CookStatus::ReviewReady,
+                Some(match self.publication.as_ref() {
+                    Some(p) if p.delivery.iter().any(|item| !item.is_delivered()) => {
+                        CookStatus::SucceededPartial
+                    }
+                    Some(p) if p.draft => CookStatus::DraftPublished,
+                    _ => CookStatus::ReviewReady,
                 }),
             ),
             (CookDeliveryState::NoChange, _) => (None, None),
@@ -673,7 +680,7 @@ fn gate_status(status: &str) -> Option<AgentTaskGateStatus> {
 /// A production gate report is named by `id` and `command: Vec<String>`;
 /// normalized results and older reports carry `name` or a string command
 /// (#14735).
-fn gate_name(gate: &Value) -> Option<String> {
+pub(super) fn gate_name(gate: &Value) -> Option<String> {
     string_at(gate, "/id")
         .or_else(|| string_at(gate, "/name"))
         .or_else(|| string_at(gate, "/failure_evidence/command"))
@@ -788,13 +795,22 @@ fn read_publication(
     let pr_url = ["/pr_url", "/pull_request_url", "/pr/url"]
         .into_iter()
         .find_map(|pointer| string_at(finalization, pointer));
-    let receipt = matches!(
-        cook_status,
-        Some(CookStatus::ReviewReady | CookStatus::DraftPublished)
-    );
+    let receipt = cook_status.as_ref().is_some_and(CookStatus::is_published);
+    // A partial delivery records the PR's own draft state; the label alone
+    // does not say whether an existing ready PR was kept ready.
+    let draft = finalization
+        .get("pr_draft")
+        .and_then(Value::as_bool)
+        .unwrap_or(cook_status == Some(CookStatus::DraftPublished));
+    let delivery = finalization
+        .pointer("/review_dossier/delivery")
+        .cloned()
+        .and_then(|delivery| serde_json::from_value(delivery).ok())
+        .unwrap_or_default();
     CookDeliveryPublication {
         published: receipt && (pr_number.is_some() || pr_url.is_some()),
-        draft: cook_status == Some(CookStatus::DraftPublished),
+        draft,
+        delivery,
         commit: string_at(finalization, "/publication_proof/binding/candidate_sha")
             .or_else(|| string_at(finalization, "/publication_proof/git_identity/commit_sha")),
         pushed_sha: string_at(finalization, "/publication_proof/binding/remote_sha")
@@ -926,7 +942,7 @@ pub(super) fn publication_status(finalization: &Value) -> (CookStatus, bool) {
         .and_then(CookStatus::from_status)
         .or_else(|| delivery.and_then(|delivery| delivery.lifecycle().cook_status))
         .unwrap_or(CookStatus::FinalizationFailed);
-    let published = matches!(status, CookStatus::ReviewReady | CookStatus::DraftPublished);
+    let published = status.is_published();
     (status, published)
 }
 

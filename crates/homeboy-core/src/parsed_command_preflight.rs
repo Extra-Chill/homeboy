@@ -617,7 +617,10 @@ fn lab_readiness_awaits_admission(readiness: &LabReadinessSnapshot) -> bool {
     matches!(
         readiness.state.as_str(),
         "capacity_blocked" | "connected_ineligible" | READINESS_UNOBSERVED
-    )
+    ) && !readiness
+        .reasons
+        .iter()
+        .any(|reason| reason == "required_capabilities_unavailable")
 }
 
 /// Readiness state of a connected runner whose readiness evidence is missing,
@@ -1790,6 +1793,7 @@ mod tests {
         for (state, reason) in [
             ("disconnected", "runner_disconnected"),
             ("stale", "stale_daemon"),
+            ("connected_ineligible", "required_capabilities_unavailable"),
         ] {
             let policy = auto_route_policy(
                 Some("lab-b"),

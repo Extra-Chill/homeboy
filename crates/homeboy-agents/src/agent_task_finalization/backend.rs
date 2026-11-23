@@ -340,6 +340,66 @@ impl AgentTaskPrFinalizationBackend for RealAgentTaskPrFinalizationBackend {
             .map(str::to_string))
     }
 
+    fn publication_base_behind_by(
+        &mut self,
+        path: &str,
+        base: &str,
+        verified_base_sha: &str,
+        live_base_sha: &str,
+    ) -> Option<u64> {
+        if !is_git_object_id(verified_base_sha) || !is_git_object_id(live_base_sha) {
+            return None;
+        }
+        let present = |sha: &str| {
+            git_output(
+                path,
+                &["rev-parse", "--verify", &format!("{sha}^{{commit}}")],
+            )
+            .is_ok()
+        };
+        if !present(live_base_sha) {
+            // The live tip was observed with ls-remote; materialize it into a
+            // Homeboy-owned ref so its distance from the gated base is countable.
+            let reference = format!("refs/homeboy/finalization/live/{base}");
+            let fetched = homeboy_core::git::with_remote_tracking_authority_until(
+                Path::new(path),
+                "fetch live finalization base",
+                std::time::Instant::now() + std::time::Duration::from_secs(30),
+                |remaining| {
+                    homeboy_core::git::run_git_output_with_env_timeout(
+                        Path::new(path),
+                        &[
+                            "fetch",
+                            "--no-tags",
+                            "--no-write-fetch-head",
+                            "origin",
+                            &format!("+refs/heads/{base}:{reference}"),
+                        ],
+                        "fetch live finalization base",
+                        &[],
+                        remaining,
+                    )
+                },
+            )
+            .ok()?;
+            if !fetched.status.success() || !present(live_base_sha) {
+                return None;
+            }
+        }
+        git_output(
+            path,
+            &[
+                "rev-list",
+                "--count",
+                &format!("{verified_base_sha}..{live_base_sha}"),
+            ],
+        )
+        .ok()?
+        .trim()
+        .parse()
+        .ok()
+    }
+
     fn validate_publication_identity(
         &mut self,
         path: &str,
@@ -709,21 +769,6 @@ impl AgentTaskPrFinalizationBackend for RealAgentTaskPrFinalizationBackend {
             number,
             url: output.url.unwrap_or_default(),
             // Editing a PR's body and title never changes its review state.
-            is_draft: false,
-        })
-    }
-
-    fn mark_pr_ready(&mut self, path: &str, pr: &AgentTaskPrRef) -> Result<AgentTaskPrRef> {
-        let output = publication_gh_output(path, &["pr", "ready", &pr.number.to_string()])?;
-        if !output.status.success() {
-            return Err(Error::git_command_failed(format!(
-                "gh pr ready failed: {}",
-                String::from_utf8_lossy(&output.stderr).trim()
-            )));
-        }
-        Ok(AgentTaskPrRef {
-            number: pr.number,
-            url: pr.url.clone(),
             is_draft: false,
         })
     }
@@ -1597,6 +1642,43 @@ mod remote_base_tests {
                 tracking.verified_remote_sha
             );
         }
+    }
+
+    /// #17610: a base advanced on origin after the candidate was gated is
+    /// counted from the gated base, fetching the live tip it has never seen.
+    #[test]
+    fn publication_base_behind_by_counts_commits_the_gated_base_lacks() {
+        let (repo, origin) = publication_repo();
+        let path = repo.path().to_str().unwrap();
+        let verified = git_output(path, &["rev-parse", "main"]).unwrap();
+        let other = tempfile::tempdir().unwrap();
+        git(
+            other.path(),
+            &["clone", origin.path().to_str().unwrap(), "."],
+        );
+        git(other.path(), &["config", "user.email", "test@example.com"]);
+        git(other.path(), &["config", "user.name", "Test"]);
+        for index in 0..2 {
+            std::fs::write(other.path().join(format!("advance{index}.txt")), "x").unwrap();
+            git(other.path(), &["add", "."]);
+            git(other.path(), &["commit", "-m", "advance"]);
+        }
+        git(other.path(), &["push", "origin", "main"]);
+
+        let mut backend = RealAgentTaskPrFinalizationBackend;
+        let live = backend
+            .publication_base_sha(path, "main")
+            .unwrap()
+            .expect("live base");
+        assert_ne!(live, verified);
+        assert_eq!(
+            backend.publication_base_behind_by(path, "main", &verified, &live),
+            Some(2)
+        );
+        assert_eq!(
+            backend.publication_base_behind_by(path, "main", &verified, &verified),
+            Some(0)
+        );
     }
 
     #[test]

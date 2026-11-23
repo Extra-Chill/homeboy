@@ -7,12 +7,7 @@ use serde::{Deserialize, Serialize};
 use std::path::Path;
 use std::time::Instant;
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct LoadAverage {
-    pub one: f64,
-    pub five: f64,
-    pub fifteen: f64,
-}
+use homeboy_engine_primitives::host_telemetry::{load_average, LoadAverage};
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 struct ResourceSnapshot {
@@ -104,7 +99,10 @@ struct SystemResourceProbe;
 impl ResourceProbe for SystemResourceProbe {
     fn snapshot(&self) -> ResourceSnapshot {
         let mut warnings = Vec::new();
-        let load_average = system_load_average(&mut warnings);
+        let load_average = load_average();
+        if load_average.is_none() {
+            warnings.push("load_average_unsupported".to_string());
+        }
         let homeboy_rss_bytes = homeboy_rss_bytes(&mut warnings);
 
         ResourceSnapshot {
@@ -266,28 +264,6 @@ fn write_summary(run_dir: &RunDir, summary: &RunResourceSummary) -> Result<()> {
     })?;
     std::fs::write(&path, json)
         .map_err(|e| Error::internal_io(e.to_string(), Some("write resource summary".into())))
-}
-
-#[cfg(unix)]
-fn system_load_average(warnings: &mut Vec<String>) -> Option<LoadAverage> {
-    let mut values = [0.0_f64; 3];
-    let count = unsafe { libc::getloadavg(values.as_mut_ptr(), values.len() as libc::c_int) };
-    if count == 3 {
-        Some(LoadAverage {
-            one: values[0],
-            five: values[1],
-            fifteen: values[2],
-        })
-    } else {
-        warnings.push("load_average_unsupported".to_string());
-        None
-    }
-}
-
-#[cfg(not(unix))]
-fn system_load_average(warnings: &mut Vec<String>) -> Option<LoadAverage> {
-    warnings.push("load_average_unsupported".to_string());
-    None
 }
 
 #[cfg(unix)]

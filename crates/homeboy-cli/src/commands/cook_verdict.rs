@@ -38,6 +38,7 @@ pub struct CookVerdict {
     pub candidate: Option<String>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub gates: Vec<CookVerdictGate>,
+    pub inherited_failures: usize,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub publication: Option<String>,
     /// Why the Cook has not completed, when it has not.
@@ -112,6 +113,7 @@ pub(crate) fn cook_verdict(run: &ControlPlaneRun) -> CookVerdict {
             .as_ref()
             .map(|publication| publication.state.clone()),
         reason: verdict_reason(run, &gates),
+        inherited_failures: run.inherited_failures,
         gates,
         next_action,
         status_command: format!("homeboy agent-task status {}", quote_arg(&run_id)),
