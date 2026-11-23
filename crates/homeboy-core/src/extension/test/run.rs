@@ -6440,6 +6440,7 @@ printf 'not json\n'
             test: vec!["sh test.sh".to_string()],
             build: Vec::new(),
             bench: Vec::new(),
+            bench_compare: Vec::new(),
             fuzz: Vec::new(),
             trace: Vec::new(),
             deps: Vec::new(),

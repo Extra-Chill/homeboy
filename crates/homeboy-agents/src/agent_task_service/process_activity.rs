@@ -15,8 +15,10 @@
 //! command string, and a single selected descendant. Diagnostics that scale
 //! with the size of the process tree are how observability turns into a flood.
 
-#[cfg(unix)]
-use std::process::Command;
+use homeboy_engine_primitives::process_table;
+#[cfg(test)]
+use homeboy_engine_primitives::process_table::parse_snapshot;
+use homeboy_engine_primitives::process_table::ProcessRow;
 
 /// Maximum characters retained from a sampled command line.
 ///
@@ -26,39 +28,9 @@ use std::process::Command;
 /// and its leading arguments — so truncate rather than drop.
 pub const MAX_ACTIVITY_COMMAND_CHARS: usize = 200;
 
-/// The `ps` projection [`descendant_activity`] requests.
-///
-/// `rss` is in the projection because supervision needs a resource number, and
-/// the walk that already answers "what is this tree doing" is the cheapest
-/// place to also answer "how much is it holding". One `ps` still, one column
-/// wider.
-pub const PS_ACTIVITY_FORMAT: &str = "pid=,ppid=,stat=,rss=,etime=,args=";
-
-/// One row of the process table, as sampled from `ps`.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct ProcessActivityRow {
-    pub pid: u32,
-    pub ppid: u32,
-    /// Process state as reported by `ps`, when the projection carried one.
-    ///
-    /// A zombie keeps its PID, command, ancestry, and elapsed time after it has
-    /// exited. It is useful as a bridge while walking to live children, but is
-    /// never activity to report or a process to count for resource supervision.
-    pub state: Option<String>,
-    /// Resident set size in KiB, when the projection carried one.
-    ///
-    /// `None` rather than `0` when the column is absent: a `ps` that did not
-    /// report memory is not a process holding no memory, and a supervision
-    /// budget must never fire on a fabricated zero.
-    pub rss_kib: Option<u64>,
-    /// Wall-clock seconds since this process started.
-    pub elapsed_seconds: u64,
-    pub command: String,
-}
-
 /// The descendant selected as "what the tree is currently doing".
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub struct DescendantActivity {
+pub struct ProviderProcessActivity {
     pub pid: u32,
     /// Hops from the observed owner. `1` is a direct child (for a Cook, the
     /// provider process itself); `2` and deeper is work the provider spawned.
@@ -116,7 +88,7 @@ impl ActivityUnavailable {
 ///   (no `ps`, a failed probe, a non-Unix host).
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct ProviderActivitySample {
-    pub activity: Option<DescendantActivity>,
+    pub activity: Option<ProviderProcessActivity>,
     /// Descendants observed under the owner, Homeboy's own processes included.
     pub descendant_count: usize,
     /// Summed resident set size across every observed descendant, in KiB.
@@ -139,118 +111,10 @@ impl ProviderActivitySample {
     }
 }
 
-/// Parse `ps` activity output into rows.
-///
-/// Kept separate from the `ps` invocation so selection behavior is testable on
-/// every platform, including ones where the probe itself returns nothing.
-///
-/// Two projections parse here: the current [`PS_ACTIVITY_FORMAT`]
-/// (`pid ppid stat rss etime args`), the original memory projection (`pid ppid
-/// rss etime args`), and the memory-free `pid ppid etime args`. A `ps` that
-/// silently drops a column must narrow the sample rather than discard every row
-/// in it.
-pub fn parse_process_activity_rows(ps_output: &str) -> Vec<ProcessActivityRow> {
-    ps_output
-        .lines()
-        .filter_map(parse_process_activity_row)
-        .collect()
-}
-
-fn parse_process_activity_row(line: &str) -> Option<ProcessActivityRow> {
-    let mut fields = line.split_whitespace();
-    let pid = fields.next()?.parse().ok()?;
-    let ppid = fields.next()?.parse().ok()?;
-    let third = fields.next()?;
-    if is_ps_state(third) {
-        let fourth = fields.next()?;
-        let (rss_kib, elapsed_seconds, leading_fields) = match fourth.parse::<u64>().ok() {
-            Some(rss) => match fields.next().and_then(parse_ps_elapsed_seconds) {
-                Some(elapsed) => (Some(rss), elapsed, 5),
-                None => (None, parse_ps_elapsed_seconds(fourth)?, 4),
-            },
-            None => (None, parse_ps_elapsed_seconds(fourth)?, 4),
-        };
-        let command = remainder_after_fields(line, leading_fields)
-            .trim()
-            .to_string();
-        return Some(ProcessActivityRow {
-            pid,
-            ppid,
-            state: Some(third.to_string()),
-            rss_kib,
-            elapsed_seconds,
-            command,
-        });
-    }
-    // `rss` is a bare integer and `etime` is `[[dd-]hh:]mm:ss`, which overlap
-    // only when `etime` is a bare seconds count. Prefer the wider projection
-    // when the field after a numeric third field is itself a valid `etime`,
-    // because that is the shape this module actually asks `ps` for.
-    let (rss_kib, elapsed_seconds, leading_fields) = match third.parse::<u64>().ok() {
-        Some(rss) => match fields.next().and_then(parse_ps_elapsed_seconds) {
-            Some(elapsed) => (Some(rss), elapsed, 4),
-            None => (None, parse_ps_elapsed_seconds(third)?, 3),
-        },
-        None => (None, parse_ps_elapsed_seconds(third)?, 3),
-    };
-    // `args` is the remainder of the line, spaces included. Recover it from the
-    // original line rather than re-joining split fields so internal spacing
-    // survives.
-    let command = remainder_after_fields(line, leading_fields)
-        .trim()
-        .to_string();
-    Some(ProcessActivityRow {
-        pid,
-        ppid,
-        state: None,
-        rss_kib,
-        elapsed_seconds,
-        command,
-    })
-}
-
-/// POSIX `ps stat` starts with a one-letter process state; any following
-/// characters are flags such as session-leader or foreground-process-group.
-fn is_ps_state(field: &str) -> bool {
-    matches!(field.as_bytes().first(), Some(byte) if byte.is_ascii_alphabetic() || *byte == b'?')
-}
-
-fn is_defunct(row: &ProcessActivityRow) -> bool {
+fn is_defunct(row: &ProcessRow) -> bool {
     row.state
         .as_deref()
         .is_some_and(|state| state.starts_with('Z') || state.starts_with('X'))
-}
-
-/// Skip `count` whitespace-separated fields and return the rest of the line.
-fn remainder_after_fields(line: &str, count: usize) -> &str {
-    let mut rest = line.trim_start();
-    for _ in 0..count {
-        match rest.find(char::is_whitespace) {
-            Some(index) => rest = rest[index..].trim_start(),
-            None => return "",
-        }
-    }
-    rest
-}
-
-/// Parse a POSIX `ps` `etime` value (`[[dd-]hh:]mm:ss`) into seconds.
-pub fn parse_ps_elapsed_seconds(etime: &str) -> Option<u64> {
-    let etime = etime.trim();
-    if etime.is_empty() {
-        return None;
-    }
-    let (days, clock) = match etime.split_once('-') {
-        Some((days, clock)) => (days.parse::<u64>().ok()?, clock),
-        None => (0, etime),
-    };
-    let mut parts = clock.split(':').rev();
-    let seconds: u64 = parts.next()?.parse().ok()?;
-    let minutes: u64 = parts.next().map(str::parse).transpose().ok()?.unwrap_or(0);
-    let hours: u64 = parts.next().map(str::parse).transpose().ok()?.unwrap_or(0);
-    if parts.next().is_some() {
-        return None;
-    }
-    Some(days * 86_400 + hours * 3_600 + minutes * 60 + seconds)
 }
 
 /// Truncate a command line to [`MAX_ACTIVITY_COMMAND_CHARS`] characters.
@@ -292,18 +156,18 @@ pub fn truncate_command(command: &str) -> String {
 /// `ignore_pids` exists because the probe's own `ps` process is a direct child
 /// of the owner and would otherwise be a candidate.
 pub fn select_provider_activity(
-    rows: &[ProcessActivityRow],
+    rows: &[ProcessRow],
     owner_pid: u32,
     ignore_pids: &[u32],
 ) -> ProviderActivitySample {
     let excluded = excluded_pids(rows, owner_pid, ignore_pids);
-    let descendants: Vec<(&ProcessActivityRow, usize)> = descendants_with_depth(rows, owner_pid)
+    let descendants: Vec<(&ProcessRow, usize)> = descendants_with_depth(rows, owner_pid)
         .into_iter()
         .filter(|(row, _)| !excluded.contains(&row.pid))
         .collect();
     // A zombie can retain live descendants in the sampled tree, so it remains
     // in the graph traversal but never becomes the reported activity.
-    let live_descendants: Vec<(&ProcessActivityRow, usize)> = descendants
+    let live_descendants: Vec<(&ProcessRow, usize)> = descendants
         .into_iter()
         .filter(|(row, _)| !is_defunct(row))
         .collect();
@@ -323,7 +187,7 @@ pub fn select_provider_activity(
         .max_by_key(|(row, depth)| (row.elapsed_seconds, *depth, row.pid));
     match selected {
         Some((row, depth)) => ProviderActivitySample {
-            activity: Some(DescendantActivity {
+            activity: Some(ProviderProcessActivity {
                 pid: row.pid,
                 depth: *depth,
                 elapsed_seconds: row.elapsed_seconds,
@@ -357,20 +221,14 @@ pub fn select_provider_activity(
 /// this is belt-and-braces against a torn snapshot — but it is also the point:
 /// the rule "never report the cook or anything that spawned it" is stated
 /// directly instead of being an emergent property of a depth comparison.
-fn excluded_pids(rows: &[ProcessActivityRow], owner_pid: u32, ignore_pids: &[u32]) -> Vec<u32> {
+fn excluded_pids(rows: &[ProcessRow], owner_pid: u32, ignore_pids: &[u32]) -> Vec<u32> {
     let mut excluded = ignore_pids.to_vec();
     excluded.push(owner_pid);
-    let mut current = owner_pid;
-    for _ in 0..MAX_PROCESS_WALK_DEPTH {
-        let Some(row) = rows.iter().find(|row| row.pid == current) else {
-            break;
-        };
-        if row.ppid == 0 || excluded.contains(&row.ppid) {
-            break;
-        }
-        excluded.push(row.ppid);
-        current = row.ppid;
-    }
+    excluded.extend(
+        process_table::ancestors(owner_pid, rows.iter().map(|row| (row.pid, row.parent_pid)))
+            .into_iter()
+            .take(MAX_PROCESS_WALK_DEPTH),
+    );
     excluded
 }
 
@@ -431,31 +289,16 @@ fn base_name(token: &str) -> &str {
 }
 
 /// Walk the owner's descendants, recording hop depth for each.
-fn descendants_with_depth(
-    rows: &[ProcessActivityRow],
-    owner_pid: u32,
-) -> Vec<(&ProcessActivityRow, usize)> {
-    let mut found: Vec<(&ProcessActivityRow, usize)> = Vec::new();
-    let mut frontier = vec![(owner_pid, 0usize)];
-    while let Some((parent, depth)) = frontier.pop() {
-        // A pid cycle cannot exist in a well-formed process table, but a
-        // torn `ps` snapshot can still produce one. Bound the walk by depth so
-        // a malformed sample cannot spin the heartbeat thread.
-        if depth >= MAX_PROCESS_WALK_DEPTH {
-            continue;
-        }
-        for row in rows {
-            if row.ppid != parent || row.pid == parent {
-                continue;
-            }
-            if found.iter().any(|(seen, _)| seen.pid == row.pid) {
-                continue;
-            }
-            found.push((row, depth + 1));
-            frontier.push((row.pid, depth + 1));
-        }
-    }
-    found
+fn descendants_with_depth(rows: &[ProcessRow], owner_pid: u32) -> Vec<(&ProcessRow, usize)> {
+    process_table::descendants(owner_pid, rows.iter().map(|row| (row.pid, row.parent_pid)))
+        .into_iter()
+        .filter(|(_, depth)| *depth <= MAX_PROCESS_WALK_DEPTH)
+        .filter_map(|(pid, depth)| {
+            rows.iter()
+                .find(|row| row.pid == pid)
+                .map(|row| (row, depth))
+        })
+        .collect()
 }
 
 /// Sample the current activity of `owner_pid`'s process tree.
@@ -469,20 +312,10 @@ fn descendants_with_depth(
 pub fn descendant_activity(owner_pid: u32) -> ProviderActivitySample {
     #[cfg(unix)]
     {
-        let Some(output) = Command::new("ps")
-            .args(["-axo", PS_ACTIVITY_FORMAT])
-            .stdin(std::process::Stdio::null())
-            .stderr(std::process::Stdio::null())
-            .output()
-            .ok()
-        else {
+        let Ok(snapshot) = process_table::snapshot(false) else {
             return ProviderActivitySample::unsampled();
         };
-        if !output.status.success() {
-            return ProviderActivitySample::unsampled();
-        }
-        let stdout = String::from_utf8_lossy(&output.stdout);
-        let rows = parse_process_activity_rows(&stdout);
+        let rows = snapshot;
         // The probe's own `ps` is a direct child of the owner whenever the
         // owner is this process; never report the observation as the activity.
         select_provider_activity(&rows, owner_pid, &[std::process::id()])
@@ -500,83 +333,16 @@ mod tests {
     use super::*;
 
     #[test]
-    fn parses_ps_etime_in_every_documented_shape() {
-        assert_eq!(parse_ps_elapsed_seconds("05"), Some(5));
-        assert_eq!(parse_ps_elapsed_seconds("06:12"), Some(372));
-        assert_eq!(parse_ps_elapsed_seconds("01:06:12"), Some(3_972));
-        assert_eq!(parse_ps_elapsed_seconds("2-01:06:12"), Some(176_772));
-        assert_eq!(parse_ps_elapsed_seconds("not-a-time"), None);
-        assert_eq!(parse_ps_elapsed_seconds(""), None);
-    }
-
-    #[test]
-    fn parses_command_lines_that_contain_spaces() {
-        let ps = "4242 100 06:12 timeout 1200 cargo test -q -p homeboy-agents\n";
-
-        let rows = parse_process_activity_rows(ps);
-
-        assert_eq!(rows.len(), 1);
-        assert_eq!(rows[0].pid, 4242);
-        assert_eq!(rows[0].ppid, 100);
-        assert_eq!(rows[0].elapsed_seconds, 372);
-        assert_eq!(
-            rows[0].command,
-            "timeout 1200 cargo test -q -p homeboy-agents"
-        );
-    }
-
-    #[test]
-    fn parses_the_resident_set_size_column_of_the_current_projection() {
-        let ps = "4242 100 S 1048576 06:12 cargo test -q -p homeboy-agents\n";
-
-        let rows = parse_process_activity_rows(ps);
-
-        assert_eq!(rows.len(), 1);
-        assert_eq!(rows[0].pid, 4242);
-        assert_eq!(rows[0].state.as_deref(), Some("S"));
-        assert_eq!(rows[0].rss_kib, Some(1_048_576));
-        assert_eq!(rows[0].elapsed_seconds, 372);
-        assert_eq!(rows[0].command, "cargo test -q -p homeboy-agents");
-    }
-
-    #[test]
-    fn a_projection_without_memory_narrows_the_row_instead_of_dropping_it() {
-        // The original `pid ppid etime args` projection still parses, and the
-        // absent column reads as "not observed" rather than as zero memory.
-        let ps = "4242 100 06:12 cargo test -q\n";
-
-        let rows = parse_process_activity_rows(ps);
-
-        assert_eq!(rows.len(), 1);
-        assert_eq!(rows[0].rss_kib, None);
-        assert_eq!(rows[0].elapsed_seconds, 372);
-        assert_eq!(rows[0].command, "cargo test -q");
-    }
-
-    #[test]
-    fn a_stateful_projection_without_memory_narrows_the_row_instead_of_dropping_it() {
-        let ps = "4242 100 S 06:12 cargo test -q\n";
-
-        let rows = parse_process_activity_rows(ps);
-
-        assert_eq!(rows.len(), 1);
-        assert_eq!(rows[0].state.as_deref(), Some("S"));
-        assert_eq!(rows[0].rss_kib, None);
-        assert_eq!(rows[0].elapsed_seconds, 372);
-        assert_eq!(rows[0].command, "cargo test -q");
-    }
-
-    #[test]
     fn a_defunct_root_is_not_reported_when_its_descendants_are_live() {
         // A reaped provider launcher can remain as a zombie while its children
         // finish work. Keep it as a graph bridge, but report the live command
         // and count only processes that can still consume host resources.
         let ps = concat!(
-            "100 1 Z 0 02:54 <defunct>\n",
-            "200 100 S 524288 02:53 pi run --format json\n",
-            "300 200 R 262144 00:12 cargo test -q -p homeboy-agents\n",
+            "100 1 Z 0 0 02:54 1000 Wed Nov 5 12:00:00 2026 tool <defunct>\n",
+            "200 100 S 524288 0 02:53 1000 Wed Nov 5 12:00:00 2026 tool pi run --format json\n",
+            "300 200 R 262144 0 00:12 1000 Wed Nov 5 12:00:00 2026 tool cargo test -q -p homeboy-agents\n",
         );
-        let rows = parse_process_activity_rows(ps);
+        let rows = parse_snapshot(ps);
 
         let sample = select_provider_activity(&rows, 1, &[]);
 
@@ -589,28 +355,15 @@ mod tests {
     }
 
     #[test]
-    fn a_bare_seconds_etime_is_not_mistaken_for_a_memory_column() {
-        // `etime` degenerates to a bare integer under a minute, which is the
-        // one shape the two projections could be confused over.
-        let ps = "4242 100 05 pi run\n";
-
-        let rows = parse_process_activity_rows(ps);
-
-        assert_eq!(rows[0].rss_kib, None);
-        assert_eq!(rows[0].elapsed_seconds, 5);
-        assert_eq!(rows[0].command, "pi run");
-    }
-
-    #[test]
     fn tree_memory_is_summed_across_every_observed_descendant() {
         // The supervision question is what the whole tree is holding on this
         // host, so a provider plus the compilers it launched is one number.
         let ps = concat!(
-            "100 1 262144 06:20 pi run --format json\n",
-            "200 100 524288 06:12 cargo test -q\n",
-            "300 200 1048576 00:03 rustc --crate-name homeboy_agents\n",
+            "100 1 S 262144 0 06:20 1000 Wed Nov 5 12:00:00 2026 tool pi run --format json\n",
+            "200 100 S 524288 0 06:12 1000 Wed Nov 5 12:00:00 2026 tool cargo test -q\n",
+            "300 200 S 1048576 0 00:03 1000 Wed Nov 5 12:00:00 2026 tool rustc --crate-name homeboy_agents\n",
         );
-        let rows = parse_process_activity_rows(ps);
+        let rows = parse_snapshot(ps);
 
         let sample = select_provider_activity(&rows, 1, &[]);
 
@@ -630,12 +383,12 @@ mod tests {
         // Both provider children share a coordinator parent. Sampling from that
         // parent would blend their commands and resource trees; each child PID
         // must be used as the root instead.
-        let rows = parse_process_activity_rows(concat!(
-            "1 0 S 1024 10:00 homeboy agent-task fanout cook\n",
-            "101 1 S 2048 05:00 pi run child-a\n",
-            "102 101 S 4096 04:00 cargo test child-a\n",
-            "201 1 S 8192 05:00 pi run child-b\n",
-            "202 201 S 16384 04:00 cargo test child-b\n",
+        let rows = parse_snapshot(concat!(
+            "1 0 S 1024 0 10:00 1000 Wed Nov 5 12:00:00 2026 tool homeboy agent-task fanout cook\n",
+            "101 1 S 2048 0 05:00 1000 Wed Nov 5 12:00:00 2026 tool pi run child-a\n",
+            "102 101 S 4096 0 04:00 1000 Wed Nov 5 12:00:00 2026 tool cargo test child-a\n",
+            "201 1 S 8192 0 05:00 1000 Wed Nov 5 12:00:00 2026 tool pi run child-b\n",
+            "202 201 S 16384 0 04:00 1000 Wed Nov 5 12:00:00 2026 tool cargo test child-b\n",
         ));
 
         let first = select_provider_activity(&rows, 101, &[]);
@@ -657,21 +410,11 @@ mod tests {
     fn an_unmeasured_tree_reports_no_memory_rather_than_zero() {
         // A budget that fired on a fabricated zero would be worse than no
         // budget at all, so the absence has to survive selection.
-        let ps = "100 1 06:20 pi run\n";
-        let rows = parse_process_activity_rows(ps);
+        let ps = "100 1 S unknown 0 06:20 1000 Wed Nov 5 12:00:00 2026 tool pi run\n";
+        let rows = parse_snapshot(ps);
 
         assert_eq!(select_provider_activity(&rows, 1, &[]).tree_rss_kib, None);
         assert_eq!(ProviderActivitySample::unsampled().tree_rss_kib, None);
-    }
-
-    #[test]
-    fn ignores_rows_that_are_not_process_table_entries() {
-        let ps = "  PID  PPID     ELAPSED COMMAND\n4242 100 06:12 cargo test\n\n";
-
-        let rows = parse_process_activity_rows(ps);
-
-        assert_eq!(rows.len(), 1);
-        assert_eq!(rows[0].pid, 4242);
     }
 
     #[test]
@@ -680,12 +423,12 @@ mod tests {
         // the compile it launched, plus a freshly started compiler child. The
         // actionable answer is `cargo test`, not `pi` and not `rustc`.
         let ps = concat!(
-            "100 1 06:20 pi run --format json # Task: make Cook honor model rotation\n",
-            "200 100 06:12 timeout 1200 cargo test -q -j3 -p homeboy-agents\n",
-            "300 200 06:12 cargo test -q -j3 -p homeboy-agents\n",
-            "400 300 00:03 rustc --crate-name homeboy_agents\n",
+            "100 1 S unknown 0 06:20 1000 Wed Nov 5 12:00:00 2026 tool pi run --format json # Task: make Cook honor model rotation\n",
+            "200 100 S unknown 0 06:12 1000 Wed Nov 5 12:00:00 2026 tool timeout 1200 cargo test -q -j3 -p homeboy-agents\n",
+            "300 200 S unknown 0 06:12 1000 Wed Nov 5 12:00:00 2026 tool cargo test -q -j3 -p homeboy-agents\n",
+            "400 300 S unknown 0 00:03 1000 Wed Nov 5 12:00:00 2026 tool rustc --crate-name homeboy_agents\n",
         );
-        let rows = parse_process_activity_rows(ps);
+        let rows = parse_snapshot(ps);
 
         let activity = select_provider_activity(&rows, 100, &[])
             .activity
@@ -702,8 +445,8 @@ mod tests {
     fn reports_the_provider_itself_when_it_has_spawned_nothing() {
         // A provider that is thinking rather than shelling out still has to be
         // visible — "no descendants" must not read as "no activity".
-        let ps = "100 1 02:00 pi run --format json\n";
-        let rows = parse_process_activity_rows(ps);
+        let ps = "100 1 S unknown 0 02:00 1000 Wed Nov 5 12:00:00 2026 tool pi run --format json\n";
+        let rows = parse_snapshot(ps);
 
         let activity = select_provider_activity(&rows, 1, &[])
             .activity
@@ -717,10 +460,10 @@ mod tests {
     #[test]
     fn never_reports_the_observing_process_as_the_activity() {
         let ps = concat!(
-            "100 1 06:20 pi run\n",
-            "999 1 00:00 ps -axo pid=,ppid=,etime=,args=\n",
+            "100 1 S unknown 0 06:20 1000 Wed Nov 5 12:00:00 2026 tool pi run\n",
+            "999 1 S unknown 0 00:00 1000 Wed Nov 5 12:00:00 2026 tool ps -axo pid=,ppid=,etime=,args=\n",
         );
-        let rows = parse_process_activity_rows(ps);
+        let rows = parse_snapshot(ps);
 
         let activity = select_provider_activity(&rows, 1, &[999])
             .activity
@@ -731,8 +474,8 @@ mod tests {
 
     #[test]
     fn controller_parent_fallback_is_not_provider_activity() {
-        let rows = parse_process_activity_rows(
-            "100 1 20:16 homeboy agent-task cook --placement local --wait\n",
+        let rows = parse_snapshot(
+            "100 1 S unknown 0 20:16 1000 Wed Nov 5 12:00:00 2026 tool homeboy agent-task cook --placement local --wait\n",
         );
 
         assert_eq!(select_provider_activity(&rows, 1, &[]).activity, None);
@@ -740,7 +483,8 @@ mod tests {
 
     #[test]
     fn returns_nothing_when_the_tree_has_no_descendants() {
-        let rows = parse_process_activity_rows("100 1 06:20 pi run\n");
+        let rows =
+            parse_snapshot("100 1 S unknown 0 06:20 1000 Wed Nov 5 12:00:00 2026 tool pi run\n");
 
         let sample = select_provider_activity(&rows, 4242, &[]);
 
@@ -757,11 +501,11 @@ mod tests {
         // 1 and age put it first, so it was reported as provider activity for
         // twenty minutes while nothing was written.
         let ps = concat!(
-            "100 1 20:16 /usr/local/bin/homeboy agent-task cook --placement local --wait\n",
-            "200 100 20:14 /usr/local/bin/homeboy agent-task cook --placement local --wait\n",
-            "300 200 20:10 pi run --format json # Task: fix homeboy cook attribution\n",
+            "100 1 S unknown 0 20:16 1000 Wed Nov 5 12:00:00 2026 tool /usr/local/bin/homeboy agent-task cook --placement local --wait\n",
+            "200 100 S unknown 0 20:14 1000 Wed Nov 5 12:00:00 2026 tool /usr/local/bin/homeboy agent-task cook --placement local --wait\n",
+            "300 200 S unknown 0 20:10 1000 Wed Nov 5 12:00:00 2026 tool pi run --format json # Task: fix homeboy cook attribution\n",
         );
-        let rows = parse_process_activity_rows(ps);
+        let rows = parse_snapshot(ps);
 
         let sample = select_provider_activity(&rows, 100, &[]);
 
@@ -777,11 +521,11 @@ mod tests {
         // provider process was observed. Naming the nested cook here is what
         // made the signal look authoritative while being wrong.
         let ps = concat!(
-            "100 1 20:16 /usr/local/bin/homeboy agent-task cook --placement local --wait\n",
-            "200 100 20:14 /usr/local/bin/homeboy agent-task cook --placement local --wait\n",
-            "300 200 00:13 homeboy contract constants all\n",
+            "100 1 S unknown 0 20:16 1000 Wed Nov 5 12:00:00 2026 tool /usr/local/bin/homeboy agent-task cook --placement local --wait\n",
+            "200 100 S unknown 0 20:14 1000 Wed Nov 5 12:00:00 2026 tool /usr/local/bin/homeboy agent-task cook --placement local --wait\n",
+            "300 200 S unknown 0 00:13 1000 Wed Nov 5 12:00:00 2026 tool homeboy contract constants all\n",
         );
-        let rows = parse_process_activity_rows(ps);
+        let rows = parse_snapshot(ps);
 
         let sample = select_provider_activity(&rows, 100, &[]);
 
@@ -800,10 +544,10 @@ mod tests {
         // tree. Tool calls the agent makes into Homeboy are Homeboy's work, not
         // the provider's.
         let ps = concat!(
-            "100 1 06:20 pi run --format json\n",
-            "200 100 00:13 homeboy contract constants all\n",
+            "100 1 S unknown 0 06:20 1000 Wed Nov 5 12:00:00 2026 tool pi run --format json\n",
+            "200 100 S unknown 0 00:13 1000 Wed Nov 5 12:00:00 2026 tool homeboy contract constants all\n",
         );
-        let rows = parse_process_activity_rows(ps);
+        let rows = parse_snapshot(ps);
 
         let activity = select_provider_activity(&rows, 1, &[])
             .activity
@@ -818,10 +562,10 @@ mod tests {
         // A torn snapshot can present a cycle in which an ancestor looks like a
         // descendant. The exclusion is stated on identity, so it holds anyway.
         let ps = concat!(
-            "100 200 30:00 /usr/local/bin/homeboy agent-task cook --wait\n",
-            "200 100 29:00 pi run --format json\n",
+            "100 200 S unknown 0 30:00 1000 Wed Nov 5 12:00:00 2026 tool /usr/local/bin/homeboy agent-task cook --wait\n",
+            "200 100 S unknown 0 29:00 1000 Wed Nov 5 12:00:00 2026 tool pi run --format json\n",
         );
-        let rows = parse_process_activity_rows(ps);
+        let rows = parse_snapshot(ps);
 
         let sample = select_provider_activity(&rows, 200, &[]);
 
@@ -874,8 +618,8 @@ mod tests {
     fn a_torn_process_table_cannot_spin_the_walk() {
         // A self-parenting row is impossible in a real table and trivial to
         // produce in a torn snapshot; the walk must still terminate.
-        let ps = "100 100 01:00 wedged\n200 100 01:00 child\n";
-        let rows = parse_process_activity_rows(ps);
+        let ps = "100 100 S unknown 0 01:00 1000 Wed Nov 5 12:00:00 2026 tool wedged\n200 100 S unknown 0 01:00 1000 Wed Nov 5 12:00:00 2026 tool child\n";
+        let rows = parse_snapshot(ps);
 
         let activity = select_provider_activity(&rows, 100, &[])
             .activity

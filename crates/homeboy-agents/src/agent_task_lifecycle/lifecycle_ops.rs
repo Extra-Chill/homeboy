@@ -3633,7 +3633,6 @@ pub fn record_cook_terminal_result_in_store(
     lifecycle_store: &AgentTaskLifecycleStore,
     run_id: &str,
     terminal_status: &str,
-    terminal_success: bool,
     exit_code: i32,
 ) -> Result<AgentTaskRunRecord> {
     let run_id = sanitize_run_id(run_id);
@@ -3649,7 +3648,6 @@ pub fn record_cook_terminal_result_in_store(
             return false;
         }
         progress.insert("terminal_status".to_string(), json!(terminal_status));
-        progress.insert("terminal_success".to_string(), json!(terminal_success));
         progress.insert("exit_code".to_string(), json!(exit_code));
         // A cancelled Cook keeps its cancellation: the provenance that minted
         // its `run.cancelled` receipt is valid only on a `Cancelled` record
@@ -3668,78 +3666,65 @@ pub fn record_cook_terminal_result_in_store(
     Ok(record)
 }
 
-/// The shared terminal telemetry write for Cook completion, including direct
-/// terminal transitions and controller reports produced on error paths.
+/// Record a Cook's end-to-end outcome on its latest attempt, the durable fact
+/// its rows project from. A later exit replaces it, and the next progress
+/// write of a resumed Cook clears it.
+pub fn record_cook_outcome_in_store(
+    lifecycle_store: &AgentTaskLifecycleStore,
+    run_id: &str,
+    exit_code: i32,
+) -> Result<()> {
+    lifecycle_store.mutate_record(&sanitize_run_id(run_id), |record| {
+        let progress = record
+            .ensure_metadata_object()
+            .entry("cook_progress".to_string())
+            .or_insert_with(|| json!({}));
+        if !progress.is_object() {
+            *progress = json!({});
+        }
+        if progress["exit_code"] == exit_code {
+            return false;
+        }
+        progress["exit_code"] = json!(exit_code);
+        true
+    })?;
+    Ok(())
+}
+
+/// A Cook's rows follow its terminal outcome, recorded on its latest attempt.
+/// Once that outcome is recorded, every Cook record named here or in its index
+/// re-projects through the normal record write, and the Cook's span records
+/// the outcome its row now reports.
 pub fn settle_cook_terminal_observations_in_store(
     lifecycle_store: &AgentTaskLifecycleStore,
     cook_id: &str,
     run_ids: &[String],
 ) -> Result<()> {
-    let observed = |state: RunExecutionState| {
-        super::failure_recording::terminal_observation_status(&state).map(|status| {
-            if status == "pass" {
-                homeboy_core::observation::RunStatus::Pass
-            } else {
-                homeboy_core::observation::RunStatus::Fail
-            }
-        })
-    };
-    // A run whose lifecycle write has not landed yet settles to its own Cook
-    // terminal report, never to another run's outcome.
-    let reported = |record: &AgentTaskRunRecord| {
-        let terminal = &record.metadata["cook_progress"];
-        (terminal["phase"] == "terminal" && terminal["terminal_success"].is_boolean()).then(|| {
-            if terminal["terminal_success"] == true && terminal["exit_code"] == 0 {
-                homeboy_core::observation::RunStatus::Pass
-            } else {
-                homeboy_core::observation::RunStatus::Fail
-            }
-        })
-    };
-    let settled = |record: &AgentTaskRunRecord| {
-        observed(CookRunState::of(record).execution_state).or_else(|| reported(record))
-    };
-    // Each run settles to its own Cook-observed outcome. Runs without a
-    // lifecycle record (invocation sources) take the Cook's outcome, and a
-    // Cook root without its own report takes the reporting run's.
-    let cook_status = observed(
-        CookRunState::of(&crate::agent_task_service::cook_observation_in_store(
-            lifecycle_store,
-            cook_id,
-        )?)
-        .execution_state,
-    )
-    .or_else(|| {
-        run_ids
-            .iter()
-            .find_map(|id| lifecycle_store.read_record_bounded(id).ok())
-            .and_then(|record| settled(&record))
-    });
     let mut ids = run_ids.to_vec();
     if let Ok(index) = lifecycle_store.read_cook_index(cook_id) {
         ids.extend(index.attempts.into_iter().map(|attempt| attempt.run_id));
     }
+    ids.push(cook_id.to_string());
     ids.sort();
     ids.dedup();
-    ids.retain(|id| id != cook_id);
-    let observation = lifecycle_store.open_observation_initialized()?;
-    for id in ids {
-        let status = match lifecycle_store.read_record_bounded(&id) {
-            Ok(record) => settled(&record),
-            Err(_) => cook_status,
-        };
-        if let Some(status) = status {
-            observation.settle_run(&id, status)?;
+    for id in &ids {
+        if lifecycle_store.read_record_bounded(id).is_ok() {
+            lifecycle_store.reproject_record(id)?;
         }
     }
-    let Some(cook_status) = cook_status else {
+    let observation = lifecycle_store.open_observation_initialized()?;
+    let running = homeboy_core::observation::RunStatus::Running.as_str();
+    let mut statuses = std::iter::once(cook_id)
+        .chain(run_ids.iter().map(String::as_str))
+        .filter_map(|id| observation.get_run(id).ok().flatten())
+        .map(|run| run.status);
+    let Some(cook_status) = statuses.find(|status| status != running) else {
         return Ok(());
     };
-    observation.settle_run(cook_id, cook_status)?;
     observation.record_run_phase(
         cook_id,
         "cook",
-        cook_status != homeboy_core::observation::RunStatus::Pass,
+        cook_status != homeboy_core::observation::RunStatus::Pass.as_str(),
     )
 }
 
@@ -5011,20 +4996,6 @@ fn converge_resolved_run_in_store(
     let before_liveness_reconciliation = record.clone();
     if runner_probe.performed {
         reconcile_runner_job_state_in_store(lifecycle_store, &mut record)?;
-    }
-    let before_stale_annotation = record.clone();
-    record.annotate_stale_running();
-    // An aged projection of a runner-backed run is not evidence that its job
-    // stopped. When the daemon job store this root owns shows the exact job
-    // still heartbeating, keep the run unmarked so nothing treats it as stale.
-    if record.is_stale_running()
-        && !before_stale_annotation.is_stale_running()
-        && observe_runner_job_in_store(lifecycle_store, &record).is_some_and(|evidence| {
-            evidence.source == "local_job_store"
-                && evidence.observation == RunnerJobObservation::Live
-        })
-    {
-        record = before_stale_annotation;
     }
     if record != before_liveness_reconciliation {
         lifecycle_store.commit_record(&mut record)?;
@@ -6448,7 +6419,8 @@ pub fn record_cook_attempt_in_store(
         // the parent between index publication and this transition.
         complete_detached_cook_handoff_parent_in_store(lifecycle_store, cook_id, run_id)?;
         inherit_cook_notification_route_locked_in_store(lifecycle_store, cook_id, run_id)?;
-        super::lifecycle_store::mirror_cook_row_in_store(
+        // A new latest attempt moves a redirected Cook's row onto it (#16179).
+        super::lifecycle_store::reproject_redirected_cook_root(
             lifecycle_store,
             &lifecycle_store.open_observation_initialized()?,
             cook_id,

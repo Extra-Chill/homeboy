@@ -24,13 +24,12 @@ pub(in crate::commands::agent_task) use super::super::status::{
 pub(in crate::commands::agent_task) use super::super::{
     review, CancelArgs, ProvidersArgs, RetryArgs,
 };
-pub(crate) use homeboy::agents::agent_tasks::provider::{
+pub(crate) use homeboy::agents::agent_task_provider::{
     ExtensionProviderAgentTaskExecutor, AGENT_TASK_EXECUTOR_PROVIDER_SCHEMA,
     AGENT_TASK_PROVIDER_CAPABILITY_CONTRACT_SCHEMA,
 };
-pub(crate) use homeboy::agents::agent_tasks::scheduler::{
-    AgentTaskAggregate, AgentTaskExecutorAdapter, AgentTaskPlan,
-};
+pub(crate) use homeboy::agents::agent_task_schedule::{AgentTaskAggregate, AgentTaskPlan};
+pub(crate) use homeboy::agents::agent_task_scheduler::AgentTaskExecutorAdapter;
 
 /// An isolated home where commands that queue daemon-scheduled work never
 /// spawn this test binary as the scheduling daemon (#17506).
@@ -50,16 +49,16 @@ pub(crate) fn with_isolated_home<R>(body: impl FnOnce(&tempfile::TempDir) -> R) 
         homeboy::agents::agent_task_service::with_scheduling_daemon_start(|| Ok(()), || body(home))
     })
 }
-pub(crate) use homeboy::agents::agent_tasks::lifecycle::{
-    self as agent_task_lifecycle, reconcile_status as lifecycle_status, AgentTaskRunRecord,
-};
-pub(crate) use homeboy::agents::agent_tasks::scheduler::AgentTaskExecutionContext;
-pub(crate) use homeboy::agents::agent_tasks::{
+pub(crate) use homeboy::agents::agent_task::{
     AgentTaskArtifact, AgentTaskDiagnostic, AgentTaskEvidenceRef, AgentTaskExecutor,
     AgentTaskFailureClassification, AgentTaskLimits, AgentTaskOutcome, AgentTaskOutcomeStatus,
     AgentTaskPolicy, AgentTaskRequest, AgentTaskWorkspace, AGENT_TASK_ARTIFACT_SCHEMA,
     AGENT_TASK_OUTCOME_SCHEMA, AGENT_TASK_REQUEST_SCHEMA,
 };
+pub(crate) use homeboy::agents::agent_task_lifecycle::{
+    self as agent_task_lifecycle, reconcile_status as lifecycle_status, AgentTaskRunRecord,
+};
+pub(crate) use homeboy::agents::agent_task_schedule::AgentTaskExecutionContext;
 pub(crate) use homeboy_control_plane_contract::ControlPlaneState;
 pub(crate) use homeboy_lifecycle_contract::RunExecutionState;
 pub(crate) use serde_json::{json, Value};

@@ -1440,85 +1440,30 @@ fn ensure_sigkill_reaped(scope: &str, owner_pid: u32, survivors: &[u32]) -> Resu
 /// The ancestors of `pid`, nearest first, stopping before PID 1.
 #[cfg(unix)]
 pub fn ancestor_pids(pid: u32) -> Result<Vec<u32>> {
-    let output = Command::new("ps")
-        .args(["-axo", "pid=,ppid="])
-        .output()
-        .map_err(|error| {
-            Error::internal_unexpected(format!("failed to inspect process tree with ps: {error}"))
-        })?;
-    if !output.status.success() {
-        return Err(Error::internal_unexpected(format!(
-            "failed to inspect process tree with ps: {}",
-            String::from_utf8_lossy(&output.stderr).trim()
-        )));
-    }
-    Ok(ancestor_pids_from_ps(
-        &String::from_utf8_lossy(&output.stdout),
+    let rows = homeboy_engine_primitives::process_table::snapshot(false).map_err(|error| {
+        Error::internal_unexpected(format!("failed to inspect process tree: {error}"))
+    })?;
+    Ok(homeboy_engine_primitives::process_table::ancestors(
         pid,
-    ))
-}
-
-#[cfg(unix)]
-fn ancestor_pids_from_ps(ps_output: &str, pid: u32) -> Vec<u32> {
-    let parents: std::collections::HashMap<u32, u32> = ps_output
-        .lines()
-        .filter_map(|line| {
-            let mut fields = line.split_whitespace();
-            Some((fields.next()?.parse().ok()?, fields.next()?.parse().ok()?))
-        })
-        .collect();
-    let mut ancestors = Vec::new();
-    let mut current = pid;
-    while let Some(&parent) = parents.get(&current) {
-        if parent <= 1 || ancestors.contains(&parent) {
-            break;
-        }
-        ancestors.push(parent);
-        current = parent;
-    }
-    ancestors
+        rows.iter().map(|row| (row.pid, row.parent_pid)),
+    )
+    .into_iter()
+    .take_while(|pid| *pid > 1)
+    .collect())
 }
 
 #[cfg(unix)]
 fn unix_descendant_pids(owner_pid: u32) -> Result<Vec<u32>> {
-    let output = Command::new("ps")
-        .args(["-axo", "pid=,ppid="])
-        .output()
-        .map_err(|error| {
-            Error::internal_unexpected(format!("failed to inspect process tree with ps: {error}"))
-        })?;
-    if !output.status.success() {
-        return Err(Error::internal_unexpected(format!(
-            "failed to inspect process tree with ps: {}",
-            String::from_utf8_lossy(&output.stderr).trim()
-        )));
-    }
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    Ok(descendant_pids_from_ps(&stdout, owner_pid))
-}
-
-#[cfg(unix)]
-fn descendant_pids_from_ps(ps_output: &str, owner_pid: u32) -> Vec<u32> {
-    let rows: Vec<(u32, u32)> = ps_output
-        .lines()
-        .filter_map(|line| {
-            let mut fields = line.split_whitespace();
-            let pid = fields.next()?.parse().ok()?;
-            let ppid = fields.next()?.parse().ok()?;
-            Some((pid, ppid))
-        })
-        .collect();
-    let mut descendants = Vec::new();
-    let mut frontier = vec![owner_pid];
-    while let Some(parent) = frontier.pop() {
-        for (pid, ppid) in &rows {
-            if *ppid == parent && !descendants.contains(pid) {
-                descendants.push(*pid);
-                frontier.push(*pid);
-            }
-        }
-    }
-    descendants
+    let rows = homeboy_engine_primitives::process_table::snapshot(false).map_err(|error| {
+        Error::internal_unexpected(format!("failed to inspect process tree: {error}"))
+    })?;
+    Ok(homeboy_engine_primitives::process_table::descendants(
+        owner_pid,
+        rows.iter().map(|row| (row.pid, row.parent_pid)),
+    )
+    .into_iter()
+    .map(|(pid, _)| pid)
+    .collect())
 }
 
 #[cfg(target_os = "linux")]
@@ -1897,25 +1842,6 @@ mod ownership_token_tests {
 #[cfg(all(test, unix))]
 mod process_tree_tests {
     use super::*;
-
-    #[test]
-    fn descendant_pids_from_ps_walks_nested_children() {
-        let ps = "10 1\n11 10\n12 11\n13 10\n20 1\n";
-
-        let mut descendants = descendant_pids_from_ps(ps, 10);
-        descendants.sort_unstable();
-
-        assert_eq!(descendants, vec![11, 12, 13]);
-    }
-
-    #[test]
-    fn ancestor_pids_from_ps_walks_up_to_init() {
-        let ps = "10 1\n11 10\n12 11\n13 10\n20 1\n";
-
-        assert_eq!(ancestor_pids_from_ps(ps, 12), vec![11, 10]);
-        assert!(ancestor_pids_from_ps(ps, 20).is_empty());
-        assert!(ancestor_pids_from_ps(ps, 99).is_empty());
-    }
 
     #[test]
     fn process_tree_recovery_commands_reference_recorded_pid() {

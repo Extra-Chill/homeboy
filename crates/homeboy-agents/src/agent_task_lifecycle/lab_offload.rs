@@ -816,7 +816,6 @@ pub(crate) fn record_detached_lab_run_with_submission_locked_in_store(
     metadata.insert(
         "runner_handoff".to_string(),
         json!({
-            "state": "in_flight",
             "authority": "runner_daemon",
             "identity": {
                 "run_id": run_id,
@@ -858,8 +857,6 @@ pub(crate) fn record_detached_lab_run_with_submission_locked_in_store(
         &accepted_at,
     )?;
     metadata.insert(METADATA_KEY_RETRYABLE.to_string(), json!(true));
-    metadata.remove(METADATA_KEY_STALE_RUNNING);
-    metadata.remove(METADATA_KEY_STALE_RUNNING_REASON);
     // A late acceptance supersedes the synthetic expiry cancellation, so the
     // running record no longer carries its provenance; the retained
     // `run.cancelled` receipt stays as the first cause a later cancel reuses.
@@ -1041,8 +1038,6 @@ fn record_lab_offload_proxy_in_store(
             metadata.insert("remote_command".to_string(), json!(remote_command));
         }
         metadata.insert(METADATA_KEY_RETRYABLE.to_string(), json!(true));
-        metadata.remove(METADATA_KEY_STALE_RUNNING);
-        metadata.remove(METADATA_KEY_STALE_RUNNING_REASON);
         metadata.insert(
             "runner_execution_record".to_string(),
             serde_json::to_value(

@@ -686,8 +686,8 @@ fn batch_child(instance: &str, item: &Value, status: &str, batch_reason: &str) -
 /// The durable run behind a child's Cook id, or `None` when it never wrote
 /// one.
 fn child_run(cook_id: &str) -> Option<Vec<(&'static str, Value)>> {
-    use homeboy::agents::agent_tasks::lifecycle;
-    let store = lifecycle::AgentTaskLifecycleStore::from_environment().ok()?;
+    use homeboy::agents::agent_task_lifecycle;
+    let store = agent_task_lifecycle::AgentTaskLifecycleStore::from_environment().ok()?;
     let target =
         homeboy::agents::agent_task_lifecycle::resolve_cook_reader_target_in_store(&store, cook_id)
             .ok()?;
@@ -696,7 +696,7 @@ fn child_run(cook_id: &str) -> Option<Vec<(&'static str, Value)>> {
         &target.run_id,
     )
     .ok()?;
-    let run = homeboy::agents::agent_tasks::service::control_plane_run(&record.run_id).ok()?;
+    let run = homeboy::agents::agent_task_service::control_plane_run(&record.run_id).ok()?;
     let verdict = crate::commands::cook_verdict::cook_verdict(&run);
     let pr_url =
         homeboy::agents::agent_task_service::CookDelivery::from_run_metadata(&record.metadata)
@@ -1134,8 +1134,8 @@ mod tests {
             );
             let first = state.steps["cook"].items[0].run_id.clone().unwrap();
             let plan =
-                homeboy::agents::agent_tasks::scheduler::AgentTaskPlan::new("child-0", Vec::new());
-            homeboy::agents::agent_tasks::lifecycle::submit_plan(&plan, Some(&first))
+                homeboy::agents::agent_task_schedule::AgentTaskPlan::new("child-0", Vec::new());
+            homeboy::agents::agent_task_lifecycle::submit_plan(&plan, Some(&first))
                 .expect("persist first child run");
             let mut view = homeboy::core::daemon::workflow_job::projection(&state, None);
             view["workflow"] = json!(COOK_BATCH_WORKFLOW_ID);

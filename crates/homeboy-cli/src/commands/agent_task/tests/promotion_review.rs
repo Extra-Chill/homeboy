@@ -41,7 +41,7 @@ fn promotion_recipe_reference_keeps_private_gates_out_of_review_commands() {
     with_temp_home(|| {
         let run_id = "cook-retained-gates-attempt-1";
         let private_program = "printf 'private $TOKEN'\n";
-        let gates = homeboy::agents::agent_tasks::gate::VerifyGateOptions {
+        let gates = homeboy::agents::agent_task_gate::VerifyGateOptions {
             verify: vec!["cargo test --lib".to_string()],
             private_verify: vec![private_program.to_string()],
             input_sources: vec![serde_json::from_value(json!({
@@ -121,11 +121,11 @@ fn promotion_resume_reference_keeps_private_gates_out_of_review_commands() {
     with_temp_home(|| {
         let run_id = "run-private-resume-gates";
         let private_program = "printf 'private token'";
-        let gates = homeboy::agents::agent_tasks::gate::VerifyGateOptions {
+        let gates = homeboy::agents::agent_task_gate::VerifyGateOptions {
             verify: vec!["cargo test --lib".to_string()],
             private_verify: vec![private_program.to_string()],
             execution_policy:
-                homeboy::agents::agent_tasks::gate::AgentTaskGateExecutionPolicy::ContinueAll,
+                homeboy::agents::agent_task_gate::AgentTaskGateExecutionPolicy::ContinueAll,
             ..Default::default()
         };
         run_loaded_plan(test_plan(), Some(run_id), Arc::new(ApplyArtifactExecutor))

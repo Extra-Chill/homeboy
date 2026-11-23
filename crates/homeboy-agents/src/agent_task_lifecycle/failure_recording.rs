@@ -325,7 +325,6 @@ fn record_interrupted_local_owner_locked(
             "phase": "terminal",
             "attempt": 1,
             "detail": "interrupted_owner",
-            "terminal_success": harvested,
             "exit_code": if harvested { 0 } else { 1 },
             "updated_at": now,
         }),
@@ -1606,12 +1605,7 @@ pub(crate) fn record_terminal_artifact_projection_in_store(
         }
     }
     let observation_store = lifecycle_store.open_observation_initialized()?;
-    match project_terminal_artifacts_in_store(
-        lifecycle_store,
-        &observation_store,
-        record,
-        aggregate,
-    ) {
+    match project_terminal_artifacts_in_store(&observation_store, record, aggregate) {
         Ok(()) => {
             record.ensure_metadata_object().insert(
                 "artifact_projection".to_string(),
@@ -1949,51 +1943,21 @@ pub(super) fn terminal_observation_status(state: &RunExecutionState) -> Option<&
 }
 
 fn project_terminal_artifacts_in_store(
-    lifecycle_store: &AgentTaskLifecycleStore,
     store: &homeboy_core::observation::ObservationStore,
     record: &AgentTaskRunRecord,
     aggregate: &AgentTaskAggregate,
 ) -> Result<()> {
-    let existing = store.get_run(&record.run_id)?;
-    let Some(status) = terminal_observation_status(&record.state()) else {
+    if terminal_observation_status(&record.state()).is_none() {
         return Ok(());
-    };
-    let homeboy_version = existing
-        .as_ref()
-        .map(|run| run.homeboy_version.clone())
-        .unwrap_or_else(|| Some(homeboy_core::build_identity::current().version));
-    let mut existing_metadata = existing
-        .map(|run| run.metadata_json)
-        .unwrap_or_else(|| json!({ "agent_task_run": record.run_id }));
-    if !existing_metadata.is_object() {
-        existing_metadata = json!({});
     }
-    existing_metadata
-        .as_object_mut()
-        .expect("object checked above")
-        .insert(
-            "agent_task_terminal_state".to_string(),
-            json!(record.state()),
-        );
-    // A Cook's runs settle once, from their Cook-observed outcome, when the
-    // Cook reaches its terminal report.
-    if super::lifecycle_store::cook_owns_observation(lifecycle_store, record) {
-        store.update_run_metadata(&record.run_id, existing_metadata)?;
-    } else {
-        store.upsert_imported_run_preserving_terminal(&homeboy_core::observation::RunRecord {
-            id: record.run_id.clone(),
-            kind: "agent-task".to_string(),
-            component_id: None,
-            started_at: record.submitted_at.clone(),
-            finished_at: record.updated_at.clone(),
-            status: status.to_string(),
-            command: Some("homeboy agent-task".to_string()),
-            cwd: None,
-            homeboy_version,
-            git_sha: None,
-            rig_id: None,
-            metadata_json: existing_metadata,
-        })?;
+    // The row's status is the record write's projection; this only annotates.
+    if let Some(existing) = store.get_run(&record.run_id)? {
+        let mut metadata = existing.metadata_json;
+        if !metadata.is_object() {
+            metadata = json!({});
+        }
+        metadata["agent_task_terminal_state"] = json!(record.state());
+        store.update_run_metadata(&record.run_id, metadata)?;
     }
 
     validate_unique_terminal_artifact_ids(aggregate)?;

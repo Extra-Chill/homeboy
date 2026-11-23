@@ -373,6 +373,14 @@ impl BaselineFacts {
         }
     }
 
+    fn failure_identities(&self) -> Vec<String> {
+        if self.failure_records.is_empty() {
+            vec![self.failure_fingerprint.clone()]
+        } else {
+            self.failure_records.clone()
+        }
+    }
+
     fn comparable(&self) -> bool {
         self.exit_code != 124
             && matches!(
@@ -418,8 +426,21 @@ impl BaselineFacts {
         // That excuse applies only when neither run named its failures: a
         // candidate that names failures the baseline cannot account for (or
         // a baseline that names failures the candidate replaced with opaque
-        // output) is not a reproduction of the baseline breakage.
+        // output) is not a reproduction of the baseline breakage. The base
+        // and head fingerprints are still recorded as inheritance evidence.
         let opaque = self.failure_records.is_empty() && candidate.failure_records.is_empty();
+        let base_failures = self.failure_identities();
+        let head_failures = candidate.failure_identities();
+        let inherited = if opaque {
+            head_failures.clone()
+        } else {
+            inherited
+        };
+        let new = if candidate.failure_records.is_empty() && !opaque {
+            head_failures.clone()
+        } else {
+            new
+        };
         let comparable_records =
             !self.failure_records.is_empty() && !candidate.failure_records.is_empty();
         let matches = gate.status == AgentTaskGateStatus::Failed
@@ -446,6 +467,8 @@ impl BaselineFacts {
                     } else {
                         AgentTaskGateFailureOrigin::CandidateBrokeGate
                     },
+                    base_failures,
+                    head_failures,
                     inherited_failures: inherited,
                     new_failures: new,
                     flaky_failures: flaky,
@@ -574,6 +597,8 @@ fn refine_gate_comparison(
             ),
             failure_attribution: Some(AgentTaskGateFailureAttribution {
                 classification: AgentTaskGateFailureOrigin::GateAlreadyRedOnBaseline,
+                base_failures: baseline.failure_identities(),
+                head_failures: Vec::new(),
                 inherited_failures: Vec::new(),
                 new_failures: Vec::new(),
                 flaky_failures: flaky,
@@ -619,8 +644,39 @@ fn refine_gate_comparison(
     );
 }
 
+/// Repository identity for base observation cache keys. The Cook's source
+/// worktree path is unique per Cook on a Lab host, so keying on it made every
+/// concurrent Cook on the same base pay for its own full base run (#18833).
+/// The admitted component, else the repository's origin, names the code under
+/// test; the component's repository-relative path keeps package roots apart.
+fn base_observation_identity(
+    root: &std::path::Path,
+    workspace: &std::path::Path,
+    component: Option<&str>,
+) -> Value {
+    let repository = match component {
+        Some(component) => serde_json::json!({ "component": component }),
+        None => match git_output(root, &["config", "--get", "remote.origin.url"]) {
+            Ok(origin) if !origin.is_empty() => serde_json::json!({ "origin": origin }),
+            _ => serde_json::json!({ "root": root }),
+        },
+    };
+    let relative = workspace
+        .strip_prefix(root)
+        .map(|path| path.display().to_string())
+        .unwrap_or_else(|_| workspace.display().to_string());
+    serde_json::json!({ "repository": repository, "workspace": relative })
+}
+
 /// Observe all declared gates before paid provider work. The cache includes
 /// placement and gate inputs, not just the SHA, so hosts never share verdicts.
+/// It keys on repository identity rather than the per-Cook worktree path, so
+/// concurrent Cooks on one component and base share a single base run under
+/// the admission lock.
+///
+/// Eager observation is an explicit policy choice: it reports a red base
+/// before paid provider work is dispatched, which lazy (failure-only)
+/// comparison cannot. Its cost is bounded by the shared cache above.
 pub(crate) fn admit_base_gates(
     options: &super::cook::CookRequest,
     store: &ObservationStore,
@@ -636,7 +692,8 @@ pub(crate) fn admit_base_gates(
     environment.admitted_component_id =
         super::cook::cook_repository_identity_component_id(&options.identity.initial_plan);
     let component = environment.admitted_component_id.clone();
-    let inputs = serde_json::json!([root, base_sha, gates]);
+    let identity = base_observation_identity(root, &workspace, component.as_deref());
+    let inputs = serde_json::json!([identity, base_sha, gates]);
     let key = format!(
         "admission-{:x}",
         Sha256::digest(inputs.to_string().as_bytes())
@@ -687,8 +744,7 @@ pub(crate) fn admit_base_gates(
                 for index in 0..(commands.len() + usize::from(gates.test_execution_plan.is_some()))
                 {
                     let input = serde_json::json!([
-                        root,
-                        workspace,
+                        identity,
                         base_sha,
                         commands.get(index),
                         if commands.get(index).is_none() {
@@ -1579,6 +1635,8 @@ mod tests {
             attribution.classification,
             AgentTaskGateFailureOrigin::GateAlreadyRedOnBaseline
         );
+        assert_eq!(attribution.base_failures, vec!["test:A"]);
+        assert_eq!(attribution.head_failures, vec!["test:A"]);
         assert_eq!(attribution.inherited_failures.len(), 1);
         assert!(attribution.new_failures.is_empty());
         let mut regression = run("test A ... FAILED\\ntest B ... FAILED\\n");
@@ -1600,13 +1658,26 @@ mod tests {
         assert_eq!(attribution.inherited_failures.len(), 1);
         assert_eq!(attribution.new_failures.len(), 1);
         assert!(attribution.new_failures[0].contains('B'));
+        assert_eq!(attribution.base_failures, vec!["test:A"]);
+        assert_eq!(attribution.head_failures, vec!["test:A", "test:B"]);
         let opaque = BaselineFacts::from_gate(&run("host unavailable"));
         let mut candidate = run("different host error");
         opaque.apply(&mut candidate, "base", None);
+        // Opaque gates keep an exit-status contract: differing output on a
+        // red base is still inherited, with both fingerprints as evidence.
         assert_eq!(
             candidate.status,
             AgentTaskGateStatus::AcceptedInheritedFailure
         );
+        let proof = candidate
+            .baseline_comparison
+            .unwrap()
+            .failure_attribution
+            .unwrap();
+        assert!(proof.base_failures[0].starts_with("sha256:"));
+        assert!(proof.head_failures[0].starts_with("sha256:"));
+        assert_eq!(proof.inherited_failures, proof.head_failures);
+        assert!(proof.new_failures.is_empty());
         // An opaque baseline cannot excuse a candidate that names failures:
         // nothing on the baseline accounts for them.
         let mut named = run("test C ... FAILED\\n");
@@ -2261,6 +2332,23 @@ mod tests {
                 );
             }
         });
+    }
+
+    /// Concurrent Cooks on one component and base have unique source worktree
+    /// paths; base admission must key on the repository, not the path (#18833).
+    #[test]
+    fn base_observation_identity_ignores_the_per_cook_worktree_path() {
+        let first = std::path::Path::new("/lab/_lab_workspaces/base-abc-1111");
+        let second = std::path::Path::new("/lab/_lab_workspaces/base-abc-2222");
+        let identity = |root: &std::path::Path, package: &str| {
+            base_observation_identity(root, &root.join(package), Some("blocks-engine"))
+        };
+        assert_eq!(identity(first, "php"), identity(second, "php"));
+        assert_ne!(identity(first, "php"), identity(second, "js"));
+        assert_ne!(
+            identity(first, "php"),
+            base_observation_identity(first, &first.join("php"), Some("other"))
+        );
     }
 
     /// Production gates each carry a unique Lab offload context; the record key

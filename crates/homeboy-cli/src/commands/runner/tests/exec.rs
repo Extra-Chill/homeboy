@@ -15,8 +15,8 @@ use homeboy::core::server;
 /// The tests below drive the store-rooted entry points. Resolving the store
 /// once here keeps the ambient lookup in one place and lets the ambient
 /// wrappers be deleted (#7505).
-fn test_lifecycle_store() -> homeboy::agents::agent_tasks::lifecycle::AgentTaskLifecycleStore {
-    homeboy::agents::agent_tasks::lifecycle::AgentTaskLifecycleStore::from_environment()
+fn test_lifecycle_store() -> homeboy::agents::agent_task_lifecycle::AgentTaskLifecycleStore {
+    homeboy::agents::agent_task_lifecycle::AgentTaskLifecycleStore::from_environment()
         .expect("lifecycle store")
 }
 

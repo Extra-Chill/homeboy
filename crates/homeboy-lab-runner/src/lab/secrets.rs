@@ -8,11 +8,11 @@
 
 use std::collections::{BTreeMap, HashMap};
 
-use homeboy_agents::agent_tasks::scheduler::AgentTaskPlan;
-use homeboy_agents::agent_tasks::secrets as agent_task_secrets;
-use homeboy_agents::agent_tasks::{
+use homeboy_agents::agent_task::{
     AgentTaskExecutor, AgentTaskRequest, AgentTaskWorkspace, AGENT_TASK_REQUEST_SCHEMA,
 };
+use homeboy_agents::agent_task_schedule::AgentTaskPlan;
+use homeboy_agents::agent_task_secrets;
 use homeboy_core::lab_contract::LabSecretEnvSource;
 use homeboy_core::secret_env_plan::{
     SecretEnvHandoffEntry, SecretEnvPlan, SecretEnvPlanMaterializeRequest,
@@ -168,7 +168,7 @@ pub(crate) fn build_lab_secret_env_handoff_plan(
 /// sole authority that materializes them.
 pub(crate) fn merge_managed_service_secret_env(
     handoff: &mut LabSecretEnvHandoffPlan,
-    plan: Option<&homeboy_agents::agent_tasks::scheduler::AgentTaskPlan>,
+    plan: Option<&homeboy_agents::agent_task_schedule::AgentTaskPlan>,
 ) {
     let mut names = Vec::new();
     for service in plan.into_iter().flat_map(|plan| plan.services.iter()) {

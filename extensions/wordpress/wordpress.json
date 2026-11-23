@@ -1,6 +1,6 @@
 {
   "name": "WordPress",
-  "version": "3.56.4",
+  "version": "3.56.5",
   "source_url": "https://github.com/Extra-Chill/homeboy",
   "icon": "w.circle.fill",
   "description": "WordPress project type with WP-CLI integration",
@@ -618,6 +618,13 @@
       "description": "Component-relative PHP paths or globs (`**` matches zero or more directories) that identify executable standalone PHP tests. Matching files run through the bounded host-PHP runner with no booted WordPress in full suites, changed-file scopes, and shard replay. Absent means the convention default tests/**/*-smoke.php; a declared list replaces the default, and [] selects none."
     },
     {
+      "id": "standalone_php_requires_wordpress_core",
+      "label": "Standalone PHP smokes require WordPress core source",
+      "type": "boolean",
+      "default": false,
+      "description": "When true, standalone PHP smokes need HOMEBOY_WORDPRESS_CORE_ROOT: if `wp-codebox wordpress-source --json` cannot resolve the WordPress core source, the test step fails up front with the resolution reason instead of running the smokes without it. When false, an unresolved source only warns."
+    },
+    {
       "id": "wordpress_test_paths",
       "label": "Booted-WordPress test paths",
       "type": "array",
@@ -677,8 +684,8 @@
       "id": "phpunit_no_tests",
       "label": "No PHPUnit tests discovered",
       "type": "string",
-      "default": "skipped",
-      "description": "How the WP Codebox PHPUnit backend treats successful WordPress install/activation when discovery finds zero PHPUnit files. Use 'skipped' for components that intentionally test through smoke scripts, or 'failed' when the component expects PHPUnit coverage. Components with phpunit.xml(.dist) still fail on zero discovery."
+      "default": "",
+      "description": "How the WP Codebox PHPUnit backend treats successful WordPress install/activation when discovery finds zero PHPUnit files. Use 'skipped' for components that intentionally test through smoke scripts, or 'failed' when the component expects PHPUnit coverage. Unset behaves as 'skipped', except that a sandbox suite whose PHPUnit config declares test directories holding test files fails (PHPUNIT_ZERO_TESTS_FAILED) when it executes zero tests; set 'skipped' explicitly to tolerate that. Components with phpunit.xml(.dist) still fail on zero discovery."
     },
     {
       "id": "npm_test_script",

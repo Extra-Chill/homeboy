@@ -677,7 +677,10 @@ fn compact_cook_report_is_bounded_and_full_remains_retrievable() {
         compact.get("failure_context").is_none(),
         "a report without failure_context must not grow one"
     );
-    assert_eq!(compact_cook_report(report.clone(), true), report);
+    let mut full = compact_cook_report(report.clone(), true);
+    assert_eq!(full["cook_summary"]["status"], "failed");
+    full.as_object_mut().unwrap().remove("cook_summary");
+    assert_eq!(full, report);
 }
 
 #[test]
@@ -861,7 +864,10 @@ fn compact_cook_report_keeps_failure_context_actionable() {
         json!({ "field": "recovery_reason", "bytes": COMPACT_TEXT_LIMIT + 1 })
     );
 
-    assert_eq!(compact_cook_report(report.clone(), true), report);
+    assert_eq!(
+        without_cook_summary(compact_cook_report(report.clone(), true)),
+        report
+    );
 }
 
 #[test]
@@ -924,7 +930,10 @@ fn compact_cook_report_bounds_recovery_action_samples_and_keeps_full_report() {
         serde_json::to_vec(&compact).unwrap().len() < 6 * 1024,
         "large recovery lists must stay within the compact terminal-output budget"
     );
-    assert_eq!(compact_cook_report(report.clone(), true), report);
+    assert_eq!(
+        without_cook_summary(compact_cook_report(report.clone(), true)),
+        report
+    );
 }
 
 #[test]
@@ -951,7 +960,10 @@ fn compact_cook_report_omits_oversized_unicode_action_without_splitting_it() {
     assert_eq!(context["next_actions_omitted"], 1);
     assert!(context.get("next_action").is_none());
     assert!(serde_json::to_vec(&compact).unwrap().len() < 2 * 1024);
-    assert_eq!(compact_cook_report(report.clone(), true), report);
+    assert_eq!(
+        without_cook_summary(compact_cook_report(report.clone(), true)),
+        report
+    );
 }
 
 /// A failed Cook's compact output keeps its cause: an oversized candidate
@@ -1021,4 +1033,15 @@ fn compact_cook_report_enforces_final_byte_budget_after_all_projections() {
         "homeboy agent-task status run-budget"
     );
     assert!(omitted.iter().any(|item| item["section"] == "provider"));
+}
+
+/// The launch output adds the shared `cook_summary` (#18817); the rest of a
+/// full report is returned unchanged.
+fn without_cook_summary(mut value: Value) -> Value {
+    assert!(
+        value["cook_summary"].is_object(),
+        "launch output carries cook_summary"
+    );
+    value.as_object_mut().unwrap().remove("cook_summary");
+    value
 }

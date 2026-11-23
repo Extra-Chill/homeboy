@@ -1,9 +1,9 @@
 use homeboy::agents::agent_task_lifecycle::AgentTaskLifecycleStore;
+use homeboy::agents::agent_task_schedule::AgentTaskPlan;
 use homeboy::agents::agent_task_service::{
     CookFinalization, CookIdentity, CookProviderTransport, CookRecipeStore, CookRequest,
     CookRetryPolicy, CookWorkspace,
 };
-use homeboy::agents::agent_tasks::scheduler::AgentTaskPlan;
 use homeboy::core::test_support::{HermeticTestContext, TestBinary};
 use homeboy_lifecycle_contract::RunExecutionState;
 use rusqlite::Connection;

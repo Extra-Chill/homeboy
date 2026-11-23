@@ -316,9 +316,6 @@ pub(crate) fn project_ledger_terminal_in_store(
         "reconciliation".into(),
         json!({"reason": "runner_job_terminal", "evidence": evidence}),
     );
-    if let Some(handoff) = metadata.get_mut("runner_handoff") {
-        handoff["state"] = json!("terminal");
-    }
     *record = match lifecycle_store.commit_terminal_record(record)? {
         super::terminal_transition::TerminalRecordCommit::Committed(record)
         | super::terminal_transition::TerminalRecordCommit::Superseded(record) => record,
@@ -427,9 +424,6 @@ pub(crate) fn terminalize_lost_accepted_lab_job_in_store(
             "safe_next_action": format!("homeboy agent-task retry {run_id} --run"),
         }),
     );
-    if let Some(handoff) = metadata.get_mut("runner_handoff") {
-        handoff["state"] = json!("lost");
-    }
     lifecycle_store.commit_record(&mut terminal)?;
     *record = terminal;
     Ok(())
@@ -485,8 +479,6 @@ pub(crate) fn apply_runner_job_terminal_state(
         "retryable".to_string(),
         json!(run_state != RunExecutionState::Succeeded),
     );
-    metadata.remove(METADATA_KEY_STALE_RUNNING);
-    metadata.remove(METADATA_KEY_STALE_RUNNING_REASON);
 }
 
 pub(crate) fn record_runner_job_terminal_metadata(
@@ -494,9 +486,6 @@ pub(crate) fn record_runner_job_terminal_metadata(
     status: homeboy_core::api_jobs::JobStatus,
     events: &[homeboy_core::api_jobs::JobEvent],
 ) {
-    if let Some(handoff) = record.ensure_metadata_object().get_mut("runner_handoff") {
-        handoff["state"] = json!("terminal");
-    }
     let runner_identity = record
         .runner_id()
         .zip(record.runner_job_id())

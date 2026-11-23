@@ -13,9 +13,11 @@ use super::CmdResult;
 pub mod args;
 pub mod auth;
 pub(crate) mod candidate;
+pub(crate) mod candidate_location;
 pub mod capacity;
 pub mod contract;
 pub mod cook_batch;
+pub(crate) mod cook_summary;
 pub(crate) mod default_branch;
 pub mod doctor;
 #[cfg(test)]
@@ -343,7 +345,7 @@ pub(crate) fn run_with_cook_progress_and_provenance(
                 *cook_args,
                 run::CookEntryContext {
                     executor: std::sync::Arc::new(
-                        homeboy::agents::agent_tasks::provider::ExtensionProviderAgentTaskExecutor::discover(),
+                        homeboy::agents::agent_task_provider::ExtensionProviderAgentTaskExecutor::discover(),
                     ),
                     attempt_dispatcher: None,
                     progress,
@@ -404,13 +406,13 @@ pub(crate) fn run_with_cook_progress_and_provenance(
         }
         AgentTaskCommand::Accept(args) => {
             let verdict = if args.verdict == "accepted" {
-                homeboy::agents::agent_tasks::lifecycle::AgentTaskAcceptanceVerdict::Accepted
+                homeboy::agents::agent_task_lifecycle::AgentTaskAcceptanceVerdict::Accepted
             } else {
-                homeboy::agents::agent_tasks::lifecycle::AgentTaskAcceptanceVerdict::Rejected
+                homeboy::agents::agent_task_lifecycle::AgentTaskAcceptanceVerdict::Rejected
             };
             let record =
-                homeboy::agents::agent_tasks::lifecycle::record_acceptance_verdict_with_feedback_in_store(
-                    &homeboy::agents::agent_tasks::lifecycle::AgentTaskLifecycleStore::from_environment()?,
+                homeboy::agents::agent_task_lifecycle::record_acceptance_verdict_with_feedback_in_store(
+                    &homeboy::agents::agent_task_lifecycle::AgentTaskLifecycleStore::from_environment()?,
                     &args.run_id,
                     verdict,
                     args.evidence_refs,
@@ -423,20 +425,20 @@ pub(crate) fn run_with_cook_progress_and_provenance(
             crate::commands::route::run_terminal_cook_worker(&request, &outcome)
         }
         AgentTaskCommand::Gate { cook_id, id } => {
-            use homeboy::agents::agent_tasks::gate;
+            use homeboy::agents::agent_task_gate;
             let recipe = if let Some(root) = std::env::var_os("HOMEBOY_GATE_VERDICT_DATA_ROOT") {
-                homeboy::agents::agent_tasks::service::CookRecipeStore::from_data_root(
+                homeboy::agents::agent_task_service::CookRecipeStore::from_data_root(
                     std::path::PathBuf::from(root),
                 )
                 .load_recipe(&cook_id)?
             } else {
-                homeboy::agents::agent_tasks::service::load_recipe(&cook_id)?
+                homeboy::agents::agent_task_service::load_recipe(&cook_id)?
             };
             // Bind the generated lint gate to the recorded base, as the Cook's
             // own gate runs do (#18388).
-            let cook_base = homeboy::agents::agent_tasks::service::gate_cook_base(&recipe);
-            let gates: gate::VerifyGateOptions = serde_json::from_value(recipe.gate_policy)
-                .map_err(|error| {
+            let cook_base = homeboy::agents::agent_task_service::gate_cook_base(&recipe);
+            let gates: agent_task_gate::VerifyGateOptions =
+                serde_json::from_value(recipe.gate_policy).map_err(|error| {
                     homeboy::core::Error::invalid_argument("gate_policy", error.to_string())
                 })?;
             let index = id
@@ -465,7 +467,7 @@ pub(crate) fn run_with_cook_progress_and_provenance(
             }
             let cwd = std::env::current_dir()
                 .map_err(|error| homeboy::core::Error::internal_io(error.to_string(), None))?;
-            let supervision = gate::GateSupervision {
+            let supervision = agent_task_gate::GateSupervision {
                 timeout: gates.gate_timeout(),
                 no_progress_timeout: gates.gate_no_progress_timeout(),
                 heartbeat_interval: gates.gate_heartbeat_interval(),
@@ -476,31 +478,31 @@ pub(crate) fn run_with_cook_progress_and_provenance(
             let runtime = tempfile::tempdir()
                 .map_err(|error| homeboy::core::Error::internal_io(error.to_string(), None))?;
             let report = if let Some(command) = command {
-                gate::run_gate_command_with_supervision(
+                agent_task_gate::run_gate_command_with_supervision(
                     &cwd,
                     index,
                     &command,
-                    gate::AgentTaskGateVisibility::Visible,
-                    gate::AgentTaskGateRevealPolicy::FullEvidence,
+                    agent_task_gate::AgentTaskGateVisibility::Visible,
+                    agent_task_gate::AgentTaskGateRevealPolicy::FullEvidence,
                     Some(runtime.path()),
                     Some(&supervision),
                     &gates.gate_environment,
                     &gates.gate_package_artifacts,
                 )?
             } else {
-                gate::run_declared_test_with_supervision(
+                agent_task_gate::run_declared_test_with_supervision(
                     &cwd,
                     index,
                     gates.test_execution_plan.as_ref().unwrap(),
-                    gate::AgentTaskGateVisibility::Visible,
-                    gate::AgentTaskGateRevealPolicy::FullEvidence,
+                    agent_task_gate::AgentTaskGateVisibility::Visible,
+                    agent_task_gate::AgentTaskGateRevealPolicy::FullEvidence,
                     Some(runtime.path()),
                     Some(&supervision),
                     &gates.gate_environment,
                     &gates.gate_package_artifacts,
                 )?
             };
-            let exit = if report.status == gate::AgentTaskGateStatus::Succeeded {
+            let exit = if report.status == agent_task_gate::AgentTaskGateStatus::Succeeded {
                 0
             } else {
                 1
@@ -524,7 +526,7 @@ pub(crate) fn run_with_cook_progress_and_provenance(
                 )
             })?;
             let receipt =
-                homeboy::agents::agent_tasks::gate::placement::execute_admitted_with_resources(
+                homeboy::agents::agent_task_gate::placement::execute_admitted_with_resources(
                     request,
                     &cwd,
                     resources
@@ -542,7 +544,7 @@ pub(crate) fn run_with_cook_progress_and_provenance(
                         .transpose()?,
                 )?;
             let exit_code = if receipt.report.status
-                == homeboy::agents::agent_tasks::gate::AgentTaskGateStatus::Succeeded
+                == homeboy::agents::agent_task_gate::AgentTaskGateStatus::Succeeded
                 || receipt
                     .readiness
                     .as_ref()
@@ -556,7 +558,7 @@ pub(crate) fn run_with_cook_progress_and_provenance(
             };
             // A non-zero exit always names its typed cause (#17649).
             let failure =
-                homeboy::agents::agent_tasks::gate::placement::gate_execute_failure(&receipt);
+                homeboy::agents::agent_task_gate::placement::gate_execute_failure(&receipt);
             if let Some(path) = receipt_file {
                 let bytes = serde_json::to_vec(&receipt).map_err(|error| {
                     homeboy::core::Error::internal_json(error.to_string(), None)

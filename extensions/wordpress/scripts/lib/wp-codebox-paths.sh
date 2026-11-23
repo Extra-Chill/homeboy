@@ -279,6 +279,24 @@ homeboy_wp_codebox_wordpress_version() {
     printf '%s\n' "$version"
 }
 
+# Print `code: message` from a failed `wp-codebox wordpress-source --json`
+# stdout envelope, or nothing when the output carries no structured error.
+homeboy_wp_codebox_wordpress_source_json_error() {
+    local output="$1"
+    local code message
+
+    [ -n "$output" ] || return 0
+    code="$(printf '%s' "$output" | jq -r '.error.code // empty' 2>/dev/null || true)"
+    message="$(printf '%s' "$output" | jq -r '.error.message // empty' 2>/dev/null || true)"
+    # One line: the reason is embedded in a single-line warning or error.
+    message="$(printf '%s' "$message" | tr '\n' ' ' | sed 's/[[:space:]]*$//')"
+    if [ -n "$code" ] && [ -n "$message" ]; then
+        printf '%s: %s\n' "$code" "$message"
+    elif [ -n "$code" ] || [ -n "$message" ]; then
+        printf '%s\n' "${code}${message}"
+    fi
+}
+
 # Resolve an extracted WordPress core source tree through
 # `wp-codebox wordpress-source --json` (schema wp-codebox/wordpress-source/v1)
 # for host-PHP consumers that load core files without booting WordPress.
@@ -316,7 +334,11 @@ homeboy_wp_codebox_wordpress_source() {
 
     output="$("${HOMEBOY_WP_CODEBOX_COMMAND[@]}" "${args[@]}" 2>"$stderr_file")" || status=$?
     if [ "$status" -ne 0 ]; then
-        reason="$(grep -v '^[[:space:]]*$' "$stderr_file" | tail -n 1 || true)"
+        # wp-codebox emits a structured `{schema, error: {code, message}}`
+        # envelope on stdout when --json fails. Older builds print nothing on
+        # stdout, so fall back to the last stderr line.
+        reason="$(homeboy_wp_codebox_wordpress_source_json_error "$output")"
+        [ -n "$reason" ] || reason="$(grep -v '^[[:space:]]*$' "$stderr_file" | tail -n 1 || true)"
         rm -f "$stderr_file"
         HOMEBOY_WP_CODEBOX_WORDPRESS_SOURCE_ERROR="wp-codebox ${args[*]} exited ${status}${reason:+: ${reason}}"
         return 1

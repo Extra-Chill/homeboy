@@ -93,7 +93,53 @@ fn render_recover_summary(payload: &Value) -> String {
             .unwrap_or_else(|| format!("homeboy agent-task status {run_id} --watch"));
         lines.push(format!("Next: {watch}"));
     }
+    // A refused or failed recovery names why and what to run next, so the
+    // human summary is never silent about a nonzero exit (#18845).
+    if let Some(failure) = payload.get("failure").filter(|value| value.is_object()) {
+        if let Some(message) =
+            string_value(failure, &["message"]).filter(|message| !message.trim().is_empty())
+        {
+            lines.push(format!("Refused: {message}"));
+        }
+        if let Some(next) =
+            string_value(failure, &["next_command"]).filter(|next| !next.trim().is_empty())
+        {
+            lines.push(format!("Next: {next}"));
+        }
+    } else if let Some(reason) = payload
+        .pointer("/step/reason")
+        .and_then(Value::as_str)
+        .filter(|reason| !reason.trim().is_empty())
+    {
+        lines.push(format!("Reason: {reason}"));
+    }
     lines.join("\n")
+}
+
+#[cfg(test)]
+#[test]
+fn recover_summary_names_the_refusal_and_next_command() {
+    let summary = render_agent_task_summary(
+        AgentTaskSummaryKind::Recover,
+        &serde_json::json!({
+            "step": {"kind": "none", "reason": "no admission inputs"},
+            "run_id": "cook-1", "status": "failed",
+            "failure": {
+                "code": "agent_task.recover_no_step",
+                "message": "no admission inputs",
+                "next_command": "homeboy agent-task diagnose cook-1"
+            }
+        }),
+    )
+    .unwrap();
+    assert!(
+        summary.contains("Refused: no admission inputs"),
+        "{summary}"
+    );
+    assert!(
+        summary.contains("Next: homeboy agent-task diagnose cook-1"),
+        "{summary}"
+    );
 }
 
 #[cfg(test)]
@@ -996,6 +1042,12 @@ fn render_status_summary(payload: &Value) -> Option<String> {
     if let Some(note) = string_value(payload, &["identity_note"]) {
         lines.push(note.to_string());
     }
+    if let Some(path) = string_value(payload, &["candidate_repo_path"]) {
+        lines.push(format!("Candidate repo: {path}"));
+    }
+    if let Some(command) = string_value(payload, &["candidate_inspect_command"]) {
+        lines.push(format!("Inspect candidate: {command}"));
+    }
     if let Some(candidate) = string_value(payload, &["candidate", "state"]) {
         lines.push(format!("Candidate: {candidate}"));
     }
@@ -1052,6 +1104,9 @@ fn render_status_summary(payload: &Value) -> Option<String> {
     if let Some(details) = payload.pointer("/blocker/details") {
         if let Some(position) = details["queue_position"].as_u64() {
             lines.push(format!("Queue position: {position}"));
+        }
+        if let Some(policy) = details["queue_policy"].as_str() {
+            lines.push(format!("Queue position / ETA: unknown ({policy})"));
         }
         if let Some(time) = details["next_attempt_at"].as_str() {
             lines.push(format!("Next attempt: {time}"));
@@ -2965,6 +3020,33 @@ mod tests {
         assert!(summary.contains("Retry: automatic reconciliation scheduled"));
         assert!(summary.contains("Next: homeboy agent-task status unmaterialized-cook --watch\n"));
         assert!(!summary.contains("Next: homeboy agent-task recover unmaterialized-cook\n"));
+    }
+
+    #[test]
+    fn local_pressure_summary_reports_process_owners_thresholds_and_retry() {
+        let payload = json!({
+            "schema": "homeboy/control-plane-run/v1", "run": "local-cook", "state": "queued",
+            "blocker": {"code": "local_pressure", "message": "Local dispatch waiting for host pressure to drop",
+                "details": {
+                    "pressure": {"load1": 134}, "pressure_thresholds": {"load1": 48},
+                    "pressure_holders": [{"user": "chubes", "command": "php", "count": 440, "pids": [101]}],
+                    "next_attempt_at": "2026-11-21T00:00:15Z",
+                    "queue_policy": "pressure polling; no ordered queue or admission ETA"
+                }}
+        });
+        let summary = render_agent_task_summary(AgentTaskSummaryKind::Status, &payload).unwrap();
+        for expected in [
+            "134",
+            "48",
+            "chubes",
+            "php",
+            "440",
+            "101",
+            "Next attempt: 2026-11-21T00:00:15Z",
+            "Queue position / ETA: unknown",
+        ] {
+            assert!(summary.contains(expected), "{summary}");
+        }
     }
 
     #[test]

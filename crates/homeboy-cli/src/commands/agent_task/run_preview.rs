@@ -36,9 +36,10 @@ pub(crate) fn preview_cook(
     validate_cook_source_authority(&args, provenance)?;
     bind_cook_preview_lifecycle(&mut args);
     let repository = prepare_cook_request(&mut args, provenance)?;
-    let preview_request =
-        dispatch_service::resolve_dispatch_request(resolved_dispatch_args_for_cook(&args)?.into())?;
-    dispatch_service::require_model_override_acknowledgement(&preview_request)?;
+    let preview_request = agent_task_dispatch_service::resolve_dispatch_request(
+        resolved_dispatch_args_for_cook(&args)?.into(),
+    )?;
+    agent_task_dispatch_service::require_model_override_acknowledgement(&preview_request)?;
     record_preview_phase(&mut progress, "destination_resolution");
     let (mut args, mut provision) =
         with_preview_heartbeat(&mut progress, "destination_resolution", || {
@@ -253,8 +254,7 @@ pub(crate) fn preview_cook(
 }
 
 pub(super) fn preflight_cook_gates(args: &AgentTaskCookArgs) -> homeboy::core::Result<()> {
-    let mut gates: homeboy::agents::agent_tasks::gate::VerifyGateOptions =
-        args.gates.clone().into();
+    let mut gates: homeboy::agents::agent_task_gate::VerifyGateOptions = args.gates.clone().into();
     let workspace = cook_gate_preflight_workspace(args)?;
     preflight_resolved_cook_gates(&mut gates, &workspace)
 }
@@ -292,7 +292,7 @@ pub(super) fn cook_gate_preflight_workspace(
 }
 
 pub(super) fn preflight_resolved_cook_gates(
-    gates: &mut homeboy::agents::agent_tasks::gate::VerifyGateOptions,
+    gates: &mut homeboy::agents::agent_task_gate::VerifyGateOptions,
     workspace: &Path,
 ) -> homeboy::core::Result<()> {
     if let Some(result) = homeboy::core::parsed_command_preflight::captured_result() {
@@ -309,7 +309,7 @@ pub(super) fn preflight_resolved_cook_gates(
 
 pub(super) fn preflight_preview_lab_provider_secret_env(
     placement: &Value,
-    plan: &homeboy::agents::agent_tasks::scheduler::AgentTaskPlan,
+    plan: &homeboy::agents::agent_task_schedule::AgentTaskPlan,
 ) -> homeboy::core::Result<()> {
     if placement.get("selected").and_then(Value::as_str) != Some("lab") {
         return Ok(());
@@ -558,7 +558,7 @@ pub(super) fn cook_preview_resolved_request(args: &AgentTaskCookArgs, placement:
             // A repro must fail on base and pass on the candidate (#17653).
             "repro": args.repro.repro,
             "repro_warning": (!args.repro.is_declared())
-                .then_some(homeboy::agents::agent_tasks::gate::NO_REPRO_GATE_WARNING),
+                .then_some(homeboy::agents::agent_task_gate::NO_REPRO_GATE_WARNING),
         },
         "publication": {
             "finalize": !args.no_finalize,
@@ -815,8 +815,8 @@ pub(super) fn append_prepared_base_replay_argv(argv: &mut Vec<String>, args: &Ag
 pub(super) fn dispatch_command_for_cook(
     args: &AgentTaskCookArgs,
     dispatch: DispatchArgs,
-) -> dispatch_service::AgentTaskDispatchCommand {
-    let mut command: dispatch_service::AgentTaskDispatchCommand = dispatch.into();
+) -> agent_task_dispatch_service::AgentTaskDispatchCommand {
+    let mut command: agent_task_dispatch_service::AgentTaskDispatchCommand = dispatch.into();
     command.component = cook_component_id(args).map(str::to_string);
     command
 }

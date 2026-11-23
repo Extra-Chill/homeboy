@@ -34,10 +34,33 @@ pub(super) fn recover(args: RecoverArgs) -> CmdResult<Value> {
             .wait_timeout_seconds
             .map(std::time::Duration::from_secs),
     };
+    let id = args.id.clone();
     let (report, exit_code) =
-        homeboy::core::foreground_wait::with_foreground_wait(policy, || recover_action(args))?;
+        match homeboy::core::foreground_wait::with_foreground_wait(policy, || recover_action(args))
+        {
+            Ok(result) => result,
+            // Keep the error's exit-code class (2 for an unknown or invalid
+            // ID) while still answering with a structured failure report.
+            Err(error) => {
+                let exit_code = crate::commands::utils::response::exit_code_for_error(error.code);
+                (
+                    serde_json::json!({
+                        "run_id": id,
+                        "failure": {
+                            "code": error.code.as_str(),
+                            "message": error.message,
+                            "details": error.details,
+                        },
+                    }),
+                    exit_code,
+                )
+            }
+        };
     let exit_code = foreground_stop_exit_code(&report).unwrap_or(exit_code);
-    Ok((report, exit_code))
+    Ok((
+        agent_task_service::ensure_recover_failure_contract(report, exit_code, &id),
+        exit_code,
+    ))
 }
 
 /// A recovery the client stopped exits with the stop's conventional status:
@@ -108,7 +131,7 @@ fn recover_action(args: RecoverArgs) -> CmdResult<Value> {
 
     // A run with no lifecycle record (an unknown ID or a recipe-only Cook)
     // has no control-plane resource, so the Cook planner answers directly.
-    let (mut report, code) =
+    let (report, code) =
         if homeboy::agents::agent_task_lifecycle::AgentTaskLifecycleStore::from_environment()?
             .read_record(&id)
             .is_err()
@@ -136,11 +159,20 @@ fn recover_action(args: RecoverArgs) -> CmdResult<Value> {
             match ack.result.data["exit_code"].as_i64() {
                 Some(code) => (ack.result.data["report"].take(), code as i32),
                 None => (
-                    serde_json::json!({"run_id": id, "failure": {"message": ack.message}}),
+                    serde_json::json!({
+                        "run_id": id,
+                        "status": ack.resource.state,
+                        "failure": {
+                            "code": "agent_task.recover_refused",
+                            "message": ack.message,
+                        },
+                    }),
                     1,
                 ),
             }
         };
+    // `recover` never exits nonzero without a structured cause (#18845).
+    let mut report = agent_task_service::ensure_recover_failure_contract(report, code, &id);
     if !preflight
         && !replayed
         && code == 0
@@ -451,15 +483,45 @@ mod tests {
                 .mutate_record(cook_id, |record| {
                     record.metadata["detached_cook_handoff"]["state"] =
                         serde_json::json!("exited_before_handoff");
+                    record.metadata["execution_step_failure"] = serde_json::json!({
+                        "code": "internal.io_error",
+                        "message": "admission inputs could not be read after upgrade",
+                    });
                     record
                         .set_state_for_test(homeboy_lifecycle_contract::RunExecutionState::Failed);
                     true
                 })
                 .unwrap();
 
+            // #18845: diagnose must name a command the public recover entry
+            // accepts even though admission never wrote a recipe.
+            let cli = Cli::try_parse_from(["homeboy", "agent-task", "diagnose", cook_id]).unwrap();
+            let Commands::AgentTask(task) = cli.command else {
+                panic!("agent-task")
+            };
+            let AgentTaskCommand::Diagnose(args) = task.command else {
+                panic!("diagnose")
+            };
+            let (diagnosis, _) = super::super::status::diagnose(args).unwrap();
+            assert_eq!(
+                diagnosis["recovery_step"]["kind"], "relaunch",
+                "{diagnosis}"
+            );
+            assert!(diagnosis["next_commands"][0]
+                .as_str()
+                .unwrap()
+                .contains("agent-task recover"));
+
             let recover = || {
-                let cli =
-                    Cli::try_parse_from(["homeboy", "agent-task", "recover", cook_id]).unwrap();
+                let cli = Cli::try_parse_from([
+                    "homeboy",
+                    "--placement",
+                    "local",
+                    "agent-task",
+                    "recover",
+                    cook_id,
+                ])
+                .unwrap();
                 let Commands::AgentTask(task) = cli.command else {
                     panic!("agent-task")
                 };

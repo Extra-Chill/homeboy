@@ -989,8 +989,6 @@ fn cancel_resolved_run_in_store(
                     json!(true),
                 );
             }
-            metadata.remove(METADATA_KEY_STALE_RUNNING);
-            metadata.remove(METADATA_KEY_STALE_RUNNING_REASON);
             true
         })?
         .unwrap_or(lifecycle_store.read_record(&record.run_id)?);
@@ -1188,8 +1186,6 @@ pub(super) fn reconcile_controller_job_cancellation_in_store(
             "confirmed_at": now_timestamp(),
         }),
     );
-    metadata.remove(METADATA_KEY_STALE_RUNNING);
-    metadata.remove(METADATA_KEY_STALE_RUNNING_REASON);
     record.updated_at = Some(now_timestamp());
     crate::controller_scratch::finalize_run_at_explicit_roots(
         &lifecycle_store.data_root(),

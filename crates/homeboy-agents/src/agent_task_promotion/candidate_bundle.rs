@@ -238,8 +238,8 @@ pub(crate) fn materialize_candidate_tree_with_feedback(
 pub(crate) fn fetch_run_candidates(
     lifecycle_store: &crate::agent_task_lifecycle::AgentTaskLifecycleStore,
     record: &crate::agent_task_lifecycle::AgentTaskRunRecord,
-    plan: &crate::agent_tasks::scheduler::AgentTaskPlan,
-    aggregate: &crate::agent_tasks::scheduler::AgentTaskAggregate,
+    plan: &crate::agent_task_schedule::AgentTaskPlan,
+    aggregate: &crate::agent_task_schedule::AgentTaskAggregate,
 ) -> Result<()> {
     let _identities = crate::agent_task_gate::placement::runner_identity_scope();
     // Telemetry setup must not prevent candidate recovery.
@@ -318,8 +318,8 @@ pub(crate) fn fetch_run_candidates(
 
 fn fetch_run_candidates_internal(
     record: &crate::agent_task_lifecycle::AgentTaskRunRecord,
-    plan: &crate::agent_tasks::scheduler::AgentTaskPlan,
-    aggregate: &crate::agent_tasks::scheduler::AgentTaskAggregate,
+    plan: &crate::agent_task_schedule::AgentTaskPlan,
+    aggregate: &crate::agent_task_schedule::AgentTaskAggregate,
 ) -> Result<()> {
     for outcome in &aggregate.outcomes {
         let Some(candidate) = &outcome.candidate else {
@@ -518,7 +518,7 @@ mod tests {
     fn terminal_aggregate_fetch_fixture(promote: bool) {
         homeboy_core::test_support::with_isolated_home(|_| {
             use crate::agent_task_lifecycle as lifecycle;
-            use crate::agent_tasks::scheduler::{AgentTaskAggregate, AgentTaskPlan};
+            use crate::agent_task_schedule::{AgentTaskAggregate, AgentTaskPlan};
             let f = fixture();
             // Rename the ref to the actual controller-owned attempt run id.
             run(
@@ -646,7 +646,7 @@ mod tests {
         let f = fixture();
         fetch_candidate_bundle(&f.controller, &f.bundle, "run-1", &f.candidate).unwrap();
         let request = serde_json::from_value(serde_json::json!({"task_id":"task", "executor":{"backend":"fixture"}, "instructions":"edit", "workspace":{"root":f.controller}})).unwrap();
-        let plan = crate::agent_tasks::scheduler::AgentTaskPlan::new("plan", vec![request]);
+        let plan = crate::agent_task_schedule::AgentTaskPlan::new("plan", vec![request]);
         homeboy_core::test_support::with_isolated_home(|_| {
             let record = crate::agent_task_lifecycle::submit_plan(&plan, Some("run-1")).unwrap();
             let aggregate = serde_json::from_value(serde_json::json!({"plan_id":"plan", "status":"failed", "totals":{"skipped":0}, "outcomes":[{"task_id":"task", "status":"timeout", "candidate":f.candidate}]})).unwrap();

@@ -1,9 +1,8 @@
 use std::io::Read;
 
 use clap::{Args, Subcommand};
-use homeboy::agents::agent_tasks::{
-    dispatch_agent_tool_request, AgentToolPolicy, AgentToolRequest,
-};
+use homeboy::agents::agent_task::{AgentToolPolicy, AgentToolRequest};
+use homeboy::agents::agent_tool_control_plane::dispatch_agent_tool_request;
 use serde_json::Value;
 
 #[derive(Args, Debug)]
@@ -65,7 +64,7 @@ fn policy_from_env() -> Result<AgentToolPolicy, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use homeboy::agents::agent_tasks::{
+    use homeboy::agents::agent_task::{
         AgentToolExecutionLocation, AgentToolResultStatus, AGENT_TOOL_POLICY_SCHEMA,
         AGENT_TOOL_REQUEST_SCHEMA,
     };

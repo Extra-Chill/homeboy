@@ -807,7 +807,7 @@ fn preflight_before_workspace_sync<T>(
 /// runner workspace. Git-based Lab materialization deliberately excludes
 /// untracked files, so evidence must travel outside the snapshot contract.
 fn stage_gate_input_args(runner: &crate::Runner, args: &[String]) -> Result<Vec<String>> {
-    use homeboy_agents::agent_tasks::gate::{data_inputs, AgentTaskGateEnvironmentPolicy};
+    use homeboy_agents::agent_task_gate::{data_inputs, AgentTaskGateEnvironmentPolicy};
     let mut policy = AgentTaskGateEnvironmentPolicy::default();
     let mut positions = Vec::new();
     for (index, arg) in args.iter().enumerate() {

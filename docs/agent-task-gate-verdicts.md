@@ -53,7 +53,8 @@ flag is needed to recover from a gate that is already red on trunk.
 Each conclusive comparison records `baseline_comparison.failure_attribution` in
 the gate receipt: `classification` is `gate_already_red_on_baseline` when every
 candidate failure also fails on the base, or `candidate_broke_gate` otherwise,
-with the failing identities listed in `inherited_failures` and `new_failures`.
+with complete `base_failures` and `head_failures` lists and the set difference
+in `new_failures` (the intersection is `inherited_failures`).
 Only new failures block; inherited failures keep their failed exit code and the
 gate is reported as an accepted inherited failure.
 
@@ -69,10 +70,16 @@ Replay errors or timeouts remain inconclusive and cannot excuse a failed gate.
 
 Subset acceptance requires comparable failure identities on both sides. If
 neither run names its failures, a red base and red candidate are reported as
-`baseline_red`. If only one side names failures, the runs are not comparable
+`baseline_red`; their normalized failure fingerprints are retained in the
+base/head lists as evidence. If only one side names failures, the runs are not comparable
 and the candidate failure blocks as `candidate_broke_gate`.
 `--baseline-policy=strict` stops before provider dispatch when a base gate is red.
 Repro gates retain their separate requirement to demonstrate the issue on base.
+
+Cook reports, control-plane status/list summaries, and shared CLI verdicts expose
+an `inherited_failures` count of accepted red gates. Completion notifications name
+that count explicitly as inherited, not passing. Lifecycle success remains success;
+this additive evidence distinguishes it from an entirely green verification.
 
 ## Candidate verdict reuse
 

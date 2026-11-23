@@ -31,7 +31,7 @@ impl WatchPoller for StatusPoller {
 
     fn is_terminal(&self, item: &Self::Item) -> bool {
         if self.recovery_step {
-            return agent_task_service_direct::recovery_step_exit_code(&self.args.run_id)
+            return agent_task_service::recovery_step_exit_code(&self.args.run_id)
                 .ok()
                 .flatten()
                 .is_some();
@@ -42,7 +42,7 @@ impl WatchPoller for StatusPoller {
             return agent_task_lifecycle::exact_record(&self.args.run_id)
                 .map_or(true, |admission| admission.state().is_terminal());
         }
-        if agent_task_service_direct::recovery_step_in_flight(&self.args.run_id)
+        if agent_task_service::recovery_step_in_flight(&self.args.run_id)
             .ok()
             .flatten()
             .is_some()
@@ -61,9 +61,7 @@ pub(super) fn cook_driver_still_owns(status: &Value) -> bool {
     status
         .get("mission")
         .and_then(Value::as_str)
-        .is_some_and(|cook_id| {
-            agent_task_service_direct::cook_driver_is_live(cook_id).unwrap_or(false)
-        })
+        .is_some_and(|cook_id| agent_task_service::cook_driver_is_live(cook_id).unwrap_or(false))
 }
 
 pub(super) fn watch_status(args: StatusArgs) -> CmdResult<Value> {
@@ -128,7 +126,7 @@ pub(super) fn watch_status_until(
     let poller = StatusPoller {
         args: args.clone(),
         await_materialization,
-        recovery_step: agent_task_service_direct::recovery_step_in_flight(&args.run_id)
+        recovery_step: agent_task_service::recovery_step_in_flight(&args.run_id)
             .ok()
             .flatten()
             .is_some(),
@@ -351,6 +349,18 @@ pub(super) fn watch_status_output(
         "continuation_command": continuation,
         "output_budget": budget,
     });
+    // The latest observation's summary, at the same top-level path as every
+    // other Cook read surface (#18817).
+    output[homeboy_control_plane_contract::COOK_SUMMARY_KEY] = observed_latest
+        .get(homeboy_control_plane_contract::COOK_SUMMARY_KEY)
+        .filter(|summary| !summary.is_null())
+        .cloned()
+        .unwrap_or_else(|| {
+            serde_json::to_value(crate::commands::agent_task::cook_summary::fallback(
+                &observed_latest,
+            ))
+            .expect("a Cook summary always serializes")
+        });
     enforce_watch_output_budget(&mut output, &continuation);
     let exit_code = if timed_out {
         TIMEOUT_EXIT_CODE
@@ -569,16 +579,15 @@ pub(crate) fn evidence(args: EvidenceArgs) -> CmdResult<Value> {
     let failed_tasks = failed_task_statuses(aggregate.as_ref());
     let plan = agent_task_lifecycle::load_plan(run_id).ok();
 
-    let gate_outputs =
-        agent_task_service_direct::recorded_promotion_report(&durable_read.record.metadata)
-            .ok()
-            .flatten()
-            .and_then(|report| report.get("deterministic_gates").cloned())
-            .and_then(|gates| gates.as_array().cloned())
-            .unwrap_or_default()
-            .iter()
-            .filter_map(homeboy::agents::agent_task_service::gate_failure_excerpt_from_value)
-            .collect::<Vec<_>>();
+    let gate_outputs = agent_task_service::recorded_promotion_report(&durable_read.record.metadata)
+        .ok()
+        .flatten()
+        .and_then(|report| report.get("deterministic_gates").cloned())
+        .and_then(|gates| gates.as_array().cloned())
+        .unwrap_or_default()
+        .iter()
+        .filter_map(homeboy::agents::agent_task_service::gate_failure_excerpt_from_value)
+        .collect::<Vec<_>>();
     let mut hydrated = Vec::new();
     let mut total = 0;
     for (evidence_ref, task_id) in

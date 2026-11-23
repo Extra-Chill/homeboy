@@ -307,11 +307,11 @@ pub(super) fn run_cook_with_runtime(
             if let Err(error) = finish_cook_terminal_with_report(
                 lifecycle_store,
                 &result.value.cook_id,
-                Some((
+                (
                     &result.value,
                     cook_component(&notification_options).as_deref(),
                     result.exit_code,
-                )),
+                ),
                 &[notification_options.identity.initial_run_id.clone()],
             ) {
                 homeboy_core::log_status!(
@@ -323,91 +323,97 @@ pub(super) fn run_cook_with_runtime(
         }
     }
     if result.is_err() {
-        // This driver is the Cook's only settlement owner, and it is leaving
-        // on an admission or execution error without a terminal report.
-        // Release ownership first so settlement can observe that no
-        // controller drives the Cook any more, then settle whatever already
-        // ended. Without this, rows whose lifecycle terminated on the error
-        // path stayed `running` forever.
+        // This driver is leaving on an admission or execution error without a
+        // terminal report. Release ownership first so settlement can observe
+        // that no controller drives the Cook any more, then record whatever
+        // already ended; its rows follow the recorded outcome.
         let cook_id = notification_options.identity.cook_id.clone();
         drop(driver);
-        settle_after_driver_error(lifecycle_store, &cook_id);
+        if let Err(error) = finish_cook_terminal(lifecycle_store, &cook_id) {
+            homeboy_core::log_status!(
+                "agent-task",
+                "Cook {} settlement after driver error failed: {}",
+                cook_id,
+                error
+            );
+        }
     }
     result
-}
-
-/// Settle a Cook whose driver failed without a terminal report. The Cook-level
-/// settlement acts only on a terminal, settled Cook observation; the per-row
-/// backstop then settles rows whose own lifecycle ended, leaving any Cook that
-/// still has live lifecycle work, or a new driver, untouched.
-fn settle_after_driver_error(lifecycle: &AgentTaskLifecycleStore, cook_id: &str) {
-    if let Err(error) = finish_cook_terminal(lifecycle, cook_id) {
-        homeboy_core::log_status!(
-            "agent-task",
-            "Cook {} settlement after driver error failed: {}",
-            cook_id,
-            error
-        );
-    }
-    if let Err(error) = super::unsettled_rows::settle_unowned_cook_rows(lifecycle, cook_id) {
-        homeboy_core::log_status!(
-            "agent-task",
-            "Cook {} row settlement after driver error failed: {}",
-            cook_id,
-            error
-        );
-    }
 }
 
 /// Settle and announce a Cook only once its end-to-end outcome is terminal.
 /// Safe for repeated delivery, including attempts that outlive their driver.
 pub fn finish_cook_terminal(lifecycle: &AgentTaskLifecycleStore, cook_id: &str) -> Result<()> {
-    finish_cook_terminal_with_report(lifecycle, cook_id, None, &[])
+    if let Some((report, exit_code)) = settle_undriven_cook(lifecycle, cook_id)? {
+        crate::agent_task_notify::cook_terminal_in_store(lifecycle, &report, None, exit_code);
+    }
+    Ok(())
+}
+
+/// Record the outcome of a Cook that ended without a live driver's terminal
+/// report, once its settled observation says it has ended, and re-project its
+/// rows from that outcome. Returns the fallback report to announce.
+pub(crate) fn settle_undriven_cook(
+    lifecycle: &AgentTaskLifecycleStore,
+    cook_id: &str,
+) -> Result<Option<(AgentTaskCookReport, i32)>> {
+    let record = cook_observation_in_store(lifecycle, cook_id)?;
+    use agent_task_lifecycle::cook_run_state::cook_settlement_in_store;
+    let recipes = CookRecipeStore::new(lifecycle.roots().clone());
+    let state = agent_task_lifecycle::CookRunState::of(&record);
+    if !state.terminal || recipes.cook_driver_held(cook_id)? {
+        return Ok(None);
+    }
+    if !cook_settlement_in_store(&recipes, cook_id, &record.run_id)?.is_settled(&record, false) {
+        return Ok(None);
+    }
+    let status = super::cook_projections::terminal_fallback_status(state.execution_state);
+    let failed = state.execution_state != homeboy_lifecycle_contract::RunExecutionState::Succeeded;
+    if !record.metadata["cook_progress"]["exit_code"].is_i64() {
+        agent_task_lifecycle::record_cook_outcome_in_store(
+            lifecycle,
+            &record.run_id,
+            i32::from(failed),
+        )?;
+    }
+    let mut report =
+        crate::agent_task_notify::terminal_attempt_report(cook_id, &record.run_id, status);
+    report.stop_reason = record.metadata["pre_execution_failure"]["message"]
+        .as_str()
+        .or_else(|| record.metadata["execution_step_failure"]["message"].as_str())
+        .or_else(|| record.metadata["unmaterialized_cook_admission"]["reason"].as_str())
+        .map(str::to_string);
+    report.report_stores = Some((recipes, lifecycle.clone()));
+    agent_task_lifecycle::settle_cook_terminal_observations_in_store(
+        lifecycle,
+        cook_id,
+        &report_run_ids(&report, &[]),
+    )?;
+    Ok(Some((report, i32::from(failed))))
+}
+
+fn report_run_ids(report: &AgentTaskCookReport, source_ids: &[String]) -> Vec<String> {
+    let mut ids = source_ids.to_vec();
+    ids.extend(report.history_run_ids.iter().cloned());
+    ids.extend(report.invocation_run_ids.iter().cloned());
+    ids.extend(report.latest_run_id.iter().cloned());
+    ids
 }
 
 pub(super) fn finish_cook_terminal_with_report(
     lifecycle: &AgentTaskLifecycleStore,
     cook_id: &str,
-    reported: Option<(&AgentTaskCookReport, Option<&str>, i32)>,
+    (report, component, exit_code): (&AgentTaskCookReport, Option<&str>, i32),
     source_ids: &[String],
 ) -> Result<()> {
-    // A live driver's terminal report is the Cook's verdict. Without one,
-    // the settled Cook observation decides whether the Cook has ended.
-    let mut fallback;
-    let (report, component, exit_code) = match reported {
-        Some(reported) => reported,
-        None => {
-            let record = cook_observation_in_store(lifecycle, cook_id)?;
-            use agent_task_lifecycle::cook_run_state::cook_settlement_in_store;
-            let recipes = CookRecipeStore::new(lifecycle.roots().clone());
-            let state = agent_task_lifecycle::CookRunState::of(&record);
-            if !state.terminal || recipes.cook_driver_held(cook_id)? {
-                return Ok(());
-            }
-            if !cook_settlement_in_store(&recipes, cook_id, &record.run_id)?
-                .is_settled(&record, false)
-            {
-                return Ok(());
-            }
-            fallback = crate::agent_task_notify::terminal_attempt_report(
-                cook_id,
-                &record.run_id,
-                super::cook_projections::terminal_fallback_status(state.execution_state),
-            );
-            fallback.report_stores = Some((
-                CookRecipeStore::new(lifecycle.roots().clone()),
-                lifecycle.clone(),
-            ));
-            let failed =
-                state.execution_state != homeboy_lifecycle_contract::RunExecutionState::Succeeded;
-            (&fallback, None, i32::from(failed))
-        }
-    };
-    let mut ids = source_ids.to_vec();
-    ids.extend(report.history_run_ids.iter().cloned());
-    ids.extend(report.invocation_run_ids.iter().cloned());
-    ids.extend(report.latest_run_id.iter().cloned());
-    agent_task_lifecycle::settle_cook_terminal_observations_in_store(lifecycle, cook_id, &ids)?;
+    if let Some(run_id) = &report.latest_run_id {
+        agent_task_lifecycle::record_cook_outcome_in_store(lifecycle, run_id, exit_code)?;
+    }
+    agent_task_lifecycle::settle_cook_terminal_observations_in_store(
+        lifecycle,
+        cook_id,
+        &report_run_ids(report, source_ids),
+    )?;
     crate::agent_task_notify::cook_terminal_in_store(lifecycle, report, component, exit_code);
     Ok(())
 }
@@ -665,7 +671,6 @@ pub(super) fn run_cook_reported(
                 lifecycle_store,
                 run_id,
                 result.value.status.as_str(),
-                result.exit_code == 0,
                 result.exit_code,
             )
             .and_then(|_| store.settle_continuations_driven_inline(&result.value.cook_id))

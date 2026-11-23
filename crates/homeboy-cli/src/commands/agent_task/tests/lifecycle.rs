@@ -1318,7 +1318,7 @@ fn status_returns_control_plane_run_for_a_cancelled_retry() {
                 json!({"agent_task":{"task_id":task_id,"logical_artifact_id":"historical-patch"}}),
             )
             .expect("controller artifact");
-        homeboy::agents::agent_tasks::lifecycle::reconcile_terminal_artifact_projection(
+        homeboy::agents::agent_task_lifecycle::reconcile_terminal_artifact_projection(
             source_run_id,
         )
         .expect("controller projection");
@@ -2229,7 +2229,7 @@ fn assert_cook_rearm_queue_ownership(block_capacity: bool) {
                 provider_invocation: None,
                 attempt_dispatcher: None,
             },
-            gates: homeboy::agents::agent_tasks::gate::VerifyGateOptions {
+            gates: homeboy::agents::agent_task_gate::VerifyGateOptions {
                 verify: vec!["homeboy review test fixture".to_string()],
                 ..Default::default()
             },
@@ -2655,7 +2655,7 @@ fn recover_public_entry_returns_before_blocking_gate_and_records_daemon_result()
             "candidate": null, "deterministic_gates": [gate],
             "operator_notification": {"status": "blocked", "message": "gate_environment_unavailable"}
         });
-        let _: homeboy::agents::agent_tasks::promotion::AgentTaskPromotionReport =
+        let _: homeboy::agents::agent_task_promotion::AgentTaskPromotionReport =
             serde_json::from_value(promotion.clone()).unwrap();
         test_lifecycle_store()
             .record_promotion(run_id, promotion)
@@ -2859,7 +2859,7 @@ fn recover_regate_verify_replaces_gates_for_an_incomplete_unjudged_candidate() {
         );
         // The executed gates replace the declared command, and the recorded
         // proof authorization names the replacement.
-        let executed = regate.apply(homeboy::agents::agent_tasks::gate::VerifyGateOptions {
+        let executed = regate.apply(homeboy::agents::agent_task_gate::VerifyGateOptions {
             verify: vec!["cargo test missing".to_string()],
             ..Default::default()
         });
@@ -3105,7 +3105,7 @@ fn observation_row(run_id: &str) -> homeboy_core::observation::RunRecord {
 
 /// A detached Cook redirected to an attempt that never materialized, and no
 /// controller drives it: status points at reconcile, and `reconcile --all`
-/// previews then settles the row its lifecycle can no longer settle.
+/// never invents a row verdict its lifecycle did not record.
 #[test]
 fn abandoned_recipe_only_cook_is_reconciled_rather_than_recovered() {
     with_temp_home(|| {
@@ -3154,47 +3154,23 @@ fn abandoned_recipe_only_cook_is_reconciled_rather_than_recovered() {
             format!("homeboy agent-task recover {attempt_id}")
         );
 
-        let fleet = |apply: bool| {
-            reconcile_run(ReconcileArgs {
-                all: true,
-                run_id: None,
-                dry_run: !apply,
-                apply,
-                idempotency_key: None,
-            })
-            .expect("fleet reconcile")
-            .0
-        };
-        let row_entry = |report: &serde_json::Value| {
-            report["unsettled_rows"]
-                .as_array()
-                .into_iter()
-                .flatten()
-                .find(|row| row["run_id"] == cook_id)
-                .cloned()
-        };
-        let preview = fleet(false);
-        let entry = row_entry(&preview).expect("preview considers the recipe-only Cook");
-        assert_eq!(entry["class"], "redirected_attempt_absent");
-        assert_eq!(entry["proposed_status"], "stale");
-        assert_eq!(entry["action"], "would-settle");
-        assert!(preview["considered"].as_u64().unwrap() >= 1);
-        assert_eq!(observation_row(cook_id).status, "running");
-
-        let applied = fleet(true);
-        assert_eq!(row_entry(&applied).expect("applied")["action"], "settled");
-        let row = observation_row(cook_id);
-        assert_eq!(row.status, "stale");
-        assert_eq!(
-            row.metadata_json["homeboy_reconciled"]["reason"],
-            "redirected_attempt_absent"
-        );
-        assert!(row_entry(&fleet(false)).is_none());
+        let applied = reconcile_run(ReconcileArgs {
+            all: true,
+            run_id: None,
+            dry_run: false,
+            apply: true,
+            idempotency_key: None,
+        })
+        .expect("fleet reconcile")
+        .0;
+        assert_eq!(applied["failed"], 0);
+        assert!(applied.get("unsettled_rows").is_none());
     });
 }
 
 /// A Cook attempt that fails admission ends its lifecycle while its driver is
-/// exiting; the driver-error settlement leaves no `running` row behind.
+/// exiting; the driver-error settlement records the Cook's outcome, so no
+/// `running` row is left behind.
 #[test]
 fn admission_failure_driver_exit_leaves_no_running_row() {
     with_temp_home(|| {
@@ -3209,13 +3185,12 @@ fn admission_failure_driver_exit_leaves_no_running_row() {
         .expect("admission failure");
 
         let store = agent_task_lifecycle::AgentTaskLifecycleStore::from_environment().unwrap();
-        let settled =
-            homeboy::agents::agent_task_service::settle_unowned_cook_rows(&store, cook_id)
-                .expect("settle after driver error");
+        store
+            .record_cook_attempt(cook_id, 1, run_id)
+            .expect("index attempt");
+        homeboy::agents::agent_task_service::finish_cook_terminal(&store, cook_id)
+            .expect("settle after driver error");
 
-        assert!(settled
-            .iter()
-            .any(|row| row.run_id == run_id && row.class == "cook_attempt_unsettled"));
         assert_eq!(observation_row(run_id).status, "fail");
     });
 }
@@ -4674,7 +4649,7 @@ fn controller_proxy_status_and_logs_resolve_before_runner_child_is_known() {
             "cook".to_string(),
         ];
         agent_task_lifecycle::record_lab_offload_planned(
-            homeboy::agents::agent_tasks::lifecycle::LabOffloadProxyPlan {
+            homeboy::agents::agent_task_lifecycle::LabOffloadProxyPlan {
                 run_id: "run-cli-controller-proxy",
                 runner_id: "homeboy-lab",
                 remote_workspace: "/runner/workspace/repo",
@@ -4709,7 +4684,7 @@ fn controller_proxy_run_uses_transport_recovery_without_provider_dispatch() {
     with_temp_home(|| {
         let command = vec!["homeboy".to_string(), "agent-task".to_string()];
         agent_task_lifecycle::record_lab_offload_planned(
-            homeboy::agents::agent_tasks::lifecycle::LabOffloadProxyPlan {
+            homeboy::agents::agent_task_lifecycle::LabOffloadProxyPlan {
                 run_id: "run-cli-transport-proxy",
                 runner_id: "remote-runner-42",
                 remote_workspace: "/runner/workspace/repo",
@@ -4825,7 +4800,7 @@ fn controller_proxy_resume_uses_transport_recovery_without_provider_dispatch() {
     with_temp_home(|| {
         let command = vec!["homeboy".to_string(), "agent-task".to_string()];
         agent_task_lifecycle::record_lab_offload_planned(
-            homeboy::agents::agent_tasks::lifecycle::LabOffloadProxyPlan {
+            homeboy::agents::agent_task_lifecycle::LabOffloadProxyPlan {
                 run_id: "run-cli-resume-transport-proxy",
                 runner_id: "remote-runner-42",
                 remote_workspace: "/runner/workspace/repo",
@@ -4881,7 +4856,7 @@ fn controller_proxy_run_resumes_on_its_recorded_runner_workspace() {
             ),
         ];
         agent_task_lifecycle::record_lab_offload_planned(
-            homeboy::agents::agent_tasks::lifecycle::LabOffloadProxyPlan {
+            homeboy::agents::agent_task_lifecycle::LabOffloadProxyPlan {
                 run_id: "run-cli-runner-resume-proxy",
                 runner_id: "lab-local",
                 remote_workspace: &workspace.path().display().to_string(),
@@ -4916,7 +4891,7 @@ fn run_next_leaves_transport_proxy_queued_for_runner_recovery() {
     with_temp_home(|| {
         let command = vec!["homeboy".to_string(), "agent-task".to_string()];
         agent_task_lifecycle::record_lab_offload_planned(
-            homeboy::agents::agent_tasks::lifecycle::LabOffloadProxyPlan {
+            homeboy::agents::agent_task_lifecycle::LabOffloadProxyPlan {
                 run_id: "run-cli-queued-proxy",
                 runner_id: "remote-runner-42",
                 remote_workspace: "/runner/workspace/repo",
@@ -7295,7 +7270,7 @@ fn bridge_resume_reprojects_historical_lab_artifacts_and_preserves_status_cursor
         assert_eq!(artifacts.len(), 1);
         assert_eq!(artifacts[0].artifact_type, "file");
         assert_eq!(
-            homeboy::agents::agent_tasks::lifecycle::verified_controller_artifact_projection_path(
+            homeboy::agents::agent_task_lifecycle::verified_controller_artifact_projection_path(
                 run_id,
                 task_id,
                 &aggregate.outcomes[0].artifacts[0],
@@ -7400,7 +7375,7 @@ fn run_plan_maps_resolved_component_worktree_before_provider_dispatch() {
         assert_eq!(exit_code, 0);
         assert_eq!(
             observed.workspace.mode,
-            homeboy::agents::agent_tasks::AgentTaskWorkspaceMode::Existing
+            homeboy::agents::agent_task::AgentTaskWorkspaceMode::Existing
         );
         let executor_workspace = std::path::PathBuf::from(
             observed

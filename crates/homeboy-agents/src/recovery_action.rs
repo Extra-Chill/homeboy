@@ -121,7 +121,17 @@ pub fn adopt(
     ))
 }
 
+/// Perform `recover` for `id`. A nonzero exit always carries a structured
+/// failure naming the run state, the refusal and the next command (#18845).
 pub fn execute(id: &str, parameters: RecoverParameters) -> Result<(Value, i32)> {
+    let (report, code) = execute_step(id, parameters)?;
+    Ok((
+        service::ensure_recover_failure_contract(report, code, id),
+        code,
+    ))
+}
+
+fn execute_step(id: &str, parameters: RecoverParameters) -> Result<(Value, i32)> {
     if let Some(candidate) = parameters.candidate_ref {
         return adopt(
             id,

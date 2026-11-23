@@ -3,7 +3,7 @@ use homeboy_core::extension;
 use homeboy_engine_primitives::shell::shell_arg;
 use serde::{Deserialize, Serialize};
 
-use homeboy::agents::agent_tasks::provider::AgentTaskProviderCatalog;
+use homeboy::agents::agent_task_provider::AgentTaskProviderCatalog;
 use homeboy::core::git;
 use homeboy::core::project::{self, Project};
 use homeboy::core::server::{self, SshClient};

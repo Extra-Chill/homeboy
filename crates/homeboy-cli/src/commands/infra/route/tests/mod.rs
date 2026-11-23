@@ -124,7 +124,7 @@ fn superseded_terminal_cook_intent_for_one_attempt_does_not_collide_with_its_fen
         register_execution_orchestration();
         crate::agents::agent_task_service::register_work_job_driver();
         let run_id = "attempt-1";
-        let plan = crate::agents::agent_tasks::scheduler::AgentTaskPlan::new("plan", Vec::new());
+        let plan = crate::agents::agent_task_schedule::AgentTaskPlan::new("plan", Vec::new());
         agent_task_lifecycle::submit_plan(&plan, Some(run_id)).unwrap();
         let set_continuation = |state: &str, generation: u64| {
             agent_task_lifecycle::rewrite_record_for_test(run_id, |record| {
@@ -275,7 +275,7 @@ fn agent_task_failed_terminal_job_persists_diagnosable_cause_even_after_completi
     use crate::agents::agent_task_service::{WorkJobHandler, WorkJobInvocation};
     homeboy::core::test_support::with_isolated_home(|_| {
         let run_id = "failed-terminal-worker";
-        let plan = crate::agents::agent_tasks::scheduler::AgentTaskPlan::new("plan", Vec::new());
+        let plan = crate::agents::agent_task_schedule::AgentTaskPlan::new("plan", Vec::new());
         agent_task_lifecycle::submit_plan(&plan, Some(run_id)).unwrap();
         agent_task_lifecycle::rewrite_record_for_test(run_id, |record| {
             record.metadata["cook_continuation"] = serde_json::json!({"state": "completed"});

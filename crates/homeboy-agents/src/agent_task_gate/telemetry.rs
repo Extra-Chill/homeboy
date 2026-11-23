@@ -10,7 +10,7 @@ pub struct GateResources {
 
 pub fn host_pressure() -> serde_json::Value {
     serde_json::json!({
-        "load": std::fs::read_to_string("/proc/loadavg").ok(),
+        "load": homeboy_engine_primitives::host_telemetry::load_average(),
         "psi": {
             "cpu": std::fs::read_to_string("/proc/pressure/cpu").ok(),
             "memory": std::fs::read_to_string("/proc/pressure/memory").ok(),
@@ -114,7 +114,8 @@ mod tests {
         let environment: super::super::AgentTaskGateEnvironment = serde_json::from_value(serde_json::json!({
             "lab_runner":"lab", "phase_name":"gate.cargo-test",
             "resources":{"cpu_user_ms":42,"cpu_system_ms":7,"peak_rss_bytes":4096},
-            "host_pressure_start":{"load":"1 2 3"}, "host_pressure_end":{"load":"4 5 6"},
+            "host_pressure_start":{"load":{"one":1.0,"five":2.0,"fifteen":3.0}},
+            "host_pressure_end":{"load":{"one":4.0,"five":5.0,"fifteen":6.0}},
             "cargo_target":{"path":"/unreachable/lab/target", "resolution":"isolated", "owner":"agent-task-gate", "state":"seeded", "acquire_ms":3, "seed_ms":2, "seed_bytes":100, "growth_bytes":20}
         })).unwrap();
         record(&environment);
@@ -123,7 +124,7 @@ mod tests {
         let metrics = &artifacts[0].metadata_json;
         assert_eq!(metrics["resources"]["cpu_user_ms"], 42);
         assert_eq!(metrics["cargo_target"]["growth_bytes"], 20);
-        assert_eq!(metrics["host_pressure_end"]["load"], "4 5 6");
+        assert_eq!(metrics["host_pressure_end"]["load"]["one"], 4.0);
         assert!(metrics["cargo_target"].get("path").is_none());
     }
 

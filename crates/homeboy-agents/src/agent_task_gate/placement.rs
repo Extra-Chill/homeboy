@@ -1687,6 +1687,7 @@ fn execute_with_context_and_resources(
                 timeout: Some(budget.remaining()),
                 supervision: Some(&supervision),
                 baseline_timeout_diagnostic: false,
+                cpus: None,
                 deadline: Some(budget.deadline),
             },
             &environment,

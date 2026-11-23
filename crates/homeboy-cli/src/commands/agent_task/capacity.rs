@@ -21,8 +21,8 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use chrono::{DateTime, Utc};
 use serde_json::{json, Value};
 
-use homeboy::agents::agent_tasks::dispatch_service as agent_task_dispatch_service;
-use homeboy::agents::agent_tasks::provider::{
+use homeboy::agents::agent_task_dispatch_service;
+use homeboy::agents::agent_task_provider::{
     evaluate_provider_capacity_with_config, AgentTaskProviderCapacityReadiness,
     AgentTaskProviderCatalog, ProviderRuntimeReadinessCache,
 };

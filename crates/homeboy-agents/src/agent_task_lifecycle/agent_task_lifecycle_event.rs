@@ -1,4 +1,4 @@
-use crate::agent_tasks::scheduler::AgentTaskAggregate;
+use crate::agent_task_schedule::AgentTaskAggregate;
 use homeboy_core::api_jobs::{JobEvent, JobEventKind};
 use homeboy_core::lab_contract::{
     AgentTaskDispatchIdentity, LabRunnerWorkload, LabRunnerWorkloadAgentTaskLifecycleMirrorPolicy,

@@ -2687,7 +2687,7 @@ fn copy_snapshot_materializes_symlinked_dependency_contents() {
 /// runs from the component subpath, and changed component content still fails.
 #[test]
 fn snapshot_git_subdirectory_gate_candidate_verifies_at_repository_root() {
-    use homeboy_agents::agent_tasks::gate::placement::{candidate_subpath, LabGateRequest};
+    use homeboy_agents::agent_task_gate::placement::{candidate_subpath, LabGateRequest};
     crate::test_support::with_isolated_home(|_| {
         let roots = homeboy_core::paths::PathRoots::from_environment().expect("roots");
         let source = tempfile::tempdir().expect("source repository");
