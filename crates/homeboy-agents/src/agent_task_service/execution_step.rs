@@ -68,13 +68,16 @@ pub struct ExecutionStepIntent {
 /// remain in this service. A transport validates workspace input before claim.
 pub trait ExecutionStepTransport {
     fn admission(&self, argv: Vec<String>, runner: Option<String>) -> Result<i32>;
+    /// Run one admitted recovery step, returning the step's own report with
+    /// its exit code. The report carries the step's declared failure, which
+    /// the execution-step child must publish as its cause.
     fn recovery(
         &self,
         _run_id: &str,
         _step: &super::CookRecoveryStep,
         _overrides: &super::CookRecoveryOverrides,
         _regate: &super::CookRegateInputs,
-    ) -> Result<i32> {
+    ) -> Result<(Value, i32)> {
         Err(invalid("transport does not support recovery"))
     }
     fn queued_preflight(
@@ -496,7 +499,7 @@ pub fn recovery_step_projection(
             json!({
                 "code": "agent_task.recovery_step_failed",
                 "message": message,
-                "details": { "job_id": job_id },
+                "details": recovery_step_failure_details(job_id),
             })
         })
         .unwrap_or(Value::Null);
@@ -550,10 +553,19 @@ pub fn recovery_step_failure(run_id: &str) -> Result<Option<Value>> {
             json!({
                 "code": "agent_task.recovery_step_failed",
                 "message": message,
-                "details": { "job_id": job_id },
+                "details": recovery_step_failure_details(Some(job_id)),
             })
         })
     }))
+}
+
+/// The step job and the log its cause was read from.
+fn recovery_step_failure_details(job_id: Option<&str>) -> Value {
+    let mut details = json!({ "job_id": job_id });
+    if let Some(path) = job_id.and_then(step_job::recorded_step_log_path) {
+        details["evidence_path"] = json!(path.display().to_string());
+    }
+    details
 }
 
 pub fn recovery_step_exit_code(run_id: &str) -> Result<Option<i32>> {
@@ -1085,40 +1097,53 @@ pub fn execute_execution_step(
     dispatcher: impl Fn(&Value) -> Result<Option<Arc<dyn super::AgentTaskCookAttemptDispatcher>>>,
     transport: &impl ExecutionStepTransport,
 ) -> Result<i32> {
+    execute_execution_step_reported(id, executor, dispatcher, transport).map(|(_, code)| code)
+}
+
+/// Run one execution step and return the report its mode produced with the
+/// exit code. Only a recovery step returns a report (`Value::Null` otherwise):
+/// its declared failure is the cause the execution-step child must publish
+/// instead of a bare nonzero exit.
+pub fn execute_execution_step_reported(
+    id: &str,
+    executor: crate::agent_task_scheduler::SharedAgentTaskExecutor,
+    dispatcher: impl Fn(&Value) -> Result<Option<Arc<dyn super::AgentTaskCookAttemptDispatcher>>>,
+    transport: &impl ExecutionStepTransport,
+) -> Result<(Value, i32)> {
     let store = AgentTaskLifecycleStore::from_environment()?;
     let intent = load_execution_intent(&store, id)?;
     if !intent.authorizes(&store.read_record(&intent.subject_id)?) {
-        return Ok(0);
+        return Ok((Value::Null, 0));
     }
     let Some(_subject_lock) = try_execution_subject_lock_in_store(&store, &intent.subject_id)?
     else {
-        return Ok(0);
+        return Ok((Value::Null, 0));
     };
     if !intent.authorizes(&store.read_record(&intent.subject_id)?) {
-        return Ok(0);
+        return Ok((Value::Null, 0));
     }
     #[cfg(feature = "test-support")]
     homeboy_core::test_support::wait_at_file_gate("HOMEBOY_TEST_EXECUTION_STEP_GATE")?;
     let Some(_generation) = pin_execution_generation_or_defer(&store, &intent.subject_id)? else {
-        return Ok(75);
+        return Ok((Value::Null, 75));
     };
-    match &intent.mode {
+    let code = match &intent.mode {
         ExecutionStepMode::Recovery {
             step,
             overrides,
             regate,
-        } => transport.recovery(&intent.subject_id, step, overrides, regate),
+        } => return transport.recovery(&intent.subject_id, step, overrides, regate),
         ExecutionStepMode::Admission { admission_request } => {
             let record = crate::agent_task_lifecycle::recover_unmaterialized_cook_input_publication_in_store(&store, &intent.subject_id)?;
             if !intent.authorizes(&record) {
-                return Ok(0);
+                return Ok((Value::Null, 0));
             }
             let argv = prepare_admission_arguments(admission_request, &intent.subject_id)?;
             let claimed = store.claim_execution_admission(&intent)?;
             if !claimed {
-                return Ok(0);
+                return Ok((Value::Null, 0));
             }
-            transport.admission(argv, intent.runner.clone())
+            transport.admission(argv, intent.runner.clone())?
         }
         ExecutionStepMode::QueuedRun { retry_preparation } => {
             if let Some(preparation) = retry_preparation {
@@ -1130,9 +1155,10 @@ pub fn execute_execution_step(
             }
             super::execution::execute_exact_queued_intent(
                 &store, &intent, executor, dispatcher, transport,
-            )
+            )?
         }
-    }
+    };
+    Ok((Value::Null, code))
 }
 
 /// Pin before either adapter can provision transport/workspace/provider input.

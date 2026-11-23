@@ -347,12 +347,14 @@ pub(super) fn continuation_args(
 }
 
 /// Execute only the step frozen by the daemon intent; never admit recursively.
+/// The step's report is returned with its exit code rather than dropped, so the
+/// execution-step child can publish the step's declared failure as its cause.
 pub(crate) fn execute_admitted_step(
     run_id: &str,
     step: &agent_task_service::CookRecoveryStep,
     overrides: &CookRecoveryOverrides,
     regate: &CookRegateInputs,
-) -> homeboy::core::Result<i32> {
+) -> homeboy::core::Result<(serde_json::Value, i32)> {
     // The daemon-owned step reports its waits to its log and stops on the
     // daemon's SIGTERM, withdrawing queued gate work (#18042).
     homeboy::core::foreground_wait::with_foreground_wait(Default::default(), || {
@@ -365,18 +367,17 @@ fn execute_admitted_step_in_scope(
     step: &agent_task_service::CookRecoveryStep,
     overrides: &CookRecoveryOverrides,
     regate: &CookRegateInputs,
-) -> homeboy::core::Result<i32> {
+) -> homeboy::core::Result<(serde_json::Value, i32)> {
     let performer = homeboy::agents::recovery_action::ControlPlaneRecoveryPerformer;
     if !overrides.is_empty() {
         return super::run::continue_cook(continuation_args(
             run_id,
             overrides.has_route_override(),
             overrides,
-        ))
-        .map(|(_, code)| code);
+        ));
     }
-    let (_, code) = match step {
-        agent_task_service::CookRecoveryStep::Regate => performer.regate(run_id, regate)?,
+    match step {
+        agent_task_service::CookRecoveryStep::Regate => performer.regate(run_id, regate),
         agent_task_service::CookRecoveryStep::Continue
         | agent_task_service::CookRecoveryStep::Rearm => {
             if *step == agent_task_service::CookRecoveryStep::Continue {
@@ -386,18 +387,15 @@ fn execute_admitted_step_in_scope(
                 run_id,
                 *step == agent_task_service::CookRecoveryStep::Rearm,
                 overrides,
-            ))?
-        }
-        _ => {
-            return Err(homeboy::core::Error::validation_invalid_argument(
-                "recovery",
-                "unsupported admitted step",
-                None,
-                None,
             ))
         }
-    };
-    Ok(code)
+        _ => Err(homeboy::core::Error::validation_invalid_argument(
+            "recovery",
+            "unsupported admitted step",
+            None,
+            None,
+        )),
+    }
 }
 
 #[cfg(test)]

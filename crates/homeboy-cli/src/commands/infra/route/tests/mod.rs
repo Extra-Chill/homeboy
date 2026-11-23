@@ -187,6 +187,33 @@ fn superseded_terminal_cook_intent_for_one_attempt_does_not_collide_with_its_fen
     });
 }
 
+/// A terminal Cook pass that exits 1 after its report declared why names that
+/// cause in the continuation failure, instead of a bare exit status.
+#[test]
+fn terminal_continuation_exit_names_the_cause_its_cook_pass_declared() {
+    let report = serde_json::json!({
+        "status": "failed",
+        "failure": {
+            "code": "agent_task.gates_failed",
+            "message": "deterministic gate `cargo test` failed",
+        },
+    });
+    let failure = crate::commands::utils::response::nested_report_failure(1, &report);
+    let error = terminal_continuation_exit_error(1, failure);
+    assert_eq!(
+        error.message,
+        "terminal Cook continuation exited with status 1: deterministic gate `cargo test` failed"
+    );
+    assert_eq!(error.details["failure"]["code"], "agent_task.gates_failed");
+    assert_eq!(error.details["exit_code"], 1);
+
+    let bare = terminal_continuation_exit_error(1, None);
+    assert_eq!(
+        bare.message,
+        "terminal Cook continuation exited with status 1"
+    );
+}
+
 /// A claimed terminal continuation that failed retryably is handed to its
 /// next generation instead of failing the work job, and a terminally failed
 /// continuation is announced before the job fails (#15831).

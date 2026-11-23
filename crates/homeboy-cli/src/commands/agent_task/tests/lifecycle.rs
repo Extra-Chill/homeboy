@@ -7830,3 +7830,46 @@ fn real_failed_gate_is_visible_in_diagnose_and_failure_only_evidence() {
         }
     });
 }
+
+/// An execution step whose recovery regate exits 1 publishes the regate's
+/// declared failure as its own cause, so the step log, the recovery
+/// projection and `diagnose` name it instead of the generic "exited 1
+/// without reporting a failure cause".
+#[test]
+fn failed_execution_step_publishes_its_recovery_report_failure() {
+    let regate_report = serde_json::json!({
+        "status": "failed",
+        "failure": {
+            "code": "agent_task.regate_gates_not_passing",
+            "message": "regate ran fresh gates on the candidate and they did not pass (status: failed)",
+        },
+    });
+    let result = super::super::execution_step_result("intent-1", &regate_report, 1);
+    assert_eq!(
+        result["failure"]["code"], "agent_task.regate_gates_not_passing",
+        "{result:#}"
+    );
+
+    let response = crate::commands::utils::response::cli_response_for_json_result_for_identity(
+        &Ok(result),
+        1,
+        &crate::commands::utils::response::CommandIdentity::with_operation(
+            "agent-task",
+            "execution-step",
+        ),
+        None,
+    );
+    let response = serde_json::to_value(response).expect("serialize response");
+    let summary = response["summary"].as_str().expect("summary");
+    assert!(summary.contains("did not pass"), "{summary}");
+    assert!(
+        !summary.contains("without reporting a failure cause"),
+        "{summary}"
+    );
+
+    // A successful step, or one without a report, carries no failure.
+    let ok = super::super::execution_step_result("intent-1", &regate_report, 0);
+    assert!(ok.get("failure").is_none(), "{ok:#}");
+    let bare = super::super::execution_step_result("intent-1", &Value::Null, 1);
+    assert!(bare.get("failure").is_none(), "{bare:#}");
+}

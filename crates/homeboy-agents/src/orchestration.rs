@@ -4010,7 +4010,8 @@ fn project_snapshot(
         resource.blocker = snapshot
             .aggregate
             .as_ref()
-            .and_then(recorded_failure_blocker);
+            .and_then(recorded_failure_blocker)
+            .or_else(|| recorded_terminal_cause_blocker(&snapshot.record));
     }
     if resource.state == ControlPlaneState::CandidateRecoverable {
         if let Some(reason) = snapshot.aggregate.as_ref().and_then(|aggregate| {
@@ -4975,6 +4976,137 @@ fn blocker(
             daemon: None,
             output: None,
         })
+}
+
+/// The cause already recorded on a terminal record that has no aggregate
+/// outcome to explain it: the authoritative runner job's own failure for a
+/// projected Lab offload, or the cancellation provenance for a cancelled run.
+/// Without it these terminal states read as "no failure diagnostic was
+/// recorded" although the evidence is on the record.
+fn recorded_terminal_cause_blocker(record: &AgentTaskRunRecord) -> Option<ControlPlaneBlocker> {
+    match record.state() {
+        RunExecutionState::Failed | RunExecutionState::PartialFailure => {
+            runner_job_failure_blocker(&record.metadata)
+        }
+        RunExecutionState::Cancelled => cancellation_blocker(&record.metadata),
+        _ => None,
+    }
+}
+
+/// The failing runner job's error event: the remote command's own envelope
+/// diagnostic when it printed one, else the error with its stderr tail.
+fn runner_job_failure_blocker(metadata: &Value) -> Option<ControlPlaneBlocker> {
+    const STDERR_TAIL_LINES: usize = 5;
+    let data = metadata["runner_job_events"]
+        .as_array()?
+        .iter()
+        .rev()
+        .find(|event| event["kind"] == "error")?
+        .get("data")?;
+    let details = &data["error_details"];
+    let envelope = details["stdout"].as_str().and_then(|stdout| {
+        let start = stdout
+            .rfind("\n{\n")
+            .map(|index| index + 1)
+            .unwrap_or_else(|| stdout.find('{').unwrap_or(0));
+        serde_json::from_str::<Value>(&stdout[start..]).ok()
+    });
+    let declared = envelope.as_ref().and_then(|envelope| {
+        let message = envelope["diagnostics"]["message"]
+            .as_str()
+            .or_else(|| envelope["summary"].as_str())?
+            .trim();
+        (!message.is_empty()).then(|| {
+            (
+                envelope["diagnostics"]["code"].as_str().map(str::to_string),
+                message.to_string(),
+            )
+        })
+    });
+    // A dependency or tool step records the stderr of the command that
+    // actually failed under its diagnostic cause; it explains more than the
+    // outer command's progress stream.
+    let cause_stderr = envelope
+        .as_ref()
+        .and_then(|envelope| envelope["diagnostics"]["details"]["cause"]["stderr"].as_str());
+    let stderr_tail = cause_stderr.or(details["stderr"].as_str()).map(|stderr| {
+        let lines = stderr
+            .lines()
+            .map(str::trim)
+            .filter(|line| !line.is_empty() && !line.starts_with("HOMEBOY_PROGRESS "))
+            .collect::<Vec<_>>();
+        lines[lines.len().saturating_sub(STDERR_TAIL_LINES)..].join("\n")
+    });
+    let (code, message) = match declared {
+        Some(declared) => declared,
+        None => {
+            let error = data["error"].as_str().unwrap_or("runner job failed").trim();
+            let mut message = match details["exit_code"].as_i64() {
+                Some(code) => format!("{error} (exit {code})"),
+                None => error.to_string(),
+            };
+            if let Some(tail) = stderr_tail.as_deref().filter(|tail| !tail.is_empty()) {
+                message.push_str(": ");
+                message.push_str(tail);
+            }
+            (None, message)
+        }
+    };
+    let code = code.or_else(|| data["error_code"].as_str().map(str::to_string));
+    Some(ControlPlaneBlocker {
+        details: Some(serde_json::json!({
+            "exit_code": details["exit_code"],
+            "error_code": data["error_code"],
+            "runner_job_id": metadata["runner_job_id"],
+            "stderr_tail": stderr_tail.map(|tail| homeboy_core::redaction::redact_string(&tail)),
+        })),
+        code: code.map(|code| bounded(&code, STATE_BOUND)),
+        message: redacted_bounded(&message, MESSAGE_BOUND),
+        state: None,
+        reason: None,
+        retry: None,
+        daemon: None,
+        output: None,
+    })
+}
+
+/// Who cancelled the run and why, including the Cook that superseded it.
+fn cancellation_blocker(metadata: &Value) -> Option<ControlPlaneBlocker> {
+    let provenance = &metadata["cancellation_provenance"];
+    let reason = provenance["reason"]
+        .as_str()
+        .or_else(|| metadata["cancel_reason"].as_str())
+        .map(str::trim)
+        .filter(|reason| !reason.is_empty())?;
+    let mut message = match provenance["actor"].as_str() {
+        Some(actor) => format!("cancelled by {actor}: {}", reason.replace('_', " ")),
+        None => format!("cancelled: {}", reason.replace('_', " ")),
+    };
+    let superseded = &metadata["superseded_by_active_cook"];
+    if let Some(cook_id) = superseded["cook_id"].as_str() {
+        message.push_str(&format!(" (active Cook `{cook_id}`"));
+        if let Some(worktree) = superseded["worktree"].as_str() {
+            message.push_str(&format!(" owns `{worktree}`"));
+        }
+        message.push(')');
+    }
+    Some(ControlPlaneBlocker {
+        details: Some(serde_json::json!({
+            "cancel_reason": reason,
+            "recovery_action": provenance["recovery_action"],
+            "superseded_by_active_cook": superseded,
+        })),
+        code: Some(format!(
+            "cancelled.{}",
+            provenance["cause"].as_str().unwrap_or("recorded")
+        )),
+        message: redacted_bounded(&message, MESSAGE_BOUND),
+        state: None,
+        reason: None,
+        retry: None,
+        daemon: None,
+        output: None,
+    })
 }
 
 /// Preserve the first non-success outcome's own classification and first
@@ -7324,6 +7456,92 @@ mod tests {
             plan,
             aggregate: None,
         }
+    }
+
+    /// A failed run with no aggregate outcome names the failure its runner
+    /// job recorded: the remote command's envelope diagnostic and the stderr
+    /// of the step that failed, not "no failure diagnostic was recorded".
+    #[test]
+    fn failed_runner_job_without_aggregate_projects_its_command_failure() {
+        let mut snapshot = snapshot("lab-offload-failed", None);
+        snapshot
+            .record
+            .set_state_for_test(RunExecutionState::Failed);
+        let stdout = serde_json::to_string_pretty(&json!({
+            "success": false,
+            "summary": "Dependency step 'dependency.setup' failed for component 'demo'",
+            "diagnostics": {
+                "code": "dependency_step_failed",
+                "message": "Dependency step 'dependency.setup' failed for component 'demo'",
+                "details": {"cause": {"stderr": "npm ci\ndeps-runner.sh: line 133: lib.sh: No such file or directory\n"}},
+            },
+        }))
+        .unwrap();
+        snapshot.record.metadata["runner_job_id"] = json!("job-1");
+        snapshot.record.metadata["runner_job_events"] = json!([
+            {"kind": "stdout", "message": "{}"},
+            {"kind": "error", "message": "Remote command failed", "data": {
+                "error": "Remote command failed",
+                "error_code": "remote.command_failed",
+                "error_details": {"exit_code": 20, "stdout": format!("{stdout}\n"), "stderr": "HOMEBOY_PROGRESS {}\n"},
+            }},
+        ]);
+        for summary in [false, true] {
+            let blocker = project_snapshot(&snapshot, summary)
+                .unwrap()
+                .blocker
+                .expect("runner job failure blocker");
+            assert_eq!(blocker.code.as_deref(), Some("dependency_step_failed"));
+            assert!(blocker.message.contains("dependency.setup"), "{blocker:?}");
+            let details = blocker.details.expect("details");
+            assert_eq!(details["exit_code"], 20);
+            assert_eq!(details["runner_job_id"], "job-1");
+            assert!(details["stderr_tail"]
+                .as_str()
+                .unwrap()
+                .contains("No such file or directory"));
+        }
+
+        // Without an envelope, the error and its stderr tail are the cause.
+        snapshot.record.metadata["runner_job_events"] = json!([
+            {"kind": "error", "data": {
+                "error": "Remote command failed",
+                "error_details": {"exit_code": 2, "stderr": "fatal: no such checkout\n"},
+            }},
+        ]);
+        let blocker = project_snapshot(&snapshot, false).unwrap().blocker.unwrap();
+        assert_eq!(
+            blocker.message,
+            "Remote command failed (exit 2): fatal: no such checkout"
+        );
+    }
+
+    /// A cancelled run names who cancelled it and why.
+    #[test]
+    fn cancelled_run_projects_its_cancellation_provenance() {
+        let mut snapshot = snapshot("superseded-attempt", None);
+        snapshot
+            .record
+            .set_state_for_test(RunExecutionState::Cancelled);
+        snapshot.record.metadata["cancel_reason"] = json!("superseded_by_active_cook");
+        snapshot.record.metadata["cancellation_provenance"] = json!({
+            "actor": "controller",
+            "cause": "operator_requested",
+            "reason": "superseded_by_active_cook",
+        });
+        snapshot.record.metadata["superseded_by_active_cook"] = json!({
+            "cook_id": "cook-2",
+            "worktree": "repo@branch",
+        });
+        let blocker = project_snapshot(&snapshot, false).unwrap().blocker.unwrap();
+        assert_eq!(
+            blocker.code.as_deref(),
+            Some("cancelled.operator_requested")
+        );
+        assert_eq!(
+            blocker.message,
+            "cancelled by controller: superseded by active cook (active Cook `cook-2` owns `repo@branch`)"
+        );
     }
 
     #[test]

@@ -2252,10 +2252,14 @@ fn spawn_terminal_cook_worker(
 
 /// Entry point of `homeboy agent-task terminal-continuation-worker`: run one
 /// continuation pass and publish its outcome for the supervising work job.
+///
+/// The returned payload carries a failed pass's typed cause under `failure`,
+/// so the worker's own log names it rather than "exited 1 without reporting a
+/// failure cause".
 pub(crate) fn run_terminal_cook_worker(
     request: &str,
     outcome_path: &Path,
-) -> homeboy::core::Result<i32> {
+) -> homeboy::core::Result<(serde_json::Value, i32)> {
     use crate::agents::agent_task_service::WorkJobStep;
 
     let request = parse_terminal_cook_job(&serde_json::from_str(request).map_err(|error| {
@@ -2287,7 +2291,7 @@ pub(crate) fn run_terminal_cook_worker(
             1,
         ),
     };
-    let body = serde_json::json!({ "schema": TERMINAL_COOK_WORKER_SCHEMA, "outcome": outcome });
+    let mut body = serde_json::json!({ "schema": TERMINAL_COOK_WORKER_SCHEMA, "outcome": outcome });
     // Publish atomically: a partially written outcome must read as absent.
     let staging = outcome_path.with_extension("json.tmp");
     std::fs::write(&staging, serde_json::to_vec(&body).unwrap_or_default())
@@ -2295,7 +2299,19 @@ pub(crate) fn run_terminal_cook_worker(
         .map_err(|error| {
             Error::internal_io(error.to_string(), Some(outcome_path.display().to_string()))
         })?;
-    Ok(exit_code)
+    if let TerminalCookWorkerOutcome::Failed {
+        code,
+        message,
+        details,
+    } = &outcome
+    {
+        body["failure"] = serde_json::json!({
+            "code": code,
+            "message": message,
+            "details": details,
+        });
+    }
+    Ok((body, exit_code))
 }
 
 fn run_terminal_cook_continuation(
@@ -2354,6 +2370,10 @@ fn run_terminal_cook_continuation(
             };
         }
     };
+    // The Cook pass's own report names why it stopped (failing gates, a
+    // refused promotion); keep its declared failure so a nonzero pass never
+    // reaches the continuation record as a bare exit status.
+    let mut pass_failure: Option<serde_json::Value> = None;
     let outcome = crate::agents::agent_task_service::consume_claimed_terminal_with_dispatcher(
         claim,
         reconstruct_cook_attempt_dispatcher,
@@ -2370,7 +2390,17 @@ fn run_terminal_cook_continuation(
                 ),
                 crate::agents::agent_task_service::CookMode::ContinueTerminal,
             )
-            .map(|result| (result.exit_code, result.value.disposition))
+            .map(|result| {
+                if result.exit_code != 0 {
+                    pass_failure = serde_json::to_value(&result.value).ok().and_then(|report| {
+                        crate::commands::utils::response::nested_report_failure(
+                            result.exit_code,
+                            &report,
+                        )
+                    });
+                }
+                (result.exit_code, result.value.disposition)
+            })
         },
     );
     let failure = match outcome {
@@ -2394,9 +2424,7 @@ fn run_terminal_cook_continuation(
                 "exit_code": 0,
             })));
         }
-        Ok(exit_code) => Error::internal_unexpected(format!(
-            "terminal Cook continuation exited with status {exit_code}"
-        )),
+        Ok(exit_code) => terminal_continuation_exit_error(exit_code, pass_failure),
         Err(error) => error,
     };
     let state = crate::agents::agent_task_service::continuation_state_in_store(
@@ -2407,6 +2435,27 @@ fn run_terminal_cook_continuation(
     terminal_continuation_failure_step(state, failure, || {
         announce_failed_terminal_continuation(&store, request);
     })
+}
+
+/// The failure of a Cook pass that exited nonzero, naming the cause its report
+/// declared. Without one the message still carries the exit status.
+fn terminal_continuation_exit_error(exit_code: i32, failure: Option<serde_json::Value>) -> Error {
+    let cause = failure
+        .as_ref()
+        .and_then(|failure| failure["message"].as_str())
+        .map(str::trim)
+        .filter(|message| !message.is_empty());
+    let mut error = Error::internal_unexpected(match cause {
+        Some(cause) => {
+            format!("terminal Cook continuation exited with status {exit_code}: {cause}")
+        }
+        None => format!("terminal Cook continuation exited with status {exit_code}"),
+    });
+    error.details["exit_code"] = serde_json::json!(exit_code);
+    if let Some(failure) = failure {
+        error.details["failure"] = failure;
+    }
+    error
 }
 
 /// Upper bound on one supervised wait while a continuation retry is backed
@@ -2631,7 +2680,7 @@ impl crate::agents::agent_task_service::ExecutionStepTransport for CliExecutionS
         step: &crate::agents::agent_task_service::CookRecoveryStep,
         overrides: &crate::agents::agent_task_service::CookRecoveryOverrides,
         regate: &crate::agents::agent_task_service::CookRegateInputs,
-    ) -> homeboy::core::Result<i32> {
+    ) -> homeboy::core::Result<(serde_json::Value, i32)> {
         crate::commands::agent_task::recover::execute_admitted_step(run_id, step, overrides, regate)
     }
     fn admission(&self, argv: Vec<String>, runner: Option<String>) -> homeboy::core::Result<i32> {

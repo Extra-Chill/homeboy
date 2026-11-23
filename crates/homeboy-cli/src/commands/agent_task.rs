@@ -297,6 +297,22 @@ pub(crate) fn run_with_cook_progress(
     run_with_cook_progress_and_provenance(args, progress, None)
 }
 
+/// The `agent-task execution-step` payload. A failed step publishes the cause
+/// its nested report declared (a regate's failing gates, a continuation's
+/// stop) under `failure`, so the step log, the recovery projection and
+/// `diagnose` name it instead of "exited 1 without reporting a failure cause".
+pub(crate) fn execution_step_result(intent_id: &str, report: &Value, exit_code: i32) -> Value {
+    let mut result = serde_json::json!({"intent_id": intent_id, "exit_code": exit_code});
+    if exit_code != 0 {
+        if let Some(failure) =
+            crate::commands::utils::response::nested_report_failure(exit_code, report)
+        {
+            result["failure"] = failure;
+        }
+    }
+    result
+}
+
 pub(crate) fn run_with_cook_progress_and_provenance(
     args: AgentTaskArgs,
     progress: CookProgress<'_>,
@@ -338,14 +354,15 @@ pub(crate) fn run_with_cook_progress_and_provenance(
         AgentTaskCommand::CookFeedback(args) => feedback::feedback(args),
         AgentTaskCommand::RunPlan(run_args) => run::run_plan(run_args),
         AgentTaskCommand::ExecutionStep { intent_id } => {
-            let exit_code = homeboy::agents::agent_task_service::execute_execution_step(
-                &intent_id,
-                Arc::new(homeboy::agents::agent_task_provider::ExtensionProviderAgentTaskExecutor::discover()),
-                crate::commands::infra::route::reconstruct_cook_attempt_dispatcher,
-                &crate::commands::infra::route::CliExecutionStepTransport,
-            )?;
+            let (report, exit_code) =
+                homeboy::agents::agent_task_service::execute_execution_step_reported(
+                    &intent_id,
+                    Arc::new(homeboy::agents::agent_task_provider::ExtensionProviderAgentTaskExecutor::discover()),
+                    crate::commands::infra::route::reconstruct_cook_attempt_dispatcher,
+                    &crate::commands::infra::route::CliExecutionStepTransport,
+                )?;
             Ok((
-                serde_json::json!({"intent_id": intent_id, "exit_code": exit_code}),
+                execution_step_result(&intent_id, &report, exit_code),
                 exit_code,
             ))
         }
@@ -403,8 +420,7 @@ pub(crate) fn run_with_cook_progress_and_provenance(
             Ok((serde_json::to_value(record).unwrap_or(Value::Null), 0))
         }
         AgentTaskCommand::TerminalContinuationWorker { request, outcome } => {
-            let exit_code = crate::commands::route::run_terminal_cook_worker(&request, &outcome)?;
-            Ok((Value::Null, exit_code))
+            crate::commands::route::run_terminal_cook_worker(&request, &outcome)
         }
         AgentTaskCommand::Gate { cook_id, id } => {
             use homeboy::agents::agent_tasks::gate;
