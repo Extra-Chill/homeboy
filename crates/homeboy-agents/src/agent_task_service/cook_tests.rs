@@ -1792,7 +1792,7 @@ fn terminal_cook_recovery_settles_rows_and_one_span_in_both_directions() {
                 .collect();
             assert_eq!(spans.len(), 1);
             assert_eq!(
-                spans[0].status == homeboy_core::phase_timing::PhaseStatus::Failed,
+                spans[0].status == homeboy_engine_primitives::phase_timing::PhaseStatus::Failed,
                 exit_code != 0
             );
             if let Some(start) = &origin {

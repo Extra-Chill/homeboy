@@ -210,7 +210,7 @@ fn hydrate_lab_workspace_dependencies_with_policy(
 ) -> Result<LabWorkspaceHydrationOutput> {
     let _timing = parent_run_id.and_then(|run_id| {
         match homeboy_core::observation::ObservationStore::open_initialized() {
-            Ok(store) => Some(homeboy_core::observation::phase_timing::for_run(
+            Ok(store) => Some(homeboy_core::observation::phase_context::for_run(
                 &store, run_id,
             )),
             Err(error) => {
@@ -288,7 +288,8 @@ fn hydrate_lab_workspace_dependencies_with_policy(
         let component_root = dependency_root(remote_path, plan_step)?;
         let options =
             hydration_runner_exec_options(command.clone(), &component_root, parent_run_id, index);
-        let (output, exit_code) = homeboy_core::observation::phase_timing::time_with_outcome(
+        let (output, exit_code) = homeboy_engine_primitives::phase_timing::PhaseTimer::current()
+            .time_with_outcome::<_, homeboy_core::Error>(
             "stage.lab.dependency_hydration",
             || {
                 exec(
@@ -1290,7 +1291,7 @@ mod tests {
             .start_run(homeboy_core::observation::NewRunRecord::builder("test").build())
             .unwrap();
         let _timing =
-            homeboy_core::observation::phase_timing::for_run(&timing_store, &timing_run.id);
+            homeboy_core::observation::phase_context::for_run(&timing_store, &timing_run.id);
 
         crate::test_support::with_isolated_home(|_| {
             let path_guard = FakeBinGuard::install(
@@ -1329,7 +1330,10 @@ mod tests {
                 .iter()
                 .find(|span| span.id == "stage.lab.dependency_hydration")
                 .expect("persisted phase");
-            assert_eq!(span.status, homeboy_core::phase_timing::PhaseStatus::Ok);
+            assert_eq!(
+                span.status,
+                homeboy_engine_primitives::phase_timing::PhaseStatus::Ok
+            );
             assert!(span.duration_ms.is_some());
             assert_eq!(
                 step.command,

@@ -669,11 +669,12 @@ struct RetainedStorageReconciliation {
 fn bounded_retained_storage_report(args: CleanupRetainedStorageArgs) -> CmdResult<Value> {
     observe_cleanup(
         || {
-            homeboy::core::observation::phase_timing::time_with_outcome(
-                "cleanup.retained_storage",
-                || retained_storage_child_report(args),
-                |(_, code)| *code != 0,
-            )
+            homeboy_engine_primitives::phase_timing::PhaseTimer::current()
+                .time_with_outcome::<_, homeboy::core::Error>(
+                    "cleanup.retained_storage",
+                    || retained_storage_child_report(args),
+                    |(_, code)| *code != 0,
+                )
         },
         |(_, code)| *code != 0,
     )
@@ -2173,7 +2174,7 @@ fn observe_cleanup<T>(
     .ok();
     let _timing = observation
         .as_ref()
-        .map(|run| homeboy::core::observation::phase_timing::for_run(run.store(), run.run_id()));
+        .map(|run| homeboy::core::observation::phase_context::for_run(run.store(), run.run_id()));
     let result = work();
     if let Some(run) = observation {
         run.finish(
@@ -3013,7 +3014,7 @@ fn run_cleanup_category(
             );
         }
     }
-    homeboy::core::observation::phase_timing::finish(
+    homeboy_engine_primitives::phase_timing::PhaseTimer::current().finish(
         &format!("cleanup.{}", metadata.category),
         started,
         categories[first_category..]
@@ -5438,7 +5439,10 @@ mod tests {
                 .iter()
                 .find(|span| span.id == "cleanup.runtime_tmp")
                 .unwrap();
-            assert_eq!(span.status, homeboy::core::phase_timing::PhaseStatus::Ok);
+            assert_eq!(
+                span.status,
+                homeboy_engine_primitives::phase_timing::PhaseStatus::Ok
+            );
             assert!(span.duration_ms.is_some());
             let category = &result.output["categories"][0];
             assert_eq!(category["category"], "runtime_tmp");

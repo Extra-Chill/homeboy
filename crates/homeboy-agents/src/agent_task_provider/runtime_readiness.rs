@@ -209,44 +209,46 @@ fn run_readiness_probe_with_gate(
     probe_timeout_ms: u64,
     mode: Option<&str>,
 ) -> std::result::Result<ProviderReadinessInvocationResult, String> {
-    homeboy_core::observation::phase_timing::time_with_outcome(
-        "provider.readiness_probe",
-        || {
-            let _permit = acquire_probe_permit(gate, probe_deadline, probe_timeout_ms)
-                .map_err(homeboy_core::Error::internal_unexpected)?;
-            let mut result = Err("provider readiness invocation did not run".to_string());
-            for _ in 0..PROVIDER_RUNTIME_READINESS_TRANSIENT_ATTEMPTS {
-                let Some(remaining) = probe_deadline.checked_duration_since(Instant::now()) else {
-                    result = Err(format!(
-                        "provider '{}' readiness invocation timed out after {} ms",
-                        provider.id, probe_timeout_ms
-                    ));
-                    break;
-                };
-                result = run_provider_readiness_probe_with_env_and_timeout(
-                    provider,
-                    config,
-                    credential_env,
-                    remaining,
-                    mode,
-                );
-                let should_retry = match &result {
-                    Err(_) => true,
-                    Ok(verdict) => {
-                        !verdict.ready
-                            && verdict.retryable
-                            && verdict.classification == "transient_failure"
+    homeboy_engine_primitives::phase_timing::PhaseTimer::current()
+        .time_with_outcome::<_, homeboy_core::Error>(
+            "provider.readiness_probe",
+            || {
+                let _permit = acquire_probe_permit(gate, probe_deadline, probe_timeout_ms)
+                    .map_err(homeboy_core::Error::internal_unexpected)?;
+                let mut result = Err("provider readiness invocation did not run".to_string());
+                for _ in 0..PROVIDER_RUNTIME_READINESS_TRANSIENT_ATTEMPTS {
+                    let Some(remaining) = probe_deadline.checked_duration_since(Instant::now())
+                    else {
+                        result = Err(format!(
+                            "provider '{}' readiness invocation timed out after {} ms",
+                            provider.id, probe_timeout_ms
+                        ));
+                        break;
+                    };
+                    result = run_provider_readiness_probe_with_env_and_timeout(
+                        provider,
+                        config,
+                        credential_env,
+                        remaining,
+                        mode,
+                    );
+                    let should_retry = match &result {
+                        Err(_) => true,
+                        Ok(verdict) => {
+                            !verdict.ready
+                                && verdict.retryable
+                                && verdict.classification == "transient_failure"
+                        }
+                    };
+                    if !should_retry {
+                        break;
                     }
-                };
-                if !should_retry {
-                    break;
                 }
-            }
-            result.map_err(homeboy_core::Error::internal_unexpected)
-        },
-        |verdict| !verdict.ready,
-    )
-    .map_err(|error| error.message)
+                result.map_err(homeboy_core::Error::internal_unexpected)
+            },
+            |verdict| !verdict.ready,
+        )
+        .map_err(|error| error.message)
 }
 
 fn remaining_deadline_duration(deadline_unix_ms: Option<u64>) -> Option<Duration> {
@@ -371,202 +373,214 @@ pub(crate) fn readiness_verdict(
     deadline_unix_ms: Option<u64>,
     mode: Option<&str>,
 ) -> Result<ProviderReadinessInvocationResult> {
-    homeboy_core::observation::phase_timing::time_with_outcome(
-        "admit.provider_readiness",
-        || {
-            ensure_readiness_deadline("probe", deadline_unix_ms)?;
-            let request_key = readiness_cache_identity(provider, config, credential_env, mode)?;
-            ensure_readiness_deadline("cache_key", deadline_unix_ms)?;
-            let mut registered_waiter = false;
-            loop {
-                let mut state = cache
-                    .shared
-                    .state
-                    .lock()
-                    .unwrap_or_else(std::sync::PoisonError::into_inner);
-                if let Err(error) = ensure_readiness_deadline("cache_lock", deadline_unix_ms) {
-                    if registered_waiter {
-                        release_cache_waiter(&mut state, &request_key);
-                        cache.shared.changed.notify_all();
-                    }
-                    return Err(error);
-                }
-                match state.by_request.get(&request_key) {
-                    Some(CachedProviderRuntimeReadiness::InFlight) => {
-                        if !registered_waiter {
-                            *state.waiters.entry(request_key.clone()).or_default() += 1;
-                            registered_waiter = true;
-                        }
-                        let Some(wait) = remaining_deadline_duration(deadline_unix_ms) else {
+    homeboy_engine_primitives::phase_timing::PhaseTimer::current()
+        .time_with_outcome::<_, homeboy_core::Error>(
+            "admit.provider_readiness",
+            || {
+                ensure_readiness_deadline("probe", deadline_unix_ms)?;
+                let request_key = readiness_cache_identity(provider, config, credential_env, mode)?;
+                ensure_readiness_deadline("cache_key", deadline_unix_ms)?;
+                let mut registered_waiter = false;
+                loop {
+                    let mut state = cache
+                        .shared
+                        .state
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner);
+                    if let Err(error) = ensure_readiness_deadline("cache_lock", deadline_unix_ms) {
+                        if registered_waiter {
                             release_cache_waiter(&mut state, &request_key);
-                            return Err(readiness_deadline_error("cache_wait", deadline_unix_ms));
-                        };
-                        let (mut state, timeout) = cache
-                            .shared
-                            .changed
-                            .wait_timeout(state, wait)
-                            .unwrap_or_else(std::sync::PoisonError::into_inner);
-                        if timeout.timed_out() {
-                            release_cache_waiter(&mut state, &request_key);
-                            return Err(readiness_deadline_error("cache_wait", deadline_unix_ms));
+                            cache.shared.changed.notify_all();
                         }
-                        drop(state);
-                        continue;
+                        return Err(error);
                     }
-                    Some(CachedProviderRuntimeReadiness::Complete {
-                        result, cached_at, ..
-                    }) => {
-                        let ttl = match result {
-                            Ok(verdict) if verdict.ready => PROVIDER_RUNTIME_READINESS_READY_TTL,
-                            Ok(_) => PROVIDER_RUNTIME_READINESS_NEGATIVE_TTL,
-                            Err(_) => PROVIDER_RUNTIME_READINESS_ERROR_TTL,
-                        };
-                        if cached_at.elapsed() <= ttl {
-                            if let Err(error) =
-                                ensure_readiness_deadline("cached_result", deadline_unix_ms)
-                            {
+                    match state.by_request.get(&request_key) {
+                        Some(CachedProviderRuntimeReadiness::InFlight) => {
+                            if !registered_waiter {
+                                *state.waiters.entry(request_key.clone()).or_default() += 1;
+                                registered_waiter = true;
+                            }
+                            let Some(wait) = remaining_deadline_duration(deadline_unix_ms) else {
+                                release_cache_waiter(&mut state, &request_key);
+                                return Err(readiness_deadline_error(
+                                    "cache_wait",
+                                    deadline_unix_ms,
+                                ));
+                            };
+                            let (mut state, timeout) = cache
+                                .shared
+                                .changed
+                                .wait_timeout(state, wait)
+                                .unwrap_or_else(std::sync::PoisonError::into_inner);
+                            if timeout.timed_out() {
+                                release_cache_waiter(&mut state, &request_key);
+                                return Err(readiness_deadline_error(
+                                    "cache_wait",
+                                    deadline_unix_ms,
+                                ));
+                            }
+                            drop(state);
+                            continue;
+                        }
+                        Some(CachedProviderRuntimeReadiness::Complete {
+                            result,
+                            cached_at,
+                            ..
+                        }) => {
+                            let ttl = match result {
+                                Ok(verdict) if verdict.ready => {
+                                    PROVIDER_RUNTIME_READINESS_READY_TTL
+                                }
+                                Ok(_) => PROVIDER_RUNTIME_READINESS_NEGATIVE_TTL,
+                                Err(_) => PROVIDER_RUNTIME_READINESS_ERROR_TTL,
+                            };
+                            if cached_at.elapsed() <= ttl {
+                                if let Err(error) =
+                                    ensure_readiness_deadline("cached_result", deadline_unix_ms)
+                                {
+                                    if registered_waiter {
+                                        release_cache_waiter(&mut state, &request_key);
+                                        cache.shared.changed.notify_all();
+                                    }
+                                    return Err(error);
+                                }
+                                let result = result.clone();
                                 if registered_waiter {
                                     release_cache_waiter(&mut state, &request_key);
                                     cache.shared.changed.notify_all();
                                 }
-                                return Err(error);
+                                return map_readiness_result(provider, result);
                             }
-                            let result = result.clone();
                             if registered_waiter {
                                 release_cache_waiter(&mut state, &request_key);
+                                registered_waiter = false;
                                 cache.shared.changed.notify_all();
                             }
-                            return map_readiness_result(provider, result);
+                            state.by_request.remove(&request_key);
                         }
-                        if registered_waiter {
-                            release_cache_waiter(&mut state, &request_key);
-                            registered_waiter = false;
-                            cache.shared.changed.notify_all();
-                        }
-                        state.by_request.remove(&request_key);
+                        None => {}
                     }
-                    None => {}
-                }
-                if state.by_request.len() >= 64 {
-                    if let Some(oldest) = state
-                        .by_request
-                        .iter()
-                        .filter_map(|(key, cached)| match cached {
-                            CachedProviderRuntimeReadiness::Complete { generation, .. }
-                                if state.waiters.get(key).copied().unwrap_or_default() == 0 =>
-                            {
-                                Some((key, generation))
+                    if state.by_request.len() >= 64 {
+                        if let Some(oldest) = state
+                            .by_request
+                            .iter()
+                            .filter_map(|(key, cached)| match cached {
+                                CachedProviderRuntimeReadiness::Complete { generation, .. }
+                                    if state.waiters.get(key).copied().unwrap_or_default() == 0 =>
+                                {
+                                    Some((key, generation))
+                                }
+                                CachedProviderRuntimeReadiness::Complete { .. }
+                                | CachedProviderRuntimeReadiness::InFlight => None,
+                            })
+                            .min_by_key(|(_, generation)| *generation)
+                            .map(|(key, _)| key.clone())
+                        {
+                            state.by_request.remove(&oldest);
+                        } else {
+                            let Some(wait) = remaining_deadline_duration(deadline_unix_ms) else {
+                                return Err(readiness_deadline_error(
+                                    "cache_capacity",
+                                    deadline_unix_ms,
+                                ));
+                            };
+                            let (state, timeout) = cache
+                                .shared
+                                .changed
+                                .wait_timeout(state, wait)
+                                .unwrap_or_else(std::sync::PoisonError::into_inner);
+                            drop(state);
+                            if timeout.timed_out() {
+                                return Err(readiness_deadline_error(
+                                    "cache_capacity",
+                                    deadline_unix_ms,
+                                ));
                             }
-                            CachedProviderRuntimeReadiness::Complete { .. }
-                            | CachedProviderRuntimeReadiness::InFlight => None,
-                        })
-                        .min_by_key(|(_, generation)| *generation)
-                        .map(|(key, _)| key.clone())
-                    {
-                        state.by_request.remove(&oldest);
-                    } else {
-                        let Some(wait) = remaining_deadline_duration(deadline_unix_ms) else {
-                            return Err(readiness_deadline_error(
-                                "cache_capacity",
-                                deadline_unix_ms,
-                            ));
-                        };
-                        let (state, timeout) = cache
-                            .shared
-                            .changed
-                            .wait_timeout(state, wait)
-                            .unwrap_or_else(std::sync::PoisonError::into_inner);
-                        drop(state);
-                        if timeout.timed_out() {
-                            return Err(readiness_deadline_error(
-                                "cache_capacity",
-                                deadline_unix_ms,
-                            ));
+                            continue;
                         }
-                        continue;
                     }
-                }
-                state.by_request.insert(
-                    request_key.clone(),
-                    CachedProviderRuntimeReadiness::InFlight,
-                );
-                if let Err(error) = ensure_readiness_deadline("probe_publication", deadline_unix_ms)
-                {
-                    state.by_request.remove(&request_key);
-                    cache.shared.changed.notify_all();
-                    return Err(error);
-                }
-                let provider = provider.clone();
-                let config = config.clone();
-                let credential_env = credential_env.to_vec();
-                let probe_timeout = Duration::from_millis(provider.pi_readiness.timeout_ms);
-                // The worker owns a permit and a child process, so it must share the
-                // caller's absolute deadline rather than merely letting the caller stop
-                // waiting while the work continues in the background.
-                let invocation_deadline = Instant::now() + probe_timeout;
-                let execution_deadline = remaining_deadline_duration(deadline_unix_ms)
-                    .map(|remaining| Instant::now() + remaining);
-                let deadline_limited =
-                    execution_deadline.is_some_and(|deadline| deadline < invocation_deadline);
-                let probe_deadline = execution_deadline
-                    .map(|deadline| invocation_deadline.min(deadline))
-                    .unwrap_or(invocation_deadline);
-                let probe_timeout_ms = u64::try_from(
-                    probe_deadline
-                        .saturating_duration_since(Instant::now())
-                        .as_millis(),
-                )
-                .unwrap_or(u64::MAX);
-                let shared = Arc::clone(&cache.shared);
-                let probe_gate = Arc::clone(&cache.shared.probe_gate);
-                let probe_request_key = request_key.clone();
-                let probe_mode = mode.map(str::to_string);
-                drop(state);
-                let spawn_result = std::thread::Builder::new()
-                    .name("provider-readiness-probe".to_string())
-                    .spawn(homeboy_core::observation::phase_timing::inherit(
-                        move || {
-                            let result =
-                                std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                                    run_readiness_probe_with_gate(
-                                        &provider,
-                                        &config,
-                                        &credential_env,
-                                        probe_gate.as_ref(),
-                                        probe_deadline,
-                                        probe_timeout_ms,
-                                        probe_mode.as_deref(),
-                                    )
-                                }))
-                                .unwrap_or_else(|_| {
-                                    Err("provider readiness invocation panicked".to_string())
-                                });
-
-                            if deadline_limited
-                                && result
-                                    .as_ref()
-                                    .err()
-                                    .is_some_and(|error| error.contains("timed out"))
-                            {
-                                // The result is about one caller's exhausted deadline,
-                                // not this provider's reusable readiness state.
-                                discard_readiness_result(&shared, &probe_request_key);
-                            } else {
-                                publish_readiness_result(&shared, probe_request_key, result);
-                            }
-                        },
-                    ));
-                if let Err(error) = spawn_result {
-                    publish_readiness_result(
-                        &cache.shared,
+                    state.by_request.insert(
                         request_key.clone(),
-                        Err(format!("failed to start provider readiness probe: {error}")),
+                        CachedProviderRuntimeReadiness::InFlight,
                     );
+                    if let Err(error) =
+                        ensure_readiness_deadline("probe_publication", deadline_unix_ms)
+                    {
+                        state.by_request.remove(&request_key);
+                        cache.shared.changed.notify_all();
+                        return Err(error);
+                    }
+                    let provider = provider.clone();
+                    let config = config.clone();
+                    let credential_env = credential_env.to_vec();
+                    let probe_timeout = Duration::from_millis(provider.pi_readiness.timeout_ms);
+                    // The worker owns a permit and a child process, so it must share the
+                    // caller's absolute deadline rather than merely letting the caller stop
+                    // waiting while the work continues in the background.
+                    let invocation_deadline = Instant::now() + probe_timeout;
+                    let execution_deadline = remaining_deadline_duration(deadline_unix_ms)
+                        .map(|remaining| Instant::now() + remaining);
+                    let deadline_limited =
+                        execution_deadline.is_some_and(|deadline| deadline < invocation_deadline);
+                    let probe_deadline = execution_deadline
+                        .map(|deadline| invocation_deadline.min(deadline))
+                        .unwrap_or(invocation_deadline);
+                    let probe_timeout_ms = u64::try_from(
+                        probe_deadline
+                            .saturating_duration_since(Instant::now())
+                            .as_millis(),
+                    )
+                    .unwrap_or(u64::MAX);
+                    let shared = Arc::clone(&cache.shared);
+                    let probe_gate = Arc::clone(&cache.shared.probe_gate);
+                    let probe_request_key = request_key.clone();
+                    let probe_mode = mode.map(str::to_string);
+                    drop(state);
+                    let spawn_result = std::thread::Builder::new()
+                        .name("provider-readiness-probe".to_string())
+                        .spawn(homeboy_core::observation::phase_context::inherit(
+                            move || {
+                                let result =
+                                    std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                                        run_readiness_probe_with_gate(
+                                            &provider,
+                                            &config,
+                                            &credential_env,
+                                            probe_gate.as_ref(),
+                                            probe_deadline,
+                                            probe_timeout_ms,
+                                            probe_mode.as_deref(),
+                                        )
+                                    }))
+                                    .unwrap_or_else(|_| {
+                                        Err("provider readiness invocation panicked".to_string())
+                                    });
+
+                                if deadline_limited
+                                    && result
+                                        .as_ref()
+                                        .err()
+                                        .is_some_and(|error| error.contains("timed out"))
+                                {
+                                    // The result is about one caller's exhausted deadline,
+                                    // not this provider's reusable readiness state.
+                                    discard_readiness_result(&shared, &probe_request_key);
+                                } else {
+                                    publish_readiness_result(&shared, probe_request_key, result);
+                                }
+                            },
+                        ));
+                    if let Err(error) = spawn_result {
+                        publish_readiness_result(
+                            &cache.shared,
+                            request_key.clone(),
+                            Err(format!("failed to start provider readiness probe: {error}")),
+                        );
+                    }
                 }
-            }
-        },
-        |verdict| !verdict.ready,
-    )
+            },
+            |verdict| !verdict.ready,
+        )
 }
 
 pub(crate) fn effective_provider_config(config: &Value, model: Option<&str>) -> Value {
@@ -765,7 +779,7 @@ mod tests {
             .start_run(homeboy_core::observation::NewRunRecord::builder("agent-task").build())
             .unwrap()
             .id;
-        let _timing = homeboy_core::observation::phase_timing::for_run(&store, &run_id);
+        let _timing = homeboy_core::observation::phase_context::for_run(&store, &run_id);
         let (_fake, provider, mut config, _) = pi_fixture("printf 'test model\\n'");
         for (model, classification, ready) in [
             ("test/model", "ready", true),
@@ -820,7 +834,7 @@ mod tests {
             );
         }
         // An unopenable timing store cannot change the actual readiness result.
-        let _broken = homeboy_core::observation::phase_timing::enter(Some((
+        let _broken = homeboy_core::observation::phase_context::enter(Some((
             root.path().to_path_buf(),
             run_id,
         )));

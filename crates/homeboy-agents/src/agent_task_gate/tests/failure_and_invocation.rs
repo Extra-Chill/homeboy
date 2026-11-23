@@ -1491,7 +1491,7 @@ fn isolated_cargo_targets_report_warm_cache_hits_and_distinct_allocations() {
             .start_run(homeboy_core::observation::NewRunRecord::builder("agent-task").build())
             .unwrap()
             .id;
-        let _timing = homeboy_core::observation::phase_timing::for_run(&store, &run_id);
+        let _timing = homeboy_core::observation::phase_context::for_run(&store, &run_id);
         let mut policy = AgentTaskGateEnvironmentPolicy::default();
         policy.shared_cargo_target = Some(true);
         policy

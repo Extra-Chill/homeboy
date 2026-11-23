@@ -91,7 +91,7 @@ fn supervise(
     let _execution = timing_store
         .as_ref()
         .zip(timing_run_id.as_deref())
-        .map(|(store, run_id)| store.run_phase_guard(run_id, "controller.job"));
+        .map(|(store, run_id)| store.phase_timer(run_id).into_guard("controller.job"));
     if job.is_cancelled() {
         cancel_before_prepare(&job, &state, recovery, driver.as_ref());
         return;
@@ -184,7 +184,7 @@ fn run(
     let recovery_handle = driver_job.clone();
     let execute_prepared = prepared.clone();
     let (sender, receiver) = mpsc::sync_channel(1);
-    let execute = std::thread::spawn(crate::observation::phase_timing::inherit(move || {
+    let execute = std::thread::spawn(crate::observation::phase_context::inherit(move || {
         let result = if recovery {
             execute_driver.resume(execute_prepared, driver_job)
         } else {

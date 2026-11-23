@@ -170,7 +170,8 @@ pub(super) fn materialization_plan_controlled(
     }
     let mut tips = Vec::new();
     for root in request.roots {
-        let output = homeboy_core::observation::phase_timing::time(
+        let output = homeboy_engine_primitives::phase_timing::PhaseTimer::current()
+            .time::<_, homeboy_core::Error>(
             "stage.lab.source_materialization.runner_inventory",
             || {
                 control.output(
@@ -402,7 +403,7 @@ pub(super) fn materialization_commit_controlled(
                 )?;
             }
         }
-        homeboy_core::observation::phase_timing::time(
+        homeboy_engine_primitives::phase_timing::PhaseTimer::current().time::<_, homeboy_core::Error>(
             "stage.lab.source_materialization.record_writes",
             || -> Result<()> {
                 let metadata_path =

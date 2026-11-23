@@ -391,12 +391,14 @@ pub(super) fn run_cook_startup_phase<T>(
             homeboy_core::log_status!("observe", "phase timing persistence failed: {}", error);
         })
         .ok();
-    let _phase = timing_store
-        .as_ref()
-        .map(|store| store.run_phase_guard(run_id, &format!("stage.{phase}")));
+    let _phase = timing_store.as_ref().map(|store| {
+        store
+            .phase_timer(run_id)
+            .into_guard(&format!("stage.{phase}"))
+    });
     {
         std::thread::scope(|scope| {
-            scope.spawn(homeboy_core::observation::phase_timing::inherit(
+            scope.spawn(homeboy_core::observation::phase_context::inherit(
                 move || loop {
                     match wait.recv_timeout(COOK_HEARTBEAT_INTERVAL) {
                         Ok(()) | Err(mpsc::RecvTimeoutError::Disconnected) => break,
@@ -458,38 +460,42 @@ pub(super) fn finalize_with_operation_claim_in_store(
     finalize: &mut dyn FnMut(&CookRequest, &str, &AgentTaskPromotionReport) -> Result<Value>,
 ) -> Result<Value> {
     let observation = lifecycle_store.open_observation_initialized()?;
-    let result = observation.time_run_phase(run_id, "publish", || {
-        let operation_key = finalization_operation_key(run_id, promotion);
-        match lifecycle_store.claim_cook_operation(
-            run_id,
-            &operation_key,
-            FINALIZATION_CLAIM_LEASE,
-        )? {
-            // A completed claim only proves an earlier publication. Re-run the
-            // idempotent finalizer so a later force-push or PR-head mutation cannot
-            // be returned as a still-valid publication.
-            agent_task_lifecycle::ClaimOutcome::AlreadyCompleted(_) => {
-                finalize(options, run_id, promotion)
+    let result = observation
+        .phase_timer(run_id)
+        .time::<_, homeboy_core::Error>("publish", || {
+            let operation_key = finalization_operation_key(run_id, promotion);
+            match lifecycle_store.claim_cook_operation(
+                run_id,
+                &operation_key,
+                FINALIZATION_CLAIM_LEASE,
+            )? {
+                // A completed claim only proves an earlier publication. Re-run the
+                // idempotent finalizer so a later force-push or PR-head mutation cannot
+                // be returned as a still-valid publication.
+                agent_task_lifecycle::ClaimOutcome::AlreadyCompleted(_) => {
+                    finalize(options, run_id, promotion)
+                }
+                // A concurrent pass owns a fresh lease. The load-or-finalize path still
+                // returns an already-recorded finalization when present; do not mark the
+                // claim completed from here — its owner does.
+                agent_task_lifecycle::ClaimOutcome::LeaseHeld => {
+                    finalize(options, run_id, promotion)
+                }
+                // This pass owns the operation. Finalize, then record the result as the
+                // claim's immutable completion.
+                agent_task_lifecycle::ClaimOutcome::Acquired(_lease) => {
+                    let finalization = match finalize(options, run_id, promotion) {
+                        Ok(finalization) => finalization,
+                        Err(error) => {
+                            _lease.fail(bounded_error_diagnostic(&error))?;
+                            return Err(error);
+                        }
+                    };
+                    _lease.complete(finalization.clone())?;
+                    Ok(finalization)
+                }
             }
-            // A concurrent pass owns a fresh lease. The load-or-finalize path still
-            // returns an already-recorded finalization when present; do not mark the
-            // claim completed from here — its owner does.
-            agent_task_lifecycle::ClaimOutcome::LeaseHeld => finalize(options, run_id, promotion),
-            // This pass owns the operation. Finalize, then record the result as the
-            // claim's immutable completion.
-            agent_task_lifecycle::ClaimOutcome::Acquired(_lease) => {
-                let finalization = match finalize(options, run_id, promotion) {
-                    Ok(finalization) => finalization,
-                    Err(error) => {
-                        _lease.fail(bounded_error_diagnostic(&error))?;
-                        return Err(error);
-                    }
-                };
-                _lease.complete(finalization.clone())?;
-                Ok(finalization)
-            }
-        }
-    })?;
+        })?;
     if options.gates.verify_ci {
         if let Some(url) = result["pr_url"].as_str() {
             let store = super::cook_recipe::CookRecipeStore::for_lifecycle_store(lifecycle_store);

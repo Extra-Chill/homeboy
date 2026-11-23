@@ -9,8 +9,8 @@ use homeboy_core::defaults;
 use homeboy_core::engine::shell;
 use homeboy_core::engine::template::{render_map, TemplateVars};
 use homeboy_core::error::{posix_quote_arg, Error, Result};
-use homeboy_core::phase_timing::PhaseTimer;
 use homeboy_core::server::SshClient;
+use homeboy_engine_primitives::phase_timing::PhaseTimer;
 use homeboy_extension_contract::DeployVerification;
 use std::time::Instant;
 
@@ -669,7 +669,7 @@ mod tests {
                     .span("stage.deploy.transfer")
                     .expect("transfer")
                     .status,
-                homeboy_core::phase_timing::PhaseStatus::Failed
+                homeboy_engine_primitives::phase_timing::PhaseStatus::Failed
             );
         });
     }

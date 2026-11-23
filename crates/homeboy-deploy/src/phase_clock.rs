@@ -7,7 +7,7 @@
 
 use std::time::Instant;
 
-use homeboy_core::phase_timing::PhaseTimer;
+use homeboy_engine_primitives::phase_timing::PhaseTimer;
 
 /// Record `phase` as finished now, started at `started`. `subject` identifies
 /// what was timed (e.g. `component=foo` or `target=/srv/site/foo`).

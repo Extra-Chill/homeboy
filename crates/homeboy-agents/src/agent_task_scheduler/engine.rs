@@ -1109,7 +1109,8 @@ impl AgentTaskScheduler {
                                 let _timing =
                                     crate::agent_task_schedule::for_execution_timing(&context);
                                 let _provider =
-                                    homeboy_core::observation::phase_timing::guard("provider");
+                                    homeboy_engine_primitives::phase_timing::PhaseTimer::current()
+                                        .into_guard("provider");
                                 if let Some((store, cook_id, prepared)) = feedback {
                                     if let Err(error) = store.acknowledge_attempt(
                                         &cook_id,

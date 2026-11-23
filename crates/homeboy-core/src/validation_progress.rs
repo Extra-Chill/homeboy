@@ -435,7 +435,10 @@ mod tests {
 
             let spans = observation.store().phase_spans(&run_id).unwrap().spans;
             assert_eq!(spans[0].id, "gate.validation.0");
-            assert_eq!(spans[0].status, crate::phase_timing::PhaseStatus::Ok);
+            assert_eq!(
+                spans[0].status,
+                homeboy_engine_primitives::phase_timing::PhaseStatus::Ok
+            );
             assert!(spans[0].duration_ms.is_some());
             observation.finish(RunStatus::Pass, None);
             run_dir.cleanup();

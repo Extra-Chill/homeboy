@@ -2180,7 +2180,7 @@ mod tests {
     #[test]
     fn lab_materialization_hashes_primary_and_extra_once_and_reuses_metadata() {
         crate::test_support::with_isolated_home(|_| {
-            use homeboy_core::observation::{phase_timing, NewRunRecord, ObservationStore};
+            use homeboy_core::observation::{phase_context, NewRunRecord, ObservationStore};
             let timing_root = tempfile::tempdir().unwrap();
             let store = ObservationStore::open_initialized_at(timing_root.path().join("timing.db"))
                 .unwrap();
@@ -2242,7 +2242,7 @@ mod tests {
                 "HOMEBOY_LAB_EXTRA_WORKSPACES_JSON",
                 serde_json::json!([extra.path()]).to_string(),
             );
-            let scope = phase_timing::for_run(&store, &run.id);
+            let scope = phase_context::for_run(&store, &run.id);
             let stage = prepare_lab_offload_workspace_stage(
                 &request,
                 contract.clone(),

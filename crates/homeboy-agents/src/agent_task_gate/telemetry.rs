@@ -59,7 +59,7 @@ pub fn delta(before: Option<GateResources>, after: Option<GateResources>) -> Opt
 /// Called on the controller AFTER dispatch, so Lab receipt metrics are retained
 /// in the same observation store as local gates, without private command output.
 pub fn record(environment: &super::AgentTaskGateEnvironment) {
-    let Some((path, run_id)) = homeboy_core::observation::phase_timing::current() else {
+    let Some((path, run_id)) = homeboy_core::observation::phase_context::current() else {
         return;
     };
     if environment.resources.is_none() {
@@ -108,7 +108,7 @@ mod tests {
         let run = store
             .start_run(homeboy_core::observation::NewRunRecord::builder("agent-task").build())
             .unwrap();
-        let _scope = homeboy_core::observation::phase_timing::for_run(&store, &run.id);
+        let _scope = homeboy_core::observation::phase_context::for_run(&store, &run.id);
         // Simulate the deserialized environment of a Lab receipt on a controller
         // that cannot access any of the runner's paths.
         let environment: super::super::AgentTaskGateEnvironment = serde_json::from_value(serde_json::json!({

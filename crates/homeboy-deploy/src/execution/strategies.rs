@@ -4,8 +4,8 @@ use homeboy_core::artifact_inputs;
 use homeboy_core::component::Component;
 use homeboy_core::context::RemoteProjectContext;
 use homeboy_core::error::Result;
-use homeboy_core::phase_timing::PhaseTimer;
 use homeboy_core::project::Project;
+use homeboy_engine_primitives::phase_timing::PhaseTimer;
 
 use super::super::effect::{remote_version_after_deploy_effect, PostDeployVerification};
 use super::super::generated_artifacts::GeneratedBuildArtifactCleanupGuard;

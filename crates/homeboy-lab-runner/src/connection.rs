@@ -2248,7 +2248,7 @@ fn runner_jobs_with_client(
         )?;
         Ok((active_jobs, stale_jobs))
     })();
-    homeboy_core::observation::phase_timing::finish(
+    homeboy_engine_primitives::phase_timing::PhaseTimer::current().finish(
         "resolve.readonly_probe.runner_typed_jobs",
         started,
         result.is_err(),
@@ -2333,7 +2333,7 @@ fn runner_running_runs_with_client(
     timeout: Duration,
 ) -> Result<Vec<RunSummary>> {
     let started = Instant::now();
-    let data = homeboy_core::observation::phase_timing::time("resolve.readonly_probe.runner_running_runs", || daemon_get(client, local_url, "/runs?status=running&limit=1000")).inspect_err(|error| {
+    let data = homeboy_engine_primitives::phase_timing::PhaseTimer::current().time::<_, homeboy_core::Error>("resolve.readonly_probe.runner_running_runs", || daemon_get(client, local_url, "/runs?status=running&limit=1000")).inspect_err(|error| {
         let timed_out = typed_probe_timed_out(error, started, timeout);
         crate::readonly_probe::record_degradation(crate::readonly_probe::ReadOnlyProbeDegradation {
             probe: "runner_running_runs".to_string(),

@@ -138,7 +138,7 @@ pub(super) fn snapshot_content_controlled(
     includes: &[String],
     control: &WorkspaceControl,
 ) -> Result<(String, SnapshotStats, WorkspaceContentManifest, String)> {
-    homeboy_core::observation::phase_timing::time(
+    homeboy_engine_primitives::phase_timing::PhaseTimer::current().time::<_, homeboy_core::Error>(
         "stage.lab.source_materialization.content_manifest_hash",
         || {
             control.checkpoint()?;
@@ -212,7 +212,7 @@ pub(super) fn workspace_content_manifest_and_hash_controlled(
     policy: &str,
     control: &WorkspaceControl,
 ) -> Result<(WorkspaceContentManifest, String)> {
-    homeboy_core::observation::phase_timing::time(
+    homeboy_engine_primitives::phase_timing::PhaseTimer::current().time::<_, homeboy_core::Error>(
         "stage.lab.source_materialization.content_manifest_hash",
         || workspace_content_manifest_and_hash_unspanned(path, excludes, policy, control),
     )

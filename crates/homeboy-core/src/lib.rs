@@ -147,14 +147,9 @@ pub(crate) mod ownership;
 pub use homeboy_lab_contract::path_materialization;
 pub mod parsed_command_preflight;
 pub mod performance_hotspots;
-pub mod reaping;
-// `phase_timing` (PhaseTimer/PhaseSpan/PhaseStatus/PhaseTimingReport) is a
-// std-only timing primitive shared by deploy and release. It lives in
-// homeboy-engine-primitives; this re-export keeps the existing
-// crate::phase_timing path working.
-pub use homeboy_engine_primitives::phase_timing;
 pub mod plan;
 pub mod process;
+pub mod reaping;
 // product_identity moved to the internal `homeboy-product-identity` crate.
 // Re-exported so `crate::product_identity::*` call sites keep working.
 pub use homeboy_product_identity as product_identity;

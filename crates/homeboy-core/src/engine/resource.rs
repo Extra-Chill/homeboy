@@ -144,7 +144,11 @@ impl ResourceSummaryRun {
     }
 
     fn finish_with_probe(&self, probe: &impl ResourceProbe) -> RunResourceSummary {
-        crate::observation::phase_timing::finish("resource.run", self.started_instant, false);
+        homeboy_engine_primitives::phase_timing::PhaseTimer::current().finish(
+            "resource.run",
+            self.started_instant,
+            false,
+        );
         let after = probe.snapshot();
         RunResourceSummary::from_snapshots(
             self.label.clone(),
@@ -361,7 +365,7 @@ mod tests {
         let timing_run = timing_store
             .start_run(crate::observation::NewRunRecord::builder("test").build())
             .unwrap();
-        let _timing = crate::observation::phase_timing::for_run(&timing_store, &timing_run.id);
+        let _timing = crate::observation::phase_context::for_run(&timing_store, &timing_run.id);
 
         let before_probe = FakeProbe {
             snapshot: snapshot(3.0, 300, None),
@@ -383,7 +387,10 @@ mod tests {
             .iter()
             .find(|span| span.id == "resource.run")
             .expect("persisted phase");
-        assert_eq!(span.status, crate::phase_timing::PhaseStatus::Ok);
+        assert_eq!(
+            span.status,
+            homeboy_engine_primitives::phase_timing::PhaseStatus::Ok
+        );
         assert!(span.duration_ms.is_some());
         assert_eq!(summary.load_average_before.unwrap().one, 3.0);
         assert!(summary.load_average_after.is_none());

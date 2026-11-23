@@ -1079,7 +1079,7 @@ fn compare_failed_gates_to_verified_base(
     };
     let _replay_phase = timing
         .as_ref()
-        .map(|store| store.run_phase_guard(run_id, "gate.replay"));
+        .map(|store| store.phase_timer(run_id).into_guard("gate.replay"));
     let base_sha = promotion
         .verified_base
         .as_ref()
