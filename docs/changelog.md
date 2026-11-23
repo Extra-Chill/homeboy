@@ -4,6 +4,14 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.494.3] - 2026-11-23
+
+### Changed
+- store the Cook cancellation fence once, on the Cook index
+
+### Fixed
+- reuse checkout base when the workspace has no origin remote
+
 ## [0.494.2] - 2026-11-23
 
 ### Fixed
