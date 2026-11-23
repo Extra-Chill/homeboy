@@ -260,6 +260,18 @@ pub(super) fn run_cook_with_runtime(
         mode,
     );
     if let Ok(result) = &mut result {
+        // A CI-deferred Cook resolves here, without an operator `recover`:
+        // a settled receipt makes the report terminal and announced below.
+        if let Err(error) = super::cook_ci::settle_awaiting_ci(
+            store,
+            &mut result.value,
+            &mut result.exit_code,
+            &homeboy_core::git::cook_ci::GithubCookCi,
+            super::cook_ci::CookCiPollCadence::DEFAULT,
+            &mut std::thread::sleep,
+        ) {
+            homeboy_core::log_status!("agent-task", "Cook CI polling failed: {}", error);
+        }
         super::cook_promotion::bind_report_to_stores(
             &mut result.value,
             store,
