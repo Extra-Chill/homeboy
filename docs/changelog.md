@@ -1413,7 +1413,7 @@ All notable changes to Homeboy CLI are documented in this file.
 ## [0.458.51] - 2026-11-12
 
 ### Fixed
-- green adopted gates supersede gate_environment_unavailable and finalize
+- green adopted gates supersede gates_deferred and finalize
 
 ## [0.458.50] - 2026-11-12
 
@@ -1990,7 +1990,7 @@ All notable changes to Homeboy CLI are documented in this file.
 ## [0.447.7] - 2026-11-08
 
 ### Fixed
-- let recover replace gates for a gate_environment_unavailable Cook and supervise resumed gates
+- let recover replace gates for a gates_deferred Cook and supervise resumed gates
 
 ## [0.447.6] - 2026-11-08
 
