@@ -3679,6 +3679,12 @@ fn issue_resolution_routes() {
             ),
             (vec!["MERGED", "OPEN"], Some("pr_rework"), "custom/pr-head"),
             (vec!["OPEN", "OPEN"], None, ""),
+            // An open PR from another repository is not this issue's PR (#17759).
+            (
+                vec!["FORK_OPEN"],
+                Some("fresh_branch"),
+                "fix/issue-1-fixture-2",
+            ),
         ] {
             // GitHub's closing-PR query omits closed PRs but returns merged
             // ones, so the fake answers with every state it reports.
@@ -3686,8 +3692,12 @@ fn issue_resolution_routes() {
                 .iter()
                 .enumerate()
                 .map(|(n, state)| {
+                    let (owner, state) = match state.strip_prefix("FORK_") {
+                        Some(state) => ("fork-owner", state),
+                        None => ("example", *state),
+                    };
                     json!({
-                        "url": format!("https://github.com/example/fixture/pull/{}", n + 2),
+                        "url": format!("https://github.com/{owner}/fixture/pull/{}", n + 2),
                         "state": state,
                     })
                 })
@@ -3723,12 +3733,90 @@ fn issue_resolution_routes() {
                     Some(format!("fixture@{}", expected_head.replace('/', "-")).as_str())
                 );
             } else {
-                assert!(result
-                    .unwrap_err()
-                    .message
-                    .contains("several open linked PRs"));
+                assert!(result.unwrap_err().message.contains("several open PRs"));
             }
         }
+    });
+}
+
+#[test]
+fn cook_repo_accepts_slug_checkout_path_and_owner_repo_for_one_component() {
+    with_isolated_home(|home| {
+        let primary = home.path().join("Developer").join("blocks-engine");
+        std::fs::create_dir_all(&primary).unwrap();
+        init_runtime_component_checkout(&primary);
+        let remote = "https://github.com/Extra-Chill/blocks-engine.git";
+        add_remote(&primary, "origin", remote);
+        register_component("blocks-engine", &primary, remote);
+        // A second clone of the same repository resolves through its remote.
+        let clone = home.path().join("elsewhere");
+        std::fs::create_dir_all(&clone).unwrap();
+        init_runtime_component_checkout(&clone);
+        add_remote(&clone, "origin", remote);
+
+        for repo in [
+            "blocks-engine".to_string(),
+            primary.display().to_string(),
+            "~/Developer/blocks-engine".to_string(),
+            "Extra-Chill/blocks-engine".to_string(),
+            clone.display().to_string(),
+        ] {
+            let mut input = cook_args_from_cli(
+                [
+                    "homeboy",
+                    "agent-task",
+                    "cook",
+                    "--prompt",
+                    "fix",
+                    "--repo",
+                    repo.as_str(),
+                    "--head",
+                    "fix/thing",
+                    "--no-finalize",
+                ]
+                .map(str::to_string)
+                .to_vec(),
+            );
+            super::super::run::resolve_cook_repository(&mut input)
+                .unwrap_or_else(|error| panic!("--repo {repo}: {error:?}"));
+            assert_eq!(
+                input.component.as_deref(),
+                Some("blocks-engine"),
+                "--repo {repo}"
+            );
+            assert_eq!(
+                input.repository_identity.as_ref().unwrap()["component_id"],
+                "blocks-engine",
+                "--repo {repo}"
+            );
+        }
+
+        let missing = home.path().join("Developer").join("blocks-engin");
+        let mut input = cook_args_from_cli(
+            [
+                "homeboy",
+                "agent-task",
+                "cook",
+                "--prompt",
+                "fix",
+                "--repo",
+                missing.display().to_string().as_str(),
+                "--head",
+                "fix/thing",
+                "--no-finalize",
+            ]
+            .map(str::to_string)
+            .to_vec(),
+        );
+        let Err(error) = super::super::run::resolve_cook_repository(&mut input) else {
+            panic!("a missing checkout path is rejected");
+        };
+        assert!(error.message.contains("no directory exists"), "{error:?}");
+        assert!(error.message.contains("owner/repo"), "{error:?}");
+        assert!(
+            error.message.contains("Closest components: blocks-engine"),
+            "{error:?}"
+        );
     });
 }
 
