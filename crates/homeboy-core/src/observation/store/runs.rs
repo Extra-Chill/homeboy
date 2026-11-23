@@ -1264,29 +1264,6 @@ impl ObservationStore {
         })
     }
 
-    /// Copy `source_id`'s status and `finished_at` onto `target_id`'s row,
-    /// leaving its metadata alone. A row that stands for another run (a Cook
-    /// standing for its latest attempt) reports that run's progress. Returns
-    /// whether the target row changed; a missing source changes nothing.
-    pub fn mirror_run_status(&self, target_id: &str, source_id: &str) -> Result<bool> {
-        validate_required("run_id", target_id)?;
-        validate_required("run_id", source_id)?;
-        let rows = execute_with_retry(&self.connection, "mirror run status", || {
-            self.connection.execute(
-                r#"
-                UPDATE runs
-                SET status = source.status, finished_at = source.finished_at
-                FROM (SELECT status, finished_at FROM runs WHERE id = ?2) AS source
-                WHERE runs.id = ?1
-                  AND (runs.status IS NOT source.status
-                       OR runs.finished_at IS NOT source.finished_at)
-                "#,
-                params![target_id, source_id],
-            )
-        })?;
-        Ok(rows > 0)
-    }
-
     /// Replace metadata only while the run remains active. A terminal winner
     /// must never be overwritten by a late heartbeat or progress writer.
     pub fn update_running_run_metadata(
@@ -2235,37 +2212,6 @@ impl ObservationStore {
         Ok(())
     }
 
-    /// Settle an active or previously settled run to its owner's latest outcome.
-    /// Changed terminal outcomes re-arm completion notifications; matching rows
-    /// are untouched.
-    pub fn settle_run(&self, run_id: &str, status: RunStatus) -> Result<bool> {
-        validate_required("run_id", run_id)?;
-        if !matches!(status, RunStatus::Pass | RunStatus::Fail) {
-            return Err(Error::validation_invalid_argument(
-                "status",
-                "settlement requires pass or fail",
-                None,
-                None,
-            ));
-        }
-        let finished_at = chrono::Utc::now().to_rfc3339();
-        let rows = execute_with_retry(&self.connection, "settle run record", || {
-            self.connection.execute(
-                r#"
-                UPDATE runs
-                SET status = ?1,
-                    finished_at = ?2,
-                    metadata_json = CASE WHEN status = 'running' THEN metadata_json ELSE
-                        json_remove(COALESCE(metadata_json, '{}'), '$.notification_delivered', '$.notification_claimed')
-                        END
-                WHERE id = ?3 AND status IN ('running', 'pass', 'fail') AND status != ?1
-                "#,
-                params![status.as_str(), finished_at, run_id],
-            )
-        })?;
-        Ok(rows > 0)
-    }
-
     /// Check whether a run's notification has already been delivered.
     pub fn is_notification_delivered(&self, run_id: &str) -> Result<bool> {
         validate_required("run_id", run_id)?;
@@ -3203,63 +3149,6 @@ mod tests {
             rig_id: None,
             metadata_json: serde_json::json!({}),
         }
-    }
-
-    /// A changed terminal outcome re-arms the completion notification so the
-    /// real outcome is announced (Extra-Chill/homeboy#15393).
-    #[test]
-    fn settlement_follows_latest_outcome_and_renotifies() {
-        with_isolated_home(|_| {
-            let store = ObservationStore::open_initialized().expect("store");
-            store
-                .upsert_imported_run(&imported_run("cook-attempt", "pass"))
-                .expect("settled pass");
-            assert!(store
-                .mark_notification_delivered("cook-attempt", "controller")
-                .expect("announce pass"));
-
-            assert!(store.settle_run("cook-attempt", RunStatus::Fail).unwrap());
-            let run = store.get_run("cook-attempt").unwrap().unwrap();
-            assert_eq!(run.status, "fail");
-            assert!(store.settle_run("cook-attempt", RunStatus::Pass).unwrap());
-            let recovered = store.get_run("cook-attempt").unwrap().unwrap();
-            assert_eq!(recovered.status, "pass");
-            assert!(!store.settle_run("cook-attempt", RunStatus::Pass).unwrap());
-            assert_eq!(
-                serde_json::to_value(store.get_run("cook-attempt").unwrap().unwrap()).unwrap(),
-                serde_json::to_value(recovered).unwrap()
-            );
-            assert!(!store.is_notification_delivered("cook-attempt").unwrap());
-            assert!(store
-                .mark_notification_delivered("cook-attempt", "controller")
-                .expect("corrected status can be announced"));
-        });
-    }
-
-    #[test]
-    fn settlement_finishes_running_and_preserves_matching_or_missing_runs() {
-        with_isolated_home(|_| {
-            let store = ObservationStore::open_initialized().expect("store");
-            store
-                .upsert_imported_run(&imported_run("still-running", "running"))
-                .unwrap();
-            store
-                .upsert_imported_run(&imported_run("already-failed", "fail"))
-                .unwrap();
-            assert!(store
-                .mark_notification_delivered("already-failed", "controller")
-                .unwrap());
-
-            assert!(store.settle_run("still-running", RunStatus::Fail).unwrap());
-            assert!(!store.settle_run("already-failed", RunStatus::Fail).unwrap());
-            assert!(!store.settle_run("missing", RunStatus::Fail).unwrap());
-
-            assert_eq!(
-                store.get_run("still-running").unwrap().unwrap().status,
-                "fail"
-            );
-            assert!(store.is_notification_delivered("already-failed").unwrap());
-        });
     }
 
     #[test]
