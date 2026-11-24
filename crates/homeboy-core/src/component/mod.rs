@@ -62,7 +62,7 @@ pub use scope::{
 };
 pub use versioning::{
     normalize_version_pattern, parse_capability_extensions, parse_version_targets,
-    validate_version_pattern, validate_version_target_conflict,
+    validate_version_pattern,
 };
 
 #[cfg(test)]

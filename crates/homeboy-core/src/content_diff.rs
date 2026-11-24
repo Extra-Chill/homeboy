@@ -469,22 +469,17 @@ mod tests {
     }
 
     #[test]
-    fn executable_mode_tag_is_canonical() {
+    fn executable_mode_tag_keeps_only_bits_that_survive_a_deploy_in_canonical_form() {
+        // Deploy normalizes ownership and group-write bits, so 0644 and 0664
+        // are the same deployed file while 0755 is not.
+        for (mode, tag) in [(0o644, "0"), (0o664, "0"), (0o755, "111"), (0o775, "111")] {
+            assert_eq!(executable_mode_tag(mode), tag, "{mode:o}");
+        }
         for tag in ["0", "1", "10", "11", "100", "101", "110", "111"] {
             assert!(is_executable_mode_tag(tag), "rejected {tag:?}");
         }
         for tag in ["2", "644", "0111", "abc", "", "+1", "8", "100000000000"] {
             assert!(!is_executable_mode_tag(tag), "accepted {tag:?}");
         }
-    }
-
-    #[test]
-    fn executable_mode_tag_keeps_only_bits_that_survive_a_deploy() {
-        // Deploy normalizes ownership and group-write bits, so 0644 and 0664
-        // are the same deployed file while 0755 is not.
-        assert_eq!(executable_mode_tag(0o644), "0");
-        assert_eq!(executable_mode_tag(0o664), "0");
-        assert_eq!(executable_mode_tag(0o755), "111");
-        assert_eq!(executable_mode_tag(0o775), "111");
     }
 }
