@@ -262,7 +262,7 @@ pub fn claim_detached_cook_handoff_parent_in_store(
             || (!reclaimable_pre_projection_failure
                 && (handoff["admission_state"] != "pre_supervisor"
                     || (handoff.get("launcher_id").is_some()
-                        && detached_cook_launcher_is_live(record, chrono::Utc::now()))))
+                        && detached_cook_pre_supervisor_owner_is_live(record, chrono::Utc::now()))))
         {
             return false;
         }
@@ -318,6 +318,20 @@ pub fn claim_detached_cook_handoff_parent_in_store(
         error.details["run_state"] = json!(format!("{:?}", record.state()));
     }
     Err(error)
+}
+
+/// A pre-supervisor handoff is owned while its launcher lives or while the
+/// daemon still holds the launch step that launcher admitted for it. The step
+/// child binds the handoff only once it starts, so a launcher that dies after
+/// admitting the step leaves a daemon-owned Cook, not an ownerless one.
+fn detached_cook_pre_supervisor_owner_is_live(
+    record: &AgentTaskRunRecord,
+    now: chrono::DateTime<chrono::Utc>,
+) -> bool {
+    detached_cook_launcher_is_live(record, now)
+        || record.metadata["detached_cook_handoff"]["launch_step_job_id"]
+            .as_str()
+            .is_some_and(super::cook_run_state::step_job_is_live)
 }
 
 fn detached_cook_launcher_is_live(
@@ -997,6 +1011,46 @@ pub fn require_detached_cook_handoff_fence_open_in_store(
     Ok(())
 }
 
+/// Record the daemon step a launcher admitted for its claimed handoff.
+///
+/// Written after submission and before the step starts, so the handoff names
+/// its daemon owner before the launcher can die waiting for the step child to
+/// bind. Only the claiming launcher may record it, and only while the handoff
+/// is still pre-supervisor; re-recording the same step is a no-op.
+pub fn record_claimed_detached_cook_launch_step_in_store(
+    lifecycle_store: &AgentTaskLifecycleStore,
+    cook_id: &str,
+    launcher_id: &str,
+    job_id: &str,
+) -> Result<()> {
+    let cook_id = sanitize_run_id(cook_id);
+    let updated = lifecycle_store.mutate_record(&cook_id, |record| {
+        let handoff = &record.metadata["detached_cook_handoff"];
+        if record.state().is_terminal()
+            || handoff["cook_id"] != cook_id
+            || handoff["admission_state"] != "pre_supervisor"
+            || handoff["launcher_id"] != launcher_id
+        {
+            return false;
+        }
+        if handoff["launch_step_job_id"] == job_id {
+            return true;
+        }
+        record.ensure_metadata_object()["detached_cook_handoff"]["launch_step_job_id"] =
+            json!(job_id);
+        record.updated_at = Some(now_timestamp());
+        true
+    })?;
+    updated.map(|_| ()).ok_or_else(|| {
+        Error::validation_invalid_argument(
+            "cook_id",
+            "detached Cook handoff is not owned by this launcher or has advanced",
+            Some(cook_id.clone()),
+            None,
+        )
+    })
+}
+
 /// Atomically transfer a claimed handoff parent to its submitted supervisor.
 ///
 /// A launcher has a live child after spawn but before the child can materialize
@@ -1322,7 +1376,7 @@ pub fn detached_cook_admission_is_live(
         // Runtime sealing can outlast the initial lease. Use the same observed
         // launcher custody as reclaim, falling back to the deadline only when
         // process identity cannot be established.
-        Some("pre_supervisor") | None => detached_cook_launcher_is_live(record, now),
+        Some("pre_supervisor") | None => detached_cook_pre_supervisor_owner_is_live(record, now),
         _ => false,
     }
 }

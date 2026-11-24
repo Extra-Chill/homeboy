@@ -301,28 +301,56 @@ pub(crate) fn live_supervisor_jobs_at(
     status: homeboy_core::error::Result<homeboy_core::daemon::DaemonStatus>,
     path: homeboy_core::error::Result<std::path::PathBuf>,
 ) -> BTreeSet<Uuid> {
+    current_daemon_job_store(status, path).map_or_else(BTreeSet::new, |(lease, store)| {
+        store
+            .list()
+            .into_iter()
+            .filter(|job| is_live_step_job_under_lease(job, &lease))
+            .map(|job| job.id)
+            .collect()
+    })
+}
+
+/// Whether `job_id` names a step job the current daemon lease still owns.
+///
+/// A detached Cook launcher submits its step before the step child can bind
+/// the handoff. Once that step is admitted, the daemon owns the Cook: a
+/// launcher that dies before the child binds must not leave the handoff
+/// looking ownerless to the reconciler.
+pub(crate) fn step_job_is_live(job_id: &str) -> bool {
+    let Ok(job_id) = Uuid::parse_str(job_id) else {
+        return false;
+    };
+    current_daemon_job_store(
+        homeboy_core::daemon::read_status(),
+        homeboy_core::paths::observation_db(),
+    )
+    .is_some_and(|(lease, store)| {
+        store
+            .get(job_id)
+            .is_ok_and(|job| is_live_step_job_under_lease(&job, &lease))
+    })
+}
+
+fn current_daemon_job_store(
+    status: homeboy_core::error::Result<homeboy_core::daemon::DaemonStatus>,
+    path: homeboy_core::error::Result<std::path::PathBuf>,
+) -> Option<(String, JobStore)> {
     let lease = status
         .ok()
         .filter(|daemon| daemon.reachable && daemon.fresh)
-        .and_then(|daemon| daemon.state.map(|state| state.lease_id));
+        .and_then(|daemon| daemon.state.map(|state| state.lease_id))?;
     let store = path
         .ok()
-        .and_then(|path| JobStore::open_without_reconciliation(path).ok());
+        .and_then(|path| JobStore::open_without_reconciliation(path).ok())?;
+    Some((lease, store))
+}
+
+fn is_live_step_job_under_lease(job: &homeboy_core::api_jobs::Job, lease: &str) -> bool {
     let operation = ["controller.", homeboy_core::daemon::step_job::STEP_JOB_TYPE].concat();
-    lease
-        .zip(store)
-        .map_or_else(BTreeSet::new, |(lease, store)| {
-            store
-                .list()
-                .into_iter()
-                .filter(|job| {
-                    job.operation == operation
-                        && job.daemon_lease_id.as_deref() == Some(lease.as_str())
-                        && matches!(job.status, JobStatus::Queued | JobStatus::Running)
-                })
-                .map(|job| job.id)
-                .collect()
-        })
+    job.operation == operation
+        && job.daemon_lease_id.as_deref() == Some(lease)
+        && matches!(job.status, JobStatus::Queued | JobStatus::Running)
 }
 
 fn live_local_cook_retry_supervisor(record: &AgentTaskRunRecord, live: &BTreeSet<Uuid>) -> bool {
