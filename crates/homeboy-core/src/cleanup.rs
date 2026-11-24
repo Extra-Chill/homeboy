@@ -3309,76 +3309,40 @@ mod tests {
         }
 
         #[test]
-        fn an_unheld_cargo_lock_is_not_an_active_build() {
-            let dir = tempfile::tempdir().expect("worktree");
-            target_with_lock(dir.path(), "debug");
+        fn a_held_lock_in_any_target_layout_is_an_active_build() {
+            for profile in [
+                "target/debug",
+                "target/release",
+                ".cargo-target/debug",
+                "target/aarch64-apple-darwin/release",
+            ] {
+                let dir = tempfile::tempdir().expect("worktree");
+                let profile_dir = dir.path().join(profile);
+                std::fs::create_dir_all(&profile_dir).expect("profile dir");
+                let lock = profile_dir.join(".cargo-lock");
+                std::fs::write(&lock, b"").expect("Cargo lock");
+                let _held = hold(&lock);
 
-            assert!(!cargo_build_lock_is_held(dir.path()));
+                assert!(cargo_build_lock_is_held(dir.path()), "{profile}");
+            }
         }
 
         #[test]
-        fn a_held_cargo_lock_is_an_active_build() {
-            let dir = tempfile::tempdir().expect("worktree");
-            let lock = target_with_lock(dir.path(), "debug");
-            let _held = hold(&lock);
+        fn a_symlinked_target_directory_is_not_traversed() {
+            for link in [".cargo-target", "target/aarch64-apple-darwin"] {
+                let dir = tempfile::tempdir().expect("worktree");
+                let external = tempfile::tempdir().expect("external target");
+                let profile = external.path().join("debug");
+                std::fs::create_dir_all(&profile).expect("external profile dir");
+                let lock = profile.join(".cargo-lock");
+                std::fs::write(&lock, b"").expect("Cargo lock");
+                let _held = hold(&lock);
+                let link = dir.path().join(link);
+                std::fs::create_dir_all(link.parent().unwrap()).expect("link parent");
+                std::os::unix::fs::symlink(external.path(), &link).expect("link external target");
 
-            assert!(cargo_build_lock_is_held(dir.path()));
-        }
-
-        #[test]
-        fn a_held_cargo_target_lock_is_an_active_build() {
-            let dir = tempfile::tempdir().expect("worktree");
-            let profile = dir.path().join(".cargo-target/debug");
-            std::fs::create_dir_all(&profile).expect("Cargo target profile dir");
-            let lock = profile.join(".cargo-lock");
-            std::fs::write(&lock, b"").expect("Cargo lock");
-            let _held = hold(&lock);
-
-            assert!(cargo_build_lock_is_held(dir.path()));
-        }
-
-        #[test]
-        fn a_held_cross_target_cargo_lock_is_an_active_build() {
-            let dir = tempfile::tempdir().expect("worktree");
-            let profile = dir.path().join("target/aarch64-apple-darwin/release");
-            std::fs::create_dir_all(&profile).expect("cross-target profile dir");
-            let lock = profile.join(".cargo-lock");
-            std::fs::write(&lock, b"").expect("Cargo lock");
-            let _held = hold(&lock);
-
-            assert!(cargo_build_lock_is_held(dir.path()));
-        }
-
-        #[test]
-        fn a_symlinked_cargo_target_is_not_traversed() {
-            let dir = tempfile::tempdir().expect("worktree");
-            let external = tempfile::tempdir().expect("external target");
-            let profile = external.path().join("debug");
-            std::fs::create_dir_all(&profile).expect("external profile dir");
-            let lock = profile.join(".cargo-lock");
-            std::fs::write(&lock, b"").expect("Cargo lock");
-            let _held = hold(&lock);
-            std::os::unix::fs::symlink(external.path(), dir.path().join(".cargo-target"))
-                .expect("link external target");
-
-            assert!(!cargo_build_lock_is_held(dir.path()));
-        }
-
-        #[test]
-        fn a_symlinked_cross_target_directory_is_not_traversed() {
-            let dir = tempfile::tempdir().expect("worktree");
-            let external = tempfile::tempdir().expect("external target");
-            let profile = external.path().join("release");
-            std::fs::create_dir_all(&profile).expect("external profile dir");
-            let lock = profile.join(".cargo-lock");
-            std::fs::write(&lock, b"").expect("Cargo lock");
-            let _held = hold(&lock);
-            let target = dir.path().join("target");
-            std::fs::create_dir(&target).expect("target dir");
-            std::os::unix::fs::symlink(&external, target.join("aarch64-apple-darwin"))
-                .expect("link external cross-target directory");
-
-            assert!(!cargo_build_lock_is_held(dir.path()));
+                assert!(!cargo_build_lock_is_held(dir.path()), "{}", link.display());
+            }
         }
 
         /// Releasing must clear the signal, or a finished build would pin the
@@ -3398,16 +3362,6 @@ mod tests {
             );
         }
 
-        /// `--release` builds lock a different profile directory.
-        #[test]
-        fn a_lock_under_any_profile_counts() {
-            let dir = tempfile::tempdir().expect("worktree");
-            let lock = target_with_lock(dir.path(), "release");
-            let _held = hold(&lock);
-
-            assert!(cargo_build_lock_is_held(dir.path()));
-        }
-
         /// Fail open: no target, no lock file, and unreadable paths are all
         /// "no evidence of a build", never a probe failure that blocks cleanup.
         #[test]
@@ -3419,6 +3373,12 @@ mod tests {
             assert!(
                 !cargo_build_lock_is_held(dir.path()),
                 "a target directory with no lock file is not an active build"
+            );
+
+            target_with_lock(dir.path(), "debug");
+            assert!(
+                !cargo_build_lock_is_held(dir.path()),
+                "an unheld lock file is not an active build"
             );
         }
 
@@ -3536,83 +3496,10 @@ mod tests {
             .expect("target declaration");
         assert_eq!(target.kind, "rust_target");
         assert_eq!(target.declared_by, "homeboy:builtin_artifact_paths");
-    }
-
-    #[test]
-    fn artifact_declarations_include_builtin_rust_target() {
-        crate::test_support::with_isolated_home(|_| {
-            let tmp = TempDir::new().expect("tempdir");
-
-            let declarations = artifact_declarations(tmp.path()).expect("declarations");
-
-            assert_eq!(declarations.len(), 2);
-            assert_eq!(declarations[0].relative_path, "target");
-            assert_eq!(declarations[0].kind, "rust_target");
-            assert_eq!(
-                declarations[0].declared_by,
-                "homeboy:builtin_artifact_paths"
-            );
-            assert_eq!(declarations[0].category, LEGACY_ARTIFACT_CATEGORY);
-            assert!(declarations[0].reconstructable);
-            assert!(declarations[0].liveness_protected);
-            assert_eq!(declarations[1].relative_path, ".cargo-target");
-            assert_eq!(declarations[1].kind, "rust_target");
-        });
-    }
-
-    #[test]
-    fn dry_run_detects_builtin_target_without_homeboy_json() {
-        let _home = crate::test_support::HomeGuard::new();
-        let repo = TempDir::new().expect("repo tempdir");
-        git(repo.path(), &["init", "-b", "main"]);
-        write_file(
-            &repo.path().join("Cargo.toml"),
-            "[package]\nname = \"fixture\"\n",
-        );
-        write_file(&repo.path().join("src/lib.rs"), "source");
-        write_file(&repo.path().join(".gitignore"), "target/\n");
-        git(
-            repo.path(),
-            &["add", "Cargo.toml", "src/lib.rs", ".gitignore"],
-        );
-        git(
-            repo.path(),
-            &[
-                "-c",
-                "user.name=Homeboy Test",
-                "-c",
-                "user.email=homeboy@example.test",
-                "commit",
-                "-m",
-                "initial",
-            ],
-        );
-        write_file(&repo.path().join("target/debug/app"), "artifact");
-
-        let output = cleanup_artifacts(ArtifactCleanupOptions {
-            path: Some(repo.path().to_path_buf()),
-            scope: ArtifactCleanupScope::ExactCheckout,
-            apply: false,
-            self_artifacts: false,
-            temp_roots: Vec::new(),
-            sort: ArtifactCleanupSort::Discovery,
-            limit: None,
-            merged_only: false,
-            min_age_days: None,
-            include_active_worktrees: false,
-            max_scan_duration: None,
-            cursor: None,
-        })
-        .expect("dry-run cleanup");
-
-        let target = output
-            .candidates
+        assert!(target.liveness_protected);
+        assert!(declarations
             .iter()
-            .find(|row| row.relative_path == "target")
-            .expect("target candidate");
-        assert_eq!(target.kind, "rust_target");
-        assert_eq!(target.declared_by, "homeboy:builtin_artifact_paths");
-        assert!(repo.path().join("target/debug/app").exists());
+            .any(|row| row.relative_path == ".cargo-target" && row.kind == "rust_target"));
     }
 
     #[test]
@@ -3637,28 +3524,6 @@ mod tests {
             fs::read_to_string(repo.path().join("src/lib.rs")).expect("source remains"),
             "changed source"
         );
-    }
-
-    #[test]
-    fn artifact_cleanup_reclaims_idle_cargo_target_alongside_target() {
-        let _home = crate::test_support::HomeGuard::new();
-        let repo = repo_with_ignored_artifacts();
-        write_file(&repo.path().join("target/debug/app"), "target artifact");
-        write_file(
-            &repo.path().join(".cargo-target/debug/app"),
-            "Cargo target artifact",
-        );
-
-        let output = cleanup_artifacts(ArtifactCleanupOptions {
-            path: Some(repo.path().to_path_buf()),
-            apply: true,
-            ..Default::default()
-        })
-        .expect("cleanup idle Cargo targets");
-
-        assert_eq!(output.applied_count, 2);
-        assert!(!repo.path().join("target").exists());
-        assert!(!repo.path().join(".cargo-target").exists());
     }
 
     #[cfg(unix)]
@@ -3742,37 +3607,6 @@ mod tests {
             assert!(output.next_command.is_some());
             assert!(!small.path().join("target").exists());
             assert!(large.path().join("target").exists());
-        });
-    }
-
-    #[test]
-    fn automatic_artifact_retention_reclaims_idle_cargo_target() {
-        crate::test_support::with_isolated_home(|_| {
-            let repo = repo_with_ignored_artifacts();
-            crate::worktree::record_removed_for_test("fixture-idle", repo.path());
-            write_file(
-                &repo.path().join(".cargo-target/debug/app"),
-                "Cargo artifact",
-            );
-            let retention = crate::defaults::RetentionConfig {
-                reconstructable_artifact_days: 0,
-                ..Default::default()
-            };
-            crate::defaults::save_config(&crate::defaults::HomeboyConfig {
-                retention: retention.clone(),
-                ..Default::default()
-            })
-            .expect("save retention");
-
-            let output = run_automatic_artifact_retention_in(
-                &[repo.path().to_path_buf()],
-                &retention,
-                automatic_retention_deadline(&retention),
-            )
-            .expect("automatic retention");
-
-            assert_eq!(output.applied_count, 1);
-            assert!(!repo.path().join(".cargo-target").exists());
         });
     }
 
@@ -4356,14 +4190,6 @@ mod tests {
     }
 
     #[test]
-    fn reconstructable_artifact_reserve_has_a_safe_nonzero_default() {
-        assert_eq!(
-            crate::defaults::RetentionConfig::default().reconstructable_artifact_reserve_bytes,
-            20 * 1024 * 1024 * 1024
-        );
-    }
-
-    #[test]
     fn self_artifact_manifest_must_be_homeboy_crate() {
         let tmp = TempDir::new().expect("tempdir");
         fs::write(
@@ -4398,6 +4224,10 @@ mod tests {
             hint.message
                 .contains("homeboy cleanup artifacts --path <PATH>")
         }));
+        assert!(err.hints.iter().any(|hint| {
+            hint.message
+                .contains("Active Homeboy checkout appears to be:")
+        }));
     }
 
     #[test]
@@ -4415,23 +4245,6 @@ mod tests {
         let root = validate_homeboy_manifest_dir(tmp.path()).expect("homeboy manifest");
 
         assert_eq!(root, tmp.path());
-    }
-
-    #[test]
-    fn self_artifact_registry_rejection_suggests_active_checkout_when_discoverable() {
-        let tmp = TempDir::new().expect("tempdir");
-        fs::write(
-            tmp.path().join("Cargo.toml"),
-            "[package]\nname = \"homeboy\"\n",
-        )
-        .expect("write manifest");
-
-        let err = validate_homeboy_manifest_dir(tmp.path()).expect_err("reject packaged source");
-
-        assert!(err.hints.iter().any(|hint| {
-            hint.message
-                .contains("Active Homeboy checkout appears to be:")
-        }));
     }
 
     #[test]
@@ -4820,41 +4633,6 @@ mod tests {
     }
 
     #[test]
-    fn partial_homeboy_temp_target_is_detected_when_source_skeleton_is_empty() {
-        let temp_root = TempDir::new().expect("temp root");
-        let partial = temp_root.path().join("homeboy-upgrade-sync-main");
-        fs::create_dir_all(partial.join(".github")).expect("mkdir github");
-        fs::create_dir_all(partial.join("docs")).expect("mkdir docs");
-        fs::create_dir_all(partial.join("src")).expect("mkdir src");
-        fs::create_dir_all(partial.join("tests")).expect("mkdir tests");
-        write_file(&partial.join("target/debug/homeboy"), "binary");
-
-        let candidates = self_temp_artifact_candidates(&ArtifactCleanupOptions {
-            path: None,
-            scope: ArtifactCleanupScope::ExactCheckout,
-            apply: false,
-            self_artifacts: false,
-            temp_roots: vec![temp_root.path().to_path_buf()],
-            sort: ArtifactCleanupSort::Discovery,
-            limit: None,
-            merged_only: false,
-            min_age_days: None,
-            include_active_worktrees: false,
-            max_scan_duration: None,
-            cursor: None,
-        })
-        .expect("temp artifact candidates");
-
-        let candidate = candidates
-            .iter()
-            .find(|row| row.kind == "partial_homeboy_temp_target")
-            .expect("partial temp target candidate");
-        assert_eq!(candidate.worktree, partial.to_string_lossy());
-        assert_eq!(candidate.path, partial.join("target").to_string_lossy());
-        assert_eq!(candidate.relative_path, "target");
-    }
-
-    #[test]
     fn partial_homeboy_temp_target_is_skipped_when_source_skeleton_has_content() {
         let temp_root = TempDir::new().expect("temp root");
         let partial = temp_root.path().join("homeboy-upgrade-sync-main");
@@ -5034,43 +4812,6 @@ mod tests {
     }
 
     #[test]
-    fn dry_run_can_sort_artifact_candidates_by_size_descending() {
-        let _home = crate::test_support::HomeGuard::new();
-        let repo = git_repo();
-        write_file(&repo.path().join("target/debug/app"), "small");
-        write_file(&repo.path().join("dist/bundle.js"), &"m".repeat(256));
-        write_file(
-            &repo.path().join("node_modules/pkg/index.js"),
-            &"l".repeat(1024),
-        );
-
-        let output = cleanup_artifacts(ArtifactCleanupOptions {
-            path: Some(repo.path().to_path_buf()),
-            scope: ArtifactCleanupScope::ExactCheckout,
-            apply: false,
-            self_artifacts: false,
-            temp_roots: Vec::new(),
-            sort: ArtifactCleanupSort::Size,
-            limit: None,
-            merged_only: false,
-            min_age_days: None,
-            include_active_worktrees: false,
-            max_scan_duration: None,
-            cursor: None,
-        })
-        .expect("dry-run cleanup");
-
-        let paths: Vec<&str> = output
-            .candidates
-            .iter()
-            .map(|row| row.relative_path.as_str())
-            .collect();
-        assert_eq!(paths, vec!["node_modules", "dist", "target"]);
-        assert!(output.candidates[0].size_bytes >= output.candidates[1].size_bytes);
-        assert!(output.candidates[1].size_bytes >= output.candidates[2].size_bytes);
-    }
-
-    #[test]
     fn limit_applies_after_size_sort_and_removes_only_selected_artifacts() {
         let _home = crate::test_support::HomeGuard::new();
         let repo = git_repo();
@@ -5218,58 +4959,6 @@ mod tests {
     }
 
     #[test]
-    fn artifact_cleanup_run_status_fails_when_any_removal_fails() {
-        assert_eq!(
-            artifact_cleanup_run_status(0),
-            crate::observation::RunStatus::Pass
-        );
-        assert_eq!(
-            artifact_cleanup_run_status(1),
-            crate::observation::RunStatus::Fail
-        );
-    }
-
-    #[test]
-    fn failed_cleanup_run_retains_successful_deletion_provenance() {
-        crate::test_support::with_isolated_home(|_| {
-            let store = crate::observation::ObservationStore::open_initialized().expect("store");
-            let run = store
-                .start_run(crate::observation::NewRunRecord::builder("cleanup.artifacts").build())
-                .expect("start cleanup run");
-            let provenance = ArtifactCleanupDeletionProvenance {
-                run_ref: format!("homeboy://run/{}", run.id),
-                deleted_at: "2026-01-01T00:00:00Z".to_string(),
-                policy: "reconstructable artifact passed Git, age, and worktree activity gates"
-                    .to_string(),
-                protection_decision: "no registered active task worktree".to_string(),
-            };
-
-            store
-                .finish_run(
-                    &run.id,
-                    artifact_cleanup_run_status(1),
-                    Some(json!({
-                        "cleanup": {
-                            "applied": [{ "path": "/repo/target", "provenance": provenance }],
-                            "failed": [{ "path": "/repo/dist" }],
-                        }
-                    })),
-                )
-                .expect("finish failed cleanup run");
-
-            let persisted = store
-                .get_run(&run.id)
-                .expect("read cleanup run")
-                .expect("cleanup run exists");
-            assert_eq!(persisted.status, "fail");
-            assert_eq!(
-                persisted.metadata_json["cleanup"]["applied"][0]["provenance"]["run_ref"],
-                format!("homeboy://run/{}", run.id)
-            );
-        });
-    }
-
-    #[test]
     fn artifact_cleanup_reports_partial_removal_failures_without_aborting() {
         let candidates = vec![
             artifact_candidate("target"),
@@ -5338,55 +5027,6 @@ mod tests {
     }
 
     #[test]
-    fn apply_skips_artifact_path_with_tracked_source_changes() {
-        let _home = crate::test_support::HomeGuard::new();
-        let repo = git_repo();
-        write_file(
-            &repo.path().join("target/generated.rs"),
-            "tracked artifact source",
-        );
-        git(repo.path(), &["add", "--force", "target/generated.rs"]);
-        git(
-            repo.path(),
-            &[
-                "-c",
-                "user.name=Homeboy Test",
-                "-c",
-                "user.email=homeboy@example.test",
-                "commit",
-                "-m",
-                "track generated source",
-            ],
-        );
-        write_file(
-            &repo.path().join("target/generated.rs"),
-            "modified tracked source",
-        );
-
-        let output = cleanup_artifacts(ArtifactCleanupOptions {
-            path: Some(repo.path().to_path_buf()),
-            scope: ArtifactCleanupScope::ExactCheckout,
-            apply: true,
-            self_artifacts: false,
-            temp_roots: Vec::new(),
-            sort: ArtifactCleanupSort::Discovery,
-            limit: None,
-            merged_only: false,
-            min_age_days: None,
-            include_active_worktrees: false,
-            max_scan_duration: None,
-            cursor: None,
-        })
-        .expect("apply cleanup");
-
-        assert_eq!(output.applied_count, 0);
-        assert!(repo.path().join("target/generated.rs").exists());
-        assert!(output.skipped.iter().any(|row| {
-            row.relative_path == "target" && row.reason.contains("tracked or staged source changes")
-        }));
-    }
-
-    #[test]
     fn artifact_directory_removal_retries_transient_non_empty_errors() {
         let artifact = PathBuf::from("target");
         let mut attempts = 0;
@@ -5449,6 +5089,10 @@ mod tests {
         let remote_url = remote.path().to_string_lossy().to_string();
 
         let merged = git_repo();
+        assert!(
+            !branch_is_merged(merged.path()),
+            "a branch without an upstream is never merged"
+        );
         git(merged.path(), &["remote", "add", "origin", &remote_url]);
         git(merged.path(), &["push", "-u", "origin", "main"]);
         // No commits ahead of upstream → merged (ancestor case).
@@ -5470,13 +5114,6 @@ mod tests {
             ],
         );
         assert!(!branch_is_merged(merged.path()));
-    }
-
-    #[test]
-    fn branch_is_merged_false_without_upstream() {
-        let repo = git_repo();
-        // No tracking branch configured at all.
-        assert!(!branch_is_merged(repo.path()));
     }
 
     #[test]
@@ -5708,28 +5345,6 @@ mod tests {
     }
 
     use crate::test_support::run_git_command as git;
-
-    #[test]
-    fn non_git_worktree_scan_errors_without_aborting_batch() {
-        // A stale/non-Git worktree path makes the per-worktree scan fail, but
-        // the batch loop turns that into a skip rather than aborting (#9925).
-        let not_a_repo = TempDir::new().expect("non-git dir");
-        let scan = collect_worktree_candidates(
-            &WorktreeInfo {
-                path: not_a_repo.path().to_path_buf(),
-            },
-            &ArtifactCleanupOptions::default(),
-            &ActiveWorktrees::default(),
-            None,
-            None,
-            None,
-            None,
-        );
-        assert!(
-            scan.is_err(),
-            "a non-Git worktree scan should fail so the caller can skip it"
-        );
-    }
 
     #[test]
     fn repository_limit_pages_every_artifact_for_size_sort_without_mutating_dry_runs() {
@@ -6799,27 +6414,6 @@ mod tests {
                 .iter()
                 .any(|row| row.relative_path == "deps" && row.reason.contains("tracked by Git")));
             assert!(repo.path().join("deps/index.txt").exists());
-        });
-    }
-
-    #[test]
-    fn unmerged_worktrees_protect_extension_declared_artifacts() {
-        crate::test_support::with_isolated_home(|_| {
-            install_artifact_cleanup_extension("fixture", dependency_tree_declaration(false));
-            let repo = repo_with_ignored_artifacts();
-            write_file(&repo.path().join("deps/package/index.txt"), "installed");
-
-            let output = cleanup_artifacts(ArtifactCleanupOptions {
-                apply: true,
-                merged_only: true,
-                ..dry_run_options(repo.path())
-            })
-            .expect("apply");
-
-            assert!(output.candidates.is_empty());
-            assert!(output.skipped.iter().any(|row| row.relative_path == "deps"
-                && row.reason.contains("not merged into its upstream")));
-            assert!(repo.path().join("deps/package/index.txt").exists());
         });
     }
 

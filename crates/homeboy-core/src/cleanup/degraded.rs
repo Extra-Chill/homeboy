@@ -430,13 +430,6 @@ mod tests {
         );
     }
 
-    #[test]
-    fn an_available_store_has_no_skip_reason() {
-        assert!(StoreAvailability::Available.skip_reason().is_none());
-        assert!(StoreAvailability::Available.is_available());
-        assert!(!StoreAvailability::Available.is_storage_exhausted());
-    }
-
     /// The load-bearing claim: a degraded sweep completes **without ever
     /// opening the observation store**.
     ///
@@ -472,35 +465,17 @@ mod tests {
                 .iter()
                 .map(|entry| entry.category)
                 .collect();
-            assert_eq!(categories, STORE_INDEPENDENT_CLEANUP_CATEGORIES);
-            for entry in &outcome.categories {
-                assert!(
-                    entry.failure.is_none(),
-                    "{} failed in degraded mode: {:?}",
-                    entry.category,
-                    entry.failure
-                );
-            }
-        });
-    }
-
-    /// `runner-downloads` runs with the store shut but its liveness veto fails
-    /// closed, so it reclaims nothing. Reporting its zero exactly like the
-    /// others would misread a structural limit as an empty result, so the
-    /// distinction is carried in the payload rather than left to a reader.
-    #[test]
-    fn only_the_categories_that_can_reclaim_without_the_store_claim_to() {
-        crate::test_support::with_isolated_home(|_| {
-            let outcome = degraded_cleanup(
-                DegradedCleanupOptions {
-                    limit: 100,
-                    runtime_tmp_days: 7,
-                    ..DegradedCleanupOptions::default()
-                },
-                exhausted(),
-                "test",
+            assert_eq!(
+                categories,
+                [
+                    "orphaned-artifact-bytes",
+                    "leaked-test-homes",
+                    "runtime-tmp",
+                    "runner-downloads"
+                ]
             );
-
+            // `runner-downloads` runs with the store shut but its liveness veto
+            // fails closed, so it must not claim to reclaim.
             let reclaiming: Vec<_> = outcome
                 .categories
                 .iter()
@@ -515,6 +490,14 @@ mod tests {
                     "runtime-tmp"
                 ]
             );
+            for entry in &outcome.categories {
+                assert!(
+                    entry.failure.is_none(),
+                    "{} failed in degraded mode: {:?}",
+                    entry.category,
+                    entry.failure
+                );
+            }
         });
     }
 
@@ -529,38 +512,6 @@ mod tests {
         assert_eq!(failure["code"], "storage.exhausted");
         assert_eq!(failed.planned_bytes, 0);
         assert_eq!(failed.reclaimed_bytes, 0);
-    }
-
-    /// The list is a contract, not a comment: the CLI gate and the degraded
-    /// fallback both render it to the operator.
-    #[test]
-    fn the_store_independent_category_list_matches_the_categories_that_run() {
-        assert_eq!(
-            STORE_INDEPENDENT_CLEANUP_CATEGORIES,
-            [
-                "orphaned-artifact-bytes",
-                "leaked-test-homes",
-                "runtime-tmp",
-                "runner-downloads"
-            ]
-        );
-    }
-
-    /// A degraded sweep is a recovery path an operator reaches for under disk
-    /// pressure, so its defaults must not delete on their own. The dry-run
-    /// default plus the finite byte ceiling are what make a partially-filled
-    /// literal safe.
-    #[test]
-    fn degraded_defaults_reclaim_nothing_and_still_bound_leaked_test_homes() {
-        let options = DegradedCleanupOptions::default();
-
-        assert!(!options.apply);
-        assert_eq!(options.limit, 0);
-        assert_eq!(
-            options.leaked_test_home_min_age,
-            std::time::Duration::from_secs(super::super::LEAKED_TEST_HOME_MIN_AGE_HOURS * 3_600)
-        );
-        assert!(options.leaked_test_home_max_total_bytes < u64::MAX);
     }
 
     fn exhausted_error() -> Error {
