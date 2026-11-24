@@ -693,6 +693,27 @@ pub(crate) fn review_form_from_aggregate(
     crate::agent_task_review_dossier::AiFilledReviewForm::from_outcome_outputs(&outcome.outputs)
 }
 
+/// The latest attempt's complete review form exactly as the agent authored
+/// it, read from the persisted outcome: `outputs.review_form`, else the same
+/// field in the outcome's `json` typed artifact (the runtime result). Never
+/// parsed or truncated, so read surfaces return the whole form for terminal
+/// and `candidate_recoverable` runs alike (#18930).
+pub fn persisted_review_form(
+    aggregate: &crate::agent_task_schedule::AgentTaskAggregate,
+) -> Option<Value> {
+    let outcome = aggregate
+        .selected_outcome()
+        .or_else(|| aggregate.outcomes.last())?;
+    let present = |form: Option<&Value>| form.filter(|form| !form.is_null()).cloned();
+    present(outcome.outputs.get("review_form")).or_else(|| {
+        outcome
+            .typed_artifacts
+            .iter()
+            .filter(|artifact| artifact.artifact_type.as_deref() == Some("json"))
+            .find_map(|artifact| present(artifact.payload.pointer("/outputs/review_form")))
+    })
+}
+
 /// The agent's own reason, from the review form in `outputs`, for leaving
 /// its task incomplete: the "why" of a Cook that settled unfinished.
 pub fn agent_incomplete_reason(outputs: &Value) -> Option<String> {
