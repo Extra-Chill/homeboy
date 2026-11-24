@@ -13,6 +13,7 @@ mod cook_ci;
 mod cook_driver;
 mod cook_follow_up;
 mod cook_gate_setup;
+mod cook_local_dispatch;
 mod cook_projections;
 mod cook_spine;
 mod cook_timeout;

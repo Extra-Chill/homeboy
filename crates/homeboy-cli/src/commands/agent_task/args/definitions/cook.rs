@@ -1964,6 +1964,10 @@ pub struct AgentTaskCookArgs {
     /// and accepted only inside that step.
     #[arg(long = "cook-id", hide = true, conflicts_with = "run_id")]
     pub cook_id: Option<String>,
+    /// The workflow instance whose Cook step this is. Set by the workflow
+    /// runner; the step waits for a terminal Cook disposition.
+    #[arg(long = "workflow-instance", hide = true)]
+    pub workflow_instance: Option<String>,
     #[arg(long, hide = true)]
     pub attempt_run_id: Option<String>,
     #[arg(long, hide = true)]

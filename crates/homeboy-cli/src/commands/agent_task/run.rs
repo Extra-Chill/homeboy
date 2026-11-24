@@ -718,10 +718,6 @@ pub(crate) use super::run_execution::validate_cook_request_with_provenance;
 pub(super) use super::run_execution::validate_cook_source_authority;
 #[cfg(test)]
 pub(super) use super::run_execution::validate_cook_subjects;
-#[cfg(test)]
-pub(super) use super::run_execution::{
-    admit_local_cook_dispatch_with_clock, record_local_dispatch_wait,
-};
 pub(crate) use super::run_execution::{run_cook, CookEntryContext};
 #[cfg(test)]
 pub(super) use super::run_preview::append_preview_lifecycle_replay_argv;
