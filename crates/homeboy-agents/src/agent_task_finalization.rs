@@ -64,7 +64,7 @@ pub fn hydrate_manual_verification_dependencies(
     )
 }
 
-pub fn finalize_pr_with_backend<B: AgentTaskPrFinalizationBackend>(
+pub fn finalize_pr_with_backend<B: AgentTaskPrFinalizationBackend + ?Sized>(
     options: AgentTaskPrFinalizationOptions,
     backend: &mut B,
     lifecycle_store: &crate::agent_task_lifecycle::AgentTaskLifecycleStore,
@@ -72,7 +72,7 @@ pub fn finalize_pr_with_backend<B: AgentTaskPrFinalizationBackend>(
     finalize_pr_with_backend_mode(options, backend, true, lifecycle_store)
 }
 
-pub fn preflight_pr_with_backend<B: AgentTaskPrFinalizationBackend>(
+pub fn preflight_pr_with_backend<B: AgentTaskPrFinalizationBackend + ?Sized>(
     options: AgentTaskPrFinalizationOptions,
     backend: &mut B,
     lifecycle_store: &crate::agent_task_lifecycle::AgentTaskLifecycleStore,
@@ -83,7 +83,7 @@ pub fn preflight_pr_with_backend<B: AgentTaskPrFinalizationBackend>(
 /// Update an open PR for this candidate. Finalization never changes an
 /// existing PR's review state: a draft stays draft (#18884). Draft to ready is
 /// an explicit operator action.
-fn update_existing_pr<B: AgentTaskPrFinalizationBackend>(
+fn update_existing_pr<B: AgentTaskPrFinalizationBackend + ?Sized>(
     backend: &mut B,
     options: &mut AgentTaskPrFinalizationOptions,
     existing: &AgentTaskPrRef,
@@ -126,7 +126,7 @@ fn is_existing_pr_conflict(message: &str) -> bool {
 
 /// Look the PR up again after a create conflict, giving GitHub's PR list a
 /// moment to catch up with a PR created seconds ago.
-fn find_open_pr_after_create_conflict<B: AgentTaskPrFinalizationBackend>(
+fn find_open_pr_after_create_conflict<B: AgentTaskPrFinalizationBackend + ?Sized>(
     backend: &mut B,
     component_id: Option<&str>,
     path: &str,
@@ -145,7 +145,7 @@ fn find_open_pr_after_create_conflict<B: AgentTaskPrFinalizationBackend>(
     Ok(None)
 }
 
-fn finalize_pr_with_backend_mode<B: AgentTaskPrFinalizationBackend>(
+fn finalize_pr_with_backend_mode<B: AgentTaskPrFinalizationBackend + ?Sized>(
     mut options: AgentTaskPrFinalizationOptions,
     backend: &mut B,
     publish: bool,

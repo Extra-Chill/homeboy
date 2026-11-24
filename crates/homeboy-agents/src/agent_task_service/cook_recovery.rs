@@ -2953,7 +2953,10 @@ mod tests {
             }
             fn retry(&self, run_id: &str) -> Result<(Value, i32)> {
                 self.0.borrow_mut().push(run_id.to_string());
-                let retry = crate::agent_task_service::retry(run_id, None, false, false)?;
+                let retry = crate::agent_task_service::retry(
+                    run_id,
+                    crate::agent_task_service::AgentTaskRetryOptions::default(),
+                )?;
                 Ok((serde_json::json!({ "run_id": retry.record.run_id }), 0))
             }
             fn reconcile(&self, _: &str) -> Result<(Value, i32)> {

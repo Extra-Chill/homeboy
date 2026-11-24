@@ -903,14 +903,6 @@ pub fn authorize_cook_continue_route(options: &CookRequest) -> Result<()> {
     )
 }
 
-/// Provenance supplied when Homeboy adopts a candidate prepared outside its
-/// provider lifecycle.
-#[derive(Debug, Clone, Default)]
-pub struct AgentTaskCandidateAdoptionOptions {
-    pub ai_model: Option<String>,
-    pub replace_interrupted: bool,
-}
-
 /// A Cook outcome.
 ///
 /// `Serialize` is written by hand so the derived completion projection is

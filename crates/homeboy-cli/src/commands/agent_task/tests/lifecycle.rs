@@ -564,7 +564,11 @@ fn historical_cook_snapshot_failure_projects_lifecycle_admission() {
         assert!(!status_value
             .to_string()
             .contains("homeboy agent-task retry <run-id> --run"));
-        assert!(homeboy::agents::agent_task_service::retry(run_id, None, false, false).is_err());
+        assert!(homeboy::agents::agent_task_service::retry(
+            run_id,
+            homeboy::agents::agent_task_service::AgentTaskRetryOptions::default()
+        )
+        .is_err());
         assert_eq!(
             agent_task_lifecycle::exact_record(run_id)
                 .expect("durable attempt")
@@ -6879,9 +6883,11 @@ fn competing_retry_run_consumers_dispatch_a_queued_cook_replacement_exactly_once
         )
         .expect("terminalize retryable source attempt");
 
-        let replacement =
-            homeboy::agents::agent_task_service::retry(source_run_id, None, false, false)
-                .expect("reserve one queued replacement");
+        let replacement = homeboy::agents::agent_task_service::retry(
+            source_run_id,
+            homeboy::agents::agent_task_service::AgentTaskRetryOptions::default(),
+        )
+        .expect("reserve one queued replacement");
         let barrier = Arc::new(Barrier::new(2));
         let consumers = (0..2)
             .map(|_| {

@@ -1485,56 +1485,6 @@ fn lab_placed_retry_refusal(
     Some(error)
 }
 
-pub fn retry(
-    run_id: &str,
-    new_run_id: Option<&str>,
-    run: bool,
-    force: bool,
-) -> Result<AgentTaskRetryServiceResult> {
-    let retry =
-        retry_with_preflight_and_timeout(run_id, new_run_id, run, force, None, None, |plan| {
-            if plan.metadata.get("generic_lab_command_replay").is_some() {
-                return Err(Error::validation_invalid_argument(
-                    "generic_lab_command_replay",
-                    "generic Lab replay requires controller workspace preflight",
-                    Some(plan.plan_id.clone()),
-                    None,
-                ));
-            }
-            Ok(())
-        })?;
-    Ok(retry)
-}
-
-/// Reserve a new Cook attempt with an explicit operator-approved provider
-/// timeout increase. Unlike the generic run-time override, this is persisted in
-/// the append-only Cook recipe before the provider can be dispatched.
-pub fn retry_with_timeout_override(
-    run_id: &str,
-    new_run_id: Option<&str>,
-    timeout_ms: u64,
-) -> Result<AgentTaskRetryServiceResult> {
-    retry_with_preflight_and_timeout(
-        run_id,
-        new_run_id,
-        false,
-        false,
-        Some(timeout_ms),
-        None,
-        |plan| {
-            if plan.metadata.get("generic_lab_command_replay").is_some() {
-                return Err(Error::validation_invalid_argument(
-                    "generic_lab_command_replay",
-                    "generic Lab replay requires controller workspace preflight",
-                    Some(plan.plan_id.clone()),
-                    None,
-                ));
-            }
-            Ok(())
-        },
-    )
-}
-
 /// An explicit, operator-authorized provider-route change for a new Cook
 /// attempt. The original recipe remains the authority for every non-route input.
 #[derive(Debug, Clone, Default)]
@@ -1554,69 +1504,58 @@ impl CookProviderRouteOverride {
     }
 }
 
-pub fn retry_with_provider_route_override(
-    run_id: &str,
-    new_run_id: Option<&str>,
-    run: bool,
-    force: bool,
-    route_override: CookProviderRouteOverride,
-) -> Result<AgentTaskRetryServiceResult> {
-    if route_override.is_empty() {
-        return retry(run_id, new_run_id, run, force);
+/// Optional inputs for [`retry`]. Every field defaults to the plain retry.
+#[derive(Default)]
+pub struct AgentTaskRetryOptions<'a> {
+    /// Requested id for the reserved successor run.
+    pub new_run_id: Option<&'a str>,
+    /// Whether the caller intends to run the reserved successor.
+    pub run: bool,
+    /// Retry even when the source run is not in a retryable state.
+    pub force: bool,
+    /// Explicit operator-approved provider timeout increase. It is persisted in
+    /// the append-only Cook recipe before the provider can be dispatched.
+    pub timeout_override_ms: Option<u64>,
+    /// Explicit provider-route change for the new Cook attempt. An empty
+    /// override is the plain retry.
+    pub provider_route_override: Option<CookProviderRouteOverride>,
+    /// Revalidation of the persisted action before any retry reservation.
+    ///
+    /// Generic Lab replays need controller-owned workspace validation that this
+    /// crate cannot perform. Without a preflight they are rejected; the Lab
+    /// route supplies that validation here before any retry reservation or Cook
+    /// recovery can mutate durable state.
+    pub preflight: Option<&'a dyn Fn(&AgentTaskPlan) -> Result<()>>,
+}
+
+fn reject_generic_lab_command_replay(plan: &AgentTaskPlan) -> Result<()> {
+    if plan.metadata.get("generic_lab_command_replay").is_some() {
+        return Err(Error::validation_invalid_argument(
+            "generic_lab_command_replay",
+            "generic Lab replay requires controller workspace preflight",
+            Some(plan.plan_id.clone()),
+            None,
+        ));
     }
-    let retry = retry_with_preflight_and_timeout(
-        run_id,
+    Ok(())
+}
+
+pub fn retry(
+    run_id: &str,
+    options: AgentTaskRetryOptions<'_>,
+) -> Result<AgentTaskRetryServiceResult> {
+    let AgentTaskRetryOptions {
         new_run_id,
         run,
         force,
-        None,
-        Some(&route_override),
-        |plan| {
-            if plan.metadata.get("generic_lab_command_replay").is_some() {
-                return Err(Error::validation_invalid_argument(
-                    "generic_lab_command_replay",
-                    "generic Lab replay requires controller workspace preflight",
-                    Some(plan.plan_id.clone()),
-                    None,
-                ));
-            }
-            Ok(())
-        },
-    )?;
-    Ok(retry)
-}
-
-/// Reserve a retry only after the caller has revalidated the persisted action.
-///
-/// Generic Lab replays need controller-owned workspace validation that this
-/// crate cannot perform. The ordinary service entry point rejects them; the
-/// Lab route supplies that validation through this boundary before any retry
-/// reservation or Cook recovery can mutate durable state.
-pub fn retry_with_preflight<F>(
-    run_id: &str,
-    new_run_id: Option<&str>,
-    run: bool,
-    force: bool,
-    preflight: F,
-) -> Result<AgentTaskRetryServiceResult>
-where
-    F: Fn(&AgentTaskPlan) -> Result<()>,
-{
-    retry_with_preflight_and_timeout(run_id, new_run_id, run, force, None, None, preflight)
-}
-
-fn retry_with_preflight_and_timeout<F>(
-    run_id: &str,
-    new_run_id: Option<&str>,
-    run: bool,
-    force: bool,
-    timeout_override_ms: Option<u64>,
-    route_override: Option<&CookProviderRouteOverride>,
-    preflight: F,
-) -> Result<AgentTaskRetryServiceResult>
-where
-    F: Fn(&AgentTaskPlan) -> Result<()>,
-{
+        timeout_override_ms,
+        provider_route_override,
+        preflight,
+    } = options;
+    let preflight = preflight.unwrap_or(&reject_generic_lab_command_replay);
+    let route_override = provider_route_override
+        .as_ref()
+        .filter(|route| !route.is_empty());
     if let Some(route) = route_override {
         if route
             .model

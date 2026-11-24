@@ -2767,7 +2767,7 @@ fn draft_publication_gap(
 }
 
 pub(crate) fn finalize_or_load_cook_pr_with_backend_with_stores<
-    B: AgentTaskPrFinalizationBackend,
+    B: AgentTaskPrFinalizationBackend + ?Sized,
 >(
     store: &super::cook_recipe::CookRecipeStore,
     lifecycle_store: &agent_task_lifecycle::AgentTaskLifecycleStore,
@@ -2817,7 +2817,7 @@ pub(crate) fn finalize_or_load_cook_pr_with_backend_with_stores<
 /// `--recover`. Publication persists the promotion it publishes, runs the
 /// engine, and records the receipt on the attempt's Cook delivery; a preflight
 /// mutates nothing.
-fn publish_cook_finalization<B: AgentTaskPrFinalizationBackend>(
+fn publish_cook_finalization<B: AgentTaskPrFinalizationBackend + ?Sized>(
     lifecycle_store: &agent_task_lifecycle::AgentTaskLifecycleStore,
     run_id: &str,
     promotion: &AgentTaskPromotionReport,

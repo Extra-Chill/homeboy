@@ -5378,9 +5378,10 @@ pub fn retry(run_id: &str, requested_run_id: Option<&str>) -> Result<AgentTaskRu
         {
             return crate::agent_task_service::retry(
                 &source_run_id,
-                requested_run_id,
-                false,
-                false,
+                crate::agent_task_service::AgentTaskRetryOptions {
+                    new_run_id: requested_run_id,
+                    ..Default::default()
+                },
             )
             .map(|retry| retry.record);
         }
