@@ -657,7 +657,7 @@
       "label": "wp-config additions",
       "type": "object",
       "default": {},
-      "description": "Map of CONSTANT_NAME => value appended to the WP Codebox wp-tests-config.php as additional define() statements. Lets a component declare wp-config-level constants (mode flags, debug toggles, custom paths) without shipping a custom drop-in. Values preserve PHP type via var_export() — booleans, integers, and nulls round-trip cleanly. Reserved canonical names (DB_NAME, ABSPATH, etc.) cannot be overridden."
+      "description": "Map of CONSTANT_NAME => value appended to the WP Codebox wp-tests-config.php as additional define() statements. Lets a component declare wp-config-level constants (mode flags, debug toggles, custom paths) without shipping a custom drop-in. Values preserve PHP type via var_export() — booleans, integers, and nulls round-trip cleanly. Reserved canonical names (DB_NAME, ABSPATH, etc.) cannot be overridden; declaring a database target constant (DB_NAME, DB_HOST, DB_USER, DB_PASSWORD, ...) makes the runner fail closed."
     },
     {
       "id": "build_nested_packages",

@@ -82,6 +82,7 @@
       "bash scripts/lint/sidecar-writer-missing-exit-smoke.sh",
       "bash tests/phpstan-wordpress-api-stubs-smoke.sh",
       "node tests/wp-codebox-database-service-smoke.mjs",
+      "node tests/wordpress-database-isolation-guard-smoke.mjs",
       "node tests/wp-codebox-native-database-canary.mjs",
       "bash scripts/test/full-suite-no-phpunit-smoke.sh",
       "bash scripts/test/standalone-php-failure-evidence-smoke.sh",

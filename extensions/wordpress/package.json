@@ -133,6 +133,7 @@
     "test:wp-cli-phpunit-bootstrap": "bash tests/wp-cli-phpunit-bootstrap-smoke.sh",
     "test:wp-codebox-phpunit-runtime-service-diagnosis": "node tests/wp-codebox-phpunit-runtime-service-diagnosis-smoke.mjs",
     "test:wp-codebox-database-service": "node tests/wp-codebox-database-service-smoke.mjs",
+    "test:wordpress-database-isolation-guard": "node tests/wordpress-database-isolation-guard-smoke.mjs",
     "test:wp-codebox-native-database-canary": "node tests/wp-codebox-native-database-canary.mjs",
     "test:wp-codebox-doctor": "bash scripts/test/wp-codebox-doctor-smoke.sh",
     "test:wp-codebox-setup-freshness": "bash scripts/build/inspect-wp-codebox-freshness-smoke.sh && bash scripts/build/setup-wp-codebox-smoke.sh",
