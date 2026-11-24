@@ -370,23 +370,6 @@ fn contain_tunnel_child(child: &mut std::process::Child) {
     }
 }
 
-pub(super) fn open_loopback_tunnel(
-    server: &Server,
-    local_port: u16,
-    remote_host: &str,
-    remote_port: u16,
-    loopback_transport: bool,
-) -> SshTunnelOutput {
-    open_loopback_tunnel_with_lifetime(
-        server,
-        local_port,
-        remote_host,
-        remote_port,
-        loopback_transport,
-        false,
-    )
-}
-
 /// SSH option args shared by every controller-owned runner tunnel. Tunnels are
 /// long-lived `-N` sessions, so ServerAlive probes make SSH notice a dead peer
 /// instead of holding a half-open forward forever.
