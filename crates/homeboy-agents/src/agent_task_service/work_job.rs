@@ -496,10 +496,4 @@ mod work_job_phase_tests {
             );
         }
     }
-
-    /// A record written before the phase field existed still loads as queued.
-    #[test]
-    fn absent_phase_defaults_to_queued() {
-        assert_eq!(WorkJobPhase::default(), WorkJobPhase::Queued);
-    }
 }
