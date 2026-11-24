@@ -518,7 +518,7 @@ fn extension_snapshot_extract_command(destination: &str, archive: &str) -> Strin
     )
 }
 
-pub(crate) fn run_materialization_command(
+fn run_materialization_command(
     runner: &Runner,
     env: Option<&HashMap<String, String>>,
     command: Vec<String>,
@@ -546,6 +546,101 @@ pub(crate) fn run_materialization_command(
             None,
         )),
     }
+}
+
+/// One extension to replace on a runner from a git source at a revision.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct RunnerExtensionGitInstall<'a> {
+    pub(crate) id: &'a str,
+    pub(crate) source_url: &'a str,
+    pub(crate) source_revision: &'a str,
+}
+
+/// Apply git installs planned by the extension-parity owner. Installs sharing
+/// one source and revision run from a single checkout in one runner job instead
+/// of one job (and one fetch) apiece. A batch failure — including a runner that
+/// predates repeated `--id` — falls back to per-extension installs so failures
+/// stay exact. Returns one result per install, in input order.
+pub(crate) fn apply_runner_extension_git_installs(
+    runner: &Runner,
+    homeboy_path: &str,
+    installs: &[RunnerExtensionGitInstall<'_>],
+    exec_runner: &mut impl FnMut(&str, RunnerExecOptions) -> Result<(super::RunnerExecOutput, i32)>,
+) -> Vec<Result<()>> {
+    let mut results: Vec<Option<Result<()>>> = installs.iter().map(|_| None).collect();
+    let mut groups: Vec<(&str, &str, Vec<usize>)> = Vec::new();
+    for (index, install) in installs.iter().enumerate() {
+        match groups.iter_mut().find(|(url, revision, _)| {
+            *url == install.source_url && *revision == install.source_revision
+        }) {
+            Some((_, _, members)) => members.push(index),
+            None => groups.push((install.source_url, install.source_revision, vec![index])),
+        }
+    }
+    for (source_url, source_revision, members) in groups {
+        if members.len() > 1 {
+            let ids: Vec<&str> = members.iter().map(|index| installs[*index].id).collect();
+            let batch = run_materialization_command(
+                runner,
+                None,
+                runner_extension_git_install_command(
+                    homeboy_path,
+                    source_url,
+                    &ids,
+                    source_revision,
+                ),
+                exec_runner,
+            );
+            if batch.is_ok() {
+                for index in members {
+                    results[index] = Some(Ok(()));
+                }
+                continue;
+            }
+        }
+        for index in members {
+            results[index] = Some(run_materialization_command(
+                runner,
+                None,
+                runner_extension_git_install_command(
+                    homeboy_path,
+                    source_url,
+                    &[installs[index].id],
+                    source_revision,
+                ),
+                exec_runner,
+            ));
+        }
+    }
+    results
+        .into_iter()
+        .map(|result| result.expect("every install belongs to one group"))
+        .collect()
+}
+
+/// `extension install --replace` for one or more extensions of one source at
+/// one revision. Repeated `--id` installs them all from a single checkout.
+pub(crate) fn runner_extension_git_install_command(
+    homeboy_path: &str,
+    source_url: &str,
+    extension_ids: &[&str],
+    source_revision: &str,
+) -> Vec<String> {
+    let mut command = vec![
+        homeboy_path.to_string(),
+        "extension".to_string(),
+        "install".to_string(),
+        source_url.to_string(),
+    ];
+    for extension_id in extension_ids {
+        command.extend(["--id".to_string(), extension_id.to_string()]);
+    }
+    command.extend([
+        "--ref".to_string(),
+        source_revision.to_string(),
+        "--replace".to_string(),
+    ]);
+    command
 }
 
 pub(crate) fn runner_extension_exists(

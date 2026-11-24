@@ -1,11 +1,15 @@
 use super::*;
 use crate as runner;
+use crate::execution::{RunnerExtensionRevisionOutcome, RunnerExtensionRevisionTarget};
+use crate::extension_materialization::runner_extension_git_install_command;
 use crate::Runner;
 use crate::RunnerExecOptions;
 use homeboy_core::Result;
 use homeboy_upgrade::upgrade::ExtensionUpgradeEntry;
 use homeboy_upgrade::upgrade::RunnerExtensionSyncEntry;
 
+/// Build the desired extension set from the upgrade entries, hand it to the
+/// extension-parity owner, and map its outcomes onto upgrade reporting.
 pub fn sync_runner_extensions(
     runner: &Runner,
     homeboy_path: &str,
@@ -24,54 +28,13 @@ pub fn sync_runner_extensions(
     // workload it queued behind the saturated Lab's gates for minutes per
     // job while the upgrade reported only that it was refreshing runners.
     let exec = &mut |runner_id: &str, options: RunnerExecOptions| {
+        progress::begin_item(sync_progress_item(&options.command));
         exec(runner_id, convergence_admission(options))
     };
-    let total = extension_updates.len();
-    let installed = extension_updates
-        .iter()
-        .any(|extension| {
-            extension.source_url.is_some()
-                && extension.source_revision.is_some()
-                && runner_supports_extension_sync(runner, &extension.extension_id)
-        })
-        .then(|| {
-            progress::begin_item("inventory".to_string());
-            let (output, code) = exec(
-                &runner.id,
-                RunnerExecOptions::raw_command(vec![
-                    homeboy_path.to_string(),
-                    "extension".to_string(),
-                    "list".to_string(),
-                ])
-                .with_env(runner.env.clone()),
-            )
-            .map_err(|err| err.message)?;
-            if code != 0 {
-                return Err(format!(
-                    "runner extension inventory failed ({code}): {}",
-                    output.stderr
-                ));
-            }
-            let value: serde_json::Value = serde_json::from_str(&output.stdout)
-                .map_err(|err| format!("invalid runner extension inventory: {err}"))?;
-            if value["success"] != true {
-                return Err("runner extension inventory did not report success".to_string());
-            }
-            value
-                .pointer("/data/entities")
-                .and_then(|rows| rows.as_array())
-                .cloned()
-                .ok_or_else(|| "runner extension inventory omitted data.entities".to_string())
-        });
-    // Classify first: unsupported, unrefreshable, and already-current
-    // extensions never cost an install job.
-    let mut pending: Vec<(&ExtensionUpgradeEntry, &str, &str)> = Vec::new();
-    for (index, extension) in extension_updates.iter().enumerate() {
-        progress::begin_item(format!(
-            "{} ({}/{total})",
-            extension.extension_id,
-            index + 1
-        ));
+
+    // Unsupported and unrefreshable extensions never reach the parity owner.
+    let mut desired: Vec<(&ExtensionUpgradeEntry, RunnerExtensionRevisionTarget<'_>)> = Vec::new();
+    for extension in extension_updates {
         let (Some(source_url), Some(source_revision)) = (
             extension.source_url.as_deref(),
             extension.source_revision.as_deref(),
@@ -98,99 +61,54 @@ pub fn sync_runner_extensions(
             });
             continue;
         }
-        match installed.as_ref().expect("sync candidate has inventory") {
-            Ok(rows) => {
-                let already_current = rows.iter().any(|row| {
-                    row["id"].as_str() == Some(&extension.extension_id)
-                        && row["source_revision"].as_str().is_some_and(|revision| {
-                            !revision.is_empty() && source_revision.starts_with(revision)
-                        })
-                });
-                if already_current {
-                    synced.push(synced_entry(runner, extension, source_revision, true));
-                } else {
-                    pending.push((extension, source_url, source_revision));
-                }
-            }
-            Err(detail) => failed.push(failed_entry(
-                runner,
-                homeboy_path,
-                extension,
+        desired.push((
+            extension,
+            RunnerExtensionRevisionTarget {
+                id: &extension.extension_id,
                 source_url,
                 source_revision,
-                detail,
-            )),
-        }
+            },
+        ));
     }
 
-    // Changed extensions sharing one source and revision install from a
-    // single checkout in one runner job instead of one job (and one fetch)
-    // apiece. A batch failure — including a runner that predates repeated
-    // `--id` — falls back to per-extension installs so failures stay exact.
-    let mut groups: Vec<(&str, &str, Vec<&ExtensionUpgradeEntry>)> = Vec::new();
-    for (extension, source_url, source_revision) in pending {
-        match groups
-            .iter_mut()
-            .find(|(url, revision, _)| *url == source_url && *revision == source_revision)
-        {
-            Some((_, _, members)) => members.push(extension),
-            None => groups.push((source_url, source_revision, vec![extension])),
-        }
-    }
-    for (source_url, source_revision, members) in groups {
-        if members.len() > 1 {
-            let ids: Vec<&str> = members
-                .iter()
-                .map(|extension| extension.extension_id.as_str())
-                .collect();
-            progress::begin_item(format!("install {}", ids.join(", ")));
-            let batch = crate::extension_materialization::run_materialization_command(
+    let targets: Vec<_> = desired.iter().map(|(_, target)| *target).collect();
+    let outcomes =
+        crate::execution::ensure_runner_extension_revisions(runner, homeboy_path, &targets, exec);
+    for ((extension, target), outcome) in desired.into_iter().zip(outcomes) {
+        match outcome {
+            RunnerExtensionRevisionOutcome::AlreadyCurrent => synced.push(synced_entry(
                 runner,
-                None,
-                runner_extension_install_recovery_command(
-                    homeboy_path,
-                    source_url,
-                    &ids,
-                    source_revision,
-                ),
-                exec,
-            );
-            if batch.is_ok() {
-                synced.extend(
-                    members
-                        .iter()
-                        .map(|extension| synced_entry(runner, extension, source_revision, false)),
-                );
-                continue;
-            }
-        }
-        for extension in members {
-            let id = extension.extension_id.as_str();
-            match crate::extension_materialization::run_materialization_command(
+                extension,
+                target.source_revision,
+                true,
+            )),
+            RunnerExtensionRevisionOutcome::Installed => synced.push(synced_entry(
                 runner,
-                None,
-                runner_extension_install_recovery_command(
-                    homeboy_path,
-                    source_url,
-                    &[id],
-                    source_revision,
-                ),
-                exec,
-            ) {
-                Ok(()) => synced.push(synced_entry(runner, extension, source_revision, false)),
-                Err(err) => failed.push(failed_entry(
-                    runner,
-                    homeboy_path,
-                    extension,
-                    source_url,
-                    source_revision,
-                    &err.message,
-                )),
+                extension,
+                target.source_revision,
+                false,
+            )),
+            RunnerExtensionRevisionOutcome::Failed { detail } => {
+                failed.push(failed_entry(runner, homeboy_path, &target, &detail))
             }
         }
     }
 
     (synced, skipped, failed)
+}
+
+/// Name the runner job extension sync is waiting on: the inventory probe or
+/// the extensions one install job replaces.
+fn sync_progress_item(command: &[String]) -> String {
+    if command.get(2).map(String::as_str) != Some("install") {
+        return "inventory".to_string();
+    }
+    let ids: Vec<&str> = command
+        .windows(2)
+        .filter(|pair| pair[0] == "--id")
+        .map(|pair| pair[1].as_str())
+        .collect();
+    format!("install {}", ids.join(", "))
 }
 
 /// Admit a runner job outside bulk pressure admission, as the daemon does for
@@ -242,49 +160,22 @@ fn synced_entry(
 fn failed_entry(
     runner: &Runner,
     homeboy_path: &str,
-    extension: &ExtensionUpgradeEntry,
-    source_url: &str,
-    source_revision: &str,
+    target: &RunnerExtensionRevisionTarget<'_>,
     err: &str,
 ) -> RunnerExtensionSyncEntry {
     RunnerExtensionSyncEntry {
-        extension_id: extension.extension_id.clone(),
-        source_revision: source_revision.to_string(),
+        extension_id: target.id.to_string(),
+        source_revision: target.source_revision.to_string(),
         synced: false,
         detail: Some(format!("sync failed: {err}")),
         recovery_commands: runner_exec_recovery_commands(
             runner,
-            &runner_extension_install_recovery_command(
+            &runner_extension_git_install_command(
                 homeboy_path,
-                source_url,
-                &[extension.extension_id.as_str()],
-                source_revision,
+                target.source_url,
+                &[target.id],
+                target.source_revision,
             ),
         ),
     }
-}
-
-/// `extension install --replace` for one or more extensions of one source at
-/// one revision. Repeated `--id` installs them all from a single checkout.
-fn runner_extension_install_recovery_command(
-    homeboy_path: &str,
-    source_url: &str,
-    extension_ids: &[&str],
-    source_revision: &str,
-) -> Vec<String> {
-    let mut command = vec![
-        homeboy_path.to_string(),
-        "extension".to_string(),
-        "install".to_string(),
-        source_url.to_string(),
-    ];
-    for extension_id in extension_ids {
-        command.extend(["--id".to_string(), extension_id.to_string()]);
-    }
-    command.extend([
-        "--ref".to_string(),
-        source_revision.to_string(),
-        "--replace".to_string(),
-    ]);
-    command
 }
