@@ -1118,17 +1118,7 @@ pub(super) fn cook_has_provider_execution_in_store(
     for attempt in index.attempts {
         if lifecycle_store
             .read_record(&attempt.run_id)
-            .ok()
-            .and_then(|record| {
-                record.metadata["provider_executions_consumed"]
-                    .as_u64()
-                    .or_else(|| {
-                        record.metadata["provider_executions"]
-                            .as_array()
-                            .map(|executions| executions.len() as u64)
-                    })
-            })
-            .is_some_and(|executions| executions > 0)
+            .is_ok_and(|record| record.provider_executions_consumed() > 0)
         {
             return Ok(true);
         }

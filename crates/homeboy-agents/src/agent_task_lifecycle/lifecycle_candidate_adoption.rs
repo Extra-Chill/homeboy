@@ -507,7 +507,7 @@ pub fn candidate_adoption_recovery_outcome(
             && record.lab_handoff_validation_error().is_none()
             && handoff.runner_job_id.is_none()
             && record.metadata["phase"] == "handoff_rejected"
-            && record.metadata["provider_executions_consumed"] == 0
+            && record.provider_executions_consumed() == 0
             && record.metadata["managed_recovery"]["reason"] == EXPIRED_LAB_HANDOFF_REASON
     });
     let failure = &record.metadata["pre_execution_failure"];
@@ -526,7 +526,7 @@ pub fn candidate_adoption_recovery_outcome(
     let eligible_failed_preexecution = matches!(
         record.state(),
         RunExecutionState::Failed | RunExecutionState::Succeeded
-    ) && record.metadata["provider_executions_consumed"] == 0
+    ) && record.provider_executions_consumed() == 0
         && record.provider_handles.is_empty()
         && no_runner_job_recorded(record)
         && record.lifecycle.external_runtime_ids.is_empty()

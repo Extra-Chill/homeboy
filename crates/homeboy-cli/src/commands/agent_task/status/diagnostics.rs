@@ -799,7 +799,7 @@ pub(super) fn runner_cancellation_diagnostic(
             "causal_phase": "runner_submission",
             "runner_id": record.runner_id(),
             "runner_job_id": record.runner_job_id(),
-            "provider_executions_consumed": record.metadata.get("provider_executions_consumed"),
+            "provider_executions_consumed": record.provider_executions_consumed(),
             "runner_execution_status": record.metadata.pointer("/runner_execution_record/status"),
         }),
     })

@@ -603,6 +603,15 @@ pub(crate) const CONTROLLER_PRE_PROVIDER_PHASES: &[&str] = &[
 ];
 
 impl AgentTaskRunRecord {
+    /// Provider executions this run consumed: the length of
+    /// `metadata.provider_executions`, with an absent ledger counting as 0.
+    pub fn provider_executions_consumed(&self) -> u64 {
+        self.metadata
+            .get("provider_executions")
+            .and_then(Value::as_array)
+            .map_or(0, |executions| executions.len() as u64)
+    }
+
     /// A freshly submitted run: `Queued`, never committed (revision `0`), with
     /// an empty task list and no evidence. Every run starts here; its state
     /// moves only through the lifecycle store's transitions afterwards.
@@ -802,10 +811,6 @@ impl AgentTaskRunRecord {
                 .metadata
                 .get("provider_executions")
                 .is_none_or(|value| value.as_array().is_some_and(Vec::is_empty))
-            && self
-                .metadata
-                .get("provider_executions_consumed")
-                .is_none_or(|value| value.as_u64() == Some(0))
     }
 
     /// Ownerless queued runner residue whose runner has already proved zero live

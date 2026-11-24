@@ -1467,10 +1467,7 @@ impl AgentTaskLifecycleStore {
                 || !crate::agent_task_service::cook_pre_execution::retryable_pre_execution_failure(
                     &existing,
                 )
-                || existing.metadata["provider_executions_consumed"]
-                    .as_u64()
-                    .unwrap_or(0)
-                    != 0
+                || existing.provider_executions_consumed() != 0
             {
                 return Err(Error::validation_invalid_argument(
                     "pre_execution_recovery",
@@ -1495,7 +1492,6 @@ impl AgentTaskLifecycleStore {
             rebound.metadata["pre_execution_recovery"] = serde_json::json!({
                 "schema": "homeboy/pre-execution-recovery/v1",
                 "reason": "retryable_pre_execution_failure",
-                "provider_executions_consumed": 0,
                 "recovered_at": super::now_timestamp(),
             });
             rebound.metadata["controller_identity"] =

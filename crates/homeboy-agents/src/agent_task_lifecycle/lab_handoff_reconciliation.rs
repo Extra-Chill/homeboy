@@ -183,7 +183,6 @@ pub(crate) fn expire_unaccepted_lab_handoff_in_store(
     }
     let metadata = record.ensure_metadata_object();
     metadata.insert("phase".to_string(), json!("handoff_rejected"));
-    metadata.insert("provider_executions_consumed".to_string(), json!(0));
     metadata.insert(
         "phase_activity".to_string(),
         json!("runner handoff acceptance deadline expired before runner acceptance"),
@@ -413,7 +412,6 @@ pub(crate) fn terminalize_lost_accepted_lab_job_in_store(
         "phase_activity".to_string(),
         json!("accepted runner job was confirmed absent across authoritative daemon generations"),
     );
-    metadata.insert("provider_executions_consumed".to_string(), json!(0));
     metadata.insert(METADATA_KEY_RETRYABLE.to_string(), json!(true));
     metadata.insert(
         "lost_accepted_runner_job".to_string(),

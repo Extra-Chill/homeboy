@@ -192,12 +192,7 @@ fn record_interrupted_local_owner_locked(
             (false, false, false, identity)
         }
     };
-    let consumed = record
-        .metadata
-        .get("provider_executions")
-        .and_then(Value::as_array)
-        .map(|executions| executions.len())
-        .unwrap_or_default();
+    let consumed = record.provider_executions_consumed() as usize;
     let in_flight = record
         .metadata
         .get("provider_executions")
@@ -299,7 +294,6 @@ fn record_interrupted_local_owner_locked(
         json!("interrupted_owner"),
     );
     metadata.insert("terminal_phase".to_string(), json!("interrupted_owner"));
-    metadata.insert("provider_executions_consumed".to_string(), json!(consumed));
     metadata.insert(METADATA_KEY_RETRYABLE.to_string(), json!(true));
     metadata.insert(
         "interrupted_owner".to_string(),
@@ -567,13 +561,10 @@ pub fn record_workspace_snapshot_fence_invalidation_in_store(
                             })
                     })
                 });
-        let consumed = record.metadata["provider_executions_consumed"]
-            .as_u64()
-            .unwrap_or(u64::MAX);
         if record.state() != RunExecutionState::Failed
             || !is_snapshot_invalidated
             || record.has_recorded_provider_progress()
-            || consumed != 0
+            || record.provider_executions_consumed() != 0
         {
             return Ok((record, None));
         }
@@ -746,10 +737,7 @@ fn lab_pre_execution_circuit(
 ) -> Option<Value> {
     if !is_circuit_breaking_lab_failure(phase, &error.message, &error.details)
         || error.retryable != Some(true)
-        || record.metadata["provider_executions_consumed"]
-            .as_u64()
-            .unwrap_or_default()
-            != 0
+        || record.provider_executions_consumed() != 0
     {
         return None;
     }

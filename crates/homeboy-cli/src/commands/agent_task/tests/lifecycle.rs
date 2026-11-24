@@ -568,7 +568,7 @@ fn historical_cook_snapshot_failure_projects_lifecycle_admission() {
         assert_eq!(
             agent_task_lifecycle::exact_record(run_id)
                 .expect("durable attempt")
-                .metadata["provider_executions_consumed"],
+                .provider_executions_consumed(),
             0
         );
     });
@@ -731,7 +731,7 @@ fn diagnose_preserves_controller_admission_hash_io_without_provider_replay() {
             record.metadata["pre_execution_failure"]["details"]["context"],
             "hash pinned controller executable"
         );
-        assert_eq!(record.metadata["provider_executions_consumed"], 0);
+        assert_eq!(record.provider_executions_consumed(), 0);
 
         let (diagnosis, exit_code) = diagnose(DiagnoseArgs {
             run_id: run_id.to_string(),
@@ -811,7 +811,7 @@ fn lab_preacceptance_io_is_structured_in_diagnose_and_durable_evidence() {
         assert!(record.runner_job_id().is_none());
         assert_eq!(record.runner_id(), Some("homeboy-lab"));
         assert!(record.provider_handles.is_empty());
-        assert_eq!(record.metadata["provider_executions_consumed"], 0);
+        assert_eq!(record.provider_executions_consumed(), 0);
         assert_eq!(
             record.metadata["pre_execution_failure"]["details"]["lab_transport_attempt_receipt"]
                 ["acceptance"],
@@ -2269,7 +2269,7 @@ fn assert_cook_rearm_queue_ownership(block_capacity: bool) {
         assert_eq!(
             agent_task_lifecycle::exact_record(source_run_id)
                 .expect("source record")
-                .metadata["provider_executions_consumed"],
+                .provider_executions_consumed(),
             0
         );
         let (probe, probe_exit_code) = recover_preflight_probe(source_run_id);
@@ -2327,7 +2327,7 @@ fn assert_cook_rearm_queue_ownership(block_capacity: bool) {
             "{successor:#?}"
         );
         assert_eq!(successor.metadata["retry_of"], source_run_id);
-        assert_eq!(successor.metadata["provider_executions_consumed"], 0);
+        assert_eq!(successor.provider_executions_consumed(), 0);
         assert_eq!(recipe.attempts.len(), 2, "one Cook owns both attempts");
         // The successor is reserved through the control-plane Retry action, so
         // the source run carries an accepted retry action in its event log.
@@ -2380,7 +2380,7 @@ fn assert_cook_rearm_queue_ownership(block_capacity: bool) {
             let terminal = agent_task_lifecycle::exact_record(&successor_run_id)
                 .expect("claimed successor has a durable failure");
             assert_eq!(terminal.state(), RunExecutionState::Failed, "{terminal:#?}");
-            assert_eq!(terminal.metadata["provider_executions_consumed"], 0);
+            assert_eq!(terminal.provider_executions_consumed(), 0);
             assert_eq!(
                 terminal.metadata["pre_execution_failure"]["error_code"],
                 "resource.capacity_reserve"
@@ -2415,7 +2415,7 @@ fn assert_cook_rearm_queue_ownership(block_capacity: bool) {
             .expect("successor completion is durable");
         assert_eq!(queued, 0, "{queued:#?}\n{completed:#?}");
         assert_eq!(executions.load(Ordering::SeqCst), 1, "{queued:#?}");
-        assert_eq!(completed.metadata["provider_executions_consumed"], 1);
+        assert_eq!(completed.provider_executions_consumed(), 1);
         assert!(
             completed.metadata["cook_delivery"]["artifacts"]["promotion"]["deterministic_gates"]
                 .is_array(),
@@ -2462,7 +2462,7 @@ fn cli_cook_converges_recipe_lifecycle_and_index_after_transient_first_write_fai
         assert_eq!(
             agent_task_lifecycle::exact_record(run_id)
                 .expect("recovered attempt")
-                .metadata["provider_executions_consumed"],
+                .provider_executions_consumed(),
             0
         );
     });
@@ -3815,7 +3815,7 @@ fn cook_retry_run_recovers_a_historical_transport_recipe_after_zero_provider_exe
             .read_record(&recipe.attempts.last().expect("replacement attempt").run_id)
             .expect("read recovered replacement");
         assert_eq!(recovered.metadata["retry_of"], run_id);
-        assert_eq!(recovered.metadata["provider_executions_consumed"], 0);
+        assert_eq!(recovered.provider_executions_consumed(), 0);
         assert!(recovered
             .metadata
             .get("controller_runtime_recovery")
@@ -4392,7 +4392,6 @@ fn diagnose_projects_missing_runner_pid_without_an_aggregate_and_keeps_replay_re
             record.set_state_for_test(RunExecutionState::Cancelled);
             record.metadata["runner_id"] = json!("homeboy-lab");
             record.metadata["cancel_reason"] = json!("missing_runner_pid");
-            record.metadata["provider_executions_consumed"] = json!(0);
             record.metadata["runner_execution_record"] = json!({
                 "status": "planned",
                 "runner_id": "homeboy-lab"
@@ -5825,7 +5824,6 @@ fn diagnose_interrupted_local_owner_names_budget_and_duplication_instead_of_gene
                 "owner_linux_starttime_ticks": null,
                 "owner_identity": format!("{run_id}:task-a:1"),
             }]);
-            record.metadata["provider_executions_consumed"] = json!(1);
             // The interrupted observer is the run's local owner, as in a real Cook.
             record.metadata["runner_pid"] = json!(owner.id());
             record

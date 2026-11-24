@@ -440,7 +440,7 @@ pub(super) fn exercise_real_git_base_advance(conflicting: bool, rewritten: bool)
         agent_task_lifecycle::record_promotion(run_id, serde_json::to_value(&applied).unwrap())
             .unwrap();
         agent_task_lifecycle::rewrite_record_for_test(run_id, |record| {
-            record.metadata["provider_executions_consumed"] = serde_json::json!(1);
+            record.metadata["provider_executions"] = serde_json::json!([{ "state": "succeeded" }]);
         })
         .unwrap();
         let terminal_continuation = agent_task_lifecycle::reconcile_status(run_id)

@@ -2024,7 +2024,7 @@ pub(super) fn run_cook_spine(
             if transitioned.metadata["pre_execution_failure"]["phase"]
                 == Value::String("workspace_snapshot_fence".to_string())
                 && transitioned.metadata["pre_execution_failure"]["retryable"] == Value::Bool(true)
-                && transitioned.metadata["provider_executions_consumed"].as_u64() == Some(0)
+                && transitioned.provider_executions_consumed() == 0
             {
                 let failure = pre_execution_failure_details(Some(&transitioned), &error);
                 attempts.push(AgentTaskCookAttemptReport {
@@ -2208,9 +2208,7 @@ pub(super) fn run_cook_spine(
                 );
                 if report.value.terminal_phase.is_none() {
                     if let Some((phase, classification, _)) = pre_provider_diagnostic_cause(
-                        record.metadata["provider_executions_consumed"]
-                            .as_u64()
-                            .unwrap_or(0),
+                        record.provider_executions_consumed(),
                         aggregate
                             .outcomes
                             .iter()
