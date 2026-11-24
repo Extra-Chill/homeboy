@@ -143,9 +143,8 @@ pub(super) fn parse_issue_number_from_url(url: &str) -> Option<u64> {
 }
 
 /// Extract `html_url` from a `gh api` REST response. The REST mutation paths
-/// (`pr_edit`, `issue_edit`) use this instead of trusting `gh pr edit`/`gh
-/// issue edit` stdout, which no longer exists once those mutations go through
-/// `gh api`.
+/// (`pr_edit`, `issue_edit`) go through `gh api`, so the URL comes from the
+/// REST response body rather than `gh pr edit`/`gh issue edit` stdout.
 pub(super) fn parse_html_url(raw: &str) -> Option<String> {
     serde_json::from_str::<serde_json::Value>(raw.trim())
         .ok()?
@@ -188,27 +187,15 @@ mod tests {
     }
 
     #[test]
-    fn parse_issue_number_from_issue_url() {
-        assert_eq!(
-            parse_issue_number_from_url("https://github.com/owner/repo/issues/42"),
-            Some(42)
-        );
-    }
-
-    #[test]
-    fn parse_issue_number_from_pr_url() {
-        assert_eq!(
-            parse_issue_number_from_url("https://github.com/owner/repo/pull/1337"),
-            Some(1337)
-        );
-    }
-
-    #[test]
-    fn parse_issue_number_handles_trailing_slash() {
-        assert_eq!(
-            parse_issue_number_from_url("https://github.com/owner/repo/issues/42/"),
-            Some(42)
-        );
+    fn parse_issue_number_from_issue_and_pr_urls() {
+        for (url, expected) in [
+            ("https://github.com/owner/repo/issues/42", Some(42)),
+            ("https://github.com/owner/repo/pull/1337", Some(1337)),
+            ("https://github.com/owner/repo/issues/42/", Some(42)),
+            ("https://github.com/owner/repo/issues/not-a-number", None),
+        ] {
+            assert_eq!(parse_issue_number_from_url(url), expected, "{url}");
+        }
     }
 
     #[test]
@@ -219,13 +206,5 @@ mod tests {
         );
         assert_eq!(parse_html_url("not json"), None);
         assert_eq!(parse_html_url("{}"), None);
-    }
-
-    #[test]
-    fn parse_issue_number_none_for_non_numeric() {
-        assert_eq!(
-            parse_issue_number_from_url("https://github.com/owner/repo/issues/not-a-number"),
-            None
-        );
     }
 }

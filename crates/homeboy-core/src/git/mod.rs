@@ -499,31 +499,24 @@ mod identity_tests {
     use std::sync::{Mutex, MutexGuard, OnceLock};
 
     #[test]
-    fn bot_shorthand() {
-        let id = parse_git_identity(Some("bot"));
-        assert_eq!(id.name, BOT_NAME);
-        assert_eq!(id.email, BOT_EMAIL);
-    }
-
-    #[test]
-    fn none_defaults_to_bot() {
-        let id = parse_git_identity(None);
-        assert_eq!(id.name, BOT_NAME);
-        assert_eq!(id.email, BOT_EMAIL);
-    }
-
-    #[test]
-    fn custom_name_and_email() {
-        let id = parse_git_identity(Some("Deploy Bot <deploy@example.com>"));
-        assert_eq!(id.name, "Deploy Bot");
-        assert_eq!(id.email, "deploy@example.com");
-    }
-
-    #[test]
-    fn name_only_uses_bot_email() {
-        let id = parse_git_identity(Some("My Service"));
-        assert_eq!(id.name, "My Service");
-        assert_eq!(id.email, BOT_EMAIL);
+    fn parse_git_identity_resolves_bot_custom_and_name_only_specs() {
+        for (spec, name, email) in [
+            (Some("bot"), BOT_NAME, BOT_EMAIL),
+            (None, BOT_NAME, BOT_EMAIL),
+            (
+                Some("Deploy Bot <deploy@example.com>"),
+                "Deploy Bot",
+                "deploy@example.com",
+            ),
+            (Some("My Service"), "My Service", BOT_EMAIL),
+        ] {
+            let id = parse_git_identity(spec);
+            assert_eq!(
+                (id.name.as_str(), id.email.as_str()),
+                (name, email),
+                "{spec:?}"
+            );
+        }
     }
 
     #[test]

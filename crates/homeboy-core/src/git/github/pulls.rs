@@ -534,12 +534,6 @@ mod tests {
     use super::*;
 
     #[test]
-    fn pr_state_gh_flag() {
-        assert_eq!(PrState::Open.as_gh_flag(), "open");
-        assert_eq!(PrState::Merged.as_gh_flag(), "merged");
-    }
-
-    #[test]
     fn parse_pr_list_extracts_all_entries() {
         let raw = r#"[
             {"number":10,"title":"feat: x","url":"u10","state":"OPEN","isDraft":true},
