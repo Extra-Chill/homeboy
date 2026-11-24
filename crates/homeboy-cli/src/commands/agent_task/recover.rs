@@ -490,8 +490,8 @@ mod tests {
             .unwrap();
             store
                 .mutate_record(cook_id, |record| {
-                    record.metadata["detached_cook_handoff"]["state"] =
-                        serde_json::json!("exited_before_handoff");
+                    record.metadata["detached_cook_handoff"]["admission_state"] =
+                        serde_json::json!("failed");
                     record.metadata["execution_step_failure"] = serde_json::json!({
                         "code": "internal.io_error",
                         "message": "admission inputs could not be read after upgrade",

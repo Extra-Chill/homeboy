@@ -523,7 +523,10 @@ fn a_claimed_handoff_parent_always_carries_the_owner_pid() {
     let record = claim_detached_cook_handoff_parent_in_store(&store, cook_id, "bootstrap-launcher")
         .expect("record and claim the handoff parent atomically");
 
-    assert_eq!(record.metadata["detached_cook_handoff"]["state"], "pending");
+    assert_eq!(
+        CookAdmissionPhase::of(&record).map(CookAdmissionPhase::handoff_label),
+        Some("pending")
+    );
     assert_eq!(
         record.metadata["detached_cook_handoff"]["launcher_id"],
         "bootstrap-launcher"
@@ -1571,8 +1574,8 @@ fn claim_family_siblings_skip_expire_and_notify() {
         .expect("read the detached parent back");
     assert_eq!(expired.state(), RunExecutionState::Failed);
     assert_eq!(
-        expired.metadata["detached_cook_handoff"]["state"],
-        "exited_before_handoff"
+        CookAdmissionPhase::of(&expired),
+        Some(CookAdmissionPhase::ExitedBeforeHandoff)
     );
     assert_eq!(
         expired.metadata["detached_cook_handoff"]["admission_state"],
