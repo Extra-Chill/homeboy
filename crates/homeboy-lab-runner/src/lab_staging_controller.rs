@@ -392,7 +392,7 @@ fn runtime_set_compatibility(requested: &str, daemon: Option<&str>) -> RuntimeSe
 
 fn runtime_set_admission(
     controller: &str,
-    latest_allowed_stable: Option<&homeboy_upgrade::update_check::AllowedStableRuntime>,
+    latest_allowed_stable: Option<&homeboy_upgrade::upgrade::update_check::AllowedStableRuntime>,
     requested: &str,
     configured: Option<&str>,
     daemon: Option<&str>,
@@ -406,7 +406,7 @@ fn runtime_set_admission(
             homeboy_core::build_identity::is_newer(&latest.version, controller)
                 && latest.compatibility.as_ref().is_some_and(|required| {
                     !required.compatible_with(
-                        &homeboy_upgrade::update_check::current_runtime_compatibility(),
+                        &homeboy_upgrade::upgrade::update_check::current_runtime_compatibility(),
                     )
                 })
         })
@@ -656,7 +656,7 @@ pub(crate) fn converge_lab_handoff_runtime(
     requested: &str,
 ) -> Result<ConvergedLabHandoffRuntime> {
     let controller = homeboy_product_identity::build_identity();
-    let latest_allowed_stable = homeboy_upgrade::update_check::latest_allowed_stable();
+    let latest_allowed_stable = homeboy_upgrade::upgrade::update_check::latest_allowed_stable();
     let controller_is_source_build = std::env::current_exe().ok().is_some_and(|path| {
         path.ancestors()
             .any(|ancestor| ancestor.join("Cargo.toml").is_file())
@@ -2840,7 +2840,7 @@ impl ProductionLabStagingOperations {
         };
         Ok(Some(LabHandoffHomeboyIdentity {
             controller_build_identity: Some(homeboy_product_identity::build_identity().display),
-            latest_allowed_stable: homeboy_upgrade::update_check::latest_allowed_stable()
+            latest_allowed_stable: homeboy_upgrade::upgrade::update_check::latest_allowed_stable()
                 .map(|stable| stable.version),
             requested_build_identity: requested.to_string(),
             configured_command_build_identity: configured
@@ -6606,16 +6606,18 @@ mod tests {
     fn stable_runtime(
         version: &str,
         contracts: impl IntoIterator<Item = (&'static str, u32)>,
-    ) -> homeboy_upgrade::update_check::AllowedStableRuntime {
-        homeboy_upgrade::update_check::AllowedStableRuntime {
+    ) -> homeboy_upgrade::upgrade::update_check::AllowedStableRuntime {
+        homeboy_upgrade::upgrade::update_check::AllowedStableRuntime {
             version: version.to_string(),
-            compatibility: Some(homeboy_upgrade::update_check::RuntimeCompatibility {
-                schema: "homeboy/runtime-compatibility/v1".to_string(),
-                required_contracts: contracts
-                    .into_iter()
-                    .map(|(id, version)| (id.to_string(), version))
-                    .collect(),
-            }),
+            compatibility: Some(
+                homeboy_upgrade::upgrade::update_check::RuntimeCompatibility {
+                    schema: "homeboy/runtime-compatibility/v1".to_string(),
+                    required_contracts: contracts
+                        .into_iter()
+                        .map(|(id, version)| (id.to_string(), version))
+                        .collect(),
+                },
+            ),
         }
     }
 

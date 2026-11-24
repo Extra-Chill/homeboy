@@ -146,15 +146,6 @@ pub enum ContainmentStatus {
 }
 
 impl ContainmentStatus {
-    /// True when some release provably contains the commit.
-    #[allow(
-        dead_code,
-        reason = "No production caller: the released/not-released partition is asserted by this module's tests."
-    )]
-    pub(crate) fn is_released(self) -> bool {
-        !matches!(self, Self::NotYetReleased)
-    }
-
     /// The command that closes the gap, or `None` when there is nothing to do
     /// or nothing established.
     pub(crate) fn remediation(self) -> Option<&'static str> {
@@ -1172,11 +1163,6 @@ mod tests {
 
     #[test]
     fn containment_status_predicates_match_the_action_split() {
-        assert!(!ContainmentStatus::NotYetReleased.is_released());
-        assert!(ContainmentStatus::ReleasedAndInstalled.is_released());
-        assert!(ContainmentStatus::ReleasedNotInstalled.is_released());
-        assert!(ContainmentStatus::ReleasedInstallUnknown.is_released());
-
         assert_eq!(
             ContainmentStatus::NotYetReleased.remediation(),
             Some(REMEDIATION_RELEASE)

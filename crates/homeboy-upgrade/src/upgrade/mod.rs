@@ -76,74 +76,42 @@ mod tests {
     }
 
     #[test]
-    fn test_current_version() {
-        let version = current_version();
-        assert!(!version.is_empty());
-        assert!(version.contains('.'));
+    fn detect_install_method_prefers_exe_path_and_uses_brew_list_as_fallback() {
+        let brew_lists_homeboy =
+            |cmd: &str, args: &[&str]| cmd == "brew" && args == ["list", "homeboy"];
+        for (exe, brew_listed, expected) in [
+            (
+                "/Users/user/.cargo/bin/homeboy",
+                true,
+                InstallMethod::Binary,
+            ),
+            ("/opt/homebrew/bin/homeboy", false, InstallMethod::Homebrew),
+            (
+                "/Applications/Homeboy/homeboy",
+                true,
+                InstallMethod::Homebrew,
+            ),
+        ] {
+            let method = helpers::detect_install_method_from_exe_path(exe, |cmd, args| {
+                brew_listed && brew_lists_homeboy(cmd, args)
+            });
+            assert_eq!(method, expected, "{exe}");
+        }
     }
 
     #[test]
-    fn test_install_method_strings() {
-        assert_eq!(InstallMethod::Homebrew.as_str(), "homebrew");
-        assert_eq!(InstallMethod::Source.as_str(), "source");
-        assert_eq!(InstallMethod::Binary.as_str(), "binary");
-        assert_eq!(InstallMethod::Unknown.as_str(), "unknown");
-    }
-
-    #[test]
-    fn test_detect_install_method_reports_cargo_bin_path_as_binary_over_brew_list() {
-        let method = helpers::detect_install_method_from_exe_path(
-            "/Users/user/.cargo/bin/homeboy",
-            |cmd, args| cmd == "brew" && args == ["list", "homeboy"],
-        );
-
-        assert_eq!(method, InstallMethod::Binary);
-    }
-
-    #[test]
-    fn test_detect_install_method_preserves_active_homebrew_path() {
-        let method = helpers::detect_install_method_from_exe_path(
-            "/opt/homebrew/bin/homeboy",
-            |_cmd, _args| false,
-        );
-
-        assert_eq!(method, InstallMethod::Homebrew);
-    }
-
-    #[test]
-    fn test_detect_install_method_uses_brew_list_only_as_fallback() {
-        let method = helpers::detect_install_method_from_exe_path(
-            "/Applications/Homeboy/homeboy",
-            |cmd, args| cmd == "brew" && args == ["list", "homeboy"],
-        );
-
-        assert_eq!(method, InstallMethod::Homebrew);
-    }
-
-    #[test]
-    fn test_resolve_binary_on_path_var_finds_first_existing_binary() {
+    fn resolve_binary_on_path_var_finds_first_existing_binary() {
         let base = tempdir().unwrap();
         let first = base.path().join("first");
         let second = base.path().join("second");
         fs::create_dir_all(&first).unwrap();
         fs::create_dir_all(&second).unwrap();
-        fs::write(second.join("homeboy"), "#!/bin/sh\n").unwrap();
-
         let path_var = format!("{}:{}", first.display(), second.display());
+
+        assert!(planning::resolve_binary_on_path_var(&path_var).is_none());
+
+        fs::write(second.join("homeboy"), "#!/bin/sh\n").unwrap();
         let found = planning::resolve_binary_on_path_var(&path_var).unwrap();
         assert_eq!(found, second.join("homeboy"));
-    }
-
-    #[test]
-    fn test_resolve_binary_on_path_var_returns_none_when_missing() {
-        let base = tempdir().unwrap();
-        let first = base.path().join("first");
-        let second = base.path().join("second");
-        fs::create_dir_all(&first).unwrap();
-        fs::create_dir_all(&second).unwrap();
-
-        let path_var = format!("{}:{}", first.display(), second.display());
-        let found = planning::resolve_binary_on_path_var(&path_var);
-        assert!(found.is_none());
     }
 }

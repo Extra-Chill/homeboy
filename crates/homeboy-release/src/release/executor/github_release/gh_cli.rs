@@ -11,7 +11,7 @@ use homeboy_engine_primitives::command::{
 };
 use homeboy_engine_primitives::content_hash;
 use serde::Serialize;
-use sha2::{Digest, Sha256};
+use sha2::Digest;
 use std::collections::BTreeMap;
 use std::collections::HashSet;
 use std::io::{Read, Write};
@@ -927,8 +927,7 @@ fn metadata_fallback_error(
 ///
 /// The error distinguishes the three ways this can fail -- the `gh` invocation
 /// itself failed, no release matched the tag, or the matched record was not
-/// parseable release metadata -- because they demand different responses and
-/// were previously indistinguishable (all collapsed into `None`).
+/// parseable release metadata -- because they demand different responses.
 fn gh_draft_release_metadata(
     github: &GitHubRepo,
     config: &GithubConfig,
@@ -982,47 +981,6 @@ pub(crate) fn parse_listed_release_metadata(stdout: &str) -> Option<GitHubReleas
         .map(str::trim)
         .find(|line| !line.is_empty())
         .and_then(|line| serde_json::from_str(line).ok())
-}
-
-#[allow(
-    dead_code,
-    reason = "No production caller: release upload verification is asserted by this module's tests but is not wired into the publish path."
-)]
-pub(crate) fn verify_release_assets(
-    artifact_paths: &[String],
-    assets: &[GitHubReleaseAsset],
-) -> Result<(), String> {
-    for path in artifact_paths {
-        let metadata = std::fs::metadata(path)
-            .map_err(|error| format!("could not read release artifact '{path}': {error}"))?;
-        let name = std::path::Path::new(path)
-            .file_name()
-            .and_then(|name| name.to_str())
-            .ok_or_else(|| format!("release artifact '{path}' has no valid filename"))?;
-        let asset = assets
-            .iter()
-            .find(|asset| asset.name == name)
-            .ok_or_else(|| format!("GitHub Release is missing uploaded asset '{name}'"))?;
-        if asset.size != metadata.len() {
-            return Err(format!(
-                "GitHub Release asset '{name}' has size {}, expected {}",
-                asset.size,
-                metadata.len()
-            ));
-        }
-        if let Some(digest) = asset
-            .digest
-            .as_deref()
-            .and_then(|value| value.strip_prefix("sha256:"))
-        {
-            if file_sha256(path)? != digest {
-                return Err(format!(
-                    "GitHub Release asset '{name}' digest does not match uploaded artifact"
-                ));
-            }
-        }
-    }
-    Ok(())
 }
 
 pub(crate) fn verify_release_publications(
@@ -1339,8 +1297,8 @@ fn run_bounded_asset_download(
         std::thread::sleep(Duration::from_millis(10));
     };
     // Build the captured evidence BEFORE branching on the outcome: a failed
-    // streamed download never produces a `GhCommandOutput`, which is exactly why
-    // its stderr used to be flattened into a sentence and lost (#11135).
+    // streamed download never produces a `GhCommandOutput`, so its stderr
+    // would otherwise be flattened into a sentence and lost (#11135).
     let captured_stderr = || {
         let mut text = String::from_utf8_lossy(&diagnostics).to_string();
         if diagnostics_truncated {
@@ -1966,8 +1924,8 @@ mod tests {
             "HTTP 404: no release found"
         ));
 
-        // Everything else on a non-zero exit is a failure to ask. Each of these
-        // previously collapsed to "no release exists".
+        // Everything else on a non-zero exit is a failure to ask, never
+        // "no release exists".
         for stderr in [
             "error connecting to github.example.com\ncheck your internet connection",
             "dial tcp: lookup github.example.com: no such host",
@@ -2165,6 +2123,7 @@ mod tests {
     }
 
     use super::*;
+    use sha2::Sha256;
     use std::sync::mpsc;
 
     /// The list endpoint is the only REST surface that exposes a draft release:
@@ -3004,19 +2963,6 @@ mod tests {
     }
 
     #[test]
-    fn verifies_asset_name_size_and_digest() {
-        let dir = tempfile::tempdir().expect("tempdir");
-        let path = dir.path().join("asset.zip");
-        std::fs::write(&path, b"asset bytes").expect("write asset");
-        let digest = format!("sha256:{:x}", Sha256::digest(b"asset bytes"));
-        verify_release_assets(
-            &[path.display().to_string()],
-            &[remote_asset("asset.zip", 11, Some(digest))],
-        )
-        .expect("verified asset");
-    }
-
-    #[test]
     fn publishing_uses_durable_release_artifact_after_source_cleanup() {
         let dir = tempfile::tempdir().expect("tempdir");
         let durable = dir.path().join("durable.zip");
@@ -3126,20 +3072,6 @@ mod tests {
         assert_eq!(
             error,
             "release asset 'homeboy-x86_64-unknown-linux-gnu.tar.xz' is empty"
-        );
-    }
-
-    #[test]
-    fn verification_names_the_missing_uploaded_archive() {
-        let dir = tempfile::tempdir().expect("tempdir");
-        let path = dir.path().join("homeboy-x86_64-unknown-linux-gnu.tar.xz");
-        std::fs::write(&path, b"archive").expect("write archive");
-
-        let error = verify_release_assets(&[path.display().to_string()], &[])
-            .expect_err("remote archive is absent");
-        assert_eq!(
-            error,
-            "GitHub Release is missing uploaded asset 'homeboy-x86_64-unknown-linux-gnu.tar.xz'"
         );
     }
 
@@ -3632,8 +3564,8 @@ mod tests {
         assert!(structured.hints.is_empty());
     }
 
-    /// The `&[]` hole: a verification failure used to reach `upload_failed_result`
-    /// with its diagnostics dropped, so `error_details` was absent entirely.
+    /// A verification failure reaches `upload_failed_result` with its
+    /// diagnostics, so `error_details` is present.
     #[test]
     fn verification_failure_propagates_command_diagnostics() {
         let publication = ReleaseAssetPublication {
