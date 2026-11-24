@@ -530,7 +530,7 @@ fn run_discovery_uses_named_provenance_and_normalized_workspace_boundaries() {
 }
 
 #[test]
-fn run_discovery_walks_beyond_legacy_prefetch_prefix() {
+fn run_discovery_walks_beyond_the_prefetch_prefix() {
     with_isolated_home(|_home| {
         let _xdg = homeboy_core::test_support::EnvVarGuard::unset("XDG_DATA_HOME");
         let store = ObservationStore::open_initialized().expect("store");

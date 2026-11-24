@@ -295,8 +295,7 @@ pub(super) fn run(command: RunnerWorkspaceCommand) -> CmdResult<RunnerWorkspaceO
             runner::RunnerWorkspacePruneOptions {
                 apply: mutation.is_apply(),
                 // One named age floor shared with `homeboy cleanup --include
-                // remote-lab-workspaces`, which used to carry its own literal
-                // `24` beside this command's `default_value_t = 24` (#10316).
+                // remote-lab-workspaces` (#10316).
                 min_age_hours: min_age_hours.unwrap_or(cleanup::RUNNER_MIN_AGE_HOURS),
                 limit: limit.unwrap_or(cleanup::RUNNER_WORKSPACE_PAGE_LIMIT),
                 passes,

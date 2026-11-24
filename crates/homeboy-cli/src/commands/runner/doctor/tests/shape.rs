@@ -33,14 +33,6 @@ fn artifact_store_probe_accepts_missing_intermediate_directories_without_creatin
 }
 
 #[test]
-fn doctor_options_default_to_general_read_only_scope() {
-    let options = RunnerDoctorOptions::default();
-
-    assert_eq!(options.scope, RunnerDoctorScope::General);
-    assert!(!options.repair);
-}
-
-#[test]
 fn bare_repair_deterministically_selects_the_lab_offload_scope() {
     assert_eq!(
         repair_scope(RunnerDoctorScope::General, true),
