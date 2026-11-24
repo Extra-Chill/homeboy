@@ -19,6 +19,12 @@ pub const COOK_SUMMARY_FAILING_TEST_LIMIT: usize = 20;
 /// Bound on the gates the summary reports.
 pub const COOK_SUMMARY_GATE_LIMIT: usize = 32;
 
+/// Bound on the attempt lines the summary reports (the latest are kept).
+pub const COOK_SUMMARY_ATTEMPT_LIMIT: usize = 8;
+
+/// Bound on the characters of one attempt line.
+pub const COOK_SUMMARY_ATTEMPT_MAX_CHARS: usize = 256;
+
 /// Bound on the characters of `why_no_pr`.
 pub const COOK_SUMMARY_REASON_MAX_CHARS: usize = 512;
 
@@ -106,6 +112,12 @@ pub struct CookSummary {
     /// The base the candidate was built and verified on.
     pub base_sha: Option<String>,
     pub gates: Vec<CookSummaryGate>,
+    /// One line per Cook attempt, oldest first:
+    /// `attempt N: <candidate sha> · gates <verdicts> · <disposition>`, where
+    /// disposition is `published`, `superseded`, `discarded` or the latest
+    /// attempt's pending state (#18888).
+    #[serde(default)]
+    pub attempts: Vec<String>,
     pub pr_url: Option<String>,
     /// Why no pull request exists, as `<status>: <reason>`. Non-null whenever
     /// `pr_url` is null on a terminal run; null whenever `pr_url` is set.
@@ -137,6 +149,7 @@ impl CookSummary {
             head_sha: None,
             base_sha: None,
             gates: Vec::new(),
+            attempts: Vec::new(),
             pr_url,
             why_no_pr,
             delivery: Vec::new(),
@@ -157,6 +170,19 @@ impl CookSummary {
             }
         }
         self.gates.truncate(COOK_SUMMARY_GATE_LIMIT);
+        if self.attempts.len() > COOK_SUMMARY_ATTEMPT_LIMIT {
+            let excess = self.attempts.len() - COOK_SUMMARY_ATTEMPT_LIMIT;
+            self.attempts.drain(..excess);
+        }
+        for attempt in &mut self.attempts {
+            if attempt.chars().count() > COOK_SUMMARY_ATTEMPT_MAX_CHARS {
+                let kept: String = attempt
+                    .chars()
+                    .take(COOK_SUMMARY_ATTEMPT_MAX_CHARS - 3)
+                    .collect();
+                *attempt = format!("{kept}...");
+            }
+        }
         for gate in &mut self.gates {
             gate.failing_tests.truncate(COOK_SUMMARY_FAILING_TEST_LIMIT);
         }
@@ -175,6 +201,9 @@ impl CookSummary {
                 .max_by_key(|gate| gate.failing_tests.len())
             {
                 gate.failing_tests.pop();
+            } else if self.attempts.len() > 1 {
+                // Keep the latest attempt; drop the oldest history first.
+                self.attempts.remove(0);
             } else if self
                 .delivery
                 .last()
@@ -222,6 +251,7 @@ impl CookSummary {
             return Err("cook summary exceeds its delivery bounds".to_string());
         }
         if self.gates.len() > COOK_SUMMARY_GATE_LIMIT
+            || self.attempts.len() > COOK_SUMMARY_ATTEMPT_LIMIT
             || self
                 .gates
                 .iter()
@@ -271,6 +301,7 @@ mod tests {
                 failing_tests: vec!["a::b".to_string()],
                 bench_compare: None,
             }],
+            attempts: vec!["attempt 1: abc · gates cargo test=failed · discarded".to_string()],
             pr_url: None,
             why_no_pr: Some("candidate_recoverable: publication not attempted".to_string()),
             delivery: vec![CookDeliveryItem {
@@ -289,6 +320,7 @@ mod tests {
             "head_sha",
             "base_sha",
             "gates",
+            "attempts",
             "pr_url",
             "why_no_pr",
             "delivery",

@@ -553,3 +553,107 @@ fn patch_only_records_are_explicitly_non_recoverable() {
         assert_eq!(error.retryable, Some(false));
     });
 }
+
+fn write_tree(repo: &Path) -> String {
+    let output = Command::new("git")
+        .arg("write-tree")
+        .current_dir(repo)
+        .output()
+        .unwrap();
+    assert!(output.status.success());
+    String::from_utf8(output.stdout).unwrap().trim().to_string()
+}
+
+/// #18888: a superseded attempt's promotion left its candidate staged on the
+/// Cook base. The newer gated candidate promotes without a manual reset, and
+/// the superseded tree stays reachable through a ref.
+#[test]
+fn a_superseded_attempts_staged_candidate_is_snapshotted_and_released() {
+    fixture(|repo, candidate, store| {
+        std::fs::write(repo.join("earlier"), "attempt 1\n").unwrap();
+        git(repo, &["add", "."]);
+        git(repo, &["commit", "-m", "earlier attempt candidate"]);
+        let earlier = git_head(repo, "HEAD");
+        let earlier_tree = git_head(repo, "HEAD^{tree}");
+        git(
+            repo,
+            &["update-ref", "refs/homeboy/candidates/attempt-1", &earlier],
+        );
+        // The shape a promotion leaves: HEAD on the base, candidate staged.
+        git(repo, &["reset", "--soft", &candidate.base_sha]);
+        assert_eq!(write_tree(repo), earlier_tree);
+        let mut options = request(repo, Some(candidate.clone()));
+        options.source_run_id = Some("attempt-2".into());
+        let mut provider = FakePromotionWorkspaceProvider {
+            workspace_path: Some(repo.into()),
+            ..Default::default()
+        };
+        let report = promote_with_provider_and_checkpoint_in_observation_store(
+            options,
+            &mut provider,
+            &mut |_| Ok(()),
+            store,
+        )
+        .unwrap_or_else(|error| panic!("{error}"));
+        assert_eq!(
+            report.status,
+            super::super::AgentTaskPromotionStatus::Applied
+        );
+        let reference = "refs/homeboy/superseded-worktree/attempt-2";
+        assert_eq!(report.provenance["destination_residue"]["ref"], reference);
+        assert_eq!(
+            report.provenance["destination_residue"]["attributed_to"],
+            "refs/homeboy/candidates/attempt-1"
+        );
+        assert_eq!(
+            git_head(repo, &format!("{reference}^{{tree}}")),
+            earlier_tree
+        );
+        assert_eq!(git_head(repo, "HEAD"), candidate.base_sha);
+        assert_eq!(write_tree(repo), candidate.tree_sha);
+        assert!(!repo.join("earlier").exists());
+        assert_eq!(
+            std::fs::read_to_string(repo.join("dirty")).unwrap(),
+            "uncommitted\n"
+        );
+    });
+}
+
+/// Edits Homeboy cannot attribute to its own candidates still stop promotion,
+/// untouched, and the refusal names the snapshot that preserves them.
+#[test]
+fn unattributed_destination_edits_refuse_promotion_and_name_the_snapshot() {
+    fixture(|repo, candidate, store| {
+        std::fs::write(repo.join("user.txt"), "keep me\n").unwrap();
+        let mut options = request(repo, Some(candidate.clone()));
+        options.source_run_id = Some("attempt-2".into());
+        let mut provider = FakePromotionWorkspaceProvider {
+            workspace_path: Some(repo.into()),
+            ..Default::default()
+        };
+        let error = promote_with_provider_and_checkpoint_in_observation_store(
+            options,
+            &mut provider,
+            &mut |_| panic!("must not checkpoint"),
+            store,
+        )
+        .unwrap_err();
+        let reference = "refs/homeboy/superseded-worktree/attempt-2";
+        assert!(error.message.contains("must be clean"), "{error}");
+        assert!(error.message.contains(reference), "{error}");
+        assert_eq!(error.details["destination_snapshot_ref"], reference);
+        assert_eq!(error.details["promotion_pre_apply_refusal"], true);
+        assert_eq!(
+            std::fs::read_to_string(repo.join("user.txt")).unwrap(),
+            "keep me\n"
+        );
+        let shown = Command::new("git")
+            .args(["show", &format!("{reference}:user.txt")])
+            .current_dir(repo)
+            .output()
+            .unwrap();
+        assert_eq!(shown.stdout, b"keep me\n");
+        assert_eq!(git_head(repo, "HEAD"), candidate.base_sha);
+        assert!(!repo.join("dirty").exists());
+    });
+}

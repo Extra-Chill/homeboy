@@ -44,9 +44,9 @@ pub use capabilities::{
 pub use control_plane_ref::{ControlPlaneRef, ControlPlaneRefError};
 pub use cook_summary::{
     CookDeliveryItem, CookDeliveryItemStatus, CookSummary, CookSummaryBenchCompare,
-    CookSummaryGate, COOK_SUMMARY_DELIVERY_LIMIT, COOK_SUMMARY_DELIVERY_TEXT_MAX_CHARS,
-    COOK_SUMMARY_FAILING_TEST_LIMIT, COOK_SUMMARY_GATE_LIMIT, COOK_SUMMARY_KEY,
-    COOK_SUMMARY_MAX_BYTES, COOK_SUMMARY_REASON_MAX_CHARS, COOK_SUMMARY_SCHEMA,
+    CookSummaryGate, COOK_SUMMARY_ATTEMPT_LIMIT, COOK_SUMMARY_DELIVERY_LIMIT,
+    COOK_SUMMARY_DELIVERY_TEXT_MAX_CHARS, COOK_SUMMARY_FAILING_TEST_LIMIT, COOK_SUMMARY_GATE_LIMIT,
+    COOK_SUMMARY_KEY, COOK_SUMMARY_MAX_BYTES, COOK_SUMMARY_REASON_MAX_CHARS, COOK_SUMMARY_SCHEMA,
 };
 pub use event::{
     ControlPlaneEvent, ControlPlaneEventAppendRequest, ControlPlaneEventPage,
