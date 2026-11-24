@@ -99,7 +99,7 @@ fn adopted_source_never_executed(record: &agent_task_lifecycle::AgentTaskRunReco
         && record.artifact_refs.is_empty()
         && record.provider_handles.is_empty()
         && record.latest_executor_evidence.is_none()
-        && record.metadata["provider_executions_consumed"] == 0
+        && record.provider_executions_consumed() == 0
 }
 
 /// Read the AI-authored review form off an adopted candidate's terminal

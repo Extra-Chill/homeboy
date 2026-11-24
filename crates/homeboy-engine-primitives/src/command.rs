@@ -224,6 +224,9 @@ impl ExecutionOwner {
                     [stat.cpu_ticks, counter("rchar"), counter("wchar")],
                 );
             }
+            // The supervisor is the subreaper for only this command, so its
+            // tree is the root's tree plus every process the command orphaned
+            // (`(gate &)` double-forks), which it adopts. Those are owned work.
             let root = self.identity.root_pid;
             let mut activity = DescendantActivity::default();
             if include_root {
@@ -232,9 +235,12 @@ impl ExecutionOwner {
                 }
             }
             for (pid, _) in crate::process_table::descendants(
-                root,
+                self.identity.wait_pid,
                 processes.iter().map(|(pid, stat)| (*pid, stat.parent_pid)),
             ) {
+                if pid == root {
+                    continue;
+                }
                 if let Some((_, stat)) = processes.iter().find(|(candidate, _)| *candidate == pid) {
                     record(&mut activity, pid, stat);
                 }
@@ -4445,6 +4451,42 @@ mod tests {
         let mut reused = after;
         reused.started_at.1 += 1;
         assert!(!owned_identity_matches(&before, &reused));
+    }
+
+    /// A command that backgrounds work in a subshell orphans it to the
+    /// execution supervisor; that adopted work is still owned activity, so a
+    /// root that only sleeps while it runs is not silent.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn descendant_activity_counts_work_the_command_orphaned() {
+        let mut command = Command::new("/bin/sh");
+        command
+            .args(["-c", "(while :; do :; done &); sleep 10"])
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null());
+        let mut owner = ExecutionOwner::spawn(&mut command).expect("spawn supervised root");
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        let before = loop {
+            let activity = owner.descendant_activity();
+            if activity.counters.len() >= 2 {
+                break activity;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "orphaned busy loop never appeared: {:?}",
+                activity.counters
+            );
+            thread::sleep(Duration::from_millis(25));
+        };
+        thread::sleep(Duration::from_millis(300));
+        let after = owner.descendant_activity();
+        let _ = owner.drain_and_reap();
+        assert!(
+            after.advanced_since(&before),
+            "orphaned CPU-busy work must advance: {:?} -> {:?}",
+            before.counters,
+            after.counters
+        );
     }
 
     #[cfg(all(unix, not(target_os = "linux")))]

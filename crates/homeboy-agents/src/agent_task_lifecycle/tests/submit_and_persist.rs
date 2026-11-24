@@ -312,7 +312,7 @@ fn queued_lab_admission_projects_its_verified_existing_checkout() {
         scope["workspaces"][0]["working_directory"],
         json!(workspace)
     );
-    assert_eq!(record.metadata["provider_executions_consumed"], 0);
+    assert_eq!(record.provider_executions_consumed(), 0);
     let mut persisted = store.read_record("queued-lab").unwrap();
     assert_eq!(
         persisted.metadata["client_context"]["requester"],
@@ -955,11 +955,12 @@ fn retry_lineage_does_not_require_force_after_continuation_only_cook_successors(
             |_| Ok(json!({})),
         )
     };
-    let fail = |run_id: &str, provider_executions: u64| {
+    let fail = |run_id: &str, provider_executions: usize| {
         lifecycle_store
             .mutate_record(run_id, |record| {
                 record.metadata["cook_id"] = json!("cook-without-recipe");
-                record.metadata["provider_executions_consumed"] = json!(provider_executions);
+                record.metadata["provider_executions"] =
+                    json!(vec![json!({ "state": "succeeded" }); provider_executions]);
                 set_run_state(record, RunExecutionState::Failed);
                 true
             })

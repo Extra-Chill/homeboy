@@ -1214,7 +1214,8 @@ fn execution_step_interrupted_materialization_retains_the_reserved_child_and_pro
         // settle that child without creating a new initial admission.
         store
             .mutate_record(child, |record| {
-                record.metadata["provider_executions_consumed"] = serde_json::json!(1);
+                record.metadata["provider_executions"] =
+                    serde_json::json!([{ "state": "succeeded" }]);
                 true
             })
             .unwrap();
@@ -1251,7 +1252,8 @@ fn execution_step_delivery_leaves_controller_staged_lab_attempt_to_its_controlle
         // the attempt, before any runner job or accepted handoff exists.
         store
             .mutate_record(child, |record| {
-                record.metadata["provider_executions_consumed"] = serde_json::json!(1);
+                record.metadata["provider_executions"] =
+                    serde_json::json!([{ "state": "succeeded" }]);
                 record.metadata["lab_staging_controller_job_id"] =
                     serde_json::json!("controller-job");
                 true
@@ -1744,7 +1746,7 @@ fn service_run_loaded_plan_persists_durable_lifecycle() {
         assert_eq!(record.state(), RunExecutionState::Succeeded);
         assert_eq!(record.tasks[0].state(), ControlPlaneState::Succeeded);
         assert!(record.aggregate_path.is_some());
-        assert_eq!(record.metadata["provider_executions_consumed"], 1);
+        assert_eq!(record.provider_executions_consumed(), 1);
         assert_eq!(record.lifecycle.provider_runtime.len(), 1);
         assert_eq!(
             record.lifecycle.provider_runtime[0].state,
@@ -1806,7 +1808,7 @@ fn provider_execution_reservation_is_exactly_once_and_terminal() {
         .expect("terminal cancellation recorded");
 
         let record = lifecycle_status("provider-reservation").expect("durable record");
-        assert_eq!(record.metadata["provider_executions_consumed"], 1);
+        assert_eq!(record.provider_executions_consumed(), 1);
         assert_eq!(
             record.metadata["provider_executions"][0]["state"],
             "cancelled"
@@ -1901,7 +1903,7 @@ fn concurrent_schedulers_dispatch_one_reserved_provider_execution() {
 
         let record = lifecycle_status("concurrent-provider-reservation").expect("durable record");
         assert_eq!(calls.load(Ordering::SeqCst), 1);
-        assert_eq!(record.metadata["provider_executions_consumed"], 1);
+        assert_eq!(record.provider_executions_consumed(), 1);
     });
 }
 
@@ -2226,7 +2228,7 @@ fn service_persists_timed_out_run_record_and_evidence_refs() {
         assert_eq!(record.tasks[0].state(), ControlPlaneState::TimedOut);
         assert_eq!(record.totals.as_ref().expect("totals").timed_out, 1);
         assert!(record.aggregate_path.is_some());
-        assert_eq!(record.metadata["provider_executions_consumed"], 1);
+        assert_eq!(record.provider_executions_consumed(), 1);
         assert_eq!(
             record.metadata["provider_executions"][0]["state"],
             "timed_out"
@@ -3590,7 +3592,6 @@ fn upgrade_admission_repairs_ownerless_queued_runner_record_after_zero_live_reco
             record.metadata["cook_id"] = serde_json::json!(cook_id);
             record.metadata["runner_id"] = serde_json::json!("homeboy-lab");
             record.metadata["runner_job_id"] = serde_json::json!("stale-zero-live-job");
-            record.metadata["provider_executions_consumed"] = serde_json::json!(0);
             record
                 .metadata
                 .as_object_mut()
@@ -3671,7 +3672,6 @@ fn control_plane_reconciliation_completes_its_effect_across_runner_terminal_proj
             record.metadata["runner_execution_context"] = execution_context
                 .evidence_record()
                 .expect("execution context evidence");
-            record.metadata["provider_executions_consumed"] = serde_json::json!(0);
             record
                 .metadata
                 .as_object_mut()
@@ -3976,7 +3976,6 @@ fn upgrade_admission_keeps_ownerless_queued_runner_record_on_runner_plane_withou
         agent_task_lifecycle::rewrite_record_for_test(run_id, |record| {
             record.metadata["runner_id"] = serde_json::json!("homeboy-lab");
             record.metadata["runner_job_id"] = serde_json::json!("unverified-job");
-            record.metadata["provider_executions_consumed"] = serde_json::json!(0);
             record
                 .metadata
                 .as_object_mut()

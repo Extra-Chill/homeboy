@@ -4130,7 +4130,7 @@ fn cook_attempt_execution_in_store(
         && record.artifact_refs.is_empty()
         && record.provider_handles.is_empty()
         && record.latest_executor_evidence.is_none()
-        && record.metadata["provider_executions_consumed"] == 0;
+        && record.provider_executions_consumed() == 0;
     let described_task = plan
         .tasks
         .iter()
@@ -5079,16 +5079,7 @@ pub(crate) fn cook_failure_context_with_probe_policy(
         // provider execution again when an earlier preflight failure used the
         // Cook ID as its run ID.
         .filter_map(|attempt| lifecycle_store.read_record(&attempt.run_id).ok())
-        .map(|record| {
-            record.metadata["provider_executions_consumed"]
-                .as_u64()
-                .unwrap_or_else(|| {
-                    record.metadata["provider_executions"]
-                        .as_array()
-                        .map(|executions| executions.len() as u64)
-                        .unwrap_or_default()
-                })
-        })
+        .map(|record| record.provider_executions_consumed())
         .sum();
     let lifecycle_state = record
         .as_ref()
@@ -5786,10 +5777,7 @@ fn dirty_candidate_adoption_recovery_actions(
         .plan
         .tasks
         .first()?;
-    if record.metadata["provider_executions_consumed"]
-        .as_u64()
-        .unwrap_or_default()
-        != 0
+    if record.provider_executions_consumed() != 0
         || record.metadata["pre_execution_failure"]["details"]["dirty_candidate_adoption"]["reason"]
             != "first_provider_admission"
     {

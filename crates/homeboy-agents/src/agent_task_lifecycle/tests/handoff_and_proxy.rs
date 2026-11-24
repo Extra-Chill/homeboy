@@ -1531,7 +1531,7 @@ fn accepted_handoff_adopts_a_job_found_on_another_known_generation() {
 
         assert_eq!(reconciled.state(), RunExecutionState::Running);
         assert_eq!(reconciled.metadata["runner_job_status"], "running");
-        assert_eq!(reconciled.metadata["provider_executions_consumed"], 0);
+        assert_eq!(reconciled.provider_executions_consumed(), 0);
         assert!(reconciled.provider_handles.is_empty());
     });
 }
@@ -1567,7 +1567,7 @@ fn reconcile_accepted_handoff_fails_after_typed_ledger_absence() {
             terminal.metadata["reconciliation"]["reason"],
             "runner_job_absent"
         );
-        assert_eq!(terminal.metadata["provider_executions_consumed"], 0);
+        assert_eq!(terminal.provider_executions_consumed(), 0);
         assert!(terminal.provider_handles.is_empty());
         let aggregate = read_aggregate(run_id).expect("failure aggregate");
         assert!(aggregate.outcomes[0]
@@ -1677,7 +1677,7 @@ fn accepted_handoff_does_not_terminalize_unconfirmed_generation_absence() {
 
         assert_eq!(retained.state(), RunExecutionState::Running);
         assert!(retained.metadata.get("lost_accepted_runner_job").is_none());
-        assert_eq!(retained.metadata["provider_executions_consumed"], 0);
+        assert_eq!(retained.provider_executions_consumed(), 0);
         assert!(retained.provider_handles.is_empty());
     });
 }

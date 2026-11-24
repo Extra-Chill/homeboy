@@ -71,7 +71,8 @@ fn missing_transport_child_projection_resolves_without_recursion_or_provider_dis
                 record.set_state_for_test(RunExecutionState::Failed);
                 record.metadata["cook_id"] = serde_json::json!(cook_id);
                 record.metadata["cook_attempt"] = serde_json::json!(1);
-                record.metadata["provider_executions_consumed"] = serde_json::json!(1);
+                record.metadata["provider_executions"] =
+                    serde_json::json!([{ "state": "succeeded" }]);
                 true
             })
             .expect("terminalize transport attempt");
@@ -306,7 +307,6 @@ fn exercise_historical_runtime_retry(compatible_binary: &str, expected_identity_
         .mutate_record(&run_id, |record| {
             record.metadata["cook_id"] = serde_json::json!(cook_id);
             record.metadata["cook_attempt"] = serde_json::json!(1);
-            record.metadata["provider_executions_consumed"] = serde_json::json!(0);
             true
         })
         .expect("bind source lifecycle record to Cook");
@@ -504,7 +504,7 @@ fn exercise_historical_runtime_retry(compatible_binary: &str, expected_identity_
     let completed = store
         .read_record(&retry_id)
         .expect("read admitted provider attempt");
-    assert_eq!(completed.metadata["provider_executions_consumed"], 1);
+    assert_eq!(completed.provider_executions_consumed(), 1);
 }
 
 fn bounded_output(command: &mut Command, timeout: Duration) -> Output {

@@ -2366,7 +2366,6 @@ where
         "task_count": plan.tasks.len(),
         "max_concurrency": plan.options.max_concurrency,
         "provider_run_ids": [],
-        "provider_executions_consumed": 0,
         "controller_identity": homeboy_core::build_identity::current().display,
         "lifecycle_schema": RUN_LIFECYCLE_RECORD_SCHEMA,
         "note": "submitted tasks are durable; provider run ids are recorded after an executor returns them as generic artifacts or evidence refs"
@@ -3114,7 +3113,6 @@ pub fn defer_cook_runtime_admission_in_store(
             "schema": "homeboy/cook-runtime-admission/v1",
             "state": "queued",
             "owner": owner,
-            "provider_executions_consumed": 0,
         });
         record.updated_at = Some(now.clone());
         reset_for_requeue(record);
@@ -3157,7 +3155,7 @@ pub fn reserve_provider_execution_in_store(
     let mut reservation = ProviderExecutionReservation::AlreadyReserved;
     lifecycle_store.mutate_record(&run_id, |record| {
         let started_at = now_timestamp();
-        let consumed = {
+        {
             let metadata = record.ensure_metadata_object();
             let executions = metadata
                 .entry("provider_executions".to_string())
@@ -3186,11 +3184,7 @@ pub fn reserve_provider_execution_in_store(
                 "owner_identity": format!("{run_id}:{execution_key}"),
                 "execution_identity": format!("{run_id}:{execution_key}:execution"),
             }));
-            let consumed = executions.len();
-            metadata.insert("provider_executions_consumed".to_string(), json!(consumed));
-            consumed
-        };
-        let _ = consumed;
+        }
         // Advance the heartbeat to provider-execution start for a local
         // (in-process) cook. Before this, a local cook left the heartbeat frozen
         // at submission time for the entire provider run, so operators could not
@@ -6107,7 +6101,7 @@ fn successor_requires_force(record: &AgentTaskRunRecord) -> bool {
     {
         return true;
     }
-    record.metadata["provider_executions_consumed"].as_u64() != Some(0)
+    record.provider_executions_consumed() != 0
 }
 
 /// `recover` reaches this refusal too, and it takes no `--force`, so the

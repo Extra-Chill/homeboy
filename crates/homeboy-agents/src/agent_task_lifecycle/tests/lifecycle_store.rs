@@ -554,3 +554,15 @@ fn cook_index_lives_only_in_the_store_and_survives_reopen() {
         homeboy_core::ErrorCode::ValidationInvalidArgument
     );
 }
+
+#[test]
+fn provider_executions_consumed_counts_the_execution_ledger() {
+    let mut record = AgentTaskRunRecord::new_queued("run", "plan", "plan.json", "now");
+    assert_eq!(record.provider_executions_consumed(), 0);
+    record.metadata = json!({ "provider_executions": [] });
+    assert_eq!(record.provider_executions_consumed(), 0);
+    record.metadata = json!({
+        "provider_executions": [{ "state": "succeeded" }, { "state": "running" }],
+    });
+    assert_eq!(record.provider_executions_consumed(), 2);
+}
