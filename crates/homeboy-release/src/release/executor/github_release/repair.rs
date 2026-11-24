@@ -1,7 +1,7 @@
 //! Manual-recovery command builders, hints, and logging for failed releases.
 
 use homeboy_core::component::GithubConfig;
-use homeboy_core::engine::shell::quote_arg;
+use homeboy_core::error::posix_quote_arg;
 use homeboy_core::git::release_download::GitHubRepo;
 
 use super::gh_cli::{gh_env_hint, gh_env_prefix, github_cli_env, safe_filename};
@@ -121,17 +121,21 @@ fn github_release_repair_commands_with_env(
     let mut generate_notes = vec![
         format!("{}gh", env_prefix),
         "api".to_string(),
-        quote_arg(&endpoint),
+        posix_quote_arg(&endpoint),
         "-f".to_string(),
-        quote_arg(&format!("tag_name={}", tag)),
+        posix_quote_arg(&format!("tag_name={}", tag)),
     ];
     if let Some(previous) = previous_tag {
         generate_notes.push("-f".to_string());
-        generate_notes.push(quote_arg(&format!("previous_tag_name={}", previous)));
+        generate_notes.push(posix_quote_arg(&format!("previous_tag_name={}", previous)));
     }
     generate_notes.push("--jq".to_string());
-    generate_notes.push(quote_arg(".body"));
-    let regenerate_command = format!("{} > {}", generate_notes.join(" "), quote_arg(&notes_file));
+    generate_notes.push(posix_quote_arg(".body"));
+    let regenerate_command = format!(
+        "{} > {}",
+        generate_notes.join(" "),
+        posix_quote_arg(&notes_file)
+    );
     // The notes-generation step is only meaningful when there is no persisted
     // exact body. With a persisted body, regenerating would risk a divergent
     // result, so the "generate" step becomes a no-op note that reuses the file.
@@ -148,41 +152,41 @@ fn github_release_repair_commands_with_env(
         format!("{}gh", env_prefix),
         "release".to_string(),
         "create".to_string(),
-        quote_arg(tag),
+        posix_quote_arg(tag),
         "--title".to_string(),
-        quote_arg(tag),
+        posix_quote_arg(tag),
         "--notes-file".to_string(),
-        quote_arg(&notes_file),
+        posix_quote_arg(&notes_file),
     ];
     for path in artifact_paths {
-        create.push(quote_arg(path));
+        create.push(posix_quote_arg(path));
     }
     if let Some(latest) = release_latest_arg(config) {
         create.push(latest.to_string());
     }
     create.push("-R".to_string());
-    create.push(quote_arg(&repo_flag));
+    create.push(posix_quote_arg(&repo_flag));
 
     let mut upload = vec![
         format!("{}gh", env_prefix),
         "release".to_string(),
         "upload".to_string(),
-        quote_arg(tag),
+        posix_quote_arg(tag),
     ];
     for path in artifact_paths {
-        upload.push(quote_arg(path));
+        upload.push(posix_quote_arg(path));
     }
     upload.extend([
         "--clobber".to_string(),
         "-R".to_string(),
-        quote_arg(&repo_flag),
+        posix_quote_arg(&repo_flag),
     ]);
     let publish_command = format!(
         "{}gh {}",
         env_prefix,
         publish_release_args(tag, &repo_flag, config)
             .iter()
-            .map(|arg| quote_arg(arg))
+            .map(|arg| posix_quote_arg(arg))
             .collect::<Vec<_>>()
             .join(" ")
     );
@@ -190,8 +194,8 @@ fn github_release_repair_commands_with_env(
     let view_command = format!(
         "{}gh release view {} -R {}",
         env_prefix,
-        quote_arg(tag),
-        quote_arg(&repo_flag)
+        posix_quote_arg(tag),
+        posix_quote_arg(&repo_flag)
     );
     let env_hint = gh_env_hint(github, &env);
 

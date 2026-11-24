@@ -4281,7 +4281,7 @@ fn projected_cook_recovery(
                 && crate::agent_task_lifecycle::is_unmaterialized_cook_admission(record))
             .then(|| record.run_id.clone())
         })?;
-    let quote = homeboy_core::engine::shell::quote_arg;
+    let quote = homeboy_core::error::posix_quote_arg;
     // The step belongs to the Cook, not this attempt: a superseded attempt
     // names the same `recover <cook>` command, so it projects the Cook's plan.
     let Ok(plan) = crate::agent_task_service::plan_cook_recovery_recorded(&cook_id) else {

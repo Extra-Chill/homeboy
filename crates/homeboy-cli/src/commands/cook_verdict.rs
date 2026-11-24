@@ -17,7 +17,7 @@
 //! so every surface reports the same answer from the same read.
 
 use homeboy::agents::agent_task_service::CookDeliveryBlockerCode;
-use homeboy::core::engine::shell::quote_arg;
+use homeboy::core::error::posix_quote_arg;
 use homeboy::core::observation::RunRecord;
 use homeboy_control_plane_contract::{ControlPlaneBlocker, ControlPlaneRun, ControlPlaneState};
 use serde::Serialize;
@@ -116,8 +116,8 @@ pub(crate) fn cook_verdict(run: &ControlPlaneRun) -> CookVerdict {
         inherited_failures: run.inherited_failures,
         gates,
         next_action,
-        status_command: format!("homeboy agent-task status {}", quote_arg(&run_id)),
-        diagnose_command: format!("homeboy agent-task diagnose {}", quote_arg(&run_id)),
+        status_command: format!("homeboy agent-task status {}", posix_quote_arg(&run_id)),
+        diagnose_command: format!("homeboy agent-task diagnose {}", posix_quote_arg(&run_id)),
         run_id,
     }
 }

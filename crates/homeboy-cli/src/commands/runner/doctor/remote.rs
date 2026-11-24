@@ -1,4 +1,5 @@
 use super::*;
+use homeboy::core::error::posix_quote_arg;
 use types::*;
 
 pub fn report(
@@ -413,7 +414,7 @@ pub fn report(
             replay_command: format!(
                 "homeboy ssh {} -- {}",
                 server.id,
-                shell::quote_arg(&probe.command)
+                posix_quote_arg(&probe.command)
             ),
         })
         .collect::<Vec<_>>();
@@ -423,7 +424,7 @@ pub fn report(
             command: "daemon.exec".to_string(),
             replay_command: format!(
                 "homeboy runner doctor {} --scope lab-offload",
-                shell::quote_arg(runner_id)
+                posix_quote_arg(runner_id)
             ),
         });
     }
@@ -514,7 +515,7 @@ pub(super) fn unreachable_report(
     server: &Server,
     output: homeboy::core::server::CommandOutput,
 ) -> RunnerDoctorOutput {
-    let recovery_command = format!("homeboy server connect {}", shell::quote_arg(&server.id));
+    let recovery_command = format!("homeboy server connect {}", posix_quote_arg(&server.id));
     RunnerDoctorOutput {
         variant: "doctor",
         command: "runner.doctor",

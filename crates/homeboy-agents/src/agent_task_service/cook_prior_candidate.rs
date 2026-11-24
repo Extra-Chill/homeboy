@@ -259,7 +259,7 @@ pub(crate) fn preserve_prior_attempt_candidate(
     let remaining = dirty_paths(&owner.path)?;
     let recovery_command = format!(
         "git -C {} cherry-pick --no-commit {}",
-        homeboy_engine_primitives::shell::quote_arg(&owner.path.display().to_string()),
+        homeboy_core::error::posix_quote_arg(&owner.path.display().to_string()),
         reference
     );
     if !remaining.is_empty() {

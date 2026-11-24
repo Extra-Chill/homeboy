@@ -1,3 +1,4 @@
+use homeboy_core::error::posix_quote_arg;
 use homeboy_engine_primitives::content_hash;
 use std::fs;
 use std::io::{Read, Write};
@@ -5,7 +6,6 @@ use std::io::{Read, Write};
 use serde_json::json;
 use sha2::Digest;
 
-use homeboy_core::engine::shell;
 use homeboy_core::error::{Error, ErrorCode, Result};
 use homeboy_core::server::{self, SshClient};
 use homeboy_lab_contract::lab::transport_failure::provider_evidence_io_error;
@@ -112,7 +112,7 @@ impl RunnerFileTransfer {
     pub(crate) fn ensure_directory(&self, remote_dir: &str) -> Result<()> {
         let mkdir = self
             .client
-            .execute(&format!("mkdir -p {}", shell::quote_arg(remote_dir)));
+            .execute(&format!("mkdir -p {}", posix_quote_arg(remote_dir)));
         if !mkdir.success {
             return Err(self.operation_error("mkdir", remote_dir, mkdir.stderr));
         }
@@ -122,7 +122,7 @@ impl RunnerFileTransfer {
     pub(crate) fn ensure_private_directory(&self, remote_dir: &str) -> Result<()> {
         let command = format!(
             "umask 077; dir={}; mkdir -p -- \"$dir\" && test ! -L \"$dir\" && test -O \"$dir\" && mode=$(stat -c %a -- \"$dir\" 2>/dev/null || stat -f %Lp \"$dir\") && test \"$mode\" = 700",
-            shell::quote_arg(remote_dir),
+            posix_quote_arg(remote_dir),
         );
         let result = self.client.execute(&command);
         if !result.success {
@@ -147,7 +147,7 @@ impl RunnerFileTransfer {
         if !verify.success {
             let _ = self
                 .client
-                .execute(&format!("rm -f {}", shell::quote_arg(remote_path)));
+                .execute(&format!("rm -f {}", posix_quote_arg(remote_path)));
             return Err(self.operation_error("upload verify", remote_path, verify.stderr));
         }
         Ok(())
@@ -220,7 +220,7 @@ impl RunnerFileTransfer {
         self.client
             .execute(&format!(
                 "test -f {}",
-                shell::quote_arg(&format!("{remote}.complete"))
+                posix_quote_arg(&format!("{remote}.complete"))
             ))
             .success
     }
@@ -228,8 +228,8 @@ impl RunnerFileTransfer {
     pub(crate) fn finish_gate_input(&self, remote: &str) -> Result<()> {
         let result = self.client.execute(&format!(
             "chmod -R a-w {} && touch {}",
-            shell::quote_arg(remote),
-            shell::quote_arg(&format!("{remote}.complete"))
+            posix_quote_arg(remote),
+            posix_quote_arg(&format!("{remote}.complete"))
         ));
         if !result.success {
             return Err(self.operation_error("seal gate input", remote, result.stderr));
@@ -260,9 +260,9 @@ impl RunnerFileTransfer {
             let publish = self.client.execute(&format!(
                 "{} && chmod 600 {} && mv -f {} {}",
                 remote_digest_check(&temp_path, expected_sha256, expected_size),
-                shell::quote_arg(&temp_path),
-                shell::quote_arg(&temp_path),
-                shell::quote_arg(remote_path),
+                posix_quote_arg(&temp_path),
+                posix_quote_arg(&temp_path),
+                posix_quote_arg(remote_path),
             ));
             if publish.success {
                 Ok(())
@@ -273,7 +273,7 @@ impl RunnerFileTransfer {
         if result.is_err() {
             let _ = self
                 .client
-                .execute(&format!("rm -f {}", shell::quote_arg(&temp_path)));
+                .execute(&format!("rm -f {}", posix_quote_arg(&temp_path)));
         }
         result
     }
@@ -300,10 +300,10 @@ impl RunnerFileTransfer {
 /// Remote shell check that `path` holds exactly `size` bytes hashing to
 /// `sha256`.
 fn remote_digest_check(path: &str, sha256: &str, size: u64) -> String {
-    let path = shell::quote_arg(path);
+    let path = posix_quote_arg(path);
     format!(
         "test \"$( (sha256sum {path} 2>/dev/null || shasum -a 256 {path}) | awk '{{print $1}}')\" = {} && test \"$(wc -c < {path})\" -eq {size}",
-        shell::quote_arg(sha256),
+        posix_quote_arg(sha256),
     )
 }
 

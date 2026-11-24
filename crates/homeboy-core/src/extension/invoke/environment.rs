@@ -386,7 +386,7 @@ pub(crate) fn build_exec_env(
     }
     // The startup-recorded `current_exe()`: it still names the installed binary
     // after an upgrade replaces the running image.
-    if let Ok(executable) = homeboy_core::daemon::daemon_launchable_executable() {
+    if let Ok(executable) = homeboy_core::daemon::launchable_executable() {
         env.push((
             runtime_helper::RUNTIME_EXECUTABLE_ENV.to_string(),
             executable.to_string_lossy().to_string(),

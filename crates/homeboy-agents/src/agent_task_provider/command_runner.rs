@@ -13,6 +13,7 @@ use crate::agent_task_executor_evidence::{
 use crate::agent_task_process_containment::{
     contained_group_recovery_commands, AgentTaskProcessContainment, AgentTaskProcessSupervisor,
 };
+use homeboy_core::error::posix_quote_arg;
 use std::collections::BTreeMap;
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
@@ -3166,10 +3167,7 @@ fn agent_tool_dispatch_command() -> String {
     let current_exe = std::env::current_exe()
         .map(|path| path.to_string_lossy().to_string())
         .expect("current executable path is required for agent tool dispatch command");
-    format!(
-        "{} agent-task tool dispatch",
-        shell::quote_arg(&current_exe)
-    )
+    format!("{} agent-task tool dispatch", posix_quote_arg(&current_exe))
 }
 
 pub(super) fn failure_outcome(

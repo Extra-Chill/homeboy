@@ -1,10 +1,10 @@
 use chrono::{DateTime, Utc};
+use homeboy_core::error::posix_quote_arg;
 use serde::ser::{SerializeStruct, Serializer};
 use serde::{Deserialize, Serialize};
 
 use homeboy_core::daemon::DaemonFreshnessReport;
 
-use homeboy_core::engine::shell;
 use homeboy_core::error::{ActionSafety, ExecutableAction};
 use homeboy_core::redaction::redact_argv_shell_display;
 
@@ -1967,7 +1967,7 @@ impl RunnerStaleDaemonWarning {
             self.mismatch_predicate = "immutable_build_identity(active_daemon_control_plane_build_identity) && immutable_build_identity(job_command_binary_build_identity) == false";
             self.message = format!(
                 "connected runner daemon build identity could not be verified against configured executable `{configured_executable}`; run `{} self identity` on the runner and ensure it reports `git_commit` or an exact `display`, then run recovery_commands if needed",
-                shell::quote_arg(configured_executable),
+                posix_quote_arg(configured_executable),
             );
             self.set_recovery(recovery_action(runner_id));
         }

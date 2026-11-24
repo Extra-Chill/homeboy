@@ -1,5 +1,6 @@
 use super::*;
 use crate::session::RunnerConnectFailureEvidence;
+use homeboy_core::error::posix_quote_arg;
 use std::path::{Path, PathBuf};
 use std::time::Instant;
 
@@ -1996,7 +1997,7 @@ pub(super) fn failed_connect(
             failure_kind: Some(failure_kind.clone()),
             failure_message: Some(failure_message),
             failure_evidence: Some(RunnerConnectFailureEvidence {
-                recovery_command: format!("homeboy runner connect {}", shell::quote_arg(runner_id)),
+                recovery_command: format!("homeboy runner connect {}", posix_quote_arg(runner_id)),
                 classification: match failure_kind {
                     RunnerFailureKind::SshFailure => "ssh".to_string(),
                     RunnerFailureKind::MissingRemoteHomeboy => "version".to_string(),
@@ -2072,12 +2073,12 @@ fn transport_unreachable_message(server_id: &str, host: &str, detail: &str) -> S
     let remedy = if host.parse::<std::net::IpAddr>().is_ok() {
         format!(
             "A numeric DHCP address is not a stable location. Set a stable hostname or a DHCP reservation with `homeboy server set {} --json '{{\"host\":\"<hostname>\"}}'`, then reconnect.",
-            shell::quote_arg(server_id)
+            posix_quote_arg(server_id)
         )
     } else {
         format!(
             "Confirm the configured host still resolves. Update it with `homeboy server set {} --json '{{\"host\":\"<hostname>\"}}'` if it does not, then reconnect.",
-            shell::quote_arg(server_id)
+            posix_quote_arg(server_id)
         )
     };
     format!(

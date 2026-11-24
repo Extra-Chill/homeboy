@@ -488,7 +488,7 @@ fn render_replay_command(command: &str, env: &[FuzzReplayEnv], args: &[String]) 
         if let Some(value) = env_value(env, env_name) {
             rendered = rendered.replace(
                 &format!("{{{placeholder}}}"),
-                &homeboy::core::engine::shell::quote_arg(value),
+                &homeboy::core::error::posix_quote_arg(value),
             );
         }
     }

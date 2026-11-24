@@ -15,10 +15,10 @@
 //! runner workspace root, before the executor starts. No new provider knowledge
 //! or framework-specific logic is introduced here; detection stays in `deps.rs`.
 
+use homeboy_core::error::posix_quote_arg;
 use serde::Serialize;
 
 use homeboy_core::deps;
-use homeboy_core::engine::shell;
 use homeboy_core::{Error, Result};
 
 use super::*;
@@ -387,7 +387,7 @@ fn hydration_cache(
             .chain(shell_tool)
             .chain(std::iter::once(step.provider_id.as_str()))
         {
-            let program = shell::quote_arg(program);
+            let program = posix_quote_arg(program);
             tools.push(format!(
                 "command -v {program}; {program} --version 2>/dev/null || true"
             ));
@@ -401,12 +401,12 @@ fn hydration_cache(
             let relative = path
                 .strip_prefix(remote_path)
                 .map_err(|_| Error::internal_unexpected("hydration output escaped workspace"))?;
-            outputs.push(shell::quote_arg(&relative.display().to_string()));
+            outputs.push(posix_quote_arg(&relative.display().to_string()));
         }
     }
     let prefix = format!(
         "cache={}; toolchain=$( (uname -sm; {}) | shasum -a 256 | awk '{{print $1}}'); archive=\"$cache/{identity}-$toolchain.tar\"; ",
-        shell::quote_arg(&format!("{}/_dependency_cache/hydration", root.trim_end_matches('/'))),
+        posix_quote_arg(&format!("{}/_dependency_cache/hydration", root.trim_end_matches('/'))),
         tools.join("; "),
     );
     let checks = declared_output_checks(remote_path, plan)?.join(" && ");
@@ -478,8 +478,8 @@ fn restore_controller_dependency_package_with_transfer(
     let output_checks = declared_output_checks(remote_path, plan)?.join(" && ");
     let verify_and_restore = format!(
         "test \"$(wc -c < {archive})\" -le {max} && test \"$(shasum -a 256 {archive} | awk '{{print $1}}')\" = {sha} && unzip -oq {archive} -d {workspace} && {output_checks}",
-        archive = shell::quote_arg(&archive), max = super::dependency_package::MAX_PACKAGE_BYTES,
-        sha = shell::quote_arg(&package.sha256), workspace = shell::quote_arg(remote_path),
+        archive = posix_quote_arg(&archive), max = super::dependency_package::MAX_PACKAGE_BYTES,
+        sha = posix_quote_arg(&package.sha256), workspace = posix_quote_arg(remote_path),
     );
     let (_, exit_code) = exec(
         runner_id,
@@ -512,7 +512,7 @@ fn prepared_source_view_is_ready(
     };
     let mut checks = vec![format!(
         "test -f {}",
-        shell::quote_arg(
+        posix_quote_arg(
             &homeboy_lab_contract::lab::handoff::runner_workspace_prepared_source_marker_path(
                 remote_path
             )
@@ -563,12 +563,12 @@ fn declared_output_checks(
                 deps::DependencyInstallOutputKind::File => "-f",
                 deps::DependencyInstallOutputKind::Directory => "-d",
             };
-            checks.push(format!("test {predicate} {}", shell::quote_arg(&path)));
+            checks.push(format!("test {predicate} {}", posix_quote_arg(&path)));
             // An existing but empty dependency directory is not evidence of
             // an installed dependency tree (prepared-source snapshots can
             // retain the directory while excluding its contents).
             if output.kind == deps::DependencyInstallOutputKind::Directory {
-                checks.push(format!("test -n \"$(ls -A {})\"", shell::quote_arg(&path)));
+                checks.push(format!("test -n \"$(ls -A {})\"", posix_quote_arg(&path)));
             }
         }
     }
@@ -638,7 +638,7 @@ fn runner_hydration_command(invocation: &deps::DependencyInstallInvocation) -> R
                 .iter()
                 .enumerate()
                 .flat_map(|(index, value)| {
-                    let mut value = vec![shell::quote_arg(value)];
+                    let mut value = vec![posix_quote_arg(value)];
                     if index == *entrypoint_index {
                         value.insert(0, "\"$entrypoint\"".to_string());
                     }
@@ -649,9 +649,9 @@ fn runner_hydration_command(invocation: &deps::DependencyInstallInvocation) -> R
                 .join(" ");
             let command = format!(
                 "extension_root=\"${{HOME}}/.config/homeboy/extensions/\"{}; entrypoint=\"$extension_root\"/{}; if test ! -f \"$entrypoint\"; then printf '%s\\n' {} >&2; exit 127; fi; exec {}",
-                shell::quote_arg(extension_id),
-                shell::quote_arg(entrypoint),
-                shell::quote_arg(&format!(
+                posix_quote_arg(extension_id),
+                posix_quote_arg(entrypoint),
+                posix_quote_arg(&format!(
                     "Lab dependency hydration requires runner-local extension `{extension_id}` entrypoint `{entrypoint}`. Install or refresh that extension on the runner."
                 )),
                 resolved_argv,

@@ -273,8 +273,8 @@ fn plan_attach_path_selection(
     let deploy_command = |component_id: &str| {
         format!(
             "homeboy deploy {} {}",
-            crate::engine::shell::quote_arg(project_id),
-            crate::engine::shell::quote_arg(component_id)
+            crate::error::posix_quote_arg(project_id),
+            crate::error::posix_quote_arg(component_id)
         )
     };
     let next_actions = match deployable_ids.as_slice() {
@@ -318,8 +318,8 @@ pub fn attach_component_paths_report(
     for (index, input) in inputs.into_iter().enumerate() {
         let attempted_command = format!(
             "homeboy project components attach-path {} {}",
-            crate::engine::shell::quote_arg(project_id),
-            crate::engine::shell::quote_arg(&input.path)
+            crate::error::posix_quote_arg(project_id),
+            crate::error::posix_quote_arg(&input.path)
         );
         let evidence_ref = format!("#/data/components/batch/items/{index}");
         let (status, component_id, skip_reason, error) = if stopped {
@@ -1105,7 +1105,7 @@ mod tests {
                 command.as_str(),
                 format!(
                     "homeboy project components attach-path 'site with spaces' {}",
-                    crate::engine::shell::quote_arg(&component.to_string_lossy())
+                    crate::error::posix_quote_arg(&component.to_string_lossy())
                 )
             );
             assert!(command.contains("'\\''"));

@@ -6,9 +6,9 @@ use std::process::Command;
 fn git(path: &Path, args: &[&str]) -> Result<String> {
     let command = format!(
         "git -C {} {}",
-        crate::engine::shell::quote_arg(&path.display().to_string()),
+        crate::error::posix_quote_arg(&path.display().to_string()),
         args.iter()
-            .map(|arg| crate::engine::shell::quote_arg(arg))
+            .map(|arg| crate::error::posix_quote_arg(arg))
             .collect::<Vec<_>>()
             .join(" ")
     );

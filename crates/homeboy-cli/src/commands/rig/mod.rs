@@ -7,7 +7,7 @@ pub use output::RigCommandOutput;
 
 use clap::{Args, Subcommand, ValueEnum};
 
-use homeboy::core::engine::shell::quote_arg;
+use homeboy::core::error::posix_quote_arg;
 use homeboy::rig;
 use homeboy::runner::runners;
 
@@ -803,7 +803,7 @@ fn non_portable_up_error(rig_id: &str) -> homeboy::core::Error {
 
 fn shell_join(args: &[String]) -> String {
     args.iter()
-        .map(|arg| quote_arg(arg))
+        .map(|arg| posix_quote_arg(arg))
         .collect::<Vec<_>>()
         .join(" ")
 }

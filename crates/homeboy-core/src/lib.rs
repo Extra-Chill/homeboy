@@ -42,10 +42,6 @@ pub fn is_zero_u32(v: &u32) -> bool {
 #[cfg(test)]
 extern crate self as homeboy;
 extern crate self as homeboy_core;
-#[cfg(test)]
-pub use crate as core;
-#[cfg(test)]
-pub use lab_contract as command_contract;
 
 // Stable domain facades for new command/core integrations.
 pub mod artifacts;

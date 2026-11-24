@@ -223,7 +223,7 @@ pub(crate) struct CookRecoveryInputs<'a> {
 pub(crate) fn incomplete_review_recovery_command(id: &str) -> String {
     format!(
         "homeboy agent-task recover {} --review-form @FILE --review-form-tool <tool> --review-form-model <model> --review-form-author <author>",
-        homeboy_core::engine::shell::quote_arg(id)
+        homeboy_core::error::posix_quote_arg(id)
     )
 }
 
@@ -232,7 +232,7 @@ pub(crate) fn incomplete_review_recovery_command(id: &str) -> String {
 pub(crate) fn regate_recovery_command(id: &str) -> String {
     format!(
         "homeboy agent-task recover {} --regate [--verify '<COMMAND>'] [--gate-timeout-seconds <SECONDS>] [--gate-no-progress-timeout-seconds <SECONDS>]",
-        homeboy_core::engine::shell::quote_arg(id)
+        homeboy_core::error::posix_quote_arg(id)
     )
 }
 
@@ -1050,7 +1050,7 @@ pub fn ensure_recover_failure_contract(mut report: Value, exit_code: i32, id: &s
         failure["next_command"] = Value::String(declared.unwrap_or_else(|| {
             format!(
                 "homeboy agent-task diagnose {}",
-                homeboy_core::engine::shell::quote_arg(&run_id)
+                homeboy_core::error::posix_quote_arg(&run_id)
             )
         }));
     }

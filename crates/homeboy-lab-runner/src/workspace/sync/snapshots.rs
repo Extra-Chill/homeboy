@@ -5,12 +5,12 @@
 //! `workspace::sync` module to separate read-only inspection from the
 //! materialization/prune/metadata write paths.
 
+use homeboy_core::error::posix_quote_arg;
 use std::fs;
 use std::path::{Path, PathBuf};
 
 use base64::Engine;
 
-use homeboy_core::engine::shell;
 use homeboy_core::error::{Error, Result};
 use homeboy_core::server::{self, SshClient};
 
@@ -107,7 +107,7 @@ pub(super) fn workspace_snapshot_for_path(
             client.env.extend(runner.env.clone());
             let command = format!(
                 "meta={}; if [ -f \"$meta\" ]; then cat -- \"$meta\"; fi",
-                shell::quote_arg(&metadata_path.display().to_string()),
+                posix_quote_arg(&metadata_path.display().to_string()),
             );
             let output = client.execute_with_timeout(&command, std::time::Duration::from_secs(30));
             if !output.success {
@@ -264,7 +264,7 @@ fn list_ssh_lab_workspaces(
     // HEAD must not be listed as reusable.
     let command = format!(
         "root={}; if [ -d \"$root\" ]; then ls -1td \"$root\"/*/ 2>/dev/null | sed 's#/$##' | while IFS= read -r ws; do if [ ! -d \"$ws/.git\" ] || git -C \"$ws\" rev-parse --verify -q HEAD >/dev/null 2>&1; then printf '%s\\n' \"$ws\"; fi; done; fi",
-        shell::quote_arg(lab_workspaces_root)
+        posix_quote_arg(lab_workspaces_root)
     );
     let output = client.execute(&command);
     if output.exit_code != 0 {
@@ -487,9 +487,9 @@ fn workspace_snapshot_scan_command_for_prefix(root: &str, prefix: Option<&str>) 
     // valid, so read each candidate defensively and verify the root afterwards.
     format!(
         "root={root}; meta_rel={meta}; if [ -d \"$root\" ]; then for dir in \"$root\"/{pattern}*; do [ -d \"$dir\" ] || continue; meta=\"$dir$meta_rel\"; [ -f \"$meta\" ] || continue; encoded=$(base64 < \"$meta\" 2>/dev/null) || continue; encoded=$(printf '%s' \"$encoded\" | tr -d '\\n'); printf \"%s\\t%s\\n\" \"$dir\" \"$encoded\"; done; [ -d \"$root\" ] || {{ printf '%s\\n' \"runner workspace snapshot root disappeared during scan: $root\" >&2; exit 1; }}; fi",
-        root = shell::quote_arg(root),
-        meta = shell::quote_arg(&workspace_metadata_relative_to_checkout()),
-        pattern = prefix.map(|prefix| shell::quote_arg(&format!("{prefix}-"))).unwrap_or_default(),
+        root = posix_quote_arg(root),
+        meta = posix_quote_arg(&workspace_metadata_relative_to_checkout()),
+        pattern = prefix.map(|prefix| posix_quote_arg(&format!("{prefix}-"))).unwrap_or_default(),
     )
 }
 fn workspace_snapshot_lease_command(root: &str, lease: &str) -> String {
@@ -497,9 +497,9 @@ fn workspace_snapshot_lease_command(root: &str, lease: &str) -> String {
     let needle = format!("\"workspace_lease\":{lease}");
     format!(
         "root={root}; meta_rel={meta}; needle={needle}; if [ -d \"$root\" ]; then for dir in \"$root\"/*; do [ -d \"$dir\" ] && [ ! -L \"$dir\" ] || continue; meta=\"$dir$meta_rel\"; [ -f \"$meta\" ] || continue; tr -d '[:space:]' < \"$meta\" | grep -Fq -- \"$needle\" || continue; encoded=$(base64 < \"$meta\" 2>/dev/null | tr -d '\\n') || continue; printf '%s\\t%s\\n' \"$dir\" \"$encoded\"; exit 0; done; fi",
-        root = shell::quote_arg(root),
-        meta = shell::quote_arg(&workspace_metadata_relative_to_checkout()),
-        needle = shell::quote_arg(&needle),
+        root = posix_quote_arg(root),
+        meta = posix_quote_arg(&workspace_metadata_relative_to_checkout()),
+        needle = posix_quote_arg(&needle),
     )
 }
 

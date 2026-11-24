@@ -206,7 +206,7 @@ fn print_hint(latest: &str, checked_at: Option<u64>) {
         &homeboy_core::build_identity::current(),
         Some(latest),
         checked_at,
-        update_check_cache::now_unix(),
+        homeboy_engine_primitives::now_secs(),
     );
 
     match staleness.warning_line() {
@@ -373,7 +373,7 @@ pub fn run_startup_check() {
         Ok(check) => check,
         Err(_) => return,
     };
-    let checked_at = update_check_cache::now_unix();
+    let checked_at = homeboy_engine_primitives::now_secs();
 
     if !already_printed && check.update_available {
         if let Some(latest) = &check.latest_version {
@@ -393,7 +393,7 @@ fn refresh_verdict() -> homeboy_core::Result<super::VersionCheck> {
         return Ok(refresh());
     }
     let (check, releases) = check_for_updates_with_catalog()?;
-    let checked_at = update_check_cache::now_unix();
+    let checked_at = homeboy_engine_primitives::now_secs();
     let runtime_compatibility = check
         .latest_version
         .as_deref()
@@ -675,7 +675,7 @@ mod tests {
                     "PATH",
                     format!("{}:{}", tools.display(), std::env::var("PATH").unwrap()),
                 );
-                seed_cache("99.0.0", true, update_check_cache::now_unix());
+                seed_cache("99.0.0", true, homeboy_engine_primitives::now_secs());
                 let calls = Arc::new(Mutex::new(Vec::new()));
                 register_runner_upgrade_provider(Box::new(Runners {
                     acquisition,
@@ -712,7 +712,7 @@ mod tests {
         fn refresh() -> super::super::VersionCheck {
             // Simulate a successful refresh followed by another process writing
             // a no-update verdict before prefetch can read the shared file.
-            seed_cache("99.0.0", true, update_check_cache::now_unix());
+            seed_cache("99.0.0", true, homeboy_engine_primitives::now_secs());
             let mut cache = read_cache().unwrap();
             cache.current_version = "99.0.0".into();
             cache.update_available = false;
@@ -757,12 +757,12 @@ mod tests {
                 seed_cache(
                     "1.0.0",
                     false,
-                    update_check_cache::now_unix() - PREFETCH_INTERVAL_SECS - 1,
+                    homeboy_engine_primitives::now_secs() - PREFETCH_INTERVAL_SECS - 1,
                 );
                 if other_version {
                     let mut cache = read_cache().unwrap();
                     cache.current_version = "1.0.0".into();
-                    cache.checked_at = update_check_cache::now_unix();
+                    cache.checked_at = homeboy_engine_primitives::now_secs();
                     write_cache(&cache);
                 }
                 REFRESH_VERDICT.with(|hook| hook.set(Some(refresh)));
@@ -783,7 +783,7 @@ mod tests {
     #[test]
     fn cached_latest_release_round_trips_the_daily_cache() {
         with_isolated_home(|_home| {
-            let checked_at = update_check_cache::now_unix();
+            let checked_at = homeboy_engine_primitives::now_secs();
             seed_cache("0.329.1", true, checked_at);
 
             let cached = cached_latest_release().expect("cache is readable");
@@ -805,7 +805,7 @@ mod tests {
     #[test]
     fn cached_latest_release_rejects_an_empty_version() {
         with_isolated_home(|_home| {
-            seed_cache("   ", false, update_check_cache::now_unix());
+            seed_cache("   ", false, homeboy_engine_primitives::now_secs());
 
             assert!(cached_latest_release().is_none());
         });
@@ -818,7 +818,7 @@ mod tests {
     #[test]
     fn cached_latest_release_returns_a_stale_cache_with_its_timestamp() {
         with_isolated_home(|_home| {
-            let old = update_check_cache::now_unix() - (CHECK_INTERVAL_SECS * 3);
+            let old = homeboy_engine_primitives::now_secs() - (CHECK_INTERVAL_SECS * 3);
             seed_cache("0.329.1", true, old);
 
             let cache = read_cache().expect("cache is readable");
@@ -839,7 +839,7 @@ mod tests {
             // The hermetic home disables the update check; re-enable it so this
             // exercises the enabled path. The guard restores the variable.
             std::env::remove_var(ENV_VAR_DISABLE);
-            seed_cache("0.329.1", false, update_check_cache::now_unix());
+            seed_cache("0.329.1", false, homeboy_engine_primitives::now_secs());
 
             assert!(latest_allowed_stable().is_none());
             assert_eq!(

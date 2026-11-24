@@ -11,7 +11,7 @@
 //! it. The full JSON remains available via `runs show <id> --json` and is
 //! always written to `--output <file>` unchanged.
 
-use homeboy::core::engine::shell::quote_arg;
+use homeboy::core::error::posix_quote_arg;
 use homeboy::core::observation::nested_failure_causes_from_run_detail;
 use serde_json::{json, Value};
 
@@ -104,14 +104,14 @@ pub(crate) fn project_runs_show_output(payload: &Value) -> Value {
         return payload.clone();
     };
     let run_id = string_value(run, &["id"]).unwrap_or("<run-id>");
-    let command_run_id = if serde_json::to_vec(&quote_arg(run_id))
+    let command_run_id = if serde_json::to_vec(&posix_quote_arg(run_id))
         .is_ok_and(|encoded| encoded.len() <= COMMAND_ID_BYTES)
     {
         run_id
     } else {
         "<oversized-run-id>"
     };
-    let quoted_run_id = quote_arg(command_run_id);
+    let quoted_run_id = posix_quote_arg(command_run_id);
     let artifacts = run
         .get("artifacts")
         .and_then(Value::as_array)
@@ -122,7 +122,7 @@ pub(crate) fn project_runs_show_output(payload: &Value) -> Value {
         .take(super::operator_projection::ITEM_LIMIT)
         .map(|artifact| {
             let id = string_value(artifact, &["id"]).unwrap_or("artifact");
-            let command_id = if serde_json::to_vec(&quote_arg(id))
+            let command_id = if serde_json::to_vec(&posix_quote_arg(id))
                 .is_ok_and(|encoded| encoded.len() <= COMMAND_ID_BYTES)
             {
                 id
@@ -136,11 +136,11 @@ pub(crate) fn project_runs_show_output(payload: &Value) -> Value {
             let command = match artifact_type {
                 "file" => Some(format!(
                     "homeboy runs artifact get {quoted_run_id} {} -o <path>",
-                    quote_arg(command_id)
+                    posix_quote_arg(command_id)
                 )),
                 "directory" => Some(format!(
                     "homeboy runs artifact preview {quoted_run_id} {}",
-                    quote_arg(command_id)
+                    posix_quote_arg(command_id)
                 )),
                 _ => None,
             };

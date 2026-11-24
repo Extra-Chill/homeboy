@@ -1,4 +1,5 @@
 use super::*;
+use homeboy_core::error::posix_quote_arg;
 
 fn admission_capability(
     command: &LabOffloadCommand,
@@ -867,7 +868,7 @@ fn controller_recovery_command_uses_source_checkout_for_current_build_binary() {
         command,
         format!(
             "homeboy upgrade --method source --source-path {} --force",
-            shell::quote_arg(&dir.path().display().to_string())
+            posix_quote_arg(&dir.path().display().to_string())
         )
     );
 }

@@ -311,7 +311,7 @@ fn cleanup_lock_guidance_shell_quotes_metacharacter_paths() {
     )
     .expect_err("live owner blocks contender");
     let owner_path = root.join(CLEANUP_LOCK_DIR).join(CLEANUP_LOCK_OWNER_FILE);
-    let quoted = crate::engine::shell::quote_arg(&owner_path.display().to_string());
+    let quoted = crate::error::posix_quote_arg(&owner_path.display().to_string());
     assert!(error
         .message
         .contains(&format!("cat {}", quoted.replace('\\', "\\\\"))));

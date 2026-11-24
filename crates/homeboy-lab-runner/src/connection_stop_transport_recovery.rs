@@ -39,8 +39,8 @@ pub(crate) fn disconnect_local_recovery(runner_id: &str) -> Result<RunnerDisconn
                     Some(runner_id.to_string()),
                     Some(vec![format!(
                         "Inspect `homeboy runner status {}` and drain or recover active jobs before retrying `homeboy runner disconnect {} --local-recovery`.",
-                        shell::quote_arg(runner_id),
-                        shell::quote_arg(runner_id),
+                        posix_quote_arg(runner_id),
+                        posix_quote_arg(runner_id),
                     )]),
                 ));
             }
@@ -92,7 +92,7 @@ fn partial_disconnect_report(
         remote_error: Some(remote_error.into()),
         local_recovery_command: Some(format!(
             "homeboy runner disconnect {} --local-recovery",
-            shell::quote_arg(runner_id)
+            posix_quote_arg(runner_id)
         )),
         session,
         session_path: session_path(runner_id)?.display().to_string(),
@@ -140,7 +140,7 @@ pub(crate) fn disconnect_with_session(
                     "runner `{runner_id}` remote daemon ownership changed during refresh; refusing to stop a different daemon"
                 ),
                 Some(runner_id.to_string()),
-                Some(vec![format!("homeboy runner status {}", shell::quote_arg(runner_id))]),
+                Some(vec![format!("homeboy runner status {}", posix_quote_arg(runner_id))]),
             ));
         }
     }
@@ -516,7 +516,7 @@ fn verify_remote_daemon_stopped(
             ),
             Err(probe_error) => format!(
                 "refusing to render a lease-bound stop command because the final authoritative daemon re-probe failed: {probe_error}. Inspect `homeboy runner status {}` before retrying",
-                shell::quote_arg(&session.runner_id)
+                posix_quote_arg(&session.runner_id)
             ),
         };
         format!("{error}. Recovery: {recovery}")
@@ -579,14 +579,14 @@ fn remote_lease_bound_stop_recovery_command(
     let Some(daemon) = &status.daemon else {
         return format!(
             "refusing to render a lease-bound stop command: the persisted lease is `{persisted_lease_id}`, but the authoritative daemon re-probe reported no active daemon. Inspect `homeboy runner status {}` before retrying",
-            shell::quote_arg(&session.runner_id)
+            posix_quote_arg(&session.runner_id)
         );
     };
     let Some(active_lease_id) = daemon.lease_id.as_deref() else {
         return format!(
             "refusing to render a lease-bound stop command: the persisted lease is `{persisted_lease_id}`, but the authoritative daemon re-probe reported an active daemon without a lease (PID {}). Inspect `homeboy runner status {}` before retrying",
             daemon.pid.map(|pid| pid.to_string()).as_deref().unwrap_or("unavailable"),
-            shell::quote_arg(&session.runner_id)
+            posix_quote_arg(&session.runner_id)
         );
     };
     if status.active_jobs != 0 {
@@ -594,13 +594,13 @@ fn remote_lease_bound_stop_recovery_command(
             "refusing to render a lease-bound stop command: the persisted lease is `{persisted_lease_id}`, while the authoritative daemon re-probe reported active lease `{active_lease_id}` (PID {}) with {} active job(s). Inspect `homeboy runner status {}` and reconcile the active jobs before retrying",
             daemon.pid.map(|pid| pid.to_string()).as_deref().unwrap_or("unavailable"),
             status.active_jobs,
-            shell::quote_arg(&session.runner_id)
+            posix_quote_arg(&session.runner_id)
         );
     }
     let command = match server_id {
         Some(server_id) => format!(
             "homeboy ssh {} -- {}",
-            shell::quote_arg(server_id),
+            posix_quote_arg(server_id),
             remote_lease_bound_daemon_stop_command(homeboy, active_lease_id, false)
         ),
         None => remote_lease_bound_daemon_stop_command(homeboy, active_lease_id, false),
@@ -728,9 +728,9 @@ pub(super) fn remote_lease_bound_daemon_stop_command(
 ) -> String {
     format!(
         "{} daemon stop{} --lease-id {}",
-        shell::quote_arg(homeboy),
+        posix_quote_arg(homeboy),
         if force { " --force" } else { "" },
-        shell::quote_arg(lease_id)
+        posix_quote_arg(lease_id)
     )
 }
 

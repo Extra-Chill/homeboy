@@ -8,7 +8,7 @@
 use std::path::{Path, PathBuf};
 
 use homeboy::agents::agent_task_lifecycle::AgentTaskRunRecord;
-use homeboy::core::engine::shell::quote_arg;
+use homeboy::core::error::posix_quote_arg;
 use serde_json::{json, Value};
 
 /// One place the Cook's durable records say its candidate may live.
@@ -148,8 +148,8 @@ pub(crate) fn candidate_location_from(
         "candidate_repo_source": found.source,
         "candidate_inspect_command": format!(
             "git -C {} show {}",
-            quote_arg(&display),
-            quote_arg(&sha)
+            posix_quote_arg(&display),
+            posix_quote_arg(&sha)
         ),
     });
     if let Some(reference) = reference {
@@ -157,8 +157,8 @@ pub(crate) fn candidate_location_from(
         if ref_resolves {
             location["candidate_ref_inspect_command"] = json!(format!(
                 "git -C {} show {}",
-                quote_arg(&display),
-                quote_arg(reference)
+                posix_quote_arg(&display),
+                posix_quote_arg(reference)
             ));
         }
     }

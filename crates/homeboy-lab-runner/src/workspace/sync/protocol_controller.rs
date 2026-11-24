@@ -1,5 +1,6 @@
 use super::protocol::*;
 use super::*;
+use homeboy_core::error::posix_quote_arg;
 use std::process::Command;
 
 /// All roots belonging to one source-materialization stage are admitted and
@@ -633,9 +634,9 @@ pub(super) fn invoke(
 pub(super) fn materialization_script(root: &str, binary: &str, commit: bool) -> String {
     format!(
         "set -eu; stage=''; phase=setup; trap 'rc=$?; trap - EXIT; if [ \"$rc\" -ne 0 ]; then printf \"materialization failed rc=%s phase=%s stage=%s\\n\" \"$rc\" \"$phase\" \"$stage\" >&2; if [ -n \"$stage\" ]; then ls -la \"$stage\" >&2 || :; if [ -f \"$stage/response.json\" ]; then cat \"$stage/response.json\" >&2 || :; fi; fi; fi; if [ -n \"$stage\" ]; then rm -rf \"$stage\" || :; fi; exit \"$rc\"' EXIT; trap 'exit 129' HUP; trap 'exit 130' INT; trap 'exit 143' TERM; mkdir -p {root}; stage=$(mktemp -d {template}); phase=extract; tar -p -C \"$stage\" -xf -; phase=execute; {binary} runner workspace materialization --input \"$stage{input}\" --response \"$stage/response.json\" {commit} >&2; phase=response; cat \"$stage/response.json\"",
-        root = shell::quote_arg(&format!("{root}/.homeboy-tmp")),
-        template = shell::quote_arg(&format!("{root}/.homeboy-tmp/.materialization.XXXXXXXX")),
-        binary = shell::quote_arg(binary),
+        root = posix_quote_arg(&format!("{root}/.homeboy-tmp")),
+        template = posix_quote_arg(&format!("{root}/.homeboy-tmp/.materialization.XXXXXXXX")),
+        binary = posix_quote_arg(binary),
         input = if commit { "" } else { "/plan.json" },
         commit = if commit { "--commit" } else { "" },
     )

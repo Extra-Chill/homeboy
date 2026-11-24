@@ -23,9 +23,9 @@ pub(crate) const RIG_LEASE_TTL_ENV: &str = "HOMEBOY_RIG_LEASE_TTL_SECS";
 use super::expand::expand_resources_with_settings;
 use super::spec::{RigResourcesSpec, RigSpec};
 use super::state::now_rfc3339;
+use homeboy_core::error::posix_quote_arg;
 use homeboy_core::error::{Error, Result, RigResourceConflictInfo};
 use homeboy_core::paths;
-use homeboy_engine_primitives::shell::quote_arg;
 use lock::acquire as acquire_lease_index_lock;
 
 /// On-disk lease held by one active mutating rig command.
@@ -465,12 +465,12 @@ fn run_lease_diagnostic(lease: RigRunLease) -> RigRunLeaseDiagnostic {
         reclaimable_without_force,
         inspect_command: run_id.map(|run_id| format!("homeboy runs show {run_id}")),
         safe_cleanup_command: reclaimable_without_force.then(|| {
-            format!("homeboy rig release-lock {}", quote_arg(&lease.rig_id))
+            format!("homeboy rig release-lock {}", posix_quote_arg(&lease.rig_id))
         }),
         reconcile_command: "homeboy runs resources --actionable".to_string(),
         force_release_warning: format!(
             "Do not use `homeboy rig release-lock {} --force` while pid {} is still running unless you have independently confirmed the holder is wedged and will never finish; force-release only removes the local guardrail and does not stop the holder process.",
-            quote_arg(&lease.rig_id),
+            posix_quote_arg(&lease.rig_id),
             lease.pid
         ),
         resources: lease.resources,

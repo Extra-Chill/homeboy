@@ -30,7 +30,6 @@ use crate::agent_task_timeout::timeout_with_grace;
 
 pub(crate) use homeboy_core::command_invocation::CommandInvocation;
 use homeboy_core::defaults;
-use homeboy_core::engine::shell;
 pub(crate) use homeboy_core::secret_env_plan::SecretEnvPlan;
 
 mod admission;

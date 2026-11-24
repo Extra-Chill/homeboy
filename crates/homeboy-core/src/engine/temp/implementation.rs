@@ -2103,7 +2103,7 @@ mod cleanup_support {
                     .max(CLEANUP_LOCK_SLEEP.as_millis() as u64)
             })
             .unwrap_or(stale_after.as_millis() as u64);
-        let quoted_owner_path = crate::engine::shell::quote_arg(&owner_path.display().to_string());
+        let quoted_owner_path = crate::error::posix_quote_arg(&owner_path.display().to_string());
         let guidance = serde_json::json!({
             "lock_path": path,
             "owner": owner,
@@ -2593,8 +2593,8 @@ mod tests {
             let release = home.path().join("release");
             let command = format!(
                 "printf '%s' \"$TMPDIR\" > {} && mkdir -p \"$TMPDIR/compiler-target\" && printf target > \"$TMPDIR/compiler-target/object\" && n=0; while [ ! -f {} ] && [ $n -lt 12000 ]; do sleep 0.01; n=$((n+1)); done",
-                crate::engine::shell::quote_arg(&ready.display().to_string()),
-                crate::engine::shell::quote_arg(&release.display().to_string()),
+                crate::error::posix_quote_arg(&ready.display().to_string()),
+                crate::error::posix_quote_arg(&release.display().to_string()),
             );
             let wrapper = RuntimeTempOwner::remote_shell_command(
                 &command,

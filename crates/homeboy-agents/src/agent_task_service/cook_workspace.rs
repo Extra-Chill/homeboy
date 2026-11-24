@@ -1,6 +1,7 @@
 //! Cook workspace validation, base materialization and ancestry.
 
 use super::cook::*;
+use homeboy_core::error::posix_quote_arg;
 
 pub(super) fn resumable_cook_run_id_in_store(
     lifecycle_store: &AgentTaskLifecycleStore,
@@ -932,7 +933,7 @@ pub(super) fn preflight_cook_workspace_resolved_base_ancestry(
             format!(
                 "Cook cannot attribute uncommitted destination changes: {}. Preserve them with `git -C {} stash push --include-untracked -m 'before Cook retry'`, then retry the Cook",
                 dirty_paths.join(", "),
-                quote_arg(target.to_string_lossy().as_ref())
+                posix_quote_arg(target.to_string_lossy().as_ref())
             ),
             Some(target.display().to_string()),
             None,
