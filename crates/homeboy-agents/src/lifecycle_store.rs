@@ -2514,7 +2514,7 @@ pub(super) fn write_record_guarded(
 /// its progress is its latest attempt's.
 fn is_redirected_cook(record: &AgentTaskRunRecord) -> bool {
     let handoff = &record.metadata["detached_cook_handoff"];
-    handoff["cook_id"] == record.run_id && handoff["state"] == "redirected"
+    handoff["cook_id"] == record.run_id && super::handoff_materialized(handoff)
 }
 
 /// The durable record a row's status follows, read before the pure
@@ -2655,7 +2655,7 @@ pub(crate) fn reproject_cook_root(
         return Ok(());
     };
     let handoff = &root.metadata_json["agent_task_run"]["metadata"]["detached_cook_handoff"];
-    let redirected = handoff["cook_id"] == cook_id.as_str() && handoff["state"] == "redirected";
+    let redirected = handoff["cook_id"] == cook_id.as_str() && super::handoff_materialized(handoff);
     if !redirected
         && !lifecycle_store
             .cook_dir(&cook_id)

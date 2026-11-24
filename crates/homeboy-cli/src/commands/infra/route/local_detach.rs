@@ -1738,7 +1738,11 @@ mod tests {
                 parent.state(),
                 homeboy_lifecycle_contract::RunExecutionState::Queued
             );
-            assert_eq!(parent.metadata["detached_cook_handoff"]["state"], "pending");
+            assert_eq!(
+                agent_task_lifecycle::CookAdmissionPhase::of(&parent)
+                    .map(agent_task_lifecycle::CookAdmissionPhase::handoff_label),
+                Some("pending")
+            );
             assert_eq!(
                 parent.metadata["detached_cook_handoff"]["admission_state"],
                 "pre_supervisor"
@@ -1772,7 +1776,11 @@ mod tests {
                 agent_task_lifecycle::logs("cook-pending").expect("pending handoff logs resolve");
 
             assert_eq!(status.run_id, "cook-pending");
-            assert_eq!(status.metadata["detached_cook_handoff"]["state"], "pending");
+            assert_eq!(
+                agent_task_lifecycle::CookAdmissionPhase::of(&status)
+                    .map(agent_task_lifecycle::CookAdmissionPhase::handoff_label),
+                Some("pending")
+            );
             assert_eq!(logs.run.as_str(), "cook-pending");
             assert_eq!(
                 agent_task_lifecycle::cancel_run("cook-pending", None)
@@ -1860,8 +1868,8 @@ mod tests {
                 homeboy_lifecycle_contract::RunExecutionState::Succeeded
             );
             assert_eq!(
-                parent.metadata["detached_cook_handoff"]["state"],
-                "redirected"
+                agent_task_lifecycle::CookAdmissionPhase::of(&parent),
+                Some(agent_task_lifecycle::CookAdmissionPhase::Materialized)
             );
             assert_eq!(
                 parent.metadata["detached_cook_handoff"]["attempt_run_id"],
@@ -2036,8 +2044,8 @@ mod tests {
             let parent = agent_task_lifecycle::exact_record(cook_id)
                 .expect("read materialized handoff parent");
             assert_eq!(
-                parent.metadata["detached_cook_handoff"]["state"],
-                "redirected"
+                agent_task_lifecycle::CookAdmissionPhase::of(&parent),
+                Some(agent_task_lifecycle::CookAdmissionPhase::Materialized)
             );
             assert_eq!(
                 parent.metadata["detached_cook_handoff"]["attempt_run_id"],
@@ -2095,8 +2103,8 @@ mod tests {
                 homeboy_lifecycle_contract::RunExecutionState::Succeeded
             );
             assert_eq!(
-                parent.metadata["detached_cook_handoff"]["state"],
-                "redirected"
+                agent_task_lifecycle::CookAdmissionPhase::of(&parent),
+                Some(agent_task_lifecycle::CookAdmissionPhase::Materialized)
             );
             assert!(
                 agent_task_lifecycle::cook_index_exists_in_store(
