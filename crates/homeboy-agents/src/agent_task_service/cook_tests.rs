@@ -1050,7 +1050,7 @@ fn verified_unchanged_attempt_ends_as_no_changes_with_the_provider_message() {
         let side_effects = CookSideEffects::for_test(
             move |lifecycle_store, _, run_id| {
                 let mut report = promotion(run_id);
-                report.status = AgentTaskPromotionStatus::NoChanges;
+                report.status = AgentTaskPromotionStatus::Gate(GateVerdict::NoChanges);
                 report.source.task_id = task_id.clone();
                 report.changed_files.clear();
                 report.deterministic_gates.clear();
@@ -1736,7 +1736,7 @@ fn terminal_cook_recovery_settles_rows_and_one_span_in_both_directions() {
             })
             .unwrap();
         let mut failed = applied.clone();
-        failed.status = AgentTaskPromotionStatus::GateFailed;
+        failed.status = AgentTaskPromotionStatus::Gate(GateVerdict::GateFailed);
         failed.deterministic_gates[0].status = crate::agent_task_gate::AgentTaskGateStatus::Failed;
         failed.deterministic_gates[0].exit_code = 1;
         let mut origin = None;
@@ -1825,7 +1825,7 @@ fn terminal_cook_finalizes_its_provisioned_destination_worktree() {
             );
             options.workspace.to_worktree = handle.to_string();
             if !gate_green {
-                promotion.status = AgentTaskPromotionStatus::GateFailed;
+                promotion.status = AgentTaskPromotionStatus::Gate(GateVerdict::GateFailed);
                 promotion.deterministic_gates[0].status =
                     crate::agent_task_gate::AgentTaskGateStatus::Failed;
                 promotion.deterministic_gates[0].exit_code = 1;
@@ -8984,7 +8984,7 @@ fn timed_out_attempt_follow_up_retries_the_same_provider_instead_of_rotating() {
     aggregate.outcomes[0].failure_classification =
         Some(crate::agent_task::AgentTaskFailureClassification::Timeout);
     let mut promotion = promotion("timeout-rotation-remediation-run");
-    promotion.status = AgentTaskPromotionStatus::GateFailed;
+    promotion.status = AgentTaskPromotionStatus::Gate(GateVerdict::GateFailed);
     promotion.deterministic_gates.clear();
     promotion.gate_results.clear();
 
@@ -9230,7 +9230,7 @@ fn canonical_completion_accepts_green_and_proven_inherited_gate_evidence() {
     assert!(canonical_finalization_eligible(&green, true));
 
     let mut inherited = green.clone();
-    inherited.status = AgentTaskPromotionStatus::GateFailed;
+    inherited.status = AgentTaskPromotionStatus::Gate(GateVerdict::GateFailed);
     inherited.deterministic_gates[0].status =
         crate::agent_task_gate::AgentTaskGateStatus::AcceptedInheritedFailure;
     inherited.deterministic_gates[0].exit_code = 1;
@@ -9980,7 +9980,7 @@ fn corrected_replacement_gates(run_id: &str, verify: &str) -> Result<AgentTaskPr
 
 fn persist_deferred_fixture(run_id: &str) {
     let mut promotion = persisted_promotion_for_attempt(run_id).unwrap().unwrap();
-    promotion.status = AgentTaskPromotionStatus::GateEnvironmentUnavailable;
+    promotion.status = AgentTaskPromotionStatus::Gate(GateVerdict::GateEnvironmentUnavailable);
     for gate in &mut promotion.deterministic_gates {
         gate.status = crate::agent_task_gate::AgentTaskGateStatus::Unavailable;
         gate.failure_evidence = None;
@@ -10237,7 +10237,10 @@ fn failing_regate_is_the_latest_gate_run_not_the_stale_receipt() {
         );
 
         let latest = persisted_promotion_for_attempt(run_id).unwrap().unwrap();
-        assert_eq!(latest.status, AgentTaskPromotionStatus::GateFailed);
+        assert_eq!(
+            latest.status,
+            AgentTaskPromotionStatus::Gate(GateVerdict::GateFailed)
+        );
         assert_eq!(
             latest.deterministic_gates[0]
                 .invocation()
@@ -10893,7 +10896,7 @@ fn deferred_recovery_supervises_declared_gate_and_persists_unavailability() {
             .unwrap();
         assert_eq!(
             promotion.status,
-            AgentTaskPromotionStatus::GateEnvironmentUnavailable
+            AgentTaskPromotionStatus::Gate(GateVerdict::GateEnvironmentUnavailable)
         );
         assert!(result
             .value
@@ -10955,7 +10958,7 @@ fn supervision_stopped_gate_is_regated_once_and_ends_as_unavailable_verification
             .unwrap();
         assert_eq!(
             promotion.status,
-            AgentTaskPromotionStatus::GateEnvironmentUnavailable
+            AgentTaskPromotionStatus::Gate(GateVerdict::GateEnvironmentUnavailable)
         );
         let gate = &promotion.deterministic_gates[0];
         assert_eq!(
@@ -11364,7 +11367,7 @@ fn interrupted_replacement_gate_fence_requires_external_proof_without_rerunning(
         .expect("link attempt");
 
         let mut failed = promotion_with_existing_path(run_id, target.path());
-        failed.status = AgentTaskPromotionStatus::GateFailed;
+        failed.status = AgentTaskPromotionStatus::Gate(GateVerdict::GateFailed);
         failed.deterministic_gates[0].status = crate::agent_task_gate::AgentTaskGateStatus::Failed;
         failed.deterministic_gates[0].exit_code = 1;
         agent_task_lifecycle::record_promotion(run_id, serde_json::to_value(failed).unwrap())
@@ -11825,7 +11828,7 @@ fn green_retry_after_verified_no_change_attempt_finalizes_its_contribution_chain
         seed_review_form_aggregate(green_run_id, &green_plan);
 
         let mut first_promotion = promotion(first_run_id);
-        first_promotion.status = AgentTaskPromotionStatus::GateFailed;
+        first_promotion.status = AgentTaskPromotionStatus::Gate(GateVerdict::GateFailed);
         first_promotion.source.task_id = task_id.clone();
         first_promotion.candidate.as_mut().unwrap().tree_sha = first_sha.to_string();
         agent_task_lifecycle::record_promotion(
@@ -11834,7 +11837,7 @@ fn green_retry_after_verified_no_change_attempt_finalizes_its_contribution_chain
         )
         .expect("persist gate-failed source promotion");
         let mut unchanged_promotion = promotion(unchanged_run_id);
-        unchanged_promotion.status = AgentTaskPromotionStatus::NoChanges;
+        unchanged_promotion.status = AgentTaskPromotionStatus::Gate(GateVerdict::NoChanges);
         unchanged_promotion.source.task_id = task_id.clone();
         unchanged_promotion.candidate.as_mut().unwrap().tree_sha = unchanged_sha.to_string();
         unchanged_promotion.changed_files.clear();
@@ -13505,7 +13508,7 @@ fn recover_retries_a_runner_cancelled_cook_but_not_an_operator_cancelled_one() {
 #[test]
 fn gate_environment_unavailable_stop_reason_names_the_non_execution_cause_and_next_step() {
     let mut deferred = promotion("run-lab-transport");
-    deferred.status = AgentTaskPromotionStatus::GateEnvironmentUnavailable;
+    deferred.status = AgentTaskPromotionStatus::Gate(GateVerdict::GateEnvironmentUnavailable);
     let mut error = homeboy_core::Error::new(
         homeboy_core::ErrorCode::RunnerLabTransportFailure,
         "runner gate did not return terminal artifact evidence",
@@ -13732,7 +13735,7 @@ echo https://github.com/example/fixture/pull/1
                 &aggregate,
             )
             .unwrap();
-            failed.status = AgentTaskPromotionStatus::GateFailed;
+            failed.status = AgentTaskPromotionStatus::Gate(GateVerdict::GateFailed);
             failed.target.path = Some(path.display().to_string());
             failed.candidate = Some(crate::agent_task::AgentTaskCandidate {
                 base_sha: base_sha.clone(),

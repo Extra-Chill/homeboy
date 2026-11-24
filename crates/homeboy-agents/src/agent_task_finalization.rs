@@ -1,3 +1,4 @@
+use homeboy_core::cook_status::GateVerdict;
 use serde_json::json;
 
 use crate::agent_task_promotion::AgentTaskPromotionReport;
@@ -348,7 +349,9 @@ fn finalize_pr_with_backend_mode<B: AgentTaskPrFinalizationBackend>(
             &options,
             intent,
             &head,
-            homeboy_core::cook_status::CookStatus::NoChanges,
+            homeboy_core::cook_status::CookStatus::Gate(
+                homeboy_core::cook_status::GateVerdict::NoChanges,
+            ),
             "none",
             None,
             None,
@@ -708,7 +711,8 @@ fn validate_gate_proof_binding(
     use crate::agent_task_promotion::AgentTaskPromotionStatus;
     if options.gate_failed_draft
         && (options.manual_finalization
-            || gate_proof.promotion.status != AgentTaskPromotionStatus::GateFailed
+            || gate_proof.promotion.status
+                != AgentTaskPromotionStatus::Gate(GateVerdict::GateFailed)
             || gate_proof.promotion.changed_files.is_empty()
             || !gate_proof
                 .promotion
@@ -1247,7 +1251,8 @@ fn validate_durable_publication_eligibility(
     // The same passing verdict recovery step selection uses: a proven
     // inherited failure passes and stays recorded as evidence (#17508).
     let failed_draft = gate_failed_draft
-        && promotion.status == crate::agent_task_promotion::AgentTaskPromotionStatus::GateFailed;
+        && promotion.status
+            == crate::agent_task_promotion::AgentTaskPromotionStatus::Gate(GateVerdict::GateFailed);
     if failed_draft && !promotion.changed_files.is_empty() && promotion.candidate.is_some() {
         // The typed gated candidate is checked against the request and the
         // publication tree by the engine, including for failed-gate drafts.

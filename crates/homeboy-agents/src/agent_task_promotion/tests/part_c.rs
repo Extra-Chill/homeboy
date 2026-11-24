@@ -12,6 +12,7 @@ use crate::agent_task_gate::{
     AgentTaskGateRevealPolicy, AgentTaskGateVisibility, VerifyGateOptions,
 };
 use crate::agent_task_scheduler::{AgentTaskAggregate, AgentTaskPlan};
+use homeboy_core::cook_status::GateVerdict;
 use homeboy_core::lab_contract::AgentTaskDispatchIdentity;
 use serde_json::Value;
 
@@ -206,7 +207,10 @@ fn promote_reports_no_changes_for_empty_patch_metadata() {
         )
         .expect("empty patch reports no changes");
 
-        assert_eq!(report.status, AgentTaskPromotionStatus::NoChanges);
+        assert_eq!(
+            report.status,
+            AgentTaskPromotionStatus::Gate(GateVerdict::NoChanges)
+        );
         assert!(report.changed_files.is_empty());
         match prior_promotion_command {
             Some(command) => std::env::set_var("HOMEBOY_AGENT_TASK_PROMOTION_COMMAND", command),
@@ -321,7 +325,10 @@ fn promote_no_op_outcome_without_committed_candidate_rejects_before_apply() {
     )
     .expect("no candidate and no change is a no-change result");
 
-    assert_eq!(report.status, AgentTaskPromotionStatus::NoChanges);
+    assert_eq!(
+        report.status,
+        AgentTaskPromotionStatus::Gate(GateVerdict::NoChanges)
+    );
     assert!(provider.apply_calls.is_empty());
     assert!(provider.verify_calls.is_empty());
 }

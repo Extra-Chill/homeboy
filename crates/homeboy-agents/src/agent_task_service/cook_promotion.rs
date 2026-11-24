@@ -16,7 +16,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-use homeboy_core::cook_status::{CookDisposition, CookStatus};
+use homeboy_core::cook_status::{CookDisposition, CookStatus, GateVerdict};
 use homeboy_core::engine::canonical_json::canonical_json_bytes;
 use homeboy_core::error::posix_quote_arg;
 use homeboy_engine_primitives::content_hash;
@@ -782,7 +782,7 @@ pub(crate) fn continuation_candidate_refusal(
         !matches!(
             promotion.status,
             AgentTaskPromotionStatus::VerificationPending
-                | AgentTaskPromotionStatus::GateEnvironmentUnavailable
+                | AgentTaskPromotionStatus::Gate(GateVerdict::GateEnvironmentUnavailable)
         )
     }) {
         return None;
@@ -810,7 +810,9 @@ pub fn preflight_cook_promotion_for_observation_in_store(
     aggregate: Option<&AgentTaskAggregate>,
 ) -> Result<Value> {
     if let Some(promotion) = persisted_promotion_from_record(run_id, record)? {
-        let behavior = if promotion.status == AgentTaskPromotionStatus::GateEnvironmentUnavailable {
+        let behavior = if promotion.status
+            == AgentTaskPromotionStatus::Gate(GateVerdict::GateEnvironmentUnavailable)
+        {
             "resume_deferred_gates"
         } else if promotion.status == AgentTaskPromotionStatus::VerificationPending {
             "resume_verification_pending"
@@ -820,7 +822,7 @@ pub fn preflight_cook_promotion_for_observation_in_store(
         if !matches!(
             promotion.status,
             AgentTaskPromotionStatus::VerificationPending
-                | AgentTaskPromotionStatus::GateEnvironmentUnavailable
+                | AgentTaskPromotionStatus::Gate(GateVerdict::GateEnvironmentUnavailable)
         ) {
             return Ok(json!({
                 "behavior": behavior,
@@ -836,7 +838,9 @@ pub fn preflight_cook_promotion_for_observation_in_store(
     }
     let (aggregate, outcome) = continuation_outcome(run_id, aggregate)?;
     if let Some(promotion) = persisted_promotion_from_record(run_id, record)? {
-        let behavior = if promotion.status == AgentTaskPromotionStatus::GateEnvironmentUnavailable {
+        let behavior = if promotion.status
+            == AgentTaskPromotionStatus::Gate(GateVerdict::GateEnvironmentUnavailable)
+        {
             "resume_deferred_gates"
         } else if promotion.status == AgentTaskPromotionStatus::VerificationPending {
             "resume_verification_pending"
@@ -905,7 +909,7 @@ fn persisted_promotion_execution_only_checks(
             "verification_gates",
         ]);
     }
-    if status == AgentTaskPromotionStatus::GateFailed {
+    if status == AgentTaskPromotionStatus::Gate(GateVerdict::GateFailed) {
         checks.push("gate_failure_differential");
     }
     checks.push("cook_loop_evaluation");
@@ -925,10 +929,10 @@ mod preflight_report_tests {
             AgentTaskPromotionStatus::DryRun,
             AgentTaskPromotionStatus::VerificationPending,
             AgentTaskPromotionStatus::Applied,
-            AgentTaskPromotionStatus::GateFailed,
+            AgentTaskPromotionStatus::Gate(GateVerdict::GateFailed),
             AgentTaskPromotionStatus::VerifiedNoChanges,
-            AgentTaskPromotionStatus::NoChangesGateFailed,
-            AgentTaskPromotionStatus::NoChanges,
+            AgentTaskPromotionStatus::Gate(GateVerdict::NoChangesGateFailed),
+            AgentTaskPromotionStatus::Gate(GateVerdict::NoChanges),
         ] {
             let checks = persisted_promotion_execution_only_checks(status, false);
             assert!(checks.contains(&"cook_loop_evaluation"), "{status:?}");
@@ -997,7 +1001,7 @@ pub(crate) fn promote_or_load_attempt_in_store(
         if !matches!(
             promotion.status,
             AgentTaskPromotionStatus::VerificationPending
-                | AgentTaskPromotionStatus::GateEnvironmentUnavailable
+                | AgentTaskPromotionStatus::Gate(GateVerdict::GateEnvironmentUnavailable)
         ) {
             if promotion.provenance.get("replacement_gate_proof").is_some() {
                 validate_replacement_promotion_in_store(lifecycle_store, &promotion)?;
@@ -1009,7 +1013,7 @@ pub(crate) fn promote_or_load_attempt_in_store(
         if matches!(
             promotion.status,
             AgentTaskPromotionStatus::VerificationPending
-                | AgentTaskPromotionStatus::GateEnvironmentUnavailable
+                | AgentTaskPromotionStatus::Gate(GateVerdict::GateEnvironmentUnavailable)
         ) {
             let target_path = promotion.target.path.as_deref().or_else(|| {
                 promotion.provenance.get("worktree_path").and_then(Value::as_str)
@@ -2704,7 +2708,9 @@ fn draft_publication_gap(
     supplied_form: bool,
     title_policy: crate::agent_task_review_dossier::PrTitlePolicy,
 ) -> Result<Option<String>> {
-    if promotion.status == crate::agent_task_promotion::AgentTaskPromotionStatus::GateFailed {
+    if promotion.status
+        == crate::agent_task_promotion::AgentTaskPromotionStatus::Gate(GateVerdict::GateFailed)
+    {
         let failed = promotion
             .deterministic_gates
             .iter()
@@ -2779,7 +2785,8 @@ pub(crate) fn finalize_or_load_cook_pr_with_backend_with_stores<
     let mut promotion = promotion.clone();
     promotion.normalize_gate_outcome();
     let failed_draft = options.finalization.publish_incomplete_draft
-        && promotion.status == crate::agent_task_promotion::AgentTaskPromotionStatus::GateFailed
+        && promotion.status
+            == crate::agent_task_promotion::AgentTaskPromotionStatus::Gate(GateVerdict::GateFailed)
         && !promotion.changed_files.is_empty();
     if !(promotion.finalization_eligible() || failed_draft) {
         return Err(Error::validation_invalid_argument(
@@ -2927,7 +2934,7 @@ pub(crate) fn cook_finalization_options_with_stores(
         .collect::<Vec<_>>();
     let inherited_failure_count = inherited_gates.len();
     let attempt_summary = if promotion.status
-        == crate::agent_task_promotion::AgentTaskPromotionStatus::GateFailed
+        == crate::agent_task_promotion::AgentTaskPromotionStatus::Gate(GateVerdict::GateFailed)
     {
         format!(
             "{} deterministic cook gate attempt(s) completed; verification failed",
@@ -3065,7 +3072,9 @@ pub(crate) fn cook_finalization_options_with_stores(
         draft_pr,
         gate_failed_draft: options.finalization.publish_incomplete_draft
             && promotion.status
-                == crate::agent_task_promotion::AgentTaskPromotionStatus::GateFailed,
+                == crate::agent_task_promotion::AgentTaskPromotionStatus::Gate(
+                    GateVerdict::GateFailed,
+                ),
         repository_integrity_evidence: promotion.repository_integrity_evidence.clone(),
     })
 }
@@ -4348,7 +4357,7 @@ fn verified_no_change_link(
     run_id: &str,
     promotion: &AgentTaskPromotionReport,
 ) -> Result<bool> {
-    if promotion.status != AgentTaskPromotionStatus::NoChanges
+    if promotion.status != AgentTaskPromotionStatus::Gate(GateVerdict::NoChanges)
         || !promotion.changed_files.is_empty()
     {
         return Ok(false);
@@ -5117,11 +5126,16 @@ pub(crate) fn cook_failure_context_with_probe_policy(
         .filter(|claim| claim.state == agent_task_lifecycle::ClaimState::Failed)
         .and_then(|claim| claim.result.clone());
     let promotion_gate_failed = delivery.as_ref().is_some_and(|delivery| {
-        delivery.blocker_code() == Some(super::CookDeliveryBlockerCode::GateFailed)
+        delivery.blocker_code()
+            == Some(super::CookDeliveryBlockerCode::Gate(
+                GateVerdict::GateFailed,
+            ))
     });
     let cook_status = CookStatus::from_status(status).or_else(|| {
         record.as_ref().and_then(|record| {
-            CookStatus::from_status(&agent_task_lifecycle::CookRunState::of(record).status)
+            agent_task_lifecycle::CookRunState::of(record)
+                .status
+                .cook_status()
         })
     });
     let progress_phase = record

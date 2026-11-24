@@ -3,8 +3,50 @@
 //! (`homeboy_core::run_lifecycle_status::RunLifecycleStatus::from`). Terminality inside Cook is instead declared
 //! by the producing exit's [`CookDisposition`].
 
+use serde::de::IntoDeserializer;
 use serde::{Deserialize, Serialize};
 use std::fmt;
+
+/// The deterministic-gate verdict on a candidate. Cook status, the cook loop,
+/// promotion and the delivery blocker all embed this one enum, so each
+/// verdict has exactly one spelling and one legacy alias.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum GateVerdict {
+    /// A deterministic gate rejected the patched candidate.
+    GateFailed,
+    /// The provider produced no patch.
+    NoChanges,
+    /// The provider produced no patch and the candidate failed its gates.
+    NoChangesGateFailed,
+    /// Verification could not execute; the candidate remains recoverable.
+    // Accepts `gates_deferred` for records written before #18802.
+    #[serde(alias = "gates_deferred")]
+    GateEnvironmentUnavailable,
+}
+
+impl GateVerdict {
+    /// The wire representation.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::GateFailed => "gate_failed",
+            Self::NoChanges => "no_changes",
+            Self::NoChangesGateFailed => "no_changes_gate_failed",
+            Self::GateEnvironmentUnavailable => "gate_environment_unavailable",
+        }
+    }
+
+    /// Whether a deterministic gate rejected the candidate.
+    pub fn is_gate_failure(self) -> bool {
+        matches!(self, Self::GateFailed | Self::NoChangesGateFailed)
+    }
+}
+
+impl fmt::Display for GateVerdict {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
 
 /// A reported Cook status, serialized as a bare snake_case string.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -23,13 +65,6 @@ pub enum CookStatus {
     IntentionalNoChange,
     SupersededByActiveCook,
     NoCandidate,
-    NoChanges,
-    NoChangesGateFailed,
-    GateFailed,
-    /// Verification could not execute; the candidate remains recoverable.
-    // Accepts `gates_deferred` for records written before #18802.
-    #[serde(alias = "gates_deferred")]
-    GateEnvironmentUnavailable,
     /// Gates failed on the verified base as well as the candidate.
     BaselineRed,
     FinalizationFailed,
@@ -50,48 +85,17 @@ pub enum CookStatus {
     PreExecutionFailure,
     PreArtifactInterruption,
     Failed,
+    /// A gate verdict, serialized as the verdict's own label.
+    #[serde(untagged)]
+    Gate(GateVerdict),
 }
 
 impl CookStatus {
-    /// Parse a recognized persisted label.
+    /// Parse a persisted label at a serialization boundary, through the
+    /// same serde vocabulary (and legacy aliases) the enum declares.
     pub fn from_status(status: &str) -> Option<Self> {
-        Some(match status {
-            "queued" => Self::Queued,
-            "in_flight" => Self::InFlight,
-            "review_ready" => Self::ReviewReady,
-            "draft_published" => Self::DraftPublished,
-            "succeeded_partial" => Self::SucceededPartial,
-            "green_no_finalize" => Self::GreenNoFinalize,
-            "validated" => Self::Validated,
-            "intentional_no_change" => Self::IntentionalNoChange,
-            "superseded_by_active_cook" => Self::SupersededByActiveCook,
-            "no_candidate" => Self::NoCandidate,
-            "no_changes" => Self::NoChanges,
-            "no_changes_gate_failed" => Self::NoChangesGateFailed,
-            "gate_failed" => Self::GateFailed,
-            // Accepts `gates_deferred` for records written before #18802.
-            "gate_environment_unavailable" | "gates_deferred" => Self::GateEnvironmentUnavailable,
-            "baseline_red" => Self::BaselineRed,
-            "finalization_failed" => Self::FinalizationFailed,
-            "gate_declaration_invalid" => Self::GateDeclarationInvalid,
-            "repro_passes_on_base" => Self::ReproPassesOnBase,
-            "awaiting_acceptance" => Self::AwaitingAcceptance,
-            "awaiting_ci" => Self::AwaitingCi,
-            "candidate_recoverable" => Self::CandidateRecoverable,
-            "blocked" => Self::Blocked,
-            "cancelled" => Self::Cancelled,
-            "timed_out" => Self::TimedOut,
-            "retries_exhausted" => Self::RetriesExhausted,
-            "execution_budget_exhausted" => Self::ExecutionBudgetExhausted,
-            "policy_failure" => Self::PolicyFailure,
-            "selection_required" => Self::SelectionRequired,
-            "provider_failure" => Self::ProviderFailure,
-            "durable_failure" => Self::DurableFailure,
-            "pre_execution_failure" => Self::PreExecutionFailure,
-            "pre_artifact_interruption" => Self::PreArtifactInterruption,
-            "failed" => Self::Failed,
-            _ => return None,
-        })
+        Self::deserialize(IntoDeserializer::<serde::de::value::Error>::into_deserializer(status))
+            .ok()
     }
 
     /// The wire representation.
@@ -107,10 +111,6 @@ impl CookStatus {
             Self::IntentionalNoChange => "intentional_no_change",
             Self::SupersededByActiveCook => "superseded_by_active_cook",
             Self::NoCandidate => "no_candidate",
-            Self::NoChanges => "no_changes",
-            Self::NoChangesGateFailed => "no_changes_gate_failed",
-            Self::GateFailed => "gate_failed",
-            Self::GateEnvironmentUnavailable => "gate_environment_unavailable",
             Self::BaselineRed => "baseline_red",
             Self::FinalizationFailed => "finalization_failed",
             Self::GateDeclarationInvalid => "gate_declaration_invalid",
@@ -130,6 +130,7 @@ impl CookStatus {
             Self::PreExecutionFailure => "pre_execution_failure",
             Self::PreArtifactInterruption => "pre_artifact_interruption",
             Self::Failed => "failed",
+            Self::Gate(verdict) => verdict.as_str(),
         }
     }
 
@@ -140,7 +141,7 @@ impl CookStatus {
 
     /// Whether a deterministic gate rejected the candidate.
     pub fn is_gate_failure(&self) -> bool {
-        matches!(self, Self::GateFailed | Self::NoChangesGateFailed)
+        matches!(self, Self::Gate(verdict) if verdict.is_gate_failure())
     }
 
     /// Whether the status reports a published pull request for the candidate.

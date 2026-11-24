@@ -6,7 +6,7 @@ use crate::agent_task_service::{
     recorded_finalization_receipt, recorded_promotion_report, CookDelivery,
     CookDeliveryBlockerCode, CookDeliveryState, COOK_DELIVERY_SCHEMA,
 };
-use homeboy_core::cook_status::CookStatus;
+use homeboy_core::cook_status::{CookStatus, GateVerdict};
 
 fn store_with_run(
     context: &homeboy_core::test_support::HermeticTestContext,
@@ -264,9 +264,9 @@ fn a_deferred_then_executed_gate_never_stays_gate_environment_unavailable() {
             "gate_failed",
             "failed",
             CookDeliveryState::Blocked,
-            Some(CookDeliveryBlockerCode::GateFailed),
+            Some(CookDeliveryBlockerCode::Gate(GateVerdict::GateFailed)),
             RunExecutionState::CandidateRecoverable,
-            Some(CookStatus::GateFailed),
+            Some(CookStatus::Gate(GateVerdict::GateFailed)),
         ),
     ] {
         let context = homeboy_core::test_support::HermeticTestContext::new();
@@ -291,7 +291,9 @@ fn a_deferred_then_executed_gate_never_stays_gate_environment_unavailable() {
         let delivery = persisted_delivery(&deferred);
         assert_eq!(
             delivery.blocker_code(),
-            Some(CookDeliveryBlockerCode::GateEnvironmentUnavailable)
+            Some(CookDeliveryBlockerCode::Gate(
+                GateVerdict::GateEnvironmentUnavailable
+            ))
         );
         assert_eq!(
             deferred.metadata["cook_delivery"]["delivery"]["blocker"]["code"],
@@ -351,7 +353,7 @@ fn a_no_change_gate_failure_is_recoverable_and_canonically_spelled() {
     let delivery = persisted_delivery(&record);
     assert_eq!(
         delivery.blocker_code(),
-        Some(CookDeliveryBlockerCode::GateFailed)
+        Some(CookDeliveryBlockerCode::Gate(GateVerdict::GateFailed))
     );
     assert_eq!(
         delivery

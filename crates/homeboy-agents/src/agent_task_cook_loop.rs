@@ -17,6 +17,7 @@ use crate::agent_task_gate::{
 };
 use crate::agent_task_promotion::{AgentTaskPromotionReport, AgentTaskPromotionStatus};
 use crate::agent_task_review_dossier::AiFilledReviewForm;
+use homeboy_core::cook_status::GateVerdict;
 use homeboy_core::gate::{HomeboyGateResult, HomeboyGateStatus};
 
 pub const AGENT_TASK_COOK_FEEDBACK_REPORT_SCHEMA: &str =
@@ -84,18 +85,6 @@ pub enum AgentTaskCookLoopStatus {
     /// Immutable-base replay could not establish whether the candidate failed
     /// differently, so provider remediation is intentionally withheld.
     IntentionalNoChange,
-    NoChanges,
-    /// A no-patch candidate failed its gates.
-    NoChangesGateFailed,
-    /// At least one declared deterministic gate deferred rather than
-    /// executing (no failure occurred). The candidate patch is promoted and
-    /// durable but unverified; retry is a verification retry, not a provider
-    /// remediation attempt, so it never spends provider execution budget
-    /// (#14731). Also covers a gate whose infrastructure failed: the
-    /// candidate is kept for verification-only recovery.
-    // Accepts `gates_deferred` for records written before #18802.
-    #[serde(alias = "gates_deferred")]
-    GateEnvironmentUnavailable,
     /// The declared gate itself was invalid or selected an inadmissible test
     /// population. This is operator remediation, never candidate-code retry.
     GateDeclarationInvalid,
@@ -103,6 +92,14 @@ pub enum AgentTaskCookLoopStatus {
     GateBudgetExceeded,
     RetryRequested,
     RetriesExhausted,
+    /// The shared gate verdict. `NoChanges` and `NoChangesGateFailed` report a
+    /// no-patch candidate. `GateEnvironmentUnavailable` means at least one
+    /// declared deterministic gate deferred rather than executing (no failure
+    /// occurred): the candidate patch is promoted and durable but unverified,
+    /// and retry is a verification retry that never spends provider execution
+    /// budget (#14731). It also covers a gate whose infrastructure failed.
+    #[serde(untagged)]
+    Gate(GateVerdict),
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -277,8 +274,8 @@ pub fn evaluate_cook_loop(options: AgentTaskCookLoopOptions) -> AgentTaskCookLoo
         && matches!(
             options.promotion_report.status,
             AgentTaskPromotionStatus::VerifiedNoChanges
-                | AgentTaskPromotionStatus::NoChangesGateFailed
-                | AgentTaskPromotionStatus::NoChanges
+                | AgentTaskPromotionStatus::Gate(GateVerdict::NoChangesGateFailed)
+                | AgentTaskPromotionStatus::Gate(GateVerdict::NoChanges)
         )
         && request_requires_substantive_candidate(&options.source_request);
     let mut quality = classify_cook_loop_quality(
@@ -312,7 +309,7 @@ pub fn evaluate_cook_loop(options: AgentTaskCookLoopOptions) -> AgentTaskCookLoo
     }
     let should_retry = environment_failure.is_none()
         && !gate_budget_exceeded
-        && options.promotion_report.status == AgentTaskPromotionStatus::GateFailed
+        && options.promotion_report.status == AgentTaskPromotionStatus::Gate(GateVerdict::GateFailed)
         && !failed_gates.is_empty()
         // A candidate-code label describes the candidate-side observation; it is
         // not remediation authority until immutable-base replay proves a delta.
@@ -393,27 +390,29 @@ pub fn evaluate_cook_loop(options: AgentTaskCookLoopOptions) -> AgentTaskCookLoo
     let status = if follow_up_request.is_some() {
         AgentTaskCookLoopStatus::RetryRequested
     } else if environment_failure.is_some() {
-        AgentTaskCookLoopStatus::GateEnvironmentUnavailable
+        AgentTaskCookLoopStatus::Gate(GateVerdict::GateEnvironmentUnavailable)
     } else if agent_reported_incomplete {
         AgentTaskCookLoopStatus::AgentReportedIncomplete
     } else if gate_budget_exceeded {
         AgentTaskCookLoopStatus::GateBudgetExceeded
     } else if invalid_gate_declaration {
         AgentTaskCookLoopStatus::GateDeclarationInvalid
-    } else if options.promotion_report.status == AgentTaskPromotionStatus::NoChangesGateFailed {
-        AgentTaskCookLoopStatus::NoChangesGateFailed
     } else if options.promotion_report.status
-        == AgentTaskPromotionStatus::GateEnvironmentUnavailable
+        == AgentTaskPromotionStatus::Gate(GateVerdict::NoChangesGateFailed)
+    {
+        AgentTaskCookLoopStatus::Gate(GateVerdict::NoChangesGateFailed)
+    } else if options.promotion_report.status
+        == AgentTaskPromotionStatus::Gate(GateVerdict::GateEnvironmentUnavailable)
     {
         // No gate failed, so `follow_up_request`/`failed_gates` are both
         // empty and this would otherwise fall through to `GreenCompleted` —
         // reporting unexecuted verification as a verified green candidate
         // (#14731).
-        AgentTaskCookLoopStatus::GateEnvironmentUnavailable
+        AgentTaskCookLoopStatus::Gate(GateVerdict::GateEnvironmentUnavailable)
     } else if intentional_no_change.is_some() {
         AgentTaskCookLoopStatus::IntentionalNoChange
     } else if quality.classification == AgentTaskCookLoopQualityClassification::NoChanges {
-        AgentTaskCookLoopStatus::NoChanges
+        AgentTaskCookLoopStatus::Gate(GateVerdict::NoChanges)
     } else if baseline_red {
         AgentTaskCookLoopStatus::BaselineRed
     } else if !failed_gates.is_empty() {
@@ -1250,7 +1249,7 @@ mod tests {
         let options = |source_request: AgentTaskRequest| AgentTaskCookLoopOptions {
             source_request,
             promotion_report: promotion_report(
-                AgentTaskPromotionStatus::GateFailed,
+                AgentTaskPromotionStatus::Gate(GateVerdict::GateFailed),
                 vec![gate.clone()],
             ),
             attempt: 1,
@@ -1314,7 +1313,10 @@ mod tests {
         gate.stderr = stderr;
         let report = evaluate_cook_loop(AgentTaskCookLoopOptions {
             source_request: source_request(),
-            promotion_report: promotion_report(AgentTaskPromotionStatus::GateFailed, vec![gate]),
+            promotion_report: promotion_report(
+                AgentTaskPromotionStatus::Gate(GateVerdict::GateFailed),
+                vec![gate],
+            ),
             attempt: 1,
             max_attempts: 3,
             source_run_id: Some("run-18130".to_string()),
@@ -1342,7 +1344,7 @@ mod tests {
         let report = evaluate_cook_loop(AgentTaskCookLoopOptions {
             source_request: source_request(),
             promotion_report: promotion_report(
-                AgentTaskPromotionStatus::GateFailed,
+                AgentTaskPromotionStatus::Gate(GateVerdict::GateFailed),
                 vec![failed_gate()],
             ),
             attempt: 1,
@@ -1413,9 +1415,9 @@ mod tests {
                 gate.stderr = output.to_string();
                 let mut promotion = promotion_report(
                     if unchanged {
-                        AgentTaskPromotionStatus::NoChangesGateFailed
+                        AgentTaskPromotionStatus::Gate(GateVerdict::NoChangesGateFailed)
                     } else {
-                        AgentTaskPromotionStatus::GateFailed
+                        AgentTaskPromotionStatus::Gate(GateVerdict::GateFailed)
                     },
                     vec![gate],
                 );
@@ -1435,7 +1437,7 @@ mod tests {
                 if environment {
                     assert_eq!(
                         report.status,
-                        AgentTaskCookLoopStatus::GateEnvironmentUnavailable,
+                        AgentTaskCookLoopStatus::Gate(GateVerdict::GateEnvironmentUnavailable),
                         "{output}"
                     );
                     assert!(report.follow_up_request.is_none());
@@ -1471,7 +1473,10 @@ mod tests {
             .classification = AgentTaskGateFailureClassification::GateDeclaration;
         let report = evaluate_cook_loop(AgentTaskCookLoopOptions {
             source_request: source_request(),
-            promotion_report: promotion_report(AgentTaskPromotionStatus::GateFailed, vec![gate]),
+            promotion_report: promotion_report(
+                AgentTaskPromotionStatus::Gate(GateVerdict::GateFailed),
+                vec![gate],
+            ),
             attempt: 1,
             max_attempts: 3,
             source_run_id: Some("run-declaration".to_string()),
@@ -1531,9 +1536,9 @@ mod tests {
                 gate.baseline_comparison = failed_gate().baseline_comparison;
                 let mut promotion = promotion_report(
                     if unchanged {
-                        AgentTaskPromotionStatus::NoChangesGateFailed
+                        AgentTaskPromotionStatus::Gate(GateVerdict::NoChangesGateFailed)
                     } else {
-                        AgentTaskPromotionStatus::GateFailed
+                        AgentTaskPromotionStatus::Gate(GateVerdict::GateFailed)
                     },
                     vec![gate],
                 );
@@ -1562,7 +1567,7 @@ mod tests {
         let report = evaluate_cook_loop(AgentTaskCookLoopOptions {
             source_request: source_request(),
             promotion_report: promotion_report(
-                AgentTaskPromotionStatus::GateFailed,
+                AgentTaskPromotionStatus::Gate(GateVerdict::GateFailed),
                 vec![AgentTaskGateReport::new(
                     "gate-1",
                     vec![
@@ -1626,7 +1631,10 @@ mod tests {
             // Defend persisted reports too: a malformed historical status cannot
             // make an intrinsic failure eligible for explicit acceptance.
             gate.status = AgentTaskGateStatus::AcceptedInheritedFailure;
-            let promotion = promotion_report(AgentTaskPromotionStatus::GateFailed, vec![gate]);
+            let promotion = promotion_report(
+                AgentTaskPromotionStatus::Gate(GateVerdict::GateFailed),
+                vec![gate],
+            );
             assert!(!promotion.finalization_eligible());
         }
     }
@@ -1646,7 +1654,10 @@ mod tests {
             .result = crate::agent_task_gate::AgentTaskGateDifferentialResult::Inconclusive;
         let report = evaluate_cook_loop(AgentTaskCookLoopOptions {
             source_request: source_request(),
-            promotion_report: promotion_report(AgentTaskPromotionStatus::GateFailed, vec![gate]),
+            promotion_report: promotion_report(
+                AgentTaskPromotionStatus::Gate(GateVerdict::GateFailed),
+                vec![gate],
+            ),
             attempt: 1,
             max_attempts: 3,
             source_run_id: Some("run-inconclusive".to_string()),
@@ -1683,7 +1694,7 @@ mod tests {
         let report = evaluate_cook_loop(AgentTaskCookLoopOptions {
             source_request: source_request(),
             promotion_report: promotion_report(
-                AgentTaskPromotionStatus::GateFailed,
+                AgentTaskPromotionStatus::Gate(GateVerdict::GateFailed),
                 vec![failed_gate(), skipped],
             ),
             attempt: 1,
@@ -1714,7 +1725,7 @@ mod tests {
         let report = evaluate_cook_loop(AgentTaskCookLoopOptions {
             source_request: source.clone(),
             promotion_report: promotion_report(
-                AgentTaskPromotionStatus::GateFailed,
+                AgentTaskPromotionStatus::Gate(GateVerdict::GateFailed),
                 vec![failed_gate()],
             ),
             attempt: 1,
@@ -1749,7 +1760,7 @@ mod tests {
         let report = evaluate_cook_loop(AgentTaskCookLoopOptions {
             source_request: source_request(),
             promotion_report: promotion_report(
-                AgentTaskPromotionStatus::GateFailed,
+                AgentTaskPromotionStatus::Gate(GateVerdict::GateFailed),
                 vec![failed_gate(), later_failure],
             ),
             attempt: 1,
@@ -1780,7 +1791,7 @@ mod tests {
         let report = evaluate_cook_loop(AgentTaskCookLoopOptions {
             source_request: source_request(),
             promotion_report: promotion_report(
-                AgentTaskPromotionStatus::GateFailed,
+                AgentTaskPromotionStatus::Gate(GateVerdict::GateFailed),
                 vec![failed_gate()],
             ),
             attempt: 2,
@@ -1848,7 +1859,7 @@ mod tests {
         let report = evaluate_cook_loop(AgentTaskCookLoopOptions {
             source_request: source_request(),
             promotion_report: promotion_report(
-                AgentTaskPromotionStatus::GateFailed,
+                AgentTaskPromotionStatus::Gate(GateVerdict::GateFailed),
                 vec![rejected],
             ),
             attempt: 1,
@@ -1882,7 +1893,7 @@ mod tests {
         let baseline_red = evaluate_cook_loop(AgentTaskCookLoopOptions {
             source_request: source_request(),
             promotion_report: promotion_report(
-                AgentTaskPromotionStatus::GateFailed,
+                AgentTaskPromotionStatus::Gate(GateVerdict::GateFailed),
                 vec![inherited],
             ),
             attempt: 1,
@@ -1903,7 +1914,7 @@ mod tests {
         let candidate_only_failure = evaluate_cook_loop(AgentTaskCookLoopOptions {
             source_request: source_request(),
             promotion_report: promotion_report(
-                AgentTaskPromotionStatus::GateFailed,
+                AgentTaskPromotionStatus::Gate(GateVerdict::GateFailed),
                 vec![failed_gate()],
             ),
             attempt: 1,
@@ -1970,7 +1981,10 @@ mod tests {
             metadata: Value::Null,
         });
 
-        assert_eq!(report.status, AgentTaskCookLoopStatus::NoChanges);
+        assert_eq!(
+            report.status,
+            AgentTaskCookLoopStatus::Gate(GateVerdict::NoChanges)
+        );
         assert_eq!(
             report.quality.classification,
             AgentTaskCookLoopQualityClassification::NoChanges
@@ -2044,7 +2058,10 @@ mod tests {
             review_form: None,
             metadata: Value::Null,
         });
-        assert_eq!(verified.status, AgentTaskCookLoopStatus::NoChanges);
+        assert_eq!(
+            verified.status,
+            AgentTaskCookLoopStatus::Gate(GateVerdict::NoChanges)
+        );
         assert_eq!(
             verified.quality.classification,
             AgentTaskCookLoopQualityClassification::NoChanges
@@ -2054,7 +2071,7 @@ mod tests {
         let failed = evaluate_cook_loop(AgentTaskCookLoopOptions {
             source_request: source_request(),
             promotion_report: promotion_report_with_changed_files(
-                AgentTaskPromotionStatus::NoChangesGateFailed,
+                AgentTaskPromotionStatus::Gate(GateVerdict::NoChangesGateFailed),
                 vec![failed_gate()],
                 Vec::new(),
             ),
@@ -2065,7 +2082,10 @@ mod tests {
             review_form: None,
             metadata: Value::Null,
         });
-        assert_eq!(failed.status, AgentTaskCookLoopStatus::NoChangesGateFailed);
+        assert_eq!(
+            failed.status,
+            AgentTaskCookLoopStatus::Gate(GateVerdict::NoChangesGateFailed)
+        );
         assert!(failed.follow_up_request.is_none());
     }
 
@@ -2115,7 +2135,7 @@ mod tests {
             .any(|source| source.uri == "homeboy://agent-task/run/run-empty"));
 
         let failed = evaluate_cook_loop(options(
-            AgentTaskPromotionStatus::NoChangesGateFailed,
+            AgentTaskPromotionStatus::Gate(GateVerdict::NoChangesGateFailed),
             vec![failed_gate()],
             "run-empty-red".to_string(),
         ));
@@ -2160,10 +2180,14 @@ mod tests {
         .expect("no-change follow-up");
         let gate_fix = evaluate_cook_loop(AgentTaskCookLoopOptions {
             promotion_report: promotion_report(
-                AgentTaskPromotionStatus::GateFailed,
+                AgentTaskPromotionStatus::Gate(GateVerdict::GateFailed),
                 vec![failed_gate()],
             ),
-            ..options(templated, AgentTaskPromotionStatus::GateFailed, Vec::new())
+            ..options(
+                templated,
+                AgentTaskPromotionStatus::Gate(GateVerdict::GateFailed),
+                Vec::new(),
+            )
         })
         .follow_up_request
         .expect("gate-fix follow-up");
@@ -2193,7 +2217,7 @@ mod tests {
         let options = |attempt| AgentTaskCookLoopOptions {
             source_request: source_request(),
             promotion_report: promotion_report_with_changed_files(
-                AgentTaskPromotionStatus::NoChanges,
+                AgentTaskPromotionStatus::Gate(GateVerdict::NoChanges),
                 Vec::new(),
                 Vec::new(),
             ),
@@ -2212,7 +2236,10 @@ mod tests {
         assert_eq!(retry.retry_budget_remaining, 2);
 
         let exhausted = evaluate_cook_loop(options(3));
-        assert_eq!(exhausted.status, AgentTaskCookLoopStatus::NoChanges);
+        assert_eq!(
+            exhausted.status,
+            AgentTaskCookLoopStatus::Gate(GateVerdict::NoChanges)
+        );
         assert_eq!(
             exhausted.quality.classification,
             AgentTaskCookLoopQualityClassification::NoChanges
@@ -2299,7 +2326,7 @@ mod tests {
         let report = evaluate_cook_loop(AgentTaskCookLoopOptions {
             source_request: source_request(),
             promotion_report: promotion_report(
-                AgentTaskPromotionStatus::GateFailed,
+                AgentTaskPromotionStatus::Gate(GateVerdict::GateFailed),
                 vec![failed_gate()],
             ),
             attempt: 1,
@@ -2424,7 +2451,7 @@ mod tests {
         let options = |previous_failure_set: Value| AgentTaskCookLoopOptions {
             source_request: source_request(),
             promotion_report: promotion_report(
-                AgentTaskPromotionStatus::GateFailed,
+                AgentTaskPromotionStatus::Gate(GateVerdict::GateFailed),
                 vec![failed_gate()],
             ),
             attempt: 2,
@@ -2464,7 +2491,7 @@ mod tests {
         let report = evaluate_cook_loop(AgentTaskCookLoopOptions {
             source_request: source_request(),
             promotion_report: promotion_report(
-                AgentTaskPromotionStatus::GateFailed,
+                AgentTaskPromotionStatus::Gate(GateVerdict::GateFailed),
                 vec![failed_gate()],
             ),
             attempt: 2,
@@ -2535,7 +2562,7 @@ mod tests {
         let report = evaluate_cook_loop(AgentTaskCookLoopOptions {
             source_request: source_request(),
             promotion_report: promotion_report(
-                AgentTaskPromotionStatus::GateFailed,
+                AgentTaskPromotionStatus::Gate(GateVerdict::GateFailed),
                 vec![private_failed_gate(AgentTaskGateRevealPolicy::SummaryOnly)],
             ),
             attempt: 1,
@@ -2569,7 +2596,7 @@ mod tests {
         let report = evaluate_cook_loop(AgentTaskCookLoopOptions {
             source_request: source_request(),
             promotion_report: promotion_report(
-                AgentTaskPromotionStatus::GateFailed,
+                AgentTaskPromotionStatus::Gate(GateVerdict::GateFailed),
                 vec![private_failed_gate(AgentTaskGateRevealPolicy::FullEvidence)],
             ),
             attempt: 1,
@@ -2691,7 +2718,7 @@ mod tests {
         let report = evaluate_cook_loop(AgentTaskCookLoopOptions {
             source_request: source_request(),
             promotion_report: promotion_report(
-                AgentTaskPromotionStatus::GateFailed,
+                AgentTaskPromotionStatus::Gate(GateVerdict::GateFailed),
                 vec![failed_gate()],
             ),
             attempt: 1,
@@ -2721,7 +2748,7 @@ mod tests {
         let report = evaluate_cook_loop(AgentTaskCookLoopOptions {
             source_request: source_request(),
             promotion_report: promotion_report(
-                AgentTaskPromotionStatus::GateEnvironmentUnavailable,
+                AgentTaskPromotionStatus::Gate(GateVerdict::GateEnvironmentUnavailable),
                 vec![deferred_gate()],
             ),
             attempt: 1,
@@ -2734,7 +2761,7 @@ mod tests {
 
         assert_eq!(
             report.status,
-            AgentTaskCookLoopStatus::GateEnvironmentUnavailable
+            AgentTaskCookLoopStatus::Gate(GateVerdict::GateEnvironmentUnavailable)
         );
         assert!(
             report.follow_up_request.is_none(),
@@ -2746,7 +2773,7 @@ mod tests {
         );
         assert_eq!(
             report.promotion_status,
-            AgentTaskPromotionStatus::GateEnvironmentUnavailable
+            AgentTaskPromotionStatus::Gate(GateVerdict::GateEnvironmentUnavailable)
         );
     }
 
@@ -2772,7 +2799,7 @@ mod tests {
             let report = evaluate_cook_loop(AgentTaskCookLoopOptions {
                 source_request: source_request(),
                 promotion_report: promotion_report(
-                    AgentTaskPromotionStatus::GateEnvironmentUnavailable,
+                    AgentTaskPromotionStatus::Gate(GateVerdict::GateEnvironmentUnavailable),
                     vec![green_gate(), gate.clone()],
                 ),
                 attempt,
@@ -2785,7 +2812,7 @@ mod tests {
 
             assert_eq!(
                 report.status,
-                AgentTaskCookLoopStatus::GateEnvironmentUnavailable
+                AgentTaskCookLoopStatus::Gate(GateVerdict::GateEnvironmentUnavailable)
             );
             assert!(report.follow_up_request.is_none());
             assert!(report.failed_gates.is_empty());

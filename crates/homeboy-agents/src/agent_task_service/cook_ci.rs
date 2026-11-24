@@ -1,6 +1,6 @@
 //! Durable CI verification receipt, separate from pre-publication gate evidence.
 use super::cook_recipe::CookRecipeStore;
-use homeboy_core::cook_status::{CookDisposition, CookStatus};
+use homeboy_core::cook_status::{CookDisposition, CookStatus, GateVerdict};
 use homeboy_core::git::cook_ci::{poll_cook_ci, CookCiSource, GithubCookCi};
 use homeboy_core::{Error, Result};
 use serde_json::{json, Value};
@@ -138,7 +138,7 @@ pub(crate) fn ci_outcome(
         "awaiting_ci" => return None,
         "completed" => (CookStatus::ReviewReady, terminal, 0, None),
         "ci_gate_failed" => (
-            CookStatus::GateFailed,
+            CookStatus::Gate(GateVerdict::GateFailed),
             terminal,
             1,
             Some(format!(
@@ -310,7 +310,11 @@ mod tests {
             ..open_pr()
         };
         for (pr, receipt_status, cook_status) in [
-            (conflicting, "ci_gate_failed", CookStatus::GateFailed),
+            (
+                conflicting,
+                "ci_gate_failed",
+                CookStatus::Gate(GateVerdict::GateFailed),
+            ),
             (merged, "completed", CookStatus::ReviewReady),
             (closed, "pr_closed", CookStatus::Blocked),
         ] {

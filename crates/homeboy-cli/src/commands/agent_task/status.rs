@@ -29,6 +29,7 @@ pub(crate) use projections::{
 
 use crate::commands::operator_projection::serialized_len;
 use crate::commands::runs::cook::{EvidenceArgs, LifecycleReadArgs};
+use homeboy::core::cook_status::GateVerdict;
 use homeboy_engine_primitives::content_hash;
 use serde::Serialize;
 use serde_json::{json, Value};
@@ -413,7 +414,7 @@ fn attach_promotion_replay(value: &mut Value, run_id: &str, requested_id: &str) 
     };
     let recoverable = homeboy::agents::agent_task_lifecycle::CookRunState::of(&record).recoverable
         || CookDelivery::from_run_metadata(&record.metadata).is_some_and(|delivery| {
-            delivery.blocker_code() == Some(CookDeliveryBlockerCode::GateFailed)
+            delivery.blocker_code() == Some(CookDeliveryBlockerCode::Gate(GateVerdict::GateFailed))
         });
     if !recoverable
         || record

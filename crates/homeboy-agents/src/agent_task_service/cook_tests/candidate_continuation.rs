@@ -57,7 +57,7 @@ fn make_multi_attempt(
         .as_object_mut()
         .unwrap()
         .remove("replacement_gate_proof");
-    promotion.status = AgentTaskPromotionStatus::GateFailed;
+    promotion.status = AgentTaskPromotionStatus::Gate(GateVerdict::GateFailed);
     promotion.deterministic_gates[0].status = crate::agent_task_gate::AgentTaskGateStatus::Failed;
     promotion.deterministic_gates[0].exit_code = 1;
     promotion.normalize_gate_outcome();
@@ -289,7 +289,7 @@ fn multi_attempt_substantive_adopt_uses_terminal_execution_lineage() {
 #[test]
 fn adoption_supersedes_deferred_and_pending_status_with_passing_candidate_proof() {
     for status in [
-        AgentTaskPromotionStatus::GateEnvironmentUnavailable,
+        AgentTaskPromotionStatus::Gate(GateVerdict::GateEnvironmentUnavailable),
         AgentTaskPromotionStatus::VerificationPending,
     ] {
         with_corrected_gate_candidate(|options, _, mut promotion| {
@@ -304,13 +304,14 @@ fn adoption_supersedes_deferred_and_pending_status_with_passing_candidate_proof(
             unverified.normalize_gate_outcome();
             assert_eq!(unverified.status, status);
             let mut deferred = promotion.clone();
-            deferred.status = AgentTaskPromotionStatus::GateEnvironmentUnavailable;
+            deferred.status =
+                AgentTaskPromotionStatus::Gate(GateVerdict::GateEnvironmentUnavailable);
             deferred.deterministic_gates[0].status =
                 crate::agent_task_gate::AgentTaskGateStatus::Deferred;
             deferred.normalize_gate_outcome();
             assert_eq!(
                 deferred.status,
-                AgentTaskPromotionStatus::GateEnvironmentUnavailable
+                AgentTaskPromotionStatus::Gate(GateVerdict::GateEnvironmentUnavailable)
             );
 
             promotion.status = status;
@@ -718,7 +719,8 @@ fn wedge(case: WedgedCook, options: &CookRequest) {
         }
         WedgedCook::DeferredGateBeforePublish => {
             let mut promotion = persisted_promotion_for_attempt(run).unwrap().unwrap();
-            promotion.status = AgentTaskPromotionStatus::GateEnvironmentUnavailable;
+            promotion.status =
+                AgentTaskPromotionStatus::Gate(GateVerdict::GateEnvironmentUnavailable);
             promotion.deterministic_gates[0].status =
                 crate::agent_task_gate::AgentTaskGateStatus::Deferred;
             promotion.deterministic_gates[0].exit_code = 0;
@@ -926,7 +928,7 @@ fn applied_candidate_gate_verdicts_select_a_completing_recovery_step() {
                 });
             }
             promotion.deterministic_gates.push(gate);
-            promotion.status = AgentTaskPromotionStatus::GateFailed;
+            promotion.status = AgentTaskPromotionStatus::Gate(GateVerdict::GateFailed);
             promotion.normalize_gate_outcome();
             store
                 .record_promotion(run, serde_json::to_value(&promotion).unwrap())
@@ -1168,7 +1170,7 @@ fn push_added_gate(
         failure_attribution: None,
     });
     promotion.deterministic_gates.push(gate);
-    promotion.status = AgentTaskPromotionStatus::GateFailed;
+    promotion.status = AgentTaskPromotionStatus::Gate(GateVerdict::GateFailed);
 }
 
 /// #17423: the declared gate passed and the only other failure is an
@@ -1273,7 +1275,7 @@ fn cook_recovery_classifies_stalled_gate_setup_as_gate_environment_unavailable()
         assert!(stored.deterministic_gates[1].failure_evidence.is_none());
         assert_eq!(
             stored.status,
-            AgentTaskPromotionStatus::GateEnvironmentUnavailable
+            AgentTaskPromotionStatus::Gate(GateVerdict::GateEnvironmentUnavailable)
         );
         let plan = crate::agent_task_service::plan_cook_recovery(cook).unwrap();
         assert_eq!(plan.step, CookRecoveryStep::Regate, "{plan:?}");

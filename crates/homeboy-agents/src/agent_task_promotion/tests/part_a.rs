@@ -14,6 +14,7 @@ use super::*;
 use crate::agent_task::AGENT_TASK_OUTCOME_SCHEMA;
 use crate::agent_task_gate::{AgentTaskGateRevealPolicy, VerifyGateOptions};
 use crate::agent_task_scheduler::AgentTaskAggregate;
+use homeboy_core::cook_status::GateVerdict;
 use serde_json::Value;
 use std::process::Command;
 
@@ -251,7 +252,10 @@ fn empty_patch_failing_gate_is_reported_against_destination() {
     )
     .expect("failed no-op gate is recorded");
 
-    assert_eq!(report.status, AgentTaskPromotionStatus::NoChanges);
+    assert_eq!(
+        report.status,
+        AgentTaskPromotionStatus::Gate(GateVerdict::NoChanges)
+    );
     assert!(report.deterministic_gates.is_empty());
     assert!(report.gate_results.is_empty());
     assert!(provider.apply_calls.is_empty());

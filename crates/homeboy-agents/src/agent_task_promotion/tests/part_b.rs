@@ -19,6 +19,7 @@ use crate::agent_task_gate::{
     AgentTaskGateStatus, AgentTaskGateVisibility, VerifyGateOptions,
 };
 use crate::agent_task_scheduler::{AgentTaskAggregate, AgentTaskPlan};
+use homeboy_core::cook_status::GateVerdict;
 use serde_json::Value;
 use sha2::{Digest, Sha256};
 use std::collections::BTreeMap;
@@ -1107,7 +1108,7 @@ fn operator_gates_compare_candidate_failures_to_the_immutable_base() {
         (
             "test \"$(cat src/lib.rs)\" = old",
             "failed",
-            AgentTaskPromotionStatus::GateFailed,
+            AgentTaskPromotionStatus::Gate(GateVerdict::GateFailed),
         ),
         ("true", "succeeded", AgentTaskPromotionStatus::Applied),
     ] {
@@ -1267,7 +1268,10 @@ fn explicit_candidate_gate_failure_is_recorded_after_normal_promotion_handoff() 
         &mut provider,
     )
     .expect("gate failure is a promotion report");
-    assert_eq!(report.status, AgentTaskPromotionStatus::GateFailed);
+    assert_eq!(
+        report.status,
+        AgentTaskPromotionStatus::Gate(GateVerdict::GateFailed)
+    );
     assert!(provider.apply_calls.is_empty());
     assert_eq!(provider.verify_calls.len(), 1);
 }
@@ -1336,7 +1340,10 @@ fn ordered_gate_failure_skips_downstream_command_with_durable_blocker_evidence()
     );
     assert!(promote.duration_ms.unwrap() >= gate.duration_ms.unwrap());
     assert!(promote.started_at <= gate.started_at);
-    assert_eq!(report.status, AgentTaskPromotionStatus::GateFailed);
+    assert_eq!(
+        report.status,
+        AgentTaskPromotionStatus::Gate(GateVerdict::GateFailed)
+    );
     assert_eq!(provider.verify_calls.len(), 1, "broad gate was not invoked");
     assert!(!downstream_marker.exists(), "broad gate was not executed");
     assert_eq!(
@@ -1420,7 +1427,10 @@ fn promotion_rejects_a_cargo_gate_that_selected_zero_tests() {
     )
     .expect("zero-selected gate produces a promotion report");
 
-    assert_eq!(report.status, AgentTaskPromotionStatus::GateFailed);
+    assert_eq!(
+        report.status,
+        AgentTaskPromotionStatus::Gate(GateVerdict::GateFailed)
+    );
     assert_eq!(
         report.deterministic_gates[0]
             .failure_evidence
@@ -1846,7 +1856,7 @@ fn promotion_setup_failure_is_bounded_and_never_dispatches_a_gate() {
 
         assert_eq!(
             report.status,
-            AgentTaskPromotionStatus::GateEnvironmentUnavailable
+            AgentTaskPromotionStatus::Gate(GateVerdict::GateEnvironmentUnavailable)
         );
         let gate = &report.deterministic_gates[0];
         assert_eq!(
@@ -2135,7 +2145,10 @@ fn gate_failure_preserves_the_pre_gate_candidate_baseline_for_feedback_retry() {
     )
     .expect("gate failure is durable promotion evidence");
 
-    assert_eq!(report.status, AgentTaskPromotionStatus::GateFailed);
+    assert_eq!(
+        report.status,
+        AgentTaskPromotionStatus::Gate(GateVerdict::GateFailed)
+    );
     let baseline = report.provenance["gate_feedback_baseline"].clone();
     assert_eq!(
         checkpoint.expect("post-apply checkpoint").provenance["gate_feedback_baseline"],

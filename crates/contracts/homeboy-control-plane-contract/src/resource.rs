@@ -928,6 +928,7 @@ impl From<homeboy_lifecycle_contract::RunExecutionState> for ControlPlaneState {
 impl From<&homeboy_lifecycle_contract::CookStatus> for ControlPlaneState {
     fn from(status: &homeboy_lifecycle_contract::CookStatus) -> Self {
         use homeboy_lifecycle_contract::CookStatus::*;
+        use homeboy_lifecycle_contract::GateVerdict;
         match status {
             Queued => Self::Queued,
             InFlight | AwaitingCi => Self::Running,
@@ -937,8 +938,10 @@ impl From<&homeboy_lifecycle_contract::CookStatus> for ControlPlaneState {
             | GreenNoFinalize
             | IntentionalNoChange
             | SupersededByActiveCook => Self::Succeeded,
-            CandidateRecoverable | GateEnvironmentUnavailable => Self::CandidateRecoverable,
-            NoChanges
+            CandidateRecoverable | Gate(GateVerdict::GateEnvironmentUnavailable) => {
+                Self::CandidateRecoverable
+            }
+            Gate(GateVerdict::NoChanges)
             | NoCandidate
             | AwaitingAcceptance
             | Blocked
@@ -950,8 +953,7 @@ impl From<&homeboy_lifecycle_contract::CookStatus> for ControlPlaneState {
             | SelectionRequired
             | BaselineRed
             | Validated => Self::PartialFailure,
-            GateFailed
-            | NoChangesGateFailed
+            Gate(GateVerdict::GateFailed | GateVerdict::NoChangesGateFailed)
             | ProviderFailure
             | DurableFailure
             | PreExecutionFailure
