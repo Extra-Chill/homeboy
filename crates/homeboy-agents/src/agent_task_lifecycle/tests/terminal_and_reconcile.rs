@@ -787,7 +787,7 @@ fn failed_lab_preacceptance_reconstructs_only_authenticated_zero_execution_recov
     assert!(candidate_adoption_recovery_outcome(&wrong_phase, &plan.tasks[0]).is_none());
 
     let mut consumed_execution = record.clone();
-    consumed_execution.metadata["provider_executions_consumed"] = json!(1);
+    consumed_execution.metadata["provider_executions"] = json!([{ "state": "succeeded" }]);
     assert!(candidate_adoption_recovery_outcome(&consumed_execution, &plan.tasks[0]).is_none());
 
     let mut provider_handle = record.clone();
@@ -1879,7 +1879,7 @@ fn typed_pre_provider_failure_outranks_stale_runner_status_and_terminalizes_once
             crate::agent_task_lifecycle::CookRunState::of(&record).status,
             "pre_execution_failure"
         );
-        assert_eq!(record.metadata["provider_executions_consumed"], 0);
+        assert_eq!(record.provider_executions_consumed(), 0);
         assert_eq!(record.metadata["runner_job_status"], "failed");
         assert_eq!(
             record.metadata["runner_result_synchronization"]["source"],
@@ -4436,7 +4436,7 @@ fn interrupted_owner_without_provider_execution_reports_before_provider_start() 
         let failed = record_interrupted_local_owner_in_store(&store, run_id)
             .expect("record interrupted observer");
         assert_eq!(failed.state(), RunExecutionState::Failed);
-        assert_eq!(failed.metadata["provider_executions_consumed"], json!(0));
+        assert_eq!(failed.provider_executions_consumed(), json!(0));
         assert_eq!(
             failed.metadata["stop_reason"],
             json!("local Cook observer was interrupted before the provider started; no work was produced")
@@ -4505,7 +4505,7 @@ fn dead_local_provider_owner_terminalizes_running_reservation_once() {
             replay.metadata["terminal_failure_classification"],
             json!("interrupted_owner")
         );
-        assert_eq!(replay.metadata["provider_executions_consumed"], json!(1));
+        assert_eq!(replay.provider_executions_consumed(), json!(1));
         assert_eq!(
             replay.metadata["interrupted_owner"]["provider_budget_consumed"],
             json!(true)
@@ -4873,7 +4873,7 @@ fn cancellation_race_defers_to_a_durable_provider_success() {
             replay.metadata["provider_executions"][0]["state"],
             json!("succeeded")
         );
-        assert_eq!(replay.metadata["provider_executions_consumed"], json!(1));
+        assert_eq!(replay.provider_executions_consumed(), json!(1));
     });
 }
 
@@ -4923,7 +4923,7 @@ fn provider_terminalization_observes_cancellation_that_won_the_race() {
             terminal.metadata["provider_executions"][0]["state"],
             json!("cancelled")
         );
-        assert_eq!(terminal.metadata["provider_executions_consumed"], json!(1));
+        assert_eq!(terminal.provider_executions_consumed(), json!(1));
     });
 }
 

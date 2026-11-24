@@ -1240,14 +1240,7 @@ fn reached_freeze_boundary_in_store(
         .map(|outcome| outcome.record) else {
             continue;
         };
-        if record.metadata["provider_executions_consumed"]
-            .as_u64()
-            .unwrap_or_default()
-            > 0
-            || record.metadata["provider_executions"]
-                .as_array()
-                .is_some_and(|executions| !executions.is_empty())
-        {
+        if record.provider_executions_consumed() > 0 {
             // Provider output authenticates the source candidate. This locks
             // dispatch and candidate inputs, while destination inputs remain
             // correctable until an applied promotion exists.
@@ -2983,7 +2976,7 @@ pub fn reconstruct_options_without_dispatcher(recipe: &AgentTaskCookRecipe) -> R
 pub(crate) fn has_unambiguous_zero_execution(
     record: &agent_task_lifecycle::AgentTaskRunRecord,
 ) -> bool {
-    record.metadata["provider_executions_consumed"].as_u64() == Some(0)
+    record.provider_executions_consumed() == 0
         && record.metadata["provider_run_ids"]
             .as_array()
             .is_some_and(Vec::is_empty)
@@ -4353,7 +4346,6 @@ mod tests {
                     record
                         .set_state_for_test(homeboy_lifecycle_contract::RunExecutionState::Failed);
                     let metadata = record.ensure_metadata_object();
-                    metadata.insert("provider_executions_consumed".into(), serde_json::json!(0));
                     metadata.insert("provider_run_ids".into(), serde_json::json!([]));
                     metadata.insert(
                         "pre_execution_failure".into(),
@@ -5278,7 +5270,8 @@ mod tests {
         lifecycle_store
             .mutate_record("run", |record| {
                 record_feedback_candidate(record);
-                record.metadata["provider_executions_consumed"] = serde_json::json!(1);
+                record.metadata["provider_executions"] =
+                    serde_json::json!([{ "state": "succeeded" }]);
                 true
             })
             .unwrap();
@@ -6241,7 +6234,8 @@ mod tests {
             )
             .expect("materialize provider attempt");
             crate::agent_task_lifecycle::rewrite_record_for_test("run-2", |record| {
-                record.metadata["provider_executions_consumed"] = serde_json::json!(1);
+                record.metadata["provider_executions"] =
+                    serde_json::json!([{ "state": "succeeded" }]);
             })
             .expect("record provider execution");
             let existing = load_recipe("cook").expect("load corrected recipe");
@@ -6362,7 +6356,8 @@ mod tests {
                     lifecycle_store.roots().data(),
                 );
                 crate::agent_task_lifecycle::rewrite_record_for_test("run", |record| {
-                    record.metadata["provider_executions_consumed"] = serde_json::json!(1);
+                    record.metadata["provider_executions"] =
+                        serde_json::json!([{ "state": "succeeded" }]);
                 })
             }
             .expect("record provider execution");

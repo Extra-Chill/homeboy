@@ -1634,7 +1634,7 @@ fn seed_moving_base_attempt(
     agent_task_lifecycle::record_promotion(run_id, serde_json::to_value(&applied).unwrap())
         .unwrap();
     agent_task_lifecycle::rewrite_record_for_test(run_id, |record| {
-        record.metadata["provider_executions_consumed"] = serde_json::json!(1);
+        record.metadata["provider_executions"] = serde_json::json!([{ "state": "succeeded" }]);
     })
     .unwrap();
     (options, applied)
@@ -2477,7 +2477,7 @@ fn executed_attempt_waits_out_short_runtime_owner_instead_of_failing_at_zero_ms(
         agent_task_lifecycle::submit_plan(&options.identity.initial_plan, Some(&run_id))
             .expect("materialize Cook lifecycle record");
         agent_task_lifecycle::rewrite_record_for_test(&run_id, |record| {
-            record.metadata["provider_executions_consumed"] = serde_json::json!(1);
+            record.metadata["provider_executions"] = serde_json::json!([{ "state": "succeeded" }]);
         })
         .expect("record the consumed provider execution");
         let lifecycle_store = test_lifecycle_store();
@@ -4820,7 +4820,7 @@ fn cook_persists_controller_admission_timeout_before_provider_execution() {
         assert_eq!(
             agent_task_lifecycle::exact_record(&successor)
                 .unwrap()
-                .metadata["provider_executions_consumed"],
+                .provider_executions_consumed(),
             0
         );
         let retry = crate::agent_task_service::retry(
@@ -4839,7 +4839,7 @@ fn cook_persists_controller_admission_timeout_before_provider_execution() {
             homeboy_lifecycle_contract::RunExecutionState::Failed
         );
         assert!(record.provider_handles.is_empty());
-        assert_eq!(record.metadata["provider_executions_consumed"], 0);
+        assert_eq!(record.provider_executions_consumed(), 0);
         assert_eq!(
             record.metadata["pre_execution_failure"]["phase"],
             "controller_admission"
@@ -5267,7 +5267,7 @@ fn admission_refused_lifecycle_retry_dispatches_through_its_cook() {
             homeboy_lifecycle_contract::RunExecutionState::Succeeded
         );
         assert!(status.metadata["pre_execution_failure"].is_null());
-        assert_eq!(status.metadata["provider_executions_consumed"], 1);
+        assert_eq!(status.provider_executions_consumed(), 1);
         let projected = crate::orchestration::run_from_current_environment(cook_id).unwrap();
         assert_eq!(projected.run.as_str(), retry.run_id);
         assert!(!serde_json::to_string(&projected.blocker)
@@ -5918,7 +5918,7 @@ fn snapshot_divergence_opens_a_per_cook_circuit_until_source_identity_changes() 
         assert_eq!(
             agent_task_lifecycle::exact_record(&options.identity.initial_run_id)
                 .expect("source record")
-                .metadata["provider_executions_consumed"],
+                .provider_executions_consumed(),
             0
         );
 
@@ -6324,7 +6324,10 @@ fn execution_step_reservation_before_recipe_and_index_repairs_and_executes_provi
             reserved
         );
         assert_eq!(
-            store.read_record(&reserved).unwrap().metadata["provider_executions_consumed"],
+            store
+                .read_record(&reserved)
+                .unwrap()
+                .provider_executions_consumed(),
             1
         );
         assert_eq!(
@@ -6434,7 +6437,7 @@ fn retryable_pre_provider_retry_returns_terminal_successor_without_reexecution()
         let successor_run_id =
             agent_task_lifecycle::cook_attempt_run_id(&options.identity.cook_id, 2);
         agent_task_lifecycle::rewrite_record_for_test(&options.identity.initial_run_id, |record| {
-            record.metadata["provider_executions_consumed"] = serde_json::json!(1);
+            record.metadata["provider_executions"] = serde_json::json!([{ "state": "succeeded" }]);
         })
         .unwrap();
         crate::agent_task_service::retry(
@@ -6451,7 +6454,7 @@ fn retryable_pre_provider_retry_returns_terminal_successor_without_reexecution()
             agent_task_lifecycle::exact_record(&successor_run_id)
         );
         let completed = agent_task_lifecycle::exact_record(&successor_run_id).unwrap();
-        assert_eq!(completed.metadata["provider_executions_consumed"], 1);
+        assert_eq!(completed.provider_executions_consumed(), 1);
         assert_eq!(
             completed.metadata["cook_controller_failure"]["details"]["field"],
             "source.candidate"
@@ -6540,7 +6543,7 @@ fn normal_cook_repairs_a_transient_initial_lifecycle_write_before_reporting_fail
         assert_eq!(index.latest_run_id, run_id);
         assert_eq!(index.attempts.len(), 1);
         let record = agent_task_lifecycle::exact_record(run_id).expect("recovered record");
-        assert_eq!(record.metadata["provider_executions_consumed"], 0);
+        assert_eq!(record.provider_executions_consumed(), 0);
         assert_eq!(
             record.metadata["pre_execution_failure"]["phase"],
             "cook_pre_execution"
@@ -7300,7 +7303,7 @@ fn cook_transport_preparation_failure_does_not_exhaust_cook_retries() {
             record.state(),
             homeboy_lifecycle_contract::RunExecutionState::Failed
         );
-        assert_eq!(record.metadata["provider_executions_consumed"], 0);
+        assert_eq!(record.provider_executions_consumed(), 0);
     });
 }
 
@@ -13915,7 +13918,7 @@ fn cook_repro_that_passes_on_base_stops_before_dispatch() {
         let record = agent_task_lifecycle::reconcile_status(&options.identity.initial_run_id)
             .expect("the stopped Cook has a durable run");
         assert_eq!(record.state(), RunExecutionState::Failed);
-        assert_eq!(record.metadata["provider_executions_consumed"], 0);
+        assert_eq!(record.provider_executions_consumed(), 0);
     });
 }
 
@@ -14098,7 +14101,7 @@ fn materialized_cook_queues_same_attempt_then_dispatches_once_after_upgrade_rele
         assert_eq!(record.state(), RunExecutionState::Queued);
         assert_eq!(record.metadata["cook_runtime_admission"]["state"], "queued");
         assert_eq!(record.metadata["execution_scheduling"]["epoch"], 1);
-        assert_eq!(record.metadata["provider_executions_consumed"], 0);
+        assert_eq!(record.provider_executions_consumed(), 0);
 
         assert_eq!(deferred.exit_code, 75);
         let lifecycle = test_lifecycle_store();
@@ -14117,7 +14120,7 @@ fn materialized_cook_queues_same_attempt_then_dispatches_once_after_upgrade_rele
             );
             let queued = lifecycle.read_record(&run_id).unwrap();
             assert_eq!(queued.state(), RunExecutionState::Queued);
-            assert_eq!(queued.metadata["provider_executions_consumed"], 0);
+            assert_eq!(queued.provider_executions_consumed(), 0);
             assert_eq!(
                 queued.metadata["execution_scheduling"]["recovery_failures"],
                 0
@@ -14167,7 +14170,7 @@ fn materialized_cook_queues_same_attempt_then_dispatches_once_after_upgrade_rele
         assert_eq!(preparations.load(Ordering::SeqCst), 1);
         let resumed = agent_task_lifecycle::exact_record(&run_id).expect("resumed attempt");
         assert_eq!(resumed.run_id, run_id);
-        assert_eq!(resumed.metadata["provider_executions_consumed"], 0);
+        assert_eq!(resumed.provider_executions_consumed(), 0);
         assert_eq!(resumed.state(), RunExecutionState::Running);
         let recipe = load_recipe(cook_id).expect("reconstructed durable Cook recipe");
         assert_eq!(recipe.attempts.len(), 1);
@@ -14245,7 +14248,7 @@ fn launch_exit_after_runtime_admission_deferral_keeps_attempt_queued_until_relea
         assert_eq!(queued.metadata["cook_runtime_admission"]["state"], "queued");
         assert!(queued.metadata.get("interrupted_owner").is_none());
         assert!(queued.metadata.get("terminal_phase").is_none());
-        assert_eq!(queued.metadata["provider_executions_consumed"], 0);
+        assert_eq!(queued.provider_executions_consumed(), 0);
         let parent = lifecycle.read_record(cook_id).expect("handoff parent");
         assert_ne!(parent.state(), RunExecutionState::Failed, "{parent:?}");
         assert!(parent.metadata.get("cook_controller_failure").is_none());
@@ -14642,7 +14645,7 @@ fn workspace_snapshot_fence_invalidation_is_retryable_without_provider_execution
             "workspace_snapshot_fence"
         );
         assert_eq!(record.metadata["pre_execution_failure"]["retryable"], true);
-        assert_eq!(record.metadata["provider_executions_consumed"], 0);
+        assert_eq!(record.provider_executions_consumed(), 0);
         assert!(record.metadata["provider_executions"].is_null());
         let retry =
             crate::agent_task_service::retry(&options.identity.initial_run_id, None, false, false)
@@ -14833,7 +14836,7 @@ fn cook_lab_workspace_stage_failure_advertises_runtime_refresh_and_retry() {
         );
         let record = agent_task_lifecycle::reconcile_status(run_id).expect("attempt exists");
         assert!(record.provider_handles.is_empty());
-        assert_eq!(record.metadata["provider_executions_consumed"], 0);
+        assert_eq!(record.provider_executions_consumed(), 0);
     });
 }
 

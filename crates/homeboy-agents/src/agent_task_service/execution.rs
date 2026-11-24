@@ -2018,12 +2018,8 @@ fn apply_cook_timeout_override(
     for attempt in &recipe.attempts {
         semantic_attempts.insert(attempt.attempt);
         if let Ok(record) = lifecycle_store.read_record(&attempt.run_id) {
-            executions_used = executions_used.saturating_add(
-                record.metadata["provider_executions_consumed"]
-                    .as_u64()
-                    .and_then(|value| u32::try_from(value).ok())
-                    .unwrap_or(0),
-            );
+            executions_used = executions_used
+                .saturating_add(u32::try_from(record.provider_executions_consumed()).unwrap_or(0));
         }
         if let Ok(aggregate) = lifecycle_store.read_aggregate(&attempt.run_id) {
             scheduler_retries_used = scheduler_retries_used.saturating_add(
@@ -2460,10 +2456,7 @@ fn retryable_cook_attempt(
     // durable recipe replays it as the same attempt whatever its transient
     // classification (#16441).
     let replaces_source_attempt = source.metadata["pre_execution_failure"].is_object()
-        && source.metadata["provider_executions_consumed"]
-            .as_u64()
-            .unwrap_or_default()
-            == 0;
+        && source.provider_executions_consumed() == 0;
     let retryable_pre_execution_failure =
         replaces_source_attempt || super::retryable_pre_execution_failure(source);
     agent_task_lifecycle::admit_lab_pre_execution_replay(source, &source_recipe_attempt.plan)?;
@@ -3923,7 +3916,6 @@ mod tests {
                 record.set_state_for_test(homeboy_lifecycle_contract::RunExecutionState::Failed);
                 record.metadata["cook_id"] = json!(cook_id);
                 record.metadata["cook_attempt"] = json!(1);
-                record.metadata["provider_executions_consumed"] = json!(0);
                 record.metadata["pre_execution_failure"] = json!({
                 "phase": "runner_preflight",
                 "retryable": true,

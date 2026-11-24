@@ -638,7 +638,10 @@ fn execution_step_runner_ineligible_then_eligible_across_daemon_restart_executes
             RunExecutionState::Succeeded
         );
         assert_eq!(
-            store.read_record(&child).unwrap().metadata["provider_executions_consumed"],
+            store
+                .read_record(&child)
+                .unwrap()
+                .provider_executions_consumed(),
             1
         );
         let calls = Arc::new(AtomicUsize::new(0));

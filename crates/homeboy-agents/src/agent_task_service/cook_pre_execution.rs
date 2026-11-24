@@ -502,10 +502,7 @@ pub(crate) fn recover_recipe_attempt_with_stores(
 pub fn retryable_pre_execution_failure(record: &agent_task_lifecycle::AgentTaskRunRecord) -> bool {
     record.metadata["pre_execution_failure"]["retryable"] == Value::Bool(true)
         || (record.metadata["pre_execution_failure"]["phase"] == "local_retry_supervisor"
-            && record.metadata["provider_executions_consumed"]
-                .as_u64()
-                .unwrap_or(0)
-                == 0)
+            && record.provider_executions_consumed() == 0)
 }
 
 #[derive(Debug)]
@@ -618,9 +615,7 @@ pub(crate) fn pre_execution_failure_details(
 fn pre_provider_outcome_failure_cause(
     record: &agent_task_lifecycle::AgentTaskRunRecord,
 ) -> Option<(String, String, Option<String>)> {
-    let provider_executions_consumed = record.metadata["provider_executions_consumed"]
-        .as_u64()
-        .unwrap_or(0);
+    let provider_executions_consumed = record.provider_executions_consumed();
     let aggregate = agent_task_lifecycle::read_attempt_aggregate(&record.run_id).ok()?;
     let (phase, classification, diagnostic) = super::cook_promotion::pre_provider_diagnostic_cause(
         provider_executions_consumed,
@@ -1083,7 +1078,6 @@ mod tests {
                 .mutate_record(run_id, |record| {
                     record
                         .set_state_for_test(homeboy_lifecycle_contract::RunExecutionState::Failed);
-                    record.metadata["provider_executions_consumed"] = serde_json::json!(0);
                     true
                 })
                 .expect("mutate record")
