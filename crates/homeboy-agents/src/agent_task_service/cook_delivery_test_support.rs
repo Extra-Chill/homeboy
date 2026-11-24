@@ -15,7 +15,9 @@ pub fn edit_cook_delivery_for_test(
     edit(&mut artifacts);
     let recorded = CookDelivery::from_run_metadata(metadata);
     let delivery = CookDelivery::project(&artifacts, recorded.as_ref());
+    let outcome = CookOutcome::from_run_metadata(metadata);
     metadata[COOK_DELIVERY_KEY] = CookDelivery::to_record(delivery.as_ref(), &artifacts);
+    CookOutcome::write(metadata, outcome);
 }
 
 /// Test builder: set the artifact at `pointer` (a JSON pointer into
@@ -66,7 +68,9 @@ pub fn record_cook_delivery_blocker_for_test(
         evidence: RECORDED_BLOCKER_EVIDENCE.to_string(),
         output: None,
     });
+    let outcome = CookOutcome::from_run_metadata(metadata);
     metadata[COOK_DELIVERY_KEY] = CookDelivery::to_record(Some(&delivery), &artifacts);
+    CookOutcome::write(metadata, outcome);
 }
 
 /// Test builder: run metadata holding only a `cook_delivery` record of

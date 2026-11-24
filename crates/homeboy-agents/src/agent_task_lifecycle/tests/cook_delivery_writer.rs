@@ -303,13 +303,19 @@ fn a_deferred_then_executed_gate_never_stays_gate_environment_unavailable() {
         // The Cook loop recorded its deferred result.
         lifecycle_store
             .mutate_record(run_id, |record| {
-                record.ensure_metadata_object().insert(
-                    "cook_progress".to_string(),
-                    json!({ "phase": "terminal", "terminal_status": "gate_environment_unavailable", "terminal_success": false, "exit_code": 1 }),
-                );
+                record
+                    .ensure_metadata_object()
+                    .insert("cook_progress".to_string(), json!({ "phase": "terminal" }));
                 true
             })
-            .expect("cook result recorded");
+            .expect("cook progress recorded");
+        record_cook_terminal_result_in_store(
+            &lifecycle_store,
+            run_id,
+            CookStatus::Gate(GateVerdict::GateEnvironmentUnavailable),
+            1,
+        )
+        .expect("cook result recorded");
 
         let verified = record_promotion_in_store(
             &lifecycle_store,
@@ -322,17 +328,14 @@ fn a_deferred_then_executed_gate_never_stays_gate_environment_unavailable() {
         assert_eq!(delivery.blocker_code(), blocker, "{executed}");
         assert_eq!(verified.state(), run_state, "{executed}");
         assert_eq!(delivery.lifecycle().cook_status, cook_status, "{executed}");
-        let terminal_status = verified.metadata["cook_progress"]["terminal_status"].as_str();
+        let outcome = crate::agent_task_service::CookOutcome::from_run_metadata(&verified.metadata)
+            .and_then(|outcome| outcome.status);
         assert_ne!(
-            terminal_status,
-            Some("gate_environment_unavailable"),
+            outcome,
+            Some(CookStatus::Gate(GateVerdict::GateEnvironmentUnavailable)),
             "{executed}"
         );
-        assert_eq!(
-            terminal_status.and_then(CookStatus::from_status),
-            cook_status,
-            "{executed}"
-        );
+        assert_eq!(outcome, cook_status, "{executed}");
     }
 }
 

@@ -319,8 +319,14 @@ fn record_interrupted_local_owner_locked(
             "phase": "terminal",
             "attempt": 1,
             "detail": "interrupted_owner",
-            "exit_code": if harvested { 0 } else { 1 },
             "updated_at": now,
+        }),
+    );
+    crate::agent_task_service::CookOutcome::write(
+        &mut record.metadata,
+        Some(crate::agent_task_service::CookOutcome {
+            status: None,
+            exit_code: i32::from(!harvested),
         }),
     );
     // Decided under the lifecycle lock from the record read at `record.revision`;
