@@ -158,11 +158,6 @@ mod tests {
     }
 
     #[test]
-    fn test_summarize_spans() {
-        trace_wrappers_preserve_span_summary_contract();
-    }
-
-    #[test]
     fn test_event_matches_key() {
         let event = event(0, "runner", "ready");
 

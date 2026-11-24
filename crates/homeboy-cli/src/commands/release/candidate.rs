@@ -278,15 +278,6 @@ mod tests {
     use super::*;
 
     #[test]
-    fn candidate_tag_is_deterministic_and_not_a_stable_tag() {
-        let sha = "0123456789abcdef0123456789abcdef01234567";
-        assert_eq!(
-            format!("candidate-{sha}"),
-            "candidate-0123456789abcdef0123456789abcdef01234567"
-        );
-    }
-
-    #[test]
     fn malformed_sha_is_rejected_before_git_access() {
         let error = resolve_sha(Path::new("."), "abc").expect_err("short SHA must fail");
         assert!(error.to_string().contains("full 40-character commit SHA"));
