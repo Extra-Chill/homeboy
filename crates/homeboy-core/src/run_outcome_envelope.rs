@@ -33,12 +33,9 @@ pub struct RunOutcomeEnvelope {
 /// The inspection view of a run outcome: the same envelope with the opaque
 /// `result` payload cleared.
 ///
-/// This used to be a second struct repeating all eight of the envelope's other
-/// fields verbatim, rebuilt field-by-field by `projection()`. `result` is
-/// `#[serde(skip_serializing_if = "Value::is_null")]`, so "the envelope without
-/// `result`" is a *value* of `RunOutcomeEnvelope`, not a second type -- the
-/// distinction was never in the serialized shape. Same collapse as #10310 and
-/// #11137 applied to the artifact-ref twins in `runner_execution_envelope`.
+/// `result` is `#[serde(skip_serializing_if = "Value::is_null")]`, so "the
+/// envelope without `result`" is a *value* of `RunOutcomeEnvelope`, not a
+/// second type.
 pub type RunOutcomeProjection = RunOutcomeEnvelope;
 
 impl RunOutcomeEnvelope {

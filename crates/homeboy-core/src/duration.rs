@@ -56,8 +56,8 @@ pub fn parse_duration_parts(raw: &str) -> Result<Duration, String> {
         .parse::<u64>()
         .map_err(|_| "duration amount must be a positive integer".to_string())?;
 
-    // Preserved from three of the four parsers. `activity` was the one that
-    // lacked it, so `activity --interval 0s` used to spin with no delay.
+    // A zero interval would make polling commands such as
+    // `activity --interval 0s` spin with no delay.
     if amount == 0 {
         return Err("duration amount must be greater than zero".to_string());
     }

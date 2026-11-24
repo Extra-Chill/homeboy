@@ -1799,8 +1799,8 @@ mod tests {
     #[test]
     fn validation_dependency_ids_reads_top_level_declaration() {
         // #9926: a component-scoped top-level `validation_dependencies` must be
-        // collected (previously only extension-nested keys were read, so a
-        // `--path` review dropped the dependency).
+        // collected alongside extension-nested keys, so a `--path` review keeps
+        // the dependency.
         let dir = tempfile::tempdir().unwrap();
         write_manifest(
             dir.path(),

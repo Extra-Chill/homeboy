@@ -1217,8 +1217,7 @@ fn scope_cleanup_report(
     ProcessContainmentCleanup {
         forced,
         complete,
-        // Foreign-owned entries are no longer counted at all, so anything left
-        // here is a process this user owns but still cannot inspect (#13128).
+        // Foreign-owned entries are not counted, so anything left here is a process this user owns but still cannot inspect (#13128).
         diagnostic: (unreadable > 0).then(|| {
             format!(
                 "process-scope discovery could not read {unreadable} same-owner /proc environment entries"

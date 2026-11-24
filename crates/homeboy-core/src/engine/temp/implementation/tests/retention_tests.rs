@@ -333,7 +333,7 @@ fn cleanup_lock_owner_uses_cross_platform_start_identity() {
 }
 
 #[test]
-fn legacy_cleanup_lock_owner_uses_lease_window_for_retry_guidance() {
+fn cleanup_lock_owner_without_start_identity_uses_lease_window_for_retry_guidance() {
     let root = tempfile::tempdir().expect("tempdir");
     let first = super::super::cleanup_support::acquire_cleanup_lock(root.path(), "test.owner")
         .expect("first lock");
@@ -341,12 +341,12 @@ fn legacy_cleanup_lock_owner_uses_lease_window_for_retry_guidance() {
     fs::write(
         &owner_path,
         format!(
-            r#"{{"token":"legacy","pid":{},"linux_starttime_ticks":null,"heartbeat_unix_ms":{}}}"#,
+            r#"{{"token":"unstamped","pid":{},"linux_starttime_ticks":null,"heartbeat_unix_ms":{}}}"#,
             std::process::id(),
             super::super::cleanup_support::unix_time_ms(),
         ),
     )
-    .expect("legacy owner");
+    .expect("unstamped owner");
     std::mem::forget(first);
 
     let error = super::super::cleanup_support::acquire_cleanup_lock_with_policy(
@@ -355,7 +355,7 @@ fn legacy_cleanup_lock_owner_uses_lease_window_for_retry_guidance() {
         1,
         Duration::from_secs(300),
     )
-    .expect_err("legacy live owner blocks contender");
+    .expect_err("unstamped live owner blocks contender");
     assert!(!error.message.contains("\"retry_after_ms\":20"));
     assert!(error.message.contains("\"lease_deadline_unix_ms\":"));
 }

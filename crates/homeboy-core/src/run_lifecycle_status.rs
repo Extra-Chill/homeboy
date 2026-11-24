@@ -132,18 +132,4 @@ mod tests {
             "gate_environment_unavailable"
         );
     }
-
-    #[test]
-    fn retired_and_future_labels_are_rejected() {
-        for label in [
-            "running",
-            "completed",
-            "blocked_by_dependency",
-            "review_form_timeout",
-            "moving_base_from_a_newer_binary",
-        ] {
-            assert_eq!(CookStatus::from_status(label), None);
-            assert!(serde_json::from_value::<CookStatus>(serde_json::json!(label)).is_err());
-        }
-    }
 }

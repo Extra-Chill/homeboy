@@ -72,10 +72,9 @@ fn load_extension_provided_defaults() -> ExtensionProvidedDefaults {
 ///
 /// Every failure mode here is operator input, so all of them fall back rather
 /// than abort: an unset variable, an unreadable file, and a file that does not
-/// parse as a defaults document. The parse case previously panicked through
-/// `expect`, which made a single malformed override file take down every
-/// command that touches defaults — including the `upgrade` path that would
-/// otherwise repair the install.
+/// parse as a defaults document. A malformed override file must not take down
+/// every command that touches defaults, including the `upgrade` path that
+/// repairs the install.
 fn load_external_extension_provided_defaults() -> Option<ExtensionProvidedDefaults> {
     let path =
         std::env::var(crate::product_identity::PRODUCT_IDENTITY.env_var("EXTENSION_DEFAULTS_PATH"))
@@ -227,7 +226,7 @@ mod tests {
                 "direct_test_file_suffixes": []
             }"#,
         )
-        .expect("override carrying a legacy binary script still parses");
+        .expect("override carrying a binary script parses");
 
         assert_eq!(
             defaults.install_methods.binary.path_patterns,

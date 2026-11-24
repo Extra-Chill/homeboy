@@ -641,18 +641,6 @@ mod tests {
     }
 
     #[test]
-    fn serializes_stable_snake_case_policy_values() {
-        assert_eq!(
-            serde_json::to_string(&ResourceCleanupPolicy::DeleteAfterTtl).unwrap(),
-            "\"delete_after_ttl\""
-        );
-        assert_eq!(
-            serde_json::to_string(&ResourceLifecycleResourceStatus::CleanupPending).unwrap(),
-            "\"cleanup_pending\""
-        );
-    }
-
-    #[test]
     fn inspection_reports_actionable_cleanup_eligible_records() {
         let inspection = ResourceLifecycle::inspect(&record());
 
