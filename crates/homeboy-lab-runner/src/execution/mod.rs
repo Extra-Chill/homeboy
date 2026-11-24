@@ -79,6 +79,12 @@ pub use extension_parity::{
     ensure_runner_extension_parity, probe_extension_parity_from_show, ExtensionParityProbe,
     ExtensionShowOutput,
 };
+pub(crate) use extension_parity::{
+    ensure_runner_extension_revisions, parse_runner_extension_inventory,
+    runner_extension_inventory_command, RunnerExtensionInventoryCompatibility,
+    RunnerExtensionInventoryManifest, RunnerExtensionRevisionOutcome,
+    RunnerExtensionRevisionTarget,
+};
 use policy::{preflight_remote_argv, remote_execution_preflight};
 
 // Cross-submodule visibility: re-export each submodule's `pub(super)` surface so
