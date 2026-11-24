@@ -1582,11 +1582,20 @@ fn reconcile_typed_absence_settles_fenced_handoff_as_cancelled() {
     with_isolated_home(|_| {
         let record = accepted_detached_handoff("ledger-absent-fenced");
         rewrite_record_for_test(&record.run_id, |record| {
-            // A legacy per-record fence, written before #18827, still fences.
-            record.metadata["cancellation_fence"] = json!({"state": "cancelled"});
             record.metadata["runner_pid"] = json!(999_999u32);
         })
         .unwrap();
+        // The mission fence lives only on the Cook index (#18827).
+        let store = test_lifecycle_store();
+        let cook_id = "cook-ledger-absent-fenced";
+        record_cook_attempt_in_store(&store, cook_id, 1, &record.run_id).unwrap();
+        store
+            .update_cook_index(cook_id, |index| {
+                index.cancellation_fence = Some(json!({"state": "cancelled"}));
+                true
+            })
+            .unwrap()
+            .expect("cook index");
         let _provider = RunnerContinuationTestGuard::install(Box::new(ReconciliationProvider {
             result: Mutex::new(Some(TestRunnerReconciliation::ReadError(json!({
                 "runner_job_absence": "ledger_absent"

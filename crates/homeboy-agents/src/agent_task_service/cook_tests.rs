@@ -10108,7 +10108,6 @@ fn operator_attempt_cancel_preserves_earlier_candidate_for_recovery() {
             homeboy_lifecycle_contract::RunExecutionState::CandidateRecoverable
         );
         assert!(candidate.metadata.get("candidate_retirement").is_none());
-        assert!(candidate.metadata.get("cancellation_fence").is_none());
         assert_eq!(
             crate::agent_task_service::plan_cook_recovery(cook)
                 .unwrap()
