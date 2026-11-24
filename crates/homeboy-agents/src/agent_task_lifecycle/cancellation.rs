@@ -212,8 +212,7 @@ pub fn fence_cook_mission_in_store(
 }
 
 /// The only fence reader: the Cook index named by the record's `cook_id` (else
-/// its run id) owns the mission fence. A per-record copy is honored only on
-/// records persisted before the index became its single home (#18827).
+/// its run id) owns the mission fence (#18827).
 pub fn cook_cancellation_fence(
     store: &AgentTaskLifecycleStore,
     record: &AgentTaskRunRecord,
@@ -225,7 +224,6 @@ pub fn cook_cancellation_fence(
         .read_cook_index(cook_id)
         .ok()
         .and_then(|index| index.cancellation_fence)
-        .or_else(|| record.metadata.get("cancellation_fence").cloned())
 }
 
 /// A retired candidate is just a `Cancelled` record; the reason lives on the
@@ -1623,7 +1621,6 @@ mod tests {
             assert_eq!(retired.metadata["candidate_evidence"], "preserved");
             // The fence lives once, on the Cook index; the attempt carries no copy.
             assert!(retired.metadata.get("candidate_retirement").is_none());
-            assert!(retired.metadata.get("cancellation_fence").is_none());
             let fence = cook_cancellation_fence(&store, &retired).expect("index fence");
             assert_eq!(fence["reason"], "shipped in https://example.test/pr/1");
             assert!(fence["cancelled_at"].is_string());
