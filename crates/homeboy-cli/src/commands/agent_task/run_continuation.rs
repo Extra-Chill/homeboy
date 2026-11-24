@@ -23,15 +23,15 @@ pub(crate) struct CookContinueArgs {
 
 /// Resume a Cook from its immutable recipe rather than asking the operator to
 /// replay prompt, provider, gate, workspace, or disclosure arguments.
-pub(crate) fn continue_cook(args: CookContinueArgs) -> CmdResult<Value> {
-    continue_cook_with(
+pub(crate) fn run_cook_continuation(args: CookContinueArgs) -> CmdResult<Value> {
+    run_cook_continuation_with(
         args,
         Arc::new(ExtensionProviderAgentTaskExecutor::discover()),
         crate::commands::infra::route::reconstruct_cook_attempt_dispatcher,
     )
 }
 
-pub(crate) fn continue_cook_with<F>(
+pub(crate) fn run_cook_continuation_with<F>(
     args: CookContinueArgs,
     executor: SharedAgentTaskExecutor,
     reconstruct_dispatcher: F,
@@ -43,7 +43,7 @@ where
             Option<Arc<dyn homeboy::agents::agent_task_service::AgentTaskCookAttemptDispatcher>>,
         > + Copy,
 {
-    continue_cook_execution(args, executor, reconstruct_dispatcher)
+    run_cook_continuation_execution(args, executor, reconstruct_dispatcher)
 }
 
 pub(super) fn explicit_local_continuation_decision(
@@ -130,7 +130,7 @@ pub(super) fn cook_provider_route_override(
 /// Queued replacement attempts belong to their committed execution step.
 /// Continuation observes them until terminal, when the existing terminal Cook
 /// continuation path can advance promotion, gates and finalization.
-pub(super) fn continue_cook_execution<F>(
+pub(super) fn run_cook_continuation_execution<F>(
     args: CookContinueArgs,
     executor: SharedAgentTaskExecutor,
     reconstruct_dispatcher: F,
