@@ -1604,8 +1604,8 @@ mod tests {
     use crate::test_support::with_isolated_home;
 
     use crate::{
-        Runner, RunnerExecMode, RunnerExecOutput, RunnerExtensionMaterializationRequest,
-        RunnerExtensionMaterializationSource, RunnerKind,
+        Runner, RunnerExecOutput, RunnerExtensionMaterializationRequest,
+        RunnerExtensionMaterializationSource, RunnerKind, RunnerTransport,
     };
     use homeboy_core::error::Error;
     use std::collections::HashMap;
@@ -1643,7 +1643,7 @@ mod tests {
             command: "runner.exec",
             runner_id: "homeboy-lab".to_string(),
             dry_run: false,
-            mode: RunnerExecMode::Local,
+            mode: RunnerTransport::Local,
             argv: Vec::new(),
             remote_cwd: String::new(),
             exit_code: 0,

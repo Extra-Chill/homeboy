@@ -1409,7 +1409,7 @@ fn detached_handoff_output_includes_runner_job_and_agent_task_followups() {
 
         let (output, _) = detached_handoff_output(
             &runner,
-            RunnerExecMode::Daemon,
+            RunnerTransport::Daemon,
             "/srv/homeboy/project".to_string(),
             vec![
                 "homeboy".to_string(),

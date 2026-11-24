@@ -38,7 +38,7 @@ pub(super) fn exec_local(plan: PreparedRunnerProcess) -> Result<(RunnerExecOutpu
     let output = execute_runner_process(&plan)?;
     Ok(exec_output(
         &plan.runner,
-        RunnerExecMode::Local,
+        RunnerTransport::Local,
         plan.cwd,
         plan.command,
         output,
@@ -110,7 +110,7 @@ pub(super) fn exec_diagnostic_ssh(
     );
     Ok(exec_output(
         runner,
-        RunnerExecMode::DiagnosticSsh,
+        RunnerTransport::DiagnosticSsh,
         cwd,
         command,
         ProcessOutput {
@@ -2057,7 +2057,7 @@ pub(super) fn command_output_until_cancelled_with_progress(
 #[allow(clippy::too_many_arguments)]
 pub(super) fn exec_output(
     runner: &Runner,
-    mode: RunnerExecMode,
+    mode: RunnerTransport,
     cwd: String,
     command: Vec<String>,
     output: ProcessOutput,
@@ -2074,11 +2074,7 @@ pub(super) fn exec_output(
         redaction_env,
         secret_env_names,
     );
-    let transport = match mode {
-        RunnerExecMode::Daemon => "daemon",
-        RunnerExecMode::Local => "local",
-        RunnerExecMode::DiagnosticSsh => "diagnostic_ssh",
-    };
+    let transport = mode.as_str();
     let runner_result = runner_result(None, exit_code, &stdout, &stderr, None, None);
     let handoff = lab_runner_handoff(runner, transport, None, Some(runner_result.clone()));
     let provenance_extensions = required_extensions_for_command(&command, &[]);

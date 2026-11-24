@@ -231,7 +231,7 @@ fn runner_extension_inventory(
 #[cfg(test)]
 mod manifest_preflight_tests {
     use super::*;
-    use crate::{RunnerExecMode, RunnerExecOutput};
+    use crate::{RunnerExecOutput, RunnerTransport};
     use homeboy_core::server::RunnerSettings;
     use std::collections::HashMap;
 
@@ -260,7 +260,7 @@ mod manifest_preflight_tests {
                 command: "runner.exec",
                 runner_id: runner_id.to_string(),
                 dry_run: false,
-                mode: RunnerExecMode::DiagnosticSsh,
+                mode: RunnerTransport::DiagnosticSsh,
                 argv: command,
                 remote_cwd: "/home/user/workspace".to_string(),
                 exit_code: 0,

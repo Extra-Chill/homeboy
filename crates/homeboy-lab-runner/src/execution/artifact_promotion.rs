@@ -14,10 +14,10 @@ use std::path::{Path, PathBuf};
 use crate::runners::{
     self as runner, RunnerExecOutput, RunnerExecPromotedOutput, RunnerExecStructuredSummary,
 };
-use homeboy_core::engine::shell;
+use crate::transport::RunnerPathKind;
 use homeboy_core::observation::{ArtifactRecord, ObservationStore};
 use homeboy_core::performance_hotspots::PERFORMANCE_HOTSPOTS_SUMMARY_SCHEMA;
-use homeboy_core::{server, Error};
+use homeboy_core::Error;
 use homeboy_fuzz::{
     parse_fuzz_observation_set_value, rank_fuzz_observation_set_hotspots, FUZZ_HOTSPOT_SET_SCHEMA,
     FUZZ_OBSERVATION_SET_SCHEMA, FUZZ_RESULT_ENVELOPE_SCHEMA,
@@ -64,8 +64,8 @@ pub fn promote_runner_exec_artifact_dirs_in_store(
     // agree -- rather than by construction (#7505).
     let artifact_root = store.artifact_root()?;
     let runner = match output.mode {
-        runner::RunnerExecMode::Local => None,
-        runner::RunnerExecMode::Daemon | runner::RunnerExecMode::DiagnosticSsh => {
+        runner::RunnerTransport::Local => None,
+        runner::RunnerTransport::Daemon | runner::RunnerTransport::DiagnosticSsh => {
             Some(runner::load(&output.runner_id)?)
         }
     };
@@ -328,8 +328,8 @@ fn promote_runner_exec_outputs(
     // agree -- rather than by construction (#7505).
     let artifact_root = store.artifact_root()?;
     let runner = match output.mode {
-        runner::RunnerExecMode::Local => None,
-        runner::RunnerExecMode::Daemon | runner::RunnerExecMode::DiagnosticSsh => {
+        runner::RunnerTransport::Local => None,
+        runner::RunnerTransport::Daemon | runner::RunnerTransport::DiagnosticSsh => {
             Some(runner::load(&output.runner_id)?)
         }
     };
@@ -520,14 +520,7 @@ fn copy_runner_exec_artifact_source_in_roots(
         RunnerKind::Local => Ok(path.to_path_buf()),
         RunnerKind::Ssh => {
             validate_runner_exec_artifact_path(runner, path)?;
-            let server_id = runner.server_id.as_deref().ok_or_else(|| {
-                Error::validation_invalid_argument(
-                    "runner",
-                    "SSH runner is missing server_id",
-                    Some(runner.id.clone()),
-                    None,
-                )
-            })?;
+            let transfer = crate::RunnerFileTransfer::for_runner(runner)?;
             let temp_path =
                 runner_exec_attach_download_path_in_roots(artifact_root, &runner.id, path);
             if let Some(parent) = temp_path.parent() {
@@ -538,78 +531,29 @@ fn copy_runner_exec_artifact_source_in_roots(
                     )
                 })?;
             }
-            let server = server::load(server_id)?;
-            let client = server::SshClient::from_server(&server, server_id)?;
-            if remote_runner_exec_artifact_type(&client, path)?
-                == RunnerExecArtifactSourceType::Directory
-            {
-                if client.is_local {
-                    copy_dir_all(path, &temp_path)?;
-                } else {
-                    let output = server::transfer::transfer(&server::transfer::TransferConfig {
-                        source: format!("{server_id}:{path_string}"),
-                        destination: temp_path.display().to_string(),
-                        recursive: true,
-                        directory_contents: false,
-                        compress: true,
-                        dry_run: false,
-                        exclude: Vec::new(),
-                    })?;
-                    if output.1 != 0 || !output.0.success {
-                        return Err(Error::validation_invalid_argument(
-                            "path",
-                            format!(
-                                "failed to download runner exec artifact directory: {}",
-                                output.0.error.unwrap_or_else(|| "scp failed".to_string())
-                            ),
-                            Some(path_string),
-                            None,
-                        ));
-                    }
+            let temp_path_string = temp_path.display().to_string();
+            match transfer.path_kind(&path_string) {
+                Some(RunnerPathKind::Directory) if transfer.shares_local_filesystem() => {
+                    copy_dir_all(path, &temp_path)?
                 }
-                return Ok(temp_path);
-            }
-            let output = client.download_file(&path_string, &temp_path.display().to_string());
-            if !output.success {
-                return Err(Error::validation_invalid_argument(
-                    "path",
-                    format!(
-                        "failed to download runner exec artifact: {}",
-                        output.stderr.trim()
-                    ),
-                    Some(path_string),
-                    None,
-                ));
+                Some(RunnerPathKind::Directory) => {
+                    transfer.download_recursive(&path_string, &temp_path_string)?
+                }
+                Some(RunnerPathKind::File) => {
+                    transfer.download_file(&path_string, &temp_path_string)?
+                }
+                None => {
+                    return Err(Error::validation_invalid_argument(
+                        "path",
+                        "runner exec artifact path is not a file or directory",
+                        Some(path_string),
+                        None,
+                    ))
+                }
             }
             Ok(temp_path)
         }
     }
-}
-
-#[derive(Clone, Copy, PartialEq, Eq)]
-enum RunnerExecArtifactSourceType {
-    File,
-    Directory,
-}
-
-fn remote_runner_exec_artifact_type(
-    client: &server::SshClient,
-    path: &Path,
-) -> homeboy_core::Result<RunnerExecArtifactSourceType> {
-    let path_string = path.display().to_string();
-    let quoted = shell::quote_path(&path_string);
-    if client.execute(&format!("test -d {quoted}")).success {
-        return Ok(RunnerExecArtifactSourceType::Directory);
-    }
-    if client.execute(&format!("test -f {quoted}")).success {
-        return Ok(RunnerExecArtifactSourceType::File);
-    }
-    Err(Error::validation_invalid_argument(
-        "path",
-        "runner exec artifact path is not a file or directory",
-        Some(path_string),
-        None,
-    ))
 }
 
 fn copy_dir_all(from: &Path, to: &Path) -> homeboy_core::Result<()> {
@@ -791,7 +735,7 @@ mod tests {
             command: "runner.exec",
             runner_id: "local".to_string(),
             dry_run: false,
-            mode: runner::RunnerExecMode::Local,
+            mode: runner::RunnerTransport::Local,
             argv: vec!["true".to_string()],
             remote_cwd: cwd.display().to_string(),
             exit_code: 0,

@@ -1018,7 +1018,7 @@ fn runner_execution_record_uses_dispatched_path_materialization_plan() {
     );
     let (output, _) = exec_output(
         &ssh_runner(),
-        RunnerExecMode::Daemon,
+        RunnerTransport::Daemon,
         "/runner/context-plan".to_string(),
         vec!["homeboy".to_string(), "test".to_string()],
         ProcessOutput {
@@ -1489,7 +1489,7 @@ fn test_exec_runs_local_runner_command() {
 
         assert_eq!(exit_code, 0);
         assert_eq!(output.runner_id, "lab-local");
-        assert_eq!(output.mode, RunnerExecMode::Local);
+        assert_eq!(output.mode, RunnerTransport::Local);
         assert_eq!(output.stdout, "ok");
         let provenance = output
             .execution_record
@@ -1959,7 +1959,7 @@ fn test_exec_rejects_unreachable_ssh_runner_without_diagnostic_fallback() {
 #[test]
 fn test_diagnostic_ssh_mode_serializes_as_diagnostic_ssh() {
     assert_eq!(
-        serde_json::to_value(RunnerExecMode::DiagnosticSsh).expect("mode json"),
+        serde_json::to_value(RunnerTransport::DiagnosticSsh).expect("mode json"),
         json!("diagnostic_ssh")
     );
 }
