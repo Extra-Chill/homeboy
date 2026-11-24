@@ -818,12 +818,12 @@ pub struct DaemonState {
     pub started_at: String,
     pub last_seen_at: String,
     pub build_identity: build_identity::BuildIdentity,
-    #[serde(default = "legacy_lab_contract_version")]
+    #[serde(default = "lab_contract_version_before_lease_field")]
     pub lab_contract_version: u32,
     /// The executable the daemon started from, so any reader can tell when
     /// an upgrade has since replaced it on disk.
-    // v0.445.4 (v1) did not record executable identity. An empty identity
-    // means unknown, not replaced; executable identity is not compatibility.
+    // An empty identity means unknown, not replaced; executable identity is
+    // not compatibility.
     #[serde(default)]
     pub executable: ExecutableIdentity,
     pub runtime_paths: DaemonRuntimeSnapshot,
@@ -832,8 +832,8 @@ pub struct DaemonState {
     pub service_manager: Option<DaemonServiceManager>,
 }
 
-// Leases predating this field used Lab contract v7.
-fn legacy_lab_contract_version() -> u32 {
+// Leases written before this field was recorded ran Lab contract v7.
+fn lab_contract_version_before_lease_field() -> u32 {
     7
 }
 
@@ -1278,8 +1278,7 @@ impl DaemonLeaseIdentity {
 pub(super) struct DaemonOperationLock {
     // The open descriptor retains the advisory lock. The lock file itself is
     // intentionally persistent so process death releases ownership safely.
-    #[allow(dead_code)]
-    file: File,
+    _file: File,
 }
 
 /// Held by the serving daemon for its entire lifetime. Unlike the short
@@ -1906,12 +1905,9 @@ fn parse_orchestration_tick_interval(configured: Option<&str>) -> Option<std::ti
     (seconds > 0).then(|| std::time::Duration::from_secs(seconds))
 }
 
-/// Drive the orchestration mechanisms that previously only advanced when a
-/// human typed a command.
-///
-/// `reconcile_stale_active_runs` had exactly two callers — `cleanup` and
-/// `agent-task reconcile --all --apply` — so a detached cook whose owner
-/// died stayed `running` forever. Loop Work jobs own controller waits.
+/// Drive the orchestration mechanisms on a cadence, so they advance without a
+/// human typing a command and a detached cook whose owner died does not stay
+/// `running` forever. Loop Work jobs own controller waits.
 fn spawn_orchestration_reconciler(
     job_store: JobStore,
     shutdown: mpsc::Receiver<()>,
@@ -4713,7 +4709,7 @@ mod tests {
             fs::write(
                 &state_path,
                 serde_json::to_vec(&json!({
-                    "schema": "homeboy.daemon.session_lease.v1",
+                    "schema": DAEMON_LEASE_SCHEMA,
                     "lease_id": "replacement",
                     "startup_token": "replacement-token",
                     "address": address.to_string(),
@@ -6014,9 +6010,8 @@ mod tests {
 
     #[test]
     fn read_only_requests_never_write_the_durable_store() {
-        // Every request used to reload, clone and rewrite the whole shared
-        // ledger first; on a large store that serialized observation behind
-        // the durable lock and timed out status on an idle Lab (#17918).
+        // Rewriting the shared ledger on reads would serialize observation
+        // behind the durable lock and time out status on an idle Lab (#17918).
         with_isolated_home(|_| {
             write_test_lease("lease-read-path");
             let store =
@@ -7612,7 +7607,8 @@ pub(super) fn try_acquire_daemon_operation_lock() -> Result<Option<DaemonOperati
         return Ok(None);
     };
     let file = open_daemon_operation_lock_file(&parent.join("operation.lock"))?;
-    Ok(try_lock_file_exclusive(&file, "daemon lifecycle")?.then_some(DaemonOperationLock { file }))
+    Ok(try_lock_file_exclusive(&file, "daemon lifecycle")?
+        .then_some(DaemonOperationLock { _file: file }))
 }
 
 /// The ensure path carries its own explicit wait so its timeout stays
@@ -7641,7 +7637,7 @@ pub(super) fn acquire_daemon_operation_lock_with_wait(
     loop {
         let file = open_daemon_operation_lock_file(&path)?;
         if try_lock_file_exclusive(&file, "daemon lifecycle")? {
-            return Ok(DaemonOperationLock { file });
+            return Ok(DaemonOperationLock { _file: file });
         }
         if Instant::now() >= deadline {
             // Drop this probe descriptor first: holder detection must not
@@ -7731,7 +7727,7 @@ fn claim_daemon_operation_lock_after_wait(path: &Path) -> Result<DaemonOperation
             // reclaiming on a guess.
             let file = open_daemon_operation_lock_file(path)?;
             if try_lock_file_exclusive(&file, "daemon lifecycle")? {
-                return Ok(DaemonOperationLock { file });
+                return Ok(DaemonOperationLock { _file: file });
             }
             Err(Error::internal_unexpected(format!(
                 "daemon lifecycle operation is in progress; the lock holder at {} could not be verified; rerun `homeboy daemon status` and retry the lifecycle command on the machine that holds the file",
@@ -7752,7 +7748,7 @@ fn reclaim_unowned_daemon_operation_lock(path: &Path) -> Result<DaemonOperationL
     let _ = fs::remove_file(path);
     let file = open_daemon_operation_lock_file(path)?;
     if try_lock_file_exclusive(&file, "daemon lifecycle")? {
-        return Ok(DaemonOperationLock { file });
+        return Ok(DaemonOperationLock { _file: file });
     }
     Err(Error::internal_unexpected(format!(
         "daemon lifecycle lock was reclaimed at {} but raced a new holder; retry the lifecycle command",

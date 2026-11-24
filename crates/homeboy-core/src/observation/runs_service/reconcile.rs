@@ -1,10 +1,7 @@
 //! Observation-run (`runs` table) stale-running reconciliation.
 //!
-//! This is the single reconciler for observation runs. It used to live in the
-//! `homeboy runs reconcile` CLI adapter while the HTTP API carried a second,
-//! diverging copy that ran as a side effect of GET reads. Now there is one
-//! rule (here) and one automatic cadence (the daemon orchestration tick);
-//! reads do not write.
+//! This is the single reconciler for observation runs: one rule (here) and
+//! one automatic cadence (the daemon orchestration tick); reads do not write.
 //!
 //! Runner terminal status maps to Pass/Fail rather than Stale, selected
 //! mirrored evidence is refreshed before settlement, and run-dir artifacts
@@ -919,8 +916,8 @@ mod tests {
     }
 
     /// The leak this closes from the other end: a lost handoff leaves a row
-    /// whose `remote_job_status` nothing will ever correct and whose runner job
-    /// id used to buy it a permanent exemption. Past the ceiling it becomes
+    /// whose `remote_job_status` nothing will ever correct, so its runner job
+    /// id must not buy it a permanent exemption. Past the ceiling it becomes
     /// reconcilable, with a reason that names why.
     #[test]
     fn reconcile_marks_a_runner_backed_running_record_stale_past_the_ceiling() {

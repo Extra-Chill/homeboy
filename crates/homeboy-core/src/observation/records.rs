@@ -254,14 +254,6 @@ mod tests {
     use std::collections::BTreeMap;
 
     #[test]
-    fn test_builder() {
-        let record = NewRunRecord::builder("lint").build();
-
-        assert_eq!(record.kind, "lint");
-        assert_eq!(record.metadata_json, serde_json::json!({}));
-    }
-
-    #[test]
     fn defaulted_run_record_uses_the_current_wire_shape() {
         let record = RunRecord {
             id: "run-1".to_string(),

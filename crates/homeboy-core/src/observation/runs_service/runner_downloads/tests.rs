@@ -145,8 +145,8 @@ fn missing_cache_root_is_an_empty_plan_and_never_opens_the_store() {
 #[test]
 fn a_freshly_pulled_artifact_is_never_removed() {
     // The data-loss case #10564 was filed for: `homeboy runs artifacts <run>
-    // --pull` writes here, and a bare `homeboy cleanup --apply` used to remove
-    // the whole tree with no age floor at all. The cache is tagged
+    // --pull` writes here, and a bare `homeboy cleanup --apply` must not remove
+    // it before the age floor. The cache is tagged
     // `internal_fetch` so the age floor is the only thing that can save it —
     // an operator-owned tag would make the assertion pass for the wrong reason.
     let home = tempfile::tempdir().expect("home");
