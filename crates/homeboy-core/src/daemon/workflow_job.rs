@@ -1290,6 +1290,8 @@ pub fn step_request(
             argv.extend(args.iter().cloned());
             argv.push("--cook-id".to_string());
             argv.push(cook_id.clone());
+            argv.push("--workflow-instance".to_string());
+            argv.push(request.instance.clone());
             linked_run = Some(cook_id.clone());
             (
                 request.homeboy_program.clone(),

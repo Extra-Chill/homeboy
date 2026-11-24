@@ -3379,6 +3379,116 @@ fn porcelain_status(path: &std::path::Path) -> String {
     String::from_utf8_lossy(&output.stdout).trim().to_string()
 }
 
+/// Records the local dispatch slot holders each provider start observes.
+#[derive(Clone, Default)]
+struct LocalDispatchLeaseObservingExecutor {
+    observed: Arc<Mutex<Vec<(String, Vec<String>)>>>,
+}
+
+impl AgentTaskExecutorAdapter for LocalDispatchLeaseObservingExecutor {
+    fn execute(
+        &self,
+        request: crate::agent_task::AgentTaskRequest,
+        context: crate::agent_task_scheduler::AgentTaskExecutionContext,
+    ) -> crate::agent_task::AgentTaskOutcome {
+        let data_root = homeboy_core::paths::homeboy_data().expect("data root");
+        let holders = homeboy_core::local_dispatch_admission::local_dispatch_holders(&data_root)
+            .expect("read local dispatch holders")
+            .iter()
+            .filter_map(|holder| holder["run_id"].as_str().map(str::to_string))
+            .collect();
+        self.observed
+            .lock()
+            .unwrap()
+            .push((context.run_id.clone().unwrap_or_default(), holders));
+        ImmediateSuccessExecutor.execute(request, context)
+    }
+}
+
+/// #18922: local dispatch admission is the engine's, so a queued Cook retry
+/// (claimed through `execute_claimed_queue_record`, the path `run_next` and the
+/// execution step share) holds the same host slot as a fresh Cook while its
+/// provider runs, and releases it when the attempt ends.
+#[test]
+fn queued_retry_acquires_the_local_dispatch_lease_a_fresh_cook_does() {
+    homeboy_core::test_support::with_isolated_home(|_| {
+        let _load = homeboy_core::test_support::EnvVarGuard::set(
+            homeboy_core::local_dispatch_admission::TEST_LOAD_AVERAGES_ENV,
+            "0,0,0",
+        );
+        let (_remote, _source, root, destination) = behind_explicit_cwd_destination();
+        let _capacity =
+            homeboy_core::observation::disk_budget::test_seam::ample_disk_capacity_for_test(
+                root.path(),
+            );
+        let local_options = |cook_id: &str| {
+            let mut options =
+                batch_cook_options(cook_id, Arc::new(AcceptedDetachedAttemptDispatcher));
+            options.identity.initial_run_id = format!("{cook_id}-attempt-1");
+            options.workspace.to_worktree = destination.display().to_string();
+            options.workspace.source_worktree_path = Some(destination.clone());
+            options.identity.initial_plan.tasks[0].workspace.root =
+                Some(destination.display().to_string());
+            options.identity.initial_plan.tasks[0].metadata =
+                serde_json::json!({ "worktree_provision": { "kind": "explicit_cwd" } });
+            options.provider_transport.attempt_dispatcher = None;
+            options
+        };
+        let data_root = homeboy_core::paths::homeboy_data().expect("data root");
+        let active = || {
+            homeboy_core::local_dispatch_admission::active_local_dispatch_count(&data_root)
+                .expect("active local dispatch count")
+        };
+
+        let fresh = LocalDispatchLeaseObservingExecutor::default();
+        let options = local_options("cook-fresh-local-lease");
+        let fresh_run_id = options.identity.initial_run_id.clone();
+        run_cook(CookContext::new(options, Arc::new(fresh.clone()))).expect("fresh Cook reports");
+        assert_eq!(
+            *fresh.observed.lock().unwrap(),
+            vec![(fresh_run_id.clone(), vec![fresh_run_id])]
+        );
+        assert_eq!(active(), 0, "the fresh attempt released its slot");
+
+        let mut options = local_options("cook-retry-local-lease");
+        options.retry_policy.max_attempts = 2;
+        persist_initial_recipe(&options).expect("persist Cook recipe");
+        super::super::materialize_initial_cook_attempt(&options).expect("first attempt");
+        agent_task_lifecycle::record_pre_execution_failure(
+            &options.identity.initial_run_id,
+            &options.identity.initial_plan,
+            "gate_environment.preserve",
+            &Error::validation_invalid_argument(
+                "CARGO_HOME",
+                "required environment capability is unavailable",
+                None,
+                None,
+            )
+            .with_retryable(true),
+        )
+        .expect("record retryable pre-provider failure");
+        let retry = agent_task_lifecycle::retry(&options.identity.initial_run_id, None)
+            .expect("queue Cook retry");
+
+        let retried = LocalDispatchLeaseObservingExecutor::default();
+        let intent = current_intent(&test_lifecycle_store(), &retry.run_id);
+        let executor: crate::agent_task_scheduler::SharedAgentTaskExecutor =
+            Arc::new(retried.clone());
+        crate::agent_task_service::execute_execution_step(
+            &intent.intent_id,
+            executor,
+            |_| Ok(None),
+            &QueuedRunTransport,
+        )
+        .expect("the queued retry runs locally");
+        assert_eq!(
+            *retried.observed.lock().unwrap(),
+            vec![(retry.run_id.clone(), vec![retry.run_id.clone()])]
+        );
+        assert_eq!(active(), 0, "the retried attempt released its slot");
+    });
+}
+
 #[test]
 fn controller_owned_evidence_admits_clean_worktree_through_provider_start_and_retry() {
     homeboy_core::test_support::with_isolated_home(|_| {

@@ -1263,6 +1263,17 @@ pub(super) fn run_cook_spine(
                         &options,
                         &run_id,
                     )?;
+                    // Host-level admission for this local attempt only. The
+                    // slot is held while the provider runs and released when
+                    // this dispatch scope ends.
+                    let _local_dispatch_lease =
+                        super::cook_local_dispatch::admit_local_provider_attempt(
+                            lifecycle_store,
+                            durable_observer,
+                            &cook_id,
+                            &run_id,
+                            attempt,
+                        )?;
                     let (heartbeat_stop, heartbeat_wait) = mpsc::channel();
                     let heartbeat_run_id = run_id.clone();
                     let heartbeat_cook_id = cook_id.clone();
