@@ -4,6 +4,13 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.496.5] - 2026-11-24
+
+### Changed
+- move local dispatch admission from the CLI into CookService
+- one runner admission/readiness projection
+- delete cook_progress.terminal_status as a Cook verdict source
+
 ## [0.496.4] - 2026-11-24
 
 ### Fixed
