@@ -3996,7 +3996,18 @@ fn cook_review_dossier_with_stores_and_review_form(
         overrides: Vec::new(),
         out_of_scope_changes,
         repro: Some(repro),
-        delivery: terminal_form.delivery.clone(),
+        // The task checklist from the admission snapshot is the delivery
+        // contract: an item the form leaves unreported is not delivered (#18900).
+        delivery: crate::agent_task_review_dossier::delivery_checklist::reconcile_delivery(
+            &options
+                .identity
+                .initial_plan
+                .tasks
+                .first()
+                .map(crate::agent_task_review_dossier::delivery_checklist::request_delivery_items)
+                .unwrap_or_default(),
+            &terminal_form.delivery,
+        ),
     })
 }
 

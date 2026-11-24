@@ -5,6 +5,7 @@ use homeboy_core::error::{Error, Result};
 use homeboy_core::gate::HomeboyGateResult;
 use homeboy_core::git::is_conventional_subject;
 
+pub mod delivery_checklist;
 mod template;
 pub use template::render_review_dossier_for_worktree;
 
