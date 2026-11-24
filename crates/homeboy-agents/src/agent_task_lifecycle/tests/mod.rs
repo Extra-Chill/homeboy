@@ -327,6 +327,7 @@ mod aggregate_status;
 mod continuation_boundary;
 mod cook_delivery_writer;
 mod cook_effects;
+mod cook_handoff_events;
 mod cook_settlement;
 mod durable_progress;
 mod handoff_and_proxy;
