@@ -389,6 +389,7 @@ fn manual_finalization_options(
         out_of_scope_changes: Vec::new(),
         repro: None,
         delivery: Vec::new(),
+        completion: None,
     };
     review_dossier.apply_overrides()?;
     let review_profile = resolve_review_profile(args.component.as_deref(), &path)?;

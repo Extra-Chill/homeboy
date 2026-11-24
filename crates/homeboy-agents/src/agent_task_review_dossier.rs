@@ -182,6 +182,10 @@ pub struct AgentTaskReviewDossier {
     /// Cook status `succeeded_partial`.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub delivery: Vec<homeboy_control_plane_contract::CookDeliveryItem>,
+    /// The review form's completion verdict when the form validated. Cook
+    /// records it; manual finalization omits it (#18931).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub completion: Option<AiReviewCompletion>,
 }
 
 /// Repro evidence for a candidate. Only `verified` proves the issue.
@@ -245,6 +249,9 @@ pub struct AgentTaskReviewAiAssistance {
 #[serde(rename_all = "snake_case")]
 pub enum AgentTaskReviewIssueRelationshipKind {
     Closes,
+    /// A same-repository issue the publication works on but has not proved
+    /// done; renders `Refs #N` so merging leaves the issue open (#18931).
+    Refs,
     RelatesTo,
 }
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -1335,6 +1342,7 @@ pub(crate) fn render_source_relationships(
                 "{} {}",
                 match item.kind {
                     AgentTaskReviewIssueRelationshipKind::Closes => "Closes",
+                    AgentTaskReviewIssueRelationshipKind::Refs => "Refs",
                     AgentTaskReviewIssueRelationshipKind::RelatesTo => "Relates to",
                 },
                 relationship_reference(&item.reference)
@@ -2102,7 +2110,7 @@ pub fn validate_issue_reference(value: &str) -> Result<()> {
         )
     }
 }
-/// `Closes` must name a GitHub issue so GitHub links and closes it on merge.
+/// `Closes` and `Refs` must name a GitHub issue so GitHub links it.
 /// `Relates to` additionally accepts a public HTTPS reference, such as a task
 /// tracked outside GitHub, rendered verbatim as a single-line link.
 pub fn validate_issue_relationship(relationship: &AgentTaskReviewIssueRelationship) -> Result<()> {
@@ -2202,7 +2210,9 @@ pub fn task_issue_relationship(
 }
 
 /// Reconcile source relationships with the PR being updated. Its own source
-/// reference is not a relationship; closing references from its body survive.
+/// reference is not a relationship; closing references from its body survive
+/// unless this publication already decided that reference's relationship, so a
+/// task that is no longer proven is not re-closed by its previous body (#18931).
 pub fn reconcile_existing_pr_relationships(
     relationships: &mut Vec<AgentTaskReviewIssueRelationship>,
     target_url: &str,
@@ -2223,7 +2233,9 @@ pub fn reconcile_existing_pr_relationships(
             reference: captures[1].to_string(),
         };
         if validate_issue_relationship(&relationship).is_ok()
-            && !relationships.contains(&relationship)
+            && !relationships
+                .iter()
+                .any(|existing| existing.reference == relationship.reference)
         {
             relationships.push(relationship);
         }
@@ -2676,6 +2688,7 @@ mod tests {
             out_of_scope_changes: Vec::new(),
             repro: None,
             delivery: Vec::new(),
+            completion: None,
         }
     }
 
