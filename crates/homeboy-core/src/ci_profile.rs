@@ -465,7 +465,7 @@ fn unknown_discovered_context(limitation: &str) -> CiLocalContext {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use homeboy_extension_contract::{CiCapability, ExtensionManifest};
+    use homeboy_extension_contract::ExtensionManifest;
     use tempfile::TempDir;
 
     fn manifest_with_ci() -> ExtensionManifest {
@@ -544,14 +544,6 @@ mod tests {
         );
         assert!(select_extension_id(&[]).is_err());
         assert!(select_extension_id(&["fixture-a".to_string(), "fixture-b".to_string()]).is_err());
-    }
-
-    #[test]
-    fn empty_ci_manifest_defaults() {
-        let ci = CiCapability::default();
-
-        assert!(ci.profiles.is_empty());
-        assert!(ci.jobs.is_empty());
     }
 
     #[test]

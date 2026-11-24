@@ -47,7 +47,7 @@ pub fn observe(limit: Option<usize>) -> LabCapacity {
 
 /// Reserve the last CPUs, leaving at least one for steps.
 /// Oversized requests are clamped to preserve step progress.
-/// Unset, invalid, or zero requests preserve the legacy admission policy.
+/// Unset, invalid, or zero requests reserve no CPUs.
 pub fn gate_reserve(allowed: &[usize]) -> Vec<usize> {
     let requested = std::env::var("HOMEBOY_LAB_GATE_RESERVE")
         .ok()

@@ -351,11 +351,9 @@ mod tests {
         assert!(config.extensions.is_some());
     }
 
-    /// Regression for #1169: `normalize_keys_to_snake_case` used to recurse
-    /// into every object, rewriting `HashMap<String, _>` lookup keys that
-    /// happened to contain hyphens or mixed case. The fix normalizes only the
-    /// top level. Nested keys (including component IDs like `simple-dark-mode`)
-    /// must now survive verbatim.
+    /// `normalize_keys_to_snake_case` normalizes only the top level. Nested
+    /// `HashMap<String, _>` keys (including component IDs like
+    /// `simple-dark-mode`) survive verbatim (#1169).
     #[test]
     fn merge_config_preserves_hyphenated_nested_keys() {
         let mut config = TestConfig {

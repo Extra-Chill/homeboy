@@ -976,8 +976,7 @@ fn lab_dispatch_metadata(
 }
 
 /// Render offloaded stdout, attaching persisted-run retrieval guidance when a
-/// run was recorded. Mirrors the legacy CLI helper but is owned by core so the
-/// transformation is testable without constructing a clap `Cli`.
+/// run was recorded. Owned by core so the transformation is testable without constructing a clap `Cli`.
 pub(crate) fn stdout_with_persisted_run_retrieval(
     stdout: &str,
     retrieval: Option<&PersistedRunRetrieval>,
@@ -1858,7 +1857,7 @@ mod tests {
             "dispatch-run-7448"
         );
 
-        // The leak itself: this used to be `is_none()`.
+        // The handoff must finish the local observation row.
         let recorded = finished.lock().unwrap().clone();
         let (status, metadata) = recorded.expect("handoff finishes the local observation");
         assert_eq!(status, RunStatus::HandedOff);

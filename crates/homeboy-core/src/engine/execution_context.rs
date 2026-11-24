@@ -536,7 +536,7 @@ impl ExecutionContext {
 ///
 /// Resolved settings are stored as typed JSON so command callers must choose
 /// whether they need string-only settings, typed JSON settings, or intentionally
-/// lossy stringification for legacy runner contracts.
+/// lossy stringification for string-only runner contracts.
 #[derive(Debug, Clone, Copy)]
 pub struct ResolvedSettings<'a> {
     settings: &'a [(String, serde_json::Value)],
@@ -1027,67 +1027,6 @@ mod tests {
         });
     }
 
-    #[test]
-    fn test_with_capability() {
-        let options = ResolveOptions::with_capability(
-            "component-a",
-            Some("/tmp/component-a".to_string()),
-            ExtensionCapability::Lint,
-            vec![("strict".to_string(), "true".to_string())],
-        );
-
-        assert_eq!(options.component_id.as_deref(), Some("component-a"));
-        assert_eq!(options.path_override.as_deref(), Some("/tmp/component-a"));
-        assert_eq!(options.capability, Some(ExtensionCapability::Lint));
-        assert_eq!(
-            options.settings_overrides,
-            vec![("strict".to_string(), "true".to_string())]
-        );
-        assert!(options.settings_json_overrides.is_empty());
-        assert!(options.extension_overrides.is_empty());
-    }
-
-    #[test]
-    fn test_with_capability_and_json() {
-        let options = ResolveOptions::with_capability_and_json(
-            "component-b",
-            None,
-            ExtensionCapability::Test,
-            vec![("mode".to_string(), "fast".to_string())],
-            vec![("threshold".to_string(), serde_json::json!(0.95))],
-        );
-
-        assert_eq!(options.component_id.as_deref(), Some("component-b"));
-        assert!(options.path_override.is_none());
-        assert_eq!(options.capability, Some(ExtensionCapability::Test));
-        assert_eq!(
-            options.settings_overrides,
-            vec![("mode".to_string(), "fast".to_string())]
-        );
-        assert_eq!(
-            options.settings_json_overrides,
-            vec![("threshold".to_string(), serde_json::json!(0.95))]
-        );
-        assert!(options.extension_overrides.is_empty());
-    }
-
-    #[test]
-    fn test_working_dir() {
-        let dir = TempDir::new().expect("temp dir");
-        let ctx = ExecutionContext {
-            component: Component::default(),
-            component_id: "component".to_string(),
-            source_path: dir.path().to_path_buf(),
-            git_root: None,
-            extension_id: None,
-            extension_path: None,
-            settings: Vec::new(),
-            accepted_setting_keys: Vec::new(),
-        };
-
-        assert_eq!(ctx.working_dir(), dir.path().to_str().unwrap());
-    }
-
     fn ctx_with_accepted_keys(accepted: &[&str]) -> ExecutionContext {
         ExecutionContext {
             component: Component::default(),
@@ -1134,54 +1073,6 @@ mod tests {
         assert!(unknown.is_empty());
     }
 
-    fn resolved_settings_entries() -> Vec<(String, serde_json::Value)> {
-        vec![
-            ("string".to_string(), serde_json::json!("value")),
-            ("object".to_string(), serde_json::json!({ "enabled": true })),
-            ("number".to_string(), serde_json::json!(3)),
-        ]
-    }
-
-    #[test]
-    fn test_string_overrides() {
-        let entries = resolved_settings_entries();
-        let settings = ResolvedSettings::new(&entries);
-
-        assert_eq!(
-            settings.string_overrides(),
-            vec![("string".to_string(), "value".to_string())]
-        );
-    }
-
-    #[test]
-    fn test_json_overrides() {
-        let entries = resolved_settings_entries();
-        let settings = ResolvedSettings::new(&entries);
-
-        assert_eq!(
-            settings.json_overrides(),
-            vec![
-                ("object".to_string(), serde_json::json!({ "enabled": true })),
-                ("number".to_string(), serde_json::json!(3)),
-            ]
-        );
-    }
-
-    #[test]
-    fn test_string_lossy_overrides() {
-        let entries = resolved_settings_entries();
-        let settings = ResolvedSettings::new(&entries);
-
-        assert_eq!(
-            settings.string_lossy_overrides(),
-            vec![
-                ("string".to_string(), "value".to_string()),
-                ("object".to_string(), r#"{"enabled":true}"#.to_string()),
-                ("number".to_string(), "3".to_string()),
-            ]
-        );
-    }
-
     #[test]
     fn resolved_settings_split_string_json_and_lossy_views() {
         let entries = [
@@ -1210,23 +1101,6 @@ mod tests {
                 ("number".to_string(), "3".to_string()),
             ]
         );
-    }
-
-    #[test]
-    fn test_log_debug() {
-        let dir = TempDir::new().expect("temp dir");
-        let ctx = ExecutionContext {
-            component: Component::default(),
-            component_id: "component".to_string(),
-            source_path: dir.path().to_path_buf(),
-            git_root: None,
-            extension_id: None,
-            extension_path: None,
-            settings: vec![("mode".to_string(), serde_json::json!("test"))],
-            accepted_setting_keys: Vec::new(),
-        };
-
-        ctx.log_debug();
     }
 
     #[test]

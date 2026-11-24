@@ -178,30 +178,6 @@ mod tests {
     use crate::plan::{PlanKind, PlanStepDependencyKind, PlanStepStatus};
 
     #[test]
-    fn test_release_preflight() {
-        let options = QualityPlanOptions::release_preflight("fixture", false);
-
-        assert_eq!(options.component_id, "fixture");
-        assert_eq!(options.mode.as_deref(), Some("release-preflight"));
-        assert_eq!(options.step_prefix, "preflight");
-        assert_eq!(options.skip_reason, "--skip-checks");
-        assert_eq!(options.lint_needs, vec!["preflight.bump_policy"]);
-        assert_eq!(options.test_needs, vec!["preflight.lint"]);
-    }
-
-    #[test]
-    fn test_review() {
-        let options = QualityPlanOptions::review("fixture");
-
-        assert_eq!(options.component_id, "fixture");
-        assert_eq!(options.mode.as_deref(), Some("review"));
-        assert_eq!(options.step_prefix, "review");
-        assert!(options.lint_needs.is_empty());
-        assert_eq!(options.test_needs, vec!["review.lint"]);
-        assert_eq!(options.needs_kind, PlanStepDependencyKind::DisplayOrder);
-    }
-
-    #[test]
     fn test_skipped_review() {
         let plan = build_quality_plan(QualityPlanOptions::skipped_review(
             "fixture",

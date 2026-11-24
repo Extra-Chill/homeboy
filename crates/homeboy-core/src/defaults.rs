@@ -110,9 +110,9 @@ pub struct HomeboyConfig {
 
     /// Controller-owned public origin for canonical run artifact routes.
     ///
-    /// Runner environment is not configuration for this origin. The legacy
+    /// Runner environment is not configuration for this origin.
     /// `HOMEBOY_PUBLIC_ARTIFACT_BASE_URL` is read only as a controller-process
-    /// compatibility input when this setting is absent.
+    /// input when this setting is absent.
     #[serde(default)]
     pub artifact_origin: ArtifactOriginConfig,
 
@@ -200,7 +200,7 @@ pub struct ArtifactOriginConfig {
 pub struct GitHostConfig {
     pub name: String,
     pub email: String,
-    /// Owners allowed to publish directly; absent preserves legacy routing.
+    /// Owners allowed to publish directly; absent publishes directly to `origin`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub direct_owners: Option<Vec<String>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -491,8 +491,7 @@ pub struct AgentTaskConfig {
     /// The command policy above bounds *what* an agent may run; this bounds
     /// *how much it may consume while running it*. Neither substitutes for the
     /// other — an agent can stay entirely inside its permitted commands and
-    /// still grow to nine gigabytes across forty child processes, which is what
-    /// Homeboy previously learned only after the process boundary closed.
+    /// still grow to nine gigabytes across forty child processes.
     ///
     /// Carried opaquely as JSON for the same reason as `rotation` and
     /// `command_policy`: core config does not depend on the agent-task
@@ -508,9 +507,7 @@ pub struct AgentTaskConfig {
     /// once, settable via `homeboy config set /agent_task/max_batch_concurrency
     /// <n>`.
     ///
-    /// Batch fanout previously derived its worker count from
-    /// `available_parallelism()` alone, so an eight-core host started eight
-    /// concurrent cooks. Concurrency is a property of what those cooks *do*,
+    /// Concurrency is a property of what those cooks *do*,
     /// not of the core count: a cook whose gate is a compile consumes tens of
     /// gigabytes of disk, and eight of those exhaust a volume that fits one.
     /// The core count cannot express that, so the host has to.
@@ -886,13 +883,6 @@ mod tests {
             let loaded = load_config();
             assert!(!loaded.settings.contains_key("cache_marker"));
         });
-    }
-
-    #[test]
-    fn homeboy_config_leaves_lab_preferred_runner_unset_by_default() {
-        let config = HomeboyConfig::default();
-
-        assert!(config.lab.preferred_runner.is_none());
     }
 
     #[test]

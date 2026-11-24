@@ -258,7 +258,7 @@ impl DependencyProvider {
             DependencyProvider::Adapter(provider) => provider.hydration_plan(context, control),
             DependencyProvider::Extension(provider) => provider.hydration_plan(context, control),
             // Component-owned ecosystems can declare this standalone contract
-            // through the local manifest provider. Do not invoke legacy deps
+            // through the local manifest provider. Do not invoke component deps
             // scripts speculatively: they may not support planning actions.
             DependencyProvider::ComponentScript(_) => Ok(None),
         }
@@ -279,7 +279,7 @@ pub(crate) fn resolve_dependency_providers(
             None,
             Some(vec![
                 "Declare a dependency provider with a top-level \"deps\" manifest in homeboy.json, an installed dependency adapter, a component deps script, or an extension deps provider".to_string(),
-                "Core no longer detects built-in dependency providers; package ecosystems must be declared outside core".to_string(),
+                "Core detects no built-in dependency providers; package ecosystems must be declared outside core".to_string(),
             ]),
         ));
     }
@@ -309,23 +309,6 @@ pub(crate) fn resolve_dependency_providers_optional_with_control(
 ) -> Result<Vec<DependencyProvider>> {
     if control.is_cancelled() {
         return Ok(Vec::new());
-    }
-    // The repo-level config contract is one file. The retired side file is a
-    // hard error instead of silently ignored config, so a checkout that still
-    // ships one learns where its manifest now lives.
-    if path.join(LEGACY_DEPENDENCY_MANIFEST).is_file() {
-        return Err(Error::validation_invalid_argument(
-            "dependency_provider",
-            format!(
-                "{} is no longer read; declare the dependency manifest under \"deps\" in {}",
-                LEGACY_DEPENDENCY_MANIFEST, COMPONENT_CONFIG_FILE
-            ),
-            Some(path.join(LEGACY_DEPENDENCY_MANIFEST).display().to_string()),
-            Some(vec![format!(
-                "Move the manifest object into a top-level \"deps\" key in {} and delete {}",
-                COMPONENT_CONFIG_FILE, LEGACY_DEPENDENCY_MANIFEST
-            )]),
-        ));
     }
     let mut providers = Vec::new();
 
@@ -1204,9 +1187,6 @@ fn read_adapter_json(path: &Path) -> Result<serde_json::Value> {
 const COMPONENT_CONFIG_FILE: &str = "homeboy.json";
 /// The `homeboy.json` key the dependency manifest lives under.
 const COMPONENT_DEPS_KEY: &str = "deps";
-/// The retired side file. The only remaining reference: its presence is an
-/// error pointing at `homeboy.json`.
-const LEGACY_DEPENDENCY_MANIFEST: &str = "homeboy-deps.json";
 
 #[derive(Debug, Clone)]
 pub(crate) struct ManifestDependencyProvider {
@@ -2310,7 +2290,7 @@ esac
             fs::write(
                 project.join(COMPONENT_CONFIG_FILE),
                 r#"{"id": "fixture", "deps": {
-                    "provider": "legacy-fixture",
+                    "provider": "manifest-fixture",
                     "commands": { "install": { "argv": ["true"] } }
                 }}"#,
             )
@@ -2320,32 +2300,6 @@ esac
                 providers.as_slice(),
                 [DependencyProvider::Manifest(_)]
             ));
-        });
-    }
-
-    #[test]
-    fn retired_side_file_is_a_hard_error_pointing_at_homeboy_json() {
-        crate::test_support::with_isolated_home(|_| {
-            let dir = tempdir().unwrap();
-            fs::write(
-                dir.path().join(LEGACY_DEPENDENCY_MANIFEST),
-                r#"{"provider":"fixture","commands":{"install":{"argv":["true"]}}}"#,
-            )
-            .unwrap();
-            let component = Component::new(
-                "fixture".to_string(),
-                dir.path().display().to_string(),
-                String::new(),
-                None,
-            );
-
-            let error = match resolve_dependency_providers_optional(&component, dir.path()) {
-                Ok(_) => panic!("the retired side file must not be silently ignored"),
-                Err(error) => error,
-            };
-            let message = error.to_string();
-            assert!(message.contains("no longer read"), "{message}");
-            assert!(message.contains("homeboy.json"), "{message}");
         });
     }
 

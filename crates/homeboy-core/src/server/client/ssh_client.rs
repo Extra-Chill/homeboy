@@ -1288,8 +1288,8 @@ where
     let mut cleanup_deadline = None;
     loop {
         // `configure_process_group_cleanup` replaced the default SIGINT/SIGTERM
-        // disposition with a recording handler, so a cancelled caller no longer
-        // terminates this process implicitly. Poll the recorded signal the same
+        // disposition with a recording handler, so a cancelled caller does not
+        // terminate this process implicitly. Poll the recorded signal the same
         // way the local executor does (#10418): without this the child keeps
         // running to the full probe deadline and the `homeboy` process survives
         // the operator's cancellation.

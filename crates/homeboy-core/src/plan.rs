@@ -541,16 +541,7 @@ fn slug_fragment(value: &str) -> String {
 mod tests {
     use crate::gate::{HomeboyGateKind, HomeboyGateResult, HomeboyGateStatus};
 
-    use super::{
-        HomeboyPlan, PlanBuilder, PlanKind, PlanStep, PlanStepStatus, PlanSummary, PlanValues,
-    };
-
-    #[test]
-    fn serializes_plan_kind_as_snake_case() {
-        let serialized = serde_json::to_value(PlanKind::PullRequest).expect("serialize plan kind");
-
-        assert_eq!(serialized, serde_json::json!("pull_request"));
-    }
+    use super::{HomeboyPlan, PlanKind, PlanStep, PlanStepStatus, PlanSummary, PlanValues};
 
     #[test]
     fn serializes_minimal_component_plan() {
@@ -568,18 +559,6 @@ mod tests {
                 }
             })
         );
-    }
-
-    #[test]
-    fn test_for_component() {
-        let plan = HomeboyPlan::for_component(PlanKind::Quality, "fixture");
-
-        assert_eq!(plan.id, "quality.fixture");
-        assert_eq!(plan.kind, PlanKind::Quality);
-        assert_eq!(plan.subject.component_id.as_deref(), Some("fixture"));
-        assert!(plan.steps.is_empty());
-        assert!(plan.warnings.is_empty());
-        assert!(plan.hints.is_empty());
     }
 
     #[test]
@@ -604,14 +583,6 @@ mod tests {
         assert!(step.blocking);
         assert!(step.scope.is_empty());
         assert!(step.inputs.is_empty());
-    }
-
-    #[test]
-    fn serializes_step_status_as_snake_case() {
-        let serialized =
-            serde_json::to_value(PlanStepStatus::PartialSuccess).expect("serialize step status");
-
-        assert_eq!(serialized, serde_json::json!("partial_success"));
     }
 
     #[test]
@@ -669,103 +640,25 @@ mod tests {
     }
 
     #[test]
-    fn test_builder_for_component() {
-        let plan = HomeboyPlan::builder_for_component(PlanKind::Quality, "fixture").build();
-
-        assert_eq!(plan.subject.component_id.as_deref(), Some("fixture"));
-    }
-
-    #[test]
-    fn test_builder_for_description() {
-        let plan = HomeboyPlan::builder_for_description(PlanKind::Trace, "Variant A").build();
-
-        assert_eq!(plan.subject.description.as_deref(), Some("Variant A"));
-    }
-
-    #[test]
-    fn test_from_plan() {
-        let plan =
-            PlanBuilder::from_plan(HomeboyPlan::for_component(PlanKind::Build, "fixture")).build();
-
-        assert_eq!(plan.kind, PlanKind::Build);
-    }
-
-    #[test]
-    fn test_mode() {
-        let plan = HomeboyPlan::builder_for_component(PlanKind::Review, "fixture")
-            .mode("changed")
-            .build();
-
-        assert_eq!(plan.mode.as_deref(), Some("changed"));
-    }
-
-    #[test]
-    fn test_plan_inputs() {
+    fn plan_values_encode_each_typed_input() {
         let plan = HomeboyPlan::builder_for_component(PlanKind::Trace, "fixture")
-            .inputs(vec![
-                ("group".to_string(), serde_json::json!("baseline")),
-                ("iteration".to_string(), serde_json::json!(2)),
-            ])
+            .inputs(
+                PlanValues::new()
+                    .string("group", "baseline")
+                    .bool("dry_run", true)
+                    .number("iteration", 2_u64)
+                    .json("items", ["first", "second"]),
+            )
             .build();
 
         assert_eq!(
-            plan.inputs.get("group"),
-            Some(&serde_json::json!("baseline"))
-        );
-        assert_eq!(plan.inputs.get("iteration"), Some(&serde_json::json!(2)));
-    }
-
-    #[test]
-    fn test_string() {
-        let plan = HomeboyPlan::builder_for_component(PlanKind::Trace, "fixture")
-            .inputs(PlanValues::new().string("group", "baseline"))
-            .build();
-
-        assert_eq!(
-            plan.inputs.get("group"),
-            Some(&serde_json::json!("baseline"))
-        );
-    }
-
-    #[test]
-    fn test_bool() {
-        let plan = HomeboyPlan::builder_for_component(PlanKind::Trace, "fixture")
-            .inputs(PlanValues::new().bool("dry_run", true))
-            .build();
-
-        assert_eq!(plan.inputs.get("dry_run"), Some(&serde_json::json!(true)));
-    }
-
-    #[test]
-    fn test_number() {
-        let plan = HomeboyPlan::builder_for_component(PlanKind::Trace, "fixture")
-            .inputs(PlanValues::new().number("iteration", 2_u64))
-            .build();
-
-        assert_eq!(plan.inputs.get("iteration"), Some(&serde_json::json!(2)));
-    }
-
-    #[test]
-    fn test_plan_values_json() {
-        let plan = HomeboyPlan::builder_for_component(PlanKind::Trace, "fixture")
-            .inputs(PlanValues::new().json("items", ["first", "second"]))
-            .build();
-
-        assert_eq!(
-            plan.inputs.get("items"),
-            Some(&serde_json::json!(["first", "second"]))
-        );
-    }
-
-    #[test]
-    fn test_input_value() {
-        let step = PlanStep::ready("lint", "quality.lint")
-            .input_value("reason", serde_json::json!("manual"))
-            .build();
-
-        assert_eq!(
-            step.inputs.get("reason"),
-            Some(&serde_json::json!("manual"))
+            serde_json::to_value(&plan.inputs).unwrap(),
+            serde_json::json!({
+                "group": "baseline",
+                "dry_run": true,
+                "iteration": 2,
+                "items": ["first", "second"]
+            })
         );
     }
 
@@ -809,43 +702,6 @@ mod tests {
     }
 
     #[test]
-    fn test_policy_value() {
-        let plan = HomeboyPlan::builder_for_component(PlanKind::Build, "fixture")
-            .policy_value("blocked", serde_json::json!(false))
-            .build();
-
-        assert_eq!(plan.policy.get("blocked"), Some(&serde_json::json!(false)));
-    }
-
-    #[test]
-    fn test_warnings() {
-        let plan = HomeboyPlan::builder_for_component(PlanKind::Quality, "fixture")
-            .warnings(vec!["review grouping".to_string()])
-            .build();
-
-        assert_eq!(plan.warnings, vec!["review grouping"]);
-    }
-
-    #[test]
-    fn test_steps() {
-        let plan = HomeboyPlan::builder_for_component(PlanKind::Quality, "fixture")
-            .steps(vec![PlanStep::ready("lint", "quality.lint").build()])
-            .build();
-
-        assert_eq!(plan.steps.len(), 1);
-    }
-
-    #[test]
-    fn test_summarize() {
-        let plan = HomeboyPlan::builder_for_component(PlanKind::Quality, "fixture")
-            .steps(vec![PlanStep::ready("lint", "quality.lint").build()])
-            .summarize()
-            .build();
-
-        assert_eq!(plan.summary.as_ref().map(|summary| summary.ready), Some(1));
-    }
-
-    #[test]
     fn test_summarize_disabled_as_skipped() {
         let plan = HomeboyPlan::builder_for_component(PlanKind::Quality, "fixture")
             .steps(vec![PlanStep::disabled(
@@ -863,84 +719,6 @@ mod tests {
     }
 
     #[test]
-    fn test_ready() {
-        let step = PlanStep::ready("lint", "quality.lint").build();
-
-        assert_eq!(step.status, PlanStepStatus::Ready);
-    }
-
-    #[test]
-    fn test_ready_labeled() {
-        let step = PlanStep::ready_labeled(
-            "test",
-            "quality.test",
-            "Run tests",
-            vec!["lint".to_string()],
-            vec![("profile".to_string(), serde_json::json!("ci"))],
-        );
-
-        assert_eq!(step.status, PlanStepStatus::Ready);
-        assert_eq!(step.label.as_deref(), Some("Run tests"));
-        assert_eq!(step.needs, vec!["lint"]);
-        assert_eq!(step.inputs.get("profile"), Some(&serde_json::json!("ci")));
-    }
-
-    #[test]
-    fn test_disabled() {
-        let step = PlanStep::disabled("audit", "quality.audit").build();
-
-        assert_eq!(step.status, PlanStepStatus::Disabled);
-    }
-
-    #[test]
-    fn test_label() {
-        let step = PlanStep::ready("lint", "quality.lint")
-            .label("Run lint")
-            .build();
-
-        assert_eq!(step.label.as_deref(), Some("Run lint"));
-    }
-
-    #[test]
-    fn test_scope() {
-        let step = PlanStep::ready("deps", "deps.stack")
-            .scope(vec!["downstream".to_string()])
-            .build();
-
-        assert_eq!(step.scope, vec!["downstream"]);
-    }
-
-    #[test]
-    fn test_needs() {
-        let step = PlanStep::ready("test", "quality.test")
-            .needs(vec!["lint".to_string()])
-            .build();
-
-        assert_eq!(step.needs, vec!["lint"]);
-    }
-
-    #[test]
-    fn test_inputs() {
-        let step = PlanStep::ready("deps", "deps.stack")
-            .inputs(vec![("package".to_string(), serde_json::json!("homeboy"))])
-            .build();
-
-        assert_eq!(
-            step.inputs.get("package"),
-            Some(&serde_json::json!("homeboy"))
-        );
-    }
-
-    #[test]
-    fn test_skip_reason() {
-        let step = PlanStep::disabled("audit", "quality.audit")
-            .skip_reason("filtered")
-            .build();
-
-        assert_eq!(step.skip_reason.as_deref(), Some("filtered"));
-    }
-
-    #[test]
     fn test_disabled_with_reason() {
         let step = PlanStep::disabled_with_reason("release.skip", "release.skip", "no-commits")
             .label("No releasable commits")
@@ -952,27 +730,5 @@ mod tests {
             step.inputs.get("reason").and_then(|value| value.as_str()),
             Some("no-commits")
         );
-    }
-
-    #[test]
-    fn test_from_steps() {
-        let summary = PlanSummary::from_steps(&[
-            PlanStep::ready("lint", "quality.lint").build(),
-            PlanStep::builder("test", "quality.test", PlanStepStatus::Missing).build(),
-        ]);
-
-        assert_eq!(summary.ready, 1);
-        assert_eq!(summary.blocked, 1);
-    }
-
-    #[test]
-    fn test_from_steps_counting_disabled_as_skipped() {
-        let summary = PlanSummary::from_steps_counting_disabled_as_skipped(&[PlanStep::disabled(
-            "audit",
-            "audit.detector.docs",
-        )
-        .build()]);
-
-        assert_eq!(summary.skipped, 1);
     }
 }

@@ -400,7 +400,6 @@ fn lock_shared_bounded(_file: &File, _lock_path: &Path, _context: &str) -> Resul
 }
 
 struct ConfigLockGuard {
-    #[allow(dead_code)]
     file: File,
 }
 

@@ -40,7 +40,7 @@ pub struct ChildProcessIdentity {
 
 /// Peak resource sample (RSS + CPU) shared by child-resource reporting structs.
 /// Flattened so the emitted JSON keys (`sampled_peak_rss_bytes`,
-/// `sampled_peak_cpu_percent`) are identical to the previously inlined fields.
+/// `sampled_peak_cpu_percent`) sit directly on the parent object.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct ChildResourcePeakSample {
     pub sampled_peak_rss_bytes: Option<u64>,

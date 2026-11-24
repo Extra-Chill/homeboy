@@ -361,8 +361,9 @@ mod tests {
         let link = dir.path().join("s");
         std::os::unix::fs::symlink(&target, &link).expect("symlink");
 
-        // The literal string is nowhere near the limit — this is exactly the
-        // shape that used to pass while handing out an unusable directory.
+        // The literal string is nowhere near the limit, but the resolved
+        // target is: checking only the literal would hand out an unusable
+        // directory.
         assert!(link.as_os_str().len() + 1 + SOCKET_HEADROOM_BYTES <= SUN_PATH_CAPACITY);
 
         let error = enforce_path_budget(&link).expect_err("the resolved target must not pass");
