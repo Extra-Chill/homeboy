@@ -2,23 +2,12 @@ use super::*;
 use serde_json::json;
 
 struct RearmCandidate(CookRequest);
-impl crate::agent_task_service::CookRecoveryPerformer for RearmCandidate {
-    fn preflight_continue_cook(&self, run: &str, rearm: bool) -> Result<(Value, i32)> {
-        assert!(rearm);
-        crate::agent_task_service::cook_recipe::preflight_continuation_claim(
-            &self.0.identity.cook_id,
-            run,
-            rearm,
-        )?;
-        Ok((json!({}), 0))
-    }
-    fn continue_cook(
-        &self,
-        run: &str,
-        rearm: bool,
-        _: &crate::agent_task_service::CookRecoveryOverrides,
-    ) -> Result<(Value, i32)> {
-        self.preflight_continue_cook(run, rearm)?;
+impl RearmCandidate {
+    /// The admitted rearm step, as the daemon's execution-step adapter
+    /// performs it through the Cook continuation handler.
+    fn execute_admitted_rearm(&self, run: &str) -> Result<(Value, i32)> {
+        use crate::agent_task_service::CookRecoveryPerformer;
+        self.preflight_continue_cook(run, true)?;
         let recipes = CookRecipeStore::from_current_data_root()?;
         let store = test_lifecycle_store();
         let claim = crate::agent_task_service::cook_recipe::claim_continuation_for_recovery_and_clear_failure_in_store(
@@ -27,6 +16,28 @@ impl crate::agent_task_service::CookRecoveryPerformer for RearmCandidate {
         let promotion = promote_or_load_attempt_in_store(&store, &self.0, run)?;
         claim.complete()?;
         Ok((serde_json::to_value(promotion).unwrap(), 0))
+    }
+}
+impl crate::agent_task_service::CookRecoveryPerformer for RearmCandidate {
+    fn admit_step(
+        &self,
+        report: &crate::agent_task_service::CookRecoveryReport,
+        _: &crate::agent_task_service::CookRecoveryOverrides,
+    ) -> Result<Option<Value>> {
+        assert_eq!(
+            report.step,
+            crate::agent_task_service::CookRecoveryStep::Rearm
+        );
+        Ok(Some(json!({"status": "admitted"})))
+    }
+    fn preflight_continue_cook(&self, run: &str, rearm: bool) -> Result<(Value, i32)> {
+        assert!(rearm);
+        crate::agent_task_service::cook_recipe::preflight_continuation_claim(
+            &self.0.identity.cook_id,
+            run,
+            rearm,
+        )?;
+        Ok((json!({}), 0))
     }
     fn retry(&self, _: &str) -> Result<(Value, i32)> {
         panic!("no provider retry")
@@ -118,7 +129,9 @@ fn recover_rearms_gate_feedback_promotion_refused_before_apply() {
         )
         .unwrap();
         assert_eq!(exit, 0, "{report:?}");
-        let result = report.result.unwrap();
+        assert_eq!(report.status, "admitted");
+        let (result, exit) = performer.execute_admitted_rearm(&report.run_id).unwrap();
+        assert_eq!(exit, 0, "{result:?}");
         assert_eq!(result["status"], "applied");
         assert!(!result["deterministic_gates"].as_array().unwrap().is_empty());
         assert_eq!(

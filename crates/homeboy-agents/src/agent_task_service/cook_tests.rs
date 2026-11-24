@@ -5610,13 +5610,11 @@ fn cook_recovery_operator_feedback_reaches_dispatch_and_survives_pre_execution_f
         dispatch: bool,
         consumed_attempt: std::cell::RefCell<String>,
     }
-    impl crate::agent_task_service::CookRecoveryPerformer for Recovery {
-        fn continue_cook(
-            &self,
-            run_id: &str,
-            _: bool,
-            _: &crate::agent_task_service::CookRecoveryOverrides,
-        ) -> Result<(Value, i32)> {
+    impl Recovery {
+        /// The admitted continuation step, as the daemon's execution-step
+        /// adapter performs it.
+        fn execute_admitted_continuation(&self, run_id: &str) -> Result<()> {
+            crate::agent_task_service::prepare_admitted_recovery_continuation(run_id)?;
             *self.consumed_attempt.borrow_mut() = run_id.to_string();
             agent_task_lifecycle::rewrite_record_for_test(run_id, |record| {
                 record.set_state_for_test(homeboy_lifecycle_contract::RunExecutionState::Queued);
@@ -5629,7 +5627,20 @@ fn cook_recovery_operator_feedback_reaches_dispatch_and_survives_pre_execution_f
                 None,
                 None,
             )?;
-            Ok((serde_json::json!({"run_id": run_id}), 0))
+            Ok(())
+        }
+    }
+    impl crate::agent_task_service::CookRecoveryPerformer for Recovery {
+        fn admit_step(
+            &self,
+            report: &crate::agent_task_service::CookRecoveryReport,
+            _: &crate::agent_task_service::CookRecoveryOverrides,
+        ) -> Result<Option<Value>> {
+            assert_eq!(
+                report.step,
+                crate::agent_task_service::CookRecoveryStep::Continue
+            );
+            Ok(Some(serde_json::json!({"status": "admitted"})))
         }
         fn preflight_continue_cook(&self, _: &str, _: bool) -> Result<(Value, i32)> {
             unreachable!()
@@ -5714,6 +5725,14 @@ fn cook_recovery_operator_feedback_reaches_dispatch_and_survives_pre_execution_f
                     crate::agent_task_service::CookRecoveryStep::Retry
                 }
             );
+            if continue_attempt {
+                // Continuation is admitted as a daemon execution step; the
+                // daemon then performs it.
+                assert_eq!(report.status, "admitted");
+                performer
+                    .execute_admitted_continuation(&report.run_id)
+                    .unwrap();
+            }
             let attempt_id = performer.consumed_attempt.borrow();
             let feedback = store.list(cook_id).unwrap();
             assert!(feedback.iter().all(|item| if dispatch {
@@ -5730,19 +5749,9 @@ fn cook_recovery_operator_feedback_reaches_dispatch_and_survives_pre_execution_f
 
 #[test]
 fn recover_removed_runner_settles_and_dispatches_in_one_call() {
-    use crate::agent_task_service::{
-        CookRecoveryOverrides, CookRecoveryPerformer, CookRecoveryStep,
-    };
+    use crate::agent_task_service::{CookRecoveryPerformer, CookRecoveryStep};
     struct Recovery;
     impl CookRecoveryPerformer for Recovery {
-        fn continue_cook(
-            &self,
-            _: &str,
-            _: bool,
-            _: &CookRecoveryOverrides,
-        ) -> Result<(Value, i32)> {
-            unreachable!("lost work must use durable-recipe retry")
-        }
         fn preflight_continue_cook(&self, _: &str, _: bool) -> Result<(Value, i32)> {
             unreachable!()
         }
@@ -6062,14 +6071,6 @@ fn recover_preflight_step(cook_id: &str) -> crate::agent_task_service::CookRecov
 fn recover_takes_over_abandoned_continuation_claims() {
     struct Preflight;
     impl crate::agent_task_service::CookRecoveryPerformer for Preflight {
-        fn continue_cook(
-            &self,
-            _: &str,
-            _: bool,
-            _: &crate::agent_task_service::CookRecoveryOverrides,
-        ) -> Result<(Value, i32)> {
-            unreachable!()
-        }
         fn preflight_continue_cook(&self, _: &str, _: bool) -> Result<(Value, i32)> {
             Ok((serde_json::json!({}), 0))
         }
@@ -9762,15 +9763,6 @@ fn cancelled_cook_root_and_attempt_observation_rows_agree_on_skipped() {
 struct ReplacementOnlyRecoveryPerformer;
 
 impl crate::agent_task_service::CookRecoveryPerformer for ReplacementOnlyRecoveryPerformer {
-    fn continue_cook(
-        &self,
-        run_id: &str,
-        _rearm: bool,
-        _overrides: &crate::agent_task_service::CookRecoveryOverrides,
-    ) -> Result<(serde_json::Value, i32)> {
-        panic!("replacement recovery must not continue {run_id}")
-    }
-
     fn preflight_continue_cook(
         &self,
         run_id: &str,
@@ -11931,15 +11923,6 @@ impl CapturePublishRecoveryPerformer {
 }
 
 impl crate::agent_task_service::CookRecoveryPerformer for CapturePublishRecoveryPerformer {
-    fn continue_cook(
-        &self,
-        run_id: &str,
-        _rearm: bool,
-        _overrides: &crate::agent_task_service::CookRecoveryOverrides,
-    ) -> Result<(serde_json::Value, i32)> {
-        panic!("a verified candidate must not replay provider work for {run_id}")
-    }
-
     fn preflight_continue_cook(
         &self,
         run_id: &str,

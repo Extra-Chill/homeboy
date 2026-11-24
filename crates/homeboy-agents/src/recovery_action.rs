@@ -31,11 +31,6 @@ impl CookRecoveryPerformer for ControlPlaneRecoveryPerformer {
     ) -> Result<Option<Value>> {
         service::admit_recovery_execution_step(report, overrides).map(Some)
     }
-    fn continue_cook(&self, _: &str, _: bool, _: &CookRecoveryOverrides) -> Result<(Value, i32)> {
-        Err(homeboy_core::Error::internal_unexpected(
-            "recovery continuation must be admitted as a daemon execution step",
-        ))
-    }
     fn preflight_continue_cook(&self, id: &str, rearm: bool) -> Result<(Value, i32)> {
         if let Some(preflight) = PREFLIGHT.get() {
             return preflight(id, rearm);

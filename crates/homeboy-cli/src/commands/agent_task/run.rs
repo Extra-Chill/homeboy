@@ -652,13 +652,13 @@ pub(super) fn explicit_local_retry_admission_refusal(
     ))
 }
 
-pub(crate) use super::run_continuation::continue_cook;
-#[allow(unused_imports)] // Preserve the existing run module path.
-pub(crate) use super::run_continuation::continue_cook_with;
 #[cfg(test)]
 pub(super) use super::run_continuation::cook_continuation_status;
 pub(super) use super::run_continuation::cook_report_with_continuation;
 pub(crate) use super::run_continuation::preflight_continue_cook;
+pub(crate) use super::run_continuation::run_cook_continuation;
+#[allow(unused_imports)] // Preserve the existing run module path.
+pub(crate) use super::run_continuation::run_cook_continuation_with;
 pub(crate) use super::run_continuation::CookContinueArgs;
 pub(super) use super::run_destination::cook_provision_repository;
 #[cfg(test)]

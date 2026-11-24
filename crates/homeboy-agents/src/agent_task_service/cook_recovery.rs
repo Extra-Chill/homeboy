@@ -737,14 +737,17 @@ pub struct CookRecoveryRequest {
     pub publish: CookPublishRequest,
 }
 
-/// The handlers a recovery step performs. Implemented by the CLI with the
-/// exact Cook continuation, retry and reconcile handlers, so recovery has no
+/// The handlers a recovery step performs. Implemented by the control plane
+/// with the exact retry and reconcile handlers, so recovery has no
 /// orchestration of its own. Replacement gates and publication default to the
 /// service handlers the retired `verify-replacement`,
 /// `record-replacement-gate-proof` and `finalize-pr --recover` verbs called.
 pub trait CookRecoveryPerformer {
-    /// Admit slow continuation work through the durable execution outbox.
-    /// Workers return `None` to execute the already admitted step.
+    /// Admit slow step work (continuation, rearm, regate and explicit operator
+    /// overrides) as a frozen daemon execution step through the durable
+    /// execution outbox; the daemon's execution-step adapter performs it.
+    /// Continuation, rearm and overrides have no in-process path: a performer
+    /// that admits nothing (`None`) can only perform a regate in-process.
     fn admit_step(
         &self,
         _plan: &CookRecoveryReport,
@@ -752,15 +755,6 @@ pub trait CookRecoveryPerformer {
     ) -> Result<Option<Value>> {
         Ok(None)
     }
-    /// Continue the Cook from `run_id`, optionally rearming its failed
-    /// terminal continuation, promoting one named patch artifact, or reserving
-    /// a successor attempt with explicit operator overrides.
-    fn continue_cook(
-        &self,
-        run_id: &str,
-        rearm: bool,
-        overrides: &CookRecoveryOverrides,
-    ) -> Result<(Value, i32)>;
     /// Validate continuation admission for `run_id` without dispatching a
     /// provider or mutating lifecycle state.
     fn preflight_continue_cook(&self, run_id: &str, rearm: bool) -> Result<(Value, i32)>;
@@ -1297,6 +1291,9 @@ pub fn cook_recovery_delegation(id: &str) -> Option<CookRecoveryPlan> {
 /// left its durable state unchanged is recorded, so the next `recover` from
 /// that state reports [`CookRecoveryStep::Blocked`] instead of looping.
 pub fn prepare_admitted_recovery_continuation(run_id: &str) -> Result<()> {
+    // The admitted step names remaining work, so its continuation must be
+    // claimable before the handler runs; otherwise the handler finds nothing
+    // to consume and reports a no-op (#17494).
     let plan = plan_cook_recovery(run_id)?;
     super::CookRecipeStore::from_current_data_root()?
         .schedule_recovery_continuation(&plan.cook_id, run_id)
@@ -1653,23 +1650,23 @@ fn recover_cook_once(
             report.result = Some(result);
         }
     }
-    if !preflight
-        && (!overrides.is_empty()
-            || matches!(
-                report.step,
-                CookRecoveryStep::Continue | CookRecoveryStep::Regate | CookRecoveryStep::Rearm
-            ))
-    {
+    let continuation = !overrides.is_empty()
+        || matches!(
+            report.step,
+            CookRecoveryStep::Continue | CookRecoveryStep::Rearm
+        );
+    if !preflight && (continuation || report.step == CookRecoveryStep::Regate) {
         if let Some(admission) = performer.admit_step(&report, &overrides)? {
             let mut report = report;
             report.status = admission["status"].as_str().unwrap_or("admitted").into();
             report.admission = Some(admission);
             return Ok((report, 0));
         }
-    }
-    if !overrides.is_empty() {
-        let result = performer.continue_cook(run_id, overrides.has_route_override(), &overrides);
-        return Ok(finish_performed_step(report, result));
+        if continuation {
+            return Err(Error::internal_unexpected(
+                "recovery continuation must be admitted as a daemon execution step",
+            ));
+        }
     }
     if preflight {
         if report.step == CookRecoveryStep::Publish {
@@ -1706,19 +1703,9 @@ fn recover_cook_once(
         report.status.clone(),
         report.step.clone(),
     );
-    let none = CookRecoveryOverrides::default();
     let result = (|| {
         Ok(match &report.step {
-            CookRecoveryStep::Continue => {
-                // The step names remaining work, so its continuation must be
-                // claimable before the handler runs; otherwise the handler
-                // finds nothing to consume and reports a no-op (#17494).
-                super::CookRecipeStore::from_current_data_root()?
-                    .schedule_recovery_continuation(&report.cook_id, run_id)?;
-                performer.continue_cook(run_id, false, &none)?
-            }
             CookRecoveryStep::Regate => performer.regate(run_id, &regate_inputs)?,
-            CookRecoveryStep::Rearm => performer.continue_cook(run_id, true, &none)?,
             CookRecoveryStep::Retry | CookRecoveryStep::ForkReplacement => {
                 // A fresh provider attempt never starts from a pre-patched
                 // destination (#16292).
@@ -1762,6 +1749,9 @@ fn recover_cook_once(
             CookRecoveryStep::Publish => performer.publish(run_id, &publish, false)?,
             CookRecoveryStep::Blocked { .. } | CookRecoveryStep::None { .. } => {
                 unreachable!("no-step handled before performing")
+            }
+            CookRecoveryStep::Continue | CookRecoveryStep::Rearm => {
+                unreachable!("continuation steps are admitted before performing")
             }
         })
     })();
@@ -2940,14 +2930,6 @@ mod tests {
     fn cook_recover_refuses_an_unmaterialized_cook_without_admission_inputs() {
         struct RetryPerformer(std::cell::RefCell<Vec<String>>);
         impl CookRecoveryPerformer for RetryPerformer {
-            fn continue_cook(
-                &self,
-                _: &str,
-                _: bool,
-                _: &CookRecoveryOverrides,
-            ) -> Result<(Value, i32)> {
-                unreachable!("an unmaterialized Cook has no attempt to continue")
-            }
             fn preflight_continue_cook(&self, _: &str, _: bool) -> Result<(Value, i32)> {
                 unreachable!()
             }
@@ -3046,14 +3028,6 @@ mod tests {
     fn cook_recover_relaunches_an_unmaterialized_cook_from_its_admission_inputs() {
         struct NoPerformer;
         impl CookRecoveryPerformer for NoPerformer {
-            fn continue_cook(
-                &self,
-                _: &str,
-                _: bool,
-                _: &CookRecoveryOverrides,
-            ) -> Result<(Value, i32)> {
-                unreachable!("an unmaterialized Cook has no attempt to continue")
-            }
             fn preflight_continue_cook(&self, _: &str, _: bool) -> Result<(Value, i32)> {
                 unreachable!()
             }

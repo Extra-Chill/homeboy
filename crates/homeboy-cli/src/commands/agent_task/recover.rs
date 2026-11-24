@@ -390,19 +390,28 @@ pub(crate) fn execute_admitted_step(
     // The daemon-owned step reports its waits to its log and stops on the
     // daemon's SIGTERM, withdrawing queued gate work (#18042).
     homeboy::core::foreground_wait::with_foreground_wait(Default::default(), || {
-        execute_admitted_step_in_scope(run_id, step, overrides, regate)
+        execute_admitted_step_with(
+            run_id,
+            step,
+            overrides,
+            regate,
+            super::run::run_cook_continuation,
+        )
     })
 }
 
-fn execute_admitted_step_in_scope(
+/// The admitted-step adapter with the Cook continuation handler it runs
+/// continuation, rearm and override steps through.
+pub(super) fn execute_admitted_step_with(
     run_id: &str,
     step: &agent_task_service::CookRecoveryStep,
     overrides: &CookRecoveryOverrides,
     regate: &CookRegateInputs,
+    continuation: impl Fn(CookContinueArgs) -> CmdResult<Value>,
 ) -> homeboy::core::Result<(serde_json::Value, i32)> {
     let performer = homeboy::agents::recovery_action::ControlPlaneRecoveryPerformer;
     if !overrides.is_empty() {
-        return super::run::continue_cook(continuation_args(
+        return continuation(continuation_args(
             run_id,
             overrides.has_route_override(),
             overrides,
@@ -415,7 +424,7 @@ fn execute_admitted_step_in_scope(
             if *step == agent_task_service::CookRecoveryStep::Continue {
                 agent_task_service::prepare_admitted_recovery_continuation(run_id)?;
             }
-            super::run::continue_cook(continuation_args(
+            continuation(continuation_args(
                 run_id,
                 *step == agent_task_service::CookRecoveryStep::Rearm,
                 overrides,
