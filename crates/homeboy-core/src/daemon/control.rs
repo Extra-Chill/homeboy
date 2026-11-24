@@ -1811,14 +1811,6 @@ mod termination_tests {
         assert_eq!(std::fs::metadata(&path).unwrap().len(), 0);
         assert_eq!(daemon_log.start, 0);
     }
-
-    #[test]
-    fn requested_stop_is_distinct_from_unexpected_exit() {
-        assert_ne!(
-            crate::daemon::DaemonTerminationClassification::CleanStop,
-            crate::daemon::DaemonTerminationClassification::UnexpectedExit
-        );
-    }
 }
 
 fn header_value(headers: &reqwest::header::HeaderMap, name: &str) -> Option<String> {

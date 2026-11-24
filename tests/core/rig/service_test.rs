@@ -529,11 +529,9 @@ mod log_rotation {
         assert_eq!(log.metadata().expect("metadata").len(), 32);
     }
 
-    #[test]
-    fn the_shipped_bounds_are_finite() {
-        const {
-            assert!(RIG_LOG_MAX_BYTES > 0);
-            assert!(RIG_LOG_MAX_GENERATIONS > 0);
-        }
-    }
+    // The shipped bounds are finite: checked at compile time.
+    const _: () = {
+        assert!(RIG_LOG_MAX_BYTES > 0);
+        assert!(RIG_LOG_MAX_GENERATIONS > 0);
+    };
 }
