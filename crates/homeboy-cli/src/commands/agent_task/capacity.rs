@@ -164,20 +164,22 @@ pub(crate) fn capacity_with_catalog(
             let report = homeboy::runner::lab_capacity::report(&runner.id).unwrap_or_else(
                 |error| json!({ "runner_id": runner.id, "unavailable": error.to_string() }),
             );
-            let admission = homeboy::runner::runners::runner_admission_snapshot(&runner.id)
-                .ok()
-                .map(homeboy::runner::runners::runner_readiness_admission_snapshot)
-                .map(|snapshot| LabAdmissionFacts {
-                    active_slots: snapshot.summary.active_job_count,
-                    accepts_jobs: snapshot
-                        .summary
-                        .accepts_jobs
-                        .unwrap_or(snapshot.summary.accepting_jobs),
-                    readiness_state: snapshot.summary.readiness_state,
-                    reasons: snapshot.summary.reasons,
-                    pressure: serde_json::to_value(snapshot.summary.pressure)
-                        .unwrap_or(Value::Null),
-                });
+            let admission = homeboy::runner::runners::runner_admission_snapshot(
+                &runner.id,
+                None,
+                homeboy::runner::runners::RunnerAdmissionReadiness::Configured,
+            )
+            .ok()
+            .map(|snapshot| LabAdmissionFacts {
+                active_slots: snapshot.summary.active_job_count,
+                accepts_jobs: snapshot
+                    .summary
+                    .accepts_jobs
+                    .unwrap_or(snapshot.summary.accepting_jobs),
+                readiness_state: snapshot.summary.readiness_state,
+                reasons: snapshot.summary.reasons,
+                pressure: serde_json::to_value(snapshot.summary.pressure).unwrap_or(Value::Null),
+            });
             let route = lab_route_value(
                 &runner.id,
                 runner.settings.concurrency_limit,

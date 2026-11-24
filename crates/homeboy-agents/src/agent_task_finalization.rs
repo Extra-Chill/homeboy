@@ -120,6 +120,42 @@ fn update_existing_pr<B: AgentTaskPrFinalizationBackend + ?Sized>(
     ))
 }
 
+/// Whether a Cook publication proved its task (#18931): the repro failed on
+/// base and passed on the candidate, the agent reported no `not_delivered`
+/// item, and the review form's verdict is `complete`. This one predicate
+/// decides both the draft state and `Closes` versus `Refs`, so they cannot
+/// disagree.
+pub fn cook_proved_task(
+    dossier: &crate::agent_task_review_dossier::AgentTaskReviewDossier,
+) -> bool {
+    dossier.repro == Some(crate::agent_task_review_dossier::AgentTaskReviewRepro::Verified)
+        && !dossier.has_undelivered_items()
+        && dossier.completion
+            == Some(crate::agent_task_review_dossier::AiReviewCompletion::Complete)
+}
+
+/// Apply `cook_proved_task` to the dossier's same-repository issue
+/// relationships and return whether the publication must be a draft. A Cook
+/// that proves its task on rework turns an earlier `Refs` into `Closes`.
+/// `Relates to` (cross-repository issues, PRs, other trackers) is untouched.
+/// Manual finalization records no repro and keeps its operator-chosen
+/// relationships; only partial delivery makes it a draft (#18884).
+fn settle_task_proof(
+    dossier: &mut crate::agent_task_review_dossier::AgentTaskReviewDossier,
+) -> bool {
+    use crate::agent_task_review_dossier::AgentTaskReviewIssueRelationshipKind as Kind;
+    if dossier.repro.is_none() {
+        return dossier.has_undelivered_items();
+    }
+    let proven = cook_proved_task(dossier);
+    for relationship in &mut dossier.source_relationships {
+        if relationship.kind != Kind::RelatesTo {
+            relationship.kind = if proven { Kind::Closes } else { Kind::Refs };
+        }
+    }
+    !proven
+}
+
 /// `gh pr create` refused because an open PR already exists for this head.
 fn is_existing_pr_conflict(message: &str) -> bool {
     message.contains("a pull request for branch") && message.contains("already exists")
@@ -163,10 +199,11 @@ fn finalize_pr_with_backend_mode<B: AgentTaskPrFinalizationBackend + ?Sized>(
         }
         options.draft_pr = true;
     }
-    // A candidate the agent reports as partly undelivered opens as a draft
-    // and settles `succeeded_partial` (#18884).
+    // A candidate the agent reports as partly undelivered settles
+    // `succeeded_partial` (#18884). An unproven Cook opens as a draft that
+    // says `Refs` rather than `Closes` (#18931).
     let partial_delivery = options.review_dossier.has_undelivered_items();
-    if partial_delivery {
+    if settle_task_proof(&mut options.review_dossier) {
         options.draft_pr = true;
     }
     // Authorization context belongs to durable run evidence, not PR prose.

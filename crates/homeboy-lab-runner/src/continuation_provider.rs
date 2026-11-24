@@ -205,7 +205,11 @@ impl RunnerContinuationProvider for RunnerContinuation {
     }
 
     fn runner_live_job_authority(&self, runner_id: &str) -> RunnerLiveJobAuthority {
-        match super::runner_admission_snapshot(runner_id) {
+        match super::runner_admission_snapshot(
+            runner_id,
+            None,
+            super::RunnerAdmissionReadiness::Observation,
+        ) {
             Ok(snapshot) => runner_live_job_authority_from_admission(
                 snapshot.summary.active_job_count,
                 snapshot.summary.safe_to_rotate,

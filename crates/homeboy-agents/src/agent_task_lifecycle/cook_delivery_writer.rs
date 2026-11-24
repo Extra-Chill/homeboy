@@ -12,10 +12,9 @@
 
 use super::*;
 use crate::agent_task_service::{
-    CookDelivery, CookDeliveryArtifacts, CookDeliveryBlockerCode, COOK_DELIVERY_KEY,
+    CookDelivery, CookDeliveryArtifacts, CookDeliveryBlockerCode, CookOutcome, COOK_DELIVERY_KEY,
 };
 use homeboy_core::cook_status::{CookStatus, GateVerdict};
-use serde::Deserialize;
 
 /// How a delivery receipt decides the run state it commits.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -31,6 +30,8 @@ pub(crate) struct CookDeliveryDraft {
     /// The delivery the record held. A step that records a blocker without a
     /// receipt of its own sets it here (see [`CookDelivery::project`]).
     pub recorded: Option<CookDelivery>,
+    /// The Cook's recorded terminal outcome (see [`CookOutcome`]).
+    pub outcome: Option<CookOutcome>,
 }
 
 /// Commit a delivery step and the `cook_delivery` record it implies.
@@ -53,10 +54,11 @@ pub(crate) fn record_cook_delivery(
         let mut draft = CookDeliveryDraft {
             artifacts: CookDeliveryArtifacts::from_run_metadata(&current.metadata),
             recorded: previous.clone(),
+            outcome: CookOutcome::from_run_metadata(&current.metadata),
         };
         let commit = record_step(&mut prepared, &mut draft)?;
         let delivery = CookDelivery::project(&draft.artifacts, draft.recorded.as_ref());
-        retire_superseded_deferral(&mut prepared, delivery.as_ref());
+        let outcome = retire_superseded_deferral(draft.outcome, delivery.as_ref());
         let metadata = prepared.ensure_metadata_object();
         if delivery.is_none() && draft.artifacts == CookDeliveryArtifacts::default() {
             metadata.remove(COOK_DELIVERY_KEY);
@@ -66,6 +68,7 @@ pub(crate) fn record_cook_delivery(
                 CookDelivery::to_record(delivery.as_ref(), &draft.artifacts),
             );
         }
+        CookOutcome::write(&mut prepared.metadata, outcome);
         let next_state = match commit {
             CookDeliveryCommit::FollowDelivery => {
                 delivery_run_state(previous.as_ref(), delivery.as_ref(), current)
@@ -119,44 +122,30 @@ fn delivery_run_state(
     .then_some(state)
 }
 
-/// A `gate_environment_unavailable` Cook result describes deferred gates. Once a later gate
-/// run executes, the delivery is verified or rejected and that result no
-/// longer holds: replace it with the status the delivery reports, or clear it
-/// so the Cook records its next result, instead of latching an unverified
-/// status over an executed gate.
-fn retire_superseded_deferral(record: &mut AgentTaskRunRecord, delivery: Option<&CookDelivery>) {
-    if delivery.is_some_and(|delivery| {
-        delivery.blocker_code()
-            == Some(CookDeliveryBlockerCode::Gate(
-                GateVerdict::GateEnvironmentUnavailable,
-            ))
-    }) {
-        return;
+/// A `gate_environment_unavailable` Cook outcome describes deferred gates.
+/// Once a later gate run executes, the delivery is verified or rejected and
+/// that outcome no longer holds: replace it with the status the delivery
+/// reports, or clear it so the Cook records its next outcome, instead of
+/// latching an unverified status over an executed gate.
+fn retire_superseded_deferral(
+    outcome: Option<CookOutcome>,
+    delivery: Option<&CookDelivery>,
+) -> Option<CookOutcome> {
+    let deferred = CookStatus::Gate(GateVerdict::GateEnvironmentUnavailable);
+    if outcome.and_then(|outcome| outcome.status) != Some(deferred)
+        || delivery.is_some_and(|delivery| {
+            delivery.blocker_code()
+                == Some(CookDeliveryBlockerCode::Gate(
+                    GateVerdict::GateEnvironmentUnavailable,
+                ))
+        })
+    {
+        return outcome;
     }
-    let Some(progress) = record
-        .metadata
-        .get_mut("cook_progress")
-        .and_then(Value::as_object_mut)
-    else {
-        return;
-    };
-    let deferred = progress
-        .get("terminal_status")
-        .and_then(|status| CookStatus::deserialize(status).ok())
-        == Some(CookStatus::Gate(GateVerdict::GateEnvironmentUnavailable));
-    if !deferred {
-        return;
-    }
-    match delivery.and_then(|delivery| delivery.lifecycle().cook_status) {
-        Some(status) => {
-            let success = status.is_success_exit();
-            progress.insert("terminal_status".to_string(), json!(status.as_str()));
-            progress.insert("exit_code".to_string(), json!(i32::from(!success)));
-        }
-        None => {
-            for key in ["terminal_status", "exit_code"] {
-                progress.remove(key);
-            }
-        }
-    }
+    delivery
+        .and_then(|delivery| delivery.lifecycle().cook_status)
+        .map(|status| CookOutcome {
+            status: Some(status),
+            exit_code: i32::from(!status.is_success_exit()),
+        })
 }

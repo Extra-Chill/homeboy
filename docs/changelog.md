@@ -4,6 +4,25 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.496.4] - 2026-11-24
+
+### Fixed
+- return the complete review form from agent-task review
+
+## [0.496.3] - 2026-11-24
+
+### Fixed
+- say Closes #N only when the Cook proved its task, otherwise Refs #N
+
+## [0.496.2] - 2026-11-24
+
+### Changed
+- derive Cook admission phase instead of storing handoff.state
+
+### Fixed
+- keep runner SSH tunnels alive with ServerAlive probes
+- start Cook gate-fix retries from the previous candidate
+
 ## [0.496.1] - 2026-11-24
 
 ### Changed

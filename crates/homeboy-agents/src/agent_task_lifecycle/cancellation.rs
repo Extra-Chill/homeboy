@@ -513,13 +513,9 @@ fn cancel_resolved_run_in_store(
         })?;
         record = lifecycle_store.read_record(&record.run_id)?;
     }
-    let detached_child = record
-        .metadata
-        .get("detached_cook_handoff")
-        .and_then(serde_json::Value::as_object)
-        .filter(|handoff| {
-            handoff.get("state").and_then(serde_json::Value::as_str) == Some("pending")
-        })
+    let detached_child = record.metadata["detached_cook_handoff"]
+        .as_object()
+        .filter(|_| has_pending_detached_cook_handoff(&record))
         .and_then(|handoff| {
             Some((
                 u32::try_from(handoff.get("child_pid")?.as_u64()?).ok()?,

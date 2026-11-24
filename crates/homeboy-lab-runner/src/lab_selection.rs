@@ -363,6 +363,10 @@ pub struct PlacementReadiness {
     pub runner_id: String,
     pub state: PlacementReadinessState,
     pub predicates: Vec<PlacementReadinessPredicate>,
+    /// Why the runner admission projection refuses this runner; the same
+    /// reasons Lab offload and `runner status` report for the same status.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub admission_reasons: Vec<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub provider_admission:
         Option<homeboy_agents::agent_task_provider::AgentTaskProviderAdmissionPlan>,
@@ -514,18 +518,16 @@ fn placement_readiness_from_status_with_catalog(
             status,
             require_exact_runner_version,
         );
-    let mut availability = RunnerAvailability::from_status_parts(
-        request.runner_id.clone(),
-        status.connected,
-        blocking_status_drift,
-        status.active_jobs.len(),
-        &status.active_job_state,
-        capacity,
+    // Required capabilities are evaluated below against the compiled plan, so
+    // the shared admission projection does not repeat the runtime probe.
+    let availability = super::runner_admission_availability(
+        status,
+        &super::RunnerAdmissionPolicy {
+            capacity,
+            capabilities_ready: true,
+            exact_version: require_exact_runner_version,
+        },
     );
-    if status.under_pressure() {
-        availability.reasons.push("pressure".to_string());
-        availability.accepts_jobs = false;
-    }
     let compatible = matches!(capability, super::LabRunnerGateDecision::Eligible);
     let inputs_declared = source_path_inputs
         .iter()
@@ -637,6 +639,7 @@ fn placement_readiness_from_status_with_catalog(
                 }),
         )
         .collect(),
+        admission_reasons: availability.reasons,
         provider_admission,
         recovery_actions,
         recovery_action_projections,
@@ -1996,7 +1999,21 @@ mod placement_readiness_tests {
             session: None,
             stale_daemon: None,
             configured_job_binary_build_identity: None,
-            daemon_freshness: None,
+            daemon_freshness: Some(homeboy_core::daemon::DaemonFreshnessReport {
+                fresh: true,
+                stale_reason_code: None,
+                restartable: false,
+                lease_id: Some("lease".to_string()),
+                pid: Some(42),
+                recovery_evidence: None,
+                ownership_evidence: None,
+                daemon_version: None,
+                daemon_build_identity: None,
+                runtime_paths: None,
+                active_jobs: 0,
+                termination_evidence: None,
+                repair_plan: Vec::new(),
+            }),
             active_jobs: Vec::new(),
             active_runner_jobs: Vec::new(),
             stale_runner_jobs: Vec::new(),
@@ -2245,6 +2262,90 @@ mod placement_readiness_tests {
         );
         assert_eq!(result.state, PlacementReadinessState::Ready);
         assert!(result.recovery_actions.is_empty());
+    }
+
+    /// Placement, the Lab offload dispatch gate and `runner status` read one
+    /// runner admission projection, so each reports the same refusal reason.
+    #[test]
+    fn placement_offload_and_status_report_the_same_admission_refusal() {
+        let mut pressured = status();
+        pressured
+            .daemon_freshness
+            .as_mut()
+            .expect("fixture freshness")
+            .runtime_paths = Some(homeboy_core::daemon::DaemonRuntimeSnapshot {
+            pressure_thresholds: Default::default(),
+            pressure: Some(homeboy_core::runner_pressure::RunnerPressure {
+                cpu: Some(10_900),
+                load_fallback: true,
+                admission_reason: Some("pressure".to_string()),
+                ..Default::default()
+            }),
+            loaded_at: "2026-11-09T14:39:00Z".to_string(),
+            paths: Vec::new(),
+        });
+        let mut disconnected = status();
+        disconnected.connected = false;
+        disconnected.state = RunnerSessionState::Disconnected;
+        let mut stale_binary = status();
+        stale_binary.stale_daemon = Some(
+            RunnerStaleDaemonWarning::new("lab", "old".to_string(), "new".to_string(), None, None)
+                .with_runtime_paths(
+                    "lab",
+                    vec![crate::session::RunnerStaleRuntimePath {
+                        env: "HOMEBOY_BIN".to_string(),
+                        path: "/usr/local/bin/homeboy".to_string(),
+                        loaded_fingerprint: "old".to_string(),
+                        current_fingerprint: "new".to_string(),
+                    }],
+                    Vec::new(),
+                ),
+        );
+
+        for (observed, reason) in [
+            (pressured, "pressure"),
+            (disconnected, "not_connected"),
+            (stale_binary, "stale_daemon"),
+        ] {
+            let placement = decide(
+                &request(),
+                &observed,
+                Some(1),
+                super::super::LabRunnerGateDecision::Eligible,
+            );
+            let offload = crate::lab::offload::require_available_lab_runner(
+                "lab",
+                &observed,
+                Some(1),
+                "test",
+            )
+            .expect_err("offload refuses");
+            let offload_reasons: Vec<String> =
+                serde_json::from_value(offload.details["runner_availability"]["reasons"].clone())
+                    .expect("offload reasons");
+            let status_reasons = crate::runner_admission_snapshot_for_status(
+                observed,
+                crate::RunnerAdmissionReadiness::Policy(crate::RunnerAdmissionPolicy {
+                    capacity: Some(1),
+                    capabilities_ready: true,
+                    exact_version: false,
+                }),
+            )
+            .summary
+            .reasons;
+
+            assert_eq!(
+                placement.state,
+                PlacementReadinessState::Blocked,
+                "{reason}"
+            );
+            assert_eq!(
+                placement.admission_reasons.first().map(String::as_str),
+                Some(reason)
+            );
+            assert_eq!(placement.admission_reasons, offload_reasons, "{reason}");
+            assert_eq!(placement.admission_reasons, status_reasons, "{reason}");
+        }
     }
 
     #[test]

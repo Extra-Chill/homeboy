@@ -61,6 +61,7 @@ pub(super) struct MockBackend {
     publication_observed_after_pr_lookup: bool,
     pub(super) existing_pr: Option<AgentTaskPrRef>,
     existing_title: Option<String>,
+    existing_body: Option<String>,
     last_title: Option<String>,
     merged_pr: Option<AgentTaskPrRef>,
     merged_pr_head_sha: Option<String>,
@@ -300,6 +301,15 @@ impl AgentTaskPrFinalizationBackend for MockBackend {
     ) -> Result<Option<String>> {
         self.component_ids.push(_component_id.map(str::to_string));
         Ok(self.existing_title.clone())
+    }
+
+    fn open_pr_body(
+        &mut self,
+        _component_id: Option<&str>,
+        _path: &str,
+        _number: u64,
+    ) -> Result<Option<String>> {
+        Ok(self.existing_body.clone())
     }
 
     fn create_pr(
@@ -1080,6 +1090,166 @@ fn fully_delivered_items_keep_the_ready_publication() {
     assert!(!backend.created_draft);
     assert_eq!(report.status.as_str(), "review_ready");
     assert_eq!(report.pr_draft, Some(false));
+}
+
+#[test]
+fn cook_task_proof_decides_closes_or_refs_and_draft_state_together() {
+    use crate::agent_task_review_dossier::{
+        AgentTaskReviewIssueRelationship, AgentTaskReviewIssueRelationshipKind as Kind,
+        AgentTaskReviewRepro as Repro, AiReviewCompletion as Completion,
+    };
+    let verified = Some(Repro::Verified);
+    let complete = Some(Completion::Complete);
+    // (case, repro, undelivered, completion, existing PR (draft, body),
+    //  task relationship kind, expected body line, expected draft)
+    #[allow(clippy::type_complexity)]
+    let cases: &[(
+        &str,
+        Option<Repro>,
+        bool,
+        Option<Completion>,
+        Option<(bool, &str)>,
+        Kind,
+        &str,
+        bool,
+    )] = &[
+        (
+            "proven",
+            verified,
+            false,
+            complete,
+            None,
+            Kind::Closes,
+            "Closes #3678",
+            false,
+        ),
+        (
+            "no repro gate",
+            Some(Repro::None),
+            false,
+            complete,
+            None,
+            Kind::Closes,
+            "Refs #3678",
+            true,
+        ),
+        (
+            "repro failed",
+            Some(Repro::FailedOnCandidate),
+            false,
+            complete,
+            None,
+            Kind::Closes,
+            "Refs #3678",
+            true,
+        ),
+        (
+            "not delivered",
+            verified,
+            true,
+            complete,
+            None,
+            Kind::Closes,
+            "Refs #3678",
+            true,
+        ),
+        (
+            "no form verdict",
+            verified,
+            false,
+            None,
+            None,
+            Kind::Closes,
+            "Refs #3678",
+            true,
+        ),
+        (
+            "form incomplete",
+            verified,
+            false,
+            Some(Completion::Incomplete),
+            None,
+            Kind::Closes,
+            "Refs #3678",
+            true,
+        ),
+        (
+            "rework proves",
+            verified,
+            false,
+            complete,
+            Some((true, "Refs #3678")),
+            Kind::Refs,
+            "Closes #3678",
+            true,
+        ),
+        (
+            "rework unproven",
+            Some(Repro::FailedOnCandidate),
+            false,
+            None,
+            Some((false, "Closes #3678")),
+            Kind::Closes,
+            "Refs #3678",
+            false,
+        ),
+        (
+            "cross repo",
+            Some(Repro::None),
+            false,
+            None,
+            None,
+            Kind::RelatesTo,
+            "Relates to Extra-Chill/other#3678",
+            true,
+        ),
+    ];
+    for (case, repro, undelivered, completion, existing, kind, line, draft) in cases.iter().cloned()
+    {
+        let mut backend = MockBackend {
+            changed_files: vec!["src/lib.rs".to_string()],
+            existing_pr: existing.map(|(is_draft, _)| AgentTaskPrRef {
+                number: 77,
+                url: "https://github.com/Extra-Chill/homeboy/pull/77".into(),
+                is_draft,
+            }),
+            existing_body: existing.map(|(_, body)| body.to_string()),
+            ..Default::default()
+        };
+        let mut finalization = options();
+        finalization.review_dossier.repro = repro;
+        finalization.review_dossier.completion = completion;
+        if undelivered {
+            finalization.review_dossier.delivery = partial_delivery();
+        }
+        finalization.review_dossier.source_relationships = vec![AgentTaskReviewIssueRelationship {
+            kind: kind.clone(),
+            reference: if kind == Kind::RelatesTo {
+                "Extra-Chill/other#3678".into()
+            } else {
+                "#3678".into()
+            },
+        }];
+
+        let report = finalize_pr_with_backend(finalization, &mut backend).expect(case);
+
+        let relationship_lines = backend
+            .last_body
+            .lines()
+            .filter(|body_line| {
+                ["Closes ", "Refs ", "Relates to "]
+                    .iter()
+                    .any(|prefix| body_line.starts_with(prefix))
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(
+            relationship_lines,
+            vec![line],
+            "{case}: {}",
+            backend.last_body
+        );
+        assert_eq!(report.pr_draft, Some(draft), "{case}");
+    }
 }
 
 #[test]
@@ -2461,6 +2631,7 @@ pub(super) fn options() -> AgentTaskPrFinalizationOptions {
             out_of_scope_changes: Vec::new(),
             repro: None,
             delivery: Vec::new(),
+            completion: None,
         },
         review_profile: crate::agent_task_review_dossier::default_profile(),
         manual_finalization: true,

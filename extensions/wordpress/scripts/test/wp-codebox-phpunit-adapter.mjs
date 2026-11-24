@@ -17,6 +17,7 @@ import { createTimeoutLineRedactor, recipeRunProjection, readBoundedText, wpCode
 import { configuredWpCodeboxPhpunitTimeoutSeconds } from '../lib/wp-codebox-phpunit-timeout.mjs';
 import { configuredWpCodeboxRuntimeCrashGraceSeconds, createWpCodeboxRuntimeCrashDetector } from '../lib/wp-codebox-runtime-crash.mjs';
 import { applyLocalWorkspaceDependenciesBeforePrepare } from '../lib/local-workspace-prepare.mjs';
+import { assertIsolatedDatabaseTarget } from '../lib/wordpress-database-isolation-guard.mjs';
 
 const require = createRequire(import.meta.url);
 const { preflightWpCodeboxCommand } = require('../../lib/wp-codebox-runtime-selection.js');
@@ -43,6 +44,14 @@ const SCOPED_ZERO_TEST_CAUSES = new Set(['changed_file_filter_mismatch', 'change
 const MANAGED_DEFAULT_SUITE_TEST_DIRECTORY = 'tests';
 
 const settings = parseSettings(process.env.HOMEBOY_SETTINGS_JSON);
+// Fail closed before anything is prepared or installed: a DB target from the
+// host environment, bench_env, or wp_config_defines would install the test site
+// into that database instead of the one this runner provisions (#18886).
+assertIsolatedDatabaseTarget({
+  environment: process.env,
+  settings,
+  allowedEnvironmentNames: declaredDatabaseAdministrationEnvironmentNames(settings),
+}, 'WordPress PHPUnit runner');
 const discoveryOnly = process.env.HOMEBOY_WORDPRESS_PHPUNIT_DISCOVERY_ONLY === '1';
 const phpunitTimeoutSeconds = configuredWpCodeboxPhpunitTimeoutSeconds(process.env, settings);
 const runtimeCrashGraceSeconds = configuredWpCodeboxRuntimeCrashGraceSeconds(process.env, settings);
@@ -375,6 +384,7 @@ async function runHostSuite(suite) {
   const logPath = path.join(suiteArtifacts, 'phpunit.log');
   const execution = spawnSync(binary, ['--configuration', suite.config], {
     cwd: pluginSourceDirectory,
+    env: environmentWithoutDatabaseAdministration(),
     encoding: 'utf8',
     timeout: phpunitTimeoutSeconds * 1000,
     maxBuffer: 64 * 1024 * 1024,
@@ -1116,6 +1126,10 @@ function requireDatabaseServiceCapability(service) {
 }
 function isObject(value) {
   return value !== null && typeof value === 'object' && !Array.isArray(value);
+}
+function declaredDatabaseAdministrationEnvironmentNames(configuration) {
+  const secretEnv = configuration?.wp_codebox_database_service?.secret_env;
+  return isObject(secretEnv) ? Object.values(secretEnv).filter((name) => typeof name === 'string') : [];
 }
 function environmentWithoutDatabaseAdministration() {
   const environment = { ...process.env };

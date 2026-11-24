@@ -1263,6 +1263,17 @@ pub(super) fn run_cook_spine(
                         &options,
                         &run_id,
                     )?;
+                    // Host-level admission for this local attempt only. The
+                    // slot is held while the provider runs and released when
+                    // this dispatch scope ends.
+                    let _local_dispatch_lease =
+                        super::cook_local_dispatch::admit_local_provider_attempt(
+                            lifecycle_store,
+                            durable_observer,
+                            &cook_id,
+                            &run_id,
+                            attempt,
+                        )?;
                     let (heartbeat_stop, heartbeat_wait) = mpsc::channel();
                     let heartbeat_run_id = run_id.clone();
                     let heartbeat_cook_id = cook_id.clone();
@@ -2070,11 +2081,9 @@ pub(super) fn run_cook_spine(
             && persisted_promotion_for_attempt_in_store(lifecycle_store, &run_id)?
                 .is_some_and(|promotion| promotion.applied_with_passing_verdict())
             && !matches!(review_form_from_aggregate(&aggregate), Ok(Some(form)) if form.validate(crate::agent_task_review_dossier::PrTitlePolicy::from_plan(&options.identity.initial_plan)).is_ok());
-        let persisted_terminal_status = record.metadata["cook_progress"]["terminal_status"]
-            .as_str()
-            .map(str::to_string);
-        if let Some(status @ ("intentional_no_change" | "no_candidate")) =
-            persisted_terminal_status.as_deref()
+        if let Some(status @ (CookStatus::IntentionalNoChange | CookStatus::NoCandidate)) =
+            super::CookOutcome::from_run_metadata(&record.metadata)
+                .and_then(|outcome| outcome.status)
         {
             let declaration =
                 intentional_no_change_from_aggregate(&aggregate).ok_or_else(|| {
@@ -2094,12 +2103,7 @@ pub(super) fn run_cook_spine(
                 promotion: None,
                 feedback: None,
             });
-            let is_refusal = status == "no_candidate";
-            let status = if is_refusal {
-                CookStatus::NoCandidate
-            } else {
-                CookStatus::IntentionalNoChange
-            };
+            let is_refusal = status == CookStatus::NoCandidate;
             let mut report = stores.report(CookReportInput {
                 cook_id,
                 status,
@@ -2379,6 +2383,21 @@ pub(super) fn run_cook_spine(
         });
         let feedback_status = feedback.status;
         let follow_up_request = feedback.follow_up_request.clone();
+        // An attempt without a candidate keeps the agent's own reason for the
+        // Cook summary's attempt line (#18916).
+        if promotion.changed_files.is_empty() {
+            if let Some(reason) = review_form
+                .as_ref()
+                .and_then(|form| form.incomplete_reason())
+                .and_then(super::cook_summary::bounded_attempt_reason)
+            {
+                let _ = lifecycle_store.mutate_record(&run_id, |record| {
+                    record.metadata[super::cook_summary::NO_CHANGE_REASON_KEY] =
+                        Value::String(reason.clone());
+                    true
+                });
+            }
+        }
         delivery.attempts.push(AgentTaskCookAttemptReport {
             attempt,
             run_id: run_id.clone(),

@@ -127,7 +127,8 @@ fn terminal_transition_settles_cook_observations_and_span() {
             agent_task_lifecycle::record_cook_terminal_result_in_store(
                 &store,
                 &attempt,
-                status,
+                homeboy_core::cook_status::CookStatus::from_status(status)
+                    .unwrap_or(homeboy_core::cook_status::CookStatus::ReviewReady),
                 i32::from(!success),
             )
             .unwrap();

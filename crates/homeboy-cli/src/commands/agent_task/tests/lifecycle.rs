@@ -2427,8 +2427,11 @@ fn assert_cook_rearm_queue_ownership(block_capacity: bool) {
             "Cook promotion and gates must run instead of the generic plan runner: {completed:#?}"
         );
         assert_eq!(
-            completed.metadata["cook_progress"]["terminal_status"],
-            "green_no_finalize",
+            homeboy::agents::agent_task_service::CookOutcome::from_run_metadata(
+                &completed.metadata
+            )
+            .and_then(|outcome| outcome.status),
+            Some(homeboy::core::cook_status::CookStatus::GreenNoFinalize),
             "the Cook-owned no-finalize finalization decision must close the lifecycle: {completed:#?}"
         );
     });
@@ -3168,7 +3171,7 @@ fn abandoned_recipe_only_cook_is_reconciled_rather_than_recovered() {
             record.set_state_for_test(RunExecutionState::Succeeded);
             record.metadata["detached_cook_handoff"] = json!({
                 "cook_id": cook_id,
-                "state": "redirected",
+                "admission_state": "materialized",
                 "attempt_run_id": attempt_id,
             });
             record.submitted_at = "2020-01-01T00:00:00Z".into();

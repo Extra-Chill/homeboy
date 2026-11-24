@@ -13,6 +13,7 @@ mod cook_ci;
 mod cook_driver;
 mod cook_follow_up;
 mod cook_gate_setup;
+mod cook_local_dispatch;
 mod cook_projections;
 mod cook_spine;
 mod cook_timeout;
@@ -24,8 +25,9 @@ mod cook_adoption;
 pub use cook_admission_key::COOK_ADMISSION_KEY_METADATA;
 /// Per-attempt Cook timeline `agent-task status` reports (#17893).
 mod cook_attempt_timeline;
-/// Fresh provider attempts start from a clean Cook base tree.
-mod cook_attempt_workspace;
+/// Fresh provider attempts start from a clean Cook base tree; gate-guided
+/// attempts start from the previous candidate (#18916).
+pub(crate) mod cook_attempt_workspace;
 pub use cook_attempt_timeline::{
     cook_attempt_timeline, cook_attempt_timeline_in_store, CookAttemptTiming,
 };
@@ -92,7 +94,7 @@ pub use cook_delivery::test_support::*;
 pub use cook_delivery::{
     CookDelivery, CookDeliveryArtifacts, CookDeliveryBlocker, CookDeliveryBlockerCode,
     CookDeliveryCandidate, CookDeliveryDestination, CookDeliveryGate, CookDeliveryLifecycle,
-    CookDeliveryPublication, CookManualPublication, COOK_DELIVERY_SCHEMA,
+    CookDeliveryPublication, CookManualPublication, CookOutcome, COOK_DELIVERY_SCHEMA,
 };
 pub(crate) use cook_delivery::{CookDeliveryState, COOK_DELIVERY_KEY};
 pub use cook_delivery_artifacts::*;

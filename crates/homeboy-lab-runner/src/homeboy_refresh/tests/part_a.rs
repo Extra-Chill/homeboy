@@ -659,7 +659,10 @@ fn stale_daemon_admission_snapshot(
     });
     status.active_job_count = active_job_count;
     status.active_job_state = RunnerActiveJobState::Available;
-    RunnerAdmissionSnapshot::from_status(status)
+    crate::runner_admission_snapshot_for_status(
+        status,
+        crate::RunnerAdmissionReadiness::Observation,
+    )
 }
 
 #[test]
@@ -675,7 +678,10 @@ fn refresh_routing_preserves_disconnected_ssh_execution_and_fences_unsafe_stale_
         resources: Default::default(),
         policy: Default::default(),
     };
-    let disconnected = RunnerAdmissionSnapshot::from_status(refreshed_daemon_status(false, None));
+    let disconnected = crate::runner_admission_snapshot_for_status(
+        refreshed_daemon_status(false, None),
+        crate::RunnerAdmissionReadiness::Observation,
+    );
 
     let route = refresh_execution_route(&runner, &disconnected)
         .expect("disconnected SSH refresh retains diagnostic execution");
@@ -732,7 +738,10 @@ fn reconcile_then_refresh_uses_the_idle_postcondition() {
         },
         |status| {
             operations.borrow_mut().push("project");
-            RunnerAdmissionSnapshot::from_status(status)
+            crate::runner_admission_snapshot_for_status(
+                status,
+                crate::RunnerAdmissionReadiness::Observation,
+            )
         },
     )
     .expect("reconciled refresh admission");
@@ -763,7 +772,12 @@ fn reconcile_then_refresh_fails_closed_when_the_postcondition_has_a_live_job() {
     let admission = reconciled_refresh_admission_with(
         "lab",
         |_| Ok(live),
-        RunnerAdmissionSnapshot::from_status,
+        |status| {
+            crate::runner_admission_snapshot_for_status(
+                status,
+                crate::RunnerAdmissionReadiness::Observation,
+            )
+        },
     )
     .expect("live postcondition projects");
 

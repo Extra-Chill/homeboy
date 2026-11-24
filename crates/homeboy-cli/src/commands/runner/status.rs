@@ -32,7 +32,11 @@ pub(super) fn status(id: Option<&str>, full: bool) -> CmdResult<RunnerOutput> {
         }
         let lab_readiness = runner::lab_runner_readiness()?;
         let preferred_lab_runner = lab_readiness.selected_runner_id.clone();
-        let admission_snapshot = runner::runner_status_admission_snapshot(id)?;
+        let admission_snapshot = runner::runner_admission_snapshot(
+            id,
+            None,
+            runner::RunnerAdmissionReadiness::Configured,
+        )?;
         let report = admission_snapshot.status;
         let capabilities =
             global_execution_capabilities(&runners, Some(&report), Some(&lab_readiness))?;
@@ -338,7 +342,10 @@ pub(super) fn reconcile_output(
     id: &str,
     report: homeboy::runner::runners::RunnerStatusReport,
 ) -> CmdResult<RunnerOutput> {
-    let admission_snapshot = runner::runner_admission_snapshot_for_status(report);
+    let admission_snapshot = runner::runner_admission_snapshot_for_status(
+        report,
+        runner::RunnerAdmissionReadiness::Observation,
+    );
     let report = admission_snapshot.status;
     let admission_summary = admission_snapshot.summary;
     let reconciliation = reconciliation_outcome(id, &report, &admission_summary);
@@ -724,7 +731,14 @@ fn selected_lab_runner_status(
         workspace_root: runner_config.workspace_root.clone(),
         readiness_state: format!("{:?}", status.state).to_ascii_lowercase(),
         connected: status.connected,
-        availability: status.admission_availability(runner_config.settings.concurrency_limit),
+        availability: runner::runner_admission_availability(
+            &status,
+            &runner::RunnerAdmissionPolicy {
+                capacity: runner_config.settings.concurrency_limit,
+                capabilities_ready: true,
+                exact_version: false,
+            },
+        ),
     }))
 }
 

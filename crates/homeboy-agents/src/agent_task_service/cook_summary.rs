@@ -89,7 +89,34 @@ fn cook_attempt_records(
         .collect()
 }
 
-/// `attempt N: <candidate sha> · gates <verdicts> · <disposition>`.
+/// Run-record metadata key holding the agent's own reason for an attempt that
+/// produced no candidate (#18916).
+pub(crate) const NO_CHANGE_REASON_KEY: &str = "agent_no_change_reason";
+
+/// Longest no-change reason, in characters, an attempt line carries.
+const ATTEMPT_REASON_LIMIT: usize = 160;
+
+/// `reason` collapsed to one line and bounded to [`ATTEMPT_REASON_LIMIT`]
+/// characters, or `None` when it is blank.
+pub(crate) fn bounded_attempt_reason(reason: &str) -> Option<String> {
+    let reason = reason.split_whitespace().collect::<Vec<_>>().join(" ");
+    if reason.is_empty() {
+        return None;
+    }
+    if reason.chars().count() <= ATTEMPT_REASON_LIMIT {
+        return Some(reason);
+    }
+    let mut bounded = reason
+        .chars()
+        .take(ATTEMPT_REASON_LIMIT - 1)
+        .collect::<String>();
+    bounded.push('…');
+    Some(bounded)
+}
+
+/// `attempt N: <candidate sha> · gates <verdicts> · <disposition>`, with the
+/// agent's bounded reason appended (`<disposition>: <reason>`) when the
+/// attempt produced no candidate.
 fn attempt_line(attempt: u32, record: &AgentTaskRunRecord, latest: bool) -> String {
     let delivery = CookDelivery::from_run_metadata(&record.metadata);
     let candidate_sha = delivery
@@ -131,7 +158,18 @@ fn attempt_line(attempt: u32, record: &AgentTaskRunRecord, latest: bool) -> Stri
     let sha = candidate_sha
         .map(|sha| sha.chars().take(12).collect::<String>())
         .unwrap_or_else(|| "none".to_string());
-    format!("attempt {attempt}: {sha} · gates {gates} · {disposition}")
+    let reason = (sha == "none")
+        .then(|| {
+            record
+                .metadata
+                .get(NO_CHANGE_REASON_KEY)
+                .and_then(Value::as_str)
+                .and_then(bounded_attempt_reason)
+        })
+        .flatten()
+        .map(|reason| format!(": {reason}"))
+        .unwrap_or_default();
+    format!("attempt {attempt}: {sha} · gates {gates} · {disposition}{reason}")
 }
 
 fn project_summary(record: &AgentTaskRunRecord) -> CookSummary {

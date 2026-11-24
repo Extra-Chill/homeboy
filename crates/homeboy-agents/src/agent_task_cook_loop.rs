@@ -435,7 +435,14 @@ pub fn evaluate_cook_loop(options: AgentTaskCookLoopOptions) -> AgentTaskCookLoo
         failed_gate_results,
         follow_up_request,
         intentional_no_change,
-        metadata: report_metadata(options.metadata, &failure_progression, baseline_red),
+        metadata: report_metadata(
+            options.metadata,
+            &failure_progression,
+            baseline_red,
+            no_change_gap
+                .then(|| source_gate_guided_candidate(&options.source_request))
+                .flatten(),
+        ),
     }
 }
 
@@ -528,6 +535,7 @@ fn build_follow_up_request(
             relative_to_checkout(failure, &root);
         }
     }
+    let gate_guided_candidate = gate_guided_candidate(options);
     request.schema = AGENT_TASK_REQUEST_SCHEMA.to_string();
     request.task_id = format!("{}-gate-fix-{}", request.task_id, next_attempt);
     request.parent_plan_id = request
@@ -556,12 +564,17 @@ fn build_follow_up_request(
             "candidate_commit": options.promotion_report.provenance.get("candidate_commit"),
             "candidate_ref": options.promotion_report.candidate_ref,
             "remediation_scope": remediation_scope(options, gate_failure_paths(failed_gates)),
+            // The attempt's workspace starts from this candidate (#18916).
+            "gate_guided_candidate": gate_guided_candidate,
         }
     });
     restore_homeboy_facts(&mut request, homeboy_facts);
     request.instructions = strip_gate_failure_prompt_section(&request.instructions).to_string();
     apply_prompt_template(&mut request, PromptPurpose::FollowUp);
-    if let Some(section) = gate_failure_prompt_section(&agent_visible_failed_gates) {
+    if let Some(section) = gate_failure_prompt_section(
+        &agent_visible_failed_gates,
+        gate_guided_candidate.map(|candidate| candidate.candidate_sha.as_str()),
+    ) {
         request.instructions = format!("{}\n\n{section}", request.instructions.trim_end());
     }
     request.source_refs.push(AgentTaskSourceRef {
@@ -617,6 +630,34 @@ fn build_follow_up_request(
         }),
     );
     request
+}
+
+/// The previous non-empty candidate a gate-guided retry starts from (#18916):
+/// the promoted candidate when it changed files, else the candidate an
+/// unchanged gate-guided attempt was itself started from.
+fn gate_guided_candidate(
+    options: &AgentTaskCookLoopOptions,
+) -> Option<&crate::agent_task::AgentTaskCandidate> {
+    options
+        .promotion_report
+        .candidate
+        .as_ref()
+        .filter(|_| !options.promotion_report.changed_files.is_empty())
+        .filter(|candidate| !candidate.candidate_sha.trim().is_empty())
+}
+
+/// The candidate a gate-guided source attempt started from, if it was one.
+fn source_gate_guided_candidate(request: &AgentTaskRequest) -> Option<Value> {
+    request
+        .inputs
+        .pointer("/cook_loop/gate_guided_candidate")
+        .filter(|candidate| {
+            candidate
+                .get("candidate_sha")
+                .and_then(Value::as_str)
+                .is_some_and(|sha| !sha.trim().is_empty())
+        })
+        .cloned()
 }
 
 /// Files a remediation attempt may change: the original candidate's files
@@ -763,6 +804,9 @@ fn build_no_change_follow_up_request(
         "to_worktree": options.promotion_report.to_worktree,
         "no_change_feedback": true,
         "failed_gates": agent_visible_failed_gates,
+        // An unchanged gate-guided attempt left the previous candidate as it
+        // was; the next attempt starts from that candidate again (#18916).
+        "gate_guided_candidate": source_gate_guided_candidate(&options.source_request),
         // The agent's own account of what it left unfinished.
         "incomplete_reason": options
             .review_form
@@ -817,15 +861,24 @@ const GATE_FAILURE_PROMPT_HEADING: &str = "## Homeboy cook loop: deterministic g
 
 /// The gate-fix prompt section carrying each failed gate's bounded output
 /// excerpt (#16218), or `None` when no agent-visible excerpt exists.
-fn gate_failure_prompt_section(failed_gates: &[AgentTaskCookLoopGateFailure]) -> Option<String> {
+fn gate_failure_prompt_section(
+    failed_gates: &[AgentTaskCookLoopGateFailure],
+    candidate_sha: Option<&str>,
+) -> Option<String> {
     let excerpts = failed_gates
         .iter()
         .filter(|failure| !failure.failure_excerpt.is_empty())
         .map(|failure| format!("```text\n{}\n```", failure.failure_excerpt))
         .collect::<Vec<_>>();
+    let workspace = match candidate_sha {
+        Some(sha) => format!(
+            "The workspace already contains the previous candidate `{sha}`, checked out on the Cook base. It failed these deterministic gates. Make the smallest change to it that fixes the failure shown in the output below; do not guess from the command alone."
+        ),
+        None => "The previous attempt's candidate failed these deterministic gates. Fix the cause shown in the output below so the gate passes; do not guess from the command alone.".to_string(),
+    };
     (!excerpts.is_empty()).then(|| {
         format!(
-            "{GATE_FAILURE_PROMPT_HEADING}\n\nThe previous attempt's candidate failed these deterministic gates. Fix the cause shown in the output below so the gate passes; do not guess from the command alone.\n\n{}",
+            "{GATE_FAILURE_PROMPT_HEADING}\n\n{workspace}\n\n{}",
             excerpts.join("\n\n")
         )
     })
@@ -1009,9 +1062,16 @@ fn report_metadata(
     metadata: Value,
     progression: &AgentTaskCookLoopFailureProgression,
     baseline_red: bool,
+    unchanged_candidate: Option<Value>,
 ) -> Value {
     let mut metadata = metadata.as_object().cloned().unwrap_or_default();
     metadata.insert("failure_progression".to_string(), json!(progression));
+    if let Some(candidate) = unchanged_candidate {
+        // A gate-guided attempt that left its starting candidate unchanged is
+        // `no_change` relative to that candidate, which stays the Cook's best
+        // candidate (#18916).
+        metadata.insert("no_change_relative_to_candidate".to_string(), candidate);
+    }
     if baseline_red {
         metadata.insert("baseline_red".to_string(), Value::Bool(true));
         metadata.insert(
@@ -1236,6 +1296,174 @@ mod tests {
         AgentTaskPromotionNotification, AgentTaskPromotionSource, AgentTaskPromotionTarget,
         AGENT_TASK_PROMOTION_REPORT_SCHEMA,
     };
+
+    /// #18916: a gate-fix retry hands the agent the previous candidate's gate
+    /// output, so its workspace must contain that candidate. The destination
+    /// was reset to the Cook base (#16292); the gate-guided retry checks the
+    /// candidate's tree back out on the base, while a fresh retry still resets.
+    #[test]
+    fn gate_guided_retry_workspace_contains_the_previous_candidate() {
+        use crate::agent_task_service::cook_attempt_workspace as workspace;
+        let dir = tempfile::tempdir().expect("tempdir");
+        let git = |args: &[&str]| {
+            let output = std::process::Command::new("git")
+                .args(["-c", "user.name=t", "-c", "user.email=t@t"])
+                .args(["-c", "commit.gpgsign=false"])
+                .args(args)
+                .current_dir(dir.path())
+                .output()
+                .expect("git");
+            assert!(output.status.success(), "git {args:?}");
+            String::from_utf8(output.stdout).unwrap().trim().to_string()
+        };
+        git(&["init", "-q"]);
+        std::fs::write(dir.path().join("BoxTree.php"), "<?php // base\n").unwrap();
+        git(&["add", "."]);
+        git(&["commit", "-q", "-m", "base"]);
+        let base = git(&["rev-parse", "HEAD"]);
+        std::fs::write(
+            dir.path().join("BoxTree.php"),
+            "<?php // names the capture producer\n",
+        )
+        .unwrap();
+        std::fs::write(dir.path().join("Capture.php"), "<?php // new\n").unwrap();
+        git(&["add", "."]);
+        git(&["commit", "-q", "-m", "homeboy: cook candidate"]);
+        let candidate_sha = git(&["rev-parse", "HEAD"]);
+        let tree_sha = git(&["rev-parse", "HEAD^{tree}"]);
+        // The destination was reset to the Cook base before the retry.
+        git(&["reset", "-q", "--hard", &base]);
+
+        let mut promotion = promotion_report_with_changed_files(
+            AgentTaskPromotionStatus::Gate(GateVerdict::GateFailed),
+            vec![failed_gate()],
+            vec!["BoxTree.php".to_string(), "Capture.php".to_string()],
+        );
+        promotion.candidate = Some(crate::agent_task::AgentTaskCandidate {
+            base_sha: base.clone(),
+            candidate_sha: candidate_sha.clone(),
+            tree_sha,
+        });
+        let report = evaluate_cook_loop(AgentTaskCookLoopOptions {
+            source_request: source_request(),
+            promotion_report: promotion,
+            attempt: 1,
+            max_attempts: 3,
+            source_run_id: Some("cook-1-attempt-1".to_string()),
+            current_diff: String::new(),
+            review_form: None,
+            metadata: Value::Null,
+        });
+        let request = report.follow_up_request.expect("gate-fix follow-up");
+        assert!(
+            request.instructions.contains(&format!(
+                "The workspace already contains the previous candidate `{candidate_sha}`"
+            )),
+            "{}",
+            request.instructions
+        );
+        assert_eq!(
+            workspace::gate_guided_candidate(&request).map(|c| c.candidate_sha),
+            Some(candidate_sha.clone())
+        );
+
+        let recipe: crate::agent_task_service::AgentTaskCookRecipe =
+            serde_json::from_value(json!({
+                "schema": "homeboy/agent-task-cook-recipe/v1",
+                "cook_id": "cook-1",
+                "attempts": [],
+                "promotion_transport": null,
+                "gate_policy": null,
+                "retry_budget": null,
+                "finalization": { "task_base_sha": base },
+                "source_refs": [],
+                "runtime_generation": "test",
+                "sensitive_mappings": [],
+                "harvest_context": {},
+            }))
+            .expect("recipe");
+        let evidence = workspace::prepare_gate_guided_attempt_workspace(
+            &recipe,
+            &request,
+            dir.path(),
+            "cook-1-attempt-2",
+        )
+        .unwrap()
+        .expect("the reset destination is moved onto the candidate");
+        assert_eq!(evidence["candidate"], candidate_sha.as_str());
+        // HEAD stays the Cook base; the candidate is the working tree's change.
+        assert_eq!(git(&["rev-parse", "HEAD"]), base);
+        assert_eq!(
+            std::fs::read_to_string(dir.path().join("BoxTree.php")).unwrap(),
+            "<?php // names the capture producer\n"
+        );
+        assert!(dir.path().join("Capture.php").exists());
+        assert_eq!(
+            git(&["diff", "--name-only", &base]),
+            "BoxTree.php",
+            "tracked changes are measured against the Cook base"
+        );
+        // Re-preparing a workspace that already holds the candidate is a no-op.
+        assert!(workspace::prepare_gate_guided_attempt_workspace(
+            &recipe,
+            &request,
+            dir.path(),
+            "cook-1-attempt-2b",
+        )
+        .unwrap()
+        .is_none());
+
+        // A fresh (not gate-guided) retry keeps the #16292 reset to the base.
+        assert!(workspace::prepare_gate_guided_attempt_workspace(
+            &recipe,
+            &source_request(),
+            dir.path(),
+            "cook-1-attempt-3",
+        )
+        .unwrap()
+        .is_none());
+        workspace::reset_attempt_workspace_to_base(dir.path(), &base, "cook-1-attempt-3")
+            .unwrap()
+            .expect("a fresh retry resets the candidate away");
+        workspace::assert_attempt_workspace_at_base(dir.path(), &base).unwrap();
+        assert!(!dir.path().join("Capture.php").exists());
+    }
+
+    /// An unchanged gate-guided attempt is `no_change` relative to the
+    /// candidate it started from; its retry starts from that candidate again.
+    #[test]
+    fn unchanged_gate_guided_attempt_keeps_the_previous_candidate() {
+        let candidate = json!({
+            "base_sha": "base",
+            "candidate_sha": "2784d784a",
+            "tree_sha": "tree",
+        });
+        let mut request = source_request();
+        request.inputs = json!({ "cook_loop": { "gate_guided_candidate": candidate } });
+        let report = evaluate_cook_loop(AgentTaskCookLoopOptions {
+            source_request: request,
+            promotion_report: promotion_report_with_changed_files(
+                AgentTaskPromotionStatus::Gate(GateVerdict::NoChanges),
+                Vec::new(),
+                Vec::new(),
+            ),
+            attempt: 2,
+            max_attempts: 3,
+            source_run_id: Some("cook-1-attempt-2".to_string()),
+            current_diff: String::new(),
+            review_form: None,
+            metadata: Value::Null,
+        });
+        assert_eq!(
+            report.metadata["no_change_relative_to_candidate"],
+            candidate
+        );
+        let retry = report.follow_up_request.expect("no-change follow-up");
+        assert_eq!(
+            retry.inputs["cook_loop"]["gate_guided_candidate"],
+            candidate
+        );
+    }
 
     #[test]
     fn gate_failure_excerpt_reaches_gate_fix_prompt() {

@@ -523,7 +523,10 @@ fn a_claimed_handoff_parent_always_carries_the_owner_pid() {
     let record = claim_detached_cook_handoff_parent_in_store(&store, cook_id, "bootstrap-launcher")
         .expect("record and claim the handoff parent atomically");
 
-    assert_eq!(record.metadata["detached_cook_handoff"]["state"], "pending");
+    assert_eq!(
+        CookAdmissionPhase::of(&record).map(CookAdmissionPhase::handoff_label),
+        Some("pending")
+    );
     assert_eq!(
         record.metadata["detached_cook_handoff"]["launcher_id"],
         "bootstrap-launcher"
@@ -1125,9 +1128,13 @@ fn cook_progress_is_durable_across_active_and_terminal_lifecycle_states() {
             .expect("retain terminal progress");
     assert_eq!(terminal.state(), RunExecutionState::Cancelled);
     assert_eq!(terminal.metadata["cook_progress"]["phase"], "terminal");
-    let terminal =
-        record_cook_terminal_result_in_store(&lifecycle_store, run_id, "no_candidate", 1)
-            .expect("record terminal Cook result");
+    let terminal = record_cook_terminal_result_in_store(
+        &lifecycle_store,
+        run_id,
+        homeboy_core::cook_status::CookStatus::NoCandidate,
+        1,
+    )
+    .expect("record terminal Cook result");
     assert_eq!(
         terminal.state(),
         RunExecutionState::Cancelled,
@@ -1136,7 +1143,11 @@ fn cook_progress_is_durable_across_active_and_terminal_lifecycle_states() {
     assert!(terminal.metadata["cook_progress"]
         .get("terminal_success")
         .is_none());
-    assert_eq!(terminal.metadata["cook_progress"]["exit_code"], 1);
+    assert_eq!(
+        crate::agent_task_service::CookOutcome::from_run_metadata(&terminal.metadata)
+            .map(|outcome| outcome.exit_code),
+        Some(1)
+    );
 
     let repeated = record_cook_progress_in_store(
         &lifecycle_store,
@@ -1188,7 +1199,13 @@ fn terminal_cook_report_preserves_each_attempts_lifecycle_status() {
     )
     .unwrap();
     record_cook_progress_in_store(&store, second, "terminal", 2, Some("published")).unwrap();
-    record_cook_terminal_result_in_store(&store, second, "review_ready", 1).unwrap();
+    record_cook_terminal_result_in_store(
+        &store,
+        second,
+        homeboy_core::cook_status::CookStatus::ReviewReady,
+        1,
+    )
+    .unwrap();
 
     let observations = store.open_observation_initialized().unwrap();
     for (run_id, expected) in [(first, "fail"), (second, "pass"), (cook_id, "pass")] {
@@ -1313,9 +1330,13 @@ fn cook_write_siblings_persist_progress_and_delivery_evidence() {
     let progress = record_cook_progress_in_store(&seeded, run_id, "terminal", 1, Some("rooted"))
         .expect("record Cook progress into the injected store");
     assert_eq!(progress.metadata["cook_progress"]["phase"], "terminal");
-    let terminal =
-        record_cook_terminal_result_in_store(&seeded, run_id, "intentional_no_change", 0)
-            .expect("record the terminal Cook result into the injected store");
+    let terminal = record_cook_terminal_result_in_store(
+        &seeded,
+        run_id,
+        homeboy_core::cook_status::CookStatus::IntentionalNoChange,
+        0,
+    )
+    .expect("record the terminal Cook result into the injected store");
     assert!(terminal.metadata["cook_progress"]
         .get("terminal_success")
         .is_none());
@@ -1358,7 +1379,11 @@ fn cook_write_siblings_persist_progress_and_delivery_evidence() {
         .read_record(run_id)
         .expect("read the seeded record back");
     assert_eq!(persisted.metadata["cook_progress"]["phase"], "terminal");
-    assert_eq!(persisted.metadata["cook_progress"]["exit_code"], 0);
+    assert_eq!(
+        crate::agent_task_service::CookOutcome::from_run_metadata(&persisted.metadata)
+            .map(|outcome| outcome.exit_code),
+        Some(0)
+    );
     assert_eq!(
         persisted.metadata["cook_controller_failure"]["reason"],
         "rooted"
@@ -1571,8 +1596,8 @@ fn claim_family_siblings_skip_expire_and_notify() {
         .expect("read the detached parent back");
     assert_eq!(expired.state(), RunExecutionState::Failed);
     assert_eq!(
-        expired.metadata["detached_cook_handoff"]["state"],
-        "exited_before_handoff"
+        CookAdmissionPhase::of(&expired),
+        Some(CookAdmissionPhase::ExitedBeforeHandoff)
     );
     assert_eq!(
         expired.metadata["detached_cook_handoff"]["admission_state"],

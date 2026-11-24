@@ -252,3 +252,28 @@ fn summary_lists_every_attempt_with_sha_gates_and_disposition() {
     assert_eq!(single.attempts.len(), 1);
     assert!(single.attempts[0].starts_with("attempt 1: "));
 }
+
+/// #18916: an attempt with no candidate carries the agent's bounded reason.
+#[test]
+fn attempt_without_a_candidate_carries_the_agents_bounded_reason() {
+    let reason = "The comment only exists in commits which aren't in this PR's history";
+    let unchanged = record(
+        RunExecutionState::Failed,
+        json!({ NO_CHANGE_REASON_KEY: format!("  {reason}\n") }),
+    );
+    let latest = record(
+        RunExecutionState::Failed,
+        json!({ NO_CHANGE_REASON_KEY: "x".repeat(400) }),
+    );
+    let summary = cook_summary_with_attempts(&latest, &[(2, unchanged), (3, latest.clone())]);
+    summary.validate().expect("valid summary");
+    assert_eq!(
+        summary.attempts[0],
+        format!("attempt 2: none · gates none · discarded: {reason}")
+    );
+    let bounded = summary.attempts[1]
+        .strip_prefix("attempt 3: none · gates none · discarded: ")
+        .expect("reason appended");
+    assert_eq!(bounded.chars().count(), 160);
+    assert!(bounded.ends_with('…'));
+}

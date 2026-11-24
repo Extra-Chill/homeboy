@@ -277,29 +277,80 @@ pub(super) fn report_cook_progress_with_activity(
     terminal_success: Option<bool>,
     terminal_retry_command: Option<&str>,
 ) -> Result<()> {
-    let record = lifecycle_store.record_cook_progress_with_activity(
-        run_id,
-        phase,
-        attempt,
-        detail,
+    publish_cook_progress(
+        lifecycle_store,
+        observer,
+        CookProgressEvent {
+            phase,
+            cook_id,
+            run_id,
+            attempt,
+            detail,
+            elapsed_ms: 0,
+            wait_owner: String::new(),
+            terminal_success,
+            terminal_retry_command,
+            activity,
+        },
         activity.and_then(CookProviderActivity::to_record_value),
+    )
+}
+
+/// Record a progress phase whose durable activity is controller evidence
+/// rather than a provider activity sample (for example a local dispatch
+/// waiting for host pressure), then deliver it to the observer.
+pub(super) fn report_cook_progress_with_evidence(
+    lifecycle_store: &AgentTaskLifecycleStore,
+    observer: Option<&CookProgressObserver<'_>>,
+    cook_id: &str,
+    run_id: &str,
+    phase: &str,
+    attempt: u32,
+    detail: Option<&str>,
+    evidence: Value,
+) -> Result<()> {
+    publish_cook_progress(
+        lifecycle_store,
+        observer,
+        CookProgressEvent {
+            phase,
+            cook_id,
+            run_id,
+            attempt,
+            detail,
+            elapsed_ms: 0,
+            wait_owner: String::new(),
+            terminal_success: None,
+            terminal_retry_command: None,
+            activity: None,
+        },
+        Some(evidence),
+    )
+}
+
+/// Persist `event` with its durable activity record, then hand the observer
+/// the event with the lifecycle-owned elapsed time and wait owner.
+fn publish_cook_progress(
+    lifecycle_store: &AgentTaskLifecycleStore,
+    observer: Option<&CookProgressObserver<'_>>,
+    mut event: CookProgressEvent<'_>,
+    activity_record: Option<Value>,
+) -> Result<()> {
+    let record = lifecycle_store.record_cook_progress_with_activity(
+        event.run_id,
+        event.phase,
+        event.attempt,
+        event.detail,
+        activity_record,
     )?;
     let progress = &record.metadata["cook_progress"];
-    let event = CookProgressEvent {
-        phase,
-        cook_id,
-        run_id,
-        attempt,
-        detail,
-        elapsed_ms: progress["elapsed_ms"].as_u64().unwrap_or_default(),
-        wait_owner: progress["wait_owner"]
-            .as_str()
-            .unwrap_or("cook_controller")
-            .to_string(),
-        terminal_success,
-        terminal_retry_command,
-        activity,
-    };
+    event.elapsed_ms = progress["elapsed_ms"].as_u64().unwrap_or_default();
+    event.wait_owner = progress["wait_owner"]
+        .as_str()
+        .unwrap_or("cook_controller")
+        .to_string();
+    let run_id = event.run_id;
+    let phase = event.phase;
     if let Some(observer) = observer {
         if let Err(error) = observer(&event) {
             // The observer is the submitting client's output channel. Once the
@@ -691,6 +742,27 @@ pub(crate) fn review_form_from_aggregate(
         return Ok(None);
     };
     crate::agent_task_review_dossier::AiFilledReviewForm::from_outcome_outputs(&outcome.outputs)
+}
+
+/// The latest attempt's complete review form exactly as the agent authored
+/// it, read from the persisted outcome: `outputs.review_form`, else the same
+/// field in the outcome's `json` typed artifact (the runtime result). Never
+/// parsed or truncated, so read surfaces return the whole form for terminal
+/// and `candidate_recoverable` runs alike (#18930).
+pub fn persisted_review_form(
+    aggregate: &crate::agent_task_schedule::AgentTaskAggregate,
+) -> Option<Value> {
+    let outcome = aggregate
+        .selected_outcome()
+        .or_else(|| aggregate.outcomes.last())?;
+    let present = |form: Option<&Value>| form.filter(|form| !form.is_null()).cloned();
+    present(outcome.outputs.get("review_form")).or_else(|| {
+        outcome
+            .typed_artifacts
+            .iter()
+            .filter(|artifact| artifact.artifact_type.as_deref() == Some("json"))
+            .find_map(|artifact| present(artifact.payload.pointer("/outputs/review_form")))
+    })
 }
 
 /// The agent's own reason, from the review form in `outputs`, for leaving

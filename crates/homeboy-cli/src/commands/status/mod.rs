@@ -652,8 +652,12 @@ fn global_status(
         let sender = sender.clone();
         let id = id.clone();
         std::thread::spawn(move || {
-            let result = homeboy::runner::runner_admission_snapshot_until(&id, deadline)
-                .map(|snapshot| snapshot.status.connected);
+            let result = homeboy::runner::runner_admission_snapshot(
+                &id,
+                Some(deadline),
+                homeboy::runner::RunnerAdmissionReadiness::Observation,
+            )
+            .map(|snapshot| snapshot.status.connected);
             let _ = sender.send(result);
         });
     }

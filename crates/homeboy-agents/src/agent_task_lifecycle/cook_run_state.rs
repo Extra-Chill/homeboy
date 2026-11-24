@@ -564,35 +564,33 @@ impl CookRunPhase {
     }
 }
 
-/// End-to-end outcome from durable Cook evidence, without recipe reads.
+/// End-to-end outcome from durable Cook evidence, without recipe reads: the
+/// stored `RunExecutionState` plus the refinements its `cook_delivery` record
+/// (delivery facts and the Cook's recorded [`CookOutcome`]) defines. Live
+/// `cook_progress` is never read as a verdict (#18920).
+///
+/// [`CookOutcome`]: crate::agent_task_service::CookOutcome
 fn observed_execution_state(record: &AgentTaskRunRecord) -> RunExecutionState {
     let stored = record.state();
+    let delivery = crate::agent_task_service::CookDelivery::from_run_metadata(&record.metadata);
     // Publication is the end-to-end receipt, not a second verdict derived
-    // from a possibly older promotion or terminal-progress snapshot.
-    if crate::agent_task_service::CookDelivery::from_run_metadata(&record.metadata)
-        .is_some_and(|d| d.published())
-    {
+    // from a possibly older promotion snapshot.
+    if delivery.as_ref().is_some_and(|d| d.published()) {
         return RunExecutionState::Succeeded;
     }
-    if stored != RunExecutionState::Succeeded {
+    if stored != RunExecutionState::Succeeded || record.metadata["cook_id"].as_str().is_none() {
         return stored;
     }
-    if record.metadata["cook_id"].as_str().is_none() {
-        return stored;
-    }
-    let terminal = &record.metadata["cook_progress"];
-    if terminal["phase"] == "terminal"
-        && terminal["terminal_status"] == CookStatus::IntentionalNoChange.as_str()
-        && terminal["exit_code"] == 0
+    let outcome = crate::agent_task_service::CookOutcome::from_run_metadata(&record.metadata);
+    let status = outcome.and_then(|outcome| outcome.status);
+    if status == Some(CookStatus::IntentionalNoChange)
+        && outcome.is_some_and(|outcome| outcome.exit_code == 0)
     {
         return stored;
     }
-    // The provider finished, but the Cook ended without a change. There is no
-    // candidate to recover, so it must not read as `candidate_recoverable`
-    // (#15294).
-    if terminal["phase"] == "terminal"
-        && terminal["terminal_status"] == CookStatus::Gate(GateVerdict::NoChanges).as_str()
-    {
+    // Delivery finished without a change: there is no candidate to recover,
+    // so it must not read as `candidate_recoverable` (#15294).
+    if outcome.is_none() && delivery.as_ref().is_some_and(|d| d.is_no_change()) {
         return RunExecutionState::PartialFailure;
     }
     let verified =
@@ -609,8 +607,7 @@ fn observed_execution_state(record: &AgentTaskRunRecord) -> RunExecutionState {
                         | crate::agent_task_promotion::AgentTaskPromotionStatus::VerifiedNoChanges
                 ) && promotion.finalization_eligible()
             });
-    let no_finalize = terminal["terminal_status"] == "green_no_finalize";
-    if !(verified && no_finalize) {
+    if !(verified && status == Some(CookStatus::GreenNoFinalize)) {
         return RunExecutionState::CandidateRecoverable;
     }
     stored
@@ -718,7 +715,7 @@ impl CookRunState {
             CookRunPhase::Queued | CookRunPhase::Running | CookRunPhase::Continuing => {
                 CookRunStatus::of_phase(phase)
             }
-            _ => terminal_status(record, phase),
+            _ => settled_status(record, phase),
         };
         Self {
             liveness,
@@ -861,9 +858,10 @@ pub(crate) fn transition_record(
 }
 
 /// The status of a terminal attempt: delivery's typed read model first, then
-/// the attempt's own failure and terminal evidence, then its execution state.
+/// the attempt's own failure evidence and recorded Cook outcome, then its
+/// execution state.
 /// Labels that read as in flight are stale on a terminal record and ignored.
-fn terminal_status(record: &AgentTaskRunRecord, phase: CookRunPhase) -> CookRunStatus {
+fn settled_status(record: &AgentTaskRunRecord, phase: CookRunPhase) -> CookRunStatus {
     let settled = |status: CookStatus| (!status.is_in_flight()).then_some(status);
     let delivery = crate::agent_task_service::CookDelivery::from_run_metadata(&record.metadata)
         .and_then(|delivery| delivery.lifecycle().cook_status)
@@ -878,11 +876,10 @@ fn terminal_status(record: &AgentTaskRunRecord, phase: CookRunPhase) -> CookRunS
     {
         return CookRunStatus::Cook(CookStatus::PreExecutionFailure);
     }
-    if let Some(status) = record
-        .metadata
-        .pointer("/cook_progress/terminal_status")
-        .and_then(|status| CookStatus::deserialize(status).ok())
-        .and_then(settled)
+    if let Some(status) =
+        crate::agent_task_service::CookOutcome::from_run_metadata(&record.metadata)
+            .and_then(|outcome| outcome.status)
+            .and_then(settled)
     {
         return CookRunStatus::Cook(status);
     }
@@ -1419,36 +1416,120 @@ mod tests {
         }
     }
 
+    /// Status, diagnose, recover and notifications all read one
+    /// classification. The phase comes from the record's execution state and
+    /// the outcome detail from its `cook_delivery` record; a `cook_progress`
+    /// label is never a verdict (#18920).
     #[test]
-    fn a_stale_in_flight_label_never_classifies_a_terminal_record() {
-        for label in ["queued", "in_flight", "awaiting_ci"] {
-            let classified = CookRunState::of(&record(
-                RunExecutionState::CandidateRecoverable,
-                serde_json::json!({ "cook_progress": { "phase": "terminal", "terminal_status": label } }),
-            ));
-            assert_eq!(
-                classified.status,
-                CookRunStatus::Cook(CookStatus::CandidateRecoverable),
-                "{label}"
+    fn cook_outcomes_classify_from_phase_and_delivery_only() {
+        use crate::agent_task_service::{set_cook_delivery_artifact_for_test, CookOutcome};
+        let outcome = |metadata: &mut Value, status: CookStatus, exit_code: i32| {
+            CookOutcome::write(
+                metadata,
+                Some(CookOutcome {
+                    status: Some(status),
+                    exit_code,
+                }),
             );
-            assert!(classified.allows(A::Recover), "{label}");
-        }
-        let settled = CookRunState::of(&record(
-            RunExecutionState::Failed,
-            serde_json::json!({ "cook_progress": { "terminal_status": "gate_failed" } }),
-        ));
-        assert_eq!(
-            settled.status,
-            CookRunStatus::Cook(CookStatus::Gate(GateVerdict::GateFailed))
+        };
+        let cook =
+            || serde_json::json!({ "cook_id": "cook", "cook_progress": { "phase": "terminal" } });
+        let mut no_changes = cook();
+        outcome(&mut no_changes, CookStatus::Gate(GateVerdict::NoChanges), 2);
+        let mut intentional = cook();
+        outcome(&mut intentional, CookStatus::IntentionalNoChange, 0);
+        let mut gate_failed = cook();
+        set_cook_delivery_artifact_for_test(
+            &mut gate_failed,
+            "/promotion",
+            serde_json::json!({ "status": "gate_failed" }),
         );
+        outcome(
+            &mut gate_failed,
+            CookStatus::Gate(GateVerdict::GateFailed),
+            1,
+        );
+        let mut published = cook();
+        set_cook_delivery_artifact_for_test(
+            &mut published,
+            "/promotion",
+            serde_json::json!({ "status": "applied" }),
+        );
+        set_cook_delivery_artifact_for_test(
+            &mut published,
+            "/finalization",
+            serde_json::json!({ "status": "review_ready", "pr_url": "https://example.test/pull/1" }),
+        );
+        outcome(&mut published, CookStatus::ReviewReady, 0);
+        // A record written before #18920 keeps its verdict label in
+        // `cook_progress`; it reads from its phase instead.
+        let legacy_label = serde_json::json!({
+            "cook_id": "cook",
+            "cook_progress": { "phase": "terminal", "terminal_status": "gate_failed", "exit_code": 1 },
+        });
+        let legacy_in_flight = serde_json::json!({
+            "cook_id": "cook",
+            "cook_progress": { "phase": "terminal", "terminal_status": "in_flight" },
+        });
 
-        let unrecognized = CookRunState::of(&record(
-            RunExecutionState::CandidateRecoverable,
-            serde_json::json!({ "cook_progress": { "phase": "terminal", "terminal_status": "moving_base" } }),
-        ));
-        assert_eq!(
-            unrecognized.status,
-            CookRunStatus::Cook(CookStatus::CandidateRecoverable)
-        );
+        for (name, stored, metadata, phase, status, recoverable) in [
+            (
+                "no_changes",
+                RunExecutionState::PartialFailure,
+                no_changes,
+                P::PartialFailure,
+                CookStatus::Gate(GateVerdict::NoChanges),
+                false,
+            ),
+            (
+                "intentional_no_change",
+                RunExecutionState::Succeeded,
+                intentional,
+                P::Succeeded,
+                CookStatus::IntentionalNoChange,
+                false,
+            ),
+            (
+                "gate_failed",
+                RunExecutionState::CandidateRecoverable,
+                gate_failed,
+                P::CandidateRecoverable,
+                CookStatus::Gate(GateVerdict::GateFailed),
+                true,
+            ),
+            (
+                "published",
+                RunExecutionState::Running,
+                published,
+                P::Succeeded,
+                CookStatus::ReviewReady,
+                false,
+            ),
+            (
+                "legacy_label",
+                RunExecutionState::PartialFailure,
+                legacy_label,
+                P::PartialFailure,
+                CookStatus::Failed,
+                false,
+            ),
+            (
+                "legacy_in_flight",
+                RunExecutionState::CandidateRecoverable,
+                legacy_in_flight,
+                P::CandidateRecoverable,
+                CookStatus::CandidateRecoverable,
+                true,
+            ),
+        ] {
+            let classified = CookRunState::of(&record(stored, metadata));
+            assert_eq!(classified.phase, phase, "{name}");
+            assert!(classified.terminal, "{name}");
+            assert_eq!(classified.status, CookRunStatus::Cook(status), "{name}");
+            assert_eq!(classified.recoverable, recoverable, "{name}");
+            assert_eq!(classified.retryable, phase == P::PartialFailure, "{name}");
+            assert!(classified.allows(A::Recover), "{name}");
+            assert!(classified.allows_regate(), "{name}");
+        }
     }
 }

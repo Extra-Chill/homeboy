@@ -2,6 +2,11 @@
 
 All notable changes to the **wordpress** extension will be documented in this file.
 
+## [3.56.6] - 2026-11-24
+
+### Fixed
+- fail closed when a test/bench DB target is not the provisioned database
+
 ## [3.56.5] - 2026-11-23
 
 ### Fixed

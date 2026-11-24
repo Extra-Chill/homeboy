@@ -1415,8 +1415,10 @@ fn render_logs_summary(payload: &Value) -> Option<String> {
 }
 
 fn render_review_summary(payload: &Value) -> Option<String> {
-    let run_id = string_value(payload, &["run_id"])?;
-    let state = string_value(payload, &["state"]).unwrap_or("unknown");
+    let run_id = string_value(payload, &["run_id"]).or_else(|| string_value(payload, &["run"]))?;
+    let state = string_value(payload, &["state"])
+        .or_else(|| string_value(payload, &["resource", "state"]))
+        .unwrap_or("unknown");
     let summary = value_at(payload, &["aggregate_review", "summary"]);
     let raw_apply_candidates = summary
         .and_then(|_| {
@@ -1480,6 +1482,7 @@ fn render_review_summary(payload: &Value) -> Option<String> {
     if let Some(diagnostic) = first_actionable_diagnostic(payload) {
         lines.push(format!("Diagnostic: {diagnostic}"));
     }
+    lines.extend(review_form_lines(payload));
     if let Some(patch_path) = patch_path {
         lines.push(format!("Patch: {patch_path}"));
     } else if let Some(patch) = patch {
@@ -1491,6 +1494,26 @@ fn render_review_summary(payload: &Value) -> Option<String> {
         lines.push(format!("Next: {next}"));
     }
     Some(finish(lines))
+}
+
+/// The agent's verdict from the latest attempt's review form. The incomplete
+/// reason is the agent's own account of the run, so it is shown in full.
+fn review_form_lines(payload: &Value) -> Vec<String> {
+    let Some(form) = value_at(payload, &["review_form"])
+        .or_else(|| value_at(payload, &["evidence", "review_form"]))
+    else {
+        return Vec::new();
+    };
+    let mut lines = Vec::new();
+    if let Some(completion) = string_value(form, &["completion"]) {
+        lines.push(format!("Agent verdict: {completion}"));
+    }
+    if let Some(reason) =
+        string_value(form, &["incomplete_reason"]).filter(|reason| !reason.trim().is_empty())
+    {
+        lines.push(format!("Incomplete reason: {reason}"));
+    }
+    lines
 }
 
 fn target_application_line(payload: &Value) -> Option<String> {

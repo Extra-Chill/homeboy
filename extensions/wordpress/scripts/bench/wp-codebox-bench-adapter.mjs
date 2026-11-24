@@ -12,12 +12,16 @@ import { createRequire } from 'node:module';
  */
 import { rigWorkloadInputs, selectedScenarioIds } from './wp-codebox-bench-selection.mjs';
 import { boundedText } from '../lib/wp-codebox-timeout-diagnostics.mjs';
+import { assertIsolatedDatabaseTarget } from '../lib/wordpress-database-isolation-guard.mjs';
 
 const requireFromHere = createRequire(import.meta.url);
 const { preflightWpCodeboxCommand, preflightWpCodeboxRuntime, wpCodeboxCommand } = requireFromHere('../../lib/wp-codebox-runtime-selection.js');
 const CHILD_OUTPUT_BYTES = 128 * 1024;
 
 const settings = json(process.env.HOMEBOY_SETTINGS_JSON, {});
+// Bench installs a WordPress site too; refuse any DB target the runtime did not
+// provision (#18886).
+assertIsolatedDatabaseTarget({ environment: process.env, settings }, 'WordPress bench runner');
 const componentPath = required(process.env.HOMEBOY_COMPONENT_PATH, 'HOMEBOY_COMPONENT_PATH');
 const slug = process.env.HOMEBOY_COMPONENT_ID || process.env.COMPONENT_ID || path.basename(componentPath);
 const root = settings.wp_codebox_source_root || componentPath;
