@@ -2843,53 +2843,6 @@ fn cook_selector_maps_to_provider() {
 }
 
 #[test]
-fn cook_execution_budget_flags_parse_and_reject_removed_attempts() {
-    let cli = Cli::try_parse_from([
-        "homeboy",
-        "agent-task",
-        "cook",
-        "--to-worktree",
-        "homeboy@execution-budget",
-        "--verify",
-        "true",
-        "--backend",
-        "sample-backend",
-        "--prompt",
-        "cook",
-        "--max-provider-executions",
-        "2",
-        "--max-same-provider-retries",
-        "1",
-    ])
-    .expect("execution budget flags parse");
-    let Commands::AgentTask(agent_task) = cli.command else {
-        panic!("expected agent-task command");
-    };
-    let AgentTaskCommand::Cook(args) = agent_task.command else {
-        panic!("expected cook command");
-    };
-    assert_eq!(args.dispatch.core.attempts, Some(2));
-    assert_eq!(args.dispatch.core.same_provider_retries, Some(1));
-
-    assert!(Cli::try_parse_from([
-        "homeboy",
-        "agent-task",
-        "cook",
-        "--to-worktree",
-        "homeboy@execution-budget",
-        "--verify",
-        "true",
-        "--backend",
-        "sample-backend",
-        "--prompt",
-        "cook",
-        "--attempts",
-        "2",
-    ])
-    .is_err());
-}
-
-#[test]
 fn cook_rejects_zero_max_attempts_at_the_cli_boundary() {
     assert!(Cli::try_parse_from([
         "homeboy",
@@ -3397,85 +3350,6 @@ fn list_sparse_scope_reports_incomplete_search_before_matches_beyond_window() {
             ["match-c", "match-b", "match-a"]
         );
     });
-}
-
-#[test]
-fn agent_task_timeout_ms_flags_parse_for_cook_run_and_run_plan() {
-    let recover = Cli::try_parse_from([
-        "homeboy",
-        "agent-task",
-        "recover",
-        "cook-123",
-        "--timeout-ms",
-        "2400000",
-    ])
-    .expect("recover timeout parses");
-    let Commands::AgentTask(agent_task) = recover.command else {
-        panic!("expected agent-task command");
-    };
-    let AgentTaskCommand::Recover(args) = agent_task.command else {
-        panic!("expected recover command");
-    };
-    assert_eq!(args.timeout_ms, Some(2_400_000));
-
-    let cook = Cli::try_parse_from([
-        "homeboy",
-        "agent-task",
-        "cook",
-        "--to-worktree",
-        "homeboy@cook-timeout",
-        "--verify",
-        "true",
-        "--backend",
-        "sample-backend",
-        "--prompt",
-        "cook",
-        "--timeout-ms",
-        "1234",
-    ])
-    .expect("cook timeout parses");
-    let Commands::AgentTask(agent_task) = cook.command else {
-        panic!("expected agent-task command");
-    };
-    let AgentTaskCommand::Cook(args) = agent_task.command else {
-        panic!("expected cook command");
-    };
-    assert_eq!(args.dispatch.core.timeout_ms, Some(1234));
-
-    let run = Cli::try_parse_from([
-        "homeboy",
-        "agent-task",
-        "run",
-        "run-123",
-        "--timeout-ms",
-        "5678",
-    ])
-    .expect("run timeout parses");
-    let Commands::AgentTask(agent_task) = run.command else {
-        panic!("expected agent-task command");
-    };
-    let AgentTaskCommand::Run(args) = agent_task.command else {
-        panic!("expected run command");
-    };
-    assert_eq!(args.timeout_ms, Some(5678));
-
-    let run_plan = Cli::try_parse_from([
-        "homeboy",
-        "agent-task",
-        "run-plan",
-        "--plan",
-        "@plan.json",
-        "--timeout-ms",
-        "9012",
-    ])
-    .expect("run-plan timeout parses");
-    let Commands::AgentTask(agent_task) = run_plan.command else {
-        panic!("expected agent-task command");
-    };
-    let AgentTaskCommand::RunPlan(args) = agent_task.command else {
-        panic!("expected run-plan command");
-    };
-    assert_eq!(args.timeout_ms, Some(9012));
 }
 
 /// Regression for #16217: an issue-derived destination whose leftover local

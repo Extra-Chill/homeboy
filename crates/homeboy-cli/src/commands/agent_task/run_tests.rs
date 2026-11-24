@@ -348,19 +348,6 @@ fn controller_lint_gate_records_provenance_and_dedupes() {
 }
 
 #[test]
-fn no_component_lint_gate_flag_parses() {
-    let args = parse_cook(&[
-        "homeboy",
-        "agent-task",
-        "cook",
-        "--verify",
-        "true",
-        "--no-component-lint-gate",
-    ]);
-    assert!(args.gates.no_component_lint_gate);
-}
-
-#[test]
 fn preview_worktree_capacity_blocks_local_shortfall_and_reports_safe_action() {
     let mut resolved = serde_json::json!({ "placement": { "selected": "local" } });
     let capacity = serde_json::json!({

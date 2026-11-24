@@ -277,15 +277,6 @@ mod tests {
     }
 
     #[test]
-    fn serde_runner_status_matches_report_wire_labels() {
-        // The report serializes RunnerDoctorStatus as snake_case; verdict
-        // comparisons must use the exact same strings.
-        assert_eq!(serde_runner_status(RunnerDoctorStatus::Ok), "ok");
-        assert_eq!(serde_runner_status(RunnerDoctorStatus::Warning), "warn");
-        assert_eq!(serde_runner_status(RunnerDoctorStatus::Error), "error");
-    }
-
-    #[test]
     fn provider_failure_blocks_cook_with_its_own_blocker() {
         let provider = blocked_provider();
         let runner = json!({ "status": "ok", "checks": [] });

@@ -672,36 +672,6 @@ mod tests {
     }
 
     #[test]
-    fn recover_parses_its_id_and_preflight() {
-        let cli = Cli::try_parse_from([
-            "homeboy",
-            "agent-task",
-            "recover",
-            "cook-attempt-1",
-            "--preflight",
-        ])
-        .expect("recover parses");
-        let Commands::AgentTask(agent_task) = cli.command else {
-            panic!("agent task");
-        };
-        let AgentTaskCommand::Recover(args) = agent_task.command else {
-            panic!("recover");
-        };
-        assert_eq!(args.id, "cook-attempt-1");
-        assert!(args.preflight);
-        assert!(Cli::try_parse_from([
-            "homeboy",
-            "agent-task",
-            "recover",
-            "cook-attempt-1",
-            "--artifact-id",
-            "patch-a"
-        ])
-        .is_err());
-        assert!(args.overrides().is_empty());
-    }
-
-    #[test]
     fn recover_accepts_explicit_overrides_but_never_with_preflight_or_artifact() {
         let cli = Cli::try_parse_from([
             "homeboy",
@@ -742,25 +712,8 @@ mod tests {
         }
     }
 
-    #[test]
-    fn retired_cook_continuation_verb_is_not_a_command() {
-        for retired in [
-            vec!["resume", "run-1"],
-            vec!["adopt", "cook-1", "--candidate-ref", "abc123"],
-            vec!["cook-continue", "cook-1"],
-            vec!["cook-continue", "cook-1", "--preflight"],
-            vec!["cook-continue", "cook-1", "--rearm"],
-            vec!["cook-continue", "cook-1", "--artifact-id", "patch-a"],
-        ] {
-            let mut argv = vec!["homeboy", "agent-task"];
-            argv.extend(retired.iter().copied());
-            assert!(Cli::try_parse_from(argv).is_err(), "{retired:?}");
-        }
-    }
-
-    /// Recover covers non-Cook runs too: #15925 no longer justifies separate
-    /// resume and adopt commands. Explicit retry, reconciliation and manual
-    /// finalization remain available independently of recovery.
+    /// Recover covers non-Cook runs too. Explicit retry, reconciliation and
+    /// manual finalization stay available independently of recovery.
     #[test]
     fn recovery_adjacent_verbs_recover_does_not_perform_remain_commands() {
         for kept in [

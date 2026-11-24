@@ -541,7 +541,7 @@ pub(super) fn retry_exact(args: RetryArgs) -> CmdResult<Value> {
 /// Reserve a retry successor through the control-plane Retry action: the one
 /// legal-action entry point with idempotent acknowledgement, eligibility and
 /// audit. `agent-task retry` and `agent-task recover` both reserve through here, so
-/// a Cook continuation is no longer a side door around the action outbox.
+/// a Cook continuation always goes through the action outbox.
 pub(super) fn reserve_retry_through_action(
     run_id: &str,
     new_run_id: Option<String>,
