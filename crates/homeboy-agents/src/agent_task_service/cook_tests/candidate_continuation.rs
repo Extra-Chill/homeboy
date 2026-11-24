@@ -256,13 +256,14 @@ fn multi_attempt_substantive_adopt_uses_terminal_execution_lineage() {
             committed_sha: Some(sha.to_string()),
             ..Default::default()
         };
-        let result = adopt_cook_candidate_with_dispatcher_and_backend(
+        let result = adopt_cook_candidate(
             &options.identity.cook_id,
             sha,
-            AgentTaskCandidateAdoptionOptions::default(),
-            |_| Ok(None),
-            Arc::new(UnusedExecutor),
-            &mut backend,
+            AgentTaskCandidateAdoptionOptions {
+                executor: Some(Arc::new(UnusedExecutor)),
+                backend: Some(&mut backend),
+                ..Default::default()
+            },
         )
         .unwrap();
         assert_eq!(result.exit_code, 0, "{result:#?}");
@@ -317,13 +318,14 @@ fn adoption_supersedes_deferred_and_pending_status_with_passing_candidate_proof(
                 hydrate_run_id: Some(options.identity.initial_run_id.clone()),
                 ..Default::default()
             };
-            let result = adopt_cook_candidate_with_dispatcher_and_backend(
+            let result = adopt_cook_candidate(
                 &options.identity.cook_id,
                 &sha,
-                AgentTaskCandidateAdoptionOptions::default(),
-                |_| Ok(None),
-                Arc::new(UnusedExecutor),
-                &mut backend,
+                AgentTaskCandidateAdoptionOptions {
+                    executor: Some(Arc::new(UnusedExecutor)),
+                    backend: Some(&mut backend),
+                    ..Default::default()
+                },
             )
             .unwrap();
             assert_eq!(result.exit_code, 0, "{result:#?}");

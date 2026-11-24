@@ -887,16 +887,16 @@ pub(super) fn adopt_green_candidate_missing_review_form_with_scope(
         commit_real: true,
         ..Default::default()
     };
-    let result = adopt_cook_candidate_with_dispatcher_and_backend(
+    let result = adopt_cook_candidate(
         cook_id,
         &candidate,
         AgentTaskCandidateAdoptionOptions {
             ai_model: Some("fixture-model-review".to_string()),
             replace_interrupted: false,
+            executor: Some(review_executor),
+            backend: Some(&mut backend),
+            ..Default::default()
         },
-        |_| Ok(None),
-        review_executor,
-        &mut backend,
     );
     AdoptedMissingFormFixture {
         result,
