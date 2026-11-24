@@ -14,6 +14,10 @@ pub use io::{
 };
 pub use policy::resolve_release_gate_local_hot_policy_from;
 pub use policy::{
+    agent_task_local_execution_denied_error, resolve_agent_task_local_execution_policy,
+    AgentTaskLocalExecutionPolicy, AGENT_TASK_LOCAL_EXECUTION_POINTER,
+};
+pub use policy::{
     resolve_release_gate_local_hot_policy, BenchConfig, BenchLocalExecutionPolicy,
     ReleaseGateConfig, ReleaseGateLocalHotPolicy, RELEASE_GATE_LOCAL_HOT_ENV,
 };
@@ -527,6 +531,17 @@ pub struct AgentTaskConfig {
     /// …). With no template declared, nothing is appended.
     #[serde(default, skip_serializing_if = "HashMap::is_empty")]
     pub prompt_templates: HashMap<String, String>,
+    /// Whether agent tasks may execute locally on this controller, settable via
+    /// `homeboy config set /agent_task/local_execution denied`.
+    ///
+    /// `denied` rejects any agent-task submission whose placement selects local
+    /// execution (`--placement local`, or `lab-or-local` / `auto` falling back)
+    /// before admission. Defaults to `allowed`.
+    #[serde(
+        default,
+        skip_serializing_if = "AgentTaskLocalExecutionPolicy::is_allowed"
+    )]
+    pub local_execution: AgentTaskLocalExecutionPolicy,
 }
 
 /// Fallback ceiling on concurrent child cooks in a batch fanout when neither
@@ -878,6 +893,42 @@ mod tests {
         let config = HomeboyConfig::default();
 
         assert!(config.lab.preferred_runner.is_none());
+    }
+
+    #[test]
+    fn agent_task_local_execution_defaults_to_allowed() {
+        let config = HomeboyConfig::default();
+        assert_eq!(
+            config.agent_task.local_execution,
+            AgentTaskLocalExecutionPolicy::Allowed
+        );
+        let parsed: HomeboyConfig = serde_json::from_str(r#"{"agent_task":{}}"#).unwrap();
+        assert_eq!(
+            parsed.agent_task.local_execution,
+            AgentTaskLocalExecutionPolicy::Allowed
+        );
+        // The default is not serialized, so existing config files are unchanged.
+        let value = serde_json::to_value(&config.agent_task).unwrap();
+        assert!(value.get("local_execution").is_none());
+    }
+
+    #[test]
+    fn agent_task_local_execution_parses_denied_from_config() {
+        let config: HomeboyConfig =
+            serde_json::from_str(r#"{"agent_task":{"local_execution":"denied"}}"#).unwrap();
+        assert!(config.agent_task.local_execution.is_denied());
+        let value = serde_json::to_value(&config.agent_task).unwrap();
+        assert_eq!(value["local_execution"], "denied");
+    }
+
+    #[test]
+    fn agent_task_local_execution_denied_error_names_policy_and_reason() {
+        let error = agent_task_local_execution_denied_error(Some("runner `lab` is disconnected"));
+        let rendered = format!("{error:?}");
+        assert!(rendered.contains(AGENT_TASK_LOCAL_EXECUTION_POINTER));
+        assert!(rendered.contains("runner `lab` is disconnected"));
+        assert!(rendered.contains("--placement lab"));
+        assert!(rendered.contains("homeboy runner status"));
     }
 
     #[test]
