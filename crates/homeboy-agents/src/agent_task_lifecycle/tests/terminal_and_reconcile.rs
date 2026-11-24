@@ -1876,8 +1876,10 @@ fn typed_pre_provider_failure_outranks_stale_runner_status_and_terminalizes_once
             }
         );
         assert_eq!(
-            crate::agent_task_lifecycle::CookRunState::of(&record).status,
-            "pre_execution_failure"
+            crate::agent_task_lifecycle::CookRunState::of(&record)
+                .status
+                .cook_status(),
+            Some(homeboy_core::cook_status::CookStatus::PreExecutionFailure)
         );
         assert_eq!(record.provider_executions_consumed(), 0);
         assert_eq!(record.metadata["runner_job_status"], "failed");

@@ -24,7 +24,7 @@
 
 use std::collections::BTreeSet;
 
-use homeboy_core::cook_status::CookStatus;
+use homeboy_core::cook_status::{CookStatus, GateVerdict};
 use homeboy_lifecycle_contract::RunExecutionState;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -591,7 +591,7 @@ fn observed_execution_state(record: &AgentTaskRunRecord) -> RunExecutionState {
     // candidate to recover, so it must not read as `candidate_recoverable`
     // (#15294).
     if terminal["phase"] == "terminal"
-        && terminal["terminal_status"] == CookStatus::NoChanges.as_str()
+        && terminal["terminal_status"] == CookStatus::Gate(GateVerdict::NoChanges).as_str()
     {
         return RunExecutionState::PartialFailure;
     }
@@ -603,7 +603,9 @@ fn observed_execution_state(record: &AgentTaskRunRecord) -> RunExecutionState {
                 matches!(
                     promotion.status,
                     crate::agent_task_promotion::AgentTaskPromotionStatus::Applied
-                        | crate::agent_task_promotion::AgentTaskPromotionStatus::GateFailed
+                        | crate::agent_task_promotion::AgentTaskPromotionStatus::Gate(
+                            GateVerdict::GateFailed
+                        )
                         | crate::agent_task_promotion::AgentTaskPromotionStatus::VerifiedNoChanges
                 ) && promotion.finalization_eligible()
             });
@@ -612,6 +614,51 @@ fn observed_execution_state(record: &AgentTaskRunRecord) -> RunExecutionState {
         return RunExecutionState::CandidateRecoverable;
     }
     stored
+}
+
+/// The status label a [`CookRunState`] reports: a Cook status when the run's
+/// evidence settles one, otherwise the bare phase. Serialized as the label.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(untagged)]
+pub enum CookRunStatus {
+    Cook(CookStatus),
+    Phase(CookRunPhase),
+}
+
+impl CookRunStatus {
+    /// The status of a run whose phase is the only evidence. Phases that share
+    /// a Cook status label report that status.
+    fn of_phase(phase: CookRunPhase) -> Self {
+        match phase {
+            CookRunPhase::Queued => Self::Cook(CookStatus::Queued),
+            CookRunPhase::Continuing => Self::Cook(CookStatus::InFlight),
+            CookRunPhase::CandidateRecoverable => Self::Cook(CookStatus::CandidateRecoverable),
+            CookRunPhase::Failed => Self::Cook(CookStatus::Failed),
+            CookRunPhase::Cancelled => Self::Cook(CookStatus::Cancelled),
+            phase => Self::Phase(phase),
+        }
+    }
+
+    /// The Cook status this label reports, when it is one.
+    pub fn cook_status(self) -> Option<CookStatus> {
+        match self {
+            Self::Cook(status) => Some(status),
+            Self::Phase(_) => None,
+        }
+    }
+
+    pub fn as_str(&self) -> &str {
+        match self {
+            Self::Cook(status) => status.as_str(),
+            Self::Phase(phase) => phase.as_str(),
+        }
+    }
+}
+
+impl std::fmt::Display for CookRunStatus {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
 }
 
 /// The one classification of a Cook run, read by every surface.
@@ -639,7 +686,7 @@ pub struct CookRunState {
     /// The Cook status label this state reports. A label that reads as in
     /// flight never survives on a terminal record: the record's execution
     /// state outranks a stale label from an earlier exit.
-    pub status: String,
+    pub status: CookRunStatus,
 }
 
 impl CookRunState {
@@ -668,10 +715,10 @@ impl CookRunState {
                 execution_phase
             };
         let status = match phase {
-            CookRunPhase::Queued => "queued".to_string(),
-            CookRunPhase::Running => "running".to_string(),
-            CookRunPhase::Continuing => "in_flight".to_string(),
-            _ => terminal_status_label(record, phase),
+            CookRunPhase::Queued | CookRunPhase::Running | CookRunPhase::Continuing => {
+                CookRunStatus::of_phase(phase)
+            }
+            _ => terminal_status(record, phase),
         };
         Self {
             liveness,
@@ -717,12 +764,7 @@ impl CookRunState {
             CookRunPhase::Failed | CookRunPhase::Cancelled | CookRunPhase::PartialFailure
         );
         next.recoverable = phase == CookRunPhase::CandidateRecoverable && !next.fenced;
-        next.status = if phase == CookRunPhase::Continuing {
-            "in_flight"
-        } else {
-            phase.as_str()
-        }
-        .to_owned();
+        next.status = CookRunStatus::of_phase(phase);
         Ok(next)
     }
 
@@ -818,38 +860,36 @@ pub(crate) fn transition_record(
     })
 }
 
-/// The label of a terminal attempt: delivery's typed read model first, then
+/// The status of a terminal attempt: delivery's typed read model first, then
 /// the attempt's own failure and terminal evidence, then its execution state.
 /// Labels that read as in flight are stale on a terminal record and ignored.
-fn terminal_status_label(record: &AgentTaskRunRecord, phase: CookRunPhase) -> String {
+fn terminal_status(record: &AgentTaskRunRecord, phase: CookRunPhase) -> CookRunStatus {
     let settled = |status: CookStatus| (!status.is_in_flight()).then_some(status);
     let delivery = crate::agent_task_service::CookDelivery::from_run_metadata(&record.metadata)
         .and_then(|delivery| delivery.lifecycle().cook_status)
         .and_then(settled);
     if let Some(status) = delivery {
-        return status.as_str().to_string();
+        return CookRunStatus::Cook(status);
     }
     if record
         .metadata
         .get("pre_execution_failure")
         .is_some_and(|failure| !failure.is_null())
     {
-        return CookStatus::PreExecutionFailure.as_str().to_string();
+        return CookRunStatus::Cook(CookStatus::PreExecutionFailure);
     }
     if let Some(status) = record
         .metadata
         .pointer("/cook_progress/terminal_status")
-        .and_then(Value::as_str)
-        .and_then(CookStatus::from_status)
+        .and_then(|status| CookStatus::deserialize(status).ok())
         .and_then(settled)
     {
-        return status.as_str().to_string();
+        return CookRunStatus::Cook(status);
     }
     match phase {
-        CookRunPhase::PartialFailure => "failed",
-        phase => phase.as_str(),
+        CookRunPhase::PartialFailure => CookRunStatus::Cook(CookStatus::Failed),
+        phase => CookRunStatus::of_phase(phase),
     }
-    .to_string()
 }
 
 /// Every action `state` makes legal. Verbs refuse exactly what is absent here,
@@ -909,7 +949,7 @@ mod tests {
             recoverable: phase == P::CandidateRecoverable,
             fenced,
             live_owner,
-            status: phase.as_str().to_string(),
+            status: CookRunStatus::of_phase(phase),
         }
     }
 
@@ -1182,7 +1222,7 @@ mod tests {
             }),
         ));
         assert_eq!(continuing.phase, P::Continuing);
-        assert_eq!(continuing.status, "in_flight");
+        assert_eq!(continuing.status, CookRunStatus::Cook(CookStatus::InFlight));
         assert!(!continuing.allows(A::Recover));
 
         let fenced = CookRunState::of(&record(
@@ -1386,19 +1426,29 @@ mod tests {
                 RunExecutionState::CandidateRecoverable,
                 serde_json::json!({ "cook_progress": { "phase": "terminal", "terminal_status": label } }),
             ));
-            assert_eq!(classified.status, "candidate_recoverable", "{label}");
+            assert_eq!(
+                classified.status,
+                CookRunStatus::Cook(CookStatus::CandidateRecoverable),
+                "{label}"
+            );
             assert!(classified.allows(A::Recover), "{label}");
         }
         let settled = CookRunState::of(&record(
             RunExecutionState::Failed,
             serde_json::json!({ "cook_progress": { "terminal_status": "gate_failed" } }),
         ));
-        assert_eq!(settled.status, "gate_failed");
+        assert_eq!(
+            settled.status,
+            CookRunStatus::Cook(CookStatus::Gate(GateVerdict::GateFailed))
+        );
 
         let unrecognized = CookRunState::of(&record(
             RunExecutionState::CandidateRecoverable,
             serde_json::json!({ "cook_progress": { "phase": "terminal", "terminal_status": "moving_base" } }),
         ));
-        assert_eq!(unrecognized.status, "candidate_recoverable");
+        assert_eq!(
+            unrecognized.status,
+            CookRunStatus::Cook(CookStatus::CandidateRecoverable)
+        );
     }
 }

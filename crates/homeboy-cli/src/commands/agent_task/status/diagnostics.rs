@@ -745,7 +745,7 @@ pub(super) fn current_lifecycle_diagnostic(
     let delivery = CookDelivery::from_run_metadata(&record.metadata)?;
     let blocker = delivery.blocker?;
     let (task_id, class) = match blocker.code {
-        CookDeliveryBlockerCode::GateFailed => {
+        CookDeliveryBlockerCode::Gate(GateVerdict::GateFailed) => {
             ("promotion", "agent_task.promotion_gate_failed".to_string())
         }
         CookDeliveryBlockerCode::PublishRefused => (

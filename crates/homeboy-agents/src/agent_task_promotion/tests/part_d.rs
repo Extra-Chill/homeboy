@@ -11,6 +11,7 @@ use super::candidate_fixture::{promote_with_provider, promote_with_provider_in_o
 use super::*;
 use crate::agent_task::{AGENT_TASK_ARTIFACT_SCHEMA, AGENT_TASK_OUTCOME_SCHEMA};
 use crate::agent_task_gate::{AgentTaskGateRevealPolicy, VerifyGateOptions};
+use homeboy_core::cook_status::GateVerdict;
 use serde_json::Value;
 use std::path::Path;
 
@@ -188,7 +189,10 @@ fn empty_patch_records_declared_base_candidate_delta_before_running_gates() {
     )
     .expect("empty candidate verifies");
 
-    assert_eq!(report.status, AgentTaskPromotionStatus::NoChanges);
+    assert_eq!(
+        report.status,
+        AgentTaskPromotionStatus::Gate(GateVerdict::NoChanges)
+    );
     assert_eq!(report.target.head.as_deref(), Some(revision.as_str()));
     assert!(report.changed_files.is_empty());
     assert!(provider.apply_calls.is_empty());
@@ -258,7 +262,10 @@ fn verified_unchanged_attempt_promotes_as_no_change_without_running_gates() {
     )
     .expect("unchanged attempt reports no change");
 
-    assert_eq!(report.status, AgentTaskPromotionStatus::NoChanges);
+    assert_eq!(
+        report.status,
+        AgentTaskPromotionStatus::Gate(GateVerdict::NoChanges)
+    );
     assert!(
         report.changed_files.is_empty(),
         "{:?}",
@@ -311,7 +318,10 @@ fn no_op_still_requires_an_audited_candidate_without_verification() {
     )
     .expect("no candidate and no change is a no-change result");
 
-    assert_eq!(error.status, AgentTaskPromotionStatus::NoChanges);
+    assert_eq!(
+        error.status,
+        AgentTaskPromotionStatus::Gate(GateVerdict::NoChanges)
+    );
     assert!(provider.apply_calls.is_empty());
 }
 
@@ -551,7 +561,10 @@ fn promote_verification_failure_keeps_the_applied_target_recoverable() {
         )
         .expect("verification failure is a recoverable promotion report");
 
-        assert_eq!(report.status, AgentTaskPromotionStatus::GateFailed);
+        assert_eq!(
+            report.status,
+            AgentTaskPromotionStatus::Gate(GateVerdict::GateFailed)
+        );
         assert!(report.status.patch_promoted());
         assert_eq!(report.target.path.as_deref(), worktree_path.to_str());
         assert!(provider.apply_calls.is_empty());

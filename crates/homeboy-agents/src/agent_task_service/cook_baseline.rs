@@ -1604,6 +1604,7 @@ mod tests {
         AgentTaskGateEnvironment, AgentTaskGateFailureClassification, AgentTaskGateFailureEvidence,
         AgentTaskGateRevealPolicy, AgentTaskGateStatus,
     };
+    use homeboy_core::cook_status::GateVerdict;
     use homeboy_core::gate::HomeboyGateVisibility;
     use sha2::{Digest, Sha256};
 
@@ -2332,7 +2333,9 @@ mod tests {
                     if accepted {
                         crate::agent_task_promotion::AgentTaskPromotionStatus::Applied
                     } else {
-                        crate::agent_task_promotion::AgentTaskPromotionStatus::GateFailed
+                        crate::agent_task_promotion::AgentTaskPromotionStatus::Gate(
+                            GateVerdict::GateFailed,
+                        )
                     }
                 );
             }

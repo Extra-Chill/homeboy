@@ -1,6 +1,7 @@
 //! Cook runtime driver and durable error reporting.
 
 use super::cook::*;
+use serde::Deserialize;
 
 /// Process-local dependencies for one Cook invocation. Production callers must
 /// bind every dependency explicitly; there are no environment-derived stores or
@@ -505,9 +506,7 @@ pub(super) fn run_cook_reported(
                 // and status instead of admitting another (#18450).
                 let mut report = stores.report(CookReportInput {
                     cook_id: admitted["cook_id"].as_str().unwrap_or_default().to_string(),
-                    status: admitted["status"]
-                        .as_str()
-                        .and_then(homeboy_core::cook_status::CookStatus::from_status)
+                    status: homeboy_core::cook_status::CookStatus::deserialize(&admitted["status"])
                         .unwrap_or(homeboy_core::cook_status::CookStatus::InFlight),
                     disposition: CookDisposition::InFlight,
                     attempts: Vec::new(),

@@ -4,6 +4,7 @@ use homeboy_control_plane_contract::{
     ControlPlaneEventSource, RunId, TaskId, CONTROL_PLANE_EVENT_APPEND_REQUEST_SCHEMA,
     CONTROL_PLANE_EVENT_DATA_MAX_BYTES,
 };
+use homeboy_core::cook_status::GateVerdict;
 use homeboy_core::observation::PreparedControlPlaneEventAppend;
 use serde_json::{json, Value};
 use std::collections::BTreeSet;
@@ -436,7 +437,7 @@ fn gate_lifecycle_requests_for_promotion(
     use crate::agent_task_promotion::AgentTaskPromotionStatus as Status;
     let gate_phase_failed = matches!(
         serde_json::from_value(Value::String(status.to_string())),
-        Ok(Status::GateFailed | Status::NoChangesGateFailed)
+        Ok(Status::Gate(GateVerdict::GateFailed) | Status::Gate(GateVerdict::NoChangesGateFailed))
     );
     requests.push(progress_request(
         &format!("gate\0{}\0{promotion_index}\0terminal", record.run_id),

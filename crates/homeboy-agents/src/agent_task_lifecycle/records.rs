@@ -1,4 +1,5 @@
 use super::*;
+use homeboy_core::cook_status::GateVerdict;
 use homeboy_lifecycle_contract::RunExecutionState;
 
 use homeboy_runner_contract::{WorkspaceClaim, WorkspaceIdentity, WorkspaceOwnerLease};
@@ -672,7 +673,9 @@ impl AgentTaskRunRecord {
                     delivery
                         .blocker
                         .as_ref()
-                        .filter(|blocker| blocker.code == CookDeliveryBlockerCode::GateFailed)
+                        .filter(|blocker| {
+                            blocker.code == CookDeliveryBlockerCode::Gate(GateVerdict::GateFailed)
+                        })
                         .map(|blocker| blocker.message.clone())
                 })
         });

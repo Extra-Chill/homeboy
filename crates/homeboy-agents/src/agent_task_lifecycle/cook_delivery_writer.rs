@@ -14,7 +14,8 @@ use super::*;
 use crate::agent_task_service::{
     CookDelivery, CookDeliveryArtifacts, CookDeliveryBlockerCode, COOK_DELIVERY_KEY,
 };
-use homeboy_core::cook_status::CookStatus;
+use homeboy_core::cook_status::{CookStatus, GateVerdict};
+use serde::Deserialize;
 
 /// How a delivery receipt decides the run state it commits.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -125,7 +126,10 @@ fn delivery_run_state(
 /// status over an executed gate.
 fn retire_superseded_deferral(record: &mut AgentTaskRunRecord, delivery: Option<&CookDelivery>) {
     if delivery.is_some_and(|delivery| {
-        delivery.blocker_code() == Some(CookDeliveryBlockerCode::GateEnvironmentUnavailable)
+        delivery.blocker_code()
+            == Some(CookDeliveryBlockerCode::Gate(
+                GateVerdict::GateEnvironmentUnavailable,
+            ))
     }) {
         return;
     }
@@ -138,9 +142,8 @@ fn retire_superseded_deferral(record: &mut AgentTaskRunRecord, delivery: Option<
     };
     let deferred = progress
         .get("terminal_status")
-        .and_then(Value::as_str)
-        .and_then(CookStatus::from_status)
-        == Some(CookStatus::GateEnvironmentUnavailable);
+        .and_then(|status| CookStatus::deserialize(status).ok())
+        == Some(CookStatus::Gate(GateVerdict::GateEnvironmentUnavailable));
     if !deferred {
         return;
     }

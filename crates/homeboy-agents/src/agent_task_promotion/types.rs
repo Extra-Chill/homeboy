@@ -5,6 +5,7 @@ use serde_json::Value;
 
 use crate::agent_task_gate::{AgentTaskGateReport, AgentTaskGateStatus, VerifyGateOptions};
 use homeboy_core::command_invocation::CommandInvocation;
+use homeboy_core::cook_status::GateVerdict;
 use homeboy_core::gate::{HomeboyGateResult, HomeboyGateVisibility};
 use homeboy_core::git::output_allow_empty;
 use homeboy_core::repository_integrity::RepositoryIntegrityEvidence;
@@ -101,7 +102,8 @@ impl AgentTaskPromotionReport {
     pub fn applied_with_passing_verdict(&self) -> bool {
         matches!(
             self.status,
-            AgentTaskPromotionStatus::Applied | AgentTaskPromotionStatus::GateFailed
+            AgentTaskPromotionStatus::Applied
+                | AgentTaskPromotionStatus::Gate(GateVerdict::GateFailed)
         ) && self.finalization_eligible()
     }
 
@@ -137,17 +139,21 @@ impl AgentTaskPromotionReport {
             )
         });
         let status = match self.status {
-            AgentTaskPromotionStatus::GateFailed
-            | AgentTaskPromotionStatus::GateEnvironmentUnavailable
+            AgentTaskPromotionStatus::Gate(GateVerdict::GateFailed)
+            | AgentTaskPromotionStatus::Gate(GateVerdict::GateEnvironmentUnavailable)
             | AgentTaskPromotionStatus::VerificationPending
                 if all_gates_passed =>
             {
                 AgentTaskPromotionStatus::Applied
             }
-            AgentTaskPromotionStatus::GateFailed if only_unexecuted_gates_block => {
-                AgentTaskPromotionStatus::GateEnvironmentUnavailable
+            AgentTaskPromotionStatus::Gate(GateVerdict::GateFailed)
+                if only_unexecuted_gates_block =>
+            {
+                AgentTaskPromotionStatus::Gate(GateVerdict::GateEnvironmentUnavailable)
             }
-            AgentTaskPromotionStatus::NoChangesGateFailed if all_gates_passed => {
+            AgentTaskPromotionStatus::Gate(GateVerdict::NoChangesGateFailed)
+                if all_gates_passed =>
+            {
                 AgentTaskPromotionStatus::VerifiedNoChanges
             }
             status => status,
@@ -262,26 +268,17 @@ pub enum AgentTaskPromotionStatus {
     /// has not completed. Retrying must resume verification, not apply again.
     VerificationPending,
     Applied,
-    GateFailed,
-    /// At least one declared deterministic gate deferred rather than
-    /// executing (its portable Lab route had no ready runner) and none of the
-    /// remaining gates failed. This is control-plane evidence, not a verdict
-    /// on the candidate: the patch is promoted and durable, but unverified.
-    /// Distinct from `GateFailed` so a run whose gates could not execute is
-    /// never classified as rejected (#14731).
-    ///
-    /// Written as `gate_environment_unavailable`, the spelling shared with
-    /// Cook status and the delivery blocker.
-    // Accepts `gates_deferred` for records written before #18802.
-    #[serde(alias = "gates_deferred")]
-    GateEnvironmentUnavailable,
     /// A provider produced no patch, but the pinned candidate workspace passed
     /// every declared deterministic verification gate.
     VerifiedNoChanges,
-    /// A provider produced no patch and the pinned candidate workspace failed
-    /// deterministic verification. The candidate remains available for repair.
-    NoChangesGateFailed,
-    NoChanges,
+    /// The shared gate verdict. `GateEnvironmentUnavailable` means at least
+    /// one declared deterministic gate deferred rather than executing and none
+    /// of the remaining gates failed: control-plane evidence, not a verdict on
+    /// the candidate, so a run whose gates could not execute is never
+    /// classified as rejected (#14731). `NoChangesGateFailed` keeps a no-patch
+    /// candidate that failed verification available for repair.
+    #[serde(untagged)]
+    Gate(GateVerdict),
 }
 
 impl AgentTaskPromotionStatus {
@@ -293,8 +290,7 @@ impl AgentTaskPromotionStatus {
             self,
             Self::VerificationPending
                 | Self::Applied
-                | Self::GateFailed
-                | Self::GateEnvironmentUnavailable
+                | Self::Gate(GateVerdict::GateFailed | GateVerdict::GateEnvironmentUnavailable)
         )
     }
 
@@ -304,13 +300,13 @@ impl AgentTaskPromotionStatus {
     /// behavior on "did a gate fail" must not run that behavior for evidence
     /// that was never produced (#14731).
     pub fn gate_failed(self) -> bool {
-        matches!(self, Self::GateFailed)
+        matches!(self, Self::Gate(GateVerdict::GateFailed))
     }
 
     /// Whether at least one declared gate deferred instead of executing, with
     /// no gate failure alongside it.
     pub fn gate_deferred(self) -> bool {
-        matches!(self, Self::GateEnvironmentUnavailable)
+        matches!(self, Self::Gate(GateVerdict::GateEnvironmentUnavailable))
     }
 
     /// Whether the patch reached its destination without a passing verdict:
@@ -320,7 +316,8 @@ impl AgentTaskPromotionStatus {
     pub fn applied_without_passing_verdict(self) -> bool {
         matches!(
             self,
-            Self::VerificationPending | Self::GateFailed | Self::GateEnvironmentUnavailable
+            Self::VerificationPending
+                | Self::Gate(GateVerdict::GateFailed | GateVerdict::GateEnvironmentUnavailable)
         )
     }
 }

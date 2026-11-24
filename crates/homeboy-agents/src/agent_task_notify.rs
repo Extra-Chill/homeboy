@@ -495,11 +495,15 @@ fn terminal_payload(
         let status = metadata
             .state
             .as_ref()
-            .and_then(|state| homeboy_core::cook_status::CookStatus::from_status(&state.status))
+            .and_then(|state| state.status.cook_status())
             .unwrap_or(report.status);
         if status.is_gate_failure() && !payload.facts.iter().any(|fact| fact.label == "Gates") {
             payload = payload.with_fact("Gates", "failed");
-        } else if status == homeboy_core::cook_status::CookStatus::GateEnvironmentUnavailable {
+        } else if status
+            == homeboy_core::cook_status::CookStatus::Gate(
+                homeboy_core::cook_status::GateVerdict::GateEnvironmentUnavailable,
+            )
+        {
             payload = payload.with_fact("Gates", "deferred");
         }
     }

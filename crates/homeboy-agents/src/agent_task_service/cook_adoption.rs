@@ -30,7 +30,7 @@ use crate::agent_task_promotion::{
 };
 use crate::agent_task_provider::ExtensionProviderAgentTaskExecutor;
 use crate::agent_task_scheduler::SharedAgentTaskExecutor;
-use homeboy_core::cook_status::{CookDisposition, CookStatus};
+use homeboy_core::cook_status::{CookDisposition, CookStatus, GateVerdict};
 use homeboy_core::{Error, Result};
 
 use super::cook::{
@@ -901,11 +901,11 @@ pub(crate) fn adopt_cook_candidate_with_dispatcher_and_backend_for_attempt_with_
         // gate is a gate failure; green gates with another unmet requirement
         // must not be reported as failed verification (#9692).
         let (status, reason) = if feedback.status
-            == AgentTaskCookLoopStatus::GateEnvironmentUnavailable
+            == AgentTaskCookLoopStatus::Gate(GateVerdict::GateEnvironmentUnavailable)
             && feedback.failed_gates.is_empty()
         {
             (
-                CookStatus::GateEnvironmentUnavailable,
+                CookStatus::Gate(GateVerdict::GateEnvironmentUnavailable),
                 super::cook::gate_environment_unavailable_stop_reason(&promotion, cook_id),
             )
         } else if feedback.failed_gates.is_empty() {
@@ -917,7 +917,7 @@ pub(crate) fn adopt_cook_candidate_with_dispatcher_and_backend_for_attempt_with_
             (CookStatus::CandidateRecoverable, reason)
         } else {
             (
-                CookStatus::GateFailed,
+                CookStatus::Gate(GateVerdict::GateFailed),
                 "adopted candidate did not pass the original deterministic gates".to_string(),
             )
         };
@@ -993,7 +993,7 @@ pub(crate) fn adopt_cook_candidate_with_dispatcher_and_backend_for_attempt_with_
 }
 
 fn adoption_incomplete_reason(status: AgentTaskCookLoopStatus, label: &str) -> String {
-    if status == AgentTaskCookLoopStatus::GateEnvironmentUnavailable {
+    if status == AgentTaskCookLoopStatus::Gate(GateVerdict::GateEnvironmentUnavailable) {
         "adopted candidate verification was deferred; the candidate was not judged".to_string()
     } else {
         format!(
@@ -1009,7 +1009,7 @@ mod outcome_tests {
     #[test]
     fn deferred_verification_does_not_claim_a_pass() {
         let reason = adoption_incomplete_reason(
-            AgentTaskCookLoopStatus::GateEnvironmentUnavailable,
+            AgentTaskCookLoopStatus::Gate(GateVerdict::GateEnvironmentUnavailable),
             "gate_environment_unavailable",
         );
         assert!(reason.contains("not judged"));

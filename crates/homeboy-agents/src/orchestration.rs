@@ -46,6 +46,7 @@ use homeboy_control_plane_contract::{
     ControlPlanePlacementUpdateParameters, ControlPlaneRetryParameters,
 };
 use homeboy_core::control_plane::{register_control_plane_provider, ControlPlaneProvider};
+use homeboy_core::cook_status::GateVerdict;
 use homeboy_lifecycle_contract::RunExecutionState;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -3273,7 +3274,7 @@ fn review_canonical_candidate(
         matches!(
             candidate.promotion,
             AgentTaskPromotionStatus::Applied
-                | AgentTaskPromotionStatus::GateFailed
+                | AgentTaskPromotionStatus::Gate(GateVerdict::GateFailed)
                 | AgentTaskPromotionStatus::VerificationPending
         ) && candidate.candidate.is_some()
     });
