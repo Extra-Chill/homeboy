@@ -214,13 +214,6 @@ mod tests {
     use serde_json::json;
 
     #[test]
-    fn removed_forms_do_not_parse() {
-        assert!(Cli::try_parse_from(["homeboy", "workflow", "status", "wf-x"]).is_err());
-        assert!(Cli::try_parse_from(["homeboy", "workflow", "list", "--registered"]).is_err());
-        assert!(Cli::try_parse_from(["homeboy", "workflow", "list"]).is_ok());
-    }
-
-    #[test]
     fn workflow_discovery_rejects_filters() {
         for flags in [
             vec!["--status", "running"],

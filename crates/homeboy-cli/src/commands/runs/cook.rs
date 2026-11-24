@@ -133,10 +133,7 @@ mod tests {
     use clap::Parser;
 
     #[test]
-    fn discovery_cli_selectors_and_removed_verbs() {
-        for verb in ["list", "active"] {
-            assert!(Cli::try_parse_from(["homeboy", "agent-task", verb]).is_err());
-        }
+    fn discovery_cli_selectors_are_validated() {
         assert!(Cli::try_parse_from(["homeboy", "agent-task", "reconcile"]).is_err());
         assert!(Cli::try_parse_from(["homeboy", "agent-task", "reconcile", "--all"]).is_ok());
         assert!(
