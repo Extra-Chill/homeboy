@@ -4,6 +4,16 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.495.3] - 2026-11-24
+
+### Changed
+- derive provider_executions_consumed from provider_executions
+- remove renaming re-exports that give one item two names
+
+### Fixed
+- count work a supervised command orphaned as owned descendant activity
+- release superseded Homeboy candidates from the destination and account every Cook attempt
+
 ## [0.495.2] - 2026-11-23
 
 ### Changed
