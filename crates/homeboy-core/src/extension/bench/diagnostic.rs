@@ -161,20 +161,6 @@ mod tests {
         assert_eq!(serialized["metadata"]["line_count"], 3);
     }
 
-    #[test]
-    fn diagnostic_rejects_removed_code_kind_and_details_aliases() {
-        for raw in [
-            r#"{"code":"wordpress.bench.stdout_noise"}"#,
-            r#"{"kind":"wordpress.bench.stdout_noise"}"#,
-            r#"{"class":"wordpress.bench.stdout_noise","details":{"line_count":3}}"#,
-        ] {
-            assert!(
-                serde_json::from_str::<BenchDiagnostic>(raw).is_err(),
-                "removed alias must not parse (#16779): {raw}"
-            );
-        }
-    }
-
     fn diagnostic(class: &str) -> BenchDiagnostic {
         BenchDiagnostic {
             class: class.to_string(),

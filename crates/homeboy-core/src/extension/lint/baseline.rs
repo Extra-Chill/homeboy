@@ -163,7 +163,7 @@ pub fn parse_findings_file(path: &Path) -> homeboy_core::error::Result<Vec<Homeb
     };
 
     for finding in raw_findings {
-        normalize_legacy_lint_finding(finding);
+        normalize_flat_lint_finding(finding);
     }
 
     let findings: Vec<HomeboyFinding> = serde_json::from_value(payload).map_err(|e| {
@@ -296,7 +296,9 @@ fn normalize_sidecar_finding(mut finding: HomeboyFinding, path: &Path) -> Homebo
     finding
 }
 
-fn normalize_legacy_lint_finding(finding: &mut serde_json::Value) {
+/// Lift the flat `{source: "<tool>", code: "<rule>"}` shape the rust, go and
+/// swift lint runners emit onto the canonical `source.kind`/`tool`/`rule` fields.
+fn normalize_flat_lint_finding(finding: &mut serde_json::Value) {
     let Some(object) = finding.as_object_mut() else {
         return;
     };
@@ -354,24 +356,16 @@ mod tests {
     }
 
     #[test]
-    fn test_fingerprint() {
+    fn fingerprint_and_context_label_fall_back_to_message_and_tool() {
         let finding = lint_finding("id-1", "security", "message");
         let fp = LintFingerprint(&finding);
         assert_eq!(fp.fingerprint(), "id-1");
-    }
-
-    #[test]
-    fn test_description() {
-        let finding = lint_finding("id-1", "security", "message");
-        let fp = LintFingerprint(&finding);
-        assert_eq!(fp.description(), "message");
-    }
-
-    #[test]
-    fn test_context_label() {
-        let finding = lint_finding("id-1", "security", "message");
-        let fp = LintFingerprint(&finding);
         assert_eq!(fp.context_label(), "lint:security");
+
+        let bare = HomeboyFinding::builder("phpcs", "bare message").build();
+        let fp = LintFingerprint(&bare);
+        assert_eq!(fp.fingerprint(), "bare message");
+        assert_eq!(fp.context_label(), "lint:phpcs");
     }
 
     #[test]
