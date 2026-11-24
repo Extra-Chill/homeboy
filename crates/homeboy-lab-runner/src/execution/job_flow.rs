@@ -55,7 +55,7 @@ impl RunnerExecCompletion {
 
 pub(super) struct SubmittedRunnerJobFlow<'a> {
     pub(super) runner: &'a Runner,
-    pub(super) mode: RunnerExecMode,
+    pub(super) mode: RunnerTransport,
     pub(super) transport: &'static str,
     pub(super) runner_job_transport: &'static str,
     pub(super) timeout_label: &'static str,

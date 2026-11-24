@@ -2520,13 +2520,10 @@ pub(crate) fn write_runner_state_file(
                 if !prepare.success {
                     return Ok(prepare);
                 }
-                let upload = client.upload_file(
+                crate::RunnerFileTransfer::for_runner(runner)?.upload_file(
                     &metadata_file.path().display().to_string(),
                     &staged_metadata_path,
-                );
-                if !upload.success {
-                    return Ok(upload);
-                }
+                )?;
                 Ok(client.execute_with_timeout(&publish_command, WORKSPACE_METADATA_TIMEOUT))
             })?;
             if output.success {

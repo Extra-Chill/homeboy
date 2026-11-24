@@ -1315,14 +1315,8 @@ pub(crate) fn materialize_prepared_workspace_update(
                 };
                 run_shell_command(&remote_shell(&prepare), "update prepared SSH workspace")
                     .and_then(|_| {
-                        let output = client
-                            .upload_file(&removal_list.path().display().to_string(), &removal_path);
-                        output.success.then_some(()).ok_or_else(|| {
-                            Error::internal_unexpected(format!(
-                                "stage prepared workspace removals failed: {}",
-                                output.stderr.trim()
-                            ))
-                        })
+                        crate::RunnerFileTransfer::for_runner(runner)?
+                            .upload_file(&removal_list.path().display().to_string(), &removal_path)
                     })
                     .and_then(|_| {
                         let metadata = crate::staging_temp::file().map_err(|err| {
@@ -1337,14 +1331,8 @@ pub(crate) fn materialize_prepared_workspace_update(
                                 Some("stage prepared workspace metadata".to_string()),
                             )
                         })?;
-                        let output = client
-                            .upload_file(&metadata.path().display().to_string(), &metadata_path);
-                        output.success.then_some(()).ok_or_else(|| {
-                            Error::internal_unexpected(format!(
-                                "stage prepared workspace metadata failed: {}",
-                                output.stderr.trim()
-                            ))
-                        })
+                        crate::RunnerFileTransfer::for_runner(runner)?
+                            .upload_file(&metadata.path().display().to_string(), &metadata_path)
                     })
                     .and_then(|_| {
                         run_shell_command(&remote_shell(&remove), "update prepared SSH workspace")

@@ -40,7 +40,7 @@ pub(super) fn failed_runner_exec_output(stdout: &str, stderr: &str) -> RunnerExe
         command: "runner.exec",
         runner_id: "lab".to_string(),
         dry_run: false,
-        mode: RunnerExecMode::Daemon,
+        mode: RunnerTransport::Daemon,
         argv: vec![
             "homeboy".to_string(),
             "extension".to_string(),

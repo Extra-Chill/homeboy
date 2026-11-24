@@ -474,9 +474,9 @@ pub use execution::{
     runner_exec_failure_error, runner_exec_orchestration_provenance,
     runner_exec_structured_summary, runner_job_cancel, runner_job_cancel_for_session,
     runner_job_cancel_projection, schedule_terminal_runner_exec_recovery, ExtensionParityProbe,
-    ExtensionShowOutput, RunnerExecDiagnostics, RunnerExecMode, RunnerExecOptions,
-    RunnerExecOutput, RunnerExecPromotedOutput, RunnerExecRecoveryChildSchedule,
-    RunnerExecRecoveryDiagnostic, RunnerExecRequest, RunnerExecStructuredSummary,
+    ExtensionShowOutput, RunnerExecDiagnostics, RunnerExecOptions, RunnerExecOutput,
+    RunnerExecPromotedOutput, RunnerExecRecoveryChildSchedule, RunnerExecRecoveryDiagnostic,
+    RunnerExecRequest, RunnerExecStructuredSummary,
 };
 pub use execution::{RUNNER_HOSTED_EXEC_ENV, RUNNER_ID_ENV, RUNNER_PLACEMENT_RESOLVED_ENV};
 pub(crate) use extension_materialization::extension_source_content_hash;
@@ -544,7 +544,8 @@ pub use session::{
     RunnerWorkspaceLease, RunnerWorkspaceLeaseSet,
 };
 pub use tool_registry::{RunnerToolRegistry, RunnerToolSpec};
-pub(crate) use transport::{select_runner_transport, RunnerFileTransfer, RunnerTransport};
+pub use transport::RunnerTransport;
+pub(crate) use transport::{connected_daemon_session, select_runner_transport, RunnerFileTransfer};
 pub use upgrade_runners::register as register_runner_upgrade;
 pub use workspace::{
     hydrate_prepared_workspace_source_snapshot, list_workspaces, plan_workspace_pull,

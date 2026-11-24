@@ -1,7 +1,7 @@
 use super::*;
 use crate::{
-    Runner, RunnerActiveJobState, RunnerExecMode, RunnerExecOutput, RunnerKind, RunnerSessionState,
-    RunnerStatusReport,
+    Runner, RunnerActiveJobState, RunnerExecOutput, RunnerKind, RunnerSessionState,
+    RunnerStatusReport, RunnerTransport,
 };
 use homeboy_core::server::RunnerSettings;
 use homeboy_core::Result;
@@ -90,7 +90,7 @@ pub(super) fn exec_output(
         command: "runner.exec",
         runner_id: runner_id.to_string(),
         dry_run: false,
-        mode: RunnerExecMode::DiagnosticSsh,
+        mode: RunnerTransport::DiagnosticSsh,
         argv,
         remote_cwd: "/home/user/workspace".to_string(),
         exit_code,

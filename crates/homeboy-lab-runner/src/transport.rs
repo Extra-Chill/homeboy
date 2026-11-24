@@ -3,6 +3,7 @@ use homeboy_engine_primitives::content_hash;
 use std::fs;
 use std::io::{Read, Write};
 
+use serde::Serialize;
 use serde_json::json;
 use sha2::Digest;
 
@@ -35,12 +36,24 @@ impl RunnerSessionHandle {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) enum RunnerTransport {
-    DirectDaemon(RunnerSessionHandle),
+/// How a runner executes a command. This is both the transport selected for
+/// a run and the `mode` recorded on its output.
+#[derive(Debug, Clone, Copy, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum RunnerTransport {
+    Daemon,
     Local,
     DiagnosticSsh,
-    Unavailable,
+}
+
+impl RunnerTransport {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            RunnerTransport::Daemon => "daemon",
+            RunnerTransport::Local => "local",
+            RunnerTransport::DiagnosticSsh => "diagnostic_ssh",
+        }
+    }
 }
 
 /// Lab runner file transfer is direct SSH to the runner's configured
@@ -61,8 +74,16 @@ pub(crate) enum RunnerFileTransferCapability {
 /// Controller-side file operations against a remote Lab runner over SSH.
 pub(crate) struct RunnerFileTransfer {
     runner_id: String,
+    server_id: Option<String>,
     client: SshClient,
     transport: &'static str,
+}
+
+/// What a runner path holds, as observed through [`RunnerFileTransfer`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum RunnerPathKind {
+    File,
+    Directory,
 }
 
 impl RunnerFileTransferCapability {
@@ -89,21 +110,24 @@ impl RunnerFileTransferCapability {
 
 impl RunnerFileTransfer {
     pub(crate) fn for_runner(runner: &Runner) -> Result<RunnerFileTransfer> {
-        let (mut client, transport) = match RunnerFileTransferCapability::for_runner(runner) {
-            RunnerFileTransferCapability::DirectSsh { server_id } => (
-                SshClient::from_server(&server::load(&server_id)?, &server_id)?,
-                FILE_TRANSFER_TRANSPORT,
-            ),
-            RunnerFileTransferCapability::CoLocated => (SshClient::local(), "co_located"),
-            RunnerFileTransferCapability::Unsupported { transport, reason } => {
-                return Err(unsupported_file_transfer_error(
-                    &runner.id, transport, reason,
-                ));
-            }
-        };
+        let (mut client, server_id, transport) =
+            match RunnerFileTransferCapability::for_runner(runner) {
+                RunnerFileTransferCapability::DirectSsh { server_id } => (
+                    SshClient::from_server(&server::load(&server_id)?, &server_id)?,
+                    Some(server_id),
+                    FILE_TRANSFER_TRANSPORT,
+                ),
+                RunnerFileTransferCapability::CoLocated => (SshClient::local(), None, "co_located"),
+                RunnerFileTransferCapability::Unsupported { transport, reason } => {
+                    return Err(unsupported_file_transfer_error(
+                        &runner.id, transport, reason,
+                    ));
+                }
+            };
         client.env.extend(runner.env.clone());
         Ok(RunnerFileTransfer {
             runner_id: runner.id.clone(),
+            server_id,
             client,
             transport,
         })
@@ -284,6 +308,56 @@ impl RunnerFileTransfer {
             return Err(self.operation_error("download", remote_path, download.stderr));
         }
         Ok(())
+    }
+
+    /// Recursively copy `remote_source` (a path or remote glob) into the local
+    /// `local_destination` directory with `scp -r` semantics.
+    pub(crate) fn download_recursive(
+        &self,
+        remote_source: &str,
+        local_destination: &str,
+    ) -> Result<()> {
+        let Some(server_id) = self.server_id.as_deref() else {
+            return Err(self.operation_error(
+                "recursive download",
+                remote_source,
+                "recursive download requires a direct SSH runner".to_string(),
+            ));
+        };
+        let (output, exit_code) = server::transfer::transfer(&server::transfer::TransferConfig {
+            source: format!("{server_id}:{remote_source}"),
+            destination: local_destination.to_string(),
+            recursive: true,
+            directory_contents: false,
+            compress: true,
+            dry_run: false,
+            exclude: Vec::new(),
+        })?;
+        if exit_code != 0 || !output.success {
+            return Err(self.operation_error(
+                "recursive download",
+                remote_source,
+                output.error.unwrap_or_else(|| "scp failed".to_string()),
+            ));
+        }
+        Ok(())
+    }
+
+    /// Whether `remote_path` is a file, a directory, or neither.
+    pub(crate) fn path_kind(&self, remote_path: &str) -> Option<RunnerPathKind> {
+        let quoted = posix_quote_arg(remote_path);
+        if self.client.execute(&format!("test -d {quoted}")).success {
+            Some(RunnerPathKind::Directory)
+        } else if self.client.execute(&format!("test -f {quoted}")).success {
+            Some(RunnerPathKind::File)
+        } else {
+            None
+        }
+    }
+
+    /// The runner's filesystem is this machine's filesystem.
+    pub(crate) fn shares_local_filesystem(&self) -> bool {
+        self.client.is_local
     }
 
     fn operation_error(&self, operation: &str, remote_path: &str, stderr: String) -> Error {
@@ -530,33 +604,29 @@ mod content_addressed_evidence_tests {
     }
 }
 
+/// The connected daemon session a [`RunnerTransport::Daemon`] run targets.
+pub(crate) fn connected_daemon_session(
+    status: Option<&RunnerStatusReport>,
+) -> Option<RunnerSessionHandle> {
+    let status = status.filter(|status| status.connected)?;
+    let session = status.session.as_ref()?;
+    let local_url = session.local_url.as_ref()?;
+    Some(RunnerSessionHandle::new(session.clone(), local_url.clone()))
+}
+
+/// Select how `runner` executes; `None` means no transport is available.
 pub(crate) fn select_runner_transport(
     runner: &Runner,
     status: Option<&RunnerStatusReport>,
     allow_diagnostic_ssh: bool,
-) -> RunnerTransport {
+) -> Option<RunnerTransport> {
     if runner.kind == RunnerKind::Ssh && allow_diagnostic_ssh {
-        return RunnerTransport::DiagnosticSsh;
+        return Some(RunnerTransport::DiagnosticSsh);
     }
-
-    if let Some(status) = status {
-        if status.connected {
-            if let Some(session) = status.session.as_ref() {
-                if let Some(local_url) = session.local_url.as_ref() {
-                    return RunnerTransport::DirectDaemon(RunnerSessionHandle::new(
-                        session.clone(),
-                        local_url.clone(),
-                    ));
-                }
-            }
-        }
+    if connected_daemon_session(status).is_some() {
+        return Some(RunnerTransport::Daemon);
     }
-
-    if runner.kind == RunnerKind::Local {
-        RunnerTransport::Local
-    } else {
-        RunnerTransport::Unavailable
-    }
+    (runner.kind == RunnerKind::Local).then_some(RunnerTransport::Local)
 }
 
 fn unsupported_file_transfer_error(runner_id: &str, transport: &str, reason: &str) -> Error {
@@ -683,7 +753,7 @@ mod tests {
     fn selects_diagnostic_ssh_before_session_transport() {
         assert_eq!(
             select_runner_transport(&runner(RunnerKind::Ssh), None, true),
-            RunnerTransport::DiagnosticSsh
+            Some(RunnerTransport::DiagnosticSsh)
         );
     }
 
@@ -692,12 +762,13 @@ mod tests {
         let mut session = session(RunnerTunnelMode::DirectSsh);
         session.local_url = Some("http://127.0.0.1:1234".to_string());
 
-        match select_runner_transport(&runner(RunnerKind::Ssh), Some(&status(session)), false) {
-            RunnerTransport::DirectDaemon(handle) => {
-                assert_eq!(handle.endpoint_url(), "http://127.0.0.1:1234");
-            }
-            transport => panic!("expected direct daemon, got {transport:?}"),
-        }
+        let status = status(session);
+        assert_eq!(
+            select_runner_transport(&runner(RunnerKind::Ssh), Some(&status), false),
+            Some(RunnerTransport::Daemon)
+        );
+        let handle = connected_daemon_session(Some(&status)).expect("daemon session");
+        assert_eq!(handle.endpoint_url(), "http://127.0.0.1:1234");
     }
 
     #[test]
@@ -719,10 +790,10 @@ mod tests {
         runner.server_id = Some("srv".to_string());
         let mut session = session(RunnerTunnelMode::DirectSsh);
         session.local_url = Some("http://127.0.0.1:1234".to_string());
-        assert!(matches!(
+        assert_eq!(
             select_runner_transport(&runner, Some(&status(session)), false),
-            RunnerTransport::DirectDaemon(_)
-        ));
+            Some(RunnerTransport::Daemon)
+        );
 
         assert_eq!(
             RunnerFileTransferCapability::for_runner(&runner),
@@ -769,6 +840,36 @@ mod tests {
 
         let builtin = runner(RunnerKind::Local);
         assert!(RunnerFileTransfer::for_runner(&builtin).is_err());
+    }
+
+    #[test]
+    fn file_transfer_classifies_paths_and_downloads_files() {
+        let mut host = runner(RunnerKind::Local);
+        host.id = crate::host_runner::ID.to_string();
+        let transfer = RunnerFileTransfer::for_runner(&host).expect("co-located transfer");
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("artifact.txt");
+        std::fs::write(&file, b"artifact").unwrap();
+        let file = file.display().to_string();
+
+        assert_eq!(
+            transfer.path_kind(&dir.path().display().to_string()),
+            Some(RunnerPathKind::Directory)
+        );
+        assert_eq!(transfer.path_kind(&file), Some(RunnerPathKind::File));
+        assert_eq!(transfer.path_kind("/definitely/not/here"), None);
+
+        let copy = dir.path().join("copy.txt");
+        transfer
+            .download_file(&file, &copy.display().to_string())
+            .expect("download file");
+        assert_eq!(std::fs::read(&copy).unwrap(), b"artifact");
+
+        let error = transfer
+            .download_recursive(&file, &dir.path().display().to_string())
+            .expect_err("recursive download needs an SSH server");
+        assert_eq!(error.code, ErrorCode::RunnerLabTransportFailure);
+        assert_eq!(error.details["operation"], "recursive download");
     }
 
     #[cfg(unix)]

@@ -4,7 +4,7 @@ use std::cell::RefCell;
 use std::time::{Duration, Instant};
 
 use super::*;
-use crate::{RunnerActiveJobState, RunnerExecMode, RunnerSessionState, RunnerStatusReport};
+use crate::{RunnerActiveJobState, RunnerSessionState, RunnerStatusReport, RunnerTransport};
 use homeboy_core::daemon::{DaemonFreshnessReport, DaemonStaleReasonCode};
 use homeboy_core::error::Error;
 
@@ -310,7 +310,7 @@ pub(super) fn unconverged_refresh_fixture() -> (HomeboyBinaryRefreshPlan, Runner
         command: "runner.exec",
         runner_id: "homeboy-lab".to_string(),
         dry_run: false,
-        mode: RunnerExecMode::Daemon,
+        mode: RunnerTransport::Daemon,
         argv: Vec::new(),
         remote_cwd: "/runner".to_string(),
         exit_code: 0,

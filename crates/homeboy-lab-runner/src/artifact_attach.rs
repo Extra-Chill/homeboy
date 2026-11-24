@@ -9,9 +9,9 @@
 use std::fs;
 use std::path::{Path, PathBuf};
 
+use crate::transport::RunnerPathKind;
 use crate::{Runner, RunnerKind};
-use homeboy_core::engine::shell;
-use homeboy_core::{server, Error};
+use homeboy_core::Error;
 
 /// Whether an attached runner artifact is a file or a directory.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -71,14 +71,7 @@ pub fn copy_runner_artifact_source(
             })
         }
         RunnerKind::Ssh => {
-            let server_id = runner.server_id.as_deref().ok_or_else(|| {
-                Error::validation_invalid_argument(
-                    "runner",
-                    "SSH runner is missing server_id",
-                    Some(runner.id.clone()),
-                    None,
-                )
-            })?;
+            let transfer = crate::RunnerFileTransfer::for_runner(runner)?;
             let temp_path = attach_download_path_in_roots(artifact_root, &runner.id, path);
             if let Some(parent) = temp_path.parent() {
                 fs::create_dir_all(parent).map_err(|err| {
@@ -88,47 +81,26 @@ pub fn copy_runner_artifact_source(
                     )
                 })?;
             }
-            let server = server::load(server_id)?;
-            let client = server::SshClient::from_server(&server, server_id)?;
-            let artifact_type = remote_runner_artifact_type(&client, path)?;
-            if artifact_type == RunnerAttachArtifactType::Directory {
-                let output = server::transfer::transfer(&server::transfer::TransferConfig {
-                    source: format!("{server_id}:{path}"),
-                    destination: temp_path.display().to_string(),
-                    recursive: true,
-                    directory_contents: false,
-                    compress: true,
-                    dry_run: false,
-                    exclude: Vec::new(),
-                })?;
-                if output.1 != 0 || !output.0.success {
+            let artifact_type = match transfer.path_kind(path) {
+                Some(RunnerPathKind::Directory) => RunnerAttachArtifactType::Directory,
+                Some(RunnerPathKind::File) => RunnerAttachArtifactType::File,
+                None => {
                     return Err(Error::validation_invalid_argument(
                         "path",
-                        format!(
-                            "failed to download runner artifact directory: {}",
-                            output.0.error.unwrap_or_else(|| "scp failed".to_string())
-                        ),
+                        "runner artifact path is not a file or directory",
                         Some(path.to_string()),
                         None,
-                    ));
+                    ))
                 }
-                return Ok(RunnerAttachSource {
-                    path: temp_path,
-                    artifact_type,
-                    temporary: true,
-                });
-            }
-            let output = client.download_file(path, &temp_path.display().to_string());
-            if !output.success {
-                return Err(Error::validation_invalid_argument(
-                    "path",
-                    format!(
-                        "failed to download runner artifact: {}",
-                        output.stderr.trim()
-                    ),
-                    Some(path.to_string()),
-                    None,
-                ));
+            };
+            let temp_path_string = temp_path.display().to_string();
+            match artifact_type {
+                RunnerAttachArtifactType::Directory => {
+                    transfer.download_recursive(path, &temp_path_string)?
+                }
+                RunnerAttachArtifactType::File => {
+                    transfer.download_file(path, &temp_path_string)?
+                }
             }
             Ok(RunnerAttachSource {
                 path: temp_path,
@@ -153,25 +125,6 @@ pub fn cleanup_runner_attach_source(source: &RunnerAttachSource) {
             let _ = fs::remove_dir_all(&source.path);
         }
     }
-}
-
-fn remote_runner_artifact_type(
-    client: &server::SshClient,
-    path: &str,
-) -> homeboy_core::Result<RunnerAttachArtifactType> {
-    let quoted = shell::quote_path(path);
-    if client.execute(&format!("test -d {quoted}")).success {
-        return Ok(RunnerAttachArtifactType::Directory);
-    }
-    if client.execute(&format!("test -f {quoted}")).success {
-        return Ok(RunnerAttachArtifactType::File);
-    }
-    Err(Error::validation_invalid_argument(
-        "path",
-        "runner artifact path is not a file or directory",
-        Some(path.to_string()),
-        None,
-    ))
 }
 
 fn attach_download_path_in_roots(artifact_root: &Path, runner_id: &str, path: &str) -> PathBuf {

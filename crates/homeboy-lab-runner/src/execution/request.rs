@@ -7,7 +7,7 @@ use homeboy_core::observation::ArtifactRecord;
 use homeboy_core::runner_execution_envelope::RunnerExecutionRecord;
 use homeboy_core::{Error, Result};
 
-use super::{exec, RunnerExecMode, RunnerExecOptions, RunnerExecOutput};
+use super::{exec, RunnerExecOptions, RunnerExecOutput, RunnerTransport};
 
 /// All controller-side work required before dispatching a runner command.
 ///
@@ -362,12 +362,12 @@ fn persist_execution_output(
         )?;
     } else if matches!(
         output.mode,
-        RunnerExecMode::DiagnosticSsh | RunnerExecMode::Local
+        RunnerTransport::DiagnosticSsh | RunnerTransport::Local
     ) {
         homeboy_agents::agent_task_lifecycle::finish_runner_exec_direct_in_store(
             lifecycle_store,
             run_id,
-            if matches!(output.mode, RunnerExecMode::DiagnosticSsh) {
+            if matches!(output.mode, RunnerTransport::DiagnosticSsh) {
                 "diagnostic_ssh"
             } else {
                 "local"

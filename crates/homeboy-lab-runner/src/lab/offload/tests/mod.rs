@@ -12,9 +12,9 @@ pub(super) use super::*;
 pub(super) use crate::verify_lab_workspace_from_env;
 pub(super) use crate::{
     compile_lab_admission_plan, RunnerActiveJobSource, RunnerActiveJobState, RunnerAvailability,
-    RunnerExecMode, RunnerExecOutput, RunnerRequiredTool, RunnerSession, RunnerSessionState,
-    RunnerStaleDaemonWarning, RunnerTunnelMode, RunnerWorkspaceMaterializationPlan,
-    RunnerWorkspaceSyncOutput,
+    RunnerExecOutput, RunnerRequiredTool, RunnerSession, RunnerSessionState,
+    RunnerStaleDaemonWarning, RunnerTransport, RunnerTunnelMode,
+    RunnerWorkspaceMaterializationPlan, RunnerWorkspaceSyncOutput,
 };
 pub(super) use homeboy_core::engine::command::{CaptureMetadata, CommandCaptureMetadata};
 pub(super) use homeboy_core::observation::{
@@ -172,7 +172,7 @@ pub(super) fn truncated_runner_exec_output() -> RunnerExecOutput {
         command: "runner.exec",
         runner_id: "homeboy-lab".to_string(),
         dry_run: false,
-        mode: RunnerExecMode::Daemon,
+        mode: RunnerTransport::Daemon,
         argv: vec!["homeboy".to_string(), "status".to_string()],
         remote_cwd: "/tmp/homeboy-workspace".to_string(),
         exit_code: 0,
