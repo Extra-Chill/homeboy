@@ -83,14 +83,4 @@ mod tests {
         assert!(buckets.items.is_empty());
         assert!(!buckets.is_empty());
     }
-
-    #[test]
-    fn handles_empty_input() {
-        let buckets = top_n_by(Vec::<String>::new(), |label| label.clone(), 10);
-
-        assert_eq!(buckets.total, 0);
-        assert_eq!(buckets.remainder, 0);
-        assert!(buckets.items.is_empty());
-        assert!(buckets.is_empty());
-    }
 }

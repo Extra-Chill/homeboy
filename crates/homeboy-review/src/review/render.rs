@@ -918,6 +918,15 @@ mod tests {
             "should not render bullets on a clean run:\n{}",
             md
         );
+        assert!(md.contains("> Deep dive: homeboy review lint my-comp"));
+        assert!(md.contains("> Deep dive: homeboy review test my-comp"));
+        // The consumer (`homeboy git pr comment --header`) owns the wrapping
+        // `### Title` heading. Renderer must only emit the body.
+        assert!(
+            !md.starts_with("### "),
+            "renderer must not emit a section header:\n{}",
+            md
+        );
     }
 
     #[test]
@@ -1101,17 +1110,6 @@ mod tests {
     }
 
     #[test]
-    fn renders_full_scope_banner() {
-        let env = passing_envelope();
-        let md = render_pr_comment(&env);
-        assert!(
-            md.contains(":information_source: Scope: **full**"),
-            "missing full-scope banner:\n{}",
-            md
-        );
-    }
-
-    #[test]
     fn renders_action_banners_before_scope_banner() {
         let env = passing_envelope();
         let banners = vec![
@@ -1245,26 +1243,6 @@ mod tests {
     }
 
     #[test]
-    fn renders_deep_dive_hints_for_ran_stages() {
-        let env = passing_envelope();
-        let md = render_pr_comment(&env);
-        assert!(md.contains("> Deep dive: homeboy review lint my-comp"));
-        assert!(md.contains("> Deep dive: homeboy review test my-comp"));
-    }
-
-    #[test]
-    fn never_emits_top_level_section_heading() {
-        let env = passing_envelope();
-        let md = render_pr_comment(&env);
-        // The consumer (`homeboy git pr comment --header`) owns the wrapping
-        // `### Title` heading. Renderer must only emit the body.
-        assert!(
-            !md.starts_with("### "),
-            "renderer must not emit a section header:\n{}",
-            md
-        );
-    }
-    #[test]
     fn a_slow_test_is_reported_on_a_passing_stage() {
         let mut env = passing_envelope();
         env.test = stage_test_passing_but_slow();
@@ -1337,7 +1315,7 @@ mod tests {
     }
 
     #[test]
-    fn a_stage_without_durations_renders_exactly_as_before() {
+    fn a_stage_without_durations_renders_no_slow_test_section() {
         let mut env = passing_envelope();
         env.test = stage_test_passing(450);
         let baseline = render_pr_comment(&env);

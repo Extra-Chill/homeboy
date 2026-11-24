@@ -145,9 +145,8 @@ pub fn set_home_root_override(path: Option<PathBuf>) {
 /// Resolved home root: the process-local override when set, else `$HOME`.
 ///
 /// Defined on every platform so [`home_root`] is, too. On Windows `HOME` is
-/// normally unset and this returns `Err`, which is exactly what the callers
-/// that used to read the variable directly already handled — the override is
-/// consulted first either way, so a hermetic test can still repoint them.
+/// normally unset and this returns `Err`, which callers handle; the override is
+/// consulted first, so a hermetic test can still repoint them.
 fn resolved_home_root() -> Result<PathBuf> {
     let override_path = {
         let guard = home_root_override()
@@ -421,8 +420,8 @@ impl Drop for ObservationStoreIsolation {
 }
 
 /// The runtime-temp root of the innermost test isolation on this thread, unless
-/// a legacy `HomeGuard` injected a process-wide home (where ambient resolution
-/// is the point).
+/// a `HomeGuard` injected a process-wide home (where ambient resolution is the
+/// point).
 #[doc(hidden)]
 pub fn hermetic_runtime_root() -> Option<PathBuf> {
     if explicit_home_injected() {
@@ -441,9 +440,9 @@ fn explicit_home_injected() -> bool {
 /// Panic when ambient Homeboy state is resolved inside test isolation.
 ///
 /// A `HermeticTestContext` hands its code explicit roots; reaching the
-/// process-global root from inside one is exactly the escape that second-root
-/// isolation tests used to probe for. Legacy `HomeGuard` explicitly injects a
-/// process-wide home, so ambient resolution is the point there and is allowed.
+/// process-global root from inside one is the escape this guard catches. A
+/// `HomeGuard` explicitly injects a process-wide home, so ambient resolution is
+/// the point there and is allowed.
 #[track_caller]
 fn assert_ambient_root_allowed(what: &str) {
     let caller = std::panic::Location::caller();

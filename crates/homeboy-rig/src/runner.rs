@@ -18,9 +18,9 @@ use super::expand::{expand_resources, expand_vars};
 use super::lease::acquire_active_run_lease;
 use super::lint::run_package_lint;
 use super::pipeline::{
-    cleanup_shared_paths, repair_shared_paths, run_command_step, run_pipeline,
-    run_pipeline_check_groups, run_pipeline_with_settings, run_prepare_requirement_steps,
-    PipelineOutcome, PipelineStepOutcome, SharedPathRepair, SharedPathRepairStatus,
+    cleanup_shared_paths, repair_shared_paths, run_command_step, run_pipeline_check_groups,
+    run_pipeline_with_settings, run_prepare_requirement_steps, PipelineOutcome,
+    PipelineStepOutcome, SharedPathRepair, SharedPathRepairStatus,
 };
 use super::resource_lifecycle::{
     dependency_materialization_cache_lifecycle_record, lifecycle_snapshot_lifecycle_records,

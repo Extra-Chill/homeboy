@@ -518,10 +518,10 @@ fn deployment_provider_diagnostic_error(
 
 /// What `layered_payload` was doing when a step failed.
 ///
-/// Named rather than inlined because three of these steps used to emit the
-/// same literal — `"Could not prepare deployment provider input"` — which made
-/// a failure unattributable to a line. `distinct_payload_step_contexts` pins
-/// that they stay distinguishable (#11134).
+/// Named rather than inlined so every step reports a distinct operation and a
+/// failure is attributable to a line.
+/// `every_payload_step_reports_a_distinct_operation` pins that they stay
+/// distinguishable (#11134).
 const ENCODE_POLICY_CONTEXT: &str =
     "canonically encode the deployment provider policy for its digest";
 const CREATE_INPUT_CONTEXT: &str = "create the deployment provider input tempfile";
@@ -677,9 +677,8 @@ mod tests {
     use homeboy_core::error::Error;
     use homeboy_core::project::{Project, ProjectComponentAttachment};
 
-    /// Three of these steps used to emit the identical literal
-    /// `"Could not prepare deployment provider input"`, so a report named the
-    /// function but not the line (#11134).
+    /// Each step names its own operation, so a report identifies the failing
+    /// line and not only the function (#11134).
     #[test]
     fn every_payload_step_reports_a_distinct_operation() {
         let mut contexts = vec![

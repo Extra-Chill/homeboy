@@ -814,7 +814,7 @@ pub(super) fn load_project_components_with_projection(
             Err(error) => return Err(error),
         };
 
-        // Bundled/retired components are no longer standalone deploy targets.
+        // Bundled/retired components are not standalone deploy targets.
         // Skip them before extension validation and artifact resolution so they
         // never appear as deploy obligations or `--outdated` drift. Their
         // version tracks the host component (when bundled) or is moot (retired).

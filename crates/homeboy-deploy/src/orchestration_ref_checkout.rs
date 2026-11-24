@@ -426,11 +426,11 @@ fn checkout_is_exact_commit(source_root: &Path, sha: &str) -> bool {
 
 /// Create one disposable full checkout of `sha`.
 fn materialize_tree(source_root: &Path, sha: &str) -> Result<MaterializedTree> {
-    // The exact-ref worktree used to land in `std::env::temp_dir()`, which put
-    // it outside every cleanup surface -- no owner record, no pin, no run
-    // binding, invisible to `cleanup --include runtime-tmp` and to the
-    // retained-storage report -- and broke outright on a `noexec` `/tmp`
-    // (#11128). The artifact root is the volume the operator already sized for
+    // The exact-ref worktree lives under the artifact root, not
+    // `std::env::temp_dir()`: a temp-dir checkout sits outside every cleanup
+    // surface (no owner record, pin, or run binding, invisible to
+    // `cleanup --include runtime-tmp` and the retained-storage report) and
+    // breaks on a `noexec` `/tmp` (#11128). The artifact root is the volume the operator already sized for
     // run bytes, so it is where a checkout belongs.
     let parent = materialized_trees_root(&homeboy_core::artifacts::root()?);
     std::fs::create_dir_all(&parent).map_err(|err| {
