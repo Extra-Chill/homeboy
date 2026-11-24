@@ -156,8 +156,8 @@ fn registered_core(config_root: Option<&Path>) -> Result<Vec<Component>> {
     }
 
     // 2. Standalone component registrations from ~/.config/homeboy/components/
-    //    These are components registered via `component create` or legacy config
-    //    that aren't attached to any project. They're still valid for local-only
+    //    These are components registered via `component create` that aren't
+    //    attached to any project. They're valid for local-only
     //    operations like release, version bump, and changelog.
     if let Ok(standalone) = load_standalone_components_core(config_root) {
         for component in standalone {
@@ -432,7 +432,7 @@ fn load_standalone_components_core(config_root: Option<&Path>) -> Result<Vec<Com
 
         // If the local_path directory has a homeboy.json, prefer portable discovery
         // (it's the source of truth for repo-owned fields) and use standalone
-        // data only for machine-local fields or legacy fallback values.
+        // data only for machine-local fields or values the portable config omits.
         if local_dir.exists() {
             if let Some(discovered) = discover_from_portable(local_dir) {
                 let portable = read_portable_config(local_dir)

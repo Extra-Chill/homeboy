@@ -448,7 +448,7 @@ pub struct RemoteRunnerJobResult {
     /// never needs a live runner endpoint.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub observation_run_details: Vec<RemoteRunnerObservationRunDetail>,
-    /// Set by the broker when a legacy worker declared run IDs without the
+    /// Set by the broker when a worker declared run IDs without the
     /// typed terminal records needed for disconnected reconciliation.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub observation_run_details_compatibility_degraded: bool,
@@ -1489,41 +1489,48 @@ mod tests {
     }
 
     #[test]
-    fn canonical_run_ref_metadata_copies_lifecycle_id_onto_the_existing_alias() {
-        let metadata = canonical_run_ref_metadata(Some(&lifecycle("run-1")), None, None)
-            .expect("lifecycle identity");
-        assert_run_ref_wire(&metadata, json!("run-1"), json!("run-1"));
-    }
-
-    #[test]
-    fn canonical_run_ref_metadata_keeps_workload_identity_on_the_existing_alias() {
-        let metadata = canonical_run_ref_metadata(None, Some(&workload("run-2")), None)
-            .expect("workload identity");
-        assert_run_ref_wire(&metadata, Value::Null, json!("run-2"));
-    }
-
-    #[test]
-    fn canonical_run_ref_metadata_still_emits_legacy_alias_input() {
-        let metadata = canonical_run_ref_metadata(
-            None,
-            None,
-            Some(&json!({ "agent_task_run_id": "legacy-run" })),
-        )
-        .expect("legacy identity");
-        assert_run_ref_wire(&metadata, Value::Null, json!("legacy-run"));
-    }
-
-    #[test]
-    fn canonical_run_ref_metadata_preserves_divergent_durable_and_alias_sources() {
-        let metadata = canonical_run_ref_metadata(
-            Some(&lifecycle("canonical-run")),
-            Some(&workload("workload-run")),
-            Some(&json!({
-                "run_id": "metadata-run",
-                "agent_task_run_id": "legacy-run"
-            })),
-        )
-        .expect("canonical identity");
-        assert_run_ref_wire(&metadata, json!("canonical-run"), json!("workload-run"));
+    fn canonical_run_ref_metadata_resolves_durable_and_agent_task_run_ids() {
+        let cases = [
+            (
+                Some(lifecycle("run-1")),
+                None,
+                None,
+                json!("run-1"),
+                json!("run-1"),
+            ),
+            (
+                None,
+                Some(workload("run-2")),
+                None,
+                Value::Null,
+                json!("run-2"),
+            ),
+            (
+                None,
+                None,
+                Some(json!({ "agent_task_run_id": "metadata-run" })),
+                Value::Null,
+                json!("metadata-run"),
+            ),
+            (
+                Some(lifecycle("canonical-run")),
+                Some(workload("workload-run")),
+                Some(json!({
+                    "run_id": "metadata-run",
+                    "agent_task_run_id": "metadata-agent-run"
+                })),
+                json!("canonical-run"),
+                json!("workload-run"),
+            ),
+        ];
+        for (lifecycle, workload, metadata, durable_run_id, agent_task_run_id) in cases {
+            let wire = canonical_run_ref_metadata(
+                lifecycle.as_ref(),
+                workload.as_ref(),
+                metadata.as_ref(),
+            )
+            .expect("run identity");
+            assert_run_ref_wire(&wire, durable_run_id, agent_task_run_id);
+        }
     }
 }

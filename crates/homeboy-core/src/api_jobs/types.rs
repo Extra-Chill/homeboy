@@ -116,7 +116,7 @@ pub struct Job {
     pub path_materialization_plan: Option<PathMaterializationPlan>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub stale_reason: Option<String>,
-    /// Daemon lease that accepted this job. Missing values are legacy records.
+    /// Daemon lease that accepted this job. Absent when no daemon lease was recorded.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub daemon_lease_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -245,9 +245,8 @@ impl RunnerJobSource {
 
     /// Which side of the exchange owns this job's lifecycle.
     ///
-    /// Returns the canonical `RunnerLifecycleOwner` directly. A parallel
-    /// 2-variant `RunnerJobLifecycleOwner` used to live here purely to be
-    /// re-matched onto this enum at its single call site.
+    /// Broker-driven kinds are broker-owned; every other kind is
+    /// controller-owned.
     pub fn lifecycle_owner(self) -> RunnerLifecycleOwner {
         match self {
             Self::Broker | Self::ReverseBroker => RunnerLifecycleOwner::Broker,

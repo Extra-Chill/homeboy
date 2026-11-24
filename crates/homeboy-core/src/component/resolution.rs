@@ -2554,9 +2554,9 @@ mod tests {
     #[test]
     fn resolve_artifact_conflicting_patterns_fail_deterministically() {
         crate::test_support::with_isolated_home(|home| {
-            // Two providers that disagree used to be a coin flip decided by
-            // HashMap iteration order — the same binary could deploy
-            // `build/plugin.zip` on one run and `dist/plugin.tgz` on the next.
+            // Two providers that disagree must fail rather than let HashMap
+            // iteration order pick `build/plugin.zip` on one run and
+            // `dist/plugin.tgz` on the next.
             write_build_extension(home.path(), "wordpress", "build/{component_id}.zip", &[]);
             write_build_extension(home.path(), "nodejs", "dist/{component_id}.tgz", &[]);
 
